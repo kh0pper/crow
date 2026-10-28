@@ -81,6 +81,21 @@ function makeManager(instanceId = LOCAL_ID) {
   // emit-path assertion would go vacuous. These tests drive stub feeds, never real
   // Hypercores, so force-enable (same as tests/group-tombstones.test.js:80).
   mgr.feedsDisabled = false;
+  // PT-1: entries apply only from a trusted, live paired peer (the apply gate
+  // fails closed on an unknown id). Every remote these stub-feed tests feed
+  // from is such a peer, so pair it on first use (fixture, not gate).
+  const process_ = mgr._processNewEntries.bind(mgr);
+  // The row is removed again afterwards: this file shares one DB, and a
+  // leftover paired row would become an emit target in later tests.
+  mgr._processNewEntries = async (remoteId, feed) => {
+    const added = await db.execute({
+      sql: "INSERT OR IGNORE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, 'crow:stub', 'active', 1)",
+      args: [remoteId, remoteId],
+    });
+    try { return await process_(remoteId, feed); } finally {
+      if (added.rowsAffected) await db.execute({ sql: "DELETE FROM crow_instances WHERE id = ?", args: [remoteId] });
+    }
+  };
   return { mgr, db };
 }
 
@@ -1167,6 +1182,8 @@ test("14. Legacy DB without sync_conflicts.op: stale update still skipped AND co
   await db.execute({ sql: "ALTER TABLE sync_conflicts DROP COLUMN op", args: [] });
 
   const mgr = new InstanceSyncManager(IDENTITY, db, INST);
+  // PT-1: the remote is a trusted paired peer (the apply gate fails closed on unknown ids).
+  await db.execute({ sql: "INSERT OR IGNORE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, 'crow:stub', 'active', 1)", args: [REMOTE, REMOTE] });
 
   await db.execute({
     sql: "INSERT INTO memories (id, category, content, lamport_ts) VALUES (900, 'general', 'newer-local', 50)",
@@ -1859,7 +1876,7 @@ test("T3d. strict emitChange throws on a parked peer; thrown error carries dispo
   mgr.outFeeds.set("peer-ok", { append: async (e) => captured.push(e) });
   // peer-park is PAIRED (crow_instances row) but has no armed outFeed -> would park.
   await db.execute({
-    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')",
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
     args: ["peer-park", "Peer Park", "crow:park"],
   });
   await db.execute({
@@ -1906,7 +1923,7 @@ test("T3e. strict emitChange throws on a failed append; thrown error carries dis
 test("T3f. non-strict emitChange byte-identical: paired-but-unarmed peer parks in _pendingPeerEmits, plain lamport number returned, no throw", async () => {
   const { mgr, db } = makeManager("inst-t3f");
   await db.execute({
-    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')",
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
     args: ["peer-unarmed-f", "Peer F", "crow:f"],
   });
   await db.execute({

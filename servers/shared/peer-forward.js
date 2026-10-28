@@ -21,7 +21,7 @@
  *                                     compat with existing bundle callers
  */
 
-import { getInstance } from "../gateway/instance-registry.js";
+import { peerTrust } from "./peer-trust.js";
 import { getPeerCreds } from "./peer-credentials.js";
 import { signRequest, auditCrossHostCall } from "./cross-host-auth.js";
 
@@ -95,15 +95,19 @@ export async function forwardSignedRequest({
     ...auditMeta,
   };
 
-  // 1. Resolve target instance
-  const instance = await getInstance(db, targetInstanceId);
-  if (!instance) {
+  // 1. Resolve target instance. PT-1: the target must pass the one trust
+  // predicate (trusted=1 AND active/offline) — a paused or revoked target
+  // with leftover creds is never signed to.
+  const trust = await peerTrust(db, targetInstanceId);
+  const instance = trust.row;
+  if (!instance && trust.reason !== "trust_lookup_failed") {
     const error = "target_not_registered";
     await auditCrossHostCall(db, { ...audit, error });
     return { ok: false, status: 0, error };
   }
-  if (instance.trusted !== 1) {
-    const error = "target_not_trusted";
+  if (!trust.ok) {
+    // `untrusted` keeps the historical error string; other reasons name themselves.
+    const error = trust.reason === "untrusted" ? "target_not_trusted" : `target_not_trusted:${trust.reason}`;
     await auditCrossHostCall(db, { ...audit, error });
     return { ok: false, status: 0, error };
   }

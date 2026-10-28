@@ -12,6 +12,7 @@ import { scrypt, randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { createDbClient, auditLog } from "../../db.js";
 import { is2faEnabled, verifyDeviceTrust, createPending2faToken } from "./totp.js";
 import { forwardedAddrs, classifyPeer, isOverlayAddr, normalizeAddr } from "../../shared/peer-class.js";
+import { peerTrust } from "../../shared/peer-trust.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -336,7 +337,8 @@ export async function complete2faLogin(ip) {
  *
  * Identical storage to a normal session (oauth_tokens, client_id='dashboard'
  * so verifySession accepts it) but with a 24h lifetime and a distinct
- * `scopes='dashboard sso'` tag for auditing / independent revocation. The
+ * `scopes='dashboard sso src:<issuing instance id>'` tag for auditing and so
+ * revoking the issuing peer ends its sessions (PT-1). The
  * caller is responsible for having validated the SSO ticket first.
  *
  * @param {string} srcInstanceId  The issuing (source) instance id, for audit.
@@ -345,11 +347,26 @@ export async function complete2faLogin(ip) {
 export async function mintSsoSession(srcInstanceId) {
   const db = createDbClient();
   try {
+    // PT-1: re-check the issuing peer immediately before minting. The accept
+    // route checked it when the ticket arrived, but both 2FA completions mint
+    // up to 5 minutes later, and the peer may have been revoked or paused in
+    // between. Every mint goes through here, so no caller can skip it.
+    const trust = await peerTrust(db, srcInstanceId);
+    if (!trust.ok) {
+      try { await auditLog(db, 'auth_sso_refused', { src: srcInstanceId || null, reason: trust.reason }); } catch { /* audit is best effort */ }
+      const err = new Error("single sign-on refused");
+      err.code = "sso_refused";
+      err.reason = trust.reason;
+      throw err;
+    }
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SSO_SESSION_MAX_AGE).toISOString();
     await db.execute({
-      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard sso', ?)",
-      args: [hashToken(token), expiresAt],
+      // Tagged with the issuing peer (PT-1) so revoking that peer ends the
+      // sessions it minted. local-session.js compares scopes to "dashboard"
+      // exactly and the session verifier ignores scopes, so the tag is inert.
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+      args: [hashToken(token), srcInstanceId ? `dashboard sso src:${srcInstanceId}` : "dashboard sso", expiresAt],
     });
     await auditLog(db, 'auth_sso_login', { src: srcInstanceId || null });
     return { token };

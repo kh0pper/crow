@@ -26,6 +26,7 @@
  */
 
 import { remoteServersForBot, parseRemoteInvocationFlag } from "../../../scripts/pi-bots/remote-blocks.mjs";
+import { TRUSTED_PEER_SQL } from "../../shared/peer-trust.js";
 
 /**
  * Map<canonicalId, Set<toolName>> of a bot's per-capability tool selections from
@@ -200,7 +201,7 @@ async function defaultPeerGatewayUrls(db) {
   const map = new Map();
   try {
     const { rows } = await db.execute({
-      sql: "SELECT id, gateway_url FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL",
+      sql: `SELECT id, gateway_url FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND gateway_url IS NOT NULL`,
       args: [],
     });
     for (const r of rows) map.set(r.id, r.gateway_url);

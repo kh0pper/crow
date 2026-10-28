@@ -83,6 +83,25 @@ export async function ensureVoiceBotAtBoot({ noAuth, dbFactory = createDbClient 
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
+  // PT-1 peer-trust sweeper: the boot reconcile of peer-tokens.json (the
+  // one-time pre-PT-1 snapshot, then delete revoked peers' keys minted before
+  // their revoke), then every 10 s and on every crow_instances row change:
+  // tear down what a revoked / paused / untrusted peer still has open here.
+  (async () => {
+    try {
+      const { startPeerTrustSweeper } = await import("../peer-trust-sweeper.js");
+      const { getOrCreateLocalInstanceId } = await import("../instance-registry.js");
+      const { getInstanceSyncManager } = await import("../../sharing/server.js");
+      startPeerTrustSweeper({
+        db: createDbClient(),
+        getInstanceSyncManager: () => { try { return getInstanceSyncManager(); } catch { return null; } },
+        localInstanceId: getOrCreateLocalInstanceId(),
+      });
+    } catch (err) {
+      console.warn("[peer-trust] sweeper setup failed:", err.message);
+    }
+  })();
+
   // Wire up calls WebSocket signaling (MUST be before extension and companion)
   if (setupCallsSignaling) {
     setupCallsSignaling(server);

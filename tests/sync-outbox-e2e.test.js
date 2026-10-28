@@ -97,7 +97,7 @@ async function seedSyncDeploymentEnabled(db) {
  *  quietly inert (spec round-2 finding 9, named again in the task brief). */
 async function registerPeer(db, id, status = "active") {
   await db.execute({
-    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, ?)",
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, ?, 1)",
     args: [id, id, `crow:${id}`, status],
   });
 }

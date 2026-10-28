@@ -26,8 +26,12 @@ import { groupTombstoneStatement, isGroupTombstoned } from "./group-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar, avatarFieldValue } from "./avatar.js";
 import bus from "../shared/event-bus.js";
+import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
+
+/** How long the re-pair fence waits to learn a peer feed's remote length (PT-1). */
+const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
 
 /**
  * Build the canonical wire row for a crow_context DB row.
@@ -1343,7 +1347,7 @@ export class InstanceSyncManager {
     let rows = [];
     try {
       const r = await this.db.execute({
-        sql: "SELECT id, sync_url FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        sql: `SELECT id, sync_url FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND id != ?`,
         args: [this.localInstanceId],
       });
       rows = r.rows || [];
@@ -2473,13 +2477,31 @@ export class InstanceSyncManager {
     // still processes — only a swapped-out feed bails.
     const current = this.inFeeds.get(remoteInstanceId);
     if (current !== undefined && current !== feed) return;
-    // A revoked peer's entries are never applied (same cross-process reason
-    // as emitChange's target filter). The seq is NOT advanced: nothing from
-    // a revoked peer is consumed.
-    if (await this._isPeerRevoked(remoteInstanceId)) return;
+    // Only a trusted, live peer's entries are applied (PT-1; same
+    // cross-process reason as emitChange's target filter). The seq is NOT
+    // advanced: nothing from a revoked, paused or untrusted peer is consumed,
+    // and a DB error fails closed (the next run retries).
+    if (!(await this._isPeerTrusted(remoteInstanceId))) return;
     const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
-    // Re-read lastSeq inside the lock — the prior chained run may have advanced it.
-    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId, feed);
+    // The applied-seq record, read STRICTLY (PT-1): the lenient reader turns
+    // a DB or JSON error into "no record", which would skip the re-pair fence
+    // and replay the feed from 0. On an error nothing is applied or consumed.
+    let rec;
+    try {
+      rec = await this._appliedSeqRecordStrict(remoteInstanceId);
+    } catch (err) {
+      console.warn(`[instance-sync] applied-seq read for ${remoteInstanceId.slice(0, 12)} failed, applying nothing: ${err.message}`);
+      return;
+    }
+    // Re-pair fence (PT-1): the first run after a move into trust
+    // fast-forwards past everything the peer appended before it.
+    if (rec && typeof rec === "object" && Number(rec.ff) === 1) {
+      await this._consumeRepairFence(remoteInstanceId, feed, feedKeyHex);
+      return;
+    }
+    // lastSeq from that same read (inside the per-peer lock, so the prior
+    // chained run's advance is visible). Same key-gating as _getLastAppliedSeq.
+    const lastSeq = (rec && typeof rec === "object" && rec.k === feedKeyHex) ? (Number(rec.s) || 0) : 0;
 
     for (let seq = lastSeq; seq < feed.length; seq++) {
       try {
@@ -3856,6 +3878,17 @@ export class InstanceSyncManager {
     return null;
   }
 
+  /** As _appliedSeqRecord, but a DB or JSON error throws instead of reading as "no record". */
+  async _appliedSeqRecordStrict(remoteInstanceId) {
+    const { rows } = await this.db.execute({
+      sql: "SELECT last_applied_seq_per_peer FROM sync_state WHERE instance_id = ?",
+      args: [this.localInstanceId],
+    });
+    if (!rows.length || !rows[0].last_applied_seq_per_peer) return null;
+    const rec = JSON.parse(rows[0].last_applied_seq_per_peer)[remoteInstanceId];
+    return rec === undefined ? null : rec;
+  }
+
   /**
    * Key-gated read (2d C2). feed=null is the display path: coerce BOTH shapes
    * (legacy bare number → itself; {k,s} → s) — never used to gate application.
@@ -3887,7 +3920,7 @@ export class InstanceSyncManager {
    * feed-keyed — {"k": feedKeyHex, "s": seq} — so a rotated feed never
    * inherits a stale mark from its predecessor.
    */
-  async _setLastAppliedSeq(remoteInstanceId, seq, feedKeyHex) {
+  async _setLastAppliedSeq(remoteInstanceId, seq, feedKeyHex, { clearFence = false } = {}) {
     // Guard: a `"` in the id would break the json_set path literal.
     if (remoteInstanceId.includes('"')) {
       console.warn(`[instance-sync] _setLastAppliedSeq: skipping id with quote char: ${remoteInstanceId}`);
@@ -3898,12 +3931,19 @@ export class InstanceSyncManager {
       // json(?) — NOT CAST — so the object lands as JSON, not a quoted string
       // (spec C2 SQL note): json_set with a plain string param stores a string
       // and every reader's .k/.s would be undefined.
+      // PT-1 re-pair fence: while the current record carries `ff`, every
+      // rewrite keeps it (in SQL, so a fence written concurrently is never
+      // lost to a stale read). Only the fence-consume step clears it.
+      const path = `$."${remoteInstanceId}"`;
+      const rec = JSON.stringify({ k: feedKeyHex ?? null, s: Number(seq) });
       await this.db.execute({
         sql: `UPDATE sync_state
-              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, json(?)),
+              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?,
+                    CASE WHEN ? = 0 AND json_extract(COALESCE(last_applied_seq_per_peer, '{}'), ?) = 1
+                         THEN json_set(json(?), '$.ff', 1) ELSE json(?) END),
                   updated_at = datetime('now')
               WHERE instance_id = ?`,
-        args: [`$."${remoteInstanceId}"`, JSON.stringify({ k: feedKeyHex ?? null, s: Number(seq) }), this.localInstanceId],
+        args: [path, clearFence ? 1 : 0, `${path}.ff`, rec, rec, this.localInstanceId],
       });
     } catch (err) {
       console.warn(`[instance-sync] Failed to update checkpoint for ${remoteInstanceId}:`, err.message);
@@ -3981,16 +4021,58 @@ export class InstanceSyncManager {
     }
   }
 
-  async _isPeerRevoked(remoteInstanceId) {
+  /**
+   * The apply gate (PT-1): true only when the peer's row passes the one trust
+   * predicate. Fails CLOSED: a DB error reads as "not trusted" (the old
+   * revoked-only check returned "not revoked" on error, so a DB fault let a
+   * revoked peer's entries apply). Safe because the apply loop returns
+   * before reading lastSeq, so a blocked run consumes nothing.
+   */
+  async _isPeerTrusted(remoteInstanceId) {
     try {
       const { rows } = await this.db.execute({
-        sql: "SELECT status FROM crow_instances WHERE id = ?",
+        sql: `SELECT 1 FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL}`,
         args: [remoteInstanceId],
       });
-      return rows?.[0]?.status === "revoked";
-    } catch {
+      return rows.length > 0;
+    } catch (err) {
+      console.warn(`[instance-sync] trust check for ${String(remoteInstanceId).slice(0, 12)} failed, applying nothing: ${err.message}`);
       return false;
     }
+  }
+
+  /**
+   * Consume a re-pair fence: learn the remote length, mark everything up to
+   * it as applied (without applying it), and clear the fence. Works whatever
+   * the record's `k` is (a re-pair can coincide with a feed rotation). If the
+   * remote length cannot be learned, nothing is applied and the fence stays
+   * for the next run (fail closed).
+   */
+  async _consumeRepairFence(remoteInstanceId, feed, feedKeyHex) {
+    if (typeof feed.update === "function") {
+      let timer;
+      try {
+        await Promise.race([
+          feed.update({ wait: true }),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), REPAIR_FENCE_UPDATE_TIMEOUT_MS); }),
+        ]);
+      } catch (err) {
+        console.warn(`[instance-sync] re-pair fence for ${remoteInstanceId.slice(0, 12)}: remote length unknown (${err.message}); applying nothing`);
+        return false;
+      } finally {
+        clearTimeout(timer);
+      }
+      // No connected peer: the local length may be stale. Keep the fence.
+      if (Array.isArray(feed.peers) && feed.peers.length === 0) {
+        console.warn(`[instance-sync] re-pair fence for ${remoteInstanceId.slice(0, 12)}: no connected peer to learn the remote length from; applying nothing`);
+        return false;
+      }
+    }
+    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId, feed);
+    const skipped = Math.max(0, feed.length - lastSeq);
+    await this._setLastAppliedSeq(remoteInstanceId, feed.length, feedKeyHex, { clearFence: true });
+    console.log(`[instance-sync] re-pair fence: skipped ${skipped} entries from ${remoteInstanceId} appended before re-trust`);
+    return true;
   }
 
   /** True when ANY replication stream (tailnet or Hyperswarm) to the peer is live. */

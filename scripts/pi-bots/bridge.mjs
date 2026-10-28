@@ -67,6 +67,7 @@ import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from 
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
+import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
 
 const HOME = process.env.HOME || homedir();
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -223,11 +224,12 @@ export function readRemoteInvocationEnabled(conn) {
   } catch { return false; }
 }
 
-// instanceId -> gateway_url for non-revoked peers with a URL. (The peer's L2a
-// exposure gate is the trust boundary; this is just URL resolution.)
+// instanceId -> gateway_url for trusted live peers with a URL (PT-1: the one
+// trust predicate; a paused or untrusted peer is not a target). The peer's L2a
+// exposure gate is still the trust boundary on the far side.
 export function readPeerGatewayUrls(conn) {
   try {
-    const rows = conn.prepare("SELECT id, gateway_url FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL").all();
+    const rows = conn.prepare(`SELECT id, gateway_url FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND gateway_url IS NOT NULL`).all();
     const map = {};
     for (const r of rows) map[r.id] = r.gateway_url;
     return map;

@@ -764,6 +764,7 @@ async function realRailsApp() {
 test("rails: no session → refused; session without X-Crow-Csrf → 403; with it → through", async () => {
   resetFakes(); seed([P_LOCAL()]);
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await mintSsoSession("test");
   const { srv, base } = await realRailsApp();
   const net = { ...serveHeaders("someone@example.com") };
@@ -790,6 +791,7 @@ test("rails: a Funnel request is refused on both verbs, by layer 1 and by layer 
   const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
   assert.equal(PUBLIC_FUNNEL_PREFIXES.some((p) => p.startsWith("/dashboard")), false);
   const { mintSsoSession, dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await mintSsoSession("test");
   const cookie = `crow_session=${token}; crow_csrf=c1`;
   const funnel = { "tailscale-funnel-request": "?1", "tailscale-user-login": "someone@example.com", cookie, "x-crow-csrf": "c1" };

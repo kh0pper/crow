@@ -42,6 +42,7 @@ import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { __setEmitSinkForTest as __setGroupSink } from "../servers/sharing/group-sync.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
+import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
 const LOCAL_ID = "inst-dddd-0000-0000-0000-00000000000d";
 const PEER_ID = "peer-cccc-0000-0000-0000-00000000000c";
@@ -88,7 +89,7 @@ async function makeRig(label) {
     stdio: "pipe",
   });
   const db = createDbClient(join(dir, "crow.db"));
-  const mgr = new InstanceSyncManager(await makeIdentity(), db, LOCAL_ID);
+  const mgr = trustRemotesOnApply(new InstanceSyncManager(await makeIdentity(), db, LOCAL_ID));
   mgr.dataDir = join(dir, "instance-sync"); // MUST: keep test feeds out of ~/.crow
   mgr.feedsDisabled = false;                // MUST: scratch env disables feeds (2c C6)
   mgr._drainCapMs = DRAIN_CAP_MS;           // small cap for test speed

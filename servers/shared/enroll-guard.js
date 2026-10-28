@@ -167,6 +167,10 @@ export async function markOtcUsed(db, localId, digest, now = Date.now()) {
 /** When this gateway first saw this OTC (ms epoch); records `now` on first sight. */
 export async function otcFirstSeen(db, localId, digest, now = Date.now()) {
   const key = `${OTC_SEEN_KEY_PREFIX}${digest}`;
+  // Read first: once the mark exists (the gateway writes it at boot) a
+  // request takes no write lock before the enrollment's own transaction.
+  const seen = Number(await readLocal(db, key, localId));
+  if (Number.isFinite(seen) && seen > 0) return seen;
   await db.execute({
     sql: `INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at)
           VALUES (?, ?, ?, datetime('now')) ON CONFLICT(key, instance_id) DO NOTHING`,

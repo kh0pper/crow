@@ -30,6 +30,7 @@ import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
 import { installBirdAvatarHooks } from "./profile-avatar.js";
+import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -782,7 +783,7 @@ export async function initSharingRuntime(managers, helpers) {
       // already open, rather than racing a first-open against the connection.
       // Revoked/paused peers are deliberately excluded.
       const { rows: instances } = await db.execute({
-        sql: "SELECT id, sync_url FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        sql: `SELECT id, sync_url FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND id != ?`,
         args: [instanceSyncManager.localInstanceId],
       });
       for (const inst of instances) {
@@ -829,7 +830,7 @@ export async function initSharingRuntime(managers, helpers) {
     try {
       // Only return a key if we actually have a paired row for this instance.
       const { rows } = await db.execute({
-        sql: "SELECT id FROM crow_instances WHERE id = ? AND status IN ('active','offline') AND id != ? LIMIT 1",
+        sql: `SELECT id FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} AND id != ? LIMIT 1`,
         args: [remoteInstanceId, instanceSyncManager.localInstanceId],
       });
       if (rows.length === 0) return null;
@@ -849,7 +850,7 @@ export async function initSharingRuntime(managers, helpers) {
   peerManager.onInstanceKeyReceived = async (remoteInstanceId, feedKeyHex) => {
     try {
       const { rows } = await db.execute({
-        sql: "SELECT sync_url FROM crow_instances WHERE id = ? AND status IN ('active','offline') AND id != ?",
+        sql: `SELECT sync_url FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} AND id != ?`,
         args: [remoteInstanceId, instanceSyncManager.localInstanceId],
       });
       if (rows.length === 0) return; // Not paired with this instance_id — drop
@@ -857,7 +858,7 @@ export async function initSharingRuntime(managers, helpers) {
       if (!keyBuf) return; // malformed or self-echoed — skip persist AND init
       if (rows[0].sync_url === feedKeyHex) return; // unchanged — skip
       await db.execute({
-        sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
+        sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
         args: [feedKeyHex, remoteInstanceId],
       });
       console.log(`[sharing] Stored feed key for instance ${remoteInstanceId.slice(0, 12)}…`);

@@ -36,6 +36,7 @@ import {
   upsertProvider, setProviderSyncManager, reconcileDecision,
 } from "../servers/shared/providers-db.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
+import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
 const A_ID = "aaaaaaaa-0000-0000-0000-00000000000a"; // owner (crow)
 const B_ID = "bbbbbbbb-0000-0000-0000-00000000000b"; // non-owner (grackle)
@@ -61,8 +62,8 @@ const IDENTITY = {
 
 const dbA = createDbClient(join(dirA, "crow.db"));
 const dbB = createDbClient(join(dirB, "crow.db"));
-const mgrA = new InstanceSyncManager(IDENTITY, dbA, A_ID);
-const mgrB = new InstanceSyncManager(IDENTITY, dbB, B_ID);
+const mgrA = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, dbA, A_ID));
+const mgrB = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, dbB, B_ID));
 mgrA.feedsDisabled = false;
 mgrB.feedsDisabled = false;
 

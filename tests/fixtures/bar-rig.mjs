@@ -66,6 +66,7 @@ export async function startBarRig() {
   const { markdownBlocks } = await import("../../servers/blog/renderer.js");
   const TURBO = readFileSync(join(REPO, "servers/gateway/public/vendor/turbo-8.0.5.umd.js"), "utf8");
 
+  await (await import("./sso-source.mjs")).trustedSsoSource("test");
   const { token: sessionToken } = await auth.mintSsoSession("test");
   const displayId = sessionDisplayId(sessionToken);
   const WAV = wav(240);

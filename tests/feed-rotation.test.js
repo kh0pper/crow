@@ -50,7 +50,7 @@ async function makeRealDb(dir) {
 /** Seed `db`'s crow_instances with peerId as an active paired peer. */
 async function registerPeerRow(db, peerId) {
   await db.execute({
-    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')",
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
     args: [peerId, peerId, `crow:${peerId}`],
   });
 }

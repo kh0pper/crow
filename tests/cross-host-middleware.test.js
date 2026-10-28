@@ -27,12 +27,30 @@ process.env.CROW_PEER_TOKENS_PATH = peerTokensPath;
 const { signRequest, _resetNonceCache, crossHostVerifyMiddleware } =
   await import("../servers/shared/cross-host-auth.js");
 
-// Audit sink: capture every db.execute the middleware issues.
+// Audit sink: capture every audit INSERT the middleware issues. The trust
+// lookup (PT-1) reads the peer's crow_instances row: TEST_SOURCE_ID is a
+// trusted active peer whose bearer hash matches TEST_AUTH_TOKEN. The row
+// matrix itself (untrusted/paused/revoked/missing) is exercised on a REAL DB
+// in tests/peer-trust.test.js (U1).
+const { createHash } = await import("node:crypto");
+const PEER_ROW = {
+  id: TEST_SOURCE_ID, status: "active", trusted: 1,
+  auth_token_hash: createHash("sha256").update(TEST_AUTH_TOKEN).digest("hex"),
+};
 const auditStmts = [];
 const fakeDb = {
-  execute: async (stmt) => { auditStmts.push(stmt); return { rows: [], rowsAffected: 1 }; },
+  execute: async (stmt) => {
+    if (/FROM crow_instances/.test(stmt.sql)) {
+      return { rows: stmt.args[0] === TEST_SOURCE_ID ? [PEER_ROW] : [] };
+    }
+    auditStmts.push(stmt);
+    return { rows: [], rowsAffected: 1 };
+  },
   close: () => {},
 };
+// Every refusal after the source header has one body; the reason is the
+// audit row's `error` column (args index 10).
+const lastAuditError = () => auditStmts[auditStmts.length - 1]?.args?.[10] ?? null;
 
 let server;
 let baseUrl;
@@ -105,7 +123,7 @@ test("signature present but X-Crow-Source missing → 401 missing_x_crow_source"
   assert.equal((await r.json()).error, "missing_x_crow_source");
 });
 
-test("unknown peer → 401 unknown_peer + audit row written", async () => {
+test("unknown peer → 401 peer_auth_failed + audit row with the reason", async () => {
   const auditCountBefore = auditStmts.length;
   const r = await fetch(`${baseUrl}/required`, {
     headers: {
@@ -116,12 +134,13 @@ test("unknown peer → 401 unknown_peer + audit row written", async () => {
     },
   });
   assert.equal(r.status, 401);
-  assert.equal((await r.json()).error, "unknown_peer");
+  assert.equal((await r.json()).error, "peer_auth_failed");
+  assert.equal(lastAuditError(), "peer_not_trusted:unknown");
   assert.ok(auditStmts.length > auditCountBefore, "expected an audit INSERT");
   assert.match(auditStmts[auditStmts.length - 1].sql, /INSERT INTO cross_host_calls/);
 });
 
-test("bad signature (path tampered) → 401 hmac_mismatch", async () => {
+test("bad signature (path tampered) → 401 peer_auth_failed, audit hmac_mismatch", async () => {
   _resetNonceCache();
   const headers = signRequest({
     method: "GET",
@@ -133,7 +152,8 @@ test("bad signature (path tampered) → 401 hmac_mismatch", async () => {
   });
   const r = await fetch(`${baseUrl}/required?tampered=1`, { headers });
   assert.equal(r.status, 401);
-  assert.equal((await r.json()).error, "hmac_mismatch");
+  assert.equal((await r.json()).error, "peer_auth_failed");
+  assert.equal(lastAuditError(), "hmac_mismatch");
 });
 
 test("valid signed GET in required mode → 200, req.crossHostAuth.valid", async () => {
@@ -194,5 +214,6 @@ test("optional mode: INVALID signature must 401, never fall through to the handl
     body: rawBody,
   });
   assert.equal(r.status, 401);
-  assert.equal((await r.json()).error, "hmac_mismatch");
+  assert.equal((await r.json()).error, "peer_auth_failed");
+  assert.equal(lastAuditError(), "hmac_mismatch");
 });

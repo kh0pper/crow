@@ -35,10 +35,16 @@ const { rejectFunneledMiddleware } = await import("../servers/gateway/funnel.js"
 // fakeDb: returns the local instance row for getInstance queries, and
 // empty rows for everything else (buildAdvertisementPayload → listAdvertisedBots
 // returns [] → bots: [] in the payload).
+const PEER_HASH = (await import("node:crypto")).createHash("sha256").update(TEST_AUTH_TOKEN).digest("hex");
 function fakeDb() {
   return {
     execute: async (opts) => {
       const sql = typeof opts === "string" ? opts : (opts?.sql ?? "");
+      // PT-1: the trust lookup reads the signing peer's row — a trusted,
+      // active peer whose bearer hash matches TEST_AUTH_TOKEN.
+      if (/FROM crow_instances WHERE id = \?/.test(sql) && opts?.args?.[0] === TEST_SOURCE_ID) {
+        return { rows: [{ id: TEST_SOURCE_ID, status: "active", trusted: 1, auth_token_hash: PEER_HASH }] };
+      }
       // getInstance looks up by id — return a matching row
       if (sql.includes("crow_instances") && sql.includes("WHERE")) {
         return {

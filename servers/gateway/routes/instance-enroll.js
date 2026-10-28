@@ -65,9 +65,11 @@ import {
   setPeerCreds,
   getPeerCreds,
   loadPeerCreds,
-  savePeerCreds,
+  updatePeerCreds,
   generateSecret,
 } from "../../shared/peer-credentials.js";
+import { fenceStatements } from "../../shared/repair-fence.js";
+import { rowIsTrusted } from "../../shared/peer-trust.js";
 import {
   ENROLL_OTC_MIN_LENGTH, MAX_REPAIR_PROOFS, sha256Hex, safeEqual, verifyRepairProofs, repairProofKey,
   hasRepairAllowance, otcFirstSeen, OTC_USED_KEY_PREFIX, REPAIR_ALLOW_KEY_PREFIX,
@@ -216,8 +218,7 @@ export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.no
       let usedAllowance = false;
       if (!fresh) {
         const proofOk = Boolean(existing)
-          && Number(existing.trusted) === 1
-          && (existing.status === "active" || existing.status === "offline")
+          && rowIsTrusted(existing)
           && verifyRepairProofs(
             repairProofKey(existing.auth_token_hash, existingCreds?.signing_key),
             body, repair_proofs, { targetId: localId, otcDigest: digest },
@@ -296,6 +297,11 @@ export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.no
         // Abort (NOT NULL violation) if the CAS above matched no row: the row
         // changed since it was authorized.
         stmts.push({ sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value) SELECT NULL, NULL, NULL WHERE changes() = 0", args: [] });
+        // PT-1: any move into trust (from revoked, or from trusted != 1) writes
+        // the re-pair fence in this same batch, so entries the peer appended
+        // while not trusted are never replayed. If the fence does not land the
+        // batch aborts and the row is unchanged. (Paused stays paused; no fence.)
+        if (existing.status === "revoked" || Number(existing.trusted) !== 1) stmts.push(...fenceStatements(localId, source_instance_id));
       } else {
         stmts.push({
           sql: `INSERT INTO crow_instances (id, name, crow_id, tailscale_ip, gateway_url, sync_profile, is_home, auth_token_hash, last_seen_at, status, trusted)
@@ -329,10 +335,14 @@ export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.no
       } catch (err) {
         // Compare-and-restore: only undo OUR write — if another process has
         // since written this id's creds (and committed), leave them.
-        const all = loadPeerCreds();
-        if (all[source_instance_id]?.auth_token === peerOutboundBearer) {
-          if (hadPrev) all[source_instance_id] = prevCreds; else delete all[source_instance_id];
-          savePeerCreds(all);
+        try {
+          updatePeerCreds((all) => {
+            if (all[source_instance_id]?.auth_token !== peerOutboundBearer) return { write: false };
+            if (hadPrev) all[source_instance_id] = prevCreds; else delete all[source_instance_id];
+            return {};
+          });
+        } catch (restoreErr) {
+          console.error(`[instance-enroll] could not restore peer-tokens.json after a failed enrollment: ${restoreErr.message}`);
         }
         const msg = String(err?.message || "");
         if (/constraint/i.test(msg) && /dashboard_settings_overrides\.key/.test(msg) && /UNIQUE|PRIMARY/i.test(msg)) {

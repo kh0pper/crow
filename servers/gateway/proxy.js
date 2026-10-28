@@ -25,6 +25,7 @@ import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
 import bus from "../shared/event-bus.js";
+import { rowIsTrusted } from "../shared/peer-trust.js";
 
 /** GET <gatewayUrl>/health with a 5 s cap; throws on non-2xx or timeout. */
 async function probePeerHealth(gatewayUrl) {
@@ -658,9 +659,10 @@ export async function loadRemoteInstances() {
       args: [localId],
     });
 
-    // A connection whose row is no longer probed (revoked, or deleted) is
-    // dropped — otherwise a revoked peer kept a live federated MCP client.
-    const liveIds = new Set(rows.map((r) => r.id));
+    // A connection whose row is no longer trusted and live (revoked, paused,
+    // trusted=0, or deleted) is dropped — otherwise such a peer kept a live
+    // federated MCP client (PT-1: the one trust predicate).
+    const liveIds = new Set(rows.filter((r) => rowIsTrusted(r)).map((r) => r.id));
     for (const key of [...connectedServers.keys()]) {
       const entry = connectedServers.get(key);
       if (entry?.isRemote && entry.instanceId && !liveIds.has(entry.instanceId)) {
@@ -685,9 +687,21 @@ export async function loadRemoteInstances() {
           await probePeerHealth(inst.gateway_url);
           recordPeerProbe(inst.id, true);
           await db.execute({
-            sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ?",
+            sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ? AND status != 'revoked'",
             args: [inst.id],
           });
+        } catch (err) {
+          recordPeerProbe(inst.id, false, { error: err.message });
+        }
+        continue;
+      }
+
+      // Not trusted and live (paused, trusted=0): probe /health only (its
+      // liveness is still shown), never connect a federated MCP client.
+      if (!rowIsTrusted(inst)) {
+        try {
+          await probePeerHealth(inst.gateway_url);
+          recordPeerProbe(inst.id, true);
         } catch (err) {
           recordPeerProbe(inst.id, false, { error: err.message });
         }
@@ -728,7 +742,7 @@ export async function loadRemoteInstances() {
 
         // Update last_seen
         await db.execute({
-          sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")}, updated_at = datetime('now') WHERE id = ?`,
+          sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")}, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'`,
           args: [inst.id],
         });
       } catch (err) {
@@ -749,7 +763,7 @@ export async function loadRemoteInstances() {
         await db.execute({
           // Never overwrite a revoke/pause that landed while this probe was
           // in flight (MPA retirement defect 4).
-          sql: `UPDATE crow_instances SET status = ${livenessStatusSql("offline")}, updated_at = datetime('now') WHERE id = ?`,
+          sql: `UPDATE crow_instances SET status = ${livenessStatusSql("offline")}, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'`,
           args: [inst.id],
         }).catch(() => {});
       }

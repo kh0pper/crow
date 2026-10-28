@@ -30,6 +30,7 @@ import {
   registerInstance,
   getInstance,
   updateInstance,
+  reactivateOnRepair,
   getOrCreateLocalInstanceId,
   selfPairingAddress,
 } from "../../servers/gateway/instance-registry.js";
@@ -332,6 +333,8 @@ async function networkPair(db, { peerUrl, peerName, peerId: expectPeerId, otc: o
   const ownTailnet = tailnetSuffix(gatewayUrlHost(self.gateway_url)) || ownTailnetSuffix();
   const answerName = typeof peerPayload.peer_name === "string" ? peerPayload.peer_name.slice(0, 128) : null;
   await storePeerCredsLocally(db, {
+    // vetPeerAnswer already refused a revoked id the operator did not name.
+    allowReactivate: expectPeerId === peerId,
     peerId,
     peerName: peerName || answerName || knownRow?.name || peerId,
     peerGatewayUrl: vetPeerGatewayUrl(peerPayload.peer_gateway_url, { row: knownRow, peerUrl, ownTailnet }),
@@ -381,9 +384,23 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
   if (!peerPayload?.peer_outbound_bearer) {
     throw new Error("peer JSON missing peer_outbound_bearer");
   }
+  // The pasted answer must be the peer the operator named (the manual
+  // counterpart of vetPeerAnswer): an answer for another id would otherwise
+  // re-key, and reactivate, whichever row it names.
+  const answeredId = peerPayload.peer_instance_id;
+  if (typeof answeredId !== "string" || !ENROLL_ID_RE.test(answeredId)) {
+    throw new Error("peer JSON has no valid peer_instance_id; nothing was written");
+  }
+  if (answeredId !== peerId) {
+    throw new Error(`peer JSON is for ${answeredId}, not the --peer-id ${peerId} you named; nothing was written`);
+  }
+  if (answeredId === localId) {
+    throw new Error(`peer JSON names THIS instance's own id (${localId}); nothing was written`);
+  }
 
   await storePeerCredsLocally(db, {
-    peerId: peerPayload.peer_instance_id || peerId,
+    allowReactivate: true, // --peer-id named this id, and the answer matched it
+    peerId: answeredId,
     peerName,
     peerGatewayUrl: pickPeerGatewayUrl(peerPayload.peer_gateway_url, peerUrl),
     peerTailscaleIp: peerPayload.peer_tailscale_ip,
@@ -399,6 +416,7 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
 }
 
 async function storePeerCredsLocally(db, {
+  allowReactivate = false,
   peerId,
   peerName,
   peerGatewayUrl,
@@ -411,13 +429,19 @@ async function storePeerCredsLocally(db, {
 }) {
   const tailscaleIp = typeof peerTailscaleIp === "string" && isTailnetAddress(peerTailscaleIp.trim()) ? peerTailscaleIp.trim() : null;
   const existing = await getInstance(db, peerId);
+  if (existing?.status === "revoked" && !allowReactivate) {
+    throw new Error(`${peerId} is REVOKED here; a revoked peer is only re-paired when --peer-id names it. Nothing was written.`);
+  }
   if (existing) {
-    await updateInstance(db, peerId, {
+    // PT-1: the CLI side of a re-pair. Unlike updateInstance (which refuses
+    // any edit to a revoked row) this flips a revoked row back to active and
+    // writes the re-pair fence in the same transaction.
+    await reactivateOnRepair(db, peerId, {
       name: peerName,
-      gateway_url: peerGatewayUrl,
-      ...(tailscaleIp ? { tailscale_ip: tailscaleIp } : {}),
-      auth_token_hash: peerOutboundBearerHash,
-      trusted: 1,
+      gatewayUrl: peerGatewayUrl,
+      tailscaleIp,
+      authTokenHash: peerOutboundBearerHash,
+      localInstanceId: getOrCreateLocalInstanceId(),
     });
   } else {
     await registerInstance(db, {

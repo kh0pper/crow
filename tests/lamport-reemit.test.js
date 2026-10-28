@@ -63,9 +63,9 @@ const B_FILES = initInstance("b");
 // (the boot-window target set), so without it G3's park-while-closed never fires.
 {
   const sa = createDbClient(A_FILES.path);
-  await sa.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')", args: [B_ID, "B", "crow:b"] });
+  await sa.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)", args: [B_ID, "B", "crow:b"] });
   const sb = createDbClient(B_FILES.path);
-  await sb.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')", args: [A_ID, "A", "crow:a"] });
+  await sb.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)", args: [A_ID, "A", "crow:a"] });
 }
 
 after(() => {
