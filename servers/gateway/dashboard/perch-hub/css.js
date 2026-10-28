@@ -604,6 +604,28 @@ background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9
 #perch-hub-root .filecard .file-note{font-size:12px;color:var(--dim)}
 #perch-hub-root .filecard .file-dl{display:inline-block;margin-top:4px;color:var(--teal);font-size:13px;text-decoration:none}
 #perch-hub-root .filecard .file-img{max-width:100%;height:auto;border-radius:6px;margin-bottom:4px}
+/* Live browser tile (spec 2026-10-27 §1): the same card box as a sent file,
+   phone-first. min-width:0 + the clipped host: a long hostname never widens
+   the column past 390 px. Targets are 44 px. Perch tokens only, so the dark
+   theme comes with them. A not-holder frame dims (data-dim); a frozen tile's
+   dot turns --dim. */
+#perch-hub-root .ph-btile{flex-direction:column;gap:6px;align-self:stretch;width:100%;max-width:560px;min-width:0;
+background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px;margin:2px 0}
+#perch-hub-root .ph-btile [hidden]{display:none}
+#perch-hub-root .ph-btile .bt-frame{display:block;width:100%;min-height:44px;padding:0;border:0;border-radius:8px;
+background:var(--sky);overflow:hidden;cursor:pointer}
+#perch-hub-root .ph-btile[data-phase="done"] .bt-frame{cursor:default}
+#perch-hub-root .ph-btile .bt-img{display:block;width:100%;max-width:100%;height:auto}
+#perch-hub-root .ph-btile[data-dim="1"] .bt-img,#perch-hub-root .ph-btile[data-operator="1"] .bt-img{opacity:.45}
+#perch-hub-root .ph-btile .bt-bar{display:flex;align-items:center;gap:8px;min-width:0;font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-btile .bt-dot{width:9px;height:9px;border-radius:50%;background:var(--dim);flex-shrink:0}
+#perch-hub-root .ph-btile[data-phase="live"] .bt-dot{background:var(--alive)}
+#perch-hub-root .ph-btile .bt-state{font-weight:600;color:var(--ink);flex-shrink:0}
+#perch-hub-root .ph-btile .bt-host{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+#perch-hub-root .ph-btile .bt-note{font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-btile .bt-actions{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root .ph-btile .bt-actions button{min-height:44px;min-width:44px;padding:8px 14px}
+#perch-hub-root .browser-status{font-size:12.5px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Spec 2026-10-01: the phone call card (same box as a file card), laid out
    for a phone by the 2026-10-02 polish. min-width:0 + overflow-wrap:anywhere:
    the card never grows past the transcript column, whatever a bot or a

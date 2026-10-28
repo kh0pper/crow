@@ -4000,9 +4000,10 @@ test("W1: the watchdog and revive listeners are registered once per realm and re
   // pageshow/online/visibilitychange go through bindOnce — one listener each per realm.
   assert.equal(hub.win._listenerCount("pageshow"), 1);
   assert.equal(hub.win._listenerCount("online"), 1);
-  // Two keys, each bound once per realm: the stream revive and composer
-  // dictation's hide handler (dictation.js, 'dictationHide').
-  assert.equal(hub.doc._listenerCount("visibilitychange"), 2);
+  // Three keys, each bound once per realm: the stream revive, composer
+  // dictation's hide handler (dictation.js, 'dictationHide') and the live
+  // browser tile's frame poller (browser-tile.js, 'btVisibility').
+  assert.equal(hub.doc._listenerCount("visibilitychange"), 3);
   // Retire must stop the watchdog (closeStream does), leaving no interval behind.
   hub.win.__crowPerchHub.retire();
   assert.ok(![...hub.timerDelays.values()].includes(15000), "retiring stops the watchdog");
