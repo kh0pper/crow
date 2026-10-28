@@ -49,7 +49,10 @@ const urlsafePadded = (buf) => buf.toString("base64").replace(/\+/g, "-").replac
 export function newVapidKeypair() {
   const ecdh = createECDH("prime256v1");
   ecdh.generateKeys();
-  return { privateKey: urlsafePadded(ecdh.getPrivateKey()), publicKey: urlsafePadded(ecdh.getPublicKey()) };
+  // getPrivateKey() drops leading zero bytes (about 1 key in 256); VAPID needs exactly 32.
+  const priv = ecdh.getPrivateKey();
+  const priv32 = Buffer.concat([Buffer.alloc(32 - priv.length), priv]);
+  return { privateKey: urlsafePadded(priv32), publicKey: urlsafePadded(ecdh.getPublicKey()) };
 }
 
 /** The uncompressed public key for an encoded private key, or null if it is not one. */
