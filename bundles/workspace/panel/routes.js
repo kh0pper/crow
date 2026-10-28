@@ -27,6 +27,25 @@ export const BUNDLE_DIR = CANDIDATES.find((p) => existsSync(join(p, "manifest.js
 const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 
+/**
+ * One start attempt for the per-process workers; throws while Workspace is not set up (the caller retries). The queue
+ * worker starts first and alone; the comment watcher is loaded and started after it in its own try, so a watcher
+ * that fails to load or start only logs and never keeps the queue worker from running (nor restarts it).
+ * `load` is a test seam (default: the bundle-dir import).
+ */
+export async function startBackgroundWorkers({ clock = realClock, load = bundleImport } = {}) {
+  const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker }] = await Promise.all([load("server/db.js"), load("server/config.js"), load("server/queue/worker.js")]);
+  getConfig();
+  const db = await openWorkspaceDb();
+  startQueueWorker({ db, getConfig, clock }); // recovers rows stranded in applying_close first
+  try {
+    const { startCommentWatcher } = await load("server/comments/watcher.js");
+    startCommentWatcher({ db, getConfig, clock }); // comment loop (§3.6): idle in mode off (no Nextcloud call)
+  } catch (e) {
+    console.warn(`[workspace] comment watcher not started: ${/^[a-z_]{1,40}$/.test(String(e?.code || "")) ? e.code : "error"}`);
+  }
+}
+
 export default function workspaceRouter(authMiddleware, seams = {}) {
   const router = express.Router();
   const clock = seams.clock || realClock;
@@ -49,13 +68,7 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   // ---- K5 close-time worker: one per gateway process; waits until Workspace is set up (getConfig not_ready). ----
   if (seams.startWorker !== false) {
     const tryStart = async () => {
-      try {
-        const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker }, { startCommentWatcher }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/queue/worker.js"), bundleImport("server/comments/watcher.js")]);
-        getConfig();
-        const db = await openWorkspaceDb();
-        startQueueWorker({ db, getConfig, clock }); // recovers rows stranded in applying_close first
-        startCommentWatcher({ db, getConfig, clock }); // comment loop (§3.6): idle in mode off (no Nextcloud call)
-      } catch { setTimeout(tryStart, 5 * 60e3).unref(); }
+      try { await startBackgroundWorkers({ clock }); } catch { setTimeout(tryStart, 5 * 60e3).unref(); }
     };
     setTimeout(tryStart, 5000).unref();
   }

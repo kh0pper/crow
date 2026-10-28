@@ -1,4 +1,4 @@
-import { WsError } from "../result.js";
+import { WsError, NcError } from "../result.js";
 
 // Methods that are safe to send twice (RFC 9110 idempotent + the read-only WebDAV methods). POST, MOVE, MKCOL,
 // PROPPATCH and LOCK are never resent.
@@ -23,7 +23,7 @@ export async function ncFetch(cfg, method, url, { headers = {}, body, timeoutMs 
       return await send();
     }
   } catch (e) {
-    throw new WsError("workspace_unreachable", `Crow Workspace did not answer (${e?.name === "TimeoutError" ? "timed out" : "connection failed"}). Is it running?`);
+    throw new NcError("workspace_unreachable", `Crow Workspace did not answer (${e?.name === "TimeoutError" ? "timed out" : "connection failed"}). Is it running?`);
   }
 }
 
@@ -31,12 +31,17 @@ export async function readCapped(res, maxBytes) {
   const len = Number(res.headers.get("content-length") || 0);
   if (len > maxBytes) { res.body?.cancel?.(); throw new WsError("too_large", `The file is ${(len / 1048576).toFixed(1)} MB; the limit is ${(maxBytes / 1048576).toFixed(0)} MB`); }
   const chunks = []; let total = 0;
-  for await (const c of res.body) { total += c.length; if (total > maxBytes) throw new WsError("too_large", `The file is larger than ${(maxBytes / 1048576).toFixed(0)} MB`); chunks.push(c); }
+  try {
+    for await (const c of res.body) { total += c.length; if (total > maxBytes) throw new WsError("too_large", `The file is larger than ${(maxBytes / 1048576).toFixed(0)} MB`); chunks.push(c); }
+  } catch (e) {
+    if (e instanceof WsError) throw e;
+    throw new NcError("workspace_unreachable", "Crow Workspace stopped answering mid-download. Is it running?"); // the body stream died
+  }
   return new Uint8Array(Buffer.concat(chunks));
 }
 
 export function httpFail(res, what) {
   const map = { 401: ["not_ready", "Crow bot's Workspace app password was rejected; re-run Workspace setup"], 403: ["forbidden", `Crow bot is not allowed to ${what}`], 404: ["not_found", `Not found while trying to ${what}`], 409: ["conflict", `The parent folder does not exist (${what})`], 412: ["changed_concurrently", `Someone changed it first (${what})`], 423: ["locked", `It is locked (${what})`], 507: ["quota", "The Workspace is out of space"] };
   const [code, msg] = map[res.status] || ["workspace_error", `Workspace answered HTTP ${res.status} while trying to ${what}`];
-  return new WsError(code, msg);
+  return new NcError(code, msg);
 }

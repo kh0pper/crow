@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 
 export const MODES = ["off", "shadow", "on"];
-export const EVENT_KINDS = ["live_report", "scan_new", "scan_edit", "rekey", "would_fire", "unverified", "fp_mismatch", "history", "unresolved_key"];
+export const EVENT_KINDS = ["live_report", "scan_new", "scan_edit", "rekey", "would_fire", "unverified", "fp_mismatch", "history", "unresolved_key", "scan_error"];
 const DAY = 86400000;
 
 export async function getWatch(db) {

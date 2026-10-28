@@ -48,6 +48,8 @@ export function getConfig() {
     ownerUids,
     // Set (bootstrap: a duplicate owner display name) → the comment watcher does nothing.
     commentLoopBlocked: e.WORKSPACE_COMMENT_LOOP_BLOCKED || "",
+    // Nextcloud's instance id (the "<instanceid>_" of people.xml uids), when the editor has not shown it yet.
+    ncInstanceId: /^[A-Za-z0-9]{1,64}$/.test(e.WORKSPACE_NC_INSTANCE_ID || process.env.WORKSPACE_NC_INSTANCE_ID || "") ? (e.WORKSPACE_NC_INSTANCE_ID || process.env.WORKSPACE_NC_INSTANCE_ID) : "",
   });
 }
 

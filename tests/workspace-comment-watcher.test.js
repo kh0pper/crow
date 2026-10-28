@@ -14,7 +14,7 @@ const HOUR = 3600_000, DAY = 24 * HOUR;
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 const ENV_BASE = "WORKSPACE_BOOTSTRAP_DONE=1\nWORKSPACE_PUBLIC_HOST=crow.test\nWORKSPACE_BOT_APP_PASSWORD=pw-secret-123\nWORKSPACE_ONLYOFFICE_JWT_SECRET=jwt\n";
 
-let home, template, W, ST, S, K, getConfig, createDbClient, initWorkspaceTables, n = 0;
+let home, template, W, ST, S, K, OO, getConfig, createDbClient, initWorkspaceTables, n = 0;
 const fakes = [];
 const writeEnv = (extra = "") => writeFileSync(join(home, "bundles", "workspace", ".env"), ENV_BASE + extra, { mode: 0o600 });
 
@@ -34,11 +34,13 @@ before(async () => {
   ST = await import("../bundles/workspace/server/comments/store.js");
   S = await import("../bundles/workspace/server/comments/sessions.js");
   K = await import("../bundles/workspace/server/comments/keys.js");
+  OO = await import("../bundles/workspace/server/nc/onlyoffice.js");
 });
 after(() => { for (const f of fakes) f.close(); });
 
 /** A fresh fake Nextcloud + crow.db per test. The owner's display name is literally "admin" (spike E12). */
-async function setup({ mode = "shadow", watchSince = T0 - HOUR } = {}) {
+async function setup({ mode = "shadow", watchSince = T0 - HOUR, seams } = {}) {
+  OO.setNcInstanceId(null); // the instance id is learnt per test, from this test's editor sessions (or the env)
   const fake = await startFakeNextcloud(); fakes.push(fake);
   const names = { admin: "admin", coworker: "coworker", "crow-bot": "Crow bot" };
   fake.extraRoutes = async (req, res, body, { send, ms }) => {
@@ -58,7 +60,7 @@ async function setup({ mode = "shadow", watchSince = T0 - HOUR } = {}) {
   const clock = { t: T0, now() { return this.t; } };
   fake.state.realisticMtime = () => Math.floor(clock.t / 1000); // version ids follow the test clock
   if (mode !== "off") await ST.setMode(db, mode, watchSince);
-  const tick = W.makeCommentTick({ db, getConfig, clock });
+  const tick = W.makeCommentTick({ db, getConfig, clock, seams });
   const doc = (p, threads = [], people = { admin: "ocinst_admin" }, opts = {}) => fake.addFile(`D/${p}`, commentDocx({ threads, people }), { owner: "admin", mime: S.DOCX_MIME, ...opts });
   const save = (node, threads, people = { admin: "ocinst_admin" }, author = "admin") => fake.editorSave(node.path, commentDocx({ threads, people }), { author });
   const open = (node, users = ["admin"]) => fake.openInEditor(node.path, users, { releaseAfterMs: 1e9 });
@@ -194,6 +196,7 @@ test("I-2: newest version authored by coworker → unverified; 2 versions since 
 });
 
 test("I-2: a version saved outside any sampled owner-only window → unverified", async () => {
+  writeEnv("WORKSPACE_NC_INSTANCE_ID=ocinst\n"); // no editor session ever shows the instance id: config supplies it
   const s = await setup();
   const f = s.doc("w.docx"); // never opened in an editor: no session row covers the save
   s.advance(2000);
@@ -204,6 +207,139 @@ test("I-2: a version saved outside any sampled owner-only window → unverified"
   await s.tick();
   const v = await s.verdicts(f.fileId);
   assert.equal(v.length, 1); assert.equal(v[0].kind, "unverified"); assert.equal(v[0].reason, "no_sole_owner_window");
+  writeEnv();
+});
+
+test("instance id unknown (no editor session showed it, no WORKSPACE_NC_INSTANCE_ID) → unmapped_author", async () => {
+  const s = await setup();
+  const f = s.doc("u.docx"); // never opened: nothing reveals the instance id
+  s.advance(2000);
+  await s.tick();
+  s.advance(5000);
+  s.save(f, [hankRoot(s.clock.t - 1000)]);
+  s.advance(1000);
+  await s.tick();
+  assert.equal(OO.getNcInstanceId(), null);
+  const v = await s.verdicts(f.fileId);
+  assert.equal(v.length, 1); assert.equal(v[0].kind, "unverified"); assert.equal(v[0].reason, "unmapped_author");
+});
+
+test("docSession learns the instance id from the connector's crow-bot user id", async () => {
+  const s = await setup();
+  const f = s.doc("i.docx"); s.open(f);
+  assert.equal(OO.getNcInstanceId(), null);
+  const sess = await OO.docSession(getConfig(), f.fileId);
+  assert.deepEqual(sess.uids, ["admin"]);
+  assert.equal(OO.getNcInstanceId(), "ocinst");
+  OO.setNcInstanceId("bad_id"); assert.equal(OO.getNcInstanceId(), null, "only a plain alphanumeric id is kept");
+});
+
+test("people.xml uid with another instance's prefix → unmapped_author, even though the rest reads admin", async () => {
+  const s = await setup();
+  const f = s.doc("pp.docx"); s.open(f);
+  s.advance(2000);
+  await s.tick();
+  s.advance(5000);
+  s.save(f, [hankRoot(s.clock.t - 1000)], { admin: "ocx_admin" });
+  s.advance(1000);
+  await s.tick();
+  const v = await s.verdicts(f.fileId);
+  assert.equal(v.length, 1); assert.equal(v[0].kind, "unverified"); assert.equal(v[0].reason, "unmapped_author");
+});
+
+test("the GET's mtime is not in the versions list → non_owner_version (no fallback to the newest listed)", async () => {
+  const s = await setup();
+  const f = s.doc("nv.docx"); s.open(f);
+  s.advance(2000);
+  await s.tick();
+  s.advance(5000);
+  s.save(f, [hankRoot(s.clock.t - 1000)]);
+  const vs = s.fake.versionsOf(f.path);
+  vs.at(-1).id -= 3; // the current file is listed under some other id: an owner-authored version, but not this one
+  s.advance(1000);
+  await s.tick();
+  const v = await s.verdicts(f.fileId);
+  assert.equal(v.length, 1); assert.equal(v[0].kind, "unverified"); assert.equal(v[0].reason, "non_owner_version");
+});
+
+test("a non-Nextcloud failure in one file is that file's alone: marked error, logged, the next file still scanned", async () => {
+  const boom = (threads, pm) => { if (JSON.stringify(threads).includes("boom")) throw new TypeError("parse blew up"); return K.snapshot(threads, pm); };
+  const s = await setup({ seams: { snapshot: boom } });
+  s.advance(1000);
+  const good = s.doc("e2.docx", [hankRoot(s.clock.t - 500, "@hank fine")]);
+  s.advance(1000);
+  const bad = s.doc("e1.docx", [hankRoot(s.clock.t - 500, "@hank boom")]); // newest: listed (and scanned) first
+  s.advance(1000);
+  const r = await s.tick();
+  assert.equal(r.ran, true); assert.notEqual(r.error, true, "no back-off");
+  assert.equal((await ST.getState(s.db, bad.fileId)).skip_reason, "error");
+  assert.ok((await ST.getState(s.db, good.fileId))?.scanned_at, "file 2 was still scanned");
+  const errs = await s.events("scan_error", bad.fileId);
+  assert.equal(errs.length, 1);
+  assert.ok(!JSON.stringify(errs[0]).includes("boom"), "no comment text in the event");
+  const rows = (await s.db.execute("SELECT kind, file_id FROM workspace_comment_events ORDER BY id")).rows;
+  assert.equal(Number(rows[0].file_id), bad.fileId, "the failing file came first in the tick");
+  assert.ok(rows.some((x) => x.kind === "scan_new" && Number(x.file_id) === good.fileId));
+  s.advance(15_000);
+  const n1 = s.fake.calls.length;
+  await s.tick();
+  assert.ok(s.fake.calls.length > n1, "no 60 s back-off: the next tick calls Nextcloud");
+  assert.equal((await s.events("scan_error", bad.fileId)).length, 1, "not retried until its etag changes");
+});
+
+test("a comment by \"Crow\" (the gateway's authorFor(null)) naming @hank logs no verdict", async () => {
+  const s = await setup();
+  const f = s.doc("crow.docx"); s.open(f);
+  s.advance(2000);
+  await s.tick();
+  s.advance(5000);
+  s.save(f, [{ ...hankRoot(s.clock.t - 1000, "@hank over to you"), author: "Crow" }], { admin: "ocinst_admin" });
+  s.advance(1000);
+  await s.tick();
+  assert.equal((await s.verdicts(f.fileId)).length, 0);
+  assert.equal((await s.events("would_fire")).length, 0);
+  assert.equal((await s.events(undefined, f.fileId)).length, 0, "no scan_new either");
+});
+
+test("displayName: a non-207 answer is null and not cached; a real answer is cached", async () => {
+  const s = await setup();
+  const { displayName } = await import("../bundles/workspace/server/nc/ocs.js");
+  let fail = true, asked = 0;
+  s.fake.failRoute = (req, res, send) => {
+    if (req.method === "PROPFIND" && req.url === "/remote.php/dav/principals/users/dn-user/") {
+      asked++;
+      if (fail) { send(503); return true; }
+      send(207, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>${req.url}</d:href><d:propstat><d:prop><d:displayname>Dee Enn</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`); return true;
+    }
+    return false;
+  };
+  const cfg = getConfig();
+  assert.equal(await displayName(cfg, "dn-user"), null, "an error answer is not the uid");
+  fail = false;
+  assert.equal(await displayName(cfg, "dn-user"), "Dee Enn", "the failure was not cached");
+  assert.equal(await displayName(cfg, "dn-user"), "Dee Enn");
+  assert.equal(asked, 2, "the real answer is cached");
+});
+
+test("startBackgroundWorkers: the queue worker starts first, and a watcher that fails to load does not stop it", async () => {
+  const { startBackgroundWorkers } = await import("../bundles/workspace/panel/routes.js");
+  const order = [];
+  const mods = {
+    "server/db.js": { openWorkspaceDb: async () => ({}) },
+    "server/config.js": { getConfig: () => ({}) },
+    "server/queue/worker.js": { startQueueWorker: () => order.push("queue") },
+  };
+  const load = async (rel) => { if (rel === "server/comments/watcher.js") { order.push("watcher-load"); throw new SyntaxError("bad module"); } return mods[rel]; };
+  await startBackgroundWorkers({ clock: { now: () => T0 }, load }); // resolves: no retry of the whole start
+  assert.deepEqual(order, ["queue", "watcher-load"]);
+  // and a watcher that loads starts after the queue worker
+  order.length = 0;
+  await startBackgroundWorkers({ clock: { now: () => T0 }, load: async (rel) => rel === "server/comments/watcher.js" ? { startCommentWatcher: () => order.push("watcher") } : mods[rel] });
+  assert.deepEqual(order, ["queue", "watcher"]);
+  // Workspace not set up → it throws (the caller retries later) and nothing started
+  order.length = 0;
+  await assert.rejects(startBackgroundWorkers({ clock: { now: () => T0 }, load: async (rel) => rel === "server/config.js" ? { getConfig: () => { throw Object.assign(new Error("x"), { code: "not_ready" }); } } : mods[rel] }));
+  assert.deepEqual(order, []);
 });
 
 test("coworker sampled on the key since last scan → coworker_in_session", async () => {
@@ -430,16 +566,55 @@ test("startCommentWatcher returns {stop}", async () => {
 
 test("identity helpers: liveOwner rules (a)-(d), isBotAuthor, normName", async () => {
   const I = await import("../bundles/workspace/server/comments/identity.js");
-  const base = { reporterUid: "ocinst_admin", sessionUids: ["ocinst_admin"], sessionRow: { uids_json: '["admin"]' }, payloadName: "admin", tokenName: " Admin ", ownerUids: ["admin"], ownerNames: ["admin"] };
+  const base = { reporterUid: "admin", sessionUids: ["admin"], sessionRow: { uids_json: '["admin"]' }, payloadName: "admin", tokenName: " Admin ", ownerUids: ["admin"], ownerNames: ["admin"] };
   assert.deepEqual(I.liveOwner(base), { ok: true, reason: null, sole: true });
-  assert.equal(I.liveOwner({ ...base, reporterUid: "ocinst_coworker" }).reason, "non_owner_author");
-  assert.equal(I.liveOwner({ ...base, sessionUids: ["ocinst_admin", "ocinst_coworker"] }).reason, "coworker_in_session");
+  assert.equal(I.liveOwner({ ...base, reporterUid: "coworker" }).reason, "non_owner_author");
+  assert.equal(I.liveOwner({ ...base, reporterUid: "ocx_admin" }).reason, "non_owner_author", "session uids are compared as they are: no prefix strip");
+  assert.equal(I.liveOwner({ ...base, sessionUids: ["admin", "coworker"] }).reason, "coworker_in_session");
+  assert.equal(I.liveOwner({ ...base, sessionUids: ["ocx_admin"] }).sole, false, "a prefixed session uid is not the owner");
   assert.equal(I.liveOwner({ ...base, sessionRow: { uids_json: '["admin","coworker"]' } }).reason, "coworker_in_session");
   assert.equal(I.liveOwner({ ...base, payloadName: "coworker" }).reason, "unverified_author");
   assert.equal(I.isBotAuthor("Hank (bot)", null), true);
   assert.equal(I.isBotAuthor("Crow bot", "ocinst_crow-bot"), true);
   assert.equal(I.isBotAuthor("admin", "ocinst_admin"), false);
+  assert.equal(I.isBotAuthor(" Crow ", "ocinst_admin"), true, "the gateway's authorFor(null), whatever the uid");
+  assert.equal(I.isBotAuthor("Crowley", null), false);
   assert.equal(I.normName(" A\u0301dmin "), I.normName("\u00C1dmin"), "NFC: decomposed = composed");
   assert.equal(I.normName("  ADMIN "), "admin");
   assert.equal(I.historyOf({ date: "not a date", watchSince: 0, firstSighting: false }), "unknown");
+});
+
+test("historyOf: knownFp true → history, whatever the date and thresholds", async () => {
+  const I = await import("../bundles/workspace/server/comments/identity.js");
+  const fresh = iso(T0);
+  assert.equal(I.historyOf({ date: fresh, watchSince: T0 - DAY, knownFp: false, firstSighting: false }), "new", "control");
+  assert.equal(I.historyOf({ date: fresh, watchSince: T0 - DAY, knownFp: true, firstSighting: false }), "history");
+  assert.equal(I.historyOf({ date: fresh, watchSince: T0 - DAY, knownFp: true, firstSighting: true }), "history", "even a first sighting with no thresholds");
+  assert.equal(I.historyOf({ date: "garbage", watchSince: null, knownFp: true }), "history", "even an unreadable date");
+});
+
+test("peopleUidOf strips exactly \"<instanceid>_\"; VERDICT_REASONS is frozen and complete", async () => {
+  const I = await import("../bundles/workspace/server/comments/identity.js");
+  assert.equal(I.peopleUidOf("ocinst_admin", "ocinst"), "admin");
+  assert.equal(I.peopleUidOf("ocinst_first_last", "ocinst"), "first_last", "only the instance prefix goes");
+  assert.equal(I.peopleUidOf("ocx_admin", "ocinst"), null);
+  assert.equal(I.peopleUidOf("admin", "ocinst"), null, "no prefix → unmapped");
+  assert.equal(I.peopleUidOf("ocinst_", "ocinst"), null);
+  assert.equal(I.peopleUidOf("ocinst_admin", null), null, "instance id unknown → unmapped");
+  assert.ok(Object.isFrozen(I.VERDICT_REASONS));
+  for (const r of ["history", "date_unknown", "owner_verified", "non_owner_author", "coworker_in_session", "unverified_author", "unmapped_author", "multi_version", "non_owner_version", "no_sole_owner_window", "unverified"]) assert.ok(Object.values(I.VERDICT_REASONS).includes(r), r);
+});
+
+test("savedOwner: exact-prefix people uid maps; version author compared as-is; unknown instance id → unmapped_author", async () => {
+  const I = await import("../bundles/workspace/server/comments/identity.js");
+  const s = await setup();
+  const fileId = 999;
+  await S.recordSession(s.db, { key: "kso", fileId, uids: ["admin"], at: T0 - 60_000 });
+  await S.recordSession(s.db, { key: "kso", fileId, uids: ["admin"], at: T0 + 60_000 });
+  const base = { author: "admin", peopleUid: "ocinst_admin", instanceId: "ocinst", newestVersion: { versionId: String(T0 / 1000), author: "admin" }, versionsSince: 1, db: s.db, fileId, sinceMs: T0 - HOUR, ownerUids: ["admin"], ownerNames: ["admin"] };
+  assert.deepEqual(await I.savedOwner(base), { ok: true, reason: null, sole: true });
+  assert.equal((await I.savedOwner({ ...base, instanceId: null })).reason, "unmapped_author");
+  assert.equal((await I.savedOwner({ ...base, peopleUid: "ocx_admin" })).reason, "unmapped_author");
+  assert.equal((await I.savedOwner({ ...base, peopleUid: "ocinst_coworker" })).reason, "non_owner_author");
+  assert.equal((await I.savedOwner({ ...base, newestVersion: { ...base.newestVersion, author: "ocx_admin" } })).reason, "non_owner_version", "version author: no prefix strip");
 });

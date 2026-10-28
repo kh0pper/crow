@@ -16,11 +16,18 @@ export async function ocsPost(cfg, path, form) {
   return j.ocs.data;
 }
 const nameCache = new Map();
+/**
+ * A Nextcloud user's display name, or null when Nextcloud gave no real answer (a non-207 status, or no displayname
+ * in it). Only real answers are cached, so an outage never pins a uid as someone's "name"; callers that only show
+ * the name fall back to the uid themselves (`?? uid`), and the comment loop fails closed on null.
+ */
 export async function displayName(cfg, uid) {
   if (nameCache.has(uid)) return nameCache.get(uid);
   const r = await ncFetch(cfg, "PROPFIND", principalUrl(cfg, uid), { headers: { Depth: "0", "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>` });
-  const name = r.status === 207 ? (propText(parseMultistatus(await r.text())[0]?.props || new Map(), NS.d, "displayname") || uid) : uid;
-  nameCache.set(uid, name); return name;
+  if (r.status !== 207) { r.body?.cancel?.(); return null; }
+  const name = propText(parseMultistatus(await r.text())[0]?.props || new Map(), NS.d, "displayname") || null;
+  if (name !== null) nameCache.set(uid, name);
+  return name;
 }
 export const myShares = (cfg, segs) => ocsGet(cfg, `/ocs/v2.php/apps/files_sharing/api/v1/shares?path=${encodeURIComponent(`/${joinPath(segs)}`)}`);
 export const createUserShare = (cfg, segs, user, permissions) => ocsPost(cfg, "/ocs/v2.php/apps/files_sharing/api/v1/shares", { path: `/${joinPath(segs)}`, shareType: "0", shareWith: user, permissions: String(permissions) });

@@ -27,6 +27,17 @@ export async function ooCommand(cfg, payload) {
  * Callers that only reach this with the file LOCKED (stale-lock checks) key on `known`: a locked file whose key
  * is still cached with no users is the editor's post-close save window, not a stale lock.
  */
+/**
+ * Nextcloud's instance id, as the editor connector reveals it: the connector names crow-bot "<instanceid>_crow-bot"
+ * (spike S6). Cached per process from the first docSession that shows it; the comment loop strips exactly
+ * "<instanceid>_" from people.xml uids with it. Null until seen (the caller then falls back to
+ * WORKSPACE_NC_INSTANCE_ID, else fails closed). It is never inferred from file content.
+ */
+let ncInstanceId = null;
+const INSTANCE_RE = /^[A-Za-z0-9]{1,64}$/;
+export const getNcInstanceId = () => ncInstanceId;
+export function setNcInstanceId(id) { ncInstanceId = id != null && INSTANCE_RE.test(String(id)) ? String(id) : null; }
+
 export async function docSession(cfg, fileId) {
   const c = await ocsGet(cfg, `/ocs/v2.php/apps/onlyoffice/api/v1/config/${Number(fileId)}`);
   const key = c?.document?.key;
@@ -35,6 +46,7 @@ export async function docSession(cfg, fileId) {
   const own = String(c?.editorConfig?.user?.id || "");
   const suffix = `_${cfg.user}`;
   const prefix = own.endsWith(suffix) ? own.slice(0, -suffix.length) : "";
+  if (prefix && INSTANCE_RE.test(prefix)) setNcInstanceId(prefix);
   const info = await ooCommand(cfg, { c: "info", key });
   const users = Array.isArray(info.users) ? info.users.map(String) : [];
   const known = info.error === 0;

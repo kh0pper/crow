@@ -30,7 +30,7 @@ export async function classifyLock(cfg, e) {
     // name and nobody to close — "busy" (retry shortly; a queued change simply waits for the unlock)
     return { code: "busy", key: s.key, users: [], message: `"${e.name}" is being saved after its editor closed. Try again in a few seconds.`, data: { open_by: [], since: l.since, lock_type: "editor", can_proceed: false } };
   }
-  const who = await Promise.all(s.uids.map((u) => displayName(cfg, u)));
+  const who = await Promise.all(s.uids.map(async (u) => (await displayName(cfg, u)) ?? u));
   return {
     code: "open_in_editor", key: s.key, users: s.users,
     message: `${names(who)} ${who.length > 1 ? "have" : "has"} "${e.name}" open in the editor.`,

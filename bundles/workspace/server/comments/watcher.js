@@ -6,8 +6,10 @@
  *
  * One tick: mode / block check (mode off → no Nextcloud call at all) → back-off → lease → prune → session sweep →
  * for changed etags (≤ MAX_DOWNLOADS downloads; over MAX_BYTES by listing size → skipped until the etag changes):
- * download, snapshot, diff, classify, log → putState per file. A Nextcloud error ends the tick (files already done
- * keep their state), backs off BACKOFF_MS and widens the next listing to OUTAGE_LIMIT.
+ * download, snapshot, diff, classify, log → putState per file. A Nextcloud error (NcError: no answer or an HTTP
+ * error) ends the tick (files already done keep their state), backs off BACKOFF_MS and widens the next listing to
+ * OUTAGE_LIMIT. Any other error while scanning one file is that file's alone: it is marked skip_reason "error"
+ * (retried when its etag changes), a scan_error event is logged (no comment text), and the tick goes on.
  */
 import { randomUUID } from "node:crypto";
 import { appImport } from "../app-root.js";
@@ -15,9 +17,11 @@ import { listRecent, getFile } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
 import { listVersions } from "../nc/versions.js";
 import { displayName } from "../nc/ocs.js";
+import { getNcInstanceId } from "../nc/onlyoffice.js";
+import { NcError } from "../result.js";
 import { openDocx } from "../ooxml/docx-model.js";
 import { readCommentThreads } from "../ooxml/docx-comments.js";
-import { flatten, fingerprint, snapshot, diff, pairKey } from "./keys.js";
+import { flatten, fingerprint, snapshot as snapshotOf, diff, pairKey } from "./keys.js";
 import { DOCX_MIME, sweepSessions } from "./sessions.js";
 import { getWatch, takeLease, prune, getState, putState, logEvent, textHash, snippetOf } from "./store.js";
 import { isBotAuthor, historyOf, savedOwner, verdictOf } from "./identity.js";
@@ -34,8 +38,10 @@ const WINDOW_SLACK_MS = 30000; // the same ±30 s soleOwnerWindowAt uses
 let mentionsP = null;
 const mentions = () => (mentionsP ??= appImport("servers/shared/bot-mention.js").catch((e) => { mentionsP = null; throw e; }));
 const parseJson = (s, d) => { try { return JSON.parse(s); } catch { return d; } };
+const errCode = (err) => (/^[a-z_]{1,40}$/.test(String(err?.code || "")) ? err.code : "error");
 
-export function makeCommentTick({ db, getConfig, clock }) {
+/** seams.snapshot: tests only (a failure inside one file's scan). */
+export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
   const owner = `comment-watch:${randomUUID()}`;
   let backoffUntil = 0, outage = false;
 
@@ -55,7 +61,7 @@ export function makeCommentTick({ db, getConfig, clock }) {
     try {
       ({ anyLive } = await sweepSessions({ db, getConfig: () => cfg, clock, limit }));
       const entries = await listRecent(cfg, { limit, mimes: [DOCX_MIME] });
-      const ctx = { db, cfg, now, watch, names: null };
+      const ctx = { db, cfg, now, watch, names: null, instanceId: getNcInstanceId() || cfg.ncInstanceId || null, snapshot: seams.snapshot || snapshotOf };
       let downloads = 0;
       for (const e of entries) {
         if (e.isFolder || !(Number(e.fileId) > 0)) continue;
@@ -64,12 +70,18 @@ export function makeCommentTick({ db, getConfig, clock }) {
         if (e.size > MAX_BYTES) { await skip(ctx, e, st, { etag: e.etag, mtime: e.mtime }, "too_large"); continue; }
         if (downloads >= MAX_DOWNLOADS) continue; // the rest wait for the next tick (oversized ones are still marked)
         downloads++;
-        await scanFile(ctx, e, st);
+        try { await scanFile(ctx, e, st); } catch (err) {
+          if (err instanceof NcError) throw err;
+          await skip(ctx, e, st, { etag: e.etag, mtime: e.mtime }, "error");
+          await logEvent(db, { at: now, fileId: e.fileId, kind: "scan_error", detail: { source: "saved", code: errCode(err) } });
+          console.warn(`[workspace] comment watcher: file ${Number(e.fileId)} skipped (${errCode(err)})`);
+        }
       }
       outage = false;
     } catch (err) {
+      if (!(err instanceof NcError)) throw err; // not an outage: no back-off (the loop logs it and ticks again)
       backoffUntil = clock.now() + BACKOFF_MS; outage = true;
-      console.warn(`[workspace] comment watcher: ${/^[a-z_]{1,40}$/.test(String(err?.code || "")) ? err.code : "error"}; backing off`);
+      console.warn(`[workspace] comment watcher: ${errCode(err)}; backing off`);
       return { ran: true, error: true, nextMs: BACKOFF_MS };
     }
     return { ran: true, nextMs: anyLive ? LIVE_TICK_MS : TICK_MS };
@@ -90,7 +102,7 @@ async function scanFile(ctx, e, st) {
   let parsed;
   try { parsed = readCommentThreads(openDocx(got.bytes)); } catch { return skip(ctx, e, st, got, "unreadable"); }
   const { parseMentions, resolveMentionedBot } = await mentions();
-  const next = snapshot(parsed.threads, parseMentions);
+  const next = ctx.snapshot(parsed.threads, parseMentions);
   const nextJson = JSON.stringify(next);
   const prev = st?.scanned_at ? parseJson(st.threads_json, []) : null; // null = first sighting
   const row = baseRow(e, st, now);
@@ -125,7 +137,8 @@ async function scanFile(ctx, e, st) {
   if (cands.length) {
     ctx.names ??= await Promise.all(cfg.ownerUids.map((u) => displayName(cfg, u)));
     const versions = await listVersions(cfg, e.fileId);
-    const newest = versions.find((v) => Number(v.versionId) === Number(got.mtime)) || versions[0] || null;
+    // The version the GET returned, by its mtime; not listed → no newest version → non_owner_version (fail closed).
+    const newest = versions.find((v) => Number(v.versionId) === Number(got.mtime)) || null;
     const prevVersion = newest ? versions.find((v) => Number(v.versionId) < Number(newest.versionId)) || null : null;
     const sinceS = prev ? Number(st.mtime) : Math.floor(Number(watch.watch_since) / 1000);
     let sessionFirstSeenMs = null;
@@ -147,7 +160,7 @@ async function scanFile(ctx, e, st) {
     await logEvent(db, { at: now, fileId: e.fileId, kind, detail: common });
     await checkLiveFp(db, now, e.fileId, pair, x.fp, flat, bot.botId);
     const history = historyOf({ date: c.date, watchSince: watch.watch_since, knownFp: prevFps.has(x.fp), firstSighting: !prev, sessionFirstSeenMs: facts.sessionFirstSeenMs, prevVersionMtimeS: facts.prevVersionMtimeS });
-    const identity = await savedOwner({ author: c.author, peopleUid, newestVersion: facts.newest, versionsSince: facts.versionsSince, db, fileId: e.fileId, sinceMs: facts.sinceMs, ownerUids: cfg.ownerUids, ownerNames: ctx.names });
+    const identity = await savedOwner({ author: c.author, peopleUid, instanceId: ctx.instanceId, newestVersion: facts.newest, versionsSince: facts.versionsSince, db, fileId: e.fileId, sinceMs: facts.sinceMs, ownerUids: cfg.ownerUids, ownerNames: ctx.names });
     const v = verdictOf(history, identity);
     const age = Date.parse(c.date);
     await logEvent(db, { at: now, fileId: e.fileId, kind: v.kind, detail: { ...common, reason: v.reason, sole: !!identity.sole, age_s: Number.isFinite(age) ? Math.round((now - age) / 1000) : null } });
