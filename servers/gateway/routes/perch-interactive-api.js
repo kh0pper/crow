@@ -976,8 +976,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     let tdb = null;
     try {
       try {
-        tdb = createDbClient(TASKS_DB);
-        await recoverThread(db, tdb, sid);
+        // tasks.db opens only when this thread has a stranded offer (runOfferSweep's rule).
+        tdb = await recoverThread(db, () => (tdb = createDbClient(TASKS_DB)), sid);
       } catch (e) {
         console.warn("[perch-interactive-api] offer recovery skipped:", e.message);
       }
@@ -1036,7 +1036,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         // unreadable), the offer stays accepted and the lease + recovery decide it.
         let found;
         if (Number.isInteger(err && err.cardId)) found = err.cardId;
-        else { try { found = await findOfferCard(tdb, offerId); } catch { found = undefined; } }
+        else { try { found = await findOfferCard(tdb, offerId, offer.bot_id); } catch { found = undefined; } }
         if (found == null) {
           if (found === null) {
             try { await releaseClaim(db, offerId, token); } catch (e) { console.warn("[perch-interactive-api] offer release failed:", e.message); }
@@ -1045,10 +1045,14 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         }
         console.warn(`[perch-interactive-api] offer ${offerId}: card ${found} was made, then:`, err && err.message);
         cardId = found;
+        try {
+          const r = (await tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [cardId] })).rows[0];
+          if (r && r.project_id != null) projectId = Number(r.project_id);
+        } catch { /* keep the bot's project as the best answer */ }
       }
 
       try {
-        await settleOffer(db, offerId, cardId);
+        await settleOffer(db, offerId, cardId, projectId);
       } catch (e) {
         console.warn(`[perch-interactive-api] offer ${offerId}: settle failed (recovery will settle it):`, e.message);
       }

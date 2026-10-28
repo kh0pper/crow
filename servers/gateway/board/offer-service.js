@@ -200,23 +200,33 @@ export async function releaseClaim(db, offerId, claimToken) {
   return r.rowsAffected === 1;
 }
 
-export async function settleOffer(db, offerId, cardId) {
+/** Settle an accepted offer to its card. `projectId` is where the card really went (the bot's
+ *  board at accept time, which can differ from the one named at offer time); it is written in
+ *  the same UPDATE so listOffers never reports a stale project. null keeps the offer's own. */
+export async function settleOffer(db, offerId, cardId, projectId = null) {
   await db.execute({
-    sql: "UPDATE card_offers SET card_id=? WHERE id=? AND card_id IS NULL",
-    args: [Number(cardId), Number(offerId)],
+    sql: "UPDATE card_offers SET card_id=?, project_id=COALESCE(?, project_id) WHERE id=? AND card_id IS NULL",
+    args: [Number(cardId), projectId == null ? null : Number(projectId), Number(offerId)],
   });
 }
 
-/** The card an accept made for this offer, by an EXACT tag match (offer 1 never matches
- *  crow-offer-12), or null. The LIKE only narrows the candidates. */
-export async function findOfferCard(tdb, offerId) {
+/** The card an accept made for this offer: an EXACT tag match (offer 1 never matches
+ *  crow-offer-12) on a card assigned to the offering bot (so a card someone tagged by hand is
+ *  never adopted), as {id, projectId}, or null. The LIKE only narrows the candidates. */
+export async function findOfferCardRow(tdb, offerId, botId) {
   const tag = offerTag(offerId);
   const { rows } = await tdb.execute({
-    sql: "SELECT id, tags FROM tasks_items WHERE board_id IS NULL AND tags LIKE '%crow-offer-' || ? || '%' ORDER BY id",
-    args: [String(Number(offerId))],
+    sql: "SELECT id, tags, project_id FROM tasks_items WHERE board_id IS NULL AND assigned_bot = ? AND tags LIKE '%crow-offer-' || ? || '%' ORDER BY id",
+    args: [String(botId), String(Number(offerId))],
   });
   const hit = rows.find((r) => tagList(r.tags).includes(tag));
-  return hit ? Number(hit.id) : null;
+  return hit ? { id: Number(hit.id), projectId: hit.project_id == null ? null : Number(hit.project_id) } : null;
+}
+
+/** findOfferCardRow's card id, or null. */
+export async function findOfferCard(tdb, offerId, botId) {
+  const r = await findOfferCardRow(tdb, offerId, botId);
+  return r ? r.id : null;
 }
 
 /**
@@ -229,9 +239,9 @@ export async function findOfferCard(tdb, offerId) {
 export async function recoverOffer(db, tdb, offer) {
   if (!offer) return offer;
   if (offer.card_id != null || offer.status !== "accepted") return { ...offer, recovered: null };
-  const cardId = await findOfferCard(tdb, offer.id);
-  if (cardId != null) {
-    await settleOffer(db, offer.id, cardId);
+  const card = await findOfferCardRow(tdb, offer.id, offer.bot_id);
+  if (card) {
+    await settleOffer(db, offer.id, card.id, card.projectId);
     return { ...(await getOffer(db, offer.id)), recovered: "settled" };
   }
   // A lease that was never written is a state the accept path does not produce; it reads as
@@ -244,7 +254,7 @@ export async function recoverOffer(db, tdb, offer) {
   return { ...(await getOffer(db, offer.id)), recovered: r.rowsAffected === 1 ? "reopened" : null };
 }
 
-async function strandedOffers(db, threadId) {
+export async function strandedOffers(db, threadId) {
   try {
     const { rows } = await db.execute({
       sql: threadId == null
@@ -259,9 +269,15 @@ async function strandedOffers(db, threadId) {
   }
 }
 
-/** recoverOffer over one thread's stranded offers (the GET /offers read). */
+/** recoverOffer over one thread's stranded offers (the GET /offers read). `tdb` may be a getter,
+ *  called only when there is a stranded offer, so a read never makes a tasks.db file on an
+ *  install without one. Returns the client it opened (the caller closes it), or null. */
 export async function recoverThread(db, tdb, threadId) {
-  for (const o of await strandedOffers(db, threadId)) await recoverOffer(db, tdb, o);
+  const stranded = await strandedOffers(db, threadId);
+  if (!stranded.length) return null;
+  const t = typeof tdb === "function" ? tdb() : tdb;
+  for (const o of stranded) await recoverOffer(db, t, o);
+  return t;
 }
 
 /**
@@ -315,6 +331,8 @@ export async function runOfferSweep(openDb, openTasks) {
  * turn never started.
  */
 export async function claimOfferNotes(db, threadId) {
+  // Delivery is AT MOST once: a crash between this claim and the engine taking the message loses
+  // the line (accepted; the chat's system note still shows the card).
   let rows;
   try {
     rows = (await db.execute({
@@ -338,6 +356,14 @@ export async function claimOfferNotes(db, threadId) {
     }
   }
   return { lines, claims };
+}
+
+/** The offer-note lines the message route prefixes, removed from the start of a stored user
+ *  message (exact lines, anchored, followed by the blank line), so a reloaded transcript shows
+ *  the operator only their own text. Anything else is returned unchanged. */
+const OFFER_NOTE_PREFIX = /^(?:\[Crow\] The operator made card #\d+ from your offer\.\n)+\n/;
+export function stripOfferNotes(text) {
+  return typeof text === "string" ? text.replace(OFFER_NOTE_PREFIX, "") : text;
 }
 
 export async function unclaimOfferNotes(db, claims) {

@@ -53,9 +53,9 @@ function seedOffer({ bot = "b1", thread = "perchlive-q", title = "Draft the repl
   c.close();
   return Number(r.lastInsertRowid);
 }
-function seedCard(tags, title = "seeded") {
+function seedCard(tags, title = "seeded", { bot = "b1", project = PID } = {}) {
   const t = rawTasks();
-  const r = t.prepare("INSERT INTO tasks_items (title, tags, project_id) VALUES (?,?,?)").run(title, tags, PID);
+  const r = t.prepare("INSERT INTO tasks_items (title, tags, project_id, assigned_bot) VALUES (?,?,?,?)").run(title, tags, project, bot);
   t.close();
   return Number(r.lastInsertRowid);
 }
@@ -312,17 +312,17 @@ test("offer 1 never matches crow-offer-12", async () => {
     c.prepare("INSERT INTO card_offers (id, bot_id, thread_id, title, project_id, status, lease_until) VALUES (1,'b1','t','T',1,'accepted','2999-01-01T00:00:00.000Z')").run();
     c.close();
     const t = new Database(tpath);
-    t.exec("CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT, tags TEXT, board_id INTEGER)");
-    t.prepare("INSERT INTO tasks_items (id, title, tags) VALUES (5,'x','crow-offer-12'),(6,'y','a,xcrow-offer-1'),(7,'z','crow-offer-1x')").run();
+    t.exec("CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT, tags TEXT, board_id INTEGER, project_id INTEGER, assigned_bot TEXT)");
+    t.prepare("INSERT INTO tasks_items (id, title, tags, assigned_bot) VALUES (5,'x','crow-offer-12','b1'),(6,'y','a,xcrow-offer-1','b1'),(7,'z','crow-offer-1x','b1')").run();
     t.close();
     const db = createDbClient(cpath), tdb = createDbClient(tpath);
     try {
-      assert.equal(await svc.findOfferCard(tdb, 1), null);
+      assert.equal(await svc.findOfferCard(tdb, 1, "b1"), null);
       const r = await svc.recoverOffer(db, tdb, await svc.getOffer(db, 1));
       assert.equal(r.card_id, null, "not settled to another offer's card");
       assert.equal(r.status, "accepted", "the lease is live, so it is not reopened either");
-      await tdb.execute("INSERT INTO tasks_items (id, title, tags) VALUES (8,'w','gift, crow-offer-1')");
-      assert.equal(await svc.findOfferCard(tdb, 1), 8);
+      await tdb.execute("INSERT INTO tasks_items (id, title, tags, assigned_bot) VALUES (8,'w','gift, crow-offer-1','b1')");
+      assert.equal(await svc.findOfferCard(tdb, 1, "b1"), 8);
     } finally { db.close(); tdb.close(); }
   } finally { rmSync(d2, { recursive: true, force: true }); }
 });
@@ -436,4 +436,61 @@ test("the gateway runs the sweep before listen and every 10 minutes after", asyn
   const pl = readFileSync(join(REPO, "servers/gateway/boot/post-listen.js"), "utf8");
   assert.match(pl, /runOfferSweep\(/);
   assert.match(pl, /OFFER_SWEEP_INTERVAL_MS = 10 \* 60 \* 1000/);
+});
+
+// ---- fix round 1 ----
+
+test("a hand-tagged card that is not the offering bot's is never adopted", async () => {
+  const id = seedOffer({ status: "accepted", lease: "2000-01-01T00:00:00.000Z", token: "t" });
+  seedCard(`crow-offer-${id}`, "someone else's", { bot: "b9" });
+  seedCard(`crow-offer-${id}`, "nobody's", { bot: null });
+  const r = await get("/interactive/perchlive-q/offers");
+  const o = r.body.offers.find((x) => x.id === id);
+  assert.equal(o.cardId, null, "not settled to a card the bot was never given");
+  assert.equal(o.status, "pending", "and the expired accept reopens");
+  // the bot's own tagged card is adopted
+  const id2 = seedOffer({ title: "Mine", status: "accepted", lease: "2999-01-01T00:00:00.000Z", token: "t" });
+  const mine = seedCard(`crow-offer-${id2}`, "mine");
+  assert.deepEqual(await sweep(), { settled: 1, reopened: 0 });
+  assert.equal(offerRow(id2).card_id, mine);
+});
+
+test("listOffers reports the project the card really went to", async () => {
+  const c = raw();
+  const PID_NEW = Number(c.prepare("INSERT INTO project_spaces (slug, name) VALUES ('b1-new-board','B1 new board')").run().lastInsertRowid);
+  c.close();
+  const id = seedOffer();                       // named the old board at offer time
+  seedBot("b1", BOARD_ON, { project: PID_NEW });  // the bot's board moved before the accept
+  const r = await decide(id, true);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.projectId, PID_NEW);
+  assert.equal(cardsTagged(id)[0].project_id, PID_NEW);
+  const offers = (await get("/interactive/perchlive-q/offers")).body.offers;
+  assert.equal(offers.find((o) => o.id === id).projectId, PID_NEW);
+  assert.equal(offerRow(id).project_id, PID_NEW);
+});
+
+test("recovery also settles the card's real project", async () => {
+  const c = raw();
+  const PID_X = Number(c.prepare("INSERT INTO project_spaces (slug, name) VALUES ('b1-x','B1 x')").run().lastInsertRowid);
+  c.close();
+  const id = seedOffer({ status: "accepted", lease: "2999-01-01T00:00:00.000Z", token: "t" });
+  const cardId = seedCard(`crow-offer-${id}`, "moved", { project: PID_X });
+  assert.deepEqual(await sweep(), { settled: 1, reopened: 0 });
+  assert.equal(offerRow(id).card_id, cardId);
+  assert.equal(offerRow(id).project_id, PID_X);
+});
+
+test("reading a chat's offers never makes a tasks.db on an install without one", async () => {
+  const { renameSync, existsSync } = await import("node:fs");
+  seedOffer();                                   // pending, not stranded
+  renameSync(TASKS, TASKS + ".away");
+  try {
+    const r = await get("/interactive/perchlive-q/offers");
+    assert.equal(r.status, 200);
+    assert.equal(r.body.offers.length, 1);
+    assert.equal(existsSync(TASKS), false, "no tasks.db was created");
+  } finally {
+    renameSync(TASKS + ".away", TASKS);
+  }
 });

@@ -539,6 +539,31 @@ test("GET transcript strips the trailing [Dates] line the engine added to a user
   assert.equal(body.events[2].message.content, "I typed [Dates] myself");
 });
 
+test("GET transcript (card offers): a user message the offer note was prefixed to renders the operator's own text only", async () => {
+  const sessions = join(dir, "sessions-offer-note");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-000000000042";
+  const NOTE = "[Crow] The operator made card #42 from your offer.";
+  const DATES = "[Dates] To add or plan something, a day named without a date is the next one: Friday 2026-10-16 (tomorrow); Thursday is today 2026-10-15 or next week 2026-10-22. For something already past, it is the previous one. UTC offset -05:00.";
+  writeFileSync(join(sessions, "2026-10-27T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "u1", message: { role: "user", content: NOTE + "\n\nthanks\n\n" + DATES } }) + "\n" +
+    JSON.stringify({ type: "message", id: "u2", message: { role: "user", content: [{ type: "text", text: NOTE + "\n[Crow] The operator made card #43 from your offer.\n\nboth?" }] } }) + "\n" +
+    JSON.stringify({ type: "message", id: "u3", message: { role: "user", content: "quoting: " + NOTE + "\n\nok" } }) + "\n" +
+    JSON.stringify({ type: "message", id: "u4", message: { role: "user", content: NOTE + "\nno blank line" } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-offer-note',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+  const { status, body } = await getJson("/bots/chatty/sessions/t-offer-note/transcript");
+  assert.equal(status, 200);
+  assert.equal(body.events[0].message.content, "thanks");
+  assert.deepEqual(body.events[1].message.content, [{ type: "text", text: "both?" }]);
+  assert.equal(body.events[2].message.content, "quoting: " + NOTE + "\n\nok", "only a leading note is stripped");
+  assert.equal(body.events[3].message.content, NOTE + "\nno blank line", "only the exact shape the route writes");
+});
+
 test("GET transcript strips an echo of the [Dates] line from the assistant replies of a turn that carried it, and only those", async () => {
   const sessions = join(dir, "sessions-dates-echo");
   mkdirSync(sessions, { recursive: true });
