@@ -51,6 +51,8 @@ export const VIEWER_STRINGS = {
     grant_note: "A bot you tick can read and revise this artifact and ask to link it to its chats.", done: "Done",
     cardLink: "Card #{n}", openChat: "Open the chat", backMake: "Make", backChat: "Chat",
     reply: "Reply", sentTo: "Sent to {bot}", busy: "{bot} is already working on this document. Try again when it finishes.",
+    mention_not_found: "No bot called @{name}.", mention_forbidden: "@{name} can't open this document.",
+    mention_failed: "That didn't reach @{name}. Try again.", mention_stopped: "@{name} couldn't start on this thread. {why}",
   },
   es: {
     title: "Artefacto", version: "Versión", current: "actual", proposed: "propuesta", flagged_v: "marcada",
@@ -88,6 +90,8 @@ export const VIEWER_STRINGS = {
     grant_note: "Un bot que marques puede leer y revisar este artefacto y pedir vincularlo a sus chats.", done: "Listo",
     cardLink: "Tarjeta #{n}", openChat: "Abrir el chat", backMake: "Crear", backChat: "Chat",
     reply: "Responder", sentTo: "Enviado a {bot}", busy: "{bot} ya está trabajando en este documento. Inténtalo cuando termine.",
+    mention_not_found: "No hay ningún bot llamado @{name}.", mention_forbidden: "@{name} no puede abrir este documento.",
+    mention_failed: "No le llegó a @{name}. Inténtalo de nuevo.", mention_stopped: "@{name} no pudo empezar con este hilo. {why}",
   },
 };
 

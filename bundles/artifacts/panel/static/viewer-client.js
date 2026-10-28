@@ -49,7 +49,7 @@
   function isDoc() { return !!(S.art && S.art.type === "document"); }
   function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? (c.author_id || T.bot) : (c.author_id || c.author_kind); }
 
-  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null, busy: {} };
+  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null, notes: {} };
 
   // ── skeleton ────────────────────────────────────────────────────────────
   var title = el("h1", { class: "cv-title" });
@@ -144,7 +144,8 @@
   function refresh() {
     return api("GET", BASE).then(function (j) {
       S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
-      if (!S.activeRound) S.busy = {};   // the round that made a mention wait has ended
+      // The round that made a mention wait has ended: its "already working" line goes.
+      if (!S.activeRound) Object.keys(S.notes).forEach(function (k) { if (S.notes[k].busy) delete S.notes[k]; });
       if (S.n == null) S.n = (WANT_V && S.versions.some(function (v) { return Number(v.n) === WANT_V; })) ? WANT_V : Number(S.art.current_version);
       document.title = S.art.title;
       placeCommentBtn();
@@ -207,19 +208,23 @@
     pushPins();
   }
 
-  /** P6: a thread's status line, from stored state only. The active round
-   *  holds this thread → "Sent to <bot>"; the server answered round_running
-   *  to an @bot here → "<bot> is already working…"; a finished round adds
-   *  nothing (the bot's reply is the status). Placed with textContent. */
+  /** P6: a thread's status line, from stored state or the server's own answer
+   *  only. The active round holds this thread → "Sent to <bot>" once the bot
+   *  has it, "Waiting for a free session" while queued; else the last @bot
+   *  answer for this thread (refused, or started and failed at once); a
+   *  finished round adds nothing (the bot's reply is the status). Placed
+   *  with textContent. */
   var SENT = ["delivering", "working"];   // the bot has it (not pending/queued, not put back after a failed spawn)
   function threadStatus(t) {
     var r = S.activeRound;
-    if (r && r.kind === "round" && SENT.indexOf(r.status) >= 0 && t.sent_round_id != null && Number(t.sent_round_id) === Number(r.id)) return fmt(T.sentTo, { bot: r.bot_id || T.bot });
-    var b = S.busy[Number(t.id)];
-    return b ? fmt(T.busy, { bot: b }) : "";
+    var held = r && r.kind === "round" && t.sent_round_id != null && Number(t.sent_round_id) === Number(r.id);
+    if (held && SENT.indexOf(r.status) >= 0) return fmt(T.sentTo, { bot: roundBot() });
+    if (held && r.status === "queued") return T.queued;
+    var n = S.notes[Number(t.id)];
+    return n ? n.text : "";
   }
-  /** The bot the active round went to (the stored round's), else the maker. */
-  function roundBot() { return (S.activeRound && S.activeRound.bot_id) || (S.art && S.art.created_by_bot) || T.bot; }
+  /** The bot the active round went to (the stored round's name, else id), else the maker. */
+  function roundBot() { return (S.activeRound && (S.activeRound.bot_name || S.activeRound.bot_id)) || (S.art && S.art.created_by_bot) || T.bot; }
 
   /** P6: the owner's reply box in one thread. Like an edit, it holds the
    *  thread list (S.editing) so a poll never wipes half-typed text. */
@@ -237,9 +242,29 @@
     ta.focus();
   }
 
-  /** The comment routes' `mention` answer: remember a busy one for its thread. */
+  /** The line for the comment routes' `mention` answer (the server's real
+   *  answer, nothing guessed), or null when it needs none (a round that
+   *  started: the stored round speaks for itself). */
+  function mentionLine(m) {
+    if (!m) return null;
+    var name = m.name || m.botId || "";
+    if (m.error === "round_running") return { text: fmt(T.busy, { bot: m.botName || m.botId || name }), busy: true };
+    if (m.error === "not_found") return { text: fmt(T.mention_not_found, { name: name }) };
+    if (m.error === "forbidden") return { text: fmt(T.mention_forbidden, { name: name }) };
+    if (m.error) return { text: fmt(T.mention_failed, { name: name }) };
+    if (m.status === "failed") {
+      var why = m.reason && T["why_" + m.reason] ? T["why_" + m.reason] : "";
+      return { text: why ? fmt(T.mention_stopped, { name: name, why: why }) : fmt(T.mention_failed, { name: name }) };
+    }
+    return null;
+  }
+  /** Remember the line for its thread; a later comment there replaces it.
+   *  Only S.notes changes: the list redraws on the next refresh, which waits
+   *  while a reply or edit is half-typed (S.editing). */
   function noteMention(threadId, m) {
-    if (m && m.error === "round_running" && m.botId) S.busy[Number(threadId)] = m.botId;
+    if (threadId == null) return;
+    var line = mentionLine(m);
+    if (line) S.notes[Number(threadId)] = line; else delete S.notes[Number(threadId)];
   }
 
   /** One comment. The owner's OWN comments get Edit/Delete — hidden while a

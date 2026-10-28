@@ -791,10 +791,17 @@ test("live P6: each thread has an owner reply box (resolved ones too); '@bot' in
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-thread.cv-resolved .cv-treply button')`)) === true, 15000), `a resolved thread has a Reply (page errors: ${JSON.stringify(t.errors)})`);
     assert.equal(await t.evalIn(`document.querySelector('.cv-treply button').textContent`), "Reply");
     assert.ok((await t.evalIn(`document.querySelector('.cv-treply button').getBoundingClientRect().height`)) >= 44, "a 44px tap target");
-    await t.evalIn(`document.querySelector('.cv-treply button').click()`);
-    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-replybox textarea')`)) === true), "the reply box opened");
-    await t.evalIn(`(() => { const ta = document.querySelector('.cv-replybox textarea'); ta.value = '@bobby still too big'; document.querySelector('.cv-replybox .cv-primary').click(); })()`);
-    assert.ok(await waitFor(async () => (await t.evalIn(`(document.querySelector('.cv-tstatus') || {}).textContent === 'Sent to bobby'`)) === true, 10000), `the thread says where it went (page errors: ${JSON.stringify(t.errors)})`);
+    const replyWith = async (text) => {
+      await t.evalIn(`document.querySelector('.cv-treply button').click()`);
+      assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-replybox textarea')`)) === true), "the reply box opened");
+      await t.evalIn(`(() => { const ta = document.querySelector('.cv-replybox textarea'); ta.value = ${JSON.stringify(text)}; document.querySelector('.cv-replybox .cv-primary').click(); })()`);
+    };
+    // A refused mention says why, from the route's answer (and reopens nothing).
+    await replyWith("@nobody <b>look</b>");
+    assert.ok(await waitFor(async () => (await t.evalIn(`(document.querySelector('.cv-tstatus') || {}).textContent === 'No bot called @nobody.'`)) === true, 10000), `not_found is said (page errors: ${JSON.stringify(t.errors)})`);
+    assert.equal((await s.db.execute({ sql: "SELECT status FROM artifact_threads WHERE id=?", args: [th.threadId] })).rows[0].status, "resolved");
+    await replyWith("@bobby still too big");
+    assert.ok(await waitFor(async () => (await t.evalIn(`(document.querySelector('.cv-tstatus') || {}).textContent === 'Sent to Bobby'`)) === true, 10000), `the thread says where it went, by the bot's name (page errors: ${JSON.stringify(t.errors)})`);
     const row = (await s.db.execute({ sql: "SELECT status, sent_round_id FROM artifact_threads WHERE id=?", args: [th.threadId] })).rows[0];
     assert.equal(row.status, "open", "reopened");
     const r = (await s.db.execute({ sql: "SELECT id, status, snapshot_json FROM artifact_rounds WHERE artifact_id=?", args: [doc.id] })).rows;
@@ -805,11 +812,11 @@ test("live P6: each thread has an owner reply box (resolved ones too); '@bot' in
     // Pending (not yet with the bot, or put back after a failed spawn): no "Sent to".
     await s.db.execute({ sql: "UPDATE artifact_rounds SET status='pending', bot_id='eve' WHERE id=?", args: [r[0].id] });
     await t.nav(base + viewUrl);
-    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-thread') && document.querySelector('.cv-send').textContent.includes('eve')`)) === true, 15000), "the Send button names the round's own bot");
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-thread') && document.querySelector('.cv-send').textContent.includes('Eve')`)) === true, 15000), "the Send button names the round's own bot");
     assert.equal(await t.evalIn(`!!document.querySelector('.cv-tstatus')`), false, "pending: nothing claims it was sent");
     await s.db.execute({ sql: "UPDATE artifact_rounds SET status='working' WHERE id=?", args: [r[0].id] });
     await t.nav(base + viewUrl);
-    assert.ok(await waitFor(async () => (await t.evalIn(`(document.querySelector('.cv-tstatus') || {}).textContent === 'Sent to eve'`)) === true, 15000), "working: Sent to the round's bot");
+    assert.ok(await waitFor(async () => (await t.evalIn(`(document.querySelector('.cv-tstatus') || {}).textContent === 'Sent to Eve'`)) === true, 15000), "working: Sent to the round's bot, by its display name");
     assert.deepEqual(t.errors, []);
   } finally { await t.close(); }
 });

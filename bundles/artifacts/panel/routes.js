@@ -419,6 +419,12 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     // never re-derives policy (one definition, server-side). scriptsOff is
     // the SAME expression the view-mint route uses (D20).
     const activeRound = (await S.db.execute({ sql: "SELECT id, kind, status, bot_id FROM artifact_rounds WHERE artifact_id=? AND status IN ('queued','pending','delivering','working') ORDER BY id DESC LIMIT 1", args: [art.id] })).rows[0] || null;
+    // P6: the round's bot by its display name ("Sent to <name>"), else its id.
+    if (activeRound) {
+      let n = null;
+      try { n = (await S.db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id=?", args: [activeRound.bot_id] })).rows[0]?.display_name || null; } catch { n = null; }
+      activeRound.bot_name = n ? String(n) : activeRound.bot_id;
+    }
     const cur = versions.find((v) => Number(v.n) === Number(art.current_version)) || null;
     const scripted = S.policy.isScriptedType(art.type);
     res.json({ artifact: art, versions: versions.map((v) => ({ ...v, anchor_map: v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null, anchor_map_json: undefined })), threads: await M.comments.listThreads(S.db, art.id),
@@ -651,20 +657,27 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   async function mentionRound(art, threadId, text) {
     const m = await M.mentions.mentionBotFor(S.db, { actor: OWNER, text });
     if (!m) return undefined;
-    if (!m.bot) return { botId: null, error: "not_found" };
-    const botId = m.bot.botId;
+    // `name`: the owner's own @word (the viewer's lines quote it); `botName`: the
+    // matched bot's display name. Both reach the page as text only.
+    const name = m.token;
+    if (!m.bot) return { botId: null, name, error: "not_found" };
+    const botId = m.bot.botId, botName = m.bot.displayName;
+    const refused = (error) => ({ botId, botName, name, error });
     try {
-      if (!(await M.store.canAccess(S.db, { kind: "bot", id: botId }, art))) return { botId, error: "forbidden" };
+      if (!(await M.store.canAccess(S.db, { kind: "bot", id: botId }, art))) return refused("forbidden");
       // Any active round on the document refuses the mention BEFORE the thread
       // is touched, so a refused mention never leaves a thread reopened.
-      if (await M.rounds.hasActiveRound(S.db, art.id)) return { botId, error: "round_running" };
-      if ((await M.comments.reopenForMention(S.db, { threadId, artifactId: art.id })) === "busy") return { botId, error: "round_running" };
-      const { round } = await startOwnerRound(art, { include: [threadId], choice: "chat", kind: "round", botId, source: "mention" });
-      return { botId, roundId: round.id, status: round.status };
+      if (await M.rounds.hasActiveRound(S.db, art.id)) return refused("round_running");
+      if ((await M.comments.reopenForMention(S.db, { threadId, artifactId: art.id })) === "busy") return refused("round_running");
+      const { round, delivery } = await startOwnerRound(art, { include: [threadId], choice: "chat", kind: "round", botId, source: "mention" });
+      // A round that started but whose delivery failed at once carries the
+      // delivery's own named reason (bot_lacks_artifacts, target_locked, …).
+      const reason = delivery && typeof delivery.error === "string" ? delivery.error : null;
+      return { botId, botName, name, roundId: round.id, status: round.status, ...(reason ? { reason } : {}) };
     } catch (e) {
-      if (MENTION_ERRORS.has(e && e.code)) return { botId, error: e.code };
+      if (MENTION_ERRORS.has(e && e.code)) return refused(e.code);
       console.warn(`[artifacts] a mention round could not start (${(e && e.code) || "error"})`);
-      return { botId, error: "failed" };
+      return refused("failed");
     }
   }
 

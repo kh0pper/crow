@@ -38,7 +38,7 @@ before(async () => {
     CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER,
       created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));`);
   await initArtifactsTables(s.db);
-  for (const [id, name, en] of [["writer", "Writer Bot", 1], ["eve", "Eve", 1], ["sleepy", "Sleepy", 0], ["crow.voice", "Crow Voice", 1]]) {
+  for (const [id, name, en] of [["writer", "Writer Bot", 1], ["eve", "Eve", 1], ["sleepy", "Sleepy", 0], ["crow.voice", "Crow Voice", 1], ["notools", "No Tools", 1], ["boom", "Boom", 1]]) {
     await s.db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)", args: [id, name, JSON.stringify(DEF), en] });
   }
   s.blobs = createLocalBlobStore(join(s.dir, "blobs"));
@@ -47,14 +47,14 @@ before(async () => {
   const engine = {
     async list() { return s.sessions; },
     async message(id) { s.sent.push(id); },
-    async spawn(o) { const t = tid("n"); s.spawned.push({ ...o, threadId: t }); return { sessionId: t, threadId: t }; },
+    async spawn(o) { if (o.botId === "boom") throw new Error("engine fault"); const t = tid("n"); s.spawned.push({ ...o, threadId: t }); return { sessionId: t, threadId: t }; },
     async stop() {},
   };
   const dashboardAuth = (req, res, next) => (/crow_session=good/.test(req.headers.cookie || "") ? next() : res.status(401).json({ error: "login" }));
   const app = express();
   app.use(artifactsRouter(dashboardAuth, {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks }, engine,
-    loadBotDef: async () => DEF, createBoardCard: null, notify: async () => {},
+    loadBotDef: async (id) => (id === "notools" ? { tools: { crow_mcp: [] } } : DEF), createBoardCard: null, notify: async () => {},
   }));
   s.http = app.listen(0, "127.0.0.1"); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
@@ -109,7 +109,7 @@ test("the voice bot is never matched", async () => {
   const { art } = await setup();
   const r = await newThread(art, "@CrowVoice read this aloud");
   assert.equal(r.status, 201);
-  assert.deepEqual(r.body.mention, { botId: null, error: "not_found" });
+  assert.deepEqual(r.body.mention, { botId: null, name: "CrowVoice", error: "not_found" });
   assert.equal((await roundsOf(art)).length, 0);
 });
 
@@ -126,7 +126,7 @@ test("a mention by the owner starts a mention round on that thread to the bot's 
   assert.equal(row.target_thread, A);
   assert.equal(JSON.parse(row.snapshot_json).source, "mention");
   assert.equal(row.kind, "round");
-  assert.deepEqual(r.body.mention, { botId: "writer", roundId: Number(row.id), status: "working" });
+  assert.deepEqual(r.body.mention, { botId: "writer", botName: "Writer Bot", name: "writer", roundId: Number(row.id), status: "working" });
   assert.ok(s.sent.includes(A), "delivered to the linked chat");
   assert.equal((await threadRow(th)).sent_round_id, Number(row.id));
 });
@@ -145,7 +145,7 @@ test("a mention of a bot with no linked chat goes to a new session (never anothe
   assert.equal(s.spawned[s.spawned.length - 1].botId, "eve");
   assert.equal(s.spawned[s.spawned.length - 1].narrowedTools, undefined, "a trusted round: a plain new session");
   assert.equal(s.sent.filter((x) => x === A).length, sentBefore, "writer's linked chat never gets eve's round");
-  assert.deepEqual(r.body.mention, { botId: "eve", roundId: Number(row.id), status: "working" });
+  assert.deepEqual(r.body.mention, { botId: "eve", botName: "Eve", name: "eve", roundId: Number(row.id), status: "working" });
 });
 
 test("@bot on a resolved thread reopens it (C9)", async () => {
@@ -188,13 +188,13 @@ test("@bot on a thread whose round is still working is round_running", async () 
   await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [th], botId: "writer" });
   const r = await reply(art, th, "@writer and also bold");
   assert.equal(r.status, 201, "the comment is saved");
-  assert.deepEqual(r.body.mention, { botId: "writer", error: "round_running" });
+  assert.deepEqual(r.body.mention, { botId: "writer", botName: "Writer Bot", name: "writer", error: "round_running" });
   assert.equal((await commentsOf(th)).length, 2, "the comment is kept");
   assert.equal((await roundsOf(art)).length, 1, "no second round");
   // Another active round on the artifact (a different thread) is round_running too.
   const r2 = await newThread(art, "@writer a new point");
   assert.equal(r2.status, 201);
-  assert.deepEqual(r2.body.mention, { botId: "writer", error: "round_running" });
+  assert.deepEqual(r2.body.mention, { botId: "writer", botName: "Writer Bot", name: "writer", error: "round_running" });
   assert.equal((await roundsOf(art)).length, 1);
 });
 
@@ -206,7 +206,7 @@ test("a mention while another thread's round is active is round_running and neve
   await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [x], botId: "writer" });
   const r = await reply(art, y, "@writer this one too");
   assert.equal(r.status, 201);
-  assert.deepEqual(r.body.mention, { botId: "writer", error: "round_running" });
+  assert.deepEqual(r.body.mention, { botId: "writer", botName: "Writer Bot", name: "writer", error: "round_running" });
   const t = await threadRow(y);
   assert.equal(t.status, "resolved", "untouched");
   assert.equal(t.sent_round_id, null);
@@ -230,7 +230,7 @@ test("an unknown name keeps the comment and reports not_found", async () => {
   const { art } = await setup();
   const r = await newThread(art, "@nobody look here");
   assert.equal(r.status, 201);
-  assert.deepEqual(r.body.mention, { botId: null, error: "not_found" });
+  assert.deepEqual(r.body.mention, { botId: null, name: "nobody", error: "not_found" });
   assert.equal((await commentsOf(r.body.threadId)).length, 1);
   assert.equal((await roundsOf(art)).length, 0);
   const plain = await newThread(art, "no mention here");
@@ -241,7 +241,7 @@ test("a bot without access to the document, or a received document, is forbidden
   const { art } = await setup();
   const r = await newThread(art, "@eve you can't see this");
   assert.equal(r.status, 201);
-  assert.deepEqual(r.body.mention, { botId: "eve", error: "forbidden" });
+  assert.deepEqual(r.body.mention, { botId: "eve", botName: "Eve", name: "eve", error: "forbidden" });
   assert.equal((await roundsOf(art)).length, 0);
   const { art: got } = await setup();
   const th = (await newThread(got, "first")).body.threadId;
@@ -249,7 +249,7 @@ test("a bot without access to the document, or a received document, is forbidden
   await s.db.execute({ sql: "UPDATE artifacts SET received=1 WHERE id=?", args: [got.id] });
   const r2 = await reply(got, th, "@writer fix it");
   assert.equal(r2.status, 201);
-  assert.deepEqual(r2.body.mention, { botId: "writer", error: "forbidden" });
+  assert.deepEqual(r2.body.mention, { botId: "writer", botName: "Writer Bot", name: "writer", error: "forbidden" });
   assert.equal((await threadRow(th)).status, "resolved", "a refused mention never reopens the thread");
   assert.equal((await commentsOf(th)).length, 2);
   assert.equal((await roundsOf(got)).length, 0);
@@ -279,18 +279,60 @@ test("the thread's status line: Sent to <bot> from the active round that holds i
   const g = await req("GET", `/api/artifacts/${art.id}`);
   assert.equal(g.status, 200);
   assert.equal(g.body.activeRound.bot_id, "writer", "the stored round names its bot");
+  assert.equal(g.body.activeRound.bot_name, "Writer Bot", "by its display name");
   const t = g.body.threads.find((x) => Number(x.id) === th);
   assert.equal(Number(t.sent_round_id), Number(g.body.activeRound.id));
   const src = readFileSync(new URL("../bundles/artifacts/panel/static/viewer-client.js", import.meta.url), "utf8");
-  assert.match(src, /Number\(t\.sent_round_id\) === Number\(r\.id\)\) return fmt\(T\.sentTo, \{ bot: r\.bot_id/);
-  assert.match(src, /m\.error === "round_running"/);
+  assert.match(src, /if \(held && SENT\.indexOf\(r\.status\) >= 0\) return fmt\(T\.sentTo, \{ bot: roundBot\(\) \}\)/);
   assert.match(src, /var SENT = \["delivering", "working"\]/, "Sent to only once the bot has it");
-  assert.match(src, /SENT\.indexOf\(r\.status\) >= 0/);
   assert.match(src, /api\("POST", BASE \+ "\/threads\/" \+ encodeURIComponent\(t\.id\) \+ "\/comments", \{ text: ta\.value \}\)\s*\.then\(function \(j\) \{ noteMention\(t\.id, j && j\.mention\)/, "the reply box posts the reply and reads its mention answer");
   assert.match(src, /S\.editing = "reply:" \+ t\.id/, "a half-typed reply holds the list like an edit");
   assert.match(src, /if \(S\.locked\.indexOf\(Number\(t\.id\)\) < 0\) \{\s*var slot = el\("div", \{ class: "cv-treply" \}\)/, "no reply box while a round holds the thread");
-  assert.match(src, /function roundBot\(\) \{ return \(S\.activeRound && S\.activeRound\.bot_id\)/);
+  assert.match(src, /function roundBot\(\) \{ return \(S\.activeRound && \(S\.activeRound\.bot_name \|\| S\.activeRound\.bot_id\)\)/);
   assert.equal(VIEWER_STRINGS.en.reply, "Reply");
   assert.equal(VIEWER_STRINGS.es.reply, "Responder");
   assert.match(src, /el\("p", \{ class: "cv-tstatus", role: "status", text: line \}\)/, "placed with textContent");
+});
+
+test("a round that starts but whose delivery fails at once carries the delivery's reason; an unexpected fault is 'failed' and the comment stays", async () => {
+  const { art } = await setup();
+  await s.db.execute({ sql: "INSERT INTO artifact_bot_access (artifact_id, bot_id) VALUES (?, 'notools'), (?, 'boom')", args: [art.id, art.id] });
+  const r = await newThread(art, "@notools trim it");
+  assert.equal(r.status, 201);
+  const [row] = await roundsOf(art);
+  assert.deepEqual(r.body.mention, { botId: "notools", botName: "No Tools", name: "notools", roundId: Number(row.id), status: "failed", reason: "bot_lacks_artifacts" });
+  const warned = [];
+  const orig = console.warn;
+  console.warn = (m) => warned.push(String(m));
+  let r2;
+  try { r2 = await newThread(art, "@boom trim it"); } finally { console.warn = orig; }
+  assert.equal(r2.status, 201, "the comment is saved");
+  assert.deepEqual(r2.body.mention, { botId: "boom", botName: "Boom", name: "boom", error: "failed" });
+  assert.equal((await commentsOf(r2.body.threadId)).length, 1);
+  assert.ok(warned.some((w) => /a mention round could not start/.test(w)), "logged once, by code");
+});
+
+test("the viewer's line for each mention answer (the client's own mentionLine, run as written)", async () => {
+  const vm = await import("node:vm");
+  const src = readFileSync(new URL("../bundles/artifacts/panel/static/viewer-client.js", import.meta.url), "utf8");
+  const fn = /\n  function mentionLine\(m\) \{[\s\S]*?\n  \}\n/.exec(src);
+  assert.ok(fn, "mentionLine found");
+  const fmt = (x, o) => String(x || "").replace(/\{(\w+)\}/g, (_, k) => (o && o[k] != null ? String(o[k]) : ""));
+  for (const L of ["en", "es"]) {
+    const T = VIEWER_STRINGS[L];
+    const line = vm.runInNewContext(`(${fn[0].trim().replace(/^function mentionLine/, "function")})`, { T, fmt });
+    const txt = (m) => (line(m) || {}).text;
+    assert.equal(txt({ botId: null, name: "nobody", error: "not_found" }), L === "en" ? "No bot called @nobody." : "No hay ningún bot llamado @nobody.");
+    assert.equal(txt({ botId: "eve", name: "eve", error: "forbidden" }), L === "en" ? "@eve can't open this document." : "@eve no puede abrir este documento.");
+    assert.equal(txt({ botId: "boom", name: "boom", error: "failed" }), L === "en" ? "That didn't reach @boom. Try again." : "No le llegó a @boom. Inténtalo de nuevo.");
+    assert.equal(txt({ botId: "writer", botName: "Writer Bot", name: "writer", error: "round_running" }), fmt(T.busy, { bot: "Writer Bot" }));
+    assert.equal(line({ botId: "writer", botName: "Writer Bot", name: "writer", error: "round_running" }).busy, true);
+    assert.equal(txt({ botId: "notools", name: "notools", roundId: 3, status: "failed", reason: "bot_lacks_artifacts" }), fmt(T.mention_stopped, { name: "notools", why: T.why_bot_lacks_artifacts }));
+    assert.equal(txt({ botId: "x", name: "x", roundId: 4, status: "failed", reason: "something_new" }), fmt(T.mention_failed, { name: "x" }), "an unknown reason still says it didn't reach");
+    assert.equal(line({ botId: "writer", name: "writer", roundId: 5, status: "working" }), null, "a started round: the stored round speaks");
+    assert.equal(line(undefined), null);
+  }
+  assert.equal(VIEWER_STRINGS.en.mention_stopped, "@{name} couldn't start on this thread. {why}");
+  assert.equal(VIEWER_STRINGS.es.mention_stopped, "@{name} no pudo empezar con este hilo. {why}");
+  assert.match(src, /var n = S\.notes\[Number\(t\.id\)\];\s*return n \? n\.text : "";/, "the line is the stored answer, drawn by renderThreads (which waits while S.editing)");
 });
