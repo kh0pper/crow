@@ -367,7 +367,8 @@ const VERIFY_RES = [/\bverif(?:y|ied|ies)\b/gi, /\b(?:confirmed|checked)\b[^.]{0
  */
 const NEGATION_GAP = 4;
 const NEGATION_FILLER = new Set(["be", "been", "able", "to", "yet", "independently", "get", "have", "was", "were",
-  "had", "actually", "fully"]);
+  "had", "actually", "fully", "manage", "managed", "personally", "directly", "really", "successfully", "myself",
+  "quite", "even"]);
 /** A negation never reaches across a clause: "I couldn't verify it, but I confirmed it against the source" claims. */
 const CLAUSE_BREAK = /[,;:]|\bbut\b/i;
 
