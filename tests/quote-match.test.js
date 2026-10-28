@@ -66,7 +66,7 @@ test("a real attribution tail is cut only after the full quote fails", () => {
   assert.equal(matchQuote("easier to test - And Easier", page("easier to test - and easier to undo")).found, 1);
 });
 
-const CUT = "couldn't check exactly: Crow checks only exact wording; quote the passage without cuts, or verify by hand";
+const CUT = "couldn't check exactly: Crow checks only exact wording; quote the passage without cuts, or tell the owner";
 
 test("apostrophe-like marks fold to '", () => {
   assert.equal(normalizeForMatch("we don\u02bct, we can\u2019t, it\u2018s, it`s"), "we don't, we can't, it's, it's");

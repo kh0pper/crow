@@ -222,7 +222,7 @@ function occursIn(text, q, budget) {
 
 const NOT_CHECKED = (reason) => ({ found: null, where: null, reason });
 export const CUT_OR_INSERTION =
-  "couldn't check exactly: Crow checks only exact wording; quote the passage without cuts, or verify by hand";
+  "couldn't check exactly: Crow checks only exact wording; quote the passage without cuts, or tell the owner";
 const TOO_MANY_PLACEMENTS = "couldn't check: too many possible placements";
 
 /**
