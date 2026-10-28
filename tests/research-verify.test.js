@@ -313,6 +313,45 @@ test("manual_owner is owner-only and fails closed for unknown callers", async ()
   assert.equal(JSON.parse(a.at(-1).payload).method, "manual_owner");
 });
 
+// An owner mount reached by a product client that marks itself (x-crow-actor-kind) — the header
+// arrives on the HTTP request, which InMemoryTransport does not carry, so inject it as requestInfo.
+async function connectWithHeaders(server, headers) {
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  const inner = st.onmessage;
+  st.onmessage = (m, extra) => inner(m, { ...(extra || {}), requestInfo: { headers } });
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(ct);
+  return client;
+}
+
+test("a downgrade header on an owner mount refuses manual_owner, direct and through the router", async () => {
+  const owner = await clientFor(OWNER);
+  const pid = await newProject(owner);
+  const sid = insertSource({ project_id: pid, fetch_status: "not_applicable", fetched_text: null, source_type: "book", url: null });
+  const cases = [
+    { "x-crow-actor-kind": "unknown" },
+    { "x-crow-actor-kind": "bot", "x-crow-actor-id": "companion-bot" },
+  ];
+  for (const headers of cases) {
+    const direct = await connectWithHeaders(createProjectServer(CORE, { fetchPage: makeStub(), actor: OWNER }), headers);
+    const r = await verify(direct, { id: sid, method: "manual_owner" });
+    assert.equal(r.isError, true, text(r));
+    assert.match(text(r), /only the owner/);
+    assert.equal(source(sid).verified, 0);
+
+    const routed = await connectWithHeaders(createRouterServer({ actor: OWNER }), headers);
+    const rr = await routed.callTool({ name: "crow_projects", arguments: { action: "verify_source", params: { id: sid, method: "manual_owner" } } });
+    assert.match(text(rr), /only the owner/);
+    assert.equal(source(sid).verified, 0);
+  }
+  // a header claiming owner on an unknown mount is ignored
+  const claim = await connectWithHeaders(createProjectServer(CORE, { fetchPage: makeStub(), actor: UNKNOWN }), { "x-crow-actor-kind": "owner" });
+  const rc = await verify(claim, { id: sid, method: "manual_owner" });
+  assert.equal(rc.isError, true, text(rc));
+  assert.equal(source(sid).verified, 0);
+});
+
 test("--no-auth mounts are never the owner", async () => {
   const owner = await clientFor(OWNER);
   const pid = await newProject(owner);

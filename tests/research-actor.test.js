@@ -63,6 +63,38 @@ test("_meta can downgrade but never upgrade; a peer is checked first", () => {
   assert.deepEqual(resolveCallActor(UNKNOWN, { _meta: { "crow/actor": { kind: "bot", id: 7 } } }), { kind: "bot", id: "7" });
 });
 
+const hdr = (h) => ({ requestInfo: { headers: h } });
+
+test("an x-crow-actor-kind header can downgrade an owner mount but never upgrade", () => {
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "unknown" })).kind, "unknown");
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "bot" })).kind, "unknown", "a bot with no id is unknown");
+  assert.deepEqual(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "hank" })), { kind: "bot", id: "hank" });
+  assert.deepEqual(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": ["bot"], "x-crow-actor-id": ["hank"] })), { kind: "bot", id: "hank" });
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "BOT", "x-crow-actor-id": "hank" })).id, "hank", "case-insensitive kind");
+  // an id that is not a plain identifier is not trusted as a name
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "a b\nc" })).kind, "unknown");
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "x".repeat(200) })).kind, "unknown");
+  // claiming owner, or an unrecognised kind, never widens and never narrows below what it says
+  assert.equal(resolveCallActor(UNKNOWN, hdr({ "x-crow-actor-kind": "owner" })).kind, "unknown");
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "owner" })).kind, "owner");
+  assert.equal(resolveCallActor(OWNER, hdr({ "x-crow-actor-kind": "admin" })).kind, "unknown", "an unrecognised kind fails closed");
+  // a peer is checked first; a fixed bot base is never renamed
+  assert.equal(resolveCallActor(OWNER, { authInfo: { token: "peer-instance" }, ...hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "b" }) }).kind, "unknown");
+  assert.equal(resolveCallActor({ kind: "bot", id: "b2" }, hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "b9" })).id, "b2");
+  // no header: unchanged
+  assert.equal(resolveCallActor(OWNER, hdr({})).kind, "owner");
+  assert.equal(resolveCallActor(OWNER, { requestInfo: {} }).kind, "owner");
+});
+
+test("forwardActorMeta carries a downgrade header to the server a router dispatches to", () => {
+  assert.deepEqual(forwardActorMeta(hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "hank" })), { _meta: { "crow/actor": { kind: "bot", id: "hank" } } });
+  assert.deepEqual(forwardActorMeta(hdr({ "x-crow-actor-kind": "unknown" })), { _meta: { "crow/actor": { kind: "unknown" } } });
+  assert.deepEqual(forwardActorMeta(hdr({ "x-crow-actor-kind": "owner" })), {});
+  assert.deepEqual(forwardActorMeta({ authInfo: { token: "peer-instance" }, ...hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "b" }) }), { _meta: { "crow/actor": { kind: "peer" } } });
+  // a forwarded owner header can never become the owner on the far side
+  assert.equal(resolveCallActor(OWNER, forwardActorMeta(hdr({ "x-crow-actor-kind": "unknown" }))).kind, "unknown");
+});
+
 test("forwardActorMeta passes a bot through and turns a peer into kind peer", () => {
   assert.deepEqual(forwardActorMeta({ _meta: { "crow/actor": { kind: "bot", id: "b1" } } }), { _meta: { "crow/actor": { kind: "bot", id: "b1" } } });
   assert.deepEqual(forwardActorMeta({ authInfo: { token: "peer-instance" } }), { _meta: { "crow/actor": { kind: "peer" } } });
