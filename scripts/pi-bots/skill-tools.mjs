@@ -34,7 +34,7 @@ import { normalizeSkillName } from "./skill_proposals.mjs";
 import { offSkills } from "../../servers/shared/skill-state.js";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { isVoiceBotDef } from "../../servers/shared/voice-bot.js";
-import { classifyTool, classifyToolDetail } from "../../servers/shared/tool-classify.js";
+import { classifyTool, classifyToolDetail, LEGACY_READ } from "../../servers/shared/tool-classify.js";
 
 /** An exact `server/tool` entry (the only spelling that grants). */
 export const SKILL_TOOL_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9_]+$/;
@@ -50,10 +50,21 @@ export const GRANTABLE_SERVERS = Object.freeze(["crow-projects"]);
 /** The one read/write rule, shared with Bot Builder's Read-only mode (servers/shared/tool-classify.js). */
 export const isReadTool = (tool) => classifyTool({ name: tool }) === "read";
 
+/** Split a crow_mcp entry ("server/tool" or "server__tool") into [server, tool]; null for a bare server. */
+function splitEntry(e) {
+  if (typeof e !== "string") return null;
+  const i = e.indexOf("/"), j = e.indexOf("__");
+  if (i > 0) return [e.slice(0, i), e.slice(i + 1)];
+  if (j > 0) return [e.slice(0, j), e.slice(j + 2)];
+  return null;
+}
+
 /**
  * Is `server` selected Read-only in this crow_mcp list, for the union? True
  * when the selection is NON-EMPTY, is not a whole-server grant, and holds no
- * tool the classifier calls write. Fails closed: a tool name the rule does
+ * tool the classifier calls write, except LEGACY_READ entries (a def saved as
+ * Read-only when crow_fetch_source still classified as read stores it; that
+ * selection is still Read-only). Fails closed: a tool name the rule does
  * not recognise does not take the selection OUT of read mode (it can never
  * turn a read-only pick into write grants), and in read mode the union adds
  * only tools the classifier calls read (an unrecognised one counts as write
@@ -61,9 +72,26 @@ export const isReadTool = (tool) => classifyTool({ name: tool }) === "read";
  */
 export function serverInReadMode(list, server) {
   if (!Array.isArray(list) || list.includes(server)) return false;
-  const mine = list.filter((e) => typeof e === "string" && (e.startsWith(server + "/") || e.startsWith(server + "__")))
-    .map((e) => e.slice(server.length + (e.startsWith(server + "__") ? 2 : 1)));
-  return mine.length > 0 && mine.every((tool) => classifyToolDetail({ name: tool }) !== "write");
+  const mine = list.map(splitEntry).filter((x) => x && x[0] === server).map((x) => x[1]);
+  return mine.length > 0 && mine.every((tool) => LEGACY_READ.has(tool) || classifyToolDetail({ name: tool }) !== "write");
+}
+
+/**
+ * The list without the LEGACY_READ entries of any server it selects
+ * Read-only (serverInReadMode), so a Read-only bot never keeps a tool that
+ * writes. Entries of a server with a real write pick are kept. PURE.
+ */
+export function dropLegacyRead(list) {
+  if (!Array.isArray(list)) return [];
+  const ro = new Map();
+  const readMode = (server) => {
+    if (!ro.has(server)) ro.set(server, serverInReadMode(list, server));
+    return ro.get(server);
+  };
+  return list.filter((e) => {
+    const x = splitEntry(e);
+    return !(x && LEGACY_READ.has(x[1]) && readMode(x[0]));
+  });
 }
 
 const inside = (dir, p) => {
@@ -124,7 +152,8 @@ export function grantsTool(list, entry) {
  * @returns {{ list: string[], added: string[] }}
  */
 export function withSkillRequiredTools(crowMcp, skills, { crowHome, declined = [], repoSkillsDir } = {}) {
-  const list = Array.isArray(crowMcp) ? crowMcp.slice() : [];
+  // a Read-only server's legacy entries (crow_fetch_source) are dropped
+  const list = dropLegacyRead(crowMcp);
   const skip = new Set(Array.isArray(declined) ? declined : []);
   const added = [];
   // a server in Read-only mode (judged on the list as given) gets read tools only
@@ -156,17 +185,24 @@ export function effectiveCrowMcp(def, { crowHome, repoSkillsDir } = {}) {
 /**
  * Cap-guarded union for a spawn or a job.
  * @returns {Promise<{def: object, added: string[], refused: boolean, wanted: string[]}>}
- *   a NEW def when tools are added (the input is never mutated); `refused`
- *   when the candidate passes the model's tool cap (`wanted` names them).
+ *   a NEW def when tools are added or a Read-only server's LEGACY_READ
+ *   entries are dropped (the input is never mutated); `refused` when the
+ *   candidate passes the model's tool cap (`wanted` names them; the legacy
+ *   entries are still dropped).
  */
 export async function addSkillToolsGuarded(def, { crowHome, budget = null, repoSkillsDir } = {}) {
   if (!def || typeof def !== "object" || isVoiceBotDef(def)) return { def, added: [], refused: false, wanted: [] };
-  const { list, added } = withSkillRequiredTools(crowMcpOf(def), def.skills, { crowHome, repoSkillsDir, declined: declinedOf(def) });
-  if (!added.length) return { def, added: [], refused: false, wanted: [] };
+  const stored = crowMcpOf(def);
+  const { list, added } = withSkillRequiredTools(stored, def.skills, { crowHome, repoSkillsDir, declined: declinedOf(def) });
+  // the stored list minus a Read-only server's legacy entries: what the bot
+  // runs with when nothing is added (or the union is refused)
+  const base = dropLegacyRead(stored);
+  const baseDef = base.length === stored.length ? def : { ...def, tools: { ...(def.tools || {}), crow_mcp: base } };
+  if (!added.length) return { def: baseDef, added: [], refused: false, wanted: [] };
   const candidate = { ...def, tools: { ...(def.tools || {}), crow_mcp: list } };
   // lazy: artifacts-companions imports bot-world.mjs, which imports this module
   const b = budget || (await (await import("./artifacts-companions.mjs")).defaultCompanionBudget(def));
-  if (Number.isInteger(b.cap) && b.cap > 0 && b.countFor(candidate) > b.cap) return { def, added: [], refused: true, wanted: added };
+  if (Number.isInteger(b.cap) && b.cap > 0 && b.countFor(candidate) > b.cap) return { def: baseDef, added: [], refused: true, wanted: added };
   return { def: candidate, added, refused: false, wanted: added };
 }
 

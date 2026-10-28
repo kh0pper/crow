@@ -43,7 +43,7 @@ import { offSkills } from "../../../../shared/skill-state.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 import { classifySkills } from "../../../skills-catalog.js";
 import { REPO_SKILLS_DIR } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
-import { addSkillToolsGuarded, effectiveCrowMcp, skillToolHints } from "../../../../../scripts/pi-bots/skill-tools.mjs";
+import { addSkillToolsGuarded, skillToolHints } from "../../../../../scripts/pi-bots/skill-tools.mjs";
 import { isVoiceBotDef } from "../../../../shared/voice-bot.js";
 import { fileURLToPath } from "node:url";
 
@@ -116,7 +116,10 @@ export async function renderAbilities(ctx) {
       const g = await addSkillToolsGuarded(def, { crowHome, repoSkillsDir: ctx.repoSkillsDir,
         budget: ctx.companionBudget ? await ctx.companionBudget(def) : null });
       if (g.refused) skillToolsCapped = true;
-      else if (g.added.length) selected = effectiveCrowMcp(def, { crowHome, repoSkillsDir: ctx.repoSkillsDir }).filter((x) => typeof x === "string");
+      // the union's list (or, refused, the stored list minus a Read-only
+      // source's legacy entries): what the bot runs with
+      const got = g.def && g.def.tools && g.def.tools.crow_mcp;
+      if (g.def !== def && Array.isArray(got)) selected = got.filter((x) => typeof x === "string");
     } catch { /* the stored list */ }
   }
   const builtin = Array.isArray(tools.pi_builtin) ? tools.pi_builtin : [];

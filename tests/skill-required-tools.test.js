@@ -425,3 +425,62 @@ test("an unrecognised tool in the selection never turns into write grants", () =
   assert.equal(ST.serverInReadMode([LIST, CREATE], "crow-projects"), false);
   assert.ok(ST.withSkillRequiredTools([LIST, CREATE], ["fxw"], opts).added.includes(ADD));
 });
+
+// Final review I1: a def saved as Read-only before crow_fetch_source became a
+// write tool stores it. That selection still counts as Read-only: the union
+// adds only read tools, the legacy entry is dropped wherever the union runs
+// (spawn, jobs, regen), and Bot Builder renders the row as Read-only.
+const P = (n) => "crow-projects/" + n;
+const LEGACY_READ_SEL = () => {
+  // the Read-only set as Bot Builder expanded it then: today's read tools,
+  // minus crow_web_search (new), plus crow_fetch_source (read at the time)
+  const reads = PROJECT_TOOLS.filter((n) => n !== "crow_web_search" && classifyToolNow(n) === "read");
+  return [...reads.map(P), P("crow_fetch_source")];
+};
+const REAL_SKILLS = join(REPO, "skills");
+const { classifyTool: classifyNow } = await import("../servers/shared/tool-classify.js");
+const classifyToolNow = (name) => classifyNow({ name });
+
+test("a legacy Read-only list (with crow_fetch_source) stays Read-only: only read tools added, the legacy entry dropped", async () => {
+  const { classifyTool } = await import("../servers/shared/tool-classify.js");
+  const sel = LEGACY_READ_SEL();
+  assert.equal(ST.serverInReadMode(sel, "crow-projects"), true);
+  const r = ST.withSkillRequiredTools(sel, ["research-pipeline"], { crowHome, repoSkillsDir: REAL_SKILLS });
+  assert.deepEqual(r.added, [P("crow_web_search")]);
+  assert.ok(r.added.every((e) => classifyTool({ name: e.split("/")[1] }) === "read"));
+  assert.ok(!r.list.includes(P("crow_fetch_source")), "the legacy write entry is dropped");
+  for (const w of ["crow_add_source", "crow_add_note", "crow_verify_source", "crow_generate_bibliography", "crow_create_project"]) assert.ok(!r.list.includes(P(w)), w);
+  // a save of the untouched Read-only page records no declines for write tools
+  assert.equal(ST.unionMayGrant(sel, P("crow_add_source")), false);
+  // dropped even with no skill to union
+  assert.ok(!ST.withSkillRequiredTools(sel, [], opts).list.includes(P("crow_fetch_source")));
+  // a selection with a real write pick is not read mode: crow_fetch_source is kept
+  const wide = [...sel, P("crow_add_source")];
+  assert.equal(ST.serverInReadMode(wide, "crow-projects"), false);
+  assert.ok(ST.withSkillRequiredTools(wide, [], opts).list.includes(P("crow_fetch_source")));
+  // spawn and regen go through addSkillToolsGuarded: the copy drops it, the input is untouched
+  const def = { system_prompt: "x", models: { default: "stub/m1" }, skills: [], tools: { pi_builtin: ["read"], crow_mcp: sel.slice() } };
+  const g = await ST.addSkillToolsGuarded(def, { crowHome, repoSkillsDir: REAL_SKILLS, budget: await noCap() });
+  assert.ok(!g.def.tools.crow_mcp.includes(P("crow_fetch_source")));
+  assert.ok(def.tools.crow_mcp.includes(P("crow_fetch_source")), "the stored def is never mutated");
+  // over the cap the union is refused, but the legacy entry is still dropped
+  const capped = await ST.addSkillToolsGuarded({ ...def, skills: ["research-pipeline"] }, { crowHome, repoSkillsDir: REAL_SKILLS, budget: await capOf(3)() });
+  assert.equal(capped.refused, true);
+  assert.ok(!capped.def.tools.crow_mcp.includes(P("crow_fetch_source")));
+});
+
+test("Bot Builder renders a legacy Read-only list with research-pipeline as Read-only, not Custom", async () => {
+  const ta = await import("../servers/gateway/dashboard/panels/bot-builder/tool-access.js");
+  const cat = ta.catalogFromProbe(PROJECT_TOOLS.map((name) => ({ name })));
+  // no skill: today's reads minus the new crow_web_search is a partial pick, but the legacy entry alone never makes it Custom
+  const withWs = [...LEGACY_READ_SEL(), P("crow_web_search")];
+  assert.equal(ta.sourceMode("crow-projects", withWs, cat), "read");
+  _setSourcesForTest({ error: null, sources: [{ server: "crow-projects", name: "Crow projects", account: "", ok: true, catalog: cat }] });
+  try {
+    const def = { system_prompt: "x", models: { default: "stub/m1" }, skills: ["research-pipeline"], tools: { pi_builtin: ["read"], crow_mcp: LEGACY_READ_SEL() } };
+    const html = await renderAbilities({ def, lang: "en", hidden: () => "", db: null, req: null, bot: { display_name: "Hank" }, botId: "hank", crowHome, repoSkillsDir: REAL_SKILLS, companionBudget: noCap });
+    assert.equal(shownMode(html), "read");
+    assert.equal(ticked(html, P("crow_fetch_source")), false);
+    assert.equal(ticked(html, P("crow_add_source")), false);
+  } finally { _setSourcesForTest(SOURCES); }
+});

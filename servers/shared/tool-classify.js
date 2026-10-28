@@ -47,6 +47,12 @@ const WRITE_NAMES = new Set([
   "crow_fetch_source",
 ]);
 
+// Tools that USED to classify as read and are write now. A def saved as
+// Read-only before the change stores them; Bot Builder and the skill-tools
+// union still treat such a selection as Read-only, and the union drops the
+// entry so a Read-only bot never keeps a tool that writes.
+export const LEGACY_READ = new Set(["crow_fetch_source"]);
+
 // Otherwise, any of these tokens means it only looks.
 const READ_TOKENS = new Set([
   "get", "list", "search", "read", "find", "recall", "stats", "status", "check", "view",

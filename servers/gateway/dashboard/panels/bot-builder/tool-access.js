@@ -21,7 +21,7 @@ import { t } from "../../shared/i18n.js";
 // The read/write name rule lives in servers/shared/tool-classify.js, shared
 // with the skill-tools union (scripts/pi-bots/skill-tools.mjs), so Bot
 // Builder's Read-only and the union's read mode can never disagree.
-import { classifyTool } from "../../../../shared/tool-classify.js";
+import { classifyTool, LEGACY_READ } from "../../../../shared/tool-classify.js";
 export { classifyTool };
 
 /** Names (no server prefix) of the read-class tools in a catalog. */
@@ -45,7 +45,11 @@ export function sourceMode(server, selected, catalog) {
   for (const n of mine) if (!known.has(n)) return "custom";
   if (mine.size === all.length) return "all";
   const reads = readToolNames(catalog);
-  if (reads.length && reads.length < all.length && mine.size === reads.length && reads.every((n) => mine.has(n))) return "read";
+  // a Read-only selection saved before a LEGACY_READ tool (crow_fetch_source)
+  // became write still stores it: it reads Read-only, not Custom
+  const writes = new Set((catalog || []).filter((t) => t.access !== "read").map((t) => t.name));
+  const picked = new Set([...mine].filter((n) => !(LEGACY_READ.has(n) && writes.has(n))));
+  if (reads.length && reads.length < all.length && picked.size === reads.length && reads.every((n) => picked.has(n))) return "read";
   return "custom";
 }
 
