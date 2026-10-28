@@ -274,6 +274,14 @@ function previewBlock(r, max = PREVIEW_CHARS) {
   return `${previewOpen(preview.length)}\n${preview}\n${PREVIEW_CLOSE}`;
 }
 
+const STORED_OPEN = "--- stored content ---";
+const STORED_CLOSE = "--- end stored content ---";
+const STORED_CLOSE_DEFANGED = "- - - end stored content - - -";
+/** Stored (possibly peer-written) text inside the stored-content markers; it cannot close them. */
+function storedBlock(value) {
+  return `${STORED_OPEN}\n${String(value).split(STORED_CLOSE).join(STORED_CLOSE_DEFANGED)}\n${STORED_CLOSE}`;
+}
+
 /** The content type as safe to echo, or a neutral phrase. */
 function contentTypeLabel(ct) {
   return typeof ct === "string" && CONTENT_TYPE_RE.test(ct) ? ct : "an unrecognized content type";
@@ -851,8 +859,8 @@ export function createProjectServer(dbPath, options = {}) {
           : `Verified: ${source.verified ? (viaLegacy ? "legacy flag, unchecked" : `Yes (${source.verification_method || "method unknown"}${source.verified_by ? `, by ${oneLine(source.verified_by, 60)}` : ""})`) : "No"}\n`;
         if (source.verification_notes) {
           text += st == null
-            ? `Notes from the sharing instance (not a verification claim): ${source.verification_notes}\n`
-            : `Verification notes: ${source.verification_notes}\n`;
+            ? `Notes from the sharing instance (not a verification claim):\n${storedBlock(source.verification_notes)}\n`
+            : `Verification notes:\n${storedBlock(source.verification_notes)}\n`;
         }
       }
       text += `Relevance: ${source.relevance_score}/10\n`;
@@ -860,8 +868,8 @@ export function createProjectServer(dbPath, options = {}) {
       if (source.backend_id) text += `Backend: #${source.backend_id}\n`;
       const citations = generateAllCitations(source);
       text += `\nCitations:\n  APA:     ${citations.apa}\n  MLA:     ${citations.mla}\n  Chicago: ${citations.chicago}\n  Web:     ${citations.web}\n`;
-      if (source.abstract) text += `\nAbstract:\n--- stored content ---\n${source.abstract}\n--- end stored content ---\n`;
-      if (source.content_summary) text += `\nSummary:\n--- stored content ---\n${source.content_summary}\n--- end stored content ---\n`;
+      if (source.abstract) text += `\nAbstract:\n${storedBlock(source.abstract)}\n`;
+      if (source.content_summary) text += `\nSummary:\n${storedBlock(source.content_summary)}\n`;
       if (notes.length > 0) {
         text += `\nNotes (${notes.length}):\n`;
         text += notes.map((n) => {
