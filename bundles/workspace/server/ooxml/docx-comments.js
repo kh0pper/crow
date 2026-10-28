@@ -10,6 +10,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { WsError } from "../result.js";
+import { authorFor } from "../actor.js";
 import { NS, kids, all, attr, el, parseXml, insertAfter, removeNode } from "./xml.js";
 import { RUN_CONTAINERS, SEP, textMap, makeRun } from "./docx-model.js";
 import { isolate, spliceText, isPlainTextParagraph } from "./docx-edit.js";
@@ -17,7 +18,6 @@ import { addRel, partsOfType, setOverride, REL } from "./opc.js";
 import { scanMap, normalizeSegs, SEP as SEP_CHAR } from "./text-find.js";
 
 const W = NS.w, W14 = NS.w14, W15 = NS.w15, W16CID = NS.w16cid, W16CEX = NS.w16cex;
-const AUTHOR = "Crow bot", INITIALS = "CB";
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n';
 const CT = "application/vnd.openxmlformats-officedocument.wordprocessingml";
 
@@ -101,7 +101,8 @@ function addDurableRows(d, pid, date) {
   if (cex) { cex.doc.documentElement.appendChild(el(cex.doc, W16CEX, "w16cex:commentExtensible", { "w16cex:durableId": durable, "w16cex:dateUtc": date })); d.pkg.markDirty(cex.part); }
 }
 
-function newComment(d, content) {
+/** `who` = authorFor(actor): { author, initials } of the new comment. */
+export function newComment(d, content, who = authorFor(null)) {
   const cd = commentsPart(d, true); const doc = cd.doc;
   const used = [...kids(doc.documentElement, W, "comment").map((c) => attr(c, W, "id")), ...["commentRangeStart", "commentRangeEnd", "commentReference"].flatMap((n) => all(d.body, W, n).map((x) => attr(x, W, "id")))];
   const id = String(Math.max(-1, ...used.map(Number).filter(Number.isFinite)) + 1);
@@ -109,7 +110,7 @@ function newComment(d, content) {
   const lines = String(content).normalize("NFC").split("\n");
   const paras = lines.map((line) => el(doc, W, "w:p", { "w14:paraId": hexId(taken), "w14:textId": hexId(taken) }, [makeRun(doc, line, null)]));
   const date = now();
-  doc.documentElement.appendChild(el(doc, W, "w:comment", { "w:id": id, "w:author": AUTHOR, "w:date": date, "w:initials": INITIALS }, paras));
+  doc.documentElement.appendChild(el(doc, W, "w:comment", { "w:id": id, "w:author": who.author, "w:date": date, "w:initials": who.initials }, paras));
   d.pkg.markDirty(cd.part);
   const pid = attr(paras.at(-1), W14, "paraId");
   addDurableRows(d, pid, date);
@@ -131,7 +132,7 @@ const marker = (d, local, id) => all(d.body, W, local).find((x) => attr(x, W, "i
 /** The run holding w:commentReference for `id`. */
 const refRunOf = (d, id) => { const r = marker(d, "commentReference", id); return r && isW(r.parentNode, "r") ? r.parentNode : null; };
 
-export function addComment(d, content, quotedText) {
+export function addComment(d, content, quotedText, who = authorFor(null)) {
   const doc = d.doc;
   let first, last;
   if (quotedText) {
@@ -147,7 +148,7 @@ export function addComment(d, content, quotedText) {
     const inner = kids(p).filter((c) => !isW(c, "pPr")); first = inner[0] || null; last = inner.at(-1) || null;
     if (!first) { const r = makeRun(doc, "", null); p.appendChild(r); first = last = r; }
   }
-  const { id, pid } = newComment(d, content);
+  const { id, pid } = newComment(d, content, who);
   first.parentNode.insertBefore(el(doc, W, "w:commentRangeStart", { "w:id": id }), first);
   const end = el(doc, W, "w:commentRangeEnd", { "w:id": id }); insertAfter(end, last); insertAfter(refRun(doc, id), end);
   setEx(d, pid, { done: false }); d.pkg.markDirty(d.part);
@@ -169,10 +170,10 @@ function findComment(d, id) {
   return { c, pid, done: e ? attr(e, W15, "done") === "1" : false, parent: e ? attr(e, W15, "paraIdParent") : "" };
 }
 
-export function replyComment(d, id, content) {
+export function replyComment(d, id, content, who = authorFor(null)) {
   const root = findComment(d, id);
   if (root.parent) throw new WsError("bad_args", `Comment ${id} is itself a reply; reply to the thread's first comment.`);
-  const r = newComment(d, content);
+  const r = newComment(d, content, who);
   // the reply shares the root's range and has its own reference mark (as Word and ONLYOFFICE write it)
   const s = marker(d, "commentRangeStart", id), e = marker(d, "commentRangeEnd", id), ref = refRunOf(d, id);
   if (s && e) {
@@ -216,7 +217,7 @@ const CROSSES_BREAK = "The highlighted text includes a tab, line break, image or
  * when the anchored paragraph holds links, fields, tracked changes, images or other non-text content. Without a
  * usable anchor it replies with the reason and leaves the thread unresolved.
  */
-export function applyCommentEdit(d, id, replaceText, summary) {
+export function applyCommentEdit(d, id, replaceText, summary, who = authorFor(null)) {
   const root = findComment(d, id);
   if (root.parent) throw new WsError("bad_args", `Comment ${id} is a reply; use the thread's first comment.`);
   if (root.done) throw new WsError("already_resolved", `Comment ${id} is already resolved.`);
@@ -226,18 +227,18 @@ export function applyCommentEdit(d, id, replaceText, summary) {
   const p = startEl ? paragraphOf(startEl) : null;
   const off = p ? anchorOffsets(p, String(id)) : { s: null, e: null };
   if (!p || off.s === null || off.e === null || off.e <= off.s) {
-    replyComment(d, id, NO_ANCHOR);
+    replyComment(d, id, NO_ANCHOR, who);
     return { applied: false, reason: "no_anchor", left_unresolved: true };
   }
   if (!isPlainTextParagraph(p)) throw new WsError("not_plain_text", "the commented paragraph holds a link, field, image, tracked change or note reference; Crow will not rewrite it. Edit it with ws_docs_find_replace instead.");
   const map = textMap(p);
   if (map.text.slice(off.s, off.e).includes(SEP_CHAR)) {
-    replyComment(d, id, CROSSES_BREAK);
+    replyComment(d, id, CROSSES_BREAK, who);
     return { applied: false, reason: "crosses_break", left_unresolved: true };
   }
   spliceText(map.segs, off.s, off.e, repl);
   d.pkg.markDirty(d.part);
-  replyComment(d, id, summary); resolveComment(d, id);
+  replyComment(d, id, summary, who); resolveComment(d, id);
   return { applied: true };
 }
 

@@ -12,8 +12,8 @@ export const fail = (code, error, data) => ({ content: block({ success: false, c
  * unavailable the details are withheld.
  */
 export function handler(fn, { redactWith } = {}) {
-  return async (args) => {
-    try { return ok(await fn(args ?? {})); }
+  return async (args, extra) => {
+    try { return ok(await fn(args ?? {}, extra)); }
     catch (e) {
       let cfg = null;
       try { cfg = redactWith ? redactWith() : null; } catch { cfg = null; }

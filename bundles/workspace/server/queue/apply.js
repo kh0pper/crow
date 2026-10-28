@@ -7,7 +7,7 @@ import { getFile } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
 import { MAX_EDIT_BYTES } from "../write-protocol.js";
 import { checkPre, checkPost } from "./conditions.js";
-import { cas, argsOf, preOf, resultOf, markVerified, APPLIER_ID, APPLY_LEASE_MS } from "./store.js";
+import { cas, argsOf, preOf, actorOf, resultOf, markVerified, APPLIER_ID, APPLY_LEASE_MS } from "./store.js";
 import { ALL_DEFS } from "../tools/all.js";
 
 /** Version labels of close-time applies: "Crow (queued): …"; Quick edit keeps "Quick edit: …" (both match CROW_LABEL_RE). */
@@ -38,7 +38,7 @@ async function fail(db, row, from, reason, extra = {}) {
 async function runClaimed(ctx, db, row) {
   const args = argsOf(row); const def = ALL_DEFS.get(row.tool);
   if (!def) return fail(db, row, "applying_close", "unsupported");
-  const callArgs = Object.defineProperties({ ...args, if_open: "wait", wait_s: 0 }, { __tool: { value: null }, __label: { value: labelFor(row) } });
+  const callArgs = Object.defineProperties({ ...args, if_open: "wait", wait_s: 0 }, { __tool: { value: null }, __label: { value: labelFor(row) }, __actor: { value: actorOf(row) } });
   let out;
   try { out = await def.run(callArgs, ctx); }
   catch (e) {
