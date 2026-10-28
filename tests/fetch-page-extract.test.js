@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { fetchPage, splitFetchedText, storedTextMaybeTruncated, FULL_TEXT_MARKER, FETCHED_TEXT_MAX } from "../servers/shared/fetch-page.js";
+import { fetchPage, pageFromResponse, failedRequest, splitFetchedText, storedTextMaybeTruncated, FULL_TEXT_MARKER, FETCHED_TEXT_MAX } from "../servers/shared/fetch-page.js";
 import { extractReadable } from "../servers/shared/fetch-page-worker.js";
 
 const FIX = new URL("./fixtures/research-pages/", import.meta.url);
@@ -146,4 +146,21 @@ test("extractReadable keeps a separator at block boundaries", async () => {
   }
   const m = matchQuote("kilometres. Work starts", { readable, body, truncated: false });
   assert.equal(m.found, 1, JSON.stringify(m));
+});
+
+// pageFromResponse is the post-request half of fetchPage: same result for the same response.
+for (const [path, contentType, body] of [["/html", "text/html", ARTICLE], ["/plain", "text/plain", "just plain text"], ["/pdf", "application/pdf", "%PDF-1.4 x"]]) {
+  test(`pageFromResponse gives what fetchPage gives for ${path}`, async () => {
+    const viaFetch = await fetchPage(u(path), OPTS());
+    const direct = await pageFromResponse({ final_url: viaFetch.final_url, http_status: 200, content_type: contentType, charset: path === "/html" ? "utf-8" : null, buffer: Buffer.from(body) });
+    for (const k of ["ok", "fetch_status", "final_url", "http_status", "content_type", "text", "readable_text", "truncated", "sha256"]) assert.deepEqual(direct[k], viaFetch[k], `${path} ${k}`);
+  }); // /pdf is the fetched_no_text path
+}
+test("pageFromResponse: non-2xx is a failed fetch with the HTTP reason", async () => {
+  const r = await pageFromResponse({ final_url: "https://a.example/x", http_status: 403, content_type: "text/html", charset: null, buffer: Buffer.from("<p>no</p>") });
+  assert.deepEqual([r.ok, r.fetch_status, r.reason, r.http_status], [false, "failed", "HTTP 403", 403]);
+});
+test("failedRequest maps the error code to fetchPage's reason", () => {
+  assert.equal(failedRequest(Object.assign(new Error("t"), { code: "ETIMEDOUT" })).reason, "timed out");
+  assert.equal(failedRequest({ code: "EWHAT" }).reason, "the page could not be fetched (EWHAT)");
 });
