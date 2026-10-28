@@ -169,8 +169,8 @@ const SERVER_FACTORIES = {
 /**
  * Create an in-process MCP Client connected to a server.
  */
-async function createInProcessClient(name, serverFactory) {
-  const server = serverFactory();
+async function createInProcessClient(name, serverFactory, factoryOptions) {
+  const server = factoryOptions ? serverFactory(undefined, factoryOptions) : serverFactory();
   const client = new Client({ name: `chat-${name}`, version: "0.1.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -240,7 +240,11 @@ export function createToolExecutor(opts = {}) {
       throw new Error(`Unknown category: ${category}`);
     }
 
-    const { client } = await createInProcessClient(category, factory);
+    // The project server's base actor is the bound bot (unbound executors stay unknown).
+    const factoryOptions = {
+      projects: { actor: boundBotId ? { kind: "bot", id: boundBotId } : undefined },
+    }[category];
+    const { client } = await createInProcessClient(category, factory, factoryOptions);
     clients.set(category, client);
     return client;
   }

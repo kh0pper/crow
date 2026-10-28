@@ -25,6 +25,7 @@ import { jsonObject } from "../shared/tool-schema-types.js";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
+import { UNKNOWN, forwardActorMeta } from "../research/actor.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
@@ -54,8 +55,8 @@ const CATEGORY_ALIASES = {
  * Create an in-process MCP Client connected to a server via InMemoryTransport.
  * Returns { client, server } pair.
  */
-async function createInProcessClient(name, serverFactory) {
-  const server = serverFactory();
+async function createInProcessClient(name, serverFactory, factoryOptions) {
+  const server = factoryOptions ? serverFactory(undefined, factoryOptions) : serverFactory();
   const client = new Client({ name: `router-${name}`, version: "0.1.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   // Server must connect first — it needs to be ready when client sends initialize
@@ -122,7 +123,10 @@ export function createRouterServer(options = {}) {
       throw new Error(`Unknown server category: ${category}. Available: ${Object.keys(TOOL_MANIFESTS).join(", ")}`);
     }
 
-    const { client } = await createInProcessClient(category, factory);
+    // The project server learns who is calling from the mount (owner or unknown); each call's
+    // forwarded _meta (below) can only narrow it.
+    const factoryOptions = category === "projects" ? { actor: options.actor || UNKNOWN } : undefined;
+    const { client } = await createInProcessClient(category, factory, factoryOptions);
     clients.set(category, client);
     return client;
   }
@@ -131,7 +135,7 @@ export function createRouterServer(options = {}) {
    * Dispatch an action to the appropriate server.
    * Resolves the full tool name from the action (adds crow_ prefix if needed).
    */
-  async function dispatch(category, action, params) {
+  async function dispatch(category, action, params, extra) {
     const client = await getClient(category);
 
     // Resolve tool name: accept both "store_memory" and "crow_store_memory"
@@ -147,6 +151,8 @@ export function createRouterServer(options = {}) {
     const result = await client.callTool({
       name: toolName,
       arguments: params || {},
+      // Forward the caller's actor (a peer-instance call becomes kind "peer").
+      ...forwardActorMeta(extra),
     });
     return result;
   }
@@ -165,9 +171,9 @@ export function createRouterServer(options = {}) {
         // grammar-constrained local model can only fill with objects (queue item 26).
         params: jsonObject().optional().describe("Parameters for the action, as an object (e.g. {\"query\": \"...\"}); the dispatched server validates them"),
       },
-      async ({ action, params }) => {
+      async ({ action, params }, extra) => {
         try {
-          return await dispatch(category, action, params);
+          return await dispatch(category, action, params, extra);
         } catch (error) {
           return {
             content: [{ type: "text", text: `Error in ${category}/${action}: ${error.message}` }],

@@ -264,6 +264,16 @@ export function buildBotMcp(def, canonical, opts = {}) {
     disable(name, null);
   }
 
+  // A canonical file generated for the owner (scripts/generate-mcp-config.js) marks its project
+  // server CROW_ACTOR_KIND=owner; a bot must never inherit that. Replace, never mutate, the block
+  // (it may be the shared canonical or catalog object).
+  for (const [name, block] of Object.entries(out.mcpServers)) {
+    if (block && block.env && block.env.CROW_ACTOR_KIND === "owner") {
+      const { CROW_ACTOR_KIND: _owner, ...env } = block.env;
+      out.mcpServers[name] = { ...block, env };
+    }
+  }
+
   if (opts.actor && opts.actor.botId) applyActorEnv(out.mcpServers, actorEnvFor(opts.actor));
 
   return { json: out, servers: active, warnings, journalGuarded, minted, rebound, disabled };

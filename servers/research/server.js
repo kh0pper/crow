@@ -8,7 +8,8 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
+import { existsSync } from "node:fs";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern, resolveDbPath } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import {
   AclError,
@@ -25,6 +26,8 @@ import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-sp
 import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
+import { UNKNOWN, resolveCallActor } from "./actor.js";
+import { ensureProvenanceSchema } from "./ensure-schema.js";
 
 // publication_date is free-form TEXT ("1993", "2005-07", "2023-05-14",
 // occasionally prose like "May 14, 2023"). new Date() parses the ISO
@@ -167,13 +170,51 @@ function generateAllCitations(source) {
   };
 }
 
+// Paths whose provenance columns are known present. Columns are never dropped, so once a path is
+// ready it stays ready, and later constructions (the gateway builds one server per MCP session)
+// skip the ensure, which can wait on a busy store's lock.
+const schemaReadyPaths = new Set();
+
+function readySchema(path) {
+  if (!path) return { ready: false, state: "error", reason: "no database path" };
+  if (schemaReadyPaths.has(path)) return { ready: true, state: "ready" };
+  // ensureProvenanceSchema opens the path read-write, which would create an empty file.
+  if (path === ":memory:" || !existsSync(path)) {
+    return { ready: false, state: "error", reason: "not a database file" };
+  }
+  const r = ensureProvenanceSchema(path);
+  if (r.ready) schemaReadyPaths.add(path);
+  return r;
+}
+
+/**
+ * @param {string} [dbPath]
+ * @param {{instructions?: string, actor?: {kind: string, id?: string}, fetchPage?: Function}} [options]
+ *   actor: who is calling (servers/research/actor.js); absent means unknown, never the owner.
+ */
 export function createProjectServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
+
+  // Who is calling: the construction-time base; each call narrows it via callActor(extra).
+  const baseActor = options.actor || UNKNOWN;
+  const callActor = (extra) => resolveCallActor(baseActor, extra);
+
+  // The deploy window (no SCHEMA_GENERATION bump): ready the provenance columns here. While not
+  // ready, tools keep to the pre-0013 column lists; refreshSchema() retries until ready.
+  const schemaPath = dbPath || resolveDbPath();
+  const schema = { ...readySchema(schemaPath) };
+  const refreshSchema = () => {
+    if (!schema.ready) Object.assign(schema, { reason: undefined }, readySchema(schemaPath));
+    return schema;
+  };
 
   const server = new McpServer(
     { name: "crow-projects", version: "0.1.0" },
     options.instructions ? { instructions: options.instructions } : undefined
   );
+
+  // Read by the tool handlers' callers and tests: who is calling and whether provenance is ready.
+  server.research = { actor: baseActor, schema, callActor, refreshSchema };
 
   // --- Project Tools ---
 

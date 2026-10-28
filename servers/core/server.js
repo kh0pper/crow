@@ -21,6 +21,7 @@ import { z } from "zod";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
+import { actorFromEnv } from "../research/actor.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, getToolNames } from "../gateway/tool-manifests.js";
@@ -82,7 +83,10 @@ export async function createCoreServer(dbPath) {
     }
     if (!factory) throw new Error(`Unknown server: ${name}`);
 
-    const targetServer = factory(dbPath);
+    // The project server needs to know who is calling (owner only by explicit env, else unknown).
+    const targetServer = name === "projects"
+      ? factory(dbPath, { actor: actorFromEnv(process.env) })
+      : factory(dbPath);
     const client = new Client({ name: `core-${name}`, version: "0.1.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await targetServer.connect(serverTransport);
