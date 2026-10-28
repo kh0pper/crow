@@ -36,6 +36,7 @@ export function perchTakeOverJs(lang = "en") {
   var TO_NO_PASSWORD='${tJs("perch.noPassword", lang)}';
   var TO_FINISHING='${tJs("perch.botFinishing", lang)}';
   var TO_WAITING='${tJs("perch.browserWaiting", lang)}';
+  var TO_NOT_WAITING='${tJs("perch.browserNotWaiting", lang)}';
   var TO_COPIED='${tJs("passwords.copied", lang)}';
   var TO_REAUTH_TITLE='${tJs("passwords.reauthTitle", lang)}';
   var TO_REAUTH_PASSWORD='${tJs("passwords.reauthPassword", lang)}';
@@ -93,6 +94,7 @@ export function perchTakeOverJs(lang = "en") {
     s.node=node; s.status=status; s.back=back; s.copy=copy; s.hint=hint; s.pw=pw; s.view=view;
     s.reauth=reauth; s.rInput=rInput; s.rErr=rErr; s.host=host;
     toSheet=s;
+    toMine(false);
     (el('perch-hub-root')||document.body).appendChild(node);
     back.onclick=function(){ toHandBack(s); };
     copy.onclick=function(){ toCopy(s); };
@@ -103,7 +105,8 @@ export function perchTakeOverJs(lang = "en") {
     /* From a link: the server takes it only while that chat's turn uses the browser. */
     var body=(detail&&detail.link)?{ from:'link', sid:String(detail.sid||'') }:undefined;
     perchApi('POST','/browser/take-over',body).then(function(r){
-      if(r&&r.status===409&&r.j&&r.j.error==='no_live_turn'){ if(toSheet===s) closeTakeOver(); return; }
+      /* a stale link: say so (nothing was taken); Hand back closes the sheet */
+      if(r&&r.status===409){ if(toSheet===s&&!s.closed){ s.state='ended'; toSetStatus(s,TO_NOT_WAITING); } return; }
       toAnswer(s,r);
     });
   }
@@ -128,7 +131,7 @@ export function perchTakeOverJs(lang = "en") {
     }
     if(st==='idle'){
       /* held: the browser went back (5-minute loss). Not yet held: the take-over gave up. */
-      if(s.state==='held'){ closeTakeOver(); return; }
+      if(s.state==='held'){ closeTakeOver(); toMine(false); return; }
       s.state='ended'; toSetStatus(s,TO_FAILED);
       return;
     }
@@ -161,7 +164,7 @@ export function perchTakeOverJs(lang = "en") {
     toApi('hand-back').then(function(r){
       s.backing=false; s.back.disabled=false;
       if(s.closed||toSheet!==s) return;
-      if(r&&r.ok){ closeTakeOver(); return; }
+      if(r&&r.ok){ closeTakeOver(); toMine(false); return; }
       toSetStatus(s,TO_FAILED);
     });
   }
@@ -249,6 +252,27 @@ export function perchTakeOverJs(lang = "en") {
     if(s.frame){ try{ s.frame.setAttribute('src','about:blank'); }catch(e){} }
     if(s.node.parentNode) s.node.parentNode.removeChild(s.node);
   }
+
+  /* "You have the browser · Hand back" (#perch-browser-mine): shown on load
+     while the server says the operator holds or is taking the browser, so
+     leaving the sheet never strands the operator without a way to hand back. */
+  function toMine(on){ var b=el('perch-browser-mine'); if(b&&b.hidden!==!on) b.hidden=!on; }
+  function toMineRefresh(){
+    if(!el('perch-browser-mine')) return;
+    perchApi('GET','/browser/state').then(function(r){
+      if(!live()||toSheet) return;
+      var st=r&&r.ok&&r.j?r.j.state:null;
+      toMine(st==='held'||st==='pending');
+    });
+  }
+  (function(){
+    var b=el('perch-browser-mine'); if(!b) return;
+    b.onclick=function(){
+      if(b.disabled) return;
+      b.disabled=true;
+      toApi('hand-back').then(function(r){ b.disabled=false; if(r&&r.ok) toMine(false); });
+    };
+  })();
 
   bindOnce(document,'perch:browser-takeover','takeOver',function(ev){
     if(!live()) return;

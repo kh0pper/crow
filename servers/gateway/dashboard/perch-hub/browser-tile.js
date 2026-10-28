@@ -131,7 +131,11 @@ export function perchBrowserTileJs(lang = "en") {
     return t;
   }
   function btTakeOver(t){
-    try{ document.dispatchEvent(new CustomEvent('perch:browser-takeover',{ detail:{ sid:t.sid, anchor:t.anchor } })); }catch(e){}
+    /* a Done tile (its bot asked for you, then ended the turn) asks like a link:
+       the server checks the ask is recent and no other bot has the browser */
+    var detail={ sid:t.sid, anchor:t.anchor };
+    if(t.phase!=='live') detail.link=true;
+    try{ document.dispatchEvent(new CustomEvent('perch:browser-takeover',{ detail:detail })); }catch(e){}
   }
   function btSetHost(t,domain){
     if(typeof domain==='string'&&domain) t.domain=domain;
@@ -304,7 +308,8 @@ export function perchBrowserTileJs(lang = "en") {
     t.node.removeAttribute('data-operator'); t.operator=false;
     btDim(t,false);
     t.state.textContent=BT_DONE;
-    t.take.hidden=true;
+    /* a turn that parked on wait_for_user keeps its Take over */
+    t.take.hidden=!(d&&d.ask===true);
     /* a frozen picture is not a control */
     t.frame.removeAttribute('aria-label'); t.frame.setAttribute('tabindex','-1'); t.frame.disabled=true;
     if(d&&d.domain) btSetHost(t,d.domain); else btSetHost(t,null);

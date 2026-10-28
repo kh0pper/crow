@@ -628,6 +628,9 @@ background:var(--sky);overflow:hidden;cursor:pointer}
 #perch-hub-root .browser-status{font-size:12.5px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The Take over sheet (spec 2026-10-27 §4.4): full screen over the hub, the
    noVNC viewer filling what the bar leaves. Targets are 44 px; Perch tokens only. */
+#perch-hub-root .browser-mine{display:block;width:100%;min-height:44px;margin:0 0 6px;padding:8px 14px;text-align:left;
+background:var(--card);color:var(--teal);border:1px solid var(--line);border-radius:10px;font-weight:600;cursor:pointer}
+#perch-hub-root .browser-mine[hidden]{display:none}
 #perch-hub-root .ph-tosheet{position:fixed;inset:0;z-index:1300;display:flex;flex-direction:column;gap:6px;
 background:var(--card);color:var(--ink);padding:8px;padding-top:max(8px,env(safe-area-inset-top));min-width:0}
 #perch-hub-root .ph-tosheet [hidden]{display:none}

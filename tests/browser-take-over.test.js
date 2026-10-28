@@ -548,15 +548,33 @@ test("engine: a forged operator file during a turn sets no operator state: no fr
   void shots;   // the stalled turn's own exit path decides the shot; the point is the note
 });
 
-test("wait_for_user raises an attention item that opens the sheet (once per turn; not on resume)", async () => {
+const WAIT = "mcp__browser__crow_browser_wait_for_user";
+const parked = (message = "x") => ({ content: [{ type: "text", text: JSON.stringify({ status: "waiting_for_user", message, instruction: "tap Take over" }, null, 2) }] });
+
+test("wait_for_user raises the attention item at its END, only when it parked (not on a busy/held refusal, not on resume)", async () => {
   const h = makeEngine();
   const s = await h.engine.spawn({ botId: "botty" });
   await tick();
   await h.engine.message(s.sessionId, "log in");
   const pi = h.state.instances[0];
-  pi.emit({ type: "tool_execution_start", toolName: "mcp__browser__crow_browser_wait_for_user", toolCallId: "w1", args: { message: "Solve the CAPTCHA on https://bank.example.test/login" } });
+  // a refusal from the lease guard: no item
+  pi.emit({ type: "tool_execution_start", toolName: WAIT, toolCallId: "w0", args: { message: "x" } });
+  await tick();
+  assert.equal(h.notes.length, 0, "nothing at the start");
+  pi.emit({ type: "tool_execution_end", toolName: WAIT, toolCallId: "w0", isError: false, result: { content: [{ type: "text", text: "The operator has the browser; call again to continue." }] } });
+  await tick();
+  assert.equal(h.notes.length, 0, "a held refusal raises nothing");
+  // an error: no item
+  pi.emit({ type: "tool_execution_start", toolName: WAIT, toolCallId: "w9", args: {} });
+  pi.emit({ type: "tool_execution_end", toolName: WAIT, toolCallId: "w9", isError: true, result: parked() });
+  await tick();
+  assert.equal(h.notes.length, 0);
+  // parked: the item (the end frame carries no args; the start's verdict is remembered)
+  pi.emit({ type: "tool_execution_start", toolName: WAIT, toolCallId: "w1", args: { message: "Solve the CAPTCHA on https://bank.example.test/login" } });
+  pi.emit({ type: "tool_execution_end", toolName: WAIT, toolCallId: "w1", isError: false, result: parked("Solve the CAPTCHA on https://bank.example.test/login") });
   await tick();
   pi.emit({ type: "tool_execution_start", toolName: "mcp__browser", toolCallId: "w2", args: { action: "call", tool: "crow_browser_wait_for_user", args: { message: "again" } } });
+  pi.emit({ type: "tool_execution_end", toolName: "mcp__browser", toolCallId: "w2", isError: false, result: parked() });
   await tick();
   assert.equal(h.notes.length, 1, "one item per turn");
   const n = h.notes[0];
@@ -565,18 +583,73 @@ test("wait_for_user raises an attention item that opens the sheet (once per turn
   assert.equal(n.action_url, "/dashboard/perch?take-over=1#" + s.sessionId);
   assert.match(n.title, /botty needs you/);
   assert.doesNotMatch(JSON.stringify(n), /bank\.example|https?:/, "no URL or host rides the item");
-  // the resume call raises nothing
   pi.lastTurn().resolve(END);
   await tick();
   await h.engine.message(s.sessionId, "go on");
   const pi2 = h.state.instances[0];
-  pi2.emit({ type: "tool_execution_start", toolName: "mcp__browser__crow_browser_wait_for_user", toolCallId: "w3", args: { message: "x", resume: true } });
+  pi2.emit({ type: "tool_execution_start", toolName: WAIT, toolCallId: "w3", args: { message: "x", resume: true } });
+  pi2.emit({ type: "tool_execution_end", toolName: WAIT, toolCallId: "w3", isError: false, result: parked() });
   pi2.emit({ type: "tool_execution_start", toolName: "mcp__browser", toolCallId: "w4", args: JSON.stringify({ action: "call", tool: "crow_browser_wait_for_user", args: { resume: true } }) });
+  pi2.emit({ type: "tool_execution_end", toolName: "mcp__browser", toolCallId: "w4", isError: false, result: parked() });
   await tick();
   assert.equal(h.notes.length, 1, "resume raises nothing");
   const { isWaitForUser } = await import("../servers/gateway/browser-tile/session-hooks.js");
   assert.equal(isWaitForUser("mcp__other__crow_browser_navigate", {}), false);
   assert.equal(isWaitForUser("mcp__x__wait_for_user", {}), false);
+});
+
+/** The real engine behind the real router (auth stubbed: the auth rails are tested below). */
+async function engineRoutes(h) {
+  const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const { default: express } = await import("express");
+  const app = express();
+  app.use(express.json());
+  app.use(perchInteractiveApiRouter((req, res, next) => next(), { engine: () => h.engine, annotate: async (m) => m, providerModels: () => [], piProviders: () => null }));
+  const srv = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  const base = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api/browser/";
+  const post = async (op, body) => {
+    const r = await fetch(base + op, { method: "POST", headers: body ? { "content-type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+    return { status: r.status, body: await r.json().catch(() => null) };
+  };
+  const get = async (op) => { const r = await fetch(base + op); return { status: r.status, body: await r.json().catch(() => null) }; };
+  return { post, get, close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) };
+}
+
+test("the wait_for_user link after the turn ended opens the sheet and takes the browser; the Done tile keeps Take over; another bot holding → 409; after 30 min → 409", async () => {
+  const h = makeEngine();
+  const { s, pi, browser } = await liveTurn(h);
+  pi.emit({ type: "tool_execution_start", toolName: WAIT, toolCallId: "w1", args: { message: "2FA code" } });
+  pi.emit({ type: "tool_execution_end", toolName: WAIT, toolCallId: "w1", isError: false, result: parked("2FA code") });
+  await tick();
+  pi.lastTurn().resolve(END);   // wait_for_user returns at once: the bot ends its turn
+  await tick();
+  const done = browser().filter((e) => e.phase === "done")[0];
+  assert.equal(done.ask, true, "the Done tile keeps its Take over");
+  assert.equal(h.engine.browserTurnLive(s.sessionId), false, "no live turn any more");
+  const r = await engineRoutes(h);
+  try {
+    const link = { from: "link", sid: s.sessionId };
+    // the lease: free (the turn end released it)
+    assert.deepEqual(await r.post("take-over", link), { status: 200, body: { state: "held" } }, "the link takes the browser");
+    assert.equal((await lease.readLease(h.leaseDir)).holder.kind, "operator");
+    assert.deepEqual(await r.get("state"), { status: 200, body: { state: "held" } });
+    assert.deepEqual((await r.post("take-over", link)).body, { state: "held" }, "operator-held: the link still works (a renewal)");
+    assert.deepEqual((await r.post("hand-back")).body, { state: "idle" });
+    // another bot holds it now: refused, nothing taken
+    await lease.acquire(h.leaseDir, { kind: "bot", sessionId: "perchlive-0ther000", botId: "other" }, { now: h.clock.now() });
+    assert.deepEqual(await r.post("take-over", link), { status: 409, body: { error: "no_live_turn" } });
+    assert.equal((await lease.readLease(h.leaseDir)).holder.sessionId, "perchlive-0ther000");
+    assert.deepEqual(await r.get("state"), { status: 200, body: { state: "idle" } });
+    await lease.release(h.leaseDir, "perchlive-0ther000", { now: h.clock.now(), isAlive: () => false });
+    // this session's own holding counts
+    await lease.acquire(h.leaseDir, { kind: "bot", sessionId: s.sessionId, botId: "botty" }, { now: h.clock.now() });
+    assert.equal(await h.engine.browserLinkOk(s.sessionId), true);
+    await lease.release(h.leaseDir, s.sessionId, { now: h.clock.now(), isAlive: () => false });
+    // 30 minutes later: refused
+    h.clock.set(h.clock.now() + 30 * 60_000 + 1000);
+    assert.deepEqual(await r.post("take-over", link), { status: 409, body: { error: "no_live_turn" } });
+    assert.equal(await h.engine.browserLinkOk("perchlive-nosuch00"), false);
+  } finally { h.engine.browserTakeOver.close(); await r.close(); }
 });
 
 // ---------------------------------------------------------------------------
@@ -592,7 +665,7 @@ async function routeHarness() {
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { default: express } = await import("express");
   const h = controller({ isAlive: () => true });
-  const engine = { browserTakeOver: h.ctl, browserTurnLive: (sid) => sid === "perchlive-11111111" };
+  const engine = { browserTakeOver: h.ctl, browserLinkOk: async (sid) => sid === "perchlive-11111111" };
   const app = express();
   app.use(express.json());
   const router = express.Router();
@@ -609,7 +682,7 @@ async function routeHarness() {
     let out = null; try { out = await r.json(); } catch { out = null; }
     return { status: r.status, body: out };
   };
-  return { ...h, engine, post, AUTH, close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) };
+  return { ...h, engine, post, AUTH, base, close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) };
 }
 
 test("routes need CSRF and dashboard auth; a contact or Funnel request is refused; take over / heartbeat / hand back answer the state", async () => {
@@ -642,6 +715,10 @@ test("routes need CSRF and dashboard auth; a contact or Funnel request is refuse
     r.held.length = 0;
     const take = await r.post("take-over");
     assert.equal(take.status, 200);
+    const stateOf = async (headers) => { const x = await fetch(r.base + "state", { headers, redirect: "manual" }); return { status: x.status, body: await x.json().catch(() => null) }; };
+    assert.deepEqual(await stateOf(r.AUTH), { status: 200, body: { state: "held" } }, "GET state (no CSRF needed for a read)");
+    assert.notEqual((await stateOf({ ...serveHeaders(), cookie: "crow_csrf=tok" })).status, 200, "no session: refused");
+    assert.equal((await stateOf({ ...r.AUTH, "tailscale-funnel-request": "?1" })).status, 403, "Funnel: refused");
     assert.deepEqual(take.body, { state: "held" });
     assert.deepEqual((await r.post("heartbeat")).body, { state: "held" });
     assert.deepEqual((await r.post("hand-back")).body, { state: "idle" });
@@ -713,6 +790,40 @@ test("the Browser panel shows \"A bot is using the browser\" with Take over whil
     assert.doesNotMatch(await render(), /browser-bot-using/);
     assert.equal(botHolding({ holder: { kind: "bot", sessionId: "s" } }, () => true), null, "a free (expired) lease");
     assert.equal(botHolding(null, lease.isFree), null);
+    // the gateway's in-memory state says the operator holds it: "You have the browser" + Hand back
+    const pi = await import("../servers/gateway/perch-interactive.js");
+    let st = "held";
+    pi._setInteractiveEngineForTest({ browserTakeOver: { state: () => st } });
+    try {
+      html = await render();
+      assert.match(html, /class="browser-operator-has"/);
+      assert.match(html, /You have the browser/);
+      assert.match(html, /<button type="button" id="browser-hand-back"[^>]*>Hand back<\/button>/);
+      assert.match(await render("es"), /Tienes tú el navegador[\s\S]*>Devolver</);
+      st = "pending";
+      assert.match(await render(), /browser-operator-has/);
+      st = "idle";
+      assert.doesNotMatch(await render(), /browser-operator-has/, "idle: nothing");
+      // the file alone (a forged operator holding) never shows it
+      pi._setInteractiveEngineForTest(null);
+      assert.doesNotMatch(await render(), /browser-operator-has/);
+    } finally { pi._setInteractiveEngineForTest(null); }
+    // tap → the hand-back route with the CSRF header, then a reload
+    const { HAND_BACK_JS } = await import("../bundles/browser/panel/browser.js");
+    assert.equal(/`|\$\{/.test(HAND_BACK_JS), false);
+    const vm = await import("node:vm");
+    const btn = { disabled: false, l: null, addEventListener(t, f) { this.l = f; } };
+    const fetched = []; let reloaded = 0;
+    const ctx = { document: { getElementById: (id) => (id === "browser-hand-back" ? btn : null), cookie: "a=1; crow_csrf=tk%3D" },
+      fetch: (u, o) => { fetched.push({ u, o }); return Promise.resolve({ ok: true }); }, location: { reload: () => { reloaded++; } }, decodeURIComponent };
+    vm.runInNewContext(HAND_BACK_JS, ctx);
+    btn.l(); btn.l();
+    await tick();
+    assert.equal(fetched.length, 1, "one request for a double tap");
+    assert.equal(fetched[0].u, "/dashboard/perch-api/browser/hand-back");
+    assert.equal(fetched[0].o.method, "POST");
+    assert.equal(fetched[0].o.headers["X-Crow-Csrf"], "tk=");
+    assert.equal(reloaded, 1);
   } finally { process.env.CROW_HOME = prevHome; process.env.PATH = prevPath; }
 });
 

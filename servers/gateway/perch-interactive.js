@@ -159,7 +159,7 @@ import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE,
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
-import { readLease, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
+import { readLease, isFree as isLeaseFree, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
 import { isBrowserTool, isWaitForUser, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
 import { createWatcher as createBrowserWatcher, createFinalShotHook } from "./browser-tile/watcher.js";
 import { storeShot } from "./browser-tile/shots.js";
@@ -1433,7 +1433,17 @@ export function createInteractiveEngine({
       if (turn.browserCalls.size < 256) turn.browserCalls.add(id);
     }
     const rec = browserRecord(turn, id);
-    if (phase === "start" && isWaitForUser(m.toolName, m.args)) attentionForBrowser(s, turn);
+    // crow_browser_wait_for_user: remembered at its start (an end frame may
+    // carry no args), announced at its end, and only when it really parked
+    // (not a busy / held refusal from the lease guard).
+    if (phase === "start" && id && isWaitForUser(m.toolName, m.args)) {
+      if (!turn.waitCalls) turn.waitCalls = new Set();
+      if (turn.waitCalls.size < 64) turn.waitCalls.add(id);
+    }
+    if (phase === "end" && id && turn.waitCalls && turn.waitCalls.has(id)) {
+      turn.waitCalls.delete(id);
+      if (!m.isError && waitedForUser(m)) attentionForBrowser(s, turn);
+    }
     if (phase !== "end" || rec.finished) return;
     browserQueue(s, async () => {
       const dir = browserDir();
@@ -1525,7 +1535,7 @@ export function createInteractiveEngine({
           }
         }
       } finally {
-        if (rec && rec.live) emit(s, doneEventFor(rec, { shot, operator }));
+        if (rec && rec.live) emit(s, doneEventFor(rec, { shot, operator, ask: !!(turn && turn.browserAsked) }));
         if (rec && s.browser === rec) s.browser = null;
       }
     });
@@ -1600,18 +1610,56 @@ export function createInteractiveEngine({
     log,
   });
 
-  /** A "?take-over=1" link (a needs-you item) may take the browser only while
-   *  that session has a live turn using it: a stale click never grabs it from
-   *  another bot. */
+  /** The session has a live turn using the browser. */
   function browserTurnLive(sessionId) {
     const s = sessions.get(String(sessionId || ""));
     const rec = s && s.turn && s.turn.browser;
     return !!(rec && !rec.finished && s.state !== "stopped");
   }
 
+  /** sessionId → when its bot last parked on crow_browser_wait_for_user. Kept
+   *  apart from the session record (a hibernated session keeps its ask). */
+  const browserAsked = new Map();
+  const BROWSER_ASK_WINDOW_MS = 30 * 60_000;
+
+  /**
+   * May a "?take-over=1" link (a needs-you item, a Done tile that asked) take
+   * the browser for this session? Yes while its turn is using the browser, or
+   * within 30 minutes of its bot asking for the operator, as long as no OTHER
+   * bot holds the lease (free, this session's own, or the operator's). A stale
+   * click never grabs another bot's browser.
+   */
+  async function browserLinkOk(sessionId) {
+    const sid = String(sessionId || "");
+    if (browserTurnLive(sid)) return true;
+    const at = browserAsked.get(sid);
+    if (at == null) return false;
+    if (now() - at > BROWSER_ASK_WINDOW_MS) { browserAsked.delete(sid); return false; }
+    const d = browserDir();
+    if (!d) return false;
+    let l;
+    try { l = await readLease(d); } catch { return false; }
+    if (!l || isLeaseFree(l, now()) || !l.holder) return true;
+    if (l.holder.kind === "operator") return true;
+    return l.holder.kind === "bot" && l.holder.sessionId === sid;
+  }
+
+  /** wait_for_user's result says it parked ("status": "waiting_for_user"). */
+  function waitedForUser(m) {
+    const r = m && m.result;
+    let text = typeof m.resultText === "string" ? m.resultText : "";
+    if (typeof r === "string") text += r;
+    else if (r && Array.isArray(r.content)) {
+      for (const c of r.content) if (c && typeof c.text === "string" && text.length < 65536) text += c.text;
+    }
+    return /"status"\s*:\s*"waiting_for_user"/.test(text);
+  }
+
   /** A bot parked on crow_browser_wait_for_user: one "needs you" per turn that
    *  opens the Take over sheet in that chat. No URL or host rides it. */
   function attentionForBrowser(s, turn) {
+    browserAsked.set(s.sessionId, now());
+    if (browserAsked.size > 256) browserAsked.delete(browserAsked.keys().next().value);
     if (turn.browserAsked) return;
     turn.browserAsked = true;
     pushAttention({
@@ -4451,6 +4499,7 @@ export function createInteractiveEngine({
     /** Take over / Hand back / heartbeat for the routes (Task 7). */
     browserTakeOver,
     browserTurnLive,
+    browserLinkOk,
     /** The frames route's watcher (null unless this engine watches a browser). */
     get browserWatcher() { return browserWatcher; },
     /** Precondition-test surface (r1 S10) — also the internal resolver. */

@@ -208,6 +208,7 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/dashboard/perch-api/browser/take-over",
       "/dashboard/perch-api/browser/hand-back",
       "/dashboard/perch-api/browser/heartbeat",
+      "/dashboard/perch-api/browser/state",
     ]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);

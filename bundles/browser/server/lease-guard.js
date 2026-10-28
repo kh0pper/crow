@@ -49,6 +49,9 @@ export const TEXTS = Object.freeze({
 });
 
 /** Tools that never drive the page and so never touch the lease. */
+/** One retry of a failed endCall, this long after. */
+export const END_CALL_RETRY_MS = 500;
+
 export const EXEMPT_TOOLS = new Set(["crow_browser_status", "crow_browser_guide"]);
 
 const OPERATOR_WAIT_MS = 20000;
@@ -190,7 +193,17 @@ export function installLeaseGuard(server, opts = {}) {
           try { await lease.beginCall(dir, holder, { callId, pid, targetId, now: now(), ...LOCK_OPTS }); } catch { /* taken meanwhile */ }
         }
       }
-      try { ended = await lease.endCall(dir, holder, { callId, now: now(), ...LOCK_OPTS }); } catch { /* advisory */ }
+      try {
+        ended = await lease.endCall(dir, holder, { callId, now: now(), ...LOCK_OPTS });
+      } catch {
+        // A locked lease (ELEASELOCKED) or a write error: one retry after
+        // 500 ms, so a finished call does not sit in inCall (it would make a
+        // take-over wait the full 30 s). Still advisory after that.
+        try {
+          await sleep(END_CALL_RETRY_MS);
+          ended = await lease.endCall(dir, holder, { callId, now: now(), ...LOCK_OPTS });
+        } catch { /* advisory */ }
+      }
     }
 
     const prefixes = [];

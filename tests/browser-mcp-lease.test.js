@@ -333,3 +333,21 @@ test("a pending take-over (pendingOperator): a new call waits like an operator h
   assert.equal(text(await b.call({})), TEXTS.handedBack);
   assert.equal(b.calls.length, 0, "a call that waited never acts");
 });
+
+test("a failed endCall (ELEASELOCKED) is retried once after 500 ms, so a finished call does not stay in inCall", async () => {
+  let fails = 1, attempts = 0;
+  const flaky = { ...leaseMod, endCall: async (...a) => { attempts++; if (fails-- > 0) throw Object.assign(new Error("locked"), { code: "ELEASELOCKED" }); return leaseMod.endCall(...a); } };
+  const ctx = setup({ lease: flaky });
+  const before = ctx.clock.t;
+  const r = await ctx.call({});
+  assert.equal(text(r), "acted");
+  assert.equal(attempts, 2, "retried once");
+  assert.equal(ctx.clock.t - before, 500, "after 500 ms");
+  assert.deepEqual((await readLease(ctx.dir)).inCall, [], "the call left inCall");
+  // two failures: still only one retry, and the result is unharmed
+  let n = 0;
+  const broken = { ...leaseMod, endCall: async () => { n++; throw Object.assign(new Error("locked"), { code: "ELEASELOCKED" }); } };
+  const b = setup({ lease: broken });
+  assert.equal(text(await b.call({})), "acted");
+  assert.equal(n, 2);
+});

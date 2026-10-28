@@ -69,6 +69,7 @@ function mount({ server, clipboard = "ok", search = "", lang = "en" } = {}) {
   const hub = perchHubJs(lang);
   const root = makeEl("div");
   const transcript = makeEl("div");
+  const mine = makeEl("button"); mine.hidden = true; mine.className = "browser-mine";
   const calls = [];
   const logs = [];
   const answer = server || ((c) => {
@@ -104,7 +105,7 @@ function mount({ server, clipboard = "ok", search = "", lang = "en" } = {}) {
     document: doc, window: { innerWidth: 390 }, API, HUB: { streams: {} }, navigator: nav,
     location: loc, history: { state: null, replaceState: (st, t, url) => replaced.push(url) },
     current: { sid: SID },
-    el: (id) => (id === "perch-hub-root" ? root : id === "perch-transcript" ? transcript : null),
+    el: (id) => (id === "perch-hub-root" ? root : id === "perch-transcript" ? transcript : id === "perch-browser-mine" ? mine : null),
     live: () => !sandbox.__retired,
     bindOnce: (target, type, key, fn) => { handlers[key] = fn; target.addEventListener(type, (ev) => { const h = handlers[key]; if (h) h(ev); }); },
     fetch: fetchFn,
@@ -116,7 +117,7 @@ function mount({ server, clipboard = "ok", search = "", lang = "en" } = {}) {
   sandbox.line = (cls, text) => { const d = makeEl("div"); if (cls) d.className = cls; d.textContent = text == null ? "" : String(text); return d; };
   vm.createContext(sandbox);
   const lifted = ["csrf", "perchApi"].map((n) => lift(hub, n)).join("\n");
-  vm.runInContext(`(function(){\n${lifted}\n${perchBrowserTileJs(lang)}\n${perchTakeOverJs(lang)}\n;__export({ closeTakeOver: closeTakeOver, takeOverFromLink: takeOverFromLink, browserFrame: browserFrame });\n})();`, sandbox);
+  vm.runInContext(`(function(){\n${lifted}\n${perchBrowserTileJs(lang)}\n${perchTakeOverJs(lang)}\n;__export({ closeTakeOver: closeTakeOver, takeOverFromLink: takeOverFromLink, browserFrame: browserFrame, toMineRefresh: toMineRefresh });\n})();`, sandbox);
   const sheet = () => one(root, "ph-tosheet") || null;
   const fire = async (ms) => {
     const due = [...timers.entries()].filter(([, t]) => ms == null || t.ms === ms);
@@ -126,7 +127,7 @@ function mount({ server, clipboard = "ok", search = "", lang = "en" } = {}) {
   const open = async (detail = { sid: SID, anchor: "call_1" }) => { doc.dispatchEvent(new CustomEvent("perch:browser-takeover", { detail })); await tick(); };
   const posts = (suffix) => calls.filter((c) => c.method === "POST" && c.path.endsWith(suffix));
   const click = async (n) => { n.onclick(); await tick(); };
-  return { sandbox, api: sandbox.api, root, transcript, calls, posts, timers, fire, open, sheet, written, logs, replaced, doc, handlers, click };
+  return { sandbox, api: sandbox.api, root, transcript, mine, calls, posts, timers, fire, open, sheet, written, logs, replaced, doc, handlers, click };
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +148,7 @@ test("the snippet has no backtick or stray ${, is spliced into the hub, parses, 
   assert.equal((body.match(/\$\{/g) || []).length, (body.match(/\$\{tJs\("/g) || []).length, "the only ${ are tJs interpolations");
   const hub = perchHubJs("en");
   assert.match(hub, /HUB\.retire=function\(\)\{[\s\S]*?closeTakeOver\(\);[\s\S]*?\};/, "a Turbo retire closes the sheet");
-  assert.match(hub, /else \{ startListPolling\(\); loadList\(\); \}\n\s*takeOverFromLink\(\);\n\}\)\(\);/, "the bootstrap honours ?take-over=1");
+  assert.match(hub, /else \{ startListPolling\(\); loadList\(\); \}\n\s*takeOverFromLink\(\);\n\s*toMineRefresh\(\);\n\}\)\(\);/, "the bootstrap honours ?take-over=1");
   const retire = lift(hub, "closeTakeOver");
   assert.doesNotMatch(retire, /hand-back/, "closing the UI never hands back");
 });
@@ -396,14 +397,69 @@ test("a ?take-over=1 link (the wait_for_user attention item) opens the sheet onc
   assert.deepEqual(h5.replaced, ["/dashboard/perch#" + SID]);
 });
 
-test("a stale link (no live turn using the browser: 409 no_live_turn) never takes the browser: the sheet closes", async () => {
-  const h = mount({ search: "?take-over=1", server: (c) => (c.path.endsWith("/take-over") ? { status: 409, body: { error: "no_live_turn" } } : { status: 200, body: { entries: [] } }) });
+test("a stale link (409 no_live_turn) never takes the browser: the sheet says the bot is no longer waiting; Hand back closes it", async () => {
+  const h = mount({ search: "?take-over=1", server: (c) => (c.path.endsWith("/take-over") ? { status: 409, body: { error: "no_live_turn" } } : c.path.endsWith("/hand-back") ? { status: 200, body: { state: "idle" } } : { status: 200, body: { entries: [] } }) });
   h.api.takeOverFromLink();
   await tick();
-  assert.equal(h.sheet(), null);
+  assert.ok(h.sheet(), "not a silent close");
+  const st = one(h.sheet(), "to-status");
+  assert.equal(st.textContent, "The bot is no longer waiting for you.");
+  assert.equal(st.hidden, false);
+  assert.equal(one(h.sheet(), "to-vnc"), undefined, "no viewer");
   assert.equal(h.posts("/browser/take-over").length, 1);
-  assert.equal(h.posts("/browser/hand-back").length, 0);
   assert.equal([...h.timers.values()].filter((t) => t.ms === 1000 || t.ms === 15000).length, 0, "nothing keeps running");
+  await h.click(one(h.sheet(), "to-back"));
+  assert.equal(h.sheet(), null);
+  assert.equal(translations["perch.browserNotWaiting"].es, "El bot ya no te está esperando.");
+});
+
+test("a Done tile whose turn asked for the operator keeps Take over, and its tap asks like a link", async () => {
+  const h = mount();
+  h.api.browserFrame({ type: "browser", phase: "live", anchor: "call_9", domain: "bank.example.test", gen: 1 });
+  h.api.browserFrame({ type: "browser", phase: "done", anchor: "call_9", domain: "bank.example.test", shot: null, note: null, ask: true });
+  await tick();
+  const tile = one(h.transcript, "ph-btile");
+  assert.equal(tile.getAttribute("data-phase"), "done");
+  const take = one(tile, "bt-take");
+  assert.equal(take.hidden, false, "kept");
+  await h.click(take);
+  assert.ok(h.sheet());
+  assert.deepEqual(h.posts("/browser/take-over")[0].body, { from: "link", sid: SID }, "checked against the ask window");
+  // without the ask, a Done tile has no Take over (as before)
+  const g = mount();
+  g.api.browserFrame({ type: "browser", phase: "live", anchor: "call_8", domain: null, gen: 1 });
+  g.api.browserFrame({ type: "browser", phase: "done", anchor: "call_8", domain: null, shot: null, note: null });
+  await tick();
+  assert.equal(one(one(g.transcript, "ph-btile"), "bt-take").hidden, true);
+});
+
+test("\"You have the browser · Hand back\": shown on load while held or pending, a tap hands back and hides it; hidden while the sheet is open", async () => {
+  for (const state of ["held", "pending"]) {
+    const h = mount({ server: (c) => (c.path.endsWith("/browser/state") ? { status: 200, body: { state } } : c.path.endsWith("/hand-back") ? { status: 200, body: { state: "idle" } } : { status: 200, body: { entries: [] } }) });
+    h.api.toMineRefresh();
+    await tick();
+    assert.equal(h.mine.hidden, false, state + ": shown");
+    assert.equal(h.calls.find((c) => c.path.endsWith("/browser/state")).method, "GET");
+    h.mine.onclick(); h.mine.onclick();
+    await tick();
+    assert.equal(h.posts("/browser/hand-back").length, 1, "one hand back");
+    assert.equal(h.posts("/browser/hand-back")[0].headers["X-Crow-Csrf"], "tok-9");
+    assert.equal(h.mine.hidden, true, "gone after hand back");
+  }
+  const idle = mount({ server: (c) => (c.path.endsWith("/browser/state") ? { status: 200, body: { state: "idle" } } : { status: 200, body: { entries: [] } }) });
+  idle.api.toMineRefresh();
+  await tick();
+  assert.equal(idle.mine.hidden, true, "idle: hidden");
+  const o = mount();
+  o.mine.hidden = false;
+  await o.open();
+  assert.equal(o.mine.hidden, true, "the open sheet has its own Hand back");
+  const hubSrc = perchHubJs("en");
+  assert.match(hubSrc, /takeOverFromLink\(\);\n\s*toMineRefresh\(\);\n\}\)\(\);/, "refreshed on every hub load");
+  const html = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/html.js", import.meta.url), "utf8");
+  assert.match(html, /<button type="button" class="browser-mine" id="perch-browser-mine" hidden>\$\{escapeHtml\(t\("perch.youHaveBrowser", lang\)\)\} · \$\{escapeHtml\(t\("perch.handBack", lang\)\)\}<\/button>/);
+  assert.equal(translations["perch.youHaveBrowser"].en, "You have the browser");
+  assert.equal(translations["perch.youHaveBrowser"].es, "Tienes tú el navegador");
 });
 
 test("a failed check while pending keeps checking every 1 s (never stuck); pending that ends idle says it failed and stops", async () => {

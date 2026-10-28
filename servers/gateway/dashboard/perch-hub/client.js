@@ -3630,5 +3630,6 @@ ${perchTakeOverJs(lang)}
   if(parseHash(location.hash)) applyHash();
   else { startListPolling(); loadList(); }
   takeOverFromLink();
+  toMineRefresh();
 })();`;
 }

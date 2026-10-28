@@ -95,8 +95,8 @@ export function tileEventFor(lease, s, now = Date.now()) {
 }
 
 /** The `done` frame for a tile record. `shot` is { id, url } or null. */
-export function doneEventFor(rec, { shot = null, operator = false } = {}) {
-  return {
+export function doneEventFor(rec, { shot = null, operator = false, ask = false } = {}) {
+  const ev = {
     type: "browser",
     phase: "done",
     anchor: rec.anchor || null,
@@ -104,6 +104,9 @@ export function doneEventFor(rec, { shot = null, operator = false } = {}) {
     shot: validShot(shot),
     note: operator ? "operator" : null,
   };
+  // The turn parked on wait_for_user: the frozen tile keeps its Take over.
+  if (ask) ev.ask = true;
+  return ev;
 }
 
 /** A final-shot hook's answer, kept only when it is the { id, url } shape. */

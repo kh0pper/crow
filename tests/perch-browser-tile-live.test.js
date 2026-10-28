@@ -91,7 +91,7 @@ function scripted(req, res) {
 /** The four tile routes (and the shot's workspace url) go to the real router. */
 const REAL = /^\/dashboard\/perch-api\/interactive\/[^/]+\/(events|files\/history|browser\/frame|browser-shots\/[^/]+|workspace\/.+)$/;
 /** Task 7: the take-over routes go to the real router too. */
-const REAL_TAKE_OVER = /^\/dashboard\/perch-api\/browser\/(take-over|hand-back|heartbeat)$/;
+const REAL_TAKE_OVER = /^\/dashboard\/perch-api\/browser\/(take-over|hand-back|heartbeat|state)$/;
 const LEASE = join(dir, "browser-lease");
 let leaseMod = null, takeOver = null;
 
@@ -394,6 +394,21 @@ test("live: Take over opens the sheet with the noVNC iframe; Hand back closes it
     assert.match(next.content.map((c) => c.text).join(" "), /clicked/, "the bot's next call runs");
     assert.equal(acted.length, 2);
     assert.equal((await leaseMod.readLease(LEASE)).targetId, botPage.id);
+
+    // Leaving the sheet (a reload) keeps the holding, and "You have the browser · Hand back" stays reachable.
+    await tab.evaluate("document.querySelector('.ph-btile[data-phase=\"live\"] .bt-take').click()");
+    await tab.waitFor("document.querySelector('.ph-tosheet iframe.to-vnc')!==null");
+    await tab.send("Page.reload");
+    await tab.waitFor("(function(){ var b=document.getElementById('perch-browser-mine'); return !!b&&!b.hidden; })()");
+    assert.equal(await tab.evaluate("document.querySelector('.ph-tosheet')"), null, "the sheet did not come back by itself");
+    assert.equal(takeOver.state(), "held", "a reload never hands back");
+    const mine = await tab.evaluate("(function(){ var b=document.getElementById('perch-browser-mine'), r=b.getBoundingClientRect(); return { text:b.textContent, h:Math.round(r.height) }; })()");
+    assert.equal(mine.text, "You have the browser · Hand back");
+    assert.ok(mine.h >= 44);
+    await tab.evaluate("document.getElementById('perch-browser-mine').click()");
+    await tab.waitFor("document.getElementById('perch-browser-mine').hidden===true");
+    assert.equal(takeOver.state(), "idle");
+    assert.equal((await leaseMod.readLease(LEASE)).holder, null);
   } finally {
     await tab.close();
     await botPage.close();

@@ -24,6 +24,13 @@ export function takeOverHref(holding) {
   return /^perchlive-[0-9a-f]{8}$/.test(sid || "") ? "/dashboard/perch?take-over=1#" + sid : "/dashboard/perch?take-over=panel";
 }
 
+/** The panel's Hand back: the same route as the chat's sheet (CSRF header from the cookie). No backtick or dollar-brace. */
+export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-hand-back');if(!b)return;" +
+  "b.addEventListener('click',function(){if(b.disabled)return;b.disabled=true;" +
+  "var m=document.cookie.match(/(?:^|; )crow_csrf=([^;]*)/);" +
+  "fetch('/dashboard/perch-api/browser/hand-back',{method:'POST',headers:{'X-Crow-Csrf':m?decodeURIComponent(m[1]):''}})" +
+  ".then(function(r){if(r.ok){location.reload();}else{b.disabled=false;}},function(){b.disabled=false;});});})();";
+
 export default {
   id: "browser",
   name: "Browser",
@@ -119,17 +126,35 @@ export default {
       const leaseMod = await import(pathToFileURL(join(appRoot, "servers/shared/browser-lease.js")).href);
       botUsing = botHolding(await leaseMod.readLease(leaseMod.leaseDir(stateDir)), leaseMod.isFree);
     } catch {}
+    // The operator's own holding: the gateway's in-memory take-over state
+    // (never the lease file, which a bot can write). Never creates an engine.
+    let operatorHas = false;
+    try {
+      const eng = (await import(pathToFileURL(join(appRoot, "servers/gateway/perch-interactive.js")).href))
+        .getInteractiveEngine({ createIfMissing: false });
+      const st = eng && eng.browserTakeOver && eng.browserTakeOver.state();
+      operatorHas = st === "held" || st === "pending";
+    } catch {}
     let botUsingText = "A bot is using the browser", takeOverText = "Take over";
+    let youHaveText = "You have the browser", handBackText = "Hand back";
     try {
       const { t } = await import(pathToFileURL(join(appRoot, "servers/gateway/dashboard/shared/i18n.js")).href);
       botUsingText = t("browser.botUsing", lang);
       takeOverText = t("perch.takeOver", lang);
+      youHaveText = t("perch.youHaveBrowser", lang);
+      handBackText = t("perch.handBack", lang);
     } catch {}
     const botNotice = botUsing ? `
       <div class="browser-bot-using" role="status" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.75rem; padding:1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:1rem;">
         <span>${escapeHtml(botUsingText)}</span>
         <a class="btn btn-primary btn-sm" style="min-height:44px; display:inline-flex; align-items:center;" href="${escapeHtml(takeOverHref(botUsing))}">${escapeHtml(takeOverText)}</a>
       </div>` : "";
+    const operatorNotice = operatorHas ? `
+      <div class="browser-operator-has" role="status" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.75rem; padding:1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:1rem;">
+        <span>${escapeHtml(youHaveText)}</span>
+        <button type="button" id="browser-hand-back" class="btn btn-primary btn-sm" style="min-height:44px;">${escapeHtml(handBackText)}</button>
+      </div>
+      <script>${HAND_BACK_JS}</script>` : "";
 
     const tab = req.query.tab || "status";
 
@@ -164,6 +189,7 @@ export default {
         ${containerRunning && !botUsing ? `<a href="/proxy/browser/vnc.html" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
       </div>
 
+      ${operatorNotice}
       ${botNotice}
       ${containerRunning && !botUsing ? `
         <div style="margin-bottom:1rem;">

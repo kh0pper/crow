@@ -51,6 +51,9 @@ export function perchHubContent(lang = "en", engine = { state: "ready" }, { scop
   return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
 <div id="perch-hub-root"${scopeHtml}>
 ${engineBanner(engine, lang)}
+<!-- Live browser tile: while the operator holds (or is taking) the browser,
+     "You have the browser · Hand back" stays reachable after leaving the sheet. -->
+<button type="button" class="browser-mine" id="perch-browser-mine" hidden>${escapeHtml(t("perch.youHaveBrowser", lang))} · ${escapeHtml(t("perch.handBack", lang))}</button>
 <!-- No brand block here. The shell's .content-header already renders
      <h2>Perch</h2> from this panel's title (panels/perch-hub.js), and
      Perch's own <div class="brand">Perch</div> printed the same word again

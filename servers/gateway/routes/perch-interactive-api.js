@@ -1706,7 +1706,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // 30 s). The sheet heartbeats every 15 s; { state: "idle" } means the browser
   // went back (Hand back, or 5 minutes without a heartbeat). A take-over sent
   // from a link ({from:"link", sid}) is 409 no_live_turn unless that chat has a
-  // live turn using the browser. A lease error
+  // live turn using the browser, or its bot asked for the operator in the last
+  // 30 minutes and no other bot holds the browser. GET /browser/state is the
+  // controller's state (the "You have the browser" control). A lease error
   // (a jammed lock, Ruling B3) is 503 browser_busy, never a hang. CSRF-railed
   // (this router mounts after csrfMiddleware), behind dashboardAuth, never
   // Funnel-reachable.
@@ -1720,7 +1722,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const body = req.body && typeof req.body === "object" ? req.body : {};
       if (op === "takeOver" && body.from === "link") {
         const sid = typeof body.sid === "string" ? body.sid.slice(0, 64) : "";
-        if (!sid || typeof eng.browserTurnLive !== "function" || !eng.browserTurnLive(sid)) {
+        if (!sid || typeof eng.browserLinkOk !== "function" || !(await eng.browserLinkOk(sid))) {
           return jsonError(res, 409, "no_live_turn");
         }
       }
@@ -1737,6 +1739,12 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   router.post(P + "/browser/take-over", takeOverRoute("takeOver"));
   router.post(P + "/browser/hand-back", takeOverRoute("handBack"));
   router.post(P + "/browser/heartbeat", takeOverRoute("heartbeat"));
+  router.get(P + "/browser/state", (req, res) => {
+    const ctl = resolveEngine().browserTakeOver;
+    if (!ctl) return jsonError(res, 404, "no_browser");
+    res.set("Cache-Control", "no-store");
+    res.json({ state: ctl.state() });
+  });
 
   // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----
   // Lists dirs + files inside the session's OWN cwd, realpath-jailed under it
