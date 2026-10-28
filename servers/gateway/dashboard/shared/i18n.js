@@ -3812,7 +3812,6 @@ export const translations = {
   "shell.confirmAcceptNo": { en: "No, leave it", es: "No, dejarlo" },
 
   // ─── Doc ↔ card (P6) ───
-  "shell.documents": { en: "Documents", es: "Documentos" },
   "shell.documentNumbered": { en: "Document {id}", es: "Documento {id}" },
 };
 

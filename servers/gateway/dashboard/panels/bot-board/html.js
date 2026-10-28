@@ -632,7 +632,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
     </div>
     <div id="bb-d-decision"></div>
     <div id="bb-d-docs-wrap" hidden>
-      <h4 style="margin-top:1rem">${escapeHtml(t("shell.documents", lang))}</h4>
+      <h4 style="margin-top:1rem">${escapeHtml(t("shell.makeDocs", lang))}</h4>
       <ul id="bb-d-docs" class="bb-docs"></ul>
     </div>
     <h4 style="margin-top:1rem;display:flex;justify-content:space-between;align-items:center">
@@ -792,7 +792,7 @@ export async function cardDocumentsHtml(db, cardId, lang) {
     return "";
   }
   if (!docs.length) return "";
-  return `<h4 style="margin-top:1rem">${escapeHtml(t("shell.documents", lang))}</h4>` +
+  return `<h4 style="margin-top:1rem">${escapeHtml(t("shell.makeDocs", lang))}</h4>` +
     `<ul class="bb-docs">` +
     docs.map((d) => `<li><a href="${escapeHtml(d.openUrl)}">${escapeHtml(d.title)}</a></li>`).join("") +
     `</ul>`;
