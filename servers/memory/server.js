@@ -97,6 +97,10 @@ export function createMemoryServer(dbPath, options = {}) {
     async ({ content, category, context, tags, source, importance, instance_id, project_id }) => {
       // One insert path (memory-write.js), shared with the gateway's session
       // summary job: the INSERT, the async embedding and the sync emit.
+      // No project_uuid here on purpose: deferred until every paired instance
+      // runs migration 0020. A memory carrying the key is rejected by a peer
+      // whose memories table lacks the column, and that entry is never
+      // retried (the peer's checkpoint moves past it).
       const memoryId = await insertMemory(db, {
         content, category, context, tags, source, importance, instance_id, project_id,
       }, { syncManager, onStored: storeEmbedding });

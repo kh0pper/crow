@@ -219,6 +219,12 @@ function quoteIdent(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
 }
 
+/** A session summary's memory source (session-summary.js SUMMARY_SOURCE_PREFIX). */
+export const SUMMARY_MEMORY_SOURCE_PREFIX = "session-summary:";
+export function isSummaryMemorySource(source) {
+  return typeof source === "string" && source.startsWith(SUMMARY_MEMORY_SOURCE_PREFIX) && source.length > SUMMARY_MEMORY_SOURCE_PREFIX.length;
+}
+
 /**
  * Inbound memories: project_id is local, project_uuid is portable. A row that
  * carries project_uuid (even null) gets project_id set to the local
@@ -266,10 +272,13 @@ const OUTBOUND_TRANSFORMS = {
   // project_uuid is left off too, so an ordinary memory never carries the key
   // to a peer whose memories table predates it (0020); the accepted cost is
   // that "remove from project" (uuid -> null) does not propagate. A summary
-  // memory WITH a project still fails to apply on a peer running pre-0020 code
-  // until that peer upgrades (the generic apply path writes every wire key and
-  // fails loudly on an unknown column); the fleet deploys one commit, so that
-  // window is a deploy's length. Also applied to the LOCAL row in
+  // memory WITH a project is REJECTED by a peer whose memories table lacks
+  // project_uuid (_wireColumnsValid: unknown column), and it is NOT retried
+  // when that peer upgrades: the peer's checkpoint advances past the rejected
+  // entry, so the insert is lost there. A later update of the same summary
+  // heals it (summary memories apply by source, upserting:
+  // _applySummaryMemory). This is why CROW_SESSION_SUMMARIES stays off until
+  // the whole fleet runs 0020. Also applied to the LOCAL row in
   // _checkConflict / _applyInsert: the local row loses the same keys the wire
   // row lacks, so the compare is like with like.
   memories: (row) => {
@@ -2828,6 +2837,20 @@ export class InstanceSyncManager {
       return;
     }
 
+    // Session-summary memories (R1.2 PR 4) apply by their natural key, the
+    // source "session-summary:<threadId>", never by the raw id: memory ids are
+    // per-instance AUTOINCREMENT, so an id-keyed update or delete could hit an
+    // unrelated local memory. Routed before the id-keyed protection check,
+    // which would test the wrong row.
+    if (table === "memories" && isSummaryMemorySource(row && row.source)) {
+      try {
+        await this._applySummaryMemory(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on a summary memory:`, err.message);
+      }
+      return;
+    }
+
     // Locally protected rows (review I1): a maker-lab learner memory or a
     // starter row never syncs OUT, and must not be overwritten or deleted by
     // an inbound op whose id merely collides (memory ids are per-instance
@@ -3938,6 +3961,59 @@ export class InstanceSyncManager {
     } catch (err) {
       console.warn("[instance-sync] Failed to send conflict notification:", err.message);
     }
+  }
+
+  /**
+   * A session-summary memory (source "session-summary:<threadId>"), applied by
+   * that natural key (idx_memories_session_summary_source keeps it unique):
+   *   - insert / update: the local row with that source is updated (after the
+   *     usual lamport conflict check against THAT row), or, with none, a new
+   *     row is inserted under a fresh local id. The wire id is never written;
+   *   - delete: the local row with that source is deleted (same conflict check).
+   * project_uuid is mapped to the local project as for any memory. A key the
+   * local table lacks rejects the entry (_wireColumnsValid), as on the generic
+   * path.
+   */
+  async _applySummaryMemory(op, row, lamportTs, instanceId) {
+    const source = String(row.source);
+    const { rows: localRows } = await this.db.execute({
+      sql: "SELECT id FROM memories WHERE source = ? ORDER BY id LIMIT 1",
+      args: [source],
+    });
+    const localId = localRows[0] ? localRows[0].id : null;
+    const { id: _wireId, lamport_ts: _ts, ...wire } = row;
+
+    if (op === "delete") {
+      if (localId == null) return;
+      const verdict = await this._checkConflict("memories", localId, lamportTs, instanceId, wire, "delete");
+      if (verdict === "skip") return;
+      await this.db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [localId] });
+      return;
+    }
+    if (op !== "insert" && op !== "update") return;
+
+    const mapped = await mapInboundMemoryProject(this.db, wire);
+    if (!(await this._wireColumnsValid("memories", mapped, op))) return;
+
+    if (localId != null) {
+      // The same summary already lives here: an update of THAT row, LWW.
+      const verdict = await this._checkConflict("memories", localId, lamportTs, instanceId, wire, "update", mapped);
+      if (verdict === "skip") return;
+      const keys = Object.keys(mapped);
+      await this.db.execute({
+        sql: `UPDATE "memories" SET ${[...keys.map((k) => `${quoteIdent(k)} = ?`), '"lamport_ts" = ?'].join(", ")} WHERE "id" = ?`,
+        args: [...keys.map((k) => mapped[k] ?? null), lamportTs, localId],
+      });
+      return;
+    }
+
+    const ins = { ...mapped };
+    if (ins.instance_id === undefined) ins.instance_id = instanceId;
+    const cols = Object.keys(ins);
+    await this.db.execute({
+      sql: `INSERT INTO "memories" (${[...cols.map(quoteIdent), '"lamport_ts"'].join(", ")}) VALUES (${[...cols.map(() => "?"), "?"].join(", ")})`,
+      args: [...cols.map((c) => ins[c] ?? null), lamportTs],
+    });
   }
 
   /**

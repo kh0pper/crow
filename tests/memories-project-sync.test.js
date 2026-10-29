@@ -18,6 +18,11 @@ import assert from "node:assert/strict";
 import { InstanceSyncManager, mapInboundMemoryProject, INBOUND_DROPPED_COLUMNS } from "../servers/sharing/instance-sync.js";
 import { sign } from "../servers/sharing/identity.js";
 import { makeFleet, linkPeers, until, sleep } from "./fixtures/sync-fleet.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { summarizeSessionByThread } from "../servers/gateway/perch/session-summary.js";
+import { forgetSummary } from "../servers/gateway/perch/briefing.js";
 
 const U_SHARED = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const U_SECOND = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -250,10 +255,9 @@ test("a mixed-version peer that sends no project_uuid leaves it null and breaks 
 });
 
 
-test("a peer's insert with a session-summary source this instance already holds is skipped, not a crash", async () => {
-  // idx_memories_session_summary_source (0020): one memory per summary source.
-  // Thread ids are per-instance, so in practice the same source is the same
-  // memory and arrives as an update; a stray insert must still never wedge the feed.
+test("a peer's summary memory lands on this instance's row for that source: one row, never a second", async () => {
+  // idx_memories_session_summary_source (0020): one memory per summary source,
+  // and instance sync applies a summary memory BY that source (I2).
   const fleet = await makeFleet();
   let link;
   try {
@@ -266,12 +270,168 @@ test("a peer's insert with a session-summary source this instance already holds 
     await a.mgr.emitChange("memories", "insert", { ...rows[0] });
     // A later entry on the same feed still applies: the apply loop moved on.
     await writeMemory(a, { id: 302, content: "after the collision" });
-    assert.ok(await until(async () => !!(await mem(b.db, 302))), "the feed drained past the skipped insert");
+    assert.ok(await until(async () => !!(await mem(b.db, 302))), "the feed drained");
     const { rows: same } = await b.db.execute({ sql: "SELECT id, content FROM memories WHERE source = ?", args: [SRC] });
-    assert.deepEqual(same.map((r) => [Number(r.id), r.content]), [[300, "B local summary"]], "B keeps its one row for the source");
-    assert.equal(await conflicts(b.db), 0, "a secondary-constraint skip is not a conflict row");
+    assert.deepEqual(same.map((r) => [Number(r.id), r.content]), [[300, "A summary"]], "B's one row for the source took the newer version");
+    assert.equal(await mem(b.db, 301), null, "the wire id is never written");
   } finally {
     link?.close();
     await fleet.cleanup();
+  }
+});
+
+// ---- natural-key apply of summary memories (I2) and the real seam (I6) ---------
+
+
+const bySource = async (db, source) => {
+  const { rows } = await db.execute({ sql: "SELECT id, content, project_id, project_uuid FROM memories WHERE source = ?", args: [source] });
+  return rows.map((r) => ({ id: Number(r.id), content: r.content, project_id: r.project_id == null ? null : Number(r.project_id), project_uuid: r.project_uuid ?? null }));
+};
+
+test("summary memories sync by source: an id collision never makes an insert, update or delete hit an unrelated memory", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    await seedProjects(a, b);
+    // B's id 500 is an UNRELATED memory; A's summary memory happens to have id 500 too.
+    await b.db.execute("INSERT INTO memories (id, content, source) VALUES (500, 'B unrelated note', 'manual')");
+    link = await linkPeers(a, b);
+    const SRC = "session-summary:perchlive-0000aaaa";
+    await a.db.execute({ sql: "INSERT INTO memories (id, content, source, project_id, project_uuid) VALUES (500, 'A summary v1', ?, 10, ?)", args: [SRC, U_SHARED] });
+    const { rows } = await a.db.execute("SELECT * FROM memories WHERE id = 500");
+    await a.mgr.emitChange("memories", "insert", { ...rows[0] });
+    assert.ok(await until(async () => (await bySource(b.db, SRC)).length === 1), "the summary reached B");
+    const [landed] = await bySource(b.db, SRC);
+    assert.notEqual(landed.id, 500, "a fresh local id, not the colliding wire id");
+    assert.deepEqual({ ...landed, id: 0 }, { id: 0, content: "A summary v1", project_id: 40, project_uuid: U_SHARED });
+    assert.equal((await mem(b.db, 500)).content, "B unrelated note", "the unrelated memory is untouched");
+
+    // An update by A (wire id 500) updates B's summary row, never B's id 500.
+    await a.db.execute("UPDATE memories SET content = 'A summary v2' WHERE id = 500");
+    await a.mgr.emitChange("memories", "update", { id: 500, content: "A summary v2", source: SRC, project_uuid: U_SHARED });
+    assert.ok(await until(async () => (await bySource(b.db, SRC))[0]?.content === "A summary v2"));
+    assert.equal((await bySource(b.db, SRC))[0].id, landed.id, "updated in place");
+    assert.equal((await mem(b.db, 500)).content, "B unrelated note");
+
+    // A delete by A (wire id 500) deletes B's summary row by source, never B's id 500.
+    await a.db.execute("DELETE FROM memories WHERE id = 500");
+    await a.mgr.emitChange("memories", "delete", { id: 500, source: SRC });
+    assert.ok(await until(async () => (await bySource(b.db, SRC)).length === 0), "the summary is gone on B");
+    assert.equal((await mem(b.db, 500)).content, "B unrelated note", "the unrelated memory survives the delete");
+    await sleep(100);
+    assert.equal(await conflicts(b.db), 0);
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});
+
+/** A perch-live session on `side` with a transcript, filed to `projectId` (or unfiled). */
+async function seedThread(side, tmp, { threadId, projectId, text }) {
+  const piId = "pi-" + threadId;
+  const sdir = join(tmp, side.id, threadId);
+  mkdirSync(sdir, { recursive: true });
+  const file = join(sdir, "2026-10-29T00-00-00_" + piId + ".jsonl");
+  writeFileSync(file, [JSON.stringify({ type: "session", id: piId }),
+    JSON.stringify({ type: "message", timestamp: "2026-10-29T10:00:00.000Z", message: { role: "user", content: text } }),
+    JSON.stringify({ type: "message", timestamp: "2026-10-29T10:01:00.000Z", message: { role: "assistant", content: "Done: " + text } })].join("\n") + "\n");
+  utimesSync(file, new Date("2026-10-29T10:01:00Z"), new Date("2026-10-29T10:01:00Z"));
+  await side.db.execute({
+    sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status, pi_session_id, pi_session_dir, model, label) VALUES ('botty','perch',?,'perch-live','waiting-user',?,?, 'crow-local/big', 'Named')",
+    args: [threadId, piId, sdir],
+  });
+  if (projectId != null) {
+    await side.db.execute({ sql: "INSERT INTO shell_items (item_kind, item_ref, project_id, set_by) VALUES ('perch_thread', ?, ?, 'origin')", args: [threadId, projectId] });
+  }
+  return file;
+}
+
+const jobDeps = (side, output, nowIso = "2026-10-29T12:00:00Z") => ({
+  env: { CROW_SESSION_SUMMARIES: "1" }, now: () => Date.parse(nowIso), log: () => {}, trigger: "close",
+  sessionModelKey: "crow-local/big",
+  resolveRole: async (_db, key) => (key === "role:quick" ? { key: "crow-local/quick" } : { key: null }),
+  where: () => "here",
+  complete: async () => "SUMMARY: " + output,
+  syncManager: side.mgr,
+});
+
+test("real seam: summarizeSessionByThread on A crosses the real link to B (filed and unfiled), and Forget on A removes it on B", async () => {
+  const fleet = await makeFleet();
+  const tmp = mkdtempSync(join(tmpdir(), "summary-seam-"));
+  let link;
+  try {
+    const { a, b } = fleet;
+    await seedProjects(a, b);
+    link = await linkPeers(a, b);
+    const FILED = "perchlive-0000f11e", UNFILED = "perchlive-0000a0f1";
+    await seedThread(a, tmp, { threadId: FILED, projectId: 10, text: "Plan the shared beds." });   // B has U_SHARED as id 40
+    await seedThread(a, tmp, { threadId: UNFILED, projectId: 12, text: "Plan the only-A beds." }); // B lacks U_ONLY_A
+    assert.equal((await summarizeSessionByThread(a.db, FILED, jobDeps(a, "The bot planned the shared beds."))).written, true);
+    assert.equal((await summarizeSessionByThread(a.db, UNFILED, jobDeps(a, "The bot planned the only-A beds."))).written, true);
+
+    const sF = "session-summary:" + FILED, sU = "session-summary:" + UNFILED;
+    assert.ok(await until(async () => (await bySource(b.db, sF)).length === 1 && (await bySource(b.db, sU)).length === 1), "both summaries reach B");
+    const [f] = await bySource(b.db, sF);
+    const [u] = await bySource(b.db, sU);
+    assert.equal(f.content, "The bot planned the shared beds.");
+    assert.deepEqual([f.project_id, f.project_uuid], [40, U_SHARED], "filed under B's own id for the project");
+    assert.deepEqual([u.project_id, u.project_uuid], [null, U_ONLY_A], "unfiled on B, uuid kept");
+
+    // Forget on A: the memory is gone on B too.
+    const r = await forgetSummary(a.db, FILED, { syncManager: a.mgr });
+    assert.equal(r.memoryDeleted, true);
+    assert.equal((await bySource(a.db, sF)).length, 0);
+    assert.ok(await until(async () => (await bySource(b.db, sF)).length === 0), "Forget on A reaches B");
+    assert.equal((await bySource(b.db, sU)).length, 1, "the other summary stays");
+    assert.equal(await conflicts(b.db), 0);
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("un-migrated receiver (CURRENT behaviour, pinned): a summary memory with project_uuid is dropped and NOT retried after the upgrade; a later update heals it", async () => {
+  // This pins today's behaviour so a change to it is visible. It is why
+  // CROW_SESSION_SUMMARIES defaults OFF until every paired instance runs 0020.
+  const fleet = await makeFleet();
+  const tmp = mkdtempSync(join(tmpdir(), "summary-old-peer-"));
+  let link;
+  try {
+    const { a, b } = fleet;
+    await seedProjects(a, b);
+    // B predates 0020: its memories table has no project_uuid column.
+    await b.db.execute("DROP INDEX IF EXISTS idx_memories_session_summary_source");
+    await b.db.execute("ALTER TABLE memories DROP COLUMN project_uuid");
+    link = await linkPeers(a, b);
+    const T1 = "perchlive-00000ld1";
+    const file = await seedThread(a, tmp, { threadId: T1, projectId: 10, text: "Plan the beds." });
+    assert.equal((await summarizeSessionByThread(a.db, T1, jobDeps(a, "The bot planned the beds."))).written, true);
+    await writeMemory(a, { id: 777, content: "a later plain memory" });
+    const exists = async (id) => (await b.db.execute({ sql: "SELECT 1 FROM memories WHERE id = ?", args: [id] })).rows.length === 1;
+    assert.ok(await until(() => exists(777)), "the feed moved past the rejected entry");
+    const { rows: none } = await b.db.execute({ sql: "SELECT id FROM memories WHERE source = ?", args: ["session-summary:" + T1] });
+    assert.equal(none.length, 0, "dropped: B's table has no project_uuid column");
+
+    // B upgrades (0020 adds the column). The dropped insert is NOT re-applied:
+    // B's checkpoint already moved past it.
+    await b.db.execute("ALTER TABLE memories ADD COLUMN project_uuid TEXT");
+    await writeMemory(a, { id: 778, content: "after B's upgrade" });
+    assert.ok(await until(async () => !!(await mem(b.db, 778))));
+    await sleep(150);
+    const { rows: still } = await b.db.execute({ sql: "SELECT id FROM memories WHERE source = ?", args: ["session-summary:" + T1] });
+    assert.equal(still.length, 0, "not retried after the upgrade (the entry is lost on B)");
+
+    // A later re-summary (an update on the wire) heals it: summary memories upsert by source.
+    appendFileSync(file, JSON.stringify({ type: "message", timestamp: "2026-10-29T12:30:00.000Z", message: { role: "user", content: "And water them." } }) + "\n");
+    utimesSync(file, new Date("2026-10-29T12:30:00Z"), new Date("2026-10-29T12:30:00Z"));
+    assert.equal((await summarizeSessionByThread(a.db, T1, jobDeps(a, "The bot planned and watered the beds.", "2026-10-29T13:00:00Z"))).written, true);
+    assert.ok(await until(async () => (await bySource(b.db, "session-summary:" + T1))[0]?.content === "The bot planned and watered the beds."), "healed by the update");
+    assert.equal((await bySource(b.db, "session-summary:" + T1))[0].project_id, 40);
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+    rmSync(tmp, { recursive: true, force: true });
   }
 });
