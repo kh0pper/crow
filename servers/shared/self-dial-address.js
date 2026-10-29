@@ -198,6 +198,17 @@ export function lookupTailnetIpForHost(hostname, { execFileSyncImpl = execFileSy
 export const SYNC_PORT_KEY_PREFIX = "tailnet_sync_port:";
 /** …and for "this peer has completed a challenge-response handshake with us" (downgrade guard). */
 export const SYNC_CR_KEY_PREFIX = "tailnet_sync_cr:";
+/**
+ * …and for "this peer has completed a pair-bound sync handshake with us"
+ * (PT-2a, sync-pair-binding.js). One pin covers both sync transports, and it
+ * is never cleared automatically: forgetPeerHandshakeState leaves it alone.
+ */
+export const SYNC_PB_KEY_PREFIX = "sync_pair_bound:";
+/**
+ * …and for "the owner cleared this peer's pair pin" (value: ISO time), written
+ * by the LOCAL clear-pin CLI and removed when a new pin is written.
+ */
+export const SYNC_PB_CLEARED_PREFIX = "sync_pair_cleared:";
 
 /**
  * Remember a peer's backend sync port (from pairing or a signed handshake)

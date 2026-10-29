@@ -78,6 +78,10 @@ The code works once and expires 30 minutes after the peer's gateway first sees i
 
 Re-pairing an instance the peer already trusts works the same way, as long as this instance still holds its old credentials for the peer (add `--peer-id <peer's instance id>` if the URL you type differs from the address stored for it). If it lost them, or the peer revoked it, the peer's operator first runs `node scripts/cli/instance-pair.js --allow-re-pair <this instance's id>` on the peer; without that the peer answers `409 already_paired` and changes nothing.
 
+### Pair binding and clearing a pin
+
+Beyond the shared Crow ID, each sync handshake also proves that both sides hold the pair's key from the pairing step. After the first such handshake an instance remembers ("pins") that the peer is pair-bound and refuses any later sync from it without the proof. If a peer is legitimately downgraded (an older Crow, or a rollback), the owner clears the pin on the instance that holds it: `node scripts/cli/sync-pair-pin.js --list` shows each peer's pin state and a short key fingerprint, and `--clear <peer-id>` removes only that pin and records when. It must run as the same user that owns the database, it never contacts the peer, and the peer is pinned again at its next bound handshake. `--fingerprint <peer-id>` prints the short fingerprint (never the key) so you can check both sides hold the same pair key.
+
 ### 4. Verify Connectivity
 
 ```

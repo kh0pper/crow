@@ -116,6 +116,7 @@ export async function runPostListenSetup(server, app, deps) {
       const { setupTailnetSyncServer, startTailnetSyncClients } = await import("../../sharing/tailnet-sync.js");
       const { getInstanceSyncManager } = await import("../../sharing/server.js");
       const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
+      const { defaultPairKey, pairBindingMode } = await import("../../shared/sync-pair-binding.js");
       const ism = getInstanceSyncManager();
       if (!ism) {
         console.warn("[tailnet-sync] InstanceSyncManager not ready; skipping");
@@ -133,6 +134,10 @@ export async function runPostListenSetup(server, app, deps) {
         // This gateway's own backend port, advertised (signed) in the
         // handshake so a peer that learns our tailscale_ip dials it directly.
         syncPort: Number(PORT) || null,
+        // PT-2a pair binding: the pair's signing_key from the PT-1 store
+        // (re-read on every handshake) and CROW_SYNC_PAIR_BINDING (auto|require).
+        pairKeyLookup: defaultPairKey,
+        pairBindingMode: pairBindingMode(),
       };
       setupTailnetSyncServer(server, ctx);
       await startTailnetSyncClients(ctx);

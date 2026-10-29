@@ -27,6 +27,7 @@ import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar, avatarFieldValue } from "./avatar.js";
 import bus from "../shared/event-bus.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../shared/self-dial-address.js";
 import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
 
@@ -1099,13 +1100,37 @@ export async function applyRemoteOp(db, table, op, row, lamportTs = 0, origin = 
   }
 }
 
+/**
+ * Entry-origin policy (PT-2): an in-feed has exactly one writer, so an entry
+ * whose `instance_id` is not the peer it arrived from is forged or stale.
+ * `observe` (PT-2a default) applies it, counts it and logs it; `enforce`
+ * (PT-2b) skips it. Any value other than the exact string `enforce` means
+ * observe: enforce can cut sync, so a typo must fall to the safe direction.
+ * An unrecognised non-empty value is logged once.
+ */
+let _warnedBadOriginMode = false;
+export function entryOriginMode(env = process.env) {
+  const v = env?.CROW_SYNC_ENTRY_ORIGIN;
+  if (v === "enforce") return "enforce";
+  if (v !== undefined && v !== "" && v !== "observe" && !_warnedBadOriginMode) {
+    _warnedBadOriginMode = true;
+    console.warn(`[instance-sync] unknown CROW_SYNC_ENTRY_ORIGIN "${v}", using observe`);
+  }
+  return "observe";
+}
+
+const ORIGIN_LOG_INTERVAL_MS = 3_600_000;
+
 export class InstanceSyncManager {
   /**
    * @param {object} identity - Crow identity (from loadOrCreateIdentity)
    * @param {import("@libsql/client").Client} db
    * @param {string} localInstanceId - This instance's UUID
    */
-  constructor(identity, db, localInstanceId) {
+  constructor(identity, db, localInstanceId, { now = Date.now } = {}) {
+    this._now = now; // injectable clock (origin-mismatch log rate limit)
+    this.originMismatches = new Map(); // peer id -> entries whose instance_id != peer
+    this._originLogAt = new Map();     // peer id -> last log time (ms)
     this.identity = identity;
     this.db = db;
     this.localInstanceId = localInstanceId;
@@ -2574,6 +2599,19 @@ export class InstanceSyncManager {
     if (!verified) {
       console.warn(`[instance-sync] Signature verification failed for entry from ${remoteInstanceId}`);
       return;
+    }
+
+    // Entry origin (PT-2): this in-feed speaks only for `remoteInstanceId`.
+    if (instance_id !== remoteInstanceId) {
+      this.originMismatches.set(remoteInstanceId, (this.originMismatches.get(remoteInstanceId) || 0) + 1);
+      const nowMs = this._now();
+      const last = this._originLogAt.get(remoteInstanceId);
+      if (last === undefined || nowMs - last >= ORIGIN_LOG_INTERVAL_MS) {
+        this._originLogAt.set(remoteInstanceId, nowMs);
+        console.warn(`[instance-sync] entry origin mismatch from ${remoteInstanceId}: claims ${instance_id}`);
+      }
+      // PT-2b: skipped here; the caller's checkpoint still advances past it.
+      if (entryOriginMode() === "enforce") return;
     }
 
     // Verified: from here on every handler sees the row minus its local-only columns.
@@ -4072,10 +4110,34 @@ export class InstanceSyncManager {
         inFeedLength: inFeed ? inFeed.length : 0,
         lastAppliedSeq: lastSeq,
         pendingEntries: inFeed ? Math.max(0, inFeed.length - lastSeq) : 0,
+        ...(await this._pairBindingStatus(instanceId)),
       });
     }
 
     return status;
+  }
+
+  /**
+   * PT-2a, for display: has this peer completed a pair-bound sync handshake
+   * with us (the LOCAL `sync_pair_bound:` pin), and when did the owner last
+   * clear that pin (the LOCAL `sync_pair_cleared:` marker)? Fails soft
+   * (false / null): this is a status view, never an admission check.
+   */
+  async _pairBindingStatus(peerId) {
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT key, value FROM dashboard_settings_overrides WHERE instance_id = ? AND key IN (?, ?)",
+        args: [this.localInstanceId, `${SYNC_PB_KEY_PREFIX}${peerId}`, `${SYNC_PB_CLEARED_PREFIX}${peerId}`],
+      });
+      const byKey = new Map(rows.map((r) => [r.key, r.value]));
+      const cleared = byKey.get(`${SYNC_PB_CLEARED_PREFIX}${peerId}`);
+      return {
+        pair_bound: Number(byKey.get(`${SYNC_PB_KEY_PREFIX}${peerId}`)) >= 1,
+        pair_cleared_at: cleared ? String(cleared) : null,
+      };
+    } catch {
+      return { pair_bound: false, pair_cleared_at: null };
+    }
   }
 
   /**

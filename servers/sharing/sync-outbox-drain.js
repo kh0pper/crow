@@ -22,6 +22,11 @@
 
 import { ensureSyncTables } from "../shared/sync-stamp.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import { testTunableMs } from "../shared/test-timing.js";
+
+// The recurring drain cadence. CROW_TEST_SYNC_DRAIN_MS applies only inside
+// the test suite's scratch env (servers/shared/test-timing.js).
+const DRAIN_INTERVAL_MS = testTunableMs("CROW_TEST_SYNC_DRAIN_MS", 60_000);
 
 const CLAIM_STALE_MINUTES = 10;
 
@@ -291,7 +296,7 @@ export async function drainOnce(mgr, db, { batchSize = 100 } = {}) {
  * @param {{intervalMs?: number}} [opts]
  * @returns {{stop(): void}}
  */
-export function startOutboxDrain(mgr, db, { intervalMs = 60000 } = {}) {
+export function startOutboxDrain(mgr, db, { intervalMs = DRAIN_INTERVAL_MS } = {}) {
   const tick = () => {
     drainOnce(mgr, db).catch((err) => {
       console.warn(`[sync-outbox-drain] drain pass failed: ${err?.message ?? err}`);

@@ -706,7 +706,7 @@ export class NostrManager {
    * Subscribe to all incoming DMs directed at us.
    * Routes message types:
    *   - invite_accepted → onInviteAccepted(payload)
-   *   - crow_social (with subtype) → onSocialMessage(subtype, payload, senderPubkey)
+   *   - crow_social (with subtype) → onSocialMessage(subtype, payload, senderPubkey, event.created_at)
    *   - ramble.* → consumed (contact-only; see subscribeToContact)
    *   - ANYTHING ELSE (plaintext, malformed JSON, subtype-less crow_social,
    *     unknown type) → onMessageRequest(senderPubkey, decrypted, event)
@@ -757,7 +757,7 @@ export class NostrManager {
                   await onInviteAccepted(payload, senderPubkey, event);
                 } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
                   handled = true;
-                  await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
+                  await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey, event.created_at);
                 } else if (typeof payload.type === "string" && payload.type.startsWith("ramble.")) {
                   // Ramble envelopes are contact-only: the per-contact
                   // subscription (subscribeToContact) is their only door. On

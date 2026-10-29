@@ -13,6 +13,7 @@ import { shouldInitInstanceSync } from "./instance-sync.js";
 import { createHash, randomBytes } from "node:crypto";
 import { sign, verify, crowIdMatchesKey } from "./identity.js";
 import { contactCbMessage, decideContactProof, RefusalLog } from "./contact-binding.js";
+import { ENROLL_ID_RE } from "../shared/enroll-guard.js";
 
 // 2c follow-up (spec §F2 C2c): hard cap on awaiting the DHT announce
 // confirmation (`discovery.flushed()`) in joinContact. An unresponsive DHT
@@ -101,6 +102,7 @@ export class PeerManager {
     preAuthMaxLines = 64,
     preAuthMaxBytes = 65_536,
     preAuthMs = 15_000,
+    pairBindingWaitMs = 10_000,
   } = {}) {
     this.identity = identity;
     this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
@@ -108,8 +110,17 @@ export class PeerManager {
     this.preAuthMaxLines = preAuthMaxLines;
     this.preAuthMaxBytes = preAuthMaxBytes;
     this.preAuthMs = preAuthMs;
-    // Async hooks run first in _admit: ({ conn, msg, state }) => { ok, reason }.
+    // PT-2a: how long a sibling that offered pair binding may take to send
+    // its `pair-binding` frame once we have proven ourselves to it.
+    this.pairBindingWaitMs = pairBindingWaitMs;
+    // Async hooks run first in _admit: ({ conn, msg, state, remoteInstanceId }) => { ok, reason }.
+    // `instance` is the PT-2a pair-binding guard, set by wireInstanceSync
+    // (instance-connect.js). Unset, every sibling is refused (guard:unwired).
     this.admitGuards = { instance: null, contact: null };
+    // { macFor({ peerInstanceId, challengeHex, handshakeHashHex }) → hex|null },
+    // set by wireInstanceSync: the pair MAC our `pair-binding` frame carries.
+    this.instanceBinding = null;
+    this._unwiredLogged = false;
     // { lookupKey, isCbPinned, markCbPinned }, set by wireContactBinding (boot.js).
     // Unset, every foreign Crow ID is refused (no_binding).
     this.contactBinding = null;
@@ -286,6 +297,10 @@ export class PeerManager {
       handshakeHashHex: null,
       ourChallengeHex: challenge.toString("hex"),
       peerInstanceId: null,
+      ourPb: false,        // our challenge offered pair binding (pb: 1)
+      peerPb: null,        // the peer's cb challenge offered it: { challengeHex }
+      pbFrame: undefined,  // the peer's `pair-binding` frame: { pb_mac } once it arrived
+      pbWaiters: [],
       deferredReply: null, // a no-cb asker's challenge, answered only after admission
       held: [],
       preBytes: 0,
@@ -297,7 +312,8 @@ export class PeerManager {
     // in its crow_instances table (crow_id alone is ambiguous: all instances
     // of one user share one Crow identity). Sent on contact connections too;
     // the receiver ignores it for other users. `cb: 1` asks for a reply bound
-    // to this connection (a cb_sig) instead of a bare signature.
+    // to this connection (a cb_sig) instead of a bare signature; `pb: 1`
+    // (PT-2a, only with cb) asks a sibling to add a pair MAC (pb_mac).
     const challengePayload = {
       type: "challenge",
       challenge: challenge.toString("hex"),
@@ -305,6 +321,7 @@ export class PeerManager {
       pubkey: this.identity.ed25519Pubkey,
       crowId: this.identity.crowId,
     };
+    if (this.instanceSyncEnabled) { challengePayload.pb = 1; state.ourPb = true; }
     if (this.localInstanceId) {
       challengePayload.instance_id = this.localInstanceId;
     }
@@ -351,6 +368,9 @@ export class PeerManager {
         let msg;
         try { msg = JSON.parse(line); } catch { continue; } // Ignore parse errors
         if (msg?.type === "authenticated") state.peerAuthSeen = true;
+        // A sibling's pair-binding frame is read OUTSIDE the frame chain: our
+        // admission may be waiting on it inside the chain (see _admit).
+        if (msg?.type === "pair-binding") { this._onPairBindingFrame(msg, state); continue; }
         chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
       }
       if (capped() && state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
@@ -367,6 +387,8 @@ export class PeerManager {
     };
     conn.on("close", () => {
       state.closed = true;
+      for (const w of state.pbWaiters) w(null);
+      state.pbWaiters = [];
       clearTimeout(timer);
       dropEntry();
       if (state.hadEntry && this.onPeerDisconnected) this.onPeerDisconnected(state.remoteCrowId);
@@ -391,6 +413,9 @@ export class PeerManager {
         break;
       case "challenge-response":
         await this._onChallengeResponse(conn, msg, ourChallenge, state);
+        break;
+      case "pair-binding":
+        this._onPairBindingFrame(msg, state);
         break;
       case "authenticated":
         // The other side admitted us. Recorded whenever it arrives; the
@@ -458,6 +483,11 @@ export class PeerManager {
         crowId: this.identity.crowId,
         cb_sig: cbSig,
       }) + "\n");
+      // PT-2a: the pair MAC is NOT in this reply. The asker has proven
+      // nothing yet (our Crow ID is public), so the reply is the same for
+      // everyone. Its offer is remembered; the MAC goes out in a separate
+      // `pair-binding` frame only after it proves the seed (_admit).
+      if (msg.pb === 1) state.peerPb = { challengeHex: msg.challenge };
       return;
     }
     state.deferredReply = { challengeHex: msg.challenge, instanceId: state.peerInstanceId, sent: false };
@@ -563,11 +593,74 @@ export class PeerManager {
    * the connections entry, the callbacks and the held frames.
    */
   async _admit(conn, state, msg, kind) {
+    // A sibling is admitted under ONE instance id, resolved before the guard
+    // (private engineering notes, PT-2a "one id"): the id it challenged with,
+    // else the one in its response. Two different ids, a malformed id, or our
+    // own id never reach the guard. Every later use reads this one.
+    let remoteInstanceId = null;
+    if (kind === "instance") {
+      const c = state.peerInstanceId || null;
+      const r = (typeof msg.instance_id === "string" && msg.instance_id) || null;
+      if (c && r && c !== r) { this._refuseInstance(conn, state, "instance_id_mismatch"); return false; }
+      remoteInstanceId = c ?? r ?? null;
+      if (remoteInstanceId !== null && !ENROLL_ID_RE.test(remoteInstanceId)) {
+        this._refuseInstance(conn, state, "bad_instance_id");
+        return false;
+      }
+      // Self-loopback: the DHT can return ourselves on the instance-sync topic.
+      // Nothing to sync with ourselves; drop before the guard and any side effect.
+      if (remoteInstanceId && remoteInstanceId === this.localInstanceId) {
+        this._kill(conn, state);
+        return false;
+      }
+      state.remoteInstanceId = remoteInstanceId;
+    }
+
     const guard = this.admitGuards?.[kind];
+    // PT-2a I3: a sibling is admitted only through the pair-binding guard.
+    // Nothing wired (a PeerManager built without wireInstanceSync) fails closed.
+    if (kind === "instance" && this.instanceSyncEnabled && typeof guard !== "function") {
+      this._kill(conn, state);
+      if (!this._unwiredLogged) {
+        this._unwiredLogged = true;
+        console.warn("[peer-manager] instance-sync connection refused: guard:unwired");
+      }
+      return false;
+    }
+    let pbMac;
+    if (kind === "instance") {
+      // PT-2a pair binding (private engineering notes §3.5). The peer has
+      // proven the seed here, so it may now learn our MAC; each side sends
+      // its frame before running its own guard (each guard needs the other's
+      // frame, so gating it on admission would deadlock).
+      // Only a cb_sig prover: a bare signature can be relayed from an older
+      // sibling (a pre-PT-3 signing oracle), so it never learns our MAC.
+      if (state.peerPb && state.proof === "cb" && this.instanceSyncEnabled && msg.crowId === this.identity.crowId) {
+        let mac = null;
+        try {
+          mac = this.instanceBinding?.macFor?.({
+            peerInstanceId: remoteInstanceId,
+            challengeHex: state.peerPb.challengeHex,
+            handshakeHashHex: state.handshakeHashHex || hashHexOf(conn),
+          }) ?? null;
+        } catch {}
+        conn.write(JSON.stringify({ type: "pair-binding", pb_mac: typeof mac === "string" && mac ? mac : null }) + "\n");
+      }
+      // Both offered (and it proved with a cb_sig): wait (bounded) for the
+      // peer's frame. A peer that did not offer (PT-3, pre-PT-3) or proved
+      // with a bare signature is decided unbound at once.
+      if (state.ourPb && state.peerPb && state.proof === "cb") {
+        const frame = await this._awaitPairBindingFrame(state, this.pairBindingWaitMs);
+        if (state.refused || state.closed || conn.destroyed) return false;
+        if (!frame) { this._refuseInstance(conn, state, "guard:pb_timeout"); return false; }
+        pbMac = frame.pb_mac;
+      }
+    }
+
     if (typeof guard === "function") {
       let verdict;
       try {
-        verdict = await guard({ conn, msg, state });
+        verdict = await guard({ conn, msg, state, remoteInstanceId, pbMac });
       } catch {
         verdict = { ok: false, reason: "error" };
       }
@@ -581,16 +674,6 @@ export class PeerManager {
     if (state.refused || state.closed || conn.destroyed) return false;
 
     const crowId = state.claimedCrowId;
-    const remoteInstanceId = kind === "instance"
-      ? ((typeof msg.instance_id === "string" && msg.instance_id) || state.peerInstanceId || null)
-      : null;
-
-    // Self-loopback: the DHT can return ourselves on the instance-sync topic.
-    // Nothing to sync with ourselves; drop before any side effect.
-    if (kind === "instance" && remoteInstanceId && remoteInstanceId === this.localInstanceId) {
-      this._kill(conn, state);
-      return false;
-    }
 
     if (kind === "contact") {
       if (state.proof === "cb") {
@@ -608,7 +691,6 @@ export class PeerManager {
     state.armTimer?.();
     state.authenticated = true;
     state.remoteCrowId = crowId;
-    state.remoteInstanceId = remoteInstanceId;
     state.kind = kind;
     state.admitMsg = msg;
 
@@ -655,8 +737,8 @@ export class PeerManager {
       // An old sibling piggybacks its feed key on its (now verified)
       // challenge-response. Persist it before dispatching, so the
       // onInstanceConnected handler can open the inbound feed at once.
-      if (state.proof === "sig" && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
-        fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
+      if (state.proof === "sig" && state.remoteInstanceId && msg.feed_key_hex && this.onInstanceKeyReceived) {
+        fire(() => this.onInstanceKeyReceived(state.remoteInstanceId, msg.feed_key_hex));
       }
       if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId));
     } else if (this.onPeerConnected) {
@@ -682,6 +764,8 @@ export class PeerManager {
     if (state.proof !== "sig") return;
     const isInstance = state.kind === "instance" && this.instanceSyncEnabled;
     let feedKeyHex = null;
+    // d.instanceId (the challenge's id) equals state.remoteInstanceId whenever
+    // this fires: _admit refuses a response naming a different one.
     if (isInstance && d.instanceId && this.getFeedKeyForInstance) {
       try { feedKeyHex = await this.getFeedKeyForInstance(d.instanceId); } catch {}
     }
@@ -697,6 +781,32 @@ export class PeerManager {
     conn.write(JSON.stringify(payload) + "\n");
   }
 
+  /**
+   * A sibling's `pair-binding` frame: kept on the connection state (the
+   * first one only, and only before we decide), never held or dispatched.
+   */
+  _onPairBindingFrame(msg, state) {
+    if (state.refused || state.authenticated || state.pbFrame !== undefined) return;
+    const mac = msg?.pb_mac;
+    state.pbFrame = { pb_mac: typeof mac === "string" && mac ? mac : null };
+    const waiters = state.pbWaiters || [];
+    state.pbWaiters = [];
+    for (const w of waiters) w(state.pbFrame);
+  }
+
+  /** The peer's pair-binding frame, or null after `ms` or when the connection ends. */
+  _awaitPairBindingFrame(state, ms) {
+    if (state.pbFrame !== undefined) return Promise.resolve(state.pbFrame);
+    if (state.refused || state.closed) return Promise.resolve(null);
+    if (!Array.isArray(state.pbWaiters)) state.pbWaiters = [];
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { done(null); }, ms);
+      timer.unref?.();
+      const done = (v) => { clearTimeout(timer); resolve(v); };
+      state.pbWaiters.push(done);
+    });
+  }
+
   /** Frames of an admitted connection, by kind. Frames of the other kind are ignored. */
   async _dispatchAdmitted(conn, msg, state) {
     if (!state.mutual || state.refused) return;
@@ -709,7 +819,7 @@ export class PeerManager {
     if (state.kind === "instance" && msg.type === "instance-key") {
       if (typeof msg.instance_id === "string" && msg.instance_id && msg.instance_id === state.remoteInstanceId
           && typeof msg.feed_key_hex === "string" && msg.feed_key_hex && this.onInstanceKeyReceived) {
-        fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
+        fire(() => this.onInstanceKeyReceived(state.remoteInstanceId, msg.feed_key_hex));
       }
     }
   }
@@ -717,6 +827,8 @@ export class PeerManager {
   /** Destroy a connection that will never be admitted; drop what it queued. */
   _kill(conn, state) {
     state.refused = true;
+    for (const w of state.pbWaiters || []) w(null);
+    state.pbWaiters = [];
     state.held = [];
     state.deferredReply = null;
     state.clearTimer?.();
