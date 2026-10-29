@@ -193,23 +193,22 @@ fi
 
 # Seed-bearing identity files (any identity.json or identity.json.*, .bak included) under $HOME
 # or $CROW_DATA_DIR. Fail closed: an unreadable identity file counts as a seed (same rule as
-# servers/satellite/guards.js), an unreadable directory is refused (it could hide one), and a
-# symlinked directory is refused rather than followed. Exempt: the satellite's own code checkout
+# servers/satellite/guards.js) and an unreadable directory is refused (it could hide one).
+# Symlinked directories are followed (find -L); find's "File system loop detected" warnings are
+# not fatal (each loop is scanned once). Exempt: the satellite's own code checkout
 # ($SAT_HOME/app, public code) and its bundles' container data ($SAT_HOME/bundles/*/data, owned
 # by container uids).
 seeds=()
 scan_denied=()
-scan_links=()
 scan_seeds() {
   local root="$1" f line errfile
   [ -d "$root" ] || return 0
-  find -H "$root" -maxdepth 0 >/dev/null 2>&1 || refuse "could not scan $root for Crow identity files"
+  find -L "$root" -maxdepth 0 >/dev/null 2>&1 || refuse "could not scan $root for Crow identity files"
   errfile="$(mktemp)"
   while IFS= read -r -d '' f; do
-    if [ -L "$f" ] && [ -d "$f" ]; then scan_links+=("$f"); continue; fi
     if [ ! -r "$f" ] || grep -qE '"seed"[[:space:]]*:' "$f" 2>/dev/null; then seeds+=("$f"); fi
-  done < <(LC_ALL=C find -H "$root" \( -path "$APP_DIR" -o -path "$SAT_HOME/bundles/*/data" \) -prune \
-    -o -type l -xtype d -print0 \
+  # Under -L, -type l matches only a dangling link, which then counts as unreadable (a hit).
+  done < <(LC_ALL=C find -L "$root" \( -path "$APP_DIR" -o -path "$SAT_HOME/bundles/*/data" \) -prune \
     -o \( -name identity.json -o -name 'identity.json.*' \) \( -type f -o -type l \) -print0 2>"$errfile")
   wait "$!" 2>/dev/null || true
   while IFS= read -r line; do
@@ -222,10 +221,6 @@ if [ -n "${CROW_DATA_DIR:-}" ]; then scan_seeds "$(realpath -m "$CROW_DATA_DIR")
 if [ "${#scan_denied[@]}" -gt 0 ]; then
   printf '  %s\n' "${scan_denied[@]}" >&2
   refuse "the seed scan could not read the director(ies) above, which could hide a Crow identity seed; fix their permissions or move them off this box, then re-run"
-fi
-if [ "${#scan_links[@]}" -gt 0 ]; then
-  printf '  %s\n' "${scan_links[@]}" >&2
-  refuse "the symlinked director(ies) above are not followed by the seed scan; replace them with real directories or remove them, then re-run"
 fi
 if [ "${#seeds[@]}" -gt 0 ]; then
   printf '  %s\n' "${seeds[@]}" >&2
@@ -451,10 +446,10 @@ sudo ln -sfn "$APP_DIR/scripts/crow-satellite" "$CLI_LINK"
 # ufw (asserted above): add only the one rule the agent needs, Serve's 443/tcp on tailscale0,
 # never the whole tailnet interface, and never change anything else. Later extensions (G1) bring
 # their own rules.
-if ! grep -qE '^443/tcp on tailscale0[[:space:]]+ALLOW IN[[:space:]]+Anywhere' <<<"$ufw_out"; then
-  say "adding the ufw rule: 443/tcp on tailscale0 (Tailscale Serve)"
-  sudo ufw allow in on tailscale0 to any port 443 proto tcp comment 'crow-satellite' >/dev/null
-fi
+# ufw itself is idempotent here ("Skipping adding existing rule", for v4 and v6 alike), so the
+# allow always runs: no status-text matching that could miss one of the two lines.
+say "asserting the ufw rule: 443/tcp on tailscale0 (Tailscale Serve)"
+sudo ufw allow in on tailscale0 to any port 443 proto tcp comment 'crow-satellite' >/dev/null
 grep -qE '^(22|22/tcp|OpenSSH)[[:space:]]' <<<"$ufw_out" \
   || say "note: ufw has no 22/tcp rule; ssh then works only over the tailnet (left as is)"
 

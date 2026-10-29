@@ -64,8 +64,9 @@ function fakeBox(opts = {}) {
   return { dir, home, bin, log };
 }
 
-function dryRun(box, { args = ["--dry-run", "--sha", SHA], env = {} } = {}) {
+function dryRun(box, { args = ["--dry-run", "--sha", SHA], env = {}, timeout = 60000 } = {}) {
   const r = spawnSync("/bin/bash", [SCRIPT, ...args], {
+    timeout,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     detached: true, // no controlling tty: every prompt takes its headless path
@@ -307,7 +308,9 @@ test("static: never Funnel, never a path-prefixed Serve mapping, never rewrites 
   // ufw: only Serve's 443/tcp on tailscale0, never the whole tailnet interface.
   assert.match(code, /sudo ufw allow in on tailscale0 to any port 443 proto tcp comment 'crow-satellite'/);
   assert.doesNotMatch(code, /allow in on tailscale0(?! to any port 443 proto tcp)/);
-  assert.match(code, /\^443\/tcp on tailscale0/, "idempotency matches the exact scoped rule");
+  // Idempotent by ufw itself ("Skipping adding existing rule", v4 and v6): always run, no grep gate.
+  assert.match(code, /^sudo ufw allow in on tailscale0 to any port 443 proto tcp comment 'crow-satellite'/m);
+  assert.doesNotMatch(code, /on tailscale0\[\[:space:\]\]/);
   assert.match(code, /sudo tailscale serve --bg --https=443 "http:\/\/127\.0\.0\.1:\$\{AGENT_PORT\}"/);
   // --repair never deletes kept state.
   assert.doesNotMatch(code, /rm -rf?[^\n]*(vault|secrets|installed\.json|bundles|cert\.json|pinned\.json)/);
@@ -374,15 +377,34 @@ test("seed scan: an unreadable bundle data dir under SAT_HOME/bundles/*/data is 
   }
 });
 
-test("seed scan: a symlinked directory under HOME is refused (the scan does not follow it)", () => {
+test("seed scan follows a symlinked directory: a seed .bak behind it is refused", () => {
   const box = fakeBox();
   const outside = join(box.dir, "outside");
   mkdirSync(outside);
-  writeFileSync(join(outside, "identity.json"), '{"seed":"aa"}');
+  writeFileSync(join(outside, "identity.json.bak"), '{"seed":"aa"}');
   symlinkSync(outside, join(box.home, "linked"));
   const r = dryRun(box);
   assert.equal(r.status, 78, r.out);
-  assert.ok(r.out.includes(join(box.home, "linked")), r.out);
+  assert.ok(r.out.includes(join(box.home, "linked", "identity.json.bak")), r.out);
+});
+
+test("seed scan: a node_modules-style symlinked directory with no seed is accepted", () => {
+  const box = fakeBox();
+  const store = join(box.home, "proj", "node_modules", ".pnpm", "pkg@1.0.0", "node_modules", "pkg");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, "index.js"), "");
+  symlinkSync(store, join(box.home, "proj", "node_modules", "pkg"));
+  const r = dryRun(box);
+  assert.equal(r.status, 0, r.out);
+});
+
+test("seed scan: a symlink loop does not hang and is accepted", () => {
+  const box = fakeBox();
+  mkdirSync(join(box.home, "a"));
+  symlinkSync(join(box.home, "a"), join(box.home, "a", "loop"));
+  symlinkSync(box.home, join(box.home, "a", "up"));
+  const r = dryRun(box, { timeout: 20000 });
+  assert.equal(r.status, 0, r.out);
 });
 
 test("a symlink standing in for ~/.crow-satellite is refused", () => {
