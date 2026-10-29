@@ -461,6 +461,9 @@ test("a transform may change only appendSystemPromptFile, inside the scratch", a
     ["getter", /key def must be a data property/],
     ["proxy", /the result must not be a Proxy/],
     ["symbol", /key Symbol\(x\) was added/],
+    ["envHome", /process\.env\.CROW_HOME was changed/],
+    ["envSet", /process\.env\.CROW_PI_SANDBOX was added/],
+    ["envDelete", /process\.env\.CROW_GATEWAY_URL was removed/],
   ];
   let n = 0;
   for (const [transform, re] of cases) {
@@ -474,7 +477,9 @@ test("a transform may change only appendSystemPromptFile, inside the scratch", a
 
 test("checkEvalSpawnOpts: the re-review's bypasses are refused and the original is never touched", async () => {
   const { cloneSpawnOpts, checkEvalSpawnOpts } = await import("../scripts/lib/eval-guard.mjs");
+  const { realish } = await import("../scripts/lib/protected-paths.mjs");
   const home = process.env.CROW_HOME; // the suite's scratch home under tmp
+  const sealed = realish(home); // what assertEvalSeam returns, captured before any transform
   mkdirSync(join(home, "x"), { recursive: true });
   const fn = function f() {};
   const mk = () => ({ def: { id: "b", permission_policy: { bash: "deny" } }, narrowedTools: ["read"], appendSystemPromptFile: "/base.md", mcpConfig: { a: 1 }, fn });
@@ -485,7 +490,9 @@ test("checkEvalSpawnOpts: the re-review's bypasses are refused and the original 
     assert.notEqual(clone.def, original.def, "the clone is deep");
     assert.equal(clone.fn, original.fn, "functions by reference");
     let res;
-    try { res = { f: checkEvalSpawnOpts(original, clone, f(clone)) }; } catch (e) { res = { error: e.message }; }
+    const savedHome = process.env.CROW_HOME;
+    try { res = { f: checkEvalSpawnOpts(original, clone, f(clone), sealed) }; } catch (e) { res = { error: e.message }; }
+    finally { process.env.CROW_HOME = savedHome; }
     assert.deepStrictEqual(original, snapshot, "the original is never touched");
     return res;
   };
@@ -505,6 +512,14 @@ test("checkEvalSpawnOpts: the re-review's bypasses are refused and the original 
     homeItself: (o) => ({ ...o, appendSystemPromptFile: home }),
     outside: (o) => ({ ...o, appendSystemPromptFile: "/etc/passwd" }),
     removed: (o) => { const { mcpConfig, ...rest } = o; return rest; },
+    // Lane D I1: the home is sealed at guard time; redefining it from inside the transform is moot.
+    envHome: (o) => { process.env.CROW_HOME = "/"; return { ...o, appendSystemPromptFile: "/etc/passwd" }; },
+    // Lane D I2: pi resolves a relative path against its own cwd, so only absolute, normalized paths.
+    relativeUp: (o) => ({ ...o, appendSystemPromptFile: `../../..${home}/q.md` }),
+    relative: (o) => ({ ...o, appendSystemPromptFile: "x/ok.md" }),
+    rawDotdot: (o) => ({ ...o, appendSystemPromptFile: `${home}/x/../x/ok.md` }),
+    dotSegment: (o) => ({ ...o, appendSystemPromptFile: `${home}/x/./ok.md` }),
+    doubleSlash: (o) => ({ ...o, appendSystemPromptFile: `${home}//x/ok.md` }),
   };
   for (const [name, f] of Object.entries(refused)) {
     const r = run(f);
@@ -520,6 +535,34 @@ test("checkEvalSpawnOpts: the re-review's bypasses are refused and the original 
   // Allowed: only the path changes, inside the home; or nothing changes at all.
   assert.deepEqual(run((o) => ({ ...o, appendSystemPromptFile: join(home, "x", "ok.md") })), { f: join(home, "x", "ok.md") });
   assert.deepEqual(run((o) => o), { f: "/base.md" });
+  assert.throws(() => checkEvalSpawnOpts(mk(), cloneSpawnOpts(mk()), mk()), /no sealed home/, "the sealed home is required");
+});
+
+test("cloneSpawnOpts keeps an own __proto__ key, and a non-plain value is named in the refusal", async () => {
+  const { cloneSpawnOpts, checkEvalSpawnOpts, evalSpawnOpts } = await import("../scripts/lib/eval-guard.mjs");
+  const { realish } = await import("../scripts/lib/protected-paths.mjs");
+  const sealed = realish(process.env.CROW_HOME);
+  const original = { def: JSON.parse('{"id":"b","__proto__":{"x":1}}'), appendSystemPromptFile: "/base.md" };
+  assert.ok(Object.hasOwn(original.def, "__proto__"));
+  const clone = cloneSpawnOpts(original);
+  assert.ok(Object.hasOwn(clone.def, "__proto__"), "the key survives the clone");
+  assert.equal(Object.getPrototypeOf(clone.def), Object.prototype, "and never becomes the prototype");
+  assert.equal(({}).x, undefined, "nothing polluted");
+  assert.equal(checkEvalSpawnOpts(original, clone, clone, sealed), "/base.md", "the comparison passes for an unchanged clone");
+  // A class instance loses its prototype in the clone: refused even unchanged, and the refusal says why.
+  class Resolved { constructor() { this.key = "stub/m1"; } }
+  const withClass = { resolved: new Resolved(), appendSystemPromptFile: "/base.md" };
+  const cc = cloneSpawnOpts(withClass);
+  assert.throws(() => checkEvalSpawnOpts(withClass, cc, cc, sealed), /key resolved was changed \(it holds a non-plain value/);
+  // A Map survives structuredClone exactly, so an unchanged one passes.
+  const withMap = { resolved: new Map([["k", 1]]), appendSystemPromptFile: "/base.md" };
+  const mc = cloneSpawnOpts(withMap);
+  assert.equal(checkEvalSpawnOpts(withMap, mc, mc, sealed), "/base.md");
+  // Lane C: with no file the spawn options are the original's keys exactly.
+  const bare = { def: { id: "b" }, sessionDir: "/s" };
+  assert.deepEqual(Object.keys(evalSpawnOpts(bare, undefined)), Object.keys(bare));
+  assert.deepEqual(Object.keys(evalSpawnOpts(original, "/base.md")), Object.keys(original));
+  assert.equal(checkEvalSpawnOpts(bare, cloneSpawnOpts(bare), cloneSpawnOpts(bare), sealed), undefined);
 });
 
 test("bridge.mjs: the evalSpawnTransform block opens with the guard, and nothing imports perch or the guard statically", () => {
@@ -527,7 +570,7 @@ test("bridge.mjs: the evalSpawnTransform block opens with the guard, and nothing
   const HEAD = 'if (typeof opts.evalSpawnTransform === "function") {';
   assert.equal(src.split(HEAD).length - 1, 1, "exactly one seam block");
   const body = src.slice(src.indexOf(HEAD) + HEAD.length);
-  assert.ok(body.replace(/^\s*/, "").startsWith('(await import("../lib/eval-guard.mjs")).assertEvalSeam();'), "the first statement is the guard; nothing precedes it");
+  assert.ok(body.replace(/^\s*/, "").startsWith('const sealedHome = (await import("../lib/eval-guard.mjs")).assertEvalSeam();'), "the first statement is the guard; nothing precedes it");
   assert.doesNotMatch(src, /^\s*import\s[^;]*eval-guard/m, "no static import of eval-guard");
   assert.doesNotMatch(src, /^\s*import\s+["'][^"']*eval-guard/m, "no static import of eval-guard");
   for (const m of src.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["'`]([^"'`]+)["'`]/gm)) {
@@ -537,7 +580,12 @@ test("bridge.mjs: the evalSpawnTransform block opens with the guard, and nothing
   assert.deepEqual([...src.matchAll(/opts\.evalSpawnTransform/g)].length, 2);
   assert.doesNotMatch(src, /briefing/i, "bridge.mjs carries no briefing strings");
   // The transform gets a clone; the spawn options are built from the untouched original.
-  assert.match(src, /const next = await opts\.evalSpawnTransform\(clone\);/);
-  assert.match(src, /spawnPrep\.piRpcOpts = Object\.assign\(\{\}, original, \{ appendSystemPromptFile: f \}\);/);
+  assert.match(src, /const transform = opts\.evalSpawnTransform; \/\/ read once/);
+  assert.match(src, /const next = await evalSeam\.transform\(clone\);/);
+  assert.match(src, /spawnPrep\.piRpcOpts = evalSeam\.guard\.evalSpawnOpts\(original, f\);/);
+  // Nothing async between the env check and new PiRpc (which reads the live process.env).
+  const gap = src.slice(src.indexOf("evalSeam.guard.checkEnvUnchanged(envBefore);"), src.indexOf("const pi = new PiRpc("));
+  assert.ok(gap.length > 0 && src.indexOf("const pi = new PiRpc(") > src.indexOf("checkEnvUnchanged"), "the env check precedes the spawn");
+  assert.doesNotMatch(gap, /\bawait\b|\.then\(|setTimeout|setImmediate/, "no async gap before new PiRpc");
   assert.doesNotMatch(src, /piRpcOpts = next\b|Object\.assign\([^)]*\bnext\b/, "the transform's object is never used");
 });

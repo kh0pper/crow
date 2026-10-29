@@ -18,7 +18,10 @@
  * Perch's close hook calls, which reads CROW_SESSION_SUMMARIES itself); a thread with
  * `briefingBefore` gets briefingText(buildBriefing(...)) for the rank of the bot's model, applied
  * by handleInbound's eval-only evalSpawnTransform exactly where Perch puts it (an appended system prompt file,
- * never the operator's message) and recorded on its row. Such threads are Perch sessions in the
+ * never the operator's message) and recorded on its row. That transform is trusted in-process
+ * code and the bridge's checks on it are a shape fence, not a sandbox: the options' key set and
+ * values, the system prompt path (absolute, inside the home sealed at guard time) and process.env
+ * (unchanged across the transform). Such threads are Perch sessions in the
  * DB (kind perch-live, filed under `projectId` in shell_items), and the run gets a provider
  * registry: the scratch `providers` table mirrors `models`, so the roles store, the privacy
  * ranks and the summary's model call resolve through their real paths. Results carry only
