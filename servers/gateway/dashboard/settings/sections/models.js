@@ -64,6 +64,7 @@ function rowHtml(row, lang) {
     </article>`;
 }
 
+// The sheet rules shared with Add a provider (.mc-inner, .mc-head, .mc-warn, .mc-check, .mc-actions ...) live once, in shared/add-provider-ui.js, which this page also renders.
 const STYLE = `<style>
   .mr-top { display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem 1rem; justify-content:space-between; margin-bottom:1rem; }
   .mr-top-links { display:flex; flex-wrap:wrap; gap:0.5rem 1rem; }
@@ -92,30 +93,14 @@ const STYLE = `<style>
   @media (max-width: 480px) {
     #models-change { width:100%; margin:auto 0 0; border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0; }
   }
-  .mc-inner { padding:16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); display:flex; flex-direction:column; gap:0.75rem; min-width:0; }
-  .mc-head { display:flex; align-items:center; justify-content:space-between; gap:0.5rem; }
-  .mc-title { font-size:1.05rem; margin:0; overflow-wrap:anywhere; }
-  .mc-close { width:44px; height:44px; flex:0 0 44px; border:none; border-radius:50%; background:transparent; color:var(--crow-text-secondary); font-size:1.4rem; cursor:pointer; }
   .mc-list { display:flex; flex-direction:column; gap:0.4rem; }
   .mc-pick { display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem; width:100%; min-height:44px; padding:0.5rem 0.75rem; box-sizing:border-box; text-align:left;
     font:inherit; color:var(--crow-text-primary); background:var(--crow-bg-elevated); border:1px solid var(--crow-border); border-radius:var(--crow-radius-control); cursor:pointer; overflow-wrap:anywhere; }
   .mc-pick[aria-pressed="true"] { border-color:var(--crow-accent); box-shadow:0 0 0 1px var(--crow-accent); }
   .mc-pick:disabled { cursor:not-allowed; opacity:0.7; }
   .mc-pick-label { flex:1 1 auto; min-width:0; }
-  .mc-star { color:var(--crow-accent); }
   .mc-pick-provider { font-size:0.8rem; color:var(--crow-text-muted); }
   .mc-pick-note { flex-basis:100%; font-size:0.8rem; color:var(--crow-text-muted); }
-  .mc-warn { display:flex; flex-direction:column; gap:0.35rem; font-size:0.9rem; overflow-wrap:anywhere; }
-  .mc-warn p { margin:0; }
-  .mc-warn [hidden] { display:none; }
-  .mc-group { font-size:0.8rem; margin:0.25rem 0 0; color:var(--crow-text-secondary); }
-  .mc-names { margin:0; padding-left:1.2rem; }
-  .mc-cloud, .mc-changed { font-weight:600; }
-  .mc-check { display:flex; align-items:flex-start; gap:0.5rem; min-height:44px; padding-top:0.6rem; box-sizing:border-box; cursor:pointer; }
-  .mc-check input { width:20px; height:20px; flex:0 0 20px; margin:0; }
-  .mc-error { margin:0; color:var(--crow-error); font-size:0.85rem; }
-  .mc-error:empty { display:none; }
-  .mc-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:0.5rem; position:sticky; bottom:0; background:var(--crow-bg-surface); padding-top:0.5rem; }
   .mc-save:disabled { opacity:0.5; cursor:not-allowed; }
 </style>`;
 

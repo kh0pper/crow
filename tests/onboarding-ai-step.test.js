@@ -209,6 +209,33 @@ test("cloud-provider POST: no typed model and no verified pick -> model_required
   assert.ok(res.redirected.includes("cloud_error=model_required"));
 });
 
+test("cloud-provider POST: a preview-only everyday pick is not used; model_required", async () => {
+  let wrote = false;
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "" }), res, {
+    db: {}, testFn: okTest, listRowsFn: noRows,
+    pickFn: () => ({ model_id: "preview-model", status: "preview", preview: true }),
+    upsertProviderFn: async () => { wrote = true; }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(wrote, false);
+  assert.ok(res.redirected.includes("cloud_error=model_required"));
+});
+
+test("cloud-provider POST: Other with an empty key and a typed model writes a keyless row", async () => {
+  const calls = [];
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "other", baseUrl: "https://api.example.com/v1", apiKey: "", model: "local-model" }), res, {
+    db: {}, listRowsFn: noRows,
+    testFn: async (args) => ({ ok: true, code: "ok", models: null, host: "api.example.com", baseUrl: args.baseUrl }),
+    upsertProviderFn: async (db, provider) => { calls.push(provider); }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].baseUrl, "https://api.example.com/v1");
+  assert.ok(!calls[0].apiKey, "no key stored");
+  assert.equal(calls[0].models[0].id, "local-model");
+  assert.ok(res.redirected.includes("cloud=ok"));
+});
+
 test("cloud-provider POST: key_rejected redirects cloud_error=key_rejected and never writes", async () => {
   let wrote = false;
   const res = makeRes();

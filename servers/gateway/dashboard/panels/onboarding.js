@@ -640,6 +640,7 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     invalidateCacheFn = invalidateProvidersCache,
     listRowsFn = listProvidersAll,
     testFn,
+    pickFn = candidatePick,
   } = opts;
   const aiIdx = STEP_KEYS.indexOf("ai");
   const base = `/dashboard/onboarding?step=${aiIdx}`;
@@ -653,7 +654,9 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
     if (!apiKey && preset.id !== "other") return back("missing_key", hint);
     const typed = typeof req.body?.model === "string" ? req.body.model.trim() : "";
-    const model = typed || candidatePick(preset.id, "everyday")?.model_id || "";
+    // Unattended default: only a stable, verified pick. A preview-only pick needs the model typed.
+    const pick = pickFn(preset.id, "everyday");
+    const model = typed || (pick && !pick.preview ? pick.model_id : "") || "";
     if (!model) return back("model_required", hint);
     const variantId = typeof req.body?.variant === "string" && req.body.variant ? req.body.variant : undefined;
     const baseUrl = preset.id === "other" && typeof req.body?.baseUrl === "string" ? req.body.baseUrl.trim() : undefined;
