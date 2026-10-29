@@ -1,6 +1,6 @@
 /**
  * The strict local check and the operator's "This is local" mark (roles
- * phase 2, Task 19; Kevin's answer Q2).
+ * phase 2, Task 19; the owner's ruling (Q2)).
  *
  * Voice and the phone's local slot must run on a provider Crow can prove is
  * local. A provider on a DNS name (box.example.internal, a dotless name, a

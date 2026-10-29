@@ -45,7 +45,7 @@ export function ownToolsLoaded(voiceDef, connected = null) {
 
 /**
  * The voice bot's fast key exactly as the turn dials it (turn.js voiceKeys + llm-router resolveBotVoiceKey),
- * and whether that key is not proven local under the strict check (roles phase 2 Task 20, Kevin Q2):
+ * and whether that key is not proven local under the strict check (roles phase 2 Task 20, the owner's ruling (Q2)):
  *   - no fast key, or a `role:<id>` that resolves to nothing: the turn dials the router's fast key, so the
  *     answer is resolveVoiceKeys' `fastCloud`;
  *   - a `role:<id>` that resolves: the resolved key;

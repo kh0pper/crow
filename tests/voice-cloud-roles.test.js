@@ -1,5 +1,5 @@
 /**
- * Roles phase 2, Task 20: voice applies the strict local check (Kevin Q2,
+ * Roles phase 2, Task 20: voice applies the strict local check (the owner's ruling (Q2),
  * N4). resolveVoiceKeys reports, per side, whether the key is not proven
  * local (isStrictCloud over every hop, with this box's "This is local"
  * marks), raw constants and env keys included; a key the old host-column

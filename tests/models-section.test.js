@@ -281,7 +281,7 @@ test("the menu preview never waits on DNS for the classifier", async () => {
 });
 
 test("a row whose stored host is cloud shows the cloud chip, on this box's address or a private one", async () => {
-  // crow-embed-like (loopback, host cloud) and raven-like (private address, host cloud).
+  // A row on this box (loopback, host cloud) and one on a second box (private address, host cloud).
   await db.execute({ sql: "INSERT INTO providers (id, base_url, api_key, host, models, disabled) VALUES (?,?,?,?,?,0)",
     args: ["flag-here", "http://127.0.0.1:8031/v1", null, "cloud", JSON.stringify([{ id: "f1" }])] });
   await db.execute({ sql: "INSERT INTO providers (id, base_url, api_key, host, models, disabled) VALUES (?,?,?,?,?,0)",

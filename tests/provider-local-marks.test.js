@@ -1,5 +1,5 @@
 // tests/provider-local-marks.test.js — the strict local check and the
-// operator's "This is local" mark (roles phase 2 Task 19, Kevin's Q2).
+// operator's "This is local" mark (roles phase 2 Task 19, the owner's ruling (Q2)).
 //
 // A provider on a DNS name is "not proven local" (the strict check). The
 // operator can mark such a row "This is local" on this box; the mark pins the
