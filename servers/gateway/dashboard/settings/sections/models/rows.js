@@ -19,7 +19,7 @@ import { LEGACY_PINS } from "../../../../../shared/role-change.js";
 import { pickProviderByTask, EMBED_TASKS, RERANK_TASKS } from "../../../../../shared/provider-task.js";
 import { speechProfileWhere } from "../../../../../shared/speech-where.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings } from "../../../../../shared/voice-bot.js";
-import { resolveVoiceKeys } from "../../../../routes/llm-router.js";
+import { resolveVoiceKeys } from "../../../../../shared/voice-keys.js";
 import { getClassifierStatus } from "../../../panels/bot-builder/classifier-status.js";
 import { getDefaultTtsProfile, getTtsProfiles } from "../../../../ai/tts/index.js";
 import { getDefaultSttProfile, getSttProfiles } from "../../../../ai/stt/index.js";

@@ -74,13 +74,12 @@ import { providerRowToObject } from "../../shared/provider-row.js";
 import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../shared/relative-dates.js";
 import { withTurnContext } from "../voice/context-echo.js";
 import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
-import { VOICE_ROUTE_DEFAULTS } from "../../shared/voice-route-defaults.js";
 import { resolveRole } from "../../shared/model-roles-store.js";
-import { resolveVoiceKeys, logRoleMiss } from "../../shared/voice-keys.js";
+import { resolveVoiceKeys, logRoleMiss, VOICE_RAW_KEYS } from "../../shared/voice-keys.js";
 import { isRoleRef } from "../../shared/model-roles.js";
 
-const FAST_KEY = process.env.COMPANION_FAST_MODEL || VOICE_ROUTE_DEFAULTS.fast;
-const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || VOICE_ROUTE_DEFAULTS.escalate;
+// The raw fast/escalate keys are computed once, in servers/shared/voice-keys.js.
+const { fast: FAST_KEY, escalate: ESC_KEY } = VOICE_RAW_KEYS;
 // Disable visible chain-of-thought on the fast voice route (set "0" to keep it).
 const FAST_DISABLE_THINKING = (process.env.COMPANION_FAST_DISABLE_THINKING || "1") !== "0";
 

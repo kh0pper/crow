@@ -76,26 +76,62 @@ export async function resolveModelSpec(db, spec, { local = false } = {}) {
   return live.endpoint;
 }
 
-// The bindings-change listener is registered once per process (setBinding fires it); it refreshes the
-// dispatcher settings of the router that initialised last. A failing refresh only warns.
-let refreshOnRebind = null;
-let rebindListenerRegistered = false;
-async function listenForRebinds(refresh) {
-  refreshOnRebind = refresh;
-  if (rebindListenerRegistered) return;
-  rebindListenerRegistered = true;
+// A repeated refresh failure warns once per message per minute (a stalled DB would otherwise warn on every
+// rebind and every 30 s tick).
+const WARN_EVERY_MS = 60_000;
+const lastWarned = new Map(); // `${what}|${message}` -> at
+export function warnRefreshFailure(what, err, now = Date.now()) {
+  const msg = String(err?.message || err);
+  const id = `${what}|${msg}`;
+  const at = lastWarned.get(id);
+  if (at !== undefined && now - at < WARN_EVERY_MS) return false;
+  if (lastWarned.size > 100) lastWarned.clear();
+  lastWarned.set(id, now);
+  console.warn(`[phone] ${what}:`, msg);
+  return true;
+}
+
+// The bindings-change and marks-change listeners are registered once per process (setBinding, markLocal and
+// unmarkLocal fire them); they refresh the dispatcher settings of the router that initialised last. A failing
+// refresh only warns.
+let refreshOnChange = null;
+let changeListenersRegistered = false;
+async function listenForRoleChanges(refresh) {
+  refreshOnChange = refresh;
+  if (changeListenersRegistered) return;
+  changeListenersRegistered = true;
+  const onChange = () => {
+    try {
+      const p = refreshOnChange?.();
+      if (p && typeof p.catch === "function") p.catch((e) => warnRefreshFailure("settings refresh after a role or mark change", e));
+    } catch (e) { warnRefreshFailure("settings refresh after a role or mark change", e); }
+  };
   try {
-    const { addBindingsChangeListener } = await appImport("servers/shared/model-roles-store.js");
-    addBindingsChangeListener(() => {
-      try {
-        const p = refreshOnRebind?.();
-        if (p && typeof p.catch === "function") p.catch((e) => console.warn("[phone] settings refresh after a rebind:", e?.message));
-      } catch (e) { console.warn("[phone] settings refresh after a rebind:", e?.message); }
-    });
+    const [{ addBindingsChangeListener }, { addLocalMarksChangeListener }] = await Promise.all([
+      appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/provider-local-marks.js")]);
+    addBindingsChangeListener(onChange);
+    addLocalMarksChangeListener(onChange);
   } catch (e) {
-    rebindListenerRegistered = false;
-    console.warn("[phone] cannot follow role changes at once (the 30 s refresh still applies):", e?.message);
+    changeListenersRegistered = false;
+    console.warn("[phone] cannot follow role or mark changes at once (the 30 s refresh still applies):", e?.message);
   }
+}
+
+/**
+ * Coalesce: at most one refresh runs and at most one waits behind it. Callers arriving while one waits share
+ * it (it reads after every change they announce), so a stuck read never queues more than one behind it.
+ */
+export function coalesced(fn) {
+  let running = null, pending = null;
+  const run = () => {
+    if (!running) {
+      running = Promise.resolve().then(fn).finally(() => { running = null; });
+      return running;
+    }
+    if (!pending) pending = running.catch(() => {}).then(() => { pending = null; return run(); });
+    return pending;
+  };
+  return run;
 }
 
 async function readLang(db) {
@@ -156,12 +192,11 @@ export default function phoneRouter(authMiddleware, seams = {}) {
         next.cloud = await resolveModelSpec(db, next.cloudModel);
         cached = next;
       };
-      // One refresh at a time, in call order, so an older read never overwrites a newer one.
-      let refreshing = Promise.resolve();
-      const refresh = () => (refreshing = refreshing.then(readNow, readNow));
+      // One refresh at a time and at most one waiting (coalesced), so an older read never overwrites a newer one.
+      const refresh = coalesced(readNow);
       await refresh();
-      await listenForRebinds(refresh); // a rebind reaches the local slot at once
-      setInterval(() => refresh().catch((e) => console.warn("[phone] settings refresh:", e.message)), 30000).unref(); // provider edits
+      await listenForRoleChanges(refresh); // a rebind or a mark change reaches the local slot at once
+      setInterval(() => refresh().catch((e) => warnRefreshFailure("settings refresh", e)), 30000).unref(); // provider edits
       const settings = () => ({ ownerName: cached.ownerName, ownerNumber: cached.ownerNumber, dailyCap: cached.dailyCap, line: "interactive",
         model: (call) => (call.allow_cloud && cached.cloud) ? { ...cached.cloud, label: "cloud:" + cached.cloudModel } : (cached.local || null) });
       const d = (seams.createDispatcher || disp.createDispatcher)({ db, runner,

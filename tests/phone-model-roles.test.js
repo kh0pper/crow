@@ -205,6 +205,55 @@ test("a rebind reaches the local slot at once (no timer)", async () => {
   assert.deepEqual(await setBinding(s.db, "quick", { model: "local-box/m3" }), { ok: true });
 });
 
+test("a mark or unmark reaches the local slot at once (no timer)", async () => {
+  const { unmarkLocal } = await import("../servers/shared/provider-local-marks.js");
+  await s.db.execute({ sql: "INSERT INTO providers (id, base_url, host, models) VALUES (?, ?, ?, ?)", args: ["box-two", "http://box2.example.internal:8011/v1", "local", JSON.stringify([{ id: "m7" }])] });
+  invalidateRoleContext();
+  assert.deepEqual(await markLocal(s.db, "box-two", { actor: "test" }), { ok: true });
+  assert.equal((await post({ localModel: "box-two/m7" })).status, 200);
+  await s.disp.refresh();
+  assert.equal(s.disp.settings().model({ allow_cloud: false }).model, "m7", "positive control");
+  const settle = async (want) => {
+    const deadline = Date.now() + 3000;
+    while ((s.disp.settings().model({ allow_cloud: false })?.model ?? null) !== want && Date.now() < deadline) await new Promise((r) => setImmediate(r));
+    return s.disp.settings().model({ allow_cloud: false })?.model ?? null;
+  };
+  await unmarkLocal(s.db, "box-two");
+  assert.equal(await settle(null), null, "unmarked: refused at once");
+  assert.deepEqual(await markLocal(s.db, "box-two", { actor: "test" }), { ok: true });
+  assert.equal(await settle("m7"), "m7", "marked again: accepted at once");
+});
+
+test("refresh coalesces: one running, at most one waiting, behind a stuck read", async () => {
+  const { coalesced } = await import("../bundles/phone/panel/routes.js");
+  let calls = 0, release;
+  const gate = new Promise((r) => { release = r; });
+  const run = coalesced(async () => { calls++; if (calls === 1) await gate; });
+  const first = run();
+  const waiting = [run(), run(), run(), run()];
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls, 1, "the stuck read holds; nothing else starts");
+  assert.equal(new Set(waiting).size, 1, "every later caller shares the one waiting refresh");
+  release();
+  await first; await waiting[0];
+  assert.equal(calls, 2, "exactly one read after the stuck one");
+  // A failed read rejects its caller and the next call still runs.
+  const failing = coalesced(async () => { throw new Error("db down"); });
+  await assert.rejects(failing(), /db down/);
+  await assert.rejects(failing(), /db down/);
+});
+
+test("a repeated refresh failure warns once per message per minute", async () => {
+  const { warnRefreshFailure } = await import("../bundles/phone/panel/routes.js");
+  s.warns.length = 0;
+  const t0 = 1_000_000;
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-x"), t0), true);
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-x"), t0 + 59_000), false);
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-y"), t0 + 59_000), true, "another message warns");
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-x"), t0 + 60_000), true, "a minute later it warns again");
+  assert.equal(s.warns.filter((w) => w.includes("stall-x")).length, 2);
+});
+
 test("the refusal reads the same on the route and in the panel, en and es", () => {
   assert.equal(NOT_PROVEN, "The local model must run on a provider Crow can prove is local.");
   assert.equal(PHONE_STRINGS.en.errors.local_not_proven_local, t("phone.localNotProvenLocal", "en"));

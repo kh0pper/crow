@@ -44,37 +44,43 @@ export function ownToolsLoaded(voiceDef, connected = null) {
 }
 
 /**
- * Is the fast voice model a cloud one, under the strict check (roles phase 2 Task 20, Kevin Q2)? Anything not
- * proven local counts as cloud. The key is the one the turn would use (turn.js voiceKeys): the def's own key (a
- * `role:` ref resolved by the full walk, a raw "provider/model" as it is) is checked by strictVoiceCloud (every
- * hop, this box's "This is local" marks, a row flagged host "cloud" always cloud); a def with no fast key, an
- * unresolvable role or a malformed key uses the router's fast side, so its answer is resolveVoiceKeys'
- * `fastCloud`. Never throws: a failure is not proof of local.
+ * The voice bot's fast key exactly as the turn dials it (turn.js voiceKeys + llm-router resolveBotVoiceKey),
+ * and whether that key is not proven local under the strict check (roles phase 2 Task 20, Kevin Q2):
+ *   - no fast key, or a `role:<id>` that resolves to nothing: the turn dials the router's fast key, so the
+ *     answer is resolveVoiceKeys' `fastCloud`;
+ *   - a `role:<id>` that resolves: the resolved key;
+ *   - anything else (a raw "provider/model", and also a bare "role:" or a key with no "/", which the turn
+ *     dials as written): that key as written.
+ * A key is judged by strictVoiceCloud (every hop, this box's "This is local" marks, a row flagged host
+ * "cloud" or on a known cloud preset URL always cloud); a malformed key names no provider, so it is not proven
+ * local. Never throws: a failure is not proof of local (cloud: true).
+ * → { key: string|null, cloud: boolean }
  */
-export async function fastModelIsCloud(db, def, { resolveVoiceKeysFn } = {}) {
+export async function fastVoiceKeyFor(db, def, { resolveVoiceKeysFn } = {}) {
+  let key = null;
   try {
     // Lazy: surfaces load this module through appImport; the store and the strict check load on use.
     const vk = await import("../../shared/voice-keys.js");
     const routerFast = async () => {
       const k = await (resolveVoiceKeysFn || vk.resolveVoiceKeys)(db);
-      return k?.fastCloud !== false;
+      return { key: typeof k?.fast === "string" ? k.fast : null, cloud: k?.fastCloud !== false };
     };
-    const key = normalizeVoiceSettings(def).fast_voice_model;
+    key = normalizeVoiceSettings(def).fast_voice_model;
     if (typeof key !== "string" || !key) return await routerFast();
-    let resolved = key;
-    if (key.startsWith("role:")) {
-      const [{ resolveRole }, { isRoleRef }] = await Promise.all([
-        import("../../shared/model-roles-store.js"), import("../../shared/model-roles.js"),
-      ]);
-      if (!isRoleRef(key)) return await routerFast(); // a bare "role:" is no role
+    const { isRoleRef } = await import("../../shared/model-roles.js");
+    if (isRoleRef(key)) {
+      const { resolveRole } = await import("../../shared/model-roles-store.js");
       const r = await resolveRole(db, key, { need: "chat" });
-      if (!r?.key) return await routerFast(); // the turn falls back to the router's fast key
-      resolved = r.key;
+      if (!r?.key) return await routerFast(); // resolveBotVoiceKey's fallback: the router's fast key
+      key = r.key;
     }
-    const i = resolved.indexOf("/");
-    if (i <= 0 || i === resolved.length - 1) return await routerFast();
-    return await vk.strictVoiceCloud(db, resolved);
-  } catch { return true; }
+    return { key, cloud: await vk.strictVoiceCloud(db, key) };
+  } catch { return { key, cloud: true }; }
+}
+
+/** Is the fast voice model not proven local, as the turn dials it (fastVoiceKeyFor)? Never throws. */
+export async function fastModelIsCloud(db, def, opts = {}) {
+  return (await fastVoiceKeyFor(db, def, opts)).cloud;
 }
 
 /**

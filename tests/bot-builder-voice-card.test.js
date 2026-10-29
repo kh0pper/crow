@@ -166,6 +166,27 @@ test("the editor: every section, the rev of the rendered row, and the stored val
   for (const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) { assert.ok(!m[1].includes("`")); assert.ok(!m[1].includes("${")); }
 });
 
+test("the cloud warning agrees with the turn: a DNS-named row is not proven local until marked (roles phase 2)", async () => {
+  const { markLocal } = await import("../servers/shared/provider-local-marks.js");
+  const { invalidateRoleContext } = await import("../servers/shared/model-roles-store.js");
+  await db.execute({ sql: "INSERT INTO providers (id, base_url, host, models, disabled) VALUES (?,?,?,?,0)",
+    args: ["box-x", "http://box.example.internal:8011/v1", "local", JSON.stringify([{ id: "m1", name: "M1" }])] });
+  invalidateRoleContext();
+  try {
+    await reset({ ...SEED_DEF, fast_voice_model: "box-x/m1" });
+    const before = await editor();
+    assert.ok(before.includes(T("botbuilder.voiceCloudSlower")), "host 'local' on a DNS name still warns");
+    assert.ok(before.includes(T("botbuilder.voiceCloudLeaves").replace("{provider}", "box-x")));
+    assert.deepEqual(await markLocal(db, "box-x", { actor: "test" }), { ok: true });
+    assert.ok(!(await editor()).includes(T("botbuilder.voiceCloudSlower")), "marked: no warning");
+  } finally {
+    await db.execute({ sql: "DELETE FROM providers WHERE id = 'box-x'", args: [] });
+    await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = 'provider_local_marks'", args: [] });
+    invalidateRoleContext();
+    await reset();
+  }
+});
+
 test("cloud warnings show only for a cloud model", async () => {
   await reset();
   const local = await editor();

@@ -29,7 +29,6 @@ import { escapeHtml, section } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t, fill, translations } from "../../shared/i18n.js";
 import { readSetting } from "../../settings/registry.js";
-import { listProvidersAll } from "../../../../shared/providers-db.js";
 import {
   CROW_VOICE_BOT_ID, VOICE_PRESETS, DEFAULT_PERSONA, voiceBotDefinition, normalizeVoiceSettings,
   ROUTINE_BACKENDS, CONFIRM_LEVELS, isVoiceBotId, isVoiceBotDef,
@@ -40,6 +39,7 @@ import { createHandoffStore } from "../../../voice/handoff-store.js";
 import { drawerHrefs } from "../../../board/card-link.js";
 import { boardState, oneLine } from "../../shared/bot-display.js";
 import { resolveRoutineBackends } from "../../../voice/own-tools.js";
+import { fastVoiceKeyFor } from "../../../voice/crow-voice.js";
 import { connectedAddonToolNames, createToolExecutor } from "../../../ai/tool-executor.js";
 import { loadModelOptions } from "./data-queries.js";
 import { rowRev, defRev } from "./def-adapter.js";
@@ -428,14 +428,15 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const v = normalizeVoiceSettings(def);
   const rev = voiceRev(row);
   const { opts } = await loadModelOptions(db);
-  let providerRows = [];
-  try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }
   const ttsProfiles = await loadProfiles(db, "tts_profiles");
   const sttProfiles = await loadProfiles(db, "stt_profiles");
   const model = v.fast_voice_model || "";
-  const provId = model.includes("/") ? model.slice(0, model.indexOf("/")) : "";
-  const provRow = providerRows.find((p) => p && p.id === provId);
-  const cloud = !!provRow && provRow.host === "cloud";
+  // The turn's own strict check (isStrictCloud through fastVoiceKeyFor), on the key the turn dials, so the
+  // warning agrees with the turn: anything not proven local warns.
+  const dialed = await fastVoiceKeyFor(db, def);
+  const cloud = dialed.cloud;
+  const dialedKey = dialed.key || model;
+  const provId = dialedKey.includes("/") ? dialedKey.slice(0, dialedKey.indexOf("/")) : dialedKey;
   const memoryOn = crowMcpOf(def).some(isMemoryTool);
   const name = row.display_name || "Crow";
   const sec = (key, body) => `<div class="btb-vsec"><h3>${escapeHtml(t(key, lang))}</h3>${body}</div>`;

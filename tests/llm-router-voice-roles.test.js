@@ -406,15 +406,14 @@ test("voice bot cloud flag via role", async () => {
   } finally { cleanup(); }
 });
 
-test("a bare \"role:\" fast model is no role: the router's fast side decides", async () => {
+test("a bare \"role:\" fast model is no role: the turn dials it as written, so it is not proven local", async () => {
   const { db, cleanup } = fresh();
   try {
     await baseProviders(db);
-    await seedVoiceBot(db, { kind: "voice", fast_voice_model: "role:" });
-    // The raw fast constant has no row: not proven local.
-    assert.equal((await createVoiceBotLoader()(db)).cloud, true);
     await provider(db, FAST_KEY.split("/")[0], "http://127.0.0.1:8011/v1", [FAST_ID]);
-    assert.equal((await createVoiceBotLoader()(db)).cloud, false);
+    await seedVoiceBot(db, { kind: "voice", fast_voice_model: "role:" });
+    // Even with the router's fast key proven local: "role:" names no provider.
+    assert.equal((await createVoiceBotLoader()(db)).cloud, true);
   } finally { cleanup(); }
 });
 

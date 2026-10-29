@@ -21,7 +21,7 @@ import { resolveVoiceKeys } from "../servers/shared/voice-keys.js";
 import llmRouterRouter, { resolveVoiceKeys as routerResolveVoiceKeys, VOICE_ROUTE_KEYS, COMPANION_TURN_MODEL } from "../servers/gateway/routes/llm-router.js";
 import { setBinding, invalidateRoleContext } from "../servers/shared/model-roles-store.js";
 import { markLocal } from "../servers/shared/provider-local-marks.js";
-import { createVoiceBotLoader } from "../servers/gateway/voice/crow-voice.js";
+import { createVoiceBotLoader, fastVoiceKeyFor } from "../servers/gateway/voice/crow-voice.js";
 import { CROW_VOICE_BOT_ID } from "../servers/shared/voice-bot.js";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -150,6 +150,23 @@ test("a def's own raw key is checked the same strict way", async () => {
   } finally { w.restore(); cleanup(); }
 });
 
+test("a def key the turn dials as written is judged as written: a bare role: or a key with no '/' is not proven local", async () => {
+  const { db, cleanup } = fresh();
+  const w = captureWarns();
+  try {
+    await localDefaults(db);
+    await seedVoiceBot(db, { kind: "voice" });
+    assert.equal((await loader()(db)).cloud, false, "control: the router's fast key is on loopback");
+    for (const bad of ["role:", "noslash"]) {
+      await db.execute("DELETE FROM pi_bot_defs");
+      await seedVoiceBot(db, { kind: "voice", fast_voice_model: bad });
+      const got = await fastVoiceKeyFor(db, { kind: "voice", fast_voice_model: bad }, { resolveVoiceKeysFn: (d) => resolveVoiceKeys(d, { env: NO_ENV }) });
+      assert.deepEqual(got, { key: bad, cloud: true }, bad);
+      assert.equal((await loader()(db)).cloud, true, bad);
+    }
+  } finally { w.restore(); cleanup(); }
+});
+
 test("light module: voice-keys.js loads neither express nor the orchestrator", () => {
   const target = pathToFileURL(join(ROOT, "servers/shared/voice-keys.js")).href;
   const script = `
@@ -169,6 +186,7 @@ test("light module: voice-keys.js loads neither express nor the orchestrator", (
 // ---- the route log ---------------------------------------------------------------
 
 let up, upUrl, srv, appUrl, routerDb, routerCleanup;
+let routerFastKey = "cloud-a/c1";
 
 before(async () => {
   up = http.createServer((req, res) => {
@@ -179,6 +197,7 @@ before(async () => {
   upUrl = `http://127.0.0.1:${up.address().port}/v1`;
   ({ db: routerDb, cleanup: routerCleanup } = fresh());
   await provider(routerDb, "cloud-a", "https://203.0.113.9/v1", ["c1"], { host: "cloud" });
+  await provider(routerDb, "local-v", "http://127.0.0.1:8011/v1", ["v1"], { host: "local" });
   await provider(routerDb, ESC_PROVIDER, "http://127.0.0.1:8003/v1", [ESC_MODEL], { host: "local" });
   const router = llmRouterRouter({
     acquireFn: async () => true,
@@ -189,7 +208,7 @@ before(async () => {
     remoteAddressFn: () => "127.0.0.1",
     doorAuthFn: async () => false,
     recordUsageFn: async () => {},
-    resolveVoiceKeysFn: () => resolveVoiceKeys(routerDb, { env: { COMPANION_FAST_MODEL: "cloud-a/c1" } }),
+    resolveVoiceKeysFn: () => resolveVoiceKeys(routerDb, { env: { COMPANION_FAST_MODEL: routerFastKey } }),
   });
   const app = express();
   app.use(router);
@@ -199,7 +218,8 @@ before(async () => {
 });
 after(() => { srv?.close(); up?.close(); routerCleanup?.(); });
 
-test("log: a routed chat turn logs cloud=<bool>", async () => {
+async function routedLine(fastKey) {
+  routerFastKey = fastKey;
   const lines = [];
   const orig = console.log;
   console.log = (...a) => { lines.push(a.join(" ")); };
@@ -214,5 +234,13 @@ test("log: a routed chat turn logs cloud=<bool>", async () => {
   assert.equal(r.status, 200);
   const route = lines.filter((l) => l.includes("[llm-router] route=fast"));
   assert.equal(route.length, 1, JSON.stringify(lines));
-  assert.match(route[0], /cloud=true/);
+  return route[0];
+}
+
+test("log: a routed chat turn logs cloud=<bool>", async () => {
+  const cloudLine = await routedLine("cloud-a/c1");
+  assert.match(cloudLine, /-> cloud-a\/c1 .* cloud=true /);
+  // Local control: an env fast key on loopback logs cloud=false.
+  const localLine = await routedLine("local-v/v1");
+  assert.match(localLine, /-> local-v\/v1 .* cloud=false /);
 });
