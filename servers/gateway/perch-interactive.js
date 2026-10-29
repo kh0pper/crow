@@ -1757,7 +1757,10 @@ export function createInteractiveEngine({
     } finally { try { db.close(); } catch {} }
   }
 
-  async function writeRow(s, { status, piSessionDir = null, model = null }, control = "run") {
+  async function writeRow(s, { status, piSessionDir = null, model = null, preMint = false }, control = "run") {
+    // Item 46 PR-B: spawn()'s pre-spawn row names no card (see spawn()), so a
+    // row stranded by a crash in that window never holds the card.
+    const cardId = preMint ? null : s.cardId;
     const db = createDbClient();
     try {
       await db.batch([
@@ -1789,7 +1792,7 @@ export function createInteractiveEngine({
           // narrowed_tools is NEVER restamped here: the INSERT below seeds a
           // forced (locked) narrowing once; after that the narrow route is its
           // only writer, so extra narrowing the owner adds is never erased.
-          args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
+          args: [status, control, cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
         },
         {
           sql:
@@ -1798,7 +1801,7 @@ export function createInteractiveEngine({
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
           // A row this INSERT mints is brand new and cannot have a name yet;
           // label defaults to NULL and writeLabel() owns it from there.
-          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.forcedNarrowing || null, s.botId, s.threadId],
+          args: [s.botId, s.threadId, status, control, cardId, s.projectId, piSessionDir, model, s.cwd || null, s.forcedNarrowing || null, s.botId, s.threadId],
         },
       ]);
       const { rows } = await db.execute({
@@ -2349,9 +2352,10 @@ export function createInteractiveEngine({
     if (!s.forcedNarrowing && storedList && storedList.includes(NARROWING_LOCK)) s.forcedNarrowing = stored;
     // Item 46 PR-B: spawn()'s pre-minted row seeded the narrowing known then.
     // A lock learned only now must be seeded by the post-spawn INSERT exactly
-    // as before (and verified by spawn()), so that row is given back; the
-    // config then names a session that no longer exists, which only weakens
-    // it (the relay refuses a dead session).
+    // as before (and verified by spawn()), so that row is given back. The
+    // config then names a session that no longer exists, so this session has
+    // NO remote (peer) tools: the relay refuses a dead session. Only reachable
+    // when the world reports a lock the fresh row did not carry.
     if (s.rowPreMinted && (s.forcedNarrowing || null) !== (s.preMintNarrowing || null)) await dropPreMintedRow(s);
     if (s.forcedNarrowing) world.narrowedTools = mergeDisabled(stored, s.forcedNarrowing);
     // D22 provenance (R3-L1): with any third-party pi extension loaded, a tool
@@ -3395,12 +3399,16 @@ export function createInteractiveEngine({
     // config name bot_sessions.id, so the row must exist before startChild
     // builds the world. It used to be minted by startChild's post-spawn
     // writeRow; it is minted here instead, with the same INSERT (and the same
-    // forced-narrowing seed). If the spawn then fails before that post-spawn
-    // write, the row is deleted again, so a failed spawn leaves no row, as
-    // before. A failed pre-write is non-fatal: startChild's write mints the
-    // row as it always did (the config then binds no session).
+    // forced-narrowing seed), but parked ('waiting-user', a status the signed
+    // session check accepts) and with NO card: the post-spawn write sets
+    // 'active' and the card exactly as before. So a row stranded by a crash in
+    // between neither reads as a live claim nor locks the card. If the spawn
+    // fails (or stopAll() runs) before that post-spawn write, the row is
+    // deleted again, so a failed spawn leaves no row, as before. A failed
+    // pre-write is non-fatal: startChild's write mints the row as it always
+    // did (the config then binds no session).
     try {
-      await writeRow(s, { status: "active" });
+      await writeRow(s, { status: "waiting-user", preMint: true });
       s.rowPreMinted = s.rowId != null;
       s.preMintNarrowing = s.forcedNarrowing || null;
     } catch (e) {
@@ -3423,7 +3431,7 @@ export function createInteractiveEngine({
       // hibernating forever and whose fresh claim 409s any wake. Gated on
       // rowId, not on `pi`: writeRow's insert branch would otherwise MINT a
       // row for a spawn that never got far enough to have one.
-      if (s.rowPreMinted) dropPreMintedRow(s).catch(() => {});
+      if (s.rowPreMinted) await dropPreMintedRow(s).catch(() => {});
       else if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
       writeLeases();
       throw e;
@@ -4375,6 +4383,9 @@ export function createInteractiveEngine({
   async function stopAll({ timeoutMs = DEFAULT_STOP_ALL_MS } = {}) {
     stopLeaseRefresh();
     const live = [...sessions.values()].filter((s) => s.pi);
+    // Item 46 PR-B: a spawn still before its post-spawn row write has no child
+    // yet; its pre-minted row is given back, as a failed spawn's is.
+    await Promise.all([...sessions.values()].filter((s) => !s.pi && s.rowPreMinted).map((s) => dropPreMintedRow(s).catch(() => {})));
     await Promise.all(live.map(async (s) => {
       const pi = s.pi;
       s.pi = null;

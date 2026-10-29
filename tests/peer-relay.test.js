@@ -92,6 +92,8 @@ before(async () => {
     ["stopped", "hank", "stopped", null], ["done", "hank", "done", null], ["archived", "hank", "active", "2026-10-01 00:00:00"],
     ["otto", "otto", "active", null], ["ghost", "ghost", "active", null],
   ]) SESS[name] = Number(sess.run(bot, "discord", "discord:42", status, archived).lastInsertRowid);
+  SESS.otherThread = Number(sess.run("hank", "discord", "discord:99", "active", null).lastInsertRowid);
+  SESS.otherGateway = Number(sess.run("hank", "telegram", "discord:42", "active", null).lastInsertRowid);
   ACTOR = { ...ACTOR, sessionId: String(SESS.live) };
   d.close();
 
@@ -191,6 +193,9 @@ test("B6: the signed session must be this bot's live session", async () => {
   }
   // Another bot's session, signed as hank.
   assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS.otto) }) } }), 401, /session/);
+  // A valid signature over (hank, that session) whose thread or gateway is not the session row's.
+  assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS.otherThread) }) } }), 401, /session/);
+  assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS.otherGateway) }) } }), 401, /session/);
   // A session id with no row.
   assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: "999999" }) } }), 401, /session/);
   // No session header at all (a v1-shaped caller): the v2 signature cannot verify.

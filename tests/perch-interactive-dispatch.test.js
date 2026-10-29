@@ -578,6 +578,36 @@ test("a hibernating card-bound session KEEPS its claim — a second spawn for th
   await assert.rejects(() => engine.spawn({ botId: "intruder", cardId: 402 }), (e) => e.code === "card_occupied");
 });
 
+// Item 46 PR-B (B6, fix round 1 I-2): spawn() mints the session row before the
+// world is built. A shutdown or crash in that window must not leave a row that
+// holds the card: the card stays free, exactly as when no row existed yet.
+test("B6: an engine stopped mid-spawn (before the world is built) leaves the card free", async () => {
+  const A = makeEngine();
+  let release;
+  A.state.worldGate = new Promise((r) => { release = r; });
+  const p = A.engine.spawn({ botId: "midspawn", cardId: 404 });
+  p.catch(() => {});
+  await tick();
+  assert.equal(A.state.worlds.length, 1, "precondition: the spawn is inside buildBotWorld");
+  await A.engine.stopAll({ timeoutMs: 500 });
+  const B = makeEngine();
+  const r = await spawned(B.engine, { botId: "next", cardId: 404 });
+  assert.equal((await B.engine.get(r.sessionId)).cardId, 404, "the card was free");
+  release();
+  await tick();
+});
+
+test("B6: a crash mid-spawn (no stopAll) leaves the card free too", async () => {
+  const A = makeEngine();
+  A.state.worldGate = new Promise(() => {}); // never settles: the process "died" here
+  A.engine.spawn({ botId: "crashed", cardId: 405 }).catch(() => {});
+  await tick();
+  assert.equal(A.state.worlds.length, 1, "precondition: the spawn is inside buildBotWorld");
+  const B = makeEngine();
+  const r = await spawned(B.engine, { botId: "next2", cardId: 405 });
+  assert.equal((await B.engine.get(r.sessionId)).cardId, 405, "the card was free");
+});
+
 // ---------------------------------------------------------------------------
 // 9. adoptRow restores the claim across a restart
 // ---------------------------------------------------------------------------

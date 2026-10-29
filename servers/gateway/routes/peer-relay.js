@@ -18,7 +18,8 @@
  *   2. Bearer <relay token>                                          else 401
  *   3. X-Crow-Actor-{Id,Session,Thread,Gateway,Sig}, kind            else 401
  *      "peer-relay" (v2: bound to the bot session), and that session
- *      is a live session of the signed bot (signed-session.js)        else 401
+ *      is a live session of the signed bot whose thread and gateway
+ *      are the signed ones (signed-session.js)                        else 401
  *   4. feature_flags.remote_invocation                               else 403
  *   5. <mount> is a remote capability                                else 404
  *      and the bot's row selected (instanceId, capability)          else 403
@@ -126,8 +127,10 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       if (typeof bot !== "string" || !BOT_ID_RE.test(bot) || !verifyPeerRelayActorSig({ botId: bot, sessionId, threadId, gatewayType, sig })) {
         return refuse(res, 401, "a signed bot actor is required", { id });
       }
-      // The signature names a session; it must still be this bot's, and live.
-      if (!(await resolveSignedSession(db, { botId: bot, sessionId }))) {
+      // The signature names a session; it must still be this bot's, live, and
+      // the thread and gateway it signed must be that session's own.
+      const session = await resolveSignedSession(db, { botId: bot, sessionId });
+      if (!session || (threadId ?? "").trim() !== (session.threadId ?? "") || (gatewayType ?? "").trim() !== (session.gatewayType ?? "")) {
         return refuse(res, 401, "the signed bot session is not live", { id });
       }
 

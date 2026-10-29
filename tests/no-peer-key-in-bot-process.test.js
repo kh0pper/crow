@@ -87,6 +87,13 @@ function importGraph(entry) {
   return [...seen].map((f) => f.slice(REPO.length + 1));
 }
 
+// discord_gateway.mjs (pibot-discord@) is deliberately NOT walked here: the same
+// file also runs as the gateway's SUPERVISED Discord child, which receives the
+// per-boot key over stdin (readActorKeyFromStdin, only when the gateway sets
+// CROW_ACTOR_KEY_STDIN=1; tests/actor-sig.test.js covers that handoff). Under
+// its own systemd unit nothing writes that stdin, so it holds no key and asks
+// the signing relay like the other two hosts; its import graph is otherwise
+// the bridge's (bridge.mjs → bot-world.mjs → actor-sig.mjs), walked below.
 for (const entry of ["scripts/pi-bots/bridge_tick.mjs", "scripts/pi-bots/gateways/gateway_runner.mjs"]) {
   test(`static: ${entry} and its imports never read a peer key, mint or install an actor key`, () => {
     const rel = importGraph(entry);
@@ -112,7 +119,6 @@ test("static: the signing relay answers with signatures only", () => {
   assert.ok(!/\.send\(|\.write\(|\.end\(/.test(src), "no other way to write a body");
 });
 
-// ---- runtime ----
 // ---- runtime ----
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "no-peer-key-")));

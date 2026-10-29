@@ -10,7 +10,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
@@ -26,8 +26,16 @@ import {
 
 let dir, dbPath, base, srv;
 const SESS = {};
-const ME = { unit: "pibot-bridge@alpha.service", pid: process.pid, state: "activating" };
+// This test process plays each host's main process: the unit records are the
+// injected part; the socket, fds, cgroup and start time are this process's real ones.
+const CGROUP = readFileSync(`/proc/${process.pid}/cgroup`, "utf8").split("\n").find((l) => l.startsWith("0::")).slice(3);
+const hostUnit = (template, instance) => ({
+  unit: `pibot-${template}@${instance}.service`, pid: process.pid, state: "active", transient: "no",
+  fragment: `/etc/systemd/system/pibot-${template}@.service`, cgroup: CGROUP, envFiles: [`/etc/crow/pibot-${instance}.env`],
+});
+const ME = hostUnit("bridge", "alpha");
 let units = [ME];
+let envFiles = {}; // path -> instance config text (filled in before())
 const ALL = ["bot", "board", "artifacts", "board-thread", "peer-relay", "service"];
 
 before(async () => {
@@ -36,18 +44,25 @@ before(async () => {
   dbPath = join(dir, "crow.db");
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: dbPath }, cwd: join(import.meta.dirname, ".."), stdio: "pipe" });
   const d = new Database(dbPath);
-  d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?, ?, ?)").run("hank", "Hank", "{}");
-  d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?, ?, ?)").run("otto", "Otto", "{}");
+  envFiles = {
+    "/etc/crow/pibot-alpha.env": `CROW_HOME=${dir}\nCROW_DB_PATH=${dbPath}\n`,
+    "/etc/crow/pibot-bravo.env": `CROW_DB_PATH=${join(dir, "bravo", "crow.db")}\n`,
+  };
+  const bot = d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, ?, ?, ?)");
+  bot.run("hank", "Hank", JSON.stringify({ gateways: [{ type: "gmail", address: "bots+hank@example.com" }] }), 1);
+  bot.run("otto", "Otto", JSON.stringify({ gateways: [{ type: "discord" }] }), 1);
+  bot.run("dora", "Dora", JSON.stringify({ gateways: [{ type: "gmail", address: "bots+dora@example.com" }] }), 0);
   const ins = d.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, archived_at) VALUES (?, ?, ?, ?, ?)");
   for (const [name, bot, gw, thread, status, archived] of [
     ["live", "hank", "gmail", "t-100", "active", null], ["stopped", "hank", "gmail", "t-101", "stopped", null],
-    ["archived", "hank", "gmail", "t-102", "active", "2026-10-01 00:00:00"], ["otto", "otto", "gmail", "t-200", "active", null],
+    ["archived", "hank", "gmail", "t-102", "active", "2026-10-01 00:00:00"], ["otto", "otto", "discord", "t-200", "active", null], ["dora", "dora", "gmail", "t-400", "active", null],
     ["card", "hank", "board", "board-card-5", "active", null], ["ghost", "ghost", "gmail", "t-300", "active", null],
   ]) SESS[name] = String(ins.run(bot, gw, thread, status, archived).lastInsertRowid);
-  const job = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status) VALUES (?, ?, ?, ?)");
-  job.run("job-run-1", "hank", "g", "running");
-  job.run("job-done-1", "hank", "g", "completed");
-  job.run("job-otto-1", "otto", "g", "running");
+  const job = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid) VALUES (?, ?, ?, ?, ?)");
+  job.run("job-run-1", "hank", "g", "running", process.pid);
+  job.run("job-done-1", "hank", "g", "completed", process.pid);
+  job.run("job-otto-1", "otto", "g", "running", process.pid);
+  job.run("job-elsewhere-1", "hank", "g", "running", 1); // claimed by another host
   d.close();
 
   _resetActorKeyForTest();
@@ -57,7 +72,13 @@ before(async () => {
   app.use(actorSignRouter({
     createDbClient: () => createDbClient(dbPath),
     // cacheMs 0: each leg's unit list is the one it sets (the cache itself is covered in bot-host-caller.test.js).
-    deps: { resolver: createBotHostCallerResolver({ listUnits: async () => units, cacheMs: 0, refreshMinMs: 0 }) },
+    deps: {
+      resolver: createBotHostCallerResolver({
+        manager: "system", listUnits: async () => units, cacheMs: 0, refreshMinMs: 0,
+        readEnvFile: (p) => { if (!(p in envFiles)) throw new Error("ENOENT"); return { isFile: true, uid: 0, mode: 0o100644, text: envFiles[p] }; },
+      }),
+      localDbPath: dbPath,
+    },
   }));
   srv = http.createServer(app);
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
@@ -161,6 +182,8 @@ test("refused: an unknown bot, another bot's session, a dead session, a thread t
     "another gateway": { ...LIVE(), gatewayType: "discord" },
     "a job that is not running": { ...LIVE(), jobId: "job-done-1" },
     "another bot's job": { ...LIVE(), jobId: "job-otto-1" },
+    "a job another host claimed": { ...LIVE(), jobId: "job-elsewhere-1" },
+    "a disabled bot": { botId: "dora", sessionId: SESS.dora, threadId: "t-400", gatewayType: "gmail" },
   };
   for (const [name, body] of Object.entries(cases)) {
     const r = await ask({ ...body, kinds: ["peer-relay", "bot"] });
@@ -198,4 +221,34 @@ test("without a key in the gateway the relay signs nothing (503)", async () => {
     assert.equal(r.json?.sigs, undefined);
   } finally { initGatewayActorKey(); }
   assert.equal(signActor({ kind: "bot", botId: "x" }) !== null, true);
+});
+
+// Fix round 1 (security MEDIUM): an authenticated host gets signatures only for
+// the bots and gateway types it hosts, from the same source it picks them from.
+test("a host is bound to its own instance, its own bots and its own gateway types", async () => {
+  const saved = units;
+  const OTTO = { botId: "otto", sessionId: SESS.otto, threadId: "t-200", gatewayType: "discord" };
+  try {
+    units = [ME];
+    assert.equal((await ask({ ...LIVE(), kinds: ["peer-relay"] })).status, 200, "the bridge host for its own gmail bot");
+    let r = await ask({ ...OTTO, kinds: ["peer-relay"] });
+    assert.equal(r.status, 403, "the bridge host for a discord bot: " + r.text);
+    assert.match(r.json.error, /does not host/);
+
+    units = [hostUnit("discord", "alpha")];
+    assert.equal((await ask({ ...OTTO, kinds: ["peer-relay"] })).status, 200, "the discord host for its own discord bot");
+    r = await ask({ ...LIVE(), kinds: ["peer-relay"] });
+    assert.equal(r.status, 403, "the discord host for a gmail bot: " + r.text);
+    assert.match(r.json.error, /does not host/);
+
+    units = [hostUnit("gateways", "alpha")];
+    assert.equal((await ask({ ...LIVE(), kinds: ["peer-relay"] })).status, 403, "the telegram/slack host does not host gmail");
+    assert.equal((await ask({ botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1", kinds: ["bot"] })).status, 200,
+      "it does drain jobs: one it claimed itself");
+
+    units = [hostUnit("bridge", "bravo")];
+    r = await ask({ ...LIVE(), kinds: ["peer-relay"] });
+    assert.equal(r.status, 403, "host B (another instance's database) asking for host A's bot: " + r.text);
+    assert.match(r.json.error, /another instance/);
+  } finally { units = saved; }
 });

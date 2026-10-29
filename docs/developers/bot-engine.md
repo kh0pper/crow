@@ -153,6 +153,25 @@ Supporting endpoints (all behind the same `dashboardAuth` as every perch-api rou
 
 The hub's chat surface is four tabs (Chat / Session / Files / Activity). Tab switching is pure visibility toggling on the client — it never touches the SSE lifecycle, which belongs to the session, not the tab. Log/tool/error frames route to the Activity rail; the Chat transcript keeps only messages, ask cards, and hard failures.
 
+## Actor signatures on separate bot hosts
+
+A bot's MCP config carries actor headers signed with a per-boot key that lives only in the gateway's memory. The in-gateway bot runtime signs directly, and the supervised Discord child gets the key over stdin. The separate systemd hosts (`pibot-bridge@`, `pibot-gateways@`, `pibot-discord@`) never get the key. Before each turn they ask their own gateway's loopback signing relay (`POST /internal/actor-sign`) for that turn's signatures.
+
+The relay accepts a caller only when it is the main process of an installed bot host unit:
+
+- **Manager.** The unit belongs to the configured systemd manager.
+- **Installed, not transient.** It is `Transient=no`, and its unit file is the template from `scripts/pi-bots/systemd/` in an allowed unit directory.
+- **This instance.** It loads a root-owned `/etc/crow/pibot-<instance>.env` that names this gateway's database. `install-runtime.sh` writes that file.
+- **Its own socket.** The connecting socket is held by the unit's `MainPID`, inside that unit's cgroup.
+
+The relay then signs only for a live session (or a job that host claimed) of an enabled bot that host serves, on that bot's own gateway.
+
+| Setting (gateway env) | Values | Meaning |
+|---|---|---|
+| `CROW_BOT_HOST_MANAGER` | `system` (default) \| `user` | Which systemd manager's units count as bot hosts. `system`: units under `/etc/systemd/system`, `/lib/systemd/system` or `/usr/lib/systemd/system` (what `install-runtime.sh` installs). `user`: only the gateway user's `~/.config/systemd/user` units, for an install that runs its bot hosts with `systemctl --user`. The two are never combined. |
+
+`user` mode is weaker: the gateway's own user can write `~/.config/systemd/user`, so any process running as that user can install a look-alike unit there. Use it only on a single-user box where that user is already trusted. A transient unit (`systemd-run --unit=pibot-…`) is refused in both modes.
+
 ## The pi sandbox (defense in depth, not containment)
 
 Every pi child goes through `PiRpc` in `scripts/pi-bots/bridge.mjs`, whatever started it (channel turns, Perch sessions, background jobs, skill review, the Discord child). That spawn runs through `scripts/pi-bots/pi_sandbox.mjs`.
