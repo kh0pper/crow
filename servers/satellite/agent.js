@@ -24,6 +24,7 @@ import { recoverStagedCert } from "./certs.js";
 import { registerCoreRoutes } from "./routes.js";
 import { registerBundleRoutes } from "./bundles.js";
 import { createMcpHost, registerMcpRoutes } from "./mcp-host.js";
+import { applyPendingDbRestore, createUpdater, registerUpdateRoute } from "./update.js";
 import { createScheduler } from "./scheduler.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -75,10 +76,11 @@ export function readAppSha(root = APP_ROOT) {
  * bundle manager's injectable runners and readers (composeRunner, dockerRunner, readText,
  * mcpPids, npmRunner, appBundlesDir); omitted, the real docker / compose / proc are used.
  * `mcpOptions`: the MCP host's timings (idleMs, killGraceMs, ...; tests shorten them).
+ * `updateDeps`: the updater's runner, appRoot, fetchCheckRuns and exit (update.js).
  * The MCP host's running-child pids feed the install gate's current-use reader unless
  * bundleDeps.mcpPids is given.
  */
-export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn, bundleDeps = {}, mcpOptions = {} }) {
+export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn, bundleDeps = {}, mcpOptions = {}, updateDeps = {} }) {
   // A cert commit a crash interrupted is finished (or discarded) before anything reads the files.
   recoverStagedCert({ db, key, satHome, now });
   const state = { cert: readCert(satHome), pinned: readPinned(satHome) };
@@ -171,6 +173,7 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     toolCache: { refresh: (id, version) => mcpHost.refreshToolCache(id, version), remove: (id) => mcpHost.removeBundle(id) },
   });
   registerMcpRoutes(signed, { host: mcpHost, satHome, sendSigned: auth.sendSigned });
+  registerUpdateRoute(signed, { updater: createUpdater({ db, satHome, now, log: out, ...updateDeps }), sendSigned: auth.sendSigned });
   for (const add of signedRoutes) add(signed, ctx);
   signed.use((_req, res) => auth.sendSigned(res, 404, { error: "not_found" }));
   app.use("/satellite/v1", signed);
@@ -196,13 +199,18 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
  * Open state, build the app and listen. Guards are the caller's job (index.js).
  * → {server, host, port, app, db, key, home, satelliteId, isPaired, issuePairCode, close}.
  */
-export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog, bundleDeps, mcpOptions } = {}) {
+export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog, bundleDeps, mcpOptions, updateDeps = {} } = {}) {
   const satHome = resolveSatHome(env);
   const { host, port } = resolveBind(env);
+  // A rolled-back update's migration: its backup goes back before satellite.db is opened.
+  applyPendingDbRestore(satHome, out);
   const db = openSatelliteDb(satHome);
   const key = ensureSatelliteKey(satHome, { now: now() });
+  let handle = null;
+  // The supervised restart: close cleanly, then exit with the code the unit restarts on.
+  const exit = updateDeps.exit || (async (code) => { try { await handle?.close(); } finally { process.exit(code); } });
   const { app, isPaired, state, refusals, mcpHost } = createSatelliteApp({
-    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog, bundleDeps, mcpOptions,
+    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog, bundleDeps, mcpOptions, updateDeps: { ...updateDeps, exit },
   });
   const server = await new Promise((ok, fail) => {
     const s = app.listen(port, host, () => ok(s));
@@ -214,7 +222,7 @@ export async function startAgent({ env = process.env, now = Date.now, out = cons
   // A bundle whose version changed (or whose cache is missing) gets its tool list re-cached.
   const reconciled = mcpHost.reconcile().catch((err) => out(`satellite: tool cache reconcile failed: ${err?.message || err}`));
   let closed = false;
-  return {
+  handle = {
     server, app, db, key, home: satHome, host: addr.address, port: addr.port, satelliteId: key.satellite_id,
     isPaired, scheduler, refusals, mcpHost,
     issuePairCode: () => issuePairCode(db, { now: now() }),
@@ -230,4 +238,5 @@ export async function startAgent({ env = process.env, now = Date.now, out = cons
       db.close();
     },
   };
+  return handle;
 }
