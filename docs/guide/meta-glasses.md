@@ -137,7 +137,7 @@ near 1.5 s.
 
 ### Talk to Crow on the glasses
 
-Your glasses always answer as **Crow**. There is no bot to bind: Crow's persona, model and tool limits are set once, on the **Crow** voice bot in the [Bot Builder](/guide/bot-builder), and the speech, text-to-speech and vision profiles are the ones you picked in the Meta Glasses panel. Crow still enforces the permission policy before any tool runs: a publish is downgraded to a draft, a true send is blocked, and a confirm-required or denied action is spoken back to you.
+Your glasses always answer as **Crow**. There is no bot to bind: Crow's persona, model and tool limits are set once, on the **Crow** voice bot in the [Bot Builder](/guide/bot-builder), and the speech, text-to-speech and vision profiles are the ones you picked in the Meta Glasses panel. Crow's tool limits still apply before any tool runs, and an action that needs your confirmation is asked about out loud.
 
 For a bigger job, Crow can hand it to one of your bots. Crow says which bot and what the task is, and nothing starts until you say yes (on the glasses, you answer out loud). When the bot finishes, you get one notification that opens what it made, and if you are still talking Crow says so. You can ask "how's writer doing?" and say "stop writer" or "stop it"; Crow asks first, and whatever the bot already made is kept. Which bots Crow may hand work to is set in Crow's voice settings in Bot Builder (**Hand-offs**).
 

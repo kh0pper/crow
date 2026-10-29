@@ -60,7 +60,7 @@ Cuando dices que sí, el trabajo aparece como una tarjeta en el tablero de ese b
 
 Mientras un bot trabaja puedes preguntar «¿cómo va writer?». Para pararlo, di «para a writer» o «párala». Crow siempre te pregunta antes, y lo que el bot ya hizo se conserva.
 
-Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow: abre **Crow** en el Bot Builder y ve a la sección **Encargos a otros bots**, con un interruptor, la lista de bots permitidos (vacía significa todos los bots activados) y un registro de los encargos recientes.
+Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow: abre **Crow** en el Bot Builder y ve a la sección **Encargos a otros bots**, con un interruptor, la lista de bots permitidos (vacía significa todos los bots activados con su tablero encendido; Crow ofrece como máximo ocho) y un registro de los encargos recientes.
 
 ## Perch: habla con un agente desde tu propio panel
 

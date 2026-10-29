@@ -138,7 +138,7 @@ cerca de los 1.5 s.
 
 ### Hablar con Crow desde los lentes
 
-Tus lentes siempre responden como **Crow**. No hay ningún bot que vincular: la personalidad, el modelo y los límites de herramientas de Crow se configuran una sola vez en el bot de voz **Crow** del [Bot Builder](/es/guide/bot-builder), y los perfiles de habla, texto a voz y visión son los que elegiste en el panel de Lentes Meta. Crow sigue aplicando la política de permisos antes de ejecutar cualquier herramienta: una publicación se degrada a borrador, un envío real se bloquea, y una acción que requiere confirmación o está denegada te la dice de viva voz.
+Tus lentes siempre responden como **Crow**. No hay ningún bot que vincular: la personalidad, el modelo y los límites de herramientas de Crow se configuran una sola vez en el bot de voz **Crow** del [Bot Builder](/es/guide/bot-builder), y los perfiles de habla, texto a voz y visión son los que elegiste en el panel de Lentes Meta. Los límites de herramientas de Crow siguen aplicándose antes de ejecutar cualquier herramienta, y una acción que necesita tu confirmación te la pregunta en voz alta.
 
 Para un trabajo más grande, Crow puede encargárselo a uno de tus bots. Te dice qué bot y de qué se trata, y no empieza nada hasta que digas que sí (en los lentes, respondes en voz alta). Cuando el bot termina, recibes una sola notificación que abre lo que hizo, y si sigues hablando Crow te lo dice. Puedes preguntar «¿cómo va writer?» y decir «para a writer» o «párala»; Crow te pregunta antes y lo que el bot ya hizo se conserva. Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow en el Bot Builder (**Encargos a otros bots**).
 

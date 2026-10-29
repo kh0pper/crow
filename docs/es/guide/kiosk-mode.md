@@ -16,9 +16,9 @@ La música o la radio que inicias desde Hablar con Crow suena en la **barra del 
 
 ## Quién responde y los encargos
 
-Todas las pantallas responden como **Crow**, el mismo bot de voz de tus lentes y de Hablar con Crow en el teléfono. Un quiosco ya no se vincula a un bot propio; la personalidad, el modelo y los límites de herramientas de Crow se configuran una sola vez en el bot de voz **Crow** del [Bot Builder](/es/guide/bot-builder). Lo que sigue siendo por dispositivo es el aspecto del compañero: el avatar y las funciones del quiosco (animación del avatar, modo mascota/inactivo, chat social, memoria), que se ajustan donde emparejas la pantalla.
+Todas las pantallas responden como **Crow**, el mismo bot de voz de tus lentes y de Hablar con Crow en el teléfono. Un quiosco ya no se vincula a un bot propio; la personalidad, el modelo y los límites de herramientas de Crow se configuran una sola vez en el bot de voz **Crow** del [Bot Builder](/es/guide/bot-builder). Lo que sigue siendo por dispositivo es el aspecto del compañero: el avatar y las funciones del quiosco (animación del avatar, modo mascota/inactivo, chat social, memoria), que se ajustan en la pestaña **Lo básico** de un bot: elige el canal **Compañero de IA (quiosco)**, escoge o empareja la pantalla y rellena el avatar y las funciones. El emparejamiento de la pantalla en sí se hace en el panel Kiosk.
 
-Crow puede encargarle un trabajo más grande a uno de tus bots. Un quiosco es una pantalla compartida, así que un «sí» dicho en la sala nunca basta: Crow manda una notificación a tu teléfono y ahí tocas Confirmar. Cuando el bot termina, una sola notificación abre lo que hizo, y si sigues hablando con el quiosco Crow dice que el bot terminó. Puedes preguntar «¿cómo va writer?» y decir «para a writer» o «párala»; Crow te pregunta antes (en un quiosco, también en el teléfono) y lo que el bot ya hizo se conserva. Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow en el Bot Builder (**Encargos a otros bots**). Consulta [la arquitectura del quiosco](/es/architecture/kiosk).
+Crow puede encargarle un trabajo más grande a uno de tus bots. Un quiosco es una pantalla compartida, así que un «sí» dicho en la sala nunca basta: Crow manda una notificación a tu teléfono y ahí tocas Confirmar. Cuando el bot termina, una sola notificación abre lo que hizo, y si sigues hablando con el quiosco Crow dice que el bot terminó. Puedes preguntar «¿cómo va writer?» y decir «para a writer» o «párala»; Crow te pregunta antes (en un quiosco, también en el teléfono) y lo que el bot ya hizo se conserva. Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow en el Bot Builder (**Encargos a otros bots**). Consulta [la arquitectura del quiosco](/es/architecture/kiosk#encargos).
 
 El avatar surte efecto en la siguiente sesión del quiosco. Los toggles de funciones se aplican en capas distintas: las funciones de configuración de dispositivo (`social_chat`, `face_tracking`) se obtienen y aplican en cada carga de página del quiosco; las funciones de generación de config (`avatar_model`, `memory_integration`) se incorporan a la config generada del compañero y solo surten efecto tras regenerar la config y reiniciar el contenedor. Consulta la [tabla de semántica de `companion_features`](/es/architecture/companion) para el desglose completo.
 
@@ -26,7 +26,7 @@ El par de modelos lo comparten todas las pantallas porque un contenedor de compa
 
 ## Funciones sociales / de chat
 
-La sala de chat y los DM del compañero están controlados por el toggle por dispositivo `social_chat`, de modo que un kiosco de cara al público puede funcionar solo con el avatar (sin UI social) mientras una pantalla personal conserva el chat completo.
+La sala de chat y los DM del compañero están controlados por el toggle por dispositivo `social_chat`, de modo que un kiosco de cara al público puede funcionar solo con el avatar (sin UI social) mientras una pantalla personal conserva el chat completo. Actívalo en la pestaña Lo básico del bot (canal **Compañero de IA (quiosco)**).
 
 ## Relacionado
 

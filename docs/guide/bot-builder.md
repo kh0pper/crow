@@ -60,7 +60,7 @@ Once you say yes, the work shows up as a card on that bot's board, and Crow tell
 
 While a bot works you can ask "how's writer doing?". To stop it, say "stop writer" or "stop it". Crow always asks first, and whatever the bot already made is kept.
 
-Which bots Crow may hand work to is set in Crow's voice settings: open **Crow** in Bot Builder and use the **Hand-offs** section, which has a switch, the list of allowed bots (empty means every enabled bot) and a log of recent hand-offs.
+Which bots Crow may hand work to is set in Crow's voice settings: open **Crow** in Bot Builder and use the **Hand-offs** section, which has a switch, the list of allowed bots (empty means every enabled bot with its board on; Crow offers at most eight) and a log of recent hand-offs.
 
 ## Perch: talk to an agent from your own dashboard
 
