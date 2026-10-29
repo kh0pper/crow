@@ -55,6 +55,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { serviceById, renderDerivedEnv } from "../../shared/service-catalog.js";
 import { recordChildFailure, recordChildRecovered, servableConnection } from "../../shared/service-connections.js";
+import { connectionBindingOk } from "../../shared/service-sensitivity.js";
 import { redactAcross, redactSecrets, redactThenTruncate, MIN_SECRET_LENGTH } from "../../shared/redact-secrets.js";
 import { resolveAddonCommand, checkLauncherArgs } from "../../shared/resolve-command.js";
 import { serviceSecretsFor } from "../keychain/store.js";
@@ -650,6 +651,14 @@ export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(),
   }
   const conn = await servableConnection(db, uuid, { allowError: true });
   if (!conn) throw new ChildError("not_active");
+  // Before anything is spawned or reused: the row's service_id picks the bundle, the env and the
+  // folder rules, and a bot can write crow.db. Only the service the owner connected (the binding
+  // in the hidden secrets dir; a missing one too) is served (Task 16c fix round 1).
+  if (!connectionBindingOk(conn, { crowHome })) {
+    const err = new ChildError("not_active");
+    err.reason = "binding_mismatch";
+    throw err;
+  }
   const service = serviceById(conn.serviceId);
   if (!service || service.crowWide) throw new ChildError("not_installed");
   // An 'error' row: a transient child failure is retried once its cooldown is over; a folder
@@ -777,6 +786,7 @@ export function listableConnection(conn) {
 export async function listedTools(db, uuid, { crowHome = resolveCrowHome() } = {}) {
   const conn = await servableConnection(db, uuid, { allowError: true });
   if (!listableConnection(conn)) return null;
+  if (!connectionBindingOk(conn, { crowHome })) return null;
   return serviceTools(conn.serviceId, { crowHome });
 }
 

@@ -21,6 +21,15 @@
  * never "not sensitive" on its own account. Any other failure in isSensitiveConnection reads as
  * sensitive.
  *
+ * The BINDING (fix round 1): a bot can write crow.db, so a row's service_id is not to be trusted
+ * on its own: a bot could turn an obsidian row (locked private) into a "github" one. So the
+ * owner's connect route records uuid -> serviceId in a sibling file in the same hidden dir
+ * (service-connection-bindings, same anchored mechanism; only that route, and the later
+ * owner-only write paths of services PR 4 / PR 8, may write it). A connection whose row
+ * service_id differs from its recorded binding, or that has no binding, is sensitive AND not
+ * served: the mount and ensureChild refuse it (not_active, reason binding_mismatch). A
+ * connection made before bindings existed has none and is refused until the owner reconnects it.
+ *
  * Google mail, calendar and contacts (services PR 6) will be added here as sensitive and LOCKED
  * when Google arrives (roles spec §11.2: mail, calendar, contacts and file contents).
  */
@@ -54,6 +63,9 @@ export const UNKNOWN_SERVICE_SENSITIVITY = S(true, true);
 
 /** The override file, inside the anchored secrets dir. */
 export const SENSITIVITY_OVERRIDES_FILENAME = "service-sensitivity-overrides";
+/** The uuid -> serviceId bindings the owner's connect route recorded, beside it. */
+export const CONNECTION_BINDINGS_FILENAME = "service-connection-bindings";
+const SERVICE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -66,6 +78,64 @@ export function serviceSensitivity(serviceId) {
 
 const envFor = (crowHome) => ({ ...process.env, CROW_HOME: crowHome || resolveCrowHome() });
 
+/** One anchored one-line JSON object file as a Map (keys: uuids, lower-cased; values that pass `ok`). */
+function readUuidMap(name, ok, crowHome) {
+  const out = new Map();
+  try {
+    const p = anchoredPath(envFor(crowHome), name);
+    const f = p ? readSecretValuesFile(p, { raw: true }) : null;
+    if (!f || f.lines.length !== 1) return out;
+    const obj = JSON.parse(f.lines[0]);
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return out;
+    for (const [k, v] of Object.entries(obj)) {
+      if (UUID_RE.test(k) && ok(v)) out.set(k.toLowerCase(), v);
+    }
+  } catch {
+    out.clear();
+  }
+  return out;
+}
+
+/** Write a Map as that file, atomically (temp, fsync, rename; 600), through the anchored dir only. */
+function writeUuidMap(name, map, crowHome) {
+  const p = anchoredPath(envFor(crowHome), name);
+  if (!p) throw new Error("no anchored secrets dir");
+  const obj = Object.fromEntries([...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  writeSecretValuesFile(p, [JSON.stringify(obj)], { raw: true });
+}
+
+/** uuid -> serviceId, as the owner's connect route recorded it (missing or corrupt: empty). */
+export function readConnectionBindings({ crowHome } = {}) {
+  return readUuidMap(CONNECTION_BINDINGS_FILENAME, (v) => typeof v === "string" && SERVICE_ID_RE.test(v), crowHome);
+}
+
+/**
+ * Record a connection's service at creation. ONLY the owner's connect route (services-api.js)
+ * and the owner-only write paths of services PR 4 / PR 8 may call this. Throws on a bad value or
+ * when the anchored dir can't be written (the connection is then never served: fail closed).
+ */
+export function recordConnectionBinding(conn, { crowHome } = {}) {
+  const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
+  const serviceId = conn?.serviceId;
+  if (!UUID_RE.test(uuid) || typeof serviceId !== "string" || !SERVICE_ID_RE.test(serviceId)) throw new SensitivityError("bad_value");
+  const map = readConnectionBindings({ crowHome });
+  map.set(uuid, serviceId);
+  writeUuidMap(CONNECTION_BINDINGS_FILENAME, map, crowHome);
+}
+
+/** True only when the row's service_id is the one recorded for its uuid. Any doubt: false. */
+export function connectionBindingOk(conn, { crowHome, bindings } = {}) {
+  try {
+    const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
+    if (!uuid || typeof conn?.serviceId !== "string") return false;
+    const map = bindings instanceof Map ? bindings : readConnectionBindings({ crowHome });
+    const bound = map.get(uuid);
+    return typeof bound === "string" && bound === conn.serviceId;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The owner's overrides: uuid -> boolean. Only the anchored path is read. A missing, unreadable
  * or corrupt file is an empty map (every connection takes its default); an entry whose key is
@@ -73,20 +143,7 @@ const envFor = (crowHome) => ({ ...process.env, CROW_HOME: crowHome || resolveCr
  * @returns {Map<string, boolean>}
  */
 export function readSensitivityOverrides({ crowHome } = {}) {
-  const out = new Map();
-  try {
-    const p = anchoredPath(envFor(crowHome), SENSITIVITY_OVERRIDES_FILENAME);
-    const f = p ? readSecretValuesFile(p, { raw: true }) : null;
-    if (!f || f.lines.length !== 1) return out;
-    const obj = JSON.parse(f.lines[0]);
-    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return out;
-    for (const [k, v] of Object.entries(obj)) {
-      if (UUID_RE.test(k) && typeof v === "boolean") out.set(k.toLowerCase(), v);
-    }
-  } catch {
-    out.clear();
-  }
-  return out;
+  return readUuidMap(SENSITIVITY_OVERRIDES_FILENAME, (v) => typeof v === "boolean", crowHome);
 }
 
 /** {sensitive, locked, default} for one connection ({uuid, serviceId}). */
@@ -102,12 +159,14 @@ export function connectionSensitivity(conn, { crowHome, overrides } = {}) {
 /**
  * THE predicate every bot-facing path uses (the services mount now; the pi blocks, Task 18, and
  * the dashboard chat, Task 20, must skip a connection for which this is true). Any failure is
- * true (fail closed).
+ * true (fail closed). A connection whose binding is missing or doesn't match its row is sensitive
+ * too (and the mount and ensureChild refuse to serve it at all).
  * @param {{uuid: string, serviceId: string}} conn
  * @param {{crowHome?: string}} [opts]
  */
 export function isSensitiveConnection(conn, { crowHome } = {}) {
   try {
+    if (!connectionBindingOk(conn, { crowHome })) return true;
     return connectionSensitivity(conn, { crowHome }).sensitive !== false;
   } catch {
     return true;
@@ -132,12 +191,8 @@ export function setSensitivityOverride(conn, sensitive, { crowHome } = {}) {
   if (!UUID_RE.test(uuid)) throw new SensitivityError("bad_value");
   const s = serviceSensitivity(conn?.serviceId);
   if (s.locked) throw new SensitivityError("locked");
-  const env = envFor(crowHome);
-  const p = anchoredPath(env, SENSITIVITY_OVERRIDES_FILENAME);
-  if (!p) throw new Error("no anchored secrets dir");
   const map = readSensitivityOverrides({ crowHome });
   map.set(uuid, sensitive);
-  const obj = Object.fromEntries([...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-  writeSecretValuesFile(p, [JSON.stringify(obj)], { raw: true });
+  writeUuidMap(SENSITIVITY_OVERRIDES_FILENAME, map, crowHome);
   return connectionSensitivity({ uuid, serviceId: conn.serviceId }, { crowHome });
 }

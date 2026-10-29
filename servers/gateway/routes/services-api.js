@@ -55,7 +55,9 @@ import { servicesUiEnabled } from "../services/ui-flag.js";
 import { ChildError, childState, ensureChild, resetChildFailures, stopChild } from "../services/children.js";
 import { requireDashboardSessionJson } from "./models.js";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
-import { SensitivityError, connectionSensitivity, readSensitivityOverrides, setSensitivityOverride } from "../../shared/service-sensitivity.js";
+import {
+  SensitivityError, connectionBindingOk, connectionSensitivity, readConnectionBindings, readSensitivityOverrides, recordConnectionBinding, setSensitivityOverride,
+} from "../../shared/service-sensitivity.js";
 import { crowServerCatalog } from "../../../scripts/pi-bots/crow-server-catalog.mjs";
 import { readCanonicalMcp } from "../../../scripts/pi-bots/mcp_writer.mjs";
 
@@ -103,7 +105,7 @@ const toSet = (v) => (v instanceof Set ? v : new Set(Array.isArray(v) ? v : []))
  * One connection as the dashboard sees it: no value, ever. `private` is its effective
  * sensitivity (Task 16c: on = bots can't read it yet; locked = the owner can't turn it off).
  */
-export async function connectionView(db, conn, service, { installed, crowHome = resolveCrowHome(), overrides } = {}) {
+export async function connectionView(db, conn, service, { installed, crowHome = resolveCrowHome(), overrides, bindings } = {}) {
   const { status, labelKey } = connectionDisplayStatus(conn, { installed });
   const saved = await serviceSecretKeys(db, conn.uuid);
   const fields = {};
@@ -121,13 +123,14 @@ export async function connectionView(db, conn, service, { installed, crowHome = 
     lastTestedAt: conn.lastTestedAt,
     lastError: conn.lastError,
     fields,
-    private: privateView(conn, { crowHome, overrides }),
+    private: privateView(conn, { crowHome, overrides, bindings }),
   };
 }
 
-/** {on, locked}; any failure reads as private (fail closed). */
-function privateView(conn, { crowHome, overrides }) {
+/** {on, locked}; any failure, or a row that isn't the service the owner connected, reads as private and locked. */
+function privateView(conn, { crowHome, overrides, bindings }) {
   try {
+    if (!connectionBindingOk(conn, { crowHome, bindings })) return { on: true, locked: true };
     const s = connectionSensitivity(conn, { crowHome, overrides });
     return { on: s.sensitive !== false, locked: s.locked === true };
   } catch {
@@ -164,10 +167,11 @@ export async function loadServicesPage(db, slug, { installedIds = new Set(), lan
   const byId = new Map(catalog.map((s) => [s.id, s]));
   const conns = await listConnections(db, { projectId: project.id, ownerContactId: null });
   const overrides = readSensitivityOverrides({ crowHome });
+  const bindings = readConnectionBindings({ crowHome });
   const connections = [];
   for (const c of conns) {
     const s = byId.get(c.serviceId);
-    connections.push(await connectionView(db, c, s, { installed: s ? installed.has(s.bundleId) : false, crowHome, overrides }));
+    connections.push(await connectionView(db, c, s, { installed: s ? installed.has(s.bundleId) : false, crowHome, overrides, bindings }));
   }
   const here = new Set(conns.map((c) => c.serviceId));
   const alsoOnCrow = (await otherProjectServiceIds(db, project.id))
@@ -378,6 +382,10 @@ export function servicesApiRouter({
       if (err instanceof ConnectionError) return fail(res, err.code);
       throw err;
     }
+    // The owner's binding uuid -> service, in the hidden secrets dir: a bot that rewrites the row's
+    // service_id in crow.db gets a connection nothing serves. Unwritten, the connection is never
+    // served (fail closed) and the owner reconnects.
+    try { recordConnectionBinding(conn, { crowHome: home() }); } catch { console.warn("[services] connection binding not written"); }
     refresh();
     res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true, crowHome: home() }) });
   }));
