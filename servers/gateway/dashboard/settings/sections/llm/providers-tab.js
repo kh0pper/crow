@@ -34,6 +34,9 @@ import { getOrCreateLocalInstanceId } from "../../../../instance-registry.js";
 import { isExternalEngine, externalEngineInfo } from "../../../../../shared/provider-engine.js";
 import { getProviderHealth } from "../../../../provider-health.js";
 import { t, fill } from "../../../shared/i18n.js";
+import { csrfInput } from "../../../shared/csrf.js";
+import { roleRefLabel } from "../../../shared/bot-display.js";
+import { readCustomRoleDefs } from "../../../../../shared/model-roles-store.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isDefaultCrowHome } from "../../../../../shared/crow-home.js";
@@ -226,6 +229,40 @@ function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
   return `<td class="llm-cell-usedby" data-label="${label}" title="${escapeHtml(labels.join("\n"))}">${shown}${more}${hint}</td>`;
 }
 
+/**
+ * The Disable confirm for a provider that roles are bound to: names the roles
+ * that move (every label through escapeHtml: custom labels are user text) and
+ * offers Confirm (a POST with confirm=1, behind the session and CSRF rails) or
+ * Cancel. "" when there is nothing to confirm.
+ */
+export function disableMovesCallout(pending, req, lang = "en") {
+  if (!pending || !pending.id || !pending.labels?.length) return "";
+  return `<div class="llm-disable-moves" role="alert" style="margin:0 0 1rem;padding:0.75rem 1rem;background:var(--crow-bg-surface);border-left:3px solid var(--crow-brand-gold);border-radius:4px">
+      <p style="margin:0 0 0.6rem">${escapeHtml(fill(t("providers.disableMoves", lang), { roles: pending.labels.join(", ") }))}</p>
+      <form method="post" style="display:inline">
+        ${csrfInput(req)}
+        <input type="hidden" name="action" value="llm_provider_disable">
+        <input type="hidden" name="id" value="${escapeHtml(pending.id)}">
+        <input type="hidden" name="confirm" value="1">
+        <button class="btn btn-danger btn-sm" type="submit">${escapeHtml(fill(t("providers.disableConfirm", lang), { provider: pending.id }))}</button>
+      </form>
+      <a class="btn btn-secondary btn-sm" href="${BACK}">${escapeHtml(t("models.deleteCancelButton", lang))}</a>
+    </div>`;
+}
+
+/** {id, labels} for the roles (bound, then the ones that follow them) a provider carries, or null. */
+async function rolesThatMove(db, id, lang) {
+  try {
+    const { providerBindings } = await import("../../../../models/manager.js");
+    const b = await providerBindings(db, id);
+    const all = [...(b.roles || []), ...(b.reach || [])];
+    if (!(b.roles || []).length) return null;
+    const customDefs = await readCustomRoleDefs(db).catch(() => ({}));
+    const labels = [...new Set(all.map((r) => roleRefLabel("role:" + r.roleId, { lang, customDefs }) || r.roleId))];
+    return { id, labels };
+  } catch { return null; }
+}
+
 export default {
   /** piAgentDir / tasksDbPaths are test seams; production passes neither. */
   async render({ req, db, lang = "en", piAgentDir, tasksDbPaths }) {
@@ -406,6 +443,7 @@ export default {
     </style>
 
     ${botsNote}
+    ${disableMovesCallout(req?.providerDisableConfirm, req, lang)}
     <p class="llm-section-hint">
       ${escapeHtml(fill(t(active.length === 1 ? "settings.providers.enabledOne" : "settings.providers.enabledN", lang), { n: active.length }))} ${escapeHtml(t("settings.providers.introTail", lang))}
     </p>
@@ -468,7 +506,7 @@ export default {
     </details>`;
   },
 
-  async handleAction({ req, res, db, action }) {
+  async handleAction({ req, res, db, action, lang = "en" }) {
     if (action === "llm_provider_add") {
       const { id, provider_type, base_url, api_key, model_id, description } = req.body;
       if (!id || !base_url) {
@@ -491,6 +529,14 @@ export default {
       return true;
     }
     if (action === "llm_provider_disable") {
+      // Roles bound to this provider move when it goes off: say which, and wait for confirm=1.
+      if (req.body?.confirm !== "1" && typeof req.body?.id === "string") {
+        const pending = await rolesThatMove(db, req.body.id, lang);
+        if (pending) {
+          req.providerDisableConfirm = pending;
+          return { renderSection: "llm" };
+        }
+      }
       await disableProvider(db, req.body.id);
       invalidateProvidersCache();
       res.redirectAfterPost(BACK);

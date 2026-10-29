@@ -327,3 +327,30 @@ test("round 2 (b): a throw while choosing evicting/starting fails the job instea
   assert.match(j.error, /orchestrator unavailable/);
   assert.equal(deps.jobs.activeFor("crow-chat"), null);
 });
+
+test("DELETE without confirm returns the roles and the roles that follow them; a mock without roles still works", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { deps } = coreDeps();
+    const withRoles = { profiles: [], bots: [], roles: [{ roleId: "everyday", model: "crow-chat/chat-model", seeded: false }], reach: [{ roleId: "coordinator", via: "everyday" }] };
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => createLifecycleCore(deps),
+      providerBindingsFn: async () => withRoles,
+    }, async (base) => {
+      const fb = await (await fetch(`${base}/api/models/providers/crow-chat`, { headers: authHeaders(token), method: "DELETE" })).json();
+      assert.equal(fb.requiresConfirm, true);
+      assert.equal(fb.bindings.roles[0].roleId, "everyday");
+      assert.equal(fb.bindings.reach[0].roleId, "coordinator");
+    });
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => createLifecycleCore(deps),
+      providerBindingsFn: async () => ({ profiles: [], bots: [] }),
+    }, async (base) => {
+      const fb = await (await fetch(`${base}/api/models/providers/crow-chat`, { headers: authHeaders(token), method: "DELETE" })).json();
+      assert.equal(fb.requiresConfirm, true);
+    });
+  } finally { await h.cleanup(); }
+});
