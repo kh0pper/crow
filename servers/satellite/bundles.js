@@ -16,6 +16,9 @@
  *   POST bundles/:id/bot-access     501 not_supported (bundle-defined exec: Gitea G4)
  *   GET  jobs/:id                   {id, bundle_id, action, status, log, started_at, completed_at}
  *
+ * `toolCache` ({refresh(id, version), remove(id)}, mcp-host.js) caches a bundle's tool list at
+ * install and drops it (stopping the child) at uninstall.
+ *
  * Only owner callers (owner-local / owner-remote) manage bundles; a `bot:` caller gets 403.
  * Bundles come only from the agent's own checkout ($SAT_HOME/app/bundles/<id>) and are
  * installed with bundle-core in a full Crow's formats under crowHome = SAT_HOME: installed.json,
@@ -103,6 +106,7 @@ function validateEnv(manifest, env) {
 export function createBundleManager({
   db, satHome, now = Date.now, appBundlesDir = join(satHome, "app", "bundles"),
   composeRunner, dockerRunner = coreDockerRunner(), readText = readTextOrNull, mcpPids = () => [], npmRunner = run,
+  toolCache = null,
 }) {
   const compose = composeRunner || ((args, opts = {}) => runCompose(args, { ...opts, crowHome: satHome }));
   const kdb = keychainDb(db);
@@ -345,6 +349,15 @@ export function createBundleManager({
         const gen = Object.fromEntries(Object.entries(plan.env).filter(([k]) => !hashed.has(k)));
         writeAddonEntry(id, manifest, { ...typed, ...gen });
         log(job, `Registered MCP server '${id}'`);
+        // tool_cache (§7.3): start the child once, cache its tools/list, stop it.
+        if (toolCache) {
+          try {
+            const c = await toolCache.refresh(id, manifest.version);
+            log(job, `Cached ${c.count} tool(s) (sha256 ${c.sha256.slice(0, 12)})`);
+          } catch (err) {
+            log(job, `Warning: could not cache the tool list: ${String(err?.message || err).slice(0, 200)}`);
+          }
+        }
       }
       if (upFailure) return fail("Installed, but the containers did not start: fix the settings and Start it");
       finish(job, "complete");
@@ -362,6 +375,7 @@ export function createBundleManager({
     const job = newJob(id, "uninstall");
     (async () => {
       const dest = destOf(id);
+      if (toolCache) await toolCache.remove(id); // the child first: its folder goes below
       if (existsSync(join(dest, "docker-compose.yml"))) {
         try {
           await teardown(["down"], dest);

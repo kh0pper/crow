@@ -1,7 +1,7 @@
 /**
  * `GET /satellite/v1/status` body (SAT-3, spec §8 Servers card): identity, version, cert, memory
  * (/proc/meminfo, bytes), memory PSI (/proc/pressure/memory "some avg10", percent), free disk
- * under SAT_HOME (statfs), host uptime and the installed bundles. Never more than 64 KiB: the
+ * under SAT_HOME (statfs), host uptime, the installed bundles and each bundle's cached tool-list hash. Never more than 64 KiB: the
  * installed list is cut (installed_truncated: true) if it would not fit. All readers injectable.
  */
 import { readFileSync, statfsSync } from "node:fs";
@@ -31,7 +31,7 @@ export function parsePsiSomeAvg10(text) {
 }
 
 export function collectStatus({
-  satelliteId, sha, cert, installed = [], satHome = ".",
+  satelliteId, sha, cert, installed = [], tools = {}, satHome = ".",
   readText = readTextOrNull, statfs = statfsSync, uptime = osUptime,
 }) {
   let disk = null;
@@ -46,6 +46,8 @@ export function collectStatus({
     disk_free_bytes: Number.isFinite(disk) ? disk : null,
     uptime_s: Math.floor(Number(uptime()) || 0),
     installed: installed.map((b) => ({ id: String(b.id), version: b.version == null ? null : String(b.version) })),
+    // tool_cache per bundle (§7.3, §9.1): crow pins the sha256 of each bundle's cached tools/list.
+    tools: Object.fromEntries(Object.entries(tools || {}).map(([id, t]) => [String(id), { version: t?.version == null ? null : String(t.version), sha256: String(t?.sha256 || "") }])),
   };
   const size = () => Buffer.byteLength(JSON.stringify(status));
   if (size() > STATUS_MAX_BYTES) {
@@ -53,6 +55,7 @@ export function collectStatus({
     while (status.installed.length && size() > STATUS_MAX_BYTES) {
       status.installed.length = Math.floor((status.installed.length * STATUS_MAX_BYTES) / size());
     }
+    if (size() > STATUS_MAX_BYTES) { status.tools = {}; status.tools_truncated = true; }
   }
   return status;
 }
