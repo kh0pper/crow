@@ -27,6 +27,17 @@ The Crow's Nest header bird opens the same page inside the dashboard, with no pa
 - The page is framed by the dashboard only (`frame-ancestors 'self'`); the paired page at `/display` still refuses all framing.
 - Player bar (the Talk to Crow overlay opens its page with `?bar=1` when the dashboard's bar has the kiosk backend; the page then plays through the bar): `GET`/`POST /api/kiosk/session/media` lets the dashboard's player bar read and steer what the overlay started after the overlay is closed. Same gate as the socket — the network rule (never Funnel), the dashboard session cookie (`401`), and on `POST` the `X-Crow-Csrf` double-submit (`403`). It reaches only the caller's own login's display, and only when that display's page asked for the bar in its `hello` (`caps.bar` plus a per-tab nonce; a paired display can never ask). `GET` hands the current item (and its ticket) only to the tab that owns the audio, named by the `X-Crow-Owner` header carrying its nonce; any other tab, a missing or malformed header, or a display without a bar gets `item: null`. `POST { do, id, owner }` acts only on the current item for the tab that holds it (else `409 superseded`), except that the owner's `stop` ends the session even with a stale item id (after a station reload); answers are never cached and the ticket path in them is never logged. Audio handed to the bar is not cut when the overlay closes: it ends at logout (checked every minute, open streams are cut), when its ticket expires, or after three minute-checks in a row cannot read the login store (a check with no answer in 10 s counts as one).
 
+## Hand-offs
+
+The voice bot (`crow.voice`) can hand a bigger job to one of your bots (`servers/gateway/voice/handoff*.js`). Crow proposes, you say yes, and only then does it create a card on the bot's home project through `board/give-service.js` and start the bot. The proposal and its outcome are logged in `voice_handoffs`, a local-only table (migration 0018) that is never synced.
+
+- A dashboard tab, the phone and glasses confirm by voice. A kiosk is a shared display, so a spoken yes there is never enough: the proposal becomes an `awaiting_phone` row and a notification opens `/dashboard/voice/handoffs/<id>`, where the signed-in owner taps Confirm or Decline. A paired peer's single sign-on session cannot decide it. An unanswered proposal expires.
+- A yes never blocks on a cold model. If the bot is up within a short budget Crow says it is on it; otherwise it says the bot is starting up and reports a later failure.
+- Completion goes through `board/result-requesters.js`: the card's final report becomes one notification that opens what the bot made, and the board's generic notice and Perch's "replied" push are not sent for it. If you are still talking to a surface, `voice/presence.js` `announce` makes Crow say the bot finished.
+- "How's \<bot\> doing?" is answered from the card, the log and the bot's session. "Stop \<bot\>" or "stop it" is a proposal like any other (a kiosk confirms it on the phone). Stopping never deletes anything: what the bot already made is kept.
+- Which bots Crow may hand work to is **Hand-offs** in Crow's voice settings in Bot Builder (`handoff.enabled`, `handoff.allowed_bots`; an empty list means every enabled bot).
+- Relay contract: any turn run for a non-operator transcript (an R1.2 session's text, or a late answer) sets `relayThreadId` on `runVoiceTurn`. Such a turn can never propose, confirm or stop a hand-off, runs only read tools, and cannot answer a pending question. `relayKind` is `"operator"` (the operator's relayed turn) or `"answer"` (bot text spoken in short: no tools, nothing saved as the user's words).
+
 ## Voice services
 - Speech-to-text: the Faster-Whisper bundle (loopback :8004); the kiosk adds a `distil-small.en` profile at first pairing. Each display can switch to the faster, less accurate `tiny.en` (Speech model) and set its end-of-speech wait (300–900 ms, default 450). Crow warms the display's speech model at gateway start, on connect, and after a settings change, so the first question is not slow.
 - Voice: the Kokoro TTS bundle (loopback :8880) when installed.
@@ -35,9 +46,9 @@ The Crow's Nest header bird opens the same page inside the dashboard, with no pa
 The quick voice model has a small context (8,192 tokens on the stock local model), and an assistant's system prompt carries the full text of every skill it has. Before each model call the voice turn estimates the request (`servers/gateway/voice/prompt-fit.js`) and never sends one that cannot fit:
 - the full prompt fits → nothing changes;
 - it does not → the turn runs **without the assistant's skill bodies** (persona and tools stay); the turn's metrics carry `prompt_fit: "no_skills"`;
-- still too large → no model call: the display says that the assistant is too large and to choose another one in the Kiosk settings (`failed: "bot_too_large"`).
+- still too large → no model call: the display says that Crow's voice settings are too large for the quick voice model and to open Crow in Bot Builder (`failed: "bot_too_large"`).
 
-Saved conversation is trimmed, oldest exchange first, when it would push a request over. The **Kiosk** panel shows the same result for every assistant in the picker — fits, works without its skills, or too large — and refuses to bind a too-large one. A general-purpose assistant with many skills belongs on a larger model; give a display a small household assistant.
+Saved conversation is trimmed, oldest exchange first, when it would push a request over. The same result (fits, works without its skills, or too large) is shown for the Crow voice bot in Bot Builder. A voice bot with many skills belongs on a larger model.
 
 ## How a spoken request is resolved
 

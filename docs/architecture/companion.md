@@ -34,6 +34,8 @@ Model routing runs in-process in the gateway: `servers/gateway/routes/llm-router
 
 `generate-config.py` points OLVV's `base_url` at the router when `COMPANION_PROXY_URL` is set (default `http://localhost:3001/llm/v1`); unset it to talk to a model directly.
 
+> **Voice is Crow.** Kiosk, glasses and the phone all answer as the Crow voice bot (`crow.voice`); the per-device bot binding described below is retired for voice, and Crow hands bigger jobs to your bots after you say yes. See [Kiosk](/architecture/kiosk#hand-offs).
+
 ## Models: fast voice, escalate for agentic work
 
 | Role | Provider / model | Engine | Notes |

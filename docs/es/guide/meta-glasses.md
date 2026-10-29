@@ -9,12 +9,7 @@ y contrólalos con tu propio BYOAI. Los turnos de voz capturados en los lentes f
 por la app Android de Crow → tu STT configurado → IA → perfiles de TTS →
 de vuelta a los altavoces de los lentes.
 
-Puedes llevar esto más lejos **vinculando los lentes a un agente del
-[Bot Builder](/es/guide/bot-builder)**. Cuando un dispositivo está vinculado a un agente,
-ese agente dirige el turno de voz: su persona, sus skills, sus herramientas delimitadas
-y su política de permisos, hablados a través de las voces del dispositivo. Un dispositivo
-sin vincular recurre a un perfil de IA simple, descrito más abajo. La vinculación es la
-ruta más rica y se configura desde la pestaña Lo básico (Canal) del Bot Builder.
+Los lentes responden como **Crow**, el mismo bot de voz del quiosco y de Hablar con Crow en el teléfono. Además, Crow puede encargarle un trabajo más grande a uno de tus bots del [Bot Builder](/es/guide/bot-builder) cuando digas que sí (consulta [Hablar con Crow desde los lentes](#hablar-con-crow-desde-los-lentes)).
 
 Sin jailbreak de firmware. Sin ingeniería inversa. La integración usa el
 [**Wearables Device Access Toolkit**](https://wearables.developer.meta.com/docs)
@@ -76,11 +71,7 @@ Para que los turnos de voz se sientan ágiles, prefiere:
 - **faster-whisper** en una máquina con GPU en tu red — totalmente local
 
 **Perfiles de IA (BYOAI)** — Ya tienes esto si has usado la función de
-Mensajes de Crow. Un dispositivo sin vincular usa tu perfil de IA predeterminado a
-menos que lo sobrescribas por dispositivo. Si vinculas el dispositivo a un agente
-(consulta [Vincular los lentes a un agente](#vincular-los-lentes-a-un-agente) más
-abajo), el agente reemplaza este perfil y aporta el modelo, la persona, las
-herramientas delimitadas y los permisos del turno de voz.
+Mensajes de Crow. Los lentes responden como Crow, con los ajustes de voz de Crow en el Bot Builder; ya no se elige un bot por dispositivo.
 
 **Texto a voz** — Abre `Configuración → Texto a voz` y elige un proveedor.
 
@@ -145,27 +136,11 @@ cerca de los 1.5 s.
 
 ## Usar los lentes
 
-### Vincular los lentes a un agente
+### Hablar con Crow desde los lentes
 
-Abre el [Bot Builder](/es/guide/bot-builder), elige o crea un agente y, en su
-pestaña **Lo básico**, elige el canal **Gafas Meta** y selecciona tu dispositivo
-emparejado. Elige sus perfiles de habla, texto a voz y visión (el modelo de voz del
-agente se configura una sola vez, en Modelo de la misma pestaña) y guarda. El dispositivo queda vinculado a ese agente.
+Tus lentes siempre responden como **Crow**. No hay ningún bot que vincular: la personalidad, el modelo y los límites de herramientas de Crow se configuran una sola vez en el bot de voz **Crow** del [Bot Builder](/es/guide/bot-builder), y los perfiles de habla, texto a voz y visión son los que elegiste en el panel de Lentes Meta. Crow sigue aplicando la política de permisos antes de ejecutar cualquier herramienta: una publicación se degrada a borrador, un envío real se bloquea, y una acción que requiere confirmación o está denegada te la dice de viva voz.
 
-A partir de entonces, un turno de voz en esos lentes lo dirige el agente:
-
-- Habla con la **persona** del agente y sigue los **skills** del agente.
-- Solo puede llamar a las **herramientas que el agente seleccionó**. Una herramienta
-  que el agente no seleccionó está ausente, y una herramienta seleccionada que no tiene
-  equivalente de voz se marca en el editor al guardar.
-- Aplica la **política de permisos** del agente antes de ejecutar cualquier herramienta.
-  Una publicación se degrada a borrador, un envío real se bloquea, y una acción que
-  requiere confirmación o está denegada se te dice de viva voz en lugar de ejecutarse
-  en silencio.
-
-La vinculación es de un dispositivo a un agente. Elegir un nuevo agente para un
-dispositivo libera el vínculo anterior. Para volver al comportamiento simple dirigido
-por perfiles, borra la vinculación del dispositivo.
+Para un trabajo más grande, Crow puede encargárselo a uno de tus bots. Te dice qué bot y de qué se trata, y no empieza nada hasta que digas que sí (en los lentes, respondes en voz alta). Cuando el bot termina, recibes una sola notificación que abre lo que hizo, y si sigues hablando Crow te lo dice. Puedes preguntar «¿cómo va writer?» y decir «para a writer» o «párala»; Crow te pregunta antes y lo que el bot ya hizo se conserva. Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow en el Bot Builder (**Encargos a otros bots**).
 
 ### Haz una pregunta
 
@@ -308,10 +283,7 @@ propio alcance de memoria.
 En el panel de Lentes Meta, haz clic en **Editar** junto a un dispositivo emparejado y
 elige un perfil de hogar + overrides de STT / IA / TTS por dispositivo.
 
-Para un asistente completo por persona, vincula los lentes de cada quien a su propio
-agente del [Bot Builder](/es/guide/bot-builder). Cada miembro obtiene entonces una
-persona, un conjunto de skills, herramientas delimitadas y una política de permisos
-distintos, además de su propia voz, todo desde un mismo Crow compartido.
+Los lentes de todos responden como Crow; el perfil del hogar cambia la voz y el ámbito de memoria del turno, no el bot que responde.
 
 ## Solución de problemas
 

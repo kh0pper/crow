@@ -14,37 +14,19 @@ El encabezado de Crow's Nest ya no tiene el botón **Compañero**. Su único bot
 
 La música o la radio que inicias desde Hablar con Crow suena en la **barra del reproductor** del panel, abajo en la página, no dentro de la superposición. Sigue sonando al cerrar la superposición y al pasar de un panel a otro; los botones de la barra la pausan, saltan y detienen, y al recargar la página la barra vuelve (toca ⏯ si el navegador retuvo el sonido). Termina cuando la detienes o cierras sesión.
 
-## Personalización por dispositivo
+## Quién responde y los encargos
 
-Un kiosco es un **dispositivo** vinculado a un agente del [Bot Builder](/es/architecture/bot-builder) — el mismo modelo de vinculación que los [lentes Meta](/es/guide/meta-glasses). Pantallas distintas pueden ejecutar bots distintos:
+Todas las pantallas responden como **Crow**, el mismo bot de voz de tus lentes y de Hablar con Crow en el teléfono. Un quiosco ya no se vincula a un bot propio; la personalidad, el modelo y los límites de herramientas de Crow se configuran una sola vez en el bot de voz **Crow** del [Bot Builder](/es/guide/bot-builder). Lo que sigue siendo por dispositivo es el aspecto del compañero: el avatar y las funciones del quiosco (animación del avatar, modo mascota/inactivo, chat social, memoria), que se ajustan donde emparejas la pantalla.
 
-```
-kitchen-tablet → "Chef"  (avatar A · voz A · social desactivado)
-studio-display → "Aide"  (avatar B · voz B · social activado)
-```
+Crow puede encargarle un trabajo más grande a uno de tus bots. Un quiosco es una pantalla compartida, así que un «sí» dicho en la sala nunca basta: Crow manda una notificación a tu teléfono y ahí tocas Confirmar. Cuando el bot termina, una sola notificación abre lo que hizo, y si sigues hablando con el quiosco Crow dice que el bot terminó. Puedes preguntar «¿cómo va writer?» y decir «para a writer» o «párala»; Crow te pregunta antes (en un quiosco, también en el teléfono) y lo que el bot ya hizo se conserva. Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow en el Bot Builder (**Encargos a otros bots**). Consulta [la arquitectura del quiosco](/es/architecture/kiosk).
 
-Vincula un dispositivo en la pestaña **Lo básico** del bot → canal **Compañero de IA (quiosco)**:
+El avatar surte efecto en la siguiente sesión del quiosco. Los toggles de funciones se aplican en capas distintas: las funciones de configuración de dispositivo (`social_chat`, `face_tracking`) se obtienen y aplican en cada carga de página del quiosco; las funciones de generación de config (`avatar_model`, `memory_integration`) se incorporan a la config generada del compañero y solo surten efecto tras regenerar la config y reiniciar el contenedor. Consulta la [tabla de semántica de `companion_features`](/es/architecture/companion) para el desglose completo.
 
-1. **Dispositivo emparejado** — elige el dispositivo kiosco, o simplemente **escribe un nombre** en el campo "…o empareja un quiosco nuevo" y pulsa Guardar: Crow crea y conecta el dispositivo por ti en un solo paso (sin necesidad del bundle de Lentes Meta). Los dispositivos emparejados en el panel de Lentes Meta también aparecen aquí; los kioscos reutilizan ese almacén, etiquetados con `device_kind:"companion"`.
-2. **Avatar** — el modelo Live2D que se renderiza para este kiosco.
-3. **Funciones del quiosco** — activa o desactiva la animación del avatar/sincronización labial, el modo mascota/inactivo, las funciones sociales (sala de chat y DM) y la integración automática de memoria.
-
-Al guardar se establece el `bound_bot_id` del dispositivo y los toggles se almacenan como `companion_features`. La persona y el avatar surten efecto en la siguiente sesión del kiosco. Los toggles de funciones se aplican en capas distintas: las funciones de configuración de dispositivo (`social_chat`, `face_tracking`) se obtienen y aplican en cada carga de página del kiosco; el estilo de escucha y el tiempo de inactividad de voz de un editor anterior se conservan en el dispositivo pero nunca se aplicaron, así que el editor ya no los muestra; las funciones de generación de config (`avatar_model`, `memory_integration`) se incorporan a la config generada del compañero y solo surten efecto tras regenerar la config y reiniciar el contenedor. Consulta la [tabla de semántica de `companion_features`](/es/architecture/companion) para el desglose completo.
-
-### Qué es por dispositivo y qué no
-
-| Por dispositivo | Compartido en todo el contenedor |
-|------------|-----------------------------|
-| Persona, avatar, voz | El **par de modelos** rápido→escalado |
-| `companion_features` (animación del avatar, modo mascota, social/chat, memoria) | Los puentes MCP base (`crow-wm`, `crow-storage`) |
-| El puente de memoria `crow` (opt-in por bot vía `memory_integration`) | |
-| Bot vinculado | |
-
-El par de modelos se comparte porque un contenedor de compañero tiene un único `base_url` de LLM (el [router `/llm/v1` del gateway](/es/architecture/companion)). El conjunto de herramientas MCP se comparte *en su mayor parte* — todos los personajes reciben `crow-wm` y `crow-storage` — pero el puente de memoria `crow` se añade por bot cuando su función `memory_integration` está habilitada (un ajuste de generación de config; consulta [Puentes MCP](/es/architecture/companion)). Un kiosco que de verdad necesite un par de modelos *distinto* necesita su **propio contenedor de compañero** (puerto propio + `conf.yaml`).
+El par de modelos lo comparten todas las pantallas porque un contenedor de compañero tiene un único `base_url` de LLM (el [router `/llm/v1` del gateway](/es/architecture/companion)). Un quiosco que de verdad necesite un par de modelos *distinto* necesita su **propio contenedor de compañero** (puerto propio + `conf.yaml`).
 
 ## Funciones sociales / de chat
 
-La sala de chat y los DM del compañero están controlados por el toggle por dispositivo `social_chat`, de modo que un kiosco de cara al público puede funcionar solo con el avatar (sin UI social) mientras una pantalla personal conserva el chat completo. Actívalo o desactívalo en la pestaña Lo básico del bot.
+La sala de chat y los DM del compañero están controlados por el toggle por dispositivo `social_chat`, de modo que un kiosco de cara al público puede funcionar solo con el avatar (sin UI social) mientras una pantalla personal conserva el chat completo.
 
 ## Relacionado
 

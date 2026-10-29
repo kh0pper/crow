@@ -100,7 +100,7 @@ This wrapper is the security boundary for voice. It closes the gap left by the o
 
 ## Deep work
 
-Long-running work is handed off as a background job via the `crow_delegate` tool. The job is enqueued in the shared `bot_jobs` table and run by a pi worker in the Bot Builder host process — a single strong agent doing the multi-step work in one coherent context. The agent acknowledges immediately with a job ID and the result is delivered on a later turn (retrieved with `crow_job_status`, or pushed to the originating channel), since the job outlives the turn that started it. A persistent completion-notification path is a planned follow-on.
+Long-running work is handed off as a background job via the `crow_delegate` tool. The job is enqueued in the shared `bot_jobs` table and run by a pi worker in the Bot Builder host process — a single strong agent doing the multi-step work in one coherent context. The agent acknowledges immediately with a job ID and the result is delivered on a later turn (retrieved with `crow_job_status`, or pushed to the originating channel), since the job outlives the turn that started it. Voice hand-offs have their own completion path: `board/result-requesters.js` routes the finished card's report to one notification (and a spoken heads-up if the operator is still talking), instead of the generic board notice. See [Kiosk](/architecture/kiosk#hand-offs).
 
 ## Opt-in self-authoring
 

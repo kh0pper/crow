@@ -34,6 +34,8 @@ El enrutamiento de modelos corre en proceso dentro del gateway: `servers/gateway
 
 `generate-config.py` apunta el `base_url` de OLVV al router cuando `COMPANION_PROXY_URL` está definida (predeterminado `http://localhost:3001/llm/v1`); quítala para hablar directamente con un modelo.
 
+> **La voz es Crow.** El quiosco, los lentes y el teléfono responden como el bot de voz de Crow (`crow.voice`); el vínculo de bot por dispositivo descrito más abajo ya no se usa para la voz, y Crow encarga los trabajos más grandes a tus bots cuando dices que sí. Consulta [Quiosco](/es/architecture/kiosk#encargos).
+
 ## Modelos: voz rápida, escalar para trabajo agéntico
 
 | Rol | Proveedor / modelo | Motor | Notas |

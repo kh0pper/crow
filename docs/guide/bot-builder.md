@@ -46,15 +46,21 @@ A gateway connects an agent to a place where people talk to it. The same agent d
 
 - **Gmail**: The agent reads and replies to email on a connected mailbox.
 - **Discord**: The agent joins a Discord server as a bot and answers in channels and DMs, with a per-agent user allowlist.
-- **Meta Glasses**: A paired pair of Ray-Ban Meta (Gen 2) glasses binds to one agent. That agent then drives the fast voice turn: its persona, its skills, its scoped tools, and its permissions, spoken through the speech and voice profiles you picked. See the [Meta Glasses guide](/guide/meta-glasses).
+- **Meta Glasses**: Paired Ray-Ban Meta (Gen 2) glasses answer as Crow, with the speech and voice profiles you picked. See the [Meta Glasses guide](/guide/meta-glasses).
 - **Crow Messages**: The agent becomes reachable as a contact. People you invite can message it, you can browse and add the bots running across your Crows, and you can put people and bots together in a group room. See the [Crow Messages guide](/guide/crow-messages).
 - **Perch**: The agent becomes chattable right on the board in your own dashboard. There is nothing to configure — choosing the channel is the whole setup, and nothing to install. See [Perch](#perch-talk-to-an-agent-from-your-own-dashboard) below.
 
-### Which bot answers voice
+### Voice and hand-offs
 
-Each bot's card says where it answers voice: **Answers voice on:** names the glasses or AI Companion bound to it, **Phone & dashboard** when it answers Talk to Crow (marked *(automatic)* when nobody chose one and Automatic picked it), and each kiosk display it is on. With the Kiosk extension installed, the card's **⋯ → Use for voice…** gives it Phone & dashboard or a display in one step. It saves the same settings as the Kiosk panel. A display switches right away; Phone & dashboard applies the next time Talk to Crow opens. Glasses and the companion are set in the bot's channel settings, which the dialog links to. A display can't be left without a bot, so to move one off this bot, choose another bot for it.
+Voice always answers as **Crow**, whether you talk to a kiosk, to your glasses or to Talk to Crow on your phone. There is no per-device bot to pick. Crow's own settings (its model, voice, memory and the rest) live on the **Crow** voice bot in Bot Builder.
 
-Binding glasses to an agent is one-to-one: a device drives one agent at a time, and choosing a new agent for a device releases the old binding.
+Crow can hand a bigger job to one of your bots. Ask for something that fits a bot ("have writer draft a post about the garden") and Crow tells you which bot it would give it to and what the task is. Nothing happens until you say yes. On a kiosk, which is a shared display, you confirm on your phone: Crow sends a notification and you tap Confirm there.
+
+Once you say yes, the work shows up as a card on that bot's board, and Crow tells you the bot is on it (or that it is still starting up). When the bot finishes, you get one notification that opens what it made. If you are still talking to Crow, Crow also says the bot finished.
+
+While a bot works you can ask "how's writer doing?". To stop it, say "stop writer" or "stop it". Crow always asks first, and whatever the bot already made is kept.
+
+Which bots Crow may hand work to is set in Crow's voice settings: open **Crow** in Bot Builder and use the **Hand-offs** section, which has a switch, the list of allowed bots (empty means every enabled bot) and a log of recent hand-offs.
 
 ## Perch: talk to an agent from your own dashboard
 

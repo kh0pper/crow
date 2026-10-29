@@ -123,7 +123,7 @@ Crow trusts `X-Forwarded-For` only from proxies you declare. If Caddy or nginx r
 CROW_TRUSTED_PROXIES=loopback
 ```
 
-Without it, the gateway refuses those requests and logs `[net] WARN forwarding headers from undeclared peer` once. If Crow runs in Docker behind `docker-proxy`, use the network's bridge gateway instead (find it with `docker network inspect <network> --format '{{(index .IPAM.Config 0).Gateway}}'`). Tailscale Serve and Funnel need no entry. `CROW_ALLOWED_IPS` lists trusted *clients*, not proxies.
+Without it, the gateway refuses those requests and logs `[net] WARN forwarding headers from undeclared peer` once. If Crow runs in Docker behind `docker-proxy`, use the network's bridge gateway instead (find it with <code v-pre>docker network inspect &lt;network&gt; --format '{{(index .IPAM.Config 0).Gateway}}'</code>). Tailscale Serve and Funnel need no entry. `CROW_ALLOWED_IPS` lists trusted *clients*, not proxies.
 
 On Linux, Crow honours Tailscale Serve's headers only on connections opened by tailscaled's user (`CROW_SERVE_PEER_UIDS`, default `0`, read from `/proc/net/tcp`). On a host without `/proc` (macOS, Windows native) that check cannot run, so it fails closed and tailnet users through Serve are refused. To accept them anyway, set `CROW_SERVE_PEER_UIDS=off` (logged as a warning: any local process could then forge a tailnet identity).
 
