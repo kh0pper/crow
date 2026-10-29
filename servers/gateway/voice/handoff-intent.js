@@ -142,6 +142,51 @@ export function namesWork(transcript) {
   return words.length > 0 && listMatches(words, WORK);
 }
 
+/**
+ * A hand-off request beside a status question ("how's it going, have writer research the bus routes"): a
+ * work phrase that is still there once the work-target phrases are taken out, so "is writer done with the
+ * research" (the research = the work, not a request to research) is not one.
+ */
+export function asksForHandoff(transcript) {
+  const words = phraseWords(transcript);
+  const rest = [];
+  for (let i = 0; i < words.length;) {
+    const n = matchAt(words, i, WORK);
+    if (n) i += n; else rest.push(words[i++]);
+  }
+  return rest.length > 0 && listMatches(rest, LISTS.work);
+}
+
+// The status forms about a subject the lists cannot name: "how's <x> doing", "is <x> done", "cómo va <x>",
+// "ya terminó <x>", with <x> one or two words (an optional "the"/"el"/"la" before). A bot that is no longer a
+// candidate (hand-offs off, or dropped from the list) is still asked about by name this way.
+const SHAPE_ARTICLES = new Set(["the", "el", "la"]);
+const subjectAt = (words, i, max = 2) => {
+  const at = i + (SHAPE_ARTICLES.has(words[i]) ? 1 : 0);
+  return at < words.length ? { at, max: Math.min(max, words.length - at) } : null;
+};
+// The subject is never only stopwords ("is it done" is the bare form, read by wantsHandoffStatus itself).
+const endsWith = (words, at, max, ends) => {
+  for (let k = 1; k <= max; k++) if (ends.has(words[at + k]) && !words.slice(at, at + k).every((w) => STOPWORDS.has(w))) return true;
+  return false;
+};
+
+/** The transcript has the shape of a status question about something, whatever it is named. */
+export function statusShape(transcript) {
+  const words = phraseWords(transcript);
+  for (let i = 0; i < words.length; i++) {
+    const howLead = words[i] === "hows" ? 1 : words[i] === "how" && words[i + 1] === "is" ? 2 : 0;
+    const lead = howLead || (words[i] === "is" ? 1 : 0);
+    if (lead) {
+      const s = subjectAt(words, i + lead);
+      if (s && endsWith(words, s.at, s.max, howLead ? new Set(["doing"]) : new Set(["done"]))) return true;
+    }
+    if (words[i] === "como" && words[i + 1] === "va" && words[i + 2] && words[i + 2] !== "a") return true;
+    if (words[i] === "ya" && words[i + 1] === "termino" && words[i + 2]) return true;
+  }
+  return false;
+}
+
 // A bare status question is a status phrase and nothing else but lead-ins, end words, "yet"-words and the
 // pronouns that point at the last topic (P16): "hey crow, how's it going?", "is it done yet?", "how far along
 // is it", "¿ya terminó eso?". Anything more has a subject of its own.

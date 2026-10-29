@@ -38,7 +38,7 @@
  * is kept), and an `active` session moves a quiet row back to `started` [rv2 N2].
  */
 import { HANDOFF_OPEN, HANDOFF_QUIET_AFTER_MS, PERSONAL_SURFACES } from "./handoff-constants.js";
-import { wantsHandoff, wantsHandoffStatus, mayAskStatus, namesWork, isBareStatus, namedBots } from "./handoff-intent.js";
+import { wantsHandoffStatus, mayAskStatus, namesWork, isBareStatus, namedBots, asksForHandoff, statusShape } from "./handoff-intent.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf, notifyRow } from "./handoff-confirm.js";
 import { rememberTopic, topicFor } from "./handoff-topic.js";
@@ -132,13 +132,14 @@ async function newestResult(tdb, cardId) {
 }
 
 /** The line key for a row that is no longer open (or still starting), from its status alone. A stopped row
- * with no session yet is "stopping" (the stop lands when the session appears, [rv3 m3]); one with a session
- * (a stop the sweep is still retrying included) was stopped. */
+ * whose stop landed before its session existed (detail `pending_start`, no session yet) is "stopping": the stop
+ * lands when the session appears [rv3 m3]; any other stopped row (a stop while queued, a stop the sweep is
+ * still retrying) was stopped. */
 function keyOfEnded(row) {
   switch (row?.status) {
     case "done": return "status_done";
     case "failed": return row.detail === SESSION_ENDED_NO_RESULT ? "status_ended_quiet" : "status_failed";
-    case "stopped": return row.session_id == null ? "status_stopping" : "status_stopped";
+    case "stopped": return row.session_id == null && row.detail === "pending_start" ? "status_stopping" : "status_stopped";
     case "starting": return "status_starting";
     default: return null;
   }
@@ -296,18 +297,23 @@ export async function status(core, db, { device, surface, transcript, lang, bot 
   // The cached candidates and the status check come first; the log is read only once they pass.
   const bots = new Map((await candidatesOf(core, db, bot)).map((c) => [c.bot_id, c.name]));
   const names = (m) => [...m].flatMap(([id, name]) => [name, id]);
-  if (!wantsHandoffStatus(transcript, names(bots))) return null;
+  // A question about something the candidates cannot name ("how's writer doing" with writer no longer a
+  // candidate, or hand-offs turned off) still reaches the log when it has a status question's shape: the row
+  // bots' names are then tried too. Anything else is the model's without a read.
+  const strict = wantsHandoffStatus(transcript, names(bots));
+  if (!strict && !statusShape(transcript)) return null;
   const { open, ended } = await rowsInScope(core.store, db, device, surface, core.now());
   const rows = [...open, ...ended];
   for (const r of rows) if (!bots.has(r.bot_id)) bots.set(r.bot_id, await botName(db, r.bot_id));
+  if (!strict && !wantsHandoffStatus(transcript, names(bots))) return null;
   const botList = [...bots].map(([bot_id, name]) => ({ bot_id, name }));
 
   const { named, rows: mine } = resolveRows(transcript, rows, botList);
   let about;
   if (named.length) {
     // "How's it going, have writer research the bus routes": a work phrase beside the name is a hand-off
-    // request, the model's to propose (the names alone are not asked: a bare name is a hand-off cue too).
-    if (wantsHandoff(transcript, [])) return null;
+    // request, the model's to propose. The work itself ("is writer done with the research") is not one.
+    if (asksForHandoff(transcript)) return null;
     if (!mine.length) return { say: voiceLine("status_none", speak), verb: "status_none" };
     about = mine;
   } else if (namesWork(transcript)) {

@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wantsHandoff, wantsHandoffStatus, wantsHandoffStop, namesWork, isBareStatus, mayAskStatus, namedBots, STATUS_LEAD_WORDS, HANDOFF_INTENT_WORDS, HANDOFF_TARGET_PHRASES } from "../servers/gateway/voice/handoff-intent.js";
+import { wantsHandoff, wantsHandoffStatus, wantsHandoffStop, namesWork, isBareStatus, mayAskStatus, namedBots, asksForHandoff, statusShape, STATUS_LEAD_WORDS, HANDOFF_INTENT_WORDS, HANDOFF_TARGET_PHRASES } from "../servers/gateway/voice/handoff-intent.js";
 import { HANDOFF_TARGET_WORDS } from "../servers/gateway/voice/handoff-constants.js";
 import { normalizeIntentLists, listMatches, phraseWords, INTENT_MAX_CHARS } from "../servers/gateway/voice/tool-families.js";
 
@@ -154,6 +154,24 @@ test("namedBots: whole names or ids anywhere, each once, stopword-only names nev
   assert.deepEqual(namedBots("is it done", bots), [], "\"it\" is a stopword name");
   assert.deepEqual(namedBots("how's writer doing", null), []);
   assert.deepEqual(namedBots("", bots), []);
+});
+
+test("asksForHandoff: a work phrase beside the question, never the work itself", () => {
+  for (const t of ["how's it going, have writer research the bus routes", "is writer done? then have helper write up the bus routes", "como va writer, y pidele a helper que investigue las rutas", "research the bus routes"]) {
+    assert.equal(asksForHandoff(t), true, t);
+  }
+  for (const t of ["is writer done with the research", "how's writer doing on that research", "how's the research going", "is the report done", "como va la investigacion", "how's writer doing", ""]) {
+    assert.equal(asksForHandoff(t), false, t);
+  }
+});
+
+test("statusShape: the question's shape about any subject; no shape, no read", () => {
+  for (const t of ["how's writer doing", "how is the writer doing", "is writer done", "is the bot hank done", "is writer done with the research", "como va writer", "ya termino writer", "como va la investigacion"]) {
+    assert.equal(statusShape(t), true, t);
+  }
+  for (const t of ["how's it going", "is it done", "how do I get to the airport", "how's the weather", "is done", "como va a estar el clima", "ya termino", "play some jazz", ""]) {
+    assert.equal(statusShape(t), false, t);
+  }
 });
 
 test("isBareStatus and namesWork: the input cap holds", () => {

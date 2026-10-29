@@ -348,6 +348,31 @@ test("stopping is a stopped row with no session yet; one with a session was stop
   const u = await setup();
   await u.handoff({ status: "stopped", session: "s2", detail: "stop_pending" });
   assert.equal((await u.ask("how's writer doing")).verb, "status_stopped", "the engine stop is still being retried, but the session exists");
+  const v = await setup();
+  await v.handoff({ status: "stopped" });
+  assert.equal((await v.ask("how's writer doing")).verb, "status_stopped", "a stop while queued: no session, no pending start");
+});
+
+test("a named question about the work is a status question, not a hand-off request", async () => {
+  const s = await setup();
+  const { cardId } = await s.handoff({ session: "s1" });
+  await s.session({ sid: "s1", cardId, status: "active" });
+  for (const t of ["is writer done with the research", "how's writer doing on that research", "how's writer doing with the report", "como va writer con el informe", "ya terminó writer el informe"]) {
+    assert.equal((await s.ask(t))?.verb, "status_running", t);
+  }
+});
+
+test("a bot that is no longer a candidate is still asked about by name (hand-offs off, a row open)", async () => {
+  const s = await setup();
+  const { cardId } = await s.handoff({ session: "s1" });
+  await s.session({ sid: "s1", cardId, status: "active" });
+  const off = { ...VOICE, handoff: { enabled: false, allowed_bots: [] } };
+  assert.deepEqual(await s.ask("how's writer doing", { bot: off }), { say: "Writer is working on research radio history.", verb: "status_running" });
+  assert.equal((await s.ask("is the writer done", { bot: null })).verb, "status_running", "no voice def at all");
+  assert.equal((await s.ask("como va writer", { bot: off, lang: "es" })).verb, "status_running");
+  assert.equal(await s.ask("how's my mom doing", { bot: off }), null, "the shape alone is not enough: the name must be a row's bot");
+  assert.equal(await s.ask("is dinner done", { bot: off }), null);
+  assert.equal(await s.ask("how's helper doing", { bot: off }), null, "helper has no row and is not a candidate: the model");
 });
 
 test("a compound utterance that also asks for a hand-off goes to the model, even with the bot named", async () => {
