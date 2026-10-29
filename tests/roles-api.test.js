@@ -308,3 +308,65 @@ test("speechProfileWhere: hosted adapters are cloud whatever the endpoint; self-
   assert.equal(speechProfileHost({ provider: "edge", baseUrl: "http://127.0.0.1:1" }), "speech.platform.bing.com");
   assert.equal(speechProfileHost({ provider: "openai" }), "api.openai.com");
 });
+
+// --- final fix wave ---------------------------------------------------------
+
+test("F2: the picks rules are enforced on preview and apply", async () => {
+  await ins("emb-a", "http://127.0.0.1:8020/v1", [{ id: "e1", task: "embed" }]);
+  await withServer(async (s) => {
+    const cases = [
+      ["safety", { model: "role:quick" }, "safety_no_chain"],
+      ["safety", { model: "local-chat/m1", fallback: ["quick"] }, "safety_no_chain"],
+      ["everyday", { model: "role:safety" }, "safety_not_followable"],
+      ["everyday", { model: "local-chat/m1", fallback: ["safety"] }, "safety_not_followable"],
+      ["quick", { model: "role:quick" }, "self_reference"],
+      ["quick", { model: "local-chat/m1", fallback: ["quick"] }, "self_reference"],
+      ["embed", { model: "local-chat/m1" }, "capability_mismatch"],
+      ["everyday", { model: "emb-a/e1" }, "capability_mismatch"],
+    ];
+    for (const [role, body, code] of cases) {
+      const p = await call(s, "POST", `/api/roles/${role}/preview`, { body });
+      assert.equal(p.status, 400, `${role} ${JSON.stringify(body)}`);
+      assert.deepEqual(p.json, { error: code });
+      const a = await call(s, "POST", `/api/roles/${role}`, { body: { ...body, previewHash: "x", ackUnattended: true, ackCloud: true } });
+      assert.equal(a.status, 400, `apply ${role} ${JSON.stringify(body)}`);
+      assert.deepEqual(a.json, { error: code });
+    }
+    assert.equal(await settingOf("model_role.safety"), null);
+    assert.equal(await settingOf("model_role.quick"), null);
+    // The allowed shapes still pass.
+    for (const [role, body] of [["everyday", { model: "role:quick" }], ["embed", { model: "emb-a/e1" }], ["safety", { model: "local-chat/m1", fallback: [] }]]) {
+      const ok = await call(s, "POST", `/api/roles/${role}/preview`, { body });
+      assert.equal(ok.status, 200, `${role} ${JSON.stringify(body)}`);
+    }
+  });
+});
+
+test("F6: picks carry the stored fallback chain so the sheet can keep it", async () => {
+  await bind("everyday", { model: "local-chat/m1", fallback: ["expert", "quick"] });
+  await withServer(async (s) => {
+    const r = await call(s, "GET", "/api/roles/everyday/picks");
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.fallback, ["expert", "quick"]);
+    const q = await call(s, "GET", "/api/roles/quick/picks");
+    assert.equal("fallback" in q.json, false);
+  });
+});
+
+test("F8: own addresses are probed once per request when not injected", async () => {
+  let n = 0;
+  const probeOwnAddrs = () => { n++; return new Set(); };
+  await withServer(async (s) => {
+    const r = await call(s, "GET", "/api/roles/everyday/picks");
+    assert.equal(r.status, 200);
+    assert.equal(n, 1);
+    n = 0;
+    const p = await call(s, "POST", "/api/roles/everyday/preview", { body: { model: "cloud-a/c1" } });
+    assert.equal(p.status, 200);
+    assert.equal(n, 1);
+    n = 0;
+    const st = await call(s, "GET", "/api/roles/stt/picks");
+    assert.equal(st.status, 200);
+    assert.equal(n, 1);
+  }, { ownAddrs: undefined, probeOwnAddrs });
+});

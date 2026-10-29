@@ -25,6 +25,7 @@ import { getDefaultTtsProfile, getTtsProfiles } from "../../../../ai/tts/index.j
 import { getDefaultSttProfile, getSttProfiles } from "../../../../ai/stt/index.js";
 import { friendlyModel } from "../../../shared/bot-display.js";
 import { readSetting } from "../../registry.js";
+import { getOwnAddresses } from "../../../../../shared/locality.js";
 
 /** Page groups, in order. `custom` is filled by the custom-roles work (Task 18). */
 export const ROLE_GROUPS = Object.freeze([
@@ -230,7 +231,8 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
  */
 export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, localInstanceId, classifierStatusFn = getClassifierStatus, classifierLookup } = {}) {
   const ctx = await loadRoleContext(db, { maxAgeMs: 0, ...(localInstanceId ? { getOrCreateLocalInstanceId: localInstanceId } : {}) });
-  const whereOpts = { ...(ownAddrs ? { ownAddrs } : {}), ...(localMarks ? { localMarks } : {}) };
+  // This box's addresses: probed once for all rows, not per model.
+  const whereOpts = { ownAddrs: ownAddrs || getOwnAddresses(), ...(localMarks ? { localMarks } : {}) };
   // Voice keys from the same context the rows use.
   const resolveRoleFn = async (_db, key, { need, chosenOnly } = {}) => (chosenOnly ? resolveChosenRoleKey : resolveRoleKey)(key, { ...ctx, need });
   let voiceKeys = null;

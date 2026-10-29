@@ -28,7 +28,8 @@ import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { requireDashboardSessionJson } from "./models.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
-import { CORE_ROLES, MEDIA_CAPABILITIES, isRoleRef, roleIdOf, isRawKey, isValidCustomRoleId } from "../../shared/model-roles.js";
+import { CORE_ROLES, MEDIA_CAPABILITIES, isRoleRef, roleIdOf, isRawKey, isValidCustomRoleId, walkRole } from "../../shared/model-roles.js";
+import { getOwnAddresses } from "../../shared/locality.js";
 import { loadRoleContext } from "../../shared/model-roles-store.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
 import { listRolePicks } from "../../shared/role-picks.js";
@@ -69,6 +70,34 @@ function validFallback(fallback, customDefs) {
   return Array.isArray(fallback) && fallback.every((f) => typeof f === "string" && knownRoleId(isRoleRef(f) ? roleIdOf(f) : f, customDefs));
 }
 
+/** The safety role is a boundary: never chained, in either direction (the picks' rule). */
+const SAFETY = "safety";
+
+/**
+ * The picks' rules, enforced here too (a crafted POST must not do what the
+ * page never offers). Returns an error code, or null when the change is fine:
+ *   safety_no_chain       safety bound to a role ref, or given a fallback chain
+ *   safety_not_followable another role naming role:safety (model or fallback)
+ *   self_reference        a role naming itself (model or fallback)
+ *   capability_mismatch   a raw key whose model lacks the role's capability
+ */
+function picksRuleError(roleId, { model, fallback }, ctx) {
+  const refs = [
+    ...(isRoleRef(model) ? [roleIdOf(model)] : []),
+    ...(Array.isArray(fallback) ? fallback.map((f) => (isRoleRef(f) ? roleIdOf(f) : f)) : []),
+  ];
+  if (roleId === SAFETY && refs.length) return "safety_no_chain";
+  if (refs.includes(SAFETY)) return "safety_not_followable";
+  if (refs.includes(roleId)) return "self_reference";
+  if (typeof model === "string" && isRawKey(model)) {
+    const ctxX = { ...ctx, bindings: { ...(ctx.bindings || {}), [roleId]: { model, fallback: [], seeded: false } } };
+    let first = null;
+    try { first = walkRole(roleId, ctxX).next().value || null; } catch { first = null; }
+    if (first && first.key === model && first.verdict === "capability") return "capability_mismatch";
+  }
+  return null;
+}
+
 const langOf = (req) => {
   const c = parseCookies(req).crow_lang;
   return SUPPORTED_LANGS.includes(c) ? c : "en";
@@ -79,7 +108,8 @@ const langOf = (req) => {
  * @param {() => object} [opts.dbFactory]
  * @param {Function} [opts.sessionGate]
  * @param {object} [opts.env]             env for pins and env overrides (default process.env)
- * @param {Set<string>} [opts.ownAddrs]   this box's addresses (default: probed)
+ * @param {Set<string>} [opts.ownAddrs]   this box's addresses (default: probed once per request)
+ * @param {() => Set<string>} [opts.probeOwnAddrs]  the probe (default getOwnAddresses)
  * @param {() => string} [opts.localInstanceId]
  * @param {(roleId:string) => string[]} [opts.recommendedFn]
  */
@@ -88,11 +118,16 @@ export default function rolesApiRouter({
   sessionGate = requireDashboardSessionJson,
   env = process.env,
   ownAddrs,
+  probeOwnAddrs = getOwnAddresses,
   localInstanceId = getOrCreateLocalInstanceId,
   recommendedFn,
 } = {}) {
   const router = Router();
-  const own = ownAddrs ? { ownAddrs } : {};
+  /** This box's addresses, probed at most once per request and passed down. */
+  const ownOf = (req) => {
+    if (!req.crowOwnAddrs) req.crowOwnAddrs = ownAddrs || probeOwnAddrs();
+    return { ownAddrs: req.crowOwnAddrs };
+  };
 
   router.use("/api/roles", sessionGate);
 
@@ -124,7 +159,7 @@ export default function rolesApiRouter({
     return rows.length > 0;
   }
 
-  async function speechPreview(db, roleId, profileId) {
+  async function speechPreview(db, roleId, profileId, own) {
     const profiles = await SPEECH[roleId].list(db); // keys stripped
     const profile = typeof profileId === "string" ? profiles.find((p) => p && p.id === profileId) : null;
     if (!profile) return null;
@@ -144,8 +179,12 @@ export default function rolesApiRouter({
     const ctx = await loadCtx(db);
     const def = roleDef(req.params.id, ctx.customDefs);
     if (!def) return res.status(404).json({ error: "unknown_role" });
+    const own = ownOf(req);
     const picks = listRolePicks(def.id, { ctx, lang: langOf(req), ...(recommendedFn ? { recommendedFn } : {}), ...own });
-    if (!SPEECH[def.id]) return res.json({ picks });
+    // The stored chain rides along so a Change from the page keeps it (it is sent back unchanged).
+    const fb = ctx.bindings?.[def.id]?.fallback;
+    const base = Array.isArray(fb) ? { picks, fallback: [...fb] } : { picks };
+    if (!SPEECH[def.id]) return res.json(base);
     // Speech rows are views over the default profile (Phase 2).
     const profiles = (await SPEECH[def.id].list(db)).filter((p) => p && typeof p.id === "string").map((p) => ({
       id: p.id,
@@ -155,7 +194,7 @@ export default function rolesApiRouter({
       where: speechProfileWhere(p, own),
       host: speechProfileHost(p),
     }));
-    res.json({ picks, profiles });
+    res.json({ ...base, profiles });
   }));
 
   // --- Speech defaults (stt/tts) ---------------------------------------------
@@ -163,7 +202,7 @@ export default function rolesApiRouter({
 
   router.post("/api/roles/:id/profile/preview", csrfMiddleware, withDb("profile preview", async (db, req, res) => {
     if (!SPEECH[req.params.id]) return res.status(404).json({ error: "unknown_role" });
-    const pv = await speechPreview(db, req.params.id, req.body?.profileId);
+    const pv = await speechPreview(db, req.params.id, req.body?.profileId, ownOf(req));
     if (!pv) return res.status(404).json({ error: "unknown_profile" });
     res.json(pv);
   }));
@@ -172,7 +211,7 @@ export default function rolesApiRouter({
     const roleId = req.params.id;
     if (!SPEECH[roleId]) return res.status(404).json({ error: "unknown_role" });
     const { profileId, previewHash, ackCloud } = req.body || {};
-    const preview = await speechPreview(db, roleId, profileId);
+    const preview = await speechPreview(db, roleId, profileId, ownOf(req));
     if (!preview) return res.status(404).json({ error: "unknown_profile" });
     if (typeof previewHash !== "string" || previewHash !== preview.previewHash) {
       return res.status(409).json({ ok: false, reason: "preview_changed", preview });
@@ -194,6 +233,8 @@ export default function rolesApiRouter({
     const { model, fallback } = req.body || {};
     if (!validModel(model, ctx.customDefs)) { res.status(400).json({ error: "invalid_model" }); return null; }
     if (!validFallback(fallback, ctx.customDefs)) { res.status(400).json({ error: "invalid_fallback" }); return null; }
+    const ruleError = picksRuleError(def.id, { model, fallback }, ctx);
+    if (ruleError) { res.status(400).json({ error: ruleError }); return null; }
     const change = { model: model ?? null };
     if (fallback !== undefined) change.fallback = [...fallback];
     return { ctx, roleId: def.id, change };
@@ -202,7 +243,7 @@ export default function rolesApiRouter({
   router.post("/api/roles/:id/preview", csrfMiddleware, withDb("preview", async (db, req, res) => {
     const c = await checkChange(db, req, res);
     if (!c) return;
-    res.json(await previewRoleChange(db, c.roleId, c.change, { ctx: c.ctx, env, ...own }));
+    res.json(await previewRoleChange(db, c.roleId, c.change, { ctx: c.ctx, env, ...ownOf(req) }));
   }));
 
   router.post("/api/roles/:id", csrfMiddleware, withDb("apply", async (db, req, res) => {
@@ -216,7 +257,7 @@ export default function rolesApiRouter({
       ackCloud: ackCloud === true,
       replacePin: replacePin === true,
       env,
-      ...own,
+      ...ownOf(req),
     });
     if (r.ok) return res.json({ ok: true, preview: r.preview });
     res.status(CONFLICT_REASONS.has(r.reason) ? 409 : 400).json({ ok: false, reason: r.reason, preview: r.preview });

@@ -13,6 +13,7 @@ import {
   whereItRuns, isCloudKey, isValidCustomRoleId,
 } from "./model-roles.js";
 import { friendlyModel } from "../gateway/dashboard/shared/bot-display.js";
+import { getOwnAddresses } from "./locality.js";
 import { t, fill } from "../gateway/dashboard/shared/i18n.js";
 
 const WHERE_RANK = Object.freeze({ here: 0, other_box: 1, cloud: 2, unproven: 3, missing: 4 });
@@ -58,7 +59,7 @@ function safetyReachesCloud(ctxX, ownAddrs) {
   try {
     for (const e of walkRole("safety", ctxX)) {
       if (!e.key || e.filtered || !(e.verdict === "ok" || e.verdict === "not_configured")) continue;
-      if (isCloudKey(e.key, { providers: ctxX.providers, ...(ownAddrs ? { ownAddrs } : {}) })) return true;
+      if (isCloudKey(e.key, { providers: ctxX.providers, ownAddrs })) return true;
     }
   } catch { return true; } // cannot judge the chain: refuse
   return false;
@@ -76,7 +77,8 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn = () => 
   const capability = capabilityOf(roleId, ctx.customDefs);
   if (!capability || MEDIA_CAPABILITIES.includes(capability)) return [];
   const providers = ctx.providers || [];
-  const own = ownAddrs ? { ownAddrs } : {};
+  ownAddrs ??= getOwnAddresses(); // once per list, not per candidate
+  const own = { ownAddrs };
   const where = (key) => (key ? whereItRuns(key, { providers, localMarks, ...own }) : "missing");
 
   let rec;
