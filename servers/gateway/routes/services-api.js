@@ -39,9 +39,9 @@ import { keyCreatedHook } from "../keychain/api.js";
 import { ensureWriteKey, serviceSecretKeys, serviceSecretsFor } from "../keychain/store.js";
 import { loadKeychainKey } from "../keychain/key.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
-import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
+import { SUPPORTED_LANGS, t } from "../dashboard/shared/i18n.js";
 import { installedBundleIds } from "../skills-catalog.js";
-import { testConnection as defaultTestConnection, normalizeAddress, folderRefusal } from "../services/connect-test.js";
+import { testConnection as defaultTestConnection, normalizeAddress, folderRefusal, suggestLabel } from "../services/connect-test.js";
 import { servicesUiEnabled } from "../services/ui-flag.js";
 import { requireDashboardSessionJson } from "./models.js";
 import { crowServerCatalog } from "../../../scripts/pi-bots/crow-server-catalog.mjs";
@@ -60,17 +60,17 @@ const KEY_FAULTS = new Set(["KEYCHAIN_KEY_MISSING", "KEYCHAIN_KEY_INVALID"]);
  * and the canonical ~/.pi/agent/mcp.json. Computed here, never taken from the client. A source
  * that can't be read contributes nothing (the bot config builder still refuses a collision).
  */
-export function defaultReservedNames(crowHome = resolveCrowHome()) {
+export function defaultReservedNames(crowHome = resolveCrowHome(), { catalog: readCatalog = crowServerCatalog, canonical: readCanonical = readCanonicalMcp } = {}) {
   let catalog = [];
   let canonical = [];
   try {
-    const c = crowServerCatalog(crowHome);
-    catalog = [...Object.keys(c.servers || {}), ...Object.keys(c.unconfigured || {})];
+    const c = readCatalog(crowHome);
+    catalog = [...Object.keys(c?.servers || {}), ...Object.keys(c?.unconfigured || {})];
   } catch {
     console.warn("[services] server catalog unreadable");
   }
   try {
-    canonical = Object.keys(readCanonicalMcp().mcpServers || {});
+    canonical = Object.keys(readCanonical()?.mcpServers || {});
   } catch { /* no canonical config: nothing to collide with */ }
   return RESERVED_BLOCK_NAMES(catalog, canonical);
 }
@@ -298,9 +298,15 @@ export function servicesApiRouter({
       throw err;
     }
     if (body.accountLabel != null && typeof body.accountLabel !== "string") return fail(res, "bad_value", { field: "accountLabel" });
+    // An empty label is filled before the label check (no network): an address service suggests
+    // its host ("this Crow :{port}" on loopback), anything else the default "main".
+    let accountLabel = body.accountLabel;
+    if (accountLabel == null || accountLabel.trim() === "") {
+      accountLabel = (service.labelFrom && suggestLabel(service, values.config, { lang: langOf(req) })) || t("services.connect.labelDefault", langOf(req));
+    }
     const reservedSet = reserved();
     try {
-      await checkLabelFree(db, { projectId: project.id, serviceId: service.id, accountLabel: body.accountLabel, reservedNames: reservedSet });
+      await checkLabelFree(db, { projectId: project.id, serviceId: service.id, accountLabel, reservedNames: reservedSet });
     } catch (err) {
       if (err instanceof ConnectionError) return fail(res, err.code, err.code === "label_taken" ? {} : { field: "accountLabel" });
       throw err;
@@ -332,7 +338,7 @@ export function servicesApiRouter({
     let conn;
     try {
       conn = await createConnection(db, {
-        projectId: project.id, serviceId: service.id, accountLabel: body.accountLabel,
+        projectId: project.id, serviceId: service.id, accountLabel,
         config: values.config, secrets: values.secrets, testedAt: new Date(),
       }, { key, actor: "local", reservedNames: reservedSet });
     } catch (err) {
@@ -390,7 +396,10 @@ export function servicesApiRouter({
   // answers a fixed class and logs a fixed line, never the parser's message.
   router.use(SERVICES_API_BASE, (err, req, res, next) => {
     if (!err || res.headersSent) return next(err);
-    if (err.type === "entity.parse.failed" || err.type === "entity.too.large" || err.status === 400 || err.status === 413) {
+    // Every body-parser refusal (bad JSON, too large, an unsupported charset or encoding: 400 /
+    // 413 / 415, each with a `type`) is the same fixed answer; never a 500.
+    const status = Number(err.status || err.statusCode);
+    if (typeof err.type === "string" || (status >= 400 && status < 500)) {
       console.warn("[services] bad body");
       return res.status(400).json({ error: "bad_value" });
     }

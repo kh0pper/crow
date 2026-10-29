@@ -54,7 +54,7 @@ function connect(I, value, uuid = "00000000-0000-4000-8000-000000000001") {
 test("(a) an operator-recorded service secret a bot echoes is hidden on the gateway's approval card", () => {
   const I = scratchInstance();
   connect(I, SERVICE_TOKEN);
-  refreshSecretValuesFile({ env: I.env, write: false });
+  refreshSecretValuesFile({ env: I.env, write: false, cardTrusted: true });
   const r = maskSecretsDetailed("curl -H 'Authorization: Bearer " + SERVICE_TOKEN + "' https://api.example.test/user", { card: true });
   assert.equal(r.text.includes(SERVICE_TOKEN), false, "the card hides it");
   assert.equal(r.count, 1);
@@ -67,7 +67,7 @@ test("(b) what pi is handed (the fd payload and the values file) never holds a s
   insert(I, "manual", MANUAL);
   SV.recordCardSecret([MANUAL], I.env);
   connect(I, SERVICE_TOKEN);
-  const r = refreshSecretValuesFile({ env: I.env });
+  const r = refreshSecretValuesFile({ env: I.env, cardTrusted: true });
   const payload = SV.secretValuesPayload(SV.getCardValues());
   assert.equal(payload, MANUAL + "\n", "the card set alone");
   assert.equal(payload.includes(SERVICE_TOKEN), false);
@@ -84,7 +84,7 @@ test("(c) a service row a bot inserted, with no recorded hash, masks nothing", (
   assert.deepEqual(sets.service, []);
   assert.equal(sets.display.includes(SERVICE_TOKEN), false, "not on display paths either");
   assert.equal(sets.card.includes(SERVICE_TOKEN), false);
-  refreshSecretValuesFile({ env: I.env, write: false });
+  refreshSecretValuesFile({ env: I.env, write: false, cardTrusted: true });
   assert.equal(maskSecretsDetailed("echo " + SERVICE_TOKEN, { card: true }).text.includes(SERVICE_TOKEN), true, "the card shows it as written");
   // A manual row flipped to 'service' by a bot is no different: no hash, no mask.
   SV.recordCardSecret([MANUAL], I.env);
@@ -110,7 +110,7 @@ test("(d) display masking covers a dotted HA/Discord-shaped token after a connec
   SV.recordServiceSecretValues([DOTTED_TOKEN], I.env);
   const sets = collectSecretValueSets({ env: I.env });
   assert.ok(sets.display.includes(DOTTED_TOKEN));
-  refreshSecretValuesFile({ env: I.env, write: false });
+  refreshSecretValuesFile({ env: I.env, write: false, cardTrusted: true });
   SV.invalidateSecretValues();
   assert.equal(maskSecrets("ha said: token " + DOTTED_TOKEN + " ok", { values: SV.getSecretValues({ env: I.env }) }).includes(DOTTED_TOKEN), false);
   SV.primeSecretValues([], []);
@@ -129,5 +129,18 @@ test("recording writes only a hash (600, hidden dir), joins this process's displ
   SV.invalidateSecretValues();
   assert.ok(SV.getSecretValues({ env: I.env }).includes(SERVICE_TOKEN), "display masking in this process before any spawn");
   assert.equal(SV.getCardValues().includes(SERVICE_TOKEN), false);
+  SV.primeSecretValues([], []);
+});
+
+test("m3: an omitted card-trust flag is untrusted (fail closed): no card or service value primed", () => {
+  const I = scratchInstance();
+  insert(I, "manual", MANUAL);
+  SV.recordCardSecret([MANUAL], I.env);
+  connect(I, SERVICE_TOKEN);
+  refreshSecretValuesFile({ env: I.env, write: false });
+  assert.deepEqual(SV.getCardValues(), []);
+  assert.deepEqual(SV.getApprovalCardValues(), []);
+  refreshSecretValuesFile({ env: I.env, write: false, cardTrusted: true });
+  assert.ok(SV.getCardValues().includes(MANUAL) && SV.getApprovalCardValues().includes(SERVICE_TOKEN));
   SV.primeSecretValues([], []);
 });

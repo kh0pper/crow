@@ -183,7 +183,7 @@ test("validation before the test: missing field, bad value, unknown and toggle s
     assert.deepEqual((await post("spring", { serviceId: "github", accountLabel: "Main", values: { [GH]: "x".repeat(4097) } })).json, { error: "bad_value", field: GH });
     assert.deepEqual((await post("spring", { serviceId: "github", accountLabel: "Main", values: { [GH]: 7 } })).json, { error: "bad_value", field: GH });
     assert.deepEqual((await post("spring", { serviceId: "github", accountLabel: "Main", values: { [GH]: "t1", OTHER: "x" } })).json, { error: "bad_value" });
-    assert.deepEqual((await post("spring", { serviceId: "github", accountLabel: "", values: { [GH]: "t1" } })).json, { error: "missing_field", field: "accountLabel" });
+    assert.deepEqual((await post("spring", { serviceId: "github", accountLabel: 5, values: { [GH]: "t1" } })).json, { error: "bad_value", field: "accountLabel" });
     assert.deepEqual((await post("spring", { serviceId: "nope", accountLabel: "Main", values: {} })).json, { error: "unknown_service" });
     assert.deepEqual((await post("spring", { serviceId: "arxiv", accountLabel: "Main", values: {} })).json, { error: "unknown_service" }, "a toggle service");
     const missing = await post("nowhere", { serviceId: "github", accountLabel: "Main", values: { [GH]: "t1" } });
@@ -219,16 +219,28 @@ test("canary never leaves the keychain (Review Focus 2)", async () => {
     const { result, out } = await capture(async () => {
       const c = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Main", values: { [GH]: CANARY } }, headers: AUTH });
       const g = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: AUTH });
-      return { c, g };
+      // Test again decrypts it and hands it to the test (here a failing one), then a failed connect.
+      ctx.test.result = { ok: false, error: "auth_failed" };
+      const t = await call(s, "POST", `/dashboard/services/api/connection/${c.json.connection.uuid}/test`, { headers: AUTH });
+      const f = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Other", values: { [GH]: CANARY + "-2" } }, headers: AUTH });
+      ctx.test.result = { ok: true };
+      // A second connection to disconnect, so the first one's sealed row stays active for the open check below.
+      const c2 = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Gone", values: { [GH]: CANARY + "-3" } }, headers: AUTH });
+      const d = await call(s, "POST", `/dashboard/services/api/connection/${c2.json.connection.uuid}/disconnect`, { headers: AUTH });
+      return { c, g, t, f, c2, d };
     });
     assert.equal(result.c.status, 201);
     assert.equal(result.c.json.ok, true);
     assert.equal(result.g.status, 200);
-    for (const r of [result.c, result.g]) assert.ok(!r.text.includes(CANARY), "no response carries it");
+    assert.deepEqual(result.t.json, { ok: false, status: "error", error: "auth_failed" });
+    assert.equal(ctx.test.calls[1].values[GH], CANARY, "Test again used the saved secret");
+    assert.deepEqual(result.f.json, { error: "auth_failed" });
+    assert.deepEqual(result.d.json, { ok: true });
+    for (const r of Object.values(result)) assert.ok(!r.text.includes(CANARY), "no response carries it");
     assert.ok(!out.join("\n").includes(CANARY), "no log line carries it");
     assert.equal(ctx.test.calls[0].values[GH], CANARY, "the live test got it");
     const conns = (await ctx.db.execute("SELECT * FROM service_connections")).rows;
-    assert.equal(conns.length, 1);
+    assert.equal(conns.length, 2, "the failed connect saved nothing");
     assert.ok(!JSON.stringify(conns).includes(CANARY));
     const audit = (await ctx.db.execute("SELECT * FROM project_audit_log")).rows;
     assert.ok(audit.some((a) => a.action === "service.connect"));
@@ -317,7 +329,7 @@ test("(e) masking, connect write path: the saved secret's hash is recorded and t
 test("rulings 1 + 6: the gateway's masks change at once on connect; after disconnect the value is still masked but never served; a keychain-page delete purges it", async () => {
   const ctx = { ...(await freshDb()), test: fakeTest() };
   const TOKEN = "test-token-" + "Live7" + "Ab3x".repeat(4);   // shell-safe: may hide text on a card
-  refreshSecretValuesFile({ env: maskEnv(ctx), dbPath: ctx.path, write: false });   // a sandboxed spawn ran in this process
+  refreshSecretValuesFile({ env: maskEnv(ctx), dbPath: ctx.path, write: false, cardTrusted: true });   // a sandboxed spawn ran in this process
   await withApp(ctx, async (s) => {
     const c = await connectGh(s, "Live", TOKEN);
     assert.equal(c.status, 201);
@@ -464,4 +476,71 @@ test("the gateway's global body parser skips this prefix (case-insensitively)", 
   const skip = new Function("p", `return ${m[1]};`);
   for (const p of ["/dashboard/services/api/project/home/connect", "/DASHBOARD/Services/API/project/home/connect"]) assert.equal(skip(p), true, p);
   for (const p of ["/dashboard/services", "/dashboard/keychain/api/add"]) assert.equal(skip(p), false, p);
+});
+
+test("m6: an empty label is filled before the label check: an address service suggests its host, others the default", async () => {
+  const { suggestLabel } = await import("../servers/gateway/services/connect-test.js");
+  const { serviceById } = await import("../servers/shared/service-catalog.js");
+  const haSvc = serviceById("home-assistant");
+  assert.equal(suggestLabel(haSvc, { HA_URL: "http://ha.example.lan:8123" }), "ha.example.lan");
+  assert.equal(suggestLabel(haSvc, { HA_URL: "http://127.0.0.1:8123" }), "this Crow :8123");
+  assert.equal(suggestLabel(haSvc, { HA_URL: "http://localhost:8123" }, { lang: "es" }), "este Crow :8123");
+  assert.equal(suggestLabel(serviceById("github"), {}), undefined, "no labelFrom");
+  assert.equal(suggestLabel(haSvc, { HA_URL: "not an address" }), undefined);
+
+  const ctx = { ...(await freshDb()), test: fakeTest(), installed: ["home-assistant", "github"] };
+  await withApp(ctx, async (s) => {
+    const post = (body, q = "") => call(s, "POST", "/dashboard/services/api/project/spring/connect" + q, { body, headers: AUTH });
+    const lan = await post({ serviceId: "home-assistant", accountLabel: "", values: { HA_URL: "http://ha.example.lan:8123", HA_TOKEN: "test-token-11" } });
+    assert.equal(lan.status, 201, lan.text);
+    assert.equal(lan.json.connection.accountLabel, "ha.example.lan");
+    const here = await post({ serviceId: "home-assistant", values: { HA_URL: "http://127.0.0.1:8123", HA_TOKEN: "test-token-12" } });
+    assert.equal(here.status, 201, here.text);
+    assert.equal(here.json.connection.accountLabel, "this Crow :8123");
+    const gh = await post({ serviceId: "github", accountLabel: "  ", values: { [GH]: "test-token-13" } });
+    assert.equal(gh.json.connection.accountLabel, "main", "no labelFrom: the default");
+    const ghEs = await post({ serviceId: "github", values: { [GH]: "test-token-14" } }, "?lang=es");
+    assert.equal(ghEs.json.connection.accountLabel, "principal");
+    // The suggested label is still checked before the live test.
+    const calls = ctx.test.calls.length;
+    const again = await post({ serviceId: "home-assistant", accountLabel: "", values: { HA_URL: "http://ha.example.lan:8123", HA_TOKEN: "test-token-15" } });
+    assert.deepEqual(again.json, { error: "label_taken" });
+    assert.deepEqual((await post({ serviceId: "github", values: { [GH]: "test-token-16" } })).json, { error: "label_taken" });
+    assert.equal(ctx.test.calls.length, calls, "the test was never called");
+  });
+});
+
+test("m2: every body-parser refusal (bad JSON, too large, unsupported charset or encoding) is 400 bad_value with one fixed log line, never a 500", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await withApp(ctx, async (s) => {
+    const path = "/dashboard/services/api/project/spring/connect";
+    const body = JSON.stringify({ serviceId: "github", accountLabel: "Main", values: { [GH]: CANARY } });
+    for (const extra of [{ "content-type": "application/json; charset=x-unknown-9" }, { "content-encoding": "x-unknown-9" }]) {
+      const { result: r, out } = await capture(() => call(s, "POST", path, { raw: body, headers: { ...AUTH, ...extra } }));
+      assert.equal(r.status, 400, JSON.stringify(extra));
+      assert.deepEqual(r.json, { error: "bad_value" });
+      assert.deepEqual(out, ["[services] bad body"]);
+    }
+    assert.equal(ctx.test.calls.length, 0);
+  });
+});
+
+test("m5: defaultReservedNames: the catalog's servers and unconfigured names plus the canonical config's, and a refused label through the route", async () => {
+  const { defaultReservedNames } = await import("../servers/gateway/routes/services-api.js");
+  const seen = [];
+  const inputs = {
+    catalog: (home) => { seen.push(home); return { servers: { "crow-memory": {}, "github-work": {} }, unconfigured: { "google-workspace-alex": "unconfigured" } }; },
+    canonical: () => ({ mcpServers: { "trello-main": {} } }),
+  };
+  const names = defaultReservedNames(HOME, inputs);
+  assert.deepEqual([...names].sort(), ["crow-memory", "github-work", "google-workspace-alex", "trello-main"]);
+  assert.deepEqual(seen, [HOME], "the catalog of this Crow home");
+  const { result: broken, out } = await capture(async () => defaultReservedNames(HOME, { catalog: () => { throw new Error("x"); }, canonical: () => { throw new Error("no file"); } }));
+  assert.equal(broken.size, 0, "an unreadable source contributes nothing");
+  assert.deepEqual(out, ["[services] server catalog unreadable"]);
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await withApp(ctx, async (s) => {
+    assert.deepEqual((await connectGh(s, "Work")).json, { error: "label_taken" }, "github-work is a catalog server");
+    assert.equal(ctx.test.calls.length, 0);
+  }, { reservedNames: () => defaultReservedNames(HOME, inputs) });
 });

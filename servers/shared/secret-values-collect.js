@@ -194,12 +194,13 @@ let lastCardTrusted = false;   // the last pi spawn's sandbox state in THIS proc
 
 export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
-  lastCardTrusted = opts.cardTrusted !== false;
+  // Fail closed: only a caller that says the spawn was sandboxed (cardTrusted: true) is trusted.
+  lastCardTrusted = opts.cardTrusted === true;
   try {
     const sets = collectSecretValueSets(opts);
     // Untrusted (no sandbox): a bot could have written either hash list, so
     // neither set may hide text on a card.
-    const trusted = opts.cardTrusted !== false;
+    const trusted = opts.cardTrusted === true;
     primeSecretValues(sets.display, trusted ? sets.card : [], trusted ? sets.service : []);
     if (opts.write === false) return null;
     // Written through the anchored dir; the path returned (for pi) is where

@@ -166,8 +166,21 @@ function classifyStatus(status, expect) {
   return "unexpected_response";
 }
 
+/**
+ * The account label a `label_from: "address"` service suggests, with no network: the same label
+ * testConnection returns. A loopback host gives "this Crow :{port}" (services.connect.labelHere,
+ * the port of the typed address, i.e. the service's own port on this machine); any other host gives
+ * its hostname. undefined when the service has no labelFrom or no usable address.
+ * @param {object} service  a catalog entry
+ * @param {object} values   the typed values
+ * @param {{lang?: string}} [opts]
+ */
+export function suggestLabel(service, values, { lang = "en" } = {}) {
+  return labelFor(service, values, lang);
+}
+
 function labelFor(service, values, lang) {
-  if (service.labelFrom !== "address") return undefined;
+  if (!service || service.labelFrom !== "address") return undefined;
   const field = (service.fields || []).find((f) => f.kind === "address");
   const addr = field && normalizeAddress(values?.[field.name]);
   if (!addr) return undefined;

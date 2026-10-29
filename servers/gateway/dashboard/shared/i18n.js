@@ -4210,6 +4210,7 @@ export const translations = {
   "voiceHandoff.stopStatus.not_sent": { en: "This couldn't be sent to your phone, so {bot}'s task kept running. Ask Crow again.", es: "No se pudo enviar a tu teléfono, así que la tarea de {bot} siguió en marcha. Pídeselo a Crow otra vez." },
   "services.keychain.deleteServiceRow": { en: "This key belongs to a project connection. Disconnect it on the project's Services page instead.", es: "Esta clave pertenece a una conexión de un proyecto. Desconéctala en la página Servicios del proyecto." },
   "services.connect.labelHere": { en: "this Crow :{port}", es: "este Crow :{port}" },
+  "services.connect.labelDefault": { en: "main", es: "principal" },
   "services.field.HA_URL": { en: "Address", es: "Dirección" },
   "services.field.HA_TOKEN": { en: "Token", es: "Token" },
   "services.field.GITHUB_PERSONAL_ACCESS_TOKEN": { en: "Token", es: "Token" },

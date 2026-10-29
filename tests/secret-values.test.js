@@ -323,7 +323,7 @@ test("two sets: display masking uses every trusted value; cards and the values f
   const sets = collectSecretValueSets({ env: I.env });
   for (const v of ["N0t_a-real_pw9", "pa$$ w0rd&x", gen("ext"), gen("retained")]) assert.ok(sets.display.includes(v), "display " + v);
   assert.deepEqual(sets.card, ["N0t_a-real_pw9"], "cards: manual and shell-safe only");
-  const r = refreshSecretValuesFile({ env: I.env });
+  const r = refreshSecretValuesFile({ env: I.env, cardTrusted: true });
   assert.equal(readFileSync(r.path, "utf8"), "N0t_a-real_pw9\n", "the file pi-lab reads holds the card set");
   SV.invalidateSecretValues();
   assert.ok(SV.getSecretValues({ env: I.env }).includes(gen("retained")), "this process's display set (in memory)");
