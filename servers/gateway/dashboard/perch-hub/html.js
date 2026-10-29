@@ -312,6 +312,9 @@ ${listHead('<h2 class="ph-h">' + escapeHtml(t("perch.sessionsHeading", lang)) + 
     <div id="perch-planbar" hidden><div id="perch-planbar-fill"></div></div>
     <div id="perch-transcript"></div>
     <div id="perch-ask"></div>
+    <!-- Credential card (spec 10): the password card, its own pane so an ask card and it never
+         clear each other. Filled by secret-card.js with createElement/textContent only. -->
+    <div id="perch-secret"></div>
     <!-- The working strip: the chat tab's own "the bot is busy" signal.
          Since Phase D moved the state pill into the Session tab, the only
          in-chat evidence of a running turn was Send flipping to Steer —

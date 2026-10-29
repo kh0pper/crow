@@ -13,13 +13,16 @@
  * one fixed refusal line.
  *
  * What it returns: fixed lines only. The call returns at once; the card is shown through the
- * injectable `emitSecretCard(sessionId, frame, { botId })` seam (Task 3 wires the engine hook;
- * absent, it is a no-op), and the bot learns the outcome as a fixed note on its next turn
+ * injectable `emitSecretCard(sessionId, frame, { botId })` seam (request-store.js; the boot wires
+ * it to the Perch engine's hook, and absent it is a no-op), and the bot learns the outcome as a fixed note on its next turn
  * (request-store.js takeSecretNotes). No value ever passes through here.
  */
 import { McpServer as SdkMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z as zod } from "zod";
-import { createSecretRequest, discardSecret, SECRET_NOTES } from "./request-store.js";
+import { createSecretRequest, discardSecret, getSecretRequest, secretFrame, emitSecretCard, setEmitSecretCard, SECRET_NOTES } from "./request-store.js";
+
+// The card hook seam lives in request-store.js (its expiry timer emits through it too).
+export { emitSecretCard, setEmitSecretCard };
 
 export const SECRET_TOOL_LINES = Object.freeze({
   showing: "A password card is showing to the operator. You'll get a note on your next turn saying what happened.",
@@ -59,16 +62,6 @@ export function resolveSecretsActor(extra, verifyActor) {
   return valid ? a : null;
 }
 
-// The card hook seam (Task 3 installs the engine's hook here, or passes `emitSecretCard` to
-// createSecretsMcpServer). Until then showing a card is a no-op and the request just waits.
-let installedCardHook = null;
-/** Install (or, with null, remove) the process's card hook: (sessionId, frame, { botId }) => result. */
-export function setEmitSecretCard(fn) { installedCardHook = typeof fn === "function" ? fn : null; }
-/** The default card hook: the installed one, or a no-op (undefined) when none is installed. */
-export function emitSecretCard(sessionId, frame, opts) {
-  return installedCardHook ? installedCardHook(sessionId, frame, opts) : undefined;
-}
-
 const text = (t, isError = false) => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });
 
 /**
@@ -77,8 +70,9 @@ const text = (t, isError = false) => ({ content: [{ type: "text", text: t }], ..
  * @param {(sessionId: string, opts: {botId: string}) => boolean|Promise<boolean>} o.isLiveSession
  *        a resident, awake Perch session of that bot (default: none is live)
  * @param {(sessionId: string, frame: object, opts: {botId: string}) => any} [o.emitSecretCard]
- *        the card hook (default: the module's emitSecretCard seam, a no-op until Task 3 installs
- *        one). A result of `{ delivered: false }` (or a throw) drops the request.
+ *        the card hook (default: request-store.js's emitSecretCard seam, which the boot wires to
+ *        the Perch engine; a no-op when none is installed). It gets the open frame
+ *        `{ type: "secret_request", id, label, state: "open" }`. A result of `{ delivered: false }` (or a throw) drops the request.
  */
 export function createSecretsMcpServer({ McpServer = SdkMcpServer, z = zod, verifyActor, isLiveSession, emitSecretCard: cardHook } = {}) {
   const server = new McpServer({ name: "crow-secrets", version: "0.1.0" });
@@ -103,7 +97,8 @@ export function createSecretsMcpServer({ McpServer = SdkMcpServer, z = zod, veri
           return text(SECRET_TOOL_LINES.failed, true);
         }
         let shown;
-        try { shown = await emit(actor.thread, { type: "secret_request", id }, { botId: actor.id }); }
+        const req = getSecretRequest(id);
+        try { shown = req ? await emit(actor.thread, secretFrame(req, "open"), { botId: actor.id }) : { delivered: false }; }
         catch { shown = { delivered: false }; }
         if (shown && shown.delivered === false) {
           discardSecret(id);

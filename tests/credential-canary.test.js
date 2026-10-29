@@ -7,10 +7,10 @@
  *
  * Cases that need a later task are `todo` (they still run, so their state is visible) and are
  * flipped to live by that task:
- *   (a) the keychain card submit                               → Task 3
+ *   (a) the keychain card submit                               (LIVE: Task 3)
  *   (b) a composer /message and /steer with the canary pasted   → Task 4
- *   (c) a malformed-JSON body: /message, /steer and other global-parser routes (LIVE now),
- *       the submit route → Task 3
+ *   (c) a malformed-JSON body: /message, /steer, other global-parser routes and the secret
+ *       submit route (all LIVE)
  *   (d) the services connect submit with the canary as a value  (LIVE now: the route exists;
  *       Task 4 adds the Connect card's own case)
  *
@@ -23,7 +23,15 @@ import { join } from "node:path";
 import { createCanaryHarness, makeCanary } from "./fixtures/credential-canary.mjs";
 
 let h;
+let secretMounted = false;
 before(async () => { h = await createCanaryHarness(); });
+/** The submit route behind the harness's CSRF rail and session gate, mounted once. */
+async function mountSecretSubmit() {
+  if (secretMounted) return;
+  const { default: secretSubmitRouter } = await import("../servers/gateway/routes/secret-submit.js");
+  h.mountDashboard(secretSubmitRouter(h.sessionGate));
+  secretMounted = true;
+}
 after(async () => { if (h) await h.close(); });
 
 const show = (hits) => JSON.stringify(hits, null, 1);
@@ -90,12 +98,17 @@ test("(c) an oversized /message body answers a fixed too_large and logs no body 
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 
-test("(c) a malformed-JSON body to the secret submit route", { todo: "Task 3: the submit route" }, async () => {
+test("(c) a malformed-JSON body to the secret submit route: fixed answer, fixed line, zero hits", async () => {
   const c = makeCanary();
-  const { default: secretSubmitRouter } = await import("../servers/gateway/routes/secret-submit.js");
-  h.mountDashboard(secretSubmitRouter(h.sessionGate));
-  const r = await h.post("/dashboard/perch-api/secret/" + "0".repeat(32), `{"value": ${c}}`);
+  await mountSecretSubmit();
+  const before = h.console.lines.length;
+  const r = await h.post("/dashboard/perch-api/secret/" + "0".repeat(32) + "?sid=x", `{"value": ${c}}`);
   assert.equal(r.status, 400);
+  assert.deepEqual(r.json, { error: "bad_body" });
+  assert.deepEqual(h.console.lines.slice(before), ["[secrets] bad body"], "its own handler, not the global parser's");
+  const big = await h.post("/dashboard/perch-api/secret/" + "0".repeat(32) + "?sid=x", JSON.stringify({ value: c + "x".repeat(8 * 1024) }));
+  assert.equal(big.status, 413);
+  assert.deepEqual(big.json, { error: "too_large" });
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 
@@ -129,19 +142,30 @@ test("(c) other routes on the global parser: an ask /answer and an unrouted path
 // (a) the keychain card submit
 // ---------------------------------------------------------------------------
 
-test("(a) the keychain card submit: the bot gets the name, the sealed row decrypts to the canary, zero hits", { todo: "Task 3: card, submit route and engine hook" }, async () => {
+test("(a) the keychain card submit: the bot gets the name, the sealed row decrypts to the canary, zero hits", async () => {
   const c = makeCanary();
   const store = await import("../servers/gateway/secrets/request-store.js");
-  const { default: secretSubmitRouter } = await import("../servers/gateway/routes/secret-submit.js");
-  h.mountDashboard(secretSubmitRouter(h.sessionGate));
+  const { createKeychainKey } = await import("../servers/gateway/keychain/key.js");
+  createKeychainKey({ crowHome: h.crowHome });   // the target never creates one
+  await mountSecretSubmit();
   const s = await h.spawnSession("keychain-bot");
   const { id } = store.createSecretRequest({ sessionId: s.sessionId, threadId: s.threadId, botId: "keychain-bot", kind: "password", target: "keychain", label: "Canary site" });
-  const r = await h.post("/dashboard/perch-api/secret/" + id, { value: c });
+  // The card goes out the way crow_request_secret sends it (the boot's seam, to the engine).
+  assert.deepEqual(store.emitSecretCard(s.sessionId, store.secretFrame(store.getSecretRequest(id), "open"), { botId: "keychain-bot" }), { delivered: true, botId: "keychain-bot" });
+  const r = await h.post(`/dashboard/perch-api/secret/${id}?sid=${encodeURIComponent(s.sessionId)}`, { value: c });
   assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, code: "saved" });
   const rows = await h.keychainRows();
-  assert.equal(rows.length, 1);
-  assert.ok(!JSON.stringify(rows[0]).includes(c), "the row holds no plaintext");
-  assert.equal(await h.openKeychain(rows[0].id), c, "the sealed row decrypts to the canary");
+  const row = rows.find((x) => x.label === "Canary site");
+  assert.ok(row, "a manual row under the label");
+  assert.ok(!JSON.stringify(row).includes(c), "the row holds no plaintext");
+  assert.equal(await h.openKeychain(row.id), c, "the sealed row decrypts to the canary");
+  const states = h.frames.filter((f) => f.sessionId === s.sessionId && f.event.type === "secret_request").map((f) => f.event.state);
+  assert.deepEqual(states, ["open", "done"]);
+  // The bot's next turn: the name and entry number, never the value.
+  assert.equal((await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/message`, { message: "did it work?" })).status, 202);
+  assert.match(h.pi().lastTurn().message, new RegExp(`^\\[Crow\\] Saved in the keychain as "Canary site" \\(entry ${row.id}\\)\\.`));
+  await h.endTurn("thanks");
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 

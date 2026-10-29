@@ -41,7 +41,9 @@ test("create, one open per session", () => {
   const other = store.createSecretRequest(req({ sessionId: "perchlive-bbbb2222", threadId: "perchlive-bbbb2222" }));
   assert.notEqual(other.id, id);
   // Closing frees the session for a new request.
-  assert.deepEqual(store.cancelSecret(id, "perchlive-aaaa1111"), { outcome: "ok", note: "You closed the form. Nothing was sent." });
+  const closed = store.cancelSecret(id, "perchlive-aaaa1111");
+  assert.deepEqual({ outcome: closed.outcome, note: closed.note }, { outcome: "ok", note: "You closed the form. Nothing was sent." });
+  assert.equal(closed.request.id, id, "the closed request's metadata comes back for the card frame");
   assert.ok(store.createSecretRequest(req()).id);
 });
 
@@ -278,7 +280,7 @@ test("tool refuses unsigned, non-perch and dead-session actors", async () => {
     assert.ok(open);
     assert.equal(open.botId, "tool-bot");
     assert.equal(open.label, "Example site");
-    assert.deepEqual(emitted, [{ sid: live.sessionId, frame: { type: "secret_request", id: open.id }, o: { botId: "tool-bot" } }]);
+    assert.deepEqual(emitted, [{ sid: live.sessionId, frame: { type: "secret_request", id: open.id, label: "Example site", state: "open" }, o: { botId: "tool-bot" } }]);
     assert.deepEqual(await callText(c, args), { text: "A password card is already open in this chat. Wait for its note on your next turn.", isError: true });
     store.cancelSecret(open.id, live.sessionId);
     assert.deepEqual(await callText(c, { ...args, target: "browser" }), { text: "That kind of request isn't available yet.", isError: true });
@@ -308,13 +310,15 @@ test("the card seam: a no-op by default; an undelivered card drops the request",
     await teardown(m);
   }
   // The module default: no hook installed → undefined (no-op); an installed hook is used.
+  // (The harness installs the boot's wiring to its engine; it is put back at the end.)
+  mcpMod.setEmitSecretCard(null);
   assert.equal(mcpMod.emitSecretCard("s", { type: "secret_request" }, { botId: "b" }), undefined);
   const seen = [];
   mcpMod.setEmitSecretCard((...a) => { seen.push(a); return { delivered: true }; });
   try {
     assert.deepEqual(mcpMod.emitSecretCard("s", { type: "secret_request", id: "x" }, { botId: "b" }), { delivered: true });
     assert.deepEqual(seen, [["s", { type: "secret_request", id: "x" }, { botId: "b" }]]);
-  } finally { mcpMod.setEmitSecretCard(null); }
+  } finally { mcpMod.setEmitSecretCard((sid, f, o) => h.engine.emitSecretCard(sid, f, o)); }
 });
 
 // ---------------------------------------------------------------------------
