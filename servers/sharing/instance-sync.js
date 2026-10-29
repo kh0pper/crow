@@ -300,7 +300,7 @@ export async function mapInboundMemoryProject(db, row) {
   let projectId = null;
   if (typeof uuid === "string" && uuid !== "") {
     try {
-      const { rows } = await db.execute({ sql: "SELECT id FROM project_spaces WHERE uuid = ?", args: [uuid] });
+      const { rows } = await db.execute({ sql: "SELECT id FROM project_spaces WHERE uuid = ? AND archived_at IS NULL", args: [uuid] });
       if (rows.length > 0) projectId = Number(rows[0].id);
     } catch (err) {
       console.warn("[instance-sync] memories project_uuid lookup failed (landing unfiled):", err.message);

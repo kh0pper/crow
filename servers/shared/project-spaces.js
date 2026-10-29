@@ -14,6 +14,9 @@
 import { slugify, workspacePathFor, storagePrefixFor } from "./slugify.js";
 import { resolveDataDir } from "../db.js";
 import { resolve } from "node:path";
+import { lstatSync } from "node:fs";
+
+const pathExists = (p) => { try { lstatSync(p); return true; } catch { return false; } };
 
 /**
  * Create a new project_spaces row and its owner project_members row in one
@@ -27,7 +30,8 @@ import { resolve } from "node:path";
  * Explicit slug mode (pass opts.explicitSlug):
  *   The caller supplies the final slug (e.g. the "-clone-N" form from the
  *   sharing clone path). workspace_dir and storage_prefix are still computed
- *   here from that slug. The path-containment assertion STAYS in the caller.
+ *   here from that slug; when <slug>/workspace already exists on disk the
+ *   workspace goes to a fresh <slug>-2/workspace (then -3, ...) instead. The path-containment assertion STAYS in the caller.
  *
  * Owner member row:
  *   Inserted with INSERT OR IGNORE so callers that already have their own
@@ -72,7 +76,10 @@ export async function createProjectSpace(db, opts = {}) {
   if (explicitSlug) {
     // --- Explicit slug mode ---
     // Caller owns slug derivation; we own workspace_dir / storage_prefix.
-    const workspaceDir = workspacePathFor(dataDir, explicitSlug);
+    // A folder already on disk at that path (a deleted project's workspace whose move failed) is
+    // never adopted: the new project gets a fresh <slug>-2, -3, ... folder instead.
+    let workspaceDir = workspacePathFor(dataDir, explicitSlug);
+    for (let n = 2; pathExists(workspaceDir); n++) workspaceDir = workspacePathFor(dataDir, `${explicitSlug}-${n}`);
     const storagePrefix = storagePrefixFor(explicitSlug);
 
     const stmts = [
@@ -165,7 +172,7 @@ export async function createProjectSpace(db, opts = {}) {
  * @param {object} db
  * @param {number} id
  * @param {object} patch  — { name?, description?, status?, tags?, type? }
- * @returns {number} rowsAffected
+ * @returns {number} rowsAffected (0 for a missing row or a deleted project's tombstone)
  */
 export async function updateProjectSpaceMeta(db, id, patch = {}) {
   const sets = [];
@@ -200,7 +207,8 @@ export async function updateProjectSpaceMeta(db, id, patch = {}) {
   args.push(id);
 
   const result = await db.execute({
-    sql: `UPDATE project_spaces SET ${sets.join(", ")} WHERE id = ?`,
+    // A deleted project's tombstone (archived_at set) is never rewritten: callers see 0, "not found".
+    sql: `UPDATE project_spaces SET ${sets.join(", ")} WHERE id = ? AND archived_at IS NULL`,
     args,
   });
 

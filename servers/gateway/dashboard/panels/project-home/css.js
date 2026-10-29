@@ -10,11 +10,13 @@
  */
 
 import { sessionUiCss } from "../../shared/session-cards.js";
+import { lifecycleRules } from "../../shared/project-lifecycle-ui.js";
 
 export function projectHomeCss() {
   return `<style>
   body.shell .ph { min-width: 0; max-width: 44rem; display: flex; flex-direction: column; gap: 24px; }
 ${sessionUiCss("body.shell")}
+${lifecycleRules()}
   body.shell .ph-missing { align-items: flex-start; gap: 12px; }
   /* Where you left off (R1.2 PR 4). A summary row stacks its title over its text. */
   body.shell .ph-summary { flex-direction: column; align-items: flex-start; gap: 4px; }

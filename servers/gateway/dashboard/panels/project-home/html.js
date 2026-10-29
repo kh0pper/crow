@@ -13,6 +13,7 @@ import { t } from "../../shared/i18n.js";
 import { needsYouLabel } from "../board/needs-you-label.js";
 import { relativeDay } from "./data.js";
 import { csrfInput } from "../../shared/csrf.js";
+import { manageProjectHtml } from "../../shared/project-lifecycle-ui.js";
 import { servicesUiEnabled } from "../../../services/ui-flag.js";
 import { sessionCardHtml, sessionCardModel, startControlHtml } from "../../shared/session-cards.js";
 
@@ -172,6 +173,7 @@ export function projectHomeHtml(data, project, lang, { now = new Date(), service
     ${leftOffSection(data, project, lang, now)}
     ${needsSection(data, project, lang)}
     ${sessionsSection(data, project, lang, now)}
+    ${data.canManage ? manageProjectHtml(req, project, lang) : ""}
   </div>`;
 }
 

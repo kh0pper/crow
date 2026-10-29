@@ -20,6 +20,10 @@ import {
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
 import { approveBackend, revokeBackendApproval, hasApproval, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
 import { csrfInput } from "../shared/csrf.js";
+import { canOwnProject } from "../../../shared/project-lifecycle.js";
+import {
+  handleLifecyclePost, deleteConfirmHtml, lifecycleRules, detailControlsHtml, archivedRowActionsHtml, resultBannerHtml,
+} from "../shared/project-lifecycle-ui.js";
 import { statSync } from "node:fs";
 import { statusCode } from "../../../research/fetch-labels.js";
 
@@ -97,6 +101,16 @@ export default {
     // --- POST Actions ---
     if (req.method === "POST") {
       const { action } = req.body;
+
+      // Archive, Restore, Delete (§15): owner-only, re-checked on the server, named options only.
+      if (["archive_project", "restore_project", "delete_project"].includes(action)) {
+        const pid = Number(req.body.id);
+        const handled = await handleLifecyclePost(req, res, {
+          db, lang, layout, projectId: pid, forbiddenHtml: `<p role="alert">${escapeHtml(t("projectHome.forbidden", lang))}</p>`,
+          urls: { post: "/dashboard/projects", confirm: (extra) => `/dashboard/projects?delete=${pid}&${extra}` },
+        });
+        if (handled) return handled.page;
+      }
 
       if (action === "create") {
         const { name, description, type, tags } = req.body;
@@ -217,6 +231,11 @@ export default {
       }
     }
 
+    // --- Delete confirm ---
+    if (typeof req.query.delete === "string" && req.query.delete) {
+      return await renderDeleteConfirm(db, req, layout, lang);
+    }
+
     // --- Detail View ---
     const viewId = req.query.view;
     if (viewId) {
@@ -224,11 +243,31 @@ export default {
     }
 
     // --- List View ---
-    return await renderListView(db, req.query, layout, lang);
+    return await renderListView(db, req.query, layout, lang, req);
   },
 };
 
-async function renderListView(db, query, layout, lang) {
+/** The delete confirm page for /dashboard/projects?delete=<id> (owner only; a live or archived project). */
+async function renderDeleteConfirm(db, req, layout, lang) {
+  const id = Number(req.query.delete);
+  const { rows } = Number.isInteger(id)
+    ? await db.execute({ sql: "SELECT id, slug, name, status FROM project_spaces WHERE id = ? AND archived_at IS NULL", args: [id] })
+    : { rows: [] };
+  const p = rows[0];
+  if (!p || !(await canOwnProject(db, id))) {
+    return layout({ title: "Project Not Found", content: section("Not Found", `<p>Project #${escapeHtml(String(req.query.delete))} not found.</p>`) });
+  }
+  const project = { id: Number(p.id), slug: String(p.slug), name: String(p.name || p.slug), status: String(p.status || "") };
+  const view = await deleteConfirmHtml(db, req, project, lang, {
+    urls: { post: "/dashboard/projects", cancel: `/dashboard/projects?view=${id}` },
+    error: typeof req.query.error === "string" ? req.query.error : "",
+    disconnected: typeof req.query.disconnected === "string" ? req.query.disconnected : "",
+  });
+  if (view.forbidden) return layout({ title: "Project Not Found", content: section("Not Found", `<p>Project #${id} not found.</p>`) });
+  return layout({ title: project.name, content: `<style>${lifecycleRules()}</style>${view.html}` });
+}
+
+async function renderListView(db, query, layout, lang, req) {
   const live = (await withdrawReady(db)) ? " AND withdrawn_at IS NULL" : "";
   const page = parseInt(query.page) || 1;
   const offset = (page - 1) * PAGE_SIZE;
@@ -294,6 +333,9 @@ async function renderListView(db, query, layout, lang) {
 
   // Project cards
   let projectsHtml;
+  // Archived rows the local owner may Restore or Delete (§15).
+  const ownsById = new Set();
+  for (const p of projects) if (p.status === "archived" && (await canOwnProject(db, Number(p.id)))) ownsById.add(Number(p.id));
   if (projects.length === 0) {
     projectsHtml = `<div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">No projects found. Create one to get started.</div>`;
   } else {
@@ -304,7 +346,7 @@ async function renderListView(db, query, layout, lang) {
       const counts = `<span style="font-size:0.75rem;color:var(--crow-text-secondary)">${p.source_count} sources · ${p.note_count} notes${p.backend_count > 0 ? ` · ${p.backend_count} backends` : ""}</span>`;
       const delay = i * 30;
 
-      return `<a href="/dashboard/projects?view=${p.id}" class="project-card" style="animation:fadeInUp 0.3s ease-out ${delay}ms both">
+      const card = `<a href="/dashboard/projects?view=${p.id}" class="project-card" style="animation:fadeInUp 0.3s ease-out ${delay}ms both">
         <div style="display:flex;justify-content:space-between;align-items:start;gap:0.5rem">
           <div style="font-weight:600;font-size:0.95rem">${escapeHtml(p.name)}</div>
           <div style="flex-shrink:0">${statusBadge}${typeBadge}</div>
@@ -316,6 +358,7 @@ async function renderListView(db, query, layout, lang) {
         </div>
         ${tags}
       </a>`;
+      return p.status === "archived" && ownsById.has(Number(p.id)) ? card + archivedRowActionsHtml(req, p, lang) : card;
     }).join("");
   }
 
@@ -376,7 +419,7 @@ async function renderListView(db, query, layout, lang) {
     }
   </style>`;
 
-  const content = `${css}${createForm}${filterBar}${projectsHtml}${paginationHtml}`;
+  const content = `${css}<style>${lifecycleRules()}</style>${resultBannerHtml(query, lang)}${createForm}${filterBar}${projectsHtml}${paginationHtml}`;
   return layout({ title: `Projects (${totalCount})`, content });
 }
 
@@ -464,6 +507,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
       ${project.tags ? ` · Tags: ${escapeHtml(project.tags)}` : ""}
     </div>
     <div style="margin-bottom:1rem">Change status: ${statusOptions}</div>
+    ${(await canOwnProject(db, Number(project.id))) ? `<style>${lifecycleRules()}</style>${detailControlsHtml(req, project, lang)}` : ""}
   `;
 
   // Sources table

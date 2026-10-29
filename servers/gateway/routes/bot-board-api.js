@@ -971,7 +971,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT id FROM project_spaces WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "project not found");
-      await updateProjectSpaceMeta(cdb, id, patch);
+      if (!(await updateProjectSpaceMeta(cdb, id, patch))) return jsonError(res, 404, "project not found"); // a deleted project's tombstone
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
