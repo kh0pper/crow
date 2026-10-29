@@ -29,6 +29,10 @@ import { translations, SUPPORTED_LANGS, fill } from "../servers/gateway/dashboar
 // language-neutral terms, product/protocol names, numerals, enum labels).
 const IDENTICAL_OK = new Set([
   "nav.blog",
+  "services.field.HA_TOKEN", // "Token" is the same word in Spanish
+  "services.field.GITHUB_PERSONAL_ACCESS_TOKEN", // "Token" is the same word in Spanish
+  "services.field.TRELLO_TOKEN", // "Token" is the same word in Spanish
+  "services.field.CANVAS_API_TOKEN", // "Token" is the same word in Spanish
   "nav.perch", // "Perch Hub" — product name
   "login.2faPlaceholder", // "000000"
   "shell.apps", // "Apps": the Spanish UI says "apps" too (shell.appsAll "Todas las apps")

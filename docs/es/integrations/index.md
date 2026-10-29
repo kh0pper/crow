@@ -32,13 +32,11 @@ Agrega claves de API para habilitar estas integraciones. Para despliegues en la 
 |---|---|---|---|
 | **GitHub** | `GITHUB_PERSONAL_ACCESS_TOKEN` | Repos, issues, PRs, búsqueda de código | [Ajustes de GitHub](https://github.com/settings/tokens) |
 | **Brave Search** | `BRAVE_API_KEY` | Búsqueda web, búsqueda local | [API de Brave](https://brave.com/search/api/) |
-| **Slack** | `SLACK_BOT_TOKEN` | Mensajes, canales, hilos | [Apps de Slack](https://api.slack.com/apps) |
 | **Notion** | `NOTION_TOKEN` | Páginas, bases de datos, comentarios | [Integraciones de Notion](https://www.notion.so/my-integrations) |
 | **Trello** | `TRELLO_API_KEY`, `TRELLO_TOKEN` | Tableros, tarjetas, listas | [Power-Ups de Trello](https://trello.com/power-ups/admin) |
 | **Discord** | `DISCORD_BOT_TOKEN` | Servidores, canales, mensajes | [Portal de desarrolladores de Discord](https://discord.com/developers/applications) |
 | **Google Workspace** | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat | [Consola de Google Cloud](https://console.cloud.google.com/apis/credentials) |
 | **Canvas LMS** | `CANVAS_API_TOKEN`, `CANVAS_BASE_URL` | Cursos, tareas, calificaciones | Ajustes de cuenta de Canvas |
-| **Microsoft Teams** | `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID` | Mensajes, canales, equipos | [Portal de Azure](https://portal.azure.com) |
 | **Zotero** | `ZOTERO_API_KEY`, `ZOTERO_USER_ID` | Citas, gestión de biblioteca | [Ajustes de Zotero](https://www.zotero.org/settings/keys) |
 | **arXiv** | *(ninguna)* | Búsqueda de artículos académicos, texto completo | Funciona de inmediato |
 | **Obsidian** | `OBSIDIAN_VAULT_PATH` | Búsqueda en el vault, sincronización de notas | Ruta local al vault |
@@ -51,13 +49,11 @@ Instrucciones de configuración detalladas paso a paso para cada integración:
 
 - [GitHub](./github) — Tokens de acceso personal, scopes requeridos
 - [Brave Search](./brave-search) — Registro para la clave de API gratuita
-- [Slack](./slack) — Token de bot, scopes de OAuth, instalación en el workspace
 - [Notion](./notion) — Configuración de integración interna, compartición de páginas
 - [Trello](./trello) — Clave de API y token del Power-Up
 - [Discord](./discord) — Token de bot, intent de contenido de mensajes
 - [Google Workspace](./google-workspace) — Credenciales OAuth, habilitación de APIs
 - [Canvas LMS](./canvas-lms) — Token de acceso, URL de la institución
-- [Microsoft Teams](./microsoft-teams) — Registro de app en Azure AD
 - [Zotero](./zotero) — Clave de API e ID de usuario
 - [Home Assistant](./home-assistant) — Token de acceso de larga duración
 - [Obsidian](./obsidian) — Configuración de la ruta del vault

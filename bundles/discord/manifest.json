@@ -1,0 +1,61 @@
+{
+  "id": "discord",
+  "name": "Discord",
+  "version": "1.0.0",
+  "description": "Community servers and channels",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "communication",
+  "tags": [
+    "discord",
+    "chat",
+    "community"
+  ],
+  "icon": "message-circle",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-discord"
+    ],
+    "envKeys": [
+      "DISCORD_BOT_TOKEN"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "DISCORD_BOT_TOKEN",
+      "description": "Discord bot token",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "DISCORD_BOT_TOKEN",
+        "kind": "secret",
+        "label_key": "services.field.DISCORD_BOT_TOKEN"
+      }
+    ],
+    "steps": [
+      "services.steps.discord.1",
+      "services.steps.discord.2",
+      "services.steps.discord.3"
+    ],
+    "test": {
+      "kind": "http",
+      "url": "https://discord.com/api/v10/users/@me",
+      "headers": {
+        "Authorization": "Bot ${DISCORD_BOT_TOKEN}"
+      },
+      "expect": [
+        200
+      ]
+    }
+  },
+  "ports": [],
+  "webUI": null
+}

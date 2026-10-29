@@ -1,0 +1,73 @@
+{
+  "id": "canvas-lms",
+  "name": "Canvas LMS",
+  "version": "1.0.0",
+  "description": "Course and assignment management",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": [
+    "canvas",
+    "lms",
+    "courses"
+  ],
+  "icon": "school",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-canvas-lms"
+    ],
+    "envKeys": [
+      "CANVAS_BASE_URL",
+      "CANVAS_API_TOKEN"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "CANVAS_BASE_URL",
+      "description": "Canvas address (e.g. https://your-school.instructure.com)",
+      "required": true
+    },
+    {
+      "name": "CANVAS_API_TOKEN",
+      "description": "Canvas access token",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "CANVAS_BASE_URL",
+        "kind": "address",
+        "label_key": "services.field.CANVAS_BASE_URL"
+      },
+      {
+        "name": "CANVAS_API_TOKEN",
+        "kind": "secret",
+        "label_key": "services.field.CANVAS_API_TOKEN"
+      }
+    ],
+    "steps": [
+      "services.steps.canvas-lms.1",
+      "services.steps.canvas-lms.2",
+      "services.steps.canvas-lms.3"
+    ],
+    "test": {
+      "kind": "http",
+      "url": "${CANVAS_BASE_URL}/api/v1/users/self",
+      "headers": {
+        "Authorization": "Bearer ${CANVAS_API_TOKEN}"
+      },
+      "expect": [
+        200
+      ]
+    },
+    "label_from": "address"
+  },
+  "ports": [],
+  "webUI": null
+}

@@ -246,16 +246,6 @@ export const EXTERNAL_SERVERS = [
     category: "productivity",
   },
   {
-    name: "slack",
-    command: "npx",
-    args: ["-y", "@anthropic/mcp-server-slack"],
-    envKeys: ["SLACK_BOT_TOKEN"],
-    envMap: { SLACK_BOT_TOKEN: "SLACK_BOT_TOKEN" },
-    mcpEnv: { SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN}" },
-    description: "Requires SLACK_BOT_TOKEN",
-    category: "communication",
-  },
-  {
     name: "discord",
     command: "npx",
     args: ["-y", "mcp-discord"],
@@ -263,16 +253,6 @@ export const EXTERNAL_SERVERS = [
     envMap: { DISCORD_BOT_TOKEN: "DISCORD_BOT_TOKEN" },
     mcpEnv: { DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN}" },
     description: "Requires DISCORD_BOT_TOKEN",
-    category: "communication",
-  },
-  {
-    name: "microsoft-teams",
-    command: "npx",
-    args: ["-y", "mcp-server-microsoft-teams"],
-    envKeys: ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
-    envMap: { TEAMS_CLIENT_ID: "TEAMS_CLIENT_ID", TEAMS_CLIENT_SECRET: "TEAMS_CLIENT_SECRET", TEAMS_TENANT_ID: "TEAMS_TENANT_ID" },
-    mcpEnv: { TEAMS_CLIENT_ID: "${TEAMS_CLIENT_ID}", TEAMS_CLIENT_SECRET: "${TEAMS_CLIENT_SECRET}", TEAMS_TENANT_ID: "${TEAMS_TENANT_ID}" },
-    description: "Requires Azure AD credentials (experimental)",
     category: "communication",
   },
   {
