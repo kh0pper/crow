@@ -19,6 +19,12 @@ import { tJs } from "../shared/i18n.js";
  *  - opened by the tile's "perch:browser-takeover" event (Take over, or a tap
  *    on the live picture), by a "?take-over=1" link (the wait_for_user
  *    attention item), or from the Browser panel;
+ *  - R1.2 PR 5: the app tile sends the same event with detail.app
+ *    { id, label, base } (base = the app's /proxy/<id>/<desktop path>). Another
+ *    app's sheet runs the same states on POST …/apps/<id>/take-over |
+ *    heartbeat | hand-back, has no password row, and never touches the
+ *    browser's "You have the browser" control. The browser itself stays on
+ *    …/browser/*;
  *  - POST …/browser/take-over → "held": the noVNC viewer loads; "pending": "The
  *    bot is finishing its step…" and a 1 s check until it switches;
  *  - held: a heartbeat every 15 s (the server keeps the holding 5 minutes
@@ -50,6 +56,23 @@ export function perchTakeOverJs(lang = "en") {
   var toSheet=null;
 
   function toApi(path){ return perchApi('POST','/browser/'+path); }
+  /* R1.2 PR 5: the sheet also takes over another desktop app (detail.app from
+     the app tile): the same state machine on that app's own routes. The
+     browser, from its tile or the launcher's, stays on /browser/. */
+  var TO_APP_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
+  var TO_APP_PATH=/^[A-Za-z0-9._~-]+(\\/[A-Za-z0-9._~-]+)*$/;
+  function toAppOf(detail){
+    var a=detail&&detail.app;
+    if(!a||typeof a.id!=='string'||!TO_APP_ID.test(a.id)) return null;
+    var pre='/proxy/'+a.id+'/', base=typeof a.base==='string'?a.base:'';
+    if(base.indexOf(pre)!==0||!TO_APP_PATH.test(base.slice(pre.length))||base.indexOf('..')>=0) return null;
+    return { id:a.id, label:typeof a.label==='string'?a.label:'', base:base };
+  }
+  function toIsBrowser(s){ return !s.app||s.app.id==='browser'; }
+  function toOp(s,op){
+    if(toIsBrowser(s)) return toApi(op);
+    return perchApi('POST','/apps/'+encodeURIComponent(s.app.id)+'/'+op);
+  }
   function toKeychain(method,path,body){
     var opts={ method:method, headers:{ 'X-Crow-Csrf':csrf() }, cache:'no-store' };
     if(body!==undefined){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
@@ -66,13 +89,14 @@ export function perchTakeOverJs(lang = "en") {
     if(!live()) return;
     if(toSheet){ if(toSheet.back.focus) toSheet.back.focus(); return; }
     var anchor=detail&&typeof detail.anchor==='string'?detail.anchor:null;
-    var tile=(typeof btFind==='function')?btFind(anchor):null;
-    var s={ state:'opening', timer:null, pwTimer:null, secret:null, entryId:null, method:'password', closed:false, retry:null };
+    var app=toAppOf(detail);
+    var tile=(!app&&typeof btFind==='function')?btFind(anchor):null;
+    var s={ state:'opening', timer:null, pwTimer:null, secret:null, entryId:null, method:'password', closed:false, retry:null, app:app };
     var node=document.createElement('div'); node.className='ph-tosheet';
     node.setAttribute('role','dialog'); node.setAttribute('aria-modal','true');
     var head=document.createElement('div'); head.className='to-head';
     var host=document.createElement('span'); host.className='to-host';
-    host.textContent=(typeof btHost==='function')?btHost(tile?tile.domain:null):'';
+    host.textContent=(app&&app.label)?app.label:(typeof btHost==='function')?btHost(tile?tile.domain:null):'';
     var back=toButton('to-back btn btn-primary',TO_HAND_BACK);
     head.appendChild(host); head.appendChild(back);
     var status=line('to-status',''); status.setAttribute('role','status'); status.hidden=true;
@@ -101,6 +125,15 @@ export function perchTakeOverJs(lang = "en") {
     rGo.onclick=function(){ toReauth(s); };
     rCancel.onclick=function(){ s.retry=null; rInput.value=''; reauth.hidden=true; };
     if(back.focus) back.focus();
+    if(!toIsBrowser(s)){
+      /* another app: no keychain lookup (the browser's VNC password only) */
+      perchApi('POST','/apps/'+encodeURIComponent(app.id)+'/take-over').then(function(r){
+        /* its lease is not confirmed any more: nothing was taken; Hand back closes the sheet */
+        if(r&&r.status===409){ if(toSheet===s&&!s.closed){ s.state='ended'; toSetStatus(s,TO_FAILED); } return; }
+        toAnswer(s,r);
+      });
+      return;
+    }
     toFindPassword(s);
     /* From a link: the server takes it only while that chat's turn uses the browser. */
     var body=(detail&&detail.link)?{ from:'link', sid:String(detail.sid||'') }:undefined;
@@ -131,7 +164,7 @@ export function perchTakeOverJs(lang = "en") {
     }
     if(st==='idle'){
       /* held: the browser went back (5-minute loss). Not yet held: the take-over gave up. */
-      if(s.state==='held'){ closeTakeOver(); toMine(false); return; }
+      if(s.state==='held'){ closeTakeOver(); if(toIsBrowser(s)) toMine(false); return; }
       s.state='ended'; toSetStatus(s,TO_FAILED);
       return;
     }
@@ -146,17 +179,17 @@ export function perchTakeOverJs(lang = "en") {
     s.timer=setTimeout(function(){
       s.timer=null;
       if(s.closed||toSheet!==s||!live()) return;
-      toApi('heartbeat').then(function(r){ toAnswer(s,r); });
+      toOp(s,'heartbeat').then(function(r){ toAnswer(s,r); });
     },ms);
   }
 
   function toViewer(s){
     if(s.frame) return;
     var f=document.createElement('iframe'); f.className='to-vnc';
-    f.setAttribute('title','VNC');
+    f.setAttribute('title',(s.app&&s.app.label)?s.app.label:'VNC');
     /* view_only pinned off: noVNC keeps that setting in its own browser storage, and the
-       Browser panel's watch-only viewer sets it on the same origin */
-    f.setAttribute('src','/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false');
+       Browser panel's (and the app tile's) watch-only viewer sets it on the same origin */
+    f.setAttribute('src',(s.app?s.app.base:'/proxy/browser/vnc.html')+'?autoconnect=true&resize=scale&view_only=false');
     s.view.appendChild(f); s.frame=f;
   }
 
@@ -167,10 +200,10 @@ export function perchTakeOverJs(lang = "en") {
     if(s.state==='ended'){ closeTakeOver(); toMineRefresh(); return; }
     if(s.backing) return;
     s.backing=true; s.back.disabled=true;
-    toApi('hand-back').then(function(r){
+    toOp(s,'hand-back').then(function(r){
       s.backing=false; s.back.disabled=false;
       if(s.closed||toSheet!==s) return;
-      if(r&&r.ok){ closeTakeOver(); toMine(false); return; }
+      if(r&&r.ok){ closeTakeOver(); if(toIsBrowser(s)) toMine(false); return; }
       toSetStatus(s,TO_FAILED);
     });
   }

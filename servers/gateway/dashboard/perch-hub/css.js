@@ -668,6 +668,19 @@ background:var(--sky);overflow:hidden;cursor:pointer}
 #perch-hub-root .ph-btile .bt-note{font-size:13px;color:var(--dim)}
 #perch-hub-root .ph-btile .bt-actions{display:flex;flex-wrap:wrap;gap:8px}
 #perch-hub-root .ph-btile .bt-actions button{min-height:44px;min-width:44px;padding:8px 14px}
+/* R1.2 PR 5: the embedded app tile, the browser tile's box around another
+   desktop app's watch-only noVNC view. */
+#perch-hub-root .ph-atile{flex-direction:column;gap:6px;align-self:stretch;width:100%;max-width:560px;min-width:0;
+background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px;margin:2px 0}
+#perch-hub-root .ph-atile [hidden]{display:none}
+#perch-hub-root .ph-atile:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+#perch-hub-root .ph-atile .at-bar{display:flex;align-items:center;gap:8px;min-width:0;font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-atile .at-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--ink)}
+#perch-hub-root .ph-atile .at-state{flex-shrink:0}
+#perch-hub-root .ph-atile .at-vnc{display:block;width:100%;aspect-ratio:16/10;border:0;border-radius:8px;background:var(--sky)}
+#perch-hub-root .ph-atile .at-note{font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-atile .at-actions{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root .ph-atile .at-actions button{min-height:44px;min-width:44px;padding:8px 14px}
 #perch-hub-root .browser-status{font-size:12.5px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The Take over sheet (spec 2026-10-27 §4.4): full screen over the hub, the
    noVNC viewer filling what the bar leaves. Targets are 44 px; Perch tokens only. */

@@ -217,3 +217,36 @@ export function createTakeOver({
     close() { closed = true; clearPoll(); clearLoss(); },
   };
 }
+
+/**
+ * R1.2 PR 5: Take over for any desktop app, keyed by app id. "browser" is the
+ * engine's own browserTakeOver (unchanged); every other app gets its own
+ * controller over its own lease directory (dirFor(appId) → dir or null), with
+ * no onHeld (only the browser has an operator note and a stall pause).
+ *
+ * get(appId) returns an existing controller; get(appId, { create: true })
+ * makes one. The caller (the take-over route) creates only for an app it has
+ * checked, so the map holds at most one controller per installed desktop app.
+ */
+export function createAppTakeOvers({ browser = null, dirFor, ...opts } = {}) {
+  const ctls = new Map();
+  let closed = false;
+  return {
+    get(appId, { create = false } = {}) {
+      if (appId === "browser") return browser;
+      if (ctls.has(appId)) return ctls.get(appId);
+      if (!create || closed) return null;
+      const ctl = createTakeOver({
+        ...opts,
+        dir: () => { try { return dirFor(appId); } catch { return null; } },
+        onHeld: () => {},
+      });
+      ctls.set(appId, ctl);
+      return ctl;
+    },
+    close() {
+      closed = true;
+      for (const c of ctls.values()) { try { c.close(); } catch { /* closed */ } }
+    },
+  };
+}

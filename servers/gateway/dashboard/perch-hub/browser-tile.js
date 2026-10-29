@@ -421,6 +421,132 @@ export function perchBrowserTileJs(lang = "en") {
     retireBrowserTiles();
     btTiles={}; btLiveKey=null; btShotSeen={}; btGen++;
     btHeader();
+    resetAppTiles();
   }
+
+  /* ---- R1.2 PR 5: the embedded app tile ----------------------------------
+     Any desktop (VNC) app opened from the launcher (the drawer or the
+     session's apps sheet) while a session is open in new mode: the shell
+     dispatches a cancelable "crow:open-app-tile" { appId }, and this handler
+     calls preventDefault ONLY when it really opens a tile (so the shell closes
+     its sheet and does not navigate). "Known desktop app": the launcher's own
+     link for it (a.shell-app[data-app-kind="desktop"][data-app-id]) is on the
+     page; the server then confirms it (GET …/apps/<id>/tile, the catalog) and
+     says whether Take over is offered (lease declared AND enforced).
+
+     DOM, one tile per app per transcript:
+       div.entry.ph-atile[data-app][tabindex=-1][role=group]
+         div.at-bar > span.at-name (the app's name), span.at-state (Watching)
+         div.at-view > iframe.at-vnc  watch-only noVNC, a src built here from
+                                      the server's /proxy/<id>/<path> (checked)
+         div.at-note                  "can't be shown here" (the server said no)
+         div.at-actions > button.at-take (only when offered), button.at-close
+     Take over opens the Take over sheet with detail.app (take-over.js). The
+     browser's own tile (its crow_browser_* trigger, the CDP frames and shots)
+     is above and unchanged; non-browser tool calls make no tile. */
+  var AT_WATCHING='${tJs("perch.appTileWatching", lang)}';
+  var AT_CLOSE='${tJs("perch.appTileClose", lang)}';
+  var AT_UNAVAILABLE='${tJs("perch.appTileUnavailable", lang)}';
+  var AT_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
+  var AT_PATH=/^[A-Za-z0-9._~-]+(\\/[A-Za-z0-9._~-]+)*$/;
+  var atTiles={}, atGen=0;
+
+  /* The launcher's link for a desktop app on this page, or null (an app the
+     page never offered is not opened from an event alone). */
+  function atLauncherLink(appId){
+    if(typeof document.querySelectorAll!=='function') return null;
+    var list=document.querySelectorAll('a.shell-app[data-app-kind="desktop"]');
+    for(var i=0;i<list.length;i++){ if(list[i].getAttribute('data-app-id')===appId) return list[i]; }
+    return null;
+  }
+  function atLabelOf(a,appId){
+    var lb=a&&a.querySelector?a.querySelector('.shell-app-label'):null;
+    var text=lb?String(lb.textContent||''):'';
+    return text||appId;
+  }
+  /* /proxy/<id>/<plain path> from the server's src (its query is dropped: the
+     tile builds its own), or null. */
+  function atBase(appId,src){
+    var str=String(src||''), q=str.indexOf('?'), base=q>=0?str.slice(0,q):str, pre='/proxy/'+appId+'/';
+    if(base.indexOf(pre)!==0||base.length>300||base.indexOf('..')>=0||!AT_PATH.test(base.slice(pre.length))) return null;
+    return base;
+  }
+  function atOpen(appId,label){
+    var tr=el('perch-transcript'); if(!tr) return null;
+    var t=atTiles[appId];
+    if(t&&t.node.parentNode) return t;
+    t={ id:appId, label:label, sid:current.sid, base:null, takeOver:false, frame:null };
+    var node=document.createElement('div'); node.className='entry ph-atile';
+    node.setAttribute('data-app',appId); node.setAttribute('role','group');
+    node.setAttribute('aria-label',label); node.setAttribute('tabindex','-1');
+    var bar=document.createElement('div'); bar.className='at-bar';
+    var name=document.createElement('span'); name.className='at-name'; name.textContent=label;
+    var st=document.createElement('span'); st.className='at-state'; st.textContent=AT_WATCHING;
+    bar.appendChild(name); bar.appendChild(st);
+    var view=document.createElement('div'); view.className='at-view';
+    var note=line('at-note',''); note.hidden=true;
+    var acts=document.createElement('div'); acts.className='at-actions';
+    var take=document.createElement('button'); take.type='button'; take.className='at-take'; take.textContent=BT_TAKE_OVER;
+    take.hidden=true;
+    var close=document.createElement('button'); close.type='button'; close.className='at-close'; close.textContent=AT_CLOSE;
+    acts.appendChild(take); acts.appendChild(close);
+    node.appendChild(bar); node.appendChild(view); node.appendChild(note); node.appendChild(acts);
+    t.node=node; t.name=name; t.state=st; t.view=view; t.note=note; t.take=take; t.close=close;
+    take.onclick=function(){ atTakeOver(t); };
+    close.onclick=function(){ atDrop(t,true); };
+    atTiles[appId]=t;
+    tr.appendChild(node); tr.scrollTop=tr.scrollHeight;
+    atLoad(t);
+    return t;
+  }
+  function atLoad(t){
+    var gen=atGen;
+    perchApi('GET','/apps/'+encodeURIComponent(t.id)+'/tile').then(function(r){
+      if(!live()||gen!==atGen||atTiles[t.id]!==t) return;
+      var j=(r&&r.ok&&r.j&&typeof r.j==='object')?r.j:null;
+      var base=(j&&j.id===t.id)?atBase(t.id,j.src):null;
+      if(!base){ t.note.textContent=AT_UNAVAILABLE; t.note.hidden=false; t.state.hidden=true; return; }
+      t.base=base;
+      if(typeof j.label==='string'&&j.label){ t.label=j.label; t.name.textContent=j.label; t.node.setAttribute('aria-label',j.label); }
+      var f=document.createElement('iframe'); f.className='at-vnc';
+      f.setAttribute('title',t.label);
+      f.setAttribute('src',base+'?view_only=true&autoconnect=true&resize=scale');
+      t.view.appendChild(f); t.frame=f;
+      t.takeOver=j.takeOver===true; t.take.hidden=!t.takeOver;
+    });
+  }
+  function atTakeOver(t){
+    if(!t.takeOver||!t.base) return;
+    var detail={ sid:t.sid, anchor:null, app:{ id:t.id, label:t.label, base:t.base } };
+    try{ document.dispatchEvent(new CustomEvent('perch:browser-takeover',{ detail:detail })); }catch(e){}
+  }
+  /* Close the tile (not a hand back: a holding stays until its sheet's Hand back). */
+  function atDrop(t,byUser){
+    if(t.frame){ try{ t.frame.setAttribute('src','about:blank'); }catch(e){} }
+    if(t.node.parentNode) t.node.parentNode.removeChild(t.node);
+    if(atTiles[t.id]===t) delete atTiles[t.id];
+    if(byUser){ var inp=el('perch-input'); if(inp&&inp.focus) inp.focus(); }
+  }
+  function resetAppTiles(){
+    for(var k in atTiles) atDrop(atTiles[k],false);
+    atTiles={}; atGen++;
+  }
+  /* Into the tile now (a non-modal drawer), and again once the launcher's
+     dialog has closed (a modal sheet keeps the page inert until then, and its
+     close puts focus back on its opener). */
+  function atFocus(t){
+    var go=function(){ if(live()&&atTiles[t.id]===t&&t.node.focus) t.node.focus(); };
+    go();
+    setTimeout(go,0);
+  }
+  bindOnce(document,'crow:open-app-tile','appTile',function(ev){
+    if(!live()||!current.sid||!el('perch-session-sheet')) return;   /* an open session in new mode */
+    var appId=ev&&ev.detail?ev.detail.appId:null;
+    if(typeof appId!=='string'||!AT_ID.test(appId)) return;
+    var a=atLauncherLink(appId); if(!a) return;
+    var t=atOpen(appId,atLabelOf(a,appId)); if(!t) return;
+    if(ev.preventDefault) ev.preventDefault();
+    atFocus(t);
+  });
 `;
 }

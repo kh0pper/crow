@@ -5,7 +5,8 @@
  * Advisory, not a privacy boundary: a bot with a shell can reach CDP directly,
  * and nothing private depends on this file.
  *
- * The lease directory (stateDir("browser-lease")) is writable by bots (the
+ * The lease directory (stateDir("browser-lease"), or "app-lease-<id>" for
+ * another desktop app: leaseDir) is writable by bots (the
  * browser MCP server runs inside the bot's sandbox), so:
  *   - every byte read from it is untrusted: reads are capped at 4 KB and
  *     schema-validated; anything invalid reads as a free lease;
@@ -63,9 +64,63 @@ const OPERATOR_HOLDER = Object.freeze({ kind: "operator", sessionId: "operator",
 const SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const TOKEN_RE = /^[\x21-\x7e]{1,128}$/;
 
-/** The lease directory for an instance: stateDirFn("browser-lease"). */
-export function leaseDir(stateDirFn) {
-  return stateDirFn("browser-lease");
+/** An app id a lease directory may be named after (R1.2 PR 5). */
+export const APP_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * The lease directory for an instance's app. "browser" (the default) keeps
+ * stateDirFn("browser-lease"), so nothing installed moves; any other app gets
+ * stateDirFn("app-lease-" + appId). A bad app id throws.
+ */
+export function leaseDir(stateDirFn, appId = "browser") {
+  if (appId === "browser") return stateDirFn("browser-lease");
+  if (typeof appId !== "string" || !APP_ID_RE.test(appId)) {
+    throw Object.assign(new Error("bad app id"), { code: "EBADAPPID" });
+  }
+  return stateDirFn("app-lease-" + appId);
+}
+
+/**
+ * enforced.json: a bundle whose server enforces the lease says so at startup
+ * ({ v: 1, bundleVersion, at }). Bots can write this directory too, so a
+ * forged file can only make Take over appear for an app; the lease itself
+ * stays advisory either way.
+ */
+export const ENFORCED_NAME = "enforced.json";
+const ENFORCED_CAP = 512;
+const VERSION_RE = /^[0-9A-Za-z.+_-]{1,64}$/;
+
+/** Write enforced.json atomically (temp + rename, never through a planted name). Throws on failure. */
+export function writeEnforced(dir, { bundleVersion, now = Date.now() } = {}) {
+  if (typeof bundleVersion !== "string" || !VERSION_RE.test(bundleVersion)) throw new Error("bad bundle version");
+  const dfd = openDir(dir, { create: true });
+  try {
+    const tmp = "." + ENFORCED_NAME + "." + process.pid + "." + randomBytes(8).toString("hex") + ".tmp";
+    const fd = openSync(at(dfd, tmp), fs.O_WRONLY | fs.O_CREAT | fs.O_EXCL | fs.O_NOFOLLOW, 0o600);
+    try {
+      try { writeSync(fd, JSON.stringify({ v: 1, bundleVersion, at: now })); } finally { closeSync(fd); }
+      renameSync(at(dfd, tmp), at(dfd, ENFORCED_NAME));
+    } catch (e) {
+      try { unlinkSync(at(dfd, tmp)); } catch { /* already gone */ }
+      throw e;
+    }
+  } finally { closeSync(dfd); }
+}
+
+/** enforced.json, schema-checked: { v: 1, bundleVersion, at } or null (missing, too big, invalid). */
+export function readEnforced(dir) {
+  let dfd;
+  try { dfd = openDir(dir); } catch { return null; }
+  try {
+    const text = readCapped(dfd, ENFORCED_NAME, ENFORCED_CAP);
+    if (text == null) return null;
+    let raw;
+    try { raw = JSON.parse(text); } catch { return null; }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.v !== 1) return null;
+    if (typeof raw.bundleVersion !== "string" || !VERSION_RE.test(raw.bundleVersion)) return null;
+    if (!isTime(raw.at)) return null;
+    return { v: 1, bundleVersion: raw.bundleVersion, at: raw.at };
+  } finally { closeSync(dfd); }
 }
 
 /** Default liveness check: process.kill(pid, 0) semantics (EPERM = alive). */
