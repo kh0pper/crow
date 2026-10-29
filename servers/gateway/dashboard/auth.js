@@ -157,9 +157,24 @@ async function clearLockout(db, ip) {
 }
 
 /**
- * Attempt login. Returns session token on success, null on failure.
+ * The scopes a password login's session is stored under. A login made from
+ * this machine itself (servers/shared/self-origin.js) is tagged 'onhost':
+ * verifySession ignores scopes, so it browses the dashboard as signed in, but
+ * local-session.js compares scopes to "dashboard" exactly, so it is never the
+ * owner's turn, even if its cookie is replayed from another machine. Only an
+ * explicit `onHost: false` gives a plain 'dashboard' session (fails closed).
  */
-export async function attemptLogin(password, ip) {
+export function passwordSessionScopes(onHost) {
+  return onHost === false ? "dashboard" : "dashboard onhost";
+}
+
+/**
+ * Attempt login. Returns session token on success, null on failure.
+ * `opts.onHost` (5th argument): whether the login request came from this
+ * machine; anything but `false` stores an 'onhost' session.
+ */
+export async function attemptLogin(password, ip, deviceTrustToken = null, userAgent = null, opts = {}) {
+  const onHost = opts?.onHost !== false;
   const db = createDbClient();
   try {
     // Check lockout (persistent in DB)
@@ -185,7 +200,6 @@ export async function attemptLogin(password, ip) {
         // Detailed security report. NOTE: auditLog() reads only {actor, ip,
         // details} — the extras MUST be nested under `details` or they're
         // silently dropped (W2-1 fix for a pre-existing bug).
-        const userAgent = arguments.length > 3 ? arguments[3] : null;
         await auditLog(db, 'security_lockout_report', {
           ip,
           details: {
@@ -279,14 +293,15 @@ export async function attemptLogin(password, ip) {
     const twoFaEnabled = await is2faEnabled();
     if (twoFaEnabled) {
       // Check device trust cookie (passed via options)
-      const deviceTrustToken = arguments.length > 2 ? arguments[2] : null;
       if (deviceTrustToken && await verifyDeviceTrust(deviceTrustToken)) {
         // Trusted device — skip 2FA, issue session directly
         await auditLog(db, 'auth_login_success', { ip, method: '2fa_trusted_device' });
       } else {
         // Need 2FA verification — create pending token
         await auditLog(db, 'auth_password_verified', { ip });
-        const pending2faToken = await createPending2faToken();
+        // The on-host flag rides the pending token, so the 2FA step mints an
+        // 'onhost' session even when its own request comes from elsewhere.
+        const pending2faToken = await createPending2faToken(onHost ? { onhost: true } : null);
         return { requires2fa: true, pending2faToken };
       }
     } else {
@@ -297,9 +312,12 @@ export async function attemptLogin(password, ip) {
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE).toISOString();
     await db.execute({
-      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)",
-      args: [hashToken(token), expiresAt],
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+      args: [hashToken(token), passwordSessionScopes(onHost), expiresAt],
     });
+    if (onHost) {
+      try { await auditLog(db, 'auth_login_onhost', { ip, details: { scopes: passwordSessionScopes(true) } }); } catch { /* audit is best effort */ }
+    }
 
     return { token };
   } catch (err) {
@@ -315,16 +333,19 @@ export async function attemptLogin(password, ip) {
 
 /**
  * Complete login after 2FA verification. Issues a session token.
+ * `opts.onHost`: whether the login (password step or 2FA step) came from this
+ * machine; anything but `false` stores an 'onhost' session (passwordSessionScopes).
  */
-export async function complete2faLogin(ip) {
+export async function complete2faLogin(ip, opts = {}) {
+  const onHost = opts?.onHost !== false;
   const db = createDbClient();
   try {
-    await auditLog(db, 'auth_login_success', { ip, method: '2fa' });
+    await auditLog(db, 'auth_login_success', { ip, method: '2fa', ...(onHost ? { details: { onhost: true } } : {}) });
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE).toISOString();
     await db.execute({
-      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)",
-      args: [hashToken(token), expiresAt],
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+      args: [hashToken(token), passwordSessionScopes(onHost), expiresAt],
     });
     return { token };
   } finally {

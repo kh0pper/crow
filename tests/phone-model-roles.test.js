@@ -65,7 +65,7 @@ before(async () => {
   const router = mod.default(auth, {
     db: s.db, csrf: (req, res, next) => next(),
     runner: { farend: async () => ({ ok: true }), stop: async () => ({ ok: true }), events: async () => ({ events: [], done: false, active: false }) },
-    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => false },
+    authority: { isLocalDashboardSession: async (_db, req) => req?.dashboardSession === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => false },
     notifyCard: async () => ({ delivered: false }),
     createDispatcher: () => ({ tick: async () => {} }),
     onDispatcher: (d) => s.onDispatcher(d),
@@ -290,5 +290,5 @@ test("delete confirm lists roles", async () => {
 
 test("manifest bumped", () => {
   const manifest = JSON.parse(readFileSync(join(ROOT, "bundles", "phone", "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "0.2.8");
+  assert.equal(manifest.version, "0.2.9");
 });

@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import Database from "better-sqlite3";
+import { fromLaptop, markFromLaptop } from "./helpers/off-box.js";
 
 const root = mkdtempSync(join(tmpdir(), "vh-route-"));
 process.env.CROW_DATA_DIR = join(root, "master");
@@ -126,7 +127,7 @@ function fakeEngine() {
 /** The session stub: a known crow_session cookie is a dashboard session, anything else goes to the login page. */
 function stubAuth(req, res, next) {
   const m = /(?:^|;\s*)crow_session=([^;]+)/.exec(req.headers.cookie || "");
-  if (m && (m[1] === OWN || m[1] === SSO)) { req.dashboardSession = m[1]; return next(); }
+  if (m && (m[1] === OWN || m[1] === SSO)) { req.dashboardSession = m[1]; markFromLaptop(req); return next(); }
   res.redirect(303, "/dashboard/login");
 }
 
@@ -485,12 +486,12 @@ test("the page is in the row's language (the push title's), else the dashboard's
 test("isLocalPasswordSessionOn: only this instance's own password session, on the caller's client", async () => {
   const { isLocalPasswordSessionOn } = await import("../servers/gateway/dashboard/local-session.js");
   const s = await setup();
-  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: OWN }), true);
-  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: SSO }), false);
-  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: OWN, crossHostAuth: { ok: true } }), false);
-  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: "unknown" }), false);
+  assert.equal(await isLocalPasswordSessionOn(s.db, fromLaptop({ dashboardSession: OWN })), true);
+  assert.equal(await isLocalPasswordSessionOn(s.db, fromLaptop({ dashboardSession: SSO })), false);
+  assert.equal(await isLocalPasswordSessionOn(s.db, fromLaptop({ dashboardSession: OWN, crossHostAuth: { ok: true } })), false);
+  assert.equal(await isLocalPasswordSessionOn(s.db, fromLaptop({ dashboardSession: "unknown" })), false);
   assert.equal(await isLocalPasswordSessionOn(s.db, {}), false);
-  assert.equal(await isLocalPasswordSessionOn({ execute: async () => { throw new Error("locked"); } }, { dashboardSession: OWN }), false, "an error is a no");
+  assert.equal(await isLocalPasswordSessionOn({ execute: async () => { throw new Error("locked"); } }, fromLaptop({ dashboardSession: OWN })), false, "an error is a no");
 });
 
 test("a failed row that has a card ran and could not finish: the page says so, never \"nothing was started\" (P26)", async () => {

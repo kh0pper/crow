@@ -13,6 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { fromLaptop } from "./helpers/off-box.js";
 
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-grants-home-"));
 process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-grants-data-"));
@@ -242,11 +243,11 @@ test("the owner check: only a local password session (not a peer sign-in, not a 
       await db.execute({ sql: "INSERT OR REPLACE INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)", args: [h(t), scopes, exp] });
     }
   } finally { db.close(); }
-  assert.equal(await isLocalPasswordSession({ dashboardSession: "local" }), true);
-  assert.equal(await isLocalPasswordSession({ dashboardSession: "sso" }), false, "a peer sign-in session");
-  assert.equal(await isLocalPasswordSession({ dashboardSession: "old" }), false, "expired");
+  assert.equal(await isLocalPasswordSession(fromLaptop({ dashboardSession: "local" })), true);
+  assert.equal(await isLocalPasswordSession(fromLaptop({ dashboardSession: "sso" })), false, "a peer sign-in session");
+  assert.equal(await isLocalPasswordSession(fromLaptop({ dashboardSession: "old" })), false, "expired");
   assert.equal(await isLocalPasswordSession({ dashboardSession: "local", crossHostAuth: {} }), false, "a signed peer request");
-  assert.equal(await isLocalPasswordSession({ dashboardSession: "nope" }), false);
+  assert.equal(await isLocalPasswordSession(fromLaptop({ dashboardSession: "nope" })), false);
   assert.equal(await isLocalPasswordSession({}), false);
 });
 

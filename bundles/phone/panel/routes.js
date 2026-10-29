@@ -235,7 +235,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
   router.use("/api/phone", authMiddleware, csrfMw);
 
   const localOnly = async (req, res) => {
-    if (await authority.isLocalDashboardSession(db, req.dashboardSession)) return true;
+    if (await authority.isLocalDashboardSession(db, req)) return true;
     res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to use Phone (peer sign-in is not enough)." });
     return false;
   };
@@ -243,7 +243,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
   // I7: any dashboard session may ask; only a local password session learns
   // the 2FA requirement and the cloud model label.
   router.get("/api/phone/whoami", wrap(async (req, res) => {
-    const local = await authority.isLocalDashboardSession(db, req.dashboardSession);
+    const local = await authority.isLocalDashboardSession(db, req);
     if (!local) return res.json({ local: false, totp_required: false, cloud_model: null });
     const st = await readSettings(db);
     res.json({ local: true, totp_required: !!(await authority.totpRequired()), cloud_model: st.cloudModel || null });
@@ -271,7 +271,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
 
   router.post("/api/phone/calls/:id/approve", wrap(async (req, res) => {
     const b = req.body || {};
-    if (!(await authority.isLocalDashboardSession(db, req.dashboardSession))) return res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to approve calls (peer sign-in is not enough)." });
+    if (!(await authority.isLocalDashboardSession(db, req))) return res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to approve calls (peer sign-in is not enough)." });
     if (!(await authority.stepUpOk(b.totp))) return res.status(403).json({ error: "totp_required", message: "Enter your current 2FA code." });
     if (b.business_confirmed !== true) return res.status(400).json({ error: "business_confirmation_required" });
     const st = await readSettings(db);
@@ -333,7 +333,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
   }));
   router.post("/api/phone/settings", wrap(async (req, res) => {
     const b = req.body || {};
-    if (!(await authority.isLocalDashboardSession(db, req.dashboardSession))) return res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to change Phone settings." });
+    if (!(await authority.isLocalDashboardSession(db, req))) return res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to change Phone settings." });
     if (!(await authority.stepUpOk(b.totp))) return res.status(403).json({ error: "totp_required", message: "Enter your current 2FA code." });
     const checkModel = async (spec, { local }) => {
       if (spec === "") return true;
