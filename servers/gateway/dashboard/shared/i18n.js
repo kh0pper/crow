@@ -3843,6 +3843,8 @@ export const translations = {
   "shell.previewsNotEnabled": { en: "Previews are off.", es: "Vistas previas desactivadas." },
   "shell.previewsEnable": { en: "Turn on", es: "Activar" },
   "shell.previewsEnableLabel": { en: "Turn on previews", es: "Activar vistas previas" },
+  "shell.makeNotOnCard": { en: "Created, but not added to the card. Open the card to add it.", es: "Creado, pero no se añadió a la tarjeta. Abre la tarjeta para añadirlo." },
+  "shell.makeCardCapped": { en: "Showing the first {n} of this card's Workspace files.", es: "Se muestran los primeros {n} archivos de Workspace de esta tarjeta." },
   "shell.previewsWhat": { en: "What this does", es: "Qué hace" },
   "shell.previewsDisclosure": { en: "Crow builds a small sandboxed browser on this machine to draw previews (a one-time download of a few hundred MB).", es: "Crow crea un pequeño navegador aislado en esta máquina para dibujar las vistas previas (una descarga única de unos cientos de MB)." },
   "shell.previewsNoDocker": { en: "Previews are off: Docker isn't available on this machine.", es: "Las vistas previas están desactivadas: Docker no está disponible en esta máquina." },

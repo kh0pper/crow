@@ -44,6 +44,13 @@ before(async () => {
   await db.execute("INSERT INTO artifacts (id,title,type,current_version,origin_card) VALUES ('art_card001','Card doc','page',1,7)");
   await db.execute("INSERT INTO artifacts (id,title,type,current_version) VALUES ('art_other01','Other','page',1)");
   db.close();
+  // Cards live in tasks.db: 7 is open, 10 is archived (and still has a document linked to it).
+  const tdb = new Database(process.env.CROW_TASKS_DB_PATH);
+  tdb.exec("CREATE TABLE IF NOT EXISTS tasks_items (id INTEGER PRIMARY KEY, title TEXT, status TEXT, project_id INTEGER, action_needed TEXT, data_json TEXT, board_id INTEGER, archived_at TEXT)");
+  tdb.prepare("INSERT INTO tasks_items (id, title, status) VALUES (7, 'Seven', 'open')").run();
+  tdb.prepare("INSERT INTO tasks_items (id, title, status) VALUES (9, 'Nine', 'open')").run();
+  tdb.prepare("INSERT INTO tasks_items (id, title, status, archived_at) VALUES (10, 'Old card', 'done', '2026-10-01 00:00:00')").run();
+  tdb.close();
   make = await import("../servers/gateway/dashboard/panels/make.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
@@ -347,4 +354,44 @@ test("card mode Workspace lookups: at most 50 ids, four at a time, one deadline,
   assert.equal(slow.workspace, "unavailable");
   assert.ok(Date.now() - t0 < 2000, "one deadline, not one per lookup");
   db.close();
+});
+
+test("an archived card shows the empty This card view with no start sheet", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const { setItemCard } = await import("../servers/shared/shell-items.js");
+  const db = createDbClient();
+  await setItemCard(db, "artifact", "art_other01", 10);
+  db.close();
+  seen = [];
+  seam({ items: [], ...OK });
+  const r = await get("/dashboard/make?scope=card:10");
+  assert.equal(r.status, 200);
+  assert.equal(seen.at(-1).opts.cardRefs.size, 0, "nothing of an archived card is listed");
+  assert.match(r.body, /This card has no documents yet/);
+  assert.doesNotMatch(r.body, /id="mk-start"/);
+  assert.doesNotMatch(r.body, /class="btn btn-primary mk-start-btn"/);
+  const live = await get("/dashboard/make?scope=card:7");
+  assert.match(live.body, /<dialog id="mk-start"[^>]* data-card="7"/, "a live card keeps its sheet");
+});
+
+test("a card with more than 50 Workspace files says only the first 50 show", async () => {
+  const { listMakeItems } = await import("../servers/gateway/make/sources.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const refs = new Set(Array.from({ length: 60 }, (_, i) => `workspace_file:${i + 1}`));
+  const wsStat = async (cfg, { file_id }) => ({ fileId: file_id, name: `f${file_id}.docx`, mime: docx, modified: "2026-10-02T00:00:00.000Z", isFolder: false });
+  const m = await listMakeItems(db, { all: true }, { crowHome: process.env.CROW_HOME, cardRefs: refs, wsStat });
+  assert.equal(m.wsCapped, 50);
+  assert.equal(m.items.length, 50);
+  const few = await listMakeItems(db, { all: true }, { crowHome: process.env.CROW_HOME, cardRefs: new Set(["workspace_file:1"]), wsStat });
+  assert.equal(few.wsCapped, undefined);
+  db.close();
+  seam({ items: [item()], ...OK, wsCapped: 50 });
+  const r = await get("/dashboard/make?scope=card:7");
+  assert.match(r.body, /Showing the first 50 of this card(&#39;|')s Workspace files\./);
+  const plain = await get("/dashboard/make");
+  assert.doesNotMatch(plain.body, /Showing the first 50/);
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  assert.notEqual(t("shell.makeCardCapped", "es"), t("shell.makeCardCapped", "en"));
 });

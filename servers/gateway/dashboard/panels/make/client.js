@@ -85,6 +85,8 @@ export function makeClientJs(lang) {
   var rawProject = dlg.getAttribute('data-project') || 'unassigned';
   var projectId = /^[1-9][0-9]*$/.test(rawProject) ? Number(rawProject) : 'unassigned';
   /* This card mode: a blank document is linked to the card (make-api validates it). */
+  var T_NOTLINKED = '${tJs("shell.makeNotOnCard", lang)}';
+  var NOTICE_MS = 3000;
   var rawCard = dlg.getAttribute('data-card') || '';
   var cardId = /^[1-9][0-9]{0,15}$/.test(rawCard) ? Number(rawCard) : null;
 
@@ -182,7 +184,14 @@ export function makeClientJs(lang) {
           if (!x.ok || !x.d || !x.d.ok) return fail();
           // Same tab (R-P4-9): a new tab opened after an async fetch is popup-blocked, and Workspace has its own back.
           if (!x.d.webUrl) return fail();
-          location.href = x.d.webUrl;
+          var url = x.d.webUrl;
+          if (cardId !== null && x.d.filed === false) {
+            /* The file exists but is not on the card: say so, then open it. */
+            say(T_NOTLINKED);
+            setTimeout(function () { location.href = url; }, NOTICE_MS);
+            return;
+          }
+          location.href = url;
         }).catch(fail);
       return;
     }

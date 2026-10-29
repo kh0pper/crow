@@ -180,8 +180,10 @@ export function renderPreviewSheet({ projects, lang }) {
 }
 
 /** @param {{items: object[], artifacts: string, workspace: string}} model */
-export function renderMakePage({ model, filter, lang, project, projects = [], previews = null, scope = null, startCard = null }) {
+export function renderMakePage({ model, filter, lang, project, projects = [], previews = null, scope = null, startCard = null, noStart = false }) {
   const { items, artifacts, workspace } = model;
+  // A card with more Workspace files than card mode looks up says so, quietly.
+  const capped = scope?.mode === "card" && model.wsCapped ? `<p class="mk-notice" role="status">${esc(fill(t("shell.makeCardCapped", lang), { n: model.wsCapped }))}</p>` : "";
   const bothMissing = artifacts === "missing" && workspace === "missing";
   const notice = workspace === "unavailable" ? `<p class="mk-notice" role="status">${esc(t("shell.workspaceUnavailable", lang))}</p>` : "";
   let body;
@@ -190,9 +192,9 @@ export function renderMakePage({ model, filter, lang, project, projects = [], pr
   else if (!items.length && scope?.mode === "card" && workspace === "unavailable") body = offers(artifacts, workspace, lang);
   else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t(scope?.mode === "card" ? "shell.makeCardEmpty" : "shell.makeEmpty", lang))}</p>`;
   else body = `${offers(artifacts, workspace, lang)}<ul class="mk-grid">${items.map((i) => tile(i, lang)).join("")}</ul>`;
-  const startBtn = `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
+  const startBtn = noStart ? "" : `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
   const head = scope?.mode === "card"
     ? `<p class="mk-card-head">${esc(fill(t("shell.makeCardHeader", lang), { id: scope.cardId, title: scope.cardTitle || "" }).trim())}</p>` : "";
   const pv = bothMissing ? "" : previewsBlock(previews, lang);
-  return `<div class="mk-page">${scopeRow(scope, filter, lang)}<div class="mk-bar">${chips(filter, lang, scope)}${startBtn}</div>${head}${pv}${notice}${body}${renderStartSheet({ artifacts, workspace, project, card: startCard, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
+  return `<div class="mk-page">${scopeRow(scope, filter, lang)}<div class="mk-bar">${chips(filter, lang, scope)}${startBtn}</div>${head}${pv}${notice}${capped}${body}${noStart ? "" : renderStartSheet({ artifacts, workspace, project, card: startCard, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
 }

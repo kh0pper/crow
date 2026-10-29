@@ -2,7 +2,8 @@
  * make-api.js — the Make tab's own routes.
  *
  *   POST /dashboard/make-api/blank  { kind: "docx"|"xlsx"|"pptx", title, project_id?, card_id? }
- *     -> { ok: true, fileId, webUrl, filed }  (filed:false = created but left Unassigned or unlinked)
+ *     -> { ok: true, fileId, webUrl, filed }  (filed:false = created but left Unassigned, or with
+ *        card_id not linked to the card; the client then says so before it opens the file)
  *
  * Creates an empty Workspace file in Crow/<project slug or "Unassigned"> and files it under the
  * project (project_id absent or "unassigned" = Unassigned). With card_id (Make's This card), the

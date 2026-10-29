@@ -263,7 +263,9 @@ async function statCardFiles(cfg, fileIds, st, { deadlineMs }) {
     clearTimeout(timer);
   }
   if (failure) throw failure;
-  return found.filter(Boolean);
+  const out = found.filter(Boolean);
+  if (fileIds.length > ids.length) out.capped = ids.length;
+  return out;
 }
 
 const workspaceImport = (crowHome, file) => import(pathToFileURL(join(crowHome, "bundles", "workspace", "server", file)).href);
@@ -281,6 +283,7 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
     const cfg = getConfig();
     if (fileIds) {
       files = await statCardFiles(cfg, fileIds, statFn || dav.stat, { deadlineMs });
+      if (files.capped) out.capped = files.capped;
       limit = Math.max(limit, files.length);
     } else {
       files = await dav.listRecent(cfg, { limit: scoped ? limit * 3 : limit, mimes: Object.keys(WS_TYPES) });
@@ -322,11 +325,13 @@ export async function listMakeItems(db, scope = { all: true }, { crowHome, filte
   const refsOf = (kind) => (cardRefs ? [...cardRefs].filter((k) => k.startsWith(`${kind}:`)).map((k) => k.slice(kind.length + 1)) : null);
   const artifacts = installedBundle(crowHome, "artifacts") ? "installed" : "missing";
   let workspace = installedBundle(crowHome, "workspace") ? "installed" : "missing";
+  let wsCapped = 0; // card mode: the card has more Workspace files than were looked up
   const lists = [];
   if (artifacts === "installed") lists.push(await listArtifactItems(db, scope, cardRefs ? { ids: refsOf("artifact") } : limit ? { limit } : {}));
   if (workspace === "installed") {
     const ws = await listWorkspaceItems(db, scope, { crowHome, ...(cardRefs ? { fileIds: refsOf("workspace_file"), stat: wsStat, ...(wsDeadlineMs ? { deadlineMs: wsDeadlineMs } : {}) } : limit ? { limit } : {}) });
     if (ws.status !== "ok") workspace = ws.status;
+    if (ws.capped) wsCapped = ws.capped;
     lists.push(ws);
   }
   let items = lists.flat();
@@ -339,7 +344,7 @@ export async function listMakeItems(db, scope = { all: true }, { crowHome, filte
     Object.assign(item, { previewState: "off", previewUrl: null, previewReason: "not_enabled" });
     if (previews) Object.assign(item, await previews(item));
   }
-  return { items, artifacts, workspace };
+  return { items, artifacts, workspace, ...(wsCapped ? { wsCapped } : {}) };
 }
 
 const BLANK_KINDS = {

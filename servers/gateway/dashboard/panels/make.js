@@ -46,8 +46,9 @@ export function parseMakeScope(query, crowScope) {
 }
 
 /**
- * A top-level card's title and project from tasks.db, in one query; null for an unknown card, a
- * missing tasks.db or any read failure (card mode then shows the card's empty line, never an error).
+ * A live top-level card's title and project from tasks.db, in one query; null for an unknown or
+ * archived card, a missing tasks.db or any read failure (card mode then shows the card's empty line
+ * and no start sheet, never an error). SELECT * so a store without archived_at still reads.
  */
 async function cardRow(cardId) {
   const path = tasksDbPath();
@@ -55,8 +56,8 @@ async function cardRow(cardId) {
   let tdb;
   try {
     tdb = createDbClient(path);
-    const { rows } = await tdb.execute({ sql: "SELECT title, project_id FROM tasks_items WHERE id = ? AND board_id IS NULL", args: [Number(cardId)] });
-    if (!rows[0]) return null;
+    const { rows } = await tdb.execute({ sql: "SELECT * FROM tasks_items WHERE id = ? AND board_id IS NULL", args: [Number(cardId)] });
+    if (!rows[0] || rows[0].archived_at != null) return null;
     return { title: String(rows[0].title ?? ""), projectId: rows[0].project_id == null ? null : Number(rows[0].project_id) };
   } catch (err) {
     console.warn(`[make] card lookup failed: ${err.message}`);
@@ -155,9 +156,10 @@ export default {
     let cardRefs = null;
     let card = null;
     if (parsed.kind === "card") {
-      const docs = await documentsForCard(db, parsed.cardId, { lang });
-      cardRefs = new Set(docs.map((d) => `${d.kind}:${d.ref}`));
       card = await cardRow(parsed.cardId);
+      // An unknown or archived card lists nothing (its empty line), whatever is still linked to it.
+      const docs = card ? await documentsForCard(db, parsed.cardId, { lang }) : [];
+      cardRefs = new Set(docs.map((d) => `${d.kind}:${d.ref}`));
     }
     const model = await lister(db, scope, { crowHome: crowHome(), filter, previews, ...(cardRefs ? { cardRefs } : {}) });
     // One line under the chips for a renderer reason (the first one any tile met).
@@ -180,7 +182,7 @@ export default {
       : shellScope.projectId != null ? String(chip?.name || shellScope.slug || "") : null;
     return layout({
       title: t("shell.tabMake", lang),
-      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, startCard: parsed.kind === "card" && card ? parsed.cardId : null, scope: { mode: parsed.kind, cardId, cardTitle: card?.title || "", explicit, projectName }, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
+      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, startCard: parsed.kind === "card" && card ? parsed.cardId : null, noStart: parsed.kind === "card" && !card, scope: { mode: parsed.kind, cardId, cardTitle: card?.title || "", explicit, projectName }, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
     });
   },
 };
