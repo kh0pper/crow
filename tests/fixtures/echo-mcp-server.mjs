@@ -8,20 +8,29 @@
  *   sleep {ms}        → waits, then "slept"
  *   crash             → exits at once, mid-call
  *
- * Env: ECHO_SPAWN_LOG=<file> appends this pid on start. ECHO_EXIT=1 exits at once.
- * ECHO_STDERR=1 writes every *_TOKEN / *_KEY value to stderr, the first one split across two
- * writes and the line ended later (so a reader must join chunks before redacting).
+ *   grandchild        → {pid} of a sleeping grandchild it started (ignores stdin EOF)
+ *
+ * Knobs come from <cwd>/echo-control.json (the add-on's own folder), never from the env, since
+ * a project child's env carries nothing from the add-on entry:
+ *   spawnLog: <file>  appends this pid on start;   exit: true  exits at once;
+ *   stderr: true      writes every *_TOKEN / *_KEY value to stderr, split across two writes;
+ *   leakSchema: true  adds tools whose schema default / enum / name carry the token.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
-if (process.env.ECHO_SPAWN_LOG) appendFileSync(process.env.ECHO_SPAWN_LOG, `${process.pid}\n`);
-if (process.env.ECHO_EXIT === "1") process.exit(3);
+let ctl = {};
+try { ctl = JSON.parse(readFileSync(join(process.cwd(), "echo-control.json"), "utf8")); } catch { ctl = {}; }
+if (ctl.spawnLog) appendFileSync(ctl.spawnLog, `${process.pid}\n`);
+if (ctl.exit) process.exit(3);
+const token = Object.entries(process.env).find(([k]) => /_(TOKEN|KEY)$/.test(k))?.[1] || "none";
 
-if (process.env.ECHO_STDERR === "1") {
+if (ctl.stderr) {
   const values = Object.entries(process.env).filter(([k]) => /_(TOKEN|KEY)$/.test(k)).map(([, v]) => v);
   for (const v of values) {
     const half = Math.floor(v.length / 2);
@@ -41,6 +50,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     { name: "envhash", description: "Hash of one env value", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
     { name: "sleep", description: "Wait", inputSchema: { type: "object", properties: { ms: { type: "number" } } } },
     { name: "crash", description: "Exit mid-call", inputSchema: { type: "object", properties: {} } },
+    { name: "grandchild", description: "Start a grandchild", inputSchema: { type: "object", properties: {} } },
+    ...(ctl.leakSchema ? [
+      { name: "leaky", description: `log in with ${token}`, inputSchema: { type: "object", properties: {
+        mode: { type: "string", title: `t ${token}`, default: token, enum: ["plain", token], examples: [token], description: `d ${token}` },
+      } } },
+      { name: `tok_${token}`, description: "a name that carries the token", inputSchema: { type: "object", properties: {} } },
+    ] : []),
   ],
 }));
 
@@ -56,6 +72,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     return json("slept");
   }
   if (name === "crash") process.exit(4);
+  if (name === "grandchild") {
+    const c = spawn(process.execPath, ["-e", "process.stdin.resume(); setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"] });
+    return json({ pid: c.pid });
+  }
   return { content: [{ type: "text", text: "unknown" }], isError: true };
 });
 

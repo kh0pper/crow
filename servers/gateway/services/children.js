@@ -18,10 +18,21 @@
  *    stopping to make room; none idle → busy. Connect timeout 60 s. The default is 2, not the
  *    plan's 6 (spec §12 budget: three gateways × the cap × one child's RSS ≤ 1.5 GB): a freshly
  *    started npx launcher chain (npm exec + sh + node) measured about 180 MB RSS.
+ *  - Lifetime: a child lives at most CROW_SERVICE_CHILD_MAX_LIFETIME_MS (default 1 h, bounded
+ *    1 min .. 24 h), however busy. Past it, it is stopped at once if idle or when its last call
+ *    settles, and the next call respawns it — which re-runs the folder check and link walk. So a
+ *    link planted while a child runs is seen at the next spawn, at most one lifetime later.
+ *  - Stop: the child's whole process tree (an npx launcher's npm exec → sh → node) is signalled,
+ *    not only the direct child, so no grandchild keeps the credentials in its environment.
  *  - Credentials: read from the keychain at each spawn (serviceSecretsFor: active rows only) and
  *    put in the child's ENVIRONMENT only, never argv. A keychain key fault, or a declared secret
- *    that has no saved value, never spawns (child_unavailable). The environment is an allowlist
- *    (connectionChildEnv, M14): the gateway's own env never leaks a Crow-wide token in.
+ *    that has no saved value, never spawns (child_unavailable); neither does a start that a stop
+ *    (disconnect, uninstall) overtook while the credentials were being read. The environment is
+ *    an allowlist (connectionChildEnv, M14): the gateway's own env and the add-on entry's env
+ *    never reach it. The SDK's transport adds its own safe defaults under it (HOME, LOGNAME,
+ *    PATH, SHELL, TERM, USER).
+ *  - Tool cache: written at every successful start, sanitized with this child's injected values
+ *    (sanitizeToolsForCache), since other projects' connections of the service read it.
  *  - Serving: only the local owner's active connection in a project that is not archived
  *    (servableConnection, m8), else not_active. Every folder field is re-checked at spawn with the
  *    shared folderRefusal, including symlinks planted inside it (M4).
@@ -32,7 +43,7 @@
  * Errors are ChildError with `code` one of not_installed | not_active | child_unavailable | busy.
  * A pending callTool settles when its child exits (the SDK rejects open requests on close).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -45,7 +56,8 @@ import { resolveAddonCommand, checkLauncherArgs } from "../../shared/resolve-com
 import { serviceSecretsFor } from "../keychain/store.js";
 import { loadKeychainKey } from "../keychain/key.js";
 import { folderRefusal } from "./connect-test.js";
-import { readToolCache, writeToolCache } from "./tool-cache.js";
+import { readToolCache, sanitizeToolsForCache, writeToolCache } from "./tool-cache.js";
+import { loopbackErrorText } from "../loopback-tool-mount.js";
 
 export const CHILD_ERROR_CODES = Object.freeze(new Set(["not_installed", "not_active", "child_unavailable", "busy"]));
 
@@ -67,7 +79,9 @@ let folderOpts = {};
 let now = () => Date.now();
 
 /** Tests only: shorter windows, a folder scan without the host's instance scan, a clock. */
-export function _setChildrenForTest({ windowMs, cooldownMs, connectTimeoutMs, folder, clock } = {}) {
+let beforeSpawnHook = null;
+export function _setChildrenForTest({ windowMs, cooldownMs, connectTimeoutMs, folder, clock, beforeSpawn } = {}) {
+  if (beforeSpawn !== undefined) beforeSpawnHook = beforeSpawn;
   if (windowMs != null) timing.windowMs = windowMs;
   if (cooldownMs != null) timing.cooldownMs = cooldownMs;
   if (connectTimeoutMs != null) timing.connectTimeoutMs = connectTimeoutMs;
@@ -88,9 +102,18 @@ const maxChildren = () => {
   return n <= MAX_CHILDREN_CEILING ? n : DEFAULT_MAX_CHILDREN;
 };
 
+export const DEFAULT_MAX_LIFETIME_MS = 60 * 60_000;
+const LIFETIME_MIN_MS = 60_000;
+const LIFETIME_MAX_MS = 24 * 60 * 60_000;
+/** CROW_SERVICE_CHILD_MAX_LIFETIME_MS: an integer 60000..86400000 overrides the default 1 h. */
+const maxLifetimeMs = () => {
+  const n = intEnv("CROW_SERVICE_CHILD_MAX_LIFETIME_MS", DEFAULT_MAX_LIFETIME_MS, LIFETIME_MIN_MS);
+  return n <= LIFETIME_MAX_MS ? n : DEFAULT_MAX_LIFETIME_MS;
+};
+
 /** The limits in force now (read from the env on every call). */
 export function childLimits() {
-  return { maxChildren: maxChildren(), idleMs: idleMs() };
+  return { maxChildren: maxChildren(), idleMs: idleMs(), maxLifetimeMs: maxLifetimeMs() };
 }
 
 /** uuid → record. A record outlives its process (cooldown, stderr, injected values). */
@@ -102,7 +125,7 @@ function recordFor(uuid) {
     r = {
       uuid, serviceId: null, bundleId: null, state: "stopped", client: null, transport: null, tools: [],
       pid: null, startPromise: null, lastUsedAt: 0, inFlight: 0, idleTimer: null, generation: 0,
-      stderr: [], secrets: [], failures: [], coolingUntil: 0, pendingRecord: false, calls: new Set(),
+      stderr: [], secrets: [], failures: [], coolingUntil: 0, pendingRecord: false, calls: new Set(), startedAt: 0, lifeTimer: null, tree: [],
     };
     records.set(uuid, r);
   }
@@ -111,6 +134,7 @@ function recordFor(uuid) {
 
 const cooling = (r) => r.coolingUntil > now();
 const isLive = (r) => r.state === "running" || r.startPromise != null;
+const expired = (r) => r.state === "running" && now() - r.startedAt >= maxLifetimeMs();
 
 // ---------------------------------------------------------------------------------------------
 // Environment (M14)
@@ -134,11 +158,13 @@ function derivedEnvFor(service, values) {
 
 /**
  * The child's environment: from `base` only the allowlisted keys (and XDG_*); then CROW_HOME and
- * CROW_ADDON_HOST="service"; then the add-on entry's env minus every field and derived key (a
- * Crow-wide token in mcp-addons.json never reaches a project's child); then the connection's
- * config and secrets under their field names; then the derived env.
+ * CROW_ADDON_HOST="service"; then the connection's declared fields (config and secrets under
+ * their field names); then the derived env. Nothing from the add-on entry's env: every service's
+ * declared env_vars are its fields, and any other key there (a Crow-wide token under some name)
+ * must never reach a project's child. `addonEntry` is accepted and ignored for that reason.
+ * (derivedEnvFor mirrors legacy-sources.js addonDerivedEnv, which PR 4 deletes.)
  */
-export function connectionChildEnv({ addonEntry, service, config = {}, secrets = {}, base = process.env, crowHome = resolveCrowHome() } = {}) {
+export function connectionChildEnv({ addonEntry: _addonEntry, service, config = {}, secrets = {}, base = process.env, crowHome = resolveCrowHome() } = {}) {
   const env = {};
   for (const [k, v] of Object.entries(base || {})) {
     if (typeof v === "string" && (BASE_KEYS.has(k) || k.startsWith("XDG_"))) env[k] = v;
@@ -146,11 +172,6 @@ export function connectionChildEnv({ addonEntry, service, config = {}, secrets =
   env.CROW_HOME = crowHome;
   env.CROW_ADDON_HOST = "service";
   const fieldNames = new Set((service?.fields || []).map((f) => f.name));
-  const derivedNames = new Set(Object.keys(service?.derivedEnv || {}));
-  for (const [k, v] of Object.entries(addonEntry?.env || {})) {
-    if (fieldNames.has(k) || derivedNames.has(k) || k === "CROW_HOME" || k === "CROW_ADDON_HOST") continue;
-    if (typeof v === "string") env[k] = v;
-  }
   const values = {};
   for (const [k, v] of Object.entries(config || {})) if (fieldNames.has(k) && typeof v === "string") values[k] = v;
   for (const [k, v] of Object.entries(secrets || {})) if (fieldNames.has(k) && typeof v === "string") values[k] = v;
@@ -326,9 +347,66 @@ function wrapClient(r, client) {
       r.calls.delete(ac);
       r.inFlight--;
       touch(r);
+      if (r.state === "running") r.tree = processTree(r.pid);
+      // Past its lifetime: stopped at its first idle moment; the next call respawns it.
+      if (expired(r) && r.inFlight === 0) stopChild(r.uuid).catch(() => {});
     }
   };
   return client;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The process tree (Linux /proc): an npx launcher is npm exec → sh → node, and closing the
+// transport signals only the first. Each pid is kept with its start time, so a recycled pid is
+// never signalled.
+
+function startTimeOf(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every descendant of `pid` (not pid itself), each as {pid, start}. [] off Linux or when gone. */
+export function processTree(pid) {
+  const out = [];
+  if (!Number.isInteger(pid) || pid <= 0) return out;
+  const stack = [pid];
+  const seen = new Set([pid]);
+  while (stack.length && out.length < 256) {
+    const p = stack.pop();
+    let tids = [];
+    try { tids = readdirSync(`/proc/${p}/task`); } catch { continue; }
+    for (const tid of tids) {
+      let kids = "";
+      try { kids = readFileSync(`/proc/${p}/task/${tid}/children`, "utf8"); } catch { continue; }
+      for (const k of kids.split(/\s+/).filter(Boolean).map(Number)) {
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const start = startTimeOf(k);
+        if (start) out.push({ pid: k, start });
+        stack.push(k);
+      }
+    }
+  }
+  return out;
+}
+
+function signalTree(tree, sig) {
+  for (const { pid, start } of tree || []) {
+    if (startTimeOf(pid) !== start) continue;   // gone, or the pid was reused
+    try { process.kill(pid, sig); } catch { /* gone */ }
+  }
+}
+
+/** SIGTERM what is left of the tree now, SIGKILL whatever survives 2 s. */
+function reapTree(tree) {
+  if (!tree || !tree.length) return;
+  signalTree(tree, "SIGTERM");
+  const t = setTimeout(() => signalTree(tree, "SIGKILL"), 2000);
+  t.unref?.();
 }
 
 function abortCalls(r) {
@@ -343,6 +421,9 @@ function onExit(r, transport) {
   r.client = null;
   r.pid = null;
   abortCalls(r);
+  reapTree(r.tree);
+  r.tree = [];
+  if (r.lifeTimer) { clearTimeout(r.lifeTimer); r.lifeTimer = null; }
   if (r.idleTimer) { clearTimeout(r.idleTimer); r.idleTimer = null; }
   if (r.state === "running") {
     r.state = "error";
@@ -407,7 +488,10 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
     throw await failStart(db, r);
   }
 
-  const env = connectionChildEnv({ addonEntry: entry, service, config: conn.config, secrets, crowHome });
+  if (beforeSpawnHook) await beforeSpawnHook(conn.uuid);
+  // A Disconnect or uninstall that landed while the credentials were read: never spawn with them.
+  if (r.generation !== generation) throw new ChildError("child_unavailable");
+  const env = connectionChildEnv({ service, config: conn.config, secrets, crowHome });
   r.secrets = secretValuesOf(secrets);
   const transport = new StdioClientTransport({
     command: rc.command, args: Array.isArray(entry.args) ? entry.args.map(String) : [], env, cwd, stderr: "pipe",
@@ -445,13 +529,20 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
   r.pid = transport.pid;
   r.tools = tools;
   r.state = "running";
+  r.startedAt = now();
+  r.tree = processTree(r.pid);
+  if (r.lifeTimer) clearTimeout(r.lifeTimer);
+  r.lifeTimer = setTimeout(() => {
+    r.lifeTimer = null;
+    if (r.generation === generation && r.inFlight === 0) stopChild(r.uuid).catch(() => {});
+  }, maxLifetimeMs());
+  r.lifeTimer.unref?.();
   // client.onclose, not transport.onclose: the transport's handler belongs to the SDK, which
   // rejects every open request on close (so a pending callTool settles when the child exits).
   client.onclose = () => onExit(r, transport);
   try {
-    writeToolCache(crowHome, service.id, version, tools.map((t) => ({
-      ...t, description: typeof t?.description === "string" ? redactSecrets(t.description, r.secrets) : undefined,
-    })));
+    // Sanitized with THIS child's values: other projects' connections of the service read it.
+    writeToolCache(crowHome, service.id, version, sanitizeToolsForCache(tools, r.secrets));
   } catch {
     console.warn("[services] tool cache not written");
   }
@@ -492,6 +583,10 @@ export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(),
   r.serviceId = service.id;
   r.bundleId = service.bundleId;
   r.lastUsedAt = now();
+  if (r.state === "running" && r.client && expired(r) && r.inFlight === 0) {
+    // Past its lifetime and idle: retire it now (synchronously) and start a fresh one below.
+    stopChild(uuid).catch(() => {});
+  }
   if (r.state === "running" && r.client) {
     touch(r);
     return { client: r.client, tools: r.tools };
@@ -512,16 +607,20 @@ export async function stopChild(uuid, { forget = false } = {}) {
   if (!r) return;
   r.generation++;
   if (r.idleTimer) { clearTimeout(r.idleTimer); r.idleTimer = null; }
+  if (r.lifeTimer) { clearTimeout(r.lifeTimer); r.lifeTimer = null; }
   const transport = r.transport;
+  const tree = r.pid ? [...processTree(r.pid), ...(r.tree || [])] : r.tree || [];
   r.state = "stopped";
   r.transport = null;
   r.client = null;
   r.pid = null;
+  r.tree = [];
   abortCalls(r);
   if (transport) {
     console.warn(`[services] child exited (${r.stderr.length} stderr lines)`);
     try { await transport.close(); } catch { /* gone */ }
   }
+  reapTree(tree);
   if (forget) records.delete(uuid);
 }
 
@@ -572,9 +671,9 @@ export function childSecretValues(uuid) {
  * or the installed version changed since). Reads the row for its service only.
  */
 export async function listedTools(db, uuid, { crowHome = resolveCrowHome() } = {}) {
-  const r = (await db.execute({ sql: "SELECT service_id FROM service_connections WHERE uuid = ?", args: [uuid] })).rows[0];
-  if (!r) return null;
-  return serviceTools(r.service_id, { crowHome });
+  const conn = await servableConnection(db, uuid);   // only a connection that may be served
+  if (!conn) return null;
+  return serviceTools(conn.serviceId, { crowHome });
 }
 
 /** A service's cached tools at its installed version (null on a miss). Starts nothing. */
@@ -587,33 +686,60 @@ export function serviceTools(serviceId, { crowHome = resolveCrowHome() } = {}) {
 }
 
 export const SERVICE_RESULT_MAX_BYTES = 256 * 1024;
+const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+const TOOL_CODES = new Set([
+  "busy", "child_unavailable", "not_installed", "unreachable", "tools_changed",
+  "not_owner_turn", "scope_unknown", "wrong_project", "not_selected", "owner_mismatch", "not_granted", "not_active",
+]);
+const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const errResult = (text) => ({ content: [{ type: "text", text }], isError: true });
 
 /**
- * A child's tools/call result made safe to show (Task 17's mount shapes its own; Task 20's
- * dashboard chat, which bypasses the mount, uses this): text items only (others are dropped), redacted as one text with
- * the values injected into that child (a secret split over two items is caught), capped at
- * `maxBytes` (redacted first, then cut). No other field survives but isError.
- * @returns {{content: Array<{type:"text", text:string}>, isError?: true, truncated?: true}}
+ * A child's tools/call result made safe to show, by the loopback mount's own rules
+ * (loopback-tool-mount.js runTool step 6, mirrored because it isn't exported there; a parity
+ * test feeds both the same results). Task 20's dashboard chat bypasses the mount and uses this
+ * with `secrets: childSecretValues(uuid)`:
+ *  - a non-object result, or one without a content array: its `code` (if a known one) or
+ *    "<tool> failed.";
+ *  - items rebuilt from an allowlist: text → {type, text}; image → {type, mimeType, data} for
+ *    png/jpeg/gif/webp and a base64 string; everything else dropped, with one fixed note;
+ *  - text redacted as one text across items (redactAcross) with `secrets`;
+ *  - only content and isError survive; over `maxBytes` (JSON, images count) → "Result too
+ *    large (<n> KiB)." as an error; any throw while shaping → "<tool> failed.".
+ * The texts are the mount's (loopbackErrorText), in `lang`.
+ * @returns {{content: object[], isError?: true}}
  */
-export function shapeServiceResult(result, uuid, { maxBytes = SERVICE_RESULT_MAX_BYTES } = {}) {
-  const secrets = childSecretValues(uuid);
-  const items = result && typeof result === "object" && Array.isArray(result.content) ? result.content : [];
-  const texts = items.filter((i) => i && typeof i === "object" && i.type === "text" && typeof i.text === "string").map((i) => i.text);
-  const redacted = redactAcross(texts, secrets);
-  const content = [];
-  let used = 0;
-  let truncated = false;
-  for (const text of redacted) {
-    const bytes = Buffer.byteLength(text);
-    if (used + bytes <= maxBytes) { content.push({ type: "text", text }); used += bytes; continue; }
-    const room = maxBytes - used;
-    // Already redacted: a cut can only shorten a [redacted] marker, never expose a value.
-    if (room > 0) content.push({ type: "text", text: Buffer.from(text).subarray(0, room).toString("utf8").replace(/�$/, "") });
-    truncated = true;
-    break;
+export function shapeServiceResult(result, { secrets = [], maxBytes = SERVICE_RESULT_MAX_BYTES, lang = "en", tool = "The tool", contentTypes = ["text", "image"] } = {}) {
+  const kinds = new Set(contentTypes);
+  const fail = (code, o = {}) => errResult(loopbackErrorText(code, { lang, tool, ...o }));
+  let out, bytes;
+  try {
+    if (!isPlainObject(result) || !Array.isArray(result.content)) {
+      const code = isPlainObject(result) && typeof result.code === "string" && TOOL_CODES.has(result.code) ? result.code : "failed";
+      return fail(code);
+    }
+    const sec = Array.isArray(secrets) ? secrets : [];
+    const content = [];
+    const texts = [];
+    let dropped = 0;
+    for (const item of result.content) {
+      const kind = isPlainObject(item) && kinds.has(item.type) ? item.type : null;
+      const text = kind === "text" ? item.text : undefined;
+      if (kind === "text" && typeof text === "string") { texts.push(content.length); content.push({ type: "text", text }); }
+      else if (kind === "image" && typeof item.mimeType === "string" && IMAGE_MIME.has(item.mimeType) && typeof item.data === "string" && BASE64_RE.test(item.data)) {
+        content.push({ type: "image", mimeType: item.mimeType, data: item.data });
+      } else dropped++;
+    }
+    const redacted = redactAcross(texts.map((i) => content[i].text), sec);
+    texts.forEach((i, k) => { content[i] = { type: "text", text: redacted[k] }; });
+    if (dropped) content.push({ type: "text", text: loopbackErrorText("dropped", { lang, n: dropped }) });
+    out = { content };
+    if (result.isError === true) out.isError = true;
+    bytes = Buffer.byteLength(JSON.stringify(out));
+  } catch {
+    return fail("failed");
   }
-  const out = { content };
-  if (result?.isError === true) out.isError = true;
-  if (truncated) out.truncated = true;
+  if (bytes > maxBytes) return fail("too_large", { kib: Math.ceil(bytes / 1024) });
   return out;
 }
