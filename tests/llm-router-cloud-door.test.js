@@ -14,13 +14,16 @@ process.env.COMPANION_ESCALATION_MODEL = "crow-chat/qwen3.6-35b-a3b";
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import zlib from "node:zlib";
 import express from "express";
 import llmRouterRouter from "../servers/gateway/routes/llm-router.js";
 import {
   resolveCloudTarget, isCloudTarget as realIsCloudTarget, CLOUD_OPS, REQUEST_HEADER_ALLOW, RESPONSE_HEADER_ALLOW,
 } from "../servers/gateway/models/cloud-door.js";
 import { cloudDoorUrl } from "../servers/gateway/models/door.js";
-import { extractUsageFromAnthropicStream } from "../servers/shared/metering.js";
+import { extractUsageFromAnthropicStream, recordUsageEvent } from "../servers/shared/metering.js";
+import { readFileSync } from "node:fs";
+import { isLocalPeer } from "../servers/shared/peer-class.js";
 import { grantCloudConsent, readCloudConsent, readCloudConsentSalt, ensureCloudConsentSalt, CLOUD_CONSENT_KEY } from "../servers/shared/cloud-consent.js";
 import { normalizeBaseUrl } from "../servers/shared/provider-presets.js";
 
@@ -69,6 +72,8 @@ const lookupFn = (host, opts, cb) => {
 // is NOT allowed: its loopback answer must hit the real refusal.
 const allowAddressFn = (name, addr) => (name === "up.example.test" || name === "up2.example.test") && addr === "127.0.0.1";
 const isCloudTargetFn = (u) => u.startsWith("http://up.example.test:") || realIsCloudTarget(u);
+// The fake upstreams speak plain http; every other http row meets the real https rule.
+const allowInsecureFn = (u) => u.startsWith("http://up.example.test:") || u.startsWith("http://up2.example.test:");
 
 function readBody(req) {
   return new Promise((resolve) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => resolve(b)); });
@@ -90,6 +95,7 @@ function baseRows() {
     "lit-64": { baseUrl: `http://[64:ff9b::7f00:1]:${upPort}/v1`, apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
     "meta": { baseUrl: "http://169.254.169.254/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
     "local-chat": { baseUrl: "http://127.0.0.1:8003/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
+    "cloud-h": { baseUrl: "http://api.example.com/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
   };
 }
 
@@ -125,6 +131,7 @@ function makeRouter(extra = {}) {
     cloudProvidersFn: async (id) => (rows[id] ? { [id]: { id, ...rows[id] } } : {}),
     consentFn: async () => ({ consent: await readCloudConsent(db), salt: await readCloudConsentSalt(db) }),
     isCloudTargetFn,
+    allowInsecureFn,
     lookupFn,
     allowAddressFn,
     ...extra,
@@ -161,7 +168,7 @@ beforeEach(async () => {
   rows = baseRows();
   db = fakeDb(rows);
   await ensureCloudConsentSalt(db);
-  for (const id of ["cloud-a", "cloud-b", "Cloud A", "cloud-n", "cloud-r", "cloud-nokey", "cloud-lo"]) await grant(id);
+  for (const id of ["cloud-a", "cloud-b", "Cloud A", "cloud-n", "cloud-r", "cloud-nokey", "cloud-lo", "cloud-h"]) await grant(id);
   for (const id of ["lit-0", "lit-6", "lit-64", "meta", "local-chat"]) await forceConsent(id);
   // Capture every log line: the real key must never appear in one.
   for (const k of ["log", "warn", "error"]) console[k] = (...a) => { logs.push(a.map(String).join(" ")); };
@@ -176,10 +183,11 @@ function call(path, { body = { model: "c1", messages: [{ role: "user", content: 
       hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: "POST",
       headers: Object.fromEntries(Object.entries({ "content-type": "application/json", authorization: `Bearer ${DOOR_TOKEN}`, ...headers }).filter(([, v]) => v !== undefined)),
     }, (res) => {
-      let b = "";
-      res.on("data", (c) => { b += c; });
-      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: b, json() { return JSON.parse(b); } }));
-      res.on("error", (e) => resolve({ status: res.statusCode, headers: res.headers, body: b, aborted: e }));
+      const parts = [];
+      res.on("data", (c) => { parts.push(c); });
+      const out = (extra) => { const buf = Buffer.concat(parts); const b = buf.toString("utf8"); return { status: res.statusCode, headers: res.headers, buf, body: b, json() { return JSON.parse(b); }, ...extra }; };
+      res.on("end", () => resolve(out()));
+      res.on("error", (e) => resolve(out({ aborted: e })));
     });
     req.on("error", reject);
     req.end(payload);
@@ -324,6 +332,9 @@ test("refusals never call upstream", async () => {
     ["forwarded for loopback", "/llm/c/cloud-a/v1/chat/completions", { headers: { "x-forwarded-for": "127.0.0.1" } }, 403, "CLOUD_SOURCE_REFUSED"],
     ["Forwarded header", "/llm/c/cloud-a/v1/chat/completions", { headers: { forwarded: "for=127.0.0.1" } }, 403, "CLOUD_SOURCE_REFUSED"],
     ["x-real-ip", "/llm/c/cloud-a/v1/chat/completions", { headers: { "x-real-ip": "127.0.0.1" } }, 403, "CLOUD_SOURCE_REFUSED"],
+    ["x-forwarded-host", "/llm/c/cloud-a/v1/chat/completions", { headers: { "x-forwarded-host": "crow.example.ts.net" } }, 403, "CLOUD_SOURCE_REFUSED"],
+    ["x-forwarded-proto", "/llm/c/cloud-a/v1/chat/completions", { headers: { "x-forwarded-proto": "https" } }, 403, "CLOUD_SOURCE_REFUSED"],
+    ["http row (unseamed)", "/llm/c/cloud-h/v1/chat/completions", {}, 400, "INSECURE_TARGET"],
     ["Tailscale-User-Login", "/llm/c/cloud-a/v1/chat/completions", { headers: { "tailscale-user-login": "x" } }, 403, "CLOUD_SOURCE_REFUSED"],
     ["Tailscale-Headers-Info", "/llm/c/cloud-a/v1/chat/completions", { headers: { "tailscale-headers-info": "x" } }, 403, "CLOUD_SOURCE_REFUSED"],
     ["Funnel", "/llm/c/cloud-a/v1/chat/completions", { headers: { "tailscale-funnel-request": "1" } }, 403, "FUNNEL_REFUSED"],
@@ -595,15 +606,251 @@ test("resolveCloudTarget: shapes and the allowlists", async () => {
   const consent = await readCloudConsent(db);
   const salt = await readCloudConsentSalt(db);
   const providers = { "cloud-a": { id: "cloud-a", ...rows["cloud-a"] }, "cloud-b": { id: "cloud-b", ...rows["cloud-b"] } };
-  const a = resolveCloudTarget({ providers, consent, salt, providerId: "cloud-a", op: "chat/completions", model: "c1", isCloudTarget: isCloudTargetFn });
+  const a = resolveCloudTarget({ providers, consent, salt, providerId: "cloud-a", op: "chat/completions", model: "c1", isCloudTarget: isCloudTargetFn, allowInsecure: allowInsecureFn });
   assert.equal(a.kind, "forward");
   assert.equal(a.url, `http://up.example.test:${upPort}/v1/chat/completions`);
   assert.equal(a.authStyle, "bearer");
   assert.equal(a.host, "up.example.test");
-  const b = resolveCloudTarget({ providers, consent, salt, providerId: "cloud-b", op: "messages", model: "m-b", isCloudTarget: isCloudTargetFn });
+  const b = resolveCloudTarget({ providers, consent, salt, providerId: "cloud-b", op: "messages", model: "m-b", isCloudTarget: isCloudTargetFn, allowInsecure: allowInsecureFn });
   assert.equal(b.url, `http://up.example.test:${upPort}/v1/messages`);
   assert.equal(b.authStyle, "anthropic");
   assert.deepEqual(CLOUD_OPS, { openai: ["chat/completions", "completions", "embeddings"], anthropic: ["messages"] });
   assert.deepEqual(REQUEST_HEADER_ALLOW, ["content-type", "accept"]);
   assert.deepEqual(RESPONSE_HEADER_ALLOW, ["content-type", "retry-after", "x-should-retry", "request-id", "x-request-id"]);
+});
+
+// ---------------------------------------------------------------- fix round 1
+
+test("a client abort before the upstream answers closes the upstream request at once", async () => {
+  let upClosedAt = null;
+  upHandler = (req, res) => { res.on("close", () => { upClosedAt = Date.now(); }); /* never answers */ };
+  const u = new URL(`${appUrl}/llm/c/cloud-a/v1/chat/completions`);
+  const creq = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${DOOR_TOKEN}` } });
+  creq.on("error", () => {});
+  creq.end(JSON.stringify({ model: "c1", messages: [] }));
+  for (let i = 0; i < 100 && !hits.length; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(hits.length, 1, "the upstream was reached");
+  const abortedAt = Date.now();
+  creq.destroy();
+  for (let i = 0; i < 100 && upClosedAt == null; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(upClosedAt != null && upClosedAt - abortedAt < 1000, "the upstream request stayed open after the client left");
+  // The slot is free again.
+  upHandler = null;
+  assert.equal((await call("/llm/c/cloud-a/v1/chat/completions")).status, 200);
+});
+
+test("a client abort mid-stream closes the upstream", async () => {
+  let upClosedAt = null;
+  upHandler = (req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"n":0}\n\n');
+    res.on("close", () => { upClosedAt = Date.now(); });
+  };
+  let abortedAt;
+  await new Promise((resolve) => {
+    const u = new URL(`${appUrl}/llm/c/cloud-a/v1/chat/completions`);
+    const creq = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${DOOR_TOKEN}` } }, (res) => {
+      res.once("data", () => { abortedAt = Date.now(); creq.destroy(); resolve(); });
+    });
+    creq.on("error", () => {});
+    creq.end(JSON.stringify({ model: "c1", stream: true, messages: [] }));
+  });
+  for (let i = 0; i < 100 && upClosedAt == null; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(upClosedAt != null && upClosedAt - abortedAt < 1000);
+});
+
+test("an http row is refused before consent, with zero upstream hits", () => {
+  const providers = { "cloud-h": { id: "cloud-h", ...rows["cloud-h"] } };
+  const t = resolveCloudTarget({ providers, consent: {}, salt: null, providerId: "cloud-h", op: "chat/completions", model: "c1" });
+  assert.equal(t.code, "INSECURE_TARGET");
+  const ok = resolveCloudTarget({ providers: { x: { id: "x", baseUrl: "https://api.example.com/v1", apiKey: UP_KEY, models: [{ id: "c1" }] } }, consent: {}, salt: null, providerId: "x", op: "chat/completions", model: "c1" });
+  assert.equal(ok.code, "NOT_CONSENTED", "an https row goes on to the consent check");
+});
+
+test("a compressed answer keeps its content-encoding, arrives intact, and is still metered", async () => {
+  const sse = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\ndata: [DONE]\n\n';
+  upHandler = (req, res) => { res.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" }); res.end(zlib.gzipSync(sse)); };
+  const r = await call("/llm/c/cloud-a/v1/chat/completions", { body: { model: "c1", stream: true, messages: [] } });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers["content-encoding"], "gzip");
+  assert.equal(zlib.gunzipSync(r.buf).toString("utf8"), sse);
+  await settled();
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].inputTokens, 3);
+  assert.equal(usage[0].outputTokens, 2);
+});
+
+test("a compressed error body is decoded, redacted and sent plain", async () => {
+  upHandler = (req, res) => {
+    res.writeHead(401, { "content-type": "application/json", "content-encoding": "gzip" });
+    res.end(zlib.gzipSync(JSON.stringify({ error: { message: `bad key ${req.headers.authorization}` } })));
+  };
+  const r = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r.status, 401);
+  assert.equal(r.headers["content-encoding"], undefined);
+  assert.equal(r.json().error.message, "bad key Bearer [redacted]");
+  assertNoKeyAnywhere(r);
+});
+
+test("metering: a non-streamed body over 96 KB is still metered, for openai and anthropic", async () => {
+  const big = "y".repeat(200_000);
+  upHandler = (req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "x", choices: [{ message: { role: "assistant", content: big } }], usage: { prompt_tokens: 40, completion_tokens: 30000 } }));
+  };
+  await call("/llm/c/cloud-a/v1/chat/completions");
+  await settled();
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].inputTokens, 40);
+  assert.equal(usage[0].outputTokens, 30000);
+  usage = [];
+  upHandler = (req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ type: "message", content: [{ type: "text", text: big }], usage: { input_tokens: 9, output_tokens: 31000 } }));
+  };
+  await call("/llm/c/cloud-b/v1/messages", { body: { model: "m-b", messages: [] } });
+  await settled();
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].inputTokens, 9);
+  assert.equal(usage[0].outputTokens, 31000);
+});
+
+test("metering: an openai stream without include_usage records the call with null counts", async () => {
+  upHandler = (req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n');
+  };
+  await call("/llm/c/cloud-a/v1/chat/completions", { body: { model: "c1", stream: true, messages: [] } });
+  await settled();
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].providerId, "cloud-a");
+  assert.equal(usage[0].inputTokens, null);
+  assert.equal(usage[0].outputTokens, null);
+});
+
+test("recordUsageEvent: null counts are written as an unpriced row, even when a rule matches", async () => {
+  const inserts = [];
+  const fake = {
+    async execute(q) {
+      if (typeof q === "string") return { rows: [{ provider_id: "cloud-a", provider_type: null, model_id: "*", input_cost_per_1m: 1, output_cost_per_1m: 1 }] };
+      inserts.push(q.args);
+      return { rows: [] };
+    },
+  };
+  const r = await recordUsageEvent(fake, { surface: "llm", providerId: "cloud-a", modelId: "c1", inputTokens: null, outputTokens: null, cachedTokens: null });
+  assert.deepEqual(r, { priced: false, cost: null });
+  const a = inserts[0];
+  assert.deepEqual([a[7], a[8], a[9], a[10], a[11]], [0, 0, 0, null, 0]);
+  const known = await recordUsageEvent(fake, { surface: "llm", providerId: "cloud-a", modelId: "c1", inputTokens: 1_000_000, outputTokens: 0 });
+  assert.equal(known.priced, true);
+});
+
+/** index.js's global-parser skip predicate, read from the source (as workspace-live.test.js does). */
+function gatewayParserSkip() {
+  const src = readFileSync(new URL("../servers/gateway/index.js", import.meta.url), "utf8");
+  const m = /const _hasOwnParser = \(p\) => ([^\n]*\n[^\n]*);/.exec(src);
+  assert.ok(m, "the predicate is where it was");
+  return new Function("p", `return ${m[1]};`);
+}
+
+test("/LLM/C with the Funnel header is refused, and the body is never parsed", async () => {
+  const hasOwnBodyParser = gatewayParserSkip();
+  assert.equal(hasOwnBodyParser("/LLM/C/x/v1/chat/completions"), true);
+  assert.equal(hasOwnBodyParser("/Llm/c"), true);
+  assert.equal(hasOwnBodyParser("/api/chat"), false);
+  // The gateway's layering: the global parser (skipped by the same predicate), then the router.
+  let parsed = 0;
+  const app = express();
+  const json = express.json({ limit: "1mb" });
+  app.use((req, res, next) => (hasOwnBodyParser(req.path) ? next() : (parsed++, json(req, res, next))));
+  app.use(makeRouter());
+  const s = http.createServer(app);
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  try {
+    const base = `http://127.0.0.1:${s.address().port}`;
+    // Not JSON: a parse would answer 400, never 403/401.
+    const r1 = await call("/LLM/C/cloud-a/v1/chat/completions", { base, raw: "{not json", headers: { "tailscale-funnel-request": "?1" } });
+    assert.equal(r1.status, 403);
+    assert.equal(r1.json().error.code, "FUNNEL_REFUSED");
+    const r2 = await call("/LLM/C/cloud-a/v1/chat/completions", { base, raw: "{not json", headers: { authorization: undefined } });
+    assert.equal(r2.status, 401);
+    assert.equal(r2.json().error.code, "CLOUD_TOKEN_REFUSED");
+    assert.equal(parsed, 0);
+    assert.equal(hits.length, 0);
+  } finally { s.close(); }
+});
+
+test("an upstream that echoes the key and the caller's token gets them redacted", async () => {
+  upHandler = (req, res) => {
+    res.writeHead(401, { "content-type": "application/json", "x-ratelimit-echo": req.headers.authorization, "request-id": UP_KEY });
+    res.end(JSON.stringify({ error: { message: `Incorrect API key provided: ${UP_KEY}`, headers: req.headers } }));
+  };
+  const r = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r.status, 401);
+  assert.equal(r.headers["x-ratelimit-echo"], "Bearer [redacted]");
+  assert.equal(r.headers["request-id"], "[redacted]");
+  assert.match(r.json().error.message, /provided: \[redacted\]$/);
+  assertNoKeyAnywhere(r);
+  // A 2xx answer's header values are redacted too (the body streams as is).
+  upHandler = (req, res) => { res.writeHead(200, { "content-type": "application/json", "x-ratelimit-key": UP_KEY }); res.end("{}"); };
+  const r2 = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r2.headers["x-ratelimit-key"], "[redacted]");
+  // The caller's own token, echoed, is redacted as well.
+  upHandler = (req, res) => { res.writeHead(400, { "content-type": "application/json" }); res.end(JSON.stringify({ seen: DOOR_TOKEN })); };
+  const r3 = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r3.json().seen, "[redacted]");
+});
+
+test("routing and egress body fields are stripped; provider tools are kept", async () => {
+  await call("/llm/c/cloud-a/v1/chat/completions", { body: {
+    model: "c1", messages: [], models: ["other/expensive"], route: "fallback", provider: { order: ["x"] },
+    tools: [{ type: "function", function: { name: "f" } }],
+  } });
+  const sent = JSON.parse(hits[0].body);
+  for (const k of ["models", "route", "provider"]) assert.equal(sent[k], undefined, k);
+  assert.deepEqual(sent.tools, [{ type: "function", function: { name: "f" } }]);
+  await call("/llm/c/cloud-b/v1/messages", { body: {
+    model: "m-b", messages: [], mcp_servers: [{ type: "url", url: "https://mcp.example.com/sse", name: "x" }],
+    tools: [{ type: "web_search_20250305", name: "web_search" }],
+  }, headers: { "anthropic-version": "2023-06-01" } });
+  const sentB = JSON.parse(hits[1].body);
+  assert.equal(sentB.mcp_servers, undefined);
+  assert.deepEqual(sentB.tools, [{ type: "web_search_20250305", name: "web_search" }]);
+});
+
+test("POST /llm/c with no trailing path answers 404 inside the door", async () => {
+  for (const path of ["/llm/c", "/llm/c/"]) {
+    const r = await call(path);
+    assert.equal(r.status, 404, path);
+    assert.equal(r.json().error.code, "NOT_FOUND", path);
+  }
+  assert.equal((await call("/llm/c", { headers: { authorization: undefined } })).status, 401);
+  assert.equal(hits.length, 0);
+});
+
+test("isLocalPeer is the one source rule: every forwarding and tailscale header refuses", () => {
+  assert.equal(isLocalPeer("127.0.0.1", {}), true);
+  assert.equal(isLocalPeer("::1", {}), true);
+  assert.equal(isLocalPeer("::ffff:127.0.0.1", { "content-type": "x" }), true);
+  for (const h of ["x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host", "x-forwarded-proto", "tailscale-user-login", "tailscale-headers-info", "tailscale-anything"]) {
+    assert.equal(isLocalPeer("127.0.0.1", { [h]: h === "forwarded" ? "for=127.0.0.1" : "127.0.0.1" }), false, h);
+  }
+  for (const a of ["100.64.20.9", "10.0.0.50", "203.0.113.5", ""]) assert.equal(isLocalPeer(a, {}), false, a);
+});
+
+test("at most 8 requests at once; the ninth gets 429 DOOR_BUSY", async () => {
+  const held = [];
+  upHandler = (req, res) => { held.push(res); };
+  const pending = [];
+  for (let i = 0; i < 8; i++) pending.push(call("/llm/c/cloud-a/v1/chat/completions"));
+  for (let i = 0; i < 200 && hits.length < 8; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(hits.length, 8);
+  const r9 = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r9.status, 429);
+  assert.equal(r9.json().error.code, "DOOR_BUSY");
+  assert.equal(hits.length, 8);
+  for (const res of held) { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); }
+  for (const r of await Promise.all(pending)) assert.equal(r.status, 200);
+  upHandler = null;
+  assert.equal((await call("/llm/c/cloud-a/v1/chat/completions")).status, 200);
 });

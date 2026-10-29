@@ -253,7 +253,7 @@ export async function summarizeUsage(db, { since = null, until = null } = {}) {
  * @returns {Promise<{priced:boolean, cost:number|null}>}
  */
 export async function recordUsageEvent(db, event) {
-  const {
+  let {
     tenantId = null,
     conversationId = null,
     messageId = null,
@@ -267,12 +267,19 @@ export async function recordUsageEvent(db, event) {
     requestId = null,
   } = event;
 
+  // Unknown counts (a response that reported no usage, e.g. an openai stream
+  // without include_usage): the call is still recorded, unpriced (priced=0,
+  // cost NULL), with 0 in the NOT NULL token columns.
+  const unknown = inputTokens == null && outputTokens == null;
+  inputTokens = inputTokens ?? 0;
+  outputTokens = outputTokens ?? 0;
+  cachedTokens = cachedTokens ?? 0;
   const rules = await loadPricingRules(db);
   const rule = selectPriceRule(rules, { providerId, providerType, modelId });
 
   let cost = null;
   let priced = 0;
-  if (rule) {
+  if (rule && !unknown) {
     cost = computeCost({ inputTokens, outputTokens, cachedTokens }, rule);
     priced = 1;
   }

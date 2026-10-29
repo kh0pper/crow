@@ -43,8 +43,13 @@
  * and no Tailscale identity header, carrying the per-boot cloud-door token
  * (and no other token), reaches it; Funnel is refused by name. It forwards
  * only to the row's own base URL, only while this box's consent still matches
- * that URL and key (re-read every request), through safeRequest. No --no-auth
- * bypass exists: the router never reads that flag.
+ * that URL and key (re-read every request), over https, through safeRequest.
+ * No --no-auth bypass exists: the router never reads that flag. A same-box
+ * forwarder that adds no forwarding or tailscale-* header (`tailscale serve
+ * --tcp` onto this port, a host-network container) looks exactly like a bot:
+ * there the token is the only gate. Provider server tools (web_search and the
+ * like) pass, since they run on the user's own key; OpenRouter's
+ * models/route/provider and anthropic's mcp_servers are stripped.
  */
 
 import express from "express";
@@ -796,7 +801,7 @@ export default function llmRouterRouter(opts = {}) {
     });
   });
   // Nothing else under /llm/c is served, and nothing falls through to later routes.
-  router.all("/llm/c/*", (req, res) => res.status(404).json({ error: { code: "NOT_FOUND", message: "the cloud door serves POST /llm/c/<provider>/v1/<op> only" } }));
+  router.all(["/llm/c", "/llm/c/*"], (req, res) => res.status(404).json({ error: { code: "NOT_FOUND", message: "the cloud door serves POST /llm/c/<provider>/v1/<op> only" } }));
   router.get("/llm/p/:provider/v1/models", (req, res) => {
     const p = ((deps.loadProvidersFn() || {}).providers || {})[req.params.provider];
     const listed = p ? listDoorModels({ [req.params.provider]: p }) : [];

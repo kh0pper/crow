@@ -181,7 +181,10 @@ export function isTrustedProxy(a, env = process.env) {
 }
 
 // ---- the classifier ---------------------------------------------------------
-const FORWARDING = ["x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host"];
+// Any of these on a loopback socket means a forwarder is in the path, so the
+// request is not "local". x-forwarded-proto joined in roles phase 2 (the cloud
+// door's list was the stricter one; one list now serves both).
+const FORWARDING = ["x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host", "x-forwarded-proto"];
 const MEMO = Symbol.for("crow.peer-class");
 
 const present = (v) => v != null && String(v).trim() !== "";
@@ -210,6 +213,17 @@ function loginOf(headers) {
   return s || null;
 }
 
+const hasForwarding = (headers) => FORWARDING.some((h) => present(headers[h]));
+const hasTailscale = (headers) => Object.keys(headers).some((h) => h.toLowerCase().startsWith("tailscale-"));
+
+/** The "local" rule of classifyPeer, for a caller that has only the socket
+ * address and the headers: a loopback socket, no forwarding header and no
+ * tailscale-* header. The cloud door's source check. */
+export function isLocalPeer(remoteAddr, headers = {}) {
+  const h = headers || {};
+  return isLoopbackAddr(normalizeAddr(remoteAddr || "")) && !hasForwarding(h) && !hasTailscale(h);
+}
+
 /** → { via, client, hops, socket, tailnetLogin, peerUid }. See the table above. */
 export function classifyPeer(req) {
   if (req && req[MEMO]) return req[MEMO];
@@ -218,8 +232,8 @@ export function classifyPeer(req) {
   const sock = normalizeAddr(socket?.remoteAddress || "");
   const hops = forwardedAddrs(headers).map((a) => (a === null ? null : normalizeAddr(a)));
   const out = { via: "unverified", client: sock, hops, socket: sock, tailnetLogin: null, peerUid: null };
-  const hasFwd = FORWARDING.some((h) => present(headers[h]));
-  const hasTs = Object.keys(headers).some((h) => h.toLowerCase().startsWith("tailscale-"));
+  const hasFwd = hasForwarding(headers);
+  const hasTs = hasTailscale(headers);
 
   if (!sock) {
     // no peer address: stays unverified
