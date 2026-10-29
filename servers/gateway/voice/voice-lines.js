@@ -63,6 +63,14 @@ export const VOICE_LINES = Object.freeze({
     handoff_queued: "Okay, it's on {bot}'s board. {bot} can't start it right now, so it will wait there.",
     handoff_failed: "Sorry, I couldn't hand that to {bot}, so nothing was started.",
     handoff_already: "That one is already with {bot}.",
+    // A kiosk (a shared display) never takes a spoken yes (PR 4): the proposal is pushed to the operator's phone.
+    // "sent" only once the push really went out [rv1 C5]; one open phone confirmation per kiosk [rv2 m4].
+    handoff_sent_to_phone: "I've sent that to your phone to confirm.",
+    handoff_phone_off: "I couldn't send that to your phone, because Crow's alerts are turned off there. Ask me from your phone instead.",
+    handoff_already_sent: "I've already sent one to your phone. Confirm or decline that first.",
+    // The push's title; {display} is the kiosk's name, or handoff_display_fallback when it has none.
+    handoff_phone_title: "Crow on {display}: hand a task to {bot}?",
+    handoff_display_fallback: "the kiosk",
     // A stop that landed while the yes was still starting the bot (the status lines proper are PR 5).
     status_stopped: "{bot}'s task was stopped. What it made so far is kept.",
   }),
@@ -113,6 +121,11 @@ export const VOICE_LINES = Object.freeze({
     handoff_queued: "Vale, está en el tablero de {bot}. {bot} no puede empezar ahora, así que esperará ahí.",
     handoff_failed: "Lo siento, no pude pasárselo a {bot}, así que no se ha empezado nada.",
     handoff_already: "Eso ya lo tiene {bot}.",
+    handoff_sent_to_phone: "Te lo he enviado al teléfono para que lo confirmes.",
+    handoff_phone_off: "No pude enviártelo al teléfono porque las alertas de Crow están desactivadas. Pídemelo desde el teléfono.",
+    handoff_already_sent: "Ya te envié una al teléfono. Confírmala o recházala primero.",
+    handoff_phone_title: "Crow en {display}: ¿pasarle una tarea a {bot}?",
+    handoff_display_fallback: "el quiosco",
     status_stopped: "La tarea de {bot} se paró. Lo que hizo hasta ahora se queda.",
   }),
 });

@@ -437,12 +437,13 @@ export function createKioskRuntime(deps) {
   const voicedNow = (db, device) => loadVoiceBot(db).then((vb) => voiced(device, vb));
   // The display tools as the panel counts them (no display, no windows): the bind-time fit and the ability line.
   const panelTools = () => createDisplayTools(displayCtx({ id: "", kiosk_settings: {} }, effectiveCaps(null, null), () => {}));
-  // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
+  // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix),
+  // plus Crow's hand-off tool, which a kiosk turn is offered too (its proposal is confirmed on the phone).
   const botFit = createBotFit({
     now, log,
     assess: async (db, botId, memoryOn) => (deps.voice.assessBot ? deps.voice.assessBot({
       db, botId, memoryOn, denyTools: KIOSK_DENY_TOOLS, promptSuffix: displayPromptSuffix(null, ["crow_show", "crow_wm"]),
-      extraTools: panelTools(),
+      extraTools: panelTools(), handoffs: true, surface: "kiosk",
     }) : null),
   });
 

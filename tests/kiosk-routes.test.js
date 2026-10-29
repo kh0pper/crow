@@ -684,6 +684,8 @@ test("fit: the listing gives every assistant its fit (with and without memories)
     assert.deepEqual(q.denyTools, KIOSK_DENY_TOOLS);
     assert.equal(q.promptSuffix, displayPromptSuffix(null));
     assert.deepEqual(q.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"]);
+    assert.equal(q.handoffs, true, "the kiosk fit counts Crow's hand-off tool");
+    assert.equal(q.surface, "kiosk");
     const n = f.asked.length;
     await (await fetch(f.b + "/api/kiosk/admin/displays")).json();
     assert.equal(f.asked.length, n, "the 5 s panel poll does not re-read every skill file: fits are cached");
