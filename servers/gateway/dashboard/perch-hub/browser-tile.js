@@ -448,7 +448,7 @@ export function perchBrowserTileJs(lang = "en") {
   var AT_CLOSE='${tJs("perch.appTileClose", lang)}';
   var AT_UNAVAILABLE='${tJs("perch.appTileUnavailable", lang)}';
   var AT_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
-  var AT_PATH=/^[A-Za-z0-9._~-]+(\\/[A-Za-z0-9._~-]+)*$/;
+  var AT_PATH=/^([A-Za-z0-9._~-]+\\/)*vnc(_lite)?[.]html$/;
   var atTiles={}, atGen=0;
 
   /* The launcher's link for a desktop app on this page, or null (an app the

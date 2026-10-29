@@ -60,7 +60,7 @@ export function perchTakeOverJs(lang = "en") {
      the app tile): the same state machine on that app's own routes. The
      browser, from its tile or the launcher's, stays on /browser/. */
   var TO_APP_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
-  var TO_APP_PATH=/^[A-Za-z0-9._~-]+(\\/[A-Za-z0-9._~-]+)*$/;
+  var TO_APP_PATH=/^([A-Za-z0-9._~-]+\\/)*vnc(_lite)?[.]html$/;
   function toAppOf(detail){
     var a=detail&&detail.app;
     if(!a||typeof a.id!=='string'||!TO_APP_ID.test(a.id)) return null;
@@ -90,6 +90,7 @@ export function perchTakeOverJs(lang = "en") {
     if(toSheet){ if(toSheet.back.focus) toSheet.back.focus(); return; }
     var anchor=detail&&typeof detail.anchor==='string'?detail.anchor:null;
     var app=toAppOf(detail);
+    if(detail&&detail.app&&!app) return;    /* an app the sheet cannot check never falls back to the browser */
     var tile=(!app&&typeof btFind==='function')?btFind(anchor):null;
     var s={ state:'opening', timer:null, pwTimer:null, secret:null, entryId:null, method:'password', closed:false, retry:null, app:app };
     var node=document.createElement('div'); node.className='ph-tosheet';

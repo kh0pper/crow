@@ -1802,7 +1802,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       }
       if (op === "state") return res.json({ state: ctl.state() });
       const r = await ctl[op]();
-      if (r.state === "no_browser" || r.state === "other_bot") return jsonError(res, 404, "not_desktop");
+      if (r.state === "no_browser") return jsonError(res, 404, "not_desktop");
+      if (r.state === "other_bot") return jsonError(res, 409, "other_bot");
       res.json({ state: r.state });
     } catch (err) {
       if (res.headersSent) return;

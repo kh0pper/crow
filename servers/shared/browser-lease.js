@@ -82,9 +82,12 @@ export function leaseDir(stateDirFn, appId = "browser") {
 
 /**
  * enforced.json: a bundle whose server enforces the lease says so at startup
- * ({ v: 1, bundleVersion, at }). Bots can write this directory too, so a
- * forged file can only make Take over appear for an app; the lease itself
- * stays advisory either way.
+ * ({ v: 1, bundleVersion, at }). Bots can write this directory too, so the
+ * marker is never trusted alone: a forged one could make the UI claim the
+ * operator holds an app the bot still drives. The gateway offers Take over
+ * only for apps on its own allowlist of known enforcers
+ * (servers/gateway/apps/app-tile.js LEASE_ENFORCERS), at or past their first
+ * enforcing version, AND with this marker for the installed version.
  */
 export const ENFORCED_NAME = "enforced.json";
 const ENFORCED_CAP = 512;

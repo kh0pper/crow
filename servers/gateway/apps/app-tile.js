@@ -20,14 +20,40 @@ import { defaultCrowHome } from "./launcher.js";
 
 export { APP_ID_RE };
 
-/** A desktop path a noVNC page may sit at: relative, plain segments, no "..". */
-const PATH_RE = /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/;
+/**
+ * A desktop path: relative, plain segments, no "..", and its last segment a
+ * noVNC page (vnc.html or vnc_lite.html), so a desktop app's tile can only
+ * ever frame a VNC viewer, never another page of the app.
+ */
+const PATH_RE = /^(?:[A-Za-z0-9._~-]+\/)*vnc(?:_lite)?\.html$/;
 
 function cleanPath(p) {
   const s = String(p == null ? "" : p).replace(/^\/+/, "");
   if (!s || s.length > 200 || !PATH_RE.test(s)) return null;
   if (s.split("/").some((seg) => seg === "." || seg === "..")) return null;
   return s;
+}
+
+/**
+ * The bundles whose own server is KNOWN (reviewed gateway code, not a file a
+ * bot can write) to enforce the lease, with the first bundle version whose
+ * lease guard did. enforced.json alone is not enough: its directory is
+ * bot-writable, so a forged marker could otherwise make the UI say the
+ * operator holds an app the bot still drives. Adding an app here is a code
+ * review decision.
+ */
+export const LEASE_ENFORCERS = Object.freeze({ browser: "1.3.9" });
+
+/** a >= b for dotted numeric versions ("1.3.11" >= "1.3.9"); anything else is false. */
+export function versionAtLeast(a, b) {
+  const re = /^[0-9]{1,6}(?:\.[0-9]{1,6}){0,3}$/;
+  if (typeof a !== "string" || typeof b !== "string" || !re.test(a) || !re.test(b)) return false;
+  const x = a.split(".").map(Number), y = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d > 0;
+  }
+  return true;
 }
 
 /** This instance's lease directory for an app (throws on a bad id). */
@@ -59,9 +85,17 @@ export function leaseEnforced(appId, { crowHome = defaultCrowHome() } = {}) {
   return !!m && typeof m.version === "string" && m.version === rec.bundleVersion;
 }
 
-/** Take over is offered: the manifest declares the lease and its server enforces it. */
+/**
+ * Take over is offered: the manifest declares the lease, the app is a known
+ * enforcer at or past its first enforcing version, and its server reported
+ * enforcing it for the installed version.
+ */
 export function takeOverOffered(app, { crowHome = defaultCrowHome() } = {}) {
-  return !!app && app.leaseDeclared === true && leaseEnforced(app.id, { crowHome });
+  if (!app || app.leaseDeclared !== true) return false;
+  if (!Object.prototype.hasOwnProperty.call(LEASE_ENFORCERS, app.id)) return false;
+  const m = getManifest(app.id, crowHome);
+  if (!m || !versionAtLeast(m.version, LEASE_ENFORCERS[app.id])) return false;
+  return leaseEnforced(app.id, { crowHome });
 }
 
 /** The noVNC page of a desktop app, without a query. */
