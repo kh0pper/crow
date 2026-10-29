@@ -35,6 +35,7 @@ export function satelliteRamMb(manifest) {
 
 /** GPU, model, desktop and browser bundles never run on a satellite. */
 function heavyReason(m) {
+  if (m?.privileged === true) return "needs privileged access";
   if (m?.host_grants?.gpu || m?.requires?.gpu) return "needs a GPU";
   if (m?.type === "model" || /model/i.test(String(m?.category || ""))) return "is a model bundle";
   if (/desktop/i.test(String(m?.category || ""))) return "is a desktop bundle";

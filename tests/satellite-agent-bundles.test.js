@@ -276,6 +276,49 @@ test("install: a failed compose up still records the bundle (Configure + Start c
   assert.equal(readJson(join(t.home, "installed.json"))[0].id, "demo");
 });
 
+test("install: one install job at a time across the agent (each would pass the gate alone)", async () => {
+  const world = fakeDocker();
+  let release;
+  const gate = new Promise((ok) => { release = ok; });
+  const inner = world.composeRunner;
+  world.composeRunner = async (args, o) => { if (args[0] === "pull") await gate; return inner(args, o); };
+  // 400 − 96 = 304: room for demo (120) or other (200), never both.
+  const t = await boot({ memMb: 400, world, setup: (h) => { appBundle(h, "demo"); appBundle(h, "other", { manifest: { satellite: { min_ram_mb: 200 } } }); } });
+  const first = await call(t, "POST", "bundles/install", { id: "demo" });
+  assert.equal(first.status, 202);
+  const second = await call(t, "POST", "bundles/install", { id: "other" });
+  assert.equal(second.status, 409);
+  assert.equal(second.json.error, "job_running");
+  release();
+  assert.equal((await waitJob(t, first.json.job_id)).status, "complete");
+  // Now demo's reservation is counted: other is refused by the gate, not raced past it.
+  const third = await call(t, "POST", "bundles/install", { id: "other" });
+  assert.equal(third.json.error, "insufficient_memory");
+});
+
+test("install: a failed install marks the keychain rows it saved as removed", async () => {
+  const world = fakeDocker({ service: goodService({ privileged: true }) });
+  const t = await boot({ world, setup: (h) => appBundle(h, "demo") });
+  assert.equal((await installDemo(t)).status, "failed");
+  assert.deepEqual(t.a.db.prepare("SELECT env_key, status FROM crow_keychain").all(), [{ env_key: "DEMO_KEY", status: "extension_removed" }]);
+});
+
+test("install: consent never unlocks a privileged-equivalent (consent verified, compose still refused)", async () => {
+  const world = fakeDocker({ service: goodService({ volumes: [{ type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true }] }) });
+  const t = await boot({ world, setup: (h) => appBundle(h, "demo", { manifest: { consent_required: true } }) });
+  const ch = await call(t, "POST", "bundles/install", { id: "demo" });
+  const c = await call(t, "POST", "bundles/demo/consent", { token: ch.json.challenge.token, accept: true });
+  const job = await installDemo(t, { consent_token: c.json.consent_token });
+  assert.equal(job.status, "failed");
+  assert.match(job.log.join("\n"), /socket/i);
+  // A manifest that declares privileged never gets as far as a job.
+  rmSync(join(t.home, "app", "bundles", "demo"), { recursive: true });
+  appBundle(t.home, "demo", { manifest: { privileged: true } });
+  const r = await call(t, "POST", "bundles/install", { id: "demo" });
+  assert.equal(r.status, 403);
+  assert.equal(r.json.error, "never_satellite");
+});
+
 test("install: one running job per bundle", async () => {
   const world = fakeDocker();
   let release;
@@ -379,7 +422,7 @@ test("logs: tail/since reach compose; redacted against env values and keychain e
   const last = world.calls.at(-1).args;
   assert.deepEqual(last.slice(0, 3), ["logs", "--no-color", "--tail"]);
   assert.equal(last[3], "50");
-  assert.deepEqual(last.slice(4), ["--since", "2026-10-29T00:00:00Z"]);
+  assert.deepEqual(last.slice(4), ["--since=2026-10-29T00:00:00Z"]);
   // Default tail 200, no since.
   await call(t, "GET", "bundles/demo/logs");
   assert.deepEqual(world.calls.at(-1).args, ["logs", "--no-color", "--tail", "200"]);
@@ -391,7 +434,7 @@ test("logs: tail/since reach compose; redacted against env values and keychain e
   assert.ok(Buffer.byteLength(big.json.log) <= LOG_CAP_BYTES);
   assert.match(big.json.log, /newest \[redacted\]/);
   assert.ok(!big.json.log.includes("old-line"));
-  for (const q of ["tail=0", "tail=abc", "tail=100000", "since=;rm"]) {
+  for (const q of ["tail=0", "tail=abc", "tail=100000", "since=;rm", "since=-1h", "since=--follow"]) {
     const bad = await call(t, "GET", `bundles/demo/logs?${q}`);
     assert.equal(bad.status, 400, q);
   }
@@ -460,7 +503,8 @@ test("start/stop/restart: compose up -d (re-checked) / stop / restart; uninstall
   assert.deepEqual(world.calls.map((c) => (c.args.includes("config") ? "config" : c.args.join(" "))), ["config", "up -d"]);
   world.calls.length = 0;
   assert.deepEqual((await call(t, "POST", "bundles/demo/restart")).json, { ok: true });
-  assert.deepEqual(world.calls.map((c) => c.args), [["restart"]]);
+  // Restart re-checks and recreates, so a changed .env applies.
+  assert.deepEqual(world.calls.map((c) => (c.args.includes("config") ? "config" : c.args.join(" "))), ["config", "up -d --force-recreate"]);
   // Start re-runs the satellite rules: a model that no longer passes is not started.
   world.service = goodService({ network_mode: "host" });
   world.calls.length = 0;

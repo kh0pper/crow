@@ -23,7 +23,7 @@
  * crow_keychain with the keychain core (key: $SAT_HOME/secrets/keychain.key). No skill sync,
  * no panels, no gateway env. docker / compose / proc / cgroup reads are injected (`deps`).
  */
-import { cpSync, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, constants as fsConstants, cpSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
@@ -31,7 +31,7 @@ import {
   appendLog, blankHardFailKeys, createJob, dockerRunner as coreDockerRunner, finishJob, installedPath, jobs, MISSING_VAR_RE,
   readInstalled, run, runCompose, TEARDOWN_DUMMY, validateComposeFile, writeInstalled, writeInstallEnv,
 } from "../gateway/bundle-core.js";
-import { checkComposeModel, composeEnv, loadComposeModel, looksLikeHostPath } from "../gateway/compose-guard.js";
+import { composeEnv, loadComposeModel, looksLikeHostPath } from "../gateway/compose-guard.js";
 import { envValueProblem, parseEnvText, pathEnvKeys, updateEnvText } from "../gateway/bundle-env-codec.js";
 import { planGeneratedEnv, writePrivateFile } from "../gateway/bundle-env-secrets.js";
 import { composeProjectName } from "../gateway/bundle-lifecycle.js";
@@ -41,7 +41,7 @@ import { launcherPin } from "../shared/resolve-command.js";
 import { redactSecrets } from "../shared/redact-secrets.js";
 import { repinAddon } from "../../scripts/ops/pin-addon-command.mjs";
 import { bundleCurrentUseMb, runGate } from "./gate.js";
-import { checkSatelliteComposeModel } from "./compose-rules.js";
+import { checkSatelliteCompose } from "./compose-rules.js";
 import { readTextOrNull } from "./status.js";
 
 export const LOG_CAP_BYTES = 262144;
@@ -51,7 +51,7 @@ export const CONSENT_TTL_MS = 10 * 60000;
 const BUNDLE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BACKUP_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
-const SINCE = /^[0-9A-Za-z:.+-]{1,40}$/;
+const SINCE = /^[0-9A-Za-z][0-9A-Za-z:.+-]{0,39}$/; // never a leading "-" (it would read as a flag)
 
 class Refusal extends Error {
   constructor(status, code, extra = {}) { super(code); Object.assign(this, { status, code, extra }); }
@@ -122,6 +122,7 @@ export function createBundleManager({
   };
   function newJob(bundleId, action) {
     const job = createJob(bundleId, action);
+    Object.defineProperty(job, "satHome", { value: satHome }); // the registry is process-wide
     // bundle-core counts ids per process; a satellite job id must survive restarts in satellite.db.
     jobs.delete(job.id);
     job.id = randomBytes(8).toString("hex");
@@ -132,6 +133,9 @@ export function createBundleManager({
   const log = (job, line) => { appendLog(job, line); persist(job); };
   const finish = (job, status) => { finishJob(job, status); persist(job); };
   const activeJob = (bundleId) => [...jobs.values()].find((j) => j.bundleId === bundleId && j.status === "running") || null;
+  // One install at a time across the agent: two concurrent installs would each pass the memory
+  // gate against the same MemAvailable before either reservation is recorded.
+  const activeInstall = () => [...jobs.values()].find((j) => j.action === "install" && j.status === "running" && j.satHome === satHome) || null;
 
   const installed = () => readInstalled(instPath);
   const record = (id) => installed().find((b) => b.id === id) || null;
@@ -155,15 +159,14 @@ export function createBundleManager({
   });
   const runConfig = (args, { cwd, env }) => compose(args, { cwd, env, timeout: 60_000 });
 
-  /** The shared model check, then the satellite rules. → {valid, reason?, model?} */
-  async function checkCompose(id, manifest, consentVerified) {
+  /** The satellite's one compose check (compose-guard strict + satellite rules; consent never
+   * widens it). → {valid, reason?, model?} */
+  async function checkCompose(id, manifest) {
     const dir = destOf(id);
     const loaded = await loadComposeModel(dir, { env: composeEnv(process.env, satHome), runConfig });
     if (loaded.error) return { valid: false, reason: loaded.error };
-    const shared = checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified, ctx: ctxFor(id) });
-    if (!shared.valid) return shared;
-    const sat = checkSatelliteComposeModel(loaded.model);
-    return sat.valid ? { valid: true, model: loaded.model } : sat;
+    const c = checkSatelliteCompose(loaded.model, { bundleDir: dir, manifest, ctx: ctxFor(id) });
+    return c.valid ? { valid: true, model: loaded.model } : c;
   }
 
   async function teardown(args, cwd) {
@@ -222,7 +225,7 @@ export function createBundleManager({
     const manifest = readManifest(join(appBundlesDir, id));
     if (!manifest || manifest.id !== id) throw new Refusal(404, "unknown_bundle");
     if (record(id)) throw new Refusal(409, "already_installed");
-    if (activeJob(id)) throw new Refusal(409, "job_running");
+    if (activeJob(id) || activeInstall()) throw new Refusal(409, "job_running");
     const env = validateEnv(manifest, body.env);
     const gate = await runGate({ manifest, installed: installed(), manifestFor: manifestOf, readText, currentUseMb });
     if (!gate.ok) throw new Refusal(gate.status || 409, gate.code, { reason: gate.reason, ...(gate.shortfall_mb !== undefined ? { need_mb: gate.need_mb, free_mb: gate.free_mb, shortfall_mb: gate.shortfall_mb } : {}) });
@@ -236,7 +239,7 @@ export function createBundleManager({
       consentTokens.delete(t);
       consentVerified = true;
     }
-    if (activeJob(id)) throw new Refusal(409, "job_running"); // the gate awaited: re-check
+    if (activeJob(id) || activeInstall()) throw new Refusal(409, "job_running"); // the gate awaited: re-check
     const job = newJob(id, "install");
     runInstall(job, { id, manifest, env, consentVerified }).catch((err) => {
       log(job, `Install failed: ${String(err?.message || err).slice(0, 300)}`);
@@ -249,9 +252,14 @@ export function createBundleManager({
     const src = join(appBundlesDir, id);
     const dest = destOf(id);
     let recorded = false;
-    const fail = (reason) => {
+    let keychainWritten = false;
+    const fail = async (reason) => {
       log(job, reason);
-      if (!recorded) rmSync(dest, { recursive: true, force: true });
+      if (!recorded) {
+        rmSync(dest, { recursive: true, force: true });
+        // Nothing was installed: the secrets saved for it are not live either.
+        if (keychainWritten) { try { await markBundleRemoved(kdb, id); } catch { /* stays active */ } }
+      }
       finish(job, "failed");
     };
     try {
@@ -274,7 +282,8 @@ export function createBundleManager({
       const composePath = join(dest, "docker-compose.yml");
       const hasCompose = existsSync(composePath);
       if (hasCompose) {
-        const t = validateComposeFile(composePath, id, { manifest, consentVerified });
+        // Strict: no consent unlock on a satellite (the model check below is strict too).
+        const t = validateComposeFile(composePath, id, { manifest: { ...manifest, privileged: false, consent_required: false }, consentVerified: false });
         if (!t.valid) return fail(`Security check failed: ${t.reason}`);
       }
 
@@ -288,6 +297,7 @@ export function createBundleManager({
       }
       if (Object.keys(plain).length) {
         const key = await ensureWriteKey(kdb, { crowHome: satHome });
+        keychainWritten = true;
         for (const [k, secret] of Object.entries(plain)) {
           await saveExtensionSecret(kdb, key, { bundleId: id, envKey: k, label: `${manifest.name || id} ${k}`, secret, origin: "generated", now: new Date(now()) });
         }
@@ -300,7 +310,7 @@ export function createBundleManager({
       let project = null;
       let upFailure = null;
       if (hasCompose) {
-        const c = await checkCompose(id, manifest, consentVerified);
+        const c = await checkCompose(id, manifest);
         if (!c.valid) return fail(`Security check failed: ${c.reason}`);
         project = c.model.name;
         log(job, "Security check passed");
@@ -339,7 +349,7 @@ export function createBundleManager({
       if (upFailure) return fail("Installed, but the containers did not start: fix the settings and Start it");
       finish(job, "complete");
     } catch (err) {
-      fail(`Install failed: ${String(err?.message || err).slice(0, 300)}`);
+      await fail(`Install failed: ${String(err?.message || err).slice(0, 300)}`);
     }
   }
 
@@ -381,19 +391,19 @@ export function createBundleManager({
 
   // ── start / stop / restart ─────────────────────────────────────────────────
   async function lifecycle(id, action) {
-    const rec = installedId(id);
+    installedId(id);
     if (activeJob(id)) throw new Refusal(409, "job_running");
     const dest = destOf(id);
     if (!existsSync(join(dest, "docker-compose.yml"))) throw new Refusal(409, "no_containers");
     try {
-      if (action === "start") {
-        const c = await checkCompose(id, manifestOf(id), rec.consent?.verified === true);
-        if (!c.valid) throw new Refusal(422, "compose_refused", { reason: c.reason });
-        await compose(["up", "-d"], { cwd: dest, timeout: 600_000 });
-      } else if (action === "stop") {
+      if (action === "stop") {
         await teardown(["stop"], dest);
       } else {
-        await compose(["restart"], { cwd: dest, timeout: 300_000 });
+        // Start and restart both re-run the check; restart recreates the containers so a
+        // changed .env (PUT env) really applies (`compose restart` keeps the old env).
+        const c = await checkCompose(id, manifestOf(id));
+        if (!c.valid) throw new Refusal(422, "compose_refused", { reason: c.reason });
+        await compose(action === "start" ? ["up", "-d"] : ["up", "-d", "--force-recreate"], { cwd: dest, timeout: 600_000 });
       }
     } catch (err) {
       if (err instanceof Refusal) throw err;
@@ -448,7 +458,7 @@ export function createBundleManager({
       tail = +query.tail;
     }
     if (query.since !== undefined && (typeof query.since !== "string" || !SINCE.test(query.since))) throw new Refusal(400, "bad_since");
-    const args = ["logs", "--no-color", "--tail", String(tail), ...(query.since ? ["--since", query.since] : [])];
+    const args = ["logs", "--no-color", "--tail", String(tail), ...(query.since ? [`--since=${query.since}`] : [])];
     let text;
     try {
       const r = await compose(args, { cwd: destOf(id), timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
@@ -470,11 +480,19 @@ export function createBundleManager({
 
   // ── backups ────────────────────────────────────────────────────────────────
   const backupsDir = (id) => join(satHome, "backups", id);
-  const sha256File = (p) => new Promise((ok, fail) => {
+  // Opened with O_NOFOLLOW and checked with fstat on that same fd: a symlink (or a file swapped
+  // for one after a listing) is never followed, and what is hashed or sent is what was checked.
+  const openRegular = (p) => {
+    let fd;
+    try { fd = openSync(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK || 0)); } catch { return null; }
+    const st = fstatSync(fd);
+    if (!st.isFile()) { closeSync(fd); return null; }
+    return { fd, st };
+  };
+  const sha256Fd = (fd) => new Promise((ok, fail) => {
     const h = createHash("sha256");
-    createReadStream(p).on("error", fail).on("data", (d) => h.update(d)).on("end", () => ok(h.digest("hex")));
+    createReadStream(null, { fd, autoClose: true }).on("error", fail).on("data", (d) => h.update(d)).on("end", () => ok(h.digest("hex")));
   });
-  const regularFile = (p) => { try { const s = lstatSync(p); return s.isFile() ? s : null; } catch { return null; } };
   async function backupList(id) {
     if (typeof id !== "string" || !BUNDLE_ID.test(id)) throw new Refusal(400, "bad_bundle_id");
     let names = [];
@@ -482,10 +500,9 @@ export function createBundleManager({
     const out = [];
     for (const name of names) {
       if (!BACKUP_NAME.test(name)) continue;
-      const p = join(backupsDir(id), name);
-      const st = regularFile(p);
-      if (!st) continue;
-      out.push({ name, size: st.size, sha256: await sha256File(p), created_at: st.mtime.toISOString() });
+      const f = openRegular(join(backupsDir(id), name));
+      if (!f) continue;
+      out.push({ name, size: f.st.size, sha256: await sha256Fd(f.fd), created_at: f.st.mtime.toISOString() });
     }
     out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.name.localeCompare(b.name)));
     return { backups: out };
@@ -493,10 +510,9 @@ export function createBundleManager({
   function backupFile(id, name) {
     if (typeof id !== "string" || !BUNDLE_ID.test(id)) throw new Refusal(400, "bad_bundle_id");
     if (typeof name !== "string" || !BACKUP_NAME.test(name)) throw new Refusal(400, "bad_name");
-    const p = join(backupsDir(id), name);
-    const st = regularFile(p);
-    if (!st) throw new Refusal(404, "not_found");
-    return { path: p, size: st.size };
+    const f = openRegular(join(backupsDir(id), name));
+    if (!f) throw new Refusal(404, "not_found");
+    return { fd: f.fd, size: f.st.size };
   }
 
   function repin(body = {}) {
@@ -556,7 +572,7 @@ export function registerBundleRoutes(router, { db, satHome, now, sendSigned, ...
   router.get("/bundles/:id/backups/:name", h((req, res) => {
     const f = m.backupFile(req.params.id, req.params.name);
     res.status(200).set({ "Content-Type": "application/octet-stream", "Content-Length": String(f.size), "Cache-Control": "no-store" });
-    createReadStream(f.path).on("error", () => res.destroy()).pipe(res);
+    createReadStream(null, { fd: f.fd, autoClose: true }).on("error", () => res.destroy()).pipe(res);
     return undefined;
   }));
   router.post("/bundles/:id/bot-access", h((req) => m.botAccess(req.params.id)));
