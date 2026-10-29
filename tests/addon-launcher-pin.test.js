@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { mcpAddonEntryFor } from "../servers/gateway/routes/bundles.js";
 import { resolveAddonCommand, checkLauncherArgs, addonLauncherStatus } from "../servers/shared/resolve-command.js";
 import { repinAddon } from "../scripts/ops/pin-addon-command.mjs";
+import { trustedBinsMissing } from "../servers/shared/trusted-bins.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const sha = (s) => createHash("sha256").update(s).digest("hex");
@@ -88,13 +89,20 @@ test("pin-addon-command --check: read-only, one line per add-on, honours CROW_HO
   assert.match(out, new RegExp(home.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")));
 });
 
+// The requires-bins gate (servers/shared/trusted-bins.js) refuses an install
+// whose bare bin is not trusted-resolvable on this host. Only these bundles
+// may be skipped for that reason; anything else must resolve.
+const BINS_GATE_ALLOWED = new Set(["arxiv", "zotero"]);
+
 test("every bundle manifest in this repo resolves on a fresh-install layout", () => {
   const checked = [];
+  const gated = [];
   for (const id of readdirSync(join(REPO, "bundles"))) {
     const mf = join(REPO, "bundles", id, "manifest.json");
     if (!existsSync(mf)) continue;
     let m; try { m = JSON.parse(readFileSync(mf, "utf8")); } catch { continue; }
     if (!m.server || m.server.url || typeof m.server.command !== "string") continue;
+    if (trustedBinsMissing(m).length > 0) { gated.push(id); continue; }   // the install is refused here
     const home = mkdtempSync(join(tmpdir(), "fresh-"));
     const bdir = join(home, "bundles", id);
     cpSync(join(REPO, "bundles", id), bdir, { recursive: true, filter: (src) => !src.includes("node_modules") });
@@ -105,6 +113,7 @@ test("every bundle manifest in this repo resolves on a fresh-install layout", ()
     checked.push(id);
   }
   assert.ok(checked.includes("rookery") && checked.includes("home-assistant") && checked.length > 40, checked.join(","));
+  for (const id of gated) assert.ok(BINS_GATE_ALLOWED.has(id), `${id} is skipped by the requires-bins gate but is not on the allowed list`);
 });
 
 test("one-click re-pin route handler: owner session only (a signed peer request is refused); pins and reports", async () => {

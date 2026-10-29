@@ -685,6 +685,7 @@ export const translations = {
   "extensions.incompatibleGpuArch": { en: "Incompatible GPU arch.", es: "Arquitectura GPU incompatible." },
   "extensions.insufficientVram": { en: "insufficient VRAM", es: "VRAM insuficiente" },
   "extensions.incompatibleHost": { en: "incompatible host", es: "host incompatible" },
+  "extensions.binsNotTrusted": { en: "Needs {bins} installed system-wide (not in your home folder) before Crow can run it.", es: "Necesita {bins} instalado para todo el sistema (no en su carpeta personal) antes de que Crow pueda ejecutarlo." },
   "extensions.webUiFallback": { en: "Web UI", es: "Interfaz web" },
 
   // ─── Extensions Panel — store IA (browse/installed views, collections, groups) ───
