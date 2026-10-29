@@ -52,6 +52,7 @@ import { execFileSync } from "node:child_process";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel, getPanelRoutes } from "./panel-registry.js";
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
+import { healthAttentionRouter } from "./panels/health.js";
 import { csrfMiddleware } from "./shared/csrf.js";
 import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
 import federationRouterFactory from "../routes/federation.js";
@@ -760,6 +761,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // The shell's POST /dashboard/mode and /dashboard/scope (redesign P2): after
   // dashboardAuth and csrfMiddleware, like every state-changing dashboard route.
   router.use(shellRouter({ createDbClient }));
+
+  // Health attention: the "This is expected" ack and the alert landing route.
+  router.use(healthAttentionRouter({ createDbClient }));
 
   // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
   router.post("/dashboard/nest/backup", async (req, res) => {
