@@ -275,7 +275,7 @@ test("the delete route answers 409 {error:'service_row'} for a service row, audi
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { req.dashboardSession = "S1"; next(); });
-  app.use(keychainApiRouter({ openDb: () => createDbClient(path), crowHome, gate, notify: async () => {}, vault: { status: () => null, save: async () => ({ ok: false }) } }));
+  app.use(keychainApiRouter({ openDb: () => createDbClient(path), crowHome, gate, notify: async () => {}, vault: { status: () => null, save: async () => ({ ok: false }) }, isOwner: async () => true }));
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${server.address().port}/dashboard/keychain/api`;

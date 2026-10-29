@@ -163,6 +163,17 @@ Todas las solicitudes que cambian estado (POST, PUT, DELETE) requieren un token 
 
 Después de 5 intentos fallidos de inicio de sesión en 15 minutos, la cuenta se bloquea por 30 minutos. Esto previene ataques de fuerza bruta contra la contraseña del Crow's Nest.
 
+### Peticiones desde esta máquina
+
+Una petición que viene de la máquina donde corre Crow nunca es el turno del dueño, lleve lo que lleve. Un contenedor de navegador con red del host, un script o un bot con shell pueden poner cualquier encabezado o cookie, y por Tailscale Serve incluso llevan tu inicio de sesión de la tailnet; solo su dirección los delata. Por eso `isLocalPasswordSessionOn` (`servers/gateway/dashboard/local-session.js`) rechaza una petición cuyo cliente (`servers/shared/self-origin.js`) es una de las direcciones propias de la máquina (incluidas la de la tailnet y las de los bridges de contenedores), está dentro de la subred de un bridge de contenedores o máquinas virtuales, llega por un proxy de esta misma máquina o no se puede determinar. Un inicio de sesión hecho desde la máquina se guarda como `dashboard onhost`, así que su cookie tampoco es nunca la del dueño, se use donde se use después.
+
+Esa sesión sigue entrando y navegando el Crow's Nest. Lo que no puede hacer es nada que actúe como tú: usar servicios conectados, aprobar llamadas del teléfono, cambiar horarios o la autenticación de dos factores, revelar contraseñas guardadas, ni iniciar los turnos del dueño en Perch y en el tablero. En la práctica:
+
+- **La consola de la propia máquina** (un monitor y un teclado en la caja de Crow) no es tu propio turno. Usa tu portátil o tu teléfono, por Tailscale Serve o por la LAN.
+- **Un proxy inverso en la misma máquina** renuncia al turno del dueño para todo lo que pasa por él (consulta [Dominio propio](../getting-started/custom-domain.md)).
+- **Una subred de bridge de contenedores que se solapa con tu LAN** (los rangos 192.168.x de Docker en una red doméstica 192.168.x) hace que los clientes de la LAN en el solapamiento cuenten como esta máquina, salvo que el prefijo de la interfaz de la LAN sea más específico. El gateway registra una vez al arrancar `[net] WARN a container or VM bridge subnet overlaps this machine's LAN subnet` cuando esto ocurre.
+- **En qué se apoya:** un bot que pasa por otra máquina e inicia sesión desde allí obtiene una sesión normal. Lo protege que la contraseña del panel siga en secreto, así que no la guardes en un perfil de navegador que los bots puedan manejar.
+
 ## Sistema de layout
 
 La función de layout (`shared/layout.js`) envuelve el contenido del panel en una estructura de página consistente. Recibe un único objeto de opciones:

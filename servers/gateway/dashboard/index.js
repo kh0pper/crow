@@ -43,7 +43,7 @@ import { getPeerCreds } from "../../shared/peer-credentials.js";
 import { peerTrust, rowIsTrusted } from "../../shared/peer-trust.js";
 import { signTicket, verifyTicket, isSafeDestPath } from "../../shared/sso-ticket.js";
 import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
-import { isSelfOrigin } from "../../shared/self-origin.js";
+import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { resolve } from "node:path";
@@ -117,6 +117,8 @@ function retryPendingCtx(ssoCtx, onHost) {
  */
 export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: renderPage = renderLayout } = {}) {
   const router = Router();
+  // Once at start: a bridge subnet over the LAN makes some LAN clients "this machine" (self-origin.js).
+  warnBridgeOverlap();
 
   // URL-encoded body parsing for form submissions
   router.use("/dashboard", express.urlencoded({ extended: false }));

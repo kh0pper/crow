@@ -179,6 +179,17 @@ All state-changing requests (POST, PUT, DELETE) require a CSRF token. The token 
 
 After 5 failed login attempts within 15 minutes, the account is locked for 30 minutes. This prevents brute-force attacks on the Crow's Nest password.
 
+### Requests from this machine
+
+A request that comes from the machine Crow runs on is never the owner's own turn, whatever it carries. A browser container on host networking, a script, or a bot with a shell can set any header or cookie, and through Tailscale Serve it even carries your tailnet login; only its address gives it away. So `isLocalPasswordSessionOn` (`servers/gateway/dashboard/local-session.js`) refuses a request whose client (`servers/shared/self-origin.js`) is any of the machine's own addresses (tailnet and container bridges included), is inside a container or VM bridge subnet, comes through a proxy on this machine, or can't be determined. A login made from the machine is stored as `dashboard onhost`, so its cookie is never the owner's either, wherever it is used later.
+
+Such a session still signs in and browses the Crow's Nest. What it can't do is anything that acts as you: use connected services, approve phone calls, change schedules or two-factor settings, reveal saved passwords, or start the owner's Perch and board turns. In practice:
+
+- **The machine's own console** (a monitor and keyboard on the Crow box) is not your own turn. Use your laptop or phone, through Tailscale Serve or the LAN.
+- **A reverse proxy on the same machine** gives up the owner's turn for everything that goes through it (see [Custom domain](../getting-started/custom-domain.md#behind-your-own-reverse-proxy)).
+- **A container bridge subnet that overlaps your LAN** (Docker's 192.168.x pools on a 192.168.x home network) makes LAN clients in the overlap count as this machine unless the LAN interface's prefix is more specific. The gateway logs `[net] WARN a container or VM bridge subnet overlaps this machine's LAN subnet` once at start when this applies.
+- **What it rests on:** a bot that relays through another machine and logs in from there gets a normal session. That is guarded by the dashboard password staying secret, so don't save it in a browser profile that bots can drive.
+
 ## Layout System
 
 The layout function (`shared/layout.js`) wraps panel content in a consistent page structure. It takes a single options object:

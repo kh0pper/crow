@@ -89,6 +89,16 @@ test("undeterminable is on the box: no address, garbage, an unreadable or empty 
   assert.equal(isSelfAddress("10.0.0.42"), true, "a bridge with no prefix could cover anything");
 });
 
+test("a declared reverse proxy ON this box vouches for nobody: loopback, a bridge address, the box's own address", () => {
+  const prev = process.env.CROW_TRUSTED_PROXIES;
+  const withProxies = (v, fn) => { process.env.CROW_TRUSTED_PROXIES = v; try { fn(); } finally { if (prev === undefined) delete process.env.CROW_TRUSTED_PROXIES; else process.env.CROW_TRUSTED_PROXIES = prev; } };
+  const lap = { "x-forwarded-for": "10.0.0.42" };
+  withProxies("loopback", () => assert.equal(isSelfOrigin(direct("127.0.0.1", { headers: lap })), true, "same-box Caddy/nginx (the documented setup)"));
+  withProxies("172.18.0.0/16", () => assert.equal(isSelfOrigin(direct("172.18.0.1", { headers: lap })), true, "a containerised proxy declared by its bridge"));
+  withProxies("10.0.0.5", () => assert.equal(isSelfOrigin(direct("10.0.0.5", { headers: lap })), true, "the box's own LAN address"));
+  withProxies("loopback", () => assert.equal(effectiveClient(direct("127.0.0.1", { headers: lap })), null));
+});
+
 test("a declared reverse proxy: its forwarded client decides (on the box, or not)", () => {
   const prev = process.env.CROW_TRUSTED_PROXIES;
   process.env.CROW_TRUSTED_PROXIES = "10.0.0.9";
@@ -227,8 +237,10 @@ test("the real login route: a login from the box is 'dashboard onhost', still si
 
     // A login straight to loopback (no Serve client) is on the box too.
     const r3 = await login({}, { password: PW });
+    assert.equal(r3.status, 303, "a loopback login still signs in");
     const loopTok = sessionOf(r3);
-    if (loopTok) assert.equal(await scopesOf(loopTok), "dashboard onhost");
+    assert.ok(loopTok, "a session cookie");
+    assert.equal(await scopesOf(loopTok), "dashboard onhost");
   });
   await db.execute("DELETE FROM dashboard_settings WHERE key = 'password_hash'");
 });
@@ -242,4 +254,161 @@ test("phone call approvals: an onhost session is refused, the owner's session fr
   assert.equal(await isLocalDashboardSession(db, direct("172.17.0.3", { dashboardSession: "s-owner" })), false, "a container");
   assert.equal(await isLocalDashboardSession(db, direct("203.0.113.7", { dashboardSession: "s-sso" })), false);
   assert.equal(await isLocalDashboardSession(db, "s-owner"), false, "a bare session string (no request) is refused");
+});
+
+// ---- I2: docker's address pools next to a common home LAN -------------------------------------
+test("a LAN on eno1 next to an overlapping docker pool: the more specific LAN wins; a tie and the bridge-only part stay on the box", () => {
+  const T = {
+    lo: TABLE.lo,
+    eno1: [{ address: "192.168.1.5", netmask: "255.255.255.0", family: "IPv4", cidr: "192.168.1.5/24" }],
+    "br-5e6f7a8b": [{ address: "192.168.0.1", netmask: "255.255.240.0", family: "IPv4", cidr: "192.168.0.1/20" }],
+  };
+  assert.equal(isSelfAddress("192.168.1.20", { interfaces: T }), false, "a LAN laptop: eno1's /24 beats the bridge's /20");
+  assert.equal(isSelfAddress("192.168.2.7", { interfaces: T }), true, "inside the bridge only: a container");
+  assert.equal(isSelfAddress("192.168.0.1", { interfaces: T }), true, "the bridge's own address");
+  assert.equal(isSelfAddress("192.168.1.5", { interfaces: T }), true, "eno1's own address");
+  const tie = { lo: TABLE.lo, eno1: [{ address: "192.168.16.5", cidr: "192.168.16.5/20" }], "br-x": [{ address: "192.168.16.1", cidr: "192.168.16.1/20" }] };
+  assert.equal(isSelfAddress("192.168.16.9", { interfaces: tie }), true, "an equal prefix is a routing tie: on the box");
+  const noLanPrefix = { lo: TABLE.lo, eno1: [{ address: "192.168.1.5" }], "br-x": [{ address: "192.168.0.1", cidr: "192.168.0.1/20" }] };
+  assert.equal(isSelfAddress("192.168.1.20", { interfaces: noLanPrefix }), true, "a LAN interface with no readable prefix can't claim it");
+});
+
+test("the startup line: one fixed warning when a bridge subnet overlaps a LAN subnet, none otherwise", async () => {
+  const { warnBridgeOverlap, BRIDGE_OVERLAP_WARNING } = await import("../servers/shared/self-origin.js");
+  const lines = [];
+  const log = (l) => lines.push(l);
+  const T = { lo: TABLE.lo, eno1: [{ address: "192.168.1.5", cidr: "192.168.1.5/24" }], "br-x": [{ address: "192.168.0.1", cidr: "192.168.0.1/20" }] };
+  assert.equal(warnBridgeOverlap({ interfaces: T, log }), true);
+  assert.deepEqual(lines, [BRIDGE_OVERLAP_WARNING]);
+  assert.doesNotMatch(BRIDGE_OVERLAP_WARNING, /\d+\.\d+\.\d+\.\d+/, "fixed text, no addresses");
+  assert.equal(warnBridgeOverlap({ interfaces: TABLE, log }), false, "docker0 and br-* clear of the LAN");
+  assert.equal(lines.length, 1);
+  assert.equal(warnBridgeOverlap({ interfaces: null, log }), false, "the live table (injected TABLE) has no overlap");
+});
+
+// ---- the 2FA login routes carry the on-host flag ---------------------------------------------
+test("the real 2FA routes: a password step from the box mints 'dashboard onhost' even when the code comes from the laptop, a wrong code keeps the flag, the laptop alone mints 'dashboard'", async () => {
+  const OTPAuth = await import("otpauth");
+  const totpMod = await import("../servers/gateway/dashboard/totp.js");
+  const { setPassword } = await import("../servers/gateway/dashboard/auth.js");
+  const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
+  const { secret } = totpMod.generateTotpSecret();
+  await totpMod.saveTotpSetup(secret, totpMod.generateRecoveryCodes());
+  await totpMod.enable2fa();
+  const PW = "correct horse battery staple";
+  await setPassword(PW);
+  const code = () => new OTPAuth.TOTP({ issuer: "Crow", label: "Crow's Nest", algorithm: "SHA1", digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(secret) }).generate();
+  const app = express();
+  app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
+  app.use(dashboardRouter((req, res, next) => next()));
+  const form = (o) => new URLSearchParams(o).toString();
+  const cookieOf = (r, name) => [].concat(r.headers["set-cookie"] || []).map((c) => new RegExp(`^${name}=([^;]+)`).exec(c)).find(Boolean)?.[1] || null;
+  const scopesOf = async (tok) => (await db.execute({ sql: "SELECT scopes FROM oauth_tokens WHERE token = ?", args: [hash(tok)] })).rows[0]?.scopes;
+  const fromBox = serveHeaders("owner@example.invalid", "100.64.20.1");
+  const fromLap = serveHeaders("owner@example.invalid", "100.64.20.9");
+  try {
+    await withServer(app, async (port) => {
+      const post = (path, headers, body, cookie = null) => request(port, { method: "POST", path, headers: { ...headers, "content-type": "application/x-www-form-urlencoded", ...(cookie ? { cookie } : {}) }, body: form(body) });
+      const pending = async (headers) => {
+        const r = await post("/dashboard/login", headers, { password: PW });
+        const p = cookieOf(r, "crow_pending_2fa");
+        assert.ok(p, "2FA asked for");
+        return p;
+      };
+      // Password on the box, code from the laptop.
+      let p = await pending(fromBox);
+      let r = await post("/dashboard/login/2fa", fromLap, { totp_code: code() }, `crow_pending_2fa=${p}`);
+      assert.equal(r.status, 303);
+      assert.equal(await scopesOf(cookieOf(r, "crow_session")), "dashboard onhost");
+      // Password on the box, a wrong code (the retry token keeps the flag), then the right code from the laptop.
+      p = await pending(fromBox);
+      r = await post("/dashboard/login/2fa", fromLap, { totp_code: "000000" }, `crow_pending_2fa=${p}`);
+      const retry = cookieOf(r, "crow_pending_2fa");
+      assert.ok(retry && retry !== p, "a fresh pending token");
+      r = await post("/dashboard/login/2fa", fromLap, { totp_code: code() }, `crow_pending_2fa=${retry}`);
+      assert.equal(await scopesOf(cookieOf(r, "crow_session")), "dashboard onhost");
+      // Password on the laptop, code on the box: on-host too.
+      p = await pending(fromLap);
+      r = await post("/dashboard/login/2fa", fromBox, { totp_code: code() }, `crow_pending_2fa=${p}`);
+      assert.equal(await scopesOf(cookieOf(r, "crow_session")), "dashboard onhost");
+      // Both steps on the laptop: a plain session.
+      p = await pending(fromLap);
+      r = await post("/dashboard/login/2fa", fromLap, { totp_code: code() }, `crow_pending_2fa=${p}`);
+      assert.equal(await scopesOf(cookieOf(r, "crow_session")), "dashboard");
+    });
+  } finally {
+    await totpMod.disable2fa();
+    await db.execute("DELETE FROM dashboard_settings WHERE key = 'password_hash'");
+  }
+});
+
+// ---- I1: owner-only security actions ------------------------------------------------------------
+test("2FA changes are the owner's: an onhost session, the box itself and an SSO session can't disable it; the owner from the laptop can", async () => {
+  const totpMod = await import("../servers/gateway/dashboard/totp.js");
+  const section = (await import("../servers/gateway/dashboard/settings/sections/two-factor.js")).default;
+  const { OWNER_ONLY_MSG } = await import("../servers/gateway/dashboard/settings/sections/two-factor.js");
+  const { secret } = totpMod.generateTotpSecret();
+  await totpMod.saveTotpSetup(secret, totpMod.generateRecoveryCodes());
+  await totpMod.enable2fa();
+  const res = () => { const r = { urls: [], redirectAfterPost(u) { r.urls.push(u); } }; return r; };
+  try {
+    for (const [who, req] of [
+      ["onhost session from the laptop", direct("203.0.113.7", { dashboardSession: "s-onhost", body: {} })],
+      ["owner session from the box", direct("10.0.0.5", { dashboardSession: "s-owner", body: {} })],
+      ["owner session from a container", direct("172.17.0.4", { dashboardSession: "s-owner", body: {} })],
+      ["SSO session from the laptop", direct("203.0.113.7", { dashboardSession: "s-sso", body: {} })],
+    ]) {
+      for (const action of ["disable_2fa", "regenerate_recovery_codes", "revoke_devices"]) {
+        const r = res();
+        assert.equal(await section.handleAction({ req, res: r, db, action }), true, `${who} ${action}`);
+        assert.deepEqual(r.urls, ["/dashboard/settings?section=two-factor&error=owner-only"], `${who} ${action}`);
+      }
+      assert.equal(await totpMod.is2faEnabled(), true, `${who}: still on`);
+      assert.equal(await totpMod.getTotpSecret(), secret);
+    }
+    const r = res();
+    await section.handleAction({ req: direct("203.0.113.7", { dashboardSession: "s-owner", body: {} }), res: r, db, action: "disable_2fa" });
+    assert.deepEqual(r.urls, ["/dashboard/settings?section=two-factor&success=2fa-disabled"]);
+    assert.equal(await totpMod.is2faEnabled(), false);
+    // The refusal reads in both languages.
+    for (const lang of ["en", "es"]) {
+      const html = await section.render({ req: { query: { error: "owner-only" }, csrfToken: "t" }, res: { set() {} }, db, lang });
+      assert.ok(html.includes(OWNER_ONLY_MSG[lang].split(",")[0]), lang);
+    }
+    assert.notEqual(OWNER_ONLY_MSG.en, OWNER_ONLY_MSG.es);
+  } finally {
+    try { await totpMod.disable2fa(); } catch {}
+  }
+});
+
+test("keychain re-auth and reveal are the owner's: refused from the box, for an onhost or SSO session, even with a grant", async () => {
+  const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
+  const { markFromLaptop } = await import("./helpers/off-box.js");
+  let verifies = 0;
+  const gate = { method: async () => "password", verify: async () => { verifies++; return { ok: true, method: "password", expires_at: 1 }; }, isGranted: () => true, expiresAt: () => null, revoke() {} };
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.dashboardSession = req.headers["x-test-session"] || null;
+    if (req.headers["x-test-from"] === "laptop") markFromLaptop(req);
+    next();
+  });
+  app.use(keychainApiRouter({ openDb: () => createDbClient(join(tmpDir, "crow.db")), gate, notify: async () => {}, audit: async () => {} }));
+  await withServer(app, async (port) => {
+    const post = (path, session, from) => request(port, { method: "POST", path: `/dashboard/keychain/api${path}`, headers: { "content-type": "application/json", "x-test-session": session, ...(from ? { "x-test-from": from } : {}) }, body: JSON.stringify({ password: "x", id: 1 }) });
+    for (const [who, session, from] of [["owner from the box", "s-owner", null], ["onhost from the laptop", "s-onhost", "laptop"], ["SSO from the laptop", "s-sso", "laptop"]]) {
+      const a = await post("/reauth", session, from);
+      assert.equal(a.status, 403, `${who} reauth`);
+      assert.equal(JSON.parse(a.text).code, "owner_only");
+      const b = await post("/reveal", session, from);
+      assert.equal(b.status, 403, `${who} reveal with a grant`);
+      assert.equal(JSON.parse(b.text).code, "owner_only");
+    }
+    assert.equal(verifies, 0, "the gate is never even asked");
+    const ok = await post("/reauth", "s-owner", "laptop");
+    assert.equal(ok.status, 200, "the owner from the laptop");
+    assert.equal(verifies, 1);
+    const rev = await post("/reveal", "s-owner", "laptop");
+    assert.equal(rev.status, 404, "past the owner check and the grant (no such entry)");
+  });
 });

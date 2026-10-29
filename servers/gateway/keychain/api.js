@@ -13,6 +13,7 @@ import { createNotification } from "../../shared/notifications.js";
 import { verifyPassword } from "../dashboard/auth.js";
 import { is2faEnabled, getTotpSecret, verifyTotp } from "../dashboard/totp.js";
 import { createReauthGate } from "./reauth.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { loadKeychainKey } from "./key.js";
 import { sealExport, openExport, MIN_PASSPHRASE } from "./export.js";
 import {
@@ -73,6 +74,10 @@ export function keychainApiRouter({
   audit = auditLog,
   notify = createNotification,
   tickets = createExportTickets(),
+  // Revealing a saved password is the owner's own act (Task 16b): a peer sign-in (SSO), a
+  // session minted by a login from this machine, and any request from this machine itself
+  // (the shared browser, a bot with a shell) are refused, before and after a re-auth grant.
+  isOwner = (db, req) => isLocalPasswordSessionOn(db, req),
 } = {}) {
   const router = Router();
   const cardEnv = crowHome ? { ...process.env, CROW_HOME: crowHome } : process.env;
@@ -104,7 +109,14 @@ export function keychainApiRouter({
     }
   };
 
-  const requireGrant = async (req, res) => {
+  const OWNER_ONLY = { code: "owner_only", error: "Only you, signed in with your password from your own device, can do this. Not from this Crow's own machine or a paired sign-in." };
+  const ownerTurn = async (db, req) => { try { return (await isOwner(db, req)) === true; } catch { return false; } };
+
+  const requireGrant = async (req, res, db) => {
+    if (!(await ownerTurn(db, req))) {
+      res.status(403).json(OWNER_ONLY);
+      return false;
+    }
     if ((await gate.method()) === "none") {
       res.status(403).json({ code: "reauth_unavailable", error: "Set a dashboard password or two-factor authentication first: Crow needs one to confirm it's you." });
       return false;
@@ -127,6 +139,7 @@ export function keychainApiRouter({
   }));
 
   router.post(`${BASE}/reauth`, withDb(async (req, res, db) => {
+    if (!(await ownerTurn(db, req))) return res.status(403).json(OWNER_ONLY);
     const out = await gate.verify(req.dashboardSession, { password: req.body?.password, totp_code: req.body?.totp_code });
     if (out.ok) {
       await audit(db, "keychain_reauth_ok", { ip: req.ip, details: { method: out.method } });
@@ -143,7 +156,7 @@ export function keychainApiRouter({
   }));
 
   router.post(`${BASE}/reveal`, withDb(async (req, res, db) => {
-    if (!(await requireGrant(req, res))) return;
+    if (!(await requireGrant(req, res, db))) return;
     const purpose = req.body?.purpose === "copy" ? "copy" : "reveal";
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ error: "No such password." });
@@ -176,7 +189,7 @@ export function keychainApiRouter({
   }));
 
   router.post(`${BASE}/delete`, withDb(async (req, res, db) => {
-    if (!(await requireGrant(req, res))) return;
+    if (!(await requireGrant(req, res, db))) return;
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ error: "No such password." });
     // C5: a generated token may be the ONLY plaintext of a hash the extension still uses.
@@ -195,7 +208,7 @@ export function keychainApiRouter({
   // The Nest reminder is recorded only once the file was served, or, when the page asks with
   // ?confirm=1 (the Crow app), only once it says the file was saved (POST /export/saved).
   router.post(`${BASE}/export`, withDb(async (req, res, db) => {
-    if (!(await requireGrant(req, res))) return;
+    if (!(await requireGrant(req, res, db))) return;
     const passphrase = typeof req.body?.passphrase === "string" ? req.body.passphrase : "";
     if (passphrase.length < MIN_PASSPHRASE) return res.status(400).json({ error: `Choose a passphrase of at least ${MIN_PASSPHRASE} characters.` });
     const key = readKey();
@@ -257,7 +270,7 @@ export function keychainApiRouter({
   }));
 
   router.post(`${BASE}/import`, withDb(async (req, res, db) => {
-    if (!(await requireGrant(req, res))) return;
+    if (!(await requireGrant(req, res, db))) return;
     const entries = await openExport(req.body?.file, typeof req.body?.passphrase === "string" ? req.body.passphrase : "");
     if (!entries) return res.status(400).json({ error: "That passphrase does not open this file, or it is not a Crow keychain export." });
     const ikey = await writeKey(db, req.ip);
@@ -270,7 +283,7 @@ export function keychainApiRouter({
   }));
 
   router.post(`${BASE}/vault-save`, withDb(async (req, res, db) => {
-    if (!(await requireGrant(req, res))) return;
+    if (!(await requireGrant(req, res, db))) return;
     const st = vault.status();
     if (!st || !st.installed || !st.cliPath) return res.status(409).json({ ok: false, reason: "Install or update the Vaultwarden extension first." });
     if (st.serverOutdated) return res.status(409).json({ ok: false, reason: st.serverOutdated });

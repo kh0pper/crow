@@ -99,7 +99,7 @@ test("the real export + import routes record the reminder state (HTTP, injected 
   const app = express();
   app.use(express.json({ limit: "5mb" }));
   app.use((req, res, next) => { req.dashboardSession = "test-session"; next(); });
-  app.use(keychainApiRouter({ gate, openDb: () => createDbClient() }));
+  app.use(keychainApiRouter({ gate, openDb: () => createDbClient(), isOwner: async () => true }));
   const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   try {
     const url = (p) => `http://127.0.0.1:${server.address().port}/dashboard/keychain/api${p}`;
