@@ -37,7 +37,7 @@
  *   4. The result claim is released (guarded on a card, P9).
  */
 import { PERSONAL_SURFACES } from "./handoff-constants.js";
-import { wantsHandoffStop } from "./handoff-intent.js";
+import { wantsHandoffStop, stopShape } from "./handoff-intent.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf } from "./handoff-confirm.js";
 import { rowsInScope, resolveRows, candidatesOf } from "./handoff-status.js";
@@ -120,14 +120,16 @@ export async function stop(core, db, id, via) {
 
   if (await store.transition(db, id, ["starting"], "stopped", { detail: "pending_start" })) {
     const now = await store.get(db, id);
+    // A session here means finishStart lost to us and already stopped it: our engine.stop is a harmless
+    // second call (no_such_session, or a no-op on a stopped session).
     if (now?.session_id) return stopSession(core, db, now, via, line);
-    await endedOnCard(core, db, row, via, "pending_start");
+    await endedOnCard(core, db, now ?? row, via, "pending_start");
     return { status: "pending_start", say: line("stop_pending_start") };
   }
   if (await store.transition(db, id, OPEN_FROM, "stopped")) {
     const now = await store.get(db, id);
     if (now?.session_id) return stopSession(core, db, now, via, line);
-    await endedOnCard(core, db, row, via);
+    await endedOnCard(core, db, now ?? row, via);
     return { status: "stopped", say: line("stopped_queued") };
   }
   if (!(await store.get(db, id))) return { status: "none", say: line("stop_none") };
@@ -163,8 +165,8 @@ export async function decideStop(core, db, stopId, decision) {
   const from = ["awaiting_phone"];
   const target = row.target_id ? await store.get(db, row.target_id) : null;
   if (!target || target.kind !== "handoff" || String(target.device_id) !== String(row.device_id) || String(target.bot_id) !== String(row.bot_id)) {
-    await store.transition(db, stopId, from, "failed", { detail: "bad_target" }, { live: true });
-    return { status: "failed", detail: "bad_target" };
+    if (await store.transition(db, stopId, from, "failed", { detail: "bad_target" }, { live: true })) return { status: "failed", detail: "bad_target" };
+    return lostDecide(store, db, stopId);
   }
   if (decision === "no") {
     if (await store.transition(db, stopId, from, "declined", {}, { live: true })) return { status: "declined" };
@@ -265,11 +267,17 @@ export async function stopIntent(core, db, { device, surface, transcript, lang, 
   const speak = langOf(lang);
   const bots = new Map((await candidatesOf(core, db, bot)).map((c) => [c.bot_id, c.name]));
   const names = (m) => [...m].flatMap(([id, name]) => [name, id]);
-  const kind = wantsHandoffStop(transcript, names(bots));
-  if (!kind) return null;
+  // The cached candidates and the stop check come first; a stop about something the candidates cannot name
+  // ("stop writer" with writer no longer a candidate, or hand-offs turned off) still reaches the log when it
+  // has a stop's shape (stopShape): the row bots' names are then tried too. Anything else is the model's.
+  let kind = wantsHandoffStop(transcript, names(bots));
+  if (!kind && !stopShape(transcript)) return null;
   const { open, ended } = await rowsInScope(core.store, db, device, surface, core.now());
   // The carried gate: a stop fires only with an open hand-off in scope; otherwise the words are the room's.
   if (!open.length) return null;
+  for (const r of [...open, ...ended]) if (!bots.has(r.bot_id)) bots.set(r.bot_id, await botName(db, r.bot_id));
+  if (!kind) kind = wantsHandoffStop(transcript, names(bots));
+  if (!kind) return null;
   const ctx = { device, surface, lang: speak, transcript, pending };
 
   if (kind === "pronoun") {
@@ -279,7 +287,6 @@ export async function stopIntent(core, db, { device, surface, transcript, lang, 
     return proposeStop(core, db, ctx, row, { media: mediaMayBeActive(mediaActive) });
   }
 
-  for (const r of [...open, ...ended]) if (!bots.has(r.bot_id)) bots.set(r.bot_id, await botName(db, r.bot_id));
   const botList = [...bots].map(([bot_id, name]) => ({ bot_id, name }));
   const { named, rows } = resolveRows(transcript, open, botList);
   let about = open;

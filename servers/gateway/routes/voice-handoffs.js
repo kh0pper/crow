@@ -86,7 +86,9 @@ function statusLine(row, now, lang, vars) {
   // A stop row's lines are its own (P26): a stop in progress, one that expired or one whose target had already
   // ended never read as a hand-off's "nothing was started".
   if (row.kind === "stop") {
-    if (status === "failed" && row.detail === "already") return fill(t("voiceHandoff.stopStatus.already", lang), vars);
+    // done carries core.stop's status as its detail: a stop still landing (pending_start, stopping) is not "Stopped".
+    if (status === "done" && (row.detail === "pending_start" || row.detail === "stopping")) return fill(t(`voiceHandoff.stopStatus.done_${row.detail}`, lang), vars);
+    if (status === "failed" && (row.detail === "already" || row.detail === "not_sent")) return fill(t(`voiceHandoff.stopStatus.${row.detail}`, lang), vars);
     if (["done", "declined", "failed", "starting", "expired"].includes(status)) return fill(t(`voiceHandoff.stopStatus.${status}`, lang), vars);
   }
   if (status === "failed" && FAILED_REASONS.has(row.detail)) return fill(t(`voiceHandoff.failed.${row.detail}`, lang), vars);

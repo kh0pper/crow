@@ -225,6 +225,29 @@ const negated = (words, i) => i > 0 && NEGATIONS.has(words[i - 1]);
 const paraOpens = (words, i) => words.slice(0, i).every((w) => PARA_LEADS.has(w));
 
 /**
+ * The transcript has the shape of a stop about something, whatever it is named (5.4, the twin of statusShape):
+ * a stop verb (not negated; "para" only sentence-initial) followed by a one- or two-word subject (an optional
+ * "a", "the", "el" or "la" before; never only stopwords) that ends the sentence: "stop writer", "cancel the
+ * writer", "detén a hank", "stop the music". A bot that is no longer a candidate is still stopped by name
+ * through it; the caller then checks the name against the bots that have work.
+ */
+export function stopShape(transcript) {
+  const words = phraseWords(transcript);
+  for (let i = 0; i < words.length; i++) {
+    if (!STOP_VERBS.has(words[i]) || negated(words, i)) continue;
+    if (words[i] === "para" && !paraOpens(words, i)) continue;
+    let at = i + 1;
+    if (words[at] === "a") at++;
+    if (SHAPE_ARTICLES.has(words[at])) at++;
+    for (let k = 1; k <= 2 && at + k <= words.length; k++) {
+      if (words.slice(at, at + k).every((w) => STOPWORDS.has(w))) continue;
+      if (endsAt(words, at + k)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * "named": a stop verb (stop, cancel, halt, para, detén, cancela) followed by a bot name or a work word ("the
  * research", "la tarea"; Spanish may put "a" between: "detén a writer"). "pronoun": "stop it", "cancel that",
  * "páralo", "cancela eso"… ending the sentence ("stop that song" is not one). null otherwise.

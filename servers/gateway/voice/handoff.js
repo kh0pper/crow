@@ -120,7 +120,6 @@ async function retirePending(ctx) {
 async function proposeToPhone(ctx, task, target, lang) {
   const { core, db, device, transcript } = ctx;
   await retirePending(ctx);
-  if (await core.store.openPhone(db, device.id, "handoff")) return done("already_sent", voiceLine("handoff_already_sent", lang));
   const avail = await core.availability(db, target.model_key);
   const r = await sendToPhone(core, db, {
     device, kind: "handoff", lang, log: ctx.log || console.warn,
@@ -362,8 +361,9 @@ function namesAnother(transcript, names) {
  *   turnContext  a pending hand-off, stop or which: "[Hand-off] Waiting for a yes or no: …", pending (an action
  *                turn, so a reply claiming the bot started or stopped is held and replaced); it reads only the entry [rv1 C6]
  *   afterTurn    every turn counts one exchange on the device (handoff-topic.js). A turn that left a pending
- *                hand-off, stop or which unanswered (no crow_handoff call) takes it and expires a hand-off's
- *                row, so a later stray "yes" answers nothing; a routine or which_calendar entry is never
+ *                hand-off or which unanswered (no crow_handoff call) takes it and expires a hand-off's row;
+ *                an unanswered stop is taken whatever was called, so a later stray "yes" answers nothing
+ *                (fix round 1); a routine or which_calendar entry is never
  *                touched. A relay turn (relay: true, turn.js's relay contract) takes a pending hand-off, which
  *                or stop whatever was called, and expires a hand-off's row
  */
@@ -469,7 +469,9 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
       bumpExchange(core, device.id);
       const e = pending.get(device.id);
       if (!e) return;
-      if (relay === true ? !RELAY_KINDS.has(e.kind) : !OWN_KINDS.has(e.kind) || calledTools.includes(HANDOFF_TOOL_NAME)) return;
+      // A crow_handoff call this turn keeps a proposal or a which (the call re-proposed, or was refused and the
+      // question still stands); a stop is answered by a yes or no alone, so it is taken whatever was called.
+      if (relay === true ? !RELAY_KINDS.has(e.kind) : !OWN_KINDS.has(e.kind) || (TOOL_KINDS.has(e.kind) && calledTools.includes(HANDOFF_TOOL_NAME))) return;
       pending.take(device.id);
       if (e.kind === "handoff" && e.id) await core.store.transition(db, e.id, ["proposed"], "expired");
     },

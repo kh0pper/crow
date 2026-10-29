@@ -572,6 +572,18 @@ test("a stop row's page lines are its own: starting, expired, and a target that 
   const mid = await (await s.get(starting)).text();
   assert.ok(!hasForm(mid));
   assert.match(mid, /Confirmed\. Stopping Writer's task…/);
+  // A done stop row carries core.stop's status: a stop still landing is never "Stopped".
+  const pendingStart = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-5" });
+  await s.core.store.transition(s.db, pendingStart, ["awaiting_phone"], "done", { detail: "pending_start" });
+  assert.match(await (await s.get(pendingStart)).text(), /Confirmed\. Writer's task will stop as soon as it starts\. Anything it makes is kept\./);
+  const stopping = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-6", lang: "es" });
+  await s.core.store.transition(s.db, stopping, ["awaiting_phone"], "done", { detail: "stopping" });
+  assert.match(await (await s.get(stopping)).text(), /Confirmado\. La tarea de Writer se está parando\. Lo que hizo hasta ahora se queda\./);
+  const notSent = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-7" });
+  await s.core.store.transition(s.db, notSent, ["awaiting_phone"], "failed", { detail: "not_sent" });
+  const unsent = await (await s.get(notSent)).text();
+  assert.match(unsent, /This couldn't be sent to your phone, so Writer's task kept running\. Ask Crow again\./);
+  assert.ok(!/The stop didn't go through/.test(unsent));
   const expired = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-3", lang: "es" });
   s.now.advance(HANDOFF_PHONE_TTL_MS + 1);
   const late = await (await s.get(expired)).text();

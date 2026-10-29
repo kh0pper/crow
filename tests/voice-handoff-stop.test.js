@@ -351,6 +351,41 @@ test("no declines a stop and leaves the task running; an unanswered stop is take
   s.done();
 });
 
+test("a turn that calls crow_handoff (refused) while a stop waits still takes the stop, so a later yes stops nothing (fix round 1)", async () => {
+  const s = await setup();
+  const { id, sid } = await started(s);
+  assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+  // Not a yes or no, and no hand-off cue: the tool is not offered, the model's forced call is refused, and the
+  // call still counts as called this turn (calledTools) — the stop question is taken all the same.
+  const { h, turn } = withTurn(s, [call({ task: "write a poem", bot: "writer" }), says("It'll be sunny. ")]);
+  const r = await turn("what's the weather tomorrow");
+  assert.equal(r.fastPath, false);
+  assert.deepEqual(r.timings.tools, ["crow_handoff:not_offered"]);
+  assert.deepEqual(h.calls.spoken, ["It'll be sunny."]);
+  assert.equal(s.pending.get(DEVICE.id), null, "the stop question is gone");
+  assert.equal(await s.ask("yes"), null, "a stray yes stops nothing");
+  assert.deepEqual(s.eng.calls.stop, []);
+  assert.equal((await s.row(id)).status, "started");
+  assert.equal(sid, "s1");
+  s.done();
+});
+
+test("a bot that is no longer a candidate is still stopped by name through its open row (stopShape, fix round 1)", async () => {
+  const s = await setup();
+  const { id, sid } = await started(s);
+  const off = { ...VOICE, handoff: { enabled: false, allowed_bots: [] } };
+  assert.deepEqual(await s.ask("stop writer", { bot: off }), { say: "Stop Writer's task: research radio history?", verb: "stop_propose" });
+  assert.equal((await s.ask("yes", { bot: off })).verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, [sid]);
+  assert.equal((await s.row(id)).status, "stopped");
+  // The shape alone never stops anything: a subject that is no row's bot is the model's (or the media's).
+  const t = await setup();
+  await started(t);
+  for (const phrase of ["stop the music", "cancel the timer", "para la musica", "stop helper"]) assert.equal(await t.ask(phrase, { bot: off }), null, phrase);
+  assert.equal((await t.ask("stop writer", { bot: null })).verb, "stop_propose", "no voice def at all: the shape still reads the log");
+  s.done(); t.done();
+});
+
 test("turnContext names the pending stop, and nothing else", async () => {
   const s = await setup();
   await started(s);
@@ -756,8 +791,7 @@ test("a stopped card's later result gets today's notification, and the row stays
   await s.report(cardId, { outcome: "success" });
   const rows = (await s.db.execute("SELECT title FROM notifications ORDER BY id")).rows;
   assert.equal(rows.length, 1);
-  assert.ok(!/finished/.test(rows[0].title) || !rows[0].title.startsWith("Writer finished:"), "not the hand-off's completion notice");
-  assert.ok(!rows[0].title.startsWith("Writer finished:"), rows[0].title);
+  assert.ok(!rows[0].title.startsWith("Writer finished:"), `not the hand-off's completion notice: ${rows[0].title}`);
   assert.equal((await s.row(id)).status, "stopped");
   assert.equal(RR.requesterOf(cardId), null);
   s.done();
