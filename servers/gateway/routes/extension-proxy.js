@@ -26,11 +26,9 @@ import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth
 // CROW_HOME) proxies ITS extensions — not the primary's. Hardcoding ~/.crow
 // here made every co-hosted instance serve the primary's web UIs.
 const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
-const INSTALLED_PATH = join(CROW_HOME, "installed.json");
-const BUNDLES_DIR = join(CROW_HOME, "bundles");
 
-function getManifest(bundleId) {
-  const manifestPath = join(BUNDLES_DIR, bundleId, "manifest.json");
+export function getManifest(bundleId, home = CROW_HOME) {
+  const manifestPath = join(home, "bundles", bundleId, "manifest.json");
   if (!existsSync(manifestPath)) return null;
   try {
     return JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -45,9 +43,9 @@ function getManifest(bundleId) {
  * sides. Returns `{}` on any read failure — a bundle with no `.env` is
  * normal, not an error.
  */
-function readBundleEnv(bundleId) {
+function readBundleEnv(bundleId, home = CROW_HOME) {
   try {
-    return parseEnvText(readFileSync(join(BUNDLES_DIR, bundleId, ".env"), "utf8"));
+    return parseEnvText(readFileSync(join(home, "bundles", bundleId, ".env"), "utf8"));
   } catch {
     return {}; // No .env for this bundle — defaults apply.
   }
@@ -63,29 +61,30 @@ function readBundleEnv(bundleId) {
  * that override actually lives (the installer writes it), so read it as the layer
  * between the process environment and the manifest default.
  */
-export function resolveWebUIPort(manifest, bundleId) {
+export function resolveWebUIPort(manifest, bundleId, home = CROW_HOME) {
   const key = manifest?.webUI?.portEnv;
   const fallback = manifest?.webUI?.port;
   if (!key) return fallback;
   const fromProcess = Number(process.env[key]);
   if (fromProcess) return fromProcess;
-  const fromBundle = Number(readBundleEnv(bundleId)[key]);
+  const fromBundle = Number(readBundleEnv(bundleId, home)[key]);
   if (fromBundle) return fromBundle;
   return fallback;
 }
 
-function getProxiedExtensions() {
-  if (!existsSync(INSTALLED_PATH)) return [];
+export function getProxiedExtensions(home = CROW_HOME) {
+  const installedPath = join(home, "installed.json");
+  if (!existsSync(installedPath)) return [];
   try {
-    const installed = JSON.parse(readFileSync(INSTALLED_PATH, "utf8"));
+    const installed = JSON.parse(readFileSync(installedPath, "utf8"));
     const proxied = [];
     for (const entry of installed) {
-      const manifest = getManifest(entry.id);
+      const manifest = getManifest(entry.id, home);
       if (manifest?.webUI?.port) {
         proxied.push({
           id: entry.id,
           name: manifest.name || entry.id,
-          port: resolveWebUIPort(manifest, entry.id),
+          port: resolveWebUIPort(manifest, entry.id, home),
           path: manifest.webUI.path || "/",
           label: manifest.webUI.label || manifest.name || entry.id,
           proxyMode: manifest.webUI.proxyMode || "subpath",

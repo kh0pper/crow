@@ -236,7 +236,7 @@ function labelFor(id) {
  * (The bridge additionally requires a capability-listed model at spawn; the
  * envelope reports the def's grant, not the per-turn resolution.)
  */
-async function buildEnvelope(db, def) {
+export async function buildEnvelope(db, def) {
   const { toolAllowlist } = await loadBridge();
   const remoteEnabled = await remoteInvocationOn(db);
   const csv = toolAllowlist(def, { remoteEnabled });
