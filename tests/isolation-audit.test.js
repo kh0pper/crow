@@ -58,3 +58,12 @@ test("auditInstanceFiles: modes of the instance's own secret files, existing one
   assert.equal(by[join(ch, "board-token")].groupOrWorld, false);
   assert.equal(by[join(ch, "app.env")], undefined);
 });
+
+test("auditInstanceFiles lists the instance secrets dir and its mode (peer credentials live there)", () => {
+  const ch = join(scratch, "inst-secrets");
+  mkdirSync(join(ch, "secrets"), { recursive: true, mode: 0o755 });
+  const r = auditInstanceFiles({ crowHome: ch, dataDir: join(ch, "data"), appEnv: join(ch, "app.env") });
+  const s = r.find((f) => f.path === join(ch, "secrets"));
+  assert.ok(s, "secrets/ is listed");
+  assert.equal(s.groupOrWorld, true, "a 0755 secrets dir is flagged");
+});
