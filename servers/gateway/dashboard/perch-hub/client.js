@@ -3498,6 +3498,11 @@ export function perchHubJs(lang = "en") {
     if(appsCloseBtn) appsCloseBtn.onclick=closeAppsSheet;
     APPS_SHEET.addEventListener('click',function(e){ if(e.target===APPS_SHEET) closeAppsSheet(); });
     APPS_SHEET.addEventListener('close',function(){
+      /* The close event fires a task after close() (the browser hands focus
+         back inside close() itself), so a quick reopen can run first. Open
+         again means this event belongs to the sheet that already closed: it
+         must not drop the reopened sheet's answer or pull focus out of it. */
+      if(APPS_SHEET.open){ appsSkipFocus=false; return; }
       appsGen++;                            /* a late answer never paints a closed sheet */
       if(appsSkipFocus){ appsSkipFocus=false; return; }
       if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
