@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { REDACTED, redactSecrets, redactHeaderValue, redactThenTruncate, maxSecretBytes } from "../servers/shared/redact-secrets.js";
+import { REDACTED, redactSecrets, redactHeaderValue, redactThenTruncate, maxSecretBytes, redactAcross } from "../servers/shared/redact-secrets.js";
 
 test("replaces every occurrence of a secret", () => {
   assert.equal(redactSecrets("a sk-secret-1 b sk-secret-1", ["sk-secret-1"]), `a ${REDACTED} b ${REDACTED}`);
@@ -60,4 +60,21 @@ test("a secret that contains another is redacted whole, in either order", () => 
 test("regex characters in a secret are matched literally, and duplicates are harmless", () => {
   assert.equal(redactSecrets("a.b*c(d) and aXbbc(d)", ["a.b*c(d)", "a.b*c(d)"]), `${REDACTED} and aXbbc(d)`);
   assert.equal(redactSecrets("p$&q$1r", ["p$&q$1r"]), REDACTED);
+});
+
+test("redactAcross: a secret split across pieces is redacted, the piece count is kept", () => {
+  const S = "fake-live-ABCDEFGHIJ";
+  assert.deepEqual(redactAcross(["head fake-live-A", "BCDEFGHIJ tail"], [S]), [`head ${REDACTED}`, " tail"]);
+  assert.deepEqual(redactAcross(["fake-", "live-", "ABCDEFGHIJ"], [S]), [REDACTED, "", ""], "across three pieces");
+  assert.deepEqual(redactAcross([`a ${S} b`, "c"], [S]), [`a ${REDACTED} b`, "c"], "inside one piece, as redactSecrets");
+  assert.deepEqual(redactAcross([`${S}`, `${S}x`], [S]), [REDACTED, `${REDACTED}x`]);
+  assert.deepEqual(redactAcross(["plain", "text"], [S]), ["plain", "text"]);
+  assert.deepEqual(redactAcross(["abc", "def"], ["abc"]), ["abc", "def"], "below the length floor");
+  assert.deepEqual(redactAcross([], [S]), []);
+  for (const parts of [["x fake-live-ABC", "DEFGHIJ y", "z"], ["fake-live-ABCDEFGHIJfake-li", "ve-ABCDEFGHIJ"]]) {
+    const out = redactAcross(parts, [S]);
+    assert.equal(out.length, parts.length);
+    assert.ok(!out.join("").includes(S));
+    assert.equal(out.join(""), redactSecrets(parts.join(""), [S]), "same text as redacting the joined pieces");
+  }
 });

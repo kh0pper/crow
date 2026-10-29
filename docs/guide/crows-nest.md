@@ -207,7 +207,7 @@ If a request comes from an IP outside these ranges, the Crow's Nest returns a **
 ::: warning
 Only set `CROW_DASHBOARD_PUBLIC=true` if the gateway is behind another authentication layer (e.g., a reverse proxy with HTTP basic auth, Cloudflare Access, or a VPN). Without an additional auth layer, anyone on the internet could access the Crow's Nest with only a password between them and your data.
 
-If your reverse proxy runs on the same machine, you usually don't need `CROW_DASHBOARD_PUBLIC` at all: declare the proxy with `CROW_TRUSTED_PROXIES=loopback` so LAN clients behind it are recognised (see [Custom Domain](/getting-started/custom-domain#behind-your-own-reverse-proxy)).
+If your reverse proxy runs on the same machine, you usually don't need `CROW_DASHBOARD_PUBLIC` at all: declare the proxy with `CROW_TRUSTED_PROXIES=loopback` so LAN clients behind it are recognised (see [Custom Domain](/getting-started/custom-domain#behind-your-own-reverse-proxy)). Note that this turns off the doors only same-box bots use (cloud models and loopback tool connections); the Custom Domain page explains the tradeoff.
 :::
 
 For remote access without opening the Crow's Nest publicly, use [Tailscale](/getting-started/tailscale-setup). Tailscale IPs fall within the `100.64.0.0/10` range that the Crow's Nest already trusts.

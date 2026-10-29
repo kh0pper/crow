@@ -21,7 +21,7 @@ import { createBotHostCallerResolver } from "../servers/gateway/bot-host-caller.
 import {
   initGatewayActorKey, _resetActorKeyForTest, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig,
   verifyBoardThreadActorSig, verifyPeerRelayActorSig, presignActors, _resetPresignedForTest,
-  signPeerRelayActor, signBoardActor, signActor,
+  signPeerRelayActor, signBoardActor, signActor, verifyScopeActorSig, setActorKey,
 } from "../scripts/pi-bots/actor-sig.mjs";
 
 let dir, dbPath, base, srv;
@@ -57,12 +57,24 @@ before(async () => {
     ["live", "hank", "gmail", "t-100", "active", null], ["stopped", "hank", "gmail", "t-101", "stopped", null],
     ["archived", "hank", "gmail", "t-102", "active", "2026-10-01 00:00:00"], ["otto", "otto", "discord", "t-200", "active", null], ["dora", "dora", "gmail", "t-400", "active", null],
     ["card", "hank", "board", "board-card-5", "active", null], ["ghost", "ghost", "gmail", "t-300", "active", null],
+    ["card6", "hank", "board", "board-card-6", "active", null],
   ]) SESS[name] = String(ins.run(bot, gw, thread, status, archived).lastInsertRowid);
   const job = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid) VALUES (?, ?, ?, ?, ?)");
   job.run("job-run-1", "hank", "g", "running", process.pid);
   job.run("job-done-1", "hank", "g", "completed", process.pid);
   job.run("job-otto-1", "otto", "g", "running", process.pid);
   job.run("job-elsewhere-1", "hank", "g", "running", 1); // claimed by another host
+  // bot_jobs.principal arrives with a later migration; this scratch DB adds it.
+  if (!d.prepare("PRAGMA table_info(bot_jobs)").all().some((c) => c.name === "principal")) d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT");
+  const pjob = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, card_id, principal) VALUES (?, ?, 'g', ?, ?, ?, ?)");
+  pjob.run("job-own-1", "hank", "running", process.pid, null, "owner");
+  pjob.run("job-own-else", "hank", "running", 1, null, "owner"); // another host's owner job
+  pjob.run("job-card-1", "hank", "running", process.pid, 5, "owner");
+  pjob.run("job-other-1", "hank", "running", process.pid, null, "other");
+  pjob.run("job-own-done", "hank", "completed", process.pid, null, "owner"); // the owner's, but finished
+  pjob.run("job-null-1", "hank", "running", process.pid, null, null); // column present, value NULL (the insert default)
+  pjob.run("job-empty-1", "hank", "running", process.pid, null, "");
+  pjob.run("job-caps-1", "hank", "running", process.pid, null, "OWNER");
   d.close();
 
   _resetActorKeyForTest();
@@ -267,14 +279,80 @@ test("the tuple matches its session with fields trimmed on both sides, as the MA
   assert.equal(verifyPeerRelayActorSig({ ...LIVE(), sig: r.json.sigs["peer-relay"] }), true, "and signs the trimmed tuple");
 });
 
-// Adversarial review I1: no "service" kind in this PR.
-test("the signing relay refuses kind 'service'", async () => {
+// Adversarial review I1, superseded by the loopback mount helper (spec §4.4):
+// 'service' is now a known kind, but never for a session-only turn (a Gmail,
+// Telegram, Slack or Discord session): 403 for the whole request.
+test("the signing relay refuses kind 'service' for a session turn, never partially", async () => {
   const r = await ask({ ...LIVE(), kinds: ["service"] });
-  assert.equal(r.status, 400, r.text);
+  assert.equal(r.status, 403, r.text);
   assert.equal(r.json?.sigs, undefined);
   const mixed = await ask({ ...LIVE(), kinds: ["peer-relay", "service"] });
-  assert.equal(mixed.status, 400, "never a partial answer: " + mixed.text);
+  assert.equal(mixed.status, 403, "never a partial answer: " + mixed.text);
+  assert.equal(mixed.json?.sigs, undefined);
   assert.equal((await ask({ ...LIVE(), kinds: ["peer-relay"] })).status, 200, "positive control");
+});
+
+// ---- the scope kind 'service' (loopback mount helper, spec §4.4) ----
+
+const OWNJOB = { botId: "hank", threadId: "job-job-own-1", gatewayType: "job", jobId: "job-own-1" };
+
+test("service: an owner job this host claimed gets a v3 sig for its generic tuple, under scope j:<id>", async () => {
+  const r = await ask({ ...OWNJOB, kinds: ["service", "bot"] });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(Object.keys(r.json.sigs).sort(), ["bot", "service"]);
+  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: `j:job-own-1@${process.pid}`, threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.service }), true);
+  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: "s:1", threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.service }), false);
+  assert.equal(verifyActorSig({ kind: "bot", botId: "hank", threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.bot }), true);
+});
+
+test("service: an owner card job with its own board-card tuple gets a sig; another card's tuple is 403", async () => {
+  const CARD = { botId: "hank", sessionId: SESS.card, threadId: "board-card-5", gatewayType: "board", jobId: "job-card-1" };
+  const r = await ask({ ...CARD, kinds: ["service", "peer-relay"] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: `j:job-card-1@${process.pid}`, threadId: "board-card-5", gatewayType: "board", sig: r.json.sigs.service }), true,
+    "the job wins over the session");
+  const other = await ask({ ...CARD, sessionId: SESS.card6, threadId: "board-card-6", kinds: ["service"] });
+  assert.equal(other.status, 403, "another card id: " + other.text);
+  assert.equal(other.json?.sigs, undefined);
+  assert.equal((await ask({ ...CARD, sessionId: SESS.card6, threadId: "board-card-6", kinds: ["peer-relay"] })).status, 200,
+    "control: the session itself is live and this host's job is running");
+});
+
+test("service: refused for a NULL-principal (cron) job, a non-owner job, a finished or another host's owner job, and a job-less turn", async () => {
+  for (const [name, body] of Object.entries({
+    "cron job (NULL principal)": { botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1" },
+    "principal 'other'": { botId: "hank", threadId: "job-job-other-1", gatewayType: "job", jobId: "job-other-1" },
+    "another host's owner job": { botId: "hank", threadId: "job-job-own-else", gatewayType: "job", jobId: "job-own-else" },
+    "a running claimed job, principal column present but NULL": { botId: "hank", threadId: "job-job-null-1", gatewayType: "job", jobId: "job-null-1" },
+    "a running claimed job, principal ''": { botId: "hank", threadId: "job-job-empty-1", gatewayType: "job", jobId: "job-empty-1" },
+    "a running claimed job, principal 'OWNER'": { botId: "hank", threadId: "job-job-caps-1", gatewayType: "job", jobId: "job-caps-1" },
+    "a finished owner job": { botId: "hank", threadId: "job-job-own-done", gatewayType: "job", jobId: "job-own-done" },
+    "a Gmail session": LIVE(),
+    "a Gmail session with an owner job": { ...LIVE(), jobId: "job-own-1" },
+    "an owner job, another job's tuple": { ...OWNJOB, threadId: "job-job-run-1" },
+  })) {
+    const r = await ask({ ...body, kinds: ["service"] });
+    assert.equal(r.status, 403, `${name}: ${r.status} ${r.text}`);
+    assert.equal(r.json?.sigs, undefined, name);
+  }
+  // Mixed: the whole request is refused, the v1 kind included.
+  const mixed = await ask({ ...LIVE(), kinds: ["board", "service"] });
+  assert.equal(mixed.status, 403, mixed.text);
+  assert.equal(mixed.json?.sigs, undefined, "no partial sigs");
+  const mixedCron = await ask({ botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1", kinds: ["bot", "service"] });
+  assert.equal(mixedCron.status, 403, mixedCron.text);
+  assert.equal(mixedCron.json?.sigs, undefined);
+  assert.equal((await ask({ botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1", kinds: ["bot"] })).status, 200,
+    "control: the cron job still gets its v1 kinds");
+});
+
+test("service: the two job 403 messages stay distinct", async () => {
+  let r = await ask({ botId: "hank", threadId: "job-job-done-1", gatewayType: "job", jobId: "job-done-1", kinds: ["service"] });
+  assert.equal(r.status, 403);
+  assert.match(r.json.error, /no running job/);
+  r = await ask({ botId: "hank", threadId: "job-job-own-else", gatewayType: "job", jobId: "job-own-else", kinds: ["service"] });
+  assert.equal(r.status, 403);
+  assert.match(r.json.error, /another host/);
 });
 
 // Adversarial review M3: a job/board-gateway session is signed only with a job this host claimed.
@@ -287,4 +365,21 @@ test("a board-gateway session is signed only for a job this host claimed", async
   r = await ask({ ...CARD, jobId: "job-run-1", kinds: ["peer-relay", "board"] });
   assert.equal(r.status, 200, "its own claimed job: " + r.text);
   assert.equal(verifyPeerRelayActorSig({ ...CARD, sig: r.json.sigs["peer-relay"] }), true);
+});
+
+// Step 7 for a scope kind: a process that holds only the v1/v2 key (setActorKey,
+// as a child does) and no scope key refuses the WHOLE request with 503, even
+// for an owner job it claimed; never a partial answer with the v1 kinds.
+test("service: no scope key -> 503 for the whole request, no sigs", async () => {
+  _resetActorKeyForTest();
+  try {
+    assert.equal(setActorKey("ab".repeat(32)), true, "v1/v2 key installed");
+    const r = await ask({ ...OWNJOB, kinds: ["bot", "service"] });
+    assert.equal(r.status, 503, r.text);
+    assert.equal(r.json?.sigs, undefined, "no partial sigs");
+    assert.equal((await ask({ ...OWNJOB, kinds: ["bot"] })).status, 200, "control: the v1 kind alone still signs");
+  } finally {
+    _resetActorKeyForTest();
+    initGatewayActorKey();
+  }
 });

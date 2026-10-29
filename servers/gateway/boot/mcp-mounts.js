@@ -22,7 +22,7 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken, SERVICES_TOKEN, SATELLITE_TOOLS_TOKEN } from "../local-token.js";
 import { peerRelayRouter } from "../routes/peer-relay.js";
 import { actorSignRouter } from "../routes/actor-sign.js";
 import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
@@ -84,6 +84,31 @@ export async function rotateCloudDoorTokenAtBoot({
   } catch (err) {
     log.warn(`[gateway] rotateLlmCloudToken failed: ${err.message}`);
     return false;
+  }
+}
+
+/**
+ * Boot step: rotate every loopback-mount family token (pathScopedToken), each
+ * with its own DB client. A failed rotation has already deleted that family's
+ * stored hash (fail closed: not even the previous boot's token validates), so
+ * the log says the family is off until the next boot. Never throws.
+ */
+export async function rotateFamilyTokensAtBoot({
+  createDb = createDbClient, log = console,
+  tokens = [[SERVICES_TOKEN, "services-tools"], [SATELLITE_TOOLS_TOKEN, "satellite-tools"]],
+} = {}) {
+  for (const [tok, label] of tokens) {
+    try {
+      const tokenDb = createDb();
+      try {
+        await tok.rotate(tokenDb);
+        log.log(`[gateway] ${label} token rotated`);
+      } finally {
+        try { tokenDb.close(); } catch {}
+      }
+    } catch (err) {
+      log.warn(`[gateway] ${label} token rotation failed: ${err.message}; the ${label} mount refuses every request until the next boot`);
+    }
   }
 }
 
@@ -351,6 +376,8 @@ export async function mountMcpServers(app, deps) {
   } catch (err) {
     console.warn(`[gateway] ensurePeerRelayToken failed: ${err.message}`);
   }
+  // Loopback-mount family tokens (pathScopedToken): fresh on every boot.
+  await rotateFamilyTokensAtBoot();
   app.use(peerRelayRouter({ createDbClient }));
   // Item 46 PR-B: the loopback signing relay for the key-less bot hosts
   // (routes/actor-sign.js). It authenticates the calling process itself (the

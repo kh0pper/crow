@@ -62,20 +62,36 @@
  *    so a shell can still persist or escape. Only a dedicated bot user closes
  *    this.
  *  - a child replaying its OWN headers (that is its own identity).
+ *
+ * The second key: scope-bound (v3) kinds (SCOPE_ACTOR_KINDS, "service"),
+ * the loopback MCP mount helper, below. initGatewayActorKey also mints a
+ * separate per-boot `scopeKey`, which it never returns: the stdin hand-off
+ * carries only the v1/v2 key, and setActorKey installs only that one. So the
+ * supervised Discord child, which holds the v1/v2 key, cannot compute a v3 MAC
+ * for any scope (not even a live owner Perch session's), and a v1/v2 key
+ * received anywhere verifies no v3 signature. Key-less hosts get v3 only from
+ * the signing relay, and only for an owner job (routes/actor-sign.js). The v3
+ * tuple carries NO owner or channel claim, on purpose: the mount resolves who
+ * started the turn, and on which channel, from rows on every request.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 let key = null;
+// The v3 (scope-bound) key: gateway-only, never returned, never handed off.
+let scopeKey = null;
 
-/** Gateway boot: mint the per-boot key once (idempotent). Returns it so the
- *  gateway can hand it to a supervised child over a pipe. */
+/** Gateway boot: mint the per-boot keys once (idempotent). Returns ONLY the
+ *  v1/v2 key, so the gateway can hand it to a supervised child over a pipe;
+ *  the scope key stays in this process. */
 export function initGatewayActorKey() {
   if (!key) key = randomBytes(32);
+  if (!scopeKey) scopeKey = randomBytes(32);
   return key;
 }
 
 /** Install a key received from the gateway (child processes). Accepts a
- *  Buffer or a hex string; anything not 32 bytes is ignored. */
+ *  Buffer or a hex string; anything not 32 bytes is ignored. Installs the
+ *  v1/v2 key only: a child never holds the scope key. */
 export function setActorKey(k) {
   const b = Buffer.isBuffer(k) ? k : (typeof k === "string" && /^[0-9a-f]{64}$/i.test(k.trim()) ? Buffer.from(k.trim(), "hex") : null);
   if (b && b.length === 32) key = Buffer.from(b);
@@ -85,7 +101,7 @@ export function setActorKey(k) {
 export function hasActorKey() { return !!key; }
 
 /** Test seam only. */
-export function _resetActorKeyForTest() { key = null; }
+export function _resetActorKeyForTest() { key = null; scopeKey = null; }
 
 // Fields are trimmed on BOTH sides: HTTP strips edge whitespace from header
 // values, so an untrimmed MAC would silently fail for such an id.
@@ -204,6 +220,77 @@ export function verifySessionActorSig({ sig, ...actor } = {}) {
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
+// ---- scope-bound actor headers, v3 (loopback MCP mount helper) ----
+//
+//   sig   = HMAC-SHA256(scopeKey, JSON(["crow-actor-v3", kind, bot, scope, thread, gateway]))
+//   scope = jobId ? "j:<job_id>@<worker_pid>" : "s:<bot_sessions.id>"   (a job wins whenever one exists)
+//
+// A job scope names the worker that claimed the job (bot_jobs.worker_pid): a
+// job re-claimed by another host (stale-claim recovery) no longer resolves for
+// the first host's signature (signed-session.js resolveSignedScope). The
+// worker defaults to THIS process (the claimer when a host or the gateway
+// signs for its own job); the signing relay passes the calling host's pid.
+//
+// Signed with the SECOND key (header comment): only the gateway can mint one,
+// in process for its own bots, or through the signing relay for an owner job.
+// Different version tag and a different key, so no v1/v2 signature verifies
+// as v3 or the reverse. The verifier is handed the scope string the request
+// carries (X-Crow-Actor-Scope) and resolves it itself (signed-session.js
+// resolveSignedScope): the job still running, the session still live.
+
+/** The kinds signed over the scope-bound (v3) tuple. Closed set, like v2. */
+export const SCOPE_ACTOR_KINDS = Object.freeze(["service"]);
+
+// bot_jobs.job_id as the generators mint it ("job-<base36>-<base36>"), with
+// room for other safe ids; bounded so the scope header stays small. A job id
+// outside it gets no v3 signature (fail closed), never a session fallback.
+const JOB_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+export const SCOPE_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128}@[1-9][0-9]{0,9})$/;
+
+const validPid = (p) => Number.isSafeInteger(p) && p > 0 && p <= 9_999_999_999;
+
+/** The scope a turn's ids name: "j:<job>@<worker pid>" when a job id is given
+ *  (H1; `workerPid` defaults to this process, anything but a positive integer
+ *  is null), else "s:<session>" for a valid session id, else null. */
+export function scopeRefFor({ sessionId, jobId, workerPid } = {}) {
+  if (jobId != null && !(typeof jobId === "string" && jobId.trim() === "")) {
+    const j = typeof jobId === "string" ? jobId.trim() : null;
+    const pid = workerPid === undefined ? process.pid : workerPid;
+    return j !== null && JOB_ID_RE.test(j) && validPid(pid) ? `j:${j}@${pid}` : null;
+  }
+  const s = sessionField(sessionId);
+  return s === null ? null : "s:" + s;
+}
+
+function v3Message({ kind, botId, scope, threadId, gatewayType }) {
+  return JSON.stringify(["crow-actor-v3", f(kind), f(botId), f(scope), f(threadId), f(gatewayType)]);
+}
+
+function v3Valid({ kind, botId, scope }) {
+  return SCOPE_ACTOR_KINDS.includes(kind) && botId != null && String(botId).trim() !== "" && typeof scope === "string" && SCOPE_RE.test(scope.trim());
+}
+
+/** Scope-bound signature, or null for a non-scope kind, no bot, no scope, or
+ *  no scope key (and no presigned match for exactly this tuple). */
+export function signScopeActor({ kind, botId, sessionId, jobId, workerPid, threadId, gatewayType } = {}) {
+  const scope = scopeRefFor({ sessionId, jobId, workerPid });
+  const actor = { kind, botId, scope, threadId, gatewayType };
+  if (!v3Valid(actor)) return null;
+  const msg = v3Message(actor);
+  if (!scopeKey) return presignedFor(msg);
+  return createHmac("sha256", scopeKey).update(msg).digest("hex");
+}
+
+/** Constant-time check of a presented scope-bound signature over the scope
+ *  string the request carries. False without the scope key. */
+export function verifyScopeActorSig({ kind, botId, scope, threadId, gatewayType, sig } = {}) {
+  const actor = { kind, botId, scope, threadId, gatewayType };
+  if (!scopeKey || !v3Valid(actor) || typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig.trim())) return false;
+  const want = createHmac("sha256", scopeKey).update(v3Message(actor)).digest();
+  const got = Buffer.from(sig.trim(), "hex");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
 // ---- peer-relay actor headers (item 46 PR-B) ----
 //
 // A pi bot's remote-tools proxy (crow-remote-proxy.mjs) calls a paired peer
@@ -256,8 +343,12 @@ function remember(msg, sig) {
 export function _resetPresignedForTest() { presigned.clear(); }
 
 /** The exact message each kind signs for a turn's tuple (the catalog's tuples). */
-function messageFor(kind, { botId, sessionId, threadId, gatewayType, jobId }) {
+function messageFor(kind, { botId, sessionId, threadId, gatewayType, jobId, workerPid }) {
   if (SESSION_ACTOR_KINDS.includes(kind)) return v2Valid({ kind, botId, sessionId }) ? v2Message({ kind, botId, sessionId, threadId, gatewayType }) : null;
+  if (SCOPE_ACTOR_KINDS.includes(kind)) {
+    const scope = scopeRefFor({ sessionId, jobId, workerPid }); // job first, as signScopeActor
+    return v3Valid({ kind, botId, scope }) ? v3Message({ kind, botId, scope, threadId, gatewayType }) : null;
+  }
   if (kind === "board") return v1Message({ kind, botId, threadId: jobId, gatewayType: null });
   if (kind === "bot" || kind === "artifacts" || kind === "board-thread") return v1Message({ kind, botId, threadId, gatewayType });
   return null;
@@ -310,9 +401,18 @@ export async function presignActors({ gatewayUrl, botId, sessionId, threadId, ga
 }
 
 /** Gateway side of the signing relay: the signature of one kind over a turn's
- *  tuple with THIS process's key (null without one or for an unknown kind). */
+ *  tuple with THIS process's key (null without one or for an unknown kind).
+ *  A scope kind signs with the scope key, and only for a job tuple: the relay
+ *  never signs an s: scope (spec §4.4; in-process bots use signScopeActor).
+ *  The relay passes `workerPid` = the calling host's pid (its claim). */
 export function signKindForTuple(kind, tuple = {}) {
-  if (!key || tuple.botId == null || String(tuple.botId).trim() === "") return null;
+  if (tuple.botId == null || String(tuple.botId).trim() === "") return null;
+  if (SCOPE_ACTOR_KINDS.includes(kind)) {
+    if (!scopeKey || !String(scopeRefFor(tuple) || "").startsWith("j:")) return null;
+    const msg = messageFor(kind, tuple);
+    return msg ? createHmac("sha256", scopeKey).update(msg).digest("hex") : null;
+  }
+  if (!key) return null;
   const msg = messageFor(kind, tuple);
   return msg ? createHmac("sha256", key).update(msg).digest("hex") : null;
 }

@@ -180,6 +180,28 @@ export function isTrustedProxy(a, env = process.env) {
   return !!n && compileProxies(env).ranges.some((r) => inRange(n, r));
 }
 
+/**
+ * The loopback-only doors (the cloud door, the signing relay and the loopback
+ * tool mounts) refuse a loopback socket listed in CROW_TRUSTED_PROXIES: a
+ * same-box reverse proxy could be relaying anyone. The one-line warning for a
+ * CROW_TRUSTED_PROXIES that covers loopback, or null when it does not.
+ */
+export function loopbackProxyWarning(env = process.env) {
+  if (!isTrustedProxy("127.0.0.1", env) && !isTrustedProxy("::1", env)) return null;
+  return "[net] WARN CROW_TRUSTED_PROXIES covers a loopback address, so every same-box connection counts as that proxy: " +
+    "the loopback-only doors (the cloud door, the signing relay and the loopback tool mounts) will refuse requests from it, " +
+    "and from every other same-box caller, so bots on this host lose cloud models and their loopback tool connections while it is set " +
+    "(see docs/getting-started/custom-domain.md)";
+}
+
+/** Logs loopbackProxyWarning once (gateway boot). Returns true when it logged. */
+export function warnLoopbackProxiedDoors({ env = process.env, log = console.warn } = {}) {
+  const w = loopbackProxyWarning(env);
+  if (!w) return false;
+  log(w);
+  return true;
+}
+
 // ---- the classifier ---------------------------------------------------------
 // Any of these on a loopback socket means a forwarder is in the path, so the
 // request is not "local". x-forwarded-proto joined in roles phase 2 (the cloud
@@ -216,12 +238,19 @@ function loginOf(headers) {
 const hasForwarding = (headers) => FORWARDING.some((h) => present(headers[h]));
 const hasTailscale = (headers) => Object.keys(headers).some((h) => h.toLowerCase().startsWith("tailscale-"));
 
-/** The "local" rule of classifyPeer, for a caller that has only the socket
- * address and the headers: a loopback socket, no forwarding header and no
- * tailscale-* header. The cloud door's source check. */
+/**
+ * The single loopback rule: the socket is loopback, is NOT a declared proxy,
+ * and the request carries no forwarding header and no tailscale-* header.
+ * A same-box reverse proxy listed in CROW_TRUSTED_PROXIES is a proxy, not
+ * local. classifyPeer's `local` branch derives from this, and the cloud door
+ * and the loopback mounts use it as their source check. Any throw -> false.
+ */
 export function isLocalPeer(remoteAddr, headers = {}) {
-  const h = headers || {};
-  return isLoopbackAddr(normalizeAddr(remoteAddr || "")) && !hasForwarding(h) && !hasTailscale(h);
+  try {
+    const sock = normalizeAddr(remoteAddr || "");
+    const h = headers || {};
+    return !!sock && isLoopbackAddr(sock) && !isTrustedProxy(sock) && !hasForwarding(h) && !hasTailscale(h);
+  } catch { return false; }
 }
 
 /** → { via, client, hops, socket, tailnetLogin, peerUid }. See the table above. */
@@ -233,7 +262,6 @@ export function classifyPeer(req) {
   const hops = forwardedAddrs(headers).map((a) => (a === null ? null : normalizeAddr(a)));
   const out = { via: "unverified", client: sock, hops, socket: sock, tailnetLogin: null, peerUid: null };
   const hasFwd = hasForwarding(headers);
-  const hasTs = hasTailscale(headers);
 
   if (!sock) {
     // no peer address: stays unverified
@@ -243,7 +271,7 @@ export function classifyPeer(req) {
   } else if (!isLoopbackAddr(sock)) {
     out.via = "direct";
     if (hasFwd) undeclaredHint(sock);
-  } else if (!hasFwd && !hasTs) {
+  } else if (isLocalPeer(sock, headers)) {
     out.via = "local";
   } else {
     const xff = headerValues(headers["x-forwarded-for"]).map((v) => v.trim()).filter(Boolean);

@@ -409,9 +409,33 @@ export function llmCloudTokenPath() {
  *  A reader sees the old token or the new one, never a partial or
  *  world-readable file. Returns the raw token. */
 export async function rotateLlmCloudToken(db) {
+  return rotateTokenFile(db, {
+    path: llmCloudTokenPath(), hashKey: LLM_CLOUD_HASH_KEY, createdKey: LLM_CLOUD_CREATED_KEY, label: "llm-cloud-token",
+    ensureDir: (d) => mkdirSync(d, { recursive: true }), onFailure: "restore",
+  });
+}
+
+/**
+ * The one rotation both per-boot token shapes use (the cloud-door token and
+ * every pathScopedToken). Steps 1-3 as rotateLlmCloudToken describes. What a
+ * failure leaves behind is the caller's choice:
+ *  - "restore" (the cloud door): the old file and the old hash keep matching,
+ *    so the old token keeps validating;
+ *  - "fail-closed" (the loopback tool families, "rotated every boot"): ANY
+ *    failure deletes the stored hash, so no token validates (not even the
+ *    previous boot's) until a rotation succeeds.
+ * Throws the step's error either way.
+ */
+async function rotateTokenFile(db, { path, hashKey, createdKey, label, ensureDir, onFailure }) {
   const token = randomBytes(32).toString("hex");
-  const path = llmCloudTokenPath();
-  mkdirSync(dirname(path), { recursive: true });
+  const failClosed = async (err) => {
+    try { await deleteLocalSetting(db, hashKey); } catch (e) {
+      console.warn(`[${label}] could not delete the stored hash after a failed rotation: ${e.message}`);
+    }
+    throw err;
+  };
+  const bail = async (err) => { if (onFailure === "fail-closed") return failClosed(err); throw err; };
+  try { ensureDir(dirname(path)); } catch (err) { return bail(err); }
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const dropTmp = () => { try { unlinkSync(tmp); } catch { /* already gone */ } };
   try {
@@ -419,32 +443,33 @@ export async function rotateLlmCloudToken(db) {
     chmodSync(tmp, 0o600);
   } catch (err) {
     dropTmp();
-    throw err;
+    return bail(err);
   }
   let oldHash;
   try {
-    oldHash = await readSetting(db, LLM_CLOUD_HASH_KEY);
-    await writeSetting(db, LLM_CLOUD_HASH_KEY, sha256Hex(token), { scope: "local" });
+    oldHash = await readSetting(db, hashKey);
+    await writeSetting(db, hashKey, sha256Hex(token), { scope: "local" });
   } catch (err) {
     dropTmp();
-    throw err;
+    return bail(err);
   }
   try {
     renameSync(tmp, path);
   } catch (err) {
     dropTmp();
+    if (onFailure === "fail-closed") return failClosed(err);
     try {
-      if (oldHash) await writeSetting(db, LLM_CLOUD_HASH_KEY, oldHash, { scope: "local" });
-      else await deleteLocalSetting(db, LLM_CLOUD_HASH_KEY);
+      if (oldHash) await writeSetting(db, hashKey, oldHash, { scope: "local" });
+      else await deleteLocalSetting(db, hashKey);
     } catch (restoreErr) {
       // Best effort: the next boot rotates again. Until then the stored hash
-      // matches no file, so bots cannot reach the door.
-      console.warn(`[llm-cloud-token] could not put the old hash back after a failed rename: ${restoreErr.message}`);
+      // matches no file, so nothing validates.
+      console.warn(`[${label}] could not put the old hash back after a failed rename: ${restoreErr.message}`);
     }
     throw err;
   }
   try {
-    await writeSetting(db, LLM_CLOUD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+    await writeSetting(db, createdKey, new Date().toISOString(), { scope: "local" });
   } catch { /* informational only */ }
   return token;
 }
@@ -461,6 +486,47 @@ export async function validateLlmCloudToken(db, token) {
 }
 
 export const LLM_CLOUD_TOKEN_KEYS = { HASH: LLM_CLOUD_HASH_KEY, CREATED: LLM_CLOUD_CREATED_KEY };
+
+// Path-scoped token factory (loopback mount helper, spec §2.1): ONE shape for
+// every loopback-mounted family (services, satellite tools, ...). The raw token
+// lives at <crowHome>/secrets/<name>-token (0600), only its sha256 in a
+// local-scope setting under the family's OWN hash key, so validate() accepts
+// that family's token and nothing else: no local/board/phone/... token opens a
+// family mount, and a family token opens no other validator (none of them
+// consult these keys). `home` (string or () => string) overrides the crow home
+// for tests. Rotated on EVERY boot (see boot/mcp-mounts.js), never "ensure".
+export function pathScopedToken({ name, hashKey, createdKey, home }) {
+  const root = () => (typeof home === "function" ? home() : home) || crowHome();
+  const path = () => join(root(), "secrets", `${name}-token`);
+  return {
+    name,
+    path,
+    /** rotateTokenFile's ordering (a reader sees the old token or the new
+     *  one, never a partial or world-readable file), failing CLOSED: any
+     *  failure deletes this family's stored hash, so the previous boot's
+     *  token stops validating and the family refuses every request until a
+     *  rotation succeeds (the next boot). secrets/ is made (and tightened)
+     *  0700 by the shared ensureSecretsDir. */
+    async rotate(db) {
+      return rotateTokenFile(db, { path: path(), hashKey, createdKey, label: `${name}-token`, ensureDir: ensureSecretsDir, onFailure: "fail-closed" });
+    },
+    /** Timing-safe check against this family's hash ONLY. */
+    async validate(db, token) {
+      try {
+        if (!token || typeof token !== "string") return false;
+        const stored = await readSetting(db, hashKey);
+        if (!stored) return false;
+        const a = Buffer.from(sha256Hex(token), "hex");
+        const b = Buffer.from(stored, "hex");
+        return a.length === b.length && timingSafeEqual(a, b);
+      } catch { return false; }
+    },
+  };
+}
+
+// Key names follow this file's existing `mcp_<x>_token_hash` / `_created` shape.
+export const SERVICES_TOKEN = pathScopedToken({ name: "services", hashKey: "mcp_services_token_hash", createdKey: "mcp_services_token_created" });
+export const SATELLITE_TOOLS_TOKEN = pathScopedToken({ name: "satellite-tools", hashKey: "mcp_satellite_tools_token_hash", createdKey: "mcp_satellite_tools_token_created" });
 
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,

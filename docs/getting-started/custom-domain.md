@@ -125,6 +125,10 @@ CROW_TRUSTED_PROXIES=loopback
 
 Without it, the gateway refuses those requests and logs `[net] WARN forwarding headers from undeclared peer` once. If Crow runs in Docker behind `docker-proxy`, use the network's bridge gateway instead (find it with <code v-pre>docker network inspect &lt;network&gt; --format '{{(index .IPAM.Config 0).Gateway}}'</code>). Tailscale Serve and Funnel need no entry. `CROW_ALLOWED_IPS` lists trusted *clients*, not proxies.
 
+::: warning Loopback as a proxy turns the bot-only doors off
+With `CROW_TRUSTED_PROXIES` covering a loopback address (`loopback`, `127.0.0.1`, `::1`), every connection from the same machine counts as that proxy, including your bots' own. The doors that only same-box bots may use (the cloud door for cloud models, the signing relay, and the loopback tool mounts) then refuse every request, so bots on this host lose cloud models and their tool connections. The gateway logs `[net] WARN CROW_TRUSTED_PROXIES covers a loopback address` once at boot when this applies. If your bots need those doors, leave loopback out of `CROW_TRUSTED_PROXIES` and reach the Crow's Nest another way (for example Tailscale Serve).
+:::
+
 On Linux, Crow honours Tailscale Serve's headers only on connections opened by tailscaled's user (`CROW_SERVE_PEER_UIDS`, default `0`, read from `/proc/net/tcp`). On a host without `/proc` (macOS, Windows native) that check cannot run, so it fails closed and tailnet users through Serve are refused. To accept them anyway, set `CROW_SERVE_PEER_UIDS=off` (logged as a warning: any local process could then forge a tailnet identity).
 
 ## Step 4: Set the Public URL

@@ -151,3 +151,13 @@ test("generalLimiterSkip: the loopback signing relay is exempt", () => {
   assert.equal(skip("/internal/actor-sign"), true);
   assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/internal/actor-sign"));
 });
+
+test("generalLimiterSkip: the loopback mount families /services-tools/ and /satellite-tools/ are exempt; lookalikes are not", () => {
+  // Every bot calls them from 127.0.0.1, so one shared bucket would 429 them
+  // all; each mount has its own token, signed actor and in-flight cap.
+  const skip = (path) => generalLimiterSkip({ path });
+  assert.equal(skip("/services-tools/11111111-2222-4333-8444-555555555555/mcp"), true);
+  assert.equal(skip("/satellite-tools/sat-1/mcp"), true);
+  for (const p of ["/services-toolsx/a/mcp", "/services-tools", "/api/services-tools/x", "/satellite-toolsx/a/mcp", "/satellite-tools"]) assert.equal(skip(p), false, p);
+  assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/services-tools/") && GENERAL_LIMITER_SKIP_PREFIXES.includes("/satellite-tools/"));
+});

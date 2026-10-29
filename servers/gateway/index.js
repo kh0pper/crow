@@ -53,7 +53,7 @@ import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { generalLimiterSkip, dashboardLoginKey } from "./middleware/rate-limit.js";
-import { trustedProxyList, resolveClientMiddleware } from "../shared/peer-class.js";
+import { trustedProxyList, resolveClientMiddleware, warnLoopbackProxiedDoors } from "../shared/peer-class.js";
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
@@ -317,6 +317,9 @@ const app = express();
 // entry: resolveClientMiddleware (below) recognises them from the socket.
 // Always an array, never true/false (express-rate-limit validates both).
 app.set("trust proxy", trustedProxyList());
+// A proxy declared on loopback makes every same-box caller that proxy, so the
+// loopback-only doors refuse them: say so once, at boot.
+warnLoopbackProxiedDoors();
 
 // `res.redirectAfterPost(url)` → res.redirect(303, url). Turbo Drive treats
 // 302-after-POST as "stay on current URL" and 303 as "GET the new URL", so

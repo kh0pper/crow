@@ -153,6 +153,12 @@ export const GENERAL_LIMITER_SKIP_PREFIXES = Object.freeze([
   // a bot host unit's main process (routes/actor-sign.js), one call per turn.
   // A refusal here would silently run the turn unsigned.
   "/internal/actor-sign",
+  // The loopback mount families (loopback-tool-mount.js): local only, each with
+  // its own path-scoped token, a signed bot actor and an in-flight cap per
+  // mount key. Every bot shares 127.0.0.1, so one bucket would 429 them all.
+  // A remote caller is refused there with an empty 404 before any work (the
+  // mount's source check is its first step, ahead of any DB read).
+  "/services-tools/", "/satellite-tools/",
 ]);
 
 /** express-rate-limit `skip` predicate for the general limiter; `extraPrefixes` = GATEWAY_RATE_LIMIT_SKIP_PREFIXES. */
