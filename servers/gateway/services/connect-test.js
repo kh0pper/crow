@@ -28,7 +28,7 @@ import { networkInterfaces } from "node:os";
 import { classifyIp, parseIPv6 } from "../../shared/ip-classify.js";
 import { getOwnAddresses } from "../../shared/locality.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
-import { instanceSecretsDirs } from "../../shared/secret-values.js";
+import { checkedInstanceSecretsDirs } from "../../shared/secret-values.js";
 import { gatewayListenPort } from "../listen-port.js";
 import { t, fill } from "../dashboard/shared/i18n.js";
 
@@ -284,9 +284,9 @@ function realOr(p) {
  *  - `not_found`: not a non-empty absolute path, missing, or not a directory;
  *  - `forbidden_target`: after realpath, inside or containing this instance's home (its secrets,
  *    bundles' .env files, data/crow.db) or any other Crow home's secrets dir on this host
- *    (instanceSecretsDirs). A scan that can't be completed refuses (fail closed);
+ *    (checkedInstanceSecretsDirs: the scan plus every other-instance dir this instance hid before, the same rule the bot launcher uses). A scan that can't be completed, or a remembered dir that is gone or replaced, refuses (fail closed);
  *  - `not_a_vault`: `expectEntry` given and not present (a name, never a path).
- * Options: `crowHome`, `env` and `instanceScan` (passed to instanceSecretsDirs), or
+ * Options: `crowHome`, `env` and `instanceScan` (passed to checkedInstanceSecretsDirs), or
  * `otherSecretsDirs` to supply the other homes' secrets dirs directly.
  */
 export function folderRefusal(path, {
@@ -306,7 +306,7 @@ export function folderRefusal(path, {
   const home = resolvePath(crowHome);
   const guarded = new Set([home, realOr(home), join(home, "secrets"), realOr(join(home, "secrets"))]);
   try {
-    const others = otherSecretsDirs ?? instanceSecretsDirs({ ...env, CROW_HOME: home }, instanceScan);
+    const others = otherSecretsDirs ?? checkedInstanceSecretsDirs({ ...env, CROW_HOME: home }, instanceScan);
     for (const d of others) { guarded.add(resolvePath(d)); guarded.add(realOr(d)); }
   } catch {
     return "forbidden_target";

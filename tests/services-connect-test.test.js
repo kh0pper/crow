@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import https from "node:https";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, networkInterfaces } from "node:os";
 import { lookup as dnsLookup } from "node:dns";
+import { rememberInstanceSecretsDirs } from "../servers/shared/secret-values.js";
 import {
   renderTemplate, normalizeAddress, testConnection, isForbiddenTarget, probeOwnAddresses, folderRefusal, BODY_CAP_BYTES,
 } from "../servers/gateway/services/connect-test.js";
@@ -483,6 +484,27 @@ test("folderRefusal: the rest of crowHome, other instances' secrets, symlinks in
     assert.equal(folderRefusal(join(root, "nope"), opts), "not_found");
     // A scan that can't complete refuses (fail closed).
     assert.equal(folderRefusal(join(root, "vault"), { crowHome, otherSecretsDirs: { [Symbol.iterator]() { throw new Error("x"); } } }), "forbidden_target");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("folderRefusal: the bot launcher's remembered-instance rule applies; a remembered dir that is gone or replaced refuses", () => {
+  const root = mkdtempSync(join(tmpdir(), "svc-folder-known-"));
+  try {
+    const fakeHome = join(root, "home");
+    const crowHome = join(fakeHome, ".crow-b");
+    const other = join(fakeHome, ".crow-c");
+    for (const d of [join(crowHome, "secrets"), join(other, "secrets", "v", ".obsidian"), join(root, "vault", ".obsidian")]) mkdirSync(d, { recursive: true });
+    const env = { HOME: fakeHome, CROW_HOME: crowHome };
+    const opts = { crowHome, expectEntry: ".obsidian", env, instanceScan: { home: fakeHome, unitDirs: [], envFileDirs: [] } };
+    // An earlier spawn hid the other instance's secrets dir and remembered it.
+    rememberInstanceSecretsDirs([join(other, "secrets")], env);
+    assert.equal(folderRefusal(join(other, "secrets", "v"), opts), "forbidden_target");
+    assert.equal(folderRefusal(join(root, "vault"), opts), null);
+    // A bot moves that home out of the scan's reach: every folder is refused until the operator forgets it.
+    renameSync(other, join(root, "moved"));
+    assert.equal(folderRefusal(join(root, "vault"), opts), "forbidden_target", "a remembered dir that is gone fails closed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
