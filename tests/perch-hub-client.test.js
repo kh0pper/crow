@@ -5528,6 +5528,9 @@ test("groupLabel: running / agents / steps / failed / never all ok", async () =>
   assert.equal(groupLabel({ total: 3, failed: 1, running: 0, others: 2, agents: ["scout"] }, en),
     "See what happened · scout · 3 steps, 1 failed");
   assert.equal(groupLabel({ total: 3, failed: 2, running: 0, agents: [] }, es), "Ver qué pasó · 3 pasos, 2 fallaron");
+  assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, true), "See what happened · running",
+    "chips all done but the turn still running: running");
+  assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, false), "See what happened · 2 steps");
   for (const c of [{ total: 2, failed: 0, running: 0, agents: [] }, { total: 0, failed: 0, running: 0 }]) {
     assert.doesNotMatch(groupLabel(c, en), /all ok|ok$/i, "it never says all ok");
   }
@@ -5628,6 +5631,41 @@ test("history groups match live groups", async () => {
   assert.deepEqual(histRows, liveRows, "a reloaded turn looks like the live one");
 });
 
+test("a reload mid-turn reads running and folds at the reply", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "m1", name: "bash", arguments: {} }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "m1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+  ];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({
+    "/transcript": () => gate.then(() => makeResponse(200, { events })) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });   // the replayed state lands before the history
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · running|true|bash]"],
+    "the running turn's history group reads running and stays open");
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 1 step|false|bash]"],
+    "the turn's end folds it");
+});
+
+test("a reload of a finished turn stays folded (no turn in flight)", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "toolResult", toolCallId: "f1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · 1 step|false|bash]"]);
+});
+
 test("history: a subagent group names its agents from the call's arguments", async () => {
   const events = [
     { type: "message", message: { role: "user", content: "go" } },
@@ -5654,7 +5692,7 @@ test("an end without a start counts in new mode only", async () => {
     es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "r1", resultText: "y", isError: false });
     await new Promise((r) => setTimeout(r, 0));
     const rows = rowShape(hub).filter((r) => r !== "entry note");
-    if (sheet) assert.deepEqual(rows, ["group[See what happened · 2 steps|true|bash,read]"]);
+    if (sheet) assert.deepEqual(rows, ["group[See what happened · running|true|bash,read]"], "the turn still runs");
     else assert.deepEqual(rows, ["chip"], "classic: no chip is minted for a call nobody watched begin");
   }
 });
@@ -5669,7 +5707,8 @@ test("a running group is expanded, collapses at turn end; text closes a group; a
   assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"]);
   es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "a1", resultText: "ok", isError: false });
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(rowShape(hub), ["group[See what happened · 1 step|true|bash]"], "still open until the turn ends");
+  assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"],
+    "every chip finished but the model still works: running, and open until the turn ends");
   es._serverFrame("file", { name: "r.txt", stored: "r.txt", servable: true, size: 3, mime: "text/plain" });
   es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "a2" });
   es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "a2", resultText: "ok", isError: false });
@@ -5795,4 +5834,44 @@ test("new mode: the composer placeholder names the session's project from the em
   showIdent.setSid("s2");
   showIdent.showIdent("Bot");
   assert.equal(nodes["perch-input"].attrs.placeholder, "Message");
+});
+
+test("new mode: the day line refreshes on return to the tab and every 10 minutes, without a /roost poll", async () => {
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false, lastActivityAt: now }] }] };
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/roost": () => makeResponse(200, roost) }) });
+  hub.els["perch-ident-sub"] = makeFakeElement("span");
+  await openChatSession(hub);
+  const sub = hub.els["perch-ident-sub"];
+  assert.equal(sub.textContent, "today");
+  const tick = [...hub.timerDelays.entries()].find(([, ms]) => ms === 600000);
+  assert.ok(tick, "a 10-minute refresh runs while the session is open");
+  const roosts = () => hub.fetchCalls.filter((c) => c.path.startsWith("/roost")).length;
+  const before = roosts();
+  sub.textContent = "stale";
+  hub.timers.get(tick[0])();
+  assert.equal(sub.textContent, "today", "the timer redraws the day line from the row and today's date");
+  sub.textContent = "stale";
+  hub.doc.visibilityState = "visible";
+  hub.doc._dispatch("visibilitychange", {});
+  assert.equal(sub.textContent, "today", "a return to the tab redraws it");
+  assert.equal(roosts(), before, "neither asks /roost");
+  hub.location.hash = "";
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.timers.has(tick[0]), false, "leaving the session stops the refresh");
+});
+
+test("classic: no day-line refresh timer", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  assert.equal([...hub.timerDelays.values()].includes(600000), false);
+});
+
+test("an ask closes the composer's + menu", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const s = src.indexOf("function renderAsk(card)");
+  const body = src.slice(s, braceMatchEnd(src, s) + 1);
+  assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);\s*plusClose\(false\);/, "renderAsk closes the sheet and the + menu");
 });

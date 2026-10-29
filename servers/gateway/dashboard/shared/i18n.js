@@ -3352,7 +3352,10 @@ export const translations = {
   // R1.2 PR 2: the new-mode sheet that holds Session, Files and Activity,
   // opened from the bot's name.
   "perch.sheetTitleBot": { en: "{bot} · Session details", es: "{bot} · Detalles de la sesión" },
-  "perch.backProject": { en: "← Back to the project home", es: "← Volver al inicio del proyecto" },
+  // The new-mode head's Back is a 44 px "←" icon: these are its accessible
+  // names, filed (the project's home) and unfiled (the Chat list).
+  "perch.backProject": { en: "Back to the project home", es: "Volver al inicio del proyecto" },
+  "perch.backList": { en: "Back to the sessions", es: "Volver a las sesiones" },
   "perch.plusLabel": { en: "Attach or dictate", es: "Adjuntar o dictar" },
   "perch.composerPlaceholderProject": { en: "Message # {project}", es: "Mensaje # {project}" },
   "perch.identToday": { en: "today", es: "hoy" },

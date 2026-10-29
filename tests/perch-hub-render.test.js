@@ -1743,6 +1743,7 @@ test("new mode: plus menu holds attach and dictate with ids unchanged", async ()
   assert.match(plus, /aria-label="Attach or dictate"/);
   assert.match(plus, /aria-expanded="false"/);
   assert.match(plus, /aria-controls="perch-plus-menu"/);
+  assert.doesNotMatch(plus, /aria-haspopup/, "a disclosure, not a menu widget");
   const menu = c.slice(c.indexOf('<div id="perch-plus-menu"'), c.indexOf('<div id="perch-draft-note"'));
   assert.ok(menu.includes('id="perch-attach"') && menu.includes('id="perch-dictate"'), "both live in the menu");
   assert.match(openTag(menu, "perch-plus-menu"), /\shidden>/, "the menu ships closed");

@@ -230,9 +230,11 @@ test("live: a running group is expanded; it collapses at turn end; a failed grou
     emit("text", { text: "One more thing", turnId: "tg1" });
     emit("tool", { phase: "start", name: "edit", toolCallId: "g2" });
     emit("tool", { phase: "end", name: "edit", toolCallId: "g2", resultText: "no such file", isError: true });
-    await s.waitFor(`JSON.parse(${GROUPS}).length===2&&JSON.parse(${GROUPS})[1].label.indexOf('failed')>0`, "the second group");
+    await s.waitFor(`JSON.parse(${GROUPS}).length===2&&JSON.parse(${GROUPS})[1].err`, "the second group");
     g = await s.json(GROUPS);
     assert.equal(g[0].expanded, "true", "finished but the turn is still going: still open");
+    assert.equal(g[0].label, "See what happened · running", "every chip done, the model still working: running");
+    assert.equal(g[1].label, "See what happened · running", "its failure is counted once the turn ends");
 
     emit("text", { text: "Done", turnId: "tg1" });
     emit("reply", { text: "One more thingDone", turnId: "tg1" });

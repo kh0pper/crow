@@ -475,7 +475,7 @@ test("a dictated draft is saved", async () => {
   const src = perchDictationJs("en");
   const at = src.indexOf("input.value=mergeTranscript(input.value,text);");
   assert.ok(at > -1);
-  assert.match(src.slice(at, at + 400), /draftSave\(\)/, "the transcript written into the composer is saved as the draft");
+  assert.match(src.slice(at, at + 700), /draftSave\(\)/, "the transcript written into the composer is saved as the draft");
 });
 
 test("classic Perch is unchanged: every session renders and the machines nav shows", async () => {

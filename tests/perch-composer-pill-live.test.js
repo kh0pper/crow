@@ -228,6 +228,34 @@ test("plus menu: opens, Escape closes and returns focus, outside tap closes, hid
   } finally { await s.close(); }
 });
 
+test("plus menu: a disclosure — opening focuses its first item, choosing Attach hands focus to the composer", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(390, 800);
+  try {
+    await s.cdp("Page.setInterceptFileChooserDialog", { enabled: true });   // the picker never opens a real dialog
+    assert.equal(await s.evalIn("document.getElementById('perch-plus').hasAttribute('aria-haspopup')"), false);
+    await s.click("perch-plus");
+    await s.waitFor(`${SHOWN("perch-plus-menu")}&&document.activeElement.id==='perch-attach'`, "focus on the first visible item");
+    await s.click("perch-attach");
+    await s.waitFor(`!${SHOWN("perch-plus-menu")}&&document.activeElement.id==='perch-input'`,
+      "the menu closes and focus lands in the composer, not on the hidden entry");
+  } finally { await s.close(); }
+});
+
+test("plus menu: an ask closes it", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(390, 800);
+  try {
+    for (const end = Date.now() + 5000; !streams.size && Date.now() < end;) await sleep(100);
+    await s.click("perch-plus");
+    await s.waitFor(SHOWN("perch-plus-menu"), "the menu");
+    emit("ask_user", { requestId: "q-plus", method: "confirm", title: "Keep going?" });
+    await s.waitFor("!!document.querySelector('#perch-ask .ask-card')", "the ask card");
+    await s.waitFor(`!${SHOWN("perch-plus-menu")}&&document.getElementById('perch-plus').getAttribute('aria-expanded')==='false'`,
+      "the ask closes the + menu");
+  } finally { await s.close(); }
+});
+
 test("390 px: the pill fits with no horizontal scroll, targets at least 44 px", async (t) => {
   if (!available) return t.skip("no headless Chrome");
   const s = await tab(390, 800);

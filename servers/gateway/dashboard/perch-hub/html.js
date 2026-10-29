@@ -35,9 +35,16 @@ function identButton(lang) {
  *  Attach and Dictate (ids unchanged; dictation's probe still decides the
  *  mic's [hidden], and the client hides "+" when neither is available). The
  *  row is hidden as a whole while dictating (dictation-css.js). */
+/** New mode: Back is a 44 px "←" icon whose accessible name says where it
+ *  goes (the client swaps it to the project home for a filed session). */
+function backIconButton(lang) {
+  const name = escapeHtml(t("perch.backList", lang));
+  return `<button type="button" id="perch-back" class="quiet perch-back-icon" aria-label="${name}" title="${name}"><span aria-hidden="true">←</span></button>`;
+}
+
 function pillRow(lang) {
   return `<div class="pill-row">
-        <button type="button" id="perch-plus" class="quiet" aria-label="${escapeHtml(t("perch.plusLabel", lang))}" title="${escapeHtml(t("perch.plusLabel", lang))}" aria-haspopup="true" aria-expanded="false" aria-controls="perch-plus-menu">${PLUS_SVG}</button>
+        <button type="button" id="perch-plus" class="quiet" aria-label="${escapeHtml(t("perch.plusLabel", lang))}" title="${escapeHtml(t("perch.plusLabel", lang))}" aria-expanded="false" aria-controls="perch-plus-menu">${PLUS_SVG}</button>
         <textarea id="perch-input" rows="1" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
         <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
         <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
@@ -227,7 +234,7 @@ ${engineBanner(engine, lang)}
     <!-- #perch-list-reveal leads the head: desktop only, and only while the
          Sessions column is collapsed (sessions-collapse-css.js). Visible text
          "Sessions", accessible name "Show sessions". -->
-    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident">${sheet ? identButton(lang) : `<div class="title" id="perch-bot-name"></div>`}
+    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button>${sheet ? backIconButton(lang) : `<button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>`}<div class="perch-ident">${sheet ? identButton(lang) : `<div class="title" id="perch-bot-name"></div>`}
       <div class="session-name" id="perch-session-name" hidden></div>
       <div class="browser-status" id="perch-browser-status" role="status" hidden></div>
       <div class="meta" id="perch-session-meta"${sheet ? " hidden" : ""}></div></div></div>

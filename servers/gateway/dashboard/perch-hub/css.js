@@ -920,8 +920,21 @@ border-top:1px solid var(--line);flex-shrink:0}
    are painted with. The [open] flex column makes .perch-sheet-inner, and in
    it the visible section (a flex:1 scroller, see the tab-panel rule), the
    only thing that scrolls. */
-#perch-hub-root .perch-ident-btn{display:flex;align-items:center;gap:6px;max-width:100%;min-height:44px;padding:4px 8px;margin-left:-8px;border-color:transparent;background:transparent;color:var(--ink);text-align:left}
+#perch-hub-root .perch-ident-btn{display:flex;align-items:center;gap:6px;max-width:calc(100% + 8px);min-height:44px;padding:4px 8px;margin-left:-8px;border-color:transparent;background:transparent;color:var(--ink);text-align:left}
 #perch-hub-root .perch-ident-btn:hover{background:var(--teal-soft)}
+/* The head row in new mode: Back is a 44 px "←" icon (html.js
+   backIconButton), and the ident takes the rest of the row so the bot name
+   and the "# project · day" line ellipsize only past the row's real width.
+   (2,2,0) outranks the phone chat-head rule for #perch-back. Desktop: the
+   Sessions list beside the chat is the way back to the list, so Back shows
+   only for a filed session ([data-home], client.js showIdent), where it goes
+   to the project home. */
+#perch-hub-root .perch-head #perch-back.perch-back-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;font-size:20px;line-height:1}
+#perch-hub-root .perch-head .perch-ident:has(#perch-ident-btn){flex:1 1 auto;min-width:0}
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
+  #perch-hub-root .perch-head #perch-back.perch-back-icon{display:none}
+  #perch-hub-root .perch-head #perch-back.perch-back-icon[data-home]{display:inline-flex}
+}
 #perch-hub-root .perch-ident-btn .title{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #perch-hub-root .perch-ident-text{display:flex;flex-direction:column;min-width:0;line-height:1.25}
 #perch-hub-root .perch-ident-sub{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--dim)}
