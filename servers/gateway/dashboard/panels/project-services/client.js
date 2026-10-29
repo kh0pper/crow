@@ -33,6 +33,7 @@
  */
 
 import { t } from "../../shared/i18n.js";
+import { LABEL_MAX } from "../../../../shared/service-catalog.js";
 
 const GROUP_ORDER = ["network", "signin", "paste", "builtin"];
 const STATUSES = ["active", "needs_reauth", "error", "needs_install", "disconnected", "not_tested"];
@@ -87,6 +88,8 @@ export function projectServicesData(page, lang = "en") {
     project: { slug: page?.project?.slug || "", name: page?.project?.name || "" },
     lang,
     botsLive,
+    order: [...GROUP_ORDER],      // the one group order; the client reads it from here
+    labelMax: LABEL_MAX,          // the server's account-name cap (cleanLabel)
     groups,
     strings,
   };
@@ -116,6 +119,7 @@ export function projectServicesClientJs() {
     DATA = dn ? JSON.parse(dn.textContent || 'null') : null;
   } catch (e) { DATA = null; }
   var S = (DATA && DATA.strings) || {};
+  var ORDER = (DATA && DATA.order) || [];
   function T(k) { return HAS.call(S, k) ? S[k] : k; }
   // {name} placeholders in ONE pass: a value holding "{project}" stays as typed.
   function fillOnce(str, params) {
@@ -238,15 +242,20 @@ export function projectServicesClientJs() {
   var sheet = null;
   var connected = false;   // a connection was made while the sheet was open: re-render on close
   var closing = false;
+  // Bumped whenever the sheet's view is replaced or the sheet closes: a connect answer that
+  // arrives for an older view never touches the current one.
+  var view = 0;
 
-  function wipeSecrets() {
-    if (!sheet) return;
-    var s = sheet.querySelectorAll('input.svc-secret');
+  function wipeSecrets(scope) {
+    var box = scope || sheet;
+    if (!box) return;
+    var s = box.querySelectorAll('input.svc-secret');
     for (var i = 0; i < s.length; i++) s[i].value = '';
   }
   function onClosed() {
     if (closing || (sheet && sheet.open)) return;   // a late close event after the sheet reopened
     closing = true;
+    view++;
     wipeSecrets();
     if (sheet) clearKids(sheet);
     closing = false;
@@ -300,9 +309,8 @@ export function projectServicesClientJs() {
   function allServices() {
     var out = [];
     var g = (DATA && DATA.groups) || {};
-    var order = ['network', 'signin', 'paste', 'builtin'];
-    for (var i = 0; i < order.length; i++) {
-      var list = g[order[i]] || [];
+    for (var i = 0; i < ORDER.length; i++) {
+      var list = g[ORDER[i]] || [];
       for (var j = 0; j < list.length; j++) out.push(list[j]);
     }
     return out;
@@ -319,6 +327,7 @@ export function projectServicesClientJs() {
     if (!DATA) return;
     ensureSheet();
     wipeSecrets();
+    view++;
     clearKids(sheet);
     head(fillOnce(T('services.add.title'), { project: DATA.project.name }), false);
     var lab = el('label', 'svc-field-label', T('services.add.search'));
@@ -332,13 +341,14 @@ export function projectServicesClientJs() {
     sheet.appendChild(q);
 
     var g = DATA.groups || {};
-    var buckets = { network: [], signin: [], paste: [], builtin: [] };
-    var order = ['network', 'signin', 'paste', 'builtin'];
+    var buckets = {};
+    var order = ORDER;
+    for (var b = 0; b < order.length; b++) buckets[order[b]] = [];
     for (var i = 0; i < order.length; i++) {
       var list = g[order[i]] || [];
       for (var j = 0; j < list.length; j++) {
         var s = list[j];
-        var to = order[i] === 'network' && s.found !== true ? 'paste' : order[i];
+        var to = order[i] === 'network' && s.found !== true && buckets.paste ? 'paste' : order[i];
         buckets[to].push(s);
       }
     }
@@ -451,6 +461,7 @@ export function projectServicesClientJs() {
   function openConnect(svc) {
     ensureSheet();
     wipeSecrets();
+    var mine = ++view;
     clearKids(sheet);
     head(svc.name, true);
     var form = el('form', 'svc-connect');
@@ -532,7 +543,7 @@ export function projectServicesClientJs() {
     label = el('input', 'svc-input');
     label.type = 'text';
     label.id = 'svc-f-label';
-    label.setAttribute('maxlength', '60');
+    label.setAttribute('maxlength', String(DATA.labelMax || 60));
     label.setAttribute('autocomplete', 'off');
     label.setAttribute('data-svc-label', '');
     label.value = svc.labelFrom === 'address' ? '' : T('services.connect.labelDefault');
@@ -594,16 +605,25 @@ export function projectServicesClientJs() {
       }, function () { return { status: 0, j: null }; }).then(function (res) {
         body = null;
         inflight = false;
+        var saved = res.status === 201 && res.j && res.j.ok === true;
+        if (mine !== view) {
+          // The sheet was closed or moved on while this was in flight: leave the current view
+          // alone; a connection that was made still shows on the page.
+          if (saved && document.body && document.body.contains(root)) reload();
+          return;
+        }
         var code = res.j && typeof res.j.error === 'string' ? res.j.error : null;
         // Cleared once saved, or when the key itself was refused; kept through other failures
         // (a wrong address or label) so it needn't be pasted again. Closing always clears it.
-        if (res.status === 201 || code === 'auth_failed') wipeSecrets();
-        if (res.status === 201 && res.j && res.j.ok === true) {
+        if (res.status === 201 || code === 'auth_failed') wipeSecrets(form);
+        if (saved) {
           done = true;
           connected = true;
           var all = form.querySelectorAll('input');
           for (var i = 0; i < all.length; i++) all[i].disabled = true;
           ok.textContent = T(DATA.botsLive === true ? 'services.connect.ok' : 'services.connect.okPending');
+          ok.setAttribute('tabindex', '-1');
+          try { ok.focus(); } catch (e2) { /* no focus in this environment */ }
           return;
         }
         submit.disabled = false;
@@ -613,6 +633,9 @@ export function projectServicesClientJs() {
       });
     });
     showSheet();
+    // The Connect button that had focus is gone: start on the first field.
+    var first = form.querySelector('input');
+    try { if (first) first.focus(); } catch (e) { /* no focus in this environment */ }
   }
 
   root.addEventListener('click', function (e) {
@@ -632,8 +655,11 @@ export function projectServicesClientJs() {
   });
 
   // Turbo keeps a copy of the page for Back: never with a typed secret or an open sheet in it.
+  // The bound flag never goes into the cache either: a restored snapshot (Back) binds again.
   document.addEventListener('turbo:before-cache', function uncache() {
     document.removeEventListener('turbo:before-cache', uncache);
+    root.removeAttribute('data-svc-bound');
+    view++;
     if (!sheet) return;
     wipeSecrets();
     connected = false;

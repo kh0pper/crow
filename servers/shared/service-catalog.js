@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 
 const REGISTRY_URL = new URL("../../registry/add-ons.json", import.meta.url);
 const SLUG_MAX = 16;
-const LABEL_MAX = 60;
+export const LABEL_MAX = 60;   // an account name's cap (cleanLabel); the connect sheet uses it too
 
 let _defaultRegistry = null;
 

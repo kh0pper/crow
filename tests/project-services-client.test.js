@@ -14,7 +14,7 @@ import { projectServicesHtml } from "../servers/gateway/dashboard/panels/project
 import {
   projectServicesClientJs, projectServicesData, projectServicesDataScript, ERROR_CODES,
 } from "../servers/gateway/dashboard/panels/project-services/client.js";
-import { serviceById } from "../servers/shared/service-catalog.js";
+import { serviceById, LABEL_MAX } from "../servers/shared/service-catalog.js";
 import { t, translations } from "../servers/gateway/dashboard/shared/i18n.js";
 
 const CLIENT_HTML = projectServicesClientJs();
@@ -68,15 +68,19 @@ function boot({ pageData = page(), lang = "en", fetchImpl } = {}) {
   const consoleStub = { log: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
   window.location = location;
   window.confirm = () => true;
+  const focused = [];
+  window.HTMLElement.prototype.focus = function () { focused.push(this); };
   const ctx = vm.createContext({ window, document, location, fetch: fetchStub, URL, console: consoleStub });
   vm.runInContext(CLIENT_JS, ctx);
+  const rerun = () => vm.runInContext(CLIENT_JS, ctx);
   const click = (el) => el.dispatchEvent(new window.Event("click", { bubbles: true }));
   const type = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
   const submit = (form) => form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
   const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
   const sheet = () => document.querySelector("[data-svc-sheet]");
   const isOpen = () => !!sheet() && (sheet().open === true || sheet().hasAttribute("open"));
-  return { window, document, click, type, submit, settle, calls, logs, sheet, isOpen, visits, reloads: () => reloads };
+  const lastFocus = () => focused[focused.length - 1] || null;
+  return { window, document, click, type, submit, settle, calls, logs, sheet, isOpen, visits, reloads: () => reloads, rerun, lastFocus };
 }
 
 function openConnect(s, id) {
@@ -106,6 +110,32 @@ test("Add sheet: title, groups in order (network falls under Paste a key without
   assert.equal(s.sheet().querySelector('[data-svc-connect="brave-search"]'), null);
   assert.equal(s.sheet().querySelector(".svc-browse").getAttribute("href"), "/dashboard/extensions");
   assert.equal(s.sheet().querySelector(".svc-browse").textContent, "Browse everything");
+});
+
+test("every group populated, with a discovery hit: network, signin, paste, builtin, in that order", () => {
+  const p = page();
+  p.groups.network = [{ ...card("home-assistant", true), found: true }];
+  p.groups.signin = [{ serviceId: "demo-signin", name: "Demo sign-in", installed: true, labelFrom: null, fields: [], steps: [], stepLinks: {} }];
+  const d = projectServicesData(p, "en");
+  assert.deepEqual(d.order, ["network", "signin", "paste", "builtin"], "one group order, from the server");
+  assert.equal(d.strings["services.group.network"], "Found on your network", "the heading's copy ships only with a hit");
+  const s = boot({ pageData: p });
+  s.click(s.document.querySelector(".svc-add"));
+  const groups = [...s.sheet().querySelectorAll(".svc-group")].map((g) => g.getAttribute("data-group"));
+  assert.deepEqual(groups, ["network", "signin", "paste", "builtin"]);
+  const heads = [...s.sheet().querySelectorAll(".svc-group > .svc-label")].map((h) => h.textContent);
+  assert.deepEqual(heads, ["Found on your network", "Sign in", "Paste a key", "On this Crow"]);
+  assert.equal(s.sheet().querySelector('[data-group="network"] [data-svc-pick]').getAttribute("data-service"), "home-assistant");
+});
+
+test("PR 2's real payload has no discovery hit: 'Found on your network' never renders", () => {
+  const p = page();
+  p.groups.signin = [{ serviceId: "demo-signin", name: "Demo sign-in", installed: true, labelFrom: null, fields: [], steps: [], stepLinks: {} }];
+  const s = boot({ pageData: p });
+  s.click(s.document.querySelector(".svc-add"));
+  const groups = [...s.sheet().querySelectorAll(".svc-group")].map((g) => g.getAttribute("data-group"));
+  assert.deepEqual(groups, ["signin", "paste", "builtin"]);
+  assert.ok(!s.sheet().textContent.includes("Found on your network"));
 });
 
 test("'Add one here' opens the same sheet; Spanish copy comes from the page's language", () => {
@@ -145,6 +175,8 @@ test("connect sheet: numbered steps, inputs by kind, the label pre-filled, the F
   assert.equal(tok.getAttribute("value"), null);
   assert.equal(form.querySelector(`label[for="${tok.id}"]`).textContent, "Token");
   assert.equal(form.querySelector("[data-svc-label]").value, "main");
+  assert.equal(form.querySelector("[data-svc-label]").getAttribute("maxlength"), String(LABEL_MAX), "the server's cap");
+  assert.equal(s.lastFocus(), tok, "focus moves to the first field when the view switches");
   assert.equal(form.querySelector(".svc-for").textContent, "For: Spring · Only your bots use it");
   assert.ok(!s.sheet().textContent.includes("satellite"));
   assert.equal(form.querySelector(".svc-submit").textContent, "Connect and test");
@@ -220,6 +252,8 @@ test("Connect and test POSTs the body with X-Crow-Csrf; the secret never reaches
   assert.equal(tok.value, "", "the typed secret is cleared once the answer is in");
   assert.ok(!s.document.documentElement.outerHTML.includes(SECRET), "not in the DOM");
   assert.equal(form.querySelector("[data-svc-ok]").textContent, "Connected and tested.");
+  assert.equal(s.lastFocus(), form.querySelector("[data-svc-ok]"), "focus lands on the result line");
+  assert.equal(form.querySelector("[data-svc-ok]").getAttribute("tabindex"), "-1");
   assert.ok(s.isOpen(), "the sheet shows the result");
   assert.deepEqual(s.logs, [], "nothing logged");
   assert.equal(s.reloads(), 0);
@@ -321,6 +355,52 @@ test("Back returns to the list and wipes the typed secret; closing wipes it; Tur
   s.document.dispatchEvent(new s.window.Event("turbo:before-cache"));
   assert.equal(s.sheet(), null, "the sheet is gone before the snapshot");
   assert.ok(!s.document.documentElement.outerHTML.includes(SECRET));
+});
+
+test("a restored Turbo snapshot (Back) binds again", () => {
+  const s = boot();
+  s.click(s.document.querySelector(".svc-add"));
+  s.document.dispatchEvent(new s.window.Event("turbo:before-cache"));
+  // Turbo renders a clone of the cached page and runs its scripts again.
+  const root = s.document.querySelector("[data-svc]");
+  assert.equal(root.getAttribute("data-svc-bound"), null, "the flag never goes into the cache");
+  const clone = root.cloneNode(true);
+  root.parentNode.replaceChild(clone, root);
+  s.rerun();
+  s.click(s.document.querySelector(".svc-add"));
+  assert.ok(s.isOpen(), "+ Add works after Back");
+});
+
+test("closing during an in-flight connect: the late answer leaves a newly opened sheet alone, and a success re-renders", async () => {
+  let answer = { status: 201, body: { ok: true, connection: {} } };
+  const s = boot({ fetchImpl: () => answer });
+  // The stubbed answer resolves asynchronously, so closing and reopening right after the submit
+  // happens while the request is still in flight.
+  let form = openConnect(s, "github");
+  s.type(form.querySelector('input[data-field="GITHUB_PERSONAL_ACCESS_TOKEN"]'), SECRET);
+  s.submit(form);
+  s.click(s.sheet().querySelector("[data-svc-close]"));
+  form = openConnect(s, "github");
+  const tok2 = form.querySelector('input[data-field="GITHUB_PERSONAL_ACCESS_TOKEN"]');
+  s.type(tok2, "test-token-9");
+  await s.settle();
+  assert.equal(tok2.value, "test-token-9", "the late answer never clears the new sheet's secret");
+  assert.equal(form.querySelector("[data-svc-ok]").textContent, "", "nor writes into it");
+  assert.equal(s.reloads(), 1, "the connection that was made shows on the page");
+  // A late failure does nothing at all.
+  answer = { status: 400, body: { error: "auth_failed" } };
+  const s2 = boot({ fetchImpl: () => answer });
+  let f2 = openConnect(s2, "github");
+  s2.type(f2.querySelector('input[data-field="GITHUB_PERSONAL_ACCESS_TOKEN"]'), SECRET);
+  s2.submit(f2);
+  s2.click(s2.sheet().querySelector("[data-svc-close]"));
+  f2 = openConnect(s2, "github");
+  const tok3 = f2.querySelector('input[data-field="GITHUB_PERSONAL_ACCESS_TOKEN"]');
+  s2.type(tok3, "test-token-10");
+  await s2.settle();
+  assert.equal(tok3.value, "test-token-10");
+  assert.equal(f2.querySelector("[data-svc-error]").textContent, "");
+  assert.equal(s2.reloads(), 0);
 });
 
 test("Install leaves for the extensions page (the install-then-connect sheet is a later task)", () => {
