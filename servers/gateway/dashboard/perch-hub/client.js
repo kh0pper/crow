@@ -3418,6 +3418,10 @@ export function perchHubJs(lang = "en") {
       document.addEventListener('turbo:before-cache',function(){
         var d=document.getElementById('perch-session-sheet');
         if(d&&d.open&&typeof d.close==='function') d.close();
+        /* R1.2 PR 3: a cached snapshot never carries the card-scoped Make link. */
+        var m=document.querySelector('a.shell-tab[data-shell-tab="make"]');
+        var base=m&&m.getAttribute('data-shell-href');
+        if(base!=null) m.setAttribute('href',base);
       });
     }
   }

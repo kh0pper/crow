@@ -166,3 +166,14 @@ test("make tab resets when the card session closes; no card, no change", async (
     assert.equal(await n.evalIn(MAKE), "/dashboard/make", "a session without a card leaves Make alone");
   } finally { await n.close(); withCard = true; }
 });
+
+test("turbo:before-cache restores the Make tab's server link", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  withCard = true;
+  const s = await tab(1280, 900);
+  try {
+    await s.waitFor(MAKE + ".indexOf('scope=card:42')>-1", "Make scoped to the card");
+    await s.evalIn("document.dispatchEvent(new Event('turbo:before-cache')); 1");
+    assert.equal(await s.evalIn(MAKE), "/dashboard/make");
+  } finally { await s.close(); }
+});
