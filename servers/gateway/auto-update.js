@@ -262,7 +262,10 @@ export async function acquireCheckoutLock({ appRoot = null, waitMs = 6 * 60 * 10
   const observeOnly = await treeIsExternal(appRoot);
   for (;;) {
     if (observeOnly) {
-      if (!existsSync(lock) || lockIsStale(readLock(lock))) return lock + OBSERVED_SUFFIX;
+      // A lock that exists but cannot be read (another user's 0600 file) is held:
+      // fail closed, never proceed into a pull that may be mid-write.
+      const info = existsSync(lock) ? readLock(lock) : null;
+      if (!existsSync(lock) || (info && lockIsStale(info))) return lock + OBSERVED_SUFFIX;
       if (Date.now() >= deadline) return null;
       await new Promise((r) => setTimeout(r, pollMs));
       continue;
