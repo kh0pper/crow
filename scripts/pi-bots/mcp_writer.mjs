@@ -381,7 +381,9 @@ export function writeBotMcp(def, opts = {}) {
     // convention as the board block), never the peer, and holds no peer
     // credential. The relay token is this instance's; the actor is this turn's.
     const gatewayPort = opts.gatewayPort || process.env.CROW_GATEWAY_PORT || 3001;
-    const actor = opts.botId ? { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType } : undefined;
+    // opts.sessionId: this turn's bot_sessions.id, which the relay signature
+    // binds (actor-sig.mjs v2) and the relay resolves and checks.
+    const actor = opts.botId ? { botId: opts.botId, sessionId: opts.sessionId, threadId: opts.threadId, gatewayType: opts.gatewayType } : undefined;
     const { blocks, warnings } = mintRemoteBlocks(def, {
       peerGatewayUrls: opts.peerGatewayUrls || {},
       proxyPath,

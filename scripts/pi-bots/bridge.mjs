@@ -59,7 +59,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // bot-world.mjs so P2's interactive engine can build the SAME world without
 // this module's per-turn channel semantics. bot-world imports back LAZILY —
 // see its CYCLE NOTE.
-import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
+import { buildBotWorld, prepareSpawn, bindWorldSession } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
@@ -1216,6 +1216,14 @@ export async function handleInbound(opts) {
     pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }, opts.kind ? { kind: String(opts.kind) } : {}));
+
+  // Item 46 PR-B: the config's actor signatures bind this session's id. A
+  // first turn of a thread had no row when the world was built (the row is
+  // stamped just above, at exactly the point it always was), so the config is
+  // rebuilt now with its id, before anything is spawned. No-op otherwise.
+  if (await bindWorldSession(world, session)) {
+    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { mcpConfig: world.mcpConfig });
+  }
 
   // Warm the resolved model bundle before spawning pi (same as runJob). The
   // bridge is a separate process from the gateway, so it warms over HTTP via

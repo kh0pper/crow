@@ -16,7 +16,9 @@
  * Order, every refusal a JSON-RPC-shaped error that never forwards:
  *   1. a plain loopback request (classifyPeer via "local")        else 403
  *   2. Bearer <relay token>                                          else 401
- *   3. X-Crow-Actor-{Id,Thread,Gateway,Sig}, kind "peer-relay"       else 401
+ *   3. X-Crow-Actor-{Id,Session,Thread,Gateway,Sig}, kind            else 401
+ *      "peer-relay" (v2: bound to the bot session), and that session
+ *      is a live session of the signed bot (signed-session.js)        else 401
  *   4. feature_flags.remote_invocation                               else 403
  *   5. <mount> is a remote capability                                else 404
  *      and the bot's row selected (instanceId, capability)          else 403
@@ -40,6 +42,7 @@ import { defaultPairKey } from "../../shared/sync-pair-binding.js";
 import { getPeerCreds } from "../../shared/peer-credentials.js";
 import { readSetting } from "../dashboard/settings/registry.js";
 import { verifyPeerRelayActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
+import { resolveSignedSession } from "../../shared/signed-session.js";
 import { REMOTE_CANON_MOUNT, remoteServersForBot, parseRemoteInvocationFlag } from "../../../scripts/pi-bots/remote-blocks.mjs";
 import { sanitizeActorName } from "../../../scripts/pi-bots/actor-env.mjs";
 import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
@@ -116,11 +119,16 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
 
       // 3. The signed actor: never relay unattributed (that would lend the bot this gateway's peer bearer).
       const bot = header(req, "x-crow-actor-id");
+      const sessionId = header(req, "x-crow-actor-session");
       const threadId = header(req, "x-crow-actor-thread");
       const gatewayType = header(req, "x-crow-actor-gateway");
       const sig = header(req, "x-crow-actor-sig");
-      if (typeof bot !== "string" || !BOT_ID_RE.test(bot) || !verifyPeerRelayActorSig({ botId: bot, threadId, gatewayType, sig })) {
+      if (typeof bot !== "string" || !BOT_ID_RE.test(bot) || !verifyPeerRelayActorSig({ botId: bot, sessionId, threadId, gatewayType, sig })) {
         return refuse(res, 401, "a signed bot actor is required", { id });
+      }
+      // The signature names a session; it must still be this bot's, and live.
+      if (!(await resolveSignedSession(db, { botId: bot, sessionId }))) {
+        return refuse(res, 401, "the signed bot session is not live", { id });
       }
 
       // 4. The instance switch.

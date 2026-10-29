@@ -71,6 +71,41 @@ test("static: the proxy's import graph never reaches the credential store or the
   }
 });
 
+// B6: the separate systemd bot hosts (pibot-bridge@ runs bridge_tick.mjs,
+// pibot-gateways@ runs gateways/gateway_runner.mjs) get signatures from the
+// gateway's loopback signing relay and never a key: nothing they load reads
+// the credential store, mints the per-boot actor key, or installs one.
+function importGraph(entry) {
+  const seen = new Set();
+  const stack = [join(REPO, entry)];
+  while (stack.length) {
+    const f = stack.pop();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const dep of relativeImports(f)) if (existsSync(dep)) stack.push(dep);
+  }
+  return [...seen].map((f) => f.slice(REPO.length + 1));
+}
+
+for (const entry of ["scripts/pi-bots/bridge_tick.mjs", "scripts/pi-bots/gateways/gateway_runner.mjs"]) {
+  test(`static: ${entry} and its imports never read a peer key, mint or install an actor key`, () => {
+    const rel = importGraph(entry);
+    assert.ok(rel.includes("scripts/pi-bots/bridge.mjs") && rel.includes("scripts/pi-bots/actor-sig.mjs"),
+      "the walk reaches the bridge and the signer: " + rel.join(", "));
+    for (const bad of ["servers/shared/peer-credentials.js", "servers/shared/sync-pair-binding.js"]) {
+      assert.ok(!rel.includes(bad), `${bad} is in ${entry}'s import graph`);
+    }
+    for (const f of rel) {
+      if (f === "scripts/pi-bots/actor-sig.mjs") continue; // defines them
+      const src = readFileSync(join(REPO, f), "utf8");
+      for (const call of ["initGatewayActorKey(", "setActorKey(", "readActorKeyFromStdin("]) {
+        assert.ok(!src.includes(call), `${f} (loaded by ${entry}) calls ${call}`);
+      }
+    }
+  });
+}
+
+// ---- runtime ----
 // ---- runtime ----
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "no-peer-key-")));
@@ -128,12 +163,12 @@ test("runtime: no canary in the blocks, the spawn env, or the running proxy chil
     // A def naming the store must not get it into pi's env.
     spawn_env: { CROW_PEER_TOKENS_PATH: store, HARMLESS_FLAG: "1" },
   };
-  const actor = { botId: "hank", threadId: "discord:42", gatewayType: "discord" };
+  const actor = { botId: "hank", sessionId: "7", threadId: "discord:42", gatewayType: "discord" };
   const res = writeBotMcp(def, {
     sessionDir, crowHome, canonical: { mcpServers: {} }, write: false,
     remoteEnabled: true, peerGatewayUrls: { [PEER]: "http://127.0.0.1:9" },
     botId: actor.botId, threadId: actor.threadId, gatewayType: actor.gatewayType, displayName: "Hank Bot",
-    gatewayPort: relayPort,
+    gatewayPort: relayPort, sessionId: actor.sessionId,
   });
   assert.deepEqual(res.remoteWarnings, []);
   const text = JSON.stringify(res.json);
@@ -173,7 +208,8 @@ test("runtime: no canary in the blocks, the spawn env, or the running proxy chil
   assert.equal(init.url, `/peer-relay/${PEER}/memory/mcp`);
   assert.equal(init.headers.authorization, `Bearer ${RELAY_TOKEN}`, "the proxy presents the relay token");
   assert.equal(init.headers["x-crow-actor-id"], "hank");
-  assert.equal(verifyPeerRelayActorSig({ botId: init.headers["x-crow-actor-id"], threadId: init.headers["x-crow-actor-thread"], gatewayType: init.headers["x-crow-actor-gateway"], sig: init.headers["x-crow-actor-sig"] }), true);
+  assert.equal(init.headers["x-crow-actor-session"], "7", "the bot session the signature binds");
+  assert.equal(verifyPeerRelayActorSig({ botId: init.headers["x-crow-actor-id"], sessionId: init.headers["x-crow-actor-session"], threadId: init.headers["x-crow-actor-thread"], gatewayType: init.headers["x-crow-actor-gateway"], sig: init.headers["x-crow-actor-sig"] }), true);
   for (const r of relayed) for (const c of CANARIES) assert.ok(!JSON.stringify(r.headers).includes(c));
 
   const environ = readFileSync(`/proc/${child.pid}/environ`, "utf8");

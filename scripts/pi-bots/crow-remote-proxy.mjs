@@ -11,8 +11,8 @@
  * reaches a bot or pi process, so this process never talks to the peer. It
  * connects to its own gateway's loopback relay (CROW_REMOTE_RELAY_URL,
  * servers/gateway/routes/peer-relay.js) with the path-scoped relay token read
- * from CROW_REMOTE_RELAY_TOKEN_PATH and the four X-Crow-Actor-* headers the
- * gateway signed for this bot (CROW_REMOTE_ACTOR_*). The gateway verifies the
+ * from CROW_REMOTE_RELAY_TOKEN_PATH and the X-Crow-Actor-* headers the gateway
+ * signed for this bot and its session (CROW_REMOTE_ACTOR_*). The gateway verifies the
  * bot, re-checks its selection, and forwards with the peer bearer, signing
  * the tools/call itself. This module must not import the peer credential
  * store, directly or transitively (tests/no-peer-key-in-bot-process.test.js).
@@ -29,6 +29,7 @@ const ACTOR_HEADERS = {
   CROW_REMOTE_ACTOR_ID: "X-Crow-Actor-Id",
   CROW_REMOTE_ACTOR_THREAD: "X-Crow-Actor-Thread",
   CROW_REMOTE_ACTOR_GATEWAY: "X-Crow-Actor-Gateway",
+  CROW_REMOTE_ACTOR_SESSION: "X-Crow-Actor-Session",
   CROW_REMOTE_ACTOR_SIG: "X-Crow-Actor-Sig",
 };
 

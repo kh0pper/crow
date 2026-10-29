@@ -70,9 +70,10 @@ export function remoteServersForBot(def) {
  * @param {string} o.node       absolute node binary
  * @param {string} o.relayBaseUrl   this gateway's loopback base, e.g. http://127.0.0.1:3001
  * @param {string} o.relayTokenPath absolute path to this instance's peer-relay-token
- * @param {{botId:string, threadId?:string, gatewayType?:string}} [o.actor]
- *   the bot this turn runs as; its relay signature is added when this process
- *   holds the per-boot actor key
+ * @param {{botId:string, sessionId?:string|number, threadId?:string, gatewayType?:string}} [o.actor]
+ *   the bot this turn runs as and its bot_sessions.id; its session-bound relay
+ *   signature is added when this process holds the per-boot actor key (or its
+ *   gateway presigned this exact tuple, actor-sig.mjs presignActors)
  * @returns {{ blocks: Record<string,object>, warnings: string[] }}
  */
 export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, relayBaseUrl, relayTokenPath, actor } = {}) {
@@ -109,6 +110,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, r
       env.CROW_REMOTE_ACTOR_ID = String(actor.botId);
       env.CROW_REMOTE_ACTOR_THREAD = actor.threadId == null ? "" : String(actor.threadId);
       env.CROW_REMOTE_ACTOR_GATEWAY = actor.gatewayType == null ? "" : String(actor.gatewayType);
+      env.CROW_REMOTE_ACTOR_SESSION = actor.sessionId == null ? "" : String(actor.sessionId);
       const sig = signPeerRelayActor(actor);
       if (sig) env.CROW_REMOTE_ACTOR_SIG = sig;
     }

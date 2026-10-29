@@ -38,7 +38,9 @@ const DELTA = "inst-delta-0004"; // selected by the bot, no crow_instances row
 const ECHO = "inst-echo-0005"; // a trusted peer the bot did NOT select
 const PEER_TOKENS = { [BRAVO]: "bravo-peer-bearer-" + randomBytes(6).toString("hex"), [CHARLIE]: "charlie-peer-bearer-" + randomBytes(6).toString("hex"), [ECHO]: "echo-peer-bearer-x" };
 const PAIR_KEYS = { [BRAVO]: randomBytes(32).toString("hex") }; // charlie has no pair key (S-P2)
-const ACTOR = { botId: "hank", threadId: "discord:42", gatewayType: "discord" };
+// B6: the relay signature binds the bot session; the ids are filled in before().
+let ACTOR = { botId: "hank", sessionId: null, threadId: "discord:42", gatewayType: "discord" };
+const SESS = {}; // name -> bot_sessions.id
 
 let dir, dbPath, app, relay, relayBase, upstream, upstreamPort, relayToken;
 const seen = []; // upstream requests: { path, method, headers, body }
@@ -84,6 +86,13 @@ before(async () => {
   const def = { tools: { remote_mcp: [`${BRAVO}::crow-memory`, `${CHARLIE}::crow-memory`, `${DELTA}::crow-memory`, `${BRAVO}::crow-blog`] } };
   d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?, ?, ?)").run("hank", "Hank Bot", JSON.stringify(def));
   d.prepare("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)").run(JSON.stringify({ remote_invocation: true }));
+  const sess = d.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, archived_at) VALUES (?, ?, ?, ?, ?)");
+  for (const [name, bot, status, archived] of [
+    ["live", "hank", "active", null], ["waiting", "hank", "waiting-user", null], ["errored", "hank", "error", null],
+    ["stopped", "hank", "stopped", null], ["done", "hank", "done", null], ["archived", "hank", "active", "2026-10-01 00:00:00"],
+    ["otto", "otto", "active", null], ["ghost", "ghost", "active", null],
+  ]) SESS[name] = Number(sess.run(bot, "discord", "discord:42", status, archived).lastInsertRowid);
+  ACTOR = { ...ACTOR, sessionId: String(SESS.live) };
   d.close();
 
   const tdb = createDbClient(dbPath);
@@ -115,6 +124,7 @@ beforeEach(() => { seen.length = 0; _resetRemoteActorNonces(); });
 
 const actorHeaders = (a = ACTOR, sig = signPeerRelayActor(a)) => ({
   "X-Crow-Actor-Id": a.botId, "X-Crow-Actor-Thread": a.threadId, "X-Crow-Actor-Gateway": a.gatewayType,
+  ...(a.sessionId != null ? { "X-Crow-Actor-Session": String(a.sessionId) } : {}),
   ...(sig ? { "X-Crow-Actor-Sig": sig } : {}),
 });
 const INIT = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } };
@@ -165,6 +175,42 @@ test("refused: a token but no actor signature, a bad one, or another kind's", as
   assertRefused(await post(p, { headers: { Authorization: `Bearer ${relayToken}`, ...actorHeaders({ ...ACTOR, botId: "other" }, signPeerRelayActor(ACTOR)) } }), 401, /actor/);
 });
 
+test("B6: the signed session must be this bot's live session", async () => {
+  const p = `/peer-relay/${BRAVO}/memory/mcp`;
+  const tok = { Authorization: `Bearer ${relayToken}` };
+  // Positive controls in the same harness: live, waiting-user and error sessions all pass the actor check.
+  for (const name of ["live", "waiting", "errored"]) {
+    const r = await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS[name]) }) } });
+    assert.equal(r.status, 200, `${name}: ${r.text}`);
+  }
+  seen.length = 0;
+  // A signature for another session id than the header names.
+  assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS.waiting) }, signPeerRelayActor(ACTOR)) } }), 401, /actor/);
+  for (const name of ["archived", "stopped", "done"]) {
+    assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS[name]) }) } }), 401, /session/);
+  }
+  // Another bot's session, signed as hank.
+  assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: String(SESS.otto) }) } }), 401, /session/);
+  // A session id with no row.
+  assertRefused(await post(p, { headers: { ...tok, ...actorHeaders({ ...ACTOR, sessionId: "999999" }) } }), 401, /session/);
+  // No session header at all (a v1-shaped caller): the v2 signature cannot verify.
+  const { "X-Crow-Actor-Session": _drop, ...noSession } = actorHeaders();
+  assertRefused(await post(p, { headers: { ...tok, ...noSession } }), 401, /actor/);
+});
+
+test("resolveSignedSession: the shared session check", async () => {
+  const { resolveSignedSession } = await import("../servers/shared/signed-session.js");
+  const db = createDbClient(dbPath);
+  try {
+    assert.deepEqual(await resolveSignedSession(db, { botId: "hank", sessionId: String(SESS.live) }),
+      { id: SESS.live, botId: "hank", projectId: null, threadId: "discord:42", gatewayType: "discord" });
+    assert.equal((await resolveSignedSession(db, { botId: "hank", sessionId: SESS.live })).id, SESS.live, "a numeric id");
+    for (const name of ["archived", "stopped", "done", "otto"]) assert.equal(await resolveSignedSession(db, { botId: "hank", sessionId: String(SESS[name]) }), null, name);
+    for (const bad of [null, "", "0", "x", "-1", `${SESS.live} `.repeat(2)]) assert.equal(await resolveSignedSession(db, { botId: "hank", sessionId: bad }), null, JSON.stringify(bad));
+    assert.equal(await resolveSignedSession(db, { botId: "", sessionId: String(SESS.live) }), null);
+  } finally { db.close(); }
+});
+
 test("refused: a request that is not a plain loopback one (forwarded from a tailnet address)", async () => {
   assertRefused(await post(`/peer-relay/${BRAVO}/memory/mcp`, { headers: { ...good(), "X-Forwarded-For": "100.64.20.7" } }), 403, /local/);
 });
@@ -185,7 +231,7 @@ test("refused: remote invocation switched off", async () => {
 test("refused: a peer, or a capability of it, the bot did not select; an unknown bot", async () => {
   assertRefused(await post(`/peer-relay/${ECHO}/memory/mcp`, { headers: good() }), 403, /not selected/);
   assertRefused(await post(`/peer-relay/${BRAVO}/sharing/mcp`, { headers: good() }), 403, /not selected/);
-  const ghost = { ...ACTOR, botId: "ghost" };
+  const ghost = { ...ACTOR, botId: "ghost", sessionId: String(SESS.ghost) };
   assertRefused(await post(`/peer-relay/${BRAVO}/memory/mcp`, { headers: { Authorization: `Bearer ${relayToken}`, ...actorHeaders(ghost) } }), 403, /not selected/);
 });
 

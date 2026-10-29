@@ -1666,6 +1666,28 @@ test("R2 rode-along: a spawn failure AFTER the row was stamped parks it; a failu
   assert.equal(n, 0, "a pre-stamp failure writes NO row — no minted ghost");
 });
 
+// Item 46 PR-B (B6): the child's MCP config binds the session row's id, so the
+// row exists when the world is built — the same single row the spawn has
+// always ended with.
+test("B6: a fresh spawn's row exists when its world is built, and it is the session's only row", async () => {
+  const bridge = makeBridge();
+  const atBuild = [];
+  const orig = bridge.buildBotWorld.bind(bridge);
+  bridge.buildBotWorld = async (args) => { atBuild.push(rowFor(args.threadId)); return orig(args); };
+  const { engine } = makeEngine({ bridge });
+  const r = await engine.spawn({ botId: "binder" });
+  await tick();
+  assert.ok(atBuild[0], "the row was there before the world (and its config) was built");
+  const c = raw();
+  const all = c.prepare("SELECT id, status, pi_session_dir FROM bot_sessions WHERE gateway_thread_id=?").all(r.threadId);
+  c.close();
+  assert.equal(all.length, 1, "one row, as before");
+  assert.equal(all[0].id, atBuild[0].id, "the config's session is the session's row");
+  assert.equal(all[0].status, "active");
+  assert.ok(all[0].pi_session_dir, "the post-spawn write still stamps the row");
+  await engine.stopAll?.();
+});
+
 // ---------------------------------------------------------------------------
 // PR-A (audit item 5): the combined multi-question ask card + answer dance.
 //

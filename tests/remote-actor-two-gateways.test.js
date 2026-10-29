@@ -202,6 +202,9 @@ test("E-P1: A's pi bot reaches B through A's relay (real router, writer and prox
   try {
   const def = { tools: { crow_mcp: [], remote_mcp: [`${B.id}::crow-memory`] } };
   A.sql("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition) VALUES ('hank', 'Hank', ?)", [JSON.stringify(def)]);
+  // B6: the relay signature binds the bot session, which A's relay resolves (a live row of hank's).
+  A.sql("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status) VALUES ('hank', 'discord', 'discord:7', 'active')");
+  const sessionId = String(A.sql("SELECT id FROM bot_sessions WHERE bot_id = 'hank' AND gateway_thread_id = 'discord:7' ORDER BY id DESC LIMIT 1")[0].id);
   // A's row for B holds the tailnet-shaped address; the relay's fetch seam maps it to B's Serve relay.
   const stored = String(A.row(B.id).gateway_url).replace(/\/+$/, "");
   const real = await B.urlFor(A);
@@ -227,6 +230,7 @@ test("E-P1: A's pi bot reaches B through A's relay (real router, writer and prox
       sessionDir: ${JSON.stringify(sessionDir)}, crowHome: process.env.CROW_HOME, canonical: { mcpServers: {} }, write: false,
       remoteEnabled: true, peerGatewayUrls: { [${JSON.stringify(B.id)}]: STORED },
       botId: "hank", threadId: "discord:7", gatewayType: "discord", displayName: "Hank", gatewayPort: server.address().port,
+      sessionId: ${JSON.stringify(sessionId)},
     });
     const name = Object.keys(res.json.mcpServers).find((k) => k.startsWith("crow-remote-"));
     const block = res.json.mcpServers[name];
@@ -257,6 +261,7 @@ test("E-P1: A's pi bot reaches B through A's relay (real router, writer and prox
     assert.ok(!blockText.includes(s), `the bot's MCP block names ${s === creds.auth_token ? "the peer bearer" : s === creds.signing_key ? "the pair key" : s}`);
   }
   assert.ok(!("CROW_PEER_TOKENS_PATH" in out.block.env));
+  assert.equal(out.block.env.CROW_REMOTE_ACTOR_SESSION, sessionId, "the block names the bot session its signature binds");
   assert.match(out.block.env.CROW_REMOTE_RELAY_URL, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/peer-relay/${B.id}/memory/mcp$`));
   } finally {
     // Restore A's switch: later legs must not inherit remote invocation.

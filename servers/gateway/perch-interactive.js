@@ -1743,6 +1743,20 @@ export function createInteractiveEngine({
    * shape is perch.js `saveNarrowing`'s, NOT the retired `claimTurn`'s (which
    * hardcoded kind='perch') and never ON CONFLICT (the index is not unique).
    */
+  /** Item 46 PR-B: undo spawn()'s pre-spawn INSERT when the spawn never got to
+   *  its own row write, so a failed spawn leaves no row (as before). Only a
+   *  row that never carried a pi session is removed. */
+  async function dropPreMintedRow(s) {
+    const id = s.rowId;
+    s.rowPreMinted = false;
+    s.rowId = null;
+    if (id == null) return;
+    const db = createDbClient();
+    try {
+      await db.execute({ sql: "DELETE FROM bot_sessions WHERE id = ? AND pi_session_id IS NULL", args: [id] });
+    } finally { try { db.close(); } catch {} }
+  }
+
   async function writeRow(s, { status, piSessionDir = null, model = null }, control = "run") {
     const db = createDbClient();
     try {
@@ -2333,6 +2347,12 @@ export function createInteractiveEngine({
       throw engineError("narrowing_invalid");
     }
     if (!s.forcedNarrowing && storedList && storedList.includes(NARROWING_LOCK)) s.forcedNarrowing = stored;
+    // Item 46 PR-B: spawn()'s pre-minted row seeded the narrowing known then.
+    // A lock learned only now must be seeded by the post-spawn INSERT exactly
+    // as before (and verified by spawn()), so that row is given back; the
+    // config then names a session that no longer exists, which only weakens
+    // it (the relay refuses a dead session).
+    if (s.rowPreMinted && (s.forcedNarrowing || null) !== (s.preMintNarrowing || null)) await dropPreMintedRow(s);
     if (s.forcedNarrowing) world.narrowedTools = mergeDisabled(stored, s.forcedNarrowing);
     // D22 provenance (R3-L1): with any third-party pi extension loaded, a tool
     // named like a pi builtin may not BE the builtin, so builtin names stop
@@ -2507,6 +2527,8 @@ export function createInteractiveEngine({
       // pinned bot defs to their old default across restarts (adoptRow treats
       // every stamped value as an override). writeModel() owns the column.
     });
+    // The row is now the spawned session's own (spawn() keeps it on a later failure).
+    s.rowPreMinted = false;
 
     const st = await pi.getState().catch(() => null);
     const reported = st && st.data && st.data.sessionId;
@@ -3369,6 +3391,21 @@ export function createInteractiveEngine({
       throw e;
     }
     // ---------------------------------------------------------------------
+    // Item 46 PR-B: the session-bound actor signatures in the child's MCP
+    // config name bot_sessions.id, so the row must exist before startChild
+    // builds the world. It used to be minted by startChild's post-spawn
+    // writeRow; it is minted here instead, with the same INSERT (and the same
+    // forced-narrowing seed). If the spawn then fails before that post-spawn
+    // write, the row is deleted again, so a failed spawn leaves no row, as
+    // before. A failed pre-write is non-fatal: startChild's write mints the
+    // row as it always did (the config then binds no session).
+    try {
+      await writeRow(s, { status: "active" });
+      s.rowPreMinted = s.rowId != null;
+      s.preMintNarrowing = s.forcedNarrowing || null;
+    } catch (e) {
+      log(s.sessionId + ": pre-spawn row write failed (non-fatal): " + ((e && e.message) || e));
+    }
     try {
       await startChild(S, s);
     } catch (e) {
@@ -3386,7 +3423,8 @@ export function createInteractiveEngine({
       // hibernating forever and whose fresh claim 409s any wake. Gated on
       // rowId, not on `pi`: writeRow's insert branch would otherwise MINT a
       // row for a spawn that never got far enough to have one.
-      if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
+      if (s.rowPreMinted) dropPreMintedRow(s).catch(() => {});
+      else if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
       writeLeases();
       throw e;
     }

@@ -61,9 +61,10 @@ test("flag ON with a bot: the relay port follows opts.gatewayPort, and the block
   const res = writeBotMcp(def, {
     sessionDir, canonicalPath, crowHome: "/tmp/none", write: false,
     remoteEnabled: true, peerGatewayUrls: { g1abcdef: "https://g1:8444" },
-    botId: "hank", displayName: "Hank Bot", threadId: "discord:42", gatewayType: "discord", gatewayPort: 4123,
+    botId: "hank", displayName: "Hank Bot", threadId: "discord:42", gatewayType: "discord", gatewayPort: 4123, sessionId: 31,
   });
   const remote = res.json.mcpServers["crow-remote-g1abcdef-crow-memory"];
+  assert.equal(remote.env.CROW_REMOTE_ACTOR_SESSION, "31", "the turn's session id reaches the block");
   assert.equal(remote.env.CROW_REMOTE_RELAY_URL, "http://127.0.0.1:4123/peer-relay/g1abcdef/memory/mcp");
   assert.equal(remote.env.CROW_REMOTE_ACTOR_ID, "hank");
   assert.equal(remote.env.CROW_REMOTE_ACTOR_THREAD, "discord:42");

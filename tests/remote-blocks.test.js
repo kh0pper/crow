@@ -63,18 +63,24 @@ test("mintRemoteBlocks mints one stdio block per (instance,capability) aimed at 
 test("mintRemoteBlocks adds the signed relay actor when an actor is given (sig omitted without a key)", async () => {
   const { initGatewayActorKey, _resetActorKeyForTest, verifyPeerRelayActorSig } = await import("../scripts/pi-bots/actor-sig.mjs");
   const def = { tools: { remote_mcp: ["abc12345deadbeef::crow-blog"] } };
-  const actor = { botId: "hank", threadId: "discord:42", gatewayType: "discord" };
+  const actor = { botId: "hank", sessionId: "7", threadId: "discord:42", gatewayType: "discord" };
   const mint = () => mintRemoteBlocks(def, { peerGatewayUrls: { abc12345deadbeef: "https://g:8444" }, proxyPath: "/p", node: "/n", ...RELAY, actor }).blocks["crow-remote-abc12345-crow-blog"].env;
   _resetActorKeyForTest();
   let env = mint();
   assert.equal(env.CROW_REMOTE_ACTOR_ID, "hank");
   assert.equal(env.CROW_REMOTE_ACTOR_THREAD, "discord:42");
   assert.equal(env.CROW_REMOTE_ACTOR_GATEWAY, "discord");
+  assert.equal(env.CROW_REMOTE_ACTOR_SESSION, "7", "the bot session the signature binds");
   assert.ok(!("CROW_REMOTE_ACTOR_SIG" in env), "no key → no signature");
   assert.equal(env.CROW_REMOTE_RELAY_URL, "http://127.0.0.1:3001/peer-relay/abc12345deadbeef/blog-mcp/mcp");
   initGatewayActorKey();
   env = mint();
   assert.equal(verifyPeerRelayActorSig({ ...actor, sig: env.CROW_REMOTE_ACTOR_SIG }), true);
+  assert.equal(verifyPeerRelayActorSig({ ...actor, sessionId: "8", sig: env.CROW_REMOTE_ACTOR_SIG }), false);
+  // No session id (a config built before its session row exists): no signature, no session header.
+  const noSess = mintRemoteBlocks(def, { peerGatewayUrls: { abc12345deadbeef: "https://g:8444" }, proxyPath: "/p", node: "/n", ...RELAY, actor: { ...actor, sessionId: null } }).blocks["crow-remote-abc12345-crow-blog"].env;
+  assert.equal(noSess.CROW_REMOTE_ACTOR_SESSION, "");
+  assert.ok(!("CROW_REMOTE_ACTOR_SIG" in noSess));
 });
 
 test("mintRemoteBlocks warns + skips addon caps and unknown peers", () => {
