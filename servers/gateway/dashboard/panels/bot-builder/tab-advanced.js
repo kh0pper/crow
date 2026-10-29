@@ -18,6 +18,7 @@ import { hasArchivedAtColumn } from "../../../board/util.js";
 import { learningMode } from "./def-adapter.js";
 import { storedToBashUi } from "./bash-mode.js";
 import { segGroup, scriptJson } from "./ui.js";
+import { activeProjectWhere } from "../../../../shared/shell-items.js";
 
 // Board / project: the former Project / Tracker tab, unchanged in behaviour.
 async function renderBoard(ctx) {
@@ -27,7 +28,7 @@ async function renderBoard(ctx) {
   const hidden = () => ctx.hidden("advanced") + `<input type="hidden" name="adv_section" value="board">`;
   let body;
   let projects = [];
-  try { projects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
+  try { projects = (await db.execute({ sql: `SELECT id, name, slug FROM project_spaces WHERE ${activeProjectWhere()} ORDER BY id`, args: [] })).rows; } catch {}
   let projOpts = projects.map((p) => `<option value="${p.id}"${Number(def.project_id) === Number(p.id) ? " selected" : ""}>#${p.id} &mdash; ${escapeHtml(p.name || "")} (${escapeHtml(p.slug || "")})</option>`).join("");
   // A linked project that is archived (so not in the list) stays linked.
   if (def.project_id != null && !projects.some((p) => Number(p.id) === Number(def.project_id))) {

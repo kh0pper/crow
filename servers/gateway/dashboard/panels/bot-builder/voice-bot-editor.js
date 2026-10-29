@@ -27,6 +27,7 @@
  */
 import { escapeHtml, section } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
+import { activeProjectWhere } from "../../../../shared/shell-items.js";
 import { t, fill, translations } from "../../shared/i18n.js";
 import { readSetting } from "../../settings/registry.js";
 import {
@@ -341,7 +342,7 @@ async function routineSection(db, v, lang, sec, hint) {
   const textIn = (name, labelKey, val) => `<label for="btb-v-${name}">${escapeHtml(t(labelKey, lang))}</label>` +
     `<input type="text" id="btb-v-${name}" name="${name}" form="btb-vsave" maxlength="${ID_MAX}" value="${escapeHtml(val || "")}">`;
   let projects = [];
-  try { projects = (await db.execute({ sql: "SELECT id, name FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch { projects = []; }
+  try { projects = (await db.execute({ sql: `SELECT id, name FROM project_spaces WHERE ${activeProjectWhere()} ORDER BY id`, args: [] })).rows; } catch { projects = []; }
   const curProject = v.routine.tasks.project_id;
   const projOpts = opt("", t("botbuilder.voiceRoutineProjectNone", lang), curProject == null) +
     (curProject != null && !projects.some((p) => String(p.id) === String(curProject)) ? opt(String(curProject), "#" + curProject, true) : "") +

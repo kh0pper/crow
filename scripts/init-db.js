@@ -6,6 +6,7 @@ import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./pi-bots/bot-jobs-schema.mjs";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
+import { ARCHIVED_NAME_CLEANUP_SQL } from "./migrations/0022-archived-name-cleanup.mjs";
 import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
 import {
   SERVICE_CONNECTIONS_DDL, CHAT_PROJECT_COLUMN, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL,
@@ -3348,6 +3349,14 @@ await initTable("crow_keychain table", KEYCHAIN_DDL);
 // index on it; a fresh table already has it from KEYCHAIN_DDL. Same steps as ensureKeychainTable.
 await ensureSchemaColumn(KEYCHAIN_CONNECTION_COLUMN);
 await initTable("crow_keychain service index", KEYCHAIN_SERVICE_INDEX_DDL);
+
+// Archived-project name cleanup (migration 0022): strip the old trailing " — archived" from projects
+// that are archived and not deleted. Data only, never writes archived_at, idempotent (a second run
+// matches nothing), so it runs on every init and a fresh or old install converges.
+{
+  const r = await db.execute(ARCHIVED_NAME_CLEANUP_SQL);
+  if (r.rowsAffected) console.log(`  ✓ Cleaned ${r.rowsAffected} archived project name(s)`);
+}
 
 // Stamp the schema generation so the gateway boot gate can detect when an
 // out-of-band code update introduced migrations that a plain restart missed.
