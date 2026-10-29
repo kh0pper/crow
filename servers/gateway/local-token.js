@@ -8,7 +8,7 @@
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "../shared/crow-home.js";
-import { writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import {
   readSetting, writeSetting, deleteLocalSetting,
@@ -354,6 +354,63 @@ export async function ensureModelsToken(db) {
 }
 
 export const MODELS_TOKEN_KEYS = { MODELS_HASH_KEY, MODELS_CREATED_KEY };
+
+// Cloud-door token (roles phase 2, Task 14): lets bots reach cloud models
+// through the gateway's /llm/c door without ever holding a provider key. pi
+// reads it per request from a models.json `!<command>` apiKey (pi runs that
+// command uncached on every auth resolve), so a token rotated at boot reaches
+// a pi process that is already running.
+//
+// The file deliberately lives at <crowHome>/llm-cloud-token, OUTSIDE
+// <crowHome>/secrets/: the bot sandbox (bwrap) hides secrets/ from pi, so a
+// token there would be unreadable to the bots it exists for. Peer tokens are
+// moving INTO secrets/; this one is different on purpose: it is meant for
+// bots, and it is scoped to the cloud door only. validateLlmCloudToken checks
+// this one hash and nothing else, so no other token (local, board, phone,
+// artifacts, kiosk, models) opens the door, and this token opens nothing but
+// the door (no other validator consults its hash).
+//
+// Rotated on EVERY boot (no ensure/no-op path): a fresh random value per start.
+const LLM_CLOUD_HASH_KEY = "mcp_llm_cloud_token_hash";
+const LLM_CLOUD_CREATED_KEY = "mcp_llm_cloud_token_created";
+export function llmCloudTokenPath() {
+  return join(crowHome(), "llm-cloud-token");
+}
+
+/** New random 32-byte hex token every call. Stores its hash (local scope),
+ *  then writes the raw value atomically: a temp file in the same directory,
+ *  chmod 0600, rename over the old file. A reader sees the old token or the
+ *  new one, never a partial or world-readable file. Returns the raw token. */
+export async function rotateLlmCloudToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, LLM_CLOUD_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, LLM_CLOUD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = llmCloudTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw err;
+  }
+  return token;
+}
+
+/** Timing-safe check against the cloud-door hash ONLY. */
+export async function validateLlmCloudToken(db, token) {
+  if (!token || typeof token !== "string") return false;
+  const stored = await readSetting(db, LLM_CLOUD_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export const LLM_CLOUD_TOKEN_KEYS = { HASH: LLM_CLOUD_HASH_KEY, CREATED: LLM_CLOUD_CREATED_KEY };
 
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
