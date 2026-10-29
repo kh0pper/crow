@@ -1,0 +1,209 @@
+/**
+ * Model roles: preview a rebind (who moves, any cloud model the changed chain
+ * newly reaches, refusals, pins), then apply it only with fresh acks.
+ *
+ * The cloud warning (C2, narrowed by N5): for the changed role and every role
+ * that reaches it, every usable candidate its chain can walk to counts, not
+ * only today's resolution, so a cloud model sitting behind a working local one
+ * warns now. Only pairs (role, cloud key) that are reachable after the change
+ * and not before count: a local rebind under an already-cloud consumer needs
+ * no new acknowledgement.
+ *
+ * apply recomputes the preview and refuses unless its hash matches the one the
+ * user saw and the acknowledgements it needs are given. Env vars are never
+ * touched; a setting pin is cleared only with replacePin.
+ */
+import { createHash } from "node:crypto";
+import { splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
+import {
+  resolveRoleKey, resolveChosenRoleKey, walkRole, isCloudKey, whereItRuns,
+  finalHopRow, isRoleRef, roleIdOf,
+} from "./model-roles.js";
+import { loadRoleContext, setBinding, addBindingsChangeListener, invalidateRoleContext } from "./model-roles-store.js";
+import { scanSlots } from "./model-consumers.js";
+import { listRoleConsumers, rolesReaching } from "./role-consumers.js";
+import { readSetting, writeSetting } from "../gateway/dashboard/settings/registry.js";
+import { clearProviderTaskCache, pickProviderByTask, EMBED_TASKS } from "./provider-task.js";
+import { hostnameOf } from "./provider-host.js";
+
+/** Operator pins that override a role today: a setting, and for some an env var. */
+export const LEGACY_PINS = Object.freeze({
+  embed: Object.freeze({ setting: "embed_provider", env: "CROW_EMBED_PROVIDER" }),
+  rerank: Object.freeze({ setting: "rerank_provider", env: "CROW_RERANK_PROVIDER" }),
+  safety: Object.freeze({ setting: "bot_safety_classifier" }),
+});
+
+// m8: the gateway's resolveProviderForTask cache follows every binding change.
+addBindingsChangeListener(() => clearProviderTaskCache());
+
+const SAFETY_REFUSAL = Object.freeze({ id: "safety", labelKey: "settings.providers.job.safety" });
+const PHONE_LOCAL = Object.freeze({ id: "phone_local_model", labelKey: "settings.providers.phone.local" });
+const CONSUMER_GROUPS = ["unattended", "bots", "subagents", "jobs", "otherCrows", "notAffected", "keepsOwnModel"];
+
+const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+/** A shallow copy of ctx with roleId bound to {model, fallback}; the memoized ctx is never mutated. */
+function hypothetical(ctx, roleId, { model = null, fallback } = {}) {
+  const b = { model: model ?? null, seeded: false };
+  if (fallback !== undefined) b.fallback = Array.isArray(fallback) ? [...fallback] : fallback;
+  return { ...ctx, bindings: { ...(ctx.bindings || {}), [roleId]: b } };
+}
+
+/**
+ * Every (viaRole, cloud key) a role in `roles` can walk to under ctxX: usable
+ * candidates (ok or not_configured, never filtered) that isCloudKey calls cloud.
+ * @returns {Array<{viaRole:string, key:string}>} in `roles` order, each pair once
+ */
+export function reachableCloud(ctxX, roles, { localMarks, ownAddrs } = {}) {
+  const out = [], seen = new Set();
+  for (const viaRole of roles) {
+    for (const e of walkRole(viaRole, ctxX)) {
+      if (!e.key || e.filtered || !(e.verdict === "ok" || e.verdict === "not_configured")) continue;
+      const id = `${viaRole}|${e.key}`;
+      if (seen.has(id)) continue;
+      if (!isCloudKey(e.key, { providers: ctxX.providers, localMarks, ownAddrs })) continue;
+      seen.add(id);
+      out.push({ viaRole, key: e.key });
+    }
+  }
+  return out;
+}
+
+/** Pairs in `after` and not in `before`. */
+function newlyReachable(before, after) {
+  const had = new Set(before.map((p) => `${p.viaRole}|${p.key}`));
+  return after.filter((p) => !had.has(`${p.viaRole}|${p.key}`));
+}
+
+const providerHalf = (key) => (key ? splitKey(key).provider || null : null);
+
+/** Which provider embeddings come from: env, else the pin (unless replaced), else a chosen embed role, else the task pick. */
+function embedProvider(ctxX, { envValue, pinValue }) {
+  if (envValue) return envValue;
+  if (pinValue) return pinValue;
+  let key = null;
+  try { key = resolveChosenRoleKey("role:embed", { ...ctxX, need: "embed" }).key; } catch { key = null; }
+  return providerHalf(key) || pickProviderByTask(ctxX.providers || [], EMBED_TASKS);
+}
+
+function hashOf(consumers, cloud, pin, nextKey) {
+  const ids = CONSUMER_GROUPS.flatMap((g) => (consumers[g] || []).map((c) => c.id)).sort();
+  return createHash("sha256").update(JSON.stringify([ids, cloud?.host, cloud?.model, pin?.value, nextKey])).digest("hex");
+}
+
+/**
+ * @typedef {{roleId:string, current:{key:string|null, where:string}, next:{key:string|null, reason:string, chain:string[], where:string},
+ *   consumers:object, cloud:null|{host:string|null, viaRole:string, model:string, now:boolean}, refused:Array<{id:string, labelKey:string}>,
+ *   reembed:boolean, pin:null|{setting:string, value:string}, envPinned:boolean, needs:{ackUnattended:boolean, ackCloud:boolean}, previewHash:string}} RolePreview
+ *
+ * `ctx` defaults to a fresh RoleContext; `slots` to one scanSlots(db). The
+ * reembed line assumes a setting pin is replaced (an env pin always wins).
+ * `localMarks`/`ownAddrs` pass through to the cloud check (the safety check
+ * never uses marks, minor e).
+ * @returns {Promise<RolePreview>}
+ */
+export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, env = process.env, localMarks, ownAddrs } = {}) {
+  ctx ??= await loadRoleContext(db, { maxAgeMs: 0 });
+  slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false, env });
+  const ctxX = hypothetical(ctx, roleId, change);
+  const whereOpts = { providers: ctx.providers, localMarks, ...(ownAddrs ? { ownAddrs } : {}) };
+
+  const cur = resolveRoleKey(`role:${roleId}`, ctx);
+  const nxt = resolveRoleKey(`role:${roleId}`, ctxX);
+  const where = (key) => (key ? whereItRuns(key, whereOpts) : "missing");
+
+  const extraIds = slots.filter((s) => isRoleRef(s.value)).map((s) => roleIdOf(s.value));
+  const reach = [...rolesReaching(roleId, { bindings: ctxX.bindings, customDefs: ctxX.customDefs, extraIds })];
+  const reachSet = new Set(reach);
+
+  const consumers = await listRoleConsumers(db, roleId, { slots, roleCtx: ctx, env });
+
+  // C2 + N5: cloud models newly reachable through any chain in reach.
+  const fresh = newlyReachable(
+    reachableCloud(ctx, reach, { localMarks, ownAddrs }),
+    reachableCloud(ctxX, reach, { localMarks, ownAddrs }),
+  );
+  let cloud = null;
+  if (fresh.length) {
+    const { viaRole, key } = fresh[0];
+    let nowKey = null;
+    try { nowKey = resolveRoleKey(`role:${viaRole}`, ctxX).key; } catch { nowKey = null; }
+    cloud = { host: hostnameOf(finalHopRow(key, { providers: ctx.providers })?.baseUrl) || null, viaRole, model: key, now: nowKey === key };
+  }
+
+  const refused = [];
+  if (reachSet.has("safety")) {
+    // Marks never apply to the classifier (minor e).
+    const unmarked = newlyReachable(reachableCloud(ctx, ["safety"], { ownAddrs }), reachableCloud(ctxX, ["safety"], { ownAddrs }));
+    if (unmarked.length) refused.push({ ...SAFETY_REFUSAL });
+  }
+  const phone = slots.find((s) => s.kind === "phone" && s.id === PHONE_LOCAL.id && isRoleRef(s.value));
+  if (phone && reachSet.has(roleIdOf(phone.value))) {
+    const r = roleIdOf(phone.value);
+    if (fresh.some((p) => p.viaRole === r)) refused.push({ ...PHONE_LOCAL });
+  }
+
+  const legacy = LEGACY_PINS[roleId] || null;
+  let pin = null;
+  if (legacy) {
+    let v = null;
+    try { v = str(await readSetting(db, legacy.setting)); } catch (e) { console.warn(`[roles] pin ${legacy.setting} unreadable: ${e?.message}`); }
+    if (v) pin = { setting: legacy.setting, value: v };
+  }
+  const envValue = legacy?.env ? str(env?.[legacy.env]) : null;
+  const envPinned = !!envValue;
+
+  // I12: embeddings re-index only when the provider changes.
+  const reembed = reachSet.has("embed")
+    && embedProvider(ctx, { envValue: str(env?.CROW_EMBED_PROVIDER), pinValue: roleId === "embed" ? pin?.value : null })
+      !== embedProvider(ctxX, { envValue: str(env?.CROW_EMBED_PROVIDER), pinValue: null });
+
+  const needs = {
+    ackUnattended: consumers.unattended.length + consumers.jobs.length > 0,
+    ackCloud: cloud !== null,
+  };
+  return {
+    roleId,
+    current: { key: cur.key, where: where(cur.key) },
+    next: { key: nxt.key, reason: nxt.reason, chain: nxt.chain, where: where(nxt.key) },
+    consumers,
+    cloud,
+    refused,
+    reembed,
+    pin,
+    envPinned,
+    needs,
+    previewHash: hashOf(consumers, cloud, pin, nxt.key),
+  };
+}
+
+/**
+ * Apply a rebind the user previewed. Refusals, in order: preview_changed,
+ * cloud_refused (safety onto a model not proven local, m4),
+ * needs_ack_unattended, needs_ack_cloud, then any setBinding refusal.
+ * @returns {Promise<{ok:true, preview:RolePreview}|{ok:false, reason:string, preview:RolePreview}>}
+ */
+export async function applyRoleChange(db, roleId, change = {}, {
+  actor, previewHash, ackUnattended = false, ackCloud = false, replacePin = false,
+  env = process.env, localMarks, ownAddrs,
+} = {}) {
+  const preview = await previewRoleChange(db, roleId, change, { env, localMarks, ownAddrs });
+  const fail = (reason) => ({ ok: false, reason, preview });
+  if (typeof previewHash !== "string" || previewHash !== preview.previewHash) return fail("preview_changed");
+  if (roleId === "safety" && preview.next.key) {
+    const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
+    if (isCloudKey(preview.next.key, { providers: ctx.providers, ...(ownAddrs ? { ownAddrs } : {}) })) return fail("cloud_refused");
+  }
+  if (preview.needs.ackUnattended && ackUnattended !== true) return fail("needs_ack_unattended");
+  if (preview.needs.ackCloud && ackCloud !== true) return fail("needs_ack_cloud");
+
+  const r = await setBinding(db, roleId, { model: change.model ?? null, fallback: change.fallback }, { actor });
+  if (!r.ok) return fail(r.reason);
+  if (replacePin && preview.pin) {
+    await writeSetting(db, preview.pin.setting, "", { scope: "global" });
+    // setBinding already fired the listeners; the pin write must clear the cache too.
+    invalidateRoleContext();
+    clearProviderTaskCache();
+  }
+  return { ok: true, preview };
+}

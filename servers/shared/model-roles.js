@@ -169,6 +169,17 @@ export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, 
   return "unknown";
 }
 
+/** The row a key's traffic finally reaches after the door walk (null when it cannot be named). */
+export function finalHopRow(key, { providers, resolveDoor = defaultResolveDoor } = {}) {
+  let row = providerById(providers, splitKey(key).provider);
+  for (let hops = 0; row && hops <= MAX_DOOR_HOPS; hops++) {
+    const up = resolveDoor(row, providers);
+    if (up === row) return row;
+    row = up;
+  }
+  return null;
+}
+
 /** The one cloud predicate (voice, phone, warnings): errs toward warning, so
  *  anything not proven local counts as cloud. */
 export function isCloudKey(key, opts) {

@@ -17,8 +17,11 @@ export const RERANK_TASKS = Object.freeze(["rerank", "score"]);
 const TTL_MS = 30_000;
 const _cache = new Map(); // `${tasks}|${settingKey}|${roleId}` -> { value, at }
 
+/** Forget cached resolutions (a binding or pin changed). */
+export function clearProviderTaskCache() { _cache.clear(); }
+
 /** Test seam: forget cached resolutions. */
-export function _resetProviderTaskCacheForTest() { _cache.clear(); }
+export const _resetProviderTaskCacheForTest = clearProviderTaskCache;
 
 function modelsOf(p) {
   if (!p) return [];
