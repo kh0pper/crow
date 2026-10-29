@@ -245,3 +245,27 @@ test("cloud mode refuses this box's own public address and its on-link neighbour
     assert.equal(cloud("8.8.8.8"), false);
   } finally { setInterfaceTableForTests(null); }
 });
+
+test("a string or Buffer body is sent with Content-Length, never chunked (F8)", async () => {
+  const seen = [];
+  const s = await fakeServer((req, res) => {
+    let got = "";
+    req.on("data", (c) => { got += c; });
+    req.on("end", () => {
+      seen.push({ len: req.headers["content-length"], te: req.headers["transfer-encoding"], got });
+      res.writeHead(200, { "content-type": "application/json" }); res.end("{}");
+    });
+  });
+  try {
+    const opts = { method: "POST", mode: "cloud", lookupFn: answer("127.0.0.1"), allowAddressFn: (n) => n === "fake.test", timeoutMs: 2000 };
+    const text = JSON.stringify({ model: "m", input: "é ok" });
+    const a = await safeRequest(`http://fake.test:${s.port}/v1/embeddings`, { ...opts, headers: { "content-type": "application/json" }, body: text });
+    await readJson(a);
+    const b = await safeRequest(`http://fake.test:${s.port}/v1/embeddings`, { ...opts, body: Buffer.from("abc") });
+    await readJson(b);
+    assert.deepEqual(seen, [
+      { len: String(Buffer.byteLength(text)), te: undefined, got: text },
+      { len: "3", te: undefined, got: "abc" },
+    ]);
+  } finally { await s.close(); }
+});

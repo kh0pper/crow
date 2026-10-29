@@ -147,11 +147,16 @@ export function safeRequest(url, {
     const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
     const host = u.hostname.replace(/^\[|\]$/g, "");
     const lib = transport || (u.protocol === "https:" ? https : http);
+    // A string or Buffer body goes out with its length, never chunked (some
+    // "Other" servers refuse a chunked POST).
+    const sized = typeof body === "string" || Buffer.isBuffer(body);
+    const hasLength = Object.keys(headers || {}).some((h) => h.toLowerCase() === "content-length");
+    const sendHeaders = sized && !hasLength ? { ...headers, "content-length": Buffer.byteLength(body) } : headers;
     let settled = false;
     const done = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
     const req = lib.request({
       protocol: u.protocol, hostname: host, port, method,
-      path: u.pathname + u.search, headers, agent: false,
+      path: u.pathname + u.search, headers: sendHeaders, agent: false,
       lookup: guardedLookup({ mode, lookupFn, allowAddressFn, port }),
     }, (res) => done(resolve, { status: res.statusCode, headers: res.headers, stream: res, deadline }));
     const timer = setTimeout(() => req.destroy(fail("TIMEOUT", `no answer in ${timeoutMs} ms`)), timeoutMs);
