@@ -17,6 +17,7 @@ function makeEl(tag) {
     insertBefore(c, ref) { const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) return this.appendChild(c); this.children.splice(i, 0, c); c.parentNode = this; return c; },
     removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; },
     setAttribute(k, v) { this["attr:" + k] = v; },
+    getAttribute(k) { return k === "href" ? this.href : (this["attr:" + k] ?? null); },
     get firstChild() { return this.children[0] || null; },
   };
   Object.defineProperty(node, "innerHTML", { set() { throw new Error("innerHTML sink reached"); }, get() { return ""; } });
@@ -57,6 +58,9 @@ function mount({ offers = [], card = null, result = null, decisions = [], decide
       if (method === "POST") return Promise.resolve(review(u, fetches[fetches.length - 1].body));
       return Promise.resolve(json({}));
     },
+    // The hub's own head hook (client.js setHeadCard), recorded here.
+    headCards: [],
+    setHeadCard(c, href) { sandbox.headCards.push({ c, href }); },
     __export(api) { sandbox.api = api; },
   };
   sandbox.line = (cls, text) => { const d = makeEl("div"); if (cls) d.className = cls; d.textContent = text == null ? "" : String(text); return d; };
@@ -182,6 +186,10 @@ test("the chip shows the server's lane", async () => {
   assert.equal(main.href, "/dashboard/board?project=2#card-9");
   const det = byClass(chip[0], "cardchip-details")[0];
   assert.equal(det.href, "/dashboard/bot-board?card=9", "no bot: the standalone card view");
+  // The session head's card line is fed from this same lookup (no extra request).
+  assert.equal(h.sandbox.headCards.length, 1);
+  assert.equal(h.sandbox.headCards[0].c.id, 9);
+  assert.equal(h.sandbox.headCards[0].href, "/dashboard/bot-board?card=9");
   h.state.card = { id: 9, title: "T", lane: "done", projectId: 2 };
   h.api.loadCardChip(SID); await tick();
   assert.equal(byClass(h.transcript, "perch-cardchip").length, 1, "one chip, redrawn in place");
@@ -189,6 +197,7 @@ test("the chip shows the server's lane", async () => {
   h.state.card = null;
   h.api.loadCardChip(SID); await tick();
   assert.equal(byClass(h.transcript, "perch-cardchip").length, 0, "no card, no chip");
+  assert.equal(h.sandbox.headCards[h.sandbox.headCards.length - 1].c, null, "no card clears the head line");
 });
 
 test("a turn ending reloads both; working to working does not", async () => {
