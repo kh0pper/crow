@@ -84,8 +84,8 @@ const upstream = {
     if (state.initFail === "throw") throw new Error(`child gone ${SECRET}`);
     if (state.initFail) return { code: state.initFail };
   },
-  callTool: async (ctx, name, args, { signal, meta }) => {
-    const rec = { name, args, meta, caller: currentCaller(), signal, ctx };
+  callTool: async (ctx, name, args, { signal, meta, ceilingSignal }) => {
+    const rec = { name, args, meta, caller: currentCaller(), signal, ceilingSignal, ctx };
     calls.push(rec);
     switch (name) {
       case "echo": return { content: [{ type: "text", text: `ECHO ${args.text}` }], structuredContent: { leak: SECRET } };
@@ -1016,23 +1016,78 @@ test("M6: one bot holds at most its share of a mount key's slots; another bot st
   } finally { await side.close(); }
 });
 
-test("M6: a call that never settles has its slot reclaimed at the hard ceiling", async () => {
-  const side = await sideMount({ family: "example-ceiling", maxInFlight: 1, maxInFlightPerBot: 1, callTimeoutMs: 100, inFlightCeilingMs: 300 });
+test("M6: at the hard ceiling a never-settling call is ABORTED (signal + cancelCall) and keeps counting against the budget until it settles", async () => {
+  const cancels = [];
+  const side = await sideMount({
+    family: "example-ceiling", maxInFlight: 2, maxInFlightPerBot: 1, callTimeoutMs: 100, inFlightCeilingMs: 200,
+    upstream: { ...upstream, cancelCall: (ctx, name, o) => { cancels.push({ name, reason: o?.reason, uuid: ctx?.uuid }); throw new Error("hook blew up"); } },
+  });
   const warn = console.warn;
   const warned = [];
+  const otto = jobActor("otto", "job-otto-1");
   try {
     console.warn = (...x) => warned.push(x.join(" "));
     await side.use(async () => {
-      const sid = await open(jobActor(), { path: side.path });
-      assert.match(textOf(await callTool(sid, "stuck", {}, { path: side.path })), /^Timed out/);
-      assert.equal(textOf(await callTool(sid, "echo", { text: "b" }, { path: side.path })), "Busy, try again in a moment.", "below the ceiling the slot is held (S1)");
-      await sleep(350);
-      assert.equal(textOf(await callTool(sid, "echo", { text: "c" }, { path: side.path })), "ECHO c", "reclaimed at the ceiling");
-      assert.equal(state.stuck.length, 1, "the upstream call itself never settled");
+      const hank = await open(jobActor(), { path: side.path });
+      const os = await open(otto, { path: side.path });
+      // hank's share is 1: one never-settling call passes the timeout...
+      assert.match(textOf(await callTool(hank, "stuck", {}, { path: side.path })), /^Timed out/);
+      assert.equal(textOf(await callTool(hank, "echo", { text: "b" }, { path: side.path })), "Busy, try again in a moment.", "below the ceiling the slot is held (S1)");
+      const hankCall = calls.find((c) => c.name === "stuck" && c.ctx.botId === "hank");
+      assert.equal(hankCall.signal.aborted, true, "the timeout already aborted the call's signal");
+      assert.equal(hankCall.ceilingSignal.aborted, false, "the ceiling signal has not fired yet");
+      await sleep(260);
+      // ...and at the ceiling it is aborted, the hook is called (its throw swallowed)...
+      assert.equal(hankCall.ceilingSignal.aborted, true, "the upstream's ceiling signal aborts at the ceiling");
+      assert.match(String(hankCall.ceilingSignal.reason?.message), /ceiling/);
+      assert.deepEqual(cancels, [{ name: "stuck", reason: "ceiling", uuid: UUID }]);
+      // ...but it still counts against hank's budget until it really settles.
+      assert.equal(textOf(await callTool(hank, "echo", { text: "c" }, { path: side.path })), "Busy, try again in a moment.", "reclaimed, not settled: still busy");
+      assert.equal(textOf(await callTool(os, "echo", { text: "o" }, { path: side.path, actor: otto })), "ECHO o", "another bot is unaffected");
+      // otto's never-settling call takes the key's reclaimed total to maxInFlight (2): everyone is busy.
+      assert.match(textOf(await callTool(os, "stuck", {}, { path: side.path, actor: otto })), /^Timed out/);
+      await sleep(260);
+      assert.equal(cancels.length, 2);
+      assert.equal(textOf(await callTool(os, "echo", { text: "o2" }, { path: side.path, actor: otto })), "Busy, try again in a moment.", "otto: reclaimed share used up");
+      assert.equal(state.stuck.length, 2, "neither upstream call has settled");
+      // hank's raw promise finally settles: hank runs again.
+      state.stuck.shift()();
+      await sleep(20);
+      assert.equal(textOf(await callTool(hank, "echo", { text: "d" }, { path: side.path })), "ECHO d", "a settled reclaimed call frees its budget");
+      assert.equal(textOf(await callTool(os, "echo", { text: "o3" }, { path: side.path, actor: otto })), "Busy, try again in a moment.", "otto's own call still has not settled");
+      state.stuck.shift()();
+      await sleep(20);
+      assert.equal(textOf(await callTool(os, "echo", { text: "o4" }, { path: side.path, actor: otto })), "ECHO o4");
     });
     assert.ok(warned.some((l) => /ceiling/.test(l)), JSON.stringify(warned));
+    assert.ok(!warned.some((l) => /hook blew up/.test(l)), "the hook's throw is swallowed, not logged");
+  } finally {
+    console.warn = warn;
+    state.stuck.splice(0).forEach((f) => f());
+    await side.close();
+  }
+});
+
+test("M6: once the key's reclaimed total reaches maxInFlight, every bot is busy", async () => {
+  const side = await sideMount({ family: "example-ceiling2", maxInFlight: 2, maxInFlightPerBot: 2, callTimeoutMs: 100, inFlightCeilingMs: 200 });
+  const warn = console.warn;
+  const otto = jobActor("otto", "job-otto-1");
+  try {
+    console.warn = () => {};
+    await side.use(async () => {
+      const hank = await open(jobActor(), { path: side.path });
+      const os = await open(otto, { path: side.path });
+      await Promise.all([callTool(hank, "stuck", {}, { path: side.path }), callTool(hank, "stuck", {}, { path: side.path })]);
+      await sleep(260);
+      assert.equal(textOf(await callTool(os, "echo", { text: "o" }, { path: side.path, actor: otto })), "Busy, try again in a moment.", "the key's reclaimed budget is spent");
+      assert.equal(textOf(await callTool(hank, "echo", { text: "h" }, { path: side.path })), "Busy, try again in a moment.");
+      state.stuck.shift()();
+      await sleep(20);
+      assert.equal(textOf(await callTool(os, "echo", { text: "o" }, { path: side.path, actor: otto })), "ECHO o", "one settled: room again");
+    });
     assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-ceilbad", inFlightCeilingMs: 10 })), TypeError, "a ceiling below the timeout");
     assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-sharebad", maxInFlightPerBot: 3 })), TypeError, "a share above the cap");
+    assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-cancelbad", upstream: { ...upstream, cancelCall: "no" } })), TypeError, "cancelCall must be a function");
   } finally {
     console.warn = warn;
     state.stuck.splice(0).forEach((f) => f());

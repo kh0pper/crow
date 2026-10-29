@@ -40,9 +40,17 @@
  * bounds on that: one bot holds at most `maxInFlightPerBot` of a key's
  * `maxInFlight` slots (default half, rounded up), so it cannot starve the
  * others; and a call still unsettled at the hard ceiling (`inFlightCeilingMs`,
- * default 5 x callTimeoutMs) has its slot reclaimed and logged. Below the
- * ceiling the slot is held until the upstream settles. An upstream's callTool
- * must settle when its child exits.
+ * default 5 x callTimeoutMs) is ABORTED: `ceilingSignal` (passed to callTool
+ * beside `signal`) fires with a ceiling reason, and so does `signal` if the
+ * timeout has not already aborted it (it always has, since the ceiling is
+ * >= callTimeoutMs, and an AbortSignal aborts once), and the optional `upstream.cancelCall(ctx, name, { reason:
+ * "ceiling" })` hook is called (a throw is swallowed); the event is logged.
+ * The active slot is freed then, but the budget is not: a reclaimed call
+ * still counts, per key and per bot, until its upstream promise really
+ * settles, and new calls are `busy` while the bot's reclaimed count is at its
+ * share or the key's is at maxInFlight. So never-settling calls cannot pile
+ * up past the cap. Below the ceiling the slot is held until the upstream
+ * settles. An upstream's callTool must settle when its child exits.
  *
  * MCP sessions here keep NO event store (nothing is replayable, so no result
  * stays in memory after it is sent). A session is closed when a request on it
@@ -196,6 +204,7 @@ function normalize(opts) {
   need(typeof o.authorize === "function", "authorize is required");
   need(isPlainObject(o.upstream) && typeof o.upstream.listTools === "function" && typeof o.upstream.callTool === "function", "upstream needs listTools and callTool");
   need(o.upstream.onInitialize === undefined || typeof o.upstream.onInitialize === "function", "upstream.onInitialize must be a function");
+  need(o.upstream.cancelCall === undefined || typeof o.upstream.cancelCall === "function", "upstream.cancelCall must be a function");
   need(typeof o.toolFilter === "function", "toolFilter is required");
   need(isPlainObject(o.resultCap) && Number.isInteger(o.resultCap.maxBytes) && o.resultCap.maxBytes > 0
     && Array.isArray(o.resultCap.contentTypes) && o.resultCap.contentTypes.length > 0 && o.resultCap.contentTypes.every((t) => CONTENT_KINDS.has(t)),
@@ -229,6 +238,8 @@ function normalize(opts) {
     now: deps.now || (() => Date.now()),
     inflight: new Map(),
     inflightBot: new Map(),
+    reclaimed: new Map(),
+    reclaimedBot: new Map(),
   };
 }
 
@@ -290,13 +301,18 @@ async function runTool(m, tool, args, extra) {
   const botKey = JSON.stringify([st.key, live.botId]);
   const n = m.inflight.get(st.key) || 0;
   const nb = m.inflightBot.get(botKey) || 0;
-  if (n >= m.maxInFlight || nb >= m.maxInFlightPerBot) return refuse("busy");
+  // Reclaimed-but-unsettled calls (the ceiling) still spend the budget.
+  const rk = m.reclaimed.get(st.key) || 0;
+  const rb = m.reclaimedBot.get(botKey) || 0;
+  if (n >= m.maxInFlight || nb >= m.maxInFlightPerBot || rk >= m.maxInFlight || rb >= m.maxInFlightPerBot) return refuse("busy");
   m.inflight.set(st.key, n + 1);
   m.inflightBot.set(botKey, nb + 1);
   // The slot is released when the upstream's OWN promise settles (header), or
   // at the hard ceiling for a call that never does.
   let released = false;
+  let reclaimed = false;
   let ceiling = null;
+  const ceilingAc = new AbortController();
   const dec = (map, k) => { const left = (map.get(k) || 1) - 1; if (left > 0) map.set(k, left); else map.delete(k); };
   const release = () => {
     if (released) return;
@@ -305,10 +321,16 @@ async function runTool(m, tool, args, extra) {
     dec(m.inflight, st.key);
     dec(m.inflightBot, botKey);
   };
+  // The raw upstream promise settled: free the active slot, or the budget a
+  // reclaimed call was still holding.
+  const settled = () => {
+    if (reclaimed) { reclaimed = false; dec(m.reclaimed, st.key); dec(m.reclaimedBot, botKey); }
+    release();
+  };
   let raw;
   try {
     const timeout = AbortSignal.timeout(m.callTimeoutMs);
-    const signal = AbortSignal.any([timeout, st.closed, ...(extra?.signal ? [extra.signal] : [])]);
+    const signal = AbortSignal.any([timeout, st.closed, ceilingAc.signal, ...(extra?.signal ? [extra.signal] : [])]);
     const aborted = new Promise((_, rej) => {
       if (signal.aborted) rej(signal.reason);
       else signal.addEventListener("abort", () => rej(signal.reason), { once: true });
@@ -316,12 +338,20 @@ async function runTool(m, tool, args, extra) {
     let result;
     try {
       // 5. the upstream; an upstream that ignores the signal still loses the race.
-      raw = Promise.resolve().then(() => m.upstream.callTool(live.ctx, tool.name, callArgs, { signal, meta }));
-      raw.then(release, release);
+      raw = Promise.resolve().then(() => m.upstream.callTool(live.ctx, tool.name, callArgs, { signal, meta, ceilingSignal: ceilingAc.signal }));
+      raw.then(settled, settled);
       ceiling = setTimeout(() => {
         if (released) return;
+        ceiling = null;
+        reclaimed = true;
+        m.reclaimed.set(st.key, (m.reclaimed.get(st.key) || 0) + 1);
+        m.reclaimedBot.set(botKey, (m.reclaimedBot.get(botKey) || 0) + 1);
         release();
-        noteRefusedOnce(`${m.family}:inflight`, `a call that never settled had its slot reclaimed at the ${secsOf(m.inFlightCeilingMs)} s ceiling`);
+        ceilingAc.abort(new Error(`in-flight ceiling (${secsOf(m.inFlightCeilingMs)} s) reached`));
+        try {
+          Promise.resolve(m.upstream.cancelCall?.(live.ctx, tool.name, { reason: "ceiling" })).catch(() => { /* swallowed */ });
+        } catch { /* swallowed */ }
+        noteRefusedOnce(`${m.family}:inflight`, `a call that never settled was aborted and its slot reclaimed at the ${secsOf(m.inFlightCeilingMs)} s ceiling`);
       }, m.inFlightCeilingMs);
       ceiling.unref?.();
       result = await Promise.race([raw, aborted]);
