@@ -19,6 +19,9 @@ const WHERE_RANK = Object.freeze({ here: 0, other_box: 1, cloud: 2, unproven: 3,
 /** I12: only the provider matters at run time for these, so one pick per provider. */
 const PER_PROVIDER = new Set(["embed", "rerank"]);
 
+/** Never offered as "Same as", and never offered other roles. */
+const NO_CHAIN = "safety";
+
 const CORE_BY_ID = new Map(CORE_ROLES.map((r) => [r.id, r]));
 
 function capabilityOf(roleId, customDefs) {
@@ -112,10 +115,12 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn = () => 
   }
 
   // Role refs: for a chat role, every other chat role that resolves when followed.
-  if (capability === "chat") {
+  // The classifier is a safety boundary with its own refusal rules: it is never
+  // chained, in either direction.
+  if (capability === "chat" && roleId !== NO_CHAIN) {
     const ids = [...CORE_ROLES.map((r) => r.id), ...Object.keys(ctx.customDefs || {})];
     for (const id of ids) {
-      if (id === roleId || capabilityOf(id, ctx.customDefs) !== "chat") continue;
+      if (id === roleId || id === NO_CHAIN || capabilityOf(id, ctx.customDefs) !== "chat") continue;
       const key = `role:${id}`;
       const ctxX = hypothetical(ctx, roleId, key);
       const r = tryResolve(roleId, ctxX);

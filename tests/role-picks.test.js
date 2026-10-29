@@ -62,11 +62,21 @@ test("safety refuses cloud but still lists it", () => {
   const local = s.find((p) => p.key === "local-chat/m1");
   assert.equal(local.allowed, true);
   assert.equal(local.why, undefined);
-  // A role ref whose chain can reach the cloud model is refused too.
-  const viaExpert = listRolePicks("safety", { ctx: makeCtx({ bindings: { expert: { model: "cloud-a/c1", fallback: [] } } }), ownAddrs: OWN })
-    .find((p) => p.key === "role:expert");
-  assert.equal(viaExpert.allowed, false);
-  assert.equal(viaExpert.why, "cloud_refused");
+});
+
+test("the classifier is never chained, in either direction", () => {
+  const ctx = makeCtx({ bindings: {
+    safety: { model: "local-chat/m1", fallback: [] },
+    quick: { model: "local-chat/m1", fallback: [] },
+    voice: { model: "local-chat/m1", fallback: [] },
+  } });
+  const toSafety = keys(listRolePicks("safety", { ctx, ownAddrs: OWN }));
+  assert.ok(toSafety.includes("local-chat/m1"));
+  assert.ok(!toSafety.some((k) => k.startsWith("role:")));
+  const everyday = keys(listRolePicks("everyday", { ctx, ownAddrs: OWN }));
+  assert.ok(!everyday.includes("role:safety"));
+  assert.ok(everyday.includes("role:quick"));
+  assert.ok(everyday.includes("role:voice")); // "Same as Voice" stays allowed
 });
 
 test("other roles allow cloud", () => {
