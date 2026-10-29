@@ -1,0 +1,116 @@
+/**
+ * The shared secret detector (credential card Task 1): known key prefixes, "password: …"
+ * phrasing and high-entropy tokens, and the surgical "[secret removed]" strip. The fake keys
+ * below are built at run time from pieces, so no whole key-shaped literal sits in the repo.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { findSecrets, stripSecrets, detectorSource, SECRET_REMOVED } from "../servers/shared/secret-detect.js";
+
+const rep = (s, n) => s.repeat(n);
+const GH_TOKEN = "gh" + "p_" + rep("aB3dE5", 6);            // 36 chars after the prefix
+const SK_KEY = "sk" + "-proj-" + rep("Zx9Qw2", 4);
+const AWS_KEY = "AK" + "IA" + "Q7RT2XW9PL3MZ8KD";
+const ENTROPY = "Tq8vR2mK9pXw4LzB7nYc3HsJ";                 // 24 chars, mixed case + digits
+
+const kinds = (text) => findSecrets(text).map((h) => h.kind);
+const spans = (text) => findSecrets(text).map((h) => text.slice(h.start, h.end));
+
+test("prefix keys found", () => {
+  for (const key of [GH_TOKEN, SK_KEY, AWS_KEY]) {
+    const text = `here is my key ${key} thanks`;
+    const hits = findSecrets(text);
+    assert.equal(hits.length, 1, key);
+    assert.equal(hits[0].kind, "prefix");
+    assert.equal(text.slice(hits[0].start, hits[0].end), key);
+  }
+});
+
+test("prefix keys are found on every call (the /g patterns are cloned, not shared)", () => {
+  const text = `token ${GH_TOKEN}`;
+  for (let i = 0; i < 5; i++) assert.deepEqual(spans(text), [GH_TOKEN], `call ${i}`);
+});
+
+test("password: phrasing found", () => {
+  const cases = [
+    ["my password: hunter2!x", "hunter2!x"],
+    ["Password=correct-horse", "correct-horse"],
+    ["pwd: s3cr3t!!", "s3cr3t!!"],
+    ["the passcode : 864213", "864213"],
+    ["api_key=abcdef", "abcdef"],
+    ["API key: qwerty12", "qwerty12"],
+    ["secret: opensesame", "opensesame"],
+    ["token = abc.def.ghi", "abc.def.ghi"],
+  ];
+  for (const [text, value] of cases) {
+    const hits = findSecrets(text);
+    assert.equal(hits.length, 1, text);
+    assert.equal(hits[0].kind, "phrase", text);
+    assert.equal(text.slice(hits[0].start, hits[0].end), value, "only the value is the match, not the label: " + text);
+  }
+  assert.deepEqual(findSecrets("password: short"), [], "values under 6 characters are not flagged");
+});
+
+test("entropy token found", () => {
+  const text = `use ${ENTROPY} for the login`;
+  assert.deepEqual(kinds(text), ["entropy"]);
+  assert.deepEqual(spans(text), [ENTROPY]);
+  const b64 = "dGhpcyBpcyBhIHNlY3JldCB0b2tlbjEyMw==";
+  assert.deepEqual(spans(`blob ${b64}.`), [b64]);
+});
+
+test("ordinary prose not flagged", () => {
+  const prose = [
+    "Please book a table for four at seven tonight, and remind me to call the dentist.",
+    "The password reset email never arrived; can you check the spam folder?",
+    "Internationalization and counterrevolutionaries are long words but not secrets.",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+    "abcdefghijklmnopqrstuvwxyzabcdef",        // no digit
+    "123456789012345678901234567890",          // no letter
+    "My token is in the keychain, not here.",
+  ];
+  for (const text of prose) assert.deepEqual(findSecrets(text), [], text);
+});
+
+test("uuid and git sha not flagged", () => {
+  const uuid = "550e8400-e29b-41d4-a716-446655440000";
+  const sha = "8202fefcc4a1b2c3d4e5f60718293a4b5c6d7e8f";
+  const upperSha = sha.toUpperCase();
+  for (const text of [uuid, sha, upperSha, `commit ${sha} closes ${uuid}`]) {
+    assert.deepEqual(findSecrets(text), [], text);
+  }
+  assert.equal(sha.length, 40);
+  // Mixed-case hex is not hex-only: it is flagged by the same rule.
+  assert.deepEqual(kinds("8202FEfcc4a1B2c3d4E5f60718293a4b5c6d7e8F"), ["entropy"]);
+});
+
+test("strip is surgical", () => {
+  const text = `Hi! key ${GH_TOKEN}, password: hunter2!x and ${ENTROPY}. Bye.`;
+  const out = stripSecrets(text);
+  assert.equal(out.removed, 3);
+  assert.equal(out.text, `Hi! key ${SECRET_REMOVED}, password: ${SECRET_REMOVED} and ${SECRET_REMOVED}. Bye.`);
+  assert.equal(SECRET_REMOVED, "[secret removed]");
+  assert.deepEqual(stripSecrets("nothing to see"), { text: "nothing to see", removed: 0 });
+  // Overlapping rules collapse into one replacement.
+  const both = `token: ${ENTROPY}`;
+  assert.deepEqual(stripSecrets(both), { text: `token: ${SECRET_REMOVED}`, removed: 1 });
+  assert.deepEqual(stripSecrets(""), { text: "", removed: 0 });
+  assert.deepEqual(stripSecrets(null), { text: "", removed: 0 });
+});
+
+test("detectorSource rebuilds the same regexes (what the client will get)", () => {
+  const src = detectorSource();
+  assert.ok(Array.isArray(src.prefixes) && src.prefixes.length >= 18);
+  for (const p of src.prefixes) {
+    assert.equal(typeof p.name, "string");
+    assert.doesNotThrow(() => new RegExp(p.source, p.flags), p.name);
+  }
+  const phrase = new RegExp(src.phrase.source, src.phrase.flags);
+  assert.ok(phrase.test("password: hunter2!x"));
+  const run = new RegExp(src.entropy.run.source, src.entropy.run.flags);
+  assert.ok(run.test(ENTROPY));
+  assert.equal(src.entropy.minLength, 24);
+  assert.equal(src.entropy.minBits, 3.5);
+  assert.doesNotThrow(() => JSON.stringify(src));
+  assert.ok(!JSON.stringify(src).includes("`"), "no backtick: the client embeds this in a template literal");
+});
