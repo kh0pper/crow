@@ -144,12 +144,11 @@ function scopeAttr(scope) {
 /** New mode: the session list opens with the project home's "Start a
  *  session" (shared/session-cards.js), in place of the classic launcher's bot
  *  select, model picker and directory field (the model lives behind the
- *  session's details). The new session is filed under the view's scope and
- *  opens by its hash, here. */
+ *  session's details). The Perch client starts it (HUB.startSession): filed
+ *  under the view's scope, opened here. */
 function newModeLaunch(lang, scopeValue, start) {
   const project = /^[1-9][0-9]*$/.test(String(scopeValue));
   return startControlHtml(start || { lead: null, bots: [] }, lang, {
-    projectId: project ? Number(scopeValue) : scopeValue === "unassigned" ? "unassigned" : null,
     inPlace: true,
     emptyKey: project ? "shell.noProjectBots" : "shell.noBots",
   });
@@ -198,7 +197,7 @@ ${engineBanner(engine, lang)}
          back. aria-expanded ships "true" because without JS the list IS on
          screen; the client corrects it from localStorage before first paint. -->
 ${sheet ? newModeLaunch(lang, scopeValue, start) + `
-${listHead('<h2 class="ph-h">' + escapeHtml(t("shell.earlierSessions", lang)) + "</h2>", lang)}`
+${listHead('<h2 class="ph-h">' + escapeHtml(t("perch.sessionsHeading", lang)) + "</h2>", lang)}`
  : `${listHead("<h2>" + escapeHtml(t("perch.sessionsHeading", lang)) + "</h2>", lang)}
     <!-- The launcher sits OUTSIDE #perch-list-body on purpose. renderList()
          and showListNote() both clearEl() that body, so a launch control

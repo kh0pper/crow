@@ -117,7 +117,8 @@ test("the start control: lead, the pick only with more than one bot, the project
   assert.match(startControlHtml({ lead: null, bots: [] }, "en", { emptyKey: "shell.noBots" }), /No bot is attached to Perch yet\./);
   const js = startControlJs("en");
   assert.match(js, /querySelector\('\[data-ph-start-root\]'\)/);
-  assert.match(js, /location\.hash = encodeURIComponent\(sid\)/, "in place: open by the hash");
+  assert.match(js, /hub\.startSession\(/, "in place: the Perch client starts it");
+  assert.doesNotMatch(js, /location\.hash/, "and opens it: the control never sets the hash itself");
   assert.ok(!js.slice(js.indexOf("(function")).includes("`"), "no backtick in the script");
 });
 
@@ -174,9 +175,9 @@ test("the Chat panel: every attachable bot outside a project, the project's insi
   assert.ok(seen.length && seen.every((a) => a.includes("crow.voice")), "the voice bot is excluded in every query");
   assert.deepEqual(opts(await render({ all: true }, { bot: "zed" })), ["zed*", "amy"], "?bot= picks its bot");
   const proj = await render({ projectId: 5, slug: "p" });
-  assert.match(proj, /data-ph-start-root data-project-id="5" data-ph-in-place>/);
+  assert.match(proj, /data-ph-start-root data-ph-in-place>/, "on Perch the Perch client files the start");
   assert.match(proj, /<strong data-ph-lead-name>Zed<\/strong>/);
-  assert.match(await render({ unassigned: true }), /data-ph-start-root data-project-id="unassigned" data-ph-in-place>/);
+  assert.match(await render({ unassigned: true }), /data-ph-start-root data-ph-in-place>/);
   const classic = await panel.handler({}, {}, { db, lang: "en", layout: (o) => o.content });
   assert.doesNotMatch(classic, /data-ph-start-root/);
 });

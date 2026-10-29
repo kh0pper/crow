@@ -120,7 +120,7 @@ export function sessionCardsJs(lang = "en") {
  * opts: { projectId, projectSlug, inPlace, emptyKey }
  *   projectId   sent as project_id ("unassigned" or a number; omitted when null)
  *   projectSlug where the new session opens (/dashboard/perch?project=<slug>#sid)
- *   inPlace     the page is Perch itself: open the new session by its hash
+ *   inPlace     the page is Perch itself: the Perch client starts the session
  *   emptyKey    the line shown with no bot (the project's, or Perch's)
  */
 export function startControlHtml(data, lang, { projectId = null, projectSlug = "", inPlace = false, emptyKey = "shell.noProjectBots" } = {}) {
@@ -154,8 +154,9 @@ export function startControlHtml(data, lang, { projectId = null, projectSlug = "
  * with { project_id } when the control names one (plus briefing: true when
  * "Where you left off" has anything: the server rebuilds the briefing itself,
  * so no text is sent) and the dashboard CSRF token (X-Crow-Csrf), then opens
- * the session: by its hash on Perch itself (data-ph-in-place), else at
  * /dashboard/perch?project=<slug>#<sessionId> (or /dashboard/perch#<id>).
+ * On Perch itself (data-ph-in-place) it hands the start to the Perch client
+ * (window.__crowPerchHub.startSession), which files, opens and guards it.
  *
  * Returned as a <script> string, so it is a TEMPLATE LITERAL: it must contain
  * NO backticks and no dollar-brace sequences other than the tJs strings below.
@@ -206,9 +207,25 @@ export function startControlJs(lang = "en") {
     if (nameEl) nameEl.textContent = o.textContent;
   });
 
+  function done(out) {
+    busy = false; btn.removeAttribute('disabled');
+    say(out && out.note ? out.note : '');
+  }
+
   btn.addEventListener('click', function () {
     if (busy) return;
     busy = true; btn.setAttribute('disabled', ''); say('');
+    if (inPlace) {
+      /* On Perch itself the Perch client starts it (its filing, its session
+         index and its identity guard); its outcome carries any note. */
+      var hub = window.__crowPerchHub;
+      var started = hub && typeof hub.startSession === 'function'
+        ? hub.startSession(btn.getAttribute('data-bot'), nameEl ? nameEl.textContent : '', {})
+        : null;
+      if (!started) { fail(T_FAILED); return; }
+      started.then(done, function () { fail(T_FAILED); });
+      return;
+    }
     var body = {};
     if (pid !== null) body.project_id = pid;
     if (btn.hasAttribute('data-ph-briefing')) body.briefing = true;
@@ -221,7 +238,6 @@ export function startControlJs(lang = "en") {
     }).then(function (x) {
       var sid = x.j && (x.j.sessionId || x.j.threadId);
       if (x.status >= 200 && x.status < 300 && sid) {
-        if (inPlace) { busy = false; btn.removeAttribute('disabled'); location.hash = encodeURIComponent(sid); return; }
         location.href = '/dashboard/perch' + (slug ? '?project=' + encodeURIComponent(slug) : '') + '#' + encodeURIComponent(sid);
         return;
       }

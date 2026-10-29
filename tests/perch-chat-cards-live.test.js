@@ -42,6 +42,10 @@ const SHOT_TAG = process.env.CHAT_CARDS_SHOTS_TAG || "after";
 let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", HOST = "127.0.0.1";
 let chrome = null, available = false, server = null, port = 0;
 const posts = [];
+const roosts = [];
+const NEW_SID = "perchlive-5e5e5e5e";
+// How the next spawn answers: a status, and a delay before it does.
+let spawn = { status: 201, delay: 0 };
 function send(res, code, obj) {
   res.writeHead(code, { "content-type": "application/json" });
   res.end(JSON.stringify(obj));
@@ -52,14 +56,19 @@ function serveApi(req, res) {
   if (req.method === "POST") {
     let body = "";
     req.on("data", (c) => { body += c; });
-    req.on("end", () => {
-      posts.push({ url, body });
+    req.on("end", async () => {
+      posts.push({ url, body, csrf: req.headers["x-crow-csrf"] || null });
+      if (/\/bots\/[^/]+\/interactive$/.test(url)) {
+        if (spawn.delay) await sleep(spawn.delay);
+        return spawn.status === 201 ? send(res, 201, { sessionId: NEW_SID, state: "awake" }) : send(res, spawn.status, { error: "engine_required" });
+      }
       if (url.endsWith("/rename")) return send(res, 200, { label: JSON.parse(body || "{}").label || null });
       return send(res, 200, {});
     });
     return;
   }
   if (url.endsWith("/roost")) {
+    roosts.push(req.url.replace(/^\/dashboard\/perch-api/, ""));
     return send(res, 200, {
       birds: [
         { id: "grackle-assistant", name: "Grackle assistant", perch_attached: true, state: "hibernating", sessions: [
@@ -112,7 +121,7 @@ before(async () => {
     const lang = /[?&]lang=es\b/.test(req.url) ? "es" : "en";
     req.crowMode = { mode: "new" };
     const hit = PROJECTS.find((p) => new RegExp("[?&]project=" + p.slug + "\\b").test(req.url));
-    const scope = hit ? { projectId: hit.id, slug: hit.slug } : { all: true };
+    const scope = hit ? { projectId: hit.id, slug: hit.slug } : /[?&]unassigned=1\b/.test(req.url) ? { unassigned: true } : { all: true };
     req.crowScope = scope;
     const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang,
       headerIcons: tamagotchiHtml(lang, { sheet: true }),
@@ -236,7 +245,7 @@ for (const lang of ["en", "es"]) {
       assert.deepEqual(m.pick, ["Grackle assistant", "Hank"], "the attachable bots, the lead first; never the observing bot");
       assert.equal(m.oldLauncher, false, "no bot select, model picker or More options");
       assert.ok(!/More options|Más opciones|GLM/.test(m.text), "no model or options on the page");
-      assert.equal(m.heading, tr("shell.earlierSessions", lang));
+      assert.equal(m.heading, tr("perch.sessionsHeading", lang), "the Chat tab's heading is Sessions");
       // No session id and no state word anywhere, visible or named.
       for (const sid of Object.values(SIDS).concat(["perchlive-0a0a0a0a"])) {
         const hex = sid.replace("perchlive-", "");
@@ -335,7 +344,6 @@ test("390x844: a project's Chat offers that project's bots; the card names no pr
     const m = await s.json(READ);
     assert.equal(m.lead, "Hank");
     assert.deepEqual(m.pick, [], "one bot: nothing to pick");
-    assert.equal(await s.evalIn("document.querySelector('[data-ph-start-root]').getAttribute('data-project-id')"), "2");
     const sunvox = m.cards.filter((c) => c.title === "Pick a tempo")[0];
     assert.ok(sunvox, "the project's session is listed");
     assert.ok(!sunvox.meta.includes("Sunvox"), "the page is the project's: its name is not repeated on the card");
@@ -357,4 +365,70 @@ test("1280x800: the same cards in the left column, beside an open session", asyn
     assert.ok(m.list.w > 0 && m.list.r <= m.chat.l + 1, "the list is the left column: " + JSON.stringify(m));
     assert.ok(m.sw <= m.vw, "no horizontal scroll");
   } finally { await s.close(); }
+});
+
+// Start a session, on Perch itself: the Perch client starts it
+// (HUB.startSession). The filing rule, pinned: Everything sends no project
+// (the bot's own project files it), Unassigned files it unassigned, a
+// project's Chat files it there and asks for the project's briefing.
+const START_CASES = [
+  { name: "Everything", path: "/dashboard/perch", minRows: 4, body: null, scope: "?scope=all" },
+  { name: "Unassigned", path: "/dashboard/perch?unassigned=1", minRows: 1, body: { project_id: "unassigned" }, scope: "?scope=unassigned" },
+  { name: "a project", path: "/dashboard/perch?project=sunvox", minRows: 2, body: { project_id: 2, briefing: true }, scope: "?scope=2" },
+];
+const CSRF = "document.cookie='crow_csrf=tok-123; path=/'; 1";
+async function untilPosted(n) {
+  const end = Date.now() + 5000;
+  while (posts.filter((p) => /\/bots\/[^/]+\/interactive$/.test(p.url)).length < n && Date.now() < end) await sleep(25);
+  return posts.filter((p) => /\/bots\/[^/]+\/interactive$/.test(p.url));
+}
+for (const c of START_CASES) {
+  test(`390x844 ${c.name}: Start posts the scope's filing with the CSRF token and opens the session in place`, async (t) => {
+    if (!available) return t.skip("no headless Chrome");
+    const s = await tab({ path: c.path, minRows: c.minRows });
+    try {
+      posts.length = 0; roosts.length = 0; spawn = { status: 201, delay: 0 };
+      await s.evalIn(CSRF);
+      await s.evalIn("document.querySelector('[data-ph-start]').click(), 1");
+      const [p] = await untilPosted(1);
+      assert.ok(p, "the spawn was posted");
+      assert.equal(p.csrf, "tok-123", "X-Crow-Csrf carries the dashboard token");
+      assert.deepEqual(p.body ? JSON.parse(p.body) : null, c.body, "the filing: " + c.name);
+      await s.waitFor(`location.hash==='#${NEW_SID}'&&document.body.getAttribute('data-view')==='chat'`, "the new session open");
+      await sleep(300);
+      assert.deepEqual(roosts.filter((u) => !u.includes("?")), [], "no second, unscoped /roost: the session index was seeded");
+      assert.ok(roosts.every((u) => u.endsWith(c.scope)), "every /roost is the view's: " + JSON.stringify(roosts));
+      assert.equal(await s.evalIn("document.querySelector('[data-ph-start]').disabled"), false, "Start is usable again");
+    } finally { await s.close(); }
+  });
+}
+
+test("390x844: a refused start (409) says why beside Start, and nothing opens", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const { t: tr } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  const s = await tab({ lang: "es" });
+  try {
+    posts.length = 0; spawn = { status: 409, delay: 0 };
+    await s.evalIn(CSRF);
+    await s.evalIn("document.querySelector('[data-ph-start]').click(), 1");
+    await s.waitFor("!!document.querySelector('[data-ph-status]').textContent", "the note");
+    assert.equal(await s.evalIn("document.querySelector('[data-ph-status]').textContent"), tr("perch.engineRequired", "es"));
+    assert.equal(await s.evalIn("location.hash"), "");
+    assert.equal(await s.evalIn("document.querySelector('[data-ph-start]').disabled"), false);
+  } finally { spawn = { status: 201, delay: 0 }; await s.close(); }
+});
+
+test("390x844: a late start does not pull you out of a session you opened since", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab();
+  try {
+    posts.length = 0; spawn = { status: 201, delay: 800 };
+    await s.evalIn(CSRF);
+    await s.evalIn("document.querySelector('[data-ph-start]').click(), 1");
+    await untilPosted(1);
+    await s.evalIn(`document.querySelector('a.ph-row[href="#${SIDS.untitled}"]').click(), 1`);
+    await s.waitFor(`location.hash==='#${SIDS.untitled}'&&document.body.getAttribute('data-view')==='chat'`, "the other session open");
+    await sleep(1200);
+    assert.equal(await s.evalIn("location.hash"), "#" + SIDS.untitled, "still in the session opened since");
+  } finally { spawn = { status: 201, delay: 0 }; await s.close(); }
 });
