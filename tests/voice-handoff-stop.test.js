@@ -602,6 +602,63 @@ test("through the runner: \"stop writer\" twice in a row still asks, and the yes
   s.done();
 });
 
+test("through the runner: a yes said with the stop confirms it, en and es; \"no, stop writer\" asks again (6.3 fix round 2, I1)", async () => {
+  for (const [lang, ask, yes] of [
+    ["en", "stop writer", "yes, stop it"], ["en", "stop writer", "yes stop writer"], ["en", "stop writer", "yes, stop the writer please"],
+    ["es", "detén a writer", "sí, páralo"], ["es", "detén a writer", "sí, detén a writer"],
+  ]) {
+    const s = await setup();
+    const { id, sid } = await started(s, { lang });
+    const { h, turn } = withTurn(s, []);
+    assert.equal((await turn(ask, { lang, mediaActive: () => false })).timings.verb, "stop_propose", ask);
+    const r = await turn(yes, { lang, mediaActive: () => false });
+    assert.equal(r.timings.verb, "stop_stopped", yes);
+    assert.deepEqual(s.eng.calls.stop, [sid], `${yes}: stopped once`);
+    assert.equal((await s.row(id)).status, "stopped");
+    assert.equal(h.log.length, 0);
+    s.done();
+  }
+  // "no, stop writer" is a stop request again: the question is asked again, nothing stops.
+  const s = await setup();
+  const { id } = await started(s);
+  const { turn } = withTurn(s, []);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal((await turn("no, stop writer", { mediaActive: () => false })).timings.verb, "stop_propose", "asked again, not declined");
+  assert.equal(s.pending.get(DEVICE.id).id, id);
+  assert.deepEqual(s.eng.calls.stop, []);
+  s.done();
+});
+
+test("through the runner: a yes with a stop naming ANOTHER bot asks about that bot, never confirms the asked one (6.3 fix round 2)", async () => {
+  const s = await setup();
+  const { id } = await started(s);
+  const hp = await s.handoff({ bot: "helper", session: "s2" });
+  const { turn } = withTurn(s, []);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.deepEqual((await turn("yes, stop helper", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal(s.pending.get(DEVICE.id).id, hp.id, "the question is now about helper's row");
+  assert.deepEqual(s.eng.calls.stop, []);
+  assert.equal((await turn("yes", { mediaActive: () => false })).timings.verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, ["s2"]);
+  assert.equal((await s.row(id)).status, "started", "writer's keeps running");
+  s.done();
+});
+
+test("a pronoun stop while a stop question waits means the asked row, never the device's last topic (6.3 fix round 2, m5)", async () => {
+  const s = await setup();
+  const w = await s.handoff({ session: "s1" });
+  const hp = await s.handoff({ bot: "helper", session: "s2" });
+  const { rememberTopic, topicFor } = await import("../servers/gateway/voice/handoff-topic.js");
+  assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+  assert.equal(s.pending.get(DEVICE.id).id, w.id);
+  // The device's topic is helper's row ("how's helper doing?"); the question asked is about writer's.
+  rememberTopic(s.core, DEVICE.id, hp.id, { inTurn: false });
+  assert.equal(topicFor(s.core, DEVICE.id).id, hp.id);
+  assert.deepEqual(await s.ask("stop it"), { say: "Stop Writer's task: research radio history?", verb: "stop_propose" });
+  assert.equal(s.pending.get(DEVICE.id).id, w.id, "still writer's");
+  s.done();
+});
+
 test("a named bot with nothing open of its own: already when it just ended, none otherwise; nothing open at all is the model's", async () => {
   const s = await setup();
   assert.equal(await s.ask("stop writer"), null, "no open hand-off: the stop matchers never fire");
@@ -997,7 +1054,6 @@ test("every pending.set in the hand-off files asks through askedEntry, so each q
   let sites = 0;
   for (const f of readdirSync(dir).filter((n) => /^handoff.*\.js$/.test(n))) {
     for (const m of readFileSync(join(dir, f), "utf8").matchAll(/pending\.set\(([^\n]*)/g)) {
-      if (/typeof pending\.set/.test(m[0]) && !/askedEntry/.test(m[1])) continue;
       sites++;
       assert.match(m[1], /^[^,]+, askedEntry\(/, `${f}: ${m[0]}`);
     }

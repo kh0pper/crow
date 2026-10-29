@@ -267,3 +267,13 @@ test("claimsAction: the Spanish hand-off claims, with an agent subject where the
   // As in English, "<X> está en ello" / "<X> ya empezó" names an agent only when X is one.
   for (const t of ["Writer está en ello.", "Writer ya empezó."]) assert.equal(claimsAction(t), false, `no agents: ${t}`);
 });
+
+test("claimsAction: Spanish subjunctives and a start with a time are no claims (6.3 fix round 2)", () => {
+  const agents = ["Writer"];
+  for (const t of [
+    "Saldremos cuando pare la lluvia.", "Ojalá pare pronto.", "En cuanto pare la lluvia salimos.", "Si pare, avísame.", "Aunque pare, sigue.", "Mientras pare el tráfico, espera.",
+    "Que se lo pase bien.", "Espero que se lo pase bien.",
+    "El equipo comenzó a las ocho.", "Writer empezó a la una.", "El equipo empezó el lunes.", "Writer comenzó 9 en punto.", "El equipo empezó a llover.",
+  ]) assert.equal(claimsAction(t, { agents }), false, t);
+  for (const t of ["Paré la tarea de Writer.", "Se lo pasé a Writer.", "Writer ya empezó.", "El equipo comenzó a trabajar en ello."]) assert.equal(claimsAction(t, { agents }), true, t);
+});

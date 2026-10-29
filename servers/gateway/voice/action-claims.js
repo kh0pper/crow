@@ -35,8 +35,9 @@ const STATE_NOUN = "(?!(?:it|that|this|these|those|the|a|an|my|his|her|its|our|t
 // Things that start on their own: "the movie has started" is a fact, not a hand-off claim.
 const STARTS_ON_ITS_OWN = "movie|film|show|timer|meeting|game|class|event|call|countdown|alarm|song|episode|match|race|session|concert|lesson|rain|storm|season|sale|party|service";
 // The same in Spanish (accents dropped): "la película ya ha empezado" is a fact.
-// Before a Spanish first-person stop: never "me" (reflexive) or "que" and its clitics (the subjunctive "que lo pare").
-const NOT_ME_QUE = "(?<!\\bme )(?<!\\bque(?: (?:lo|la|le|los|las|se|te|me))* )";
+// Before a Spanish first-person stop: never "me" (reflexive), nor "que", cuando, si, ojalá, aunque, mientras or "en cuanto"
+// and their clitics (the subjunctive: "que lo pare", "cuando pare la lluvia", "ojalá pare pronto").
+const NOT_ME_QUE = "(?<!\\bme )(?<!\\b(?:que|cuando|si|ojala|aunque|mientras|en cuanto)(?: (?:lo|la|le|los|las|se|te|me))* )";
 const STARTS_ON_ITS_OWN_ES = "pelicula|partido|reunion|temporizador|juego|clase|evento|llamada|cancion|episodio|serie|concierto|lluvia|fiesta|sesion|alarma";
 // A span of time after "in" ("starting in five minutes", "in an hour"): a schedule, not a claim ("starting in on it" is one).
 const SPAN = "(?:\\d|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|half|few|couple|minutes?|hours?|seconds?)";
@@ -104,7 +105,7 @@ const CLAIMS = [
   new RegExp(`${NEG}\\bse pone con ello\\b`),
   new RegExp(`${NEG}\\bya esta con ello\\b`),
   new RegExp(`${NEG}(?<!\\b(?:${STARTS_ON_ITS_OWN_ES})(?: ya)? )\\b(?:ha|han) empezado\\b`),
-  new RegExp(`${NEG}\\bse lo (?:he )?pas(?:e|ado)\\b`),
+  new RegExp(`${NEG}(?<!\\bque )\\bse lo (?:he )?pas(?:e|ado)\\b`),   // never "que se lo pase bien"
   // PR 6: "estoy en ello" (the "I'm on it"); "le pasé la tarea a Writer", "le encargué el informe a Writer". Never after
   // que, cuando, si, ojalá or aunque: "lo que le pase", "cuando le pase algo" are the subjunctive of pasar.
   new RegExp(`${NEG}\\b(?:estoy|estamos) (?:ya )?en ello\\b`),
@@ -145,7 +146,8 @@ const agentOnIt = (t, agents) => { for (const m of t.matchAll(ON_IT)) if (AGENT_
 const AGENT_WORDS_ES = new Set(["el", "ella", "ellos", "ellas", "bot", "bots", "asistente", "asistentes", "agente", "agentes", "equipo", "alguien"]);
 const OPENERS_ES = new Set(["vale", "bueno", "perfecto", "claro", "genial", "venga", "ok", "okay"]);
 const EN_ELLO = /(?:^|\b(\w+) )(?:ya )?(?:esta|estan) (?:ya )?en ello\b/g;
-const STARTED_ES = /\b(\w+) (?:ya )?(?:empezo|comenzo|empezaron|comenzaron)\b/g;
+// A start with a time, a day or the weather after it is a fact, as in English: "el equipo comenzó a las ocho".
+const STARTED_ES = /\b(\w+) (?:ya )?(?:empezo|comenzo|empezaron|comenzaron)\b(?! a (?:las|la|llover|nevar|diluviar)\b| (?:el )?(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo|hoy|ayer)\b| \d)/g;
 const agentEnEllo = (t, agents) => {
   for (const m of t.matchAll(EN_ELLO)) if (m[1] === undefined || OPENERS_ES.has(m[1]) || AGENT_WORDS_ES.has(m[1]) || agents.has(m[1])) return true;
   for (const m of t.matchAll(STARTED_ES)) if (AGENT_WORDS_ES.has(m[1]) || agents.has(m[1])) return true;
