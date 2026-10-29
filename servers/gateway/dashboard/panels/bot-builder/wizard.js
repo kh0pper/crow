@@ -37,6 +37,7 @@ import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { engineRequiredFor } from "./engine-gate.js";
 import { applyTrackerChoice } from "./tracker-choice.js";
+import { worldRootFor } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { canManageProject } from "../../../apps/extra-tiles.js";
 
 export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "review"];
@@ -396,14 +397,22 @@ export async function handleWizardCreate(req, res, { db, lang }) {
   // The preselected project (?new=1&project=<id>), re-checked here: only a
   // live project the operator owns is kept; anything else is dropped and
   // the bot is made with no project (warned on the review page).
-  let projectId = null, projectDropped = false;
+  let projectId = null, projectDropped = false, worldRoot = null;
   if (state.project != null) {
     const p = projectParam(state.project);
     if (p && await canManageProject(db, { projectId: Number(p) })) projectId = Number(p);
     else projectDropped = true;
   }
+  if (projectId != null) {
+    // A bot made ON a project works from <workspace>/bots/<id> (worldRootFor);
+    // its session_dir and write_paths name that same folder.
+    try {
+      const ws = (await db.execute({ sql: "SELECT workspace_dir FROM project_spaces WHERE id=?", args: [projectId] })).rows[0]?.workspace_dir;
+      if (ws) worldRoot = worldRootFor({ workspaceDir: ws, def: null, crowHome: null, botId });
+    } catch { worldRoot = null; }
+  }
 
-  const def = defaultDefinition(botId, projectId, state.model);
+  const def = defaultDefinition(botId, projectId, state.model, { sessionDir: worldRoot });
   const tpl = getTemplate(state.tpl) || BOT_TEMPLATES[BOT_TEMPLATES.length - 1];
 
   // Channel: simple types normalize through the shared module; crow-messages
@@ -465,7 +474,9 @@ export async function handleWizardCreate(req, res, { db, lang }) {
       args: [botId, display, JSON.stringify(def), projectId],
     });
   } catch (e) {
-    return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(String(e.message || e)));
+    // The fresh wizard keeps the preselected project (a plain id only).
+    const keep = projectParam(state.project) ? "&project=" + projectParam(state.project) : "";
+    return res.redirectAfterPost("/dashboard/bot-builder?new=1" + keep + "&error=" + encodeURIComponent(String(e.message || e)));
   }
   emitBotDefsChanged(botId);
   const warn = projectDropped ? "&warn=" + encodeURIComponent(t("botbuilder.projectDropped", lang)) : "";

@@ -15,8 +15,13 @@
  *   sessions kind='perch-live' threads FILED to this project in shell_items
  *            (the filing, not the bot's home project), unarchived and not
  *            stopped (Perch can open only those), newest first, at most 10.
+ *   allBots  EVERY non-voice bot on this project, by name (the Bots section;
+ *            `bots` above stays the Perch-attachable list Start uses).
  *   canManage / movable / confirm  the Bots section's change controls (canManageProject; the other
- *            non-voice bots, loaded only when canManage; the one ?move names, if movable).
+ *            non-voice, non-custom-tracker bots, loaded only when canManage; the one ?move names, if movable).
+ *   movedName the ?moved bot's name, only when it is on this project and canManage.
+ *   conflictPath  for ?error=conflict&bot=<id>: <workspace_dir>/bots/<id>, only
+ *            for a bot that exists (never a path taken from the URL).
  *   briefing "Where you left off" (R1.2 PR 4): perch/briefing.js's fragments,
  *            each fact with the Board's own card link; null when
  *            CROW_SESSION_BRIEFING=0 (read per request).
@@ -74,16 +79,33 @@ export async function attachableBots(db) {
   return botRows(db, "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id != ?", [CROW_VOICE_BOT_ID]);
 }
 
+/** [{ id, name }] for EVERY non-voice bot on the project (Perch or not), by display name. */
+export async function allProjectBots(db, projectId) {
+  let rows = [];
+  try {
+    rows = (await db.execute({
+      sql: "SELECT bot_id, display_name FROM pi_bot_defs WHERE project_id = ? AND bot_id != ?",
+      args: [Number(projectId), CROW_VOICE_BOT_ID],
+    })).rows || [];
+  } catch (err) {
+    if (!ABSENT_RE.test(String(err && err.message))) throw err;
+  }
+  return rows
+    .map((r) => ({ id: String(r.bot_id), name: String(r.display_name || r.bot_id) }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+}
+
 /**
  * The other bots Move can take here: every non-voice bot not already on this
  * project, by name: [{ id, name, fromName }]. fromName is the project it is in
- * now (its name), or "No project" in `lang`. Read-only.
+ * now (its name), or "No project" in `lang`. A bot with a custom tracker is
+ * left out (moveBotToProject refuses it, as "Turn on a board" does). Read-only.
  */
 export async function movableBots(db, projectId, lang = "en") {
   let rows = [];
   try {
     rows = (await db.execute({
-      sql: `SELECT d.bot_id, d.display_name, p.name AS project_name, p.slug AS project_slug
+      sql: `SELECT d.bot_id, d.display_name, d.definition, p.name AS project_name, p.slug AS project_slug
               FROM pi_bot_defs d LEFT JOIN project_spaces p ON p.id = d.project_id
              WHERE d.bot_id != ? AND (d.project_id IS NULL OR d.project_id != ?)`,
       args: [CROW_VOICE_BOT_ID, Number(projectId)],
@@ -92,6 +114,7 @@ export async function movableBots(db, projectId, lang = "en") {
     if (!ABSENT_RE.test(String(err && err.message))) throw err;
   }
   return rows
+    .filter((r) => (parseDef(r.definition).tracker_config || {}).type !== "custom")
     .map((r) => ({
       id: String(r.bot_id),
       name: String(r.display_name || r.bot_id),
@@ -100,11 +123,11 @@ export async function movableBots(db, projectId, lang = "en") {
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
 }
 
-/** The display name of one bot (for the "is now in this project" line), or null. */
-async function botName(db, botId) {
+/** { name, projectId } of one bot, or null. */
+async function botInfo(db, botId) {
   try {
-    const { rows } = await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [String(botId)] });
-    return rows[0] ? String(rows[0].display_name || botId) : null;
+    const { rows } = await db.execute({ sql: "SELECT display_name, project_id FROM pi_bot_defs WHERE bot_id = ?", args: [String(botId)] });
+    return rows[0] ? { name: String(rows[0].display_name || botId), projectId: rows[0].project_id == null ? null : Number(rows[0].project_id) } : null;
   } catch (err) {
     if (!ABSENT_RE.test(String(err && err.message))) throw err;
     return null;
@@ -184,9 +207,10 @@ async function sessionLabels(db, sids) {
  * Everything the home draws.
  * @param project { id, slug, name, tasks_db_uri }
  */
-export async function loadProjectHome(db, project, { engine = null, tasksDbPath, counts = null, canManage = false, moveId = null, movedId = null, lang = "en" } = {}) {
+export async function loadProjectHome(db, project, { engine = null, tasksDbPath, counts = null, canManage = false, moveId = null, movedId = null, conflictBotId = null, lang = "en" } = {}) {
   const id = Number(project.id);
   const bots = await projectBots(db, id);
+  const allBots = await allProjectBots(db, id);
   const lead = leadOf(bots);
 
   const opts = tasksDbPath ? { tasksDbPath } : {};
@@ -220,8 +244,18 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
   // Bots section (§14): the move picker and confirm load only for a viewer who may change the project.
   const movable = canManage ? await movableBots(db, id, lang) : [];
   const confirm = canManage && moveId ? movable.find((b) => b.id === String(moveId)) || null : null;
-  const movedName = movedId ? await botName(db, movedId) : null;
-  return { lead, bots, needsYou, needsYouCount, sessions, briefing, canManage: !!canManage, movable, confirm, movedName };
+  // The success line only for a bot that is really here now, for a viewer who may change the project.
+  let movedName = null;
+  if (canManage && movedId) {
+    const b = await botInfo(db, movedId);
+    if (b && b.projectId === id) movedName = b.name;
+  }
+  // The conflict path is rebuilt here from the project's own workspace, never read from the URL.
+  let conflictPath = null;
+  if (conflictBotId && project.workspace_dir && await botInfo(db, conflictBotId)) {
+    conflictPath = `${project.workspace_dir}/bots/${String(conflictBotId)}`;
+  }
+  return { lead, bots, allBots, needsYou, needsYouCount, sessions, briefing, canManage: !!canManage, movable, confirm, movedName, conflictPath };
 }
 
 /**

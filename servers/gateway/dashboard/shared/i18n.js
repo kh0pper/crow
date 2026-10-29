@@ -4246,7 +4246,7 @@ export const translations = {
   "projectHome.moveNone": { en: "No other bots to move here.", es: "No hay otros bots que mover aquí." },
   "projectHome.noProject": { en: "No project", es: "Sin proyecto" },
   "projectHome.moveConfirm": { en: "Move {bot} from {from} to {project}?", es: "\u00bfMover {bot} de {from} a {project}?" },
-  "projectHome.moveWhat": { en: "Its board and working folder (sessions, outputs, settings) move here. Its past sessions stay filed where they are.", es: "Su tablero y su carpeta de trabajo (sesiones, resultados, ajustes) se mudan aqu\u00ed. Sus sesiones anteriores siguen archivadas donde est\u00e1n." },
+  "projectHome.moveWhat": { en: "It will work from this project's board, and its working folder (sessions, outputs, settings) moves here. Its past sessions and cards stay where they are.", es: "Trabajará desde el tablero de este proyecto, y su carpeta de trabajo (sesiones, resultados, ajustes) se muda aquí. Sus sesiones y tarjetas anteriores siguen donde están." },
   "projectHome.moveGo": { en: "Move", es: "Mover" },
   "projectHome.moved": { en: "{bot} is now in this project.", es: "{bot} ahora est\u00e1 en este proyecto." },
   "projectHome.errConflict": { en: "Couldn't move it: a folder for this bot already exists here ({path}). Nothing was changed. Ask for help before moving that folder, since it may hold older chats.", es: "No se pudo mover: ya existe aqu\u00ed una carpeta para este bot ({path}). No se cambi\u00f3 nada. Pide ayuda antes de mover esa carpeta, porque puede tener chats anteriores." },

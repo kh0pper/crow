@@ -34,7 +34,7 @@ function noticeHtml(data, lang) {
   const n = data.notice;
   if (!n || !n.error) return "";
   const msg = n.error === "conflict"
-    ? fill("projectHome.errConflict", lang, { path: n.path || "" })
+    ? (data.conflictPath ? fill("projectHome.errConflict", lang, { path: data.conflictPath }) : t("projectHome.errOther", lang))
     : t(MOVE_ERRORS[n.error] || "projectHome.errOther", lang);
   return `<p class="ph-banner ph-banner--err" role="alert" data-ph-error="${escapeHtml(n.error)}">${escapeHtml(msg)}</p>`;
 }
@@ -42,7 +42,7 @@ function noticeHtml(data, lang) {
 /** Bots (§14): the project's bots with Edit, and for a viewer who may change it, Add a bot and Move a bot here. */
 function botsSection(data, project, lang, req) {
   const head = `<h3 class="ph-h" id="ph-bots-h">${escapeHtml(t("projectHome.bots", lang))}</h3>`;
-  const rows = data.bots.map((b) => `<li><div class="ph-row ph-bot"><span class="ph-row-title">${escapeHtml(b.name)}</span><a class="ph-link ph-edit" href="/dashboard/bot-builder?bot=${encodeURIComponent(b.id)}" aria-label="${escapeHtml(fill("projectHome.editBot", lang, { bot: b.name }))}">${escapeHtml(t("projectHome.edit", lang))}</a></div></li>`).join("");
+  const rows = (data.allBots || data.bots).map((b) => `<li><div class="ph-row ph-bot"><span class="ph-row-title">${escapeHtml(b.name)}</span><a class="ph-link ph-edit" href="/dashboard/bot-builder?bot=${encodeURIComponent(b.id)}" aria-label="${escapeHtml(fill("projectHome.editBot", lang, { bot: b.name }))}">${escapeHtml(t("projectHome.edit", lang))}</a></div></li>`).join("");
   const list = rows ? `<ul class="ph-list ph-bot-list">${rows}</ul>` : `<p class="ph-line">${escapeHtml(t("projectHome.noBots", lang))}</p>`;
   let controls = "";
   if (data.canManage) {

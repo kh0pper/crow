@@ -28,11 +28,11 @@ async function projectFor(db, req) {
   const scope = req.crowScope;
   if (!slug || !scope || scope.projectId == null || scope.slug !== slug) return null;
   const { rows } = await db.execute({
-    sql: `SELECT id, slug, name, tasks_db_uri FROM project_spaces WHERE id = ? AND ${ACTIVE_PROJECT_WHERE}`,
+    sql: `SELECT id, slug, name, tasks_db_uri, workspace_dir FROM project_spaces WHERE id = ? AND ${ACTIVE_PROJECT_WHERE}`,
     args: [Number(scope.projectId)],
   });
   const p = rows[0];
-  return p ? { id: Number(p.id), slug: String(p.slug), name: String(p.name || p.slug), tasks_db_uri: p.tasks_db_uri ?? null } : null;
+  return p ? { id: Number(p.id), slug: String(p.slug), name: String(p.name || p.slug), tasks_db_uri: p.tasks_db_uri ?? null, workspace_dir: p.workspace_dir ?? null } : null;
 }
 
 export default {
@@ -62,15 +62,17 @@ export default {
       const botId = String((req.body || {}).bot_id || "");
       const r = await moveBotToProject(db, botId, project.id, { crowHome: resolveCrowHome(), actor: "local" });
       if (r.ok) return res.redirectAfterPost(`${home}?moved=${encodeURIComponent(botId)}`);
-      const path = r.code === "conflict" && r.path ? `&path=${encodeURIComponent(String(r.path).slice(0, 300))}` : "";
-      return res.redirectAfterPost(`${home}?error=${encodeURIComponent(r.code)}${path}`);
+      // A conflict names the bot, never a path: the GET rebuilds the path from this project's workspace.
+      const who = r.code === "conflict" ? `&bot=${encodeURIComponent(botId)}` : "";
+      return res.redirectAfterPost(`${home}?error=${encodeURIComponent(r.code)}${who}`);
     }
     const q = req.query || {};
     const one = (v) => (typeof v === "string" ? v : "");
     // The shell already counted every project for the drawer (resolveShellPage).
     const data = await loadProjectHome(db, project, { engine, counts: req.crowShellCounts || null,
-      canManage, moveId: one(q.move) || null, movedId: one(q.moved) || null, lang });
-    data.notice = { error: one(q.error) || null, path: one(q.path) || null };
+      canManage, moveId: one(q.move) || null, movedId: one(q.moved) || null,
+      conflictBotId: one(q.error) === "conflict" ? one(q.bot) || null : null, lang });
+    data.notice = { error: one(q.error) || null };
     return layout({
       title: project.name,
       content: projectHomeCss() + projectHomeHtml(data, project, lang, { req }) + projectHomeClientJs(lang),

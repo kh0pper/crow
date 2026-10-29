@@ -4,8 +4,8 @@
  * generalised from no project to any project:
  *
  *   1. read the row; 2. refuse what must not move; 3. work out the old world
- *   root (bot-world.mjs's rule: a live project's workspace, else the legacy
- *   root) and the new one (<workspace>/bots/<id>); 4. plan the carry-over
+ *   root (the current project's <workspace>/bots/<id> when it is there, even
+ *   for an archived project; else the legacy root) and the new one (<workspace>/bots/<id>); 4. plan the carry-over
  *   from the bot's REAL world (planMoveCarryOver), before anything is
  *   written; 5. make the links; 6. the tracker write (applyTrackerChoice,
  *   kanban or task-list kept); 7. the compare-and-swap on the definition and
@@ -27,6 +27,11 @@ import { appendAudit } from "../../../../shared/project-acl.js";
 import { boardState } from "../../shared/bot-display.js";
 import { applyTrackerChoice } from "./tracker-choice.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { lstatSync } from "node:fs";
+
+function pathPresent(p) {
+  try { lstatSync(p); return true; } catch { return false; }
+}
 
 /**
  * @param {object} db
@@ -64,18 +69,21 @@ export async function moveBotToProject(db, botId, projectId, { crowHome, actor =
   }
   if (!target) return { ok: false, code: "no_project" };
 
-  // The old root by bot-world.mjs's rule (bridge.mjs loadProjectSpace): a
-  // project row that exists and is not archived gives its workspace; anything
-  // else runs from the legacy root.
-  let fromWorkspace = null;
-  if (fromId != null) {
-    try {
-      const r = (await db.execute({ sql: "SELECT workspace_dir, archived_at FROM project_spaces WHERE id=?", args: [fromId] })).rows[0];
-      if (r && !r.archived_at) fromWorkspace = r.workspace_dir || null;
-    } catch { fromWorkspace = null; }
-  }
+  // The old root: the current project's <workspace>/bots/<id>, archived or
+  // not (an archived project still holds the world the bot built there; the
+  // runtime falls back to the legacy root for an archived project, so moving
+  // out of one must carry what is under the workspace). Only when the row,
+  // its workspace_dir or that folder is gone is the legacy root the world.
   const legacyRoot = worldRootFor({ workspaceDir: null, def, crowHome, botId });
-  const oldRoot = worldRootFor({ workspaceDir: fromWorkspace, def, crowHome, botId });
+  let oldRoot = legacyRoot;
+  if (fromId != null) {
+    let ws = null;
+    try {
+      ws = (await db.execute({ sql: "SELECT workspace_dir FROM project_spaces WHERE id=?", args: [fromId] })).rows[0]?.workspace_dir || null;
+    } catch { ws = null; }
+    const inProject = ws ? worldRootFor({ workspaceDir: ws, def, crowHome, botId }) : null;
+    if (inProject && pathPresent(inProject)) oldRoot = inProject;
+  }
   const newRoot = worldRootFor({ workspaceDir: target.workspace_dir || null, def, crowHome, botId });
 
   const plan = planMoveCarryOver(oldRoot, newRoot, { legacyRoot });

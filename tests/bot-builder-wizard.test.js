@@ -439,3 +439,53 @@ test("en and es strings: botbuilder.projectDropped", () => {
   assert.equal(e.en, "That project isn't available, so the bot was made without one.");
   assert.equal(e.es, "Ese proyecto no está disponible, así que el bot se creó sin proyecto.");
 });
+
+// ---- fix wave: a project-neutral default prompt; a project-born bot names its real world ----
+
+test("a bot made on a project works from <workspace>/bots/<id>; the default prompt names no project or folder", async () => {
+  await addProvider("prov", [{ id: "m1" }]);
+  const pid = await addProject("world-proj");
+  const res = mkRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "blank", display_name: "World Bot", bot_id: "world-bot", model: "prov/m1", gw_type: "none", project: String(pid),
+  } }, res, { db, lang: "en" });
+  const def = JSON.parse((await botRow("world-bot")).definition);
+  const root = join(dir, "projects", "world-proj", "bots", "world-bot");
+  assert.equal(def.session_dir, root, "session_dir is the bot's real world root");
+  assert.deepEqual(def.permission_policy.write_paths, [root]);
+  for (const stale of [String(pid), "pi-bots", root]) assert.ok(!def.system_prompt.includes(stale), `the prompt never bakes in ${stale}`);
+  assert.match(def.system_prompt, /your project's board/);
+  assert.match(def.system_prompt, /your working folder/);
+
+  // A bot made with no project keeps the legacy root, with the same neutral prompt.
+  const res2 = mkRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "blank", display_name: "Loose Bot", bot_id: "loose-bot", model: "prov/m1", gw_type: "none",
+  } }, res2, { db, lang: "en" });
+  const d2 = JSON.parse((await botRow("loose-bot")).definition);
+  assert.match(d2.session_dir, /\/pi-bots\/loose-bot$/);
+  assert.deepEqual(d2.permission_policy.write_paths, [d2.session_dir]);
+  assert.ok(!d2.system_prompt.includes(d2.session_dir) && !/project null|project \d/.test(d2.system_prompt));
+  await clearProviders();
+});
+
+test("a failed create returns to a fresh wizard that keeps the preselected project", async () => {
+  await addProvider("prov", [{ id: "m1" }]);
+  const pid = await addProject("err-proj");
+  const failing = { execute: (q) => /^INSERT INTO pi_bot_defs/.test(q.sql) ? Promise.reject(new Error("disk full")) : db.execute(q) };
+  const res = mkRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "blank", display_name: "Err Bot", bot_id: "err-bot", model: "prov/m1", gw_type: "none", project: String(pid),
+  } }, res, { db: failing, lang: "en" });
+  assert.equal(res.redirected, `/dashboard/bot-builder?new=1&project=${pid}&error=disk%20full`);
+  const res2 = mkRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "blank", display_name: "Err Bot", bot_id: "err-bot", model: "prov/m1", gw_type: "none",
+  } }, res2, { db: failing, lang: "en" });
+  assert.equal(res2.redirected, "/dashboard/bot-builder?new=1&error=disk%20full", "no project, nothing added");
+  await clearProviders();
+});

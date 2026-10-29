@@ -97,9 +97,9 @@ test("bots listed with Edit links, voice bot absent, names escaped", async () =>
   const s = bots(r.body);
   assert.match(s, />Bots<\/h3>/);
   const edits = [...s.matchAll(/href="(\/dashboard\/bot-builder\?bot=[^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(edits, ["/dashboard/bot-builder?bot=hank", "/dashboard/bot-builder?bot=ivy"]);
+  assert.deepEqual(edits, ["/dashboard/bot-builder?bot=hank", "/dashboard/bot-builder?bot=ivy", "/dashboard/bot-builder?bot=quiet"],
+    "every non-voice bot on the project, Perch or not");
   assert.doesNotMatch(s, /crow\.voice|>Crow</);
-  assert.doesNotMatch(s, /Quiet/, "the same list Start uses");
   assert.match(s, /Hank &lt;i&gt;x&lt;\/i&gt;/);
   assert.doesNotMatch(r.body, /<i>x<\/i>/);
   assert.match(s, /class="ph-link ph-new-bot" href="\/dashboard\/bot-builder\?new=1&amp;project=\d+">New bot</);
@@ -141,7 +141,7 @@ test("confirm names the bot, where it is, and the project; Cancel goes back", as
   const r = await get("/dashboard/project/garden?move=cook");
   const s = bots(r.body);
   assert.match(s, /Move Cook from Kitchen to Garden &lt;b&gt;\?/);
-  assert.match(s, /Its board and working folder \(sessions, outputs, settings\) move here\. Its past sessions stay filed where they are\./);
+  assert.match(s, /It will work from this project's board, and its working folder \(sessions, outputs, settings\) moves here\. Its past sessions and cards stay where they are\./);
   assert.match(s, /<form method="POST" action="\/dashboard\/project\/garden"/);
   assert.match(s, /name="_csrf" value="tok"/);
   assert.match(s, /name="action" value="move_bot"/);
@@ -198,20 +198,97 @@ test("error banners: mapped messages, the conflict names its path, unknown codes
     assert.match(r.body, new RegExp(`role="alert" data-ph-error="${code}">`), code);
     assert.ok(r.body.includes(text), `${code}: ${text}`);
   }
-  const c = await get("/dashboard/project/garden?error=conflict&path=" + encodeURIComponent("/x/<b>/bots/cook"));
-  assert.ok(c.body.includes("a folder for this bot already exists here (/x/&lt;b&gt;/bots/cook). Nothing was changed. Ask for help before moving that folder, since it may hold older chats."));
+  // The conflict path is rebuilt from this project's workspace for a bot that exists; a ?path is never shown.
+  const c = await get("/dashboard/project/garden?error=conflict&bot=cook&path=" + encodeURIComponent("/x/<b>/bots/cook"));
+  assert.ok(c.body.includes(`a folder for this bot already exists here (${join(dir, "projects", "garden", "bots", "cook")}). Nothing was changed. Ask for help before moving that folder, since it may hold older chats.`));
   assert.doesNotMatch(c.body, /move the folder out of the way/);
-  assert.doesNotMatch(c.body, /\/x\/<b>/);
+  assert.doesNotMatch(c.body, /\/x\/(<b>|&lt;b&gt;)/);
+  for (const q of ["?error=conflict&bot=nobody", "?error=conflict&path=%2Fetc%2Fpasswd", "?error=conflict"]) {
+    const x = await get("/dashboard/project/garden" + q);
+    assert.ok(x.body.includes(en("projectHome.errOther")), `${q}: generic`);
+    assert.doesNotMatch(x.body, /\/etc\/passwd|bots\/nobody/);
+  }
 });
 
 test("en and es strings", () => {
   const T = (k, l) => i18n.t(k, l);
   assert.equal(T("projectHome.noBots", "es"), "Todavía no hay bots aquí.");
-  assert.equal(T("projectHome.moveWhat", "es"), "Su tablero y su carpeta de trabajo (sesiones, resultados, ajustes) se mudan aquí. Sus sesiones anteriores siguen archivadas donde están.");
+  assert.equal(T("projectHome.moveWhat", "en"), "It will work from this project's board, and its working folder (sessions, outputs, settings) moves here. Its past sessions and cards stay where they are.");
+  assert.equal(T("projectHome.moveWhat", "es"), "Trabajará desde el tablero de este proyecto, y su carpeta de trabajo (sesiones, resultados, ajustes) se muda aquí. Sus sesiones y tarjetas anteriores siguen donde están.");
   assert.equal(T("projectHome.errConflict", "es"), "No se pudo mover: ya existe aquí una carpeta para este bot ({path}). No se cambió nada. Pide ayuda antes de mover esa carpeta, porque puede tener chats anteriores.");
   assert.equal(T("projectHome.noProject", "es"), "Sin proyecto");
   for (const k of ["bots", "edit", "editBot", "noBots", "addBot", "newBot", "moveHere", "moveOption", "moveContinue", "moveNone", "noProject", "moveConfirm", "moveWhat", "moveGo", "moved", "errConflict", "errVoice", "errUnknown", "errSame", "errNoProject", "errStale", "errOther", "forbidden"]) {
     assert.notEqual(T("projectHome." + k, "en"), "projectHome." + k, k);
     assert.ok(T("projectHome." + k, "es").length > 0, k);
   }
+});
+
+// ---- fix wave (final review) ----
+
+function exec(sql, ...args) {
+  const c = new Database(DB_FILE);
+  try { return c.prepare(sql).run(...args); } finally { c.close(); }
+}
+const editIds = (html) => [...bots(html).matchAll(/href="\/dashboard\/bot-builder\?bot=([^"]+)"/g)].map((m) => decodeURIComponent(m[1]));
+const optionIds = (html) => [...bots(html).matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
+
+test("a non-Perch bot is listed after the wizard create and after a move", async () => {
+  exec("INSERT INTO providers (id, base_url, models, disabled) VALUES (?,?,?,0)", "fwprov", "http://127.0.0.1:9/v1", JSON.stringify([{ id: "m1" }]));
+  const made = await post("/dashboard/bot-builder", {
+    action: "wizard_create", nav: "create", tpl: "blank", display_name: "Plain Made", bot_id: "plain-made",
+    model: "fwprov/m1", gw_type: "none", project: String(P.empty),
+  });
+  assert.equal(made.status, 303);
+  assert.equal(made.location, "/dashboard/bot-builder?bot=plain-made&tab=review&created=plain-made");
+  assert.equal((await dbRow("plain-made")).project_id, P.empty);
+  assert.deepEqual(editIds((await get("/dashboard/project/empty")).body), ["plain-made"], "the wizard's no-channel bot is listed");
+
+  exec("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,NULL)",
+    "plain-moved", "Plain Moved", JSON.stringify({ models: { default: "p/m" }, gateways: [] }));
+  const moved = await post("/dashboard/project/empty", { action: "move_bot", bot_id: "plain-moved" });
+  assert.equal(moved.location, "/dashboard/project/empty?moved=plain-moved");
+  const page = await get(moved.location);
+  assert.deepEqual(editIds(page.body), ["plain-made", "plain-moved"], "the moved no-channel bot is listed");
+  assert.match(page.body, /data-ph-moved>Plain Moved is now in this project\./);
+  assert.ok(!optionIds(page.body).includes("plain-moved"), "and no longer offered by the picker");
+});
+
+test("the picker leaves out custom-tracker bots", async () => {
+  exec("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,NULL)",
+    "leads", "Leads", JSON.stringify({ models: { default: "p/m" }, gateways: [], tracker_config: { type: "custom", tracker_slug: "leads" } }));
+  exec("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,NULL)",
+    "leads-unset", "Leads unset", JSON.stringify({ models: { default: "p/m" }, gateways: [], tracker_config: { type: "custom" } }));
+  const ids = optionIds((await get("/dashboard/project/garden")).body);
+  assert.ok(ids.includes("loose"));
+  assert.ok(!ids.includes("leads") && !ids.includes("leads-unset"), "custom trackers are not offered: " + ids);
+  assert.doesNotMatch((await get("/dashboard/project/garden?move=leads")).body, /data-ph-confirm/);
+});
+
+test("the moved banner shows only for a bot on this project, and only when the viewer may change it", async () => {
+  assert.match((await get("/dashboard/project/garden?moved=hank")).body, /data-ph-moved>/);
+  assert.doesNotMatch((await get("/dashboard/project/garden?moved=loose")).body, /data-ph-moved/, "not on this project");
+  assert.doesNotMatch((await get("/dashboard/project/garden?moved=nobody")).body, /data-ph-moved/);
+  exec("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)", "guest-bot", "Guest", perch, P.visited);
+  assert.doesNotMatch((await get("/dashboard/project/visited?moved=guest-bot")).body, /data-ph-moved/, "a visitor never sees it");
+});
+
+test("a real conflict from the helper: the POST names the bot and the page shows the folder in the way", async () => {
+  // A legacy world with chats, and an unrelated bots/<id>/sessions already at the target.
+  mkdirSync(join(HOME, "pi-bots", "boxed", "sessions"), { recursive: true });
+  writeFileSync(join(HOME, "pi-bots", "boxed", "sessions", "w.jsonl"), "{}\n");
+  mkdirSync(join(dir, "projects", "kitchen", "bots", "boxed", "sessions"), { recursive: true });
+  exec("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,NULL)", "boxed", "Boxed", perch);
+  const r = await post("/dashboard/project/kitchen", { action: "move_bot", bot_id: "boxed" });
+  assert.equal(r.status, 303);
+  assert.equal(r.location, "/dashboard/project/kitchen?error=conflict&bot=boxed", "no path in the URL");
+  assert.equal((await dbRow("boxed")).project_id, null, "nothing changed");
+  const page = await get(r.location);
+  assert.match(page.body, /role="alert" data-ph-error="conflict">/);
+  assert.ok(page.body.includes(`already exists here (${join(dir, "projects", "kitchen", "bots", "boxed")})`));
+});
+
+test("a move POST to an archived project's slug is a 404 and changes nothing", async () => {
+  const r = await post("/dashboard/project/attic", { action: "move_bot", bot_id: "loose" });
+  assert.equal(r.status, 404);
+  assert.equal((await dbRow("loose")).project_id, null);
 });

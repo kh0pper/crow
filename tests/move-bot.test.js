@@ -13,10 +13,19 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, lstatSync, existsSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Hermetic for buildBotWorld (as tests/bot-world.test.js): no ambient PI_*
+// vars, and a scratch HOME carrying a minimal canonical mcp.json.
+for (const k of Object.keys(process.env)) {
+  if (/^(PI_|PIBOT_)/.test(k)) delete process.env[k];
+}
 const dir = mkdtempSync(join(tmpdir(), "move-bot-"));
 process.env.CROW_DATA_DIR = dir;
 process.env.CROW_HOME = join(dir, "home");
 delete process.env.CROW_DB_PATH;
+process.env.HOME = join(dir, "fakehome");
+mkdirSync(join(process.env.HOME, ".pi", "agent"), { recursive: true });
+writeFileSync(join(process.env.HOME, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }));
+mkdirSync(join(process.env.CROW_HOME, "skills"), { recursive: true });
 const crowHome = process.env.CROW_HOME;
 
 let db = null, moveBotToProject = null, WR = null, bus = null;
@@ -246,4 +255,69 @@ test("audit on both projects", async () => {
   assert.equal(p.to, B.id);
   assert.equal(p.carry.mode, "root");
   assert.deepEqual(JSON.parse(onA[1].payload), p);
+});
+
+// ---- fix wave (final review) ----
+
+test("moving out of an archived project carries the world under its workspace", async () => {
+  const [A, B] = await fresh(2);
+  await addBot("mv-arch-out", BASE_DEF(), A.id);
+  seedWorld(rootIn(A.ws, "mv-arch-out"));
+  await db.execute({ sql: "UPDATE project_spaces SET archived_at=datetime('now') WHERE id=?", args: [A.id] });
+  const r = await moveBotToProject(db, "mv-arch-out", B.id, { crowHome });
+  assert.equal(r.ok, true);
+  assert.equal(r.carry.mode, "root");
+  assert.equal(readlinkSync(rootIn(B.ws, "mv-arch-out")), realpathSync(rootIn(A.ws, "mv-arch-out")), "A's world, not the empty legacy root");
+  assert.deepEqual(readdirSync(join(rootIn(B.ws, "mv-arch-out"), "sessions")), ["waiting.jsonl"]);
+  assert.equal((await auditRows(A.id, "mv-arch-out")).length, 1, "the archived project still logs it");
+
+  // The project's folder is gone: the legacy world is what is carried.
+  const [C, D] = await fresh(2);
+  await addBot("mv-gone", BASE_DEF(), C.id);
+  seedWorld(legacyRoot("mv-gone"));
+  const g = await moveBotToProject(db, "mv-gone", D.id, { crowHome });
+  assert.equal(g.ok, true);
+  assert.equal(readlinkSync(rootIn(D.ws, "mv-gone")), legacyRoot("mv-gone"));
+});
+
+test("entries-mode carry: a legacy world into a project whose bots/<id> already exists with free paths", async () => {
+  const [A] = await fresh(1);
+  await addBot("mv-entries");
+  seedWorld(legacyRoot("mv-entries"));
+  const nr = rootIn(A.ws, "mv-entries");
+  mkdirSync(nr, { recursive: true });
+  writeFileSync(join(nr, "notes.txt"), "mine\n");
+  const r = await moveBotToProject(db, "mv-entries", A.id, { crowHome });
+  assert.deepEqual(r, { ok: true, carry: { mode: "entries", reason: null, carried: ["sessions", "outputs"] } });
+  assert.ok(lstatSync(nr).isDirectory() && !lstatSync(nr).isSymbolicLink(), "the existing root is kept");
+  assert.equal(readlinkSync(join(nr, "sessions")), join(legacyRoot("mv-entries"), "sessions"));
+  assert.deepEqual(WR.carriedReadRoots({ worldRoot: nr, legacyRoot: legacyRoot("mv-entries") }), [realpathSync(legacyRoot("mv-entries"))]);
+});
+
+test("buildBotWorld after A -> B, where A's world is entries-mode, resolves to the real old world", async () => {
+  const [A, B] = await fresh(2);
+  const id = "mv-world";
+  const L = legacyRoot(id);
+  await addBot(id, { ...BASE_DEF(), models: { default: "stub/m1" }, tools: { pi_builtin: ["read"] } });
+  seedWorld(L);
+  // "Turn on a board" into an existing root: A/bots/<id> is a real dir and its
+  // entries link into the legacy world (the same planner board_on runs).
+  const aRoot = rootIn(A.ws, id);
+  mkdirSync(aRoot, { recursive: true });
+  const plan = WR.planCarryOver(L, aRoot);
+  assert.equal(plan.mode, "entries");
+  WR.applyCarryOver(plan, aRoot);
+  await db.execute({ sql: "UPDATE pi_bot_defs SET project_id=? WHERE bot_id=?", args: [A.id, id] });
+
+  const r = await moveBotToProject(db, id, B.id, { crowHome });
+  assert.equal(r.ok, true);
+  assert.equal(readlinkSync(rootIn(B.ws, id)), aRoot, "B links to A's real root (a real dir), no chain");
+
+  const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+  const world = await buildBotWorld({ botId: id, threadId: "mv-world-t", gatewayType: "perch" });
+  assert.equal(world.sessionDir, rootIn(B.ws, id), "the world root is B's");
+  assert.equal(realpathSync(world.sessionDir), realpathSync(aRoot));
+  assert.equal(realpathSync(join(world.sessionDir, "sessions")), realpathSync(join(L, "sessions")), "resume finds the real old sessions");
+  assert.deepEqual(readdirSync(join(world.sessionDir, "sessions")), ["waiting.jsonl"]);
+  assert.deepEqual(world.extraReadPaths, [realpathSync(L)], "the spawn may read the carried entries");
 });
