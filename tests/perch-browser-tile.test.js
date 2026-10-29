@@ -120,7 +120,7 @@ function mount({ innerWidth = 390, io = true, newMode = false } = {}) {
   const groupFns = ["toolGroupFor", "toolGroupOpen", "toolGroupRefresh", "groupLabel", "chipFailed", "subagentNames", "isSubagentTool"];
   const lifted = ["appendToolChip", "finishToolChip", "csrf", "perchApi"].concat(newMode ? groupFns : []).map((n) => lift(hub, n)).join("\n");
   const groupVars = newMode
-    ? "var SHEET={}; var toolGroup=null, toolGroups=[], toolTurn=0; " + /var KNOWN_REFUSALS=\[[\s\S]*?\];/.exec(hub)[0] +
+    ? "var SHEET={}; var toolGroup=null, toolGroups=[], toolTurn=0, toolGroupSeq=0; " + /var KNOWN_REFUSALS=\[[\s\S]*?\];/.exec(hub)[0] +
       " var TG_S={ see:'See what happened', running:'running', step:'1 step', steps:'{n} steps', failedOne:'1 failed', failed:'{n} failed' };\n"
     : "";
   vm.runInContext(`(function(){\nvar toolChips={};\n${groupVars}${lifted}\n${perchBrowserTileJs("en")}\n;__export({ browserFrame: browserFrame, browserHistory: browserHistory, resetBrowserTiles: resetBrowserTiles, retireBrowserTiles: retireBrowserTiles, appendToolChip: appendToolChip, finishToolChip: finishToolChip });\n})();`, sandbox);

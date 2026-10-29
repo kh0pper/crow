@@ -5523,6 +5523,10 @@ test("groupLabel: running / agents / steps / failed / never all ok", async () =>
   assert.equal(groupLabel({ total: 4, failed: 1, running: 0, agents: [] }, en), "See what happened · 4 steps, 1 failed");
   assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: ["scout"] }, en),
     "See what happened · scout, 1 failed", "a subagent group still shows its failure");
+  assert.equal(groupLabel({ total: 3, failed: 0, running: 0, others: 2, agents: ["scout"] }, en),
+    "See what happened · scout · 3 steps", "subagents beside other tools: names · N steps");
+  assert.equal(groupLabel({ total: 3, failed: 1, running: 0, others: 2, agents: ["scout"] }, en),
+    "See what happened · scout · 3 steps, 1 failed");
   assert.equal(groupLabel({ total: 3, failed: 2, running: 0, agents: [] }, es), "Ver qué pasó · 3 pasos, 2 fallaron");
   for (const c of [{ total: 2, failed: 0, running: 0, agents: [] }, { total: 0, failed: 0, running: 0 }]) {
     assert.doesNotMatch(groupLabel(c, en), /all ok|ok$/i, "it never says all ok");
@@ -5537,7 +5541,9 @@ test("chipFailed: isError; known refusal text counts as failed; ordinary text do
   // The list is the lease guard's own busy and held texts, verbatim.
   const guard = readFileSync(new URL("../bundles/browser/server/lease-guard.js", import.meta.url), "utf8");
   const busy = /busy: "([^"]+)"/.exec(guard)[1], held = /held: "([^"]+)"/.exec(guard)[1];
-  assert.deepEqual(new Function(listSrc + " return KNOWN_REFUSALS;")(), [busy, held]);
+  const handedBack = /handedBack: "([^"]+)"/.exec(guard)[1];
+  assert.deepEqual(new Function(listSrc + " return KNOWN_REFUSALS;")(), [busy, held, handedBack]);
+  assert.equal(chipFailed({ isError: false, resultText: handedBack }), true);
   assert.equal(chipFailed({ isError: true, resultText: "boom" }), true);
   assert.equal(chipFailed({ isError: false, resultText: busy }), true);
   assert.equal(chipFailed({ isError: false, resultText: held + "\n\nmore" }), true);
@@ -5700,4 +5706,63 @@ test("classic chips are unchanged (no .tool-group in classic)", async () => {
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(rowShape(h2), ["user", "bot:[tool: bash]\n[tool: read]", "chip", "chip",
     "bot:Checking one more\n[tool: edit]", "chip", "bot:All set"]);
+});
+
+test("a refusal chip reads failed in new mode and done in classic", async () => {
+  const busy = "The browser is busy: another bot is using it. Try again in a minute.";
+  for (const sheet of [true, false]) {
+    const hub = await mountHub({ fetchImpl: stdFetch(), sheet });
+    await openChatSession(hub);
+    const es = FakeEventSource.instances[0];
+    es._serverFrame("tool", { phase: "start", name: "mcp__browser__crow_browser_click", toolCallId: "rf1" });
+    es._serverFrame("tool", { phase: "end", name: "mcp__browser__crow_browser_click", toolCallId: "rf1", resultText: busy, isError: false });
+    await new Promise((r) => setTimeout(r, 0));
+    const wraps = [];
+    const walk = (n) => { if (String(n.className).includes("toolwrap")) wraps.push(n); (n.children || []).forEach(walk); };
+    walk(hub.els["perch-transcript"]);
+    const chip = wraps[0].children[0];
+    assert.equal(chip.children[1].textContent, sheet ? "failed" : "done");
+    assert.equal(chip.className, sheet ? "tool-chip err" : "tool-chip");
+  }
+});
+
+test("a group's line controls its body by a unique id; a mixed subagent turn reads names · N steps", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "subagent", toolCallId: "m1", argsText: '{"agent":"scout","task":"x"}' });
+  es._serverFrame("tool", { phase: "end", name: "subagent", toolCallId: "m1", resultText: "ok", isError: false });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "m2" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "m2", resultText: "ok", isError: false });
+  es._serverFrame("text", { text: "between", turnId: "t1" });
+  es._serverFrame("tool", { phase: "start", name: "subagent", toolCallId: "m3", argsText: '{"agent":"worker","task":"y"}' });
+  es._serverFrame("tool", { phase: "end", name: "subagent", toolCallId: "m3", resultText: "ok", isError: false });
+  es._serverFrame("reply", { text: "x", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  const groups = hub.els["perch-transcript"].children.filter((c) => c.className === "tool-group");
+  assert.equal(groups.length, 2);
+  const ids = groups.map((g) => g.children[1].id);
+  assert.ok(ids[0] && ids[1] && ids[0] !== ids[1], "unique body ids");
+  groups.forEach((g) => assert.equal(g.children[0].getAttribute("aria-controls"), g.children[1].id));
+  assert.equal(groups[0].children[0].textContent, "See what happened · scout · 2 steps");
+  assert.equal(groups[1].children[0].textContent, "See what happened · worker", "subagents alone: names only");
+});
+
+test("a group folding at turn end hands focus from its body to its line", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "f1" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "f1", resultText: "ok", isError: false });
+  await new Promise((r) => setTimeout(r, 0));
+  const g = hub.els["perch-transcript"].children.find((c) => c.className === "tool-group");
+  const chip = g.children[1].children[0].children[0];
+  chip.focus();
+  assert.equal(hub.doc.activeElement, chip);
+  es._serverFrame("reply", { text: "x", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(g.children[1].hidden, true, "folded");
+  assert.equal(hub.doc.activeElement, g.children[0], "focus moved to the line, not lost");
 });

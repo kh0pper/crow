@@ -3683,6 +3683,7 @@ export function perchHubJs(lang = "en") {
       if(!hist) g.ended=false;           /* a live chip proves the turn is still going */
       var agents=Array.isArray(d&&d.agents)?d.agents:
         (isSubagentTool(d&&d.name)?subagentNames(d&&d.argsText):[]);
+      if(!isSubagentTool(d&&d.name)) g.others++;
       agents.forEach(function(a){ g.agents.push(a); });
       g.body.appendChild(wrap);
       toolGroupRefresh(g);
@@ -3703,8 +3704,11 @@ export function perchHubJs(lang = "en") {
     }
     if(!rec) return;
     if(rec.spin&&rec.spin.parentNode) rec.spin.parentNode.removeChild(rec.spin);
-    rec.status.textContent=(d&&d.isError)?TOOL_FAILED:TOOL_DONE;
-    if(d&&d.isError) rec.chip.className='tool-chip err';
+    /* New mode: a refusal (chipFailed) reads as failed on the chip too, so the
+       chip agrees with its group's count. Classic judges isError only. */
+    var bad=rec.group?chipFailed(d):!!(d&&d.isError);
+    rec.status.textContent=bad?TOOL_FAILED:TOOL_DONE;
+    if(bad) rec.chip.className='tool-chip err';
     if(d&&d.resultText!=null){
       rec.details.appendChild(line('td-h',(d&&d.isError)?'error':'result'));
       var pr=document.createElement('pre'); pr.textContent=String(d.resultText);
@@ -3712,7 +3716,7 @@ export function perchHubJs(lang = "en") {
     }
     if(rec.group){
       rec.group.running=Math.max(0,rec.group.running-1);
-      if(chipFailed(d)) rec.group.failed++;
+      if(bad) rec.group.failed++;
       toolGroupRefresh(rec.group);
     }
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
@@ -3731,13 +3735,15 @@ export function perchHubJs(lang = "en") {
      chip finished. A failed group stays collapsed, its line in the error
      colour with the count. */
   var toolGroup=null, toolGroups=[], toolTurn=0;
+  var toolGroupSeq=0;   /* body ids for aria-controls; never reset, so an id is never reused */
   /* The browser lease's refusals arrive as ordinary (isError:false) results;
-     they are still steps that did not happen. Copied verbatim from TEXTS.busy
-     and TEXTS.held in bundles/browser/server/lease-guard.js (the guard the
+     they are still steps that did not happen. Copied verbatim from TEXTS.busy,
+     TEXTS.held and TEXTS.handedBack in bundles/browser/server/lease-guard.js (the guard the
      shared lease in servers/shared/browser-lease.js reports through). */
   var KNOWN_REFUSALS=[
     'The browser is busy: another bot is using it. Try again in a minute.',
-    'The operator has the browser; call again to continue.'
+    'The operator has the browser; call again to continue.',
+    'The operator handed the browser back; call again.'
   ];
   function chipFailed(d){
     if(d&&d.isError) return true;
@@ -3770,9 +3776,11 @@ export function perchHubJs(lang = "en") {
     if(Number(c&&c.running)>0) return head+s.running;
     var names=[];
     ((c&&c.agents)||[]).forEach(function(a){ if(a&&names.indexOf(a)<0) names.push(a); });
-    if(names.length) return head+names.join(', ')+tail;
     var n=Number(c&&c.total)||0;
-    return head+(n===1?s.step:s.steps.replace('{n}',String(n)))+tail;
+    var steps=(n===1?s.step:s.steps.replace('{n}',String(n)));
+    /* subagents alone: their names; with other tools beside them: names · N steps */
+    if(names.length) return head+names.join(', ')+(Number(c&&c.others)>0?' \u00b7 '+steps:'')+tail;
+    return head+steps+tail;
   }
   function toolGroupFor(tr){
     var g=toolGroup;
@@ -3787,8 +3795,10 @@ export function perchHubJs(lang = "en") {
     node.setAttribute('data-turn',String(toolTurn));
     var btn=document.createElement('button'); btn.type='button'; btn.className='tool-group-line';
     var body=document.createElement('div'); body.className='tool-group-body';
+    body.id='perch-tg-'+(++toolGroupSeq);
+    btn.setAttribute('aria-controls',body.id);
     node.appendChild(btn); node.appendChild(body);
-    g={ node:node, line:btn, body:body, total:0, failed:0, running:0, agents:[], ended:true,
+    g={ node:node, line:btn, body:body, total:0, failed:0, running:0, others:0, agents:[], ended:true,
       open:true, turn:toolTurn };
     btn.onclick=function(){ toolGroupOpen(g,!g.open); };
     toolGroupOpen(g,true);
@@ -3797,6 +3807,9 @@ export function perchHubJs(lang = "en") {
     return g;
   }
   function toolGroupOpen(g,open){
+    /* Folding a body that holds focus would drop it on <body>: hand it to the line first. */
+    if(!open&&g.open&&typeof document!=='undefined'&&document.activeElement&&g.body.contains&&
+       g.body.contains(document.activeElement)&&g.line.focus) g.line.focus();
     g.open=!!open;
     g.body.hidden=!g.open;
     g.line.setAttribute('aria-expanded',g.open?'true':'false');
@@ -3806,6 +3819,7 @@ export function perchHubJs(lang = "en") {
     g.line.className='tool-group-line'+(g.failed>0?' err':'');
     if(g.running>0) toolGroupOpen(g,true);
     else if(g.ended) toolGroupOpen(g,false);
+    /* else: every chip finished but the turn is still going, so it stays open until the turn ends */
   }
   /* The turn ended (setTurnInFlight's true->false): its groups fold once
      every chip in them is finished; the next turn's tools start fresh. */
