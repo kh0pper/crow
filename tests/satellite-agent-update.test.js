@@ -1,7 +1,7 @@
 // The satellite's follow-the-primary update (SAT-6, spec §10, S11 a). POST /satellite/v1/update
 // {target_sha} is accepted only when, after `git fetch origin main`, the target is an ancestor of
 // (or equal to) origin/main, a fast-forward of the current sha, different from it, CI-green
-// (classifyCheckRuns), and crow was heard from within 7 days. Then: satellite.db backup,
+// (classifyCheckRuns); crow's own signed request is never refused for silence. Then: satellite.db backup,
 // `git merge --ff-only`, `npm ci --omit=dev` only when package-lock.json changed (under a
 // 600 MB systemd scope, nice + ionice), the new tree's self-check and migration, and a
 // supervised restart (exit 75). Any failure rolls back to the previous sha.
