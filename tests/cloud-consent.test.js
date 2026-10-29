@@ -429,3 +429,103 @@ test("the add sheet shows a line when the grant failed (en and es)", async () =>
   const api = readFileSync(join(import.meta.dirname, "..", "servers/gateway/routes/roles-api.js"), "utf8");
   assert.match(api, /providerId: r\.providerId, consent \}/);
 });
+
+// --- Final fix wave F2: one door-eligibility rule ---------------------------
+
+test("F2: cloudDoorEligible is the door's own rule: enabled, cloud, https, keyed, openai or anthropic, not local only, not crow-c-*", () => {
+  const ok = { id: "cloud-a", baseUrl: "https://api.example.com/v1", apiKey: KEY_A, provider_type: "openai", models: [{ id: "c1" }] };
+  assert.equal(consentMod.cloudDoorEligible(ok), true);
+  assert.equal(consentMod.cloudDoorIneligibleReason(ok), null);
+  for (const t of [null, undefined, "", "openai-compat", "openai", "anthropic"]) {
+    assert.equal(consentMod.cloudDoorEligible({ ...ok, provider_type: t }), true, `type ${t}`);
+  }
+  const cases = [
+    [{ ...ok, disabled: true }, "disabled"],
+    [{ ...ok, baseUrl: "http://127.0.0.1:8003/v1" }, "not_cloud"],
+    [{ ...ok, baseUrl: "http://169.254.169.254/v1" }, "not_cloud"],
+    [{ ...ok, id: "crow-c-cloud-a" }, "reserved_id"],
+    [{ ...ok, id: "CROW-C-x" }, "reserved_id"],
+    [{ ...ok, gpuPolicy: { local_only: true } }, "local_only"],
+    [{ ...ok, gpu_policy: { local_only: true } }, "local_only"],
+    [{ ...ok, baseUrl: "http://api.example.com/v1" }, "insecure"],
+    [{ ...ok, provider_type: "gemini" }, "unsupported_type"],
+    [{ ...ok, provider_type: "Anthropic" }, "unsupported_type"],
+    [{ ...ok, apiKey: "" }, "no_key"],
+    [{ ...ok, apiKey: "  " }, "no_key"],
+    [{ ...ok, apiKey: "none" }, "no_key"],
+    [{ ...ok, apiKey: null }, "no_key"],
+  ];
+  for (const [row, why] of cases) {
+    assert.equal(consentMod.cloudDoorIneligibleReason(row), why, JSON.stringify(row));
+    assert.equal(consentMod.cloudDoorEligible(row), false, why);
+  }
+  // The door's test seams: a plain-http fake upstream may be let through.
+  const fake = { ...ok, baseUrl: "http://up.example.test:9/v1" };
+  assert.equal(consentMod.cloudDoorIneligibleReason(fake), "insecure");
+  assert.equal(consentMod.cloudDoorIneligibleReason(fake, { allowInsecure: () => true }), null);
+});
+
+test("F2: grant refuses a cloud row the door would never serve (not_eligible), and records nothing", async () => {
+  const db = newDb();
+  await ins(db, "cloud-h", "http://api.example.com/v1", { key: KEY_A });
+  await ins(db, "cloud-nokey", "https://api.example.com/v1/n");
+  await ins(db, "cloud-lo", "https://api.example.com/v1/l", { key: KEY_A });
+  await db.execute({ sql: "UPDATE providers SET gpu_policy = ? WHERE id = ?", args: [JSON.stringify({ local_only: true }), "cloud-lo"] });
+  await ins(db, "cloud-g", "https://api.example.com/v1/g", { key: KEY_A });
+  await db.execute({ sql: "UPDATE providers SET provider_type = ? WHERE id = ?", args: ["gemini", "cloud-g"] });
+  await ins(db, "crow-c-cloud-a", "https://api.example.com/v1/r", { key: KEY_A });
+  for (const id of ["cloud-h", "cloud-nokey", "cloud-lo", "cloud-g", "crow-c-cloud-a"]) {
+    assert.deepEqual(await tick(db, id), { ok: false, reason: "not_eligible" }, id);
+  }
+  // addProvider's own write path is refused the same way.
+  assert.deepEqual(await grantCloudConsent(db, "cloud-h", { actor: "t", expect: { baseUrl: "http://api.example.com/v1", apiKey: KEY_A } }), { ok: false, reason: "not_eligible" });
+  assert.deepEqual(await readCloudConsent(db), {});
+});
+
+test("F2: addProvider on a cloud server the door would never serve (plain http) records no consent and reports not_needed", async () => {
+  const db = newDb();
+  const out = await addProvider(db, { presetId: "other", baseUrl: "http://api.example.com/v1", apiKey: KEY_A, modelIds: ["m1"] }, {
+    testFn: async () => ({ ok: true, code: "ok", models: ["m1"], host: "api.example.com", baseUrl: "http://api.example.com/v1" }), invalidateFn: () => {},
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.consent, "not_needed");
+  assert.deepEqual(await readCloudConsent(db), {});
+});
+
+test("F2: an enabled cloud row the door would never serve shows a disabled switch with a plain reason, and no token", async () => {
+  const db = newDb();
+  await ins(db, "cloud-h", "http://api.example.com/v1", { key: KEY_A });
+  await ins(db, "cloud-nokey", "https://api.example.com/v1/n");
+  await ins(db, "cloud-g", "https://api.example.com/v1/g", { key: KEY_A });
+  await db.execute({ sql: "UPDATE providers SET provider_type = ? WHERE id = ?", args: ["gemini", "cloud-g"] });
+  await ins(db, "cloud-lo", "https://api.example.com/v1/l", { key: KEY_A });
+  await db.execute({ sql: "UPDATE providers SET gpu_policy = ? WHERE id = ?", args: [JSON.stringify({ local_only: true }), "cloud-lo"] });
+  await ins(db, "cloud-a", "https://api.example.com/v1/a", { key: KEY_A });
+  for (const lang of ["en", "es"]) {
+    const h = await tab.render({ req: { query: {} }, db, lang, piAgentDir: null, tasksDbPaths: [] });
+    for (const [id, why] of [["cloud-h", "insecure"], ["cloud-nokey", "no_key"], ["cloud-g", "unsupported_type"], ["cloud-lo", "local_only"]]) {
+      const tr = trOf(h, id);
+      const reason = t(`providers.botsIneligible.${why}`, lang);
+      assert.ok(reason && reason !== `providers.botsIneligible.${why}`, `${lang} ${why} has copy`);
+      assert.ok(tr.includes(escapeAttr(reason)), `${lang} ${id} shows its reason`);
+      assert.match(tr, /role="switch" aria-checked="false" disabled/, `${id} switch is disabled`);
+      assert.ok(!tr.includes("llm_provider_bots_allow"), `${id} has no allow form`);
+      assert.equal(tokenIn(tr), null, `${id} carries no token`);
+    }
+    assert.match(trOf(h, "cloud-a"), /llm_provider_bots_allow/, "an eligible row keeps its live switch");
+  }
+});
+
+test("F2: a row that became ineligible after consent keeps a switch that only turns off", async () => {
+  const db = newDb();
+  await ins(db, "cloud-a", "https://api.example.com/v1/a", { key: KEY_A });
+  assert.deepEqual(await tick(db, "cloud-a"), { ok: true });
+  await db.execute({ sql: "UPDATE providers SET gpu_policy = ? WHERE id = ?", args: [JSON.stringify({ local_only: true }), "cloud-a"] });
+  const tr = trOf(await tab.render({ req: { query: {} }, db, lang: "en", piAgentDir: null, tasksDbPaths: [] }), "cloud-a");
+  assert.match(tr, /name="action" value="llm_provider_bots_deny"/);
+  assert.ok(!tr.includes("llm_provider_bots_allow"));
+  assert.ok(tr.includes(escapeAttr(t("providers.botsIneligible.local_only", "en"))));
+  await post(db, "llm_provider_bots_deny", { id: "cloud-a" });
+  assert.deepEqual(await readCloudConsent(db), {});
+});
+function escapeAttr(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }

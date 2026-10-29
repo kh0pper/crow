@@ -297,7 +297,8 @@ function cleanModelIds(modelIds) {
  * apiKey})` runs after the write with exactly what was written; by default it
  * records this box's consent for bots to use the row (Task 15), on a new row
  * and again on reuse, refused if the row changed since. The result's
- * `consent` is "granted", "failed", or "not_needed" (not a cloud row).
+ * `consent` is "granted", "failed", or "not_needed" (not a cloud row, or one
+ * the cloud door would never serve: cloudDoorIneligibleReason).
  */
 export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, modelIds } = {}, {
   upsertProviderFn = upsertProvider, invalidateFn = invalidateProvidersCache,
@@ -358,7 +359,7 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
   let consent = "failed";
   try {
     const r = onAdded ? await onAdded(saved.id, saved.written) : null;
-    consent = r?.ok === true ? "granted" : r?.reason === "not_cloud" ? "not_needed" : "failed";
+    consent = r?.ok === true ? "granted" : r?.reason === "not_cloud" || r?.reason === "not_eligible" ? "not_needed" : "failed";
   } catch (err) { console.warn(`[add-provider] after-save step failed: ${err?.message}`); }
   return { ok: true, providerId: saved.id, reuse: saved.reuse, consent, test };
 }

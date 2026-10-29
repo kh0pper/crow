@@ -378,3 +378,18 @@ test("fix 1: a door entry that differs from a hand-written id only in case is no
   const again = mergeManaged(prev, buildManagedEntries([a], doorOpts([a])), { log: () => {} });
   assert.deepEqual(again.removed, ["crow-c-cloud-a"]);
 });
+
+test("final F2: door entries follow the shared cloudDoorEligible rule (a consented keyless row gets none)", async () => {
+  const { cloudDoorEligible } = await import("../servers/shared/cloud-consent.js");
+  const list = [
+    cloudRow("cloud-a"),
+    cloudRow("nokey", { apiKey: "" }),
+    cloudRow("nonekey", { apiKey: "none" }),
+    cloudRow("plain", { baseUrl: "http://api.example.com/v1" }),
+    cloudRow("lo", { gpuPolicy: { local_only: true } }),
+    cloudRow("gem", { provider_type: "google" }),
+  ];
+  const e = buildManagedEntries(list, doorOpts(list));
+  assert.deepEqual(Object.keys(e), ["crow-c-cloud-a"]);
+  for (const r of list) assert.equal(Object.hasOwn(e, doorEntryId(r.id)), cloudDoorEligible(r), r.id);
+});

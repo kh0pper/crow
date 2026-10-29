@@ -25,6 +25,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { normalizeBaseUrl } from "./provider-presets.js";
 import { providerRowToObject } from "./provider-row.js";
 import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "../gateway/models/door-resolve.js";
+import { DOOR_ID_PREFIX } from "./pi-compat.js";
 
 export const CLOUD_CONSENT_KEY = "llm_cloud_door_rows";
 export const CLOUD_CONSENT_SALT_KEY = "llm_cloud_consent_salt";
@@ -173,7 +174,9 @@ export async function grantCloudConsent(db, rowId, { actor, expect } = {}) {
     const row = await providerRow(db, rowId);
     if (!row) return { ok: false, reason: "not_found" };
     if (row.disabled) return { ok: false, reason: "disabled" };
-    if (!isCloudRow(row)) return { ok: false, reason: "not_cloud" };
+    const why = cloudDoorIneligibleReason(row);
+    if (why === "not_cloud") return { ok: false, reason: "not_cloud" };
+    if (why) return { ok: false, reason: "not_eligible" };
     const salt = await ensureSalt(db);
     if (!matchesExpectation(row, salt, expect)) return { ok: false, reason: "changed" };
     const all = parseMap(await readValue(db, CLOUD_CONSENT_KEY));
@@ -218,6 +221,39 @@ export function isCloudRow(row) {
   if (typeof url !== "string" || !url) return false;
   return !isLocalClassTarget(url) && !isForbiddenTarget(url) && !isDoorUrl(url);
 }
+
+const OPENAI_FAMILY = new Set([null, undefined, "", "openai-compat", "openai"]);
+
+/**
+ * Why the cloud door would never serve `row`, or null when it could (consent
+ * aside). The one rule the providers-tab switch, grantCloudConsent, the pi
+ * models.json door entries and the door's resolveCloudTarget share, checked
+ * in this order:
+ *   "disabled", "not_cloud" (`isCloudTarget`, default isCloudRow),
+ *   "reserved_id" (crow-c-*, any case: the door entries' own namespace),
+ *   "local_only", "insecure" (not https; `allowInsecure(url)` is the door
+ *   tests' seam for a plain-http fake upstream), "unsupported_type" (neither
+ *   the openai family nor anthropic), "no_key" (empty, blank or "none").
+ * Pure.
+ */
+export function cloudDoorIneligibleReason(row, { isCloudTarget = (url) => isCloudRow({ baseUrl: url }), allowInsecure = () => false } = {}) {
+  if (!row || typeof row !== "object" || row.disabled) return "disabled";
+  const url = row.baseUrl ?? row.base_url;
+  if (typeof url !== "string" || !url || !isCloudTarget(url)) return "not_cloud";
+  if (typeof row.id === "string" && row.id.toLowerCase().startsWith(DOOR_ID_PREFIX)) return "reserved_id";
+  if (row.gpuPolicy?.local_only === true || row.gpu_policy?.local_only === true) return "local_only";
+  let https = false;
+  try { https = new URL(url).protocol === "https:"; } catch { /* not a URL */ }
+  if (!https && !allowInsecure(url)) return "insecure";
+  const type = row.provider_type ?? row.providerType;
+  if (type !== "anthropic" && !OPENAI_FAMILY.has(type)) return "unsupported_type";
+  const key = keyOf(row);
+  if (!key || key === "none") return "no_key";
+  return null;
+}
+
+/** May the cloud door serve `row` at all (consent aside)? See cloudDoorIneligibleReason. */
+export function cloudDoorEligible(row, opts) { return cloudDoorIneligibleReason(row, opts) === null; }
 
 // There is deliberately NO automatic seed (fix round 1, Task 15). A one-time
 // "grant the rows this box wrote" pass would have to trust

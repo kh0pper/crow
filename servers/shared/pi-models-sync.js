@@ -25,7 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { doorKindOf, isLocalClassTarget } from "../gateway/models/door-resolve.js";
 import { providerDoorUrl, cloudDoorUrl } from "../gateway/models/door.js";
-import { consentVerdict, isCloudRow } from "./cloud-consent.js";
+import { consentVerdict, cloudDoorEligible } from "./cloud-consent.js";
 import { piCompatFor, DOOR_ID_PREFIX, doorEntryId } from "./pi-compat.js";
 import { EMBED_TASKS, RERANK_TASKS } from "./provider-task.js";
 import { listProvidersAll } from "./providers-db.js";
@@ -137,15 +137,13 @@ export function validatePiModelsJson(json) {
 /** A path as one /bin/sh single-quoted word: each ' becomes '\\'' (close, escaped quote, reopen). */
 export function shellQuote(path) { return "'" + String(path).replace(/'/g, "'\\''") + "'"; }
 
-const isHttps = (url) => { try { return new URL(url).protocol === "https:"; } catch { return false; } };
-
 /** The door entry for a consented cloud row, or null when the row does not qualify. */
 function doorEntry(r, models, { cloudDoorPort, consent, consentSalt, tokenPath }) {
+  // The door's own rule (enabled, cloud, https, keyed, openai or anthropic,
+  // not local only, not crow-c-*): a row it would refuse gets no entry.
+  if (!cloudDoorEligible(r)) return null;
   const type = r.provider_type;
   const anthropic = type === "anthropic";
-  if (!anthropic && !OPENAI_TYPES.has(type)) return null;
-  // The door forwards over https only and never to a local, door or forbidden address.
-  if (!isCloudRow(r) || !isHttps(r.baseUrl)) return null;
   const entry = consent && typeof consent === "object" && Object.hasOwn(consent, r.id) ? consent[r.id] : null;
   if (consentVerdict(r, entry, { salt: consentSalt }) !== "ok") return null;
   // compat is an openai-completions schema; pi's own rules apply to that api only.

@@ -96,6 +96,8 @@ function baseRows() {
     "meta": { baseUrl: "http://169.254.169.254/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
     "local-chat": { baseUrl: "http://127.0.0.1:8003/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
     "cloud-h": { baseUrl: "http://api.example.com/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
+    "cloud-gem": { baseUrl: `http://up.example.test:${upPort}/v1`, apiKey: UP_KEY, provider_type: "gemini", models: [{ id: "c1" }] },
+    "crow-c-cloud-a": { baseUrl: `http://up.example.test:${upPort}/v1`, apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] },
   };
 }
 
@@ -104,12 +106,13 @@ async function grant(id) {
   const r = await grantCloudConsent(db, id, { actor: "test", expect: { baseUrl: rows[id].baseUrl, apiKey: rows[id].apiKey } });
   assert.equal(r.ok, true, `grant ${id}: ${r.reason}`);
 }
-/** Consent for a row the real grant refuses (literal, metadata, local): the
- * entry a grant would write had the row been accepted, so the door's OWN
- * checks are what refuse it. */
+/** Consent for a row the real grant refuses (literal, metadata, local, a
+ * plain-http fake upstream, no key, local only, an unsupported type, a
+ * crow-c-* id): the entry a grant would write for the row's own address and
+ * key had the row been accepted, so the door's OWN checks are what refuse it. */
 async function forceConsent(id) {
-  const shadow = `${id}--shadow`;
-  rows[shadow] = { ...rows[id], baseUrl: "https://api.example.com/v1" };
+  const shadow = `shadow--${id}`;
+  rows[shadow] = { ...rows[id], baseUrl: "https://api.example.com/v1", apiKey: rows[id].apiKey || "fixture-shadow-key", gpuPolicy: null, provider_type: "openai" };
   await grant(shadow);
   const map = await readCloudConsent(db);
   map[id] = { ...map[shadow], target: normalizeBaseUrl(rows[id].baseUrl) };
@@ -169,7 +172,9 @@ beforeEach(async () => {
   rows = baseRows();
   db = fakeDb(rows);
   await ensureCloudConsentSalt(db);
-  for (const id of ["cloud-a", "cloud-b", "Cloud A", "cloud-n", "cloud-r", "cloud-nokey", "cloud-lo", "cloud-h"]) await grant(id);
+  // The real grant takes https cloud rows only; the fake upstreams speak plain http.
+  await grant("cloud-n");
+  for (const id of ["cloud-a", "cloud-b", "Cloud A", "cloud-r", "cloud-nokey", "cloud-lo", "cloud-h", "cloud-gem", "crow-c-cloud-a"]) await forceConsent(id);
   for (const id of ["lit-0", "lit-6", "lit-64", "meta", "local-chat"]) await forceConsent(id);
   // Capture every log line: the real key must never appear in one.
   for (const k of ["log", "warn", "error"]) console[k] = (...a) => { logs.push(a.map(String).join(" ")); };
@@ -350,6 +355,8 @@ test("refusals never call upstream", async () => {
     ["openai op on an anthropic row", "/llm/c/cloud-b/v1/chat/completions", { body: { model: "m-b", messages: [] } }, 400, "OP_NOT_ALLOWED"],
     ["path tricks", "/llm/c/cloud-a/v1/chat/completions/../../models", {}, 400, "OP_NOT_ALLOWED"],
     ["no key", "/llm/c/cloud-nokey/v1/chat/completions", {}, 400, "NO_KEY"],
+    ["unsupported provider type", "/llm/c/cloud-gem/v1/chat/completions", {}, 400, "UNSUPPORTED_TYPE"],
+    ["a row in the door's own crow-c- namespace", "/llm/c/crow-c-cloud-a/v1/chat/completions", {}, 400, "RESERVED_ID"],
     ["metadata (unseamed)", "/llm/c/meta/v1/chat/completions", {}, 400, "FORBIDDEN_TARGET"],
     ["local-chat (unseamed)", "/llm/c/local-chat/v1/chat/completions", {}, 400, "NOT_CLOUD"],
     ["array body", "/llm/c/cloud-a/v1/chat/completions", { raw: "[1]" }, 400, "BAD_BODY"],
@@ -919,4 +926,20 @@ test("metering: a large non-streamed body with usage first is still metered", as
   assert.equal(usage.length, 1);
   assert.equal(usage[0].inputTokens, 21);
   assert.equal(usage[0].outputTokens, 22);
+});
+
+test("final F2: resolveCloudTarget refuses exactly the rows cloudDoorEligible refuses (before consent)", async () => {
+  const { cloudDoorEligible } = await import("../servers/shared/cloud-consent.js");
+  const ok = { id: "x", baseUrl: "https://api.example.com/v1", apiKey: UP_KEY, provider_type: "openai", models: [{ id: "c1" }] };
+  const list = [
+    ok, { ...ok, id: "x-a", provider_type: "anthropic" }, { ...ok, id: "x-h", baseUrl: "http://api.example.com/v1" },
+    { ...ok, id: "x-k", apiKey: "none" }, { ...ok, id: "x-lo", gpuPolicy: { local_only: true } },
+    { ...ok, id: "x-t", provider_type: "gemini" }, { ...ok, id: "crow-c-x" },
+  ];
+  for (const row of list) {
+    const op = row.provider_type === "anthropic" ? "messages" : "chat/completions";
+    const t = resolveCloudTarget({ providers: { [row.id]: row }, consent: {}, salt: null, providerId: row.id, op, model: "c1" });
+    // With no consent at all, an eligible row gets as far as the consent check.
+    assert.equal(t.code === "NOT_CONSENTED", cloudDoorEligible(row), `${row.id}: ${t.code}`);
+  }
 });

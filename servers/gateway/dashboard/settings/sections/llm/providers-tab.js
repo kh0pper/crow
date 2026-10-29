@@ -36,6 +36,7 @@ import { isDefaultCrowHome } from "../../../../../shared/crow-home.js";
 import { scanSlots, consumersOfModel, piConfigRefs } from "../../../../../shared/model-consumers.js";
 import {
   readCloudConsent, ensureCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow, consentTokenFor,
+  cloudDoorIneligibleReason,
 } from "../../../../../shared/cloud-consent.js";
 
 const BACK = "?section=llm&tab=providers";
@@ -115,6 +116,8 @@ export function duplicateClusters(providers) {
 
 /**
  * The "Let bots use this provider" switch for an enabled cloud row; "" otherwise.
+ * A cloud row the cloud door would never serve gets a disabled switch and the
+ * reason (cloudDoorIneligibleReason).
  * Turning it on sends back an opaque token for the address and key this page
  * showed (never the key or its fingerprint), so a row rewritten between the
  * render and the click is refused, not consented.
@@ -130,6 +133,25 @@ export function botsSwitch(p, { consent, salt, lang = "en" }) {
   }
   const on = consentVerdict(p, Object.hasOwn(consent, p.id) ? consent[p.id] : null, { salt }) === "ok";
   const label = escapeHtml(t("providers.botsMayUse", lang));
+  // A cloud row the door would never serve (cloud-consent.js, the one rule):
+  // no switch that turns on, a plain reason instead. A leftover consent can
+  // still be turned off.
+  const why = cloudDoorIneligibleReason(p);
+  if (why) {
+    const reason = `<div class="llm-bots-unavailable">${escapeHtml(t(`providers.botsIneligible.${why}`, lang))}</div>`;
+    if (on) {
+      return `<form method="post" class="llm-bots-switch">
+            <input type="hidden" name="action" value="llm_provider_bots_deny">
+            <input type="hidden" name="id" value="${escapeHtml(p.id)}">
+            <button type="submit" role="switch" aria-checked="true"><span class="llm-bots-track" aria-hidden="true"></span>${label}</button>
+            ${reason}
+          </form>`;
+    }
+    return `<div class="llm-bots-switch">
+            <button type="button" role="switch" aria-checked="false" disabled><span class="llm-bots-track" aria-hidden="true"></span>${label}</button>
+            ${reason}
+          </div>`;
+  }
   const token = !on ? `
             <input type="hidden" name="consent_token" value="${escapeHtml(consentTokenFor(p, salt))}">` : "";
   return `<form method="post" class="llm-bots-switch">

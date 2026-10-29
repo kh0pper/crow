@@ -69,7 +69,7 @@ import { StringDecoder } from "node:string_decoder";
 import { isPublicIp } from "../../shared/ip-classify.js";
 import { isLocalPeer } from "../../shared/peer-class.js";
 import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "./door-resolve.js";
-import { consentVerdict } from "../../shared/cloud-consent.js";
+import { consentVerdict, cloudDoorIneligibleReason } from "../../shared/cloud-consent.js";
 import { safeRequest } from "./safe-upstream.js";
 import { extractUsageFromOpenAIResponse, extractUsageFromAnthropicStream } from "../../shared/metering.js";
 
@@ -119,10 +119,17 @@ export function resolveCloudTarget({
   isCloudTarget: cloudCheck = isCloudTarget, allowInsecure = () => false, beta = false,
 } = {}) {
   const row = typeof providerId === "string" && Object.hasOwn(providers, providerId) ? providers[providerId] : null;
-  if (!row || row.disabled) return err(404, "UNKNOWN_PROVIDER", "no such cloud provider");
-  if (row.gpuPolicy?.local_only === true || row.gpu_policy?.local_only === true) return err(400, "LOCAL_ONLY", "this provider is local only");
+  if (!row) return err(404, "UNKNOWN_PROVIDER", "no such cloud provider");
+  // The shared eligibility rule (cloud-consent.js), the one the switch, the
+  // grant and the models.json entries use. Its address-shape reasons wait
+  // until the address checks below, so a forbidden address always answers
+  // FORBIDDEN_TARGET, whatever its scheme.
+  const why = cloudDoorIneligibleReason({ ...row, id: providerId }, { isCloudTarget: cloudCheck, allowInsecure });
+  if (why === "disabled") return err(404, "UNKNOWN_PROVIDER", "no such cloud provider");
+  if (why === "not_cloud") return err(400, "NOT_CLOUD", "the cloud door serves cloud providers only");
+  if (why === "reserved_id") return err(400, "RESERVED_ID", "ids starting with crow-c- are reserved for the cloud door's own entries");
+  if (why === "local_only") return err(400, "LOCAL_ONLY", "this provider is local only");
   const base = row.baseUrl ?? row.base_url;
-  if (typeof base !== "string" || !cloudCheck(base)) return err(400, "NOT_CLOUD", "the cloud door serves cloud providers only");
   let u;
   try { u = new URL(base); } catch { return err(400, "FORBIDDEN_TARGET", "Crow will not contact that address"); }
   const host = u.hostname.replace(/^\[|\]$/g, "");
@@ -130,7 +137,10 @@ export function resolveCloudTarget({
     || (isIP(host) && !isPublicIp(host))) {
     return err(400, "FORBIDDEN_TARGET", "Crow will not contact that address");
   }
-  if (u.protocol !== "https:" && !allowInsecure(base)) return err(400, "INSECURE_TARGET", "the cloud door sends keys over https only");
+  if (why === "insecure") return err(400, "INSECURE_TARGET", "the cloud door sends keys over https only");
+  if (why === "unsupported_type") return err(400, "UNSUPPORTED_TYPE", "the cloud door serves openai-style and anthropic providers only");
+  if (why === "no_key") return err(400, "NO_KEY", "this provider has no key");
+  if (why) return err(400, "NOT_ELIGIBLE", "the cloud door does not serve this provider");
   const entry = consent && typeof consent === "object" && Object.hasOwn(consent, providerId) ? consent[providerId] : null;
   const verdict = consentVerdict(row, entry, { salt });
   if (verdict === "not_consented") return err(403, "NOT_CONSENTED", "this box has not agreed to let bots use this provider");
@@ -140,7 +150,6 @@ export function resolveCloudTarget({
   if (!CLOUD_OPS[authStyle === "anthropic" ? "anthropic" : "openai"].includes(op)) return err(400, "OP_NOT_ALLOWED", "that operation is not served by the cloud door");
   if (typeof model !== "string" || !modelIdsOf(row).includes(model)) return err(404, "MODEL_NOT_SERVED", "this provider does not list that model");
   const apiKey = keyOf(row);
-  if (!apiKey || apiKey === "none") return err(400, "NO_KEY", "this provider has no key");
   u.hash = "";
   u.pathname = u.pathname.replace(/\/+$/, "") + (authStyle === "anthropic" ? `/v1/${op}` : `/${op}`);
   if (authStyle === "anthropic" && beta) u.searchParams.set("beta", "true");
