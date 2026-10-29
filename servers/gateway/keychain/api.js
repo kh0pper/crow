@@ -51,6 +51,18 @@ export function defaultReauthGate() {
 
 const auditDetails = (e) => ({ entry_id: e.id, label: e.label, bundle_id: e.bundle_id || null, env_key: e.env_key || null });
 const str = (v, max) => (typeof v === "string" && v.length > 0 && v.length <= max ? v : null);
+/**
+ * ensureWriteKey's onNewKey hook, shared by every route that saves to the keychain (this API and
+ * the project Services connect route): a key created while entries already exist means the old
+ * key was lost, so it is audited and the user told once (re-review m2).
+ */
+export function keyCreatedHook({ db, ip, audit = auditLog, notify = createNotification }) {
+  return async ({ orphaned }) => {
+    await audit(db, "keychain_key_created", { ip, details: { orphaned } });
+    try { await notify(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Security & passwords → Saved passwords & keys to recover them.`, type: "system", source: "keychain" }); } catch {}
+  };
+}
+
 const KEY_MISSING = { code: "key_missing", error: "This password was saved under a keychain key that is not on this machine. Import an Export file to recover it, or delete it." };
 
 export function keychainApiRouter({
@@ -75,13 +87,7 @@ export function keychainApiRouter({
   const readKey = () => loadKeychainKey({ crowHome });
   // Saving creates the key on first use; a key created while entries already exist means
   // the old key was lost — audit it and tell the user once (re-review m2).
-  const writeKey = (db, ip) => ensureWriteKey(db, {
-    crowHome,
-    onNewKey: async ({ orphaned }) => {
-      await audit(db, "keychain_key_created", { ip, details: { orphaned } });
-      try { await notify(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Security & passwords → Saved passwords & keys to recover them.`, type: "system", source: "keychain" }); } catch {}
-    },
-  });
+  const writeKey = (db, ip) => ensureWriteKey(db, { crowHome, onNewKey: keyCreatedHook({ db, ip, audit, notify }) });
 
   const withDb = (handler) => async (req, res) => {
     const db = openDb();

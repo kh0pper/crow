@@ -182,18 +182,36 @@ export async function serviceSecretsFor(db, key, connectionUuid, { allowedKeys }
 
 /**
  * The env key names a connection has a secret saved for, from metadata only: nothing is decrypted
- * and no key is needed (for a set/unset view). Every saved row counts, whatever its status or key:
- * "set" means a value is saved; whether it can be served is the connection's status (needs_install,
- * key_missing), not this answer.
+ * and no key is needed (for a set/unset view). Every saved row counts whatever its key or an
+ * uninstall (needs_install, key_missing are the connection's status, not this answer), except a
+ * disconnected row: that one is kept only so its value stays masked, and is never served.
  */
 export async function serviceSecretKeys(db, connectionUuid) {
   await ensureKeychainTable(db);
   if (typeof connectionUuid !== "string" || connectionUuid === "") return new Set();
-  const { rows } = await db.execute({ sql: "SELECT env_key FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND env_key IS NOT NULL", args: [connectionUuid] });
+  const { rows } = await db.execute({ sql: "SELECT env_key FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND env_key IS NOT NULL AND status != 'disconnected'", args: [connectionUuid] });
   return new Set(rows.map((r) => r.env_key));
 }
 
-/** Removes every secret of one connection (disconnect). */
+/**
+ * Disconnect: every secret row of one connection becomes status 'disconnected' (never deleted
+ * here). Such a row is never served (serviceSecretsFor reads active rows only, serviceSecretKeys
+ * skips it) and never reactivated by a reinstall (reactivateBundleEntries reads extension_removed
+ * only), but the masking reader (readableSecretsSync) still opens it, so a value the operator saved
+ * stays hidden in logs and on approval cards. The owner purges it for good from the keychain page
+ * (deleteEntry allows a disconnected service row). Safe to repeat.
+ */
+export async function disconnectServiceSecrets(db, connectionUuid) {
+  await ensureKeychainTable(db);
+  if (typeof connectionUuid !== "string" || connectionUuid === "") return { disconnected: 0 };
+  const r = await db.execute({
+    sql: "UPDATE crow_keychain SET status = 'disconnected', first_view_until = NULL, updated_at = ? WHERE kind = 'service' AND connection_uuid = ? AND status != 'disconnected'",
+    args: [iso(), connectionUuid],
+  });
+  return { disconnected: r.rowsAffected };
+}
+
+/** Removes every secret of one connection (a connect that failed part way: undoCreate). */
 export async function deleteServiceSecrets(db, connectionUuid) {
   await ensureKeychainTable(db);
   if (typeof connectionUuid !== "string" || connectionUuid === "") return { deleted: 0 };
@@ -258,10 +276,19 @@ export async function consumeFirstView(db, key, id, { now } = {}) {
   return openSecret(rows[0].secret_sealed, box(key));
 }
 
-/** Deletes one entry. A service row is refused (KeychainServiceRowError): disconnect its connection. */
+/**
+ * Deletes one entry. A service row of a live (not-disconnected) connection is refused (KeychainServiceRowError):
+ * disconnect its connection first. A disconnected service row may be deleted: that is how the
+ * owner purges a disconnected connection's secret for good (it then stops being masked).
+ */
 export async function deleteEntry(db, id) {
   await ensureKeychainTable(db);
-  const r = await db.execute({ sql: "DELETE FROM crow_keychain WHERE id = ? AND kind != 'service'", args: [Number(id)] });
+  // An orphan (its connection row is gone, e.g. a project was deleted) is purgeable like a disconnected one.
+  const hasConnections = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'service_connections'")).rows.length > 0;
+  const orphan = hasConnections
+    ? "NOT EXISTS (SELECT 1 FROM service_connections c WHERE c.uuid = crow_keychain.connection_uuid AND c.status != 'disconnected')"
+    : "0"; // no table: nothing proves it an orphan
+  const r = await db.execute({ sql: `DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected' OR ${orphan})`, args: [Number(id)] });
   if (r.rowsAffected > 0) return true;
   const svc = await db.execute({ sql: "SELECT 1 FROM crow_keychain WHERE id = ? AND kind = 'service'", args: [Number(id)] });
   if (svc.rows.length) throw new KeychainServiceRowError();
@@ -360,7 +387,8 @@ export async function importEntries(db, key, entries) {
       if (!uuid || !e.env_key || !e.bundle_id) { skipped++; continue; }
       if (current.some((c) => c.kind === "service" && c.connection_uuid === uuid && c.env_key === e.env_key && c.readable)) { skipped++; continue; }
       const { id } = await saveServiceSecret(db, key, { connectionUuid: uuid, bundleId: e.bundle_id || null, envKey: e.env_key, label: e.label, secret: e.secret });
-      if (e.status === "extension_removed") await db.execute({ sql: "UPDATE crow_keychain SET status = 'extension_removed' WHERE id = ?", args: [id] });
+      // A disconnected row stays disconnected (never served) after an import, as an uninstalled one stays removed.
+      if (e.status === "extension_removed" || e.status === "disconnected") await db.execute({ sql: "UPDATE crow_keychain SET status = ? WHERE id = ?", args: [e.status, id] });
       ids.push(id);
       imported++;
     } else {

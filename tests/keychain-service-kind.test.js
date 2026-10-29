@@ -21,7 +21,7 @@ const { createReauthGate } = await import("../servers/gateway/keychain/reauth.js
 const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
 const { SERVICE_CONNECTIONS_DDL } = await import("../servers/shared/project-services-schema.js");
 const { collectSecretValueSets } = await import("../servers/shared/secret-values-collect.js");
-const { recordCardSecret } = await import("../servers/shared/secret-values.js");
+const { recordCardSecret, recordServiceSecretValues } = await import("../servers/shared/secret-values.js");
 
 const SECRET_A = "test-token-61";
 const SECRET_B = "test-token-62";
@@ -166,6 +166,35 @@ test("an unreadable service row (old key) is replaced by its import: the restore
   assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), { A: SECRET_A });
 });
 
+test("disconnectServiceSecrets keeps one connection's rows as 'disconnected': never served, still read for masking, deletable from the keychain page", async () => {
+  const { db, key } = fresh();
+  const a = await save(db, key, "A", SECRET_A);
+  await K.saveServiceSecret(db, key, { connectionUuid: "u-8", bundleId: "github", envKey: "A", secret: SECRET_X });
+  assert.deepEqual(await K.disconnectServiceSecrets(db, "u-7"), { disconnected: 1 });
+  assert.deepEqual(await K.disconnectServiceSecrets(db, "u-7"), { disconnected: 0 }, "safe to repeat");
+  assert.deepEqual(await K.disconnectServiceSecrets(db, ""), { disconnected: 0 });
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), {}, "never served");
+  assert.equal((await K.serviceSecretKeys(db, "u-7")).size, 0);
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-8", { allowedKeys: ["A"] }), { A: SECRET_X }, "another connection is untouched");
+  const listed = (await K.listEntries(db, { keyId: key.id })).find((e) => e.id === a.id);
+  assert.equal(listed.status, "disconnected");
+  assert.ok(!JSON.stringify(listed).includes(SECRET_A));
+  // An export / import round trip keeps it disconnected (never served after a restore).
+  const exported = await K.exportableEntries(db, key);
+  const fresh2 = fresh();
+  await K.importEntries(fresh2.db, fresh2.key, exported);
+  const imported = (await K.listEntries(fresh2.db, {})).find((e) => e.connection_uuid === "u-7");
+  assert.equal(imported.status, "disconnected");
+  // A bundle reinstall never revives it.
+  await K.markBundleRemoved(db, "github");
+  await K.reactivateBundleEntries(db, "github", []);
+  assert.equal((await K.getEntry(db, a.id)).status, "disconnected");
+  // The keychain page may delete a disconnected service row (the owner's purge); a live one is still refused.
+  await assert.rejects(K.deleteEntry(db, (await K.listEntries(db, {})).find((e) => e.connection_uuid === "u-8").id), (e) => e.code === "KEYCHAIN_SERVICE_ROW");
+  assert.equal(await K.deleteEntry(db, a.id), true);
+  assert.equal(await K.getEntry(db, a.id), null);
+});
+
 test("deleteEntry refuses a service row; deleteServiceSecrets removes exactly one connection's rows", async () => {
   const { db, key } = fresh();
   const a = await save(db, key, "A", SECRET_A);
@@ -196,7 +225,7 @@ test("listEntries shows a service row's metadata (uuid, field name) and never it
   assert.ok(!("secret_sealed" in list[0]));
 });
 
-test("A12 (corrected) — what the bot secret-value sets really hold for a service row: display only when generated-shaped, never a card value", async () => {
+test("A12 (Task 9) — a service row counts only once the operator recorded its hash from the dashboard: then on display paths (dotted tokens too), never in the card set", async () => {
   // readableSecretsSync (the masking reader) returns every readable row, service rows included.
   const crowHome = home();
   const dataDir = join(crowHome, "data");
@@ -216,13 +245,19 @@ test("A12 (corrected) — what the bot secret-value sets really hold for a servi
   } finally { raw.close(); }
 
   const env = { CROW_HOME: crowHome, CROW_DATA_DIR: dataDir };
-  // Even a value the operator's own keychain UI recorded stays off cards: a non-manual row is
-  // steerable by a bot (kind is untrusted), so kind-based trust is not extended to services.
+  // Kind is untrusted (a bot can insert a service row or flip a row's kind): with no recorded
+  // hash a service row masks nothing, whatever its shape. A card hash is not a service hash.
   recordCardSecret([PAT, JWT], env);
-  const sets = collectSecretValueSets({ env, dbPath: path });
-  assert.ok(sets.display.includes(PAT), "a generated-shaped service secret is masked in logs and transcripts");
-  assert.ok(!sets.display.includes(JWT), "a dotted token (HA, Discord) is NOT in the display set: masking for it is Task 9's to add");
-  assert.ok(!sets.card.includes(PAT) && !sets.card.includes(JWT), "service secrets never hide text on approval cards");
+  let sets = collectSecretValueSets({ env, dbPath: path });
+  assert.ok(!sets.display.includes(PAT) && !sets.display.includes(JWT), "no service hash: not masked");
+  assert.deepEqual(sets.service, []);
+  // The Services connect route records the hash (recordServiceSecretValues).
+  recordServiceSecretValues([PAT, JWT], env);
+  sets = collectSecretValueSets({ env, dbPath: path });
+  assert.ok(sets.display.includes(PAT), "a service secret is masked in logs and transcripts");
+  assert.ok(sets.display.includes(JWT), "a dotted token (HA, Discord) too");
+  assert.ok(sets.service.includes(PAT) && sets.service.includes(JWT), "and on the gateway's own approval cards (getApprovalCardValues)");
+  assert.ok(!sets.card.includes(PAT) && !sets.card.includes(JWT), "never the card set pi is handed");
 });
 
 test("the delete route answers 409 {error:'service_row'} for a service row, audits nothing, and no response carries the secret", async () => {
@@ -257,6 +292,12 @@ test("the delete route answers 409 {error:'service_row'} for a service row, audi
     const events = (await db.execute("SELECT event_type, details FROM audit_log")).rows;
     assert.ok(!events.some((e) => e.event_type === "keychain_delete"), "a refused delete is not audited as a delete");
     for (const blob of [del.text, list.text, JSON.stringify(events), logs.join("\n")]) assert.ok(!blob.includes(SECRET_A));
+    // Once its connection is disconnected, the keychain page's Delete purges it for good.
+    await K.disconnectServiceSecrets(db, "u-7");
+    const purge = await call("/delete", { id });
+    assert.equal(purge.status, 200);
+    assert.equal((await rowsOf(db)).length, 0, "gone");
+    assert.ok((await db.execute("SELECT event_type FROM audit_log")).rows.some((e) => e.event_type === "keychain_delete"));
   } finally {
     Object.assign(console, orig);
     server.close();

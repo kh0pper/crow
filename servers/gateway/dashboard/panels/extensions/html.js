@@ -176,6 +176,9 @@ export function buildExtensionsHTML({
   bundleStatus,
   needsConfig = {},
   needsRepin = {},
+  // id → true: an installed service add-on that already runs with its account fields set
+  // Crow-wide (computed in panels/extensions.js; html.js stays pure). Configure keeps them.
+  legacyAccounts = {},
   dockerOk = true,
   keychainPending = [],
   vaultSecure = false,
@@ -506,7 +509,8 @@ export function buildExtensionsHTML({
       ports: addon.ports || [],
       webUI: addon.webUI || null,
       requires: addon.requires || {},
-      env_vars: formEnvVars(addon),
+      // The registry blob: Install on a not-installed add-on, Configure on an installed one.
+      env_vars: formEnvVars(addon, { keepAccountFields: !!(installed[addon.id] && legacyAccounts[addon.id]) }),
       official: !addon._community,
       featured: !!addon.featured,
       _iconHtml: renderIcon(addon, 48),

@@ -41,7 +41,7 @@ import { join } from "node:path";
 import { resolveInstanceDataDir } from "./crow-home.js";
 import {
   SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, cardHashOf, normalizeValues, plausibleSecretValue,
-  primeSecretValues, readCardHashes, recordCardSecret, safeShape, secretsDirCurrentPath, writeSecretValuesFile,
+  primeSecretValues, readCardHashes, readServiceHashes, recordCardSecret, safeShape, secretsDirCurrentPath, writeSecretValuesFile,
 } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
@@ -115,16 +115,25 @@ function keychainEntries({ dbPath, env, transaction = false }) {
 }
 
 /**
- * Two sets from the trusted sources above.
+ * The sets from the trusted sources above (the one place they are built).
  *   display: every trusted value (manual keychain entries, generated-shaped
- *            extension entries, generated-shaped retained bundle secrets), for
- *            logs, notifications and transcripts, where nothing is approved.
+ *            extension entries, generated-shaped retained bundle secrets, and
+ *            the service values below), for logs, notifications and
+ *            transcripts, where nothing is approved.
  *   card:    manual keychain entries only, and only shell-safe ones
  *            (safeShape). Extension and retained values can be steered by a
  *            bot through a bundle .env at the next reinstall or boot backfill,
  *            so they never hide text on what the operator approves. This is
  *            also the set written to the values file, which pi-lab uses for
  *            its own cards.
+ *   service: kind 'service' keychain values (project connections) whose hash
+ *            the OPERATOR recorded (recordServiceSecretValues, from the
+ *            dashboard's connect route) and that are cardStrong. A bot can
+ *            insert a service row or flip a row's kind, so neither the kind nor
+ *            the row counts without the hash. They join the display set and
+ *            the gateway's own approval-card mask (getApprovalCardValues), but
+ *            never the card set: that set is what pi receives, for every bot,
+ *            channel and cron bots included.
  * @param {object} [o]
  * @param {object} [o.env] the env to resolve paths from
  * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the keychain
@@ -147,12 +156,26 @@ export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
   const retained = retainedBundleSecrets(env);
   const steerable = new Set([...entries.filter((e) => e.kind !== "manual").map((e) => e.secret), ...retained]);
   const operator = manual.filter((v) => hashes.has(cardHashOf(v)) && cardStrong(v) && !steerable.has(v));
+  // Extension rows only: a service row counts through the operator's hash list
+  // alone (below), whatever its shape, so a row a bot inserted masks nothing.
+  // Before project services the only kinds were 'manual' and 'extension', so
+  // for every older row this is exactly the old "kind !== manual" rule.
   const minted = entries
-    .filter((e) => e.kind !== "manual" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
+    .filter((e) => e.kind === "extension" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
+    .map((e) => e.secret);
+  // A disconnected connection's rows are kept (status 'disconnected') and read
+  // here like any other: its value stays masked until the owner deletes it.
+  // On cards the safeShape filter still drops a domain-shaped value (dots and
+  // letters/digits/dashes only, e.g. some HA or Discord tokens): by design, a
+  // card never hides a host name. Display paths mask it.
+  const serviceHashes = readServiceHashes(env);
+  const service = entries
+    .filter((e) => e.kind === "service" && serviceHashes.has(cardHashOf(e.secret)) && cardStrong(e.secret))
     .map((e) => e.secret);
   return {
-    display: normalizeValues([...manual, ...minted, ...retained]),
+    display: normalizeValues([...manual, ...minted, ...retained, ...service]),
     card: normalizeValues(operator).filter(safeShape),
+    service: normalizeValues(service),
   };
 }
 
@@ -167,11 +190,18 @@ export function collectSecretValues(opts = {}) {
  * values file with the card set. Never throws.
  * @returns {{path: string, count: number, written: boolean}|null} null when nothing was written
  */
+let lastCardTrusted = false;   // the last pi spawn's sandbox state in THIS process (bridge.mjs passes cardTrusted)
+
 export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
+  // Fail closed: only a caller that says the spawn was sandboxed (cardTrusted: true) is trusted.
+  lastCardTrusted = opts.cardTrusted === true;
   try {
     const sets = collectSecretValueSets(opts);
-    primeSecretValues(sets.display, opts.cardTrusted === false ? [] : sets.card);
+    // Untrusted (no sandbox): a bot could have written either hash list, so
+    // neither set may hide text on a card.
+    const trusted = opts.cardTrusted === true;
+    primeSecretValues(sets.display, trusted ? sets.card : [], trusted ? sets.service : []);
     if (opts.write === false) return null;
     // Written through the anchored dir; the path returned (for pi) is where
     // that dir really is now.
@@ -185,6 +215,17 @@ export function refreshSecretValuesFile(opts = {}) {
     if (typeof opts.log === "function") opts.log("secret values file not written: " + ((e && e.message) || e));
     return null;
   }
+}
+
+/**
+ * Re-collect this process's in-memory sets now, without writing a file and with
+ * the card trust of the last pi spawn here (none yet: no card values, as before
+ * this call). The gateway calls it after a project-service connect or
+ * disconnect, so its own approval-card and log masks change at once instead of
+ * at the next spawn. Never throws.
+ */
+export function refreshGatewaySecretValues(opts = {}) {
+  return refreshSecretValuesFile({ ...opts, write: false, cardTrusted: lastCardTrusted });
 }
 
 /** Strong enough to hide text on a card: 8+ characters, not a plain word. */

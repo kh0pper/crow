@@ -450,3 +450,40 @@ test("without bubblewrap there is no PI_BOT_SECRET_VALUES_FD (no card set exists
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }
 });
+
+test("sandboxed: an operator-recorded project-service secret never reaches pi's fd or values file, while the gateway's own card mask has it", { skip: noSandbox }, async () => {
+  const { recordServiceSecretValues, getApprovalCardValues } = await import("../servers/shared/secret-values.js");
+  const SVC = "test-token-" + "SpawnSvc7" + "Ab3x".repeat(4);
+  const db = new Database(join(HOME, "data", "crow.db"));
+  db.prepare("INSERT INTO crow_keychain (kind,label,bundle_id,env_key,secret_sealed,key_id,origin,connection_uuid) VALUES ('service','s','github','GITHUB_PERSONAL_ACCESS_TOKEN',?,?,'typed',?)")
+    .run(sealSecret(SVC, { seed: SEED }), "0123456789abcdef", "00000000-0000-4000-8000-0000000000aa");
+  db.close();
+  recordServiceSecretValues([SVC], process.env);          // what the Services connect route records
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-svcfd-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync, closeSync } from "node:fs";',
+    'const n = Number(process.env.PI_BOT_SECRET_VALUES_FD);',
+    'let values = []; try { values = readFileSync(n, "utf8").split("\\n").filter(Boolean); closeSync(n); } catch {}',
+    'let file = ""; try { file = readFileSync(process.env.PI_BOT_SECRET_VALUES_FILE, "utf8"); } catch {}',
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "svcfd", values, file }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  process.env.PIBOT_PI_LAB_DIR = fakePiLab(true);
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report" && m.tag === "svcfd", 10000, "svcfd");
+    await pi.exited;
+    assert.ok(r.values.includes(FAKE), "the card set arrived");
+    assert.equal(r.values.includes(SVC), false, "no service value on the fd");
+    assert.equal(r.file.includes(SVC), false, "nor in the values file");
+    assert.ok(getApprovalCardValues().includes(SVC), "the gateway's approval-card mask has it");
+  } finally {
+    delete process.env.PIBOT_PI_LAB_DIR;
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    setManual([FAKE]);
+  }
+});

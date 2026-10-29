@@ -11,6 +11,7 @@
  *              browser never receives) always stays visible — it needs a human,
  *              whatever the manifest says.
  */
+import { servicesUiEnabled } from "./services/ui-flag.js";
 
 const nonBlank = (v) => v !== undefined && v !== null && String(v).trim() !== "";
 
@@ -24,9 +25,20 @@ export function isAdvancedEnvVar(ev) {
   return !ev.required && nonBlank(ev.default);
 }
 
-/** env_vars the browser may see: installer-generated secrets are never shown or sent. */
-export function visibleEnvVars(addon) {
-  return (addon?.env_vars || []).filter((ev) => ev && typeof ev.name === "string" && !ev.generate);
+/**
+ * env_vars the browser may see: installer-generated secrets are never shown or sent. With the
+ * project Services UI on (CROW_SERVICES_UI), a service's account fields (`connect.fields`) leave
+ * the INSTALL form: they are typed per project, in the Services connect sheet. `keepAccountFields`
+ * keeps them, for Configure on an installed add-on that already runs with them Crow-wide (a
+ * legacy configuration, see bundles-config.js configuredAccountFields), so the owner can still
+ * edit it. With the flag off the form is exactly what it was.
+ */
+export function visibleEnvVars(addon, { servicesUi = servicesUiEnabled(), keepAccountFields = false } = {}) {
+  const accountFields = servicesUi && !keepAccountFields && Array.isArray(addon?.connect?.fields)
+    ? new Set(addon.connect.fields.map((f) => f?.name).filter((n) => typeof n === "string"))
+    : null;
+  return (addon?.env_vars || []).filter((ev) => ev && typeof ev.name === "string" && !ev.generate
+    && !(accountFields && accountFields.has(ev.name)));
 }
 
 /**
@@ -49,11 +61,11 @@ export function formEnvVar(ev) {
   };
 }
 
-export function formEnvVars(addon) {
-  return visibleEnvVars(addon).map(formEnvVar);
+export function formEnvVars(addon, opts) {
+  return visibleEnvVars(addon, opts).map(formEnvVar);
 }
 
 /** Visible fields a typical install shows unfolded (the human's part of the form). */
-export function primaryEnvVars(addon) {
-  return visibleEnvVars(addon).filter((ev) => !isAdvancedEnvVar(ev));
+export function primaryEnvVars(addon, opts) {
+  return visibleEnvVars(addon, opts).filter((ev) => !isAdvancedEnvVar(ev));
 }

@@ -5,8 +5,45 @@
 import { escapeHtml, badge } from "../../shared/components.js";
 import { t, tJs, fill } from "../../shared/i18n.js";
 import { getProxyStatus } from "../../../proxy.js";
-import { legacyIntegrationsView } from "../../../services/legacy-sources.js";
+import { legacyIntegrationsView, legacyEnvSources } from "../../../services/legacy-sources.js";
 import { isSupervised } from "../../../../shared/supervisor.js";
+import { servicesUiEnabled } from "../../../services/ui-flag.js";
+import { listConnections } from "../../../../shared/service-connections.js";
+import { serviceSecretKeys } from "../../../keychain/store.js";
+
+/** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). */
+async function movedHtml({ scope, db, lang }) {
+  let href = "/dashboard/projects";
+  let label = t("settings.integrations.openProjects", lang);
+  if (scope && scope.projectId != null && scope.slug && db) {
+    try {
+      const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [Number(scope.projectId)] });
+      if (rows[0]) {
+        href = `/dashboard/project/${encodeURIComponent(scope.slug)}/services`;
+        label = fill(t("settings.integrations.open", lang), { project: rows[0].name });
+      }
+    } catch (err) { console.warn("[settings] services link lookup failed:", err.message); }
+  }
+  const none = `<li class="int-note">${escapeHtml(t("settings.integrations.none", lang))}</li>`;
+  const sources = legacyEnvSources().map((s) =>
+    `<li><strong>${escapeHtml(s.name)}</strong> <code>${escapeHtml(s.id)}</code> <span class="int-note">${s.envVars.map((v) => escapeHtml(v)).join(", ")}</span></li>`).join("");
+  let conns = "";
+  if (db) {
+    try {
+      for (const c of await listConnections(db, {})) {
+        const keys = [...(await serviceSecretKeys(db, c.uuid))].sort();
+        const status = t(`services.status.${c.status}`, lang);
+        conns += `<li><strong>${escapeHtml(c.serviceId)}</strong> ${escapeHtml(c.accountLabel)} <span class="int-note">${escapeHtml(status)}${c.lastError ? ` <code>${escapeHtml(c.lastError)}</code>` : ""}${keys.length ? ` · ${keys.map((k) => escapeHtml(k)).join(", ")}` : ""}</span></li>`;
+      }
+    } catch (err) { console.warn("[settings] connections listing failed:", err.message); }
+  }
+  return `<p class="int-note" data-int-moved>${escapeHtml(t("settings.integrations.moved", lang))}</p>
+    <p><a class="int-link" href="${escapeHtml(href)}" data-int-services-link>${escapeHtml(label)}</a></p>
+    <details class="int-advanced" data-int-advanced><summary>${escapeHtml(t("settings.integrations.advanced", lang))}</summary>
+      <h4 class="int-cat-label">${escapeHtml(t("settings.integrations.sources", lang))}</h4><ul>${sources || none}</ul>
+      <h4 class="int-cat-label">${escapeHtml(t("settings.integrations.connections", lang))}</h4><ul>${conns || none}</ul>
+    </details>`;
+}
 
 export default {
   id: "integrations",
@@ -21,7 +58,9 @@ export default {
     return `${connected} connected`;
   },
 
-  async render({ lang }) {
+  async render({ req, db, lang } = {}) {
+    // With CROW_SERVICES_UI on, services live in each project; this page only points there.
+    if (servicesUiEnabled()) return movedHtml({ scope: req && req.crowScope, db, lang });
     const proxyStatus = getProxyStatus();
     const allIntegrations = legacyIntegrationsView();
     const categories = { productivity: [], communication: [], development: [] };

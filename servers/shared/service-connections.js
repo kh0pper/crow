@@ -18,6 +18,7 @@ import { appendAudit } from "./project-acl.js";
 import {
   saveServiceSecret as defaultSaveServiceSecret,
   deleteServiceSecrets as defaultDeleteServiceSecrets,
+  disconnectServiceSecrets as defaultDisconnectServiceSecrets,
   KeychainKeyMissingError,
 } from "../gateway/keychain/store.js";
 
@@ -365,16 +366,17 @@ export async function recordChildFailure(db, uuid) {
 }
 
 /**
- * Disconnects: the keychain secrets are deleted first (if that throws, the row is untouched and a
- * retry starts over), then the row goes 'disconnected', then the audit row. Safe to repeat: an
- * already-disconnected uuid re-deletes any leftover secrets and writes no second audit row.
- * Unknown uuid → not_found. `deleteServiceSecrets` is a test seam (tests only).
+ * Disconnects: the keychain secrets are marked 'disconnected' first (kept, never served, still
+ * masked; the owner deletes them for good from the keychain page; if marking throws, the row is
+ * untouched and a retry starts over), then the row goes 'disconnected', then the audit row. Safe
+ * to repeat: an already-disconnected uuid re-marks any leftover active secret and writes no
+ * second audit row. Unknown uuid → not_found. `disconnectServiceSecrets` is a test seam (tests only).
  */
-export async function disconnectConnection(db, uuid, { actor = "local", deleteServiceSecrets = defaultDeleteServiceSecrets } = {}) {
+export async function disconnectConnection(db, uuid, { actor = "local", disconnectServiceSecrets = defaultDisconnectServiceSecrets } = {}) {
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
   const conn = await getConnection(db, uuid);
   if (!conn) throw new ConnectionError("not_found");
-  await deleteServiceSecrets(db, uuid);
+  await disconnectServiceSecrets(db, uuid);
   if (conn.status !== "disconnected") {
     await db.execute({
       sql: "UPDATE service_connections SET status = 'disconnected', updated_at = datetime('now') WHERE uuid = ?",
@@ -383,6 +385,25 @@ export async function disconnectConnection(db, uuid, { actor = "local", deleteSe
     await appendAudit(db, { project_id: conn.projectId, actor_type: actor, action: "service.disconnect", target: uuid, payload: { service_id: conn.serviceId } });
   }
   return getConnection(db, uuid);
+}
+
+/**
+ * Disconnects EVERY connection of a project, whatever its status and whether or not the project is
+ * archived, the way disconnectConnection does (secrets 'disconnected' first, then the row, one
+ * audit row per connection that changed). A project delete MUST call this before deleting the
+ * project_spaces row: service_connections.project_id cascades, and without it the keychain rows
+ * would be left 'active' with no connection (once disconnected they stay masked, never served).
+ * Safe to repeat. @returns {Promise<{disconnected:number}>} connections that changed state.
+ */
+export async function disconnectProjectConnections(db, projectId, { actor = "local" } = {}) {
+  if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
+  const { rows } = await db.execute({ sql: "SELECT uuid, status FROM service_connections WHERE project_id = ? ORDER BY id", args: [projectId] });
+  let disconnected = 0;
+  for (const r of rows) {
+    await disconnectConnection(db, r.uuid, { actor });
+    if (r.status !== "disconnected") disconnected++;
+  }
+  return { disconnected };
 }
 
 /**
@@ -409,6 +430,23 @@ export async function markConnectionsNeedInstall(db, bundleId) {
     args: ids,
   });
   return rows.map((r) => ({ projectId: Number(r.id), slug: r.slug, name: r.name }));
+}
+
+/**
+ * Read-only, for the uninstall confirm (Task 7 M4): the non-archived projects with a live (not
+ * disconnected) connection of `bundleId`, one entry per project, by slug. Changes nothing.
+ * @returns {Promise<Array<{slug:string, name:string}>>}
+ */
+export async function projectsUsingBundle(db, bundleId) {
+  if (typeof bundleId !== "string" || !bundleId) return [];
+  const { rows } = await db.execute({
+    sql: `SELECT slug, name FROM project_spaces
+          WHERE status != 'archived' AND archived_at IS NULL
+            AND id IN (SELECT project_id FROM service_connections WHERE bundle_id = ? AND ${LIVE})
+          ORDER BY slug`,
+    args: [bundleId],
+  });
+  return rows.map((r) => ({ slug: r.slug, name: r.name }));
 }
 
 /** Reinstall of `bundleId`: needs_install rows go back to active (or error when last_error is set). */

@@ -298,6 +298,14 @@ export async function mountMcpServers(app, deps) {
     } catch (err) {
       console.warn(`[keychain] backfill skipped: ${err.message}`);
     }
+    // Project connections paused by an uninstall come back for every installed bundle (a
+    // crash between an install's record and its own restore would leave them paused).
+    try {
+      const { restoreInstalledBundleServices } = await import("../routes/bundles.js");
+      await restoreInstalledBundleServices();
+    } catch (err) {
+      console.warn(`[services] connection restore skipped: ${err.message}`);
+    }
     // Skill sync: one notification per skill the owner EDITED, once per new
     // shipped version (the record's notifiedFor). Unverified copies are never
     // notified — we cannot tell the owner they edited something we cannot verify.

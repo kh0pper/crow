@@ -58,7 +58,8 @@ import {
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
-import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries } from "../keychain/install-hooks.js";
+import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
+import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
@@ -303,6 +304,27 @@ function createJob(bundleId, action) {
   // delete the job mid-flight, the client's poll would 404, and its catch-path
   // would mistake that for a gateway restart (spurious reload + lost summary).
   return job;
+}
+
+/**
+ * Read-only (project services Task 12): the non-archived projects with a live connection of this
+ * bundle, as [{slug, name}]. [] on any failure (no service_connections table yet, a busy DB): the
+ * uninstall itself never depends on it.
+ */
+let _uninstallAffectedForTest = null;
+/** Test seam: replaces the uninstall route's affected-projects query (tests only). */
+export function _setUninstallAffectedForTest(fn) { _uninstallAffectedForTest = fn || null; }
+
+export async function uninstallAffectedProjects(bundleId, { dbFactory = createDbClient } = {}) {
+  let db;
+  try {
+    db = dbFactory();
+    return await projectsUsingBundle(db, bundleId);
+  } catch {
+    return [];
+  } finally {
+    try { db?.close(); } catch {}
+  }
 }
 
 function appendLog(job, line) {
@@ -1000,6 +1022,24 @@ function installBundleSkills(bundleId, destDir, manifest, job) {
  * saved them to the keychain (install-hooks backfillKeychainEntries). Values come from the
  * installed .env, else the retained copy, else the MCP entry; never logged.
  */
+/**
+ * Boot pass (project services Task 12, review M1): every INSTALLED bundle gets the restore an
+ * install runs (restoreServicesAfterInstall: service secrets 'extension_removed' → active, then
+ * needs_install connections → active / error). A crash between the install record and the
+ * install's own restore would otherwise leave the connections paused on an installed bundle.
+ * Safe to repeat (both steps touch only paused rows) and never revives 'disconnected'.
+ * @returns {Promise<number>} connections restored
+ */
+export async function restoreInstalledBundleServices({ log = (m) => console.log(`[services] ${m}`) } = {}) {
+  let n = 0;
+  for (const rec of getInstalled()) {
+    const id = rec?.id;
+    if (typeof id !== "string" || !isValidBundleId(id)) continue;
+    n += (await restoreServicesAfterInstall(id, { log: (m) => log(`${id}: ${m}`) })).connections;
+  }
+  return n;
+}
+
 export async function backfillBundleKeychain({ log = (m) => console.log(`[keychain] ${m}`) } = {}) {
   let n = 0;
   const addons = readJsonSafe(MCP_ADDONS_PATH, {}) || {};
@@ -2500,7 +2540,8 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
   // Check not already installed
   const installed = getInstalled();
   if (installed.find((i) => i.id === bundleId)) {
-    return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed` };
+    // `extra.code` is the stable answer clients match (the Services Install sheet); the text stays.
+    return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed`, extra: { code: "already_installed" } };
   }
 
   // PR 0: dependency check — refuse install if any required bundle is missing
@@ -3302,6 +3343,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     });
     saveInstalled(installedSnapshot);
     appendLog(job, "Installation tracked");
+    // Recorded: the project connections an earlier uninstall paused come back (and their
+    // keychain secrets), for every bundle, unconditionally (Task 12).
+    await restoreServicesAfterInstall(bundleId, { log: (m) => appendLog(job, m) });
 
     // Post-install hook — AFTER the install is recorded, so a gateway restart mid-hook
     // leaves a recorded bundle + a re-runnable script, never orphan containers.
@@ -3881,6 +3925,14 @@ export default function bundlesRouter() {
       });
     }
 
+    // The projects whose connections this uninstall pauses (read-only, project services Task 12).
+    // Awaited HERE, before the install-set check below: nothing may await between that check
+    // and createJob (D6.9). This list names only NON-ARCHIVED projects, the ones the owner can
+    // act on. job.affectedProjects is a second list: it starts empty and is filled only by the
+    // job, with every project whose rows it actually paused (markConnectionsNeedInstall's
+    // RETURNING, archived projects included); a job that fails first reports none.
+    const affectedProjects = await (_uninstallAffectedForTest || uninstallAffectedProjects)(bundle_id);
+
     // D6.9: same reverse guard as /install — an uninstall finishing mid-set
     // would fire its own restart and kill the set runner. Checked immediately
     // before createJob so nothing can race past this point into job creation.
@@ -3889,7 +3941,8 @@ export default function bundlesRouter() {
     }
 
     const job = createJob(bundle_id, "uninstall");
-    res.json({ ok: true, job_id: job.id, message: `Removing ${bundle_id}...` });
+    job.affectedProjects = [];
+    res.json({ ok: true, job_id: job.id, message: `Removing ${bundle_id}...`, affectedProjects });
 
     (async () => {
       try {
@@ -4051,7 +4104,13 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
-        const keptPasswords = await markBundleKeychainRemoved(bundle_id);
+        const keptPasswords = await markBundleKeychainRemoved(bundle_id, {
+          onPaused: (projects) => {
+            // The projects whose connections this uninstall paused (needs_install, secrets kept).
+            job.affectedProjects = projects;
+            if (projects.length) appendLog(job, `Paused this extension's connections in ${projects.length} project(s) until it is installed again`);
+          },
+        });
         if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Security & passwords → Saved passwords & keys)`);
 
         let notifDb;
@@ -4068,14 +4127,20 @@ export default function bundlesRouter() {
         }
 
         // Phase 5-full: soft-disable providers registered by this bundle
+        // The install registered them under the manifest id (registerProviderFromManifest:
+        // bundleId = manifest.id), which is this bundle's id.
+        let providerDb;
         try {
-          const r = await unregisterProvidersByBundle(createDbClient(), addonId);
+          providerDb = createDbClient();
+          const r = await unregisterProvidersByBundle(providerDb, manifest?.id || bundle_id);
           if (r.disabled > 0) {
             appendLog(job, `Disabled ${r.disabled} provider(s) registered by bundle`);
             invalidateProvidersCache();
           }
         } catch (err) {
           appendLog(job, `Provider unregister skipped: ${err.message}`);
+        } finally {
+          try { providerDb?.close(); } catch {}
         }
 
         // Reverse STT/TTS profile seeding from this bundle's manifest. Use the

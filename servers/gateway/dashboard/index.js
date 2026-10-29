@@ -86,6 +86,9 @@ import meteringPanel from "./panels/metering.js";
 import perchHubPanel from "./panels/perch-hub.js";
 import makePanel, { openMakeItem } from "./panels/make.js";
 import projectHomePanel from "./panels/project-home.js";
+import projectServicesPanel from "./panels/project-services.js";
+import { servicesUiEnabled } from "../services/ui-flag.js";
+import "../services/launcher-tile.js"; // registers the "Add a service" launcher tile
 import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
@@ -133,6 +136,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(perchHubPanel);
   registerPanel(makePanel);
   registerPanel(projectHomePanel);
+  registerPanel(projectServicesPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -994,6 +998,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // /dashboard/project/<slug> (the project-home panel; req.params.slug is the
   // project, read by resolveShellPage and the panel).
   router.all("/dashboard/project/:slug", (req, res, next) => dispatchPanel(req, res, next, "project-home"));
+  // A project's Services page (project services): hidden, and a 404 like any unknown path, while
+  // CROW_SERVICES_UI is off.
+  router.all("/dashboard/project/:slug/services", (req, res, next) => (servicesUiEnabled() ? dispatchPanel(req, res, next, "project-services") : next()));
   router.all("/dashboard/:panelId", (req, res, next) => {
     const panelId = req.params.panelId;
     // Skip if it matches login/logout (already handled)

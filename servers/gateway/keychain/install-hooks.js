@@ -17,6 +17,7 @@ import { loadKeychainKey } from "./key.js";
 import { unexportedCount } from "./reminder.js";
 import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
 import { vaultwardenStatus, saveToVault, VAULT_REASONS } from "./vault-save.js";
+import { markConnectionsNeedInstall, restoreConnectionsAfterInstall } from "../../shared/service-connections.js";
 
 let _override = null;
 export function _setKeychainDepsForTest(deps) { _override = deps || null; }
@@ -258,10 +259,46 @@ export async function backfillKeychainEntries(bundleId, manifest, values, { log 
   return saved;
 }
 
-export async function markBundleKeychainRemoved(bundleId) {
+/**
+ * After an install is recorded (project services Task 12): every project connection of this
+ * bundle that the uninstall paused comes back. ALWAYS runs, whatever the manifest saves to the
+ * keychain (a service-only bundle has no reused extension key, so recordKeychainForInstall never
+ * reaches its reactivation): the service secrets the uninstall marked 'extension_removed' go
+ * back to 'active' first, then the needs_install connections go back to active (or error when
+ * they carried an error). A 'disconnected' secret or connection is never revived: neither
+ * function touches that status. Best-effort, never throws; counts only in `log`.
+ * @returns {Promise<{secrets:number, connections:number}>}
+ */
+export async function restoreServicesAfterInstall(bundleId, { log = () => {} } = {}) {
+  const out = { secrets: 0, connections: 0 };
   let db;
   try {
     db = deps().openDb();
+    out.secrets = await reactivateBundleEntries(db, bundleId, []);
+    out.connections = await restoreConnectionsAfterInstall(db, bundleId);
+    if (out.connections) log(`Resumed ${out.connections} project connection(s) paused when this extension was removed`);
+  } catch (err) {
+    log(`Project connections were not resumed (${err?.code || err?.name || "error"}); reinstall again to retry`);
+  } finally {
+    try { db?.close(); } catch {}
+  }
+  return out;
+}
+
+/**
+ * Uninstall: the bundle's project connections pause (needs_install, Task 12), then its keychain
+ * entries are marked 'extension_removed' and kept. Returns the kept-entry count; the paused
+ * projects go to `onPaused` as [{slug, name}] (best-effort: a connection failure never stops the
+ * keychain mark).
+ */
+export async function markBundleKeychainRemoved(bundleId, { onPaused = () => {} } = {}) {
+  let db;
+  try {
+    db = deps().openDb();
+    try {
+      const paused = await markConnectionsNeedInstall(db, bundleId);
+      onPaused(paused.map((p) => ({ slug: p.slug, name: p.name })));
+    } catch { /* no service_connections table yet, or a busy DB: the keychain mark still runs */ }
     return await markBundleRemoved(db, bundleId);
   } catch {
     return 0;

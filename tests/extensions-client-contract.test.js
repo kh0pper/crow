@@ -74,14 +74,18 @@ const MANY_MEDIA = Array.from({ length: 10 }, (_, i) => ({
  * @param {string}   opts.hash        initial location.hash
  * @returns the DOM plus the spies the tests assert against
  */
-function boot({ available = AVAILABLE, collections = COLLECTIONS, installed = {}, needsConfig = {}, fetchImpl, session = {}, hash = "" } = {}) {
+function boot({ available = AVAILABLE, collections = COLLECTIONS, installed = {}, needsConfig = {}, fetchImpl, session = {}, hash = "", servicesUi = false } = {}) {
+  // The Services UI flag is read when the client is rendered (Task 12): flag-on runs get their own copy.
+  const clientHtml = servicesUi ? extensionsClientJS("en", { servicesUi: true }) : extensionsClientJS("en", { servicesUi: false });
+  const clientJs = clientHtml.slice(clientHtml.indexOf("<script>") + "<script>".length, clientHtml.lastIndexOf("</script>"));
+  const overlayHtml = clientHtml.slice(0, clientHtml.indexOf("<script>"));
   const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
     installed, available, collections, needsConfig,
     registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
   });
 
   const { window, document } = parseHTML(
-    `<html><body><div class="main-content">${viewsHtml}${addonRegistryScript}${collectionsScript}${OVERLAY_HTML}</div></body></html>`,
+    `<html><body><div class="main-content">${viewsHtml}${addonRegistryScript}${collectionsScript}${overlayHtml}</div></body></html>`,
   );
 
   const calls = [];               // every fetch the client made
@@ -115,7 +119,7 @@ function boot({ available = AVAILABLE, collections = COLLECTIONS, installed = {}
     clearTimeout: () => {},
   });
   window.location = location;
-  vm.runInContext(CLIENT_JS, ctx);
+  vm.runInContext(clientJs, ctx);
 
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -1070,6 +1074,71 @@ test("BEHAVIOR: a failed engine-blast fetch still opens the confirm modal (fails
   assert.equal(document.getElementById("modal-overlay").style.display, "flex", "the confirm modal still opens");
   const content = document.getElementById("modal-content");
   assert.ok(!/stop these bot channels from working/i.test(content.textContent));
+});
+
+// ─── 9. Uninstall lists the projects whose connections pause (project services Task 12) ───
+
+function preflightFetch(answer, channels = []) {
+  return (url) => {
+    if (url.includes("/uninstall-preflight/")) return answer instanceof Error ? Promise.reject(answer) : answer;
+    if (url.includes("/engine-blast")) return { ok: true, status: 200, json: () => Promise.resolve({ channels }) };
+    return { ok: true, status: 200, json: () => Promise.resolve({}) };
+  };
+}
+const AFFECTS = /stop until you install it again/;
+
+test("BEHAVIOR (flag off): the uninstall confirm makes no preflight request and lists nothing", async () => {
+  const { $, click, settle, document, calls } = boot({
+    installed: { jellyfin: { version: "1.0.0" } },
+    fetchImpl: preflightFetch({ ok: true, status: 200, json: () => Promise.resolve({ affectedProjects: [{ slug: "spring", name: "Spring" }] }) }),
+  });
+  click($('.bundle-uninstall[data-id="jellyfin"]'));
+  assert.equal(document.getElementById("modal-overlay").style.display, "flex", "opens at once, as before");
+  await settle();
+  assert.ok(!calls.some((c) => c.url.includes("uninstall-preflight")), "no request with the flag off");
+  assert.ok(!AFFECTS.test(document.getElementById("modal-content").textContent));
+  assert.equal(document.querySelector("[data-uninstall-affects]"), null);
+});
+
+test("BEHAVIOR (flag on): the confirm lists the affected projects by name, as text", async () => {
+  const { $, click, settle, document, calls } = boot({
+    servicesUi: true,
+    installed: { jellyfin: { version: "1.0.0" } },
+    fetchImpl: preflightFetch({ ok: true, status: 200, json: () => Promise.resolve({ affectedProjects: [{ slug: "spring", name: "Spring" }, { slug: "x", name: "<b>X</b>" }] }) }),
+  });
+  click($('.bundle-uninstall[data-id="jellyfin"]'));
+  await settle();
+  assert.ok(calls.some((c) => c.url === "/dashboard/services/api/uninstall-preflight/jellyfin"));
+  const box = document.querySelector("[data-uninstall-affects]");
+  assert.equal(box.textContent, "Connections in these projects stop until you install it again: Spring, <b>X</b>");
+  assert.equal(document.querySelector("#modal-content b"), null, "a project name is never markup");
+  assert.equal(document.getElementById("modal-overlay").style.display, "flex");
+});
+
+for (const [why, answer] of [
+  ["a 404 (the Services API is off on the server)", { ok: false, status: 404, json: () => Promise.resolve({ error: "not_found" }) }],
+  ["a dropped connection", new Error("network down")],
+  ["an empty list", { ok: true, status: 200, json: () => Promise.resolve({ affectedProjects: [] }) }],
+]) test(`BEHAVIOR (flag on): ${why} still opens the confirm, with no affected list`, async () => {
+  const { $, click, settle, document } = boot({ servicesUi: true, installed: { jellyfin: { version: "1.0.0" } }, fetchImpl: preflightFetch(answer) });
+  click($('.bundle-uninstall[data-id="jellyfin"]'));
+  await settle();
+  assert.equal(document.getElementById("modal-overlay").style.display, "flex");
+  assert.equal(document.querySelector("[data-uninstall-affects]"), null);
+  assert.ok(document.querySelector("#modal-content .btn"), "the Remove button is there");
+});
+
+test("BEHAVIOR (flag on): bot-engine shows both the blast list and the affected projects", async () => {
+  const { $, click, settle, document } = boot({
+    ...BOT_ENGINE_BOOT, servicesUi: true,
+    fetchImpl: preflightFetch({ ok: true, status: 200, json: () => Promise.resolve({ affectedProjects: [{ slug: "spring", name: "Spring" }] }) },
+      [{ bot_id: "mail-bot", display_name: "Mail Bot", types: ["gmail"] }]),
+  });
+  click($('.bundle-uninstall[data-id="bot-engine"]'));
+  await settle();
+  const text = document.getElementById("modal-content").textContent;
+  assert.match(text, /Mail Bot/);
+  assert.match(text, AFFECTS);
 });
 
 // ─── Cheap smoke checks on the emitted source (NOT the guard — the DOM tests above are) ───

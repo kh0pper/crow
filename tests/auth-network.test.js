@@ -274,6 +274,8 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       // R1.2 PR 4: the Briefing card's read and the summary's Forget.
       "/dashboard/perch-api/interactive/abc/briefing",
       "/dashboard/perch-api/interactive/abc/forget-summary",
+      // Project services Task 10: a project's Services page.
+      "/dashboard/project/x/services",
       // R1.2 PR 5: the apps launcher's read.
       "/dashboard/shell-api/apps?project=all",
     ]) {
@@ -383,25 +385,76 @@ test("dashboardAuth refuses an unauthenticated /dashboard/perch-api/interactive 
   assert.equal(noSession.redirected, "/dashboard/login");
 });
 
-test("auth-network: /dashboard/project/x needs a session", async () => {
-  // The REAL dashboard router: the project home sits behind dashboardAuth like
-  // every panel page. Off-network is refused; on-network without a session is
-  // sent to the login page; neither reaches the panel.
+// Project services Task 9: the Services JSON API is dashboard-only.
+test("rejectFunneled middleware: the Services API is never funnel-exposed", async () => {
+  const paths = ["/dashboard/services/api/project/home", "/dashboard/services/api/project/home/connect",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/test",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect",
+    "/dashboard/services/api/uninstall-preflight/github"];
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+});
+
+test("the Services API's own gate: Funnel and off-network refused, no session 401, the handler never runs", async () => {
+  const { servicesApiRouter } = await import("../servers/gateway/routes/services-api.js");
+  let opened = 0;
+  const app = express();
+  app.use(servicesApiRouter({ uiEnabled: () => true, dbFactory: () => { opened++; throw new Error("handler reached"); } }));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  try {
+    const port = server.address().port;
+    const funnel = await request(port, "/dashboard/services/api/project/home", { "tailscale-funnel-request": "?1" });
+    assert.equal(funnel.status, 403);
+    const offNet = await request(port, "/dashboard/services/api/project/home");
+    assert.equal(offNet.status, 403, "bare loopback, no tailnet identity");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let noSession;
+    try { noSession = await request(port, "/dashboard/services/api/project/home"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(noSession.status, 401);
+    // Task 12 (M13): the uninstall preflight sits behind the same gate.
+    const preFunnel = await request(port, "/dashboard/services/api/uninstall-preflight/github", { "tailscale-funnel-request": "?1" });
+    assert.equal(preFunnel.status, 403, "the preflight is never served over the Funnel");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let preNoSession;
+    try { preNoSession = await request(port, "/dashboard/services/api/uninstall-preflight/github"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(preNoSession.status, 401, "the preflight needs a dashboard session");
+    assert.equal(opened, 0, "no request reached a handler");
+  } finally {
+    server.close();
+  }
+});
+
+for (const PAGE of ["/dashboard/project/x", "/dashboard/project/x/services"]) test(`auth-network: ${PAGE} needs a session`, async () => {
+  // The REAL dashboard router: the project home (and its Services page, with
+  // CROW_SERVICES_UI on) sits behind dashboardAuth like every panel page.
+  // Off-network is refused; on-network without a session is sent to the
+  // login page; neither reaches the panel.
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
+  process.env.CROW_SERVICES_UI = "1";
   const app = express();
   app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
   app.use(dashboardRouter((req, res, next) => next()));
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   try {
     const port = server.address().port;
-    const offNet = await request(port, "/dashboard/project/x");
+    const offNet = await request(port, PAGE);
     assert.equal(offNet.status, 403, "bare loopback, no tailnet identity");
     // Past the network gate (CROW_DASHBOARD_PUBLIC opens it; no tailnet identity is
     // forged): with no session the page still sends you to the login page.
     process.env.CROW_DASHBOARD_PUBLIC = "true";
     let noSession;
     try { noSession = await new Promise((resolve, reject) => {
-      const req = http.request({ host: "127.0.0.1", port, path: "/dashboard/project/x", method: "GET" },
+      const req = http.request({ host: "127.0.0.1", port, path: PAGE, method: "GET" },
         (res) => { res.resume(); res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location })); });
       req.on("error", reject);
       req.end();
@@ -409,6 +462,7 @@ test("auth-network: /dashboard/project/x needs a session", async () => {
     assert.ok(noSession.status === 302 || noSession.status === 303, `a redirect, got ${noSession.status}`);
     assert.equal(noSession.location, "/dashboard/login");
   } finally {
+    delete process.env.CROW_SERVICES_UI;
     server.close();
   }
 });
