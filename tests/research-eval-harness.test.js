@@ -41,9 +41,17 @@ const failsOf = (row) => Object.entries(row.criteria).filter(([, v]) => v === "f
 /** A judge that records every call (and answers undecided, like noJudge). */
 const rec = (calls) => async (q) => { calls.push(q); return noJudge(q); };
 
-let template;
-const tpl = async () => (template ??= await makeTemplate({}));
-after(() => template?.cleanup());
+// Memoize the PROMISE: concurrent pool workers share one template (a value memo would race).
+let templateP;
+let templateBuilds = 0;
+const tpl = () => (templateP ??= (templateBuilds++, makeTemplate({})));
+after(async () => (await templateP?.catch(() => null))?.cleanup());
+
+test("concurrent tpl() callers share one template (no leaked template dirs)", async () => {
+  const [a, b, c, d] = await Promise.all([tpl(), tpl(), tpl(), tpl()]);
+  assert.ok(a === b && b === c && c === d, "one shared template");
+  assert.equal(templateBuilds, 1, "makeTemplate ran exactly once");
+});
 
 /** Every scratch path this file creates, for the isolation test. */
 const recorded = [];
@@ -273,6 +281,7 @@ test("the harness never touches the real ~/.crow", async () => {
   assert.ok(recorded.length >= CASES.length * 4, `recorded ${recorded.length} paths`);
   const tmp = realish(tmpdir());
   const userCrow = realish(realUserCrowDir());
+  const template = await tpl();
   const paths = [template.home, template.dbPath, ...recorded];
   for (const p of paths) {
     const r = realish(p);

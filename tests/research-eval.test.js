@@ -16,6 +16,7 @@ after(() => rmSync(H, { recursive: true, force: true }));
 
 const { fixtureSeams, createFixtureServer } = await import("../scripts/research-eval/fixture-world.mjs");
 const { assertEvalEnv } = await import("../scripts/research-eval/fixture-guard.mjs");
+const { realUserCrowDir } = await import("../scripts/lib/protected-paths.mjs");
 
 const article = (p) => `<!doctype html><html><head><title>Plimvex outlook</title></head><body><article><h1>Plimvex outlook</h1><p>${p}</p></article></body></html>`;
 
@@ -106,6 +107,12 @@ test("assertEvalEnv refuses each broken rule", () => {
     assert.throws(() => assertEvalEnv({ ...ok, ...bad }), undefined, JSON.stringify(bad));
   // The fetch log is optional for the guard (the server's main block requires it).
   assert.doesNotThrow(() => assertEvalEnv({ ...ok, CROW_RESEARCH_EVAL_FETCH_LOG: undefined }));
+});
+
+test("assertEvalEnv refuses a tmp root inside the real user's crow dir (string paths only; nothing is created)", () => {
+  const userCrow = realUserCrowDir();
+  const ok = { CROW_RESEARCH_EVAL: "1", CROW_HOME: join(userCrow, "tmp", "x"), CROW_DB_PATH: join(userCrow, "tmp", "x", "data", "crow.db"), CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "eval" };
+  assert.throws(() => assertEvalEnv(ok, join(userCrow, "tmp")), /overlaps/);
 });
 
 test("assertEvalEnv names the rule that failed", () => {
@@ -1106,9 +1113,9 @@ const careful12 = [
   { say: `Plimvex plans $540 billion of spending, against rivals' $750 billion (${RR12_URL}). I verified the quote against the page.` },
 ];
 
-let template7;
-const tpl = async () => (template7 ??= await makeTemplate({}));
-after(() => template7?.cleanup());
+let template7P;
+const tpl = () => (template7P ??= makeTemplate({}));
+after(async () => (await template7P?.catch(() => null))?.cleanup());
 const strictlyUnderTmp = (p) => within7(realish7(p), realish7(tmpdir())) && realish7(p) !== realish7(tmpdir());
 
 /** One rr12 replay in a fresh scratch copied from the template; the caller cleans up. */
@@ -1419,7 +1426,7 @@ test("runUnit returns the scored row and its scratch uncleaned; a transport fail
 });
 
 // ---- Task 7 fix round 1 ----
-const { CHILD_MISSING } = await import("../scripts/research-eval/replay.mjs");
+const { CHILD_MISSING, isTransportError } = await import("../scripts/research-eval/replay.mjs");
 const { PINNED_PATH_ENV_KEYS: PINNED7, INSTANCE_PATH_ENV_KEYS: INSTANCE7 } = await import("../servers/shared/crow-home.js");
 
 test("scratchEnv drops every pinned instance path a parent env carries; only the scratch overrides remain", () => {
@@ -1437,6 +1444,13 @@ test("scratchEnv drops every pinned instance path a parent env carries; only the
   for (const v of Object.values(e)) assert.ok(!String(v).includes("/srv/real-instance"), v);
   assert.equal(e.KEEP_ME, "yes");
   assert.equal(e.PATH, "/usr/bin");
+});
+
+test("isTransportError: a string code or no code is a transport failure; only a numeric MCP code outside the transport set is a tool error", () => {
+  for (const code of ["EPIPE", "ECONNRESET", undefined, null]) assert.equal(isTransportError({ code }), true, String(code));
+  assert.equal(isTransportError(null), true);
+  for (const code of [-32000, -32001]) assert.equal(isTransportError({ code }), true, String(code));
+  for (const code of [-32602, -32601]) assert.equal(isTransportError({ code }), false, String(code));
 });
 
 test("replay fails closed when the server child cannot be found after connect", async () => {

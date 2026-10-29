@@ -42,6 +42,8 @@ export const BASE_TRAJECTORIES = ["careful", "hank", "correcting"];
 const ID_RE = [/Source (?:added|already exists) \(id: (\d+)/, /^Source #(\d+):/];
 // MCP error codes that mean the connection, not the tool, failed (ConnectionClosed, RequestTimeout).
 const TRANSPORT_CODES = new Set([-32000, -32001]);
+/** Only a numeric MCP code outside TRANSPORT_CODES is a tool error; string codes (EPIPE, ECONNRESET) and codeless errors are transport failures. */
+export const isTransportError = (err) => typeof err?.code !== "number" || TRANSPORT_CODES.has(err.code);
 
 /** Thrown for a trajectory that cannot be replayed as written (never retried: it is not transport). */
 export class TrajectoryError extends Error {}
@@ -164,6 +166,7 @@ export async function replayTrajectory({ casePath, steps, scratch, afterConnect 
     // The SDK keeps the child private; it is needed to wait for its exit after close(). Without
     // it the DB and fetch log may still be open, so the attempt fails (retryable), never reads on.
     if (afterConnect) afterConnect(transport); // test-only seam: inspect or break the live transport
+    // _process is a private field of the SDK stdio transport, checked against @modelcontextprotocol/sdk 1.27.1; if a later SDK drops it we fail closed (CHILD_MISSING).
     child = transport._process ?? null;
     if (!child || typeof child.once !== "function") throw new Error(CHILD_MISSING);
     for (const step of steps) {
@@ -186,7 +189,7 @@ export async function replayTrajectory({ casePath, steps, scratch, afterConnect 
           content = Array.isArray(r.content) ? r.content : [];
           isError = r.isError === true;
         } catch (err) {
-          if (err?.code === undefined || TRANSPORT_CODES.has(err.code)) throw err;
+          if (isTransportError(err)) throw err;
           // A protocol-level tool error (bad arguments, unknown tool): the bot would see it as an error result.
           content = [{ type: "text", text: String(err.message) }];
           isError = true;
