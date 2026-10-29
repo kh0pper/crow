@@ -23,8 +23,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { writeBotMcp } from "../scripts/pi-bots/mcp_writer.mjs";
-import { filterSpawnEnv } from "../scripts/pi-bots/bridge.mjs";
-import { buildBotBaseEnv, stripPeerCredentialEnv } from "../servers/shared/bot-env.js";
+import { filterSpawnEnv, PiRpc } from "../scripts/pi-bots/bridge.mjs";
+import { buildBotBaseEnv } from "../servers/shared/bot-env.js";
 import { initGatewayActorKey, verifyPeerRelayActorSig } from "../scripts/pi-bots/actor-sig.mjs";
 
 const REPO = resolve(import.meta.dirname, "..");
@@ -149,13 +149,13 @@ test("runtime: no canary in the blocks, the spawn env, or the running proxy chil
   const parentEnv = { ...process.env, CROW_PEER_TOKENS_PATH: store };
   for (const mode of ["scrubbed", "passthrough"]) {
     const src = mode === "passthrough" ? { ...parentEnv, CROW_BOT_ENV_PASSTHROUGH: "1" } : parentEnv;
-    const base = stripPeerCredentialEnv(buildBotBaseEnv(src));
+    const base = buildBotBaseEnv(src);
     assert.ok(!("CROW_PEER_TOKENS_PATH" in base), `${mode}: the base env carries no store path`);
   }
   const fromDef = filterSpawnEnv(def);
   assert.ok(!("CROW_PEER_TOKENS_PATH" in fromDef), "a def's spawn_env cannot name the store");
   assert.equal(fromDef.HARMLESS_FLAG, "1");
-  const spawnEnv = { ...stripPeerCredentialEnv(buildBotBaseEnv(parentEnv)), ...fromDef };
+  const spawnEnv = { ...buildBotBaseEnv(parentEnv), ...fromDef };
   const envText = JSON.stringify(spawnEnv);
   for (const c of CANARIES) assert.ok(!envText.includes(c));
   assert.ok(!envText.includes(store), "the spawn env never names the store");
@@ -182,3 +182,62 @@ test("runtime: no canary in the blocks, the spawn env, or the running proxy chil
   const fds = readdirSync(`/proc/${child.pid}/fd`).map((fd) => { try { return readlinkSync(`/proc/${child.pid}/fd/${fd}`); } catch { return ""; } });
   assert.ok(!fds.some((l) => l.includes("peer-tokens")), "no descriptor on the store: " + fds.join(", "));
 });
+
+// The real pi spawn: PiRpc (bridge.mjs) against a stub pi that captures its own
+// environment and stays alive so /proc/<pid>/environ can be read. The store's
+// env name is seeded in the parent env, the def's spawn_env AND opts.extraEnv,
+// each with a canary value; none may reach pi, in either scrub mode.
+let stubPi = null;
+after(() => { if (stubPi && stubPi.exitCode === null) { try { process.kill(-stubPi.pid, "SIGKILL"); } catch {} try { stubPi.kill("SIGKILL"); } catch {} } });
+
+async function spawnStubPi(mode) {
+  const d = join(scratch, "pirpc-" + mode);
+  mkdirSync(join(d, "sessions"), { recursive: true });
+  const canary = "canary-store-" + mode + "-" + randomBytes(6).toString("hex");
+  const capture = join(d, "env.json");
+  const stub = join(d, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.env));`,
+    "process.stdin.resume();",
+    "setTimeout(() => process.exit(0), 20000);",
+  ].join("\n"));
+  const saved = { p: process.env.CROW_PEER_TOKENS_PATH, pass: process.env.CROW_BOT_ENV_PASSTHROUGH, sb: process.env.CROW_PI_SANDBOX };
+  process.env.CROW_PEER_TOKENS_PATH = `/tmp/${canary}/parent/peer-tokens.json`;
+  process.env.CROW_PI_SANDBOX = "off";
+  if (mode === "passthrough") process.env.CROW_BOT_ENV_PASSTHROUGH = "1"; else delete process.env.CROW_BOT_ENV_PASSTHROUGH;
+  let pi;
+  try {
+    const def = { permission_policy: { bash: "deny", write_paths: [] }, spawn_env: { CROW_PEER_TOKENS_PATH: `/tmp/${canary}/def/peer-tokens.json` } };
+    pi = new PiRpc({ def, sessionDir: d, resolved: { provider: "p", model: "m", key: "p/m" },
+      nodeBin: process.execPath, cliPath: stub, diagLog: () => {},
+      extraEnv: { CROW_PEER_TOKENS_PATH: `/tmp/${canary}/extra/peer-tokens.json` } });
+  } finally {
+    for (const [k, v] of [["CROW_PEER_TOKENS_PATH", saved.p], ["CROW_BOT_ENV_PASSTHROUGH", saved.pass], ["CROW_PI_SANDBOX", saved.sb]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+  stubPi = pi.proc;
+  const deadline = Date.now() + 15_000;
+  while (!existsSync(capture)) {
+    if (Date.now() > deadline || pi.proc.exitCode !== null) assert.fail(mode + ": stub pi never captured its env");
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  await new Promise((r) => setTimeout(r, 50)); // the write is one syscall; let it land
+  const pid = pi.piPid || pi.proc.pid;
+  const environ = readFileSync(`/proc/${pid}/environ`, "utf8");
+  const captured = JSON.parse(readFileSync(capture, "utf8"));
+  try { process.kill(-pi.proc.pid, "SIGKILL"); } catch { try { pi.proc.kill("SIGKILL"); } catch {} }
+  return { canary, captured, environ };
+}
+
+for (const mode of ["scrubbed", "passthrough"]) {
+  test(`runtime (${mode}): the real pi spawn env never names the credential store`, { timeout: 30_000 }, async () => {
+    const { canary, captured, environ } = await spawnStubPi(mode);
+    assert.ok(captured.PI_BOT_PERMISSION_POLICY, "the stub really is pi as the bridge spawns it");
+    assert.ok(!("CROW_PEER_TOKENS_PATH" in captured), `${mode}: CROW_PEER_TOKENS_PATH=${captured.CROW_PEER_TOKENS_PATH}`);
+    assert.ok(!JSON.stringify(captured).includes(canary), `${mode}: no canary in pi's env`);
+    assert.ok(!environ.includes("CROW_PEER_TOKENS_PATH="), `${mode}: not in /proc/<pid>/environ`);
+    assert.ok(!environ.includes(canary), `${mode}: no canary in /proc/<pid>/environ`);
+  });
+}

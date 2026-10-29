@@ -137,7 +137,11 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       try {
         const r = await db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id = ?", args: [bot] });
         row = r.rows[0] || null;
-      } catch { row = null; }
+      } catch (err) {
+        // The relay's own fault, not the bot's: never a misleading "not selected".
+        console.error(`[peer-relay] bot lookup failed: ${err && err.message}`);
+        return refuse(res, 503, "the peer relay could not read the bot's settings", { id });
+      }
       let def = null;
       try { def = row && row.definition ? JSON.parse(row.definition) : null; } catch { def = null; }
       const selected = !!row && remoteServersForBot(def).some((s) => s.instanceId === instanceId && s.canonicalId === canonicalId);
@@ -176,7 +180,7 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
             signingKeyHex: key, bot, name: sanitizeActorName(row.display_name, bot), src, aud: instanceId, mount, body: req.body, now: now(),
           }) : null;
           if (signed) Object.assign(headers, signed);
-          else noteUnsigned(bot, instanceId, Date.now());
+          else noteUnsigned(bot, instanceId, now());
         }
       }
       try { db.close(); } catch {}
@@ -201,7 +205,9 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       const stream = Readable.fromWeb(upstream.body);
       stream.on("error", () => { try { res.end(); } catch {} });
       stream.pipe(res);
-    } catch {
+    } catch (err) {
+      // The message only: never headers, tokens or keys.
+      console.error(`[peer-relay] relay error: ${err && err.message}`);
       return refuse(res, 500, "peer relay error", { id });
     } finally {
       if (db) { try { db.close(); } catch {} }

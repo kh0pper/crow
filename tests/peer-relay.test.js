@@ -280,3 +280,74 @@ test("an unreachable peer → 502 JSON-RPC error", async () => {
     d2.close();
   }
 });
+
+// Fix round 1: a broken database is the relay's fault, never a misleading
+// "not selected"; the clock that rate-limits the unsigned log is the injected one;
+// a 5xx logs a message with no secret in it.
+async function routerWith(over) {
+  const a = express();
+  a.use(express.json());
+  a.use(peerRelayRouter(over));
+  const s = http.createServer(a);
+  const port = await listen(s);
+  return { base: `http://127.0.0.1:${port}`, close: () => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()); }) };
+}
+function captureErrors() {
+  const lines = []; const orig = console.error;
+  console.error = (...a) => { lines.push(a.join(" ")); };
+  return { lines, restore: () => { console.error = orig; } };
+}
+
+test("a DB error in the bot-row lookup is a 503 with a logged reason, not a 403", async () => {
+  const realDb = () => createDbClient(dbPath);
+  const brokenRows = () => {
+    const db = realDb();
+    const exec = db.execute.bind(db);
+    return { ...db, close: () => db.close(), execute: (q) => (typeof q === "object" && /FROM pi_bot_defs/.test(q.sql) ? Promise.reject(new Error("disk I/O error")) : exec(q)) };
+  };
+  const r = await routerWith({ createDbClient: brokenRows, deps: { getCreds: () => ({ auth_token: "x" }), keyLookup: () => null, localId: () => LOCAL } });
+  const cap = captureErrors();
+  let res;
+  try {
+    res = await fetch(`${r.base}/peer-relay/${BRAVO}/memory/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...good() }, body: JSON.stringify(INIT) });
+  } finally { cap.restore(); await r.close(); }
+  const j = await res.json();
+  assert.equal(res.status, 503, JSON.stringify(j));
+  assert.equal(j.jsonrpc, "2.0");
+  assert.equal(seen.length, 0);
+  assert.ok(cap.lines.some((l) => l.includes("[peer-relay]") && l.includes("disk I/O error")), cap.lines.join("\n"));
+  for (const l of cap.lines) assert.ok(!l.includes(relayToken), "no token in a log line");
+});
+
+test("an internal error is a 500 that logs err.message and no secret", async () => {
+  const r = await routerWith({ createDbClient: () => createDbClient(dbPath), deps: {
+    getCreds: () => ({ auth_token: PEER_TOKENS[BRAVO] }), keyLookup: () => PAIR_KEYS[BRAVO], localId: () => LOCAL,
+    fetchImpl: () => ({ get status() { throw new Error("upstream object exploded"); } }),
+  } });
+  const cap = captureErrors();
+  let res;
+  try {
+    res = await fetch(`${r.base}/peer-relay/${BRAVO}/memory/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...good() }, body: JSON.stringify(INIT) });
+  } finally { cap.restore(); await r.close(); }
+  assert.equal(res.status, 500);
+  assert.ok(cap.lines.some((l) => l.includes("[peer-relay]") && l.includes("upstream object exploded")), cap.lines.join("\n"));
+  for (const l of cap.lines) for (const sec of [relayToken, PEER_TOKENS[BRAVO], PAIR_KEYS[BRAVO]]) assert.ok(!l.includes(sec));
+});
+
+test("the unsigned log window runs on the injected clock", async () => {
+  let t = 1_000_000_000_000;
+  const { _resetPeerRelayLog } = await import("../servers/gateway/routes/peer-relay.js");
+  _resetPeerRelayLog();
+  const r = await routerWith({ createDbClient: () => createDbClient(dbPath), deps: {
+    getCreds: (id) => ({ auth_token: PEER_TOKENS[id] }), keyLookup: () => null, localId: () => LOCAL, now: () => t,
+  } });
+  const cap = captureErrors();
+  const CALL = { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "crow_store_memory", arguments: { content: "x" } } };
+  const send = () => fetch(`${r.base}/peer-relay/${CHARLIE}/memory/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...good() }, body: JSON.stringify(CALL) }).then((x) => x.text());
+  try {
+    await send(); await send();
+    t += 3_600_001; // past the hour on the injected clock only
+    await send();
+  } finally { cap.restore(); await r.close(); }
+  assert.equal(cap.lines.filter((l) => l.startsWith("[peer-relay] forwarding unsigned")).length, 2, cap.lines.join("\n"));
+});

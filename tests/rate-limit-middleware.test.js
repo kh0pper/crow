@@ -135,3 +135,12 @@ test("generalLimiterSkip: the kiosk display page and /api/kiosk/ are exempt; loo
   for (const p of ["/api/kioskx", "/kiosk", "/api/other"]) assert.equal(skip(p), false, p);
   assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/display") && GENERAL_LIMITER_SKIP_PREFIXES.includes("/api/kiosk/"));
 });
+
+// Item 46 PR-B: the peer relay is loopback-only and gated by its own token and
+// a per-boot signed actor, so a bot's remote calls never burn the shared bucket.
+test("generalLimiterSkip: /peer-relay/ is exempt; lookalikes are not", () => {
+  const skip = (path) => generalLimiterSkip({ path });
+  assert.equal(skip("/peer-relay/inst-bravo-0002/memory/mcp"), true);
+  for (const p of ["/peer-relayx/a/memory/mcp", "/peer-relay", "/api/peer-relay/x"]) assert.equal(skip(p), false, p);
+  assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/peer-relay/"));
+});
