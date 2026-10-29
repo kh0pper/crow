@@ -4,7 +4,10 @@
  * this machine is never the owner's turn, and a test's in-process HTTP call is from loopback.
  *
  * 203.0.113.0/24 is TEST-NET-3 (RFC 5737): no real interface carries it, so the live
- * interface table can never make it "this machine".
+ * interface table can never make it "this machine". It is NOT a private address, so the real
+ * isAllowedNetwork/dashboardAuth refuses it as a direct peer: use these only behind a stubbed auth
+ * middleware. A test through the real dashboardAuth should send Serve's headers for another
+ * tailnet node instead (tests/fixtures/serve-peer.mjs, as tests/self-origin.test.js does).
  */
 export const LAPTOP_ADDR = "203.0.113.7";
 

@@ -34,7 +34,8 @@ export async function isLocalPasswordSessionOn(db, req) {
 }
 
 export async function isLocalPasswordSession(req) {
-  if (!req?.dashboardSession || req?.crossHostAuth || isSelfOrigin(req)) return false;
+  // The origin rule runs inside isLocalPasswordSessionOn.
+  if (!req?.dashboardSession || req?.crossHostAuth) return false;
   const db = createDbClient();
   try {
     return await isLocalPasswordSessionOn(db, req);

@@ -39,6 +39,8 @@ async function setup({ twoFa = false, hasPassword = true, verifier, clock = { t:
     openDb: () => createDbClient(dbPath),
     crowHome,
     gate,
+    // The owner's turn is exercised in tests/self-origin.test.js; here every session is the owner.
+    isOwner: async () => true,
     notify: async (_db, n) => { notes.push(n); },
     vault: vault || { status: () => ({ installed: true, cliPath: "/x/bw.js", serverUrl: "http://localhost:18097" }), save: async (o) => { vaultCalls.push(o); return { ok: true }; } },
   }));

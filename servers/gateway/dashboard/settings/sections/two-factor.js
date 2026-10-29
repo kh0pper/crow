@@ -5,8 +5,19 @@
 import { t } from "../../shared/i18n.js";
 import { escapeHtml } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
+import { isLocalPasswordSessionOn } from "../../local-session.js";
 
 const isHosted = !!process.env.CROW_HOSTED;
+
+// Changing two-factor is the owner's own act (Task 16b). A peer sign-in (SSO), a session minted by
+// a login from this machine, and any request from this machine itself (the shared browser, a bot
+// with a shell) may look at this page but change nothing: turning 2FA off would drop the keychain's
+// re-auth to the password alone, and new recovery codes or a new secret would hand over the login.
+export const OWNER_ONLY_MSG = {
+  en: "Only you, signed in with your password from your own device, can change two-factor authentication. Not from this Crow's own machine or a paired sign-in.",
+  es: "Solo tú, con tu contraseña y desde tu propio dispositivo, puedes cambiar la autenticación de dos factores. No desde la propia máquina de este Crow ni con un inicio de sesión vinculado.",
+};
+const OWNER_ACTIONS = new Set(["enable_2fa", "disable_2fa", "regenerate_recovery_codes", "revoke_devices"]);
 
 // Freshly regenerated recovery codes ride on the request object, from the
 // POST handler straight into the render of the same response. They are never
@@ -64,7 +75,9 @@ export default {
       ? `<div class="alert alert-success">${t("settings.2faDevicesRevoked", lang)}</div>`
       : "";
     const errorMsg = req.query.error === "invalid-code"
-      ? `<div class="alert alert-error">${t("login.2faInvalidCode", lang)}</div>` : "";
+      ? `<div class="alert alert-error">${t("login.2faInvalidCode", lang)}</div>`
+      : req.query.error === "owner-only"
+      ? `<div class="alert alert-error">${escapeHtml(OWNER_ONLY_MSG[lang] || OWNER_ONLY_MSG.en)}</div>` : "";
 
     if (enabled) {
       const remaining = await getRecoveryCodeCount();
@@ -141,6 +154,15 @@ export default {
       generateRecoveryCodes,
       revokeAllDeviceTrust,
     } = await import("../../totp.js");
+
+    if (OWNER_ACTIONS.has(action)) {
+      let owner = false;
+      try { owner = (await isLocalPasswordSessionOn(db, req)) === true; } catch { owner = false; }
+      if (!owner) {
+        res.redirectAfterPost("/dashboard/settings?section=two-factor&error=owner-only");
+        return true;
+      }
+    }
 
     if (action === "enable_2fa") {
       // Never replace a live secret from this form.
