@@ -13,6 +13,7 @@ import { t } from "../../shared/i18n.js";
 import { needsYouLabel } from "../board/needs-you-label.js";
 import { relativeDay } from "./data.js";
 import { servicesUiEnabled } from "../../../services/ui-flag.js";
+import { sessionCardHtml, sessionCardModel, startControlHtml } from "../../shared/session-cards.js";
 
 const KIND_KEY = Object.freeze({ decision: "shell.kindDecision", review: "shell.kindReview", question: "shell.kindQuestion" });
 
@@ -20,26 +21,6 @@ const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 /** t(key) with {name} filled; split/join, so a "$" in a value is never a replace pattern. */
 const fill = (key, lang, vals) => Object.entries(vals).reduce((out, [k, v]) => out.split("{" + k + "}").join(String(v ?? "")), t(key, lang));
 const CLOSE_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M18 6L6 18M6 6l12 12"/></svg>';
-
-function startSection(data, lang) {
-  const { lead, bots } = data;
-  if (!lead) {
-    return `<section class="ph-section ph-start">
-      <p class="ph-line">${escapeHtml(t("shell.noProjectBots", lang))}</p>
-      <a class="ph-link" href="/dashboard/bot-builder">${escapeHtml(t("shell.makeBot", lang))}</a>
-    </section>`;
-  }
-  const many = bots.length > 1;
-  const options = bots.map((b) => `<option value="${escapeHtml(b.id)}"${b.id === lead.id ? " selected" : ""}>${escapeHtml(b.name)}</option>`).join("");
-  return `<section class="ph-section ph-start">
-      <button type="button" class="ph-start-btn"${data.briefing && !data.briefing.empty ? " data-ph-briefing" : ""} data-ph-start data-bot="${escapeHtml(lead.id)}">${escapeHtml(t("shell.startSession", lang))}</button>
-      <p class="ph-with">${escapeHtml(t("shell.with", lang))} <strong data-ph-lead-name>${escapeHtml(lead.name)}</strong>${many
-        ? ` <span aria-hidden="true">·</span> <button type="button" class="ph-change" data-ph-change aria-expanded="false" aria-controls="ph-pick">${escapeHtml(t("shell.changeLead", lang))}</button>`
-        : ""}</p>
-      ${many ? `<label class="ph-pick" id="ph-pick" hidden><span>${escapeHtml(t("shell.leadPick", lang))}</span><select data-ph-bot>${options}</select></label>` : ""}
-      <p class="ph-status" role="status" aria-live="polite" data-ph-status></p>
-    </section>`;
-}
 
 const OUTCOME_KEY = Object.freeze({ success: "board.resultOutcomeSuccess", failure: "board.resultOutcomeFailure", partial: "board.resultOutcomePartial" });
 
@@ -118,12 +99,8 @@ function sessionsSection(data, project, lang, now) {
   if (!data.sessions.length) {
     return `<section class="ph-section ph-earlier">${head}<p class="ph-line">${escapeHtml(t("shell.noSessions", lang))}</p></section>`;
   }
-  const rows = data.sessions.map((s) => {
-    const rd = relativeDay(s.lastAt, { now, lang });
-    const when = rd ? (rd.key ? t(rd.key, lang) : cap(rd.text)) : "";
-    const meta = [s.botName, when].filter(Boolean).join(" · ");
-    return `<li><a class="ph-row ph-session" href="/dashboard/perch?project=${encodeURIComponent(project.slug)}#${encodeURIComponent(s.threadId)}" data-turbo-prefetch="false"><span class="ph-row-title">${escapeHtml(s.label || t("shell.untitledSession", lang))}</span>${meta ? `<span class="ph-meta">${escapeHtml(meta)}</span>` : ""}</a></li>`;
-  }).join("");
+  const rows = data.sessions.map((s) =>
+    sessionCardHtml(sessionCardModel({ sessionId: s.threadId, label: s.label, botName: s.botName, lastAt: s.lastAt }, { projectSlug: project.slug }), lang, { now })).join("");
   return `<section class="ph-section ph-earlier">${head}<ul class="ph-list">${rows}</ul></section>`;
 }
 
@@ -134,7 +111,7 @@ export function projectHomeHtml(data, project, lang, { now = new Date(), service
     ? `\n    <nav class="ph-head"><a class="ph-link ph-services" href="/dashboard/project/${encodeURIComponent(project.slug)}/services">${escapeHtml(t("projectHome.services", lang))}</a></nav>`
     : "";
   return `<div class="ph" data-ph data-project-id="${Number(project.id)}" data-project-slug="${escapeHtml(project.slug)}">${services}
-    ${startSection(data, lang)}
+    ${startControlHtml(data, lang, { projectId: Number(project.id), projectSlug: project.slug })}
     ${leftOffSection(data, project, lang, now)}
     ${needsSection(data, project, lang)}
     ${sessionsSection(data, project, lang, now)}

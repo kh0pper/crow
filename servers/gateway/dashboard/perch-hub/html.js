@@ -4,6 +4,7 @@ import { perchHubCss } from "./css.js";
 import { perchHubJs } from "./client.js";
 import { perchSessionsCollapseCss } from "./sessions-collapse-css.js";
 import { perchDictationCss } from "./dictation-css.js";
+import { startControlHtml, startControlJs, sessionUiCss } from "../shared/session-cards.js";
 
 /** The composer mic glyph (dictation). */
 const MIC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>`;
@@ -140,6 +141,24 @@ function scopeAttr(scope) {
   return "all";
 }
 
+/** New mode: the session list opens with the project home's "Start a
+ *  session" (shared/session-cards.js), in place of the classic launcher's bot
+ *  select, model picker and directory field (the model lives behind the
+ *  session's details). The Perch client starts it (HUB.startSession): filed
+ *  under the view's scope, opened here. */
+function newModeLaunch(lang, scopeValue, start) {
+  const project = /^[1-9][0-9]*$/.test(String(scopeValue));
+  return startControlHtml(start || { lead: null, bots: [] }, lang, {
+    inPlace: true,
+    emptyKey: project ? "shell.noProjectBots" : "shell.noBots",
+  });
+}
+
+/** The list's heading row: its heading, and the desktop collapse button. */
+function listHead(heading, lang) {
+  return `    <div class="perch-list-head">${heading}<button type="button" id="perch-list-collapse" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.hideSessions", lang))}" title="${escapeHtml(t("perch.hideSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button></div>`;
+}
+
 /** Perch's markup + styles + client script, meant to be handed to a panel's
  *  `layout()` as `content` (dashboard/panels/perch-hub.js does exactly
  *  that) — NOT a standalone document. Rendering inside the dashboard shell
@@ -150,13 +169,13 @@ function scopeAttr(scope) {
  *  cosmetic) so it can't leak onto the sidebar or any other panel, and vice
  *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
-export function perchHubContent(lang = "en", engine = { state: "ready" }, { scope, projects } = {}) {
+export function perchHubContent(lang = "en", engine = { state: "ready" }, { scope, projects, start } = {}) {
   const scopeValue = scopeAttr(scope);
   const scopeHtml = scopeValue === null ? "" : ` data-scope="${escapeHtml(scopeValue)}"`;
   // New mode: Session, Files and Activity live in a sheet opened from the
   // bot's name instead of the Chat·Session·Files·Activity tab bar.
   const sheet = scopeValue !== null;
-  return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
+  return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}${sheet ? sessionUiCss("body.shell #perch-list") : ""}</style>
 <div id="perch-hub-root"${scopeHtml}>
 ${sheet ? projectsJson(projects) : ""}
 ${engineBanner(engine, lang)}
@@ -177,7 +196,9 @@ ${engineBanner(engine, lang)}
          while a chat is open; #perch-list-reveal in the chat head brings it
          back. aria-expanded ships "true" because without JS the list IS on
          screen; the client corrects it from localStorage before first paint. -->
-    <div class="perch-list-head"><h2>${escapeHtml(t("perch.sessionsHeading", lang))}</h2><button type="button" id="perch-list-collapse" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.hideSessions", lang))}" title="${escapeHtml(t("perch.hideSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button></div>
+${sheet ? newModeLaunch(lang, scopeValue, start) + `
+${listHead('<h2 class="ph-h">' + escapeHtml(t("perch.sessionsHeading", lang)) + "</h2>", lang)}`
+ : `${listHead("<h2>" + escapeHtml(t("perch.sessionsHeading", lang)) + "</h2>", lang)}
     <!-- The launcher sits OUTSIDE #perch-list-body on purpose. renderList()
          and showListNote() both clearEl() that body, so a launch control
          living inside it would be wiped by every poll and every note — and
@@ -223,7 +244,7 @@ ${engineBanner(engine, lang)}
            and an error must never sit inside a closed disclosure. -->
       <div class="empty" id="perch-launch-note" hidden></div>
     </div>
-    <div id="perch-list-body"><div class="empty">${escapeHtml(t("perch.loading", lang))}</div></div>
+`}    <div id="perch-list-body"><div class="empty">${escapeHtml(t("perch.loading", lang))}</div></div>
   </div>
   <!-- ⚠ #perch-chat is now GLOBALLY significant, not just a local handle:
        layout.js keys a document-wide app-shell clamp on "body:has(#perch-chat)"
@@ -455,5 +476,5 @@ ${sheet ? pillRow(lang) : `      <textarea id="perch-input" placeholder="${escap
   </div>
 </div>
 </div>
-<script>${perchHubJs(lang)}</script>`;
+<script>${perchHubJs(lang)}</script>${sheet ? startControlJs(lang) : ""}`;
 }

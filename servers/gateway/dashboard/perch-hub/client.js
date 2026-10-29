@@ -4,6 +4,7 @@ import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
+import { sessionCardsJs } from "../shared/session-cards.js";
 import { perchDictationJs } from "./dictation.js";
 import { perchBrowserTileJs } from "./browser-tile.js";
 import { perchTakeOverJs } from "./take-over.js";
@@ -720,12 +721,16 @@ export function perchHubJs(lang = "en") {
   /* Which list control had focus, so a re-render can put it back. Only when
      focus was INSIDE the list body: a poll must never pull focus out of the
      composer. */
+  /* The element whose children are the rows: the cards' list in new mode. */
+  function listHost(body){
+    return findIn(body,function(c){ return hasClass(c,'ph-list')&&!hasClass(c,'archived-list'); })||body;
+  }
   function listFocusMark(body){
     var ae=document.activeElement;
     if(!ae||ae===body||!body.contains||!body.contains(ae)) return null;
     var sid=ae.getAttribute?ae.getAttribute('data-sid'):null;
     if(!sid) return null;
-    var rows=body.children||[], idx=-1;
+    var rows=listHost(body).children||[], idx=-1;
     for(var i=0;i<rows.length;i++){ if(rows[i].contains&&rows[i].contains(ae)){ idx=i; break; } }
     return {sid:sid,more:hasClass(ae,'roost-more'),idx:idx};
   }
@@ -737,13 +742,106 @@ export function perchHubJs(lang = "en") {
     if(!target){
       /* The row is gone (closed, archived): the next row's ⋯ — which now sits
          at the same index — or, with none left, New session. */
-      var r=mark.idx>=0?(body.children||[])[mark.idx]:null;
-      target=findIn(r,function(c){ return hasClass(c,'roost-more'); })||el('perch-new');
+      var r=mark.idx>=0?(listHost(body).children||[])[mark.idx]:null;
+      target=findIn(r,function(c){ return hasClass(c,'roost-more'); })||el('perch-new')||document.querySelector('[data-ph-start]');
     }
     focusEl(target);
   }
 
+  /* New mode (the session sheet exists): the list is the project home's
+     session cards (shared/session-cards.js): title, bot, project, day; a live
+     dot or a Waiting chip; never an id or a state word. The whole card opens
+     the session; Rename and Archive sit in its menu. Idle bot rows are not
+     drawn: "Start a session" above the list starts any bot. */
+  var CARDS_MODE=!!el('perch-session-sheet');
+  var SC_NO_SESSIONS='${tJs("shell.noSessions", lang)}';
+  function cardModelOf(r){
+    var p=projectOfRow(r,PROJECTS);
+    var here=!!p&&SCOPE!=null&&/^[1-9][0-9]*$/.test(String(SCOPE))&&Number(SCOPE)===Number(r.projectId);
+    return sessionCardModel({sessionId:r.sessionId,label:r.label,botName:r.botName||r.botId,state:r.state,
+      pendingUi:r.pendingUi,lastAt:r.lastActivityAt},
+      {projectName:(p&&!here)?p.name:null,projectSlug:sessionHref(r,PROJECTS,SCOPE)?p.slug:null});
+  }
+  /* The menu's name for a card: what the card itself reads as. */
+  function cardName(m){ return [m.title||SC_UNTITLED,m.botName].filter(Boolean).join(' \u00b7 '); }
+  function plainClick(ev){ return !!ev&&ev.button===0&&!ev.metaKey&&!ev.ctrlKey&&!ev.shiftKey&&!ev.altKey; }
+  function renderCards(rows,archived){
+    var body=el('perch-list-body'); if(!body) return;
+    deferredList=null;
+    var mark=listFocusMark(body);
+    clearEl(body); rowIndex={};
+    var arch=Array.isArray(archived)?archived:[];
+    var live=(rows||[]).filter(function(r){ return !!(r&&r.sessionId); });
+    live.sort(function(a,b){
+      if(!!b.pendingUi!==!!a.pendingUi) return b.pendingUi?1:-1;
+      var x=String(a.lastActivityAt||''), y=String(b.lastActivityAt||'');
+      if(x!==y) return x<y?1:-1;
+      return String(a.sessionId).localeCompare(String(b.sessionId));
+    });
+    if(!live.length&&!arch.length){ body.appendChild(line('empty',SC_NO_SESSIONS)); flushPendingNote(); restoreListFocus(body,mark); return; }
+    var now=new Date();
+    if(live.length){
+      var ul=document.createElement('ul'); ul.className='ph-list';
+      live.forEach(function(r){
+        rowIndex[r.sessionId]=r;
+        var m=cardModelOf(r);
+        var day=identDay(r,now,IDENT_LANG);
+        var li=scCardEl(m,day?day.charAt(0).toUpperCase()+day.slice(1):'');
+        var a=li.firstChild;
+        /* Opened the way a row's Open did (openRow: in place, or through the
+           project's scope); a modified click keeps the link's own behaviour. */
+        a.onclick=function(ev){
+          if(!plainClick(ev)) return;
+          if(ev.preventDefault) ev.preventDefault();
+          rowIndex[r.sessionId]=r; openRow(r);
+        };
+        buildRowMenu(li,r.sessionId,[
+          {cls:'roost-rename',label:RENAME_LABEL,run:function(){ renameSession(r.sessionId,r.label||''); }},
+          {cls:'roost-archive',label:ARCHIVE_LABEL,run:function(){ archiveSession(r.sessionId); }}
+        ]);
+        var more=findIn(li,function(c){ return hasClass(c,'roost-more'); });
+        if(more){
+          more.className='roost-more ph-card-more';
+          more.setAttribute('aria-label',ROW_ACTIONS.replace('{session}',function(){ return cardName(m); }));
+        }
+        ul.appendChild(li);
+      });
+      body.appendChild(ul);
+    }
+    renderArchivedCards(body,arch);
+    flushPendingNote();
+    restoreListFocus(body,mark);
+  }
+  /* The Archived toggle, as cards: title and bot, and Unarchive. */
+  function renderArchivedCards(body,archived){
+    if(!body||!archived||!archived.length) return;
+    var head=document.createElement('button');
+    head.type='button'; head.className='archived-toggle';
+    head.textContent=ARCHIVED_LABEL+' ('+archived.length+')';
+    head.setAttribute('aria-expanded',archivedOpen?'true':'false');
+    var ul=document.createElement('ul'); ul.className='ph-list archived-list'; ul.hidden=!archivedOpen;
+    archived.forEach(function(a){
+      if(!a||!a.sessionId) return;
+      var m=sessionCardModel({sessionId:a.sessionId,label:a.label,botName:a.botName||a.botId},{});
+      var li=scCardEl(m,'');
+      var link=li.firstChild, box=document.createElement('div');
+      box.className='ph-row archived-row';
+      while(link.firstChild) box.appendChild(link.firstChild);
+      li.replaceChild(box,link);
+      var u=document.createElement('button');
+      u.type='button'; u.className='roost-rename ph-card-more ph-card-text'; u.textContent=UNARCHIVE_LABEL;
+      u.setAttribute('data-sid',a.sessionId);
+      u.onclick=function(){ unarchiveSession(a.sessionId); };
+      li.appendChild(u);
+      ul.appendChild(li);
+    });
+    head.onclick=function(){ archivedOpen=!archivedOpen; ul.hidden=!archivedOpen; head.setAttribute('aria-expanded',archivedOpen?'true':'false'); };
+    body.appendChild(head);
+    body.appendChild(ul);
+  }
+
   function renderList(rows,archived){
+    if(CARDS_MODE){ renderCards(rows,archived); return; }
     var body=el('perch-list-body'); if(!body) return;
     deferredList=null;
     var mark=listFocusMark(body);
@@ -1031,7 +1129,7 @@ export function perchHubJs(lang = "en") {
   }
   /* The operator's own pick ends the ?bot= preselect: a later poll that
      first offers that bot must not override what they chose. */
-  el('perch-new-bot').onchange=function(){ wantBot=null; syncLaunchModels(); };
+  if(el('perch-new-bot')) el('perch-new-bot').onchange=function(){ wantBot=null; syncLaunchModels(); };
 
   /* The launch control's own handler. Resolves the bot from the picker when
      there is one, then hands off to startSession() verbatim — the 409/403/
@@ -1057,7 +1155,7 @@ export function perchHubJs(lang = "en") {
     var cwd=cwdEl?String(cwdEl.value||'').trim():'';
     startSession(pick.id,pick.name,model,cwd||null);
   }
-  el('perch-new').onclick=startNewSession;
+  if(el('perch-new')) el('perch-new').onclick=startNewSession;   /* classic only: new mode starts from the shared start control */
 
   /* ---- open-anywhere C2: the server-backed directory picker ------------
      A modal overlay fed by GET /browse (directory NAMES + paths only, never
@@ -1255,15 +1353,19 @@ export function perchHubJs(lang = "en") {
      spawn passes none and behaves exactly as it always has.
      \`cwd\` (open-anywhere C2, optional) is the launcher's directory field;
      null means the key is never sent — the bot's default world root. */
-  function startSession(botId,botName,modelKey,cwd){
+  function startSession(botId,botName,modelKey,cwd,opts){
     var mySid=current.sid;                  /* identity guard: a spawn resolving after the
                                                 operator has opened another session must not
                                                 yank them out of it */
     var spawnBody={}, spawnProject=scopeProject(), hasBody=false;
     if(cwd){ spawnBody.cwd=cwd; hasBody=true; }
     if(spawnProject!==null){ spawnBody.project_id=spawnProject; hasBody=true; }
-    perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive',hasBody?spawnBody:undefined).then(function(r){
-      if(current.sid!==mySid) return;
+    if(opts&&opts.briefing){ spawnBody.briefing=true; hasBody=true; }
+    /* Resolves what happened, for a caller with its own note (the shared
+       start control): {sid}, {note} or {stale} (the identity guard held). */
+    function refused(text){ setLaunchNote(text); return {note:text}; }
+    return perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive',hasBody?spawnBody:undefined).then(function(r){
+      if(current.sid!==mySid) return {stale:true};
       /* setLaunchNote, not showListNote: a FAILED SPAWN is a fact about the
          launcher, and showListNote clears #perch-list-body — which would wipe
          every session row and, with them, every Close button, for up to the
@@ -1272,8 +1374,8 @@ export function perchHubJs(lang = "en") {
          lose); the always-present launcher makes it routine, and it lands
          hardest on an operator whose actual job right now is closing
          sessions. The note belongs next to the control that produced it. */
-      if(r.status===409){ setLaunchNote(ENGINE_REQUIRED); return; }
-      if(r.status===403){ setLaunchNote(NOT_ATTACHED); return; }
+      if(r.status===409) return refused(ENGINE_REQUIRED);
+      if(r.status===403) return refused(NOT_ATTACHED);
       /* The route validated the directory before the engine ever saw it
          (open-anywhere C1): a stale picker choice — deleted between browse
          and spawn — lands here, and the note belongs beside the field. */
@@ -1281,11 +1383,11 @@ export function perchHubJs(lang = "en") {
         /* QW2: the directory field lives in "More options" — open it, so the
            field this note is about is on screen beside it. */
         var moreOpts=el('perch-launch-more'); if(moreOpts) moreOpts.open=true;
-        setLaunchNote(CWD_INVALID); return;
+        return refused(CWD_INVALID);
       }
-      if(!r.ok||!r.j||!r.j.sessionId){ setLaunchNote(START_FAILED); return; }
+      if(!r.ok||!r.j||!r.j.sessionId) return refused(START_FAILED);
       var sid=r.j.sessionId;
-      rowIndex[sid]={botId:botId,botName:botName,sessionId:sid};
+      rowIndex[sid]={botId:botId,botName:botName,sessionId:sid,projectId:typeof spawnProject==='number'?spawnProject:null};
       /* The model, applied BEFORE the first message and before the operator
          can send one. spawn() takes no model on purpose — the engine's
          control-before-wake path already exists (perch-interactive.js:78-92)
@@ -1296,18 +1398,28 @@ export function perchHubJs(lang = "en") {
          Nothing to do when the pick IS the bot's default — that is what the
          spawn already resolved, and a redundant switch would warm a provider
          twice for no change. */
-      if(!modelKey||modelKey===launchModels.default){ location.hash=sid; return; }
-      perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/control',controlBody('model',modelKey))
+      if(!modelKey||modelKey===launchModels.default){ location.hash=sid; return {sid:sid}; }
+      return perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/control',controlBody('model',modelKey))
         .then(function(c){
-          if(current.sid!==mySid) return;   /* same identity guard as the spawn above */
+          if(current.sid!==mySid) return {stale:true};   /* same identity guard as the spawn above */
           /* A refused switch is not a refused session: the session is real
              and usable on the bot's own model, so say what happened and open
              it rather than stranding a live child behind an error. */
           if(!c.ok) setLaunchNote(LAUNCH_MODEL_FAILED);
           location.hash=sid;
+          return {sid:sid};
         });
     });
   }
+  /* New mode: the shared start control (shared/session-cards.js) starts
+     through here, so a Chat start is this startSession: the scope's filing,
+     the rowIndex seed and the identity guard. A retired instance answers
+     nothing; each new one installs its own. */
+  HUB.startSession=function(botId,botName,opts){
+    if(!live()) return null;
+    /* A project's Chat asks for its briefing, as the project home does. */
+    return startSession(botId,botName,null,null,{briefing:typeof scopeProject()==='number'||!!(opts&&opts.briefing)});
+  };
 
   var listTimer=null;
   function loadList(){
@@ -1924,7 +2036,10 @@ export function perchHubJs(lang = "en") {
     if(days===1) return IDENT_YESTERDAY;
     try{
       if(days<7) return d.toLocaleDateString(lang==='es'?'es':'en',{weekday:'long'});
-      return d.toLocaleDateString(lang==='es'?'es':'en',{month:'short',day:'numeric'});
+      /* project-home/data.js relativeDay's rule: the year when it isn't this one. */
+      var o={month:'short',day:'numeric'};
+      if(d.getFullYear()!==now.getFullYear()) o.year='numeric';
+      return d.toLocaleDateString(lang==='es'?'es':'en',o);
     }catch(e){ return d.toDateString(); }
   }
   /* The head's context line: the project's name, then the day when it fits
@@ -4158,6 +4273,7 @@ ${perchPhoneCardJs(lang)}
 ${perchArtifactCardJs(lang)}
 ${perchCardChipJs(lang)}
 ${perchBriefingJs(lang)}
+${sessionCardsJs(lang)}
 
 ${perchDictationJs(lang)}
 

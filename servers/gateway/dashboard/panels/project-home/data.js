@@ -43,18 +43,19 @@ function parseDef(raw) {
 
 /** [{ id, name, coordinator }] for the project's Perch-attachable bots, by display name. */
 export async function projectBots(db, projectId) {
+  return botRows(db, "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE project_id = ? AND bot_id != ?", [Number(projectId), CROW_VOICE_BOT_ID]);
+}
+
+async function botRows(db, sql, args) {
   let rows = [];
   try {
-    rows = (await db.execute({
-      sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE project_id = ? AND bot_id != ?",
-      args: [Number(projectId), CROW_VOICE_BOT_ID],
-    })).rows || [];
+    rows = (await db.execute({ sql, args })).rows || [];
   } catch (err) {
     if (!ABSENT_RE.test(String(err && err.message))) throw err;
   }
   return rows
     .map((r) => ({ r, def: parseDef(r.definition) }))
-    .filter(({ def }) => perchAttached(def))
+    .filter(({ r, def }) => r.bot_id != null && perchAttached(def))
     .map(({ r, def }) => ({
       id: String(r.bot_id),
       name: String(r.display_name || r.bot_id),
@@ -63,11 +64,26 @@ export async function projectBots(db, projectId) {
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
 }
 
+/** [{ id, name, coordinator }] for every Perch-attachable bot (GET /bots's
+ *  filter: a complete perch gateway, never the voice bot), by display name.
+ *  The Chat tab's start control outside a project (Everything, Unassigned). */
+export async function attachableBots(db) {
+  return botRows(db, "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id != ?", [CROW_VOICE_BOT_ID]);
+}
+
 /** The lead rule over projectBots' list (already in name order). */
 export function leadOf(bots) {
   if (!bots || !bots.length) return null;
   if (bots.length === 1) return bots[0];
   return bots.find((b) => b.coordinator) || bots[0];
+}
+
+/** The start control's data: the lead (a wanted bot when it is offered, else
+ *  leadOf) and the bots with the lead first. */
+export function startData(bots, wantId = null) {
+  const list = Array.isArray(bots) ? bots : [];
+  const lead = (wantId && list.find((b) => b.id === String(wantId))) || leadOf(list);
+  return { lead, bots: lead ? [lead, ...list.filter((b) => b !== lead)] : list };
 }
 
 /** The project's filed perch-live threads, newest first: [{ threadId, label, botName, lastAt }]. */

@@ -4121,6 +4121,7 @@ export const translations = {
   "shell.kindQuestion": { en: "Question", es: "Pregunta" },
   "shell.earlierSessions": { en: "Earlier sessions", es: "Sesiones anteriores" },
   "shell.untitledSession": { en: "Untitled session", es: "Sesión sin título" },
+  "shell.liveSession": { en: "Live", es: "En curso" },
   "shell.noSessions": { en: "No sessions yet", es: "Aún no hay sesiones" },
   "shell.today": { en: "Today", es: "Hoy" },
   "shell.yesterday": { en: "Yesterday", es: "Ayer" },
