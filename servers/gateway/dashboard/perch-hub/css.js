@@ -942,7 +942,11 @@ border-top:1px solid var(--line);flex-shrink:0}
 #perch-hub-root .perch-card-line{display:block;max-width:100%;min-height:44px;line-height:44px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--dim);text-decoration:none}
 #perch-hub-root .perch-card-line[hidden]{display:none}
 #perch-hub-root .perch-ident-btn svg{width:16px;height:16px;flex-shrink:0;color:var(--dim)}
-#perch-session-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;max-height:85dvh;
+/* One height whatever the tab holds: a sheet sized by its content moved its
+   tab strip on every switch and again when the Files fetch landed (~90 px at
+   1280), so a tap aimed at a tab hit the Files crumbs. The visible section is
+   the flex:1 scroller that absorbs the difference. */
+#perch-session-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;height:85dvh;max-height:85dvh;
 border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;background:var(--card);color:var(--ink);box-shadow:0 -8px 32px rgba(0,0,0,.18)}
 #perch-session-sheet[open]{display:flex;flex-direction:column}
 #perch-session-sheet::backdrop{background:rgba(0,0,0,.4)}
