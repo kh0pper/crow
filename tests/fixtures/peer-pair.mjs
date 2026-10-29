@@ -63,6 +63,7 @@ async function startRelay(port, clientIp) {
 /** The pre-PT-2a main (PT-3, #594): the old tree of the pair-binding gate. */
 export const PT3_SHA = "d733b582bbbc977a377c60bf95893cf2d5902635";
 const LOCAL_DHT = new URL("./gateway-local-dht.mjs", import.meta.url).href;
+const OLD_TREE_TIMING = new URL("./old-tree-timing.mjs", import.meta.url).href;
 /**
  * Advertised as this host's tailnet IP in sync legs. Not a tailnet address,
  * so it is never advertised in a handshake nor accepted by enroll, and the
@@ -70,6 +71,22 @@ const LOCAL_DHT = new URL("./gateway-local-dht.mjs", import.meta.url).href;
  * would let a peer learn it and ladder onto the box's LIVE 3001/3002).
  */
 const NO_TAILNET_IP = "192.0.2.1";
+
+/**
+ * Sync-leg timer overrides (servers/shared/test-timing.js: honoured only in
+ * the suite's scratch env, which every child inherits). Production waits a
+ * minute for the outbox drain and the rescan and backs off to a minute
+ * between dials; the gate's legs wait on those ticks. An old-tree child does
+ * not read these; tests/fixtures/old-tree-timing.mjs swaps its drain timer
+ * alone, and its dial backoff and rescan keep production's cadence.
+ */
+export const SYNC_TIMING = {
+  CROW_TEST_SYNC_DRAIN_MS: 1_000,
+  CROW_TEST_TAILNET_RETRY_BASE_MS: 500,
+  CROW_TEST_TAILNET_RETRY_MAX_MS: 2_000,
+  CROW_TEST_TAILNET_IDLE_RECHECK_MS: 1_000,
+  CROW_TEST_TAILNET_RESCAN_MS: 2_000,
+};
 
 export class Instance {
   /**
@@ -113,8 +130,10 @@ export class Instance {
       CROW_INSTANCE_SYNC_HYPERSWARM: "0",
     });
     if (this.sync) {
-      Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP });
+      Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP }, SYNC_TIMING);
       if (!String(env.NODE_OPTIONS || "").includes(LOCAL_DHT)) env.NODE_OPTIONS = `${env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ` : ""}--import=${LOCAL_DHT}`;
+      // An old tree cannot read SYNC_TIMING: the preload swaps its drain timer.
+      if (this.repo !== REPO && !String(env.NODE_OPTIONS).includes(OLD_TREE_TIMING)) env.NODE_OPTIONS = `${env.NODE_OPTIONS} --import=${OLD_TREE_TIMING}`;
     }
     if (this.port) {
       env.PORT = String(this.port);
@@ -420,7 +439,7 @@ export async function writeMarker(inst, text) {
     const r = await cap(client.callTool({ name: "crow_store_memory", arguments: { content: text, category: "general", importance: 5, source: "pt2a-gate" } }), "crow_store_memory");
     if (r.isError) throw new Error(`${inst.name}: crow_store_memory failed: ${JSON.stringify(r.content).slice(0, 300)}`);
     // The memory row and its outbox row are written in one batch, and the
-    // gateway drains once a minute: look straight away, so `queued` shows the
+    // gateway drains on a timer: look straight away, so `queued` shows the
     // outbox query really matches this marker's row.
     queued = outboxRows(inst, text).length > 0;
   } finally {

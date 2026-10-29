@@ -56,16 +56,19 @@ import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import {
   tailnetRespMac, tailnetProofMac, macEqual, pairBindingMode, pairSubkeyVia, decideAndRecordPairBinding,
 } from "../shared/sync-pair-binding.js";
+import { testTunableMs } from "../shared/test-timing.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
-const RETRY_BASE_MS = 5_000;
-const RETRY_MAX_MS = 60_000;
+// The CROW_TEST_* overrides below apply only inside the test suite's
+// scratch env (servers/shared/test-timing.js); production uses the defaults.
+const RETRY_BASE_MS = testTunableMs("CROW_TEST_TAILNET_RETRY_BASE_MS", 5_000);
+const RETRY_MAX_MS = testTunableMs("CROW_TEST_TAILNET_RETRY_MAX_MS", 60_000);
 // DIALER-RETRY: a dialer with nothing to do right now (no dial address yet,
 // not the elected dialer, or already linked) re-checks on this cadence
 // instead of returning for good. Before, a peer that booted with no address
 // was never dialed again until a gateway restart, even after its row was fixed.
-const IDLE_RECHECK_MS = 15_000;
+const IDLE_RECHECK_MS = testTunableMs("CROW_TEST_TAILNET_IDLE_RECHECK_MS", 15_000);
 // A peer that answers "unknown peer"/"not paired" (it revoked us, or never
 // paired) is re-tried at this slow cadence, not every backoff cycle.
 const REFUSED_RECHECK_MS = 30 * 60_000;
@@ -85,6 +88,8 @@ const FALLBACK_DIAL_AFTER_MS = 120_000;
 // The :443-row repair (repairUndialablePeerRows) re-runs from the refresh
 // loop at most this often.
 const REPAIR_EVERY_MS = 10 * 60_000;
+// The refresh loop's rescan cadence (new peers, changed rows, feed-key heal).
+const RESCAN_MS = testTunableMs("CROW_TEST_TAILNET_RESCAN_MS", 60_000);
 
 /* ------------------------------------------------------- signed addresses */
 
@@ -1417,7 +1422,7 @@ export async function startTailnetSyncClients(ctx) {
 
   await refreshWithRepair();
   // Periodically rescan in case new peers get paired or gateway_urls change.
-  const rescan = setInterval(refreshWithRepair, 60_000);
+  const rescan = setInterval(refreshWithRepair, RESCAN_MS);
   rescan.unref?.();
 
   return {

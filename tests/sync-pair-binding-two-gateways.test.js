@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
-  REPO, PT3_SHA, bootPair, pairInto, until, useLoopbackSync, writeMarker, hasMarker, markerDrained, pairPinned, settingsRevoke,
+  REPO, PT3_SHA, SYNC_TIMING, bootPair, pairInto, until, useLoopbackSync, writeMarker, hasMarker, markerDrained, pairPinned, settingsRevoke,
 } from "./fixtures/peer-pair.mjs";
 import { oldTree } from "./fixtures/old-tree.mjs";
 import { makeRealDb, addPeerRow, writeAndEmit } from "./fixtures/sync-fleet.mjs";
@@ -41,11 +41,14 @@ import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { deriveInstanceIdentity, loadInstanceSeed } from "../servers/sharing/identity.js";
 
 const T = { timeout: 900_000 };
-// A marker waits for the author's 60 s outbox drain tick plus the dialer's
-// backoff (capped at 60 s) after a refusal.
+// A marker waits for the author's outbox drain tick plus the dialer's backoff
+// after a refusal. New-tree children run both on SYNC_TIMING; an old-tree
+// child drains on it too (tests/fixtures/old-tree-timing.mjs) but keeps
+// production's dial backoff (capped at 60 s), which this bound covers.
 const FLOW_MS = 180_000;
-// How long a drained marker must stay absent on the peer.
-const QUIET_MS = 12_000;
+// How long a drained marker must stay absent on the peer: several drain
+// ticks and several capped dial retries of a new-tree child.
+const QUIET_MS = 3 * Math.max(SYNC_TIMING.CROW_TEST_SYNC_DRAIN_MS, SYNC_TIMING.CROW_TEST_TAILNET_RETRY_MAX_MS);
 const tag = () => randomBytes(4).toString("hex");
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -84,7 +87,7 @@ async function flowsBoth(a, b, label) {
 async function blocked(from, to, label) {
   // The drain only counts once this marker's outbox row was SEEN queued
   // (otherwise an outbox query that never matches would read as "drained").
-  // writeMarker looks right after the store, but the gateway's once-a-minute
+  // writeMarker looks right after the store, but the gateway's timed
   // drain can still land in that gap: such a marker is inconclusive, not a
   // pass, so write a fresh one. Every assertion below is on a marker that was
   // seen queued; a query that never matches fails all attempts.
