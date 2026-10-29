@@ -8,9 +8,13 @@
  *    (tool-cache.js, I3) and never starts anything.
  *  - Single-flight (I4): concurrent ensureChild calls for one uuid share one start.
  *  - Cooldown (I4): 3 failed starts or unexpected exits within 5 minutes → 5 minutes in which
- *    ensureChild throws child_unavailable without spawning; recordChildFailure runs once.
+ *    ensureChild throws child_unavailable without spawning; recordChildFailure runs once. After
+ *    the cooldown, a row left 'error' / child_unavailable is tried again (one single-flight
+ *    start): success puts it back to active, another failure counts toward the next cooldown.
+ *    Any other error (a failed live test, a folder refused at spawn) stays off until the owner
+ *    acts (Restart or Test again).
  *  - Limits: idle stop after CROW_SERVICE_CHILD_IDLE_MS (default 600000); at most
- *    CROW_SERVICE_CHILD_MAX (default 2) running per gateway, the least recently used idle one
+ *    CROW_SERVICE_CHILD_MAX (default 2, an integer 1..32 overrides it) running per gateway, the least recently used idle one
  *    stopping to make room; none idle → busy. Connect timeout 60 s. The default is 2, not the
  *    plan's 6 (spec §12 budget: three gateways × the cap × one child's RSS ≤ 1.5 GB): a freshly
  *    started npx launcher chain (npm exec + sh + node) measured about 180 MB RSS.
@@ -75,8 +79,19 @@ function intEnv(name, dflt, min = 1) {
   const n = Number(process.env[name]);
   return Number.isInteger(n) && n >= min ? n : dflt;
 }
+export const DEFAULT_MAX_CHILDREN = 2;
+export const MAX_CHILDREN_CEILING = 32;
 const idleMs = () => intEnv("CROW_SERVICE_CHILD_IDLE_MS", 600_000);
-const maxChildren = () => intEnv("CROW_SERVICE_CHILD_MAX", 2);
+/** CROW_SERVICE_CHILD_MAX: an integer 1..32 overrides the default 2; anything else is ignored. */
+const maxChildren = () => {
+  const n = intEnv("CROW_SERVICE_CHILD_MAX", DEFAULT_MAX_CHILDREN);
+  return n <= MAX_CHILDREN_CEILING ? n : DEFAULT_MAX_CHILDREN;
+};
+
+/** The limits in force now (read from the env on every call). */
+export function childLimits() {
+  return { maxChildren: maxChildren(), idleMs: idleMs() };
+}
 
 /** uuid → record. A record outlives its process (cooldown, stderr, injected values). */
 const records = new Map();
@@ -335,10 +350,11 @@ function onExit(r, transport) {
   }
 }
 
-/** Whether a Restart may start this 'error' row: a failure a start can disprove. */
-function repairableClasses(service) {
+/** The 'error' classes a start may try to disprove: child_unavailable always (after its cooldown);
+ * a folder class only on the owner's Restart (repair) for a service with a folder field. */
+function retryableClasses(service, repair) {
   const hasFolder = (service.fields || []).some((f) => f.kind === "folder");
-  return hasFolder ? ["child_unavailable", ...FOLDER_CLASSES] : ["child_unavailable"];
+  return repair && hasFolder ? ["child_unavailable", ...FOLDER_CLASSES] : ["child_unavailable"];
 }
 
 async function start(db, r, conn, service, { key, crowHome, repair }) {
@@ -439,8 +455,8 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
   } catch {
     console.warn("[services] tool cache not written");
   }
-  if (repair && conn.status === "error") {
-    try { await recordChildRecovered(db, conn.uuid, { classes: repairableClasses(service) }); } catch { console.warn("[services] recovery not recorded"); }
+  if (conn.status === "error") {
+    try { await recordChildRecovered(db, conn.uuid, { classes: retryableClasses(service, repair) }); } catch { console.warn("[services] recovery not recorded"); }
   }
   touch(r);
   return { client: r.client, tools: r.tools };
@@ -462,11 +478,13 @@ export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(),
     }
     throw new ChildError("child_unavailable");
   }
-  const conn = await servableConnection(db, uuid, { allowError: repair });
+  const conn = await servableConnection(db, uuid, { allowError: true });
   if (!conn) throw new ChildError("not_active");
   const service = serviceById(conn.serviceId);
   if (!service || service.crowWide) throw new ChildError("not_installed");
-  if (conn.status === "error" && !(repair && repairableClasses(service).includes(conn.lastError))) throw new ChildError("not_active");
+  // An 'error' row: a transient child failure is retried once its cooldown is over; a folder
+  // refused at spawn only on the owner's Restart; a failed live test never here.
+  if (conn.status === "error" && !retryableClasses(service, repair).includes(conn.lastError)) throw new ChildError("not_active");
 
   // Synchronous from here to the start promise: concurrent callers share one start.
   const r = recordFor(uuid);

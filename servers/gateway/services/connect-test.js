@@ -304,7 +304,7 @@ function realOr(p) {
  * re-check, Task 14 M4) also walks the folder and refuses it (`forbidden_target`) when any
  * symlink inside resolves into or around a guarded dir, or when the folder holds more than
  * MAX_LINK_SCAN_ENTRIES entries (fail closed: the walk could not finish). Symlinked folders are
- * judged by their target and not descended; a dangling link is skipped.
+ * followed by real path (loops end), and a dangling link refuses.
  */
 export const MAX_LINK_SCAN_ENTRIES = 100_000;
 
@@ -353,8 +353,19 @@ export function folderRefusal(path, {
   return null;
 }
 
-/** M4: a symlink inside an accepted folder that leads into (or around) a guarded dir. */
+/**
+ * M4 (defence in depth; the real fix is confining the child, a follow-up): walks the folder by
+ * REAL path, following symlinked folders (a visited set of real paths ends loops), and refuses
+ * when any real path it reaches, folder or file, is inside or contains a guarded dir. A link that
+ * doesn't resolve refuses too (fail closed: it could be satisfied later). Every visited entry
+ * counts toward `maxEntries`; a walk that can't finish within it refuses.
+ */
 function plantedLinkRefusal(root, guarded, maxEntries) {
+  const hit = (real) => {
+    for (const g of guarded) if (within(real, g) || within(g, real)) return true;
+    return false;
+  };
+  const visited = new Set([root]);
   const stack = [root];
   let seen = 0;
   while (stack.length) {
@@ -368,14 +379,20 @@ function plantedLinkRefusal(root, guarded, maxEntries) {
     for (const ent of entries) {
       if (++seen > maxEntries) return "forbidden_target";
       const p = join(dir, ent.name);
+      let real = p;
+      let isDir = ent.isDirectory();
       if (ent.isSymbolicLink()) {
-        let target;
-        try { target = realpathSync(p); } catch { continue; }
-        for (const g of guarded) {
-          if (within(target, g) || within(g, target)) return "forbidden_target";
+        try {
+          real = realpathSync(p);
+          isDir = statSync(real).isDirectory();
+        } catch {
+          return "forbidden_target";   // dangling (or unreadable) link
         }
-      } else if (ent.isDirectory()) {
-        stack.push(p);
+      }
+      if (hit(real)) return "forbidden_target";
+      if (isDir && !visited.has(real)) {
+        visited.add(real);
+        stack.push(real);
       }
     }
   }

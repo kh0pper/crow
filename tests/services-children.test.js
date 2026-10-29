@@ -579,3 +579,113 @@ test("folderRefusal scanLinks: a link around the Crow home refuses; a walk past 
   assert.equal(folderRefusal(v, opts), null, "Connect and test's rule is unchanged without scanLinks");
   assert.equal(folderRefusal(v, { ...opts, scanLinks: true }), "forbidden_target", "a link to a folder holding the Crow home");
 });
+
+test("fix round 0: after the cooldown a child_unavailable row is retried once; success → active, failure → counts again; auth_failed never auto-retried", async () => {
+  let offset = 0;
+  C._setChildrenForTest({ clock: () => Date.now() + offset });
+  writeAddons({ github: { ECHO_EXIT: "1" } });
+  try {
+    const conn = await github();
+    for (let i = 0; i < 3; i++) await codeOf(withDb((d) => C.ensureChild(d, conn.uuid, { crowHome: HOME })));
+    assert.equal(C.childState(conn.uuid), "cooling");
+    assert.equal((await withDb((d) => SC.getConnection(d, conn.uuid))).status, "error");
+    let before = spawnCount();
+    offset = 4 * 60_000;
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, conn.uuid, { crowHome: HOME }))), "child_unavailable", "still refused during the cooldown");
+    assert.equal(spawnCount(), before);
+    // Expired, still failing: one try, it counts again (no cooldown yet), the row stays error.
+    offset = 6 * 60_000;
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, conn.uuid, { crowHome: HOME }))), "child_unavailable");
+    assert.equal(spawnCount(), before + 1, "retried once after the cooldown");
+    assert.notEqual(C.childState(conn.uuid), "cooling");
+    // Fixed upstream: the next call starts it and the row is active again.
+    writeAddons();
+    before = spawnCount();
+    const [x, y] = await withDb((d) => Promise.all([C.ensureChild(d, conn.uuid, { crowHome: HOME }), C.ensureChild(d, conn.uuid, { crowHome: HOME })]));
+    assert.equal(x.client, y.client);
+    assert.equal(spawnCount(), before + 1, "single-flight retry");
+    const row = await withDb((d) => SC.getConnection(d, conn.uuid));
+    assert.equal(row.status, "active");
+    assert.equal(row.lastError, null);
+
+    // auth_failed (a failed live test): never auto-retried, cooldown or not.
+    const bad = await github();
+    await withDb((d) => SC.recordTest(d, bad.uuid, { ok: false, error: "auth_failed" }));
+    offset = 60 * 60_000;
+    before = spawnCount();
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, bad.uuid, { crowHome: HOME }))), "not_active");
+    assert.equal(spawnCount(), before);
+    // A folder refused at spawn is not auto-retried either (Restart only).
+    const v = vault("v4");
+    const ob = await connect("obsidian", { config: { OBSIDIAN_VAULT_PATH: v } });
+    symlinkSync(SECRETS, join(v, "planted"));
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, ob.uuid, { crowHome: HOME }))), "child_unavailable");
+    unlinkSync(join(v, "planted"));
+    offset = 120 * 60_000;
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, ob.uuid, { crowHome: HOME }))), "not_active", "forbidden_target waits for the owner");
+  } finally {
+    C._setChildrenForTest({ clock: null });
+    writeAddons();
+    await C.stopAllChildren();
+  }
+});
+
+test("fix round 0: the cap defaults to 2 and CROW_SERVICE_CHILD_MAX overrides it within 1..32", async () => {
+  const prev = process.env.CROW_SERVICE_CHILD_MAX;
+  try {
+    delete process.env.CROW_SERVICE_CHILD_MAX;
+    assert.equal(C.childLimits().maxChildren, 2);
+    assert.equal(C.DEFAULT_MAX_CHILDREN, 2);
+    for (const [v, want] of [["3", 3], ["1", 1], ["32", 32], ["33", 2], ["0", 2], ["-1", 2], ["2.5", 2], ["lots", 2]]) {
+      process.env.CROW_SERVICE_CHILD_MAX = v;
+      assert.equal(C.childLimits().maxChildren, want, `CROW_SERVICE_CHILD_MAX=${v}`);
+    }
+    // The override is live: with 3, three children run side by side.
+    process.env.CROW_SERVICE_CHILD_MAX = "3";
+    const pid = await project();
+    const cs = [];
+    for (const l of ["x", "y", "z"]) cs.push(await github(`test-token-6${l.charCodeAt(0) % 10}`, { projectId: pid, label: l }));
+    for (const c of cs) await withDb((d) => C.ensureChild(d, c.uuid, { crowHome: HOME }));
+    assert.deepEqual(cs.map((c) => C.childState(c.uuid)), ["running", "running", "running"]);
+  } finally {
+    if (prev === undefined) delete process.env.CROW_SERVICE_CHILD_MAX; else process.env.CROW_SERVICE_CHILD_MAX = prev;
+    await C.stopAllChildren();
+  }
+});
+
+test("fix round 0 (security review): the link walk follows symlinked folders, ends loops, refuses dangling links", async () => {
+  const { folderRefusal } = await import("../servers/gateway/services/connect-test.js");
+  const OTHER = mkdtempSync(join(tmpdir(), "crow-svcchild-other-"));
+  try {
+    const otherSecrets = join(OTHER, "secrets");
+    mkdirSync(otherSecrets, { recursive: true });
+    const opts = { crowHome: HOME, expectEntry: ".obsidian", otherSecretsDirs: [otherSecrets], scanLinks: true };
+
+    const plain = vault("w-plain");
+    mkdirSync(join(plain, "notes", "deep"), { recursive: true });
+    writeFileSync(join(plain, "notes", "deep", "a.md"), "x");
+    assert.equal(folderRefusal(plain, opts), null, "a normal vault with no links passes");
+
+    // A symlinked folder (outside the vault) that holds a second link into another instance's secrets.
+    const side = mkdtempSync(join(VAULTS, "side-"));
+    symlinkSync(otherSecrets, join(side, "inner"));
+    const viaDir = vault("w-viadir");
+    symlinkSync(side, join(viaDir, "shared"));
+    assert.equal(folderRefusal(viaDir, opts), "forbidden_target", "followed through the symlinked folder");
+
+    // A loop ends, and is not refused for being a loop.
+    const loop = vault("w-loop");
+    mkdirSync(join(loop, "a"));
+    symlinkSync(loop, join(loop, "a", "back"));
+    symlinkSync(join(loop, "a"), join(loop, "self-a"));
+    assert.equal(folderRefusal(loop, opts), null);
+    assert.equal(folderRefusal(loop, { ...opts, maxScanEntries: 2 }), "forbidden_target", "only the budget refuses it");
+
+    // A dangling link: fail closed.
+    const dangling = vault("w-dangling");
+    symlinkSync(join(VAULTS, "not-there-yet"), join(dangling, "later"));
+    assert.equal(folderRefusal(dangling, opts), "forbidden_target");
+  } finally {
+    rmScratch(OTHER);
+  }
+});
