@@ -30,9 +30,22 @@
  * served: the mount and ensureChild refuse it (not_active, reason binding_mismatch). A
  * connection made before bindings existed has none and is refused until the owner reconnects it.
  *
+ * The binding also carries two FINGERPRINTS (fix round 2, review C1): a keyed hash (HMAC-SHA256
+ * under a per-instance key kept in the same hidden dir, service-fingerprint-key, made on first
+ * record) over the connection's DECRYPTED secret values and one over its non-secret config
+ * (addresses, folder paths), each in field-name order. A bot that writes crow.db could otherwise
+ * copy another connection's sealed token into this connection's keychain row (the seal has no
+ * AAD) or point its address at a listener of its own. ensureChild recomputes both from exactly
+ * what it is about to inject and refuses on any difference, or a missing fingerprint, before
+ * spawning (not_active, reason fingerprint_mismatch). Plaintext is hashed, so a keychain key
+ * rotation that re-seals changes nothing; the hash is keyed, so the file leaks nothing about a
+ * value. Only the owner's connect route (and later the PR 4/8 owner-only edit and import paths,
+ * through recordConnectionFingerprints) records them.
+ *
  * Google mail, calendar and contacts (services PR 6) will be added here as sensitive and LOCKED
  * when Google arrives (roles spec §11.2: mail, calendar, contacts and file contents).
  */
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "./crow-home.js";
 import { anchoredPath, readSecretValuesFile, writeSecretValuesFile } from "./secret-values.js";
 
@@ -110,23 +123,117 @@ function writeUuidMap(name, map, crowHome) {
   writeSecretValuesFile(p, [JSON.stringify(obj)], { raw: true });
 }
 
+const FP_RE = /^[0-9a-f]{64}$/;
+/** A binding entry: {serviceId, secretsFp?, configFp?} (a bare serviceId string reads as one with no fingerprints). */
+function bindingEntry(v) {
+  if (typeof v === "string") return SERVICE_ID_RE.test(v) ? { serviceId: v } : null;
+  if (!v || typeof v !== "object" || Array.isArray(v) || typeof v.serviceId !== "string" || !SERVICE_ID_RE.test(v.serviceId)) return null;
+  const e = { serviceId: v.serviceId };
+  if (typeof v.secretsFp === "string" && FP_RE.test(v.secretsFp)) e.secretsFp = v.secretsFp;
+  if (typeof v.configFp === "string" && FP_RE.test(v.configFp)) e.configFp = v.configFp;
+  return e;
+}
+function readBindingEntries(crowHome) {
+  const raw = readUuidMap(CONNECTION_BINDINGS_FILENAME, (v) => bindingEntry(v) !== null, crowHome);
+  return new Map([...raw].map(([k, v]) => [k, bindingEntry(v)]));
+}
+
 /** uuid -> serviceId, as the owner's connect route recorded it (missing or corrupt: empty). */
 export function readConnectionBindings({ crowHome } = {}) {
-  return readUuidMap(CONNECTION_BINDINGS_FILENAME, (v) => typeof v === "string" && SERVICE_ID_RE.test(v), crowHome);
+  return new Map([...readBindingEntries(crowHome)].map(([k, e]) => [k, e.serviceId]));
+}
+
+// ---- fingerprints ---------------------------------------------------------------------------
+
+export const FINGERPRINT_KEY_FILENAME = "service-fingerprint-key";
+const FP_KEY_RE = /^[0-9a-f]{64}$/;
+
+/** The per-instance HMAC key (hidden dir). `create` makes it when missing or unreadable (record only). */
+function fingerprintKey(crowHome, { create = false } = {}) {
+  const p = anchoredPath(envFor(crowHome), FINGERPRINT_KEY_FILENAME);
+  if (!p) return null;
+  const f = readSecretValuesFile(p, { raw: true });
+  if (f && f.lines.length === 1 && FP_KEY_RE.test(f.lines[0])) return Buffer.from(f.lines[0], "hex");
+  if (!create) return null;
+  const hex = randomBytes(32).toString("hex");
+  writeSecretValuesFile(p, [hex], { raw: true });
+  return Buffer.from(hex, "hex");
 }
 
 /**
- * Record a connection's service at creation. ONLY the owner's connect route (services-api.js)
- * and the owner-only write paths of services PR 4 / PR 8 may call this. Throws on a bad value or
- * when the anchored dir can't be written (the connection is then never served: fail closed).
+ * The field values a child gets, the way children.js connectionChildEnv builds them (a field's
+ * secret value wins over a config value of the same name), split by the field's kind.
  */
-export function recordConnectionBinding(conn, { crowHome } = {}) {
+export function injectedFieldValues(service, { config = {}, secrets = {} } = {}) {
+  const secret = {};
+  const plain = {};
+  for (const f of service?.fields || []) {
+    const n = f.name;
+    const v = typeof secrets?.[n] === "string" ? secrets[n] : typeof config?.[n] === "string" ? config[n] : null;
+    (f.kind === "secret" ? secret : plain)[n] = v;
+  }
+  return { secret, plain };
+}
+
+const fpOf = (key, part, obj) => createHmac("sha256", key)
+  .update(part + "\n" + JSON.stringify(Object.keys(obj).sort().map((n) => [n, obj[n]])))
+  .digest("hex");
+
+/** {secretsFp, configFp} for these values, or null (no key, and `create` not set). */
+export function connectionFingerprints(service, values, { crowHome, create = false } = {}) {
+  const key = fingerprintKey(crowHome, { create });
+  if (!key) return null;
+  const { secret, plain } = injectedFieldValues(service, values);
+  return { secretsFp: fpOf(key, "secrets", secret), configFp: fpOf(key, "config", plain) };
+}
+
+/**
+ * Record a connection's service, and with `service` + `values` its fingerprints, in one atomic
+ * write. ONLY the owner's connect route (services-api.js, owner turn) and the owner-only write
+ * paths of services PR 4 / PR 8 may call this. Throws on a bad value or when the anchored dir can't
+ * be written (the connect route then undoes the connection).
+ */
+export function recordConnectionBinding(conn, { crowHome, service, values } = {}) {
   const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
   const serviceId = conn?.serviceId;
   if (!UUID_RE.test(uuid) || typeof serviceId !== "string" || !SERVICE_ID_RE.test(serviceId)) throw new SensitivityError("bad_value");
-  const map = readConnectionBindings({ crowHome });
-  map.set(uuid, serviceId);
+  if (service && service.id !== serviceId) throw new SensitivityError("bad_value");
+  const entry = { serviceId };
+  if (service && values) Object.assign(entry, connectionFingerprints(service, values, { crowHome, create: true }));
+  const map = readBindingEntries(crowHome);
+  map.set(uuid, entry);
   writeUuidMap(CONNECTION_BINDINGS_FILENAME, map, crowHome);
+}
+
+/**
+ * Re-record the fingerprints of an already-bound connection (the PR 4/8 owner-only edit and
+ * import paths, after they save new values). The connection must be bound to `service`.
+ */
+export function recordConnectionFingerprints(conn, service, values, { crowHome } = {}) {
+  const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
+  const map = readBindingEntries(crowHome);
+  const cur = map.get(uuid);
+  if (!cur || !service || cur.serviceId !== service.id || conn?.serviceId !== service.id) throw new SensitivityError("bad_value");
+  map.set(uuid, { serviceId: cur.serviceId, ...connectionFingerprints(service, values, { crowHome, create: true }) });
+  writeUuidMap(CONNECTION_BINDINGS_FILENAME, map, crowHome);
+}
+
+const sameHex = (a, b) => typeof a === "string" && typeof b === "string" && a.length === b.length && timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+
+/**
+ * True only when the connection is bound to `service` and both recorded fingerprints equal those of
+ * the values about to be used. A missing binding, fingerprint or key, or any error: false.
+ */
+export function verifyConnectionFingerprints(conn, service, values, { crowHome } = {}) {
+  try {
+    const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
+    const e = readBindingEntries(crowHome).get(uuid);
+    if (!e || !service || e.serviceId !== service.id || conn?.serviceId !== service.id || !e.secretsFp || !e.configFp) return false;
+    const now = connectionFingerprints(service, values, { crowHome });
+    return !!now && sameHex(now.secretsFp, e.secretsFp) && sameHex(now.configFp, e.configFp);
+  } catch {
+    return false;
+  }
 }
 
 /** True only when the row's service_id is the one recorded for its uuid. Any doubt: false. */

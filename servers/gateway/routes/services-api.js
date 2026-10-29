@@ -17,7 +17,10 @@
  *                                                               for the Extensions uninstall confirm (Task 12)
  *
  * Auth: the dashboard session gate (requireDashboardSessionJson: JSON 401/403, and it refuses
- * the Funnel), then the flag (404 while CROW_SERVICES_UI is off), then CSRF on every POST. A
+ * the Funnel), then the flag (404 while CROW_SERVICES_UI is off), then CSRF on every POST. Every
+ * POST (connect, test, disconnect, restart, sensitive) is also the OWNER's alone (review I1): a
+ * local password session from another machine (isLocalPasswordSessionOn), else 403
+ * {error:"not_owner"} (the client shows the generic line), checked before anything is read. A
  * peer-signed request is refused outright (csrfMiddleware would let a signed request through).
  * NEVER add this prefix to PUBLIC_FUNNEL_PREFIXES.
  *
@@ -58,6 +61,7 @@ import { requireDashboardSessionJson } from "./models.js";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import {
   SensitivityError, connectionSensitivity, readConnectionBindings, readSensitivityOverrides, recordConnectionBinding, setSensitivityOverride,
+  verifyConnectionFingerprints,
 } from "../../shared/service-sensitivity.js";
 import { crowServerCatalog } from "../../../scripts/pi-bots/crow-server-catalog.mjs";
 import { readCanonicalMcp } from "../../../scripts/pi-bots/mcp_writer.mjs";
@@ -324,7 +328,16 @@ export function servicesApiRouter({
 
   const jsonBody = express.json({ limit: "16kb" });
 
-  router.post(`${SERVICES_API_BASE}/project/:slug/connect`, jsonBody, withDb(async (req, res, db) => {
+  // The owner's turn, for every mutating route (review I1): a peer SSO session, a session minted
+  // by a login on this machine and any request from this machine are refused before anything else.
+  const ownerOnly = (handler) => withDb(async (req, res, db) => {
+    let owner = false;
+    try { owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
+    if (!owner) return res.status(403).json({ error: "not_owner" });
+    return handler(req, res, db);
+  });
+
+  router.post(`${SERVICES_API_BASE}/project/:slug/connect`, jsonBody, ownerOnly(async (req, res, db) => {
     const project = await findProject(db, req.params.slug);
     if (!project) return fail(res, "unknown_project");
     const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
@@ -391,7 +404,9 @@ export function servicesApiRouter({
     // did not happen: its secrets and row are removed (secrets first, as Task 7's undo does) and
     // the answer is the generic 500, so the owner can simply try again with the same label.
     try {
-      recordBinding(conn, { crowHome: home() });
+      // The service and both fingerprints (review C1): the decrypted secrets just saved and the
+      // config as stored.
+      recordBinding(conn, { crowHome: home(), service, values: { config: conn.config, secrets: values.secrets } });
     } catch {
       console.error("[services] connection binding not written");
       try { await rollbackNewConnection(db, conn.uuid); } catch { console.error("[services] connect rollback failed"); }
@@ -415,7 +430,7 @@ export function servicesApiRouter({
     return conn;
   };
 
-  router.post(`${SERVICES_API_BASE}/connection/:uuid/test`, withDb(async (req, res, db) => {
+  router.post(`${SERVICES_API_BASE}/connection/:uuid/test`, ownerOnly(async (req, res, db) => {
     const conn = await ownConnection(req, res, db);
     if (!conn) return;
     const service = serviceById(conn.serviceId);
@@ -425,6 +440,12 @@ export function servicesApiRouter({
     const secrets = secretNames.length
       ? await serviceSecretsFor(db, loadKeychainKey({ crowHome: home() }), conn.uuid, { allowedKeys: secretNames })
       : {};
+    // Review C1: the values must still be the ones connected, or nothing is sent anywhere (a
+    // rewritten address would receive the token). Checked only; never re-recorded here.
+    if (!verifyConnectionFingerprints(conn, service, { config: conn.config, secrets }, { crowHome: home() })) {
+      console.warn("[services] test refused: connection values changed since connect");
+      return res.status(409).json({ ok: false, error: "fingerprint_mismatch" });
+    }
     const result = await testConnection(service, { values: { ...conn.config, ...secrets }, crowHome: home(), lang: langOf(req) });
     const ok = !!result && result.ok === true;
     const error = ok ? null : CONNECTION_ERROR_CLASSES.has(result?.error) ? result.error : "unexpected_response";
@@ -435,7 +456,7 @@ export function servicesApiRouter({
     res.json(ok ? { ok: true, status } : { ok: false, status, error });
   }));
 
-  router.post(`${SERVICES_API_BASE}/connection/:uuid/disconnect`, withDb(async (req, res, db) => {
+  router.post(`${SERVICES_API_BASE}/connection/:uuid/disconnect`, ownerOnly(async (req, res, db) => {
     const conn = await ownConnection(req, res, db, { allowDisconnected: true });
     if (!conn) return;
     // Idempotent. The secrets stay in the keychain as 'disconnected' (never served, still masked;
@@ -449,7 +470,7 @@ export function servicesApiRouter({
   // R8: the operator's repair lever. Stops the child, forgets its failures and cooldown, then
   // starts it once (which also refreshes the service's tool cache). A connection whose error a
   // start can't disprove (a failed live test) answers 404 like any connection that isn't served.
-  router.post(`${SERVICES_API_BASE}/connection/:uuid/restart`, withDb(async (req, res, db) => {
+  router.post(`${SERVICES_API_BASE}/connection/:uuid/restart`, ownerOnly(async (req, res, db) => {
     const conn = await ownConnection(req, res, db);
     if (!conn) return;
     await stopChild(conn.uuid);
@@ -475,10 +496,7 @@ export function servicesApiRouter({
   // written only to the hidden secrets dir (service-sensitivity.js). Turning private ON also stops
   // the connection's child, so a bot's call in flight ends now; the mount refuses every later
   // request. The owner's own Test again / Restart keep working either way.
-  router.post(`${SERVICES_API_BASE}/connection/:uuid/sensitive`, jsonBody, withDb(async (req, res, db) => {
-    let owner = false;
-    try { owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
-    if (!owner) return res.status(403).json({ error: "not_owner" });
+  router.post(`${SERVICES_API_BASE}/connection/:uuid/sensitive`, jsonBody, ownerOnly(async (req, res, db) => {
     const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
     if (typeof body.sensitive !== "boolean") return res.status(400).json({ error: "bad_value" });
     const conn = await ownConnection(req, res, db);

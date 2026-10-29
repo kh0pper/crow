@@ -76,6 +76,9 @@ async function startApp(ctx, opts = {}) {
     crowHome: HOME,
     reservedNames: () => new Set(["github-reserved"]),
     refreshMasking: () => refreshGatewaySecretValues({ env: maskEnv(ctx), dbPath: ctx.path }),
+    // The stub gate's session is the owner's (review I1). Tests of the real owner rule pass
+    // ownerCheck: undefined, which takes the route's default (isLocalPasswordSessionOn).
+    ownerCheck: async (_db, req) => req.dashboardSession === "s1",
     ...opts,
   }));
   return new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
@@ -584,7 +587,11 @@ test("Task 16c: the owner turns Private on and off; the page shows it; the overr
     const uuid = c.json.connection.uuid;
     assert.deepEqual(c.json.connection.private, { on: false, locked: false });
     // Fix round 1: the connect route recorded the binding in the hidden dir.
-    assert.equal(JSON.parse(readFileSync(join(HOME, "secrets", SENS.CONNECTION_BINDINGS_FILENAME), "utf8"))[uuid], "github");
+    const entry = JSON.parse(readFileSync(join(HOME, "secrets", SENS.CONNECTION_BINDINGS_FILENAME), "utf8"))[uuid];
+    assert.equal(entry.serviceId, "github");
+    assert.match(entry.secretsFp, /^[0-9a-f]{64}$/, "a keyed fingerprint of the secrets");
+    assert.match(entry.configFp, /^[0-9a-f]{64}$/, "and of the config");
+    assert.ok(!JSON.stringify(entry).includes("test-token-sens"), "no value in the binding");
     assert.equal(SENS.connectionBindingOk({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
     const on = await call(s, "POST", sensPath(uuid), { body: { sensitive: true }, headers: as("own-1") });
     assert.equal(on.status, 200, on.text);
@@ -610,7 +617,7 @@ test("Task 16c: the owner turns Private on and off; the page shows it; the overr
       assert.deepEqual(r.json, { error: "bad_value" });
     }
     assert.equal((await call(s, "POST", sensPath("00000000-0000-4000-8000-00000000dead"), { body: { sensitive: true }, headers: as("own-1") })).status, 404);
-  }, { sessionGate: realGate });
+  }, { sessionGate: realGate, ownerCheck: undefined });
 });
 
 test("Task 16c: a locked service (obsidian, or one the registry doesn't name) can't be changed over the route", async () => {
@@ -638,7 +645,7 @@ test("Task 16c: a locked service (obsidian, or one the registry doesn't name) ca
     let file = {};
     try { file = JSON.parse(readFileSync(OVERRIDES, "utf8")); } catch { file = {}; }
     assert.ok(!Object.keys(file).some((k) => k.startsWith(uuid)), "nothing was written for a locked service");
-  }, { sessionGate: realGate });
+  }, { sessionGate: realGate, ownerCheck: undefined });
 });
 
 test("Task 16c: only the owner: an SSO session, a session from a login on this machine, a request from this machine, no session and no CSRF are all refused, and nothing changes", async () => {
@@ -661,12 +668,12 @@ test("Task 16c: only the owner: an SSO session, a session from a login on this m
       if (json) assert.deepEqual(r.json, json, label);
       assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "github" }, { crowHome: HOME }), false, `${label}: unchanged`);
     }
-  }, { sessionGate: realGate });
+  }, { sessionGate: realGate, ownerCheck: undefined });
   // Flag off: 404, before anything.
   await withApp(ctx, async (s) => {
     const r = await call(s, "POST", sensPath("00000000-0000-4000-8000-000000000001"), { body: { sensitive: true }, headers: as("own-1") });
     assert.equal(r.status, 404);
-  }, { sessionGate: realGate, uiEnabled: () => false });
+  }, { sessionGate: realGate, uiEnabled: () => false, ownerCheck: undefined });
 });
 
 test("Task 16c: a binding write that fails undoes the connect: 500 generic, no row, no secret, and a retry with the same label succeeds", async () => {
@@ -718,5 +725,71 @@ test("security review: the switch refuses a row whose service_id was flipped (bo
     let file = {};
     try { file = JSON.parse(readFileSync(OVERRIDES, "utf8")); } catch { file = {}; }
     assert.ok(!Object.keys(file).some((k) => k.startsWith(uuid)), "nothing written for it");
-  }, { sessionGate: realGate });
+  }, { sessionGate: realGate, ownerCheck: undefined });
+});
+
+test("review I1: every mutating route is the owner's: an on-box or SSO session can't connect, test, disconnect, restart or switch, and nothing is written", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await seedSessions(ctx);
+  const BIND = join(HOME, "secrets", SENS.CONNECTION_BINDINGS_FILENAME);
+  const bindingsNow = () => { try { return readFileSync(BIND, "utf8"); } catch { return ""; } };
+  await withApp(ctx, async (s) => {
+    const c = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Main", values: { [GH]: "test-token-i1" } }, headers: as("own-1") });
+    assert.equal(c.status, 201);
+    const uuid = c.json.connection.uuid;
+    const before = bindingsNow();
+    const rows = async () => (await ctx.db.execute("SELECT COUNT(*) AS n FROM service_connections")).rows[0].n;
+    for (const [label, headers] of [["on-box", as("own-1", { laptop: false })], ["onhost login", as("onhost-1")], ["sso", as("sso-1")]]) {
+      const conn = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: `x-${label}`, values: { [GH]: "test-token-i1b" } }, headers });
+      assert.equal(conn.status, 403, `${label} connect`);
+      assert.deepEqual(conn.json, { error: "not_owner" });
+      for (const action of ["test", "disconnect", "restart"]) {
+        const r = await call(s, "POST", `/dashboard/services/api/connection/${uuid}/${action}`, { headers });
+        assert.equal(r.status, 403, `${label} ${action}`);
+        assert.deepEqual(r.json, { error: "not_owner" });
+      }
+    }
+    assert.equal(await rows(), 1, "no connection made");
+    assert.equal(bindingsNow(), before, "no binding written");
+    assert.equal(ctx.test.calls.length, 1, "only the owner's connect ran a live test");
+    assert.equal((await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") })).json.connections[0].status, "active", "not disconnected");
+  }, { sessionGate: realGate, ownerCheck: undefined });
+});
+
+test("review I1: the Task 12 flow (install, then connect) still works for the owner", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest(), installed: [] };
+  await seedSessions(ctx);
+  await withApp(ctx, async (s) => {
+    const body = { serviceId: "github", accountLabel: "Main", values: { [GH]: "test-token-t12" } };
+    const first = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body, headers: as("own-1") });
+    assert.deepEqual(first.json, { error: "not_installed" });
+    ctx.installed = ["github"];   // the Install sheet's job finished
+    const second = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body, headers: as("own-1") });
+    assert.equal(second.status, 201, second.text);
+    assert.equal(SENS.connectionBindingOk({ uuid: second.json.connection.uuid, serviceId: "github" }, { crowHome: HOME }), true);
+  }, { sessionGate: realGate, ownerCheck: undefined });
+});
+
+test("review C1: Test again re-checks the fingerprints without rewriting them: a transplanted token is refused before anything is sent", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await withApp(ctx, async (s) => {
+    const a = await connectGh(s, "Main", "test-token-fpA");
+    const b = await connectGh(s, "Other", "test-token-fpB");
+    const BIND = join(HOME, "secrets", SENS.CONNECTION_BINDINGS_FILENAME);
+    const entryB = () => JSON.parse(readFileSync(BIND, "utf8"))[b.json.connection.uuid];
+    const fpBefore = entryB();
+    const calls = ctx.test.calls.length;
+    await ctx.db.execute({
+      sql: `UPDATE crow_keychain SET secret_sealed = (SELECT secret_sealed FROM crow_keychain WHERE connection_uuid = ?) WHERE connection_uuid = ?`,
+      args: [a.json.connection.uuid, b.json.connection.uuid],
+    });
+    const { result: r, out } = await capture(() => call(s, "POST", `/dashboard/services/api/connection/${b.json.connection.uuid}/test`, { headers: AUTH }));
+    assert.equal(r.status, 409);
+    assert.deepEqual(r.json, { ok: false, error: "fingerprint_mismatch" });
+    assert.deepEqual(out, ["[services] test refused: connection values changed since connect"]);
+    assert.equal(ctx.test.calls.length, calls, "the live test never ran (no token sent anywhere)");
+    assert.deepEqual(entryB(), fpBefore, "the fingerprints were not rewritten");
+    const ok = await call(s, "POST", `/dashboard/services/api/connection/${a.json.connection.uuid}/test`, { headers: AUTH });
+    assert.equal(ok.status, 200, "an untouched connection still tests");
+  });
 });

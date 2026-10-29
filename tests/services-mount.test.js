@@ -48,6 +48,7 @@ const { SERVICES_TOKEN, generateBoardToken } = await import("../servers/gateway/
 const { initGatewayActorKey, _resetActorKeyForTest, signScopeActor } = await import("../scripts/pi-bots/actor-sig.mjs");
 const PI = await import("../servers/gateway/perch-interactive.js");
 const SENS = await import("../servers/shared/service-sensitivity.js");
+const { serviceById } = await import("../servers/shared/service-catalog.js");
 
 const GH = "GITHUB_PERSONAL_ACCESS_TOKEN";
 const GH_TOKEN = "test-token-1";
@@ -97,9 +98,10 @@ let TOKEN, BOARD, srv, base, sessions, handle;
 async function connect(serviceId, projectId, { label = "work", secrets } = {}) {
   return withDb(async (d) => {
     const key = await ensureWriteKey(d, { crowHome: HOME });
-    const c = await SC.createConnection(d, { projectId, serviceId, accountLabel: label, secrets: secrets ?? (serviceId === "github" ? { [GH]: GH_TOKEN } : { NOTION_TOKEN: "test-token-2" }), config: {}, testedAt: new Date() }, { key });
-    // As the owner's connect route does (Task 16c fix round 1): the binding in the hidden dir.
-    SENS.recordConnectionBinding(c, { crowHome: HOME });
+    const sec = secrets ?? (serviceId === "github" ? { [GH]: GH_TOKEN } : { NOTION_TOKEN: "test-token-2" });
+    const c = await SC.createConnection(d, { projectId, serviceId, accountLabel: label, secrets: sec, config: {}, testedAt: new Date() }, { key });
+    // As the owner's connect route does (Task 16c): the binding and its fingerprints in the hidden dir.
+    SENS.recordConnectionBinding(c, { crowHome: HOME, service: serviceById(serviceId), values: { config: c.config, secrets: sec } });
     return c;
   });
 }
