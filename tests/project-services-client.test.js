@@ -258,6 +258,23 @@ test("auth_failed shows its copy and keeps the sheet open; a retry is possible",
   assert.equal(form.querySelector("[data-svc-ok]").textContent, "Connected and tested.");
 });
 
+test("a typed secret is kept through failures other than auth_failed, so the address or label can be fixed", async () => {
+  const keep = ["unreachable", "timeout", "bad_address", "redirect", "unexpected_response", "label_taken", null];
+  for (const code of keep) {
+    const s = boot({ fetchImpl: () => (code ? { status: 400, body: { error: code } } : { status: 500, body: { ok: false } }) });
+    const form = openConnect(s, "home-assistant");
+    s.type(form.querySelector('input[data-field="HA_URL"]'), "http://ha.example.lan:8123");
+    const tok = form.querySelector('input[data-field="HA_TOKEN"]');
+    s.type(tok, SECRET);
+    s.submit(form);
+    await s.settle();
+    assert.equal(tok.value, SECRET, `kept after ${code || "a 500"}`);
+    assert.ok(s.isOpen());
+    s.click(s.sheet().querySelector("[data-svc-close]"));
+    assert.equal(tok.value, "", `closing clears it (${code || "a 500"})`);
+  }
+});
+
 test("error copy: {service} and {field} filled; a 500 with no class, or no network, gets the generic line", async () => {
   const cases = [
     [{ status: 400, body: { error: "unexpected_response" } }, "It answered, but not the way GitHub should."],

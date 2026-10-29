@@ -21,9 +21,10 @@
  * Typed secrets: a secret input is type=password with autocomplete=new-password (so a browser
  * never fills a saved password into it), has no name attribute (a stray native submit can't
  * serialise it) and no value attribute. Its value goes only into the connect POST body; it never
- * goes into a URL, storage, a data- attribute or the console. Every secret input is emptied as
- * soon as the answer arrives (passed or failed), when the sheet closes, and before Turbo caches
- * the page. A step link is built only from the typed ADDRESS field, normalized and http(s) only.
+ * goes into a URL, storage, a data- attribute or the console. Every secret input is emptied when
+ * the connection is saved or the service refuses the key (auth_failed), on Back, when the sheet
+ * closes, and before Turbo caches the page; any other failure keeps it so a wrong address or
+ * label can be fixed without pasting again. A step link is built only from the typed ADDRESS field, normalized and http(s) only.
  *
  * Every service-supplied string is written with textContent; the data comes from the page's own
  * JSON block (projectServicesDataScript). Returned as a <script> string, so it is a TEMPLATE
@@ -593,7 +594,10 @@ export function projectServicesClientJs() {
       }, function () { return { status: 0, j: null }; }).then(function (res) {
         body = null;
         inflight = false;
-        wipeSecrets();
+        var code = res.j && typeof res.j.error === 'string' ? res.j.error : null;
+        // Cleared once saved, or when the key itself was refused; kept through other failures
+        // (a wrong address or label) so it needn't be pasted again. Closing always clears it.
+        if (res.status === 201 || code === 'auth_failed') wipeSecrets();
         if (res.status === 201 && res.j && res.j.ok === true) {
           done = true;
           connected = true;
@@ -603,7 +607,6 @@ export function projectServicesClientJs() {
           return;
         }
         submit.disabled = false;
-        var code = res.j && typeof res.j.error === 'string' ? res.j.error : null;
         var field = res.j && typeof res.j.field === 'string' ? res.j.field : '';
         err.textContent = errorText(code, field ? fieldLabel(field) : '', svc.name);
         markInvalid(field || null);
