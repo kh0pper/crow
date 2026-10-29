@@ -13,9 +13,10 @@
  */
 import { isAffirmative, isNegative } from "./turn-helpers.js";
 import { phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
+import { HANDOFF_PROPOSAL_TTL_MS } from "./handoff-constants.js";
 
-/** How long a pending proposal waits for its yes (plan constant). */
-export const HANDOFF_PROPOSAL_TTL_MS = 120_000;
+/** How long a pending proposal waits for its yes (it lives in handoff-constants.js, re-exported here). */
+export { HANDOFF_PROPOSAL_TTL_MS };
 
 // which_calendar (PR 2.1 Task 6): Crow asks which calendar or task list to use when none is chosen or its own (own-tools.js).
 const PENDING_KINDS = new Set(["routine", "handoff", "which", "which_calendar", "stop"]);
