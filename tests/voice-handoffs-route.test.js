@@ -464,14 +464,32 @@ test("a null asked renders without the asked block; a failed not_sent row has it
   assert.match(await (await s.get(other)).text(), /It couldn't be handed to Writer, so nothing was started\./);
 });
 
-test("the page follows the dashboard language", async () => {
+test("the page is in the row's language (the push title's), else the dashboard's", async () => {
   const s = await setup();
   const id = await s.insert({ lang: "es" });
-  const html = await (await s.get(id, { lang: "es" })).text();
-  assert.match(html, /<html lang="es">/);
+  const html = await (await s.get(id, { lang: "en" })).text();
+  assert.match(html, /<html lang="es">/, "the row's es wins over a dashboard in en");
   assert.match(html, /¿Pasarle una tarea a Writer\?/);
   assert.match(html, /value="confirm">Confirmar</);
   assert.match(html, /value="decline">Rechazar</);
+  const en = await s.insert({ lang: "en", device_id: "kiosk-2" });
+  assert.match(await (await s.get(en, { lang: "es" })).text(), /<html lang="en">[\s\S]*Hand a task to Writer\?/, "the row's en wins over a dashboard in es");
+  const bad = await s.insert({ lang: "en", device_id: "kiosk-3" });
+  await s.db.execute({ sql: "UPDATE voice_handoffs SET lang = 'fr' WHERE id = ?", args: [bad] });
+  assert.match(await (await s.get(bad, { lang: "es" })).text(), /<html lang="es">/, "an invalid row lang falls back to the dashboard's");
+  await s.db.execute({ sql: "UPDATE voice_handoffs SET lang = NULL WHERE id = ?", args: [bad] });
+  assert.match(await (await s.get(bad, { lang: "es" })).text(), /<html lang="es">/, "a missing row lang falls back too");
+});
+
+test("isLocalPasswordSessionOn: only this instance's own password session, on the caller's client", async () => {
+  const { isLocalPasswordSessionOn } = await import("../servers/gateway/dashboard/local-session.js");
+  const s = await setup();
+  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: OWN }), true);
+  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: SSO }), false);
+  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: OWN, crossHostAuth: { ok: true } }), false);
+  assert.equal(await isLocalPasswordSessionOn(s.db, { dashboardSession: "unknown" }), false);
+  assert.equal(await isLocalPasswordSessionOn(s.db, {}), false);
+  assert.equal(await isLocalPasswordSessionOn({ execute: async () => { throw new Error("locked"); } }, { dashboardSession: OWN }), false, "an error is a no");
 });
 
 test("every voiceHandoff page string is in English and Spanish", () => {

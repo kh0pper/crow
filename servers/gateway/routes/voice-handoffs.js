@@ -27,10 +27,10 @@
  */
 import { Router } from "express";
 import { createDbClient } from "../../db.js";
-import { getHandoffCore } from "../voice/handoff.js";
-import { cleanName } from "../voice/bot-summaries.js";
+import { getHandoffCore, botName } from "../voice/handoff.js";
 import { cardDrawerHref } from "../board/card-link.js";
-import { hashToken, parseCookies } from "../dashboard/auth.js";
+import { parseCookies } from "../dashboard/auth.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { csrfInput } from "../dashboard/shared/csrf.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
 import { t, fill, SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
@@ -54,29 +54,14 @@ function guardHeaders(req, res, next) {
   next();
 }
 
-/** The owner at this instance's own sign-in: a local password session, never a peer's SSO or a signed call. */
-async function ownerSession(db, req) {
-  if (!req.dashboardSession || req.crossHostAuth) return false;
-  const r = await db.execute({
-    sql: "SELECT scopes FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND julianday(expires_at) > julianday('now')",
-    args: [hashToken(String(req.dashboardSession))],
-  });
-  return r.rows[0]?.scopes === "dashboard";
-}
-
-/** The dashboard's language (the setting, else the login pages' cookie), "en" by default. */
-async function pageLang(db, req) {
+/** The page's language: the row's (the language the hand-off was asked in, as its push title), else the
+ * dashboard's (the setting, else the login pages' cookie), "en" by default. */
+async function pageLang(db, req, row = null) {
+  if (row && SUPPORTED_LANGS.includes(row.lang)) return row.lang;
   let lang = null;
   try { lang = await readSetting(db, "language"); } catch { /* no settings table: the cookie decides */ }
   if (!SUPPORTED_LANGS.includes(lang)) lang = parseCookies(req).crow_lang;
   return SUPPORTED_LANGS.includes(lang) ? lang : "en";
-}
-
-async function botName(db, botId) {
-  try {
-    const row = (await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [String(botId)] })).rows[0];
-    return cleanName(row && row.display_name, botId);
-  } catch { return String(botId); }
 }
 
 const live = (row, now) => row.status === "awaiting_phone" && Number(row.expires_at) > now;
@@ -157,7 +142,7 @@ async function renderRow(req, db, core, row, lang) {
 <p class="asked">“${escapeHtml(row.asked)}”</p>`;
   }
   if (decidable(core, row, now)) {
-    if (await ownerSession(db, req)) {
+    if (await isLocalPasswordSessionOn(db, req)) {
       const until = formatTime(row.expires_at, lang, { timeStyle: "short" });
       body += `
 <p class="status">${escapeHtml(fill(t("voiceHandoff.waiting", lang), { time: until }))}</p>
@@ -198,6 +183,7 @@ export function voiceHandoffsRouter(dashboardAuth, { core = getHandoffCore(), op
       lang = await pageLang(db, req);
       const row = ID_RE.test(id) ? await core.store.get(db, id) : null;
       if (!row) return message(res, 404, lang, "voiceHandoff.notFound");
+      lang = await pageLang(db, req, row);
       res.type("html").send(await renderRow(req, db, core, row, lang));
     } catch (err) {
       console.warn(`[voice-handoffs] page ${id}: ${err?.message || err}`);
@@ -214,7 +200,7 @@ export function voiceHandoffsRouter(dashboardAuth, { core = getHandoffCore(), op
     try {
       lang = await pageLang(db, req);
       if (!ID_RE.test(id)) return message(res, 404, lang, "voiceHandoff.notFound");
-      if (!(await ownerSession(db, req))) return message(res, 403, lang, "voiceHandoff.notOwner");
+      if (!(await isLocalPasswordSessionOn(db, req))) return message(res, 403, lang, "voiceHandoff.notOwner");
       const raw = req.body && typeof req.body === "object" ? req.body.decision : undefined;
       const decision = typeof raw === "string" && Object.hasOwn(DECISIONS, raw) ? DECISIONS[raw] : null;
       if (!decision) return message(res, 400, lang, "voiceHandoff.badRequest");

@@ -279,8 +279,8 @@ function cardDescription(row, now) {
     + "When you are done, call board_report_result. Keep anything you write; nothing is undone if this task is stopped.";
 }
 
-/** The bot's display name for the spoken lines, whatever its state now (a refused bot is still named). */
-async function botName(db, botId) {
+/** The bot's display name for the spoken lines and the phone page, whatever its state now (a refused bot is still named). */
+export async function botName(db, botId) {
   try {
     const row = (await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0];
     return cleanName(row && row.display_name, botId);
