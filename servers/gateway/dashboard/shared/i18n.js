@@ -3760,6 +3760,28 @@ export const translations = {
   "perch.textDefault": { en: "Default text size", es: "Tamaño de texto predeterminado" },
   "perch.textLarger": { en: "Larger text", es: "Texto más grande" },
   "perch.copyCode": { en: "Copy code", es: "Copiar código" },
+  // Credential card (R1.2 spec §10): the password card in a Perch chat.
+  "perch.secretTitle": { en: "\ud83d\udd12 Password for {label}", es: "\ud83d\udd12 Contrase\u00f1a para {label}" },
+  "perch.secretTitleNoLabel": { en: "\ud83d\udd12 Password", es: "\ud83d\udd12 Contrase\u00f1a" },
+  "perch.secretAsks": { en: "{bot} asks for: {label}", es: "{bot} pide: {label}" },
+  "perch.secretHelp": {
+    en: "A browser can't block screenshots; enter this where no one is watching.",
+    es: "Un navegador no puede bloquear las capturas de pantalla; escr\u00edbela donde nadie te vea.",
+  },
+  "perch.secretEnter": { en: "Enter password", es: "Escribir contrase\u00f1a" },
+  "perch.secretSave": { en: "Save", es: "Guardar" },
+  "perch.secretSaving": { en: "Saving\u2026", es: "Guardando\u2026" },
+  "perch.secretNotNow": { en: "Not now", es: "Ahora no" },
+  "perch.secretField": { en: "Password", es: "Contrase\u00f1a" },
+  "perch.secretSaved": { en: "Saved. Nothing about it reaches the bot except its name.", es: "Guardada. Al bot solo le llega su nombre." },
+  "perch.secretClosed": { en: "You closed the form. Nothing was sent.", es: "Cerraste el formulario. No se envi\u00f3 nada." },
+  "perch.secretExpired": { en: "This request expired. Nothing was sent.", es: "Esta solicitud caduc\u00f3. No se envi\u00f3 nada." },
+  "perch.secretGone": { en: "This request is no longer open. Nothing was sent.", es: "Esta solicitud ya no est\u00e1 abierta. No se envi\u00f3 nada." },
+  "perch.secretNotSetUp": {
+    en: "The keychain isn't set up yet, so nothing was saved. Set it up in Settings \u2192 Security & passwords.",
+    es: "El llavero a\u00fan no est\u00e1 configurado, as\u00ed que no se guard\u00f3 nada. Config\u00faralo en Ajustes \u2192 Seguridad y contrase\u00f1as.",
+  },
+  "perch.secretFailed": { en: "The password couldn't be saved. Nothing was sent.", es: "No se pudo guardar la contrase\u00f1a. No se envi\u00f3 nada." },
   "perch.waitingBanner": {
     en: "Waiting on your answer — respond to the question card below.",
     es: "Esperando tu respuesta — contesta la tarjeta de abajo.",

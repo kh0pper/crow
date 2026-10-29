@@ -187,8 +187,9 @@ function makeBridge(dir, crowHome) {
   };
 }
 
-/** Timers the engine arms (idle, stall, lease refresh) are held, never fired: a canary run is
- *  not about timing, and a real timer would keep the test process alive. */
+/** Timers the engine arms (idle, stall, lease refresh) are held, never fired on their own: a
+ *  canary run is not about timing, and a real timer would keep the test process alive. A test
+ *  that is about timing fires them with advance(ms); pending() counts the held ones. */
 function heldClock() {
   let t = 1_700_000_000_000, seq = 0;
   const timers = new Map();
@@ -196,6 +197,20 @@ function heldClock() {
     now: () => t,
     setTimer(fn, ms) { const id = ++seq; timers.set(id, { fn, at: t + Number(ms) }); return id; },
     clearTimer(id) { timers.delete(id); },
+    /** Fire every timer due within `ms`, in due order, advancing `now` as it goes. */
+    advance(ms) {
+      const target = t + ms;
+      for (;;) {
+        let pick = null;
+        for (const [id, e] of timers) if (e.at <= target && (!pick || e.at < pick.e.at)) pick = { id, e };
+        if (!pick) break;
+        timers.delete(pick.id);
+        t = pick.e.at;
+        pick.e.fn();
+      }
+      t = target;
+    },
+    pending: () => timers.size,
   };
 }
 
@@ -208,7 +223,7 @@ const tick = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r
  *   - services: mount the services-api router (default true), with a fake Connect test.
  *   - teeConsole: pass captured console lines through (debugging only).
  */
-export async function createCanaryHarness({ services = true, teeConsole = false } = {}) {
+export async function createCanaryHarness({ services = true, teeConsole = false, env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "crow-canary-"));
   const dataDir = join(dir, "data");
   const crowHome = join(dir, "home");
@@ -241,13 +256,17 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
   const clock = heldClock();
   const engine = createInteractiveEngine({
     crowHome,
-    env: { CROW_HOME: crowHome },
+    env: { CROW_HOME: crowHome, ...env },
     bridge,
     now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
     // The gateway's own default log line, so it lands in the console sink.
     log: (m) => console.log("[perch-interactive] " + m),
     hiddenDirs: [],
   });
+
+  // The boot's wiring (boot/mcp-mounts.js): the request store's card hook reaches this engine.
+  const secretStore = await import("../../servers/gateway/secrets/request-store.js");
+  secretStore.setEmitSecretCard((sid, frame, opts) => engine.emitSecretCard(sid, frame, opts));
 
   // A project for the services connect path.
   const db = createDbClient(dbFile);
@@ -259,7 +278,7 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
   // The gateway's global 1mb JSON parser, skipping the routes that parse their own body: the
   // same predicate as servers/gateway/index.js `_hasOwnParser` for the prefixes mounted here.
   const globalJson = express.json({ limit: "1mb" });
-  const hasOwnParser = (p) => /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/");
+  const hasOwnParser = (p) => /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+$/i.test(p);
   app.use((req, res, next) => (hasOwnParser(req.path) ? next() : globalJson(req, res, next)));
 
   const sessionGate = (req, res, next) => {
@@ -318,6 +337,16 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
       req.on("error", reject);
       req.end(payload);
     });
+  }
+
+  /** GET `path` with the session cookie. Returns { status, headers, text, json }. */
+  async function get(path, { headers = {} } = {}) {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { cookie: AUTH.cookie, ...headers } });
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { /* not JSON */ }
+    responses.push({ path, status: res.status, text });
+    return { status: res.status, headers: res.headers, text, json };
   }
 
   /** Spawn an engine session and collect every event it emits into `frames`. */
@@ -415,6 +444,7 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
   async function close() {
     for (const off of unsubs) { try { off(); } catch { /* gone */ } }
     try { await engine.stopAll(); } catch { /* best effort */ }
+    secretStore.setEmitSecretCard(null);
     cap.stop();
     server.closeAllConnections();
     await new Promise((r) => server.close(r));
@@ -427,8 +457,8 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
   function mountDashboard(router) { dash.use(router); }
 
   return {
-    dir, dataDir, crowHome, dbFile, db, engine, bridge, frames, responses, connectTests,
+    dir, dataDir, crowHome, dbFile, db, engine, bridge, frames, responses, connectTests, clock,
     console: cap, AUTH, sessionGate,
-    post, spawnSession, mountDashboard, pi, endTurn, keychainRows, openKeychain, grepEverywhere, close, tick,
+    post, get, spawnSession, mountDashboard, pi, endTurn, keychainRows, openKeychain, grepEverywhere, close, tick,
   };
 }

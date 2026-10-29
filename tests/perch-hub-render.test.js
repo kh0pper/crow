@@ -1599,10 +1599,12 @@ test("classic render is unchanged", async () => {
   // only for a change that MEANS to touch classic Perch.
   // Re-pinned for R1.2 PR 4: the Session section gained the hidden summary
   // card with Forget (both modes share the section, by design).
+  // Re-pinned for the credential card: the Chat section gained the empty #perch-secret pane
+  // (both modes share it: a password card must show in classic Perch too).
   const PINS = {
-    en: { tabs: "3863f216197f3810e82de520eaa584f4c7195d3fcc4a98493044d6512be7aa4b",
+    en: { tabs: "43c98153e4b058707336d7f74587337525e96354a4c7b03f8414bf5c0c51027d",
       head: "048286e387d9721effbaa09b37155f48a4df2b60c5b157ef27b745061ff43096" },
-    es: { tabs: "f143f5894ebafbd367fd2f87e9acc51cb19673557da20a9202012db054f5d1cd",
+    es: { tabs: "0c696013255dc6556762ee5fd025152f46d74d27e5954a6ba2b70552a21ad2a0",
       head: "f2a1635b13058fef450e71b7a0cf277d0ab112469bc1717a5cd586a6f7f014b6" },
   };
   for (const lang of ["en", "es"]) {

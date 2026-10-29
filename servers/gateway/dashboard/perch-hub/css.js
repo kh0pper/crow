@@ -354,6 +354,22 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root #perch-ask > .ask-combined{display:flex;flex-direction:column;overflow:hidden}
 #perch-hub-root .ask-body{display:grid;gap:13px;flex:0 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 #perch-hub-root .ask-combined .ask-foot{flex-shrink:0}
+/* Credential card (spec 10): the password card's own pane under the ask pane. It never
+   scrolls away with the transcript, every target is 44 px, the field's 16 px text stops iOS
+   zooming on focus, and a long bot label wraps instead of widening the column. */
+#perch-hub-root #perch-secret{flex:0 0 auto;min-width:0}
+#perch-hub-root #perch-secret:not(:empty){margin-top:6px}
+#perch-hub-root .secret-card{min-width:0}
+#perch-hub-root .secret-title,#perch-hub-root .secret-asks{overflow-wrap:anywhere}
+#perch-hub-root .secret-asks{font-size:13px;color:var(--dim)}
+#perch-hub-root .secret-help{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .secret-controls{align-items:center;gap:8px}
+#perch-hub-root .secret-controls button{min-height:44px;padding:10px 14px}
+#perch-hub-root .secret-controls button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .secret-controls .secret-input{flex:1 1 100%;min-width:0;width:auto;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card)}
+#perch-hub-root .secret-result{font-size:13.5px;color:var(--dim)}
+#perch-hub-root .secret-status{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .secret-status:empty{display:none}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page

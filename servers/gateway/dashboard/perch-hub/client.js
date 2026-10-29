@@ -2,6 +2,7 @@ import { tJs } from "../shared/i18n.js";
 import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
+import { perchSecretCardJs } from "./secret-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
@@ -1644,7 +1645,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
     resetBrowserTiles();                  /* live browser tile: its pollers and header line die with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
@@ -1915,6 +1916,8 @@ export function perchHubJs(lang = "en") {
       browserFrame(d);
     });
     on('ask_user',function(d){ renderAsk(d); });
+    /* Credential card (spec 10): metadata only ({id,label,state}); secret-card.js. */
+    on('secret_request',function(d){ secretFrame(d); });
     on('ask_expired',function(d){
       if(askShown&&d&&askShown.requestId===d.requestId) renderAsk(Object.assign({},askShown,{expired:true}));
     });
@@ -2251,7 +2254,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
     resetBrowserTiles();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
@@ -2532,6 +2535,7 @@ export function perchHubJs(lang = "en") {
     loadCardOffers(current.sid);   /* P5: pending offers and the card-made notes */
     loadCardChip(current.sid);     /* P5: the card this chat is linked to */
     loadBriefing(current.sid);     /* R1.2 PR 4: the Briefing card on top, the summary in the Session tab */
+    loadSecret(current.sid);       /* credential card: an open password card comes back on reload */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -2768,7 +2772,7 @@ export function perchHubJs(lang = "en") {
     planState=null; renderPlan();
     toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
     resetFacts();
     /* Composer dictation: a switch drops the recording and frees the mic;
        each open re-probes the server (dictation.js). */
@@ -4271,6 +4275,7 @@ export function perchHubJs(lang = "en") {
 ${perchPhoneCardJs(lang)}
 
 ${perchArtifactCardJs(lang)}
+${perchSecretCardJs(lang)}
 ${perchCardChipJs(lang)}
 ${perchBriefingJs(lang)}
 ${sessionCardsJs(lang)}

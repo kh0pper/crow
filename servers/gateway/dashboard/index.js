@@ -54,6 +54,7 @@ import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
 import { healthAttentionRouter } from "./panels/health.js";
 import { csrfMiddleware } from "./shared/csrf.js";
+import secretSubmitRouter from "../routes/secret-submit.js";
 import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
 import federationRouterFactory from "../routes/federation.js";
 import federationCompanionRouterFactory from "../routes/federation-companion.js";
@@ -746,6 +747,11 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // slot, same reasons — see perch.js's header above and this file's own
   // comment on the P1 mount.
   router.use(perchInteractiveApiRouter(dashboardAuth));
+
+  // Credential card (spec §10.2): the password card's submit. Same slot, same rails (session +
+  // CSRF, Funnel refused upstream); its own 4kb parser and fixed-code error handler (the path is
+  // in index.js _hasOwnParser). See routes/secret-submit.js's header.
+  router.use(secretSubmitRouter(dashboardAuth));
 
   // Perch composer dictation (queue item 15): one-shot speech-to-text through
   // the configured STT profile. Same slot, same reasons (session + CSRF rails,

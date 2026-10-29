@@ -13,8 +13,13 @@
  *    `deliver` (targets.js). This store keeps the request's metadata and nothing else.
  *  - One open request per session. The id is 128 random bits (32 hex characters), single use,
  *    bound to the session; it expires 10 minutes after it is made.
- *  - Expiry is lazy (every entry point sweeps first), so no timer keeps the process alive and a
- *    test can drive the clock (_setClockForTest).
+ *  - Expiry: every entry point sweeps first, and an unref'd timer per request also expires it at
+ *    `expiresAt` while nobody calls in, so the card flips to "expired" on its own. The timer never
+ *    keeps the process alive and is cleared on claim, cancel, discard and forgetSession; a test
+ *    drives both the clock (_setClockForTest) and the timers (_setTimersForTest).
+ *  - The card hook seam lives here (setEmitSecretCard / emitSecretCard; secrets/mcp.js re-exports
+ *    it): the boot wires it to the Perch engine's allowlisted `secret_request` frame, and the
+ *    expiry timer and the submit route both emit through it.
  */
 import { randomBytes } from "node:crypto";
 import { getTarget } from "./targets.js";
@@ -34,8 +39,45 @@ const ID_RE = /^[0-9a-f]{32}$/;
 const LABEL_MAX = 80;
 
 let clock = () => Date.now();
+let setTimer = (fn, ms) => { const h = setTimeout(fn, ms); if (h && typeof h.unref === "function") h.unref(); return h; };
+let clearTimer = (h) => clearTimeout(h);
 const requests = new Map(); // id -> frozen request
+const timers = new Map(); // id -> expiry timer handle
 const notes = new Map(); // sessionId -> [{ line, at }]
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+// The card hook: (sessionId, frame, { botId }) => { delivered } | undefined. Installed once at
+// boot (boot/mcp-mounts.js) with the engine's emitSecretCardToResident; absent, it is a no-op.
+let installedCardHook = null;
+/** Install (or, with null, remove) the process's card hook. */
+export function setEmitSecretCard(fn) { installedCardHook = typeof fn === "function" ? fn : null; }
+/** The default card hook: the installed one, or a no-op (undefined) when none is installed. */
+export function emitSecretCard(sessionId, frame, opts) {
+  return installedCardHook ? installedCardHook(sessionId, frame, opts) : undefined;
+}
+
+/** The card frame for a request (primitives only, never a value). */
+export function secretFrame(r, state) {
+  return { type: "secret_request", id: r.id, label: r.label, state };
+}
+
+/** Emit a frame through the hook, never throwing: a card update is display only. */
+function emitQuietly(r, state) {
+  try {
+    const out = emitSecretCard(r.sessionId, secretFrame(r, state), { botId: r.botId });
+    if (out && typeof out.then === "function") out.then(null, () => {});
+  } catch { /* display only */ }
+}
+
+function dropTimer(id) {
+  const h = timers.get(id);
+  if (h !== undefined) { timers.delete(id); try { clearTimer(h); } catch { /* gone */ } }
+}
+
+function remove(id) {
+  requests.delete(id);
+  dropTimer(id);
+}
 
 export class SecretRequestError extends Error {
   constructor(code, message) {
@@ -60,9 +102,10 @@ export function addSecretNote(sessionId, line) {
   notes.set(sid, list);
 }
 
-function expire(r) {
-  requests.delete(r.id);
+function expire(r, { emit = true } = {}) {
+  remove(r.id);
   addSecretNote(r.sessionId, SECRET_NOTES.expired);
+  if (emit) emitQuietly(r, "expired");
 }
 
 /** Drop every request past its expiry (each with its expired note), then every note older
@@ -79,8 +122,21 @@ export function sweepExpired(now = clock()) {
 /** The session stopped or was archived: drop its requests and its queued notes (no note). */
 export function forgetSession(sessionId) {
   const sid = String(sessionId);
-  for (const r of [...requests.values()]) if (r.sessionId === sid) requests.delete(r.id);
+  for (const r of [...requests.values()]) if (r.sessionId === sid) remove(r.id);
   notes.delete(sid);
+}
+
+/**
+ * The session's child is gone (hibernated, exited, shut down) but the chat goes on: its open
+ * request expires now, with the expired note for the bot's next turn, and any queued notes
+ * (a "Saved in the keychain" the bot has not seen yet) are kept. The engine draws the card
+ * change itself, so nothing is emitted through the hook. Returns the expired requests.
+ */
+export function expireSessionRequests(sessionId) {
+  const sid = String(sessionId);
+  const out = [];
+  for (const r of [...requests.values()]) if (r.sessionId === sid) { expire(r, { emit: false }); out.push(r); }
+  return out;
 }
 
 /** The session's open request, or null. */
@@ -125,6 +181,7 @@ export function createSecretRequest({ sessionId, threadId, botId, kind = "passwo
   const id = randomBytes(16).toString("hex");
   const createdAt = clock();
   requests.set(id, Object.freeze({ id, ...req, createdAt, expiresAt: createdAt + SECRET_REQUEST_TTL_MS }));
+  timers.set(id, setTimer(() => { timers.delete(id); sweepExpired(); }, Math.min(SECRET_REQUEST_TTL_MS, MAX_TIMER_MS)));
   return { id };
 }
 
@@ -149,7 +206,7 @@ function lookup(id, sessionId) {
  */
 export function claimSecret(id, { sessionId } = {}) {
   const r = lookup(id, sessionId);
-  if (r.outcome === "ok") requests.delete(id);
+  if (r.outcome === "ok") remove(id);
   return r;
 }
 
@@ -184,14 +241,14 @@ export async function deliverSecret(request, value, ctx = {}) {
 export function cancelSecret(id, sessionId) {
   const r = lookup(id, sessionId);
   if (r.outcome !== "ok") return { outcome: r.outcome };
-  requests.delete(id);
+  remove(id);
   addSecretNote(r.request.sessionId, SECRET_NOTES.closed);
-  return { outcome: "ok", note: SECRET_NOTES.closed };
+  return { outcome: "ok", note: SECRET_NOTES.closed, request: r.request };
 }
 
 /** Drop a request with no note (the card could not be shown, so the bot was told at once). */
 export function discardSecret(id) {
-  requests.delete(id);
+  remove(id);
 }
 
 /** The session's queued lines, removed as they are taken: each goes out once. */
@@ -213,4 +270,13 @@ export function returnSecretNotes(sessionId, lines) {
 
 /** Test seams. */
 export function _setClockForTest(fn) { clock = typeof fn === "function" ? fn : () => Date.now(); }
-export function _resetSecretStoreForTest() { requests.clear(); notes.clear(); clock = () => Date.now(); }
+/** Replace the expiry timers ({ setTimer(fn, ms) -> handle, clearTimer(handle) }); null restores. */
+export function _setTimersForTest(t) {
+  if (t && typeof t.setTimer === "function" && typeof t.clearTimer === "function") { setTimer = t.setTimer; clearTimer = t.clearTimer; return; }
+  setTimer = (fn, ms) => { const h = setTimeout(fn, ms); if (h && typeof h.unref === "function") h.unref(); return h; };
+  clearTimer = (h) => clearTimeout(h);
+}
+export function _resetSecretStoreForTest() {
+  for (const id of [...timers.keys()]) dropTimer(id);
+  requests.clear(); notes.clear(); clock = () => Date.now();
+}

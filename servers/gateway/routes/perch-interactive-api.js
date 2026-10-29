@@ -78,7 +78,7 @@ import {
   loadBotRow, loadGiveTarget, getOffer, listOffers, claimOffer, renewLease, releaseClaim,
   settleOffer, findOfferCard, recoverThread, claimOfferNotes, unclaimOfferNotes, offerTag,
 } from "../board/offer-service.js";
-import { takeSecretNotes, returnSecretNotes } from "../secrets/request-store.js";
+import { takeSecretNotes, returnSecretNotes, openRequestFor } from "../secrets/request-store.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -1084,6 +1084,16 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
+  });
+
+  // ---- GET /interactive/:sid/secret — the open password card, for a reload ----
+  // Credential card (spec §10.2): `{ id, label, kind, expiresAt }` for this session's open
+  // request, or null. Metadata only (the store never holds a value); no-store, because a card
+  // that was just answered must not come back from a cache. Read-only.
+  router.get(P + "/interactive/:sid/secret", (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const r = openRequestFor(String(req.params.sid));
+    res.json(r ? { id: r.id, label: r.label, kind: r.kind, expiresAt: r.expiresAt } : null);
   });
 
   // ---- POST /interactive/:sid/forget-summary — Forget (sheet → Session) ----

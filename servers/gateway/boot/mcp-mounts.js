@@ -404,10 +404,15 @@ export async function mountMcpServers(app, deps) {
   // Credential card (spec §10.2): the bot-only /secrets mount, core like /board. Its token
   // (SECRETS_TOKEN) rotates with the families above; crow_request_secret also needs a signed
   // Perch actor whose session is resident and awake in this process (never woken by a check).
-  // The card itself rides the secrets/mcp.js emitSecretCard seam. A failure never blocks boot.
+  // The card itself rides the request-store.js emitSecretCard seam, wired here to the engine's
+  // allowlisted secret_request hook (resident sessions only; never creates an engine). The
+  // expiry timer and the submit route emit through the same seam. A failure never blocks boot.
   try {
     const { createSecretsMcpServer } = await import("../secrets/mcp.js");
-    const isLiveSession = async (sid, opts) => (await import("../perch-interactive.js")).isLiveResidentSession(sid, opts);
+    const { setEmitSecretCard } = await import("../secrets/request-store.js");
+    const { isLiveResidentSession, emitSecretCardToResident } = await import("../perch-interactive.js");
+    setEmitSecretCard(emitSecretCardToResident);
+    const isLiveSession = async (sid, opts) => isLiveResidentSession(sid, opts);
     mountMcpServer(app, "/secrets", () => createSecretsMcpServer({ verifyActor: verifySecretsActorSig, isLiveSession }), sessionManager, authMiddleware, peerExposureGate);
     console.log("[gateway] secrets MCP mounted at /secrets/mcp");
   } catch (err) {
