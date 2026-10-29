@@ -208,6 +208,14 @@ test("channel step renders shared gateway fields; review re-emits newlines as en
   await clearProviders();
 });
 
+test("the new-bot channel picker no longer offers glasses (they answer as Crow); companion is still there", async () => {
+  const html = await renderPost({ action: "wizard_step", step: "3", nav: "reload", tpl: "blank", display_name: "X", bot_id: "x", model: "prov/m1", gw_type: "none" });
+  const opts = [...html.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(opts.includes("companion") && opts.includes("gmail"), opts.join(","));
+  assert.ok(!opts.includes("glasses"));
+  assert.ok(!("botbuilder.wizGw_glasses" in translations));
+});
+
 test("channel reload (update-fields button) re-renders the same step with the new type's fields", async () => {
   const html = await renderPost({
     action: "wizard_step", step: "3", nav: "reload",
@@ -338,7 +346,7 @@ test("wizard_create (voice type): persists a type-only draft record", async () =
 test("every new wizard key ships en+es and es differs from en (except proper nouns)", () => {
   const sameOk = new Set([
     "botbuilder.wizGw_gmail", "botbuilder.wizGw_discord", "botbuilder.wizGw_telegram",
-    "botbuilder.wizGw_slack", "botbuilder.wizGw_glasses",
+    "botbuilder.wizGw_slack",
   ]);
   const wizKeys = Object.keys(translations).filter((k) =>
     k.startsWith("botbuilder.wiz") || k.startsWith("botbuilder.tpl_") ||

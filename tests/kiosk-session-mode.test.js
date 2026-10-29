@@ -81,6 +81,7 @@ before(async () => {
       runVoiceTurn: async (o) => { turnCalls.push(o); return { route: "fast", timings: {} }; },
       speakText: async () => true,
     },
+    crowVoice: { CROW_VOICE_BOT_ID: "crow.voice", isVoiceBotId: (id) => id === "crow.voice" },
     sttWarmup: async () => {},
     resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
     themeCss: () => ":root{--k-sky:#eef1f3}",
@@ -231,7 +232,7 @@ test("ws: no hello → 4401 hello_timeout (the session cookie alone starts nothi
   assert.deepEqual(c.closed, { code: 4401, reason: "hello_timeout" });
 });
 
-test("valid session: ready without pairing, the turn runs on the first enabled assistant with the kiosk tool limits, and NO device is stored", async () => {
+test("valid session: ready without pairing, the turn runs as Crow with the kiosk tool limits, and NO device is stored", async () => {
   const before = await withDb((db) => store.listDevices(db));
   const c = await connect();
   const ready = c.msgs.find((m) => m.type === "ready");
@@ -240,7 +241,7 @@ test("valid session: ready without pairing, the turn runs on the first enabled a
   assert.equal(ready.display_config.follow_up, false);
   const call = await runTurn(c);
   assert.ok(call, "the turn ran");
-  assert.equal(call.device.bound_bot_id, "a-first", "first enabled assistant by id (the bot board's default)");
+  assert.equal(call.device.bound_bot_id, "crow.voice", "the session display answers as Crow");
   assert.equal(call.device.device_kind, "kiosk");
   assert.match(call.device.id, /^dash-[0-9a-f]{16}$/);
   assert.ok(!call.device.id.includes(sessionToken.slice(0, 8)), "the id is a hash, never the session token");
@@ -267,48 +268,15 @@ test("a session hello cannot claim a paired display: device_id/token in the fram
   c.ws.close();
 });
 
-test("the assistant: the one chosen in the Kiosk panel wins; a disabled or deleted choice falls back to the first enabled one", async () => {
-  const post = (body) => fetch(base + "/api/kiosk/admin/dashboard-voice", { method: "POST", headers: { ...SERVE, Cookie: cookie(), "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify(body) });
-  assert.equal((await post({ bot_id: "z-off" })).status, 400, "a disabled assistant cannot be chosen");
-  assert.equal((await post({ bot_id: "b-house" })).status, 200);
-  {
-    const c = await connect();
-    assert.equal((await runTurn(c)).device.bound_bot_id, "b-house");
-    c.ws.close();
-  }
-  const admin = await (await fetch(base + "/api/kiosk/admin/displays", { headers: { ...SERVE, Cookie: cookie() } })).json();
-  assert.equal(admin.dashboard_voice.bot_id, "b-house");
-  await withDb((db) => db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 0 WHERE bot_id = 'b-house'", args: [] }));
-  try {
-    const c = await connect();
-    assert.equal((await runTurn(c)).device.bound_bot_id, "a-first");
-    c.ws.close();
-  } finally {
-    await withDb((db) => db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 WHERE bot_id = 'b-house'", args: [] }));
-  }
-  assert.equal((await post({ bot_id: "" })).status, 200, "empty = automatic");
-  assert.equal((await (await fetch(base + "/api/kiosk/admin/displays", { headers: { ...SERVE, Cookie: cookie() } })).json()).dashboard_voice.bot_id, null);
-});
-
-test("the Kiosk panel setting is a dashboard POST: session + CSRF required", async () => {
+test("the Kiosk panel no longer chooses the dashboard's assistant: POST /api/kiosk/admin/dashboard-voice is gone (404) and writes nothing", async () => {
   const url = base + "/api/kiosk/admin/dashboard-voice";
   const body = JSON.stringify({ bot_id: "b-house" });
-  assert.equal((await fetch(url, { method: "POST", headers: { ...SERVE, Cookie: cookie(), "Content-Type": "application/json" }, body })).status, 403, "no CSRF header");
-  const noSession = await fetch(url, { method: "POST", headers: { ...SERVE, "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body, redirect: "manual" });
-  assert.ok([302, 303, 401].includes(noSession.status), String(noSession.status));
-  assert.equal(await withDb((db) => registry.readSetting(db, "kiosk_dashboard_bot_id")), "", "neither refused request changed the setting");
-});
-
-test("no enabled assistant → 4403 no_bot (the page links to the Kiosk panel); nothing is stored", async () => {
-  await withDb((db) => db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 0", args: [] }));
-  try {
-    const c = await connect();
-    await c.until(() => c.closed);
-    assert.deepEqual(c.closed, { code: 4403, reason: "no_bot" });
-    assert.ok(!c.msgs.some((m) => m.type === "ready"));
-  } finally {
-    await withDb((db) => db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 WHERE bot_id IN ('a-first','b-house')", args: [] }));
-  }
+  const before = await withDb((db) => registry.readSetting(db, "kiosk_dashboard_bot_id"));
+  assert.equal((await fetch(url, { method: "POST", headers: { ...SERVE, Cookie: cookie(), "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body })).status, 404);
+  assert.equal(await withDb((db) => registry.readSetting(db, "kiosk_dashboard_bot_id")), before, "the setting is untouched");
+  const c = await connect();
+  assert.equal((await runTurn(c)).device.bound_bot_id, "crow.voice", "and the overlay still answers as Crow");
+  c.ws.close();
 });
 
 test("logging out ends the display: the next question is refused and the socket closes 4401", async () => {
@@ -450,10 +418,9 @@ test("without the core session helpers (an older gateway) the bundle offers no s
   } finally { k.stop(); s.close(); }
 });
 
-// ─── assistant fit on a session display ─────────────────────────────────────
+// ─── a second runtime on a session display ───
 // The dashboard's Talk to Crow runs on the same quick voice model as a paired display, so the
-// same fit rules apply: "Automatic" never lands on an assistant that cannot fit, the panel setting
-// refuses one, and a turn on one says so and links to the Kiosk panel.
+// same rules apply to its turns.
 
 /** A second runtime on the same database and core auth, with its own voice runner. */
 async function serve(voice, extra = {}) {
@@ -464,6 +431,7 @@ async function serve(voice, extra = {}) {
     openDb: open, deviceStore: store,
     settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
     voice, sttWarmup: async () => {},
+    crowVoice: { CROW_VOICE_BOT_ID: "crow.voice", isVoiceBotId: (id) => id === "crow.voice" },
     resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
     themeCss: () => "", files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
     announceToken: { validate: async () => false }, helloTimeoutMs: 300, wrapPcmAsWav, log: (m) => logs.push(m),
@@ -479,7 +447,6 @@ async function serve(voice, extra = {}) {
   return {
     k, b,
     listing: async () => (await fetch(b + "/api/kiosk/admin/displays", { headers: H })).json(),
-    choose: (bot_id) => fetch(b + "/api/kiosk/admin/dashboard-voice", { method: "POST", headers: { ...H, "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify({ bot_id }) }),
     /** Open the overlay's socket; resolves once ready or closed. */
     async open(hello = { type: "hello", mode: "session", csrf: CSRF, caps: {} }) {
       const ws = new WebSocket(b.replace("http", "ws") + WS_PATH, { headers: { ...H, Origin: b } });
@@ -505,121 +472,7 @@ function fitVoice(levels, calls = []) {
     assessBot: async ({ botId }) => (levels[botId] ? { level: levels[botId], ctx: 8192, est_tokens: 1, est_no_skills_tokens: 1, reserve_tokens: 1024, model: "voice/quick" } : null),
   };
 }
-const resetChoice = () => withDb((db) => registry.writeSetting(db, "kiosk_dashboard_bot_id", ""));
-
-test("fit: Automatic picks the first assistant that fits — a full fit before a without-skills fit, never a too-large one", async () => {
-  await resetChoice();
-  // a-first is too large, b-house only fits without its skills.
-  const lean = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills" }));
-  try {
-    assert.equal((await lean.listing()).dashboard_voice.effective_bot_id, "b-house", "the too-large first assistant is skipped");
-  } finally { lean.close(); }
-  await withDb((db) => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('c-small','Small','{}',1)", args: [] }));
-  const calls = [];
-  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills", "c-small": "full" }, calls));
-  try {
-    assert.equal((await f.listing()).dashboard_voice.effective_bot_id, "c-small", "a full fit wins over an earlier without-skills fit");
-    const c = await f.open();
-    await c.ask();
-    assert.equal(calls.at(-1).device.bound_bot_id, "c-small", "and that is the assistant the overlay talks to");
-    c.ws.close();
-  } finally { f.close(); await withDb((db) => db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'c-small'", args: [] })); }
-});
-
-test("fit: when no enabled assistant fits, the overlay gets the no-assistant close (4403 no_bot → the message with the Kiosk-panel link)", async () => {
-  await resetChoice();
-  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "too_large" }));
-  try {
-    const l = await f.listing();
-    assert.equal(l.dashboard_voice.effective_bot_id, null);
-    assert.equal(l.bots.length, 2, "the assistants exist — they just do not fit");
-    const c = await f.open();
-    await c.until(() => c.closed);
-    assert.deepEqual(c.closed, { code: 4403, reason: "no_bot" });
-    assert.ok(!c.msgs.some((m) => m.type === "ready"));
-  } finally { f.close(); }
-});
-
-test("fit: the dashboard-voice setting refuses a too-large assistant (as the bind route does) and accepts one that works without its skills", async () => {
-  await resetChoice();
-  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills" }));
-  try {
-    const no = await f.choose("a-first");
-    assert.equal(no.status, 400);
-    assert.deepEqual(await no.json(), { error: "bot_too_large" });
-    assert.equal(await withDb((db) => registry.readSetting(db, "kiosk_dashboard_bot_id")), "", "nothing was saved");
-    const ok = await f.choose("b-house");
-    assert.equal(ok.status, 200);
-    assert.deepEqual(await ok.json(), { ok: true, bot_id: "b-house", effective_bot_id: "b-house", auto_bot_id: "b-house" });
-    assert.equal((await f.choose("")).status, 200, "back to automatic");
-    const l = await f.listing();
-    assert.deepEqual(l.bots.map((x) => [x.bot_id, x.fit]).sort(), [["a-first", "too_large"], ["b-house", "no_skills"]], "the picker has every assistant's status");
-  } finally { f.close(); await resetChoice(); }
-});
-
-test("voice bot choice (item 20 PR 3): the listing and the save name who Automatic would pick, also while an explicit choice is set — the same resolver, never a second one", async () => {
-  await resetChoice();
-  await withDb((db) => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('c-small','Small','{}',1)", args: [] }));
-  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills", "c-small": "full" }));
-  try {
-    let dv = (await f.listing()).dashboard_voice;
-    assert.deepEqual([dv.bot_id, dv.effective_bot_id, dv.auto_bot_id], [null, "c-small", "c-small"]);
-    const saved = await (await f.choose("b-house")).json();
-    assert.deepEqual(saved, { ok: true, bot_id: "b-house", effective_bot_id: "b-house", auto_bot_id: "c-small" });
-    dv = (await f.listing()).dashboard_voice;
-    assert.deepEqual([dv.bot_id, dv.effective_bot_id, dv.auto_bot_id], ["b-house", "b-house", "c-small"], "Automatic is still named while b-house is chosen");
-  } finally { f.close(); await resetChoice(); await withDb((db) => db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'c-small'", args: [] })); }
-});
-
-test("fit: with no estimator (an older gateway) or an unknown model context, Automatic is unchanged — the first enabled assistant", async () => {
-  await resetChoice();
-  const f = await serve(fitVoice({}));   // assessBot → null for every assistant
-  try { assert.equal((await f.listing()).dashboard_voice.effective_bot_id, "a-first"); } finally { f.close(); }
-});
-
-test("fit: a session turn on a chosen assistant that no longer fits is not sent to the model — the line is spoken, and the page shows the banner with the Kiosk-panel link", async () => {
-  // The REAL voice turn on scripted services: the chosen assistant's prompt cannot fit 8,192 tokens even without skills.
-  const { createVoiceTurnRunner } = await import("../servers/gateway/voice/turn.js");
-  const { errorDecision } = await import("../bundles/kiosk/public/state.js");
-  const { STRINGS } = await import("../bundles/kiosk/server/strings.js");
-  let modelCalls = 0;
-  const voice = createVoiceTurnRunner({
-    log: (m) => logs.push(m),
-    loadBotRow: async (db, id) => ({ bot_id: id, enabled: 1, definition: JSON.stringify({ bot_id: id, system_prompt: "P".repeat(60_000) }) }),
-    getSttProfile: async () => ({ id: "stt" }), createSttAdapter: async () => ({ transcribe: async () => ({ text: "Tell me a joke" }) }),
-    getTtsProfile: async () => ({ id: "tts", defaultVoice: "v" }),
-    createTtsAdapter: async () => ({ name: "kokoro", async *synthesize(text) { yield Buffer.from(text); } }),
-    createChatAdapter: async () => ({ async *chatStream() { modelCalls++; yield { type: "done" }; } }),
-    resolveKey: async () => ({ baseUrl: "x" }), acquire: async () => null, probeReady: async () => false,
-    contextLenFor: async () => 8192,
-    chooseVoiceRoute: () => ({ route: "fast", reason: null, key: "voice/quick" }), fastKey: "voice/quick",
-    getChatTools: () => [], createToolExecutor: () => ({ executeToolCalls: async () => [], close: async () => {} }), maxToolRounds: 10,
-    effectiveToolName: (tc) => tc.name, isExternalSendTool: () => false, isConnectedAddonTool: () => false, botVoiceScope: () => null,
-    generateSystemPrompt: async ({ botDef }) => botDef.system_prompt, isMemoryTool: () => false,
-  });
-  // Chosen while it still fit (the setting is written directly: the route would refuse it now).
-  await withDb((db) => registry.writeSetting(db, "kiosk_dashboard_bot_id", "b-house"));
-  const f = await serve(voice);
-  try {
-    const l = await f.listing();
-    assert.equal(l.bots.find((x) => x.bot_id === "b-house").fit, "too_large", "the panel shows it with the real estimator");
-    assert.equal(l.dashboard_voice.effective_bot_id, "b-house", "an explicit choice is kept, and reported at the turn");
-    const c = await f.open();
-    assert.ok(c.msgs.some((m) => m.type === "ready"));
-    await c.ask();
-    assert.equal(modelCalls, 0, "no model call");
-    const err = c.msgs.find((m) => m.type === "error");
-    assert.deepEqual(err, { type: "error", code: "bot_too_large", recoverable: false });
-    assert.ok(c.msgs.some((m) => m.type === "caption_delta" && m.text === STRINGS.en.err_bot_too_large), "the spoken line is captioned");
-    assert.equal(c.msgs.find((m) => m.type === "turn_done").failed, "bot_too_large");
-    // What the session page does with that frame: the banner that carries the link to /dashboard/kiosk.
-    assert.deepEqual(errorDecision(err.code, err.recoverable, "session"), { banner: "session_no_bot" });
-    c.ws.close();
-  } finally { f.close(); await resetChoice(); }
-});
-
 test("a session display gets the same turn rules as a paired one: display tool only when asked, the browser's time zone in the turn context, the clock fast path", async () => {
-  await resetChoice();
   const calls = [];
   const f = await serve(fitVoice({ "a-first": "full", "b-house": "full" }, calls));
   try {
@@ -694,8 +547,7 @@ async function crowServe({ def, ensure = true, providers = [], voiceExtra = {}, 
         await db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id IN (?, 'helper')", args: [CROW] });
         for (const [id] of providers) await db.execute({ sql: "DELETE FROM providers WHERE id = ?", args: [id] });
       });
-      await resetChoice();
-    },
+        },
   };
 }
 const crowDef = async (over = {}, voice = {}) => {
@@ -888,18 +740,6 @@ test("the kiosk turn check answers as the Crow voice bot (botId crow.voice)", as
   } finally { await f.close(); }
 });
 
-test("resolveSessionBot never returns a voice bot: neither an explicit choice of it nor Automatic", async () => {
-  const { resolveSessionBot } = await import("../bundles/kiosk/server/session-display.js");
-  const fake = (enabled) => ({ execute: async ({ sql, args }) => ({ rows: /bot_id = \?/.test(sql) ? (enabled.includes(args[0]) ? [{ bot_id: args[0] }] : []) : enabled.map((bot_id) => ({ bot_id })) }) });
-  const db = fake(["a.voice", CROW, "helper"]);
-  assert.equal(await resolveSessionBot(db, { readSetting: async () => CROW }), "a.voice", "the literal reserved id is excluded by default");
-  assert.equal(await resolveSessionBot(fake([CROW, "helper"]), { readSetting: async () => CROW }), "helper", "an explicit choice of crow.voice falls to Automatic");
-  assert.equal(await resolveSessionBot(fake([CROW, "helper"]), { readSetting: async () => "" }), "helper", "Automatic skips it");
-  assert.equal(await resolveSessionBot(fake([CROW]), { readSetting: async () => "" }), null);
-  assert.equal(await resolveSessionBot(db, { readSetting: async () => "" }, null, { isVoiceBotId: (id) => id.endsWith(".voice") }), "helper", "the injected test is used");
-  assert.equal(await resolveSessionBot(fake([CROW, "helper"]), { readSetting: async () => "" }, async () => "full"), "helper", "fit-aware Automatic skips it too");
-});
-
 // ─── B3: the player bar's endpoint and the bar display's lifetime (dormant until a bar hello) ───
 // A runtime on the same database and core auth, with a fake relay (a stream that answers 200, or holds
 // the request open until its ticket is cut), a settable clock, the minute sweep captured, and the
@@ -936,6 +776,7 @@ async function barServe({ verifySession = auth.verifySession, barCheckTimeoutMs 
     settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
     voice: { runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true },
     sttWarmup: async () => {},
+    crowVoice: { CROW_VOICE_BOT_ID: "crow.voice", isVoiceBotId: (id) => id === "crow.voice" },
     resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
     themeCss: () => "", files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
     announceToken: { validate: async () => false }, helloTimeoutMs: 300, wrapPcmAsWav,

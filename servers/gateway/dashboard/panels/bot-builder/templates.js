@@ -74,10 +74,10 @@ export const BOT_TEMPLATES = [
       "a time.",
   },
   {
-    // For a voice device (glasses, a headset through the phone app): a short persona and few
+    // For a voice device (a headset through the phone app): a short persona and few
     // tools, so the whole prompt fits a small quick voice model with room for the turn.
     id: "personal-voice",
-    gwType: "glasses",
+    gwType: "none",
     tools: {
       crow_mcp: [
         "crow-memory/crow_search_memories",

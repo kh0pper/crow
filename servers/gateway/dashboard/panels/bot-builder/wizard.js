@@ -37,7 +37,7 @@ export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "revi
 // the shared gateway-fields module; device-bound types persist a type-only
 // draft record and finish on the Gateways tab (spec §D3). "none" is the
 // always-present "skip for now" (spec §D1 step 3).
-const WIZARD_GW_TYPES = ["none", "crow-messages", "perch", "gmail", "discord", "telegram", "slack", "glasses", "companion"];
+const WIZARD_GW_TYPES = ["none", "crow-messages", "perch", "gmail", "discord", "telegram", "slack", "companion"];
 
 // Every field the wizard collects; the carry re-emits these as hidden inputs
 // on steps that don't edit them (spec §D1: state lives in the POST body).
@@ -155,7 +155,7 @@ function channelBody(state, lang) {
     fields = r.fields + r.hint;
   } else if (gwType === "crow-messages") {
     fields = `<p class="btb-hint">${t("botbuilder.wizGwCrowMessagesNote", lang)}</p>`;
-  } else if (gwType === "glasses" || gwType === "companion") {
+  } else if (gwType === "companion") {
     fields = `<p class="btb-hint">${t("botbuilder.wizGwFinishLaterNote", lang)}</p>`;
   } else {
     fields = `<p class="btb-hint">${t("botbuilder.wizGwNoneNote", lang)}</p>`;
@@ -178,7 +178,7 @@ function gatewayDraftFromState(state, gwType) {
 async function reviewBody(db, state, lang) {
   const tpl = getTemplate(state.tpl) || BOT_TEMPLATES[0];
   const gwType = WIZARD_GW_TYPES.includes(state.gw_type) ? state.gw_type : tpl.gwType;
-  const finishLater = gwType === "glasses" || gwType === "companion";
+  const finishLater = gwType === "companion";
   const rows = [
     [t("botbuilder.wizReviewTemplate", lang), t(`botbuilder.tpl_${tpl.id}_title`, lang)],
     [t("botbuilder.wizReviewName", lang), escapeHtml(state.display_name || "")],
@@ -415,7 +415,7 @@ export async function handleWizardCreate(req, res, { db, lang }) {
     def.gateways = simpleGateways;
   } else if (gwType === "crow-messages") {
     def.gateways = [buildCrowMessagesGatewayConfig(b)];
-  } else if (gwType === "glasses" || gwType === "companion") {
+  } else if (gwType === "companion") {
     def.gateways = [{ type: gwType }];
   }
 

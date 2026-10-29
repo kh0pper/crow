@@ -16,7 +16,7 @@ import { matchSpoken } from "./tiers.js";
 import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
 import { effectiveCaps, audioPolicy, BAR_OWNER_RE } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
-import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, isSessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
+import { sameOriginUpgrade, sessionDisplayId, isSessionDisplayId } from "./session-display.js";
 import { STRINGS } from "./strings.js";
 import { createBotFit, createBotAbilities } from "./fit.js";
 import { kioskNowContext, matchClockFastPath, relativeDatesContext, mentionsRelativeDay } from "./clock.js";
@@ -667,13 +667,12 @@ export function createKioskRuntime(deps) {
   /**
    * The session display's assistant: the Crow voice bot (deps.crowVoice.CROW_VOICE_BOT_ID), created once first
    * (deps.ensureVoiceBot; a failure is logged, and the turn then says there is no assistant). Without the shared
-   * voice module (an older caller, a test stub) the old rule: the Kiosk panel's choice, else Automatic.
+   * voice module (an older caller, a test stub) there is no assistant: the turn says so (no_bot).
    */
   const voiceBotId = typeof deps.crowVoice?.CROW_VOICE_BOT_ID === "string" ? deps.crowVoice.CROW_VOICE_BOT_ID : null;
-  const notVoice = typeof deps.crowVoice?.isVoiceBotId === "function" ? { isVoiceBotId: deps.crowVoice.isVoiceBotId } : {};
   let voiceEnsured = false;
   const sessionBot = async (db) => {
-    if (!voiceBotId) return resolveSessionBot(db, deps.settings, (id) => botFit(db, id, false), notVoice);
+    if (!voiceBotId) return null;
     if (!voiceEnsured && typeof deps.ensureVoiceBot === "function") {
       voiceEnsured = true;
       try { await deps.ensureVoiceBot(db); } catch (err) { log(`[kiosk] Crow voice bot not created (${err?.message || err})`); }
@@ -694,8 +693,6 @@ export function createKioskRuntime(deps) {
       abilities_memory: botAbilities ? await botAbilities(db, voiceBotId, true) : null,
     };
   };
-  /** Who "Automatic" would pick right now, whatever is chosen: the old resolver with no choice (never a voice bot). */
-  const automaticBot = (db) => resolveSessionBot(db, { readSetting: async () => "" }, (id) => botFit(db, id, false), notVoice);
   /** hello on the session socket: CSRF double-submit, then the assistant. `req` is the verified upgrade request. */
   async function authorizeSessionHello(req, sessionToken, msg) {
     if (!deps.csrfTokenAccepted(req, msg?.csrf)) return null;
@@ -906,11 +903,7 @@ export function createKioskRuntime(deps) {
         const base = { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles") };
         // Every display and the session overlay answer as the Crow voice bot: the panel shows "Answers as Crow" with
         // its fit and abilities (voice), and the Talk to Crow box only where the overlay is served (dashboard_talk).
-        if (voiceBotId) return { ...base, voice: await voiceListing(db), dashboard_talk: sessionMode };
-        // Without the shared voice module (an older caller, a test stub): the old chosen-assistant block.
-        const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
-        const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) };
-        return { ...base, dashboard_voice };
+        return voiceBotId ? { ...base, voice: await voiceListing(db), dashboard_talk: sessionMode } : base;
       });
       res.json(body);
     }));
@@ -943,19 +936,6 @@ export function createKioskRuntime(deps) {
         }
       });
     }));
-    // Which assistant answers the dashboard's Talk to Crow ("" = automatic: the first enabled one that fits).
-    r.post("/api/kiosk/admin/dashboard-voice", json, wrap(async (req, res) => {
-      const botId = String(req.body?.bot_id || "").slice(0, 128);
-      await withDb(async (db) => {
-        if (botId) {
-          const ok = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [botId] })).rows[0];
-          if (!ok) return res.status(400).json({ error: "bot_required" });
-          if ((await botFit(db, botId, false, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
-        }
-        await deps.settings.writeSetting(db, SESSION_BOT_SETTING, botId);
-        res.json({ ok: true, bot_id: botId || null, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) });
-      });
-    }));
     r.post("/api/kiosk/admin/displays/:id", json, wrap(async (req, res) => {
       await withDb(async (db) => {
         const cur = await deps.deviceStore.findDevice(db, req.params.id);
@@ -963,14 +943,7 @@ export function createKioskRuntime(deps) {
         const b = req.body || {};
         const patch = {};
         if (typeof b.name === "string" && b.name.trim()) patch.name = b.name.trim().slice(0, 64);
-        if (typeof b.bound_bot_id === "string") {
-          const ok = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [b.bound_bot_id] })).rows[0];
-          if (!ok) return res.status(400).json({ error: "bot_required" });
-          // Only a CHANGE of assistant is checked: a display already on a too-large one can still save its other settings.
-          const memoryOn = (b.kiosk_settings?.memory_integration ?? cur.kiosk_settings?.memory_integration) === true;
-          if (b.bound_bot_id !== cur.bound_bot_id && (await botFit(db, b.bound_bot_id, memoryOn, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
-          patch.bound_bot_id = b.bound_bot_id;
-        }
+        // bound_bot_id is retired: every display answers as Crow, so a posted value is ignored and never written.
         for (const k of ["stt_profile_id", "tts_profile_id"]) if (typeof b[k] === "string") patch[k] = b[k] || null;
         if (b.kiosk_settings && typeof b.kiosk_settings === "object") patch.kiosk_settings = b.kiosk_settings;
         const d = await deps.deviceStore.updateDeviceProfiles(db, req.params.id, patch);
