@@ -29,9 +29,9 @@ export function registerCoreRoutes(router, { db, key, satHome, state, now, out, 
   });
 
   router.post("/unpair", (_req, res) => {
-    removePairingFiles(satHome);
     state.cert = null;
     state.pinned = null;
+    removePairingFiles(satHome);
     sendSigned(res, 200, { ok: true });
     out("Unpaired by crow; management and tool calls are off");
     for (const line of pairCodeLines(issuePairCode(db, { now: now() }), key.satellite_id)) out(line);

@@ -68,7 +68,7 @@ export function readAppSha(root = APP_ROOT) {
  * `signedRoutes`: functions (router, ctx) that add routes behind auth (later tasks' bundle, job
  * and MCP routes); ctx = {db, key, satHome, state, now, out, sendSigned}.
  */
-export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders }) {
+export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn }) {
   // A cert commit a crash interrupted is finished (or discarded) before anything reads the files.
   recoverStagedCert({ db, key, satHome, now });
   const state = { cert: readCert(satHome), pinned: readPinned(satHome) };
@@ -147,7 +147,7 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     }
   });
 
-  const auth = createSatAuth({ db, key, now, getState: () => state });
+  const auth = createSatAuth({ db, key, now, getState: () => state, log: authLog });
   const signed = express.Router();
   signed.use(auth.begin);
   signed.use(express.raw({ type: () => true, limit: "1mb" }));
@@ -172,20 +172,20 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     send(500, "internal");
   });
 
-  return { app, isPaired, state };
+  return { app, isPaired, state, refusals: auth.refusals };
 }
 
 /**
  * Open state, build the app and listen. Guards are the caller's job (index.js).
  * → {server, host, port, app, db, key, home, satelliteId, isPaired, issuePairCode, close}.
  */
-export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders } = {}) {
+export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog } = {}) {
   const satHome = resolveSatHome(env);
   const { host, port } = resolveBind(env);
   const db = openSatelliteDb(satHome);
   const key = ensureSatelliteKey(satHome, { now: now() });
-  const { app, isPaired, state } = createSatelliteApp({
-    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders,
+  const { app, isPaired, state, refusals } = createSatelliteApp({
+    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog,
   });
   const server = await new Promise((ok, fail) => {
     const s = app.listen(port, host, () => ok(s));
@@ -197,12 +197,13 @@ export async function startAgent({ env = process.env, now = Date.now, out = cons
   let closed = false;
   return {
     server, app, db, key, home: satHome, host: addr.address, port: addr.port, satelliteId: key.satellite_id,
-    isPaired, scheduler,
+    isPaired, scheduler, refusals,
     issuePairCode: () => issuePairCode(db, { now: now() }),
     async close() {
       if (closed) return;
       closed = true;
       scheduler.stop();
+      refusals.flush();
       server.closeAllConnections?.();
       await new Promise((r) => server.close(() => r()));
       db.close();

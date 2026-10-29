@@ -26,7 +26,9 @@ const { fakeIdentity } = await import("./helpers/fake-satellite.js");
 const { startAgent } = await import("../servers/satellite/agent.js");
 const { ensureSatelliteKey, writeCert, writePinned, stagedCertPath } = await import("../servers/satellite/keys.js");
 const { openSatelliteDb } = await import("../servers/satellite/db.js");
-const { createNonceGuard, createSendSigned } = await import("../servers/satellite/auth.js");
+const { createNonceGuard, createSendSigned, createRefusalCounter } = await import("../servers/satellite/auth.js");
+const { applyNewCert, recoverStagedCert } = await import("../servers/satellite/certs.js");
+const { readCert, readPinned } = await import("../servers/satellite/keys.js");
 const { createScheduler, NONCE_KEEP_MS, AUDIT_KEEP_MS } = await import("../servers/satellite/scheduler.js");
 const { parseMeminfo, parsePsiSomeAvg10, collectStatus, STATUS_MAX_BYTES } = await import("../servers/satellite/status.js");
 
@@ -70,9 +72,13 @@ function pairedHome({ issuedAt } = {}) {
 /** Start (or restart) the agent on `home`; the clock is the real one plus `clock.offset`. */
 async function boot(home, clock = { offset: 0 }, opts = {}) {
   const lines = [];
-  const a = await startAgent({ env: { CROW_HOME: home, CROW_SATELLITE_PORT: "0" }, now: () => Date.now() + clock.offset, out: (l) => lines.push(l), sha: "a".repeat(40), ...opts });
+  const warns = [];
+  const a = await startAgent({
+    env: { CROW_HOME: home, CROW_SATELLITE_PORT: "0" }, now: () => Date.now() + clock.offset, out: (l) => lines.push(l),
+    authLog: (l) => warns.push(l), sha: "a".repeat(40), ...opts,
+  });
   agents.push(a);
-  return { a, lines, clock };
+  return { a, lines, warns, clock };
 }
 
 /** Serve's hop: crow's https://<host>/path → the agent, with Serve's headers. */
@@ -139,15 +145,53 @@ test("not through Serve: a signed call is an empty 404", async () => {
   assert.equal(r.json, null);
 });
 
-test("wrong mgmt key: 401 bad_signature, and the refusal itself is a signed JSON answer crow can read", async () => {
+test("wrong mgmt key: 401 bad_signature as a signed answer; no audit row (counted and logged instead)", async () => {
   const s = pairedHome();
-  const { a } = await boot(s.home);
+  const { a, warns } = await boot(s.home);
   const r = await sfetch(a, P.generateKeypair(), { path: "/satellite/v1/status" });
   assert.equal(r.status, 401);
   assert.deepEqual(r.json, { error: "bad_signature" });
-  const last = auditRows(a).at(-1);
-  assert.equal(last.result, "bad_signature");
-  assert.equal(last.caller, null, "an unverified caller is never recorded as the caller");
+  assert.equal(auditRows(a).length, 0, "an unauthenticated refusal never reaches satellite.db");
+  assert.ok(warns.some((l) => /refused unauthenticated requests: bad_signature=1/.test(l)), warns.join("\n"));
+  // Within the minute, further refusals are only counted.
+  for (let i = 0; i < 3; i++) await raw(a, P.generateKeypair());
+  await raw(a, s.mgmt, { ts: "1" }); // clock_skew
+  assert.equal(warns.length, 1);
+  assert.equal(a.refusals.pending(), 4);
+  assert.equal(auditRows(a).length, 0);
+  // A verified call is audited.
+  assert.equal((await raw(a, s.mgmt)).status, 200);
+  assert.equal(auditRows(a).length, 1);
+});
+
+test("refusal counter: one summary line per minute", () => {
+  let t = 0;
+  const logs = [];
+  const c = createRefusalCounter({ now: () => t, log: (l) => logs.push(l) });
+  c.note("bad_signature");
+  assert.equal(logs.length, 1);
+  c.note("bad_signature"); c.note("not_paired");
+  t = 59999;
+  c.note("bad_signature");
+  assert.equal(logs.length, 1);
+  t = 60000;
+  c.note("clock_skew");
+  assert.equal(logs.length, 2);
+  assert.match(logs[1], /bad_signature=2, not_paired=1, clock_skew=1/);
+  assert.equal(c.pending(), 0);
+  assert.equal(c.flush(), false);
+});
+
+test("a bad-signature request does not burn its nonce: a valid request with the same nonce then succeeds", async () => {
+  const s = pairedHome();
+  const { a } = await boot(s.home);
+  const nonce = "ab".repeat(16);
+  const bad = await raw(a, P.generateKeypair(), { nonce });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.json.error, "bad_signature");
+  const good = await raw(a, s.mgmt, { nonce });
+  assert.equal(good.status, 200);
+  assert.equal((await raw(a, s.mgmt, { nonce })).json.error, "replay");
 });
 
 test("ts window: ±59 s accepted, ±61 s refused with clock_skew (agent clock injected)", async () => {
@@ -352,6 +396,36 @@ test("crash window before the pin: a staged cert whose pin was never written is 
   assert.deepEqual(JSON.parse(readFileSync(join(s.home, "cert.json"), "utf8")), s.cert);
   assert.ok(!existsSync(stagedCertPath(s.home)));
   assert.equal((await sfetch(a, s.mgmt, { path: "/satellite/v1/status" })).status, 200);
+});
+
+test("a failed commit: cert.json still old → old pin restored, staged removed; cert.json already new → new pin and staged kept", () => {
+  for (const failAfterCert of [false, true]) {
+    const s = pairedHome({ issuedAt: Date.now() - 20 * DAY });
+    const db = openSatelliteDb(s.home);
+    const state = { cert: readCert(s.home), pinned: readPinned(s.home) };
+    const next = P.generateKeypair();
+    const rotated = cert(s.key, next.pubHex);
+    const io = {
+      writeStagedCert: (h, c) => writeFileSync(stagedCertPath(h), JSON.stringify(c), { mode: 0o600 }),
+      writePinned,
+      writeCert: (h, c) => { if (failAfterCert) writeCert(h, c); throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); },
+    };
+    assert.throws(() => applyNewCert({ db, key: s.key, satHome: s.home, state, now: Date.now, io }, rotated), /disk full/);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cert_serials WHERE serial = ?").get(rotated.payload.serial).n, 0, "serial rolled back");
+    if (!failAfterCert) {
+      assert.deepEqual(readCert(s.home), s.cert);
+      assert.equal(readPinned(s.home).mgmt_pubkey, s.mgmt.pubHex, "old pin restored");
+      assert.ok(!existsSync(stagedCertPath(s.home)));
+    } else {
+      assert.deepEqual(readCert(s.home), rotated);
+      assert.equal(readPinned(s.home).mgmt_pubkey, next.pubHex, "new pin kept: it matches cert.json");
+      assert.ok(existsSync(stagedCertPath(s.home)), "staged left for boot");
+      assert.equal(recoverStagedCert({ db, key: s.key, satHome: s.home }), "discarded", "cert.json already holds it");
+      assert.ok(!existsSync(stagedCertPath(s.home)));
+      assert.deepEqual(readCert(s.home), rotated);
+    }
+    db.close();
+  }
 });
 
 // ── unpair (§3.3) ───────────────────────────────────────────────────────────
