@@ -388,6 +388,9 @@ test("final F2: door entries follow the shared cloudDoorEligible rule (a consent
     cloudRow("plain", { baseUrl: "http://api.example.com/v1" }),
     cloudRow("lo", { gpuPolicy: { local_only: true } }),
     cloudRow("gem", { provider_type: "google" }),
+    cloudRow("ip", { baseUrl: "https://203.0.113.5/v1" }),
+    cloudRow("ip6", { baseUrl: "https://[2001:db8::1]/v1" }),
+    cloudRow("ui", { baseUrl: "https://user:pw@api.example.com/v1" }),
   ];
   const e = buildManagedEntries(list, doorOpts(list));
   assert.deepEqual(Object.keys(e), ["crow-c-cloud-a"]);

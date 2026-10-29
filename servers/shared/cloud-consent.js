@@ -26,6 +26,8 @@ import { normalizeBaseUrl } from "./provider-presets.js";
 import { providerRowToObject } from "./provider-row.js";
 import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "../gateway/models/door-resolve.js";
 import { DOOR_ID_PREFIX } from "./pi-compat.js";
+import { isIP } from "node:net";
+import { isPublicIp } from "./ip-classify.js";
 
 export const CLOUD_CONSENT_KEY = "llm_cloud_door_rows";
 export const CLOUD_CONSENT_SALT_KEY = "llm_cloud_consent_salt";
@@ -176,7 +178,7 @@ export async function grantCloudConsent(db, rowId, { actor, expect } = {}) {
     if (row.disabled) return { ok: false, reason: "disabled" };
     const why = cloudDoorIneligibleReason(row);
     if (why === "not_cloud") return { ok: false, reason: "not_cloud" };
-    if (why) return { ok: false, reason: "not_eligible" };
+    if (why) return { ok: false, reason: "not_eligible", why };
     const salt = await ensureSalt(db);
     if (!matchesExpectation(row, salt, expect)) return { ok: false, reason: "changed" };
     const all = parseMap(await readValue(db, CLOUD_CONSENT_KEY));
@@ -230,6 +232,8 @@ const OPENAI_FAMILY = new Set([null, undefined, "", "openai-compat", "openai"]);
  * models.json door entries and the door's resolveCloudTarget share, checked
  * in this order:
  *   "disabled", "not_cloud" (`isCloudTarget`, default isCloudRow),
+ *   "forbidden_target" (a scheme other than http(s), userinfo in the URL, or
+ *   an IP literal that is not public: `isPublicIp`, the door's own check),
  *   "reserved_id" (crow-c-*, any case: the door entries' own namespace),
  *   "local_only", "insecure" (not https; `allowInsecure(url)` is the door
  *   tests' seam for a plain-http fake upstream), "unsupported_type" (neither
@@ -240,11 +244,13 @@ export function cloudDoorIneligibleReason(row, { isCloudTarget = (url) => isClou
   if (!row || typeof row !== "object" || row.disabled) return "disabled";
   const url = row.baseUrl ?? row.base_url;
   if (typeof url !== "string" || !url || !isCloudTarget(url)) return "not_cloud";
+  let u;
+  try { u = new URL(url); } catch { return "forbidden_target"; }
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || (isIP(host) && !isPublicIp(host))) return "forbidden_target";
   if (typeof row.id === "string" && row.id.toLowerCase().startsWith(DOOR_ID_PREFIX)) return "reserved_id";
   if (row.gpuPolicy?.local_only === true || row.gpu_policy?.local_only === true) return "local_only";
-  let https = false;
-  try { https = new URL(url).protocol === "https:"; } catch { /* not a URL */ }
-  if (!https && !allowInsecure(url)) return "insecure";
+  if (u.protocol !== "https:" && !allowInsecure(url)) return "insecure";
   const type = row.provider_type ?? row.providerType;
   if (type !== "anthropic" && !OPENAI_FAMILY.has(type)) return "unsupported_type";
   const key = keyOf(row);

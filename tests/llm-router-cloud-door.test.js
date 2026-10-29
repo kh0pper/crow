@@ -935,11 +935,14 @@ test("final F2: resolveCloudTarget refuses exactly the rows cloudDoorEligible re
     ok, { ...ok, id: "x-a", provider_type: "anthropic" }, { ...ok, id: "x-h", baseUrl: "http://api.example.com/v1" },
     { ...ok, id: "x-k", apiKey: "none" }, { ...ok, id: "x-lo", gpuPolicy: { local_only: true } },
     { ...ok, id: "x-t", provider_type: "gemini" }, { ...ok, id: "crow-c-x" },
+    { ...ok, id: "x-ip", baseUrl: "https://203.0.113.5/v1" }, { ...ok, id: "x-ip6", baseUrl: "https://[2001:db8::1]/v1" },
+    { ...ok, id: "x-ui", baseUrl: "https://user:pw@api.example.com/v1" },
   ];
   for (const row of list) {
     const op = row.provider_type === "anthropic" ? "messages" : "chat/completions";
     const t = resolveCloudTarget({ providers: { [row.id]: row }, consent: {}, salt: null, providerId: row.id, op, model: "c1" });
     // With no consent at all, an eligible row gets as far as the consent check.
     assert.equal(t.code === "NOT_CONSENTED", cloudDoorEligible(row), `${row.id}: ${t.code}`);
+    if (["x-ip", "x-ip6", "x-ui"].includes(row.id)) assert.equal(t.code, "FORBIDDEN_TARGET", row.id);
   }
 });

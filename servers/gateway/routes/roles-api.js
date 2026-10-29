@@ -351,7 +351,7 @@ export default function rolesApiRouter({
     const id = req.params.id;
     const row = PROVIDER_ID.test(id || "") ? ((await loadCtx(db)).providers || []).find((p) => p && p.id === id) : null;
     if (!row) { res.status(404).json({ error: "unknown_provider" }); return null; }
-    if (row.id.startsWith("crow-c-") || row.bundleId || row.bundle_id) { res.status(404).json({ error: "not_addable" }); return null; }
+    if (row.id.toLowerCase().startsWith("crow-c-") || row.bundleId || row.bundle_id) { res.status(404).json({ error: "not_addable" }); return null; }
     return row;
   }
 
@@ -382,8 +382,10 @@ export default function rolesApiRouter({
     const r = await addProvider(db, { ...providerBody(req.body), modelIds }, { testFn });
     if (r?.ok) {
       console.log(`[roles-api] provider ${r.providerId} added by ${actorOf(req)}`);
-      const consent = ["granted", "failed", "not_needed"].includes(r.consent) ? r.consent : "failed";
-      return res.json({ ok: true, providerId: r.providerId, consent });
+      const consent = ["granted", "failed", "not_needed", "ineligible"].includes(r.consent) ? r.consent : "failed";
+      const out = { ok: true, providerId: r.providerId, consent };
+      if (consent === "ineligible" && typeof r.consentReason === "string" && /^[a-z_]{1,32}$/.test(r.consentReason)) out.consentReason = r.consentReason;
+      return res.json(out);
     }
     const out = { ok: false, code: typeof r?.code === "string" ? r.code : "save_failed" };
     if (Number.isFinite(r?.status)) out.status = r.status;

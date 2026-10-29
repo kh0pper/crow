@@ -165,7 +165,7 @@ test("a grant needs what was seen: a token or the written URL and key; a rewrite
   // The token rendered for the row as it was; then a peer rewrites the host before the click.
   const seenToken = consentTokenFor(await rowOf(db, "cloud-p"), salt);
   assert.match(seenToken, /^[0-9a-f]{32}$/);
-  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", "cloud-p"] });
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://elsewhere.example.com/v1", "cloud-p"] });
   assert.deepEqual(await grantCloudConsent(db, "cloud-p", { actor: "t", expect: { consentToken: seenToken } }), { ok: false, reason: "changed" });
   assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
   // A key rewrite between render and click: refused too.
@@ -313,7 +313,7 @@ test("a row rewritten between render and click is refused, with a plain line", a
   const db = await seeded();
   const render = (query = {}) => tab.render({ req: { query }, db, lang: "en", piAgentDir: null, tasksDbPaths: [] });
   const seen = tokenIn(trOf(await render(), "cloud-p"));
-  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", "cloud-p"] });
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://elsewhere.example.com/v1", "cloud-p"] });
   const { res } = await post(db, "llm_provider_bots_allow", { id: "cloud-p", consent_token: seen });
   assert.equal(res.redirected, "?section=llm&tab=providers&bots=changed");
   assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
@@ -329,7 +329,7 @@ test("a row rewritten between render and click is refused, with a plain line", a
   assert.equal(await verdictOf(db, "cloud-p"), "ok");
 
   // A consented row whose address then changed reads as off, so ticking it agrees again.
-  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://203.0.113.9/v1", "cloud-p"] });
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://moved.example.com/v1", "cloud-p"] });
   assert.match(trOf(await render(), "cloud-p"), /llm_provider_bots_allow/);
 });
 
@@ -388,7 +388,7 @@ test("addProvider consents only to what it wrote: a rewrite before the grant fai
   // A sync apply lands between the save and the grant.
   const raceUpsert = async (d, p) => {
     const r = await upsertProvider(d, p);
-    await d.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", p.id] });
+    await d.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://elsewhere.example.com/v1", p.id] });
     return r;
   };
   const out = await addProvider(db, { presetId: "openai", apiKey: KEY_A, modelIds: ["c1"] }, { testFn: okTest, invalidateFn: () => {}, upsertProviderFn: raceUpsert });
@@ -425,7 +425,7 @@ test("the add sheet shows a line when the grant failed (en and es)", async () =>
   assert.match(t("models.add.botsFailed", "es"), /Permitir que los bots usen este proveedor/);
   const ui = readFileSync(join(import.meta.dirname, "..", "servers/gateway/dashboard/shared/add-provider-ui.js"), "utf8");
   assert.match(ui, /botsFailed: '\$\{tJs\("models\.add\.botsFailed", lang\)\}'/);
-  assert.match(ui, /d\.consent === 'failed' \? T\.saved \+ ' ' \+ T\.botsFailed : T\.saved/);
+  assert.match(ui, /d\.consent === 'failed' \? T\.saved \+ ' ' \+ T\.botsFailed/);
   const api = readFileSync(join(import.meta.dirname, "..", "servers/gateway/routes/roles-api.js"), "utf8");
   assert.match(api, /providerId: r\.providerId, consent \}/);
 });
@@ -474,21 +474,26 @@ test("F2: grant refuses a cloud row the door would never serve (not_eligible), a
   await ins(db, "cloud-g", "https://api.example.com/v1/g", { key: KEY_A });
   await db.execute({ sql: "UPDATE providers SET provider_type = ? WHERE id = ?", args: ["gemini", "cloud-g"] });
   await ins(db, "crow-c-cloud-a", "https://api.example.com/v1/r", { key: KEY_A });
+  const WHY = { "cloud-h": "insecure", "cloud-nokey": "no_key", "cloud-lo": "local_only", "cloud-g": "unsupported_type", "crow-c-cloud-a": "reserved_id" };
   for (const id of ["cloud-h", "cloud-nokey", "cloud-lo", "cloud-g", "crow-c-cloud-a"]) {
-    assert.deepEqual(await tick(db, id), { ok: false, reason: "not_eligible" }, id);
+    const r = await tick(db, id);
+    assert.equal(r.ok, false, id);
+    assert.equal(r.reason, "not_eligible", id);
+    assert.equal(r.why, WHY[id], id);
   }
   // addProvider's own write path is refused the same way.
-  assert.deepEqual(await grantCloudConsent(db, "cloud-h", { actor: "t", expect: { baseUrl: "http://api.example.com/v1", apiKey: KEY_A } }), { ok: false, reason: "not_eligible" });
+  assert.deepEqual(await grantCloudConsent(db, "cloud-h", { actor: "t", expect: { baseUrl: "http://api.example.com/v1", apiKey: KEY_A } }), { ok: false, reason: "not_eligible", why: "insecure" });
   assert.deepEqual(await readCloudConsent(db), {});
 });
 
-test("F2: addProvider on a cloud server the door would never serve (plain http) records no consent and reports not_needed", async () => {
+test("F2: addProvider on a cloud server the door would never serve (plain http) records no consent and reports ineligible with the reason", async () => {
   const db = newDb();
   const out = await addProvider(db, { presetId: "other", baseUrl: "http://api.example.com/v1", apiKey: KEY_A, modelIds: ["m1"] }, {
     testFn: async () => ({ ok: true, code: "ok", models: ["m1"], host: "api.example.com", baseUrl: "http://api.example.com/v1" }), invalidateFn: () => {},
   });
   assert.equal(out.ok, true);
-  assert.equal(out.consent, "not_needed");
+  assert.equal(out.consent, "ineligible");
+  assert.equal(out.consentReason, "insecure");
   assert.deepEqual(await readCloudConsent(db), {});
 });
 
@@ -529,3 +534,25 @@ test("F2: a row that became ineligible after consent keeps a switch that only tu
   assert.deepEqual(await readCloudConsent(db), {});
 });
 function escapeAttr(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+
+test("re-review (b): userinfo, and IP literals that are not public, are ineligible everywhere (forbidden_target)", async () => {
+  const ok = { id: "cloud-a", baseUrl: "https://api.example.com/v1", apiKey: KEY_A, provider_type: "openai", models: [{ id: "c1" }] };
+  for (const url of ["https://203.0.113.5/v1", "https://[2001:db8::1]/v1", "https://user:pw@api.example.com/v1", "https://user@api.example.com/v1"]) {
+    assert.equal(consentMod.cloudDoorIneligibleReason({ ...ok, baseUrl: url }), "forbidden_target", url);
+  }
+  assert.equal(consentMod.cloudDoorIneligibleReason({ ...ok, baseUrl: "https://198.51.100.0.example.com/v1" }), null, "a name is not a literal");
+  const db = newDb();
+  await ins(db, "cloud-ip", "https://203.0.113.5/v1", { key: KEY_A });
+  await ins(db, "cloud-ip6", "https://[2001:db8::1]/v1", { key: KEY_A });
+  await ins(db, "cloud-ui", "https://user:pw@api.example.com/v1", { key: KEY_A });
+  for (const id of ["cloud-ip", "cloud-ip6", "cloud-ui"]) {
+    assert.deepEqual(await tick(db, id), { ok: false, reason: "not_eligible", why: "forbidden_target" }, id);
+  }
+  const h = await tab.render({ req: { query: {} }, db, lang: "en", piAgentDir: null, tasksDbPaths: [] });
+  for (const id of ["cloud-ip", "cloud-ip6", "cloud-ui"]) {
+    const tr = trOf(h, id);
+    assert.match(tr, /role="switch" aria-checked="false" disabled/, id);
+    assert.ok(tr.includes(escapeAttr(t("providers.botsIneligible.forbidden_target", "en"))), id);
+  }
+  assert.ok(t("providers.botsIneligible.forbidden_target", "es"));
+});

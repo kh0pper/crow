@@ -64,9 +64,7 @@
  */
 import dns from "node:dns";
 import zlib from "node:zlib";
-import { isIP } from "node:net";
 import { StringDecoder } from "node:string_decoder";
-import { isPublicIp } from "../../shared/ip-classify.js";
 import { isLocalPeer } from "../../shared/peer-class.js";
 import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "./door-resolve.js";
 import { consentVerdict, cloudDoorIneligibleReason } from "../../shared/cloud-consent.js";
@@ -127,16 +125,16 @@ export function resolveCloudTarget({
   const why = cloudDoorIneligibleReason({ ...row, id: providerId }, { isCloudTarget: cloudCheck, allowInsecure });
   if (why === "disabled") return err(404, "UNKNOWN_PROVIDER", "no such cloud provider");
   if (why === "not_cloud") return err(400, "NOT_CLOUD", "the cloud door serves cloud providers only");
+  if (why === "forbidden_target") return err(400, "FORBIDDEN_TARGET", "Crow will not contact that address");
   if (why === "reserved_id") return err(400, "RESERVED_ID", "ids starting with crow-c- are reserved for the cloud door's own entries");
   if (why === "local_only") return err(400, "LOCAL_ONLY", "this provider is local only");
   const base = row.baseUrl ?? row.base_url;
-  let u;
-  try { u = new URL(base); } catch { return err(400, "FORBIDDEN_TARGET", "Crow will not contact that address"); }
+  // Scheme, userinfo and non-public IP literals are the shared rule's
+  // forbidden_target (above); the named forbidden targets are checked here
+  // because the door's cloud check does not include them.
+  if (isForbiddenTarget(base)) return err(400, "FORBIDDEN_TARGET", "Crow will not contact that address");
+  const u = new URL(base);
   const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (isForbiddenTarget(base) || (u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password
-    || (isIP(host) && !isPublicIp(host))) {
-    return err(400, "FORBIDDEN_TARGET", "Crow will not contact that address");
-  }
   if (why === "insecure") return err(400, "INSECURE_TARGET", "the cloud door sends keys over https only");
   if (why === "unsupported_type") return err(400, "UNSUPPORTED_TYPE", "the cloud door serves openai-style and anthropic providers only");
   if (why === "no_key") return err(400, "NO_KEY", "this provider has no key");

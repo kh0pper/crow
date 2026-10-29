@@ -212,6 +212,14 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     saved: '${tJs("models.add.saved", lang)}',
     okNoList: '${tJs("models.add.test.okNoList", lang)}',
     botsFailed: '${tJs("models.add.botsFailed", lang)}',
+    botsIneligible: {
+      insecure: '${tJs("providers.botsIneligible.insecure", lang)}',
+      no_key: '${tJs("providers.botsIneligible.no_key", lang)}',
+      unsupported_type: '${tJs("providers.botsIneligible.unsupported_type", lang)}',
+      local_only: '${tJs("providers.botsIneligible.local_only", lang)}',
+      reserved_id: '${tJs("providers.botsIneligible.reserved_id", lang)}',
+      forbidden_target: '${tJs("providers.botsIneligible.forbidden_target", lang)}'
+    },
     truncated: '${tJs("models.add.truncated", lang)}',
     notTested: '${tJs("models.add.notTested", lang)}',
     tryLater: '${tJs("models.add.tryLater", lang)}',
@@ -492,7 +500,8 @@ export function addProviderClientJS({ lang = "en" } = {}) {
         st.providerId = d.providerId;
         st.changed = true;
         ui.key.value = '';
-        ui.saveLine.textContent = d.consent === 'failed' ? T.saved + ' ' + T.botsFailed : T.saved;
+        var why = d.consent === 'ineligible' && Object.prototype.hasOwnProperty.call(T.botsIneligible, d.consentReason) ? T.botsIneligible[d.consentReason] : '';
+        ui.saveLine.textContent = d.consent === 'failed' ? T.saved + ' ' + T.botsFailed : why ? T.saved + ' ' + why : T.saved;
         updateSave();
         ui.picksBox.hidden = false;
         return loadPlan();

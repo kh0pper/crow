@@ -243,7 +243,7 @@ export function providerIdFor(presetId, { rows = [], baseUrl, apiKey } = {}) {
   const wantKey = (typeof apiKey === "string" ? (cleanKey(apiKey) ?? apiKey.trim()) : apiKey) || "";
   for (let n = 1; n < 1000; n++) {
     const id = nthId(base, n, custom);
-    if (id.startsWith(DOOR_ID_PREFIX)) continue;
+    if (id.toLowerCase().startsWith(DOOR_ID_PREFIX)) continue;
     const row = byId.get(id);
     if (!row) return { id, reuse: false };
     const rowKey = row.apiKey ?? row.api_key ?? null;
@@ -297,8 +297,9 @@ function cleanModelIds(modelIds) {
  * apiKey})` runs after the write with exactly what was written; by default it
  * records this box's consent for bots to use the row (Task 15), on a new row
  * and again on reuse, refused if the row changed since. The result's
- * `consent` is "granted", "failed", or "not_needed" (not a cloud row, or one
- * the cloud door would never serve: cloudDoorIneligibleReason).
+ * `consent` is "granted", "failed", "not_needed" (not a cloud row), or
+ * "ineligible" (a cloud row the cloud door would never serve), then with
+ * `consentReason`, the cloudDoorIneligibleReason code.
  */
 export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, modelIds } = {}, {
   upsertProviderFn = upsertProvider, invalidateFn = invalidateProvidersCache,
@@ -357,11 +358,14 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
   }
   // Outside the try: the row is written, so a failing onAdded must not read as "not saved".
   let consent = "failed";
+  let consentReason = null;
   try {
     const r = onAdded ? await onAdded(saved.id, saved.written) : null;
-    consent = r?.ok === true ? "granted" : r?.reason === "not_cloud" || r?.reason === "not_eligible" ? "not_needed" : "failed";
+    if (r?.ok === true) consent = "granted";
+    else if (r?.reason === "not_cloud") consent = "not_needed";
+    else if (r?.reason === "not_eligible") { consent = "ineligible"; consentReason = typeof r.why === "string" ? r.why : null; }
   } catch (err) { console.warn(`[add-provider] after-save step failed: ${err?.message}`); }
-  return { ok: true, providerId: saved.id, reuse: saved.reuse, consent, test };
+  return { ok: true, providerId: saved.id, reuse: saved.reuse, consent, ...(consent === "ineligible" ? { consentReason } : {}), test };
 }
 
 // --- "Use the recommended models for roles you haven't set" (Task 11) -------
