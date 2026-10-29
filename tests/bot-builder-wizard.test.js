@@ -359,3 +359,83 @@ test("every new wizard key ships en+es and es differs from en (except proper nou
     if (!sameOk.has(k)) assert.notEqual(e.en, e.es, `${k} es must differ from en (t() silently falls back)`);
   }
 });
+
+// ---- ?new=1&project=<id>: the project home's "Add a bot" (R1.2 §14) ----
+
+async function addProject(slug, { owned = true, archived = false } = {}) {
+  const ws = join(dir, "projects", slug);
+  const r = await db.execute({
+    sql: "INSERT INTO project_spaces (slug, name, workspace_dir, archived_at) VALUES (?,?,?,?)",
+    args: [slug, slug, ws, archived ? new Date().toISOString() : null],
+  });
+  const id = Number(r.lastInsertRowid);
+  if (owned) await db.execute({ sql: "INSERT INTO project_members (project_id, contact_id, role) VALUES (?, NULL, 'owner')", args: [id] });
+  return id;
+}
+
+test("wizard carries project through steps", async () => {
+  const s0 = await renderGet({ new: "1", project: "42" });
+  assert.match(s0, /<input type="hidden" name="project" value="42">/, "the GET entry seeds the hidden project");
+  const s1 = await renderPost({ action: "wizard_step", step: String(stepIdx("template")), nav: "next", tpl: "blank", project: "42" });
+  assert.match(s1, /name="step" value="1"/);
+  assert.match(s1, /<input type="hidden" name="project" value="42">/, "basics carries it");
+  const s2 = await renderPost({ action: "wizard_step", step: "1", nav: "next", tpl: "blank", display_name: "Proj Bot", project: "42" });
+  assert.match(s2, /<input type="hidden" name="project" value="42">/, "model carries it");
+  const back = await renderPost({ action: "wizard_step", step: "2", nav: "back", tpl: "blank", display_name: "Proj Bot", bot_id: "proj-bot", project: "42" });
+  assert.match(back, /<input type="hidden" name="project" value="42">/, "Back keeps it");
+  const review = await renderPost({ action: "wizard_step", step: String(stepIdx("channel")), nav: "next",
+    tpl: "blank", display_name: "Proj Bot", bot_id: "proj-bot", model: "prov/m1", gw_type: "none", project: "42" });
+  assert.match(review, /name="action" value="wizard_create"/);
+  assert.match(review, /<input type="hidden" name="project" value="42">/, "the review form posts it to the create");
+  for (const bad of ["abc", "0", "-1", "1 OR 1=1", "4\"><x"]) {
+    const h = await renderGet({ new: "1", project: bad });
+    assert.ok(!/name="project"/.test(h), `a non-id project (${bad}) is never carried`);
+  }
+});
+
+test("wizard files the bot on an owned project", async () => {
+  await addProvider("prov", [{ id: "m1" }]);
+  const pid = await addProject("owned-proj");
+  const res = mkRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "discord-qa", display_name: "Filed Bot", bot_id: "filed-bot", model: "prov/m1", gw_type: "none", project: String(pid),
+  } }, res, { db, lang: "en" });
+  assert.equal(res.redirected, "/dashboard/bot-builder?bot=filed-bot&tab=review&created=filed-bot", "no warning");
+  const row = (await db.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id='filed-bot'", args: [] })).rows[0];
+  assert.equal(Number(row.project_id), pid, "the column holds the project");
+  const def = JSON.parse(row.definition);
+  assert.equal(def.tracker_config.type, "kanban", "filed as a kanban board, whatever the template said");
+  assert.equal(def.tracker_config.project_id, undefined);
+  assert.ok(!Object.prototype.hasOwnProperty.call(def, "project_id"), "the column is authoritative: no JSON copy");
+  await clearProviders();
+});
+
+test("wizard drops an unowned project", async () => {
+  await addProvider("prov", [{ id: "m1" }]);
+  const visited = await addProject("visited-proj", { owned: false });
+  const archived = await addProject("archived-proj", { archived: true });
+  const cases = [["visited", String(visited)], ["archived", String(archived)], ["missing", "999999"], ["junk", "abc"]];
+  for (const [label, project] of cases) {
+    const id = `dropped-${label}`;
+    const res = mkRes();
+    await handleWizardCreate({ body: {
+      action: "wizard_create", nav: "create",
+      tpl: "blank", display_name: id, bot_id: id, model: "prov/m1", gw_type: "none", project,
+    } }, res, { db, lang: "es" });
+    assert.equal(res.redirected,
+      `/dashboard/bot-builder?bot=${id}&tab=review&created=${id}&warn=` + encodeURIComponent(translations["botbuilder.projectDropped"].es),
+      `${label}: made, with the dropped-project warning`);
+    const row = (await db.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [id] })).rows[0];
+    assert.ok(row, `${label}: the bot is still made`);
+    assert.equal(row.project_id, null, `${label}: with no project`);
+    assert.ok(!Object.prototype.hasOwnProperty.call(JSON.parse(row.definition), "project_id"), `${label}: no project in the JSON either`);
+  }
+  await clearProviders();
+});
+
+test("en and es strings: botbuilder.projectDropped", () => {
+  const e = translations["botbuilder.projectDropped"];
+  assert.equal(e.en, "That project isn't available, so the bot was made without one.");
+  assert.equal(e.es, "Ese proyecto no está disponible, así que el bot se creó sin proyecto.");
+});

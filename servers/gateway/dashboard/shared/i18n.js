@@ -1586,6 +1586,7 @@ export const translations = {
   "botbuilder.boardProjectName": { en: "{name}'s board", es: "Tablero de {name}" },
   "botbuilder.boardOnCustom": { en: "This bot uses a custom tracker, so a board was not turned on. Change its tracker here instead.", es: "Este bot usa un rastreador personalizado, así que no se activó un tablero. Cambia su rastreador aquí." },
   "botbuilder.boardOnConflict": { en: "The board was not turned on: something is already at {path}, where this bot's old chats would be linked. Nothing was changed; move that out of the way and try again.", es: "No se activó el tablero: ya hay algo en {path}, donde se enlazarían los chats anteriores de este bot. No se cambió nada; aparta eso e inténtalo de nuevo." },
+  "botbuilder.projectDropped": { en: "That project isn't available, so the bot was made without one.", es: "Ese proyecto no está disponible, así que el bot se creó sin proyecto." },
   "botbuilder.dotOn":{ en: "On", es: "Encendido" },
   "botbuilder.dotOff": { en: "Off", es: "Apagado" },
   "botbuilder.dotActive": { en: "Working now", es: "Trabajando ahora" },
