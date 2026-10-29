@@ -89,7 +89,8 @@ test("browser target refused", () => {
     assert.throws(() => store.createSecretRequest(req({ target })), (e) => e.code === "bad_target" && e.message === "That kind of request isn't available yet.", String(target));
   }
   assert.throws(() => store.createSecretRequest(req({ kind: "token" })), (e) => e.code === "bad_target");
-  assert.deepEqual(targetsMod.targets.names(), ["keychain"], "only keychain ships");
+  assert.ok(targetsMod.targets.names().includes("keychain"), "keychain ships");
+  assert.ok(!targetsMod.targets.names().includes("browser"), "browser is not registered");
   assert.equal(store.openRequestFor("perchlive-aaaa1111"), null, "a refused request leaves nothing open");
 });
 
@@ -332,7 +333,7 @@ test("ensureServers grants with browser or workspace", async () => {
 
   for (const sel of [["crow-browser/browser_navigate"], ["browser/browser_navigate"], ["workspace/docs_create"], ["google-workspace/gmail_create_draft"], ["workspace"]]) {
     assert.deepEqual(impliedServers(def(sel)), ["crow-secrets"], sel[0]);
-    const r = buildBotMcp(def(sel), canonical, { catalog, unconfigured: {} });
+    const r = buildBotMcp(def(sel), canonical, { catalog, unconfigured: {}, interactive: true });
     assert.deepEqual(r.json.mcpServers["crow-secrets"], secrets, sel[0]);
     assert.ok(r.servers.includes("crow-secrets"));
     assert.ok(buildToolsCsv(def(sel), { resolved, interactive: true }).csv.split(",").includes(TOOL), "Perch csv carries the tool: " + sel[0]);
@@ -341,10 +342,10 @@ test("ensureServers grants with browser or workspace", async () => {
   // No browser or Workspace: nothing implied, nothing minted.
   const plain = def(["tasks/tasks_list"]);
   assert.deepEqual(impliedServers(plain), []);
-  assert.equal(buildBotMcp(plain, canonical, { catalog, unconfigured: {} }).json.mcpServers["crow-secrets"], undefined);
+  assert.equal(buildBotMcp(plain, canonical, { catalog, unconfigured: {}, interactive: true }).json.mcpServers["crow-secrets"], undefined);
   assert.ok(!buildToolsCsv(plain, { resolved, interactive: true }).csv.includes(TOOL));
   // Implied but absent from the catalog (no token): skipped silently, no warning.
-  const noTok = buildBotMcp(def(["crow-browser/browser_navigate"]), canonical, { catalog: { tasks: catalog.tasks }, unconfigured: {} });
+  const noTok = buildBotMcp(def(["crow-browser/browser_navigate"]), canonical, { catalog: { tasks: catalog.tasks }, unconfigured: {}, interactive: true });
   assert.equal(noTok.json.mcpServers["crow-secrets"], undefined);
   assert.ok(!noTok.warnings.some((w) => /crow-secrets/.test(w)), JSON.stringify(noTok.warnings));
   // Explicitly selectable on its own.
@@ -354,4 +355,55 @@ test("ensureServers grants with browser or workspace", async () => {
   // Narrowing can still take it away.
   const narrowed = buildToolsCsv(def(["crow-browser/browser_navigate"]), { resolved, interactive: true, narrowedTools: JSON.stringify([TOOL]) }).csv;
   assert.ok(!narrowed.includes(TOOL), narrowed);
+});
+
+test("a channel bot's config has no crow-secrets entry", async () => {
+  const { buildBotMcp, writeBotMcp } = await import("../scripts/pi-bots/mcp_writer.mjs");
+  const canonical = { mcpServers: { "crow-browser": { command: "node", args: ["b"] } } };
+  const secrets = { url: "http://127.0.0.1:3001/secrets/mcp", headers: { Authorization: "Bearer t" } };
+  const def = { tools: { crow_mcp: ["crow-browser/browser_navigate", "workspace/docs_create"] } };
+  for (const opts of [{}, { interactive: false }, { interactive: "yes" }]) {
+    const r = buildBotMcp(def, canonical, { catalog: { "crow-secrets": secrets }, unconfigured: {}, ...opts });
+    assert.equal(r.json.mcpServers["crow-secrets"], undefined, JSON.stringify(opts));
+    assert.ok(!r.servers.includes("crow-secrets"));
+  }
+  // Through writeBotMcp with a real catalog (the secrets token exists in the harness home by now):
+  // a discord turn gets nothing, a Perch turn gets the signed block.
+  const { SECRETS_TOKEN } = await import("../servers/gateway/local-token.js");
+  await SECRETS_TOKEN.rotate(h.db);
+  const base = { sessionDir: join(h.dir, "bots", "chan-bot"), crowHome: h.crowHome, canonical, botId: "chan-bot", write: false };
+  const chan = writeBotMcp(def, { ...base, threadId: "discord:42", gatewayType: "discord", interactive: false });
+  assert.equal(chan.json.mcpServers["crow-secrets"], undefined, "channel bot");
+  const perch = writeBotMcp(def, { ...base, threadId: "perchlive-abcd1234", gatewayType: "perch", interactive: true });
+  assert.equal(perch.json.mcpServers["crow-secrets"].url, "http://127.0.0.1:3001/secrets/mcp");
+});
+
+test("queued notes expire after 24 hours; forgetSession clears a session", () => {
+  let t = 5_000_000;
+  store._setClockForTest(() => t);
+  store.addSecretNote("perchlive-aaaa1111", "You closed the form. Nothing was sent.");
+  t += 24 * 60 * 60 * 1000 - 1;
+  store.addSecretNote("perchlive-aaaa1111", "The password request expired. Nothing was sent.");
+  store.addSecretNote("perchlive-bbbb2222", "You closed the form. Nothing was sent.");
+  t += 1;
+  store.sweepExpired();
+  assert.deepEqual(store.takeSecretNotes("perchlive-aaaa1111"), ["The password request expired. Nothing was sent."], "only the stale note goes");
+  t += 24 * 60 * 60 * 1000;
+  assert.deepEqual(store.takeSecretNotes("perchlive-bbbb2222"), [], "a note nobody took is dropped");
+  // Handed-back notes restart their clock.
+  store.returnSecretNotes("perchlive-aaaa1111", ["You closed the form. Nothing was sent."]);
+  t += 60 * 1000;
+  assert.deepEqual(store.takeSecretNotes("perchlive-aaaa1111"), ["You closed the form. Nothing was sent."]);
+
+  // forgetSession: that session's requests and notes go, with no note; others stay.
+  const a = store.createSecretRequest(req());
+  const b = store.createSecretRequest(req({ sessionId: "perchlive-bbbb2222", threadId: "perchlive-bbbb2222" }));
+  store.addSecretNote("perchlive-aaaa1111", "You closed the form. Nothing was sent.");
+  store.forgetSession("perchlive-aaaa1111");
+  assert.equal(store.getSecretRequest(a.id), null);
+  assert.equal(store.openRequestFor("perchlive-aaaa1111"), null);
+  assert.deepEqual(store.claimSecret(a.id, { sessionId: "perchlive-aaaa1111" }), { outcome: "not_found" });
+  assert.deepEqual(store.takeSecretNotes("perchlive-aaaa1111"), []);
+  assert.ok(store.getSecretRequest(b.id), "another session is untouched");
+  assert.ok(store.createSecretRequest(req()).id, "the session can ask again");
 });
