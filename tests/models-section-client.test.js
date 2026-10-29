@@ -523,6 +523,19 @@ test("F6: no stored fallback, no fallback field", async () => {
   assert.equal("fallback" in h.calls[2].body, false);
 });
 
+test("safety never sends a stored fallback chain (the server refuses one)", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, { ...PICKS, fallback: ["expert"] }) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ needs: { ackUnattended: false, ackCloud: false } })) },
+    { match: isApply, reply: () => json(200, { ok: true }) },
+  ], { role: "safety", label: "Safety" });
+  await openAndChoose(h);
+  assert.equal("fallback" in h.calls[1].body, false);
+  byAttr(h.doc.dialog, "data-mc-save")[0].fire("click");
+  await flush();
+  assert.equal("fallback" in h.calls[2].body, false);
+});
+
 test("F9: a name is listed once per group", async () => {
   const cons = PREVIEW().consumers;
   const h = harness([

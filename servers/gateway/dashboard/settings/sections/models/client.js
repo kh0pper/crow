@@ -295,10 +295,11 @@ export function modelsClientJS({ lang = "en" } = {}) {
     if (!ui.items.length) ui.list.appendChild(el('p', 'mc-empty', T.notSetUp));
   }
 
-  /** A chat-style body: the model plus the stored fallback chain, unchanged, when there is one. */
+  /** A chat-style body: the model plus the stored fallback chain, unchanged, when there is one.
+   *  Safety never carries a chain (the server refuses one), so a stale stored chain is dropped. */
   function chatBody(model) {
     var b = { model: model };
-    if (st.fallback) b.fallback = st.fallback.slice();
+    if (st.fallback && st.role !== 'safety') b.fallback = st.fallback.slice();
     return b;
   }
 
