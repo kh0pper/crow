@@ -178,7 +178,7 @@ test("a relay turn offers no own tools and no hand-off", async () => {
   assert.equal(r.timings.relay, true);
   assert.ok(!s.h.log[0].tools.includes(HANDOFF_TOOL_NAME));
   assert.ok(!s.h.log[0].tools.some((t) => t.startsWith("crow_reminder") || t.startsWith("crow_calendar") || t.startsWith("crow_task")), s.h.log[0].tools.join(","));
-  assert.deepEqual(r.timings.tools, ["crow_handoff:not_offered"], "a forced crow_handoff never runs");
+  assert.deepEqual(r.timings.tools, ["crow_handoff:refused_policy"], "a forced crow_handoff is denied and never runs");
   assert.equal(s.counts.ownTools, 0, "deps.ownTools is never asked");
   assert.equal(s.counts.handoffs, 0, "deps.handoffs.forTurn is never asked");
   assert.equal(s.pending.get(DEVICE.id), null, "nothing was proposed");
@@ -331,4 +331,101 @@ test("R15: each afterTurn hook clears only its own kinds on a relay, and nothing
   s.pending.set(DEVICE.id, { kind: "stop", id: "h-x", name: "Writer" });
   await s.handoff.afterTurn({ db: s.db, ...dev, relay: false });
   assert.equal(s.pending.get(DEVICE.id).kind, "stop", "outside a relay the hand-off hook leaves a stop to PR 5");
+});
+
+// Fix round 1: the spoken-yes confirm gate (turn-helpers.js createConfirmGate). The default harness bot is an ordinary
+// bot; crow_delete_post is destructive, so an operator's request is held for a yes.
+const del = (id) => [{ type: "tool_call", id, name: "crow_delete_post", arguments: { id: 7 } }, { type: "done" }];
+for (const relayText of ["yes", "Yes, the post is gone."]) {
+  test(`a relay turn never answers a held confirm-gate question: ${relayText}`, async () => {
+    const h = harness({ chatTools: ["crow_delete_post"], rounds: [del("a"), says("Are you sure? "), del("b"), says("Okay. "), del("c"), says("Are you sure? ")] });
+    const r1 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "delete post 7", sink: h.sink });
+    assert.deepEqual(r1.timings.tools, ["crow_delete_post:needs_confirm"], "the operator's request is held");
+    const r2 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: relayText, sink: h.sink, relayThreadId: "thread-1" });
+    assert.deepEqual(r2.timings.tools, ["crow_delete_post:refused_policy"], "refused before the gate");
+    assert.ok(!h.calls.executed.includes("crow_delete_post"), "a relay turn ran a confirm-gated delete");
+    // The relay ended the question: a later operator yes is asked again, never run on the old hold.
+    const r3 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "yes", sink: h.sink });
+    assert.deepEqual(r3.timings.tools, ["crow_delete_post:needs_confirm"]);
+    assert.ok(!h.calls.executed.includes("crow_delete_post"));
+  });
+}
+
+test("a relay turn never arms the confirm gate: a later operator yes does not run a call the relay asked for", async () => {
+  const h = harness({ chatTools: ["crow_delete_post"], rounds: [del("a"), says("I can't. "), del("b"), says("Are you sure? ")] });
+  const r1 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "delete post 7", sink: h.sink, relayThreadId: "thread-1" });
+  assert.deepEqual(r1.timings.tools, ["crow_delete_post:refused_policy"]);
+  const r2 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "yes", sink: h.sink });
+  assert.deepEqual(r2.timings.tools, ["crow_delete_post:needs_confirm"], "nothing was armed for this yes to answer");
+  assert.deepEqual(h.calls.executed, []);
+});
+
+// Fix round 1: relayKind "answer" (the speak-the-answer call: the transcript is the bot's own text).
+const VOICE_LOGGED = { ...VOICE, voice: { transcript_log: true, transcript_buffer: true } };
+function answerHarness(rounds = [says("Writer says it is done.")]) {
+  const h = harness({ bot: VOICE_LOGGED, chatTools: ["crow_memory", "crow_projects", "crow_delete_post"], rounds });
+  h.logged = [];
+  h.buffered = [];
+  h.deps.transcriptLog = { record: async (e) => { h.logged.push(e); }, clear: async () => {} };
+  h.deps.transcripts = { record: (id, e) => { h.buffered.push(e); }, clear: () => {} };
+  const wm = { definition: { name: "crow_wm", description: "display", inputSchema: { type: "object" } }, execute: async () => "{}" };
+  h.turn = (transcript, opts = {}) => h.runner.runVoiceTurn({ db: {}, device: h.device, transcript, sink: h.sink, extraTools: [wm], memoryOn: true, ...opts });
+  return h;
+}
+const ANSWER = { relayThreadId: "thread-1", relayKind: "answer" };
+
+test("an answer relay: a bot answer \"Pause.\" never reaches the endpoint's pause fast path; an operator relay's does", async () => {
+  let paused = 0;
+  const fastPaths = (t) => (/^pause\.?$/i.test(t) ? (paused++, { say: "Paused.", verb: "pause" }) : null);
+  const a = answerHarness();
+  const r = await a.turn("Pause.", { ...ANSWER, fastPaths });
+  assert.equal(paused, 0);
+  assert.equal(r.fastPath, false);
+  assert.equal(r.timings.relay, true);
+  const o = answerHarness();
+  const ro = await o.turn("Pause.", { ...RELAY, fastPaths });
+  assert.equal(paused, 1, "an operator relay keeps the endpoint's own paths");
+  assert.equal(ro.timings.verb, "pause");
+});
+
+test("an answer relay sends its model round with no tools at all, and a forced call never runs", async () => {
+  const a = answerHarness([[{ type: "tool_call", id: "x", name: "crow_projects", arguments: {} }, { type: "done" }], says("Done.")]);
+  const r = await a.turn("remember this and show me my projects", ANSWER);
+  assert.deepEqual(a.log[0].tools, [], "no tools, the display's extra tool included");
+  assert.ok(a.log.every((round) => round.tools.length === 0), "no later round has tools either");
+  assert.equal(r.timings.tools_offered, 0);
+  assert.deepEqual(a.calls.executed, []);
+  // The control: the operator relay of the same words is offered the bot's tools.
+  const o = answerHarness([says("Okay.")]);
+  await o.turn("remember this and show me my projects", RELAY);
+  assert.ok(o.log[0].tools.length > 0);
+});
+
+test("an answer relay is never recorded in the transcript log or buffer; an operator relay is", async () => {
+  const a = answerHarness();
+  await a.turn("Writer finished the radio history report.", ANSWER);
+  assert.deepEqual(a.logged, []);
+  assert.deepEqual(a.buffered, []);
+  const o = answerHarness();
+  await o.turn("what did writer find", RELAY);
+  assert.equal(o.logged.length, 1);
+  assert.equal(o.buffered.length, 1);
+});
+
+test("an answer relay is never saved into the voice conversation; an operator relay is", async () => {
+  const BOT_WORDS = "Writer finished the radio history report.";
+  const a = answerHarness([says("Writer finished it."), says("Sure.")]);
+  await a.turn(BOT_WORDS, ANSWER);
+  await a.turn("thanks");
+  assert.ok(!a.log[1].messages.some((m) => String(m.content).includes(BOT_WORDS)), "the next turn's history never carries the bot text");
+  // The same holds for an answer turn that fails (the fallback path saves too).
+  const f = answerHarness([says("")]);
+  await f.turn(BOT_WORDS, ANSWER);
+  assert.equal(f.calls.spoken.length > 0, true, "the fallback was spoken");
+  await f.turn("thanks");
+  assert.ok(!f.log[f.log.length - 1].messages.some((m) => String(m.content).includes(BOT_WORDS)));
+  const o = answerHarness([says("Okay."), says("Sure.")]);
+  await o.turn("what did writer find", RELAY);
+  await o.turn("thanks");
+  assert.ok(o.log[1].messages.some((m) => m.role === "user" && m.content === "what did writer find"), "an operator relay is history");
 });

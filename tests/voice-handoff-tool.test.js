@@ -348,14 +348,14 @@ test("no hand-off tool beside a must-run extra tool [rev2 C2]", async () => {
   assert.ok(t.h.log[0].tools.includes(HANDOFF_TOOL_NAME));
 });
 
-test("a relay turn is never offered crow_handoff (R5); a blank relayThreadId is no relay", async () => {
+test("a relay turn is never offered crow_handoff (R5) and a forced call is refused by policy; a blank relayThreadId is no relay", async () => {
   assert.equal(isRelayTurn({ relayThreadId: "thread-1" }), true);
   for (const o of [{}, { relayThreadId: "" }, { relayThreadId: "   " }, { relayThreadId: 7 }, null, undefined]) assert.equal(isRelayTurn(o), false, JSON.stringify(o));
   const s = setup({ rounds: [call({ task: TASK, bot: "writer" }), says("Sorry. ")] });
   const r = await s.turn(ASK, { relayThreadId: "thread-1" });
   assert.equal(s.forTurnCalls.length, 0);
   assert.ok(!s.h.log[0].tools.includes(HANDOFF_TOOL_NAME));
-  assert.deepEqual(r.timings.tools, ["crow_handoff:not_offered"]);
+  assert.deepEqual(r.timings.tools, ["crow_handoff:refused_policy"]);
   assert.deepEqual(await s.rows(), []);
   const b = setup({ rounds: [says("Okay. ")] });
   await b.turn(ASK, { relayThreadId: "  " });

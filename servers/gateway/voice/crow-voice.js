@@ -111,8 +111,10 @@ export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttl
  *                     opts.tz: Crow's own tools read times in it, and refuse a time without one
  *   relayThreadId     the R1.2 session's thread id on a turn whose transcript is not the operator's own speech (the
  *                     relayed turn and the speak-the-answer call): copied on when non-empty (turn.js's relay contract)
+ *   relayKind         with relayThreadId only: "answer" on the speak-the-answer call (the transcript is the bot's text),
+ *                     else "operator" (the default)
  */
-export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = false, actionWhen, actionFollowWhen, tz = null, relayThreadId = null } = {}) {
+export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = false, actionWhen, actionFollowWhen, tz = null, relayThreadId = null, relayKind = null } = {}) {
   const o = {
     surface,
     familiesOnIntent: cloud !== true,
@@ -130,7 +132,10 @@ export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = f
   // The turn's own spoken lines (Crow's own tools, their confirmations) follow the surface's language and zone.
   if (typeof lang === "string" && lang) o.lang = lang;
   if (typeof tz === "string" && tz) o.tz = tz;
-  if (typeof relayThreadId === "string" && relayThreadId.trim()) o.relayThreadId = relayThreadId;
+  if (typeof relayThreadId === "string" && relayThreadId.trim()) {
+    o.relayThreadId = relayThreadId;
+    o.relayKind = relayKind === "answer" ? "answer" : "operator";
+  }
   if (voiceDef && normalizeVoiceSettings(voiceDef).escalation === "off") o.noEscalate = true;
   return o;
 }

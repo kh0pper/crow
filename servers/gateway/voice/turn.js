@@ -246,6 +246,16 @@ export function isRelayTurn(opts) {
   return typeof opts?.relayThreadId === "string" && opts.relayThreadId.trim() !== "";
 }
 
+/** A relay turn's kind: "answer" (opts.relayKind "answer": the transcript is the bot's answer text) or "operator" (the
+ * default: the operator's relayed turn); null when the turn is no relay. */
+export function relayKindOf(opts) {
+  if (!isRelayTurn(opts)) return null;
+  return opts.relayKind === "answer" ? "answer" : "operator";
+}
+
+// A relay turn never answers or arms the spoken-yes confirm gate (the relay contract): its words are not the operator's.
+const RELAY_NO_CONFIRM = "This needs the user's own spoken yes, and this turn is not the user speaking. Tell the user to ask for it themselves, then end your turn — do not call another tool.";
+
 export function createVoiceTurnRunner(deps) {
   const now = deps.now || Date.now;
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -549,14 +559,20 @@ export function createVoiceTurnRunner(deps) {
    *   turn whose transcript is NOT the operator's own speech: the session's relayed operator turn, or its
    *   speak-the-answer call (the bot's answer text). Every such call MUST set it (crowVoiceTurnOptions passes it on).
    *   A relay turn can never act for the operator or answer a pending question:
-   *   - crow_handoff is never offered (deps.handoffs.forTurn is not asked; a forced call is refused as not_offered),
-   *     and none of Crow's own tools is loaded (neither opts.ownTools nor deps.ownTools);
+   *   - crow_handoff is never offered (deps.handoffs.forTurn is not asked) and is denied (a forced call is
+   *     refused_policy), and none of Crow's own tools is loaded (neither opts.ownTools nor deps.ownTools);
+   *   - a call the spoken-yes confirm gate would hold is refused_policy before the gate: a relay neither answers a
+   *     held question nor arms a new one, and in finally it clears the gate's entry for the device;
    *   - deps.voiceActions.fastPath and turnContext are never called, and the STT rewrite is skipped (the words were
    *     not misheard), so no hand-off matcher reads the transcript and a pending entry never makes an action turn;
    *   - deps.voiceActions.afterTurn still runs in finally with relay: true, on every outcome (opts.fastPaths answering
    *     with no model call included): it clears every pending entry on the device and expires its hand-off row;
    *   - timings.relay = true.
-   *   opts.fastPaths still run (the endpoint's own no-model paths).
+   *   opts.relayKind: "operator" (the default) | "answer". An operator relay runs opts.fastPaths and is saved to the
+   *   voice conversation as usual. An answer relay (the transcript is the bot's answer text, spoken in short) skips
+   *   opts.fastPaths, sends its model round with NO tools at all (the endpoint's extra tools included), is never
+   *   recorded in the transcript buffer or the transcript log, is never stamped in the voice memory, and is never
+   *   saved to the device's voice conversation (its "user" message would be the bot's own words).
    * opts.noTranscript: true keeps this turn out of the opt-in transcript buffer (the kiosk turn check).
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
@@ -592,6 +608,9 @@ export function createVoiceTurnRunner(deps) {
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
     const relay = isRelayTurn(opts);
+    const answerTurn = relayKindOf(opts) === "answer";   // the transcript is bot text: no tools, nothing saved as the user's
+    // The voice conversation never keeps an answer turn: its "user" message would be the bot's own text.
+    const saveConvo = (id, msgs) => { if (!answerTurn) convo.save(id, msgs); };
     // opts.startedAt: when the turn really began (the kiosk's turn_end), so an early-STT wait counts.
     const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
     const timings = { surface: VOICE_SURFACES.includes(opts.surface) ? opts.surface : "kiosk" };
@@ -630,7 +649,7 @@ export function createVoiceTurnRunner(deps) {
       await say(line);
       if (aborted()) { result.aborted = true; return; }
       say.end();
-      convo.save(device.id, [...(history || []), { role: "user", content: result.transcript }, { role: "assistant", content: line }]);
+      saveConvo(device.id, [...(history || []), { role: "user", content: result.transcript }, { role: "assistant", content: line }]);
     };
     /** Speak + caption the fallback, record the failure, and save a clean exchange (no looping tool chatter). */
     const speakFallback = async (why, spokenBefore, fallbackText = defaultFallbackText) => {
@@ -644,7 +663,7 @@ export function createVoiceTurnRunner(deps) {
       // A barge-in over the apology: the turn was interrupted, not failed (the gate excludes it anyway).
       if (aborted()) { result.aborted = true; result.failed = null; delete timings.failed; return; }
       say.end();
-      if (history) convo.save(device.id, [...history, { role: "user", content: result.transcript }, { role: "assistant", content: fallbackText }]);
+      if (history) saveConvo(device.id, [...history, { role: "user", content: result.transcript }, { role: "assistant", content: fallbackText }]);
     };
     try {
       // 1. STT (the WAV is only ever passed to the adapter; never written anywhere)
@@ -713,7 +732,8 @@ export function createVoiceTurnRunner(deps) {
         }
         try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
       }
-      if (!fp && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);
+      // An answer turn's words are the bot's: never the endpoint's own no-model paths ("Pause." is not a request).
+      if (!fp && !answerTurn && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);
       if (fp) {
         result.fastPath = true;
         if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
@@ -730,7 +750,7 @@ export function createVoiceTurnRunner(deps) {
         say.end();
         // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
         // assistant message would only confuse the next turn's chat template.
-        if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
+        if (fp.say) saveConvo(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
         return result;
       }
 
@@ -766,7 +786,8 @@ export function createVoiceTurnRunner(deps) {
       // offered on the turn it is built [rv1 C6]: the voice bot only, never on a relay turn, and never beside a
       // must-run extra tool ([rev2 C2]: that turn carries only what it carries today). deps.handoffs.forTurn → [] or
       // [{ definition, when, execute }]; a missing deps.handoffs (the eval harness, tests) gives no tool, a throw none.
-      const baseExtra = Array.isArray(opts.extraTools) ? opts.extraTools : [];
+      // An answer turn (bot text) is sent with no tools at all, the endpoint's extra tools included.
+      const baseExtra = !answerTurn && Array.isArray(opts.extraTools) ? opts.extraTools : [];
       const mustBase = baseExtra.some((x) => (typeof x.when !== "function" || x.when(transcript) === true) && typeof x.must === "function" && x.must(transcript) === true);
       let handoffExtra = [];
       if (!mustBase && !relay && voiceKind && typeof deps.handoffs?.forTurn === "function") {
@@ -787,6 +808,7 @@ export function createVoiceTurnRunner(deps) {
       // refused by the gate below even if force-called, so a room cannot hand work to
       // another bot (crow_delegate's `bot` arg accepts ANY enabled bot) or read it back.
       const deny = turnDeny(opts.denyTools, extra);
+      if (relay) deny.add("crow_handoff");   // the relay contract: a forced hand-off is refused by policy
       // extraTools[i].when(transcript) (kiosk: crow_wm): offered only when the PLAIN transcript
       // needs it. Live test 2026-10-04: with the display tool on every turn the 4B answered plain
       // questions through it — two tool rounds, 7 s, and a card repeating the spoken answer.
@@ -815,7 +837,7 @@ export function createVoiceTurnRunner(deps) {
           ownByName.set(n, { ...o, family: typeof o.family === "string" && /^own:[a-z_]{1,24}$/.test(o.family) ? o.family : "own:tools" });
         }
       }
-      const allTools = turnTools(bot, { memoryOn, extra, deny }).filter((t) => !ownByName.has(t.name)).concat([...ownByName.values()].map((o) => o.definition));
+      const allTools = answerTurn ? [] : turnTools(bot, { memoryOn, extra, deny }).filter((t) => !ownByName.has(t.name)).concat([...ownByName.values()].map((o) => o.definition));
       // Memories on: the memory tool is offered only when the question asks to remember or recall
       // (live re-test 2026-10-04: "what's today's date" went to memory twice — 11.5 s).
       const memoryOffered = memoryOn && (typeof opts.memoryWhen !== "function" || opts.memoryWhen(transcript) === true);
@@ -1181,6 +1203,8 @@ export function createVoiceTurnRunner(deps) {
         if (voiceKind && via && proxyArgsConflict(tc, { asking: true })) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
         // crow_tools' flat fallback runs locally but not on its remote route: a yes could confirm values that never run.
         if (voiceKind && reliesOnFlatFallback(tc)) return refuse("refused_policy", VOICE_ARGS_FLAT);
+        // A relay turn neither answers a held question nor arms a new one (cleared in finally, below).
+        if (relay) return refuse("refused_policy", RELAY_NO_CONFIRM, true);
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
         return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments }, { via })}? Say yes to proceed." Then end your turn — do not call another tool.`);
       };
@@ -1451,7 +1475,7 @@ export function createVoiceTurnRunner(deps) {
         let deferred = "";
         let heldRound = "";
         const retrying = retryRound === rounds;
-        const roundTools = retrying ? retryTools : narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
+        const roundTools = answerTurn ? [] : retrying ? retryTools : narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
         offeredNames = new Set(roundTools.map((t) => t.name));   // the offered-tools guard checks what this request really carried
         let roundText = "";
         let finalRes = null;
@@ -1937,7 +1961,7 @@ export function createVoiceTurnRunner(deps) {
       }
       const userIdx = messages.indexOf(userMsg);
       if (userIdx >= 0) messages[userIdx] = { role: "user", content: transcript };
-      convo.save(device.id, messages);
+      saveConvo(device.id, messages);
       return result;
     } catch (err) {
       if (aborted()) { result.aborted = true; return result; }
@@ -1961,7 +1985,7 @@ export function createVoiceTurnRunner(deps) {
       }
       // The voice memory: own families offered on intent or used are stamped (a carried-only one never is), and an
       // action request is kept for the window.
-      if (voiceKind && device?.id && result.transcript) {
+      if (voiceKind && device?.id && result.transcript && !answerTurn) {
         if (ownStamp.length || ownOkFams.size) memory.noteOwn(device.id, [...ownStamp, ...ownOkFams]);
         if (actionAsked) memory.noteAction(device.id);
       }
@@ -1975,7 +1999,7 @@ export function createVoiceTurnRunner(deps) {
         try {
           const vdef = await loadBot(db, CROW_VOICE_BOT_ID);
           if (!transcriptBufferOn(vdef)) deps.transcripts.clear();
-          else if (opts.noTranscript !== true && result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
+          else if (opts.noTranscript !== true && !answerTurn && result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
             const codes = (timings.tools || []).flatMap((r) => String(r).split("+")).filter(Boolean);
             if (timings.verb) codes.push(`verb:${timings.verb}`);
             if (result.failed) codes.push(`failed:${result.failed}`);
@@ -1989,11 +2013,13 @@ export function createVoiceTurnRunner(deps) {
         try {
           const vdef = await loadBot(db, CROW_VOICE_BOT_ID);
           if (!transcriptLogOn(vdef)) await deps.transcriptLog.clear();
-          else if (opts.noTranscript !== true && result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
+          else if (opts.noTranscript !== true && !answerTurn && result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
             await deps.transcriptLog.record({ device: { id: device.id, name: device.name }, transcript: result.transcript, heard: heardBefore });
           }
         } catch { /* never stops a turn, never logged */ }
       }
+      // A relay turn ends any spoken-yes question waiting on this device: a later yes is about something else.
+      if (relay && device?.id && typeof confirm.clear === "function") { try { confirm.clear(device.id); } catch {} }
       if (typeof voiceActions?.afterTurn === "function" && device?.id) {
         try { await voiceActions.afterTurn({ db, device, calledTools: calledTools.slice(), relay }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
       }
