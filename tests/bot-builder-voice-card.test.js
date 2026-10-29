@@ -620,11 +620,40 @@ test("allowed bots save and an unknown id is dropped", async () => {
   assert.match(await editor(), /name="allowed_bots" value="writer" form="btb-vsave" checked/);
   assert.doesNotMatch(await editor(), /name="allowed_bots" value="alpha"[^>]*checked/);
   // a single ticked box arrives as a string, none as nothing (= all bots)
-  await post(await saveBody({ allowed_bots: "alpha" }));
+  const SHOWN = ["alpha", "writer"];
+  await post(await saveBody({ allowed_bots: "alpha", allowed_bots_shown: SHOWN }));
   assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["alpha"]);
-  await post(await saveBody({}));
-  assert.deepEqual((await voiceDef()).handoff.allowed_bots, []);
+  assert.match(await editor(), /name="allowed_bots_shown" value="writer"/);
+  await post(await saveBody({ allowed_bots_shown: SHOWN }));
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, [], "shown and unticked: dropped");
   await reset();
+});
+
+test("a save never widens allowed_bots: a deleted bot's id stays, and a failed read keeps the list", async () => {
+  const withAllowed = { ...SEED_DEF, handoff: { enabled: true, allowed_bots: ["gone"] } };
+  await reset(withAllowed);
+  // stored ["gone"] (no such bot), a persona-only save
+  assert.equal(qOf(await post(await saveBody({ system_prompt: "new persona", allowed_bots_shown: ["alpha", "writer"] }))).get("saved"), "1");
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["gone"]);
+  // a save from a page without the field leaves it too
+  await post(await saveBody({ system_prompt: "again" }));
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["gone"]);
+  // the bot table cannot be read during the save
+  const broken = { execute: (q) => (typeof q === "object" && q.sql === "SELECT bot_id, definition FROM pi_bot_defs" ? Promise.reject(new Error("db down")) : db.execute(q)), close() {} };
+  await reset({ ...SEED_DEF, handoff: { enabled: true, allowed_bots: ["writer"] } });
+  assert.equal(qOf(await post(await saveBody({ allowed_bots: ["alpha"], allowed_bots_shown: ["alpha", "writer"] }), broken)).get("saved"), "1");
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["writer"]);
+  await reset();
+});
+
+test("the picker says when a bot is off", async () => {
+  await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 0 WHERE bot_id = 'alpha'", args: [] });
+  try {
+    const html = await editor();
+    assert.ok(html.slice(html.indexOf('value="alpha"')).split("</li>")[0].includes(T("botbuilder.voiceHandoffBotOff")));
+    assert.ok(!html.slice(html.indexOf('value="writer"')).split("</li>")[0].includes(T("botbuilder.voiceHandoffBotOff")));
+  } finally { await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 WHERE bot_id = 'alpha'", args: [] }); }
+  assert.ok(T("botbuilder.voiceHandoffBotsHint").includes("is on") && T("botbuilder.voiceHandoffBotsHint", "es").includes("activados"));
 });
 
 test("hand-offs off saves enabled:false and keeps routine settings", async () => {
@@ -681,6 +710,7 @@ test("the log lists the newest first, with drawer links", async () => {
 
 test("summaries and task text are escaped", async () => {
   await reset();
+  try {
   await db.execute({ sql: "UPDATE pi_bot_defs SET display_name = ? WHERE bot_id = 'writer'", args: ["<img src=x onerror=1>"] });
   await db.execute({ sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'alpha'", args: [JSON.stringify({ description: "<script>alert(1)</script>", models: { default: "crow-chat/qwen3.6-35b-a3b" } })] });
   await seedLog([HO({ task: "<b>bold</b> & \"q\"", asked: "<script>x</script>", bot_id: "<i>bot</i>", surface: "<u>s</u>" })]);
@@ -689,9 +719,11 @@ test("summaries and task text are escaped", async () => {
   assert.ok(html.includes("&lt;b&gt;bold&lt;/b&gt;") && html.includes("&lt;script&gt;x&lt;/script&gt;"));
   // alpha has no project: its board is off, and the hint says so
   assert.ok(html.includes(T("botbuilder.voiceHandoffBoardOff")));
+  } finally {
   await db.execute({ sql: "UPDATE pi_bot_defs SET display_name = 'Writer' WHERE bot_id = 'writer'", args: [] });
   await db.execute({ sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'alpha'", args: [JSON.stringify({ models: { default: "crow-chat/qwen3.6-35b-a3b" }, gateways: [{ type: "perch" }] })] });
   await db.execute({ sql: "DELETE FROM voice_handoffs", args: [] });
+  }
 });
 
 test("hand-off strings: en + es, differing, no backtick or dollar-brace", () => {

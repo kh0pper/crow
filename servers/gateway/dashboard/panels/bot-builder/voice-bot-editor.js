@@ -35,6 +35,7 @@ import {
   ROUTINE_BACKENDS, CONFIRM_LEVELS, isVoiceBotId, isVoiceBotDef,
 } from "../../../../shared/voice-bot.js";
 import { botCapabilitySummary, cleanName } from "../../../voice/bot-summaries.js";
+import { HANDOFF_TASK_MAX_CHARS } from "../../../voice/handoff-constants.js";
 import { createHandoffStore } from "../../../voice/handoff-store.js";
 import { drawerHrefs } from "../../../board/card-link.js";
 import { boardState, oneLine } from "../../shared/bot-display.js";
@@ -152,19 +153,28 @@ async function applyRoutine(db, b, def, next) {
 
 /**
  * The hand-off settings of the save, applied onto `next.handoff` (only enabled and allowed_bots move).
- * allowed_bots keeps its voice meaning (bots Crow may hand work TO; empty = all): the ticked ids are
- * narrowed to the non-voice bots that exist, deduplicated, and then normalized the way the voice turn
+ * allowed_bots keeps its voice meaning (bots Crow may hand work TO; empty = all), so a save must never
+ * widen it by accident: a stored id leaves the list only when the form showed that bot (it is in
+ * `allowed_bots_shown`) and left it unticked. Stored ids the form did not show (a deleted bot, a page
+ * without the field) stay, and a failed read of the bot table keeps the stored list as it is. Ticked
+ * ids are narrowed to the non-voice bots that exist, deduplicated, and normalized the way the voice turn
  * reads them (a malformed entry is dropped, the rest kept).
  */
 async function applyHandoff(db, b, def, next) {
-  const asked = [].concat(b.allowed_bots ?? []).filter((x) => typeof x === "string" && x);
-  let known = new Set();
+  const stored = normalizeVoiceSettings(def).handoff.allowed_bots;
+  const list = (v) => [].concat(v ?? []).filter((x) => typeof x === "string" && x);
+  let known = null;
   try {
     known = new Set((await db.execute({ sql: "SELECT bot_id, definition FROM pi_bot_defs", args: [] })).rows
       .filter((r) => !isVoiceBotId(String(r.bot_id)) && !isVoiceBotDef(parseDef(r)))
       .map((r) => String(r.bot_id)));
-  } catch { /* nothing is known: nothing is allowed through */ }
-  const ids = normalizeVoiceSettings({ handoff: { allowed_bots: [...new Set(asked)].filter((x) => known.has(x)) } }).handoff.allowed_bots;
+  } catch { /* known stays null: the stored list is kept */ }
+  let ids = stored;
+  if (known) {
+    const shown = new Set(list(b.allowed_bots_shown));
+    const kept = stored.filter((x) => !shown.has(x));
+    ids = normalizeVoiceSettings({ handoff: { allowed_bots: [...new Set([...kept, ...list(b.allowed_bots).filter((x) => known.has(x))])] } }).handoff.allowed_bots;
+  }
   next.handoff = { ...obj(def.handoff), enabled: b.handoff_enabled === "on", allowed_bots: ids };
 }
 
@@ -363,16 +373,17 @@ function logTime(ms) {
 async function handoffSection(db, v, lang, sec, hint) {
   let bots = [];
   try {
-    bots = (await db.execute({ sql: "SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows
+    bots = (await db.execute({ sql: "SELECT bot_id, display_name, definition, project_id, enabled FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows
       .filter((r) => !isVoiceBotId(String(r.bot_id)) && !isVoiceBotDef(parseDef(r)));
   } catch { bots = []; }
   const allowed = v.handoff.allowed_bots;
   const items = bots.map((r) => {
     const id = String(r.bot_id);
     const off = boardState(r).state !== "on";
-    return `<li><label class="btb-vcheck"><input type="checkbox" name="allowed_bots" value="${escapeHtml(id)}" form="btb-vsave"${allowed.includes(id) ? " checked" : ""}> ` +
+    return `<li><input type="hidden" name="allowed_bots_shown" value="${escapeHtml(id)}" form="btb-vsave"><label class="btb-vcheck"><input type="checkbox" name="allowed_bots" value="${escapeHtml(id)}" form="btb-vsave"${allowed.includes(id) ? " checked" : ""}> ` +
       `<b>${escapeHtml(cleanName(r.display_name, id))}</b></label> ` +
       `<span class="btb-hint">${escapeHtml(botCapabilitySummary(r))}</span>` +
+      (Number(r.enabled) ? "" : ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBotOff", lang))}</span>`) +
       (off ? ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBoardOff", lang))}</span>` : "") + `</li>`;
   }).join("");
   let rows = [];
@@ -385,9 +396,9 @@ async function handoffSection(db, v, lang, sec, hint) {
     const href = r.card_id != null ? hrefs.get(Number(r.card_id)) ?? null : null;
     const st = String(r.status ?? "");
     const stLabel = translations_has(HANDOFF_STATUS_KEY(st)) ? t(HANDOFF_STATUS_KEY(st), lang) : st;
-    const asked = r.asked == null ? "" : `<div class="btb-hint">${escapeHtml(oneLine(String(r.asked), 300))}</div>`;
+    const asked = r.asked == null ? "" : `<div class="btb-hint">${escapeHtml(oneLine(String(r.asked), HANDOFF_TASK_MAX_CHARS))}</div>`;
     logRows.push(`<tr><td>${escapeHtml(logTime(r.created_at))}</td><td>${escapeHtml(String(r.surface ?? ""))}</td>` +
-      `<td>${escapeHtml(String(r.bot_id ?? ""))}</td><td>${escapeHtml(oneLine(String(r.task ?? ""), 300))}${asked}</td>` +
+      `<td>${escapeHtml(String(r.bot_id ?? ""))}</td><td>${escapeHtml(oneLine(String(r.task ?? ""), HANDOFF_TASK_MAX_CHARS))}${asked}</td>` +
       `<td>${escapeHtml(stLabel)}${href ? ` <a href="${escapeHtml(href)}">${escapeHtml(t("botbuilder.voiceHandoffOpenCard", lang))}</a>` : ""}</td></tr>`);
   }
   const log = logRows.length
