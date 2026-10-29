@@ -197,7 +197,9 @@ test("E-V1: A's voice bot reads 'Hank (bot from alpha)' on B, and B's reads 'Bea
 });
 
 test("E-P1: A's pi bot reaches B through A's relay (real router, writer and proxy child); B accepts bot hank on /memory", { timeout: 120_000 }, async () => {
+  const priorFlags = A.sql("SELECT value FROM dashboard_settings WHERE key = 'feature_flags'")[0]?.value;
   A.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)", [JSON.stringify({ remote_invocation: true })]);
+  try {
   const def = { tools: { crow_mcp: [], remote_mcp: [`${B.id}::crow-memory`] } };
   A.sql("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition) VALUES ('hank', 'Hank', ?)", [JSON.stringify(def)]);
   // A's row for B holds the tailnet-shaped address; the relay's fetch seam maps it to B's Serve relay.
@@ -256,6 +258,11 @@ test("E-P1: A's pi bot reaches B through A's relay (real router, writer and prox
   }
   assert.ok(!("CROW_PEER_TOKENS_PATH" in out.block.env));
   assert.match(out.block.env.CROW_REMOTE_RELAY_URL, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/peer-relay/${B.id}/memory/mcp$`));
+  } finally {
+    // Restore A's switch: later legs must not inherit remote invocation.
+    if (priorFlags === undefined) A.sql("DELETE FROM dashboard_settings WHERE key = 'feature_flags'");
+    else A.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)", [priorFlags]);
+  }
 });
 
 test("E-F1 (and E-M2, an unsigned sender): a direct /tools call claiming bot 'Alex' in _meta reads 'Crow (via alpha)'", async () => {
@@ -302,6 +309,7 @@ test("E-F4: the same signed request sent twice: first 'bot from', second 'via' +
   const rpc = commentCall("S/f4.docx", "once");
   const headers = sign(A, B, rpc);
   const first = await peerPost(A, B, { rpc, headers });
+  assert.equal(first.status, 200, first.text.slice(0, 500));
   const firstId = JSON.parse(first.json.result.content[0].text).data.comment_id;
   assert.equal(await authorOf(B, "S/f4.docx", firstId), "Hank (bot from alpha)");
   const off = logOffset(B);
@@ -338,6 +346,11 @@ test("E-F6b: a peer's headers bound to another pair (C's B key, aud B) sent to A
   const off = logOffset(A);
   assert.equal(await commentAs(C, A, "f6b.docx", { rpc, headers: sign(C, B, rpc) }), "Crow (via charlie)");
   await reasonAfter(A, off, C, "/tools", "bad_sig");
+  // Same-pair positive control: C's real key FOR A is accepted on A.
+  const honest = commentCall("S/f6b-ok.docx", "meant for alpha");
+  const off2 = logOffset(A);
+  assert.equal(await commentAs(C, A, "f6b-ok.docx", { rpc: honest, headers: sign(C, A, honest) }), "Hank (bot from charlie)");
+  await acceptedAfter(A, off2, C, "hank", "/tools");
 });
 
 test("wrong mount: headers signed for /router sent to /tools are 'via' + mount_mismatch", async () => {
@@ -355,7 +368,7 @@ test("E-R1: Artifacts stays closed to a peer, even with a valid signed actor and
   assert.match(String(r.json?.error?.message), /not exposed for remote invocation/, "refused by the exposure gate: " + r.text.slice(0, 300));
 });
 
-test("E-F7: C enrolled on B under A's name: both signed bots carry PR-A's id suffix and differ", { timeout: 120_000 }, async () => {
+test("E-F7: a fourth instance (D) enrolled on B under A's name: both signed bots carry PR-A's id suffix and differ", { timeout: 120_000 }, async () => {
   await D.boot();
   const p = await pairInto(D, B);
   assert.equal(p.code, 0, p.out);
@@ -376,5 +389,5 @@ test("E-R3 (last): after Settings revokes A on B, A's bearer is refused", async 
   assert.equal(rv.status, 303, JSON.stringify(rv));
   assert.match(String(rv.location), /revoked=1/);
   const after = await peerPost(A, B, { rpc: { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} } });
-  assert.notEqual(after.initStatus, 200, `A's bearer is refused after the revoke: ${after.text.slice(0, 300)}`);
+  assert.ok([401, 403].includes(after.initStatus), `A's bearer is refused after the revoke (got ${after.initStatus}): ${after.text.slice(0, 300)}`);
 });
