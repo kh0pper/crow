@@ -120,17 +120,22 @@ export async function saveExtensionSecret(db, key, { bundleId, envKey, label, us
  * connection. Upsert on (connection_uuid, env_key). A row without a uuid is refused (the unique
  * index treats NULL uuids as distinct, so it could not stop duplicates).
  */
-export async function saveServiceSecret(db, key, { connectionUuid, bundleId = null, envKey, label, secret, now } = {}) {
+export async function saveServiceSecret(db, key, { connectionUuid, bundleId, envKey, label, secret, now } = {}) {
   await ensureKeychainTable(db);
   requireKey(key);
-  if (typeof connectionUuid !== "string" || connectionUuid.trim() === "") throw new Error("keychain: a service secret needs a connection uuid");
+  const uuid = typeof connectionUuid === "string" ? connectionUuid.trim() : "";
+  if (!uuid) throw new Error("keychain: a service secret needs a connection uuid");
+  // A row without a bundle would never be marked removed on uninstall, and would still be served.
+  const bundle = typeof bundleId === "string" ? cleanText(bundleId.trim(), 200) : null;
+  if (!bundle) throw new Error("keychain: a service secret needs a bundle id");
   if (!envKey || typeof envKey !== "string" || typeof secret !== "string" || secret === "") throw new Error("keychain: envKey and a secret are required");
   const sealed = sealSecret(secret, box(key));
   const ts = iso(now);
   const lbl = cleanText(label) || envKey;
-  const bundle = cleanText(bundleId, 200);
-  const existing = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND env_key = ?", args: [connectionUuid, envKey] })).rows[0];
-  // ON CONFLICT covers a concurrent first save for the same pair (the partial unique index).
+  // `created` comes from this pre-read, so two concurrent FIRST saves of one pair may both report
+  // created:true. The row itself is still right: ON CONFLICT on the partial unique index makes the
+  // second one an update. Callers use `created` for wording only, never for correctness.
+  const existing = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND env_key = ?", args: [uuid, envKey] })).rows[0];
   const r = await db.execute({
     sql: `INSERT INTO crow_keychain (kind, label, bundle_id, env_key, secret_sealed, key_id, origin, status, connection_uuid, created_at, updated_at)
           VALUES ('service', ?, ?, ?, ?, ?, 'typed', 'active', ?, ?, ?)
@@ -138,7 +143,7 @@ export async function saveServiceSecret(db, key, { connectionUuid, bundleId = nu
             label = excluded.label, bundle_id = excluded.bundle_id, secret_sealed = excluded.secret_sealed, key_id = excluded.key_id,
             origin = 'typed', status = 'active', first_view_until = NULL, updated_at = excluded.updated_at
           RETURNING id`,
-    args: [lbl, bundle, envKey, sealed, key.id, connectionUuid, ts, ts],
+    args: [lbl, bundle, envKey, sealed, key.id, uuid, ts, ts],
   });
   return { id: Number(r.rows[0].id), created: !existing };
 }
@@ -147,19 +152,25 @@ export async function saveServiceSecret(db, key, { connectionUuid, bundleId = nu
  * Gateway-internal: a connection's secrets as {envKey: plaintext}, for the connection's own child
  * and live test only (never a response, log or audit row). Only active rows sealed under this key,
  * and only env keys the service itself declares (allowedKeys): any other key on a row is never
- * returned. No key, no uuid or no allowedKeys → {} (fails closed). A row that fails to open is skipped.
+ * returned. No uuid or no allowedKeys → {} (fails closed); no rows → {}. A missing key, or rows
+ * that exist but none sealed under this key (a crow.db restored without its key file), throws
+ * KeychainKeyMissingError (code KEYCHAIN_KEY_MISSING): the fault is the key, not the token, so a
+ * caller must not report it as a bad token or spawn a child with no credentials. A row that fails
+ * to open is skipped.
  */
 export async function serviceSecretsFor(db, key, connectionUuid, { allowedKeys } = {}) {
   await ensureKeychainTable(db);
-  if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) return {};
   if (typeof connectionUuid !== "string" || connectionUuid === "" || !Array.isArray(allowedKeys) || allowedKeys.length === 0) return {};
+  if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) throw new KeychainKeyMissingError();
   const allowed = new Set(allowedKeys.filter((k) => typeof k === "string" && k));
   const { rows } = await db.execute({
-    sql: "SELECT env_key, secret_sealed FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND key_id = ? AND status = 'active' ORDER BY id",
-    args: [connectionUuid, key.id],
+    sql: "SELECT env_key, key_id, secret_sealed FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND status = 'active' ORDER BY id",
+    args: [connectionUuid],
   });
+  const mine = rows.filter((r) => r.key_id === key.id);
+  if (rows.length > 0 && mine.length === 0) throw new KeychainKeyMissingError();
   const out = {};
-  for (const r of rows) {
+  for (const r of mine) {
     if (!allowed.has(r.env_key)) continue;
     try {
       const v = openSecret(r.secret_sealed, box(key));
@@ -167,6 +178,19 @@ export async function serviceSecretsFor(db, key, connectionUuid, { allowedKeys }
     } catch { /* damaged row: skip, never log */ }
   }
   return out;
+}
+
+/**
+ * The env key names a connection has a secret saved for, from metadata only: nothing is decrypted
+ * and no key is needed (for a set/unset view). Every saved row counts, whatever its status or key:
+ * "set" means a value is saved; whether it can be served is the connection's status (needs_install,
+ * key_missing), not this answer.
+ */
+export async function serviceSecretKeys(db, connectionUuid) {
+  await ensureKeychainTable(db);
+  if (typeof connectionUuid !== "string" || connectionUuid === "") return new Set();
+  const { rows } = await db.execute({ sql: "SELECT env_key FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND env_key IS NOT NULL", args: [connectionUuid] });
+  return new Set(rows.map((r) => r.env_key));
 }
 
 /** Removes every secret of one connection (disconnect). */
@@ -333,7 +357,7 @@ export async function importEntries(db, key, entries) {
       imported++;
     } else if (e.kind === "service") {
       const uuid = typeof e.connection_uuid === "string" ? e.connection_uuid.trim() : "";
-      if (!uuid || !e.env_key) { skipped++; continue; }
+      if (!uuid || !e.env_key || !e.bundle_id) { skipped++; continue; }
       if (current.some((c) => c.kind === "service" && c.connection_uuid === uuid && c.env_key === e.env_key && c.readable)) { skipped++; continue; }
       const { id } = await saveServiceSecret(db, key, { connectionUuid: uuid, bundleId: e.bundle_id || null, envKey: e.env_key, label: e.label, secret: e.secret });
       if (e.status === "extension_removed") await db.execute({ sql: "UPDATE crow_keychain SET status = 'extension_removed' WHERE id = ?", args: [id] });

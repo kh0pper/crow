@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -20,6 +20,8 @@ const { sealExport, openExport } = await import("../servers/gateway/keychain/exp
 const { createReauthGate } = await import("../servers/gateway/keychain/reauth.js");
 const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
 const { SERVICE_CONNECTIONS_DDL } = await import("../servers/shared/project-services-schema.js");
+const { collectSecretValueSets } = await import("../servers/shared/secret-values-collect.js");
+const { recordCardSecret } = await import("../servers/shared/secret-values.js");
 
 const SECRET_A = "test-token-61";
 const SECRET_B = "test-token-62";
@@ -64,9 +66,23 @@ test("an extra env key on a row is never returned", async () => {
   assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: [] }), {}, "no allowed keys → nothing");
   assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", {}), {}, "allowedKeys missing → nothing");
   assert.deepEqual(await K.serviceSecretsFor(db, key, "u-8", { allowedKeys: ["A"] }), {}, "another connection's rows never");
-  assert.deepEqual(await K.serviceSecretsFor(db, null, "u-7", { allowedKeys: ["A"] }), {}, "no key → nothing");
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "", { allowedKeys: ["A"] }), {}, "no uuid → nothing");
+});
+
+test("call 4 — a missing key, or rows none of which this key sealed, throws KEYCHAIN_KEY_MISSING; no rows stays {}", async () => {
+  const { db, key } = fresh();
+  await save(db, key, "A", SECRET_A);
+  const missing = (e) => e instanceof K.KeychainKeyMissingError && e.code === "KEYCHAIN_KEY_MISSING" && !e.message.includes(SECRET_A);
+  await assert.rejects(K.serviceSecretsFor(db, null, "u-7", { allowedKeys: ["A"] }), missing, "no key");
+  await assert.rejects(K.serviceSecretsFor(db, { id: "x" }, "u-7", { allowedKeys: ["A"] }), missing, "a malformed key is no key");
+  await assert.rejects(K.serviceSecretsFor(db, null, "u-none", { allowedKeys: ["A"] }), missing, "no key is a fault even before any row exists");
   const other = createKeychainKey({ crowHome: home() });
-  assert.deepEqual(await K.serviceSecretsFor(db, other, "u-7", { allowedKeys: ["A"] }), {}, "rows sealed under another key are unreadable");
+  await assert.rejects(K.serviceSecretsFor(db, other, "u-7", { allowedKeys: ["A"] }), missing, "rows exist, none sealed under this key (a restored crow.db)");
+  assert.deepEqual(await K.serviceSecretsFor(db, other, "u-none", { allowedKeys: ["A"] }), {}, "no rows → {}");
+  assert.deepEqual(await K.serviceSecretsFor(db, null, "u-7", { allowedKeys: [] }), {}, "no allowed keys → {} before the key is looked at");
+  // Mixed: one row under this key, one under an old key → the readable one is served.
+  await K.saveServiceSecret(db, other, { connectionUuid: "u-7", bundleId: "github", envKey: "B", secret: SECRET_B });
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A", "B"] }), { A: SECRET_A });
 });
 
 test("M5 — a service secret without a connection uuid is refused, and the error carries no secret", async () => {
@@ -74,12 +90,19 @@ test("M5 — a service secret without a connection uuid is refused, and the erro
   for (const connectionUuid of [undefined, null, "", "   ", 7]) {
     await assert.rejects(K.saveServiceSecret(db, key, { connectionUuid, envKey: "A", secret: SECRET_A }), (e) => /connection uuid/.test(e.message) && !e.message.includes(SECRET_A));
   }
-  await assert.rejects(K.saveServiceSecret(db, key, { connectionUuid: "u-7", envKey: "A", secret: "" }));
+  for (const bundleId of [undefined, null, "", "   ", 7]) {
+    await assert.rejects(K.saveServiceSecret(db, key, { connectionUuid: "u-7", bundleId, envKey: "A", secret: SECRET_A }), (e) => /bundle id/.test(e.message) && !e.message.includes(SECRET_A), "M1: a bundle id is required");
+  }
+  await assert.rejects(K.saveServiceSecret(db, key, { connectionUuid: "u-7", bundleId: "github", envKey: "A", secret: "" }));
   await assert.rejects(K.saveServiceSecret(db, null, { connectionUuid: "u-7", envKey: "A", secret: SECRET_A }), (e) => e.code === "KEYCHAIN_KEY_MISSING");
   assert.equal((await rowsOf(db)).length, 0, "nothing was written");
-  const out = await K.importEntries(db, key, [{ kind: "service", label: "x", env_key: "A", secret: SECRET_A, connection_uuid: null }, { kind: "service", label: "x", env_key: "A", secret: SECRET_A }]);
+  const out = await K.importEntries(db, key, [
+    { kind: "service", label: "x", bundle_id: "github", env_key: "A", secret: SECRET_A, connection_uuid: null },
+    { kind: "service", label: "x", bundle_id: "github", env_key: "A", secret: SECRET_A },
+    { kind: "service", label: "x", env_key: "A", secret: SECRET_A, connection_uuid: "u-7" },
+  ]);
   assert.equal(out.imported, 0);
-  assert.equal(out.skipped, 2);
+  assert.equal(out.skipped, 3, "no uuid, or no bundle: skipped, the rest of the import goes on");
   assert.equal((await rowsOf(db)).length, 0);
 });
 
@@ -136,7 +159,7 @@ test("an unreadable service row (old key) is replaced by its import: the restore
   const { db, key } = fresh();
   const oldKey = createKeychainKey({ crowHome: home() });
   await save(db, oldKey, "A", SECRET_A);
-  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), {});
+  await assert.rejects(K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), (e) => e.code === "KEYCHAIN_KEY_MISSING");
   const out = await K.importEntries(db, key, [{ kind: "service", label: "GitHub — A", bundle_id: "github", env_key: "A", connection_uuid: "u-7", secret: SECRET_A, status: "active" }]);
   assert.equal(out.imported, 1);
   assert.equal((await rowsOf(db)).length, 1);
@@ -147,7 +170,7 @@ test("deleteEntry refuses a service row; deleteServiceSecrets removes exactly on
   const { db, key } = fresh();
   const a = await save(db, key, "A", SECRET_A);
   await save(db, key, "B", SECRET_B);
-  await K.saveServiceSecret(db, key, { connectionUuid: "u-8", envKey: "A", secret: SECRET_X });
+  await K.saveServiceSecret(db, key, { connectionUuid: "u-8", bundleId: "github", envKey: "A", secret: SECRET_X });
   const { id: manual } = await K.addManualSecret(db, key, { label: "Phone", secret: "app-pass" });
   await assert.rejects(K.deleteEntry(db, a.id), (e) => e instanceof K.KeychainServiceRowError && e.code === "KEYCHAIN_SERVICE_ROW" && !e.message.includes(SECRET_A));
   assert.equal((await rowsOf(db)).length, 4, "nothing deleted");
@@ -173,17 +196,33 @@ test("listEntries shows a service row's metadata (uuid, field name) and never it
   assert.ok(!("secret_sealed" in list[0]));
 });
 
-test("A12 — readableSecretsSync (the bot secret-masking reader) includes service secrets, so approval cards mask them", async () => {
-  const { path, db, key } = fresh();
-  await save(db, key, "A", SECRET_A);
-  await K.addManualSecret(db, key, { label: "Phone", secret: "app-pass" });
+test("A12 (corrected) — what the bot secret-value sets really hold for a service row: display only when generated-shaped, never a card value", async () => {
+  // readableSecretsSync (the masking reader) returns every readable row, service rows included.
+  const crowHome = home();
+  const dataDir = join(crowHome, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const path = join(dataDir, "crow.db");
+  const db = createDbClient(path);
+  const key = createKeychainKey({ crowHome });
+  const PAT = "github_pat_" + "Ab3".repeat(12);                     // generated-shaped: [A-Za-z0-9_-]{32,} with a letter and a digit
+  const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.c2lnbmF0dXJlMTIz"; // dotted: not generated-shaped
+  await K.saveServiceSecret(db, key, { connectionUuid: "u-7", bundleId: "github", envKey: "GITHUB_PERSONAL_ACCESS_TOKEN", secret: PAT });
+  await K.saveServiceSecret(db, key, { connectionUuid: "u-8", bundleId: "home-assistant", envKey: "HA_TOKEN", secret: JWT });
   db.close();
   const raw = new Database(path, { readonly: true });
   try {
-    const out = K.readableSecretsSync(raw, key);
-    assert.ok(out.some((e) => e.kind === "service" && e.secret === SECRET_A), "service secret masked");
-    assert.ok(out.some((e) => e.kind === "manual"));
+    const kinds = K.readableSecretsSync(raw, key).map((e) => [e.kind, e.secret]);
+    assert.deepEqual(kinds, [["service", PAT], ["service", JWT]], "the reader sees service rows");
   } finally { raw.close(); }
+
+  const env = { CROW_HOME: crowHome, CROW_DATA_DIR: dataDir };
+  // Even a value the operator's own keychain UI recorded stays off cards: a non-manual row is
+  // steerable by a bot (kind is untrusted), so kind-based trust is not extended to services.
+  recordCardSecret([PAT, JWT], env);
+  const sets = collectSecretValueSets({ env, dbPath: path });
+  assert.ok(sets.display.includes(PAT), "a generated-shaped service secret is masked in logs and transcripts");
+  assert.ok(!sets.display.includes(JWT), "a dotted token (HA, Discord) is NOT in the display set: masking for it is Task 9's to add");
+  assert.ok(!sets.card.includes(PAT) && !sets.card.includes(JWT), "service secrets never hide text on approval cards");
 });
 
 test("the delete route answers 409 {error:'service_row'} for a service row, audits nothing, and no response carries the secret", async () => {
@@ -227,4 +266,33 @@ test("the delete route answers 409 {error:'service_row'} for a service row, audi
 test("the store's service paths never log a secret", () => {
   const src = readFileSync(new URL("../servers/gateway/keychain/store.js", import.meta.url), "utf8");
   assert.ok(!/console\.(log|warn|error|info)/.test(src), "the store has no logging at all");
+});
+
+test("M2 — a padded uuid is stored trimmed and found by its canonical form", async () => {
+  const { db, key } = fresh();
+  const first = await K.saveServiceSecret(db, key, { connectionUuid: "  u-7 ", bundleId: " github ", envKey: "A", secret: SECRET_A });
+  const rows = await rowsOf(db);
+  assert.equal(rows[0].connection_uuid, "u-7");
+  assert.equal(rows[0].bundle_id, "github");
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), { A: SECRET_A });
+  assert.deepEqual(await save(db, key, "A", SECRET_B), { id: first.id, created: false }, "the canonical uuid is the same row");
+});
+
+test("M7 — serviceSecretKeys lists the saved field names from metadata only, with no key on the machine", async () => {
+  const { db, key } = fresh();
+  await save(db, key, "A", SECRET_A);
+  await save(db, key, "B", SECRET_B);
+  await K.saveServiceSecret(db, key, { connectionUuid: "u-8", bundleId: "github", envKey: "C", secret: SECRET_X });
+  // No key object is passed or needed; a row sealed under a lost key still counts as set.
+  const keys = await K.serviceSecretKeys(db, "u-7");
+  assert.ok(keys instanceof Set);
+  assert.deepEqual([...keys].sort(), ["A", "B"]);
+  await db.execute("UPDATE crow_keychain SET key_id = 'gone', secret_sealed = 'not-a-sealed-value' WHERE env_key = 'A'");
+  assert.deepEqual([...(await K.serviceSecretKeys(db, "u-7"))].sort(), ["A", "B"], "never decrypts: an unopenable row is still 'set'");
+  assert.equal(await K.markBundleRemoved(db, "github"), 3);
+  assert.deepEqual([...(await K.serviceSecretKeys(db, "u-7"))].sort(), ["A", "B"], "a removed bundle's values are still saved");
+  assert.deepEqual([...(await K.serviceSecretKeys(db, "u-none"))], []);
+  assert.deepEqual([...(await K.serviceSecretKeys(db, ""))], []);
+  await K.deleteServiceSecrets(db, "u-7");
+  assert.deepEqual([...(await K.serviceSecretKeys(db, "u-7"))], []);
 });

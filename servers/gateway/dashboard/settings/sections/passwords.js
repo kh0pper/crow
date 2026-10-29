@@ -224,6 +224,7 @@ export function passwordsClientJS(lang) {
           });
         });
         row.querySelector(".pw-delete").addEventListener("click", function() {
+          document.getElementById("pw-delete-refused").hidden = true;
           var generated = row.getAttribute("data-origin") === "generated" && row.getAttribute("data-status") === "active";
           if (!confirm(generated ? '${tJs("passwords.deleteGeneratedConfirm", lang)}' : '${tJs("passwords.deleteConfirm", lang)}')) return;
           guarded("/delete", generated ? { id: id, confirm_generated: true } : { id: id }, function(res) {

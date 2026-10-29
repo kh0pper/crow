@@ -453,6 +453,17 @@ test("R14 — a refused delete of a project connection's key keeps the row and s
   await o.settle();
   assert.equal(o.document.getElementById("pw-delete-refused").hidden, true);
 
+  // M4: the next delete click hides it again before its answer arrives (here: a success).
+  const m = boot({ entries: [...ENTRIES, svc], routes: { "/delete": (body) => (body.id === 6 ? { status: 409, d: { error: "service_row" } } : { status: 200, d: { ok: true } }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
+  m.click(m.document.querySelector('tr.pw-row[data-id="6"] .pw-delete'));
+  await m.settle();
+  assert.equal(m.document.getElementById("pw-delete-refused").hidden, false);
+  m.click(m.document.querySelector('tr.pw-row[data-id="2"] .pw-delete'));
+  assert.equal(m.document.getElementById("pw-delete-refused").hidden, true, "hidden at the start of the click");
+  await m.settle();
+  assert.equal(m.document.querySelector('tr.pw-row[data-id="2"]'), null);
+  assert.equal(m.document.getElementById("pw-delete-refused").hidden, true);
+
   const es = t("services.keychain.deleteServiceRow", "es");
   assert.notEqual(es, "services.keychain.deleteServiceRow");
   assert.notEqual(es, t("services.keychain.deleteServiceRow", "en"));
