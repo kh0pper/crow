@@ -1898,5 +1898,20 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // The route-scoped body parsers above (/message, /files): a malformed or oversized body may
+  // hold a pasted secret, and Node's JSON.parse message quotes body text, so the express default
+  // handler's stack log would print it. Every parser refusal answers a fixed code and logs one
+  // fixed line, never the parser's message (the services-api.js idiom, credential card §10.3).
+  router.use(P, (err, req, res, next) => {
+    if (!err || res.headersSent) return next(err);
+    const status = Number(err.status || err.statusCode);
+    if (typeof err.type === "string" || (status >= 400 && status < 500)) {
+      console.warn("[perch-interactive-api] bad body");
+      return status === 413 ? jsonError(res, 413, "too_large") : jsonError(res, 400, "bad_body");
+    }
+    console.error("[perch-interactive-api] request failed");
+    jsonError(res, 500, "internal");
+  });
+
   return router;
 }
