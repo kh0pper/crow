@@ -267,7 +267,8 @@ async function waitGone(pids, ms) {
  * Resolves with whatever is still alive.
  */
 export async function killTree(pid, { graceMs = KILL_GRACE_MS, includeRoot = true } = {}) {
-  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) throw new DriverRefusal(`killTree refuses pid ${pid}`);
+  // Our own pid is allowed only for its descendants (the child's parent-death cleanup).
+  if (!Number.isInteger(pid) || pid <= 1 || (pid === process.pid && includeRoot)) throw new DriverRefusal(`killTree refuses pid ${pid}`);
   const known = new Set();
   const collect = () => {
     const found = [...(includeRoot && isAlive(pid) ? [pid] : []), ...descendants(pid)].filter((p) => p !== process.pid);

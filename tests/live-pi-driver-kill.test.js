@@ -96,6 +96,16 @@ test("includeRoot false spares the root", async () => {
   child.kill("SIGKILL");
 });
 
+test("own pid: refused as a root, allowed for its descendants only (the child's parent-death cleanup)", async () => {
+  await assert.rejects(killTree(process.pid), /killTree refuses pid/);
+  const kid = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { detached: true, stdio: "ignore" });
+  track(kid.pid);
+  await until(() => alive(kid.pid));
+  const { survivors } = await killTree(process.pid, { graceMs: 300, includeRoot: false });
+  assert.equal(survivors.length, 0);
+  assert.equal(alive(kid.pid), false);
+});
+
 test("re-walk catches a late child", async () => {
   // On SIGTERM the root spawns a NEW detached grandchild and keeps running; only a re-walk finds it.
   const src = `
