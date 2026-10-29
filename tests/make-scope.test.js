@@ -100,14 +100,18 @@ test("scope and filter combine; the active chip has aria-current; chips are link
 test("card scope passes cardRefs, shows the header, and writes no cookie", async () => {
   seen = [];
   seam({ items: [item({ ref: "art_card001" })], ...OK });
-  const r = await get("/dashboard/make?scope=card:7");
+  // The shell sets its mode cookie on a first visit; send it back so only a scope write could show.
+  const first = await get("/dashboard/make");
+  const mode = /^(crow_mode_[0-9a-f]+)=([^;]*)/.exec(first.setCookie || "");
+  const jar = mode ? { ...NEW, [mode[1]]: mode[2] } : NEW;
+  const r = await get("/dashboard/make?scope=card:7", jar);
   assert.equal(r.status, 200);
   assert.ok(seen.at(-1).opts.cardRefs.has("artifact:art_card001"));
   assert.ok(!seen.at(-1).opts.cardRefs.has("artifact:art_other01"));
   assert.match(r.body, /Documents for #7/);
   assert.match(r.body, /This card/);
   assert.match(r.body, /href="\/dashboard\/make\?scope=card%3A7" aria-current="page"/);
-  assert.ok(!r.setCookie || !/crow_project|scope/i.test(r.setCookie), "no project cookie");
+  assert.equal(r.setCookie, null, "a scope GET sets no cookie at all");
 });
 
 test("?card= alone shows the This card chip but stays on the default scope", async () => {
@@ -120,6 +124,52 @@ test("unknown card shows the empty line", async () => {
   seam({ items: [], ...OK });
   const r = await get("/dashboard/make?scope=card:99999");
   assert.match(r.body, /This card has no documents yet/);
+});
+
+test("This project shows when a project chip is set and hides otherwise; the card title is escaped", async () => {
+  seam({ items: [item()], ...OK });
+  const plain = await get("/dashboard/make");
+  assert.doesNotMatch(plain.body, /scope=project/);
+  const proj = await get("/dashboard/make?project=garden");
+  assert.match(proj.body, /href="\/dashboard\/make\?scope=project" aria-current="page">Garden</);
+  const all = await get("/dashboard/make?project=garden&scope=all");
+  assert.match(all.body, /scope=all&amp;filter=pages|href="\/dashboard\/make\?scope=all" aria-current="page"/);
+  // The card title comes from tasks.db and is bot text: it must be escaped.
+  const { createDbClient } = await import("../servers/db.js");
+  const t = createDbClient(process.env.CROW_TASKS_DB_PATH);
+  await t.execute("CREATE TABLE IF NOT EXISTS tasks_items (id INTEGER PRIMARY KEY, title TEXT, status TEXT, project_id INTEGER, action_needed TEXT, data_json TEXT, board_id INTEGER)");
+  await t.execute({ sql: "INSERT OR REPLACE INTO tasks_items (id,title,status) VALUES (7, ?, 'open')", args: ["<b>x</b>&"] });
+  t.close();
+  const r = await get("/dashboard/make?scope=card:7");
+  assert.match(r.body, /Documents for #7 &lt;b&gt;x&lt;\/b&gt;&amp;/);
+  assert.doesNotMatch(r.body, /<b>x<\/b>/);
+});
+
+test("card mode reaches a document older than any recent-list cap and files only the card's rows", async () => {
+  const { listMakeItems } = await import("../servers/gateway/make/sources.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  const home = join(dir, "h2");
+  for (const b of ["artifacts", "workspace"]) {
+    mkdirSync(join(home, "bundles", b, "server", "nc"), { recursive: true });
+    writeFileSync(join(home, "bundles", b, "manifest.json"), "{}");
+  }
+  writeFileSync(join(home, "installed.json"), JSON.stringify([{ id: "artifacts" }, { id: "workspace" }]));
+  writeFileSync(join(home, "bundles", "workspace", "server", "config.js"), "export const getConfig = () => ({});");
+  writeFileSync(join(home, "bundles", "workspace", "server", "nc", "dav.js"), "export const stat = async () => null; export const listRecent = async () => { throw new Error('listRecent must not be used'); };");
+  for (let i = 0; i < 70; i++) {
+    await db.execute({ sql: "INSERT INTO artifacts (id,title,type,current_version,updated_at) VALUES (?,?,'page',1,'2026-10-01 00:00:00')", args: [`art_new${String(i).padStart(4, "0")}`, `n${i}`] });
+  }
+  await db.execute("INSERT INTO artifacts (id,title,type,current_version,updated_at) VALUES ('art_oldest1','Old','page',1,'2020-01-01 00:00:00')");
+  const count = async () => Number((await db.execute("SELECT COUNT(*) c FROM shell_items WHERE item_kind='artifact'")).rows[0].c);
+  const before = await count();
+  const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const wsStat = async (cfg, { file_id }) => (file_id === 41 ? { fileId: 41, name: "Brief.docx", mime: docx, modified: "2026-10-02T00:00:00.000Z", isFolder: false } : null);
+  const m = await listMakeItems(db, { projectId: 999 }, { crowHome: home, wsStat, cardRefs: new Set(["artifact:art_oldest1", "workspace_file:41", "workspace_file:42"]) });
+  assert.deepEqual(m.items.map((i) => `${i.kind}:${i.ref}`).sort(), ["artifact:art_oldest1", "workspace_file:41"]);
+  assert.equal(m.items.find((i) => i.kind === "workspace_file").title, "Brief.docx");
+  assert.equal(await count() - before, 1, "only the card's own artifact got filed");
+  db.close();
 });
 
 test("en and es strings", async () => {

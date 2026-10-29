@@ -138,23 +138,28 @@ async function cardProjects(cardIds, tasksDb, tasksDbPath) {
 }
 
 /** Live, non-deleted artifacts in a scope, newest first. */
-export async function listArtifactItems(db, scope = { all: true }, { limit = 60, now = Date.now(), tasksDb = null, tasksDbPath = defaultTasksDbPath } = {}) {
+export async function listArtifactItems(db, scope = { all: true }, { limit = 60, now = Date.now(), tasksDb = null, tasksDbPath = defaultTasksDbPath, ids: only = null } = {}) {
+  // only: restrict to these artifact ids (a card's documents). The query, the filing step and the
+  // listing then touch at most those rows, however old they are.
+  if (only && !only.length) return [];
   let artifacts;
   try {
-    ({ rows: artifacts } = await db.execute(
+    ({ rows: artifacts } = await db.execute({ sql:
       `SELECT a.id, a.title, a.type, a.created_by_bot, a.origin_session, a.origin_card, a.received, a.origin_contact,
               a.current_version, a.updated_at, v.made_by, v.created_at AS version_created_at
          FROM artifacts a
          LEFT JOIN artifact_versions v ON v.artifact_id = a.id AND v.n = a.current_version
-        WHERE a.deleted_at IS NULL
+        WHERE a.deleted_at IS NULL${only ? " AND a.id IN (SELECT value FROM json_each(?))" : ""}
         ORDER BY a.updated_at DESC, a.id`,
-    ));
+      args: only ? [JSON.stringify(only.map(String))] : [],
+    }));
   } catch (err) {
     if (!missingTable(err)) throw err;
     return [];
   }
   if (!artifacts.length) return [];
   const ids = artifacts.map((a) => a.id);
+  if (only) limit = Math.max(limit, ids.length);
 
   // File each artifact that has no row yet under the project of the chat (card, bot) it came from.
   const existing = await itemRows(db, "artifact", ids);
@@ -224,7 +229,7 @@ const WS_TYPES = {
 const workspaceImport = (crowHome, file) => import(pathToFileURL(join(crowHome, "bundles", "workspace", "server", file)).href);
 
 /** Office files the Workspace bot can see, newest first. The array carries `status` when it can't list. */
-export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, limit = 40 } = {}) {
+export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, limit = 40, fileIds = null, stat: statFn = null } = {}) {
   const out = [];
   out.status = "ok";
   let files;
@@ -232,8 +237,19 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
   // left short by files that belong elsewhere, then cut to `limit` once scoped.
   const scoped = scope?.projectId != null || scope?.unassigned;
   try {
-    const [{ getConfig }, { listRecent }] = await Promise.all([workspaceImport(crowHome, "config.js"), workspaceImport(crowHome, "nc/dav.js")]);
-    files = await listRecent(getConfig(), { limit: scoped ? limit * 3 : limit, mimes: Object.keys(WS_TYPES) });
+    const [{ getConfig }, dav] = await Promise.all([workspaceImport(crowHome, "config.js"), workspaceImport(crowHome, "nc/dav.js")]);
+    const cfg = getConfig();
+    if (fileIds) {
+      // A card's files: stat each id directly (a file that is gone is skipped), not the recent list.
+      const st = statFn || dav.stat;
+      files = [];
+      for (const id of fileIds.slice(0, 200)) {
+        try { const e = await st(cfg, { file_id: Number(id) }); if (e) files.push(e); } catch { /* gone or unreadable */ }
+      }
+      limit = Math.max(limit, files.length);
+    } else {
+      files = await dav.listRecent(cfg, { limit: scoped ? limit * 3 : limit, mimes: Object.keys(WS_TYPES) });
+    }
   } catch (err) {
     out.status = err?.code === "not_ready" ? "not_ready" : "unavailable";
     if (out.status === "unavailable") console.warn(`[make] Workspace listing failed: ${err?.message || err}`);
@@ -264,17 +280,17 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
  * previews: async (item) => { previewState, previewUrl, previewReason } (make/previews.js itemPreview),
  * applied only to the items returned; null (previews off) leaves every item a type tile.
  */
-export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null, cardRefs = null } = {}) {
+export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null, cardRefs = null, wsStat = null } = {}) {
   // cardRefs (a Set of "kind:ref"): only those items, and the project scope is ignored. The sources
-  // are read unscoped with a wide limit, then cut to the card's documents.
+  // are asked for exactly the card's documents.
   if (cardRefs) { scope = { all: true }; limit = undefined; }
-  const wide = cardRefs ? { limit: 500 } : null;
+  const refsOf = (kind) => (cardRefs ? [...cardRefs].filter((k) => k.startsWith(`${kind}:`)).map((k) => k.slice(kind.length + 1)) : null);
   const artifacts = installedBundle(crowHome, "artifacts") ? "installed" : "missing";
   let workspace = installedBundle(crowHome, "workspace") ? "installed" : "missing";
   const lists = [];
-  if (artifacts === "installed") lists.push(await listArtifactItems(db, scope, wide || (limit ? { limit } : {})));
+  if (artifacts === "installed") lists.push(await listArtifactItems(db, scope, cardRefs ? { ids: refsOf("artifact") } : limit ? { limit } : {}));
   if (workspace === "installed") {
-    const ws = await listWorkspaceItems(db, scope, { crowHome, ...(wide || (limit ? { limit } : {})) });
+    const ws = await listWorkspaceItems(db, scope, { crowHome, ...(cardRefs ? { fileIds: refsOf("workspace_file"), stat: wsStat } : limit ? { limit } : {}) });
     if (ws.status !== "ok") workspace = ws.status;
     lists.push(ws);
   }

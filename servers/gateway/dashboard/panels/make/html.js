@@ -32,7 +32,7 @@ function qs({ scope = null, card = null, filter = "all" }) {
   const parts = [];
   if (scope) parts.push(`scope=${encodeURIComponent(scope)}`);
   if (card && !String(scope || "").startsWith("card:")) parts.push(`card=${encodeURIComponent(card)}`);
-  if (filter && filter !== "all") parts.push(`filter=${filter}`);
+  if (filter && filter !== "all") parts.push(`filter=${encodeURIComponent(filter)}`);
   return parts.length ? `${ROUTE}?${parts.join("&")}` : ROUTE;
 }
 
