@@ -5766,3 +5766,33 @@ test("a group folding at turn end hands focus from its body to its line", async 
   assert.equal(g.children[1].hidden, true, "folded");
   assert.equal(hub.doc.activeElement, g.children[0], "focus moved to the line, not lost");
 });
+
+test("new mode: the composer placeholder names the session's project from the embedded #perch-projects JSON", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const grab = (startMark, endMark) => {
+    const a = src.indexOf(startMark);
+    assert.ok(a > -1, startMark + " missing");
+    return src.slice(a, src.indexOf(endMark, a) + endMark.length);
+  };
+  const nodes = {
+    "perch-projects": { textContent: JSON.stringify([{ id: 7, slug: "alpha", name: "Alpha <b>" }]) },
+    "perch-session-sheet": {},
+    "perch-input": { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+  };
+  const prelude = `var document={getElementById:function(i){return N[i]||null;}};
+    function el(i){return document.getElementById(i);}
+    var N=arguments[0]; var current={sid:'s1'}; var rowIndex={s1:{projectId:7},s2:{projectId:null}};
+    var PLACEHOLDER_PROJECT='Message # {project}', PLACEHOLDER_DEFAULT='Message';
+    function identSubtitle(){return '';} function backTarget(){return null;}
+    ` + grab("var PROJECTS=(function", "})();") + "\n" + grab("function projectOfRow", "\n  }\n") + "\n";
+  const showIdent = new Function(
+    prelude + src.slice(src.indexOf("function showIdent"), braceMatchEnd(src, src.indexOf("function showIdent")) + 1) +
+    "; return {showIdent:showIdent,setSid:function(s){current.sid=s;}};",
+  )(nodes);
+  showIdent.showIdent("Bot");
+  assert.equal(nodes["perch-input"].attrs.placeholder, "Message # Alpha <b>");
+  showIdent.setSid("s2");
+  showIdent.showIdent("Bot");
+  assert.equal(nodes["perch-input"].attrs.placeholder, "Message");
+});

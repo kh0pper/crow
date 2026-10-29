@@ -394,7 +394,8 @@ export function perchDictationJs(lang = "en") {
         if(input){
           input.value=mergeTranscript(input.value,text);
           input.style.height='auto';
-          input.style.height=Math.min(input.scrollHeight||72,120)+'px';
+          /* New-mode pill: the pill's CSS caps it at five lines; classic keeps 120px. */
+          input.style.height=document.getElementById('perch-session-sheet')?((input.scrollHeight||44)+'px'):Math.min(input.scrollHeight||72,120)+'px';
           /* Shell P2 (client.js): a dictated draft is saved like a typed one. */
           if(typeof draftSave==='function') draftSave();
         }

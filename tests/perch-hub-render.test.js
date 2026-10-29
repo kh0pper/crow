@@ -1753,3 +1753,14 @@ test("new mode: plus menu holds attach and dictate with ids unchanged", async ()
   assert.ok(c.indexOf('id="perch-input"') < c.indexOf('id="perch-send"'), "the input precedes Send in the pill row");
   assert.doesNotMatch(c, /class="send-row"/);
 });
+
+test("new-mode Perch hides the header h2 visually (never display:none); classic css has no such rule", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js").catch(() => ({}));
+  const mod = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const fn = perchHubCss || Object.values(mod).find((v) => typeof v === "function");
+  const css = String(fn("en"));
+  const m = css.match(/body\.shell:has\(#perch-session-sheet\) \.content-header h2\{[^}]*\}/);
+  assert.ok(m, "scoped to the new-mode sheet");
+  assert.match(m[0], /clip:rect\(0 0 0 0\)/);
+  assert.doesNotMatch(m[0], /display:\s*none/);
+});

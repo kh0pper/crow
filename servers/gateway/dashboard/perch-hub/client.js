@@ -3209,6 +3209,13 @@ export function perchHubJs(lang = "en") {
       if(plusMenu.contains(tg)||plusBtn.contains(tg)) return;
       plusClose(false);
     });
+    /* Focus leaving the composer closes the menu (never steals focus). */
+    var plusComposer=el('perch-composer');
+    if(plusComposer) plusComposer.addEventListener('focusout',function(e){
+      var to=e.relatedTarget;
+      if(to&&plusComposer.contains(to)) return;
+      plusClose(false);
+    });
     plusSync();
   }
 

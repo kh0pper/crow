@@ -413,6 +413,10 @@ body.shell #perch-draft-note[hidden]{display:none}
    up to the 120px ceiling above, then scrolls inside itself — a pasted
    essay must not push Send off screen, the one sin this page's whole flex
    chain exists to prevent. */
+/* R1.2 PR 2, new mode only: the chip already names the project, so the header
+   title is for screen readers only (visually hidden, never display:none). */
+body.shell:has(#perch-session-sheet) .content-header h2{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 /* R1.2 PR 2, new mode only (html.js renders .pill only with the sheet): the
    composer is a one-line pill. The textarea starts at one line and grows to
    five (line-height 1.5, so the ceiling follows the text size), then scrolls
