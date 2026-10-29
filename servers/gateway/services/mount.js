@@ -31,10 +31,10 @@
  */
 import { createDbClient as defaultCreateDbClient } from "../../db.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
-import { getConnection } from "../../shared/service-connections.js";
+import { getConnection, servableConnection } from "../../shared/service-connections.js";
 import { mountLoopbackMcp } from "../loopback-tool-mount.js";
 import { SERVICES_TOKEN } from "../local-token.js";
-import { effectiveCrowMcp } from "../../../scripts/pi-bots/skill-tools.mjs";
+import { effectiveCrowMcp, splitEntry } from "../../../scripts/pi-bots/skill-tools.mjs";
 import {
   ensureChild, childSecretValues, serviceTools, listableConnection, cancelCall as stopConnectionChild,
 } from "./children.js";
@@ -50,14 +50,6 @@ export const SERVICES_CALL_TIMEOUT_MS = 60_000;
 export const SERVICES_MAX_IN_FLIGHT = 4;
 
 const refuse = (code) => ({ ok: false, code });
-
-/** Split a crow_mcp entry into [server, tool] (`server/tool` or `server__tool`); null for a bare name. */
-function splitEntry(e) {
-  const i = e.indexOf("/"), j = e.indexOf("__");
-  if (i > 0) return [e.slice(0, i), e.slice(i + 1)];
-  if (j > 0) return [e.slice(0, j), e.slice(j + 2)];
-  return null;
-}
 
 /**
  * What a crow_mcp list selects of one service: `null` when nothing, `{allowedTools: null}`
@@ -80,11 +72,6 @@ async function botDef(db, botId) {
   if (!r) return null;
   const def = JSON.parse(r.definition || "{}");
   return def && typeof def === "object" && !Array.isArray(def) ? def : null;
-}
-
-async function projectArchived(db, projectId) {
-  const r = (await db.execute({ sql: "SELECT status, archived_at FROM project_spaces WHERE id = ?", args: [projectId] })).rows[0];
-  return !r || r.status === "archived" || r.archived_at != null;
 }
 
 /**
@@ -111,8 +98,9 @@ export async function authorizeServiceCall(db, actor, uuid, { crowHome = resolve
     if (!def) return refuse("not_selected");
     const sel = serviceSelection(effectiveCrowMcp(def, { crowHome, repoSkillsDir }), connection.serviceId);
     if (!sel) return refuse("not_selected");
-    // 6. servable.
-    if (!listableConnection(connection) || await projectArchived(db, connection.projectId)) return refuse("not_active");
+    // 6. servable: the one rule children.js serves by (servableConnection's owner + archive
+    // predicate, then listableConnection's status rule), never a second copy of it.
+    if (!listableConnection(await servableConnection(db, uuid, { allowError: true }))) return refuse("not_active");
     const ctx = {
       uuid: connection.uuid,
       connection,
@@ -146,7 +134,15 @@ export function servicesUpstream({ createDbClient = defaultCreateDbClient, crowH
   };
   return {
     // The cached list only: listing never starts a child (Task 14, I3).
-    listTools: async (ctx) => serviceTools(ctx.serviceId, { crowHome: home() }) || [],
+    // No cached list (a cache write that failed after the start, or a version change since):
+    // one fixed line, no values, and the helper answers 502 child_unavailable rather than
+    // opening a session with no tools and no signal.
+    listTools: async (ctx) => {
+      const tools = serviceTools(ctx.serviceId, { crowHome: home() });
+      if (tools) return tools;
+      console.warn("[services] tool list unavailable: child_unavailable");
+      return null;
+    },
     // initialize: with no cached list yet, start the child once to fill it. A ChildError is
     // its code (the helper answers 502 child_unavailable for any code).
     onInitialize: async (ctx) => {
@@ -196,6 +192,9 @@ export function mountServicesTools(app, {
     authorize: ({ db, params, actor }) => authorizeServiceCall(db, actor, params.uuid, { crowHome: home(), repoSkillsDir }),
     upstream: servicesUpstream({ createDbClient, crowHome: home }),
     toolFilter: servicesToolFilter,
+    // Explicit, like resultCap and callTimeoutMs: a change to the helper's default must never
+    // open this door to turns that are not the owner's own.
+    ownerTurnOnly: true,
     resultCap: { maxBytes: SERVICES_RESULT_CAP.maxBytes, contentTypes: [...SERVICES_RESULT_CAP.contentTypes] },
     callTimeoutMs: SERVICES_CALL_TIMEOUT_MS,
     maxInFlight: SERVICES_MAX_IN_FLIGHT,

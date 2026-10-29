@@ -90,6 +90,7 @@ const P = {};      // project ids
 const S = {};      // bot_sessions ids
 const U = {};      // connection uuids
 const live = new Set();   // session row ids the stub engine reports as serving the owner
+const audit = [];          // the helper's onAudit events (outcome tells the refusing check apart)
 let TOKEN, BOARD, srv, base, sessions, handle;
 
 async function connect(serviceId, projectId, { label = "work", secrets } = {}) {
@@ -114,6 +115,7 @@ before(async () => {
     bot.run("b2", "B2", defJson(["github"]), P.attic);
     bot.run("b3", "B3", defJson(["crow-memory"]), P.spring);   // selects nothing of github
     bot.run("b4", "B4", defJson(["github/whoami"]), null);     // no project
+    bot.run("b5", "B5", defJson(["github"]), P.home);          // another project, selects github
     const sess = d.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, project_id) VALUES (?, ?, ?, 'active', ?)");
     for (const [name, botId, gw, thread, proj] of [
       ["perch", "b1", "perch", "perch-1", "spring"], ["perch2", "b1", "perch", "perch-2", "spring"],
@@ -125,6 +127,7 @@ before(async () => {
     const job = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, principal) VALUES (?, 'b1', 'g', 'running', ?, ?)");
     job.run("jb1", process.pid, "owner");
     job.run("jcron", process.pid, null);
+    d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, principal) VALUES ('jb5', 'b5', 'g', 'running', ?, 'owner')").run(process.pid);
   });
   for (const n of ["perch", "perch2", "msgs", "discord", "gmail", "home", "b3", "b2", "b4"]) live.add(S[n]);
 
@@ -148,7 +151,7 @@ before(async () => {
   app.use(express.json({ limit: "1mb" }));
   handle = M.mountServicesTools(app, {
     sessionManager: sessions, createDbClient: () => createDbClient(DB_PATH), perchEngine: await M.perchEngineAccessor(),
-    crowHome: HOME, repoSkillsDir: SKILLS,
+    crowHome: HOME, repoSkillsDir: SKILLS, onAudit: (e) => audit.push(e),
   });
   await new Promise((r) => { srv = app.listen(0, "127.0.0.1", r); });
   base = `http://127.0.0.1:${srv.address().port}`;
@@ -182,10 +185,11 @@ function sessActor(name, { sendAs } = {}) {
   assert.ok(sig, "signed");
   return { botId, scope: `s:${sendAs ?? S[name]}`, threadId, gatewayType, sig };
 }
-function jobActor(jobId) {
+function jobActor(jobId, botId = "b1") {
   const tuple = { threadId: `job-${jobId}`, gatewayType: "job" };
-  return { botId: "b1", scope: `j:${jobId}@${process.pid}`, ...tuple, sig: signScopeActor({ kind: "service", botId: "b1", jobId, ...tuple }) };
+  return { botId, scope: `j:${jobId}@${process.pid}`, ...tuple, sig: signScopeActor({ kind: "service", botId, jobId, ...tuple }) };
 }
+const lastOutcome = () => audit.at(-1)?.outcome;
 const headersOf = (a) => ({
   "x-crow-actor-kind": "service", "x-crow-actor-id": a.botId, "x-crow-actor-scope": a.scope,
   "x-crow-actor-thread": a.threadId, "x-crow-actor-gateway": a.gatewayType, "x-crow-actor-sig": a.sig,
@@ -231,26 +235,29 @@ test("refusals never start the child: every refused initialize leaves the child 
   assert.equal(existsSync(CACHE), false, "no cache before the first start");
   const before = spawnCount();
   const cases = [
-    ["non-loopback (a forwarded caller)", U.gh, { headers: { "x-forwarded-for": "203.0.113.9" } }, 404, null],
-    ["no token", U.gh, { token: null }, 401, null],
-    ["the board token", U.gh, { get token() { return BOARD; } }, 401, null],
-    ["a bad signature", U.gh, { actor: { ...sessActor("perch"), sig: "0".repeat(64) } }, 403, "A signed bot is required."],
-    ["s:<perch> signed, s:<perch2> sent", U.gh, { actor: sessActor("perch", { sendAs: S.perch2 }) }, 403, "A signed bot is required."],
-    ["a Crow messages session", U.gh, { actor: sessActor("msgs") }, 403, "Not available on this turn."],
-    ["a Discord session", U.gh, { actor: sessActor("discord") }, 403, "Not available on this turn."],
-    ["a Gmail session", U.gh, { actor: sessActor("gmail") }, 403, "Not available on this turn."],
-    ["a Perch session not serving the owner (sessionServicesLive false)", U.gh, { actor: sessActor("other") }, 403, "Not available on this turn."],
-    ["a cron job (principal NULL)", U.gh, { actor: jobActor("jcron") }, 403, "Not available on this turn."],
-    ["a session in another project", U.gh, { actor: sessActor("home") }, 403, "Not available on this turn."],
-    ["a bot with no project", U.gh, { actor: sessActor("b4") }, 403, "Not available on this turn."],
-    ["unselected service refused", U.gh, { actor: sessActor("b3") }, 403, "Not available on this turn."],
-    ["disconnected", U.old, {}, 409, "This connection is turned off."],
-    ["archived project", U.attic, { actor: sessActor("b2") }, 409, "This connection is turned off."],
-    ["owner_contact_id = 1", U.contact, {}, 403, "Not available on this turn."],
-    ["unknown uuid", "00000000-0000-4000-8000-00000000dead", {}, 404, null],
+    ["non-loopback (a forwarded caller)", U.gh, { headers: { "x-forwarded-for": "203.0.113.9" } }, 404, null, "not_found"],
+    ["no token", U.gh, { token: null }, 401, null, "bad_token"],
+    ["the board token", U.gh, { get token() { return BOARD; } }, 401, null, "bad_token"],
+    ["a bad signature", U.gh, { actor: { ...sessActor("perch"), sig: "0".repeat(64) } }, 403, "A signed bot is required.", "unattributed"],
+    ["s:<perch> signed, s:<perch2> sent", U.gh, { actor: sessActor("perch", { sendAs: S.perch2 }) }, 403, "A signed bot is required.", "unattributed"],
+    ["a Crow messages session", U.gh, { actor: sessActor("msgs") }, 403, "Not available on this turn.", "not_owner_turn"],
+    ["a Discord session", U.gh, { actor: sessActor("discord") }, 403, "Not available on this turn.", "not_owner_turn"],
+    ["a Gmail session", U.gh, { actor: sessActor("gmail") }, 403, "Not available on this turn.", "not_owner_turn"],
+    ["a Perch session not serving the owner (sessionServicesLive false)", U.gh, { actor: sessActor("other") }, 403, "Not available on this turn.", "not_owner_turn"],
+    ["an owner job of a bot whose def is in another project", U.gh, { actor: jobActor("jb5", "b5") }, 403, "Not available on this turn.", "wrong_project"],
+    ["a cron job (principal NULL)", U.gh, { actor: jobActor("jcron") }, 403, "Not available on this turn.", "not_owner_turn"],
+    ["a session in another project", U.gh, { actor: sessActor("home") }, 403, "Not available on this turn.", "wrong_project"],
+    ["a bot with no project", U.gh, { actor: sessActor("b4") }, 403, "Not available on this turn.", "wrong_project"],
+    ["unselected service refused", U.gh, { actor: sessActor("b3") }, 403, "Not available on this turn.", "not_selected"],
+    ["disconnected", U.old, {}, 409, "This connection is turned off.", "not_active"],
+    ["archived project", U.attic, { actor: sessActor("b2") }, 409, "This connection is turned off.", "not_active"],
+    ["owner_contact_id = 1", U.contact, {}, 403, "Not available on this turn.", "owner_mismatch"],
+    ["unknown uuid", "00000000-0000-4000-8000-00000000dead", {}, 404, null, "not_found"],
   ];
-  for (const [label, uuid, o, status, message] of cases) {
+  for (const [label, uuid, o, status, message, outcome] of cases) {
+    audit.length = 0;
     const r = await init(uuid, o);
+    assert.equal(lastOutcome(), `refused:${outcome}`, `${label}: refused by ${outcome}`);
     assert.equal(r.status, status, `${label}: ${r.status} ${r.text}`);
     if (message) assert.equal(errMsg(r), message, label);
     else if (status === 404) assert.equal(r.text, "", `${label}: empty body`);
@@ -347,6 +354,14 @@ test("tool outside the selection refused: not listed, and calling it errors; a s
   assert.equal(r.json?.result?.isError, true);
   assert.equal(textOf(r), "Not available on this turn.");
   assert.equal((await callTool(U.gh, sid, "crash")).json?.result?.isError, true);
+  // Only the exact registered name: other spellings never reach the child.
+  for (const name of ["Whoami", "github__whoami", "github/whoami", "whoami "]) {
+    audit.length = 0;
+    const m = await callTool(U.gh, sid, name);
+    assert.equal(m.json?.result?.isError, true, name);
+    assert.equal(textOf(m), "Not available on this turn.", name);
+    assert.equal(lastOutcome(), "refused:not_granted", name);
+  }
 
   setDef("b1", ["github/whoami", "notion"], { skills: ["svc-skill"] });
   try {
@@ -406,6 +421,29 @@ test("child results are redacted with the connection's values", async () => {
   const r = await callTool(U.gh, sid, "reveal");
   assert.ok(!r.text.includes(GH_TOKEN), "the token never reaches the bot");
   assert.equal(textOf(r), "the token is [redacted] ok");
+});
+
+test("an isError result carrying the token comes back redacted, still isError", async () => {
+  const sid = await open(U.gh);
+  const r = await callTool(U.gh, sid, "reveal", { error: true });
+  assert.equal(r.json?.result?.isError, true);
+  assert.ok(!r.text.includes(GH_TOKEN));
+  assert.equal(textOf(r), "the token is [redacted] ok");
+});
+
+test("no cached tool list after initialize (a failed cache write): 502 child_unavailable, never a session with no tools", async () => {
+  const sid = await open(U.gh);
+  await callTool(U.gh, sid, "whoami");               // the child is running
+  const savedCache = readFileSync(CACHE, "utf8");
+  writeFileSync(CACHE, "{}");                        // the running child's list is not cached
+  try {
+    const r = await init(U.gh);
+    assert.equal(r.status, 502);
+    assert.equal(errMsg(r), "This service isn't running right now.");
+    assert.equal(r.sid, null);
+  } finally {
+    writeFileSync(CACHE, savedCache);
+  }
 });
 
 test("error text: a child error carrying the token is '<tool> failed.' only", async () => {
