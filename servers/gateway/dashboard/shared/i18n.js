@@ -2387,6 +2387,8 @@ export const translations = {
   "providers.botsIneligible.forbidden_target": { en: "Crow won't send keys to this address, so bots can't use this provider.", es: "Crow no envía claves a esta dirección, así que los bots no pueden usar este proveedor." },
   "providers.botsIneligible.reserved_id": { en: "Names starting with crow-c- are reserved for Crow, so bots can't use this provider.", es: "Los nombres que empiezan por crow-c- están reservados para Crow, así que los bots no pueden usar este proveedor." },
   "providers.botsChanged": { en: "This provider changed since the page loaded. Check it and try again.", es: "Este proveedor cambió desde que se cargó la página. Revísalo y vuelve a intentarlo." },
+  "providers.isLocal": { en: "This is local", es: "Esto es local" },
+  "providers.localNotice": { en: "These providers are no longer treated as local for voice and phone calls until you mark them \"This is local\": {names}", es: "Estos proveedores ya no se consideran locales para la voz y las llamadas hasta que los marques como \"Esto es local\": {names}" },
   "models.add.botsFailed": { en: "Bots can't use it yet. To allow them, open Models, then Advanced, then Providers, and turn on \"Let bots use this provider\".", es: "Los bots aún no pueden usarlo. Para permitirlo, abre Modelos, luego Avanzado, luego Proveedores, y activa \"Permitir que los bots usen este proveedor\"." },
   "models.add.test.ok": { en: "That key works. {n} models available.", es: "Esa clave funciona. {n} modelos disponibles." },
   "models.add.test.key_rejected": { en: "{provider} did not accept that key. Check that you copied all of it.", es: "{provider} no aceptó esa clave. Comprueba que la copiaste completa." },

@@ -18,6 +18,7 @@ import { providerRowToObject } from "./provider-row.js";
 import { loadCatalog, wrapOwnId } from "./model-roles-env.js";
 import { writeSetting } from "../gateway/dashboard/settings/registry.js";
 import { getOrCreateLocalInstanceId as defaultGetOwnId } from "../gateway/instance-registry.js";
+import { readLocalMarks } from "./provider-local-marks.js";
 
 const CORE_IDS = new Set(CORE_ROLES.map((r) => r.id));
 
@@ -321,6 +322,7 @@ async function buildContext(db, getOwnId, catalog) {
   const enabledRows = rows.filter((r) => !r.disabled).map((r) => ({ id: r.id, models: r.models }));
   return {
     bindings,
+    localMarks: await readLocalMarks(db),
     customDefs,
     providers,
     models: modelsFor(enabledRows),
@@ -330,9 +332,10 @@ async function buildContext(db, getOwnId, catalog) {
 }
 
 /**
- * {bindings, customDefs, providers, models, catalog, ownInstanceId}, memoized
- * per db for maxAgeMs. An injected getOrCreateLocalInstanceId (a test seam)
- * bypasses the cache.
+ * {bindings, localMarks, customDefs, providers, models, catalog, ownInstanceId}, memoized
+ * per db for maxAgeMs (`localMarks`: provider-local-marks.js, "This is local";
+ * a marks write invalidates the cache like a binding write). An injected
+ * getOrCreateLocalInstanceId (a test seam) bypasses the cache.
  */
 export async function loadRoleContext(db, { maxAgeMs = 1000, getOrCreateLocalInstanceId, catalog } = {}) {
   // `catalog` (a test seam) is honoured only on the uncached path, with an injected id.

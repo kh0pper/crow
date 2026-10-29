@@ -137,7 +137,16 @@ function defaultResolveDoor(row, providers) {
  *               unparseable baseUrl, a door whose upstream cannot be named, or
  *               more than MAX_DOOR_HOPS hops.
  * The result is the worst hop: cloud, else unknown, else local. isCloudKey
- * treats "unknown" as cloud. `host === "cloud"` on a row is never consulted.
+ * treats "unknown" as cloud.
+ *
+ * `localMarks` ({[rowId]: {host}}, provider-local-marks.js: the operator's
+ * "This is local", instance scope) turns an "unknown" DNS-name hop local, but
+ * only while the row's current hostname equals the recorded `host` (a peer
+ * rewriting the base URL lapses it) and the row's stored `host` is not
+ * "cloud". A mark never touches an IP-literal hop: a public, reserved or
+ * documentation literal stays what its address says. Without marks,
+ * `host === "cloud"` on a row is never consulted. The classifier and safety
+ * never pass marks.
  */
 const MAX_DOOR_HOPS = 3;
 const PUBLIC_CLASSES = new Set(["public4", "public6"]);
@@ -149,7 +158,15 @@ function hopVerdict(h, own, localSuffixes) {
   return localSuffixes.some((sfx) => h.endsWith(sfx.toLowerCase())) ? "local" : "unknown";
 }
 
-export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs, localSuffixes = DEFAULT_LOCAL_SUFFIXES } = {}) {
+/** Does a current "This is local" mark cover this hop? */
+function markedLocal(row, h, localMarks) {
+  if (!localMarks || typeof localMarks !== "object" || isIP(h) || row?.host === "cloud") return false;
+  if (typeof row?.id !== "string" || !Object.hasOwn(localMarks, row.id)) return false;
+  const m = localMarks[row.id];
+  return !!m && typeof m.host === "string" && m.host === h;
+}
+
+export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
   const { provider, model } = splitKey(key);
   let row = providerById(providers, provider);
   if (!row || !model) return "unknown";
@@ -158,7 +175,8 @@ export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, 
   for (let hops = 0; hops <= MAX_DOOR_HOPS; hops++) {
     const h = hostnameOf(row.baseUrl);
     if (!h) return "unknown";
-    const v = hopVerdict(h, own, localSuffixes);
+    let v = hopVerdict(h, own, localSuffixes);
+    if (v === "unknown" && markedLocal(row, h, localMarks)) v = "local";
     if (v === "cloud") return "cloud";
     if (v === "unknown") sawUnknown = true;
     const up = resolveDoor(row, providers);
@@ -196,7 +214,7 @@ export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r)
  * (a name or literal that cannot be proven local OR public: 0.0.0.0, ::, NAT64
  * and other reserved or embedded literals), "missing" (no provider row, no model
  * half, or a role: ref - callers resolve a role first). localMarks is passed to
- * cloudStatus, which ignores it until marks exist.
+ * cloudStatus (a current mark makes a DNS-name hop local).
  */
 export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultResolveDoor, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
   if (isRoleRef(key)) return "missing";

@@ -15,6 +15,10 @@
  * (customRolesClientJS, through /api/roles/custom), which also holds Delete.
  * Core rows have no edit or delete control.
  *
+ * While a provider that voice or the phone's local slot uses is no longer
+ * treated as local (the strict check, Task 19) and has no "This is local"
+ * mark, a dismissible banner names it and links to the providers tab.
+ *
  * Search ranking stays out of the list until something fills it on purpose;
  * "Show search ranking" (`?section=models&show=rerank`) renders it anyway.
  */
@@ -24,6 +28,10 @@ import { buildRoleRows, ROLE_GROUPS, FILLED_STATUSES } from "./models/rows.js";
 import { modelsClientJS, customRolesClientJS } from "./models/client.js";
 import { addProviderSheetHtml, addProviderClientJS } from "../../shared/add-provider-ui.js";
 import { isRecommendationsStale, loadRecommendations } from "../../../../shared/provider-recommendations.js";
+import {
+  readLocalMarks, strictVoiceKeysInUse, newlyStrictRows, LOCAL_NOTICE_SHOWN_KEY, LOCAL_NOTICE_DISMISSED, LOCAL_NOTICE_LINK,
+} from "../../../../shared/provider-local-marks.js";
+import { providerRowToObject } from "../../../../shared/provider-row.js";
 
 const WHERE_CODES = new Set(["here", "other_box", "cloud", "unproven", "missing"]);
 
@@ -125,6 +133,9 @@ const STYLE = `<style>
   .mc-pick-provider { font-size:0.8rem; color:var(--crow-text-muted); }
   .mc-pick-note { flex-basis:100%; font-size:0.8rem; color:var(--crow-text-muted); }
   .mc-save:disabled { opacity:0.5; cursor:not-allowed; }
+  .mr-local-notice { display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem 1rem; margin:0 0 1rem; padding:0.6rem 0.8rem; border-left:3px solid var(--crow-brand-gold); background:var(--crow-bg-elevated); border-radius:4px; font-size:0.9rem; overflow-wrap:anywhere; }
+  .mr-local-notice p { flex:1 1 220px; margin:0; }
+  .mr-local-notice a { color:var(--crow-text-primary); }
 </style>`;
 
 function staleLine(lang, now) {
@@ -138,7 +149,7 @@ function staleLine(lang, now) {
  * The page from built rows (pure but for the recommendations file's date;
  * `show` lists hidden roles to render anyway, `openAdd` opens Add a provider).
  */
-export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false, now = new Date() } = {}) {
+export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false, now = new Date(), notice = "" } = {}) {
   const wanted = new Set(show);
   const visible = rows.filter((r) => !r.hidden || wanted.has(r.id));
   const groups = ROLE_GROUPS.map((g) => {
@@ -164,6 +175,7 @@ export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false
         <a class="mr-link" href="/dashboard/settings?section=llm" data-turbo-frame="_top">${escapeHtml(t("models.ui.advanced", lang))}</a>
       </div>
     </div>
+    ${notice}
     ${staleLine(lang, now)}
     ${groups}
     ${showRerank}
@@ -173,6 +185,34 @@ export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false
     <script>${modelsClientJS({ lang })}</script>
     <script>${customRolesClientJS({ lang })}</script>
     <script>${addProviderClientJS({ lang })}</script>`;
+}
+
+/**
+ * The "no longer treated as local" banner (providers.localNotice), or ""
+ * when no row is affected or the operator dismissed it. Never waits on DNS.
+ * `env` and `ownAddrs` are test seams.
+ */
+export async function localNoticeHtml(db, { lang = "en", env = process.env, ownAddrs } = {}) {
+  try {
+    const { rows: shown } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [LOCAL_NOTICE_SHOWN_KEY] });
+    if (shown[0]?.value === LOCAL_NOTICE_DISMISSED) return "";
+    const keys = await strictVoiceKeysInUse(db, { env });
+    if (!keys.length) return "";
+    const { rows } = await db.execute("SELECT * FROM providers");
+    const affected = newlyStrictRows(keys, { providers: rows.map(providerRowToObject), localMarks: await readLocalMarks(db), ownAddrs });
+    if (!affected.length) return "";
+    const text = fill(t("providers.localNotice", lang), { names: affected.map((r) => r.id).join(", ") });
+    return `<div class="mr-local-notice" role="status">
+      <p><a href="${escapeHtml(LOCAL_NOTICE_LINK)}" data-turbo-frame="_top">${escapeHtml(text)}</a></p>
+      <form method="post" action="/dashboard/settings?section=models">
+        <input type="hidden" name="action" value="models_local_notice_dismiss">
+        <button type="submit" class="mr-change">${escapeHtml(t("common.close", lang))}</button>
+      </form>
+    </div>`;
+  } catch (e) {
+    console.warn(`[models] local notice skipped: ${e?.message}`);
+    return "";
+  }
 }
 
 function showParam(req) {
@@ -199,7 +239,7 @@ export default {
   id: "models",
   group: "ai",
   navOrder: 1,
-  // A view over role bindings and profiles; every write goes through /api/roles.
+  // A view over role bindings and profiles; every role write goes through /api/roles (the banner dismiss is the one action here).
   scope: "mixed",
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>`,
   labelKey: "settings.section.models",
@@ -210,7 +250,21 @@ export default {
 
   // `now` is the stale line's clock (tests pin it).
   async render({ req, db, lang = "en", now = new Date() }) {
-    const rows = await buildRoleRows(db, { lang });
-    return renderModelsPage(rows, { lang, show: showParam(req), openAdd: String(req?.query?.add ?? "") === "1", now });
+    const localMarks = await readLocalMarks(db);
+    const rows = await buildRoleRows(db, { lang, localMarks });
+    const notice = await localNoticeHtml(db, { lang });
+    return renderModelsPage(rows, { lang, show: showParam(req), openAdd: String(req?.query?.add ?? "") === "1", now, notice });
+  },
+
+  // The banner's dismiss (session + CSRF gated by the dashboard router, like every settings action).
+  async handleAction({ res, db, action }) {
+    if (action !== "models_local_notice_dismiss") return false;
+    await db.execute({
+      sql: `INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+      args: [LOCAL_NOTICE_SHOWN_KEY, LOCAL_NOTICE_DISMISSED],
+    });
+    res.redirectAfterPost("?section=models");
+    return true;
   },
 };

@@ -10,6 +10,10 @@
  * - "Let bots use this provider" (cloud rows only): this box's consent for
  *   the cloud door (servers/shared/cloud-consent.js); off again by itself
  *   when the row's address or key changes.
+ * - "This is local" (rows on a DNS name that Crow cannot prove local): this
+ *   box's mark (servers/shared/provider-local-marks.js), so voice and the
+ *   phone's local slot may use the row; it lapses by itself when the row's
+ *   hostname changes.
  *
  * Every POST redirects back to ?section=llm&tab=providers so Turbo Drive
  * keeps the user on this tab.
@@ -38,6 +42,7 @@ import {
   readCloudConsent, ensureCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow, consentTokenFor,
   cloudDoorIneligibleReason,
 } from "../../../../../shared/cloud-consent.js";
+import { readLocalMarks, markLocal, unmarkLocal, isMarkableRow, isMarkCurrent, localMarkTokenFor } from "../../../../../shared/provider-local-marks.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -161,6 +166,32 @@ export function botsSwitch(p, { consent, salt, lang = "en" }) {
           </form>`;
 }
 
+/**
+ * The "This is local" checkbox for a row Crow cannot prove local (a DNS
+ * name, not flagged cloud: isMarkableRow); "" otherwise. Ticking it sends an
+ * opaque token for the hostname this page showed (localMarkTokenFor), so a
+ * row whose host changed since the render is refused, not marked. A mark
+ * whose hostname no longer matches shows unticked (it has lapsed).
+ */
+export function localMarkSwitch(p, { localMarks, salt, ownAddrs, lang = "en" }) {
+  if (!isMarkableRow(p, { ownAddrs })) return "";
+  const on = isMarkCurrent(p, localMarks);
+  const label = escapeHtml(t("providers.isLocal", lang));
+  if (!on && !salt) {
+    return `<div class="llm-bots-switch llm-local-mark">
+            <button type="button" role="checkbox" aria-checked="false" disabled><span class="llm-local-box" aria-hidden="true"></span>${label}</button>
+            <div class="llm-bots-unavailable">${escapeHtml(t("providers.botsUnavailable", lang))}</div>
+          </div>`;
+  }
+  const token = on ? "" : `
+            <input type="hidden" name="local_token" value="${escapeHtml(localMarkTokenFor(p, salt))}">`;
+  return `<form method="post" class="llm-bots-switch llm-local-mark">
+            <input type="hidden" name="action" value="${on ? "llm_provider_unmark_local" : "llm_provider_mark_local"}">
+            <input type="hidden" name="id" value="${escapeHtml(p.id)}">${token}
+            <button type="submit" role="checkbox" aria-checked="${on ? "true" : "false"}"><span class="llm-local-box" aria-hidden="true"></span>${label}</button>
+          </form>`;
+}
+
 const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
 const USED_BY_MAX = 4;
 
@@ -220,7 +251,8 @@ export default {
     let salt = null;
     try { salt = await ensureCloudConsentSalt(db); } catch (err) { console.warn(`[llm-providers-tab] consent salt: ${err.message}`); }
     const consentCtx = { consent: await readCloudConsent(db), salt, lang };
-    const botsNote = req?.query?.bots === "changed"
+    const localCtx = { localMarks: await readLocalMarks(db), salt, ownAddrs: hostCtx.ownAddrs, lang };
+    const botsNote = req?.query?.bots === "changed" || req?.query?.local === "changed"
       ? `<p class="llm-bots-changed" role="status">${escapeHtml(t("providers.botsChanged", lang))}</p>`
       : "";
     const buildRow = (p) => {
@@ -234,7 +266,7 @@ export default {
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
-        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}</td>
+        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}${localMarkSwitch(p, localCtx)}</td>
         <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
@@ -313,6 +345,9 @@ export default {
       .llm-bots-switch button[aria-checked="true"] .llm-bots-track::after { left:14px; }
       .llm-bots-switch button[disabled] { cursor:not-allowed; opacity:0.6; }
       .llm-bots-unavailable { font-size:0.75rem; color:var(--crow-text-muted); }
+      .llm-local-box { position:relative; flex:none; width:16px; height:16px; box-sizing:border-box; border:2px solid var(--crow-border); border-radius:3px; background:var(--crow-bg-surface); }
+      .llm-local-mark button[aria-checked="true"] .llm-local-box { background:var(--crow-accent); border-color:var(--crow-accent); }
+      .llm-local-mark button[aria-checked="true"] .llm-local-box::after { content:""; position:absolute; left:3px; top:0; width:4px; height:8px; border:solid var(--crow-bg-surface); border-width:0 2px 2px 0; transform:rotate(45deg); }
       .llm-bots-switch button:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
       .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {
@@ -477,6 +512,23 @@ export default {
         } else {
           await revokeCloudConsent(db, id);
           console.log(`[llm-providers-tab] bots may no longer use ${id}`);
+        }
+      }
+      res.redirectAfterPost(BACK);
+      return true;
+    }
+    if (action === "llm_provider_mark_local" || action === "llm_provider_unmark_local") {
+      const id = typeof req.body?.id === "string" ? req.body.id : "";
+      if (id) {
+        const user = typeof req.dashboardUser === "string" && req.dashboardUser ? req.dashboardUser : "owner";
+        if (action === "llm_provider_mark_local") {
+          const token = typeof req.body?.local_token === "string" ? req.body.local_token : "";
+          const r = await markLocal(db, id, { actor: `dashboard:${user}`, expect: { token } });
+          if (r.ok) console.log(`[llm-providers-tab] ${id} marked local (dashboard:${user})`);
+          else if (r.reason === "changed") { res.redirectAfterPost(`${BACK}&local=changed`); return true; }
+        } else {
+          await unmarkLocal(db, id);
+          console.log(`[llm-providers-tab] ${id} no longer marked local (dashboard:${user})`);
         }
       }
       res.redirectAfterPost(BACK);
