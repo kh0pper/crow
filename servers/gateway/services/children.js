@@ -758,12 +758,25 @@ export function childSecretValues(uuid) {
 }
 
 /**
+ * May a bot see and call this connection's tools? An active row, or an 'error' row whose error
+ * ensureChild retries on its own after the cooldown (child_unavailable: the classes
+ * retryableClasses gives a non-repair start). A failed live test, a folder refused at spawn, a
+ * disconnected, needs_install or needs_reauth row: no. The caller checks the owner and the
+ * project's archive state (servableConnection does both).
+ */
+export function listableConnection(conn) {
+  if (!conn || typeof conn !== "object") return false;
+  return conn.status === "active" || (conn.status === "error" && conn.lastError === "child_unavailable");
+}
+
+/**
  * The cached tools of a connection's service, without starting anything (null: no cache yet,
- * or the installed version changed since). Reads the row for its service only.
+ * or the installed version changed since, or a connection that may not be served). A row in
+ * 'error' that ensureChild still retries (listableConnection) keeps listing its tools.
  */
 export async function listedTools(db, uuid, { crowHome = resolveCrowHome() } = {}) {
-  const conn = await servableConnection(db, uuid);   // only a connection that may be served
-  if (!conn) return null;
+  const conn = await servableConnection(db, uuid, { allowError: true });
+  if (!listableConnection(conn)) return null;
   return serviceTools(conn.serviceId, { crowHome });
 }
 

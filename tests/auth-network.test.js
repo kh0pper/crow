@@ -476,6 +476,27 @@ for (const PAGE of ["/dashboard/project/x", "/dashboard/project/x/services"]) te
   }
 });
 
+// Project services Task 17: the bots' loopback door to connected accounts is never public.
+test("rejectFunneled middleware: /services-tools/<uuid>/mcp is never funnel-exposed and is not a public path", async () => {
+  const paths = ["/services-tools/00000000-0000-4000-8000-000000000001/mcp", "/services-tools/x/mcp"];
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { isFunnelPublicPath, PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  assert.equal(isFunnelPublicPath("/services-tools/x/mcp"), false);
+  for (const path of paths) {
+    assert.equal(isFunnelPublicPath(path), false, path);
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+  }
+});
+
 test("auth-network: Forget a summary needs a session (and the CSRF rail)", async () => {
   // R1.2 PR 4: POST /dashboard/perch-api/interactive/:sid/forget-summary deletes
   // a memory. Through the REAL dashboard router it sits behind dashboardAuth

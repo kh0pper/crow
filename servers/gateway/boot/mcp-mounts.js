@@ -401,6 +401,16 @@ export async function mountMcpServers(app, deps) {
   // this process (idempotent; the phone mount below reuses it).
   initGatewayActorKey();
   mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions, verifyActor: verifyBoardActorSig, verifyThread: verifyBoardThreadActorSig }), sessionManager, authMiddleware, peerExposureGate);
+  // Project services Task 17: /services-tools/<uuid>/mcp, the bots' only door to the owner's
+  // connected accounts (services/mount.js on the shared loopback mount). Loopback only and
+  // never a Funnel path; its token was rotated above. The Perch engine accessor is SYNC (the
+  // helper asks it on every s: request), so the module is loaded before mounting.
+  try {
+    const { mountServicesTools, perchEngineAccessor } = await import("../services/mount.js");
+    mountServicesTools(app, { sessionManager, createDbClient, perchEngine: await perchEngineAccessor() });
+  } catch (err) {
+    console.warn(`[gateway] services-tools mount skipped: ${err.message}`);
+  }
   // Phone bundle (plan A): core-mounted like /board, but only when the bundle
   // is installed. The server factory is imported by PATH from the installed
   // copy (ramble-transport precedent). A failure here never blocks boot.
