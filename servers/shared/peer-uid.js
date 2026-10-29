@@ -98,12 +98,13 @@ function candidates(ra, rp, la, lp) {
   return out;
 }
 
-/** One pass over the tables → { uid, unavailable }. */
-function scan(want) {
+/** One pass over the tables → { uid, inode, unavailable }. `inode` is the
+ *  client-side socket's inode when exactly one live row matched, else null. */
+function scan(want, read = readTable) {
   let failed = 0;
   for (const { table, local, rem } of want) {
     let text;
-    try { text = String(readTable(table)); } catch { failed++; continue; }
+    try { text = String(read(table)); } catch { failed++; continue; }
     // procfs can repeat a row when sockets change between read() chunks: dedupe by inode (field 9).
     const hits = new Map();
     for (const line of text.split("\n")) {
@@ -113,21 +114,33 @@ function scan(want) {
       if (f[1] === local && f[2] === rem && f[3] === "01" && /^\d+$/.test(f[7])) hits.set(f[9], Number(f[7]));
     }
     const uids = new Set(hits.values());
-    if (uids.size === 1) return { uid: [...uids][0], unavailable: false };
-    if (uids.size > 1) return { uid: null, unavailable: false }; // two live sockets on one tuple: refuse
+    const inode = hits.size === 1 ? [...hits.keys()][0] : null;
+    if (uids.size === 1) return { uid: [...uids][0], inode, unavailable: false };
+    if (uids.size > 1) return { uid: null, inode: null, unavailable: false }; // two live sockets on one tuple: refuse
   }
-  return { uid: null, unavailable: failed === want.length };
+  return { uid: null, inode: null, unavailable: failed === want.length };
 }
 
-function lookup(socket) {
+function lookup(socket, read = readTable) {
   const ra = String(socket.remoteAddress || ""), la = String(socket.localAddress || "");
   const rp = socket.remotePort, lp = socket.localPort;
-  if (!ra || !la || !Number.isInteger(rp) || !Number.isInteger(lp)) return { uid: null, unavailable: false };
+  if (!ra || !la || !Number.isInteger(rp) || !Number.isInteger(lp)) return { uid: null, inode: null, unavailable: false };
   const want = candidates(ra, rp, la, lp);
-  if (!want.length) return { uid: null, unavailable: false };
-  const first = scan(want);
+  if (!want.length) return { uid: null, inode: null, unavailable: false };
+  const first = scan(want, read);
   // procfs can also skip a row mid-read: one re-read before a miss counts.
-  return first.uid === null && !first.unavailable ? scan(want) : first;
+  return first.uid === null && !first.unavailable ? scan(want, read) : first;
+}
+
+/**
+ * The client-side row of a loopback connection, unmemoised: → { uid, inode,
+ * unavailable }. `inode` names the socket the CONNECTING process holds (the
+ * signing relay matches it against a process's descriptors). `readTable`
+ * (name → text, name "tcp" | "tcp6") defaults to procfs.
+ */
+export function peerSocketRow(socket, { readTable: read = readTable } = {}) {
+  if (!socket || typeof socket !== "object") return { uid: null, inode: null, unavailable: false };
+  return lookup(socket, read);
 }
 
 /** → { uid: number|null, unavailable: boolean }. Only a confirmed uid is memoised per socket (the

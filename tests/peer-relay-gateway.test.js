@@ -54,3 +54,24 @@ test("the relay is live behind its own token and actor check", async () => {
   });
   assert.equal(m.status, 401, "the relay token is not an MCP credential");
 });
+
+// B6: the loopback signing relay is mounted on the real gateway, nothing earlier
+// in the stack answers for it, and a caller that is not a bot host unit's main
+// process (this test process) gets no signature.
+test("the signing relay is live and refuses a process that is not a bot host", async () => {
+  const ask = async (headers = {}) => {
+    const r = await fetch(`http://127.0.0.1:${A.port}/internal/actor-sign`, {
+      method: "POST", headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ botId: "hank", sessionId: "1", threadId: "t", gatewayType: "gmail", kinds: ["peer-relay"] }),
+    });
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch {}
+    return { status: r.status, json, text };
+  };
+  const r = await ask();
+  assert.equal(r.status, 403, r.text);
+  assert.match(r.json.error, /bot host/);
+  assert.equal(r.json.sigs, undefined);
+  const fwd = await ask({ "X-Forwarded-For": "100.64.20.7" });
+  assert.equal(fwd.status, 404, fwd.text);
+});

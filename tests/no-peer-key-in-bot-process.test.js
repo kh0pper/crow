@@ -105,6 +105,13 @@ for (const entry of ["scripts/pi-bots/bridge_tick.mjs", "scripts/pi-bots/gateway
   });
 }
 
+test("static: the signing relay answers with signatures only", () => {
+  const src = readFileSync(join(REPO, "servers/gateway/routes/actor-sign.js"), "utf8");
+  const sends = src.match(/\.json\([^)]*\)/g) || [];
+  assert.deepEqual(sends, [".json({ error })", ".json({ sigs })"], "every response body the route builds: " + sends.join(" | "));
+  assert.ok(!/\.send\(|\.write\(|\.end\(/.test(src), "no other way to write a body");
+});
+
 // ---- runtime ----
 // ---- runtime ----
 

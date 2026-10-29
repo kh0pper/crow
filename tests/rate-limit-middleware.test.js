@@ -144,3 +144,10 @@ test("generalLimiterSkip: /peer-relay/ is exempt; lookalikes are not", () => {
   for (const p of ["/peer-relayx/a/memory/mcp", "/peer-relay", "/api/peer-relay/x"]) assert.equal(skip(p), false, p);
   assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/peer-relay/"));
 });
+
+// Item 46 PR-B (B6): the loopback signing relay (one call per bot turn on a key-less host).
+test("generalLimiterSkip: the loopback signing relay is exempt", () => {
+  const skip = (p) => generalLimiterSkip({ path: p });
+  assert.equal(skip("/internal/actor-sign"), true);
+  assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/internal/actor-sign"));
+});
