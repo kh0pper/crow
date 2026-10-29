@@ -177,6 +177,9 @@ export function childEnv({ home, botId, runId, piCli, extraEnv = {}, turnTimeout
     PIBOT_TURN_TIMEOUT_MS: String(turnTimeoutMs),
     PIBOT_PROMPT_ACK_TIMEOUT_MS: "60000",
     CROW_EVAL_RUN_ID: runId,
+    // buildBotBaseEnv's operator extra-allow list: pi (and its MCP children) carry the run
+    // marker too, so survivorsByMarker sees an escaped pi. Pinned: a parent value never lands.
+    CROW_BOT_ENV_ALLOW: "CROW_EVAL_RUN_ID",
     PIBOT_PI_CLI: piCli,
     ...extra,
   };

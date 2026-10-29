@@ -138,7 +138,8 @@ test("child env is an allowlist", () => {
   };
   const e = childEnv({ ...baseArgs, parent, extraEnv: { CROW_SESSION_BRIEFING: "0" } });
   assert.equal(e.CROW_GATEWAY_URL, "http://127.0.0.1:1");
-  for (const k of ["CROW_BOT_ENV_PASSTHROUGH", "CROW_BOT_ENV_ALLOW", "PI_LOCAL_MODELS_SETTINGS", "GITHUB_TOKEN", "FOO", "PIBOT_MCP_CONFIG_DELIVERY", "CROW_PI_SANDBOX"]) assert.equal(k in e, false, k);
+  assert.equal(e.CROW_BOT_ENV_ALLOW, "CROW_EVAL_RUN_ID", "the parent's X is dropped; the pinned marker allow stays");
+  for (const k of ["CROW_BOT_ENV_PASSTHROUGH", "PI_LOCAL_MODELS_SETTINGS", "GITHUB_TOKEN", "FOO", "PIBOT_MCP_CONFIG_DELIVERY", "CROW_PI_SANDBOX"]) assert.equal(k in e, false, k);
   assert.equal(e.CROW_SESSION_BRIEFING, "0");
   assert.equal(e.PIBOT_PI_CLI, "/opt/pi/cli.js");
   assert.equal(e.PIBOT_TURN_TIMEOUT_MS, "90000");
@@ -150,9 +151,16 @@ test("child env is an allowlist", () => {
   const documented = new Set([...PARENT_ENV_ALLOW, "NODE_TEST_CONTEXT", "HOME", "CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_APP_ENV_PATH",
     "CROW_DISABLE_NOSTR", "CROW_DISABLE_INSTANCE_SYNC", "CROW_RESEARCH_EVAL", "CROW_ACTOR_KIND", "CROW_ACTOR_BOT_ID", "CROW_JOURNAL_MODE",
     "PI_CODING_AGENT_DIR", "PI_MODELS_JSON", "PIBOT_WARM_GATEWAY_URL", "PIBOT_WARM_TIMEOUT_MS", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL",
-    "PIBOT_MAX_PI", "PIBOT_TURN_TIMEOUT_MS", "PIBOT_PROMPT_ACK_TIMEOUT_MS", "CROW_EVAL_RUN_ID", "PIBOT_PI_CLI", "CROW_SESSION_BRIEFING"]);
+    "PIBOT_MAX_PI", "PIBOT_TURN_TIMEOUT_MS", "PIBOT_PROMPT_ACK_TIMEOUT_MS", "CROW_EVAL_RUN_ID", "CROW_BOT_ENV_ALLOW", "PIBOT_PI_CLI", "CROW_SESSION_BRIEFING"]);
   for (const k of Object.keys(e)) assert.ok(documented.has(k) || k.startsWith("LC_"), `undocumented key ${k}`);
   assert.equal(e.LC_ALL, "C");
+});
+
+test("child env pins CROW_BOT_ENV_ALLOW to the run marker; a parent value never lands", () => {
+  assert.equal(childEnv({ ...baseArgs, parent: { PATH: "/p" } }).CROW_BOT_ENV_ALLOW, "CROW_EVAL_RUN_ID");
+  const e = childEnv({ ...baseArgs, parent: { PATH: "/p", CROW_BOT_ENV_ALLOW: "X", X: "leak", NODE_TEST_CONTEXT: "child-v8" } });
+  assert.equal(e.CROW_BOT_ENV_ALLOW, "CROW_EVAL_RUN_ID");
+  assert.equal("X" in e, false);
 });
 
 test("child env never targets a gateway warm", () => {

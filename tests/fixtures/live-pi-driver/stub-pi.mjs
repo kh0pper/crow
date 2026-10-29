@@ -15,7 +15,7 @@
  *   PIBOT_TEST_CRASH=1     ack the prompt, then exit 1
  *   PIBOT_TEST_NO_SESSION=1  write no session file
  *   PIBOT_TEST_IGNORE_TERM=1 ignore SIGTERM and stdin EOF (only SIGKILL stops it)
- *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm } per prompt
+ *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker } per prompt
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -89,7 +89,7 @@ process.stdin.on("data", (chunk) => {
       out({ type: "response", command: "get_session_stats", id: m.id, success: true, data: { tokens: { input: 1, output: 1, cacheRead: 0 } } });
     } else if (m.type === "prompt") {
       const n = priorPrompts();
-      if (env.PIBOT_TEST_CAPTURE) appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1" }) + "\n");
+      if (env.PIBOT_TEST_CAPTURE) appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1", runMarker: env.CROW_EVAL_RUN_ID ?? null }) + "\n");
       record("user", m.message);
       out({ type: "response", command: "prompt", id: m.id, success: true });
       if (env.PIBOT_TEST_CRASH === "1") process.exit(1);
