@@ -17,9 +17,50 @@ SCREEN="1920x1080x24"
 log() { echo "[crow-browser] $*"; }
 die() { echo "[crow-browser] FATAL: $*" >&2; exit 1; }
 
-if [ -z "${VNC_PASSWORD:-}" ]; then
-  die "VNC_PASSWORD is required"
+# The noVNC viewer has no password of its own: it is reached only through the
+# Crow gateway's signed-in /proxy/browser/ route, so the dashboard session is
+# the credential and LOOPBACK-ONLY listening is the security boundary (checked
+# below; the container refuses to run without it). An older install's .env may
+# still pass VNC_PASSWORD: it is ignored, and never printed.
+if [ -n "${VNC_PASSWORD:-}" ]; then
+  log "VNC_PASSWORD is set but no longer used (the viewer is behind the Crow sign-in); ignoring it."
 fi
+unset VNC_PASSWORD
+
+# loopback_only PORT TABLE... — true only when something LISTENs on PORT in the
+# given /proc/net/tcp{,6}-format tables and every such listener is a loopback
+# address: 127.0.0.0/8, ::1 or ::ffff:127.x. Addresses there are hex in host
+# byte order, so 127.0.0.1 reads 0100007F. Host networking shares the host's
+# socket tables with this container, so this sees exactly what the LAN sees.
+loopback_only() {
+  local port="$1"; shift
+  local hex addr found=0
+  hex=$(printf '%04X' "$port")
+  while read -r addr; do
+    [ -n "$addr" ] || continue
+    found=1
+    case "$addr" in
+      ??????7F|00000000000000000000000001000000|0000000000000000FFFF0000??????7F) ;;
+      *) echo "[crow-browser] port ${port} has a listener on a non-loopback address (${addr})" >&2; return 1 ;;
+    esac
+  done < <(awk -v p="$hex" 'FNR > 1 && $4 == "0A" { n = split($2, a, ":"); if (a[n] == p) print a[1] }' "$@" 2>/dev/null)
+  [ "$found" = 1 ] || { echo "[crow-browser] nothing listens on port ${port}" >&2; return 1; }
+}
+
+# require_loopback PORT NAME — wait up to 10 s for NAME to listen on PORT, then
+# insist that every listener is loopback. Anything else stops the container.
+require_loopback() {
+  local i
+  for i in $(seq 1 20); do
+    if loopback_only "$1" /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+      log "$2 listens on loopback only (port $1)."
+      return 0
+    fi
+    sleep 0.5
+  done
+  loopback_only "$1" /proc/net/tcp /proc/net/tcp6 || true
+  die "$2 on port $1 is not loopback-only. Refusing to run: the viewer has no password, so it must never be reachable from the network."
+}
 
 # --- Clean stale X locks/sockets (root cause of the 2026-05 crash loop) ---
 log "Cleaning stale X locks for display :${DISP_NUM}..."
@@ -61,19 +102,23 @@ log "Xvfb ready (pid ${XVFB_PID})."
 
 # --- x11vnc ---
 log "Starting x11vnc..."
+# -localhost: listen on 127.0.0.1 only. -nopw: no password, and no warning
+# about it (the gateway's sign-in is the gate).
 x11vnc -display ":${DISP_NUM}" -auth "$XAUTHORITY" -forever -shared \
-  -passwd "$VNC_PASSWORD" -rfbport "${RFB_PORT}" -noxdamage -quiet &
+  -localhost -nopw -rfbport "${RFB_PORT}" -noxdamage -quiet &
 X11VNC_PID=$!
 sleep 1
 kill -0 "$X11VNC_PID" 2>/dev/null || die "x11vnc failed to start"
+require_loopback "${RFB_PORT}" x11vnc
 log "x11vnc up (pid ${X11VNC_PID})."
 
 # --- noVNC / websockify ---
-log "Starting noVNC on :${NOVNC_PORT}..."
-websockify --web /usr/share/novnc "${NOVNC_PORT}" "localhost:${RFB_PORT}" &
+log "Starting noVNC on 127.0.0.1:${NOVNC_PORT}..."
+websockify --web /usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${RFB_PORT}" &
 WEBSOCKIFY_PID=$!
 sleep 1
 kill -0 "$WEBSOCKIFY_PID" 2>/dev/null || die "websockify failed to start"
+require_loopback "${NOVNC_PORT}" websockify
 
 # --- Chromium with CDP ---
 CHROME_PATH=$(find /root/.cache/ms-playwright -name "chrome" -type f 2>/dev/null | head -1)
@@ -117,7 +162,7 @@ done
 echo ""
 echo "============================================="
 echo "  Crow Browser — Ready (verified)"
-echo "  noVNC:     http://localhost:${NOVNC_PORT}/vnc.html"
+echo "  noVNC:     http://127.0.0.1:${NOVNC_PORT}/vnc.html (loopback; open it through the Crow dashboard)"
 echo "  CDP:       http://127.0.0.1:${CDP_PORT}/json/version"
 echo "============================================="
 echo ""

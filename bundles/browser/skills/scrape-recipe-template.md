@@ -22,7 +22,7 @@ Trigger when the user asks to `<task phrasings: e.g. "get the latest Acme board 
 
 Before starting, verify:
 1. crow-browser container is running (`crow_browser_status`); `crow_browser_launch` if not.
-2. The user has VNC open to watch (`http://localhost:6080/vnc.html` or the Browser panel) — required if any human-intervention step exists.
+2. The user has the viewer open to watch (the Browser panel, or the live browser tile in the chat) — required if any human-intervention step exists.
 3. `<any inputs needed: credentials available? date range? target IDs? output destination?>`
 4. `<auth: does this site need login? how — cookies via add_cookies, a saved session via load_session, or a live human login over VNC?>`
 

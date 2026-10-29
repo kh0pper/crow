@@ -699,12 +699,6 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8
 #perch-hub-root .ph-atile .at-actions button,#perch-hub-root .ph-atile .at-open{min-height:44px;min-width:44px;padding:8px 14px}
 #perch-hub-root .ph-atile .at-open{display:inline-flex;align-items:center;box-sizing:border-box;text-decoration:none}
 #perch-hub-root .ph-atile .at-open[hidden]{display:none}
-#perch-hub-root .ph-atile .to-pw-row,#perch-hub-root .ph-atile .to-reauth{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
-#perch-hub-root .ph-atile .to-pw-row button,#perch-hub-root .ph-atile .to-reauth button{min-height:44px;min-width:44px;padding:8px 14px}
-#perch-hub-root .ph-atile .to-hint{font-size:13px;color:var(--dim)}
-#perch-hub-root .ph-atile .to-pw{font-size:15px;overflow-wrap:anywhere;user-select:all}
-#perch-hub-root .ph-atile .to-reauth-input{min-height:44px;flex:1;min-width:0}
-#perch-hub-root .ph-atile .to-reauth-error{font-size:13px;color:var(--ink);width:100%}
 #perch-hub-root .browser-status{font-size:12.5px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The Take over sheet (spec 2026-10-27 §4.4): full screen over the hub, the
    noVNC viewer filling what the bar leaves. Targets are 44 px; Perch tokens only. */
@@ -717,11 +711,7 @@ background:var(--card);color:var(--ink);padding:8px;padding-top:max(8px,env(safe
 #perch-hub-root .ph-tosheet .to-head{display:flex;align-items:center;gap:8px;min-width:0}
 #perch-hub-root .ph-tosheet .to-host{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
 #perch-hub-root .ph-tosheet button{min-height:44px;min-width:44px;padding:8px 14px}
-#perch-hub-root .ph-tosheet .to-status,#perch-hub-root .ph-tosheet .to-hint{font-size:13px;color:var(--dim)}
-#perch-hub-root .ph-tosheet .to-pw-row,#perch-hub-root .ph-tosheet .to-reauth{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
-#perch-hub-root .ph-tosheet .to-pw{font-size:15px;overflow-wrap:anywhere;user-select:all}
-#perch-hub-root .ph-tosheet .to-reauth-input{min-height:44px;flex:1;min-width:0}
-#perch-hub-root .ph-tosheet .to-reauth-error{font-size:13px;color:var(--ink);width:100%}
+#perch-hub-root .ph-tosheet .to-status{font-size:13px;color:var(--dim)}
 #perch-hub-root .ph-tosheet .to-view{flex:1;min-height:0;display:flex}
 #perch-hub-root .ph-tosheet .to-vnc{flex:1;width:100%;min-height:0;border:1px solid var(--line);border-radius:8px;background:var(--sky)}
 /* The floating browser preview (brief 2026-10-29): the live tile's mini

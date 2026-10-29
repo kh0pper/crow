@@ -435,14 +435,14 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
 
 const BROWSER_LINK = { id: "browser", label: "Browser Automation", kind: "desktop" };
 const PW_ENTRY = { id: 41, bundle_id: "browser", env_key: "CROW_BROWSER_VNC_PASSWORD", readable: true };
-function browserServer({ takeOver = true, reveal } = {}) {
+/* The keychain still answers with an old install's VNC entry: nothing may ask for it. */
+function browserServer({ takeOver = true } = {}) {
   return (path, call) => {
     if (path.endsWith("/apps/browser/tile")) return { status: 200, body: { id: "browser", label: "Browser Automation", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver } };
     if (path.endsWith("/browser/take-over") || path.endsWith("/browser/heartbeat")) return { status: 200, body: { state: "held" } };
     if (path.endsWith("/browser/hand-back")) return { status: 200, body: { state: "idle" } };
     if (path.endsWith("/keychain/api/entries")) return { status: 200, body: { entries: [PW_ENTRY], reauth_method: "password" } };
-    if (path.endsWith("/keychain/api/reveal")) return reveal ? reveal(call) : { status: 200, body: { secret: "vnc-Secret-77" } };
-    if (path.endsWith("/keychain/api/reauth")) return { status: 200, body: { ok: true } };
+    if (path.endsWith("/keychain/api/reveal")) return { status: 200, body: { secret: "vnc-Secret-77" } };
     return { status: 404, body: {} };
   };
 }
@@ -547,8 +547,8 @@ test("the client code is template-safe in both languages", async () => {
   }
 });
 
-// I4: an app tile for "browser" takes the browser path, password and all.
-test("the browser's app tile takes the browser path: /browser/take-over, the keychain lookup, a view_only=false viewer", async () => {
+// I4: an app tile for "browser" takes the browser path (no VNC password: loopback VNC behind sign-in).
+test("the browser's app tile takes the browser path: /browser/take-over, a view_only=false viewer, no keychain lookup", async () => {
   const h = await hub({ links: [BROWSER_LINK], tile: browserServer() });
   assert.equal(await h.open("browser"), true);
   const tile = byClass(h.transcript, "ph-atile")[0];
@@ -560,47 +560,28 @@ test("the browser's app tile takes the browser path: /browser/take-over, the key
   assert.ok(sheet, "the Take over sheet");
   assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/dashboard/perch-api/browser/take-over"), "the browser's own route");
   assert.ok(!h.calls.some((c) => c.path.includes("/apps/browser/take-over")), "never the generic app route");
-  const lookups = h.calls.filter((c) => c.method === "GET" && c.path === "/dashboard/keychain/api/entries");
-  assert.equal(lookups.length, 2, "the tile's lookup and the sheet's own");
-  assert.equal(byClass(sheet, "to-copy")[0].hidden, false, "the sheet's Copy password, as today");
+  assert.ok(!h.calls.some((c) => c.path.includes("/keychain/")), "neither the tile nor the sheet asks the keychain");
+  assert.equal(byClass(sheet, "to-copy").length, 0, "no Copy password row");
   assert.equal(byClass(sheet, "to-vnc")[0].getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
   byClass(sheet, "to-back")[0].onclick();
   await tick();
   assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/dashboard/perch-api/browser/hand-back"));
 });
 
-// I1 (b): the browser's watch view meets noVNC's password prompt: the sheet's Copy password, same flow.
-test("the browser's watch-only tile has the sheet's Copy password: keychain lookup, re-auth, reveal, wiped on close", async () => {
-  let reveals = 0;
-  const h = await hub({ links: [BROWSER_LINK], tile: browserServer({ takeOver: false, reveal: () => (++reveals === 1 ? { status: 403, body: { code: "reauth_required" } } : { status: 200, body: { secret: "vnc-Secret-77" } }) }) });
+// The browser's watch view connects without a password prompt (loopback VNC behind sign-in).
+test("the browser's watch-only tile has no password row, makes no keychain call, and its URL carries no password", async () => {
+  const h = await hub({ links: [BROWSER_LINK], tile: browserServer({ takeOver: false }) });
   await h.open("browser");
   const tile = byClass(h.transcript, "ph-atile")[0];
-  const copy = byClass(tile, "to-copy")[0];
-  assert.ok(copy, "a Copy password row in the tile");
-  assert.equal(copy.textContent, "Copy password");
-  assert.equal(copy.hidden, false, "the browser entry was found");
-  copy.onclick();
-  await tick();
-  const reauth = byClass(tile, "to-reauth")[0];
-  assert.equal(reauth.hidden, false, "the keychain asks for a re-auth first, as in the sheet");
-  byClass(tile, "to-reauth-input")[0].value = "hunter2";
-  byClass(tile, "to-reauth-go")[0].onclick();
-  await tick();
-  const re = h.calls.find((c) => c.path === "/dashboard/keychain/api/reauth");
-  assert.deepEqual(re.body, { password: "hunter2" });
-  assert.equal(reauth.hidden, true);
-  const pw = byClass(tile, "to-pw")[0];
-  assert.equal(pw.textContent, "vnc-Secret-77", "no clipboard here: shown briefly");
-  assert.deepEqual(h.calls.filter((c) => c.path === "/dashboard/keychain/api/reveal").map((c) => c.body), [{ id: 41, purpose: "copy" }, { id: 41, purpose: "copy" }]);
+  for (const cls of ["to-pw-row", "to-copy", "to-pw", "to-reauth"]) assert.equal(byClass(tile, cls).length, 0, "no " + cls);
+  const src = byClass(tile, "at-vnc")[0].getAttribute("src");
+  assert.equal(src, "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale");
+  assert.doesNotMatch(src, /password/i);
+  assert.ok(!h.calls.some((c) => c.path.includes("/keychain/")), "no keychain call");
   byClass(tile, "at-close")[0].onclick();
-  assert.equal(pw.textContent, "", "closing the tile wipes it");
-  assert.equal(byClass(tile, "to-reauth-input")[0].value, "");
-
-  // Another app's tile has no password row and makes no keychain call.
-  const s2 = await hub();
-  await s2.open("studio");
-  assert.equal(byClass(byClass(s2.transcript, "ph-atile")[0], "to-copy").length, 0);
-  assert.ok(!s2.calls.some((c) => c.path.includes("/keychain/")));
+  assert.equal(byClass(h.transcript, "ph-atile").length, 0);
+  const { perchBrowserTileJs } = await import("../servers/gateway/dashboard/perch-hub/browser-tile.js");
+  for (const lang of ["en", "es"]) assert.doesNotMatch(perchBrowserTileJs(lang), /toPwParts|toFindPassword|atWipePasswords|keychain|password=/i, lang);
 });
 
 // I1 (c): whenever Take over is not offered, the tile links to the app's page.
@@ -677,54 +658,16 @@ test("a 1.3.10-shaped installed browser (no desktop, no mcpServers) is a page li
   _resetCatalogCache();
 });
 
-// Password hygiene: a Turbo snapshot and a retired hub keep nothing of the password.
-test("turbo:before-cache wipes the sheet's and the browser tile's revealed password and typed re-auth", async () => {
-  const h = await hub({ links: [BROWSER_LINK], tile: browserServer() });
-  await h.open("browser");
-  const tile = byClass(h.transcript, "ph-atile")[0];
-  byClass(tile, "to-copy")[0].onclick();
-  await tick();
-  const tilePw = byClass(tile, "to-pw")[0];
-  assert.equal(tilePw.textContent, "vnc-Secret-77", "the tile shows it (no clipboard)");
-  byClass(tile, "to-reauth-input")[0].value = "typed";
-  byClass(tile, "at-take")[0].onclick();
-  await tick();
-  const sheet = byClass(h.root, "ph-tosheet")[0];
-  byClass(sheet, "to-copy")[0].onclick();
-  await tick();
-  const sheetPw = byClass(sheet, "to-pw")[0];
-  assert.equal(sheetPw.textContent, "vnc-Secret-77", "the sheet shows it too");
-  byClass(sheet, "to-reauth-input")[0].value = "typed";
-
-  h.sandbox.document.dispatchEvent(new Event("turbo:before-cache"));
-  assert.equal(sheetPw.textContent, ""); assert.equal(sheetPw.hidden, true);
-  assert.equal(byClass(sheet, "to-reauth-input")[0].value, "");
-  assert.equal(tilePw.textContent, ""); assert.equal(tilePw.hidden, true);
-  assert.equal(byClass(tile, "to-reauth-input")[0].value, "");
-});
-
-test("HUB.retire resets the app tiles, wiping the browser tile's password and its pending re-auth", async () => {
+test("HUB.retire resets the app tiles", async () => {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const src = perchHubJs("en");
   const at = src.indexOf("HUB.retire=function(){");
   const body = src.slice(at, src.indexOf("\n  };", at));
   assert.ok(at > -1 && /\bresetAppTiles\(\);/.test(body), "HUB.retire calls resetAppTiles()");
-
-  let reveals = 0;
-  const h = await hub({ links: [BROWSER_LINK], tile: browserServer({ takeOver: false, reveal: () => (++reveals === 1 ? { status: 403, body: { code: "reauth_required" } } : { status: 200, body: { secret: "vnc-Secret-77" } }) }) });
+  const h = await hub({ links: [BROWSER_LINK], tile: browserServer({ takeOver: false }) });
   await h.open("browser");
-  const tile = byClass(h.transcript, "ph-atile")[0];
-  byClass(tile, "to-copy")[0].onclick();
-  await tick();
-  assert.equal(byClass(tile, "to-reauth")[0].hidden, false, "a re-auth is pending (its retry callback held)");
-  byClass(tile, "to-reauth-input")[0].value = "typed";
-  const reauthGo = byClass(tile, "to-reauth-go")[0];
-  h.sandbox.__resetApps();          /* what HUB.retire now runs */
+  const frame = byClass(byClass(h.transcript, "ph-atile")[0], "at-vnc")[0];
+  h.sandbox.__resetApps();          /* what HUB.retire runs */
   assert.equal(byClass(h.transcript, "ph-atile").length, 0, "the tile is gone");
-  assert.equal(byClass(tile, "to-reauth-input")[0].value, "", "the typed re-auth is wiped");
-  // A late confirm on the dropped row does nothing: no retry, no reveal.
-  reauthGo.onclick();
-  await tick();
-  assert.equal(reveals, 1, "the pending retry never runs after retire");
-  assert.equal(byClass(tile, "to-pw")[0].textContent, "");
+  assert.equal(frame.getAttribute("src"), "about:blank", "its viewer is unloaded");
 });

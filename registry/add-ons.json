@@ -498,8 +498,8 @@
       },
       "privileged": true,
       "install_consent_messages": {
-        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools) listens on 127.0.0.1 only. The VNC viewer (ports 6080 and 5900) listens on every network interface of this machine and is protected by the generated VNC password. It saves downloads under your Crow folder.",
-        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools) escucha solo en 127.0.0.1. El visor VNC (puertos 6080 y 5900) escucha en todas las interfaces de red de esta máquina y está protegido por la contraseña VNC generada. Guarda las descargas dentro de tu carpeta de Crow."
+        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools) listens on 127.0.0.1 only. The VNC viewer (ports 6080 and 5900) listens on 127.0.0.1 only, so it has no password of its own: you open it from the Crow dashboard, behind your Crow sign-in. It saves downloads under your Crow folder.",
+        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools) escucha solo en 127.0.0.1. El visor VNC (puertos 6080 y 5900) escucha solo en 127.0.0.1, así que no tiene contraseña propia: lo abres desde el panel de Crow, con tu inicio de sesión de Crow. Guarda las descargas dentro de tu carpeta de Crow."
       },
       "server": {
         "command": "node",
@@ -507,7 +507,6 @@
           "server/index.js"
         ],
         "envKeys": [
-          "CROW_BROWSER_VNC_PASSWORD",
           "CROW_BROWSER_CDP_PORT",
           "CROW_BROWSER_VNC_PORT",
           "CROW_BROWSER_RFB_PORT",
@@ -530,22 +529,10 @@
         "skills/scrape-recipe-template.md"
       ],
       "requires": {
-        "env": [
-          "CROW_BROWSER_VNC_PASSWORD"
-        ],
         "min_ram_mb": 1024,
         "min_disk_mb": 512
       },
       "env_vars": [
-        {
-          "name": "CROW_BROWSER_VNC_PASSWORD",
-          "description": "VNC viewer password. Crow generates it at install and saves it in Settings → Passwords (this machine only), where you can copy it when the viewer asks. VNC itself checks only the first 8 characters.",
-          "required": true,
-          "secret": true,
-          "generate": "secret",
-          "keychain": true,
-          "keychain_label": "VNC viewer password"
-        },
         {
           "name": "CROW_BROWSER_CDP_PORT",
           "description": "Chrome DevTools Protocol port",
@@ -553,12 +540,12 @@
         },
         {
           "name": "CROW_BROWSER_VNC_PORT",
-          "description": "noVNC web viewer port",
+          "description": "noVNC web viewer port (listens on 127.0.0.1 only; open the viewer from the Crow dashboard)",
           "default": "6080"
         },
         {
           "name": "CROW_BROWSER_RFB_PORT",
-          "description": "Raw VNC (RFB) port inside the host network",
+          "description": "Raw VNC (RFB) port (listens on 127.0.0.1 only)",
           "default": "5900"
         },
         {
@@ -583,7 +570,7 @@
         "path": "/vnc.html",
         "label": "VNC Viewer"
       },
-      "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. CDP and VNC bind to localhost only.",
+      "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. CDP and VNC bind to 127.0.0.1 only; the VNC viewer has no password of its own and is reached through the signed-in Crow dashboard (/proxy/browser/).",
       "official": true
     },
     {

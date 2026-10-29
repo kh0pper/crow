@@ -102,9 +102,13 @@ const EXEMPT = {
   "rookery:ROOKERY_MCP_CROW_TOKEN": "must be a Crow-issued local MCP token (local-token.js), not random bytes; optional and only used with ROOKERY_MCP_CROW_URL",
 };
 
-/** Survey §1.3 F1 table (31 keys) + MINIO_ROOT_PASSWORD (§1.3 note). */
+/**
+ * Survey §1.3 F1 table (31 keys) + MINIO_ROOT_PASSWORD (§1.3 note), less
+ * browser:CROW_BROWSER_VNC_PASSWORD: the browser's viewer has no password any
+ * more (loopback VNC behind the dashboard sign-in, browser 1.3.12).
+ */
 const SURVEY_F1 = [
-  "bookstack:BOOKSTACK_DB_PASSWORD", "browser:CROW_BROWSER_VNC_PASSWORD", "campaigns:CROW_CAMPAIGNS_ENCRYPTION_KEY",
+  "bookstack:BOOKSTACK_DB_PASSWORD", "campaigns:CROW_CAMPAIGNS_ENCRYPTION_KEY",
   "coturn:TURN_SECRET", "crowdsec:CROWDSEC_API_KEY", "frigate:FRIGATE_RTSP_PASSWORD", "funkwhale:FUNKWHALE_DJANGO_SECRET_KEY",
   "lemmy:LEMMY_DB_PASSWORD", "lemmy:LEMMY_PICTRS_API_KEY", "lemmy:LEMMY_JWT", "mastodon:MASTODON_DB_PASSWORD",
   "mastodon:MASTODON_SECRET_KEY_BASE", "mastodon:MASTODON_OTP_SECRET", "mastodon:MASTODON_VAPID_PRIVATE_KEY",
@@ -121,7 +125,7 @@ function envVar(bundle, key) {
 }
 
 test("survey F1: every internal secret is generated, or exempt with a reason", () => {
-  assert.equal(SURVEY_F1.length, 32);
+  assert.equal(SURVEY_F1.length, 31);
   for (const ref of SURVEY_F1) {
     const [bundle, key] = ref.split(":");
     const v = envVar(bundle, key);

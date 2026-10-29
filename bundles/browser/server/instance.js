@@ -36,8 +36,8 @@ function bundleEnv() {
   if (envCache && envCache.path === path) return envCache.values;
   let values = {};
   try {
-    // Compose-exact decoding (bundle-env-codec.js): the installer quotes a typed
-    // CROW_BROWSER_VNC_PASSWORD with spaces or symbols; the container sees it unquoted.
+    // Compose-exact decoding (bundle-env-codec.js): the installer quotes a value
+    // with spaces or symbols; the container sees it unquoted.
     values = parseEnvText(readFileSync(path, "utf8"));
   } catch {
     // No .env (fresh checkout, bundle not installed) — defaults apply.

@@ -20,8 +20,8 @@ Match effort to the target. Don't open a browser to read an API; don't fight a p
 
 ## Setup
 
-1. `crow_browser_launch` — starts/connects the container and returns the VNC URL. (Pass `restart: true` to recycle a stuck browser; pass `proxy_url` to route through a proxy — see Escalation.)
-2. Give the user the VNC URL so they can watch and intervene: `http://localhost:6080/vnc.html`.
+1. `crow_browser_launch` — starts/connects the container and returns the viewer's path on the Crow dashboard (`vnc_url`). (Pass `restart: true` to recycle a stuck browser; pass `proxy_url` to route through a proxy — see Escalation.)
+2. The user watches in the Browser panel or the live browser tile in your chat. The viewer is only reachable through the signed-in Crow dashboard (`/proxy/browser/vnc.html`); its VNC ports listen on 127.0.0.1 only, so never send a `localhost` VNC address.
 3. `crow_browser_status` — check container + CDP health any time.
 
 ## Tool reference
@@ -68,7 +68,7 @@ Match effort to the target. Don't open a browser to read an API; don't fight a p
 When you hit something you must not automate — **CAPTCHA / reCAPTCHA, 2FA, security questions, payment/submit confirmations, or any irreversible real-world action** — do NOT guess or click blind:
 
 1. `crow_browser_screenshot` — show the current state.
-2. `crow_browser_wait_for_user` with a clear message of exactly what the human must do. The operator gets a "needs you" notice that opens the **Take over** sheet in your chat (the live browser tile has the same button). Do not send a VNC URL: the sheet carries the viewer and the VNC password.
+2. `crow_browser_wait_for_user` with a clear message of exactly what the human must do. The operator gets a "needs you" notice that opens the **Take over** sheet in your chat (the live browser tile has the same button). Do not send a VNC URL: the sheet carries the viewer, which connects on its own (there is no VNC password; the Crow sign-in is the gate).
 3. The human taps **Take over**, completes just that step in the browser, and taps **Hand back**. While the operator has the browser, your browser calls wait and then return "The operator has the browser; call again to continue." without acting — just call again.
 4. `crow_browser_wait_for_user` with `resume: true` — execution continues where it parked. Your next result may start with "The browser changed hands since your last step": check the page before relying on earlier state.
 
@@ -91,7 +91,7 @@ Many forms live in iframes. Inspect with `discover_selectors({frame_selector: "i
 
 ## Rules
 
-1. **Never automate without the user's awareness** — always surface the VNC URL.
+1. **Never automate without the user's awareness** — tell them the browser is in use; they watch it in the Browser panel or the chat's live tile.
 2. **Never submit anything with real-world consequences without explicit user confirmation.**
 3. **Save sessions before risky operations and before a proxy restart.**
 4. **Screenshot before/after important steps** for verification.

@@ -19,9 +19,10 @@ Automatización sigilosa de navegador con visualización por VNC — navega siti
 
 1. Abre la página de **Extensiones** en tu dashboard del Crow's Nest
 2. Busca **Browser Automation** y haz clic en **Install**
-3. Ingresa una contraseña de VNC cuando se te pida
-4. Docker construye el contenedor (toma unos minutos en la primera instalación)
-5. El gateway se reinicia — el panel Browser aparece en la barra lateral
+3. Docker construye el contenedor (toma unos minutos en la primera instalación)
+4. El gateway se reinicia — el panel Browser aparece en la barra lateral
+
+No hay contraseña de VNC que configurar ni escribir: al visor solo se llega a través de tu dashboard de Crow con la sesión iniciada.
 
 ## Panel del dashboard
 
@@ -46,7 +47,7 @@ El panel Browser tiene tres pestañas:
 
 | Herramienta | Descripción |
 |------|-------------|
-| `crow_browser_launch` | Conecta al navegador vía CDP, devuelve la URL de VNC |
+| `crow_browser_launch` | Conecta al navegador vía CDP, devuelve la ruta del visor en el dashboard |
 | `crow_browser_status` | Comprobación de salud del contenedor y de CDP |
 | `crow_browser_navigate` | Va a una URL con scripts de sigilo |
 | `crow_browser_screenshot` | Captura la página o un elemento como PNG |
@@ -128,19 +129,18 @@ El navegador incluye medidas anti-detección:
 Para CAPTCHA, 2FA, preguntas de seguridad o cualquier acción que requiera juicio humano:
 
 1. La IA llama a `crow_browser_wait_for_user` con un mensaje
-2. Ves el mensaje y abres el visor VNC
+2. Ves el mensaje y tocas **Tomar el control** en el chat (o abres el panel Browser)
 3. Completas la acción manualmente en el navegador
 4. Le dices a la IA que continúe (llama a `wait_for_user` con `resume: true`)
 
 ## Acceso VNC
 
-El visor VNC es accesible a través del gateway de Crow:
+Al visor VNC solo se llega a través del gateway de Crow, con tu sesión del dashboard iniciada:
 
-- **Embebido**: en la pestaña Status del panel Browser (iframe)
-- **Vista completa**: `/proxy/browser/vnc.html?view_only=false` (mismo HTTPS que tu dashboard)
-- **Directo**: `http://localhost:6080/vnc.html` (solo acceso local)
+- **Embebido**: en la pestaña Status del panel Browser (iframe), en el recuadro del navegador en vivo y en la hoja **Tomar el control** de un chat
+- **Vista completa**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (mismo HTTPS que tu dashboard)
 
-No hace falta abrir puertos en el firewall — el VNC se sirve mediante proxy a través del gateway.
+El visor se conecta solo: no hay una contraseña de VNC aparte. Dentro del contenedor, x11vnc (puerto 5900) y noVNC (puerto 6080) escuchan solo en `127.0.0.1`, y el contenedor se detiene al arrancar si cualquiera de los dos se puede alcanzar en otra dirección. Tu inicio de sesión de Crow es la única credencial, así que no hace falta abrir puertos en el firewall y los puertos directos no se pueden alcanzar desde otro dispositivo.
 
 ## Contenedor Docker
 
@@ -162,9 +162,11 @@ Desde la línea de comandos:
 ```bash
 cd ~/.crow/bundles/browser
 docker compose up -d      # iniciar
-docker compose down       # detener
+docker compose stop       # detener
 docker compose logs -f    # ver registros
 ```
+
+El perfil del navegador (sus cookies y sesiones iniciadas) vive dentro del contenedor, no en un volumen. `docker compose stop` y `restart` lo conservan; todo lo que **elimina o recrea** el contenedor lo pierde: `docker compose down`, `up --force-recreate`, una reconstrucción que cambia la imagen, o `crow_browser_launch` con `proxy_url`. Guarda antes las sesiones con `crow_browser_save_session`.
 
 ## Skill de declaración FFFF
 
@@ -173,6 +175,6 @@ La extensión Browser Automation incluye una skill para declarar impuestos vía 
 ## Seguridad
 
 - El **puerto CDP (9222)** se vincula solo a `127.0.0.1`
-- El **VNC** se sirve mediante proxy a través del gateway con autenticación de sesión
+- El **VNC** (x11vnc en 5900, noVNC en 6080) se vincula solo a `127.0.0.1`, lo que se comprueba al arrancar el contenedor, y se sirve mediante proxy a través del gateway con autenticación de sesión
 - **Ningún puerto expuesto** a la red — todo pasa por el HTTPS del gateway
-- Se requiere contraseña de VNC (se establece durante la instalación)
+- Sin contraseña de VNC: el inicio de sesión del dashboard es la puerta. Si una instalación anterior tiene `CROW_BROWSER_VNC_PASSWORD` en el `.env` del bundle, se ignora
