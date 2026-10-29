@@ -10,6 +10,9 @@
  *   owns(cdb, cardId)  the DB fallback [rv1 C7]: the card's newest hand-off row is open
  *   restore(cdb)       the card ids of the open rows, for the boot warm-up
  *
+ * The notice carries a non-enumerable onSent(): the sender calls it once the notification was really sent, and only
+ * then is the spoken heads-up announced (Task 5.2).
+ *
  * Open means starting (with a card: P8), started, queued or quiet. A stopped, done or failed row is never
  * owned, so a stopped card's later result is an ordinary board result (5.4 relies on this).
  */
@@ -39,7 +42,7 @@ function cardIdOf(v) {
 
 /**
  * @param store     the hand-off store (handoff-store.js)
- * @param announce  the spoken heads-up seam (core.announce: presence.announce once 5.2 lands) (P3)
+ * @param announce  the spoken heads-up seam (handoff-confirm.js announceHandoff → presence.announce) (P3)
  * @param cardHref  cardDrawerHref, the drawer link (null for a card that is not there)
  * @param docs      documentsForCard, a card's documents in its list order
  */
@@ -103,18 +106,27 @@ export function createHandoffCompletion({ store, announce, cardHref = cardDrawer
     const vars = { bot: await botName(cdb, row.bot_id), task: row.task };
     const url = await actionUrl(cdb, cardId, summary, ctx.tdb);
     const spoken = to === "done" ? ["completion_spoken", "completion_spoken_kiosk"] : ["completion_failed_spoken", "completion_failed_spoken_kiosk"];
-    Promise.resolve().then(() => announce({
-      originDeviceId: row.device_id,
-      lineFor: (surface) => voiceLine(surface === "kiosk" ? spoken[1] : spoken[0], lang, vars),
-    })).catch((err) => log(`[voice-handoff] ${row.id}: announce failed (${err?.message || err})`));
     releaseResult(cardId);
     const body = cut(summary, BODY_MAX);
-    return {
+    const out = {
       type: "attention", priority: "high", source: "crow-voice",
       title: voiceLine(to === "done" ? "completion_title_done" : "completion_title_failed", lang, vars),
       body: body || null,
       action_url: url,
     };
+    // The spoken heads-up says "it's on your phone", so it goes only once the notification really went out: the
+    // sender (result-service.js) calls onSent after a send that stored it, and never after one that failed or was
+    // turned off (the 5.1 carry). Not enumerable: the notice itself stays a plain notification.
+    Object.defineProperty(out, "onSent", {
+      value: () => {
+        Promise.resolve().then(() => announce({
+          originDeviceId: row.device_id,
+          handoffId: row.id,
+          lineFor: (surface) => voiceLine(surface === "kiosk" ? spoken[1] : spoken[0], lang, vars),
+        })).catch((err) => log(`[voice-handoff] ${row.id}: announce failed (${err?.message || err})`));
+      },
+    });
+    return out;
   }
 
   async function owns(cdb, cardId) {

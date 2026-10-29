@@ -342,6 +342,36 @@ export function createKioskRuntime(deps) {
   const tickets = createTicketStore({ now });
   const relay = deps.relay || createRelay();
   let hub = null;
+  /**
+   * Live voice surfaces (Task 5.2): each display whose socket is live is registered with presence.js through
+   * deps.registerVoiceSurface (P29: the panel imports presence with a guard and passes it in, or null, which skips
+   * registration). A session display is the phone's overlay ("phone"), a paired one a "kiosk". P28: the hub's sync
+   * speak (queued speech) as a Promise<boolean>; busy = a turn, speech or an open mic. lastTurnAt: the operator's
+   * last display turn, set as each one starts and ends.
+   */
+  const registerVoiceSurface = typeof deps.registerVoiceSurface === "function" ? deps.registerVoiceSurface : null;
+  const lastTurnAt = new Map();      // device id → ms
+  const surfaceOff = new Map();      // device id → unregister()
+  const surfaceGone = (d) => {
+    const off = d?.id ? surfaceOff.get(d.id) : null;
+    if (!off) return;
+    surfaceOff.delete(d.id);
+    try { off(); } catch (err) { log(`[kiosk] voice surface ${d.id} not unregistered: ${err?.message}`); }
+  };
+  const surfaceLive = (d) => {
+    if (!registerVoiceSurface || !d?.id) return;
+    surfaceGone(d);
+    const id = d.id;
+    try {
+      surfaceOff.set(id, registerVoiceSurface(id, {
+        surface: isSessionDisplayId(id) ? "phone" : "kiosk",
+        speak: async (text) => hub.speak(id, text) === true,
+        lastTurnAt: () => lastTurnAt.get(id) ?? null,
+        connected: () => hub.isConnected(id),
+        busy: () => hub.isBusy(id),
+      }));
+    } catch (err) { log(`[kiosk] voice surface ${id} not registered: ${err?.message}`); }
+  };
   const langOf = (id) => (hub?.deviceOf?.(id)?.kiosk_settings?.lang === "es" ? "es" : "en");
   /** Close this display's now-playing window (the session it showed is over). */
   const closeNowPlaying = (id) => { for (const w of wm.list(id).filter((x) => x.kind === "nowplaying")) { wm.close(id, w.id); hub?.sendTo(id, { type: "wm", action: "close", id: w.id }); } };
@@ -466,6 +496,7 @@ export function createKioskRuntime(deps) {
     // F3/F6: the page's effective audio policy rides on display_config (the stored settings are never rewritten by it).
     displayConfig: (d, rawCaps) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), ...audioPolicy(d.kiosk_settings, rawCaps), bird: await deps.resolveDisplayBird(db) })),
     runTurn: ({ device: device0, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
+      lastTurnAt.set(device0.id, now());   // the operator is talking here (presence.js)
       const vb = await loadVoiceBot(db);
       const device = voiced(device0, vb);
       // r7 G9 evidence: the server's media state before and after every display turn (fixed words, on the metrics line).
@@ -477,6 +508,7 @@ export function createKioskRuntime(deps) {
         ...turnOptions(device, caps, tz, (ev) => sink.event(ev), { onModelVerb: (v, k) => { if (asked.length < 8) { asked.push(String(v).slice(0, 24)); if (k) kept.push(String(k).slice(0, 24)); } } }, vb),
       });
       if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id), ...(asked.length ? { model_verbs: asked } : {}), ...(kept.length ? { model_verbs_kept: kept } : {}) };
+      lastTurnAt.set(device0.id, now());
       return r;
     }),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
@@ -488,6 +520,8 @@ export function createKioskRuntime(deps) {
       })
       : null,
     speak: ({ device, text, sink, signal }) => withDb(async (db) => deps.voice.speakText({ db, device: await voicedNow(db, device), text, sink, signal })),
+    onLive: surfaceLive,
+    onGone: surfaceGone,
     wm, metrics, media,
     // F8: the chip opens the now-playing window; a display that cannot draw it toggles the playback as before.
     openNowPlaying: (id, caps) => {
@@ -602,6 +636,7 @@ export function createKioskRuntime(deps) {
       if (!(barRevalidators.has(id) && media.active(id))) media.closeDevice(id);   // B3: the bar's audio lives to logout
       try { deps.voice.convo?.clear?.(id); } catch {}
       sweepWarmAt.delete(id);
+      lastTurnAt.delete(id);
     }
   }
   /**
@@ -1125,5 +1160,5 @@ export function createKioskRuntime(deps) {
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, barDisplays: () => barRevalidators.size, stop: () => { clearInterval(sweep); music?.stop(); } };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, barDisplays: () => barRevalidators.size, stop: () => { clearInterval(sweep); music?.stop(); for (const id of [...surfaceOff.keys()]) surfaceGone({ id }); } };
 }

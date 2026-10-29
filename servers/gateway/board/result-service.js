@@ -106,11 +106,17 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
       action_url: "/dashboard/bot-board#card=" + itemId,
     } : null);
     if (send) {
+      let sent = null;
       try {
         const { createNotification } = await import("../../shared/notifications.js");
-        await createNotification(cdb, send);
+        sent = await createNotification(cdb, send);
       } catch {
         // Non-fatal — the result row is already committed.
+      }
+      // A rail's notice may ask to hear that it really went out (the hand-off speaks its heads-up only then):
+      // never after a send that threw or was turned off (createNotification → null).
+      if (sent && typeof send.onSent === "function") {
+        try { send.onSent(sent); } catch { /* the rail's own hook: never undoes the result */ }
       }
     }
   }

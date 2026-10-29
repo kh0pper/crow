@@ -75,21 +75,44 @@ async function lostConfirm(core, db, h, from, decision) {
 }
 
 /**
+ * The spoken heads-up for hand-off `handoffId` (presence.announce through the core's seam). When it was really
+ * spoken, the device it was spoken on records the hand-off as its last topic (P31: on the shared core), so a
+ * follow-up "how's it going?" there is about this one. `turn: null` means "said between turns": the next
+ * exchange is the first after it (5.3 counts the exchanges). → the announce result.
+ */
+export async function announceHandoff(core, handoffId, args) {
+  const r = await core.announce({ ...args, handoffId });
+  const on = r && typeof r.spokenOn === "string" && r.spokenOn ? r.spokenOn : null;
+  if (on && handoffId != null && core.lastHandoffTopic instanceof Map) core.lastHandoffTopic.set(on, { id: handoffId, turn: null, at: core.now() });
+  return r;
+}
+
+/** Fire the heads-up without waiting for it; a failure is logged, never thrown. */
+export function announceLater(core, handoffId, args) {
+  Promise.resolve().then(() => announceHandoff(core, handoffId, args))
+    .catch((err) => core.log(`[voice-handoff] ${handoffId}: announce failed (${err?.message || err})`));
+}
+
+/**
  * The start could not be reported by the yes itself (it was said "starting up"): one high-priority
  * notification that opens the card, unless Perch's own push already went out (`skipNotify`), plus the spoken
- * heads-up on a live voice surface (presence.js, PR 5; a no-op until it exists).
+ * heads-up on a live voice surface (presence.js). The heads-up says "the details are on your phone", so it is
+ * spoken only once the phone really has them: after a notification that was sent (not turned off, not failed),
+ * or after Perch's own push (`skipNotify`).
  */
 export async function notifyRow(core, db, h, { titleKey, spokenKey = titleKey, kioskSpokenKey = spokenKey, skipNotify = false, label = "start-failed" } = {}) {
   const vars = { bot: h.name, task: h.task };
+  let sent = skipNotify;
   if (!skipNotify) {
     try {
-      await core.notify(db, { type: "attention", priority: "high", title: voiceLine(titleKey, h.lang, vars), action_url: await cardDrawerHref(db, h.cardId) });
+      sent = (await core.notify(db, { type: "attention", priority: "high", title: voiceLine(titleKey, h.lang, vars), action_url: await cardDrawerHref(db, h.cardId) })) != null;
     } catch (err) { core.log(`[voice-handoff] ${h.id}: ${label} notification failed (${err?.message || err})`); }
   }
-  Promise.resolve().then(() => core.announce({
+  if (!sent) return;
+  announceLater(core, h.id, {
     originDeviceId: h.deviceId,
     lineFor: (surface) => voiceLine(surface === "kiosk" ? kioskSpokenKey : spokenKey, h.lang, vars),
-  })).catch((err) => core.log(`[voice-handoff] ${h.id}: announce failed (${err?.message || err})`));
+  });
 }
 
 /** The start-failed report: the one notification that opens the card, plus the spoken heads-up. */

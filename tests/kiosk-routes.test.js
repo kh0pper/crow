@@ -1648,3 +1648,49 @@ test("upgrade gate (/api/kiosk/session): Serve from tailscaled's uid passes; the
     k.stop();
   }
 });
+
+test("presence (voice hand-off 5.2): each live display is a voice surface the hub speaks for; closing it unregisters it", async () => {
+  const P = await import("../servers/gateway/voice/presence.js");
+  P._resetPresenceForTest();
+  // The main runtime has no registerVoiceSurface (an older core): its displays are never registered.
+  const plain = await connect("kiosk-no-presence");
+  assert.deepEqual(P.voiceSurfaces(), []);
+  plain.ws.close();
+
+  const regs = [];
+  const k = createKioskRuntime(runtimeDeps({ registerVoiceSurface: (id, impl) => { regs.push({ id, impl }); return P.registerVoiceSurface(id, impl); } }));
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, k);
+  try {
+    const { token } = await store.pairDevice(db(), { id: "kiosk-presence", name: "Kitchen", device_kind: "kiosk" });
+    const ws = new WebSocket(wsUrl(b));
+    const msgs = [];
+    await new Promise((r) => ws.on("open", r));
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-presence", token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(P.voiceSurfaces(), [{ deviceId: "kiosk-presence", surface: "kiosk" }]);
+    const { impl } = regs.at(-1);
+    assert.equal(impl.connected(), true);
+    assert.equal(impl.lastTurnAt(), null, "no turn yet");
+    assert.equal(impl.busy(), false);
+    assert.equal((await P.announce({ originDeviceId: "kiosk-presence", lineFor: () => "Writer has finished a task." })).spokenOn, null, "no turn in the window");
+    // A turn: lastTurnAt is set, and the heads-up then goes through the hub's queued speech (P28).
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "p1" }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 100 && !msgs.some((m) => m.type === "turn_done"); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(typeof impl.lastTurnAt(), "number");
+    for (let i = 0; i < 50 && impl.busy(); i++) await new Promise((r) => setTimeout(r, 10));
+    const before = speakCalls.length;
+    const r = await P.announce({ originDeviceId: "kiosk-presence", lineFor: (surface) => (surface === "kiosk" ? "Writer has finished a task." : "wrong line") });
+    assert.deepEqual(r, { spokenOn: "kiosk-presence", surface: "kiosk" });
+    for (let i = 0; i < 50 && speakCalls.length === before; i++) await new Promise((r2) => setTimeout(r2, 10));
+    assert.equal(speakCalls.at(-1).text, "Writer has finished a task.");
+    ws.close();
+    for (let i = 0; i < 50 && P.voiceSurfaces().length; i++) await new Promise((r2) => setTimeout(r2, 10));
+    assert.deepEqual(P.voiceSurfaces(), [], "the closed display is unregistered");
+    assert.equal(impl.connected(), false);
+  } finally { k.stop(); s.close(); P._resetPresenceForTest(); }
+});

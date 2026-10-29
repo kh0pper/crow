@@ -646,3 +646,35 @@ test("upgrade gate (/api/meta-glasses/session): Serve from tailscaled's uid reac
     if (prevUids === undefined) delete process.env.CROW_SERVE_PEER_UIDS; else process.env.CROW_SERVE_PEER_UIDS = prevUids;
   }
 });
+
+test("presence (voice hand-off 5.2): a glasses socket is a voice surface; the heads-up is spoken through the TTS push, never in quiet hours", async () => {
+  const P = await import("../servers/gateway/voice/presence.js");
+  // A device of its own: earlier tests' turns on glasses-a would already count as voice mode.
+  tokens["glasses-presence"] = (await store.pairDevice(db, { id: "glasses-presence", name: "glasses-presence" })).token;
+  await store.updateDeviceProfiles(db, "glasses-presence", { bound_bot_id: "helper" });
+  reset({ chat: [sayRound("Okay. ")] });
+  const c = await client("glasses-presence");
+  try {
+    for (let i = 0; i < 50 && !P.voiceSurfaces().some((s) => s.deviceId === "glasses-presence"); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(P.voiceSurfaces().some((s) => s.deviceId === "glasses-presence" && s.surface === "glasses"));
+    const line = (surface) => (surface === "glasses" ? "Helper finished the write-up. It's on your phone." : "wrong line");
+    assert.equal((await P.announce({ originDeviceId: "glasses-presence", lineFor: line })).spokenOn, null, "no turn yet: not in voice mode");
+    await c.turn();
+    reset();
+    const r = await P.announce({ originDeviceId: "glasses-presence", lineFor: line });
+    assert.deepEqual(r, { spokenOn: "glasses-presence", surface: "glasses" });
+    assert.ok(seen.tts.some((t) => t.input.includes("Helper finished the write-up")), "spoken through the glasses' TTS push");
+    // Quiet hours (the reminders' setting) silence it [rev2 M3].
+    const hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const nowD = new Date();
+    const quiet = `${hhmm(new Date(nowD.getTime() - 3_600_000))}-${hhmm(new Date(nowD.getTime() + 3_600_000))}`;
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('meta_glasses_voice_quiet_hours', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [quiet] });
+    try {
+      reset();
+      assert.equal((await P.announce({ originDeviceId: "glasses-presence", lineFor: line })).spokenOn, null);
+      assert.equal(seen.tts.length, 0);
+    } finally { await db.execute("DELETE FROM dashboard_settings WHERE key = 'meta_glasses_voice_quiet_hours'"); }
+  } finally { c.close(); }
+  for (let i = 0; i < 50 && P.voiceSurfaces().some((s) => s.deviceId === "glasses-presence"); i++) await new Promise((r2) => setTimeout(r2, 10));
+  assert.ok(!P.voiceSurfaces().some((s) => s.deviceId === "glasses-presence"), "the closed socket is unregistered");
+});

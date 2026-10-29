@@ -27,6 +27,7 @@ import { transcriptBufferOn, reloadTranscriptSetting, voiceTranscripts } from ".
 import { transcriptLogOn, voiceTranscriptLog } from "./transcript-log.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 import { botDefsGeneration, watchBotDefs } from "./defs-generation.js";
+import { trackTurn } from "./presence.js";
 
 /**
  * A voice bot (kind "voice") also asks a spoken yes before these: a schedule or a change to the
@@ -2051,7 +2052,14 @@ export function createVoiceTurnRunner(deps) {
   }
 
   // transcripts: the opt-in transcript buffer (null without one), read by the kiosk's admin route through deps.voice.
-  return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo, get transcripts() { return deps.transcripts || null; } };
+  /** Every turn (a relay turn included) is marked running on its device for its whole length, so presence.js never
+   *  speaks a heads-up into it (P27). */
+  async function trackedTurn(opts) {
+    const done = trackTurn(opts?.device?.id);
+    try { return await runVoiceTurn(opts); } finally { done(); }
+  }
+
+  return { runVoiceTurn: trackedTurn, speakText, transcribe, assessBot, abilitiesOf, convo, get transcripts() { return deps.transcripts || null; } };
 }
 
 // One pibots:defs-changed subscription per process, however many runners defaultVoiceDeps() feeds. The generation

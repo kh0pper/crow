@@ -7,7 +7,8 @@
  * budget, on a model that was up; otherwise "starting up", and a first turn that fails is reported once.
  *
  *   getHandoffCore()                  the process singleton: { store, summaries, availability, loadVoiceDef, give,
- *                                     engine, openTasksDb, notify, announce, inFlight, forTurn, confirm, completion }
+ *                                     engine, openTasksDb, notify, announce, inFlight, lastHandoffTopic, forTurn,
+ *                                     confirm, completion }
  *   registerVoiceResultKind()         the "voice" result kind (handoff-completion.js), registered once at boot
  *   createHandoffCore(seams)          the same, built from seams (tests)
  *   createHandoffVoiceActions(...)    the runner's deps.voiceActions member (pending.js chainVoiceActions)
@@ -30,7 +31,7 @@ import { matchYesNo, changesContent } from "./pending.js";
 import { matchChoice } from "./own-tools.js";
 import { phraseWords, listMatches } from "./tool-families.js";
 import { HANDOFF_TASK_MAX_CHARS } from "./handoff-constants.js";
-import { confirm, langOf, botName, surfaceLabel } from "./handoff-confirm.js";
+import { confirm, langOf, botName, surfaceLabel, announceHandoff } from "./handoff-confirm.js";
 import { createHandoffCompletion } from "./handoff-completion.js";
 import { registerResultKind } from "../board/result-requesters.js";
 
@@ -279,11 +280,11 @@ function defaultWait(ms) {
   return new Promise((res) => { const t = setTimeout(res, ms); if (t && typeof t.unref === "function") t.unref(); });
 }
 
-/** presence.announce (PR 5): spoken on a live voice surface. Until the module exists, nothing. */
+/** presence.announce (PR 5, Task 5.2): spoken on a live voice surface. A presence that cannot load says nothing. */
 async function defaultAnnounce(args) {
   let mod;
-  try { mod = await import("./presence.js"); } catch { return null; }
-  return typeof mod.announce === "function" ? mod.announce(args) : null;
+  try { mod = await import("./presence.js"); } catch { return { spokenOn: null }; }
+  return typeof mod.announce === "function" ? mod.announce(args) : { spokenOn: null };
 }
 
 /**
@@ -308,11 +309,13 @@ export function createHandoffCore({
   now = Date.now,
   log = (m) => console.warn(m),
 } = {}) {
-  const core = { store, summaries, availability, loadVoiceDef, give, engine, openTasksDb, notify, withDb, wait, announce, now, inFlight: new Set(), log };
+  // lastHandoffTopic (P31): device id → { id, turn, at }, the hand-off last spoken about there (a confirm, a status
+  // answer, a heads-up); on the core, so it is shared like the core itself (P30).
+  const core = { store, summaries, availability, loadVoiceDef, give, engine, openTasksDb, notify, withDb, wait, announce, now, inFlight: new Set(), lastHandoffTopic: new Map(), log };
   core.forTurn = (ctx) => forTurn(core, ctx);
   core.confirm = (db, id, decision, via) => confirm(core, db, id, decision, via);
   // The announce is read through the core at call time, so a seam set later (tests, 5.2) is the one spoken.
-  core.completion = createHandoffCompletion({ store, announce: (args) => core.announce(args), log });
+  core.completion = createHandoffCompletion({ store, announce: (args) => announceHandoff(core, args?.handoffId ?? null, args), log });
   return core;
 }
 

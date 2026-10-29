@@ -83,6 +83,9 @@ export const VOICE_LINES = Object.freeze({
     completion_spoken_kiosk: "{bot} has finished a task. The details are on your phone.",
     completion_failed_spoken: "{bot} couldn't finish {task}. The details are on your phone.",
     completion_failed_spoken_kiosk: "{bot} couldn't finish a task. The details are on your phone.",
+    // The spoken heads-up on a kiosk (presence.js, Task 5.2), which never hears the task text (P34).
+    start_failed_spoken_kiosk: "{bot} couldn't start a task. The details are on your phone.",
+    ended_no_result_spoken_kiosk: "{bot} stopped without finishing a task. The card is still on {bot}'s board.",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -144,6 +147,8 @@ export const VOICE_LINES = Object.freeze({
     completion_spoken_kiosk: "{bot} ha terminado una tarea. Los detalles están en tu teléfono.",
     completion_failed_spoken: "{bot} no pudo terminar: {task}. Los detalles están en tu teléfono.",
     completion_failed_spoken_kiosk: "{bot} no pudo terminar una tarea. Los detalles están en tu teléfono.",
+    start_failed_spoken_kiosk: "{bot} no pudo empezar una tarea. Los detalles están en tu teléfono.",
+    ended_no_result_spoken_kiosk: "{bot} se detuvo sin terminar una tarea. La tarjeta sigue en el tablero de {bot}.",
   }),
 });
 

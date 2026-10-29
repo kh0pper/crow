@@ -456,3 +456,63 @@ test("the completion lines exist in both languages", () => {
   assert.equal(voiceLine("completion_title_done", "es", { bot: "Writer", task: "x" }), "Writer terminó: x");
   assert.equal(voiceLine("completion_title_failed", "en", { bot: "Writer", task: "x" }), "Writer couldn't finish: x");
 });
+
+test("the heads-up is announced only after the completion notification was sent (5.2 carry)", async () => {
+  const s = await setup();
+  const { id, cardId } = await s.handoff();
+  const seenAtAnnounce = [];
+  s.core.announce = async (a) => { seenAtAnnounce.push((await s.notifications()).length); s.announced.push(a); return { spokenOn: null }; };
+  await s.report(cardId);
+  await flush();
+  assert.equal(s.announced.length, 1);
+  assert.deepEqual(seenAtAnnounce, [1], "the notification was already stored when the heads-up was asked for");
+  assert.equal(s.announced[0].handoffId, id, "the heads-up names its hand-off (P31: the device's last topic)");
+});
+
+test("a completion notification that is turned off, or that fails, speaks nothing (5.2 carry)", async () => {
+  // Turned off: createNotification filters the attention type and returns null.
+  const s = await setup();
+  const { id, cardId } = await s.handoff();
+  await s.db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('notification_prefs', ?)", args: [JSON.stringify({ types_enabled: ["system"] })] });
+  await s.report(cardId);
+  await flush();
+  assert.deepEqual(await s.notifications(), []);
+  assert.equal(s.announced.length, 0, "nothing reached the phone, so nothing is said about it");
+  assert.equal((await s.row(id)).status, "done", "the row still ends");
+  // Failed: the send throws (no notifications table), and result-service swallows it.
+  const f = await setup();
+  const b = await f.handoff();
+  await f.db.execute("DROP TABLE notifications");
+  const r = await f.report(b.cardId);
+  await flush();
+  assert.equal(r.status, "recorded", "the result is still recorded");
+  assert.equal(f.announced.length, 0);
+});
+
+test("the notice's onSent is not part of the notification itself", async () => {
+  const s = await setup();
+  const { cardId } = await s.handoff();
+  const completion = createHandoffCompletion({ store: s.store, announce: s.core.announce, log: () => {} });
+  const notice = await completion.notice(s.db, { card: await getCard(s.tdb, cardId), outcome: "success", summaryMd: "Done.", resultId: 1, actor: WRITER, tdb: s.tdb });
+  assert.ok(!Object.keys(notice).includes("onSent"), "not enumerable");
+  assert.equal(typeof notice.onSent, "function");
+  await flush();
+  assert.equal(s.announced.length, 0, "nothing is spoken until the sender says it was sent");
+  notice.onSent({ id: 1 });
+  await flush();
+  assert.equal(s.announced.length, 1);
+});
+
+test("a completion heads-up that was spoken makes the hand-off that device's last topic, on the core (P31)", async () => {
+  const s = await setup();
+  const { id, cardId } = await s.handoff();
+  s.core.announce = async () => ({ spokenOn: "glasses-1", surface: "glasses" });
+  await s.report(cardId);
+  await flush();
+  assert.deepEqual(s.core.lastHandoffTopic.get("glasses-1"), { id, turn: null, at: T0 });
+  const t = await setup();
+  const b = await t.handoff();
+  await t.report(b.cardId);
+  await flush();
+  assert.equal(t.core.lastHandoffTopic.size, 0, "not spoken: nothing recorded");
+});
