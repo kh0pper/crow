@@ -14,6 +14,7 @@
  * MACs, the production key lookup, the pin, the policy, and the Nest records.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { pairSubkeyFor, PAIR_SUBKEY_LABELS } from "./pair-subkey.js";
 import { loadPeerCreds } from "./peer-credentials.js";
 import { ENROLL_ID_RE } from "./enroll-guard.js";
 import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "./self-dial-address.js";
@@ -21,24 +22,18 @@ import { readPin, writePin, RefusalLog } from "../sharing/contact-binding.js";
 import { recordUnboundPeer, recordPairBindingRefusal, clearPairBindingState } from "./peer-trust-health.js";
 
 /**
- * The subkey label. Its first line contains `/`, which an HTTP method token
- * (the first line of cross-host-auth's canonicalString) cannot, so a MAC under
- * the raw signing key can never stand in for this derivation.
- */
-const SUBKEY_LABEL = "crow/sync-pair-binding/v1";
-const HEX_RE = /^(?:[0-9a-fA-F]{2})+$/;
-
-/**
- * K_pb = HMAC-SHA256(key = the DECODED signing_key bytes, SUBKEY_LABEL), the
+ * K_pb = HMAC-SHA256(key = the DECODED signing_key bytes, the SYNC label), the
  * same decoding signRequest uses. Throws TypeError on anything but even-length
- * hex (Buffer.from would silently truncate it).
+ * hex (Buffer.from would silently truncate it). The label's first line contains
+ * `/`, which an HTTP method token (the first line of cross-host-auth's
+ * canonicalString) cannot, so a MAC under the raw signing key can never stand
+ * in for this derivation. The derivation itself lives in pair-subkey.js.
  */
 export function pairSubkey(signingKeyHex) {
-  if (typeof signingKeyHex !== "string" || !HEX_RE.test(signingKeyHex)) {
-    throw new TypeError("pairSubkey: signing key must be non-empty hex");
-  }
-  return createHmac("sha256", Buffer.from(signingKeyHex, "hex")).update(SUBKEY_LABEL).digest();
+  return pairSubkeyFor(signingKeyHex, PAIR_SUBKEY_LABELS.SYNC);
 }
+
+const HEX_RE = /^(?:[0-9a-fA-F]{2})+$/;
 
 function label(tag, fields) {
   for (const v of fields) {
