@@ -22,15 +22,25 @@
  *
  * Steps 2-5 are loopbackActorGate. A throw inside any step is that step's
  * refusal, never a 500 with text. Every refusal happens before any upstream
- * work. Refusals are JSON-RPC shaped, except the 404s, which are empty.
+ * work. Refusals are JSON-RPC shaped, except the 404s, which are empty. A throw
+ * inside the MCP handler itself (step 11) gets the SDK handler's fixed
+ * "Internal server error" (-32603), never any upstream text.
+ *
+ * The in-flight cap counts upstream calls that are still RUNNING: a slot is
+ * released when the upstream's own promise settles, not when the caller gets
+ * its answer, so calls abandoned at the timeout or on a disconnect (whose
+ * upstream ignores the abort) keep their slot until they really end.
  *
  * Text a caller sees comes ONLY from the fixed error table below: authorize and
  * the upstream return or throw a `code`, never text, and any userText / message
  * / thrown message is ignored. Results are shaped here: content types outside
- * `resultCap.contentTypes` are dropped with a one-line note, the whole result
- * is capped at `resultCap.maxBytes` (base64 images count), every text item goes
- * through the redactor with `ctx.secrets`, and only `content` + `isError`
- * survive (structuredContent / _meta / userText are not passed through).
+ * `resultCap.contentTypes` (text and image only) are dropped with a one-line
+ * note. Items are rebuilt from an allowlist: text -> {type, text} through the
+ * redactor with `ctx.secrets`; image -> {type, mimeType, data} only for an
+ * allowed mimeType and a base64 string. Resource items and every other type are
+ * dropped, and no other upstream field (_meta, annotations, structuredContent,
+ * userText, ...) is ever copied. The whole result is capped at
+ * `resultCap.maxBytes` (base64 images count). Only `content` + `isError` survive.
  *
  * One audit event per tools/call and per refusal, never arguments, results,
  * headers or tokens.
@@ -70,6 +80,7 @@ export const LOOPBACK_ERROR_TEXT = Object.freeze({
     method_not_allowed: "Method not allowed.",
     batch: "Batch requests are not accepted.",
     dropped: "{n} item(s) of a type this connection does not return were left out.",
+    invalid_args: "The arguments for {tool} are not valid.",
   }),
   es: Object.freeze({
     unattributed: "Se requiere un bot firmado.",
@@ -89,6 +100,7 @@ export const LOOPBACK_ERROR_TEXT = Object.freeze({
     method_not_allowed: "Método no permitido.",
     batch: "No se aceptan solicitudes por lotes.",
     dropped: "Se omitieron {n} elemento(s) de un tipo que esta conexión no devuelve.",
+    invalid_args: "Los argumentos de {tool} no son válidos.",
   }),
 });
 
@@ -115,6 +127,11 @@ const TOOL_CODES = new Set([
 const FAMILY_RE = /^[a-z][a-z0-9-]{1,40}$/;
 const PARAMS_RE = /^:[a-z][A-Za-z0-9]*(?:\/:[a-z][A-Za-z0-9]*)*$/;
 const CROW_DEV = "crow.dev/";
+const CONTENT_KINDS = new Set(["text", "image"]);
+const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+// The SDK validated a tools/call's arguments and they failed (see buildServer).
+const INVALID_ARGS = Symbol("loopback-mount.invalid-args");
 
 const langOf = (req) => (/^\s*es\b/i.test(String(req.headers?.["accept-language"] ?? "")) ? "es" : "en");
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -148,8 +165,8 @@ function normalize(opts) {
   need(o.upstream.onInitialize === undefined || typeof o.upstream.onInitialize === "function", "upstream.onInitialize must be a function");
   need(typeof o.toolFilter === "function", "toolFilter is required");
   need(isPlainObject(o.resultCap) && Number.isInteger(o.resultCap.maxBytes) && o.resultCap.maxBytes > 0
-    && Array.isArray(o.resultCap.contentTypes) && o.resultCap.contentTypes.length > 0 && o.resultCap.contentTypes.every((t) => typeof t === "string"),
-  "resultCap needs { maxBytes, contentTypes }");
+    && Array.isArray(o.resultCap.contentTypes) && o.resultCap.contentTypes.length > 0 && o.resultCap.contentTypes.every((t) => CONTENT_KINDS.has(t)),
+  'resultCap needs { maxBytes, contentTypes } (contentTypes from "text", "image")');
   need(Number.isInteger(o.callTimeoutMs) && o.callTimeoutMs > 0, "callTimeoutMs is required (a positive integer)");
   const maxInFlight = o.maxInFlight === undefined ? 4 : o.maxInFlight;
   need(Number.isInteger(maxInFlight) && maxInFlight > 0, "maxInFlight must be a positive integer");
@@ -206,6 +223,7 @@ async function runTool(m, tool, args, extra) {
   if (!live || !st || live.family !== m.family) return refuse("unattributed");
   // 2. the filter, again, on every call.
   if (!filterOk(m, live.ctx, tool)) return refuse("not_granted");
+  if (args === INVALID_ARGS) return done("refused:invalid_args", errResult(loopbackErrorText("invalid_args", { lang, tool: tool.name })));
   // 3. crow.dev/* _meta is Crow's alone: never forwarded from the caller.
   const meta = stripCrowDev(extra?._meta);
   let callArgs = isPlainObject(args) ? args : {};
@@ -214,6 +232,15 @@ async function runTool(m, tool, args, extra) {
   const n = m.inflight.get(st.key) || 0;
   if (n >= m.maxInFlight) return refuse("busy");
   m.inflight.set(st.key, n + 1);
+  // The slot is released when the upstream's OWN promise settles (header).
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    const left = (m.inflight.get(st.key) || 1) - 1;
+    if (left > 0) m.inflight.set(st.key, left); else m.inflight.delete(st.key);
+  };
+  let raw;
   try {
     const timeout = AbortSignal.timeout(m.callTimeoutMs);
     const signal = AbortSignal.any([timeout, st.closed, ...(extra?.signal ? [extra.signal] : [])]);
@@ -224,7 +251,9 @@ async function runTool(m, tool, args, extra) {
     let result;
     try {
       // 5. the upstream; an upstream that ignores the signal still loses the race.
-      result = await Promise.race([Promise.resolve().then(() => m.upstream.callTool(live.ctx, tool.name, callArgs, { signal, meta })), aborted]);
+      raw = Promise.resolve().then(() => m.upstream.callTool(live.ctx, tool.name, callArgs, { signal, meta }));
+      raw.then(release, release);
+      result = await Promise.race([raw, aborted]);
     } catch (err) {
       if (timeout.aborted) return fail("timeout", { secs: secsOf(m.callTimeoutMs) });
       if (signal.aborted) return fail("aborted");
@@ -240,29 +269,51 @@ async function runTool(m, tool, args, extra) {
     const content = [];
     let dropped = 0;
     for (const item of result.content) {
-      if (!isPlainObject(item) || !m.contentTypes.has(item.type)) { dropped++; continue; }
-      content.push(item.type === "text" ? { type: "text", text: redact(String(item.text ?? "")) } : item);
+      const kind = isPlainObject(item) && m.contentTypes.has(item.type) ? item.type : null;
+      if (kind === "text" && typeof item.text === "string") content.push({ type: "text", text: redact(item.text) });
+      else if (kind === "image" && typeof item.mimeType === "string" && IMAGE_MIME.has(item.mimeType) && typeof item.data === "string" && BASE64_RE.test(item.data)) {
+        content.push({ type: "image", mimeType: item.mimeType, data: item.data });
+      } else dropped++;
     }
-    if (dropped) content.push({ type: "text", text: loopbackErrorText("dropped", { lang, n: dropped }) });
+    if (dropped) {
+      content.push({ type: "text", text: loopbackErrorText("dropped", { lang, n: dropped }) });
+      noteRefusedOnce(`${m.family}:result`, "dropped content items outside the allowlist");
+    }
     const out = { content };
     if (result.isError === true) out.isError = true;
     const bytes = Buffer.byteLength(JSON.stringify(out));
     if (bytes > m.maxBytes) return fail("too_large", { kib: Math.ceil(bytes / 1024) });
     return done(out.isError ? "error:upstream" : "ok", out, bytes);
   } finally {
-    const left = (m.inflight.get(st.key) || 1) - 1;
-    if (left > 0) m.inflight.set(st.key, left); else m.inflight.delete(st.key);
+    // Never got as far as the upstream (a throw building the signal): free it now.
+    if (!raw) release();
   }
 }
 
-/** The per-session McpServer: the upstream's tools that pass the filter for the opening ctx. */
-function buildServer(m, ctx, tools) {
+/**
+ * The per-session McpServer: EVERY upstream tool is registered, and the filter
+ * decides live (tools/list through the `enabled` getter below, tools/call in
+ * runTool), so a hidden tool gets the fixed text and an audit event.
+ *
+ * Two reliances on @modelcontextprotocol/sdk 1.27.1 internals, both covered by
+ * tests/loopback-tool-mount.test.js (re-run it on any SDK bump):
+ *  - RegisteredTool.enabled is a plain property McpServer reads when it lists
+ *    and when it calls; here it is a getter;
+ *  - McpServer#validateToolInput (TS-private) is wrapped on the instance so a
+ *    schema failure reaches runTool as INVALID_ARGS (fixed text + audit) and
+ *    not as the SDK's own message. If the method is ever gone, the SDK's
+ *    validation still runs unwrapped (its text, no audit): fail closed.
+ */
+function buildServer(m, tools) {
   const server = new McpServer({ name: `crow-${m.family}`, version: "1.0.0" });
+  if (typeof server.validateToolInput === "function") {
+    const validate = server.validateToolInput.bind(server);
+    server.validateToolInput = async (...a) => { try { return await validate(...a); } catch { return INVALID_ARGS; } };
+  }
   const pool = { units: SOURCE_BUDGET };
   const seen = new Set();
   for (const tool of Array.isArray(tools) ? tools : []) {
     if (!isPlainObject(tool) || typeof tool.name !== "string" || !tool.name || seen.has(tool.name)) continue;
-    if (!filterOk(m, ctx, tool)) continue;
     seen.add(tool.name);
     const registered = server.registerTool(
       tool.name,
@@ -288,7 +339,7 @@ function buildServer(m, ctx, tools) {
 /** Test seam: the per-session server for an ctx, outside any request (no caller store). */
 export async function _buildLoopbackServerForTest(opts, ctx) {
   const m = normalize(opts);
-  return buildServer(m, ctx, await m.upstream.listTools(ctx));
+  return buildServer(m, await m.upstream.listTools(ctx));
 }
 
 /**
@@ -304,7 +355,7 @@ export function mountLoopbackMcp(app, opts) {
       const store = m.sessionManager.getStore(storeName, "streamable");
       h = { store, ...createMcpHandler(store, () => {
         const live = callerContext.getStore();
-        return buildServer(m, live?.ctx || {}, live ? requestState.get(live)?.tools : []);
+        return buildServer(m, live ? requestState.get(live)?.tools : []);
       }, storeName) };
       handlersByStore.set(storeName, h);
     }
@@ -318,7 +369,8 @@ export function mountLoopbackMcp(app, opts) {
     const single = isPlainObject(body) ? body : null;
     const id = single && single.id !== undefined ? single.id : null;
     const method = single && typeof single.method === "string" ? single.method.slice(0, 64) : req.method;
-    const key = Object.values(req.params || {}).map(String).join("/");
+    // Each value encoded, so "a/b" + "c" and "a" + "b/c" are different keys.
+    const key = Object.values(req.params || {}).map((v) => encodeURIComponent(String(v))).join("/");
     const sidRaw = req.headers["mcp-session-id"];
     const sid = typeof sidRaw === "string" && sidRaw ? sidRaw : undefined;
     let botId = null, scopeRef = null;
@@ -368,8 +420,10 @@ export function mountLoopbackMcp(app, opts) {
     // 7. The session belongs to this bot under this scope.
     const clientId = `${m.family}:${botId}:${scopeRef}`;
     req.auth = { clientId, token: "loopback-tool-mount", scopes: [] };
-    const h = handlersFor(`${m.family}-${key}`);
-    if (sid && h.store.has(sid) && h.store.get(sid)?.owner !== clientId) return refuse(404, "not_found");
+    // Peek only: a store is created after authorize passes, never before.
+    const storeName = `${m.family}-${key}`;
+    const known = handlersByStore.get(storeName)?.store;
+    if (sid && known?.has(sid) && known.get(sid)?.owner !== clientId) return refuse(404, "not_found");
 
     // 8. authorize, on every request.
     let az = null;
@@ -392,6 +446,7 @@ export function mountLoopbackMcp(app, opts) {
     }
 
     // 11. Run the request inside the caller context.
+    const h = handlersFor(storeName);
     const store = { caller: `bot:${botId}`, botId, peer: false, crossHost: false, family: m.family, scopeRef, projectId: actor.defProjectId ?? null, ctx };
     requestState.set(store, { lang, method, sid, key, tools, closed: closed.signal });
     const handler = req.method === "POST" ? h.postHandler : req.method === "GET" ? h.getHandler : h.deleteHandler;

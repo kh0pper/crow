@@ -35,13 +35,13 @@ const PATH = `/example-tools/${UUID}/mcp`;
 const SECRET = "secret-1-long";
 const TIMEOUT_MS = 400;
 
-let dir, dbPath, srv, base, sessions, TOKEN;
+let dir, dbPath, srv, base, sessions, TOKEN, savedDbPath;
 const SESS = {};
 const tokens = {};
 const audit = [];
 const calls = [];          // every upstream.callTool: { name, args, meta, caller, signal }
 const state = {};          // knobs the authorize / upstream read
-const resetState = () => Object.assign(state, { deny: null, initFail: null, hide: new Set(["hidden"]), release: null, started: 0 });
+const resetState = () => Object.assign(state, { deny: null, initFail: null, hide: new Set(["hidden"]), release: null, started: 0, stuck: [] });
 
 const EXAMPLE_TOKEN = () => pathScopedToken({
   name: "example-tools", hashKey: "mcp_example_tools_token_hash", createdKey: "mcp_example_tools_token_created", home: dir,
@@ -63,6 +63,9 @@ const TOOLS = [
   { name: "mixed", description: "resource item", inputSchema: { type: "object", properties: {} } },
   { name: "slow", description: "waits for its signal", inputSchema: { type: "object", properties: {} } },
   { name: "hang", description: "waits for release", inputSchema: { type: "object", properties: {} } },
+  { name: "leaky", description: "fields outside the allowlist", inputSchema: { type: "object", properties: {} } },
+  { name: "stuck", description: "ignores its signal", inputSchema: { type: "object", properties: {} } },
+  { name: "typed", description: "a required number", inputSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] } },
 ];
 
 const upstream = {
@@ -72,7 +75,7 @@ const upstream = {
     if (state.initFail) return { code: state.initFail };
   },
   callTool: async (ctx, name, args, { signal, meta }) => {
-    const rec = { name, args, meta, caller: currentCaller(), signal };
+    const rec = { name, args, meta, caller: currentCaller(), signal, ctx };
     calls.push(rec);
     switch (name) {
       case "echo": return { content: [{ type: "text", text: `ECHO ${args.text}` }], structuredContent: { leak: SECRET } };
@@ -84,6 +87,16 @@ const upstream = {
       case "usertext": return { content: [{ type: "text", text: "fine" }], userText: "USERTEXT-LEAK", message: "MESSAGE-LEAK" };
       case "big": return { content: [{ type: "text", text: "x".repeat(args.n) }] };
       case "image": return { content: [{ type: "text", text: "pic" }, { type: "image", mimeType: "image/png", data: "A".repeat(args.n) }] };
+      case "leaky": return { content: [
+        { type: "text", text: "kept", _meta: { note: SECRET }, annotations: { audience: [SECRET] } },
+        { type: "resource", resource: { uri: `file:///${SECRET}`, text: `body ${SECRET}` } },
+        { type: "weird", text: SECRET },
+        { type: "image", mimeType: "text/html", data: "QUJD" },
+        { type: "image", mimeType: "image/png", data: "not base64 at all!" },
+        { type: "image", mimeType: "image/png", data: "QUJD", _meta: { s: SECRET }, annotations: { a: SECRET } },
+      ], structuredContent: { s: SECRET }, _meta: { s: SECRET } };
+      case "stuck": return await new Promise((res) => { state.stuck.push(() => res({ content: [{ type: "text", text: "late" }] })); });
+      case "typed": return { content: [{ type: "text", text: `n=${args.n}` }] };
       case "mixed": return { content: [{ type: "text", text: "kept" }, { type: "resource", resource: { uri: "file:///x", text: "dropped" } }] };
       case "slow": return await new Promise((_, rej) => signal.addEventListener("abort", () => rej(signal.reason), { once: true }));
       case "hang": state.started++; return await new Promise((res, rej) => {
@@ -100,10 +113,12 @@ async function authorize({ db, req, params, actor }) {
   if (state.deny === "throw") throw new Error(`authorize blew up ${SECRET}`);
   if (state.deny === "null") return null;
   if (state.deny) return { ok: false, code: state.deny };
-  return { ok: true, ctx: { secrets: [SECRET], uuid: params.uuid, botId: actor.botId } };
+  // A per-request value, so a test can tell the live ctx from a closure.
+  const nonce = req.headers["x-test-nonce"] || null;
+  return { ok: true, ctx: { secrets: [SECRET], uuid: params.uuid, botId: actor.botId, nonce } };
 }
 
-const toolFilter = (ctx, tool) => !state.hide.has(tool.name);
+const toolFilter = (ctx, tool) => !state.hide.has(tool.name) && !(ctx.nonce === "deny-echo" && tool.name === "echo");
 
 function mountOpts(over = {}) {
   return {
@@ -187,6 +202,9 @@ before(async () => {
   job.run("job-otto-1", "otto", "running", process.pid, null);
   d.close();
 
+  // The session logger (createMcpHandler) writes to CROW_DB_PATH: point it at this database.
+  savedDbPath = process.env.CROW_DB_PATH;
+  process.env.CROW_DB_PATH = dbPath;
   _resetActorKeyForTest();
   initGatewayActorKey();
   const db = createDbClient(dbPath);
@@ -217,6 +235,7 @@ after(async () => {
   await new Promise((r) => (srv ? srv.close(r) : r()));
   srv?.closeAllConnections?.();
   _resetActorKeyForTest();
+  if (savedDbPath === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = savedDbPath;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -435,10 +454,17 @@ test("the tool filter applies on tools/list and on every tools/call (live contex
   const sid = await open(jobActor());
   let names = (await listTools(sid)).json.result.tools.map((t) => t.name);
   assert.ok(names.includes("echo") && !names.includes("hidden"), "hidden filtered at list");
-  // Filtered when the session opened: never registered, so the SDK's own "not found".
+  // Hidden when the session opened: still refused with the fixed text, and audited.
   const r = await callTool(sid, "hidden");
   assert.equal(r.json.result.isError, true);
-  assert.match(textOf(r), /not found/);
+  assert.equal(textOf(r), "Not available on this turn.");
+  assert.ok(audit.some((e) => e.tool === "hidden" && e.outcome === "refused:not_granted"), "hidden call audited");
+  // and un-hiding it inside the session makes it callable (registered, filtered live)
+  state.hide.delete("hidden");
+  assert.ok((await listTools(sid)).json.result.tools.some((t) => t.name === "hidden"), "listed once the filter passes");
+  assert.equal(textOf(await callTool(sid, "hidden")), "should never run");
+  calls.length = 0;
+  state.hide.add("hidden");
   // flip the filter inside the open session: list and call follow the live ctx
   state.hide.add("echo");
   names = (await listTools(sid)).json.result.tools.map((t) => t.name);
@@ -584,22 +610,131 @@ test("audit: one event per tools/call and per refusal, never args, results, head
   for (const bad of ["PAYLOAD-xyz", "ECHO", SECRET, TOKEN, "exploded"]) assert.ok(!dump.includes(bad), `audit leaks ${bad}`);
 });
 
-test("the default audit sink works (no onAudit): calls and refusals do not throw", async () => {
+test("the default audit sink (no onAudit): a refusal logs once, an ok call is counted on the session", async () => {
   const app = express();
   app.use(express.json());
   const sm = new SessionManager();
   mountLoopbackMcp(app, mountOpts({ family: "example-default", sessionManager: sm, onAudit: undefined }));
   const s = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
   const saved = base;
+  const warn = console.warn;
+  const warned = [];
   try {
     base = `http://127.0.0.1:${s.address().port}`;
     const p = `/example-default/${UUID}/mcp`;
+    console.warn = (...a) => { warned.push(a.join(" ")); };
     assert.equal((await send(initBody(), { path: p, token: "f".repeat(64) })).status, 401);
+    console.warn = warn;
+    assert.deepEqual(warned, ["[example-default] refused: refused:bad_token"], "noteRefusedOnce ran");
     const sid = await open(jobActor(), { path: p });
     assert.equal(textOf(await callTool(sid, "echo", { text: "d" }, { path: p })), "ECHO d");
+    await sm.closeAll();
+    const db = new Database(dbPath, { readonly: true });
+    let row;
+    try {
+      await until(() => (row = db.prepare("SELECT tool_call_count, tool_calls_summary FROM mcp_sessions WHERE session_id = ?").get(sid))?.tool_call_count != null);
+    } finally { db.close(); }
+    assert.equal(row.tool_call_count, 1, "recordToolCall counted the ok call");
+    assert.deepEqual(JSON.parse(row.tool_calls_summary), { echo: 1 });
   } finally {
+    console.warn = warn;
     base = saved;
     await sm.closeAll(); sm.dispose();
+    await new Promise((r) => s.close(r)); s.closeAllConnections?.();
+  }
+});
+
+// ---------------------------------------------------------------- fix round 1
+
+test("S1: the in-flight slot is held until the upstream itself settles, not freed at the timeout", async () => {
+  const sid = await open(jobActor());
+  const a = callTool(sid, "stuck");
+  const b = callTool(sid, "stuck");
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.match(textOf(ra), /^Timed out after/);
+  assert.match(textOf(rb), /^Timed out after/);
+  assert.equal(state.stuck.length, 2, "both upstream calls are still running");
+  const c = await callTool(sid, "echo", { text: "third" });
+  assert.equal(textOf(c), "Busy, try again in a moment.", "abandoned-but-running calls still hold their slots");
+  state.stuck.shift()();
+  await sleep(20);
+  assert.equal(textOf(await callTool(sid, "echo", { text: "freed" })), "ECHO freed", "a settled upstream frees its slot");
+  state.stuck.shift()();
+});
+
+test("S2: results are rebuilt from an allowlist: no resource, unknown type, bad image, _meta or annotations reaches the client", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "leaky");
+  assert.equal(r.status, 200);
+  const res = r.json.result;
+  assert.deepEqual(Object.keys(res).sort(), ["content"]);
+  assert.deepEqual(res.content[0], { type: "text", text: "kept" });
+  assert.deepEqual(res.content[1], { type: "image", mimeType: "image/png", data: "QUJD" });
+  assert.equal(res.content.length, 3);
+  assert.match(res.content[2].text, /^4 item/);
+  for (const frag of [SECRET, "secret-1", "file:///", "weird", "text/html"]) assert.ok(!r.text.includes(frag), `leaks ${frag}`);
+  assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-res", resultCap: { maxBytes: 10, contentTypes: ["text", "resource"] } })), TypeError);
+});
+
+test("I2: tool calls read the LIVE request ctx, not the one the session opened with", async () => {
+  const sid = await open(jobActor(), { headers: { "x-test-nonce": "n1" } });
+  await callTool(sid, "echo", { text: "a" }, { headers: { "x-test-nonce": "n2" } });
+  assert.equal(calls.at(-1).ctx.nonce, "n2", "the second request's ctx");
+  assert.equal(calls.at(-1).caller.ctx.nonce, "n2");
+  const names = (await listTools(sid, { headers: { "x-test-nonce": "deny-echo" } })).json.result.tools.map((t) => t.name);
+  assert.ok(!names.includes("echo"), "a ctx-based filter hides it at list");
+  calls.length = 0;
+  const r = await callTool(sid, "echo", { text: "b" }, { headers: { "x-test-nonce": "deny-echo" } });
+  assert.equal(textOf(r), "Not available on this turn.");
+  assert.equal(calls.length, 0);
+  assert.equal(textOf(await callTool(sid, "echo", { text: "c" }, { headers: { "x-test-nonce": "n3" } })), "ECHO c");
+});
+
+test("I3: a schema-validation failure gets the fixed text and an audit event", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "typed", { n: "not a number" });
+  assert.equal(r.json.result.isError, true);
+  assert.equal(textOf(r), "The arguments for typed are not valid.");
+  assert.ok(audit.some((e) => e.tool === "typed" && e.outcome === "refused:invalid_args"));
+  assert.equal(calls.length, 0);
+  assert.equal(textOf(await callTool(sid, "typed", { n: 3 })), "n=3");
+});
+
+test("M2: the mount key encodes each param, so a/b + c and a + b/c never collide", async () => {
+  const app = express();
+  app.use(express.json());
+  const sm = new SessionManager();
+  mountLoopbackMcp(app, mountOpts({ family: "example-pair", params: ":a/:b", sessionManager: sm }));
+  const s = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  const saved = base;
+  try {
+    base = `http://127.0.0.1:${s.address().port}`;
+    await send(initBody(), { path: "/example-pair/a%2Fb/c/mcp", token: "f".repeat(64) });
+    await send(initBody(), { path: "/example-pair/a/b%2Fc/mcp", token: "f".repeat(64) });
+    assert.deepEqual(audit.map((e) => e.key), ["a%2Fb/c", "a/b%2Fc"]);
+  } finally {
+    base = saved;
+    sm.dispose();
+    await new Promise((r) => s.close(r)); s.closeAllConnections?.();
+  }
+});
+
+test("M1: no session store is created for a request authorize refuses", async () => {
+  const sm = new SessionManager();
+  const app = express();
+  app.use(express.json());
+  mountLoopbackMcp(app, mountOpts({ family: "example-peek", sessionManager: sm }));
+  const s = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  const saved = base;
+  try {
+    base = `http://127.0.0.1:${s.address().port}`;
+    state.deny = "not_granted";
+    assert.equal((await send(initBody(), { path: `/example-peek/${UUID}/mcp`, sid: "00000000-0000-4000-8000-000000000000" })).status, 403);
+    assert.equal((await send(initBody(), { path: `/example-peek/${UUID}/mcp` })).status, 403);
+    assert.equal(sm.stores.size, 0, "no store before authorize passes");
+  } finally {
+    base = saved;
+    sm.dispose();
     await new Promise((r) => s.close(r)); s.closeAllConnections?.();
   }
 });
