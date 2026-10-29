@@ -378,6 +378,52 @@ test("a stale apply re-reads the warning and says something changed", async () =
   assert.ok(h.parts.warn.textContent.includes("Something changed since you looked."));
 });
 
+// The fresh plan a 409 carries: expert is no longer offered, critic now is.
+const FRESH = {
+  apply: [{ roleId: "critic", key: "openrouter/anthropic/claude-haiku-5.5", preview: { previewHash: "h-y" } }],
+  optIn: [],
+  skipped: [{ roleId: "expert", why: "failed_check" }],
+};
+
+test("an apply refused because a ticked role is no longer offered shows the fresh plan and says something changed (F9)", async () => {
+  const h = harness(fullRoutes([{ match: (u) => u === "/api/providers/openrouter/recommended",
+    reply: () => json(409, { ok: false, applied: [], refused: [{ roleId: "expert", reason: "preview_changed" }], stillEmpty: [], plan: FRESH }) }]));
+  await saved(h);
+  const ack = byAttr(h.parts.warn, "data-ap-ack", "unattended")[0];
+  ack.checked = true;
+  ack.fire("change");
+  h.parts.apply.fire("click");
+  await flush();
+  const boxes = byAttr(h.parts.recList, "data-ap-rec");
+  assert.deepEqual(boxes.map((b) => b.getAttribute("data-ap-rec")), ["critic"]);
+  assert.equal(boxes[0].checked, true);
+  assert.ok(h.parts.skipList.textContent.includes("The recommended model failed its check."));
+  assert.deepEqual(h.calls.filter((c) => c.url.endsWith("/recommended/preview")).at(-1).body.roles, ["critic"]);
+  assert.ok(h.parts.warn.textContent.includes("Something changed since you looked."));
+});
+
+test("a preview refused because a ticked role is no longer offered shows the fresh plan (F9)", async () => {
+  let n = 0;
+  const h = harness(fullRoutes([{ match: (u) => u === "/api/providers/openrouter/recommended/preview",
+    reply: () => (++n === 1 ? json(409, { ok: false, reason: "preview_changed", plan: FRESH }) : json(200, COMBINED())) }]));
+  await saved(h);
+  const boxes = byAttr(h.parts.recList, "data-ap-rec");
+  assert.deepEqual(boxes.map((b) => b.getAttribute("data-ap-rec")), ["critic"]);
+  assert.equal(n, 2, "previewed again with what is offered now");
+  assert.ok(h.parts.warn.textContent.includes("Something changed since you looked."));
+  assert.equal(h.parts.error.textContent, "");
+});
+
+test("a preview that keeps answering 409 stops at the generic line instead of looping (F9)", async () => {
+  let n = 0;
+  const h = harness(fullRoutes([{ match: (u) => u === "/api/providers/openrouter/recommended/preview",
+    reply: () => { n++; return json(409, { ok: false, reason: "preview_changed", plan: FRESH }); } }]));
+  await saved(h);
+  await flush();
+  assert.ok(n <= 4, `bounded: ${n}`);
+  assert.ok(h.parts.error.textContent.length > 0);
+});
+
 test("?add=1 opens the sheet on load; closing after a save reloads the page", async () => {
   const h = harness(fullRoutes(), { open: true });
   await flush();

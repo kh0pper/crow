@@ -516,7 +516,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     return i > 0 ? k.slice(i + 1) : k;
   }
 
-  function renderRec(d) {
+  function renderRec(d, changed) {
     ui.recList.textContent = '';
     ui.skipList.textContent = '';
     ui.warn.textContent = '';
@@ -551,7 +551,20 @@ export function addProviderClientJS({ lang = "en" } = {}) {
       ui.skipList.appendChild(el('p', 'ap-note', roleName(x.roleId) + ': ' + (has(SKIP, x.why) ? SKIP[x.why] : SKIP.unknown)));
     });
     ui.recBox.hidden = !st.recBoxes.length && !ui.skipList.children.length;
-    refreshPreview(false);
+    refreshPreview(!!changed);
+  }
+
+  /** A 409 that carries the fresh plan: show what is offered now, and say something changed. */
+  function freshPlanOf(d) {
+    var p = d && d.plan;
+    return p && typeof p === 'object' && Array.isArray(p.apply) ? p : null;
+  }
+  function showFresh(p) {
+    // Never loop: a plan that keeps moving under the sheet stops at the generic line.
+    st.fresh = (st.fresh || 0) + 1;
+    if (st.fresh > 3) { ui.error.textContent = T.failed; return; }
+    if (st.plan) { st.plan.apply = p.apply; st.plan.optIn = p.optIn; st.plan.skipped = p.skipped; }
+    renderRec(p, true);
   }
 
   function chosenRoles() {
@@ -574,6 +587,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     if (!roles.length) { if (changed) ui.warn.appendChild(el('p', 'mc-changed', T.changed)); return; }
     call('POST', base() + '/recommended/preview', { roles: roles }).then(function (r) {
       if (seq !== st.seq) return;
+      if (r.status === 409 && freshPlanOf(r.data)) return showFresh(freshPlanOf(r.data));
       if (!r.ok || !r.data || typeof r.data.previewHash !== 'string') { ui.error.textContent = T.failed; return; }
       renderWarn(r.data, roles, changed);
     });
@@ -582,6 +596,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
   function line(cls, text) { var p = el('p', cls, text); ui.warn.appendChild(p); return p; }
 
   function renderWarn(pv, roles, changed) {
+    st.fresh = 0;
     st.pv = pv;
     st.pvRoles = roles;
     ui.warn.textContent = '';
@@ -645,7 +660,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
       st.busy = false;
       if (seq !== st.seq) return;
       var d = r.data;
-      if (r.status === 409) return refreshPreview(true);
+      if (r.status === 409) return freshPlanOf(d) ? showFresh(freshPlanOf(d)) : refreshPreview(true);
       if (!d || !Array.isArray(d.applied)) { ui.error.textContent = T.failed; return updateApply(); }
       if (d.applied.length) st.changed = true;
       var parts = [];

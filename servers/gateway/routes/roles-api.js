@@ -435,17 +435,26 @@ export default function rolesApiRouter({
     res.json(out);
   }));
 
-  /** The {roleId, key} items a fresh plan offers for the named roles. */
+  /** The fresh plan's apply/optIn/skipped lists, as /plan answers them (no key rides along). */
+  const planOut = (plan) => ({ apply: plan.apply, optIn: plan.optIn, skipped: plan.skipped });
+
+  /**
+   * The {roleId, key} items a fresh plan offers for the named roles, or
+   * `{plan}` when any named role is no longer offered.
+   */
   async function offeredItems(db, providerId, roles, req) {
     const plan = await planRecommended(db, providerId, planOpts(req));
     const offered = new Map([...plan.apply, ...plan.optIn].map((x) => [x.roleId, x.key]));
-    return roles.filter((r) => offered.has(r)).map((roleId) => ({ roleId, key: offered.get(roleId) }));
+    if (roles.some((r) => !offered.has(r))) return { plan };
+    return { items: roles.map((roleId) => ({ roleId, key: offered.get(roleId) })) };
   }
 
   router.post("/api/providers/:id/recommended/preview", sessionGate, csrfMiddleware, withDb("recommended preview", async (db, req, res) => {
     const row = await providerRow(db, req, res);
     if (!row) return;
-    const items = await offeredItems(db, row.id, rolesOf(req.body) || [], req);
+    const { items, plan } = await offeredItems(db, row.id, rolesOf(req.body) || [], req);
+    // A ticked role the plan no longer offers: the sheet re-reads what is offered now.
+    if (plan) return res.status(409).json({ ok: false, reason: "preview_changed", plan: planOut(plan) });
     res.json(await combinedPreview(db, items, planOpts(req)));
   }));
 
@@ -464,6 +473,7 @@ export default function rolesApiRouter({
     const out = { ok: r.refused.length === 0, applied: r.applied, refused: r.refused, stillEmpty: r.stillEmpty };
     // Nothing written and the user can fix it by looking again or ticking a box: 409.
     const conflict = !r.applied.length && r.refused.length && r.refused.every((x) => CONFLICT_REASONS.has(x.reason));
+    if (conflict && r.plan) out.plan = planOut(r.plan);
     if (r.applied.length) console.log(`[roles-api] recommended picks for ${row.id} applied by ${actorOf(req)}`);
     res.status(conflict ? 409 : 200).json(out);
   }));

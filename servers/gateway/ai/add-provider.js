@@ -517,16 +517,16 @@ async function bindingLanded(db, roleId, key, localInstanceId) {
  * Apply the ticked roles from a plan, after the one combined warning.
  *
  * Refuses every role, writing nothing, when a role is not offered by a fresh
- * plan (`not_offered`; the others `preview_changed`), when the combined hash
- * is stale (`preview_changed`), or when an ack the combined preview needs is
- * missing. Otherwise each role goes through applyRoleChange with the same
+ * plan or the combined hash is stale (all `preview_changed`, with `plan`, the
+ * fresh plan, so the sheet can show what is offered now), or when an ack the
+ * combined preview needs is missing. Otherwise each role goes through applyRoleChange with the same
  * acks, one at a time: the first with the hash the user saw, each later one
  * with a hash taken after the writes before it (the combined hash already
  * covered them). A write that fails is listed in `refused` and the rest are
  * still tried. When applyRoleChange throws, the binding is read back: the
  * role is `applied` if the write landed, `save_failed` only if it did not, so
  * `applied` is exactly what was written.
- * @returns {Promise<{applied:Array<{roleId,key}>, refused:Array<{roleId,reason}>, stillEmpty:string[]}>}
+ * @returns {Promise<{applied:Array<{roleId,key}>, refused:Array<{roleId,reason}>, stillEmpty:string[], plan?:object}>}
  */
 export async function applyRecommended(db, providerId, {
   roles, previewHash, actor, ackUnattended = false, ackCloud = false, applyRoleChangeFn = applyRoleChange, ...seams
@@ -542,10 +542,11 @@ export async function applyRecommended(db, providerId, {
 
   const plan = await planRecommended(db, providerId, seams);
   const offered = new Map([...plan.apply, ...plan.optIn].map((x) => [x.roleId, x.key]));
-  if (wanted.some((r) => !offered.has(r))) return refuseAll((r) => (offered.has(r) ? "preview_changed" : "not_offered"));
+  const changed = async () => ({ ...(await refuseAll(() => "preview_changed")), plan });
+  if (wanted.some((r) => !offered.has(r))) return changed();
 
   const { result, list } = await combine(db, wanted.map((roleId) => ({ roleId, key: offered.get(roleId) })), seams);
-  if (typeof previewHash !== "string" || previewHash !== result.previewHash) return refuseAll(() => "preview_changed");
+  if (typeof previewHash !== "string" || previewHash !== result.previewHash) return changed();
   if (result.needs.ackUnattended && ackUnattended !== true) return refuseAll(() => "needs_ack_unattended");
   if (result.needs.ackCloud && ackCloud !== true) return refuseAll(() => "needs_ack_cloud");
 

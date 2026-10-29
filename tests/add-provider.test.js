@@ -688,7 +688,12 @@ test("apply needs acks and a fresh hash", async () => {
     assert.ok(stale.refused.length === roles.length && stale.refused.every((x) => x.reason === "preview_changed"));
     const bogus = await applyRecommended(h.db, "cloud-a", { ...opts, roles: [...roles, "coordinator"], previewHash, actor: "test", ackUnattended: true, ackCloud: true });
     assert.deepEqual(bogus.applied, []);
-    assert.equal(bogus.refused.find((x) => x.roleId === "coordinator").reason, "not_offered");
+    // A role the fresh plan no longer offers refuses everything as preview_changed, with the fresh plan (F9).
+    assert.equal(bogus.refused.length, roles.length + 1);
+    assert.ok(bogus.refused.every((x) => x.reason === "preview_changed"));
+    assert.ok(Array.isArray(bogus.plan?.apply) && Array.isArray(bogus.plan?.optIn) && Array.isArray(bogus.plan?.skipped));
+    assert.ok(!bogus.plan.apply.concat(bogus.plan.optIn).some((x) => x.roleId === "coordinator"));
+    assert.ok(!JSON.stringify(bogus).includes(PLAN_KEY));
     assert.deepEqual(await Promise.all(roles.map((r) => bindingOf(h.db, r))), before, "nothing written");
 
     const ok = await applyRecommended(h.db, "cloud-a", { ...opts, roles, previewHash, actor: "test", ackUnattended: true, ackCloud: true });

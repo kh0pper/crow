@@ -673,6 +673,36 @@ test("recommended: preview then apply fills a role nothing runs today", async ()
   assert.equal(b.model, "cloud-or/anthropic/claude-opus-5.5");
 });
 
+test("a ticked role the fresh plan no longer offers: preview and apply answer 409 preview_changed with the fresh plan (F9)", async () => {
+  await insOr("cloud-or", [{ id: "anthropic/claude-opus-5.5" }]);
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-opus-5.5|chat": { ok: true, code: "ok", at: AT } }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const plan = (await call(s, "GET", "/api/providers/cloud-or/plan")).json;
+    const roles = plan.apply.map((x) => x.roleId);
+    assert.ok(roles.length > 0);
+    const pv = await call(s, "POST", "/api/providers/cloud-or/recommended/preview", { body: { roles }, headers: csrfHeaders });
+    assert.equal(pv.status, 200);
+    // The check now fails: the plan stops offering those roles.
+    await raw("provider_pick_checks", orChecks({ "anthropic/claude-opus-5.5|chat": { ok: false, code: "no_tool_call", at: AT } }));
+    invalidateRoleContext();
+    const pv2 = await call(s, "POST", "/api/providers/cloud-or/recommended/preview", { body: { roles }, headers: csrfHeaders });
+    assert.equal(pv2.status, 409);
+    assert.equal(pv2.json.reason, "preview_changed");
+    assert.ok(Array.isArray(pv2.json.plan?.apply) && Array.isArray(pv2.json.plan?.skipped));
+    assert.ok(!pv2.json.plan.apply.some((x) => roles.includes(x.roleId)));
+    const ap = await call(s, "POST", "/api/providers/cloud-or/recommended", {
+      body: { roles, previewHash: pv.json.previewHash, ackUnattended: true, ackCloud: true }, headers: csrfHeaders,
+    });
+    assert.equal(ap.status, 409);
+    assert.deepEqual(ap.json.applied, []);
+    assert.ok(ap.json.refused.every((x) => x.reason === "preview_changed"));
+    assert.ok(Array.isArray(ap.json.plan?.apply));
+    for (const r of [pv2, ap]) assert.ok(!r.text.includes(SECRET));
+  }, addOpts());
+  assert.equal(await settingOf("model_role.expert"), null, "nothing written");
+});
+
 test("the gateway mounts the body error handler on both API prefixes", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../servers/gateway/boot/feature-mounts.js", import.meta.url), "utf8");
