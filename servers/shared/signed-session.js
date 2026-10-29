@@ -108,8 +108,9 @@ export function jobMatchesTuple(job, { threadId, gatewayType } = {}) {
   return g === "board" && job.cardId != null && t === `board-card-${job.cardId}`;
 }
 
-// The v3 scope ref (scripts/pi-bots/actor-sig.mjs SCOPE_RE, kept in step).
-const SCOPE_REF_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128})$/;
+// The v3 scope ref: a copy of scripts/pi-bots/actor-sig.mjs SCOPE_RE (this
+// module imports nothing from scripts/), pinned to it by tests/signed-scope.test.js.
+export const SCOPE_REF_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128})$/;
 
 /**
  * Resolve the scope a verified v3 signature names (spec §4.2):

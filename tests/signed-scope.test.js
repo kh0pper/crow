@@ -10,7 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { createDbClient } from "../servers/db.js";
-import { resolveRunningJob, resolveSignedScope } from "../servers/shared/signed-session.js";
+import { resolveRunningJob, resolveSignedScope, SCOPE_REF_RE } from "../servers/shared/signed-session.js";
+import { SCOPE_RE } from "../scripts/pi-bots/actor-sig.mjs";
 
 let dir, plainPath, withPath, plain, withP;
 const SESS = {};
@@ -138,4 +139,16 @@ test("resolveSignedScope: a bot with no def, malformed scope refs, a failed read
   assert.equal(await resolveSignedScope(broken, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" }), null);
   assert.equal(await resolveSignedScope(null, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" }), null);
   assert.equal(await resolveSignedScope(withP), null);
+});
+
+// The gateway's scope parser and the signer's scope check are two copies of one
+// rule (servers/shared stays free of scripts/ imports); this pins them together.
+test("SCOPE_REF_RE (signed-session.js) is actor-sig.mjs's SCOPE_RE: same source, same verdicts", () => {
+  assert.equal(SCOPE_REF_RE.source, SCOPE_RE.source);
+  assert.equal(SCOPE_REF_RE.flags, SCOPE_RE.flags);
+  const accept = ["s:1", "s:7", "s:1234567890123456", "j:job-abc123-x9y8z7", "j:a", "j:A.b_c:d-e", `j:${"x".repeat(128)}`];
+  const reject = ["", "s:", "s:0", "s:07", "s:12345678901234567", "s:x", "j:", "j:a b", "j:job/../x", `j:${"x".repeat(129)}`,
+    "k:1", "S:1", " s:1", "s:1 ", "s:1\n", "j:a\nb", "sj:1"];
+  for (const v of accept) { assert.equal(SCOPE_REF_RE.test(v), true, `ref accepts ${v}`); assert.equal(SCOPE_RE.test(v), true, `sig accepts ${v}`); }
+  for (const v of reject) { assert.equal(SCOPE_REF_RE.test(v), false, `ref rejects ${JSON.stringify(v)}`); assert.equal(SCOPE_RE.test(v), false, `sig rejects ${JSON.stringify(v)}`); }
 });

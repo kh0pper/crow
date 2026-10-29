@@ -239,7 +239,7 @@ export const SCOPE_ACTOR_KINDS = Object.freeze(["service"]);
 // room for other safe ids; bounded so the scope header stays small. A job id
 // outside it gets no v3 signature (fail closed), never a session fallback.
 const JOB_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-const SCOPE_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128})$/;
+export const SCOPE_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128})$/;
 
 /** The scope a turn's ids name: "j:<job>" when a job id is given (H1), else
  *  "s:<session>" for a valid session id, else null. */
