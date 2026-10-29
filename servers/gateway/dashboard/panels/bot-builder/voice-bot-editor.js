@@ -402,8 +402,8 @@ async function handoffSection(db, v, lang, sec, hint) {
       `<td>${escapeHtml(stLabel)}${href ? ` <a href="${escapeHtml(href)}">${escapeHtml(t("botbuilder.voiceHandoffOpenCard", lang))}</a>` : ""}</td></tr>`);
   }
   const log = logRows.length
-    ? `<table class="btb-handoff-log"><thead><tr>` + ["Time", "Surface", "Bot", "Task", "Status"].map((k) => `<th>${escapeHtml(t("botbuilder.voiceHandoffCol" + k, lang))}</th>`).join("") +
-      `</tr></thead><tbody>${logRows.join("")}</tbody></table>`
+    ? `<div class="table-scroll"><table class="btb-handoff-log"><thead><tr>` + ["Time", "Surface", "Bot", "Task", "Status"].map((k) => `<th>${escapeHtml(t("botbuilder.voiceHandoffCol" + k, lang))}</th>`).join("") +
+      `</tr></thead><tbody>${logRows.join("")}</tbody></table></div>`
     : hint("botbuilder.voiceHandoffLogEmpty");
   return sec("botbuilder.voiceHandoffTitle",
     `<label class="btb-vcheck"><input type="checkbox" name="handoff_enabled" value="on" form="btb-vsave"${v.handoff.enabled ? " checked" : ""}> ` +
