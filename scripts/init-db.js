@@ -10,6 +10,7 @@ import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
 import {
   SERVICE_CONNECTIONS_DDL, CHAT_PROJECT_COLUMN, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL,
 } from "../servers/shared/project-services-schema.js";
+import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -2904,6 +2905,9 @@ await initTable("shell_items table", `
 // removes a deleted project's connections. Same DDL as scripts/migrations/0019-project-services.mjs
 // (SERVICE_CONNECTIONS_DDL) — one shape, two rails; additive, no SCHEMA_GENERATION bump.
 await initTable("service_connections table", SERVICE_CONNECTIONS_DDL);
+
+// Satellite tables (local-only; migration 0021): same DDL constant, one shape, two rails; additive.
+await initTable("satellite tables", SATELLITE_DDL);
 
 // bot_sessions thread index: a thread's newest perch-live session (shell-items threadCard, the 0010
 // backfill) is looked up by these columns. Same DDL as BOT_SESSIONS_THREAD_INDEX_DDL in
