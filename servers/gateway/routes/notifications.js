@@ -15,8 +15,11 @@
 import { Router } from "express";
 import { createDbClient } from "../../db.js";
 import { cleanupNotifications } from "../../shared/notifications.js";
+import { collectHealthSignals } from "../dashboard/panels/nest/health-signals.js";
+import { readSetting } from "../dashboard/settings/registry.js";
+import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 
-export default function notificationsRouter(dashboardAuth) {
+export default function notificationsRouter(dashboardAuth, { collectSignals = collectHealthSignals } = {}) {
   const router = Router();
 
   // All notification routes require dashboard auth
@@ -120,7 +123,18 @@ export default function notificationsRouter(dashboardAuth) {
         // Health data optional
       }
 
-      res.json({ count: rows[0].count, health });
+      // Health issues the new shell's mascot sheet lists under "Needs attention"
+      // (the new-mode bird adds them to its badge; the classic bell ignores them).
+      let attention = 0;
+      try {
+        const setLang = await readSetting(db, "language");
+        const lang = SUPPORTED_LANGS.includes(setLang) ? setLang : "en";
+        attention = ((await collectSignals(db, { lang })).issues || []).length;
+      } catch {
+        attention = 0;
+      }
+
+      res.json({ count: rows[0].count, attention, health });
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {

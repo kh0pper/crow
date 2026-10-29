@@ -1123,13 +1123,17 @@ export function tamagotchiJs(lang) {
       var data = await resp.json();
 
       checkForCallNotifications(data.count);
-      updateCrowBubble(data.count);
+      // The new shell's mascot also counts the health issues in its sheet's
+      // "Needs attention" group; the classic bird and bell keep the plain count.
+      updateCrowBubble(data.count + (document.body.classList.contains('shell') ? (Number(data.attention) || 0) : 0));
       updateCrowMood(data.health);
       updateCrowHealthBar(data.health);
       refreshRambleBird();
     } catch(e) {}
   }
 
+  // The shell's attention group tells the bird when its issues changed (an ack).
+  document.addEventListener('crow:attention-changed', function() { pollNotifications(); });
   pollNotifications();
   refreshRambleBird();
   // 5-min fallback poll. Live updates come via the Turbo Stream at

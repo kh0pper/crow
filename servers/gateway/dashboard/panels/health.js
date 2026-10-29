@@ -11,9 +11,13 @@ import { nestClientJS } from "./nest/client.js";
 import { getNestData, getTrustedInstances } from "./nest/data-queries.js";
 import { collectHealthSignals, invalidateHealthCache } from "./nest/health-signals.js";
 import { getPeerOverview } from "../overview-cache.js";
-import { readSetting } from "../settings/registry.js";
+import { readSetting, writeSetting } from "../settings/registry.js";
+import { Router } from "express";
+import { SUPPORTED_LANGS } from "../shared/i18n.js";
+import { resolveRequestMode, safeReturnPath } from "../shell/request.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { t } from "../shared/i18n.js";
+import { attentionGroupHtml } from "../shell/attention.js";
 import { renderFixItCards } from "../../fix-it/index.js";
 
 async function resolveLocalInstanceName(db, lang) {
@@ -44,6 +48,80 @@ function buildInstanceTabs(trustedInstances, peerOverviews, localName) {
     });
   }
   return tabs;
+}
+
+const ACK_KEY_CAP = 50;
+const ATTENTION_FALLBACK = "/dashboard/attention";
+
+/**
+ * Health attention routes. Mount after dashboardAuth + csrfMiddleware, and
+ * before the /dashboard/:panelId catch-all.
+ *   POST /dashboard/health/ack  - "This is expected" for a foreign Funnel mapping.
+ *   GET  /dashboard/attention/fragment - the sheet's "Needs attention" group.
+ *   GET  /dashboard/attention   - where alert notifications land: the sheet in
+ *                                 new mode, the nest's health card in classic.
+ */
+export function healthAttentionRouter({ createDbClient }) {
+  const router = Router();
+
+  router.post("/dashboard/health/ack", async (req, res) => {
+    const kind = req.body ? req.body.kind : undefined;
+    const key = req.body && typeof req.body.key === "string" ? req.body.key : "";
+    if (kind !== "exposure-foreign" || key === "" || key.length > 1024) {
+      return res.status(400).type("text/plain").send("unknown kind or empty key");
+    }
+    const db = createDbClient();
+    try {
+      let keys = [];
+      try {
+        const parsed = JSON.parse((await readSetting(db, "health_ack_exposure_foreign")) || "[]");
+        if (Array.isArray(parsed)) keys = parsed.filter((k) => typeof k === "string");
+      } catch {}
+      if (!keys.includes(key)) keys.push(key);
+      keys = keys.slice(-ACK_KEY_CAP);
+      await writeSetting(db, "health_ack_exposure_foreign", JSON.stringify(keys), { scope: "local" });
+      invalidateHealthCache();
+    } finally {
+      db.close();
+    }
+    const raw = req.body.back;
+    const back = safeReturnPath(raw);
+    // safeReturnPath's fallback is the shell's Chat; this route's is the attention route.
+    return res.redirect(303, back === "/dashboard/perch" && raw !== "/dashboard/perch" ? ATTENTION_FALLBACK : back);
+  });
+
+  // The sheet's "Needs attention" group, loaded each time the sheet opens.
+  router.get("/dashboard/attention/fragment", async (req, res) => {
+    const db = createDbClient();
+    let issues = [];
+    let lang = "en";
+    try {
+      // The layout's language: the per-instance "language" setting.
+      const setLang = await readSetting(db, "language");
+      if (SUPPORTED_LANGS.includes(setLang)) lang = setLang;
+      issues = (await collectHealthSignals(db, { lang })).issues || [];
+    } catch {
+      issues = [];
+    } finally {
+      db.close();
+    }
+    res.set("Cache-Control", "no-store");
+    res.type("text/html").send(attentionGroupHtml(issues, lang));
+  });
+
+  router.get("/dashboard/attention", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const isNew = (await resolveRequestMode(req, res, db)).mode === "new";
+      return res.redirect(303, isNew ? "/dashboard/perch?sheet=attention" : "/dashboard/nest?open=1");
+    } catch {
+      return res.redirect(303, "/dashboard/nest?open=1");
+    } finally {
+      db.close();
+    }
+  });
+
+  return router;
 }
 
 export default {

@@ -203,6 +203,39 @@ export function shellCss() {
   body.shell .shell-crow-tray .dropdown-body { padding-left: 0; padding-right: 0; max-height: 40dvh; }
   body.shell .shell-crow-tray .dropdown-title .btn { min-height: 44px; min-width: 44px; }
   body.shell .shell-crow-sep { width: 100%; margin: 8px 0 0; border: none; border-top: 1px solid var(--crow-border); }
+  /* "Needs attention" (attention.js): a grid per row, the dot beside the text
+     and the actions on their own line under it, aligned with the text. */
+  body.shell .shell-attn-list { list-style: none; margin: 0; padding: 0; }
+  body.shell .shell-attn-row {
+    display: grid;
+    grid-template-columns: 10px minmax(120px, 1fr);
+    column-gap: 10px;
+    align-items: start;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--crow-border);
+  }
+  body.shell .shell-attn-row:last-child { border-bottom: 0; }
+  body.shell .shell-attn-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; background: var(--crow-text-muted); }
+  body.shell .shell-attn-dot--warn { background: var(--crow-warning, #d9a521); }
+  body.shell .shell-attn-dot--info { background: var(--crow-accent); }
+  body.shell .shell-attn-text { min-width: 120px; overflow-wrap: break-word; color: var(--crow-text-primary); line-height: 1.4; }
+  body.shell .shell-attn-acts { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+  body.shell .shell-attn-form { margin: 0; }
+  body.shell .shell-attn-action,
+  body.shell .shell-attn-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    color: var(--crow-accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  body.shell .shell-attn-btn--quiet { color: var(--crow-text-secondary); }
+  body.shell .shell-attn-heading { margin-top: 4px; }
   /* The no-showModal fallback (open attribute only): pin the sheet on top. */
   body.shell .shell-sheet[open]:not(:modal) { position: fixed; inset: auto 0 0; z-index: 1200; }
   body.shell .shell-heading {

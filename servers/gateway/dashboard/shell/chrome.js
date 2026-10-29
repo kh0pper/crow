@@ -283,6 +283,7 @@ export function shellAvatarSheet({ lang, tray }) {
   return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet${merged ? " shell-crow-sheet" : ""}" aria-label="${name}">
     <div class="shell-sheet-inner">
       ${closeButton(lang)}${merged ? `
+      <section class="shell-attention" data-shell-attention></section>
       <h3 class="shell-heading shell-crow-heading">${escapeHtml(t("notif.notifications", lang))}</h3>
       <div class="shell-crow-tray">${tray}</div>
       <hr class="shell-crow-sep">` : ""}

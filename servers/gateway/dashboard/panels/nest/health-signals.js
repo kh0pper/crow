@@ -45,10 +45,12 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { t, fill } from "../../shared/i18n.js";
+import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
@@ -114,6 +116,21 @@ export function pruneResolved(lastMap, activeIssueIds) {
  * info — pruneResolved). Returns the new map, whether it changed, and the ids
  * pushed. `notify(issue)` is the caller's createNotification wrapper.
  */
+/**
+ * The notification a pushed health issue becomes (post-listen.js's monitor
+ * passes it to createNotification). It lands on the attention route.
+ */
+export function healthNotification(issue) {
+  return {
+    type: "system",
+    source: `health-monitor:${issue.id}`,
+    priority: "high",
+    title: issue.label,
+    body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
+    action_url: "/dashboard/attention",
+  };
+}
+
 export async function runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) {
   const map = { ...lastMap };
   let dirty = false;
@@ -888,7 +905,25 @@ function isPublicSafeBackendPath(p, prefixes) {
 // allowlist), so it is surfaced as an info line — visible, never silent — not
 // as this Crow's warning. Anything we cannot attribute (non-proxy handlers,
 // TCP forwarders, unparseable targets) is treated as this Crow's and warns.
-function exposureSignal(lang, nowFn) {
+// A fixed-length key ("m1:" + sha256 hex): the ack route caps a key at 1024
+// characters, and a target with many mounts would otherwise never be ackable.
+export function foreignMappingKey(target, mounts) {
+  return "m1:" + createHash("sha256").update(target + "|" + mounts.slice().sort().join(",")).digest("hex");
+}
+
+// Keys of acknowledged foreign mappings (a JSON array in a local setting).
+// A missing or malformed value means nothing is acknowledged.
+async function readForeignAcks(db) {
+  try {
+    const raw = await readSetting(db, "health_ack_exposure_foreign");
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(arr) ? arr.filter((k) => typeof k === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+async function exposureSignal(db, lang, nowFn) {
   const problems = [];
   if (process.env.CROW_DASHBOARD_PUBLIC === "true") problems.push(t("signals.exposure.public", lang));
   if (process.argv.includes("--no-auth")) problems.push(t("signals.exposure.noauth", lang));
@@ -926,12 +961,18 @@ function exposureSignal(lang, nowFn) {
     });
   }
   if (foreign.size > 0) {
-    const list = [...foreign].map(([target, mounts]) => `${mounts.sort().join(", ")} → ${target}`).join("; ");
-    out.push({
-      id: "exposure:foreign", severity: "info", state: "info", issueOnly: true,
-      label: fill(t("signals.exposure.foreign", lang), { list }),
-      actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
-    });
+    const acked = await readForeignAcks(db);
+    for (const [target, mounts] of foreign) {
+      const sorted = mounts.slice().sort();
+      const key = foreignMappingKey(target, sorted);
+      if (acked.has(key)) continue;
+      out.push({
+        id: `exposure:foreign:${target}`, severity: "info", state: "info", issueOnly: true,
+        label: fill(t("signals.exposure.foreign", lang), { list: `${sorted.join(", ")} → ${target}` }),
+        actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
+        ack: { kind: "exposure-foreign", key },
+      });
+    }
   }
   return out;
 }
@@ -1238,7 +1279,7 @@ export async function collectHealthSignals(db, opts = {}) {
     syncConflictsSignal(db),
     outboxSignal(db),
     loginsSignal(db, lang),
-    exposureSignal(lang, nowFn),
+    exposureSignal(db, lang, nowFn),
     integrationsSignal(db, lang),
     federationAuditSignal(lang),
     messagesSignal(db, lang, nowFn),
@@ -1277,6 +1318,7 @@ export async function collectHealthSignals(db, opts = {}) {
       label: s.issueLabel ?? s.label,
       actionLabel: s.actionLabel ?? null,
       actionHref: s.actionHref ?? null,
+      ack: s.ack ?? null,
     }));
 
   const ok = issues.filter(i => i.severity === "warn").length === 0;

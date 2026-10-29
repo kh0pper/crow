@@ -206,6 +206,7 @@ test("open sheets are closed before Turbo caches the page", () => {
   const sheet = { close() { closed.push("close"); } };
   const fakeDoc = {
     cookie: "",
+    querySelector: () => null,
     querySelectorAll: (sel) => (sel === "dialog.shell-sheet[open]" ? [sheet] : []),
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };

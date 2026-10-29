@@ -201,7 +201,7 @@ async function open(path, { width = 390, height = 844, dark = false, textSize = 
     await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: keyCode, modifiers: mods, text });
     await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: keyCode, modifiers: mods });
   };
-  const center = async (sel) => ev(`(function(){ var e=document.querySelector(${JSON.stringify(sel)}); if(!e) return null; var b=e.getBoundingClientRect(); return {x:b.left+b.width/2,y:b.top+b.height/2}; })()`);
+  const center = async (sel) => ev(`(function(){ var e=document.querySelector(${JSON.stringify(sel)}); if(!e) return null; if(e.closest('dialog[open]')&&e.scrollIntoView) e.scrollIntoView({block:'nearest'}); var b=e.getBoundingClientRect(); return {x:b.left+b.width/2,y:b.top+b.height/2}; })()`);
   const click = async (sel) => {
     const p = await center(sel);
     assert.ok(p, "no element " + sel);
@@ -739,7 +739,8 @@ test("the mascot opens ONE sheet: notifications first, then Settings, What Crow 
             settings: true, reach: true, classic: true, talk: true, order: "before", modal: true, sw: s.vw, vw: s.vw }, `the merged sheet (${lang} ${width})`);
           // A visible Notifications heading leads the tray; no second heading above Settings.
           const heads = await p.ev("[...document.querySelectorAll('#shell-avatar .shell-heading')].map(function(h){ return h.textContent.trim(); })");
-          assert.deepEqual(heads, [lang === "es" ? "Notificaciones" : "Notifications"]);
+          // A "Needs attention" group (the prefetched health issues) may lead; then the tray's own heading.
+          assert.deepEqual(heads.filter((h) => h !== (lang === "es" ? "Necesita atención" : "Needs attention")), [lang === "es" ? "Notificaciones" : "Notifications"]);
           await assertTargets(p, [["#shell-avatar .dropdown-title .btn", 1, "Clear all"]], `${lang} ${width}`);
           // A click inside the open sheet leaves the mascot expanded and the tray shown.
           await p.click("#shell-avatar .shell-crow-heading");
