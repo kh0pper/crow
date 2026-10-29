@@ -4,9 +4,11 @@
  * `mountLoopbackMcp(app, {...})` and every request runs the same fixed order
  * (the private engineering notes, loopback mount helper spec §3):
  *
- *   1. a method other than POST/GET/DELETE -> 405;
- *   2. not a genuine same-box caller (isLocalPeer), or one that came through
- *      instance / cross-host auth -> 404, empty body;
+ *   1. not a genuine same-box caller (isLocalPeer), or one that came through
+ *      instance / cross-host auth -> 404, empty body, for EVERY method (a
+ *      remote caller learns nothing about the route; the gate re-checks this
+ *      as its step 2);
+ *   2. a local caller's method other than POST/GET/DELETE -> 405;
  *   3. this family's bearer token only -> otherwise 401;
  *   4. a v3 (scope-bound) actor signature of exactly `actorKind` -> otherwise 403;
  *   5. the signed scope still live (resolveSignedScope) -> otherwise 403;
@@ -20,7 +22,7 @@
  *  11. the request runs inside callerContext.run(...), so a tool handler reads
  *      the LIVE caller, never a closure from the request that opened the session.
  *
- * Steps 2-5 are loopbackActorGate. A throw inside any step is that step's
+ * Steps 1 (source half) and 3-5 are loopbackActorGate. A throw inside any step is that step's
  * refusal, never a 500 with text. Every refusal happens before any upstream
  * work. Refusals are JSON-RPC shaped, except the 404s, which are empty. A throw
  * inside the MCP handler itself (step 11) gets the SDK handler's fixed
@@ -49,6 +51,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpHandler } from "./routes/mcp.js";
+import { isLocalPeer } from "../shared/peer-class.js";
 import { loopbackActorGate, noteRefusedOnce, readActorHeaders } from "./loopback-gate.js";
 import { callerContext } from "./caller-context.js";
 import { recordToolCall } from "./session-logger.js";
@@ -392,7 +395,9 @@ export function mountLoopbackMcp(app, opts) {
       res.status(status).json({ jsonrpc: "2.0", error: { code: rpcCode, message: loopbackErrorText(code, { lang }) }, id });
     };
 
-    // 1.
+    // 1. Source before method: a non-local caller gets the empty 404 for any method.
+    if (!isLocalPeer(req.socket?.remoteAddress, req.headers) || req.instanceAuth || req.crossHostAuth) return refuse(404, "not_found");
+    // 2.
     if (!["POST", "GET", "DELETE"].includes(req.method)) return refuse(405, "method_not_allowed");
 
     // 2-5. The gate (each step's throw is that step's refusal).

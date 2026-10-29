@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import Database from "better-sqlite3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -295,10 +296,22 @@ test("the error table: en + es, every code, KiB and tool substitution", () => {
 
 // ---------------------------------------------------------------- gate
 
-test("a method other than POST/GET/DELETE is 405", async () => {
-  const r = await send(initBody(), { method: "PUT" });
-  assert.equal(r.status, 405);
-  assert.equal(calls.length, 0);
+test("a LOCAL caller with a method other than POST/GET/DELETE is 405", async () => {
+  for (const method of ["PUT", "PATCH"]) {
+    const r = await send(initBody(), { method });
+    assert.equal(r.status, 405, method);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("refusal order: a remote caller gets the EMPTY 404 for every method (PUT/PATCH included), never a 405", async () => {
+  for (const method of ["POST", "GET", "DELETE", "PUT", "PATCH"]) {
+    const body = method === "GET" || method === "DELETE" ? undefined : initBody();
+    assertEmpty404(await send(body, { method, headers: { "x-forwarded-for": "100.64.20.5" } }), `${method} forwarded`);
+    assertEmpty404(await send(body, { method, headers: { "x-test-instance-auth": "1" } }), `${method} instanceAuth`);
+  }
+  assert.equal(calls.length, 0, "upstream untouched");
+  assert.ok(audit.every((e) => e.outcome === "refused:not_found"));
 });
 
 test("not local: a forwarding header, instanceAuth, crossHostAuth, a CROW_TRUSTED_PROXIES loopback socket -> 404 empty, upstream untouched", async () => {
@@ -737,6 +750,17 @@ test("I3: a schema-validation failure gets the fixed text and an audit event", a
   assert.ok(audit.some((e) => e.tool === "typed" && e.outcome === "refused:invalid_args"));
   assert.equal(calls.length, 0);
   assert.equal(textOf(await callTool(sid, "typed", { n: 3 })), "n=3");
+});
+
+test("SDK-bump tripwire: McpServer#validateToolInput (private) still exists with the shape the mount wraps, and bad input is still refused", async () => {
+  assert.equal(typeof McpServer.prototype.validateToolInput, "function",
+    "the MCP SDK no longer has McpServer#validateToolInput: the mount's input-validation wrap would silently vanish; re-check loopback-tool-mount.js");
+  assert.equal(McpServer.prototype.validateToolInput.length, 3, "validateToolInput(tool, args, toolName) changed shape");
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "typed", {}); // required "n" missing
+  assert.equal(r.json.result.isError, true);
+  assert.equal(textOf(r), "The arguments for typed are not valid.");
+  assert.equal(calls.length, 0, "upstream not called");
 });
 
 test("M2: the mount key encodes each param, so a/b + c and a + b/c never collide", async () => {
