@@ -505,6 +505,40 @@ test("the drawer and the avatar sheet open, trap focus, close on Escape and on t
   } finally { await p.close(); }
 });
 
+// The close event fires a task AFTER close(), so a reopen can run before it.
+// That late event belongs to the sheet that closed: it must not clear the
+// reopened sheet's opener (the next close would have nowhere to return focus)
+// or pull focus out of it. Closing and reopening in ONE task makes it certain.
+test("a reopen before the close event lands keeps the drawer's and the avatar sheet's opener and focus", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const p = await open("/dashboard/memory");
+  try {
+    for (const [opener, id] of [[".shell-scope", "shell-drawer"], [".shell-avatar", "shell-avatar"]]) {
+      await p.click(opener);
+      await p.until(OPEN_SHEET(id), id);
+      const r = await p.ev(`(function(){
+        var d=document.getElementById(${JSON.stringify(id)}), b=document.querySelector(${JSON.stringify(opener)}), seen=[];
+        d.addEventListener('close',function(){ seen.push('close event, open='+d.open); },{once:true});
+        d.close();
+        seen.push('reopen');
+        b.click();
+        window.__closeOrder=seen;
+        return d.open;
+      })()`);
+      assert.equal(r, true, `${id}: the reopen opened it`);
+      await p.until("window.__closeOrder.length===2", id + ": the late close event");
+      assert.deepEqual(await p.ev("window.__closeOrder"), ["reopen", "close event, open=true"], `${id}: the close event landed after the reopen`);
+      await p.ev("new Promise(function(r){ setTimeout(r,50); })");
+      const after = await p.ev(`(function(){ var d=document.getElementById(${JSON.stringify(id)});
+        return { open: d.open, focusIn: d.contains(document.activeElement), opener: d.__shellOpener === document.querySelector(${JSON.stringify(opener)}) }; })()`);
+      assert.deepEqual(after, { open: true, focusIn: true, opener: true }, `${id}: still open, focus inside, opener kept`);
+      await p.key("Escape", "Escape", 27);
+      await p.until(`!document.getElementById(${JSON.stringify(id)}).open`, id + " closed");
+      await p.until(`document.activeElement === document.querySelector(${JSON.stringify(opener)})`, "focus back on the opener after " + id + " closed");
+    }
+  } finally { await p.close(); }
+});
+
 test("Back after following a drawer link shows no open sheet", async (ctx) => {
   if (!chrome) return ctx.skip("no headless Chrome");
   const p = await open("/dashboard/perch");

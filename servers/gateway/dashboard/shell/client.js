@@ -60,6 +60,9 @@ export function shellClientJs() {
           closeSheet(e.currentTarget.closest('dialog'));
         });
         dlg.addEventListener('close', function (e) {
+          // A late close event that lands after a quick reopen belongs to the
+          // sheet that already closed: keep the reopened sheet's opener and focus.
+          if (e.currentTarget.open) return;
           var opener = e.currentTarget.__shellOpener;
           e.currentTarget.__shellOpener = null;
           // The close event fires a task after close(): if focus has already
