@@ -73,13 +73,13 @@ function boardForm(html) {
   return f;
 }
 
-test("old defs map: kanban/task-list on, none/unset off", () => {
+test("old defs map: kanban/task-list/unset on, none/custom off", () => {
   assert.equal(TC.trackerOn({ tracker_config: { type: "kanban" } }), true);
   assert.equal(TC.trackerOn({ tracker_config: { type: "task-list" } }), true);
   assert.equal(TC.trackerOn({ tracker_config: { type: "none" } }), false);
-  assert.equal(TC.trackerOn({ tracker_config: {} }), false);
-  assert.equal(TC.trackerOn({}), false);
-  assert.equal(TC.trackerOn(null), false);
+  assert.equal(TC.trackerOn({ tracker_config: {} }), true, "unset runs as kanban");
+  assert.equal(TC.trackerOn({}), true);
+  assert.equal(TC.trackerOn(null), true);
   assert.equal(TC.trackerOn({ tracker_config: { type: "custom", tracker_slug: "x" } }), false);
 });
 
@@ -112,8 +112,10 @@ test("on/off save round trip", async () => {
     }
     return b;
   };
+  await putBot("rt-unset", { ...BASE }, null);
+  assert.ok(boardForm(await render("rt-unset")).querySelector('input[name="show_cards"]').hasAttribute("checked"), "unset shows On");
   // untouched save changes nothing
-  for (const id of ["rt-kanban", "rt-list", "rt-off"]) {
+  for (const id of ["rt-kanban", "rt-list", "rt-off", "rt-unset"]) {
     const before = await row(id);
     await post(await body(id));
     assert.equal((await row(id)).raw, before.raw, id + " untouched");
@@ -128,6 +130,11 @@ test("on/off save round trip", async () => {
   const b = await body("rt-off"); b.show_cards = "on";
   await post(b);
   assert.equal((await row("rt-off")).def.tracker_config.type, "kanban");
+  const bu = await body("rt-unset"); delete bu.show_cards;
+  await post(bu);
+  assert.equal((await row("rt-unset")).def.tracker_config.type, "none", "Off on an unset bot writes none");
+  const d0 = { ...BASE }; TC.applyShowCards(d0, { projectId: null, on: true });
+  assert.equal(d0.tracker_config.type, "kanban", "On for an unset bot writes kanban");
   await putBot("rt-list2", { ...BASE, tracker_config: { type: "task-list" } });
   const b2 = await body("rt-list2"); b2.project_id = ""; // keep On, nothing changed
   await post(b2);

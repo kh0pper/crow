@@ -125,7 +125,7 @@ async function renderBoard(ctx) {
       : `<label class="btb-checkbox btb-check-row"><input type="checkbox" name="show_cards"${cardsOn ? " checked" : ""}> ${escapeHtml(t("botbuilder.trackerShowCards", lang))}</label>` +
         `<input type="hidden" name="show_cards__was" value="${cardsOn ? "on" : "off"}">`) +
     snap +
-    actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveTrackerConfig", lang)}</button>`) + `</form>` +
+    actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.avSave", lang)}</button>`) + `</form>` +
     // Tracker definition editor (below the config form)
     (function() {
       if (ttype !== "custom" || !tc.tracker_slug) return "";
