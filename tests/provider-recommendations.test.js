@@ -180,7 +180,66 @@ test("candidate rules: retirement before review_by and restricted entries are sk
   assert.equal(loadRecommendations(opts).review_by, "2027-01-28");
 });
 
+function bumpMtime(f, secs) {
+  const t = new Date(Date.now() + secs * 1000);
+  utimesSync(f, t, t);
+}
+const goodEntry = (model_id) => ({
+  model_id, id_verified: true, kind: "chat", status: "stable", retires: null, tools: "yes",
+  agentic: "yes", context: null, price: { unit: "per_mtok_in_out", in: 1, out: 2, price_verified: true }, note: "",
+});
+const goodFile = (reviewBy = "2027-01-28", everyday = [goodEntry("m-good")]) => JSON.stringify({
+  schema_version: 1, accessed: "2026-10-28", review_by: reviewBy, source_notes: "x",
+  providers: { openai: { docs_urls: [], deprecations: [], roles: { everyday } } },
+});
+
+test("malformed after a good load: empty and stale, cached; a good file recovers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-recs-bad-"));
+  const f = join(dir, "recs.json");
+  const opts = { file: f };
+  const now = new Date("2026-11-01");
+  writeFileSync(f, goodFile());
+  bumpMtime(f, 10);
+  assert.equal(candidatePick("openai", "everyday", {}, opts).model_id, "m-good");
+  assert.equal(isRecommendationsStale(now, opts), false);
+
+  writeFileSync(f, "{ not json");
+  bumpMtime(f, 20);
+  assert.equal(candidatePick("openai", "everyday", {}, opts), null);
+  assert.deepEqual(recommendedFor("openai", "everyday", opts), []);
+  assert.equal(isRecommendationsStale(now, opts), true);
+  // Cached against that mtime: the same object comes back without a re-parse.
+  assert.equal(loadRecommendations(opts), loadRecommendations(opts));
+
+  writeFileSync(f, goodFile());
+  bumpMtime(f, 30);
+  assert.equal(candidatePick("openai", "everyday", {}, opts).model_id, "m-good");
+  assert.equal(isRecommendationsStale(now, opts), false);
+});
+
+test("null and non-object entries are skipped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-recs-null-"));
+  const f = join(dir, "recs.json");
+  writeFileSync(f, goodFile("2027-01-28", [null, 7, "x", [], goodEntry("m-after")]));
+  bumpMtime(f, 40);
+  const opts = { file: f };
+  assert.deepEqual(recommendedFor("openai", "everyday", opts).map((e) => e.model_id), ["m-after"]);
+  assert.equal(candidatePick("openai", "everyday", {}, opts).model_id, "m-after");
+});
+
+test("an invalid review_by date counts as stale", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-recs-date-"));
+  const f = join(dir, "recs.json");
+  const opts = { file: f };
+  for (const [i, bad] of ["not-a-date", "2027-13-45", 20270128, ""].entries()) {
+    writeFileSync(f, goodFile(bad));
+    bumpMtime(f, 50 + i);
+    assert.equal(isRecommendationsStale(new Date("2026-11-01"), opts), true, `review_by ${JSON.stringify(bad)}`);
+  }
+});
+
 test("presetForRow", () => {
+  assert.equal(presetForRow({ baseUrl: "", base_url: "https://api.groq.com/openai/v1" }), "groq");
   assert.equal(presetForRow({ baseUrl: "https://api.groq.com/openai/v1/" }), "groq");
   assert.equal(presetForRow({ base_url: "https://api.z.ai/api/coding/paas/v4" }), "zai");
   assert.equal(presetForRow({ baseUrl: "https://api.z.ai/api/paas/v4" }), "zai");

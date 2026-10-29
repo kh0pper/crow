@@ -282,11 +282,11 @@
             "context": 1048576,
             "price": {
               "unit": "per_mtok_in_out",
-              "in": 0.66,
-              "out": 1.98,
+              "in": 1.32,
+              "out": 3.96,
               "price_verified": true
             },
-            "note": "Cheap long-context."
+            "note": "Cheap long-context. Base price from the live /api/v1/models listing on 2026-10-28 (the research had $0.66 / $1.98, which is the listed off-peak override: weekends and some UTC windows)."
           }
         ],
         "expert": [

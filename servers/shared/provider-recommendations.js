@@ -28,9 +28,12 @@ export function loadRecommendations({ file = DEFAULT_FILE } = {}) {
   try { mtimeMs = statSync(file).mtimeMs; } catch { return EMPTY; }
   const hit = cache.get(file);
   if (hit && hit.mtimeMs === mtimeMs) return hit.data;
+  // A malformed file fails closed (no picks, stale) and is cached against its
+  // mtime like a good one, so it is not re-parsed on every call; the next
+  // write (new mtime) is read again.
   let data;
-  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return hit ? hit.data : EMPTY; }
-  if (!data || typeof data !== "object" || !data.providers) data = EMPTY;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { data = EMPTY; }
+  if (!data || typeof data !== "object" || !data.providers || typeof data.providers !== "object") data = EMPTY;
   cache.set(file, { mtimeMs, data });
   return data;
 }
@@ -39,7 +42,15 @@ export function loadRecommendations({ file = DEFAULT_FILE } = {}) {
 export function recommendedFor(presetId, roleId, opts) {
   if (!RECOMMENDATION_ROLES.includes(roleId)) return [];
   const list = loadRecommendations(opts).providers?.[presetId]?.roles?.[roleId];
-  return Array.isArray(list) ? list.map((e) => structuredClone(e)) : [];
+  if (!Array.isArray(list)) return [];
+  return list.filter((e) => e && typeof e === "object" && !Array.isArray(e)).map((e) => structuredClone(e));
+}
+
+/** A strict YYYY-MM-DD string that names a real calendar day, else null. */
+function validDay(v) {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const t = new Date(v + "T00:00:00Z");
+  return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === v ? v : null;
 }
 
 /**
@@ -50,11 +61,11 @@ export function recommendedFor(presetId, roleId, opts) {
  * `preview` entry come back, flagged `preview: true`.
  */
 export function candidatePick(presetId, roleId, { liveModelIds = null } = {}, opts) {
-  const reviewBy = loadRecommendations(opts).review_by;
+  const reviewBy = validDay(loadRecommendations(opts).review_by);
   const live = Array.isArray(liveModelIds) ? new Set(liveModelIds) : null;
   const eligible = recommendedFor(presetId, roleId, opts).filter((e) =>
     e.id_verified === true
-    && (e.retires == null || (reviewBy && e.retires > reviewBy))
+    && (e.retires == null || (reviewBy && validDay(e.retires) && e.retires > reviewBy))
     && (!live || live.has(e.model_id)));
   const stable = eligible.find((e) => e.status === "stable");
   if (stable) return stable;
@@ -64,7 +75,7 @@ export function candidatePick(presetId, roleId, { liveModelIds = null } = {}, op
 
 /** The preset a providers row was made from, by normalised base URL (variants and aliases included). */
 export function presetForRow(row) {
-  const url = normalizeBaseUrl(row?.baseUrl ?? row?.base_url);
+  const url = normalizeBaseUrl(row?.baseUrl || row?.base_url);
   if (!url) return null;
   for (const p of PROVIDER_PRESETS) {
     if (presetBaseUrls(p).includes(url)) return p.id;
@@ -72,9 +83,9 @@ export function presetForRow(row) {
   return null;
 }
 
-/** True once `now` is past the file's `review_by` date (or the file has none). */
+/** True once `now` is past the file's `review_by` date; a missing or invalid date fails closed (stale). */
 export function isRecommendationsStale(now = new Date(), opts) {
-  const reviewBy = loadRecommendations(opts).review_by;
+  const reviewBy = validDay(loadRecommendations(opts).review_by);
   if (!reviewBy) return true;
   return now.getTime() > new Date(reviewBy + "T23:59:59Z").getTime();
 }
