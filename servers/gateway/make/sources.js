@@ -264,17 +264,22 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
  * previews: async (item) => { previewState, previewUrl, previewReason } (make/previews.js itemPreview),
  * applied only to the items returned; null (previews off) leaves every item a type tile.
  */
-export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null } = {}) {
+export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null, cardRefs = null } = {}) {
+  // cardRefs (a Set of "kind:ref"): only those items, and the project scope is ignored. The sources
+  // are read unscoped with a wide limit, then cut to the card's documents.
+  if (cardRefs) { scope = { all: true }; limit = undefined; }
+  const wide = cardRefs ? { limit: 500 } : null;
   const artifacts = installedBundle(crowHome, "artifacts") ? "installed" : "missing";
   let workspace = installedBundle(crowHome, "workspace") ? "installed" : "missing";
   const lists = [];
-  if (artifacts === "installed") lists.push(await listArtifactItems(db, scope, limit ? { limit } : {}));
+  if (artifacts === "installed") lists.push(await listArtifactItems(db, scope, wide || (limit ? { limit } : {})));
   if (workspace === "installed") {
-    const ws = await listWorkspaceItems(db, scope, { crowHome, ...(limit ? { limit } : {}) });
+    const ws = await listWorkspaceItems(db, scope, { crowHome, ...(wide || (limit ? { limit } : {})) });
     if (ws.status !== "ok") workspace = ws.status;
     lists.push(ws);
   }
   let items = lists.flat();
+  if (cardRefs) items = items.filter((i) => cardRefs.has(`${i.kind}:${i.ref}`));
   if (filter === "shared") items = items.filter((i) => i.shared);
   else if (filter === "documents" || filter === "pages") items = items.filter((i) => i.filter === filter);
   items.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));

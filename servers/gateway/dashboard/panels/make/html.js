@@ -5,7 +5,7 @@
  * so Make stays where it was.
  */
 import { escapeHtml } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 
 const esc = (v) => escapeHtml(v === null || v === undefined ? "" : String(v));
 const ROUTE = "/dashboard/make";
@@ -27,11 +27,34 @@ export const START_TYPES = [
   { id: "diagram", needs: "artifacts", blank: null, labelKey: "shell.typeDiagram", startKey: "shell.startDiagram", tool: null },
 ];
 
-function chips(active, lang) {
+/** The query string a link keeps: the explicit scope and card (never the cookie), plus the filter. */
+function qs({ scope = null, card = null, filter = "all" }) {
+  const parts = [];
+  if (scope) parts.push(`scope=${encodeURIComponent(scope)}`);
+  if (card && !String(scope || "").startsWith("card:")) parts.push(`card=${encodeURIComponent(card)}`);
+  if (filter && filter !== "all") parts.push(`filter=${filter}`);
+  return parts.length ? `${ROUTE}?${parts.join("&")}` : ROUTE;
+}
+
+/** Show: This card (card mode, or ?card=), This project (a project chip is set), All. Plain links. */
+function scopeRow(sc, filter, lang) {
+  if (!sc) return "";
+  const link = (id, label, scope) => {
+    const on = sc.mode === id;
+    return `<a class="mk-scope-chip${on ? " mk-scope-chip-on" : ""}" href="${esc(qs({ scope, card: sc.cardId, filter: filter || "all" }))}"${on ? ' aria-current="page"' : ""}>${esc(label)}</a>`;
+  };
+  const out = [];
+  if (sc.cardId) out.push(link("card", t("shell.makeScopeCard", lang), `card:${sc.cardId}`));
+  if (sc.projectName) out.push(link("project", sc.projectName, "project"));
+  out.push(link("all", t("shell.makeScopeAll", lang), "all"));
+  return `<nav class="mk-scope-chips" role="group" aria-label="${esc(t("shell.makeScopeLabel", lang))}">${out.join("")}</nav>`;
+}
+
+function chips(active, lang, sc = null) {
   return `<nav class="mk-chips" aria-label="${esc(t("shell.tabMake", lang))}">${FILTERS.map((f) => {
     const on = f.id === active;
-    const href = f.id === "all" ? ROUTE : `${ROUTE}?filter=${f.id}`;
-    return `<a class="mk-chip${on ? " mk-chip-on" : ""}" href="${href}"${on ? ' aria-current="page"' : ""}>${esc(t(f.key, lang))}</a>`;
+    const href = qs({ scope: sc?.explicit || null, card: sc?.cardId || null, filter: f.id });
+    return `<a class="mk-chip${on ? " mk-chip-on" : ""}" href="${esc(href)}"${on ? ' aria-current="page"' : ""}>${esc(t(f.key, lang))}</a>`;
   }).join("")}</nav>`;
 }
 
@@ -150,15 +173,17 @@ export function renderPreviewSheet({ projects, lang }) {
 }
 
 /** @param {{items: object[], artifacts: string, workspace: string}} model */
-export function renderMakePage({ model, filter, lang, project, projects = [], previews = null }) {
+export function renderMakePage({ model, filter, lang, project, projects = [], previews = null, scope = null }) {
   const { items, artifacts, workspace } = model;
   const bothMissing = artifacts === "missing" && workspace === "missing";
   const notice = workspace === "unavailable" ? `<p class="mk-notice" role="status">${esc(t("shell.workspaceUnavailable", lang))}</p>` : "";
   let body;
   if (bothMissing) body = `<div class="mk-empty">${offers(artifacts, workspace, lang)}</div>`;
-  else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t("shell.makeEmpty", lang))}</p>`;
+  else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t(scope?.mode === "card" ? "shell.makeCardEmpty" : "shell.makeEmpty", lang))}</p>`;
   else body = `${offers(artifacts, workspace, lang)}<ul class="mk-grid">${items.map((i) => tile(i, lang)).join("")}</ul>`;
   const startBtn = `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
+  const head = scope?.mode === "card"
+    ? `<p class="mk-card-head">${esc(fill(t("shell.makeCardHeader", lang), { id: scope.cardId, title: scope.cardTitle || "" }).trim())}</p>` : "";
   const pv = bothMissing ? "" : previewsBlock(previews, lang);
-  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${pv}${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
+  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang, scope)}${startBtn}</div>${scopeRow(scope, filter, lang)}${head}${pv}${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
 }

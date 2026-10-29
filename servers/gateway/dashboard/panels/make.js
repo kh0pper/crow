@@ -15,6 +15,7 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { t } from "../shared/i18n.js";
+import { cardSummary, documentsForCard } from "../../make/card-docs.js";
 import { listMakeItems } from "../../make/sources.js";
 import { itemPreview, previewDeps, previewLineKey, previewsEnabled } from "../../make/previews.js";
 import { markSeen, getItem, activeProjects } from "../../../shared/shell-items.js";
@@ -25,6 +26,20 @@ import { makeClientJs } from "./make/client.js";
 const ARTIFACT_ID_RE = /^art_[A-Za-z0-9_-]{6,40}$/; // same shape as the Artifacts bundle's ARTIFACT_ID_RE
 const WS_REF_RE = /^[1-9]\d{0,15}$/;
 const FILTER_IDS = ["all", "documents", "pages", "shared"];
+
+/**
+ * Which documents Make shows. ?scope=card:<id> (a valid card id) is one card, ?scope=all is every
+ * project, anything else is the shell's project chip when it is a single project, else all. Reads
+ * only the query and the shell's already-resolved scope: it never sets the project or a cookie.
+ */
+export function parseMakeScope(query, crowScope) {
+  const raw = typeof query?.scope === "string" ? query.scope : "";
+  const m = /^card:([1-9]\d{0,15})$/.exec(raw);
+  if (m) return { kind: "card", cardId: m[1] };
+  if (raw === "all") return { kind: "all" };
+  if (crowScope?.projectId != null) return { kind: "project", scope: crowScope };
+  return { kind: "all" };
+}
 
 let lister = listMakeItems;
 let wsLookup = null;
@@ -97,7 +112,11 @@ export default {
 
   async handler(req, res, { db, layout, lang }) {
     const filter = FILTER_IDS.includes(req.query.filter) ? req.query.filter : "all";
-    const scope = req.crowScope || { all: true };
+    const shellScope = req.crowScope || { all: true };
+    const parsed = parseMakeScope(req.query, shellScope);
+    const scope = parsed.kind === "project" ? parsed.scope : { all: true };
+    const cardQ = typeof req.query.card === "string" && /^[1-9]\d{0,15}$/.test(req.query.card) ? req.query.card : null;
+    const cardId = parsed.kind === "card" ? parsed.cardId : cardQ;
     // Previews (Task 4.5): off until the switch is on, and then only for trusted artifacts.
     let enabled = false;
     try { enabled = await previewsEnabled(db); } catch (err) { console.warn(`[make] previews switch unreadable: ${err.message}`); }
@@ -108,23 +127,32 @@ export default {
       if (item.kind === "workspace_file") return itemPreview(db, item, null);
       return enabled ? itemPreview(db, item, deps) : { previewState: "off", previewUrl: null, previewReason: "not_enabled" };
     };
-    const model = await lister(db, scope, { crowHome: crowHome(), filter, previews });
+    let cardRefs = null;
+    let cardTitle = "";
+    if (parsed.kind === "card") {
+      const docs = await documentsForCard(db, parsed.cardId, { lang });
+      cardRefs = new Set(docs.map((d) => `${d.kind}:${d.ref}`));
+      cardTitle = (await cardSummary(db, parsed.cardId))?.title || "";
+    }
+    const model = await lister(db, scope, { crowHome: crowHome(), filter, previews, ...(cardRefs ? { cardRefs } : {}) });
     // One line under the chips for a renderer reason (the first one any tile met).
     const reason = enabled ? (model.items || []).map((i) => i.previewReason).find((r) => previewLineKey(r)) || null : null;
-    const back = filter === "all" ? "/dashboard/make" : `/dashboard/make?filter=${filter}`;
+    const explicit = typeof req.query.scope === "string" && (parsed.kind === "card" || req.query.scope === "all") ? req.query.scope : null;
+    const backQs = [explicit && `scope=${encodeURIComponent(explicit)}`, filter !== "all" && `filter=${filter}`].filter(Boolean).join("&");
+    const back = backQs ? `/dashboard/make?${backQs}` : "/dashboard/make";
     // The project a new thing starts in: the shell's chip, else Unassigned.
     let project = { id: "unassigned", name: t("shell.unassigned", lang) };
-    if (scope.projectId != null) {
+    if (shellScope.projectId != null) {
       try {
-        const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [Number(scope.projectId)] });
-        if (rows[0]) project = { id: Number(scope.projectId), name: String(rows[0].name || scope.slug || "") };
+        const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [Number(shellScope.projectId)] });
+        if (rows[0]) project = { id: Number(shellScope.projectId), name: String(rows[0].name || shellScope.slug || "") };
       } catch (err) { console.warn(`[make] project name lookup failed: ${err.message}`); }
     }
     let projects = [];
     try { projects = await activeProjects(db); } catch (err) { console.warn(`[make] project list failed: ${err.message}`); }
     return layout({
       title: t("shell.tabMake", lang),
-      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
+      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, scope: { mode: parsed.kind, cardId, cardTitle, explicit, projectName: shellScope.projectId != null ? project.name : null }, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
     });
   },
 };

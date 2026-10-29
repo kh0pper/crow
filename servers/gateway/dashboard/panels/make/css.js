@@ -2,6 +2,10 @@
 export const MAKE_CSS = `<style>
   .mk-page { max-width: 100%; }
   .mk-chips { display: flex; gap: var(--crow-space-2); flex-wrap: wrap; margin: 0 0 var(--crow-space-3); }
+  .mk-scope-chips { display: flex; gap: var(--crow-space-2); flex-wrap: wrap; margin: 0 0 var(--crow-space-3); }
+  .mk-card-head { margin: 0 0 var(--crow-space-3); color: var(--crow-text-secondary); font-size: 0.95rem; overflow-wrap: anywhere; }
+  .mk-scope-chip { display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--crow-space-3); border: 1px solid var(--crow-border); border-radius: 999px; color: var(--crow-text-secondary); text-decoration: none; }
+  .mk-scope-chip-on { color: var(--crow-text-primary); border-color: var(--crow-accent); background: var(--crow-bg-elevated); }
   .mk-chip { display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--crow-space-3); border: 1px solid var(--crow-border); border-radius: 999px; color: var(--crow-text-secondary); text-decoration: none; }
   .mk-chip-on { color: var(--crow-text-primary); border-color: var(--crow-accent); background: var(--crow-bg-elevated); }
   .mk-notice { margin: 0 0 var(--crow-space-3); color: var(--crow-text-muted); font-size: 0.9rem; }
