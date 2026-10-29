@@ -234,13 +234,18 @@ export async function tableMissing(db) {
   }
 }
 
-export function defaultDefinition(botId, projectId, model) {
+export function defaultDefinition(botId, projectId, model, { sessionDir: worldRoot = null } = {}) {
   // M3b: project_id is no longer a field in this returned object — the
-  // pi_bot_defs.project_id column is authoritative. We still take projectId
-  // as a parameter so the system_prompt template can baked-reference the
-  // project number at creation time (it's just a string in the prompt; the
-  // runtime project context block in bridge.mjs supersedes it).
-  const sessionDir = pathJoin(botsWorkspaceRoot(), botId);
+  // pi_bot_defs.project_id column is authoritative. projectId is kept in the
+  // signature for existing callers but no longer reaches the prompt: the
+  // default prompt is project-neutral (R1.2 §14), because a bot can move
+  // between projects and a baked-in project id or folder would go stale (the
+  // runtime project context block in bridge.mjs names the current project).
+  // sessionDir: the bot's world root when it is created ON a project
+  // (<workspace>/bots/<id>), so session_dir (worldRootFor's no-project
+  // fallback, and where skill proposals are staged) and write_paths name the
+  // folder the bot really works in. Otherwise the legacy pi-bots/<id> root.
+  const sessionDir = worldRoot || pathJoin(botsWorkspaceRoot(), botId);
   // Item 4 PR1 (§2.1): the model key is REQUIRED — the create action validates
   // it against loadModelOptions() before ever calling this. No silent fallback
   // to any specific model: a falsy model here means an upstream guard was
@@ -268,8 +273,8 @@ export function defaultDefinition(botId, projectId, model) {
     triggers: { gateway: true, cron: "" },
     system_prompt:
       `You are ${botId}, a single-purpose Crow bot. Operate ONLY within ` +
-      `project ${projectId}'s Kanban (tasks_* filtered by that project_id) and ` +
-      `your workspace ${sessionDir}. For the card you are told to do: read its ` +
+      `your project's board (tasks_* filtered by your project) and ` +
+      `your working folder. For the card you are told to do: read its ` +
       `plan file, do the work, write results into the plan file, advance the card ` +
       `pending->in_progress->done via tasks_update, then reply in the same gateway ` +
       `thread. Never send external email; never run bash. One card per request.`,

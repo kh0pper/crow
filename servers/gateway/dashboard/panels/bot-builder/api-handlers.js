@@ -26,6 +26,7 @@ import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs
 import { worldRootFor, planCarryOver, applyCarryOver, undoCarryOver } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
+import { applyTrackerChoice } from "./tracker-choice.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
 import { guardPolicyForSave } from "./policy-guard.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
@@ -66,32 +67,10 @@ function reqLang(req) {
 import { buildCrowMessagesGatewayConfig } from "./gateway-fields.js";
 export { buildCrowMessagesGatewayConfig };
 
-/**
- * The tracker write the Edit tab's tracker save makes, shared with board_on so
- * the two cannot drift. Mutates and returns `def`: mirrors project_id into
- * the JSON (the column stays authoritative, M3b) and sets tracker_config.
- * tracker_config.project_id is always dropped — tracker.mjs prefers it over
- * the column, so a stale copy would point the bot's context at another board.
- */
-export function applyTrackerChoice(def, { projectId = null, type = "kanban", slug = "", contextFields = "", queueFilterKey = "", queueFilterValue = "" } = {}) {
-  def.project_id = projectId;
-  def.tracker_config = def.tracker_config || {};
-  def.tracker_config.type = type;
-  delete def.tracker_config.project_id;
-  if (type === "custom") {
-    def.tracker_config.tracker_slug = String(slug || "").trim();
-    def.tracker_config.context_fields = String(contextFields || "").split(",").map((x) => x.trim()).filter(Boolean);
-    const qf = String(queueFilterKey || "").trim();
-    const qv = String(queueFilterValue || "").trim();
-    if (qf && qv) { def.tracker_config.queue_filter = { [qf]: qv }; }
-    else { delete def.tracker_config.queue_filter; }
-  } else if (type === "kanban" || type === "task-list" || type === "none") {
-    delete def.tracker_config.tracker_slug;
-    delete def.tracker_config.context_fields;
-    delete def.tracker_config.queue_filter;
-  }
-  return def;
-}
+// applyTrackerChoice lives in the leaf ./tracker-choice.js so wizard.js and
+// move-bot.js can share it without an import cycle (this file imports
+// wizard.js); re-exported for existing importers.
+export { applyTrackerChoice };
 
 /**
  * "Turn on a board" (queue item 20, option A). Gives a bot a kanban board:

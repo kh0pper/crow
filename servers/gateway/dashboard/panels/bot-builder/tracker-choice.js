@@ -1,0 +1,36 @@
+/**
+ * Bot Builder — the one tracker write (leaf module, no imports).
+ *
+ * Shared by the Edit tab's tracker save and "Turn on a board"
+ * (api-handlers.js), the guided wizard's project create (wizard.js) and
+ * "Move a bot here" (move-bot.js), so they cannot drift. Lives here, not in
+ * api-handlers.js, because api-handlers.js imports wizard.js: a helper there
+ * would be an import cycle.
+ */
+
+/**
+ * The tracker write the Edit tab's tracker save makes, shared with board_on so
+ * the two cannot drift. Mutates and returns `def`: mirrors project_id into
+ * the JSON (the column stays authoritative, M3b) and sets tracker_config.
+ * tracker_config.project_id is always dropped — tracker.mjs prefers it over
+ * the column, so a stale copy would point the bot's context at another board.
+ */
+export function applyTrackerChoice(def, { projectId = null, type = "kanban", slug = "", contextFields = "", queueFilterKey = "", queueFilterValue = "" } = {}) {
+  def.project_id = projectId;
+  def.tracker_config = def.tracker_config || {};
+  def.tracker_config.type = type;
+  delete def.tracker_config.project_id;
+  if (type === "custom") {
+    def.tracker_config.tracker_slug = String(slug || "").trim();
+    def.tracker_config.context_fields = String(contextFields || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const qf = String(queueFilterKey || "").trim();
+    const qv = String(queueFilterValue || "").trim();
+    if (qf && qv) { def.tracker_config.queue_filter = { [qf]: qv }; }
+    else { delete def.tracker_config.queue_filter; }
+  } else if (type === "kanban" || type === "task-list" || type === "none") {
+    delete def.tracker_config.tracker_slug;
+    delete def.tracker_config.context_fields;
+    delete def.tracker_config.queue_filter;
+  }
+  return def;
+}

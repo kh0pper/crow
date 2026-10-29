@@ -16,6 +16,12 @@
  * middle step exists. The wizard introduces NO inline JS — changing the
  * channel type re-renders via an explicit "update fields" submit button
  * (nav="reload") instead of an onchange auto-submit.
+ *
+ * ?new=1&project=<id> (the project home's "Add a bot") preselects a project:
+ * the id rides every step as the hidden `project` field (no step edits it),
+ * and the final create re-checks it (canManageProject: a live project the
+ * operator owns). A bad, stale or archived id is dropped: the bot is made
+ * with no project and the review page says so (botbuilder.projectDropped).
  */
 
 import { escapeHtml, section, stepper, button, callout, docsUrl } from "../../shared/components.js";
@@ -30,6 +36,9 @@ import { BOT_TEMPLATES, getTemplate, applyTemplate, availableMcpSet } from "./te
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { engineRequiredFor } from "./engine-gate.js";
+import { applyTrackerChoice } from "./tracker-choice.js";
+import { worldRootFor } from "../../../../../scripts/pi-bots/world-root.mjs";
+import { canManageProject } from "../../../apps/extra-tiles.js";
 
 export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "review"];
 
@@ -45,7 +54,14 @@ const WIZARD_FIELDS = [
   "tpl", "display_name", "custom_bot_id", "bot_id", "model",
   "gw_type", "gw_address", "gw_token", "gw_bot_token", "gw_app_token",
   "gw_guild_id", "gw_channel_ids", "gw_allowlist", "gw_chat_ids",
+  "project",
 ];
+
+/** A positive integer project id, as the string the carry holds, or null. */
+function projectParam(v) {
+  const s = String(v ?? "").trim();
+  return /^[1-9][0-9]{0,15}$/.test(s) ? s : null;
+}
 
 export function wizardStateFromBody(b) {
   const state = {};
@@ -201,6 +217,13 @@ async function reviewBody(db, state, lang) {
 export async function renderWizard(req, res, { db, layout, lang, PAGE_CSS, notice }) {
   const b = req.method === "POST" ? (req.body || {}) : {};
   const state = wizardStateFromBody(b);
+  // The GET entry seeds the preselected project; after that it rides the
+  // POST carry. Anything that is not a plain id is never carried.
+  if (req.method !== "POST") {
+    const p = projectParam((req.query || {}).project);
+    if (p) state.project = p;
+  }
+  if (state.project != null && !projectParam(state.project)) delete state.project;
   const last = WIZARD_STEP_KEYS.length - 1;
 
   // GET always starts fresh at step 0 (spec §D1: no GET deep-links).
@@ -371,7 +394,25 @@ export async function handleWizardCreate(req, res, { db, lang }) {
     }
   } catch { /* fall through to insert; a real conflict errors there */ }
 
-  const def = defaultDefinition(botId, null, state.model);
+  // The preselected project (?new=1&project=<id>), re-checked here: only a
+  // live project the operator owns is kept; anything else is dropped and
+  // the bot is made with no project (warned on the review page).
+  let projectId = null, projectDropped = false, worldRoot = null;
+  if (state.project != null) {
+    const p = projectParam(state.project);
+    if (p && await canManageProject(db, { projectId: Number(p) })) projectId = Number(p);
+    else projectDropped = true;
+  }
+  if (projectId != null) {
+    // A bot made ON a project works from <workspace>/bots/<id> (worldRootFor);
+    // its session_dir and write_paths name that same folder.
+    try {
+      const ws = (await db.execute({ sql: "SELECT workspace_dir FROM project_spaces WHERE id=?", args: [projectId] })).rows[0]?.workspace_dir;
+      if (ws) worldRoot = worldRootFor({ workspaceDir: ws, def: null, crowHome: null, botId });
+    } catch { worldRoot = null; }
+  }
+
+  const def = defaultDefinition(botId, projectId, state.model, { sessionDir: worldRoot });
   const tpl = getTemplate(state.tpl) || BOT_TEMPLATES[BOT_TEMPLATES.length - 1];
 
   // Channel: simple types normalize through the shared module; crow-messages
@@ -419,14 +460,25 @@ export async function handleWizardCreate(req, res, { db, lang }) {
     def.gateways = [{ type: gwType }];
   }
 
+  if (projectId != null) {
+    // Filed the way "Turn on a board" files a bot: a kanban board on the
+    // project, the column authoritative (M3b; no JSON copy added). Its world
+    // root is a fresh <workspace>/bots/<id>, so nothing needs carrying.
+    applyTrackerChoice(def, { projectId, type: "kanban" });
+    delete def.project_id;
+  }
+
   try {
     await db.execute({
-      sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,NULL,1)",
-      args: [botId, display, JSON.stringify(def)],
+      sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1)",
+      args: [botId, display, JSON.stringify(def), projectId],
     });
   } catch (e) {
-    return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(String(e.message || e)));
+    // The fresh wizard keeps the preselected project (a plain id only).
+    const keep = projectParam(state.project) ? "&project=" + projectParam(state.project) : "";
+    return res.redirectAfterPost("/dashboard/bot-builder?new=1" + keep + "&error=" + encodeURIComponent(String(e.message || e)));
   }
   emitBotDefsChanged(botId);
-  return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}`);
+  const warn = projectDropped ? "&warn=" + encodeURIComponent(t("botbuilder.projectDropped", lang)) : "";
+  return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}${warn}`);
 }

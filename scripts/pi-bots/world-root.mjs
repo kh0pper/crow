@@ -78,6 +78,47 @@ export function planCarryOver(oldRoot, newRoot) {
   return out;
 }
 
+function realOrNull(p) {
+  try { return realpathSync(p); } catch { return null; }
+}
+
+/**
+ * planCarryOver for a MOVE between projects ("Move a bot here"), where the
+ * old root may itself be a carried link (A/bots/<id> -> the legacy root).
+ * The carry source is the bot's REAL world, so A -> B -> C never chains links
+ * and moving back to where the world really lives carries nothing:
+ *   - the source is realpath(oldRoot), except that when it is the realpath of
+ *     the bot's own pre-project root (legacyRoot) the legacyRoot path itself
+ *     is used, so the links are exactly the ones "Turn on a board" makes and
+ *     carriedReadRoots (exact-target check) still recognises them;
+ *   - realpath(newRoot) === the real source: mode "none", reason "same_world";
+ *   - "entries" mode from a source that is NOT the legacy root is refused as a
+ *     conflict on newRoot: carriedReadRoots only grants the legacy root as an
+ *     extra read root, so pi-lab's realpath read gate would deny those files.
+ * Planning only, nothing is touched. Same result shape as planCarryOver.
+ */
+export function planMoveCarryOver(oldRoot, newRoot, { legacyRoot = null } = {}) {
+  if (!oldRoot || !newRoot || oldRoot === newRoot) return planCarryOver(oldRoot, newRoot);
+  if (!lstatOrNull(oldRoot)) return planCarryOver(oldRoot, newRoot); // no_old_root
+  const real = realOrNull(oldRoot);
+  if (!real) {
+    // A dangling old root: there is no world to carry (buildBotWorld names
+    // the broken link if the bot ever runs from it again).
+    return { mode: "none", reason: "no_old_root", links: [], already: [], conflicts: [], entries: [] };
+  }
+  if (realOrNull(newRoot) === real) {
+    return { mode: "none", reason: "same_world", links: [], already: [], conflicts: [], entries: [] };
+  }
+  const fromLegacy = !!legacyRoot && realOrNull(legacyRoot) === real;
+  const source = fromLegacy ? legacyRoot : real;
+  const plan = planCarryOver(source, newRoot);
+  if (plan.mode === "entries" && !fromLegacy) {
+    plan.links = [];
+    plan.conflicts = [{ name: ".", path: newRoot }];
+  }
+  return plan;
+}
+
 /**
  * Make the links a conflict-free plan names. symlinkSync refuses an existing
  * path (EEXIST), so a race can only make this fail, never overwrite. On a
