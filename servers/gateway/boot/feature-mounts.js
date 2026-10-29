@@ -346,6 +346,17 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[models] Failed to mount:", err.message);
   }
 
+  // --- Mount Roles API (roles Phase 2, the Models page) ---
+  // Same JSON session gate as the model catalog API, plus CSRF on every POST
+  // (routes/roles-api.js). Never Funnel-public.
+  try {
+    const { default: rolesApiRouter } = await import("../routes/roles-api.js");
+    app.use(rolesApiRouter());
+    console.log("Roles API mounted at /api/roles");
+  } catch (err) {
+    console.warn("[roles-api] Failed to mount:", err.message);
+  }
+
   // --- Mount Turbo Streams (server-pushed HTML fragments) ---
   // Private routes under /dashboard/streams/*; the Funnel-reject
   // middleware above blocks public access. See routes/streams.js for the

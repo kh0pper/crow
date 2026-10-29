@@ -14,6 +14,28 @@ import { upsertSetting } from "../../registry.js";
 import { PROVIDER_INFO } from "../../../../ai/stt/index.js";
 import { renderScopeToggle, scopeToggleScript } from "../../../shared/scope-toggle.js";
 
+/**
+ * Make `id` the one default STT profile. False when no profile has that id
+ * (nothing is written). Shared by this section's handler and the roles API.
+ * @returns {Promise<boolean>}
+ */
+export async function setDefaultSttProfile(db, id) {
+  if (typeof id !== "string" || !id) return false;
+  const existing = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'stt_profiles'",
+    args: [],
+  });
+  let profiles = [];
+  try { profiles = JSON.parse(existing.rows[0]?.value || "[]"); } catch {}
+  if (!Array.isArray(profiles)) return false;
+  const target = profiles.find(p => p && p.id === id);
+  if (!target) return false;
+  profiles.forEach(p => { if (p) p.isDefault = false; });
+  target.isDefault = true;
+  await upsertSetting(db, "stt_profiles", JSON.stringify(profiles));
+  return true;
+}
+
 export default {
   id: "stt-profiles",
   group: "ai",
@@ -293,17 +315,7 @@ export default {
     if (action === "set_default_stt_profile") {
       const { profile_id } = req.body;
       if (!profile_id) { res.json({ ok: false, error: "profile_id required" }); return true; }
-      const existing = await db.execute({
-        sql: "SELECT value FROM dashboard_settings WHERE key = 'stt_profiles'",
-        args: [],
-      });
-      let profiles = [];
-      try { profiles = JSON.parse(existing.rows[0]?.value || "[]"); } catch {}
-      const target = profiles.find(p => p.id === profile_id);
-      if (!target) { res.json({ ok: false, error: "Profile not found" }); return true; }
-      profiles.forEach(p => { p.isDefault = false; });
-      target.isDefault = true;
-      await upsertSetting(db, "stt_profiles", JSON.stringify(profiles));
+      if (!(await setDefaultSttProfile(db, profile_id))) { res.json({ ok: false, error: "Profile not found" }); return true; }
       res.json({ ok: true });
       return true;
     }
