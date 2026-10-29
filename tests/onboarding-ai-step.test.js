@@ -481,3 +481,20 @@ test("ai-step-client.js: the upsell card renders a real anchor to /dashboard/mod
   assert.ok(/upsellLink\.href\s*=\s*"\/dashboard\/model-catalog"/.test(body), "upsell link points at the real Model Catalog route");
   assert.ok(!body.includes("innerHTML"), "upsell link is built via DOM methods, never innerHTML (checked inside the served <script> block only)");
 });
+
+test("no-script form: the Model Studio region note is shown, and a rejected Model Studio key names the region", async () => {
+  const page = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  const form = page.slice(page.indexOf("<noscript>"), page.indexOf("</noscript>"));
+  assert.ok(form.includes("A key only works in the region where it was created."), "region note in the no-script form");
+  const rejected = await render({ step: String(AI_IDX), cloud_error: "key_rejected", cloud_preset: "modelstudio", cloud_status: "401" }, { db: providersDb(0) });
+  assert.ok(rejected.includes("Alibaba Model Studio (Qwen) did not accept that key. Check that you copied all of it, and that you picked the region where you created it."));
+  const plain = await render({ step: String(AI_IDX), cloud_error: "key_rejected", cloud_preset: "openai", cloud_status: "401" }, { db: providersDb(0) });
+  assert.ok(plain.includes("OpenAI did not accept that key. Check that you copied all of it."));
+  assert.ok(!plain.includes("OpenAI did not accept that key. Check that you copied all of it, and that you picked the region"), "only Model Studio names the region");
+});
+
+test("the variant optgroups come from one shared helper", () => {
+  const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/onboarding.js"), "utf8");
+  assert.ok(/import \{[^}]*variantOptionsHtml[^}]*\} from "\.\.\/shared\/add-provider-ui\.js"/.test(src), "onboarding imports the helper");
+  assert.ok(!src.includes("<optgroup"), "no second optgroup builder");
+});

@@ -17,6 +17,7 @@ import {
   isRecommendationsStale,
   RECOMMENDATION_ROLES,
   bareModelId,
+  recommendedModelIds,
 } from "../servers/shared/provider-recommendations.js";
 import { CORE_ROLES } from "../servers/shared/model-roles.js";
 
@@ -85,7 +86,7 @@ test("modelstudio: four regions, Singapore first, a POST key test, no listing, a
   for (const v of p.variants) assert.equal(v.labelKey, `providers.preset.modelstudio.${v.id}`);
   assert.deepEqual(p.testRequest, {
     method: "POST", path: "/chat/completions",
-    body: { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1 },
+    body: { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1, enable_thinking: false },
   });
   assert.equal(p.modelsPath, null);
   assert.deepEqual(p.probe, { toolChoice: "auto", extraBody: { enable_thinking: false } });
@@ -381,4 +382,37 @@ test("a listing's models/<id> ids match the bare recommended ids (F2, Google)", 
   assert.equal(bareModelId("models/gemini-3.8-flash"), "gemini-3.8-flash");
   assert.equal(bareModelId("openai/gpt-oss-120b"), "openai/gpt-oss-120b");
   assert.equal(bareModelId("models/"), "models/");
+});
+
+test("modelstudio notes: thinking-only models say a probe may fail; omni-flash names reasoning_effort; the domain is legacy", () => {
+  const ms = JSON.parse(readFileSync(FILE, "utf8")).providers.modelstudio;
+  const all = Object.values(ms.roles).flat();
+  for (const id of ["kimi-k3", "glm-5.3"]) {
+    const entries = all.filter((e) => e.model_id === id);
+    assert.ok(entries.length > 0, id);
+    for (const e of entries) {
+      assert.match(e.note, /always thinks/i, `${id}: ${e.note}`);
+      assert.match(e.note, /may fail/i, `${id}: ${e.note}`);
+      assert.doesNotMatch(e.note, /^Documented with tool_choice required/, id);
+    }
+  }
+  for (const e of all.filter((x) => x.model_id === "qwen3.8-omni-flash")) assert.match(e.note, /reasoning_effort/, e.note);
+  assert.match(ms.endpoint_check, /legacy/i);
+  assert.match(ms.endpoint_check, /still available/i);
+});
+
+test("recommendedModelIds: verified, fitting kinds, once each, never an entry retiring before review_by", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-recs-ids-"));
+  const f = join(dir, "recs.json");
+  const e = (model_id, extra = {}) => ({ model_id, id_verified: true, kind: "chat", status: "stable", retires: null, ...extra });
+  writeFileSync(f, JSON.stringify({
+    schema_version: 1, accessed: "2026-10-28", review_by: "2027-01-28", source_notes: "x",
+    providers: { openai: { roles: {
+      everyday: [e("m-ok"), e("m-retiring", { retires: "2026-12-11" }), e("m-later", { retires: "2027-04-01" }), e("m-inferred", { id_verified: false })],
+      quick: [e("m-ok"), e("rt", { kind: "realtime" })],
+      embed: [e("em", { kind: "embed" })],
+    } } },
+  }));
+  bumpMtime(f, 60);
+  assert.deepEqual(recommendedModelIds("openai", { file: f }), ["m-ok", "m-later", "em"]);
 });

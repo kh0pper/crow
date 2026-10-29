@@ -24,7 +24,7 @@ import { buildIdentityBackup, loadInstanceSeed, deriveInstanceIdentity } from ".
 import { instanceSeedDir } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { PROVIDER_PRESETS, presetById } from "../../../shared/provider-presets.js";
 import { candidatePick } from "../../../shared/provider-recommendations.js";
-import { addProviderSheetHtml, addProviderClientJS } from "../shared/add-provider-ui.js";
+import { addProviderSheetHtml, addProviderClientJS, variantOptionsHtml } from "../shared/add-provider-ui.js";
 import { aiStepClientJS } from "./onboarding/ai-step-client.js";
 import { upsertProvider, listProvidersAll } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
@@ -413,9 +413,11 @@ const CLOUD_ERROR_KEYS = {
 
 /** The error line for a closed-enum code, with {provider}/{host}/{status} filled from validated hints (never the key). */
 function cloudErrorLine(code, query, lang) {
-  const key = Object.hasOwn(CLOUD_ERROR_KEYS, code) ? CLOUD_ERROR_KEYS[code] : null;
+  let key = Object.hasOwn(CLOUD_ERROR_KEYS, code) ? CLOUD_ERROR_KEYS[code] : null;
   if (!key) return null;
   const preset = presetById(typeof query?.cloud_preset === "string" ? query.cloud_preset : "");
+  // A preset with its own rejected-key line (Model Studio: "is it the right region?"), as the sheet shows.
+  if (code === "key_rejected" && preset?.keyRejectedKey) key = preset.keyRejectedKey;
   const status = /^\d{3}$/.test(String(query?.cloud_status ?? "")) ? String(query.cloud_status) : "";
   let host = "";
   const url = preset?.baseUrl || preset?.variants?.[0]?.baseUrl;
@@ -451,10 +453,10 @@ function renderAiOptions(lang, ctx = {}) {
   const presetOptions = PROVIDER_PRESETS.map((p) =>
     `<option value="${escapeHtml(p.id)}">${escapeHtml(t(p.labelKey, lang))}</option>`).join("");
   // Each preset's plans or regions under its own name; the POST keeps only the chosen preset's.
-  const variantOptions = PROVIDER_PRESETS.filter((p) => Array.isArray(p.variants) && p.variants.length).map((p) =>
-    `<optgroup label="${escapeHtml(t(p.labelKey, lang))}">` +
-    p.variants.map((v) => `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("") +
-    "</optgroup>").join("");
+  const variantOptions = variantOptionsHtml(lang);
+  // A preset's own key note (Model Studio: the key is region-bound), named so it reads without the sheet.
+  const presetNotes = PROVIDER_PRESETS.filter((p) => p.keyNoteKey).map((p) =>
+    `<p class="onb-ai-free-blurb">${escapeHtml(t(p.labelKey, lang))}: ${escapeHtml(t(p.keyNoteKey, lang))}</p>`).join("");
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
   const cloudError = cloudErrorText ? callout(cloudErrorText, "error") : "";
@@ -515,6 +517,7 @@ function renderAiOptions(lang, ctx = {}) {
         <label class="onb-ai-field">${t("onboarding.ai.cloudKeyLabel", lang)}
           <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" required>
         </label>
+        ${presetNotes}
         <label class="onb-ai-field">${t("onboarding.ai.cloudModelLabel", lang)}
           <input type="text" name="model" id="onb-ai-cloud-model" autocomplete="off">
         </label>

@@ -62,8 +62,12 @@ function copyMap(prefix, codes, lang) {
 const presetLabel = (p, lang) => t(p.labelKey, lang);
 const hasVariants = (p) => Array.isArray(p.variants) && p.variants.length > 0;
 
-/** Every preset's variants, one optgroup per preset (the client keeps only the chosen preset's). */
-function variantOptionsHtml(lang) {
+/**
+ * Every preset's variants (plans or regions), one optgroup per preset. The
+ * sheet's client keeps only the chosen preset's; the onboarding no-script form
+ * sends whichever is picked and its handler ignores one from another preset.
+ */
+export function variantOptionsHtml(lang) {
   return PROVIDER_PRESETS.filter(hasVariants).map((p) =>
     `<optgroup label="${escapeHtml(presetLabel(p, lang))}">` +
     p.variants.map((v) => `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("") +

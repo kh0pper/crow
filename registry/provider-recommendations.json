@@ -3056,7 +3056,7 @@
         "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
         "https://www.alibabacloud.com/help/en/model-studio/token-plan-personal-overview"
       ],
-      "endpoint_check": "2026-10-28 (docs only, no live call): bases https://dashscope-intl.aliyuncs.com/compatible-mode/v1 (Singapore), https://dashscope-us.aliyuncs.com/compatible-mode/v1 (US Virginia), https://dashscope.aliyuncs.com/compatible-mode/v1 (Beijing), https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1 (Hong Kong); Authorization: Bearer <key>; keys are region-bound (cross-region use returns 401 invalid_api_key). No models-list endpoint is documented (unverified); key test = POST /chat/completions with max_tokens 1.",
+      "endpoint_check": "2026-10-28 (docs only, no live call): bases https://dashscope-intl.aliyuncs.com/compatible-mode/v1 (Singapore), https://dashscope-us.aliyuncs.com/compatible-mode/v1 (US Virginia), https://dashscope.aliyuncs.com/compatible-mode/v1 (Beijing), https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1 (Hong Kong); Authorization: Bearer <key>; keys are region-bound (cross-region use returns 401 invalid_api_key). No models-list endpoint is documented (unverified); key test = POST /chat/completions with max_tokens 1. The docs call the shared DashScope domain legacy but still available and recommend a workspace-dedicated domain (which needs a per-user workspace id, so the preset keeps the DashScope domain); watch for its retirement at review.",
       "none_found": [
         "rerank"
       ],
@@ -3102,7 +3102,7 @@
               "out": 15,
               "price_verified": true
             },
-            "note": "Documented with tool_choice required. Not on US Virginia. Context not stated in docs."
+            "note": "Always thinks (thinking cannot be turned off), and tool_choice required is not supported in thinking mode, so a forced tool call or \"Test the picks\" may fail on it; the function-calling page example uses required anyway (unverified which holds). Not on US Virginia. Context not stated in docs."
           },
           {
             "model_id": "deepseek-v4-pro-0813",
@@ -3172,7 +3172,7 @@
               "out": 0.47,
               "price_verified": true
             },
-            "note": "Audio and video in as well; text out."
+            "note": "Audio and video in as well; text out. Thinking is controlled by reasoning_effort, not enable_thinking, so the probe does not turn it off for this model."
           }
         ],
         "deep": [
@@ -3276,7 +3276,7 @@
               "out": 4.4,
               "price_verified": true
             },
-            "note": "Thinking always on."
+            "note": "Always thinks (thinking cannot be turned off; enable_thinking false does nothing), so a forced tool call or \"Test the picks\" may fail on it, and max_tokens counts its reasoning."
           }
         ],
         "expert": [
@@ -3312,7 +3312,7 @@
               "out": 15,
               "price_verified": true
             },
-            "note": "Different family; not on US Virginia."
+            "note": "Different family. Always thinks (thinking cannot be turned off), so a forced tool call or \"Test the picks\" may fail on it. Not on US Virginia."
           }
         ],
         "critic": [

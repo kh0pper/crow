@@ -111,7 +111,8 @@ export const PROVIDER_PRESETS = deepFreeze([
     authStyle: "bearer",
     testRequest: {
       method: "POST", path: "/chat/completions",
-      body: { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1 },
+      // Thinking off: qwen3.8-flash thinks by default, and a key test must not wait on it.
+      body: { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1, enable_thinking: false },
     },
     modelsPath: null,
     probe: { toolChoice: "auto", extraBody: { enable_thinking: false } },

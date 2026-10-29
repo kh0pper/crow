@@ -870,7 +870,8 @@ test("modelstudio: the key test is one POST to chat/completions in cloud mode; a
   assert.equal(c.mode, "cloud");
   assert.equal(c.headers.Authorization, "Bearer fixture-ms-key-1");
   assert.equal(c.headers["content-type"], "application/json");
-  assert.deepEqual(c.body, { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1 });
+  // Thinking off: qwen3.8-flash thinks by default, which a one-token key test must not wait on.
+  assert.deepEqual(c.body, { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1, enable_thinking: false });
   assert.ok(c.timeoutMs > 0 && c.timeoutMs <= 8000);
 });
 
