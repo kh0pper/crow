@@ -101,7 +101,7 @@ before(async () => {
 
   const tdb = createDbClient(dbPath);
   try { await ensurePeerRelayToken(tdb); } finally { tdb.close(); }
-  relayToken = readFileSync(join(process.env.CROW_HOME, "peer-relay-token"), "utf8").trim();
+  relayToken = readFileSync(join(process.env.CROW_HOME, "secrets", "peer-relay-token"), "utf8").trim();
   initGatewayActorKey();
 
   app = express();
@@ -160,7 +160,7 @@ test("the relay token is minted 0600 and validates; a wrong one does not", async
     assert.equal(await validatePeerRelayToken(db, ""), false);
   } finally { db.close(); }
   const { statSync } = await import("node:fs");
-  assert.equal(statSync(join(process.env.CROW_HOME, "peer-relay-token")).mode & 0o777, 0o600);
+  assert.equal(statSync(join(process.env.CROW_HOME, "secrets", "peer-relay-token")).mode & 0o777, 0o600);
 });
 
 test("refused: no token", async () => {

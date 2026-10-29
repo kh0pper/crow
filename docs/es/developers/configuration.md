@@ -81,7 +81,7 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 | Variable | Predeterminado | Propósito |
 |---|---|---|
 | `CROW_UNIFIED_DASHBOARD` | habilitado | Dashboard federado entre instancias emparejadas (`0` lo desactiva). |
-| `CROW_PEER_TOKENS_PATH` | por `CROW_HOME` | Override del archivo de credenciales de peers (hosts con varios gateways). |
+| `CROW_PEER_TOKENS_PATH` | `<CROW_HOME>/secrets/peer-tokens.json` | Override del archivo de credenciales de peers (hosts con varios gateways). El valor por defecto está en el directorio de secretos oculto a los sandbox de bots; un archivo en la ruta antigua `<CROW_HOME>/peer-tokens.json` se mueve allí al arrancar el gateway. Un override que apunta a esa ruta antigua se ignora y su archivo se mueve; cualquier otro se usa tal cual, con un aviso al arrancar si está fuera de `secrets/`. |
 | `CROW_CALLS_ENABLED` | `0` | Función de llamadas WebRTC. |
 | `CROW_CALLS_MAX_PEERS` | `4` | Máximo de peers por sala de llamada. |
 | `WEBRTC_TURN_URL` / `TURN_SECRET` | *(sin definir)* | Relay TURN para atravesar NAT. |

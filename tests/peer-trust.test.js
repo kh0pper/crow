@@ -574,7 +574,7 @@ describe("pair CLI --manual-paste vets the pasted answer", () => {
   function runPair(d, args, answer) {
     return spawnSync(process.execPath, [CLI, "--manual-paste", ...args], {
       input: JSON.stringify(answer),
-      env: { ...process.env, CROW_HOME: d, CROW_DATA_DIR: d, CROW_DB_PATH: join(d, "crow.db"), CROW_PEER_TOKENS_PATH: join(d, "peer-tokens.json"), CROW_DISABLE_NOSTR: "1" },
+      env: { ...process.env, CROW_HOME: d, CROW_DATA_DIR: d, CROW_DB_PATH: join(d, "crow.db"), CROW_PEER_TOKENS_PATH: join(d, "secrets", "peer-tokens.json"), CROW_DISABLE_NOSTR: "1" },
       encoding: "utf8",
       timeout: 60_000,
     });
@@ -589,7 +589,7 @@ describe("pair CLI --manual-paste vets the pasted answer", () => {
       assert.match(r.stderr, /not the --peer-id/);
       assert.equal((await getInstance(xdb, "peer-revoked-1")).status, "revoked");
       assert.equal((await getInstance(xdb, "peer-other-2")).status, "revoked");
-      assert.equal(existsSync(join(d, "peer-tokens.json")), false);
+      assert.equal(existsSync(join(d, "secrets", "peer-tokens.json")), false);
     } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
   });
 
@@ -660,8 +660,11 @@ async function withHome(fn) {
   mkdirSync(dataDir, { recursive: true });
   const xdb = await makeRealDb(dataDir);
   const saved = Object.fromEntries(["CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_PEER_TOKENS_PATH"].map((k) => [k, process.env[k]]));
-  Object.assign(process.env, { CROW_HOME: d, CROW_DATA_DIR: dataDir, CROW_DB_PATH: join(dataDir, "crow.db"), CROW_PEER_TOKENS_PATH: join(d, "peer-tokens.json") });
-  try { return await fn({ d, dataDir, xdb, store: join(d, "peer-tokens.json") }); } finally {
+  // The store's home since it moved into the hidden secrets dir.
+  mkdirSync(join(d, "secrets"), { recursive: true, mode: 0o700 });
+  const store = join(d, "secrets", "peer-tokens.json");
+  Object.assign(process.env, { CROW_HOME: d, CROW_DATA_DIR: dataDir, CROW_DB_PATH: join(dataDir, "crow.db"), CROW_PEER_TOKENS_PATH: store });
+  try { return await fn({ d, dataDir, xdb, store }); } finally {
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     try { xdb.close(); } catch {}
     rmSync(d, { recursive: true, force: true });

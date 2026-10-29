@@ -108,8 +108,6 @@ test("a selected remote capability reaches the pi bot's model, and a call throug
     baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none",
     models: [{ id: "fake-model", name: "fake", reasoning: false, input: ["text"], contextWindow: 32000, maxTokens: 1000,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
-  const relayTokenPath = join(crowHome, "peer-relay-token");
-  writeFileSync(relayTokenPath, TOKEN, { mode: 0o600 });
 
   const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
   const { mintRemoteBlocks } = await import("../scripts/pi-bots/remote-blocks.mjs");
@@ -120,7 +118,7 @@ test("a selected remote capability reaches the pi bot's model, and a call throug
     proxyPath: join(REPO, "scripts", "pi-bots", "crow-remote-proxy.mjs"),
     node: process.execPath,
     relayBaseUrl: `http://127.0.0.1:${peerPort}`,
-    relayTokenPath,
+    relayToken: TOKEN,
   });
   assert.deepEqual(warnings, []);
   assert.ok(csv.split(",").includes(REMOTE_TOOL), csv);

@@ -17,7 +17,9 @@
  *     (retained generated bundle secrets)        (tmpfs, read-only)
  *   <CROW_HOME>/.env, checkout .env, env/*.env  yes                  no
  *   <CROW_HOME>/bundles/<id>/.env, manifests    yes                  no
- *   <CROW_HOME>/*-token, peer-tokens.json       yes                  no
+ *   <CROW_HOME>/*-token                         yes                  no
+ *   <CROW_HOME>/secrets/peer-tokens.json,       no: hidden dir       no (not collected)
+ *     secrets/peer-relay-token
  *   <data dir>/ntfy-push.json                   yes                  no
  *   crow.db providers.api_key                   yes (crow.db is      no
  *                                                writable)

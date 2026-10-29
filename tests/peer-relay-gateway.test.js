@@ -29,7 +29,7 @@ async function post(headers) {
 }
 
 test("the relay is live behind its own token and actor check", async () => {
-  const tokenPath = join(A.dir, "peer-relay-token");
+  const tokenPath = join(A.dir, "secrets", "peer-relay-token");
   assert.ok(existsSync(tokenPath), "relay token minted at boot");
   assert.equal(statSync(tokenPath).mode & 0o777, 0o600);
   const relayToken = readFileSync(tokenPath, "utf8").trim();

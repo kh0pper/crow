@@ -23,13 +23,14 @@
  *     an enroll that wrote its key before inserting its row.
  *
  * Before the FIRST reconcile on a host, a mode-0600 snapshot of the whole
- * store is written (`<store>.pre-pt1.<ts>`); the operator shreds it once the
+ * store is written (`<store>.pre-pt1.<ts>`, beside the store in
+ * <CROW_HOME>/secrets; an older one at the old path moves with the store); the operator shreds it once the
  * final key set is verified. A marker file records that it was taken.
  */
 
 import { existsSync, writeFileSync, copyFileSync, chmodSync } from "node:fs";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
-import { updatePeerCreds, entryMintMs, loadPeerCreds, peerTokensPath } from "../shared/peer-credentials.js";
+import { updatePeerCreds, entryMintMs, loadPeerCreds, peerTokensPath, migratePeerCredsStore } from "../shared/peer-credentials.js";
 import { setUntrustedWithCreds, setOrphanKeys } from "../shared/peer-trust-health.js";
 import { closeSessionsOwnedByEverywhere, countSessionsOwnedByEverywhere, peerSessionOwner } from "./session-manager.js";
 import bus from "../shared/event-bus.js";
@@ -50,6 +51,7 @@ const _sameSecondLogged = new Set();
  * @returns {string|null} the snapshot path when one was written
  */
 export function snapshotStoreOnce({ now = () => Date.now() } = {}) {
+  migratePeerCredsStore();
   const store = peerTokensPath();
   const marker = `${store}.pre-pt1.done`;
   if (existsSync(marker) || !existsSync(store)) return null;
@@ -189,6 +191,11 @@ export function startPeerTrustSweeper({ db, getInstanceSyncManager = () => null,
     })().finally(() => { running = null; });
     return running;
   };
+  // The one-time move of the store into <CROW_HOME>/secrets comes first, so
+  // the snapshot below finds its moved marker instead of taking a new one.
+  try { migratePeerCredsStore(); } catch (err) {
+    console.error(`[peer-trust] could not move the credential store into secrets/: ${err.message}`);
+  }
   try { snapshotStoreOnce(); } catch (err) {
     console.warn(`[peer-trust] pre-PT-1 snapshot failed: ${err.message}`);
   }

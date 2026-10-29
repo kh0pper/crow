@@ -220,9 +220,9 @@ test("T10 boot reconcile: a revoked row's pre-revoke key is gone once the gatewa
     await A.boot();
     assert.equal(await until(() => A.tokens()[B.id] === undefined, 15_000), true, "deleted by the boot reconcile");
     const { existsSync, readdirSync } = await import("node:fs");
-    const snaps = readdirSync(A.dir).filter((f) => f.startsWith("peer-tokens.json.pre-pt1."));
+    const snaps = readdirSync(join(A.dir, "secrets")).filter((f) => f.startsWith("peer-tokens.json.pre-pt1."));
     assert.ok(snaps.some((f) => !f.endsWith(".done")), "the one-time pre-PT-1 snapshot exists");
-    assert.ok(existsSync(join(A.dir, "peer-tokens.json.pre-pt1.done")));
+    assert.ok(existsSync(join(A.dir, "secrets", "peer-tokens.json.pre-pt1.done")));
     const r = await rawSigned(B, A, { path: "/dashboard/overview", authToken: B.tokens()[A.id].auth_token, signingKey: key.signing_key });
     assert.equal(r.status, 401);
   } finally { await cleanup(); }

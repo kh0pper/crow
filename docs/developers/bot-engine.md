@@ -175,7 +175,7 @@ The block's env is exactly:
 | Variable | Meaning |
 |---|---|
 | `CROW_REMOTE_RELAY_URL` | the loopback relay URL above |
-| `CROW_REMOTE_RELAY_TOKEN_PATH` | `<CROW_HOME>/peer-relay-token`, the path-scoped relay token minted at gateway boot |
+| `CROW_REMOTE_RELAY_TOKEN` | the path-scoped relay token minted at gateway boot, by value. Its file, `<CROW_HOME>/secrets/peer-relay-token`, is in the directory the pi sandbox hides, so the bot engine reads it outside the sandbox and the proxy never opens it |
 | `CROW_REMOTE_ACTOR_ID`, `CROW_REMOTE_ACTOR_SESSION`, `CROW_REMOTE_ACTOR_THREAD`, `CROW_REMOTE_ACTOR_GATEWAY`, `CROW_REMOTE_ACTOR_SIG` | the turn's bot, session, thread and gateway, and their v2 `peer-relay` signature, sent as `X-Crow-Actor-{Id,Session,Thread,Gateway,Sig}` |
 
 The relay (`servers/gateway/routes/peer-relay.js`) runs these checks in order, and each refusal is a JSON-RPC error that never reaches the peer:
