@@ -270,6 +270,21 @@ test("a ready preview fills its tile, and a type tile is the same size (phone an
   }
 });
 
+test("390 px: the previews-off line is one line, at most 64 px tall, details collapsed", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  for (const lang of ["en", "es"]) {
+    await setLang(lang); fixture("artifacts"); await setPreviews(false);
+    const p = await open("/dashboard/make", { width: 390, height: 844 });
+    try {
+      const h = await p.ev("document.querySelector('.mk-previews-off').getBoundingClientRect().height");
+      assert.ok(h > 0 && h <= 64, `${lang}: off line is ${h}px`);
+      assert.equal(await p.ev("document.querySelector('.mk-previews-what').open"), false);
+      assert.ok(await p.ev("document.querySelector('.mk-previews-what summary').getBoundingClientRect().height") >= 44);
+    } finally { await p.close(); }
+  }
+  await setLang("en");
+});
+
 test("Artifacts only: the Workspace offer shows with the tiles; previews off shows the switch (phone and desktop)", async (ctx) => {
   if (!chrome) return ctx.skip("no headless Chrome");
   fixture("artifacts"); await setPreviews(false);

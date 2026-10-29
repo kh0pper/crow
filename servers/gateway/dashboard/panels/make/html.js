@@ -99,7 +99,7 @@ function previewBox(item, type, typeLabel, lang) {
 function previewsBlock(previews, lang) {
   if (!previews) return "";
   if (!previews.enabled) {
-    return `<div class="mk-previews-off"><p>${esc(t("shell.previewsNotEnabled", lang))}</p><p class="mk-disclosure">${esc(t("shell.previewsDisclosure", lang))}</p><form method="post" action="/dashboard/make/previews/enable"><input type="hidden" name="_csrf" value="${esc(previews.csrf || "")}"><input type="hidden" name="back" value="${esc(previews.back || ROUTE)}"><button type="submit" class="btn btn-secondary mk-start-act">${esc(t("shell.previewsEnable", lang))}</button></form></div>`;
+    return `<div class="mk-previews-off"><p>${esc(t("shell.previewsNotEnabled", lang))}</p><form method="post" action="/dashboard/make/previews/enable"><input type="hidden" name="_csrf" value="${esc(previews.csrf || "")}"><input type="hidden" name="back" value="${esc(previews.back || ROUTE)}"><button type="submit" class="mk-start-act mk-linkbtn">${esc(t("shell.previewsEnable", lang))}</button></form><details class="mk-previews-what"><summary>${esc(t("shell.previewsWhat", lang))}</summary><p class="mk-disclosure">${esc(t("shell.previewsDisclosure", lang))}</p></details></div>`;
   }
   return previews.lineKey ? `<p class="mk-notice mk-previews-line" role="status">${esc(t(previews.lineKey, lang))}</p>` : "";
 }

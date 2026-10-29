@@ -466,10 +466,15 @@ test("an existing instance sees the button, not previews", async () => {
     },
   });
   try {
-  for (const [lang, button, line] of [["en", "Turn on previews", "Previews are off."], ["es", "Activar vistas previas", "Las vistas previas están desactivadas."]]) {
+  for (const [lang, button, line] of [["en", "Turn on", "Previews are off."], ["es", "Activar", "Vistas previas desactivadas."]]) {
     const html = (await page(lang)).body;
     assert.match(html, new RegExp(`<form[^>]*method="post"[^>]*action="/dashboard/make/previews/enable"`));
-    assert.equal(count(html, button), 1);
+    assert.match(html, new RegExp(`<button type="submit" class="mk-start-act mk-linkbtn">${button}</button>`));
+    assert.match(html, /name="_csrf"/);
+    assert.match(html, /name="back" value="\/dashboard\/make/);
+    assert.match(html, /<details class="mk-previews-what"><summary>/);
+    assert.doesNotMatch(html, /<details class="mk-previews-what"[^>]* open/);
+    assert.equal(count(html, escHtml(line)), 1, "one line");
     assert.ok(html.includes(escHtml(line)));
     assert.ok(html.includes(escHtml(t("shell.previewsDisclosure", lang))));
     assert.doesNotMatch(tileOf(html, a.id), /<img|data-mk-pv-src/);
@@ -483,6 +488,15 @@ test("an existing instance sees the button, not previews", async () => {
   // The Workspace path reads no renderer deps at all.
   assert.deepEqual(await P.itemPreview(db, { kind: "workspace_file", ref: "4242" }, null),
     { previewState: "workspace", previewUrl: "/dashboard/make/preview/workspace_file/4242", previewReason: null });
+});
+
+test("previews on shows no off line", async () => {
+  const P2 = await import("../servers/gateway/preview/renderer.js");
+  await art({ type: "page" });
+  await P2.setPreviewsEnabled(db, true);
+  const html = (await page("en")).body;
+  assert.doesNotMatch(html, /class="mk-previews-(off|what)"|action="\/dashboard\/make\/previews\/enable"/);
+  await clearSwitch();
 });
 
 test("a throwing revoke still releases the lease", async () => {
