@@ -7,6 +7,9 @@
  *   manual mode: refreshes ENABLED providers from models.json; never
  *   re-enables a disabled (retired or uninstalled) provider, never adds one.
  * - Disable / enable / test buttons reuse the existing legacy actions.
+ * - "Let bots use this provider" (cloud rows only): this box's consent for
+ *   the cloud door (servers/shared/cloud-consent.js); off again by itself
+ *   when the row's address or key changes.
  *
  * Every POST redirects back to ?section=llm&tab=providers so Turbo Drive
  * keeps the user on this tab.
@@ -31,6 +34,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { isDefaultCrowHome } from "../../../../../shared/crow-home.js";
 import { scanSlots, consumersOfModel, piConfigRefs } from "../../../../../shared/model-consumers.js";
+import {
+  readCloudConsent, readCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow,
+} from "../../../../../shared/cloud-consent.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -107,6 +113,18 @@ export function duplicateClusters(providers) {
   return out;
 }
 
+/** The "Let bots use this provider" switch for an enabled cloud row; "" otherwise. */
+export function botsSwitch(p, { consent, salt, lang = "en" }) {
+  if (p.disabled || !isCloudRow(p)) return "";
+  const on = consentVerdict(p, consent[p.id], { salt }) === "ok";
+  const label = escapeHtml(t("providers.botsMayUse", lang));
+  return `<form method="post" class="llm-bots-switch">
+            <input type="hidden" name="action" value="${on ? "llm_provider_bots_deny" : "llm_provider_bots_allow"}">
+            <input type="hidden" name="id" value="${escapeHtml(p.id)}">
+            <button type="submit" role="switch" aria-checked="${on ? "true" : "false"}"><span class="llm-bots-track" aria-hidden="true"></span>${label}</button>
+          </form>`;
+}
+
 const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
 const USED_BY_MAX = 4;
 
@@ -163,6 +181,7 @@ export default {
     let ownInstanceId = null;
     try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
     const hostCtx = { ownAddrs: getOwnAddresses(), ownInstanceId, instanceNames };
+    const consentCtx = { consent: await readCloudConsent(db), salt: await readCloudConsentSalt(db), lang };
     const buildRow = (p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const idEsc = escapeHtml(p.id);
@@ -174,7 +193,7 @@ export default {
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
-        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}</td>
+        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}</td>
         <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
@@ -241,6 +260,16 @@ export default {
         .llm-pill { display:inline-block; max-width:100%; white-space:normal; overflow-wrap:anywhere; vertical-align:middle; }
         .llm-cell-id .llm-pill { margin-top:2px; }
       }
+      .llm-bots-switch { margin-top:6px; }
+      .llm-bots-switch button {
+        display:inline-flex; align-items:center; gap:8px; min-height:44px; padding:0 4px;
+        background:none; border:none; cursor:pointer; color:var(--crow-text-secondary); font:inherit; font-size:0.78rem; text-align:left;
+      }
+      .llm-bots-track { position:relative; flex:none; width:30px; height:18px; border-radius:9px; background:var(--crow-border); }
+      .llm-bots-track::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:var(--crow-bg-surface); }
+      .llm-bots-switch button[aria-checked="true"] .llm-bots-track { background:var(--crow-accent); }
+      .llm-bots-switch button[aria-checked="true"] .llm-bots-track::after { left:14px; }
+      .llm-bots-switch button:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
       .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {
         border:1px solid var(--crow-border);
@@ -387,6 +416,21 @@ export default {
       if (row) {
         await upsertProvider(db, { ...row, disabled: false });
         invalidateProvidersCache();
+      }
+      res.redirectAfterPost(BACK);
+      return true;
+    }
+    if (action === "llm_provider_bots_allow" || action === "llm_provider_bots_deny") {
+      const id = typeof req.body?.id === "string" ? req.body.id : "";
+      if (id) {
+        if (action === "llm_provider_bots_allow") {
+          const user = typeof req.dashboardUser === "string" && req.dashboardUser ? req.dashboardUser : "owner";
+          const r = await grantCloudConsent(db, id, { actor: `dashboard:${user}` });
+          if (r.ok) console.log(`[llm-providers-tab] bots may use ${id} (dashboard:${user})`);
+        } else {
+          await revokeCloudConsent(db, id);
+          console.log(`[llm-providers-tab] bots may no longer use ${id}`);
+        }
       }
       res.redirectAfterPost(BACK);
       return true;

@@ -2362,6 +2362,7 @@ export const translations = {
   "providers.preset.other": { en: "Other (OpenAI-compatible)", es: "Otro (compatible con OpenAI)" },
   "models.add.test.okNoList": { en: "That key works. This provider doesn't share a model list, so choose from our picks below or type a model name.", es: "Esa clave funciona. Este proveedor no comparte una lista de modelos, así que elige entre nuestras recomendaciones o escribe el nombre de un modelo." },
   "models.add.test.key_rejected_region": { en: "{provider} did not accept that key. Check that you copied all of it, and that you picked the region where you created it.", es: "{provider} no aceptó esa clave. Comprueba que la copiaste completa y que elegiste la región donde la creaste." },
+  "providers.botsMayUse": { en: "Let bots use this provider", es: "Permitir que los bots usen este proveedor" },
   "models.add.test.ok": { en: "That key works. {n} models available.", es: "Esa clave funciona. {n} modelos disponibles." },
   "models.add.test.key_rejected": { en: "{provider} did not accept that key. Check that you copied all of it.", es: "{provider} no aceptó esa clave. Comprueba que la copiaste completa." },
   "models.add.test.bad_key": { en: "That key has spaces or hidden characters. Paste it again.", es: "Esa clave tiene espacios o caracteres ocultos. Pégala de nuevo." },

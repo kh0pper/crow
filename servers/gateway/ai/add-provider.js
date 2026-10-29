@@ -22,6 +22,7 @@ import { scanSlots } from "../../shared/model-consumers.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
 import { getOwnAddresses } from "../../shared/locality.js";
 import { buildRoleRows } from "../dashboard/settings/sections/models/rows.js";
+import { grantCloudConsent } from "../../shared/cloud-consent.js";
 
 const MAX_MODEL_IDS = 2000;
 const MAX_MODEL_ID_LEN = 256;
@@ -293,11 +294,13 @@ function cleanModelIds(modelIds) {
  * `other` with a typed model id, the server simply had no listing). On
  * `reuse`, the stored models are kept and the ticked ones added (I9), so a
  * model a role is bound to is never dropped. `onAdded(providerId)` runs after
- * the write (Task 15's consent seam).
+ * the write; by default it records this box's consent for bots to use the
+ * row (Task 15), on a new row and again on reuse.
  */
 export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, modelIds } = {}, {
   upsertProviderFn = upsertProvider, invalidateFn = invalidateProvidersCache,
-  testFn = testProviderKey, listRowsFn = listProvidersAll, onAdded,
+  testFn = testProviderKey, listRowsFn = listProvidersAll,
+  onAdded = (id) => grantCloudConsent(db, id, { actor: "add-provider" }),
 } = {}) {
   const preset = presetById(presetId);
   if (!preset) return { ok: false, code: "unknown_preset" };
@@ -350,7 +353,9 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
     release();
   }
   // Outside the try: the row is written, so a failing onAdded must not read as "not saved".
-  if (onAdded) await onAdded(saved.id);
+  if (onAdded) {
+    try { await onAdded(saved.id); } catch (err) { console.warn(`[add-provider] after-save step failed: ${err?.message}`); }
+  }
   return { ok: true, providerId: saved.id, reuse: saved.reuse, test };
 }
 
