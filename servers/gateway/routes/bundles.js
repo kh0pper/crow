@@ -16,6 +16,7 @@
  * GET  /bundles/api/jobs/:id  — Poll install job progress
  */
 
+import { invalidateAppCatalog } from "../apps/catalog.js";
 import { launcherPin } from "../../shared/resolve-command.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
@@ -1134,6 +1135,7 @@ function getInstalled() {
 function saveInstalled(arr) {
   mkdirSync(dirname(INSTALLED_PATH), { recursive: true });
   writeFileSync(INSTALLED_PATH, JSON.stringify(arr, null, 2));
+  invalidateAppCatalog(); // every install/remove path writes through here
 }
 
 /** run()'s timeout: an explicit `timeout: undefined` (e.g. no pull_timeout_s) must keep the 300 s default. */

@@ -58,7 +58,7 @@ test("mid-tour deep links still open in a new tab (deepLink is out of scope)", a
   // Keyed by stem, positions derived from STEP_KEYS: a future step insertion
   // must not re-break this test. hrefs are as-rendered (button() escapes & to &amp;).
   const midTour = [
-    [STEP_KEYS.indexOf("ai"), "/dashboard/settings?section=llm&amp;tab=providers"],
+    [STEP_KEYS.indexOf("ai"), "/dashboard/settings?section=models"],
     [STEP_KEYS.indexOf("integrations"), "/dashboard/settings?section=integrations"],
     // Item 5 PR1: the bot step deep-links into the guided creation wizard.
     [STEP_KEYS.indexOf("bot"), "/dashboard/bot-builder?new=1"],
@@ -69,6 +69,16 @@ test("mid-tour deep links still open in a new tab (deepLink is out of scope)", a
     const a = anchorFor(await render(step), href);
     assert.match(a, /target="_blank"/, `mid-tour step ${step} (${href}) must keep target=_blank`);
     assert.match(a, /rel="noopener"/, `mid-tour step ${step} (${href}) must keep rel=noopener`);
+  }
+});
+
+// The Bot Builder "no model" links go straight to Add a provider.
+test("Bot Builder provider links open Add a provider on the Models page", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const f of ["html.js", "wizard.js"]) {
+    const src = readFileSync(new URL(`../servers/gateway/dashboard/panels/bot-builder/${f}`, import.meta.url), "utf8");
+    assert.ok(src.includes("/dashboard/settings?section=models&amp;add=1"), f);
+    assert.ok(!src.includes("section=llm&amp;tab=providers"), f);
   }
 });
 

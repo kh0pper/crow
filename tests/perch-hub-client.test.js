@@ -5960,5 +5960,17 @@ test("an ask closes the composer's + menu", async () => {
   const src = perchHubJs("en");
   const s = src.indexOf("function renderAsk(card)");
   const body = src.slice(s, braceMatchEnd(src, s) + 1);
-  assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);\s*plusClose\(false\);/, "renderAsk closes the sheet and the + menu");
+  assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);/, "renderAsk closes the sheet");
+  assert.match(body, /plusClose\(false\);/, "renderAsk closes the + menu");
+  assert.ok(body.indexOf("plusClose(false)") < body.indexOf("if(card.expired)"), "the + menu closes before any ask is drawn");
+});
+
+// ---- R1.2 PR 3, Task 2: the Make tab opens on This card --------------------
+test("makeTabHref: a card gives the card scope with no project (no cookie-writing prefetch); no card gives the base", async () => {
+  const makeTabHref = await extract("makeTabHref");
+  assert.equal(makeTabHref("/dashboard/make", 12), "/dashboard/make?scope=card:12");
+  assert.equal(makeTabHref("/dashboard/make?project=hw-club", 12), "/dashboard/make?scope=card:12", "the base project is dropped too");
+  assert.equal(makeTabHref("/dashboard/make", null), "/dashboard/make");
+  assert.equal(makeTabHref("/dashboard/make?project=x", undefined), "/dashboard/make?project=x");
+  assert.equal(makeTabHref("/dashboard/extensions?q=artifacts", 12), "/dashboard/extensions?q=artifacts", "no Make panel: left alone");
 });

@@ -42,6 +42,26 @@ function backIconButton(lang) {
   return `<button type="button" id="perch-back" class="quiet perch-back-icon" aria-label="${name}" title="${name}"><span aria-hidden="true">←</span></button>`;
 }
 
+/** New mode (R1.2 PR 5): the session head's apps button, a 44 px grid icon
+ *  that opens the apps sheet for the session's project. Hidden until the
+ *  client knows the session is filed in a project (showIdent). */
+const GRID_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>`;
+function appsButton(lang) {
+  const name = escapeHtml(t("perch.appsLabel", lang));
+  return `<button type="button" id="perch-apps-btn" class="quiet perch-apps-btn" aria-label="${name}" title="${name}" aria-haspopup="dialog" aria-controls="perch-apps-sheet" hidden>${GRID_SVG}</button>`;
+}
+/** The apps sheet: the same launcher grid as the drawer's (shell/css.js
+ *  .shell-apps-grid), filled from GET /dashboard/shell-api/apps on open. */
+function appsSheet(lang) {
+  return `
+    <dialog id="perch-apps-sheet" class="perch-sheet perch-apps-sheet" aria-labelledby="perch-apps-title">
+    <div class="perch-sheet-inner">
+    <div class="perch-sheet-head"><h3 class="perch-sheet-title" id="perch-apps-title">${escapeHtml(t("perch.appsLabel", lang))}</h3><button type="button" class="quiet perch-sheet-close" id="perch-apps-close" aria-label="${escapeHtml(t("common.close", lang))}" title="${escapeHtml(t("common.close", lang))}">${CLOSE_SVG}</button></div>
+    <div class="shell-apps-grid" id="perch-apps-grid" aria-live="polite"></div>
+    </div>
+    </dialog>`;
+}
+
 function pillRow(lang) {
   return `<div class="pill-row">
         <button type="button" id="perch-plus" class="quiet" aria-label="${escapeHtml(t("perch.plusLabel", lang))}" title="${escapeHtml(t("perch.plusLabel", lang))}" aria-expanded="false" aria-controls="perch-plus-menu">${PLUS_SVG}</button>
@@ -237,7 +257,7 @@ ${engineBanner(engine, lang)}
     <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button>${sheet ? backIconButton(lang) : `<button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>`}<div class="perch-ident">${sheet ? identButton(lang) : `<div class="title" id="perch-bot-name"></div>`}
       <div class="session-name" id="perch-session-name" hidden></div>
       <div class="browser-status" id="perch-browser-status" role="status" hidden></div>
-      <div class="meta" id="perch-session-meta"${sheet ? " hidden" : ""}></div></div></div>
+      <div class="meta" id="perch-session-meta"${sheet ? " hidden" : ""}></div></div>${sheet ? appsButton(lang) : ""}</div>${sheet ? appsSheet(lang) : ""}
     <!-- Phase D1: the tab strip. FOUR buttons, inline SVG glyphs ported from
          the original pi-lab hub's icon set (~/pi-lab/extensions/web/public/
          app.html, the I set) recoloured via currentColor so crow's teal owns

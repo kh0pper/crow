@@ -1754,6 +1754,71 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     res.json({ state: ctl.state() });
   });
 
+  // ---- R1.2 PR 5: the embedded app tile, for any desktop (VNC) app ----
+  // GET /apps/:app/tile → { id, label, src, takeOver }: an installed desktop
+  // app's watch-only noVNC view, and whether Take over is offered (the
+  // manifest declares the lease AND the bundle's server reported enforcing it,
+  // for the installed version). POST /apps/:app/take-over | hand-back |
+  // heartbeat and GET /apps/:app/state are the browser's take-over state
+  // machine (browser-tile/take-over.js) for that app: take over re-checks the
+  // app against the catalog every time (404 not_desktop for anything else,
+  // 409 lease_not_enforced when its lease is not confirmed). Hand back works
+  // for any installed desktop app (it can free a holding a restarted gateway
+  // forgot); a heartbeat or state for an app never taken here is idle. The
+  // browser's own /browser/* routes above are unchanged. Behind dashboardAuth,
+  // CSRF-railed like the routes above, never Funnel-reachable.
+  const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+  const appIdOf = (req) => { const id = String(req.params.app || ""); return APP_ID.test(id) ? id : null; };
+  router.get(P + "/apps/:app/tile", (req, res) => {
+    const id = appIdOf(req);
+    if (!id) return jsonError(res, 400, "bad_app");
+    const eng = resolveEngine();
+    const info = eng && typeof eng.appTile === "function" ? eng.appTile(id) : null;
+    if (!info) return jsonError(res, 404, "not_desktop");
+    res.set("Cache-Control", "no-store");
+    res.json({ id: info.id, label: info.label, src: info.src, takeOver: !!info.takeOver });
+  });
+  const appTakeOverRoute = (op) => async (req, res) => {
+    const id = appIdOf(req);
+    if (!id) return jsonError(res, 400, "bad_app");
+    try {
+      const eng = resolveEngine();
+      const reg = eng && eng.appTakeOvers;
+      if (!reg || typeof eng.appTile !== "function") return jsonError(res, 404, "not_desktop");
+      let ctl = reg.get(id);
+      if (op === "takeOver") {
+        if (!eng.appTile(id)) return jsonError(res, 404, "not_desktop");
+        if (typeof eng.appTakeOverOffered !== "function" || !eng.appTakeOverOffered(id)) {
+          return jsonError(res, 409, "lease_not_enforced");
+        }
+        ctl = ctl || reg.get(id, { create: true });
+      } else if (!ctl && op === "handBack") {
+        if (!eng.appTile(id)) return jsonError(res, 404, "not_desktop");
+        // An app nobody took here: free a holding a restarted gateway forgot,
+        // but only where a lease directory exists (never create one).
+        ctl = reg.get(id, { create: true, ifDirExists: true });
+      }
+      res.set("Cache-Control", "no-store");
+      if (!ctl) {
+        if (op === "takeOver") return jsonError(res, 404, "not_desktop");
+        return res.json({ state: "idle" });
+      }
+      if (op === "state") return res.json({ state: ctl.state() });
+      const r = await ctl[op]();
+      if (r.state === "no_browser") return jsonError(res, 404, "not_desktop");
+      if (r.state === "other_bot") return jsonError(res, 409, "other_bot");
+      res.json({ state: r.state });
+    } catch (err) {
+      if (res.headersSent) return;
+      console.warn("[perch-interactive-api] app " + op + ": " + String((err && err.code) || "error").slice(0, 40));
+      return jsonError(res, 503, "app_busy");
+    }
+  };
+  router.post(P + "/apps/:app/take-over", appTakeOverRoute("takeOver"));
+  router.post(P + "/apps/:app/hand-back", appTakeOverRoute("handBack"));
+  router.post(P + "/apps/:app/heartbeat", appTakeOverRoute("heartbeat"));
+  router.get(P + "/apps/:app/state", appTakeOverRoute("state"));
+
   // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----
   // Lists dirs + files inside the session's OWN cwd, realpath-jailed under it
   // (never the uploadsDir). The Files tab's browser: a picker/viewer, not a

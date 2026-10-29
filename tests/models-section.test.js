@@ -35,6 +35,8 @@ const rowsFor = (opts = {}) =>
   buildRoleRows(db, { env: {}, ownAddrs: OWN, localInstanceId: () => "i-self", classifierStatusFn: noClassifier, ...opts });
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.id, r]));
 const count = (s, needle) => s.split(needle).length - 1;
+/** Pinned before the recommendations' review date, so whole-page renders never drift. */
+const PINNED = new Date("2026-11-01T00:00:00Z");
 /** The rendered rows only: the change sheet's client script carries the copy too. */
 const pageOf = (html) => html.slice(0, html.indexOf('<dialog id="models-change"'));
 
@@ -151,13 +153,13 @@ test("speech: an azure profile with no endpoint and the voice bot's own profile"
   const r = byId(await rowsFor());
   assert.equal(r.stt.model.where, "cloud");
   assert.deepEqual(r.tts.voiceBot, { profileId: "k2", name: "Other voice" });
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED });
   assert.ok(html.includes("The Crow voice bot uses Other voice instead"));
 });
 
 test("render", async () => {
   const rows = await rowsFor();
-  const html = pageOf(await modelsSection.render({ req: { query: {} }, db, lang: "en" }));
+  const html = pageOf(await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED }));
   const visible = rows.filter((r) => !r.hidden).length;
   assert.equal(count(html, 'data-role="'), visible, "one Change button per visible row");
   assert.equal(count(html, 'data-role="rerank"'), 0, "search ranking hidden");
@@ -169,8 +171,8 @@ test("render", async () => {
   assert.ok(html.includes("Crow&#39;s default") || html.includes("Crow's default") || html.includes("Crow&#x27;s default"));
   assert.ok(html.includes("This box"));
   assert.ok(!html.includes(SECRET), "no provider api_key or speech profile apiKey value");
-  assert.ok(!(await modelsSection.render({ req: { query: {} }, db, lang: "en" })).includes(SECRET), "nor in the sheet's script");
-  const shown = await modelsSection.render({ req: { query: { show: "rerank" } }, db, lang: "en" });
+  assert.ok(!(await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED })).includes(SECRET), "nor in the sheet's script");
+  const shown = await modelsSection.render({ req: { query: { show: "rerank" } }, db, lang: "en", now: PINNED });
   assert.equal(count(shown, 'data-role="rerank"'), 1);
   assert.ok(!shown.includes("Show search ranking"));
 });
@@ -178,14 +180,14 @@ test("render", async () => {
 test("fallback renders with the role's name", async () => {
   await bind("quick", { model: "gone/x" });
   invalidateRoleContext();
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED });
   assert.ok(html.includes("Using Builder instead"));
 });
 
 test("preview counts filled roles", async () => {
-  const p = await modelsSection.getPreview({ settings: {}, db, lang: "en" });
+  const p = await modelsSection.getPreview({ settings: {}, db, lang: "en", now: PINNED });
   assert.match(p, /^\d+ of 15 roles ready$/);
-  assert.match(await modelsSection.getPreview({ settings: {}, db, lang: "es" }), /^\d+ de 15 roles listos$/);
+  assert.match(await modelsSection.getPreview({ settings: {}, db, lang: "es", now: PINNED }), /^\d+ de 15 roles listos$/);
 });
 
 test("/dashboard/models unchanged", () => {
@@ -198,7 +200,7 @@ test("/dashboard/models unchanged", () => {
 });
 
 test("es", async () => {
-  const html = pageOf(await modelsSection.render({ req: { query: {} }, db, lang: "es" }));
+  const html = pageOf(await modelsSection.render({ req: { query: {} }, db, lang: "es", now: PINNED }));
   assert.ok(html.includes("Aún no configurado"));
   assert.ok(html.includes("Añadir un proveedor"));
 });
@@ -220,7 +222,7 @@ test("safety bound to a cloud model shows the classifier's automatic pick, not t
   assert.equal(s.model.key, "local-cls/qwen3.5-4b");
   assert.equal(s.refused, true);
   assert.notEqual(s.model.where, "cloud");
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED });
   assert.ok(html.includes("Classifier refuses models that aren"), "the refusal is said on the row");
   const safetyCard = html.slice(html.indexOf('data-row-id="safety"'), html.indexOf('data-row-id="image"'));
   assert.ok(!safetyCard.includes(">c1<"), "the refused cloud model is not shown");
@@ -259,7 +261,7 @@ test("unset rerank shows Crow's default and stays hidden; bound rerank is visibl
   r = byId(await rowsFor()).rerank;
   assert.equal(r.status.code, "ready");
   assert.equal(r.hidden, false);
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED });
   assert.equal(count(html, 'data-role="rerank"'), 1);
   assert.ok(!html.includes("Show search ranking"));
 });

@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
 
 import onboardingPanel, { STEP_KEYS, handleCloudProviderPost } from "../servers/gateway/dashboard/panels/onboarding.js";
-import { CLOUD_PRESETS } from "../servers/gateway/dashboard/panels/onboarding/cloud-presets.js";
+import { PROVIDER_PRESETS } from "../servers/shared/provider-presets.js";
+import { candidatePick } from "../servers/shared/provider-recommendations.js";
 import * as i18n from "../servers/gateway/dashboard/shared/i18n.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -85,10 +86,19 @@ test("ai step cloud form posts to /dashboard/onboarding/cloud-provider with ever
   assert.ok(html.includes('method="POST"'), "form is a POST");
   assert.ok(!html.includes('data-turbo="false"'), "cloud form stays Turbo-enabled (redirects to wizard itself)");
   assert.ok(html.includes('name="_csrf"'), "csrf input present");
-  for (const preset of CLOUD_PRESETS) {
+  assert.equal(PROVIDER_PRESETS.length, 9, "nine presets");
+  for (const preset of PROVIDER_PRESETS) {
     assert.ok(html.includes(`value="${preset.id}"`), `preset option value for ${preset.id} rendered`);
-    assert.ok(html.includes(preset.label), `preset label for ${preset.id} rendered`);
+    assert.ok(html.includes(i18n.t(preset.labelKey, "en")), `preset label for ${preset.id} rendered`);
   }
+});
+
+test("ai step cloud panel embeds the one Add a provider sheet and an opener", async () => {
+  const html = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  assert.ok(html.includes('id="models-add"'), "the sheet is embedded");
+  assert.ok(html.includes("data-models-add"), "an opener button is present");
+  assert.ok(html.includes("/api/providers/test"), "the sheet client posts to the provider routes");
+  assert.ok(!html.includes("cloud-presets"), "no stale preset module referenced");
 });
 
 test("ai step with ?cloud=ok shows the success callout", async () => {
@@ -128,12 +138,13 @@ test("ai step's option-card radios carry a scoped width:auto override (CDP round
 test("ai step keeps the existing providers-count note + deep link (unchanged behavior)", async () => {
   const html = await render({ step: String(AI_IDX) }, { db: providersDb(2) });
   assert.ok(html.includes(i18n.t("onboarding.aiConfiguredNote", "en").replace("{n}", "2")), "configured note still renders");
-  assert.ok(html.includes("/dashboard/settings?section=llm&tab=providers")
-    || html.includes("/dashboard/settings?section=llm&amp;tab=providers"), "advanced providers deep link still renders");
+  assert.ok(html.includes("/dashboard/settings?section=models\""), "Models page deep link renders");
 });
 
 test("Task 7 review fix round 1: new i18n keys resolve in en AND es", () => {
   const KEYS = [
+    "onboarding.ai.cloudErrModelRequired",
+    "onboarding.ai.cloudThatAddress",
     "onboarding.ai.upsellLink",
     "onboarding.ai.cloudErrBadPreset",
     "onboarding.ai.cloudErrMissingKey",
@@ -149,90 +160,204 @@ test("Task 7 review fix round 1: new i18n keys resolve in en AND es", () => {
 
 // ── POST handler (handleCloudProviderPost) ──────────────────────────────────
 
-test("cloud-provider POST: valid preset+key calls upsertProvider with the preset's baseUrl, redirects with cloud=ok", async () => {
+const okTest = async () => ({ ok: true, code: "ok", models: ["m1"], host: "api.openai.com", baseUrl: "https://api.openai.com/v1" });
+const noRows = async () => [];
+
+test("cloud-provider POST: ok test writes one row at the preset's base URL, redirects cloud=ok", async () => {
   const calls = [];
   let invalidated = false;
   const res = makeRes();
-  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "sk-test-123", model: "" }), res, {
-    db: {},
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "typed-model" }), res, {
+    db: {}, testFn: okTest, listRowsFn: noRows,
     upsertProviderFn: async (db, provider) => { calls.push(provider); return { id: provider.id }; },
     invalidateCacheFn: async () => { invalidated = true; },
   });
   assert.equal(calls.length, 1, "upsertProvider called once");
-  const openaiPreset = CLOUD_PRESETS.find((p) => p.id === "openai");
   assert.equal(calls[0].id, "openai");
-  assert.equal(calls[0].baseUrl, openaiPreset.baseUrl, "baseUrl matches the preset");
-  assert.equal(calls[0].apiKey, "sk-test-123", "apiKey passed through");
+  assert.equal(calls[0].baseUrl, "https://api.openai.com/v1");
+  assert.equal(calls[0].apiKey, "fixture-key-123");
   assert.equal(calls[0].host, "cloud");
-  assert.equal(calls[0].bundleId, null);
   assert.equal(calls[0].disabled, false);
-  assert.equal(calls[0].providerType, openaiPreset.providerType);
-  assert.equal(calls[0].models[0].id, openaiPreset.defaultModel, "empty model field falls back to the preset default");
-  assert.ok(invalidated, "invalidateProvidersCache called");
-  assert.ok(res.redirected, "redirects (no raw send)");
-  assert.ok(res.redirected.includes(`step=${AI_IDX}`) && res.redirected.includes("cloud=ok"), "redirects back to the ai step with cloud=ok");
+  assert.equal(calls[0].models[0].id, "typed-model");
+  assert.ok(invalidated, "providers cache invalidated");
+  assert.ok(res.redirected.includes(`step=${AI_IDX}`) && res.redirected.includes("cloud=ok"));
+  assert.ok(!res.redirected.includes("fixture-key-123"), "key never in the redirect");
 });
 
-test("cloud-provider POST: an editable custom model field overrides the preset default", async () => {
+test("cloud-provider POST: an empty model field uses the preset's first verified everyday pick", async () => {
+  const pick = candidatePick("openai", "everyday");
+  assert.ok(pick, "the fixture preset has a verified everyday pick");
   const calls = [];
   const res = makeRes();
-  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "sk-test", model: "gpt-4o" }), res, {
-    db: {},
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "" }), res, {
+    db: {}, testFn: okTest, listRowsFn: noRows,
     upsertProviderFn: async (db, provider) => { calls.push(provider); },
     invalidateCacheFn: async () => {},
   });
-  assert.equal(calls[0].models[0].id, "gpt-4o");
+  assert.equal(calls[0].models[0].id, pick.model_id);
 });
 
-test("cloud-provider POST: unknown preset id → redirects to the ai step with cloud_error=bad_preset, never calls upsertProvider", async () => {
-  let called = false;
+test("cloud-provider POST: no typed model and no verified pick -> model_required, nothing tested or written", async () => {
+  let tested = false, wrote = false;
   const res = makeRes();
-  await handleCloudProviderPost(makePostReq({ preset: "not-a-real-preset", apiKey: "sk-test" }), res, {
-    db: {},
-    upsertProviderFn: async () => { called = true; },
+  await handleCloudProviderPost(makePostReq({ preset: "other", baseUrl: "https://api.example.com/v1", apiKey: "fixture-key-123", model: "" }), res, {
+    db: {}, testFn: async () => { tested = true; return { ok: true, code: "ok" }; }, listRowsFn: noRows,
+    upsertProviderFn: async () => { wrote = true; }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(tested, false);
+  assert.equal(wrote, false);
+  assert.ok(res.redirected.includes("cloud_error=model_required"));
+});
+
+test("cloud-provider POST: a preview-only everyday pick is not used; model_required", async () => {
+  let wrote = false;
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "" }), res, {
+    db: {}, testFn: okTest, listRowsFn: noRows,
+    pickFn: () => ({ model_id: "preview-model", status: "preview", preview: true }),
+    upsertProviderFn: async () => { wrote = true; }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(wrote, false);
+  assert.ok(res.redirected.includes("cloud_error=model_required"));
+});
+
+test("cloud-provider POST: Other with an empty key and a typed model writes a keyless row", async () => {
+  const calls = [];
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "other", baseUrl: "https://api.example.com/v1", apiKey: "", model: "local-model" }), res, {
+    db: {}, listRowsFn: noRows,
+    testFn: async (args) => ({ ok: true, code: "ok", models: null, host: "api.example.com", baseUrl: args.baseUrl }),
+    upsertProviderFn: async (db, provider) => { calls.push(provider); }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].baseUrl, "https://api.example.com/v1");
+  assert.ok(!calls[0].apiKey, "no key stored");
+  assert.equal(calls[0].models[0].id, "local-model");
+  assert.ok(res.redirected.includes("cloud=ok"));
+});
+
+test("cloud-provider POST: key_rejected redirects cloud_error=key_rejected and never writes", async () => {
+  let wrote = false;
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "m" }), res, {
+    db: {}, testFn: async () => ({ ok: false, code: "key_rejected", status: 401, models: null, host: "api.openai.com" }), listRowsFn: noRows,
+    upsertProviderFn: async () => { wrote = true; }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(wrote, false);
+  assert.ok(res.redirected.includes("cloud_error=key_rejected"));
+  assert.ok(!res.redirected.includes("fixture-key-123"));
+});
+
+test("cloud-provider POST: an existing differently-keyed openai row makes the write openai-2", async () => {
+  const calls = [];
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "m" }), res, {
+    db: {}, testFn: okTest,
+    listRowsFn: async () => [{ id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "other-key-999", models: [] }],
+    upsertProviderFn: async (db, provider) => { calls.push(provider); },
     invalidateCacheFn: async () => {},
   });
-  assert.equal(res.status_, null, "no bare status set — a redirect, not a page-replacing error response");
-  assert.equal(called, false, "upsertProvider never called for a bad preset");
-  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending");
-  assert.ok(res.redirected.includes(`step=${AI_IDX}`), "redirects to the ai step");
-  assert.ok(res.redirected.includes("cloud_error=bad_preset"), "carries the bad_preset error code");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, "openai-2");
+  assert.ok(res.redirected.includes("cloud=ok"));
 });
 
-test("cloud-provider POST: empty API key → redirects to the ai step with cloud_error=missing_key, never calls upsertProvider", async () => {
+test("cloud-provider POST: the Z.AI plan variant picks its base URL", async () => {
+  const calls = [];
+  const res = makeRes();
+  await handleCloudProviderPost(makePostReq({ preset: "zai", variant: "coding", apiKey: "fixture-key-123", model: "m" }), res, {
+    db: {}, listRowsFn: noRows,
+    testFn: async (args) => ({ ok: true, code: "ok", models: null, host: "api.z.ai", baseUrl: args.variantId === "coding" ? "https://api.z.ai/api/coding/paas/v4" : "wrong" }),
+    upsertProviderFn: async (db, provider) => { calls.push(provider); }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(calls[0].baseUrl, "https://api.z.ai/api/coding/paas/v4");
+});
+
+test("cloud-provider POST: a Model Studio region picks its base URL; another preset's variant falls back to the default region", async () => {
+  for (const [variant, want] of [["hk", "hk"], ["payg", undefined], ["", undefined]]) {
+    const seen = [];
+    const res = makeRes();
+    await handleCloudProviderPost(makePostReq({ preset: "modelstudio", variant, apiKey: "fixture-key-123", model: "qwen3.8-flash" }), res, {
+      db: {}, listRowsFn: noRows,
+      testFn: async (args) => { seen.push(args.variantId); return { ok: true, code: "ok", models: null, host: "dashscope-intl.aliyuncs.com", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" }; },
+      upsertProviderFn: async () => {}, invalidateCacheFn: async () => {},
+    });
+    assert.equal(seen[0], want, JSON.stringify(variant));
+    assert.ok(res.redirected.includes("cloud=ok"), variant);
+  }
+});
+
+test("the no-script form lists each preset's variants under its own name, with the Model Studio regions", async () => {
+  const page = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  const html = page.slice(page.indexOf("<noscript>"), page.indexOf("</noscript>"));
+  assert.ok(html.length > 0, "the no-script form");
+  assert.ok(html.includes('<optgroup label="Z.AI">'), "Z.AI group");
+  assert.ok(html.includes('<optgroup label="Alibaba Model Studio (Qwen)">'), "Model Studio group");
+  for (const v of ["payg", "coding", "intl", "us", "cn", "hk"]) assert.ok(html.includes(`<option value="${v}">`), v);
+});
+
+test("cloud-provider POST: unknown preset id -> cloud_error=bad_preset, never tests or writes", async () => {
   let called = false;
   const res = makeRes();
-  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "   " }), res, {
-    db: {},
-    upsertProviderFn: async () => { called = true; },
-    invalidateCacheFn: async () => {},
+  await handleCloudProviderPost(makePostReq({ preset: "not-a-real-preset", apiKey: "fixture-key-123" }), res, {
+    db: {}, testFn: async () => { called = true; return { ok: true }; }, listRowsFn: noRows,
+    upsertProviderFn: async () => { called = true; }, invalidateCacheFn: async () => {},
   });
-  assert.equal(res.status_, null, "no bare status set — a redirect, not a page-replacing error response");
-  assert.equal(called, false, "upsertProvider never called for an empty key");
-  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending");
-  assert.ok(res.redirected.includes(`step=${AI_IDX}`), "redirects to the ai step");
-  assert.ok(res.redirected.includes("cloud_error=missing_key"), "carries the missing_key error code");
+  assert.equal(res.status_, null);
+  assert.equal(called, false);
+  assert.ok(res.redirected.includes(`step=${AI_IDX}`));
+  assert.ok(res.redirected.includes("cloud_error=bad_preset"));
 });
 
-test("cloud-provider POST: upsertProvider failure → redirects to the ai step with cloud_error=save_failed, never logs the raw api key", async () => {
+test("cloud-provider POST: empty API key -> cloud_error=missing_key, never tests or writes", async () => {
+  let called = false;
   const res = makeRes();
-  const originalError = console.error;
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "   ", model: "m" }), res, {
+    db: {}, testFn: async () => { called = true; return { ok: true }; }, listRowsFn: noRows,
+    upsertProviderFn: async () => { called = true; }, invalidateCacheFn: async () => {},
+  });
+  assert.equal(called, false);
+  assert.ok(res.redirected.includes("cloud_error=missing_key"));
+});
+
+test("cloud-provider POST: a write failure -> cloud_error=save_failed, the key is never logged", async () => {
+  const res = makeRes();
+  const originalError = console.error, originalWarn = console.warn;
   const logged = [];
   console.error = (...args) => logged.push(args.map(String).join(" "));
+  console.warn = (...args) => logged.push(args.map(String).join(" "));
   try {
-    await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "sk-super-secret-key" }), res, {
-      db: {},
+    await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-super-secret", model: "m" }), res, {
+      db: {}, testFn: okTest, listRowsFn: noRows,
       upsertProviderFn: async () => { throw new Error("db exploded"); },
       invalidateCacheFn: async () => {},
     });
   } finally {
-    console.error = originalError;
+    console.error = originalError; console.warn = originalWarn;
   }
-  assert.equal(res.status_, null, "no bare status set — a redirect, not a page-replacing error response");
-  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending");
-  assert.ok(res.redirected.includes(`step=${AI_IDX}`), "redirects to the ai step");
-  assert.ok(res.redirected.includes("cloud_error=save_failed"), "carries the save_failed error code");
-  assert.ok(!logged.join(" ").includes("sk-super-secret-key"), "api key never logged");
+  assert.ok(res.redirected.includes("cloud_error=save_failed"));
+  assert.ok(!res.redirected.includes("fixture-super-secret"));
+  assert.ok(!logged.join(" ").includes("fixture-super-secret"), "api key never logged");
+});
+
+test("cloud-provider POST: every Task 9 failure code redirects as itself (closed enum), key never echoed", async () => {
+  for (const code of ["bad_key", "rate_limited", "unreachable", "not_found", "bad_url", "forbidden_target", "provider_error"]) {
+    const res = makeRes();
+    await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "m" }), res, {
+      db: {}, testFn: async () => ({ ok: false, code, status: 500, models: null, host: "api.openai.com" }), listRowsFn: noRows,
+      upsertProviderFn: async () => { throw new Error("must not write"); }, invalidateCacheFn: async () => {},
+    });
+    assert.ok(res.redirected.includes(`cloud_error=${code}`), code);
+    assert.ok(!res.redirected.includes("fixture-key-123"));
+  }
+});
+
+test("ai step: each failure code renders its own plain line with no raw placeholders", async () => {
+  for (const code of ["key_rejected", "bad_key", "rate_limited", "unreachable", "not_found", "bad_url", "forbidden_target", "provider_error", "model_required"]) {
+    const html = await render({ step: String(AI_IDX), cloud_error: code, cloud_preset: "openai", cloud_status: "500" }, { db: providersDb(0) });
+    assert.ok(html.includes("callout-error") || html.includes("callout"), code);
+    assert.ok(!/\{(provider|host|status)\}/.test(html.slice(html.indexOf('id="onb-ai-panel-cloud"'), html.indexOf('data-models-add'))), `${code}: no raw placeholder`);
+  }
 });
 
 // ── error-callout rendering (SSR, gated by the closed cloud_error enum) ─────
@@ -355,4 +480,21 @@ test("ai-step-client.js: the upsell card renders a real anchor to /dashboard/mod
   assert.ok(/createElement\("a"\)/.test(body), "upsell renders via a real <a> element");
   assert.ok(/upsellLink\.href\s*=\s*"\/dashboard\/model-catalog"/.test(body), "upsell link points at the real Model Catalog route");
   assert.ok(!body.includes("innerHTML"), "upsell link is built via DOM methods, never innerHTML (checked inside the served <script> block only)");
+});
+
+test("no-script form: the Model Studio region note is shown, and a rejected Model Studio key names the region", async () => {
+  const page = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  const form = page.slice(page.indexOf("<noscript>"), page.indexOf("</noscript>"));
+  assert.ok(form.includes("A key only works in the region where it was created."), "region note in the no-script form");
+  const rejected = await render({ step: String(AI_IDX), cloud_error: "key_rejected", cloud_preset: "modelstudio", cloud_status: "401" }, { db: providersDb(0) });
+  assert.ok(rejected.includes("Alibaba Model Studio (Qwen) did not accept that key. Check that you copied all of it, and that you picked the region where you created it."));
+  const plain = await render({ step: String(AI_IDX), cloud_error: "key_rejected", cloud_preset: "openai", cloud_status: "401" }, { db: providersDb(0) });
+  assert.ok(plain.includes("OpenAI did not accept that key. Check that you copied all of it."));
+  assert.ok(!plain.includes("OpenAI did not accept that key. Check that you copied all of it, and that you picked the region"), "only Model Studio names the region");
+});
+
+test("the variant optgroups come from one shared helper", () => {
+  const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/onboarding.js"), "utf8");
+  assert.ok(/import \{[^}]*variantOptionsHtml[^}]*\} from "\.\.\/shared\/add-provider-ui\.js"/.test(src), "onboarding imports the helper");
+  assert.ok(!src.includes("<optgroup"), "no second optgroup builder");
 });

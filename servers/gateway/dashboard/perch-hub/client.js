@@ -81,6 +81,9 @@ export function perchHubJs(lang = "en") {
     cancelHistRetry(); histGen++;
     /* Live browser tile: every frame poller aborts, the observer disconnects. */
     retireBrowserTiles();
+    /* R1.2 PR 5: the app tiles go too, and with them the browser tile's
+       password row (its revealed password and re-auth callback are wiped). */
+    resetAppTiles();
     /* The Take over sheet closes with the page; the operator keeps the
        browser until Hand back or the 5-minute heartbeat loss. */
     closeTakeOver();
@@ -1549,10 +1552,11 @@ export function perchHubJs(lang = "en") {
     dictationCancel();           /* dictation.js: a hidden composer must never keep recording or upload */
     cancelHistRetry(); histGen++;   /* 23a: a load or retry for the session being left must not render */
     draftSave();                 /* Shell P2: its unsent words wait for it */
-    closeStream(); current.sid=null; stopIdentRefresh();
+    closeStream(); current.sid=null; stopIdentRefresh(); applyMakeTab(null);
     resetBrowserTiles();         /* no frame poller outlives the chat it belongs to */
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     closeSheet();                /* new mode: the sheet belongs to the session being left */
+    closeAppsSheet();            /* so does its apps sheet (R1.2 PR 5) */
     setView('list'); startListPolling(); loadList();
   }
 
@@ -1883,6 +1887,7 @@ export function perchHubJs(lang = "en") {
   var BACK_PROJECT='${tJs("perch.backProject", lang)}', BACK_LIST='${tJs("perch.backList", lang)}';
   var PLACEHOLDER_DEFAULT='${tJs("perch.composerPlaceholder", lang)}';
   var PLACEHOLDER_PROJECT='${tJs("perch.composerPlaceholderProject", lang)}';
+  var APPS_EMPTY='${tJs("shell.appsEmptyProject", lang)}', APPS_LOADING='${tJs("shell.appsLoading", lang)}', APPS_FAILED='${tJs("shell.appsLoadFailed", lang)}';
   /* Classic keeps the 120px ceiling; the new-mode pill is capped by its CSS
      (five lines), so the script only has to follow the content. */
   var PILL=!!document.getElementById('perch-session-sheet');
@@ -1946,6 +1951,10 @@ export function perchHubJs(lang = "en") {
        changes. data-home marks a filed session, which is what shows Back on
        desktop too (css.js), where the list beside the chat is otherwise
        the way back. */
+    /* R1.2 PR 5: the apps button shows for a filed session only (it lists
+       the session's project's apps). */
+    var appsBtn=el('perch-apps-btn');
+    if(appsBtn) appsBtn.hidden=!projectOfRow(row,PROJECTS);
     var back=el('perch-back');
     if(back){
       var home=!!backTarget(row,PROJECTS);
@@ -1972,7 +1981,25 @@ export function perchHubJs(lang = "en") {
   function stopIdentRefresh(){ if(identTimer){ clearInterval(identTimer); identTimer=null; } }
   /* The card line under the name: "#12 Card title", a link to the card. Fed
      by the card chip's own lookup (card-chip.js), so it adds no request. */
+  /* R1.2 PR 3: the Make tab opens on This card from a card's chat. The server's
+     href is kept in data-shell-href on the first change and restored when the
+     session has no card (or closes). Any other base (no Make panel) is left alone. */
+  /* Card mode ignores the project, and a ?project= link would rewrite the scope cookie on a Turbo
+     hover prefetch: the card-scoped Make tab carries only the card. */
+  function makeTabHref(base,cardId){
+    var b=String(base||'');
+    if(!Number.isInteger(cardId)||b.indexOf('/dashboard/make')!==0) return b;
+    return '/dashboard/make?scope=card:'+String(cardId);
+  }
+  function applyMakeTab(c){
+    if(typeof document.querySelector!=='function') return;
+    var a=document.querySelector('a.shell-tab[data-shell-tab="make"]'); if(!a) return;
+    var base=a.getAttribute('data-shell-href');
+    if(base==null){ base=a.getAttribute('href')||''; a.setAttribute('data-shell-href',base); }
+    a.setAttribute('href',makeTabHref(base,c?c.id:null));
+  }
   function setHeadCard(c,href){
+    applyMakeTab(c);
     var a=el('perch-card-line'); if(!a) return;
     if(!c||!Number.isInteger(c.id)){ a.hidden=true; a.textContent=''; a.removeAttribute('href'); return; }
     a.textContent='#'+String(c.id)+(c.title?' '+String(c.title):'');
@@ -3010,6 +3037,17 @@ export function perchHubJs(lang = "en") {
     /* New mode: an ask is never hidden (spec 9.4). The card and the banner
        live in the chat, which the modal sheet makes inert, so it closes. */
     if(SHEET&&SHEET.open) closeSheet();
+    /* R1.2 PR 5: so does the apps sheet. The browser hands focus back to the
+       apps button as the modal closes, so the ask takes it once its card is
+       drawn (the ask, not the apps button, is what needs the operator). */
+    if(APPS_SHEET&&APPS_SHEET.open){
+      appsSkipFocus=true; closeAppsSheet();
+      setTimeout(function(){
+        if(!live()) return;
+        var f=document.querySelector('#perch-ask button,#perch-ask input,#perch-ask textarea,#perch-ask select');
+        if(f&&f.focus) f.focus();
+      },0);
+    }
     plusClose(false);                        /* nor under the composer's "+" popover */
     /* 2026-10-20: an expired question stays on screen, read-only, so the
        operator sees what was asked; the session still waits for them. */
@@ -3401,8 +3439,73 @@ export function perchHubJs(lang = "en") {
       document.addEventListener('turbo:before-cache',function(){
         var d=document.getElementById('perch-session-sheet');
         if(d&&d.open&&typeof d.close==='function') d.close();
+        var ad=document.getElementById('perch-apps-sheet');
+        if(ad&&ad.open&&typeof ad.close==='function') ad.close();
+        /* R1.2 PR 3: a cached snapshot never carries the card-scoped Make link. */
+        var m=document.querySelector('a.shell-tab[data-shell-tab="make"]');
+        var base=m&&m.getAttribute('data-shell-href');
+        if(base!=null) m.setAttribute('href',base);
       });
     }
+  }
+
+  /* ---- R1.2 PR 5: the session's apps sheet ------------------------------
+     #perch-apps-btn (head, filed sessions only) opens #perch-apps-sheet, which
+     lists the session's project's apps through the shell's launcher
+     (window.CrowApps, shell/client.js: GET /dashboard/shell-api/apps, the
+     drawer's tile renderer). Opening a desktop app there asks this session
+     for an app tile (crow:open-app-tile) and the shell closes the sheet when
+     it is handled; otherwise the link navigates. The sheet follows the
+     session sheet's rules: showModal, backdrop and close button, focus back
+     to the apps button when it is parked. */
+  var APPS_SHEET=el('perch-apps-sheet');
+  var appsGen=0;
+  var appsSkipFocus=false;                  /* one-shot: the next close leaves focus alone (renderAsk) */
+  function closeAppsSheet(){
+    if(!APPS_SHEET||!APPS_SHEET.open) return;
+    if(typeof APPS_SHEET.close==='function'){ APPS_SHEET.close(); return; }
+    APPS_SHEET.removeAttribute('open');
+  }
+  function appsNote(grid,text){
+    while(grid.firstChild) grid.removeChild(grid.firstChild);
+    var p=document.createElement('p'); p.className='shell-apps-empty'; p.textContent=text; grid.appendChild(p);
+  }
+  function openAppsSheet(){
+    if(!APPS_SHEET||APPS_SHEET.open) return;
+    var grid=el('perch-apps-grid');
+    var pr=projectOfRow(rowIndex[current.sid],PROJECTS);
+    if(!grid||!pr) return;
+    plusClose(false);                        /* never under the composer's "+" popover */
+    var my=++appsGen;
+    appsNote(grid,APPS_LOADING);
+    if(typeof APPS_SHEET.showModal==='function') APPS_SHEET.showModal();
+    else APPS_SHEET.setAttribute('open','');
+    var c=el('perch-apps-close'); if(c&&c.focus) c.focus();
+    var api=window.CrowApps;
+    if(!api){ appsNote(grid,APPS_FAILED); return; }
+    api.load(pr.slug).then(function(data){
+      if(my!==appsGen) return;
+      api.render(grid,data,{empty:APPS_EMPTY});
+    },function(){
+      if(my!==appsGen) return;
+      appsNote(grid,APPS_FAILED);
+    });
+  }
+  if(APPS_SHEET){
+    var appsBtnEl=el('perch-apps-btn');
+    if(appsBtnEl) appsBtnEl.onclick=openAppsSheet;
+    var appsCloseBtn=el('perch-apps-close');
+    if(appsCloseBtn) appsCloseBtn.onclick=closeAppsSheet;
+    APPS_SHEET.addEventListener('click',function(e){ if(e.target===APPS_SHEET) closeAppsSheet(); });
+    APPS_SHEET.addEventListener('close',function(){
+      appsGen++;                            /* a late answer never paints a closed sheet */
+      if(appsSkipFocus){ appsSkipFocus=false; return; }
+      if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
+      var a=document.activeElement;
+      if(a&&a!==document.body&&a!==document.documentElement&&!APPS_SHEET.contains(a)) return;
+      var b=el('perch-apps-btn');
+      if(b&&!b.hidden&&document.contains(b)&&b.focus) b.focus();
+    });
   }
 
   /* Session tab: "Change directory" reopens the SAME browse modal the

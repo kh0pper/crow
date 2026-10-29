@@ -3,9 +3,12 @@
  *
  * One page with every role: what fills it, where that runs and its status.
  * "Change" opens the change sheet (`<dialog id="models-change">`, filled by
- * models/client.js through /api/roles); Add a provider is wired by later
- * work. Advanced is today's LLM page (`?section=llm`), still deep-linkable
- * but no longer in the menu.
+ * models/client.js through /api/roles); "Add a provider" opens
+ * `<dialog id="models-add">` (shared/add-provider-ui.js, through
+ * /api/providers), and `?add=1` opens it on load. Advanced is today's LLM
+ * page (`?section=llm`), still deep-linkable but no longer in the menu.
+ * When the provider recommendations are past their review date, one line
+ * says so (Crow fills no role from them until they are reviewed).
  *
  * Search ranking stays out of the list until something fills it on purpose;
  * "Show search ranking" (`?section=models&show=rerank`) renders it anyway.
@@ -14,6 +17,8 @@ import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { buildRoleRows, ROLE_GROUPS, FILLED_STATUSES } from "./models/rows.js";
 import { modelsClientJS } from "./models/client.js";
+import { addProviderSheetHtml, addProviderClientJS } from "../../shared/add-provider-ui.js";
+import { isRecommendationsStale, loadRecommendations } from "../../../../shared/provider-recommendations.js";
 
 const WHERE_CODES = new Set(["here", "other_box", "cloud", "unproven", "missing"]);
 
@@ -59,6 +64,7 @@ function rowHtml(row, lang) {
     </article>`;
 }
 
+// The sheet rules shared with Add a provider (.mc-inner, .mc-head, .mc-warn, .mc-check, .mc-actions ...) live once, in shared/add-provider-ui.js, which this page also renders.
 const STYLE = `<style>
   .mr-top { display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem 1rem; justify-content:space-between; margin-bottom:1rem; }
   .mr-top-links { display:flex; flex-wrap:wrap; gap:0.5rem 1rem; }
@@ -87,34 +93,29 @@ const STYLE = `<style>
   @media (max-width: 480px) {
     #models-change { width:100%; margin:auto 0 0; border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0; }
   }
-  .mc-inner { padding:16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); display:flex; flex-direction:column; gap:0.75rem; min-width:0; }
-  .mc-head { display:flex; align-items:center; justify-content:space-between; gap:0.5rem; }
-  .mc-title { font-size:1.05rem; margin:0; overflow-wrap:anywhere; }
-  .mc-close { width:44px; height:44px; flex:0 0 44px; border:none; border-radius:50%; background:transparent; color:var(--crow-text-secondary); font-size:1.4rem; cursor:pointer; }
   .mc-list { display:flex; flex-direction:column; gap:0.4rem; }
   .mc-pick { display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem; width:100%; min-height:44px; padding:0.5rem 0.75rem; box-sizing:border-box; text-align:left;
     font:inherit; color:var(--crow-text-primary); background:var(--crow-bg-elevated); border:1px solid var(--crow-border); border-radius:var(--crow-radius-control); cursor:pointer; overflow-wrap:anywhere; }
   .mc-pick[aria-pressed="true"] { border-color:var(--crow-accent); box-shadow:0 0 0 1px var(--crow-accent); }
   .mc-pick:disabled { cursor:not-allowed; opacity:0.7; }
   .mc-pick-label { flex:1 1 auto; min-width:0; }
-  .mc-star { color:var(--crow-accent); }
+  .mc-pick-provider { font-size:0.8rem; color:var(--crow-text-muted); }
   .mc-pick-note { flex-basis:100%; font-size:0.8rem; color:var(--crow-text-muted); }
-  .mc-warn { display:flex; flex-direction:column; gap:0.35rem; font-size:0.9rem; overflow-wrap:anywhere; }
-  .mc-warn p { margin:0; }
-  .mc-warn [hidden] { display:none; }
-  .mc-group { font-size:0.8rem; margin:0.25rem 0 0; color:var(--crow-text-secondary); }
-  .mc-names { margin:0; padding-left:1.2rem; }
-  .mc-cloud, .mc-changed { font-weight:600; }
-  .mc-check { display:flex; align-items:flex-start; gap:0.5rem; min-height:44px; padding-top:0.6rem; box-sizing:border-box; cursor:pointer; }
-  .mc-check input { width:20px; height:20px; flex:0 0 20px; margin:0; }
-  .mc-error { margin:0; color:var(--crow-error); font-size:0.85rem; }
-  .mc-error:empty { display:none; }
-  .mc-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:0.5rem; position:sticky; bottom:0; background:var(--crow-bg-surface); padding-top:0.5rem; }
   .mc-save:disabled { opacity:0.5; cursor:not-allowed; }
 </style>`;
 
-/** The page from built rows (pure; `show` lists hidden roles to render anyway). */
-export function renderModelsPage(rows, { lang = "en", show = [] } = {}) {
+function staleLine(lang, now) {
+  if (!isRecommendationsStale(now)) return "";
+  const a = loadRecommendations().accessed;
+  const reviewed = typeof a === "string" ? `${fill(t("models.ui.recsReviewed", lang), { date: a })}. ` : "";
+  return `<p class="mr-note mr-recs-stale">${escapeHtml(reviewed + t("models.add.recsStale", lang))}</p>`;
+}
+
+/**
+ * The page from built rows (pure but for the recommendations file's date;
+ * `show` lists hidden roles to render anyway, `openAdd` opens Add a provider).
+ */
+export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false, now = new Date() } = {}) {
   const wanted = new Set(show);
   const visible = rows.filter((r) => !r.hidden || wanted.has(r.id));
   const groups = ROLE_GROUPS.map((g) => {
@@ -130,15 +131,18 @@ export function renderModelsPage(rows, { lang = "en", show = [] } = {}) {
     : "";
   return `${STYLE}
     <div class="mr-top">
-      <button type="button" class="mr-btn mr-add" data-models-add>${escapeHtml(t("models.add.title", lang))}</button>
+      <button type="button" class="mr-btn mr-add" data-models-add aria-haspopup="dialog" aria-controls="models-add">${escapeHtml(t("models.add.title", lang))}</button>
       <div class="mr-top-links">
         <a class="mr-link" href="/dashboard/settings?section=llm" data-turbo-frame="_top">${escapeHtml(t("models.ui.advanced", lang))}</a>
       </div>
     </div>
+    ${staleLine(lang, now)}
     ${groups}
     ${showRerank}
     <dialog id="models-change" class="mc-sheet" aria-labelledby="models-change-title"></dialog>
-    <script>${modelsClientJS({ lang })}</script>`;
+    ${addProviderSheetHtml({ lang, open: openAdd })}
+    <script>${modelsClientJS({ lang })}</script>
+    <script>${addProviderClientJS({ lang })}</script>`;
 }
 
 function showParam(req) {
@@ -174,8 +178,9 @@ export default {
     try { return await modelsPreview(db, lang); } catch { return ""; }
   },
 
-  async render({ req, db, lang = "en" }) {
+  // `now` is the stale line's clock (tests pin it).
+  async render({ req, db, lang = "en", now = new Date() }) {
     const rows = await buildRoleRows(db, { lang });
-    return renderModelsPage(rows, { lang, show: showParam(req) });
+    return renderModelsPage(rows, { lang, show: showParam(req), openAdd: String(req?.query?.add ?? "") === "1", now });
   },
 };

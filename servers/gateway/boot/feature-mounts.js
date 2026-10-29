@@ -350,9 +350,11 @@ export async function mountFeatureRoutes(app, deps) {
   // Same JSON session gate as the model catalog API, plus CSRF on every POST
   // (routes/roles-api.js). Never Funnel-public.
   try {
-    const { default: rolesApiRouter } = await import("../routes/roles-api.js");
+    const { default: rolesApiRouter, rolesApiBodyErrorHandler } = await import("../routes/roles-api.js");
     app.use(rolesApiRouter());
-    console.log("Roles API mounted at /api/roles");
+    // A malformed body here may hold a pasted key: refuse it without echoing or logging it.
+    app.use(["/api/roles", "/api/providers"], rolesApiBodyErrorHandler);
+    console.log("Roles API mounted at /api/roles and /api/providers");
   } catch (err) {
     console.warn("[roles-api] Failed to mount:", err.message);
   }

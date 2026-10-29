@@ -111,6 +111,69 @@ test("a filing failure after a successful create reports filed:false", async () 
   } finally { c.exec("ALTER TABLE shell_items_off RENAME TO shell_items"); c.close(); }
 });
 
+// ── This card: card_id on Blank ──
+async function cardStore() {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.exec("CREATE TABLE IF NOT EXISTS tasks_items (id INTEGER PRIMARY KEY, title TEXT, status TEXT, project_id INTEGER, action_needed TEXT, data_json TEXT, board_id INTEGER, archived_at TEXT)");
+  const c = new Database(join(dir, "crow.db"));
+  const old = c.prepare("SELECT id FROM project_spaces WHERE slug='shed'").get()
+    || { id: Number(c.prepare("INSERT INTO project_spaces (slug, name, status) VALUES ('shed','Shed','archived')").run().lastInsertRowid) };
+  c.close();
+  const put = t.prepare("INSERT OR REPLACE INTO tasks_items (id, title, status, project_id, board_id, archived_at) VALUES (?, ?, 'open', ?, NULL, ?)");
+  put.run(21, "Live card", P1, null);
+  put.run(22, "Archived card", P1, "2026-10-01 00:00:00");
+  put.run(23, "Card in an archived project", old.id, null);
+  put.run(24, "Card whose link fails", null, null);
+  t.close();
+}
+
+test("card_id: a bad, archived or missing card is 400 bad_card and creates nothing", async () => {
+  await cardStore();
+  for (const card_id of ["21", 0, -3, 1.5, 99999, 22]) {
+    const r = await post("/blank", { kind: "docx", title: "Nope", project_id: P1, card_id });
+    assert.equal(r.status, 400, `card_id ${JSON.stringify(card_id)}`);
+    assert.equal(r.body.error, "bad_card", `card_id ${JSON.stringify(card_id)}`);
+  }
+  assert.equal(rec().calls.length, 0, "nothing was created");
+  assert.deepEqual(rec().mkcols, []);
+});
+
+test("card_id: the card's project overrides a posted project_id, and the file is linked to the card", async () => {
+  await cardStore();
+  const r = await post("/blank", { kind: "docx", title: "On the card", project_id: "unassigned", card_id: 21 });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.filed, true);
+  assert.deepEqual(rec().calls[0].args.folder, "Crow/garden");
+  const it = await getItem(db, "workspace_file", String(r.body.fileId));
+  assert.equal(it.projectId, P1);
+  assert.equal(it.cardId, 21);
+});
+
+test("card_id: a card whose project is not live files Unassigned, still on the card", async () => {
+  await cardStore();
+  const r = await post("/blank", { kind: "docx", title: "Shed list", project_id: P1, card_id: 23 });
+  assert.equal(r.status, 200);
+  assert.equal(rec().calls[0].args.folder, "Crow/Unassigned");
+  const it = await getItem(db, "workspace_file", String(r.body.fileId));
+  assert.equal(it.projectId, null);
+  assert.equal(it.cardId, 23);
+});
+
+test("card_id: a link failure after the create reports filed:false", async () => {
+  await cardStore();
+  const c = new Database(join(dir, "crow.db"));
+  rec().next = 900; // a file id no earlier test used
+  c.exec("CREATE TRIGGER mk_link_fail BEFORE UPDATE OF card_id ON shell_items WHEN NEW.card_id = 24 BEGIN SELECT RAISE(ABORT, 'link refused'); END;");
+  try {
+    const r = await post("/blank", { kind: "docx", title: "Unlinked", card_id: 24 });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.filed, false);
+    assert.equal(rec().calls.length, 1, "the file was created");
+    assert.equal((await getItem(db, "workspace_file", String(r.body.fileId))).cardId, null);
+  } finally { c.exec("DROP TRIGGER mk_link_fail"); c.close(); }
+});
+
 test("Blank never re-files an existing document", async () => {
   const a = await post("/blank", { kind: "docx", title: "Same" });
   const b = await post("/blank", { kind: "docx", title: "Same" });
@@ -191,7 +254,7 @@ test("the sheet offers install instead of actions for a missing bundle", () => {
 });
 
 function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true }, { id: "b2", name: "Off", perch_attached: false }], opts = {}) {
-  const html = renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project: { id: P1, name: "Garden" }, projects: [{ id: 2, slug: "g", name: "Garden" }, { id: 3, slug: "o", name: "Orchard" }] });
+  const html = renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project: { id: P1, name: "Garden" }, projects: [{ id: 2, slug: "g", name: "Garden" }, { id: 3, slug: "o", name: "Orchard" }], startCard: opts.card ?? null });
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
   const calls = [];
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
@@ -209,7 +272,7 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
       else if (c.url.endsWith("/message")) data = { turnId: "t1" };
       else if (c.url.startsWith("/api/artifacts/")) data = { artifact: { id: "art_abc123", current_version: (opts.versions || [1])[0] }, versions: (opts.versions || [1]).map((n) => ({ n })) };
       else if (c.url.includes("/shell-api/items/")) data = { ok: true };
-      else if (c.url.endsWith("/make-api/blank")) data = { ok: true, fileId: 5, webUrl: "https://ws.example.test/f/5" };
+      else if (c.url.endsWith("/make-api/blank")) data = opts.blank || { ok: true, fileId: 5, webUrl: "https://ws.example.test/f/5" };
       return { ok: true, status: 200, json: async () => data };
     },
   });
@@ -268,6 +331,47 @@ test("Blank posts the title and project to make-api", async () => {
   assert.equal(p.headers["X-Crow-Csrf"], "tok123");
   assert.equal(c.loc.href, "https://ws.example.test/f/5", "same tab goes to the file");
   assert.equal(c.opened(), 0, "no popup");
+});
+
+test("on This card, Blank posts the card too; a chat started there carries only the card's project", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed" }, undefined, { card: "8" });
+  c.click(c.$('[data-mk-blank="docx"]'));
+  await c.settle();
+  c.$("[data-mk-title]").value = "Notes";
+  c.click(c.$("[data-mk-submit]"));
+  await c.settle();
+  assert.deepEqual(c.calls.find((x) => x.url === "/dashboard/make-api/blank").body, { kind: "docx", title: "Notes", project_id: P1, card_id: 8 });
+  const chat = bootClient({ artifacts: "installed", workspace: "installed" }, undefined, { card: "8" });
+  chat.click(chat.$('[data-mk-type="document"]'));
+  await chat.settle();
+  chat.$("[data-mk-field]").value = "Write it";
+  chat.click(chat.$("[data-mk-submit]"));
+  await chat.settle();
+  assert.deepEqual(chat.calls.find((x) => x.url.endsWith("/interactive")).body, { project_id: P1 }, "the interactive API takes no card");
+});
+
+test("on This card, filed:false says the file is not on the card before opening it (en and es)", async () => {
+  const { makeClientJs: js } = await import("../servers/gateway/dashboard/panels/make/client.js");
+  assert.ok(js("es").includes(tJs("shell.makeNotOnCard", "es")));
+  assert.notEqual(tJs("shell.makeNotOnCard", "es"), tJs("shell.makeNotOnCard", "en"));
+  const c = bootClient({ artifacts: "installed", workspace: "installed" }, undefined, { card: "8", blank: { ok: true, fileId: 5, webUrl: "https://ws.example.test/f/5", filed: false } });
+  c.click(c.$('[data-mk-blank="docx"]'));
+  await c.settle();
+  c.$("[data-mk-title]").value = "Notes";
+  c.click(c.$("[data-mk-submit]"));
+  await c.settle();
+  assert.equal(c.$("[data-mk-status]").textContent, "Created, but not added to the card. Open the card to add it.");
+  assert.equal(c.loc.href, "/dashboard/make", "it waits so the notice can be read");
+  await new Promise((r) => setTimeout(r, 3200));
+  assert.equal(c.loc.href, "https://ws.example.test/f/5", "then opens the file");
+  // filed:true on a card goes straight to the file.
+  const ok = bootClient({ artifacts: "installed", workspace: "installed" }, undefined, { card: "8", blank: { ok: true, fileId: 6, webUrl: "https://ws.example.test/f/6", filed: true } });
+  ok.click(ok.$('[data-mk-blank="docx"]'));
+  await ok.settle();
+  ok.$("[data-mk-title]").value = "Fine";
+  ok.click(ok.$("[data-mk-submit]"));
+  await ok.settle();
+  assert.equal(ok.loc.href, "https://ws.example.test/f/6");
 });
 
 // ── Task 4.4: versions stay visible ──

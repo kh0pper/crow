@@ -28,6 +28,7 @@ import { createServer, request } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { generateEnrollOtc } from "../../servers/shared/enroll-guard.js";
+import { ensureSyncTables } from "../../servers/shared/sync-stamp.js";
 
 export const REPO = new URL("../..", import.meta.url).pathname;
 const UID = String(typeof process.getuid === "function" ? process.getuid() : 0);
@@ -459,14 +460,17 @@ export async function writeMarker(inst, text) {
   const client = new Client({ name: "pt2a-marker", version: "1.0.0" });
   const cap = (p, what) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error(`${inst.name}: ${what} timed out`)), 60_000))]);
   let queued = false;
+  watchOutbox(inst);
   try {
     await cap(client.connect(transport), "marker MCP connect");
     const r = await cap(client.callTool({ name: "crow_store_memory", arguments: { content: text, category: "general", importance: 5, source: "pt2a-gate" } }), "crow_store_memory");
     if (r.isError) throw new Error(`${inst.name}: crow_store_memory failed: ${JSON.stringify(r.content).slice(0, 300)}`);
-    // The memory row and its outbox row are written in one batch, and the
-    // gateway drains on a timer: look straight away, so `queued` shows the
-    // outbox query really matches this marker's row.
-    queued = outboxRows(inst, text).length > 0;
+    // crow_store_memory queues its outbox row fire-and-forget, after the tool
+    // has answered, and the gateway's drain can empty sync_outbox before any
+    // poll sees it. So wait, bounded and with the child still alive, on the
+    // test-only audit copy (watchOutbox), which no drain touches: `queued` is
+    // true only if this marker's row really entered the outbox.
+    queued = await until(() => outboxAudit(inst, text).length > 0, 15_000, 100);
   } finally {
     try { await client.close(); } catch { /* gone */ }
   }
@@ -479,6 +483,44 @@ export function hasMarker(inst, text) {
   return inst.sql("SELECT 1 FROM memories WHERE content = ? LIMIT 1", [text]).length > 0;
 }
 
+/**
+ * Test-only, in this instance's scratch DB: an AFTER INSERT trigger on
+ * sync_outbox copies each queued row's identity into crow_test_outbox_audit,
+ * which nothing in the product reads or drains. sync_outbox is created with
+ * the product's own DDL (ensureSyncTables, the same IF NOT EXISTS the drain and
+ * the stdio door run) so the trigger exists before the first marker. Idempotent;
+ * init-db and the gateway never drop objects they do not know.
+ */
+export function watchOutbox(inst) {
+  const db = new Database(join(inst.dataDir, "crow.db"));
+  db.pragma("busy_timeout = 5000");
+  try {
+    ensureSyncTables({ executeMultiple: (ddl) => db.exec(ddl) });
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS crow_test_outbox_audit (outbox_id INTEGER, table_name TEXT, op TEXT, row_json TEXT);
+      CREATE TRIGGER IF NOT EXISTS crow_test_outbox_audit_ins AFTER INSERT ON sync_outbox BEGIN
+        INSERT INTO crow_test_outbox_audit (outbox_id, table_name, op, row_json) VALUES (NEW.id, NEW.table_name, NEW.op, NEW.row_json);
+      END;`);
+  } finally { db.close(); }
+}
+
+/** Every sync_outbox row ever queued on `inst` carrying this marker (watchOutbox's audit copy). */
+export function outboxAudit(inst, text) {
+  return inst.sql("SELECT outbox_id FROM crow_test_outbox_audit WHERE table_name = 'memories' AND row_json LIKE ?", [`%${text}%`]);
+}
+
+/** Why a marker's outbox row was not recorded (a failure message's tail). */
+export function outboxDiag(inst, text) {
+  const q = (sqlText, args = []) => { try { return JSON.stringify(inst.sql(sqlText, args)); } catch (e) { return `error: ${e.message}`; } };
+  return [
+    `memory row: ${q("SELECT id, lamport_ts FROM memories WHERE content = ?", [text])}`,
+    `audit trigger: ${q("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'sync_outbox'")}`,
+    `audit rows (all): ${q("SELECT COUNT(*) AS n FROM crow_test_outbox_audit")}`,
+    `outbox now: ${q("SELECT id, table_name, substr(row_json, 1, 120) AS r FROM sync_outbox ORDER BY id DESC LIMIT 3")}`,
+    `sync_deployment_enabled: ${q("SELECT 'override' AS s, instance_id, value FROM dashboard_settings_overrides WHERE key = 'sync_deployment_enabled' UNION ALL SELECT 'global', NULL, value FROM dashboard_settings WHERE key = 'sync_deployment_enabled'")}`,
+  ].join("\n");
+}
+
 /** `inst`'s queued sync_outbox rows carrying this marker. A failing query throws (it must never read as "drained"). */
 export function outboxRows(inst, text) {
   return inst.sql("SELECT id FROM sync_outbox WHERE table_name = 'memories' AND row_json LIKE ?", [`%${text}%`]);
@@ -486,7 +528,7 @@ export function outboxRows(inst, text) {
 
 /**
  * Has `inst`'s gateway drained the marker (appended it to every paired peer's
- * out-feed)? Only meaningful once the marker's outbox row was seen (writeMarker's
+ * out-feed)? Only meaningful once the marker's outbox row was recorded (writeMarker's
  * `queued`): an empty result alone cannot tell "drained" from "never matched".
  */
 export function markerDrained(inst, text) {

@@ -167,7 +167,7 @@ test("model step with zero providers: warn + providers link + disabled Next, no 
   await clearProviders();
   const html = await renderPost({ action: "wizard_step", step: "1", nav: "next", tpl: "blank", display_name: "Zero Prov" });
   assert.match(html, /btb-warn/, "warn shown");
-  assert.ok(html.includes("/dashboard/settings?section=llm&amp;tab=providers"), "providers deep link");
+  assert.ok(html.includes("/dashboard/settings?section=models&amp;add=1"), "Add a provider deep link");
   assert.ok(!html.includes('name="model"'), "no submittable empty model select");
   assert.match(html, /name="nav" value="next"[^>]*disabled|disabled[^>]*name="nav" value="next"/, "Next disabled");
 });

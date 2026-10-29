@@ -61,7 +61,7 @@ test("renders every step with the stepper and step-specific deep links", async (
   const deepLinkPerStem = {
     welcome: null,
     // button() renders hrefs through escapeHtml, so & appears as &amp; in HTML.
-    ai: "/dashboard/settings?section=llm&amp;tab=providers",
+    ai: "/dashboard/settings?section=models",
     integrations: "/dashboard/settings?section=integrations",
     bot: "/dashboard/bot-builder",
     starter: "/dashboard/extensions#collections",
