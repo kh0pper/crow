@@ -6,8 +6,14 @@
  * (SIGTERM, then SIGKILL after KILL_GRACE_MS). One child per bundle, shared by concurrent
  * callers (the caller is per request, in _meta). At most MAX_CHILDREN at once: a start beyond
  * that stops the least recently used idle child, or is refused while every child is busy.
- * Children get NODE_OPTIONS=--max-old-space-size=48. The MCP SDK's StdioClientTransport is used
- * directly: gateway/proxy.js cannot be imported without crow.db.
+ * Children get NODE_OPTIONS=--max-old-space-size=48. gateway/proxy.js cannot be imported without
+ * crow.db, so the child is driven by BoundedStdioTransport below: the SDK's stdio framing
+ * (ReadBuffer, serializeMessage) with one addition, a bound on stdout bytes since the last
+ * newline. The SDK's own StdioClientTransport buffers an unterminated line without limit, so a
+ * child that floods stdout would grow the agent's memory; here a backlog over
+ * STDOUT_BACKLOG_MAX (2 × the result cap) SIGKILLs the child and its in-flight calls answer
+ * isError OVERFLOW_TEXT. While an update installs dependencies the host is paused: running
+ * children are stopped and no new one starts (BUSY_TEXT) until resume().
  *
  * Admission (§7.0 item 4, reservation-based): a bundle's reservation already includes one MCP
  * child, so its own child needs only MemAvailable ≥ CHILD_FLOOR_MB (32). A child that starts
@@ -25,7 +31,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawn } from "node:child_process";
+import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, CallToolResultSchema, ErrorCode, ListToolsRequestSchema, ListToolsResultSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
@@ -45,6 +52,8 @@ export const CALL_TIMEOUT_MS = 120000;
 export const LOW_MEMORY_TEXT = "This server is low on memory right now";
 export const BUSY_TEXT = "This server is busy right now; try again shortly";
 export const START_FAILED_TEXT = "This extension's server could not start";
+export const OVERFLOW_TEXT = "This extension's server sent too much output at once and was stopped";
+export const STDOUT_BACKLOG_MAX = 2 * RESULT_CAP_BYTES;
 const BUNDLE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CROW_META = "crow.dev/";
 
@@ -96,6 +105,68 @@ export function shapeResult(result, requestId) {
 }
 
 /**
+ * An MCP client transport over a child's stdio (newline-delimited JSON-RPC, the SDK's framing),
+ * with stdout bounded: more than `maxBacklog` bytes without a newline SIGKILLs the child
+ * (`overflowed` = true) and nothing more is buffered. Same surface as the SDK's transports:
+ * start / send / close, onmessage / onerror / onclose, pid.
+ */
+export class BoundedStdioTransport {
+  constructor({ command, args = [], env, cwd, maxBacklog = STDOUT_BACKLOG_MAX }) {
+    Object.assign(this, { _command: command, _args: args, _env: env, _cwd: cwd, _max: maxBacklog });
+    this._buf = new ReadBuffer();
+    this._backlog = 0;
+    this._proc = null;
+    this.overflowed = false;
+  }
+  get pid() { return this._proc?.pid ?? null; }
+  start() {
+    return new Promise((resolve, reject) => {
+      const p = spawn(this._command, this._args, { env: this._env, cwd: this._cwd, stdio: ["pipe", "pipe", "ignore"], shell: false });
+      this._proc = p;
+      p.once("error", (err) => { reject(err); this.onerror?.(err); });
+      p.once("spawn", () => resolve());
+      p.once("close", () => { this._proc = null; this._buf.clear(); this.onclose?.(); });
+      p.stdin.on("error", (err) => this.onerror?.(err));
+      p.stdout.on("data", (chunk) => this._data(chunk));
+      p.stdout.on("error", (err) => this.onerror?.(err));
+    });
+  }
+  _data(chunk) {
+    if (this.overflowed) return;
+    const first = chunk.indexOf(0x0a);
+    const longest = first === -1 ? this._backlog + chunk.length : Math.max(this._backlog + first, chunk.length - chunk.lastIndexOf(0x0a) - 1);
+    this._backlog = first === -1 ? this._backlog + chunk.length : chunk.length - chunk.lastIndexOf(0x0a) - 1;
+    if (longest > this._max) {
+      this.overflowed = true;
+      this._buf.clear();
+      try { this._proc?.kill("SIGKILL"); } catch { /* gone */ }
+      this.onerror?.(new Error(`stdout backlog over ${this._max} bytes`));
+      return;
+    }
+    this._buf.append(chunk);
+    for (;;) {
+      let msg;
+      try { msg = this._buf.readMessage(); } catch (err) { this.onerror?.(err); continue; }
+      if (msg === null) break;
+      this.onmessage?.(msg);
+    }
+  }
+  send(message) {
+    return new Promise((resolve, reject) => {
+      const stdin = this._proc?.stdin;
+      if (!stdin || stdin.destroyed) return reject(new Error("Not connected"));
+      if (stdin.write(serializeMessage(message))) resolve(); else stdin.once("drain", resolve);
+    });
+  }
+  async close() {
+    const p = this._proc;
+    if (!p) return;
+    try { p.stdin.end(); } catch { /* closed */ }
+    try { p.kill("SIGTERM"); } catch { /* gone */ }
+  }
+}
+
+/**
  * The child manager + tool cache for one satellite. `readText` reads /proc/meminfo (injectable);
  * `manifestFor(id)` → the installed manifest (for mcp.mem_mb); `baseEnv` is what a child inherits.
  */
@@ -107,6 +178,7 @@ export function createMcpHost({
   const children = new Map(); // bundle id → entry
   let clock = 0; // LRU order (monotonic, never wall time)
   let closed = false;
+  let paused = false;
   const addonsPath = join(satHome, "mcp-addons.json");
   const configOf = (id) => {
     const c = readJson(addonsPath, {})?.[id];
@@ -126,11 +198,17 @@ export function createMcpHost({
     const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, config.args);
     if (rc.missing || argProblem) throw new Error(`command '${config.command}' not usable: ${argProblem || rc.reason || "not found"}`);
     const env = { ...baseEnv, ...(isObj(config.env) ? config.env : {}), NODE_OPTIONS: CHILD_NODE_OPTIONS, CROW_ADDON_HOST: "satellite" };
-    const transport = new StdioClientTransport({ command: rc.command, args: Array.isArray(config.args) ? config.args : [], env, cwd, stderr: "ignore" });
+    const transport = new BoundedStdioTransport({ command: rc.command, args: Array.isArray(config.args) ? config.args : [], env, cwd });
     const entry = { id, transport, client: null, pid: null, inflight: 0, lastUsed: ++clock, idleTimer: null, stopping: null };
     entry.exited = new Promise((resolve) => { entry.markExited = resolve; });
     // Set before connect: the SDK chains its own close handler after this one.
+    // The SDK's Protocol does not clear a pending request's timeout timer when the transport
+    // closes (it only rejects the request), so a child that dies mid-call would leave a live
+    // CALL_TIMEOUT_MS timer behind. Every request carries this signal; aborting it after the
+    // close cancels the request, which clears that timer.
+    entry.abort = new AbortController();
     transport.onclose = () => {
+      queueMicrotask(() => entry.abort.abort(new Error("the extension's server exited")));
       entry.markExited();
       if (children.get(id) === entry) children.delete(id);
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
@@ -190,6 +268,7 @@ export function createMcpHost({
   async function acquire(id) {
     if (closed) throw new HostRefusal(START_FAILED_TEXT);
     for (;;) {
+      if (paused) throw new HostRefusal(BUSY_TEXT);
       const have = children.get(id);
       if (have && !have.stopping) {
         have.inflight++;
@@ -232,6 +311,7 @@ export function createMcpHost({
     let done = false;
     return {
       client: entry.client,
+      entry,
       release() {
         if (done) return;
         done = true;
@@ -256,7 +336,7 @@ export function createMcpHost({
     try {
       let cursor;
       for (let page = 0; page < 100; page++) {
-        const r = await l.client.request({ method: "tools/list", params: cursor ? { cursor } : {} }, ListToolsResultSchema, { timeout: callTimeoutMs });
+        const r = await l.client.request({ method: "tools/list", params: cursor ? { cursor } : {} }, ListToolsResultSchema, { timeout: callTimeoutMs, signal: l.entry.abort.signal });
         tools.push(...(r.tools || []));
         cursor = r.nextCursor;
         if (!cursor) break;
@@ -265,7 +345,16 @@ export function createMcpHost({
       l.release();
     }
     tools = JSON.parse(JSON.stringify(tools)); // plain JSON values only (canonicalJson refuses undefined)
-    const sha256 = sha256Hex(canonicalJson(tools));
+    const canon = canonicalJson(tools);
+    const bytes = Buffer.byteLength(canon);
+    if (bytes > RESULT_CAP_BYTES) {
+      // crow could never receive it (every answer is capped): no row, so no stale list either.
+      delCache.run(id);
+      const e = children.get(id);
+      if (e && e.inflight === 0) await stopEntry(e);
+      throw new Error(`tool list too large (${Math.ceil(bytes / 1024)} KiB, the cap is ${RESULT_CAP_BYTES / 1024} KiB); not cached`);
+    }
+    const sha256 = sha256Hex(canon);
     putCache.run(id, version == null ? null : String(version), JSON.stringify(tools), sha256, new Date().toISOString());
     const e = children.get(id);
     if (e && e.inflight === 0) await stopEntry(e);
@@ -307,7 +396,13 @@ export function createMcpHost({
     }
     try {
       const forwarded = { name: params.name, arguments: isObj(params.arguments) ? params.arguments : {}, _meta: callerMeta(satCaller, params._meta) };
-      const result = await l.client.request({ method: "tools/call", params: forwarded }, CallToolResultSchema, { timeout: callTimeoutMs });
+      let result;
+      try {
+        result = await l.client.request({ method: "tools/call", params: forwarded }, CallToolResultSchema, { timeout: callTimeoutMs, signal: l.entry.abort.signal });
+      } catch (err) {
+        if (l.entry.transport.overflowed) return errorText(OVERFLOW_TEXT);
+        throw err;
+      }
       return shapeResult(result, requestId);
     } finally {
       l.release();
@@ -329,6 +424,13 @@ export function createMcpHost({
     async stopChildren() {
       await Promise.all([...children.values()].map((e) => stopEntry(e)));
     },
+    /** Stop every child and start none (calls answer BUSY_TEXT) until resume(). */
+    async pause() {
+      paused = true;
+      await Promise.all([...children.values()].map((e) => stopEntry(e)));
+    },
+    resume() { paused = false; },
+    isPaused: () => paused,
     async stopAll() {
       closed = true;
       await Promise.all([...children.values()].map((e) => stopEntry(e)));
@@ -343,8 +445,18 @@ export function createMcpHost({
  * sessionIdGenerator undefined and enableJsonResponse true, so its answer is one complete JSON
  * Response that is read whole, size-checked and sent through sendSigned. crow sends
  * `Accept: application/json` only (§5.2); the transport's Accept check wants both types, so the
- * request it sees carries both (the answer is JSON either way).
+ * request it sees carries both (the answer is JSON either way). JSON-RPC batches are accepted:
+ * every tools/call in one gets the signed caller's _meta; a batch answer over the cap becomes one
+ * JSON-RPC error per request (oversizeAnswer) in a signed 200.
  */
+/** JSON-RPC errors for every request in `body` (a message or a batch), the answer too large. */
+export function oversizeAnswer(body, kib) {
+  const error = { code: ErrorCode.InternalError, message: `result too large (${kib} KiB)` };
+  const ids = (Array.isArray(body) ? body : [body]).filter((m) => isObj(m) && typeof m.method === "string" && m.id !== undefined).map((m) => m.id);
+  const answers = ids.map((id) => ({ jsonrpc: "2.0", id, error }));
+  return Array.isArray(body) ? answers : answers[0] || { jsonrpc: "2.0", id: null, error };
+}
+
 export function registerMcpRoutes(router, { host, satHome, sendSigned }) {
   const installed = (id) => readInstalled(installedPath(satHome)).some((b) => b.id === id);
   const hasServer = (id) => { const c = readJson(join(satHome, "mcp-addons.json"), {})?.[id]; return isObj(c) && typeof c.command === "string"; };
@@ -370,7 +482,11 @@ export function registerMcpRoutes(router, { host, satHome, sendSigned }) {
       const webReq = new Request(`http://satellite.invalid/satellite/v1/mcp/${id}`, { method: "POST", headers, body: Buffer.isBuffer(req.body) ? req.body : "" });
       const answer = await transport.handleRequest(webReq, { parsedBody: req.satBody });
       const text = await answer.text();
-      if (Buffer.byteLength(text) > RESULT_CAP_BYTES) return sendSigned(res, 413, { error: "result_too_large", kib: Math.ceil(Buffer.byteLength(text) / 1024) });
+      if (Buffer.byteLength(text) > RESULT_CAP_BYTES) {
+        // A batch whose answers are each under the cap but together over it: still JSON-RPC, one
+        // error per request, in a signed 200.
+        return sendSigned(res, 200, oversizeAnswer(req.satBody, Math.ceil(Buffer.byteLength(text) / 1024)));
+      }
       let body = {};
       if (text) {
         try { body = JSON.parse(text); } catch { return sendSigned(res, 502, { error: "bad_mcp_answer" }); }

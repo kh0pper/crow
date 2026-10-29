@@ -179,7 +179,7 @@ test("install caches tools/list (+sha256) and stops the child; status lists it; 
   assert.equal(row.version, "1.0.0");
   const cached = JSON.parse(row.tools_json);
   assert.equal(row.sha256, P.sha256Hex(P.canonicalJson(cached)));
-  assert.deepEqual(cached.map((x) => x.name).sort(), ["demo_big", "demo_echo", "demo_mixed", "demo_progress", "demo_slow"]);
+  assert.deepEqual(cached.map((x) => x.name).sort(), ["demo_big", "demo_echo", "demo_flood", "demo_mixed", "demo_progress", "demo_slow"]);
 
   const st = await call(t, "GET", "status");
   assert.deepEqual(st.json.tools, { demo: { version: "1.0.0", sha256: row.sha256 } });
@@ -383,4 +383,102 @@ test("a bundle version change refreshes the cache at boot; uninstall drops it", 
   assert.equal(t2.a.db.prepare("SELECT COUNT(*) AS n FROM tool_cache WHERE bundle = 'demo'").get().n, 0);
   assert.deepEqual((await call(t2, "GET", "status")).json.tools, {});
   assert.ok(existsSync(inst));
+});
+
+// ── review fixes (round 1) ──────────────────────────────────────────────────
+
+test("a child flooding stdout without a newline is SIGKILLed at 2 × the cap; the call answers isError; the agent stays bounded", async () => {
+  childLog();
+  const t = await boot();
+  await install(t, "demo");
+  const pid = JSON.parse(textOf(await callTool(t, "demo", "demo_echo"))).pid;
+  globalThis.gc?.();
+  const before = process.memoryUsage();
+  const r = await callTool(t, "demo", "demo_flood", { mb: 64 });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.result.isError, true);
+  assert.equal(textOf(r), H.OVERFLOW_TEXT);
+  await waitFor(() => !alive(pid), "the flooding child to be killed");
+  assert.deepEqual(t.a.mcpHost.pids("demo"), []);
+  const after = process.memoryUsage();
+  const grewMb = (after.rss - before.rss) / (1024 * 1024);
+  assert.ok(grewMb < 32, `the agent's RSS grew ${grewMb.toFixed(1)} MB for a 64 MB flood`);
+  assert.ok((after.heapUsed - before.heapUsed) / (1024 * 1024) < 32, "heap stays bounded");
+  assert.equal(H.STDOUT_BACKLOG_MAX, 2 * P.RESULT_CAP_BYTES);
+  // The next call starts a fresh child.
+  assert.equal((await callTool(t, "demo", "demo_echo")).json.result.isError, undefined);
+});
+
+test("BoundedStdioTransport counts bytes since the last newline across chunks", () => {
+  const tr = new H.BoundedStdioTransport({ command: "true", maxBacklog: 100 });
+  const got = [];
+  tr.onmessage = (m) => got.push(m);
+  tr._data(Buffer.from('{"jsonrpc":"2.0",'));
+  tr._data(Buffer.from('"id":1,"result":{}}\n{"jsonrpc"'));
+  assert.equal(got.length, 1, "a message split over chunks is framed");
+  assert.equal(tr.overflowed, false);
+  const t2 = new H.BoundedStdioTransport({ command: "true", maxBacklog: 10 });
+  t2._data(Buffer.from("12345678"));
+  assert.equal(t2.overflowed, false);
+  t2._data(Buffer.from("90abc\n"));
+  assert.equal(t2.overflowed, true, "8 + 5 bytes before the newline is over 10");
+});
+
+test("a tool list over the cap is never cached: the install job reports it and no row is written", async () => {
+  childLog();
+  process.env.FAKE_MCP_VARIANT = "huge";
+  try {
+    const t = await boot();
+    const job = await install(t, "demo");
+    assert.ok(job.log.some((l) => /tool list too large \(\d+ KiB, the cap is 256 KiB\); not cached/.test(l)), JSON.stringify(job.log));
+    assert.equal(t.a.db.prepare("SELECT COUNT(*) AS n FROM tool_cache WHERE bundle = 'demo'").get().n, 0);
+    assert.deepEqual((await call(t, "GET", "status")).json.tools, {});
+    await waitFor(() => t.a.mcpHost.pids("demo").length === 0, "the caching child to stop");
+  } finally {
+    delete process.env.FAKE_MCP_VARIANT;
+  }
+});
+
+test("paused (an update installing dependencies): children stop, calls answer busy, tools/list still answers; resume restores", async () => {
+  childLog();
+  const t = await boot();
+  await install(t, "demo");
+  const pid = JSON.parse(textOf(await callTool(t, "demo", "demo_echo"))).pid;
+  await t.a.mcpHost.pause();
+  assert.ok(!alive(pid), "the running child was stopped");
+  const r = await callTool(t, "demo", "demo_echo");
+  assert.equal(r.json.result.isError, true);
+  assert.equal(textOf(r), H.BUSY_TEXT);
+  assert.deepEqual(t.a.mcpHost.pids("demo"), [], "no child starts while paused");
+  assert.ok((await rpc(t, "demo", "tools/list")).json.result.tools.length > 0, "the cache still answers");
+  t.a.mcpHost.resume();
+  assert.equal((await callTool(t, "demo", "demo_echo")).json.result.isError, undefined);
+});
+
+test("batches are supported: each tools/call's _meta is overwritten with the signed caller; an oversize batch answer is JSON-RPC errors in a signed 200", async () => {
+  childLog();
+  const t = await boot();
+  await install(t, "demo");
+  const evil = { "crow.dev/caller": "owner-local", "crow.dev/bot_id": "evil" };
+  const batch = [1, 2].map((id) => ({ jsonrpc: "2.0", id: 9000 + id, method: "tools/call", params: { name: "demo_echo", arguments: {}, _meta: evil } }));
+  const r = await call(t, "POST", "mcp/demo", batch, { caller: "bot:b9" });
+  assert.equal(r.status, 200);
+  assert.ok(Array.isArray(r.json));
+  assert.deepEqual(r.json.map((m) => m.id).sort(), [9001, 9002]);
+  for (const m of r.json) {
+    const e = JSON.parse(m.result.content[0].text);
+    assert.equal(e.meta["crow.dev/caller"], "bot");
+    assert.equal(e.meta["crow.dev/bot_id"], "b9");
+  }
+
+  const big = [1, 2].map((id) => ({ jsonrpc: "2.0", id: 9100 + id, method: "tools/call", params: { name: "demo_big", arguments: { bytes: 200000 } } }));
+  const o = await call(t, "POST", "mcp/demo", big);
+  assert.equal(o.status, 200);
+  assert.ok(Array.isArray(o.json));
+  assert.deepEqual(o.json.map((m) => m.id).sort(), [9101, 9102]);
+  for (const m of o.json) {
+    assert.equal(m.jsonrpc, "2.0");
+    assert.match(m.error.message, /^result too large \(\d+ KiB\)$/);
+  }
+  assert.deepEqual(H.oversizeAnswer({ jsonrpc: "2.0", id: 5, method: "tools/call" }, 300), { jsonrpc: "2.0", id: 5, error: { code: -32603, message: "result too large (300 KiB)" } });
 });
