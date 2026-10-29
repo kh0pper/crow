@@ -14,7 +14,7 @@ import rolesApiRouter from "../servers/gateway/routes/roles-api.js";
 let dir, db;
 const origWarn = console.warn;
 const OWN = new Set();
-const SECRET = "sk-test-never-echo-0123456789";
+const SECRET = "fixture-secret-never-echo-0123456789";
 
 const ins = (id, url, models, disabled = 0) =>
   db.execute({
