@@ -136,18 +136,19 @@ export function createCloneBundleHelpers(ctx) {
     // Defense in depth: the derived slug is already sanitized, but confirm the
     // resolved workspace path stays inside dataDir before creating it.
     const resolvedRoot = resolvePath(dataDir);
-    const resolvedWs = resolvePath(workspaceDir);
-    if (resolvedWs !== resolvedRoot && !resolvedWs.startsWith(resolvedRoot + "/")) {
+    const inRoot = (p) => { const r = resolvePath(p); return r === resolvedRoot || r.startsWith(resolvedRoot + "/"); };
+    if (!inRoot(workspaceDir)) {
       throw new Error("clone workspace path escaped data dir");
     }
-    try { mkdirSync(resolvedWs, { recursive: true }); } catch {}
 
     // Insert the new project_spaces row via the shared helper (explicitSlug
     // mode: we own the -clone-N slug + path-containment assertion above;
-    // the helper computes workspace_dir/storage_prefix from the slug).
+    // the helper computes workspace_dir/storage_prefix from the slug, and
+    // picks a fresh folder when <slug>/workspace is already on disk, e.g. a
+    // deleted project's leftover, so the folder is created only AFTER it).
     // ownerMember:false — clone path supplies its own richer member row below
     // (role='owner', mode='clone', granted_by_contact_id=originContactId).
-    const { id: newProjectId } = await createProjectSpace(db, {
+    const { id: newProjectId, workspaceDir: madeWs } = await createProjectSpace(db, {
       explicitSlug: newSlug,
       name: `${orig.name} (clone)`,
       description: orig.description ?? null,
@@ -156,6 +157,8 @@ export function createCloneBundleHelpers(ctx) {
       originInstanceId: bundle.origin_instance_id ?? null,
       ownerMember: false,
     });
+    if (!inRoot(madeWs)) throw new Error("clone workspace path escaped data dir");
+    try { mkdirSync(resolvePath(madeWs), { recursive: true }); } catch {}
 
     // Owner row for the local user on this clone (richer than the helper default:
     // mode='clone' records provenance; granted_by_contact_id links to sender).

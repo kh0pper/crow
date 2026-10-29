@@ -391,7 +391,7 @@ test("a step after the commit that fails is partial, never undone", async () => 
   assert.equal(r.ok, true);
   assert.deepEqual(r.partial, ["files"]);
   assert.ok((await proj(id)).archived_at, "tombstone stands");
-  assert.equal(await n("SELECT COUNT(*) AS n FROM storage_files WHERE project_id = ?", [id]), 1, "row kept for a later retry");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM storage_files WHERE project_id = ?", [id]), 1, "row left behind: inert (the id is never reused); a cleanup of leftovers is a queued follow-up");
   assert.equal(existsSync(p.workspace_dir), false, "later steps still ran");
   const g = await one("SELECT details FROM audit_log WHERE event_type = 'project.delete' AND details LIKE ?", [`%"project_id":${id},%`]);
   assert.deepEqual(JSON.parse(g.details).partial, ["files"]);
@@ -459,4 +459,94 @@ test("a workspace that is not <dataDir>/projects/<slug>/workspace is left in pla
   assert.deepEqual(r.partial, ["workspace"]);
   assert.equal(readFileSync(join(other, "keep.txt"), "utf8"), "mine");
   assert.ok(p.slug);
+});
+
+test("a tombstone is never rewritten by updateProjectSpaceMeta: callers see not found", async () => {
+  const { updateProjectSpaceMeta } = await import("../servers/shared/project-spaces.js");
+  const id = await mk("Meta Gone");
+  assert.equal((await del(id, "Meta Gone")).ok, true);
+  const before = { ...(await proj(id)) };
+  assert.equal(await updateProjectSpaceMeta(db, id, { status: "active", name: "Back", description: "d" }), 0);
+  assert.deepEqual({ ...(await proj(id)) }, before);
+  const live = await mk("Meta Live");
+  assert.equal(await updateProjectSpaceMeta(db, live, { status: "paused" }), 1, "a live row still updates");
+});
+
+test("a leftover workspace folder is never adopted by explicit-slug creation or a received clone", async () => {
+  // A deleted project's folder whose move failed, at the path the next "-clone-1" would use.
+  const left = join(DATA, "projects", "leftover-clone-1", "workspace");
+  mkdirSync(left, { recursive: true });
+  writeFileSync(join(left, "old.txt"), "old project's file");
+  const made = await createProjectSpace(db, { name: "Direct", explicitSlug: "leftover-clone-1" });
+  assert.equal(made.slug, "leftover-clone-1");
+  assert.equal(made.workspaceDir, join(DATA, "projects", "leftover-clone-1-2", "workspace"));
+  assert.equal((await proj(made.id)).workspace_dir, made.workspaceDir);
+
+  // The clone receive: slug leftover-clone-1 is now taken, so it goes to -clone-2; plant that folder too.
+  const left2 = join(DATA, "projects", "leftover-clone-2", "workspace");
+  mkdirSync(left2, { recursive: true });
+  writeFileSync(join(left2, "old.txt"), "another leftover");
+  const { createCloneBundleHelpers } = await import("../servers/sharing/clone-bundle.js");
+  const { applyProjectCloneBundle } = createCloneBundleHelpers({ db });
+  await applyProjectCloneBundle({
+    bundle_version: 1, project: { name: "Leftover", slug: "leftover", description: null, type: "general", tags: null },
+    sources: [], notes: [], audit_log: [], backends: [], file_manifest: [], origin_instance_id: "test-origin", snapshot_at: new Date().toISOString(),
+  }, null);
+  const clone = await one("SELECT slug, workspace_dir FROM project_spaces WHERE name = 'Leftover (clone)'");
+  assert.equal(clone.slug, "leftover-clone-2");
+  assert.equal(clone.workspace_dir, join(DATA, "projects", "leftover-clone-2-2", "workspace"));
+  assert.ok(existsSync(clone.workspace_dir), "the clone's fresh folder exists");
+  assert.deepEqual(readdirSync(clone.workspace_dir), []);
+  assert.equal(readFileSync(join(left, "old.txt"), "utf8"), "old project's file");
+  assert.equal(readFileSync(join(left2, "old.txt"), "utf8"), "another leftover");
+});
+
+test("queued jobs for the deleted cards are cancelled (never deleted); others are left alone", async () => {
+  const id = await mk("Jobbed");
+  const other = await mk("Jobs Other");
+  const [c1, c2] = seedCards(id, 2);
+  const [k1] = seedCards(other, 1);
+  const job = (jid, card, status) => db.execute({ sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, card_id, source) VALUES (?, 'b', 'g', ?, ?, 'card')", args: [jid, status, card] });
+  await job("j-q", c1, "queued");
+  await job("j-run", c2, "running");
+  await job("j-other", k1, "queued");
+  // A per-project store's card ids are another id space: a job naming the same number is not its.
+  const own = await mk("Jobs Own");
+  const OWN2 = join(DATA, "own-jobs.db");
+  const o = new Database(OWN2); o.exec(TASKS_DDL); o.close();
+  await db.execute({ sql: "UPDATE project_spaces SET tasks_db_uri = ? WHERE id = ?", args: ["file:" + OWN2, own] });
+  const [ownCard] = seedCards(own, 1, OWN2);
+  await job("j-collide", ownCard, "queued");
+
+  assert.equal((await del(id, "Jobbed")).ok, true);
+  assert.equal((await del(own, "Jobs Own")).ok, true);
+  const st = async (jid) => ({ ...(await one("SELECT status, error FROM bot_jobs WHERE job_id = ?", [jid])) });
+  assert.deepEqual(await st("j-q"), { status: "failed", error: "cancelled: its project was deleted" });
+  assert.equal((await st("j-run")).status, "running", "a running job is not touched");
+  assert.equal((await st("j-other")).status, "queued");
+  assert.equal((await st("j-collide")).status, "queued", "a per-project card id never cancels a global job");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM bot_jobs WHERE job_id IN ('j-q','j-run','j-other','j-collide')"), 4, "nothing deleted");
+});
+
+test("the refusals run again right before the disconnects; a late refusal reports the disconnects", async () => {
+  // Added after the summary, before the disconnects: refused, the connection still active.
+  const id = await mk("Early Late");
+  await seed(id);
+  const r = await L.deleteProject(db, id, {
+    confirmName: "Early Late", storageDelete: recorder().storageDelete, disconnectBackend: () => true,
+    _afterSummary: () => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, project_id) VALUES (?, 'Early', ?)", args: [`early-${id}`, id] }),
+  });
+  assert.equal(r.code, "bots");
+  assert.equal((await one("SELECT status FROM service_connections WHERE project_id = ?", [id])).status, "active", "nothing disconnected");
+
+  // Added after the disconnects: refused inside the transaction, with the count.
+  const id2 = await mk("Very Late");
+  await seed(id2);
+  const r2 = await L.deleteProject(db, id2, {
+    confirmName: "Very Late", storageDelete: recorder().storageDelete, disconnectBackend: () => true,
+    _beforeTransaction: () => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, project_id) VALUES (?, 'Late', ?)", args: [`vlate-${id2}`, id2] }),
+  });
+  assert.equal(r2.code, "bots");
+  assert.deepEqual(r2.detail, { bots: ["Late"], disconnected: 1 });
+  assert.equal((await proj(id2)).archived_at, null);
 });

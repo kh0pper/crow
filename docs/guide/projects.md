@@ -100,7 +100,7 @@ Every project gets a directory at `~/.crow/data/projects/<slug>/workspace/`. Thi
 - Readable by every bot in the project: Crow adds it to the bot's read folders automatically. Bots outside the project cannot read it unless you list it under **Safety › Folders this bot can read**.
 - Available to agents via the `crow_workspace_dir` MCP tool
 
-The directory persists across project archive (it's only deleted on hard delete).
+The directory persists across project archive. Deleting the project moves it to `~/.crow/data/deleted-projects/` (never deletes it).
 
 ## Attaching assets
 
@@ -177,7 +177,7 @@ Subscription (live one-way sync) and federated read are planned follow-on milest
 
 Phase 1 uses **soft archive**: changing a project's status to `archived` hides the project from active listings. It does not set `archived_at`: that column means "deleted", and bots on an archived project keep working. Restore sets the status back to `active`. Sources, notes, members, audit, and the workspace directory are preserved. The project can be unarchived from the dashboard at any time.
 
-Hard delete (drop the workspace dir, cascade everything) is not implemented in Phase 1 — file your decision before re-implementing as a one-way operation.
+**Delete** is permanent, for the project's owner, from **Manage project** on the project home or from the Projects page (an archived project too). It first shows what will go (cards, files, notes, sources, sessions, connections, data backends, the working folder) and asks you to type the project's name; it is refused while the project is shared with anyone or has bots on it (stop sharing it, or move its bots, first). It then disconnects its connections, deletes its cards, files, notes, sources and project context, unfiles its memories and sessions, and keeps the project's row as a hidden record (so its id and audit history are never reused or lost) while freeing its name; the working folder is moved, never deleted, to `~/.crow/data/deleted-projects/`, where you can remove it by hand.
 
 ## See also
 

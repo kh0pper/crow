@@ -261,6 +261,7 @@ async function renderDeleteConfirm(db, req, layout, lang) {
   const view = await deleteConfirmHtml(db, req, project, lang, {
     urls: { post: "/dashboard/projects", cancel: `/dashboard/projects?view=${id}` },
     error: typeof req.query.error === "string" ? req.query.error : "",
+    disconnected: typeof req.query.disconnected === "string" ? req.query.disconnected : "",
   });
   if (view.forbidden) return layout({ title: "Project Not Found", content: section("Not Found", `<p>Project #${id} not found.</p>`) });
   return layout({ title: project.name, content: `<style>${lifecycleRules()}</style>${view.html}` });

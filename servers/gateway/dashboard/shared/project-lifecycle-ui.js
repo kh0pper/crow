@@ -55,7 +55,8 @@ export function lifecycleRules() {
   .pl-manage[open] > .pl { padding-top: 8px; }
   .pl-row-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: -0.25rem 0 0.75rem; }
   .pl-row-actions form { margin: 0; }
-  @media (min-width: 600px) { .pl-actions { flex-direction: row; } }
+  /* The confirm's Cancel comes first in source, so on a phone the red button is never the first thing under the field. */
+  @media (min-width: 600px) { .pl-actions { flex-direction: row; } .pl-actions--confirm { flex-direction: row-reverse; justify-content: flex-end; } }
   `;
 }
 
@@ -102,11 +103,13 @@ const ERROR_KEY = Object.freeze({ name_mismatch: "projLife.nameMismatch", failed
  * The delete confirm page body. `urls`: { post, cancel }.
  * @returns {Promise<{ forbidden?: true, html?: string }>}
  */
-export async function deleteConfirmHtml(db, req, project, lang, { urls, error = "" }) {
+export async function deleteConfirmHtml(db, req, project, lang, { urls, error = "", disconnected = "" }) {
   const sum = await deleteSummary(db, project.id, {});
   if (sum.blocked && sum.blocked.code === "not_owner") return { forbidden: true };
   const title = `<h2 class="pl-title">${escapeHtml(fill("projLife.confirmTitle", lang, { name: project.name }))}</h2>`;
-  const err = ERROR_KEY[error] ? `<p class="pl-banner pl-banner--err" role="alert" data-pl-error="${escapeHtml(error)}">${escapeHtml(t(ERROR_KEY[error], lang))}</p>` : "";
+  const err = (ERROR_KEY[error] ? `<p class="pl-banner pl-banner--err" role="alert" data-pl-error="${escapeHtml(error)}">${escapeHtml(t(ERROR_KEY[error], lang))}</p>` : "")
+    // A refusal found after the disconnects ran (deleteProject's detail.disconnected).
+    + (/^[1-9][0-9]{0,5}$/.test(String(disconnected)) ? `<p class="pl-banner pl-banner--err" role="alert" data-pl-disconnected>${escapeHtml(t("projLife.disconnected", lang))}</p>` : "");
   const cancel = `<a class="pl-link pl-link--quiet" href="${escapeHtml(urls.cancel)}">${escapeHtml(t("common.cancel", lang))}</a>`;
   if (sum.blocked) {
     const b = sum.blocked;
@@ -135,7 +138,7 @@ export async function deleteConfirmHtml(db, req, project, lang, { urls, error = 
       <input type="hidden" name="action" value="delete_project"><input type="hidden" name="id" value="${Number(project.id)}">
       <label for="pl-confirm-name">${escapeHtml(t("projLife.nameLabel", lang))}</label>
       <input type="text" id="pl-confirm-name" name="confirm_name" required autocomplete="off" autocapitalize="off" spellcheck="false" data-pl-name>
-      <div class="pl-actions"><button type="submit" class="pl-btn pl-btn--danger" data-pl-delete-go>${escapeHtml(t("projLife.deleteGo", lang))}</button>${cancel}</div>
+      <div class="pl-actions pl-actions--confirm">${cancel}<button type="submit" class="pl-btn pl-btn--danger" data-pl-delete-go>${escapeHtml(t("projLife.deleteGo", lang))}</button></div>
     </form></div>` };
 }
 
@@ -147,11 +150,14 @@ export function resultBannerHtml(query, lang) {
     const lines = [t("projLife.deleted", lang)];
     const ws = one(q.ws);
     // The folder name is rebuilt under the server's own deleted-projects directory; only a plain name is accepted.
-    if (/^[A-Za-z0-9][A-Za-z0-9-]{5,100}$/.test(ws)) {
+    const folder = /^[A-Za-z0-9][A-Za-z0-9-]{5,100}$/.test(ws) && ws !== "none";
+    if (folder) {
       lines.push(fill("projLife.movedTo", lang, { path: join(deletedProjectsDir(), ws) }), t("projLife.removeLater", lang));
     } else if (ws === "left") lines.push(t("projLife.notMoved", lang));
     const steps = one(q.partial).split(",").filter((s) => STEP_KEY[s] && !(ws === "left" && s === "workspace")).map((s) => t(STEP_KEY[s], lang));
     if (steps.length) lines.push(fill("projLife.partial", lang, { steps: steps.join(", ") }));
+    // Only the redirect a real delete builds shows the banner: a valid ws, or a partial list. A bare ?deleted=1 shows nothing.
+    if (!folder && ws !== "left" && ws !== "none" && !steps.length) return "";
     return `<p class="pl-banner" role="status" data-pl-deleted>${lines.map(escapeHtml).join(" ")}</p>`;
   }
   if (one(q.archived)) return `<p class="pl-banner" role="status" data-pl-archived>${escapeHtml(t("projLife.archived", lang))}</p>`;
@@ -190,7 +196,8 @@ export async function handleLifecyclePost(req, res, { db, lang, layout, projectI
   }
   const r = await deleteProject(db, id, { confirmName: typeof body.confirm_name === "string" ? body.confirm_name : "", actor: "local" });
   if (!r.ok) {
-    res.redirectAfterPost(urls.confirm(`error=${encodeURIComponent(r.code)}`));
+    const n = Number(r.detail?.disconnected || 0);
+    res.redirectAfterPost(urls.confirm(`error=${encodeURIComponent(r.code)}${n > 0 ? `&disconnected=${n}` : ""}`));
     return {};
   }
   const ws = r.movedTo ? basename(r.movedTo) : (r.counts.workspace ? "left" : "none");

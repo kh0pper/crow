@@ -4275,6 +4275,7 @@ export const translations = {
   "projLife.goBots": { en: "Go to its bots", es: "Ir a sus bots" },
   "projLife.restoreFirst": { en: "Restore it first to reach its bots.", es: "Restáuralo primero para llegar a sus bots." },
   "projLife.nameMismatch": { en: "The name didn't match, so nothing was deleted.", es: "El nombre no coincidió, así que no se eliminó nada." },
+  "projLife.disconnected": { en: "Its service connections were disconnected; reconnect them on the Services page.", es: "Sus conexiones de servicios se desconectaron; vuelve a conectarlas en la página de Servicios." },
   "projLife.failed": { en: "Something went wrong, so the project was not deleted.", es: "Algo salió mal, así que no se eliminó el proyecto." },
   "projLife.cloneNote": { en: "Copies you shared with others stay on their Crows.", es: "Las copias que compartiste con otros siguen en sus Crows." },
   "projLife.workspaceNote": { en: "Its working folder moves to {path}; you can remove it by hand.", es: "Su carpeta de trabajo se mueve a {path}; puedes borrarla a mano." },

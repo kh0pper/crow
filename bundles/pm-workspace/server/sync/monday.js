@@ -701,6 +701,26 @@ export async function syncTwowayBoard(db, tdb, board, items, token, totals) {
 // ── Entry point ─────────────────────────────────────────────────────────
 
 /**
+ * A kanban target's project must be live (core's activeProjectWhere: archived_at NULL, status not
+ * 'archived', not a learner profile) or its cards would be inserted into an archived project or a
+ * deleted project's tombstone row. Inlined: an installed bundle copy cannot import core's helper.
+ */
+async function targetProjectLive(db, projectId) {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT 1 AS x FROM project_spaces WHERE id = ? AND archived_at IS NULL AND status != 'archived'
+              AND (type IS NULL OR type != 'learner_profile') LIMIT 1`,
+      args: [Number(projectId)],
+    });
+    return rows.length > 0;
+  } catch (err) {
+    if (/no such table: project_spaces/i.test(String(err && err.message))) return true; // pre-projects store: nothing to check
+    throw err;
+  }
+}
+
+
+/**
  * Run one full sync pass over every configured board.
  * Returns { ok, skipped?, reason?, totals?, boards? }.
  */
@@ -729,6 +749,15 @@ export async function runSync(db, config) {
   try {
     for (const board of syncConfig.boards) {
       try {
+        if (board.target.project_id != null && !(await targetProjectLive(db, board.target.project_id))) {
+          await logSync(db, {
+            direction: "pull", board_id: board.board_id, action: "skip_project_not_live",
+            detail: `target project ${board.target.project_id} is archived, deleted or missing; board skipped`, ok: true,
+          });
+          console.warn(`[pm-workspace sync] board ${board.board_id}: target project ${board.target.project_id} is not live; skipped`);
+          boardResults.push({ board_id: board.board_id, mode: board.mode, ok: true, skipped: "project_not_live" });
+          continue;
+        }
         const items = await pullBoardItems(token, board.board_id, board.group_ids);
         if (board.target.kind === "tracker") {
           if (!tdb) tdb = createTasksDbClient(config);

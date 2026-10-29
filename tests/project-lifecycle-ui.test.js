@@ -147,6 +147,8 @@ test("delete confirm shows counts, the warning and the notes", async () => {
   assert.match(r.body, /<label for="pl-confirm-name">Type the project's name to confirm<\/label>/);
   assert.match(r.body, />Delete permanently</);
   assert.match(r.body, />Cancel</);
+  // On a phone the actions stack in source order: Cancel comes first, never the red button right under the field.
+  assert.match(r.body, /data-pl-name>[\s\S]*?<div class="pl-actions pl-actions--confirm"><a class="pl-link pl-link--quiet"[^>]*>Cancel<\/a><button type="submit" class="pl-btn pl-btn--danger"/);
   assert.match(r.body, /name="_csrf" value="tok"/);
   const panel = await get(`/dashboard/projects?delete=${P.alpha}`);
   assert.match(panel.body, /data-pl-confirm/);
@@ -192,6 +194,9 @@ test("delete POST: tombstones, shows where the workspace went and the remove-lat
   assert.match(page.body, /Project deleted\./);
   assert.ok(page.body.includes(`Its working folder is now at ${join(dir, "deleted-projects", moved[0])}.`));
   assert.match(page.body, /You can remove that folder later\./);
+  // The deleted project's home is gone, under its old slug and its tombstone slug alike.
+  assert.equal((await get("/dashboard/project/alpha")).status, 404);
+  assert.equal((await get(`/dashboard/project/${encodeURIComponent(row(P.alpha).slug)}`)).status, 404);
   // es
   const es = i18n.t("projLife.removeLater", "es");
   assert.equal(es, "Puedes borrar esa carpeta más adelante.");
@@ -204,6 +209,10 @@ test("a forged ws or partial in the URL cannot show an arbitrary path or raw cod
   assert.doesNotMatch(banner, /etc|\.\./, "no path from a forged ws");
   assert.match(f.body, /These steps didn't finish: its cards, its board\./);
   assert.doesNotMatch(f.body, /board_defs|bogus/);
+  const bare = await get("/dashboard/projects?deleted=1");
+  assert.doesNotMatch(bare.body, /data-pl-deleted|Project deleted\./, "a bare ?deleted=1 shows nothing");
+  const junk = await get("/dashboard/projects?deleted=1&ws=" + encodeURIComponent("../x") + "&partial=bogus");
+  assert.doesNotMatch(junk.body, /data-pl-deleted/);
   const left = await get("/dashboard/projects?deleted=1&ws=left&partial=workspace,files");
   assert.match(left.body, /Its working folder was not moved\./);
   assert.match(left.body, /These steps didn't finish: its files\./);
@@ -270,4 +279,28 @@ test("the Spanish page renders the controls in Spanish", async () => {
   assert.equal(i18n.t("projLife.manage", "es"), "Gestionar proyecto");
   assert.equal(i18n.t("projLife.blockedShared", "es"), "Primero deja de compartirlo: {who}.");
   assert.equal(i18n.t("projLife.blockedBots", "es"), "Primero mueve sus bots a otro proyecto: {bots}.");
+});
+
+test("a refusal after the disconnects says so on the confirm page", async () => {
+  const r = await get("/dashboard/project/sharey?delete=1&error=shared&disconnected=2");
+  assert.match(r.body, /data-pl-disconnected[^>]*>Its service connections were disconnected; reconnect them on the Services page\.</);
+  assert.doesNotMatch((await get("/dashboard/project/sharey?delete=1&error=shared&disconnected=x")).body, /data-pl-disconnected/);
+  assert.equal(i18n.t("projLife.disconnected", "es"), "Sus conexiones de servicios se desconectaron; vuelve a conectarlas en la página de Servicios.");
+});
+
+test("an archived project is deleted from /dashboard/projects?delete=", async () => {
+  assert.equal(row(P.epsilon).status, "archived");
+  const c = await get(`/dashboard/projects?delete=${P.epsilon}`);
+  assert.equal(c.status, 200);
+  assert.match(c.body, /data-pl-confirm/);
+  assert.match(c.body, /data-pl-delete-go/);
+  const r = await post("/dashboard/projects", { action: "delete_project", id: String(P.epsilon), confirm_name: "Epsilon" });
+  assert.equal(r.status, 303);
+  assert.match(r.location, /^\/dashboard\/projects\?deleted=1&ws=[A-Za-z0-9-]+$/);
+  assert.ok(row(P.epsilon).archived_at);
+  assert.match(row(P.epsilon).slug, /^epsilon-deleted-/);
+  assert.equal(existsSync(join(dir, "projects", "epsilon", "workspace")), false);
+  // The tombstone is gone from the archived list and its confirm.
+  assert.doesNotMatch((await get("/dashboard/projects?status=archived")).body, new RegExp(`data-pl-row="${P.epsilon}"`));
+  assert.match((await get(`/dashboard/projects?delete=${P.epsilon}`)).body, /not found/);
 });

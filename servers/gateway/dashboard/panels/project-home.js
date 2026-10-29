@@ -78,7 +78,7 @@ export default {
     const q = req.query || {};
     const one = (v) => (typeof v === "string" ? v : "");
     if (one(q.delete) === "1") {
-      const view = await deleteConfirmHtml(db, req, project, lang, { urls: { post: home, cancel: home }, error: one(q.error) });
+      const view = await deleteConfirmHtml(db, req, project, lang, { urls: { post: home, cancel: home }, error: one(q.error), disconnected: one(q.disconnected) });
       if (view.forbidden) {
         res.status(403);
         return layout({ title: project.name, content: projectHomeCss() + projectForbiddenHtml(lang) });

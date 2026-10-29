@@ -236,6 +236,12 @@ async function txWrite(db, sql, args) {
   try { return await db.execute({ sql, args }); } catch (err) { if (isAbsent(err)) return { rowsAffected: 0, skipped: true }; throw err; }
 }
 
+/** The refusals (owner, shared, bots) as they stand now, or null. Synchronous DB reads only. */
+async function currentBlock(db, id) {
+  if (!(await canOwnProject(db, id))) return { code: "not_owner", detail: null };
+  return (await sharedBlock(db, id)) || (await botsBlock(db, id));
+}
+
 /** A refusal found inside the transaction: rolls it back, and deleteProject returns its code. */
 class DeleteRefused extends Error {
   constructor(code, detail = null) { super(`delete refused: ${code}`); this.code = code; this.detail = detail; }
@@ -265,8 +271,7 @@ async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
   await db.execute("BEGIN IMMEDIATE");
   let contextChanged = false;
   try {
-    if (!(await canOwnProject(db, id))) throw new DeleteRefused("not_owner");
-    const block = (await sharedBlock(db, id)) || (await botsBlock(db, id));
+    const block = await currentBlock(db, id);
     if (block) throw new DeleteRefused(block.code, block.detail);
 
     await txWrite(db, "DELETE FROM service_connections WHERE project_id = ?", [id]);
@@ -315,7 +320,7 @@ async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
 async function purgeCards(project, { tasksDbPath }, partial) {
   const id = Number(project.id);
   const store = resolveCardsStore(project, { tasksDbPath });
-  const deleted = { cards: 0 };
+  const deleted = { cards: 0, ids: [], global: store.global };
   if (store.path) {
     let tdb;
     try {
@@ -337,6 +342,7 @@ async function purgeCards(project, { tasksDbPath }, partial) {
         }
         await tdb.batch(stmts);
         deleted.cards = ids.length;
+        deleted.ids = ids;
       }
     } catch (err) {
       console.warn(`[project-lifecycle] delete ${id}: cards purge failed:`, err?.message || err);
@@ -356,6 +362,25 @@ async function purgeCards(project, { tasksDbPath }, partial) {
     } finally { if (gdb) gdb.close(); }
   }
   return deleted;
+}
+
+/**
+ * Queued bot_jobs for the deleted cards never run. bot_jobs lives in crow.db and its card_id names
+ * an instance-global card (dispatch only addresses global cards), so this runs only when the cards
+ * came from the global store: a per-project store's ids are another id space. bot_jobs.status is
+ * queued|running|completed|failed with no cancelled state, so a cancel is the force-unlock's
+ * terminal write (bot-board-api.js): status='failed' with a reason, guarded on 'queued' so a job a
+ * runner just claimed is left alone. Never a DELETE.
+ */
+async function cancelCardJobs(db, id, cards, partial) {
+  if (!cards.global || !cards.ids.length) return;
+  try {
+    await txWrite(db, `UPDATE bot_jobs SET status = 'failed', error = 'cancelled: its project was deleted', ended_at = datetime('now')
+                        WHERE status = 'queued' AND card_id IN (SELECT value FROM json_each(?))`, [JSON.stringify(cards.ids)]);
+  } catch (err) {
+    console.warn(`[project-lifecycle] delete ${id}: cancelling card jobs failed:`, err?.message || err);
+    partial.push("jobs");
+  }
 }
 
 async function purgeFiles(db, id, storageDelete, partial) {
@@ -412,14 +437,16 @@ function moveWorkspace(project, dataDir, now, partial) {
  * @param {string} [opts.dataDir]  defaults to project-spaces.js's anchor
  * @param {string} [opts.tasksDbPath]  the instance-global tasks.db (instance-paths.mjs by default)
  * @param {string} [opts.crowHome]  accepted, unused (see deleteSummary)
+ * @param {Function} [opts._afterSummary]  test seam: runs after the summary, before the pre-disconnect re-check
  * @param {Function} [opts._beforeTransaction]  test seam: runs after the pre-transaction steps, before BEGIN
  * @param {Function} [opts._beforeTombstone]  test seam: runs inside the transaction, before the tombstone
  * @returns {Promise<{ ok: true, counts: object, movedTo?: string, partial?: string[] } |
  *   { ok: false, code: 'bad_actor'|'not_owner'|'shared'|'bots'|'name_mismatch'|'failed', detail?: object }>}
+ *   A refusal found inside the transaction carries detail.disconnected: the connections already disconnected.
  */
 export async function deleteProject(db, projectId, {
   confirmName, crowHome, actor = "local", storageDelete, disconnectBackend = defaultDisconnectBackend,
-  dataDir, tasksDbPath, now = () => new Date(), _beforeTransaction, _beforeTombstone,
+  dataDir, tasksDbPath, now = () => new Date(), _afterSummary, _beforeTransaction, _beforeTombstone,
 } = {}) {
   if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
   const summary = await deleteSummary(db, projectId, { tasksDbPath });
@@ -429,9 +456,16 @@ export async function deleteProject(db, projectId, {
   const id = Number(project.id);
   const counts = summary.counts;
 
+  if (_afterSummary) await _afterSummary();
+  // The refusals again, right before the first write (the disconnects), so a member or bot added
+  // since the summary refuses with nothing changed. They run once more inside the transaction.
+  const late = await currentBlock(db, id);
+  if (late) return { ok: false, code: late.code, ...(late.detail ? { detail: late.detail } : {}) };
+
   // Pre-transaction: keychain secrets masked (one service.disconnect audit each), running backends closed.
+  let disconnected = 0;
   try {
-    await disconnectProjectConnections(db, id, { actor });
+    ({ disconnected } = await disconnectProjectConnections(db, id, { actor }));
   } catch (err) {
     console.warn(`[project-lifecycle] delete ${id}: disconnecting connections failed:`, err?.message || err);
     return { ok: false, code: "failed" };
@@ -449,7 +483,8 @@ export async function deleteProject(db, projectId, {
   try {
     purged = await purgeCrowDb(db, project, { actor, counts, beforeTombstone: _beforeTombstone });
   } catch (err) {
-    if (err instanceof DeleteRefused) return { ok: false, code: err.code, ...(err.detail ? { detail: err.detail } : {}) };
+    // A refusal this late comes after the disconnects: say how many connections were disconnected.
+    if (err instanceof DeleteRefused) return { ok: false, code: err.code, detail: { ...(err.detail || {}), disconnected } };
     console.warn(`[project-lifecycle] delete ${id}: crow.db purge rolled back:`, err?.message || err);
     return { ok: false, code: "failed" };
   }
@@ -460,7 +495,8 @@ export async function deleteProject(db, projectId, {
   if (purged.contextChanged) {
     try { (await import("../memory/crow-context.js")).invalidateContextCache(); } catch { /* cache is per-process */ }
   }
-  await purgeCards(project, { tasksDbPath }, partial);
+  const cards = await purgeCards(project, { tasksDbPath }, partial);
+  await cancelCardJobs(db, id, cards, partial);
   await purgeFiles(db, id, storageDelete || defaultStorageDeleteFor(db), partial);
   const movedTo = moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
   const workspaceMoved = !!movedTo;
