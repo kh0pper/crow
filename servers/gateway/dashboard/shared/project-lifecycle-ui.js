@@ -20,7 +20,7 @@ import {
 
 const fill = (key, lang, vals) => Object.entries(vals).reduce((out, [k, v]) => out.split("{" + k + "}").join(String(v ?? "")), t(key, lang));
 
-const STEP_KEY = Object.freeze({ cards: "projLife.stepCards", board_defs: "projLife.stepBoard", files: "projLife.stepFiles", workspace: "projLife.stepWorkspace" });
+const STEP_KEY = Object.freeze({ cards: "projLife.stepCards", board_defs: "projLife.stepBoard", files: "projLife.stepFiles", workspace: "projLife.stepWorkspace", jobs: "projLife.stepJobs" });
 const COUNT_ROWS = Object.freeze([
   ["cards", "projLife.cCards"], ["files", "projLife.cFiles"], ["notes", "projLife.cNotes"], ["sources", "projLife.cSources"],
   ["sessions", "projLife.cSessions"], ["connections", "projLife.cConnections"], ["backends", "projLife.cBackends"],

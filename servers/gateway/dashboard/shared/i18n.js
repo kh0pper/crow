@@ -4298,6 +4298,7 @@ export const translations = {
   "projLife.stepBoard": { en: "its board", es: "su tablero" },
   "projLife.stepFiles": { en: "its files", es: "sus archivos" },
   "projLife.stepWorkspace": { en: "its working folder", es: "su carpeta de trabajo" },
+  "projLife.stepJobs": { en: "cancelling its queued bot jobs", es: "cancelar sus trabajos de bot en cola" },
   "shell.addService": { en: "Add a service", es: "Añadir un servicio" },
   "services.status.active": { en: "On", es: "Activo" },
   "services.status.needs_reauth": { en: "Sign in again", es: "Vuelve a iniciar sesión" },
