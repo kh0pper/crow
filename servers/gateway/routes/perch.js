@@ -365,6 +365,18 @@ function resolveTranscriptFile(dir, sessionId) {
   return hits.length ? { file: join(dir, hits[hits.length - 1]) } : { none: "no_turn_yet" };
 }
 
+/** The transcript file's mtime as "YYYY-MM-DD HH:MM:SS" (UTC), or null on any miss. */
+function transcriptActivity(row) {
+  try {
+    if (!row) return null;
+    const found = resolveTranscriptFile(row.pi_session_dir, row.pi_session_id);
+    if (!found.file) return null;
+    return statSync(found.file).mtime.toISOString().slice(0, 19).replace("T", " ");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read at most the trailing TRANSCRIPT_TAIL_BYTES of a file.
  *
@@ -653,7 +665,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
       const rowById = new Map();
       try {
         const { rows: sessRows } = await db.execute({
-          sql: "SELECT gateway_thread_id, card_id, control, label, datetime(updated_at) AS updated_at FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
+          sql: "SELECT gateway_thread_id, card_id, control, label, pi_session_dir, pi_session_id FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
           args: [],
         });
         for (const r of sessRows) rowById.set(String(r.gateway_thread_id), r);
@@ -755,9 +767,10 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             // fills in for an entry eng.list() built from the DB alone.
             label: (s.label != null ? s.label : (dbRow && dbRow.label)) || null,
             projectId: projectOfThread.get(String(s.sessionId)) ?? null,
-            // When the session last changed (UTC, "YYYY-MM-DD HH:MM:SS"); the
-            // new-mode header turns it into "today" / "yesterday" / a weekday.
-            updatedAt: (dbRow && dbRow.updated_at) || null,
+            // When the conversation last moved: the pi transcript's mtime
+            // (UTC "YYYY-MM-DD HH:MM:SS"), null when there is no file yet.
+            // bot_sessions.updated_at would lie: renames bump it, messages don't.
+            lastActivityAt: transcriptActivity(dbRow),
           };
         });
         // spec §3.2 priority fold: waiting-on-you > working > hibernating >

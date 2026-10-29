@@ -375,7 +375,7 @@ export function perchHubJs(lang = "en") {
                      (routes/perch.js) — null when there isn't one. */
                   label:(s.label==null||s.label==='')?null:String(s.label),
                   projectId:s.projectId==null?null:Number(s.projectId),
-                  updatedAt:(typeof s.updatedAt==='string'&&s.updatedAt)?s.updatedAt:null});
+                  lastActivityAt:(typeof s.lastActivityAt==='string'&&s.lastActivityAt)?s.lastActivityAt:null});
       });
     });
     /* Blocked-on-you first: those are the only rows that need you right now. */
@@ -1311,6 +1311,7 @@ export function perchHubJs(lang = "en") {
            mid-choice. Park the payload; closing the menu draws it. */
         if(openRowMenu()){ deferredList={rows:listRows(r.j,SCOPE),archived:(r.j.archived||[])}; return; }
         renderList(listRows(r.j,SCOPE),(r.j.archived||[]));
+        if(current.sid&&rowIndex[current.sid]) showIdent(current.botName||current.botId);   /* the head's day line and Back label follow the fresh row */
         return;
       }
       /* A failed /roost is NOT an empty roost, and the old else branch said
@@ -1883,7 +1884,7 @@ export function perchHubJs(lang = "en") {
      from the row's last-activity stamp (UTC "YYYY-MM-DD HH:MM:SS"). '' when
      the row carries none or it does not parse. */
   function identDay(row,now,lang){
-    var s=row&&row.updatedAt; if(!s) return '';
+    var s=row&&row.lastActivityAt; if(!s) return '';
     var d=new Date(String(s).replace(' ','T')+'Z');
     if(isNaN(d.getTime())) return '';
     var a=new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime();

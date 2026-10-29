@@ -5463,16 +5463,16 @@ test("identSubtitle: today / yesterday / weekday / date / no project", async () 
   const now = new Date(2026, 9, 28, 15, 0, 0);          // Wed 28 Oct 2026, local
   const stamp = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000 * 0 ).toISOString().slice(0, 19).replace("T", " ");
   const at = (y, m, d) => stamp(new Date(Date.UTC(y, m, d, 12, 0, 0)));   // midday UTC: same local day in any sane zone offset check below
-  const row = (updatedAt) => ({ projectId: 3, updatedAt });
+  const row = (lastActivityAt) => ({ projectId: 3, lastActivityAt });
   // Build local-noon stamps so the local calendar day is unambiguous.
   const local = (y, m, d) => { const x = new Date(y, m, d, 12, 0, 0); return x.toISOString().slice(0, 19).replace("T", " "); };
   assert.equal(identSubtitle(row(local(2026, 9, 28)), PROJ, now, "en"), "# Homework Club · today");
   assert.equal(identSubtitle(row(local(2026, 9, 27)), PROJ, now, "en"), "# Homework Club · yesterday");
   assert.equal(identSubtitle(row(local(2026, 9, 24)), PROJ, now, "en"), "# Homework Club · Saturday");
   assert.match(identSubtitle(row(local(2026, 8, 1)), PROJ, now, "en"), /^# Homework Club · Sep 1$/);
-  assert.equal(identSubtitle({ projectId: 3, updatedAt: null }, PROJ, now, "en"), "# Homework Club");
-  assert.equal(identSubtitle({ projectId: null, updatedAt: local(2026, 9, 28) }, PROJ, now, "en"), "today");
-  assert.equal(identSubtitle({ projectId: null, updatedAt: null }, PROJ, now, "en"), "");
+  assert.equal(identSubtitle({ projectId: 3, lastActivityAt: null }, PROJ, now, "en"), "# Homework Club");
+  assert.equal(identSubtitle({ projectId: null, lastActivityAt: local(2026, 9, 28) }, PROJ, now, "en"), "today");
+  assert.equal(identSubtitle({ projectId: null, lastActivityAt: null }, PROJ, now, "en"), "");
   void at;
 });
 
