@@ -171,6 +171,28 @@ test("unreadable new zombie is not a survivor", () => {
   assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: zombie, listPids: () => [9] }), []);
 });
 
+// Unreadable new pid 9 whose parent is pid 50 with the given comm and uid.
+const withParent = (comm, parentUid = process.getuid()) => (p) => {
+  if (p === "/proc/9/stat") return statLine(1e9).replace(") S 1 ", ") S 50 ");
+  if (p === "/proc/50/comm") return `${comm}\n`;
+  if (p === "/proc/50/status") return `Uid:\t${parentUid}\t0\t0\t0\n`;
+  return fixture(1e9)(p);
+};
+
+test("unreadable new pid with an ordinary parent (bash) is not a survivor", () => {
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: withParent("bash"), listPids: () => [9] }), []);
+});
+
+test("unreadable new pid with ppid 1 is a survivor", () => {
+  assert.match(statLine(1e9), /\) S 1 /, "the fixture's ppid is 1");
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: fixture(1e9), listPids: () => [9] }), [9]);
+});
+
+test("unreadable new pid under our uid's systemd is a survivor; under another uid's is not", () => {
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: withParent("systemd"), listPids: () => [9] }), [9]);
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: withParent("systemd", process.getuid() + 1), listPids: () => [9] }), []);
+});
+
 test("survivorsByMarker requires sinceBootSec", () => {
   assert.throws(() => survivorsByMarker("r", {}), /sinceBootSec/);
 });

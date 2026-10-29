@@ -307,12 +307,23 @@ export function bootSecNow(readProc = defaultReadProc) {
   return Number(readProc("/proc/uptime").trim().split(/\s+/)[0]);
 }
 
+/** ppid is 1, or our uid's `systemd` (the user subreaper). Unreadable = not orphaned. */
+function orphaned(ppid, readProc, uid) {
+  if (ppid === 1) return true;
+  try {
+    if (readProc(`/proc/${ppid}/comm`).trim() !== "systemd") return false;
+    const m = /^Uid:\s+(\d+)/m.exec(readProc(`/proc/${ppid}/status`));
+    return !!m && Number(m[1]) === uid;
+  } catch { return false; }
+}
+
 /**
  * Every pid whose environ carries CROW_EVAL_RUN_ID=<runId> exactly, whatever its age. Fails
  * closed for a process of our uid whose environ is unreadable (EACCES), but only if it started
  * at or after sinceBootSec (the run's start, seconds since boot): long-lived unreadable
- * processes (sshd, systemd --user, gpg-agent) cannot belong to the run. Other users' processes,
- * zombies and vanished pids are skipped.
+ * processes (sshd, systemd --user, gpg-agent) cannot belong to the run, and only if its parent
+ * is init or our uid's systemd (an escaped pi is reparented there). Other users' processes,
+ * zombies and vanished pids are skipped. A readable marked pid always counts.
  */
 export function survivorsByMarker(runId, { sinceBootSec, readProc = defaultReadProc, listPids = defaultListPids, uid = process.getuid() } = {}) {
   if (!Number.isFinite(sinceBootSec)) throw new DriverRefusal("survivorsByMarker requires a finite sinceBootSec");
@@ -328,7 +339,11 @@ export function survivorsByMarker(runId, { sinceBootSec, readProc = defaultReadP
         const m = /^Uid:\s+(\d+)/m.exec(readProc(`/proc/${n}/status`));
         if (!m || Number(m[1]) !== uid) continue;
         const t = readProc(`/proc/${n}/stat`);
-        if (parseStat(t)?.state === "Z") continue; // a zombie's environ is EACCES too; it is dead
+        const st = parseStat(t);
+        if (st?.state === "Z") continue; // a zombie's environ is EACCES too; it is dead
+        // An escaped pi is reparented to init or the user subreaper; a sudo/ssh/gpg another
+        // session started meanwhile has an ordinary parent and is not ours.
+        if (!st || !orphaned(st.ppid, readProc, uid)) continue;
         const startTicks = Number(t.slice(t.lastIndexOf(")") + 1).trim().split(/\s+/)[19]); // stat field 22
         if (!Number.isFinite(startTicks) || startTicks / clkTckHz() >= sinceBootSec) out.push(n);
       } catch { /* vanished while checking */ }
@@ -461,8 +476,12 @@ export async function runConversation({
   if (typeof turnSlackMs !== "number" || !Number.isFinite(turnSlackMs)) refuse("turnSlackMs must be a finite number");
   if (!Number.isInteger(prodMaxPi) || prodMaxPi < 1) refuse("prodMaxPi must be a positive integer");
   if (typeof gatewayType !== "string" || !gatewayType) refuse("gatewayType must be a non-empty string");
-  const home = checkScratchHome(scratchHome, parentEnv);
-  checkEndpoints(models, { allowHosts, gatewayPort: parentEnv.CROW_GATEWAY_PORT });
+  // parentEnv never weakens a guard: the real process.env always applies, parentEnv only adds.
+  const protectedEnv = { CROW_SUITE_PROTECTED_ROOTS: [process.env, parentEnv].map((e) => e.CROW_SUITE_PROTECTED_ROOTS || "").join("\n") };
+  const home = checkScratchHome(scratchHome, protectedEnv);
+  const extraPort = parentEnv.CROW_GATEWAY_PORT;
+  const gatewayPorts = extraPort !== undefined && extraPort !== "" && Number.isFinite(Number(extraPort)) ? [Number(extraPort)] : [];
+  checkEndpoints(models, { allowHosts, gatewayPort: process.env.CROW_GATEWAY_PORT, gatewayPorts });
   checkBotDef(botDef, models, home);
   checkToolSurface(botDef, { allowServers, allowSkills, scratchHome: home });
   if (!Array.isArray(threads) || !threads.length) refuse("threads must be a non-empty array");
@@ -595,7 +614,7 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
   if (treeSurvivors.length) why = `${why ? `${why}; ` : ""}killTree survivors: ${treeSurvivors.join(",")}`;
 
   // After EVERY thread: a pi reparented by an exited child is invisible to the tree walk.
-  const marked = (await settledSurvivorsByMarker(runId, { sinceBootSec })).filter((p) => p !== process.pid);
+  const marked = await settledSurvivorsByMarker(runId, { sinceBootSec });
   if (marked.length) {
     // Kill only pids whose environ positively carries the marker; an unreadable one (the
     // scan fails closed) still contaminates, but is never signalled on a guess.

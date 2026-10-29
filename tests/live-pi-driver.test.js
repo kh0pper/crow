@@ -71,8 +71,9 @@ async function setup(t, { knobs = {}, over = {} } = {}) {
   t.after(() => {
     const runIds = new Set(events.filter((e) => e.runId).map((e) => e.runId));
     for (const id of runIds) for (const pid of survivorsByMarker(id, { sinceBootSec })) if (carriesMarker(pid, id)) { try { process.kill(pid, "SIGKILL"); } catch {} }
-    for (const e of events) if (e.pid) { try { process.kill(e.pid, "SIGKILL"); } catch {} }
-    for (const c of readLines(capture)) { try { process.kill(c.pid, "SIGKILL"); } catch {} }
+    const ours = (pid) => [...runIds].some((id) => carriesMarker(pid, id));
+    for (const e of events) if (e.pid && ours(e.pid)) { try { process.kill(e.pid, "SIGKILL"); } catch {} }
+    for (const c of readLines(capture)) if (c.pid && ours(c.pid)) { try { process.kill(c.pid, "SIGKILL"); } catch {} }
     s.cleanup();
   });
   const opts = {
@@ -288,6 +289,30 @@ test("pre-spawn refusals: piCli, piPackages, threads, wallMs", async (t) => {
   assert.equal(existsSync(ctx.capture), false);
   assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
   assert.equal(existsSync(join(ctx.s.home, "pi-agent", "models.json")), false, "nothing is written before the guards pass");
+});
+
+test("parentEnv never weakens the guards", async (t) => {
+  const ctx = await setup(t);
+  const saved = { ...process.env };
+  const restore = () => { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); };
+  const parentEnv = { ...ctx.opts.parentEnv };
+  delete parentEnv.CROW_GATEWAY_PORT;
+  delete parentEnv.CROW_SUITE_PROTECTED_ROOTS;
+  try {
+    // The real process.env's gateway port is refused although parentEnv lacks it.
+    process.env.CROW_GATEWAY_PORT = "3999";
+    await assert.rejects(runConversation({ ...ctx.opts, parentEnv, models: models("http://127.0.0.1:3999/v1") }),
+      (e) => e instanceof DriverRefusal && /port 3999 is a gateway port/.test(e.message));
+    delete process.env.CROW_GATEWAY_PORT;
+    // parentEnv's gateway port is refused too.
+    await assert.rejects(runConversation({ ...ctx.opts, parentEnv: { ...parentEnv, CROW_GATEWAY_PORT: "3998" }, models: models("http://127.0.0.1:3998/v1") }),
+      (e) => e instanceof DriverRefusal && /port 3998 is a gateway port/.test(e.message));
+    // A protected root in the real process.env applies although parentEnv lacks it.
+    process.env.CROW_SUITE_PROTECTED_ROOTS = [saved.CROW_SUITE_PROTECTED_ROOTS, ctx.s.home].filter(Boolean).join("\n");
+    await assert.rejects(runConversation({ ...ctx.opts, parentEnv }), (e) => e instanceof DriverRefusal && /protected/.test(e.message));
+  } finally { restore(); }
+  assert.equal(existsSync(ctx.capture), false);
+  assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
 });
 
 test("parent module loads no bridge or DB code", () => {
