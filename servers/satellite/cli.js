@@ -4,13 +4,16 @@
  *   pair-code   void every live code and print a fresh one (console only). Writes satellite.db
  *               directly, so it works while the agent runs. Refused while paired.
  *   status      paired / not paired, satellite id, crow id, cert expiry.
+ *   self-check  load the agent's whole module graph and exit 0 (update.js runs it in the NEW tree
+ *               after a fast-forward, before restarting into it).
+ *   migrate     apply satellite.db's pending SAT_SCHEMA_VERSION migrations (update.js, new tree).
  * SAT_HOME = CROW_HOME (default ~/.crow-satellite).
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { formatFingerprint } from "../shared/satellite-protocol.js";
 import { resolveSatHome } from "./agent.js";
-import { openSatelliteDb } from "./db.js";
+import { currentVersion, openSatelliteDb } from "./db.js";
 import { loadSatelliteKey, readCert, readPinned } from "./keys.js";
 import { certIsLive, issuePairCode, pairCodeLines } from "./pairing.js";
 
@@ -52,7 +55,17 @@ if (cmd === "status") {
   } finally {
     db.close();
   }
+} else if (cmd === "self-check") {
+  await import("./agent.js"); // its graph covers bundles.js, mcp-host.js, update.js and the rest
+  console.log("ok");
+} else if (cmd === "migrate") {
+  const db = openSatelliteDb(satHome);
+  try {
+    console.log(`satellite.db at schema ${currentVersion(db)}`);
+  } finally {
+    db.close();
+  }
 } else {
-  console.error("usage: cli.js pair-code | status");
+  console.error("usage: cli.js pair-code | status | self-check | migrate");
   process.exit(2);
 }

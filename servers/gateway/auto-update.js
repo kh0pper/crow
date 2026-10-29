@@ -13,6 +13,7 @@ import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSupervised } from "../shared/supervisor.js";
 import { isInstallSetRunning } from "./install-lock.js";
+import { classifyCheckRuns } from "../shared/ci-check-runs.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let APP_ROOT = dirname(dirname(__dirname));
@@ -332,23 +333,9 @@ let _quarantineAlertAt = 0;
 // reached every instance within 6h regardless of CI state).
 // ---------------------------------------------------------------------------
 
-// The three branch-protection context names (the A1 contract). Other runs
-// (deploy-docs, build, image-freshness) never block updates.
-const CI_GATE_CONTEXTS = ["suite", "static-checks", "audit"];
-
-/**
- * Pure classification of a GitHub check-runs payload for the target sha.
- * "unknown" (no named runs — a fork without our CI, or an API oddity) FAILS
- * OPEN: strangers' forks and non-GitHub deployments must still update; the
- * gate only defends against a KNOWABLY red main.
- */
-export function classifyCheckRuns(payload) {
-  const runs = (payload?.check_runs || []).filter((r) => CI_GATE_CONTEXTS.includes(r?.name));
-  if (runs.length === 0) return "unknown";
-  if (runs.some((r) => r.status !== "completed")) return "pending";
-  const ok = ["success", "neutral", "skipped"];
-  return runs.every((r) => ok.includes(r.conclusion)) ? "green" : "red";
-}
+// classifyCheckRuns lives in shared/ci-check-runs.js (the satellite agent reuses it without
+// loading this module); re-exported here unchanged.
+export { classifyCheckRuns };
 
 let _ciVerdictOverride = null;
 /** Test hook: force the CI-gate verdict (fixture repos have non-GitHub
