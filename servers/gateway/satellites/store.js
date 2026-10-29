@@ -72,6 +72,20 @@ export async function updateSatelliteStatus(db, id, patch) {
     [...keys.map((k) => patch[k]), id]);
 }
 
+/**
+ * Like updateSatelliteStatus, but never touches a revoked row (an unpair that landed while a
+ * poll or a renewal was in flight wins). Returns true when the row was updated.
+ */
+export async function updateSatelliteIfNotRevoked(db, id, patch) {
+  const keys = Object.keys(patch || {});
+  const bad = keys.filter((k) => !PATCH_COLS.includes(k));
+  if (bad.length) throw new Error(`updateSatelliteIfNotRevoked: unknown column(s): ${bad.join(", ")}`);
+  if (!keys.length) return false;
+  const r = await write(db, `UPDATE satellites SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ? AND status != 'revoked'`,
+    [...keys.map((k) => patch[k]), id]);
+  return Number(r?.rowsAffected || 0) === 1;
+}
+
 /** True when the satellite tables exist; false on a not-yet-migrated instance. */
 export async function satellitesMigrated(db) {
   try {

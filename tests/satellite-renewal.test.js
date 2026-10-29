@@ -140,3 +140,26 @@ test("rotation, unreachable for both probes: the staged key is kept for a later 
   const again = await a.renewer.resolveStaged(a.db, await store.getSatellite(a.db, a.fake.satId));
   assert.equal(again, "discarded");
 });
+
+test("coordinator fix: revoked during a renewal or a rotation → no cert committed, no key promoted", async () => {
+  const a = await setup({ ageDays: 15 });
+  a.fake.table["POST /satellite/v1/cert"] = async ({ body }) => { await store.markRevoked(a.db, a.fake.satId, new Date().toISOString()); a.fake.state.certs.push(body.cert); return { status: 200, json: { ok: true } }; };
+  const r = await a.renewer.renewOne(a.db, await store.getSatellite(a.db, a.fake.satId));
+  assert.equal(r.renewed, false);
+  assert.equal(r.code, "revoked");
+  const row = await store.getSatellite(a.db, a.fake.satId);
+  assert.equal(row.status, "revoked");
+  assert.equal(row.cert_serial, a.made.cert.payload.serial, "no cert committed");
+
+  const b = await setup();
+  const oldPub = b.made.mgmtKey.ed25519_pub;
+  b.fake.table["POST /satellite/v1/cert"] = async ({ body }) => { await store.markRevoked(b.db, b.fake.satId, new Date().toISOString()); b.fake.state.mgmtPub = body.cert.payload.mgmt_pubkey; return { status: 200, json: { ok: true, rotated: true } }; };
+  const rr = await b.renewer.rotateKey(b.db, await store.getSatellite(b.db, b.fake.satId));
+  assert.equal(rr.rotated, false);
+  assert.equal(rr.code, "revoked");
+  assert.equal(K.loadStagedMgmtKey(b.fake.satId), null, "staged key shredded");
+  assert.equal(K.loadMgmtKey(b.fake.satId).ed25519_pub, oldPub, "the live key file is not replaced");
+  const row2 = await store.getSatellite(b.db, b.fake.satId);
+  assert.equal(row2.mgmt_pubkey, oldPub);
+  assert.equal(row2.status, "revoked");
+});

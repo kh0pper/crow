@@ -298,3 +298,41 @@ test("unpair removes the satellite's add-on entries, skills and pins", async () 
     assert.equal(after2.json.error, "revoked");
   } finally { s.close(); }
 });
+
+test("coordinator fix: only jobs crow created are finished — forged id, other bundle or other action record nothing", async () => {
+  const s = await setup();
+  try {
+    // A job crow never created, reported complete for an eligible bundle.
+    s.jobs.set("abcdefabcdefabcd", { id: "abcdefabcdefabcd", bundle_id: "demo", action: "install", status: "complete", log: [] });
+    const forged = await s.call("GET", `/api/satellites/${s.sat}/jobs/abcdefabcdefabcd`);
+    assert.equal(forged.status, 200);
+    assert.equal(existsSync(s.paths.installed) && readJ(s.paths.installed).some((r) => r.id === "demo"), false);
+
+    // A real install job whose report names another bundle, or another action.
+    const ins = await s.call("POST", `/api/satellites/${s.sat}/bundles/install`, { bundle: "demo" });
+    const j = s.jobs.get(ins.json.job_id);
+    j.bundle_id = "priv";
+    await s.call("GET", `/api/satellites/${s.sat}/jobs/${ins.json.job_id}`);
+    j.bundle_id = "demo"; j.action = "uninstall";
+    await s.call("GET", `/api/satellites/${s.sat}/jobs/${ins.json.job_id}`);
+    assert.equal(existsSync(s.paths.installed) && readJ(s.paths.installed).length > 0, false, "nothing recorded");
+    // The record is still there for the honest report, and is consumed by it.
+    j.action = "install";
+    await s.call("GET", `/api/satellites/${s.sat}/jobs/${ins.json.job_id}`);
+    assert.equal(readJ(s.paths.installed).find((r) => r.id === "demo").host, s.sat);
+    writeFileSync(s.paths.installed, "[]");
+    await s.call("GET", `/api/satellites/${s.sat}/jobs/${ins.json.job_id}`);
+    assert.deepEqual(readJ(s.paths.installed), [], "a consumed record is never replayed");
+
+  } finally { s.close(); }
+});
+
+test("coordinator fix: eligibility is re-checked when the job finishes", async () => {
+  const s = await setup();
+  try {
+    const ins = await s.call("POST", `/api/satellites/${s.sat}/bundles/install`, { bundle: "demo" });
+    writeFileSync(join(s.app, "demo", "manifest.json"), JSON.stringify({ id: "demo", version: "1.0.0" })); // no longer eligible
+    await s.call("GET", `/api/satellites/${s.sat}/jobs/${ins.json.job_id}`);
+    assert.equal(existsSync(s.paths.installed) && readJ(s.paths.installed).some((r) => r.id === "demo"), false);
+  } finally { s.close(); }
+});
