@@ -72,11 +72,21 @@ export function resolveWebUIPort(manifest, bundleId, home = CROW_HOME) {
   return fallback;
 }
 
-export function getProxiedExtensions(home = CROW_HOME) {
-  const installedPath = join(home, "installed.json");
-  if (!existsSync(installedPath)) return [];
+/** installed.json as an array of entries ([] when missing or unreadable). */
+export function readInstalled(home = CROW_HOME) {
   try {
-    const installed = JSON.parse(readFileSync(installedPath, "utf8"));
+    const installedPath = join(home, "installed.json");
+    if (!existsSync(installedPath)) return [];
+    const data = JSON.parse(readFileSync(installedPath, "utf8"));
+    return Array.isArray(data) ? data : Object.entries(data).map(([id, v]) => ({ id, ...v }));
+  } catch {
+    return [];
+  }
+}
+
+export function getProxiedExtensions(home = CROW_HOME) {
+  try {
+    const installed = readInstalled(home);
     const proxied = [];
     for (const entry of installed) {
       const manifest = getManifest(entry.id, home);

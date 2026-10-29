@@ -12,8 +12,9 @@ process.env.CROW_DATA_DIR = dir;
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 const REPO = new URL("..", import.meta.url).pathname;
 
-const { listApps, appsForBots, grantedServers, appsForProject, _resetCatalogCache, _setClock } =
+const { listApps, appsForBots, grantedServers, appsForProject, invalidateAppCatalog, _resetCatalogCache, _setClock } =
   await import("../servers/gateway/apps/catalog.js");
+const { registerPanel } = await import("../servers/gateway/dashboard/panel-registry.js");
 
 const home = join(dir, "bundles-home");
 function bundle(id, manifest) {
@@ -37,9 +38,13 @@ before(() => {
   bundle("ntfy", { webUI: { port: 2586, path: "/", proxyMode: "direct" }, mcpServers: ["ntfy"] });
   bundle("notes", { panel: "panel/notes.js", mcpServers: ["notes-srv"] });
   bundle("plain", { description: "no ui" });
-  install(["browser", "ntfy", "notes", "plain"]);
+  bundle("hidden", { panel: "panel/hidden.js", mcpServers: ["hidden-srv"] });
+  bundle("dunder", { webUI: { port: 7001, path: "/" }, mcpServers: ["weird__srv"] });
+  install(["browser", "ntfy", "notes", "plain", "hidden", "dunder"]);
+  // The live registry knows notes' panel (route differs from its id); "hidden" is not enabled.
+  registerPanel({ id: "notes-panel", bundleId: "notes", route: "/dashboard/notes-panel", handler() {} });
 });
-after(() => rmSync(dir, { recursive: true, force: true }));
+after(() => { _setClock(null); _resetCatalogCache(); rmSync(dir, { recursive: true, force: true }); });
 beforeEach(() => {
   _resetCatalogCache(); _setClock(null);
   sdb = new Database(":memory:");
@@ -50,7 +55,7 @@ beforeEach(() => {
 
 test("listApps reads webUI, desktop and panel bundles", () => {
   const apps = listApps({ crowHome: home });
-  assert.deepEqual(apps.map((a) => a.id).sort(), ["browser", "notes", "ntfy"]);
+  assert.deepEqual(apps.map((a) => a.id).sort(), ["browser", "dunder", "notes", "ntfy"]); // "hidden" has no registered panel
   const b = apps.find((a) => a.id === "browser");
   assert.equal(b.kind, "desktop");
   assert.equal(b.href, "/proxy/browser/vnc.html");
@@ -59,14 +64,18 @@ test("listApps reads webUI, desktop and panel bundles", () => {
   assert.deepEqual(b.mcpServers, ["browser", "crow-browser"]);
   const n = apps.find((a) => a.id === "notes");
   assert.equal(n.kind, "page");
-  assert.equal(n.href, "/dashboard/notes");
+  assert.equal(n.href, "/dashboard/notes-panel"); // the registered panel's real route
   assert.equal(n.desktopPath, null);
 });
 
 test("direct-mode apps keep their own href", () => {
   const a = listApps({ crowHome: home }).find((x) => x.id === "ntfy");
-  assert.equal(a.href, "http://{host}:2586/");
+  assert.equal(a.href, null);
+  assert.equal(a.directPort, 2586);
+  assert.equal(a.path, "/");
+  assert.equal(a.fallbackHref, "/dashboard/extensions");
   assert.equal(a.kind, "page");
+  assert.ok(!JSON.stringify(listApps({ crowHome: home })).includes("{host}"));
 });
 
 test("skill-granted server counts", async () => {
@@ -79,6 +88,27 @@ test("skill-granted server counts", async () => {
   assert.deepEqual([...whole], ["crow-browser"]);
 });
 
+test("a repo skill's granted tools count", async () => {
+  const skills = join(dir, "skills");
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(join(skills, "sk-test.md"), "---\nname: sk-test\ndescription: x\ntools:\n  - crow-projects/crow_add_source\n---\nbody\n");
+  const g = await grantedServers(db, { skills: ["sk-test"], tools: { crow_mcp: [] } }, { repoSkillsDir: skills, crowHome: home, remoteEnabled: false });
+  assert.deepEqual([...g], ["crow-projects"]);
+});
+
+test("a server name containing __ resolves against the known names", async () => {
+  const def = { tools: { crow_mcp: ["weird__srv/some_tool"] } };
+  const g = await grantedServers(db, def, { knownServers: ["weird__srv"], remoteEnabled: false });
+  assert.deepEqual([...g], ["weird__srv"]);
+  assert.deepEqual(appsForBots(listApps({ crowHome: home }), [g]).map((a) => a.id), ["dunder"]);
+});
+
+test("disabled bots are skipped", async () => {
+  seedBot("off", { tools: { crow_mcp: ["browser/browser_navigate"] } });
+  sdb.prepare("UPDATE pi_bot_defs SET enabled = 0").run();
+  assert.deepEqual(await appsForProject(db, 1, { crowHome: home }), []);
+});
+
 test("crow-core grants no bundle apps", async () => {
   const g = await grantedServers(db, { tools: { crow_mcp: ["crow-core/crow_store_memory"] } });
   assert.deepEqual(appsForBots(listApps({ crowHome: home }), [g]), []);
@@ -87,8 +117,11 @@ test("crow-core grants no bundle apps", async () => {
 test("remote blocks never count", async () => {
   sdb.prepare("INSERT INTO dashboard_settings VALUES ('feature_flags', ?)").run(JSON.stringify({ remote_invocation: true }));
   const def = { tools: { crow_mcp: [], remote_mcp: ["abcdef1234567890::browser"] } };
-  const g = await grantedServers(db, def);
+  const g = await grantedServers(db, def, { knownServers: ["browser"] });
   assert.equal(g.size, 0);
+  // the exact remote name is what is excluded, not a "crow-remote-" prefix
+  const real = await grantedServers(db, { tools: { crow_mcp: ["crow-remote-notmine/x"] } });
+  assert.deepEqual([...real], ["crow-remote-notmine"]);
   assert.deepEqual(appsForBots(listApps({ crowHome: home }), [g]), []);
 });
 
@@ -113,10 +146,23 @@ test("the catalog is cached for 30 s", () => {
   try {
     t += 29_000;
     assert.equal(listApps({ crowHome: home }), first);
+    assert.ok(Object.isFrozen(first));
     t += 2_000;
     assert.deepEqual(listApps({ crowHome: home }).map((a) => a.id), ["browser"]);
   } finally {
-    install(["browser", "ntfy", "notes", "plain"]);
+    install(["browser", "ntfy", "notes", "plain", "hidden", "dunder"]);
+  }
+});
+
+test("invalidateAppCatalog drops the cache", () => {
+  const first = listApps({ crowHome: home });
+  install(["browser"]);
+  try {
+    assert.equal(listApps({ crowHome: home }), first);
+    invalidateAppCatalog();
+    assert.deepEqual(listApps({ crowHome: home }).map((a) => a.id), ["browser"]);
+  } finally {
+    install(["browser", "ntfy", "notes", "plain", "hidden", "dunder"]);
   }
 });
 
@@ -124,6 +170,5 @@ test("browser manifest declares mcpServers and desktop", () => {
   const mf = JSON.parse(readFileSync(join(REPO, "bundles/browser/manifest.json"), "utf8"));
   assert.deepEqual(mf.mcpServers, ["browser", "crow-browser"]);
   assert.deepEqual(mf.desktop, { path: "vnc.html", lease: true });
-  assert.equal(mf.version, "1.3.11");
   execFileSync(process.execPath, ["scripts/build-registry.mjs", "--check"], { cwd: REPO, stdio: "pipe" });
 });

@@ -5,10 +5,9 @@
  * Reuses the installed.json readers the extension proxy already owns
  * (getProxiedExtensions / getManifest) instead of a third reader.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getManifest, getProxiedExtensions } from "../routes/extension-proxy.js";
-import { buildEnvelope } from "../routes/perch.js";
+import { getManifest, getProxiedExtensions, readInstalled } from "../routes/extension-proxy.js";
+import { getPanelForBundle } from "../dashboard/panel-registry.js";
+import { effectiveCrowMcp } from "../../../scripts/pi-bots/skill-tools.mjs";
 import { remoteServersForBot, remoteBlockName } from "../../../scripts/pi-bots/remote-blocks.mjs";
 
 const TTL_MS = 30_000;
@@ -16,53 +15,47 @@ const cache = new Map(); // crowHome -> { at, apps }
 
 /** Test hook: drop the cached catalogs (and optionally inject a clock). */
 export function _resetCatalogCache() { cache.clear(); }
+/** Drop every cached catalog (called when an install or remove rewrites installed.json). */
+export function invalidateAppCatalog() { cache.clear(); }
 let now = () => Date.now();
 export function _setClock(fn) { now = fn || (() => Date.now()); }
-
-function installedIds(crowHome) {
-  try {
-    const p = join(crowHome, "installed.json");
-    if (!existsSync(p)) return [];
-    return JSON.parse(readFileSync(p, "utf8")).map((e) => e.id).filter(Boolean);
-  } catch { return []; }
-}
-
-function panelIdOf(manifest, bundleId) {
-  if (!manifest?.panel) return null;
-  return (typeof manifest.panel === "object" && manifest.panel.id) || bundleId;
-}
 
 function build(crowHome) {
   const proxied = new Map(getProxiedExtensions(crowHome).map((e) => [e.id, e]));
   const apps = [];
-  for (const id of installedIds(crowHome)) {
+  for (const { id } of readInstalled(crowHome)) {
+    if (!id) continue;
     const manifest = getManifest(id, crowHome);
     if (!manifest) continue;
     const ext = proxied.get(id);
-    const panel = panelIdOf(manifest, id);
+    // A bundle's panel counts only when the live registry has it (an install not
+    // yet enabled in panels.json has none), and the href is that panel's real route.
+    const panel = manifest.panel ? getPanelForBundle(id) : undefined;
     if (!ext && !panel) continue;
     const mcpServers = Array.isArray(manifest.mcpServers) ? manifest.mcpServers.map(String) : [];
     const label = ext?.label || manifest.name || id;
+    const base = { id, label, mcpServers, directPort: null, path: null, fallbackHref: null };
     if (ext) {
-      const direct = ext.proxyMode === "direct";
-      const desktopPath = !direct && manifest.desktop?.path ? String(manifest.desktop.path) : null;
-      apps.push({
-        id,
-        label,
-        kind: desktopPath ? "desktop" : "page",
-        // Direct-mode apps cannot sit behind a subpath proxy, so they keep their own
-        // origin. The gateway has no request here, so the host is left as the
-        // literal "{host}" token for the caller to fill from the request.
-        href: direct ? `http://{host}:${ext.port}${ext.path}` : `/proxy/${id}${ext.path}`,
-        desktopPath,
-        leaseDeclared: !!desktopPath && manifest.desktop?.lease === true,
-        mcpServers,
-      });
+      if (ext.proxyMode === "direct") {
+        // Cannot sit behind a subpath proxy: the client builds
+        // https://<location.hostname>:<directPort><path> (the gateway has no
+        // request here); fallbackHref is where it goes when it cannot.
+        apps.push({ ...base, kind: "page", href: null, directPort: ext.port, path: ext.path, fallbackHref: "/dashboard/extensions", desktopPath: null, leaseDeclared: false });
+      } else {
+        const desktopPath = manifest.desktop?.path ? String(manifest.desktop.path) : null;
+        apps.push({
+          ...base,
+          kind: desktopPath ? "desktop" : "page",
+          href: `/proxy/${id}${ext.path}`,
+          desktopPath,
+          leaseDeclared: !!desktopPath && manifest.desktop?.lease === true,
+        });
+      }
     } else {
-      apps.push({ id, label, kind: "page", href: `/dashboard/${panel}`, desktopPath: null, leaseDeclared: false, mcpServers });
+      apps.push({ ...base, kind: "page", href: panel.route || `/dashboard/${panel.id}`, desktopPath: null, leaseDeclared: false });
     }
   }
-  return apps;
+  return Object.freeze(apps.map((a) => Object.freeze(a)));
 }
 
 /** The installed apps. Cached per process (per CROW_HOME) for 30 s. */
@@ -89,28 +82,55 @@ export function appsForBots(apps, grantedServerSets) {
   return apps.filter((a) => a.mcpServers.some((s) => granted.has(s)));
 }
 
-/** Server names a bot def grants (remote blocks excluded). */
-export async function grantedServers(db, def) {
-  const { tools } = await buildEnvelope(db, def);
+/** Lazy: the bridge and the Bot Builder queries are heavy and not needed to list apps. */
+async function remoteOn(db) {
+  const { remoteInvocationOn } = await import("../dashboard/panels/bot-builder/data-queries.js");
+  return remoteInvocationOn(db);
+}
+
+/**
+ * The tool ids a def really gets: toolAllowlist over a copy whose crow_mcp includes
+ * the tools its repo skills grant (the same union the spawn applies).
+ */
+export async function grantedToolIds(def, { remoteEnabled, crowHome, repoSkillsDir } = {}) {
+  const { toolAllowlist } = await import("../../../scripts/pi-bots/bridge.mjs");
+  const crow_mcp = effectiveCrowMcp(def, { crowHome, repoSkillsDir });
+  const eff = { ...def, tools: { ...(def.tools || {}), crow_mcp } };
+  const csv = toolAllowlist(eff, { remoteEnabled: !!remoteEnabled });
+  return csv ? csv.split(",").filter(Boolean) : [];
+}
+
+/**
+ * Server names a bot def grants, excluding its remote blocks. The server is
+ * matched against `knownServers` (longest first, so a name containing "__"
+ * works), falling back to everything before the first "__".
+ */
+export async function grantedServers(db, def, { remoteEnabled, crowHome, repoSkillsDir, knownServers = [] } = {}) {
+  const on = remoteEnabled ?? (await remoteOn(db));
+  const ids = await grantedToolIds(def, { remoteEnabled: on, crowHome, repoSkillsDir });
   const remote = new Set(remoteServersForBot(def).map((r) => remoteBlockName(r.instanceId, r.canonicalId)));
+  const known = [...new Set(knownServers)].sort((a, b) => b.length - a.length);
   const out = new Set();
-  for (const { id } of tools) {
+  for (const id of ids) {
     if (!id.startsWith("mcp__")) continue;
-    const server = id.slice(5).split("__")[0];
-    if (!server || remote.has(server) || server.startsWith("crow-remote-")) continue;
-    out.add(server);
+    const rest = id.slice(5);
+    const server = known.find((k) => rest === k || rest.startsWith(k + "__")) ?? rest.split("__")[0];
+    if (server && !remote.has(server)) out.add(server);
   }
   return out;
 }
 
-/** Union of apps over the project's bots. */
+/** Union of apps over the project's enabled bots. */
 export async function appsForProject(db, projectId, { crowHome }) {
-  const { rows } = await db.execute({ sql: "SELECT bot_id, definition FROM pi_bot_defs WHERE project_id = ?", args: [projectId] });
+  const apps = listApps({ crowHome });
+  const knownServers = apps.flatMap((a) => a.mcpServers);
+  const remoteEnabled = await remoteOn(db);
+  const { rows } = await db.execute({ sql: "SELECT bot_id, definition FROM pi_bot_defs WHERE project_id = ? AND enabled != 0", args: [projectId] });
   const sets = [];
   for (const row of rows) {
     let def = {};
     try { def = JSON.parse(row.definition || "{}") || {}; } catch { /* a corrupt def grants nothing */ }
-    sets.push(await grantedServers(db, def));
+    sets.push(await grantedServers(db, def, { remoteEnabled, crowHome, knownServers }));
   }
-  return appsForBots(listApps({ crowHome }), sets);
+  return appsForBots(apps, sets);
 }
