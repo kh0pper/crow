@@ -679,6 +679,24 @@ test("no model call: a status question through the turn is a fast path, and a re
   assert.equal(topicFor(t.core, DEVICE.id), null, "no topic was set by a relay");
 });
 
+test("through the runner: a which-status question, answered by a bot's name, gets that bot's answer (e; PR 6 fix round 1)", async () => {
+  const s = await setup();
+  const a = await s.handoff({ session: "s1" });
+  await s.session({ sid: "s1", cardId: a.cardId, status: "active" });
+  s.now.advance(1000);
+  const b = await s.handoff({ bot: "helper", session: "s2" });
+  await s.session({ sid: "s2", cardId: b.cardId, bot: "helper", status: "active" });
+  const { h, turn } = withTurn(s, []);
+  assert.equal((await turn("how's the research going")).timings.verb, "status_which");
+  assert.equal(s.pending.get(DEVICE.id).purpose, "status", "the asking turn's own afterTurn keeps the question");
+  const r = await turn("writer");
+  assert.equal(r.fastPath, true);
+  assert.equal(r.timings.verb, "status_running");
+  assert.equal(h.calls.spoken.at(-1), "Writer is working on research radio history.");
+  assert.equal(s.pending.get(DEVICE.id), null);
+  assert.equal(h.log.length, 0, "no model round");
+});
+
 /* ---------- The lines ---------- */
 
 test("the status lines are the plan's, in both languages", () => {

@@ -37,7 +37,7 @@
  *   3. One board mutation handoff_stopped (DASHBOARD_ACTOR; via and the hand-off id) on the card [rv1 S].
  *   4. The result claim is released (guarded on a card, P9).
  */
-import { PERSONAL_SURFACES, HANDOFF_OPEN } from "./handoff-constants.js";
+import { PERSONAL_SURFACES, HANDOFF_OPEN, askedEntry } from "./handoff-constants.js";
 import { wantsHandoffStop, stopShape } from "./handoff-intent.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf } from "./handoff-confirm.js";
@@ -224,7 +224,7 @@ export async function proposeStop(core, db, ctx, row, { media = false } = {}) {
   const kiosk = !PERSONAL_SURFACES.has(ctx.surface);
   if (kiosk && !media) return stopToPhone(core, db, ctx, row, name);
   takeForeign(core, pending, device.id);
-  pending.set(device.id, { kind: "stop", id: row.id, bot_id: row.bot_id, name, task: row.task, phone: kiosk, media });
+  pending.set(device.id, askedEntry({ kind: "stop", id: row.id, bot_id: row.bot_id, name, task: row.task, phone: kiosk, media }));
   if (media) return { say: voiceLine("stop_propose_media", lang, { bot: name }), verb: "stop_propose_media" };
   return { say: voiceLine("stop_propose", lang, { bot: name, task: row.task }), verb: "stop_propose" };
 }
@@ -306,7 +306,7 @@ export async function stopIntent(core, db, { device, surface, transcript, lang, 
   if (ids.length === 1) return proposeStop(core, db, ctx, about[0]);
   const which = ids.map((id) => ({ bot_id: id, name: bots.get(id), id: about.find((r) => r.bot_id === id).id }));
   takeForeign(core, pending, device.id);
-  pending.set(device.id, { kind: "which", purpose: "stop", options: which, asked: transcript });
+  pending.set(device.id, askedEntry({ kind: "which", purpose: "stop", options: which, asked: transcript }));
   return { say: voiceLine("status_which", speak, { list: joinAnd(which.map((w) => w.name), speak) }), verb: "status_which" };
 }
 
