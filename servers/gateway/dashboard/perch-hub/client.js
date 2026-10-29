@@ -3421,6 +3421,10 @@ export function perchHubJs(lang = "en") {
     if(sheetCloseBtn) sheetCloseBtn.onclick=closeSheet;
     SHEET.addEventListener('click',function(e){ if(e.target===SHEET) closeSheet(); });
     SHEET.addEventListener('close',function(){
+      /* A late close event (it fires a task after close()) that lands after
+         a quick reopen belongs to the sheet that already closed: leave the
+         reopened sheet and its focus alone (the apps sheet's rule below). */
+      if(SHEET.open){ sheetSkipFocus=false; return; }
       if(sheetSkipFocus){ sheetSkipFocus=false; return; }
       if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
       /* The shell sheets' rule: return focus only when it is PARKED (nowhere,
