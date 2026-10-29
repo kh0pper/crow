@@ -423,7 +423,7 @@ overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;borde
    inside itself. "+" opens #perch-plus-menu, a popover that grows UPWARD from
    the composer (the same containing block the slash menu uses), holding
    Attach and Dictate. Every target is 44px. */
-#perch-hub-root #perch-composer.pill .pill-row{display:flex;align-items:flex-end;gap:6px;min-width:0;
+#perch-hub-root #perch-composer.pill .pill-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:6px;min-width:0;
 border:1px solid var(--line);border-radius:24px;background:var(--card);padding:4px}
 #perch-hub-root #perch-composer.pill .pill-row:focus-within{border-color:var(--teal)}
 #perch-hub-root #perch-composer.pill textarea{flex:1 1 auto;min-width:0;box-sizing:border-box;border:0;background:transparent;
