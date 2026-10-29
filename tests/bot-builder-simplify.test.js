@@ -291,6 +291,25 @@ test("Basics: rename writes the column only; the persona and voice model write t
   assert.deepEqual(def.models, before.models);
 });
 
+test("Basics: What it's for renders escaped and survives a save and a reload", async () => {
+  await putBot("gm", GMAIL);
+  const desc = 'Writes "quoted" <b>reports</b> & notes';
+  const body = await formOf("gm", "basics");
+  body.bot_description = desc;
+  const res = await post(body);
+  assert.match(res.redirected, /saved=1/);
+  assert.equal(JSON.parse((await row("gm")).definition).description, desc);
+  const html = await render("gm", "basics");
+  assert.ok(!html.includes("<b>reports</b>"), "the description is never raw HTML");
+  assert.match(html, /name="bot_description"[^>]*maxlength="140"[^>]*value="Writes &quot;quoted&quot; &lt;b&gt;reports&lt;\/b&gt; &amp; notes"/);
+  // the reloaded form posts the same text back, and an untouched re-save changes nothing
+  const again = await formOf("gm", "basics");
+  assert.equal(again.bot_description, desc);
+  const before = (await row("gm")).definition;
+  await post(again);
+  assert.equal((await row("gm")).definition, before);
+});
+
 test("Basics: an empty name is refused and nothing is written", async () => {
   await putBot("gm", GMAIL);
   const body = await formOf("gm", "basics");

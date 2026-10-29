@@ -30,6 +30,12 @@ const STATE_WORD = "(?!(?:nothing|anything|what|whats|who|where|when|which|how|t
 // July 19" and "The game is set for 8pm" state a fact; an item named bare with set / scheduled / confirmed is what was
 // just written. (booked / added / saved / created / put on, and the place forms, take any subject.)
 const STATE_NOUN = "(?!(?:it|that|this|these|those|the|a|an|my|his|her|its|our|their|everything|something)\\b)" + STATE_WORD;
+// Things that start on their own: "the movie has started" is a fact, not a hand-off claim.
+const STARTS_ON_ITS_OWN = "movie|film|show|timer|meeting|game|class|event|call|countdown|alarm|song|episode|match|race|session|concert|lesson|rain|storm|season|sale|party|service";
+// The same in Spanish (accents dropped): "la película ya ha empezado" is a fact.
+const STARTS_ON_ITS_OWN_ES = "pelicula|partido|reunion|temporizador|juego|clase|evento|llamada|cancion|episodio|serie|concierto|lluvia|fiesta|sesion|alarma";
+// A span of time after "in" ("starting in five minutes", "in an hour"): a schedule, not a claim ("starting in on it" is one).
+const SPAN = "(?:\\d|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|half|few|couple|minutes?|hours?|seconds?)";
 const DAY = "(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|noon)";
 const CLAIMS = [
   // Done: "I've added", "I have scheduled", "I just set", "I added".
@@ -66,6 +72,15 @@ const CLAIMS = [
   new RegExp(`${OPEN}(?:${STATE_WORD}){1,8}(?:is|are|s) (?:now )?(?:on|in) (?:your|the) (?:\\w+ )?(?:calendar|agenda|schedule|list)\\b`),
   new RegExp(`${OPEN}(?=.*\\b(?:booked|added|set|scheduled|saved|put)\\b)(?:${STATE_WORD}){1,4}s (?:now )?(?:\\w+ )?(?:on|for|at) (?:${DAY}|\\d)`),
   /\b(?:your|the) (?:\w+ )?(?:calendar|agenda|schedule|list|reminders) now (?:has|includes|contains|shows|lists)\b/,
+  // A hand-off claimed as started ([rev2 C1]): "I'm on it", "Writer has started", "I've handed it to Writer". Only
+  // the server says a bot started, after the card exists (handoff.js); a model saying it is a claim. "<X> is on it"
+  // is read by agentOnIt below (a bot or agent subject only: "milk is on it" is a list answer). A start with a time
+  // after it ("is starting at eight", "starting to rain") or a thing that starts on its own ("the movie has started")
+  // is a fact, not a claim.
+  /\b(?:i m|i am|they re|it s) on it\b/,
+  new RegExp(`(?<!\\b(?:${STARTS_ON_ITS_OWN}) )\\b(?:has|have) (?:started|begun)\\b(?! (?:at|yet|to|raining|snowing|pouring)\\b| on (?:${DAY})\\b| \\d)`),
+  new RegExp(`\\b(?:is|s) (?:now )?(?:working on|starting)\\b(?! (?:to|at)\\b| on (?:${DAY})\\b| in ${SPAN}\\b| \\d)`),
+  /\bi(?: ve| have)? (?:handed|passed|given|sent|forwarded) (?:it|this|that)(?: over| off)? to\b/,
   // Spanish (accents already dropped): done, promised, offered, state, bare.
   new RegExp(`${NEG}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:anadido|agregado|creado|programado|agendado|reservado|enviado|mandado|guardado|anotado|apuntado|puesto|borrado|eliminado|cancelado|movido|cambiado|actualizado|configurado)\\b`),
   new RegExp(`${NEG}\\b(?:anadi|agregue|programe|agende|envie|mande|guarde|anote|apunte|borre|elimine|cancele)\\b`),
@@ -77,6 +92,11 @@ const CLAIMS = [
   new RegExp(`${NEG}\\b(?:ha|han) sido (?:anadid|agregad|cread|programad|agendad|enviad|guardad|reservad|borrad|eliminad|cancelad)[oa]s?\\b`),
   new RegExp(`${NEG}\\b(?:te lo|se lo|te la|se la|lo|la) (?:recuerdo|apunto|agendo|anoto|programo|guardo|agrego|anado|pongo|mando|envio)\\b`),
   new RegExp(`${OPEN}(?:listo|lista|hecho|agendad[oa]|programad[oa]|anotad[oa]|apuntad[oa]|guardad[oa]|anadid[oa]|agregad[oa]|reservad[oa]|enviad[oa])\\b`),
+  // The hand-off, in Spanish ("se pone con ello", "ya han empezado", "se lo pasé"); never after "no".
+  new RegExp(`${NEG}\\bse pone con ello\\b`),
+  new RegExp(`${NEG}\\bya esta con ello\\b`),
+  new RegExp(`${NEG}(?<!\\b(?:${STARTS_ON_ITS_OWN_ES})(?: ya)? )\\b(?:ha|han) empezado\\b`),
+  new RegExp(`${NEG}\\bse lo (?:he )?pas(?:e|ado)\\b`),
 ];
 
 const REMINDER = [
@@ -99,15 +119,28 @@ export function claimSentences(text) {
   return capped.split(/(?:(?<!\d)[.:]|[.:](?!\d)|[!?¡¿;\n—–])+|,(?= )/).map(claimText).filter(Boolean);
 }
 
+// "<X> is on it" / "<X>'s on it" is a hand-off claim only when X (the word before the verb) is an agent: one of these,
+// or a bot the turn could hand work to (opts.agents: names or ids; the last word of each counts). "Here's what's on
+// it", "milk and eggs are on it" and "the lid is on it" name no agent.
+const AGENT_WORDS = new Set(["he", "she", "we", "bot", "bots", "assistant", "assistants", "agent", "agents", "team", "someone"]);
+const ON_IT = /\b(\w+) (?:is|s|are|re) (?:now |already |right )?on it\b/g;
+const agentSet = (opts) => new Set((Array.isArray(opts?.agents) ? opts.agents : [])
+  .map((n) => claimText(String(n ?? "")).split(" ").at(-1)).filter(Boolean));
+const agentOnIt = (t, agents) => { for (const m of t.matchAll(ON_IT)) if (AGENT_WORDS.has(m[1]) || agents.has(m[1])) return true; return false; };
+const claimIn = (t, agents) => CLAIMS.some((re) => re.test(t)) || agentOnIt(t, agents);
+
 // Clauses joined by "and" are read on their own too ("I've made a note and added it to your calendar").
 const clauses = (text) => claimSentences(text).flatMap((t) => [t, ...t.split(/ (?:and|also|then|plus|y|tambien|luego) /)]);
-export function claimsAction(text) {
-  return clauses(text).some((t) => CLAIMS.some((re) => re.test(t)));
+/** opts.agents: the bots this turn could hand work to ("Writer's on it" is a claim only about one of them, or an agent word). */
+export function claimsAction(text, opts = {}) {
+  const agents = agentSet(opts);
+  return clauses(text).some((t) => claimIn(t, agents));
 }
 
 /** A claim of a reminder or a later follow-up — what a saved memory is not (a memory call alone backs the rest). */
-export function claimsReminder(text) {
-  return claimSentences(text).some((t) => CLAIMS.some((re) => re.test(t)) && REMINDER.some((re) => re.test(t)));
+export function claimsReminder(text, opts = {}) {
+  const agents = agentSet(opts);
+  return claimSentences(text).some((t) => claimIn(t, agents) && REMINDER.some((re) => re.test(t)));
 }
 
 // Effective tool names: what changes something (create, send, delete…), what only reads, and what is unknown.
@@ -163,7 +196,8 @@ const NOT_MEMORY = /\b(?:calendar|agenda|schedule|list|reminders?|email|message|
  * After a memory was saved (and nothing else changed): a claim beyond that save — a reminder, a calendar
  * entry, a sent message. "I've saved that" is true; "I've saved it and added it to your calendar" is not.
  */
-export function claimsBeyondMemory(text) {
-  return claimSentences(text).flatMap((t) => t.split(/ (?:and|also|then|plus|y|tambien|luego) /)).some((t) => CLAIMS.some((re) => re.test(t))
+export function claimsBeyondMemory(text, opts = {}) {
+  const agents = agentSet(opts);
+  return claimSentences(text).flatMap((t) => t.split(/ (?:and|also|then|plus|y|tambien|luego) /)).some((t) => claimIn(t, agents)
     && (REMINDER.some((re) => re.test(t)) || NOT_MEMORY.test(t) || !SAVE_ONLY.test(t)));
 }

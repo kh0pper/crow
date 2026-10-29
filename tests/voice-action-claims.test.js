@@ -188,3 +188,51 @@ test("needsSpokenYes: a tool whose first verb deletes, changes or sends asks for
   assert.equal(toolEffect("crow_revoke_instance"), "write");
   for (const n of ["ws_cal_create_event", "crow_store_memory", "fw_play", "ws_cal_list_events", "crow_create_schedule", "gmail_create_draft", "acme_frobnicate", "", null]) assert.equal(needsSpokenYes(n), false, String(n));
 });
+
+test("claimsAction: a hand-off claimed as started is a claim (en + es) [rev2 C1]; a refusal or a negation is not", () => {
+  for (const t of [
+    "I'm on it!", "I am on it.", "They're on it.", "It's on it now.", "He's on it.", "The bots are on it.", "Your assistant is on it.",
+    "Writer has started.", "They have begun.",
+    "Writer is working on it.", "Writer's now working on that.", "Writer is starting.", "Writer's now starting on it.", "It has started.", "Writer has started on it.", "Hank has started on that.", "Writer has started already.", "Writer is starting in on it.",
+    "I've handed it to Writer.", "I have passed this over to Helper.", "I handed that off to Writer.",
+    "I've given it to Writer.", "I sent it over to Helper.", "I forwarded this to Writer.",
+    "Writer se pone con ello.", "Ya está con ello.", "Ya ha empezado.", "Han empezado.",
+    "Se lo pasé a Writer.", "Se lo he pasado a Writer.",
+  ]) assert.equal(claimsAction(t), true, t);
+  for (const t of [
+    "I can't hand that to Writer.", "I can't pass it to Writer from here.",
+    "No se lo he pasado a Writer.", "No ha empezado.", "Writer no se pone con ello.",
+  ]) assert.equal(claimsAction(t), false, t);
+});
+
+test("claimsAction: \"<X> is on it\" is a hand-off claim only about an agent or a bot the turn could reach (opts.agents)", () => {
+  const agents = ["Writer", "Helper", "research-bot"];
+  for (const t of ["Writer's on it!", "Writer is on it.", "Helper and Writer're on it.", "Writer is already on it.", "Research-bot is on it."]) {
+    assert.equal(claimsAction(t, { agents }), true, t);
+    assert.equal(claimsReminder(`${t} I'll remind you later.`, { agents }), true, t);
+    assert.equal(claimsBeyondMemory(t, { agents }), true, t);
+  }
+  assert.equal(claimsAction("Writer's on it!"), false, "no agents: a plain noun");
+});
+
+test("claimsAction: read answers and things that start on their own are not hand-off claims (fix round 1)", () => {
+  const agents = ["Writer", "Helper"];
+  for (const t of [
+    "Here's what's on it: milk and eggs.", "Here is what is on it.", "What's on it?", "Milk and eggs are on it.", "Milk is on it.", "The lid is on it.",
+    "The movie has started.", "Your timer has started.", "The meeting has started already.", "The game has begun.", "Has it started yet?",
+    "It's starting to rain at three.", "The movie is starting at eight.", "Your dentist is now starting at nine.",
+    "The class is starting on Monday.", "The sale is starting in an hour.",
+  ]) {
+    assert.equal(claimsAction(t, { agents }), false, t);
+    assert.equal(claimsAction(t), false, t);
+  }
+});
+
+test("claimsAction: a start with a time, a span or the weather after it, or a Spanish thing that starts on its own, is no claim (fix round 2)", () => {
+  for (const t of [
+    "It has started to rain.", "It has started raining.", "Writer's show has started on Monday.", "It has started at noon.",
+    "The movie is starting in five minutes.", "Writer is starting in an hour.", "The class is starting 9 sharp.",
+    "La película ya ha empezado.", "El partido ha empezado.", "La reunión ha empezado.", "El temporizador ya ha empezado.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+  for (const t of ["Writer ya ha empezado.", "Han empezado."]) assert.equal(claimsAction(t), true, t);
+});

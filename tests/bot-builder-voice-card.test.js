@@ -185,7 +185,7 @@ test("cloud warnings show only for a cloud model", async () => {
 const saveBody = async (over = {}) => ({
   action: "voice_bot_save", bot_id: "crow.voice", rev: voiceRev(await voiceRow()),
   display_name: "Crow", system_prompt: "mine", fast_voice_model: "crow-voice/qwen3.5-4b", escalation: "default",
-  tts_profile_id: "t2", stt_profile_id: "", memory_tools: "on", enabled: "on", ...over,
+  tts_profile_id: "t2", stt_profile_id: "", memory_tools: "on", enabled: "on", handoff_enabled: "on", ...over,
 });
 
 test("save: writes only Crow's row, keeps migration, routine and handoff; memory tools on/off", async () => {
@@ -608,4 +608,131 @@ test("the calendar id label says what empty means under auto: Crow's own, else G
   assert.match(t.en, /empty: Crow picks its own calendar, else Google primary, else asks/);
   assert.match(t.es, /vacío: Crow usa su propio calendario; si no, el principal de Google; si no, pregunta/);
   assert.ok(!/never a shared one|nunca uno compartido/.test(`${t.en} ${t.es}`));
+});
+
+// ── PR 3 Task 3.10: the Hand-offs section and the log ──
+test("allowed bots save and an unknown id is dropped", async () => {
+  await reset();
+  const url = await post(await saveBody({ allowed_bots: ["writer", "nope", "crow.voice", "writer"] }));
+  assert.equal(qOf(url).get("saved"), "1");
+  const d = await voiceDef();
+  assert.deepEqual(d.handoff, { enabled: true, allowed_bots: ["writer"] });
+  assert.match(await editor(), /name="allowed_bots" value="writer" form="btb-vsave" checked/);
+  assert.doesNotMatch(await editor(), /name="allowed_bots" value="alpha"[^>]*checked/);
+  // a single ticked box arrives as a string, none as nothing (= all bots)
+  const SHOWN = ["alpha", "writer"];
+  await post(await saveBody({ allowed_bots: "alpha", allowed_bots_shown: SHOWN }));
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["alpha"]);
+  assert.match(await editor(), /name="allowed_bots_shown" value="writer"/);
+  await post(await saveBody({ allowed_bots_shown: SHOWN }));
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, [], "shown and unticked: dropped");
+  await reset();
+});
+
+test("a save never widens allowed_bots: a deleted bot's id stays, and a failed read keeps the list", async () => {
+  const withAllowed = { ...SEED_DEF, handoff: { enabled: true, allowed_bots: ["gone"] } };
+  await reset(withAllowed);
+  // stored ["gone"] (no such bot), a persona-only save
+  assert.equal(qOf(await post(await saveBody({ system_prompt: "new persona", allowed_bots_shown: ["alpha", "writer"] }))).get("saved"), "1");
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["gone"]);
+  // a save from a page without the field leaves it too
+  await post(await saveBody({ system_prompt: "again" }));
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["gone"]);
+  // the bot table cannot be read during the save
+  const broken = { execute: (q) => (typeof q === "object" && q.sql === "SELECT bot_id, definition FROM pi_bot_defs" ? Promise.reject(new Error("db down")) : db.execute(q)), close() {} };
+  await reset({ ...SEED_DEF, handoff: { enabled: true, allowed_bots: ["writer"] } });
+  assert.equal(qOf(await post(await saveBody({ allowed_bots: ["alpha"], allowed_bots_shown: ["alpha", "writer"] }), broken)).get("saved"), "1");
+  assert.deepEqual((await voiceDef()).handoff.allowed_bots, ["writer"]);
+  await reset();
+});
+
+test("the picker says when a bot is off", async () => {
+  await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 0 WHERE bot_id = 'alpha'", args: [] });
+  try {
+    const html = await editor();
+    assert.ok(html.slice(html.indexOf('value="alpha"')).split("</li>")[0].includes(T("botbuilder.voiceHandoffBotOff")));
+    assert.ok(!html.slice(html.indexOf('value="writer"')).split("</li>")[0].includes(T("botbuilder.voiceHandoffBotOff")));
+  } finally { await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 WHERE bot_id = 'alpha'", args: [] }); }
+  assert.ok(T("botbuilder.voiceHandoffBotsHint").includes("is on") && T("botbuilder.voiceHandoffBotsHint", "es").includes("activados"));
+});
+
+test("hand-offs off saves enabled:false and keeps routine settings", async () => {
+  await reset();
+  await post(await saveBody({ routine_tasks_list: "mine" }));
+  const before = await voiceDef();
+  const body = await saveBody({ routine_tasks_list: "mine" });
+  delete body.handoff_enabled;
+  assert.equal(qOf(await post(body)).get("saved"), "1");
+  const d = await voiceDef();
+  assert.equal(d.handoff.enabled, false);
+  assert.deepEqual(d.routine, before.routine);
+  assert.equal(d.routine.tasks.list, "mine");
+  assert.doesNotMatch(await editor(), /name="handoff_enabled"[^>]*checked/);
+  await reset();
+});
+
+const HO = (over) => ({ kind: "handoff", surface: "phone", device_id: "d1", bot_id: "writer", task: "t", status: "done", ...over });
+async function seedLog(rows) {
+  await db.execute({ sql: "DELETE FROM voice_handoffs", args: [] });
+  const { createHandoffStore } = await import("../servers/gateway/voice/handoff-store.js");
+  let clock = 1_700_000_000_000;
+  const store = createHandoffStore({ now: () => (clock += 60_000) });
+  for (const r of rows) await store.insert(db, r);
+}
+
+test("the log lists the newest first, with drawer links", async () => {
+  await reset();
+  await seedLog([HO({ task: "first job", device_id: "a" }), HO({ task: "second job", device_id: "b", status: "declined", asked: null }), HO({ task: "third job", device_id: "c", status: "proposed", asked: "please do the third" })]);
+  const { default: Database } = await import("better-sqlite3");
+  const tdb = new Database(process.env.CROW_TASKS_DB_PATH);
+  tdb.exec("CREATE TABLE IF NOT EXISTS tasks_items (id INTEGER PRIMARY KEY, title TEXT NOT NULL, project_id INTEGER, board_id INTEGER, archived_at TEXT)");
+  tdb.prepare("INSERT OR REPLACE INTO tasks_items (id, title) VALUES (42, 'a card')").run();
+  tdb.close();
+  await db.execute({ sql: "UPDATE voice_handoffs SET card_id = 42 WHERE task = 'second job'", args: [] });
+  await db.execute({ sql: "UPDATE voice_handoffs SET card_id = 999 WHERE task = 'third job'", args: [] });
+  const html = await editor();
+  assert.ok(html.includes(T("botbuilder.voiceHandoffLogTitle")));
+  assert.ok(html.indexOf("third job") < html.indexOf("second job") && html.indexOf("second job") < html.indexOf("first job"));
+  assert.match(html, /href="\/dashboard\/bot-board\?card=42"/);
+  assert.equal((html.match(/bot-board\?card=/g) || []).length, 1, "a card that is gone gets no link");
+  assert.ok(html.includes("please do the third"));
+  assert.ok(html.includes(T("botbuilder.voiceHandoffStatus_declined")), "a known status is translated");
+  assert.ok((await editor({ lang: "es" })).includes(T("botbuilder.voiceHandoffStatus_declined", "es")));
+  // at most 20 rows, a null asked renders cleanly
+  await seedLog(Array.from({ length: 25 }, (_, i) => HO({ task: "job-" + String(i).padStart(2, "0"), device_id: "x" + i, asked: null })));
+  const many = await editor();
+  assert.equal((many.match(/<tr><td>/g) || []).length, 20);
+  assert.ok(!many.includes("job-00") && many.includes("job-24"));
+  assert.ok(!/null|undefined/.test(many.slice(many.indexOf("btb-handoff-log"))));
+  await db.execute({ sql: "DELETE FROM voice_handoffs", args: [] });
+  assert.ok((await editor()).includes(T("botbuilder.voiceHandoffLogEmpty")));
+});
+
+test("summaries and task text are escaped", async () => {
+  await reset();
+  try {
+  await db.execute({ sql: "UPDATE pi_bot_defs SET display_name = ? WHERE bot_id = 'writer'", args: ["<img src=x onerror=1>"] });
+  await db.execute({ sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'alpha'", args: [JSON.stringify({ description: "<script>alert(1)</script>", models: { default: "crow-chat/qwen3.6-35b-a3b" } })] });
+  await seedLog([HO({ task: "<b>bold</b> & \"q\"", asked: "<script>x</script>", bot_id: "<i>bot</i>", surface: "<u>s</u>" })]);
+  const html = await editor();
+  for (const raw of ["<img src=x", "<script>alert", "<b>bold</b>", "<script>x</script>", "<i>bot</i>", "<u>s</u>"]) assert.ok(!html.includes(raw), raw);
+  assert.ok(html.includes("&lt;b&gt;bold&lt;/b&gt;") && html.includes("&lt;script&gt;x&lt;/script&gt;"));
+  // alpha has no project: its board is off, and the hint says so
+  assert.ok(html.includes(T("botbuilder.voiceHandoffBoardOff")));
+  } finally {
+  await db.execute({ sql: "UPDATE pi_bot_defs SET display_name = 'Writer' WHERE bot_id = 'writer'", args: [] });
+  await db.execute({ sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'alpha'", args: [JSON.stringify({ models: { default: "crow-chat/qwen3.6-35b-a3b" }, gateways: [{ type: "perch" }] })] });
+  await db.execute({ sql: "DELETE FROM voice_handoffs", args: [] });
+  }
+});
+
+test("hand-off strings: en + es, differing, no backtick or dollar-brace", () => {
+  const keys = Object.keys(translations).filter((k) => k.startsWith("botbuilder.voiceHandoff"));
+  assert.ok(keys.length >= 20);
+  for (const k of keys) {
+    const { en, es } = translations[k];
+    assert.ok(en && es, k);
+    assert.notEqual(en, es, k);
+    assert.ok(!/[`]|\$\{/.test(en + es), k);
+  }
 });

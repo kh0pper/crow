@@ -531,7 +531,8 @@ async function botFit(db, d) {
   if (hit && Date.now() - hit.at < 60_000) return hit.fit;
   let fit = null;
   try {
-    const r = await _voice.assessBot({ db, botId, memoryOn: d.voice_settings?.memory !== false, denyTools: GLASSES_DENY_TOOLS, promptSuffix: stringsFor(d.voice_settings?.lang).prompt_suffix });
+    // handoffs: glasses turns carry the voice bot's crow_handoff tool, so the fit counts it (an older core ignores it).
+    const r = await _voice.assessBot({ db, botId, memoryOn: d.voice_settings?.memory !== false, denyTools: GLASSES_DENY_TOOLS, promptSuffix: stringsFor(d.voice_settings?.lang).prompt_suffix, handoffs: true, surface: "glasses" });
     fit = r ? { level: r.level, model: r.model } : { level: "no_bot", model: null };
   } catch { fit = null; }
   _fitCache.set(key, { at: Date.now(), fit });

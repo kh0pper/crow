@@ -6,6 +6,7 @@
  *   friendlyModel(key, providers) — "Qwen3.6 35B A3B" instead of the raw key
  *   purposeLine(def, lang, on)    — one line on what the bot does
  *   agoText(isoUtc, now, lang)    — "updated 9 days ago"
+ *   oneLine(s, max)               — free text as one clean line
  */
 import { t, fill } from "./i18n.js";
 
@@ -78,6 +79,20 @@ export function purposeLine(def, lang = "en", boardOn = false) {
   }
   if (phrases.length) return phrases.join(" · ");
   return boardOn ? t("botbuilder.purposeBoard", lang) : "";
+}
+
+/**
+ * Free text as one clean line: line breaks and tabs (and U+0085/2028/2029)
+ * become a space, other control characters and invisible format characters
+ * (\p{Cf}: zero-width and bidi controls) are dropped, runs of spaces collapse,
+ * and the result is trimmed and cut at `max` code points.
+ */
+export function oneLine(s, max = Infinity) {
+  if (typeof s !== "string") return "";
+  const clean = s.replace(/[\r\n\t\u0085\u2028\u2029]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]|\p{Cf}/gu, "")
+    .replace(/ {2,}/g, " ").trim();
+  const cps = Array.from(clean);
+  return cps.length > max ? cps.slice(0, max).join("").trimEnd() : clean;
 }
 
 /** SQLite's datetime() text ("YYYY-MM-DD HH:MM:SS") is UTC with no marker. */

@@ -113,9 +113,11 @@ export const SYNCED_TABLES = [
   "ramble_wallet",
 ];
 
-// Tables that must NEVER leave this machine (Crow keychain: human passwords). The
-// keychain has its own key file, but its rows are still never replicated. Checked at load.
-export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain"]);
+// Tables that must NEVER leave this machine (Crow keychain: human passwords; voice_handoffs:
+// the voice hand-off log, which holds the operator's verbatim speech and stays on the instance
+// that heard it). The keychain has its own key file, but its rows are still never replicated.
+// Checked at load.
+export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain", "voice_handoffs"]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {
     if (synced.includes(t)) throw new Error(`instance-sync: table ${t} is local-only and must never be in SYNCED_TABLES`);

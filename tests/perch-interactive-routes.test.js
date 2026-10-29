@@ -247,7 +247,7 @@ beforeEach(() => {
     },
     async attachCard(sid, cardId) {
       engineCalls.attachCard.push({ sid, cardId });
-      return { ok: true, cardId, botId: "chatty" };
+      return { ok: true, cardId, botId: sid === "sess-voice" ? "crow.voice" : "chatty" };
     },
     async rename(sid, label) {
       engineCalls.rename.push({ sid, label });
@@ -283,7 +283,7 @@ beforeEach(() => {
     },
     async get(sid) {
       engineCalls.get.push({ sid });
-      return { sessionId: sid, botId: "chatty", threadId: sid, rowId: 1, state: "awake", pendingUi: null, lastError: null, model: "local/qwen" };
+      return { sessionId: sid, botId: sid === "sess-voice" ? "crow.voice" : "chatty", threadId: sid, rowId: 1, state: "awake", pendingUi: null, lastError: null, model: "local/qwen" };
     },
     async subscribe(sid, fn) {
       engineCalls.subscribe.push({ sid, fn });
@@ -609,6 +609,19 @@ test("POST /bots/:id/dispatch 201s, spawns with cardId, writes assigned_bot, and
   assert.equal(taskRow(liveCardId).assigned_bot, "chatty");
 });
 
+test("POST /bots/:id/dispatch refuses crow.voice before the engine or the tasks store", async () => {
+  seedBot("crow.voice", PERCH_BOT, { name: "Crow" });
+  try {
+    const before = engineCalls.spawn.length;
+    const { status, body } = await postJson("/bots/crow.voice/dispatch", { card_id: liveCardId });
+    assert.equal(status, 400);
+    assert.equal(body.error, "bot_unavailable");
+    assert.equal(engineCalls.spawn.length, before);
+  } finally {
+    const c = raw(); c.prepare("DELETE FROM pi_bot_defs WHERE bot_id='crow.voice'").run(); c.close();
+  }
+});
+
 test("POST /bots/:id/dispatch defaults note to \"\" when omitted", async () => {
   await postJson("/bots/chatty/dispatch", { card_id: liveCardId });
   assert.equal(engineCalls.message.at(-1).text, "");
@@ -730,6 +743,16 @@ test("POST /interactive/:sid/attach-card 200s, checks occupancy, calls attachCar
   assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId, opts: { excludeSessionId: "sess-1" } }]);
   assert.deepEqual(engineCalls.attachCard, [{ sid: "sess-1", cardId: liveCardId }]);
   assert.equal(taskRow(liveCardId).assigned_bot, "chatty");
+});
+
+test("POST /interactive/:sid/attach-card refuses a session bound to crow.voice and leaves the card alone", async () => {
+  const cardId = seedCard({ title: "voice attach" });
+  const { status, body } = await postJson("/interactive/sess-voice/attach-card", { card_id: cardId });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bot_unavailable");
+  assert.equal(taskRow(cardId).assigned_bot, null);
+  assert.deepEqual(engineCalls.attachCard, [], "nothing was claimed or attached");
+  assert.deepEqual(engineCalls.checkCardFree, []);
 });
 
 test("POST /interactive/:sid/attach-card 400s bad_request for a missing or non-integer card_id", async () => {

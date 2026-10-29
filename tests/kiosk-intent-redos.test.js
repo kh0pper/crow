@@ -17,6 +17,7 @@ import { parseOpen, parsePlay, lookupItem, mentionsOpen, mentionsPlay, asksOpen,
 import { asksForNews } from "../bundles/kiosk/server/sources/news.js";
 import { fold, compact, wordsOf, cleanName, buildIndex, readRequest, trackQueries, decide, choose, describeChoices, matchReport } from "../bundles/kiosk/server/sources/music-match.js";
 import { stationKey, createStationsSource, normalizeStations } from "../bundles/kiosk/server/sources/stations.js";
+import { wantsHandoff, wantsHandoffStatus, wantsHandoffStop } from "../servers/gateway/voice/handoff-intent.js";
 
 const store = createWmStore({ setTimer: () => ({}), clearTimer: () => {} });
 // The music matcher reads the words after "play" and the "Which one?" answer. Made-up names.
@@ -28,6 +29,7 @@ const MUSIC_IX = buildIndex({
 const MUSIC_LIVE = { tracks: [{ id: 9, title: "Quiet Engines", artist: "Tanglewire" }], artistAlbums: new Set() };
 const MUSIC_CHOICES = decide(readRequest("greatest misses"), MUSIC_IX, MUSIC_LIVE).candidates;
 const STATIONS = createStationsSource({ list: () => normalizeStations([{ name: "WXYZ HD1", aliases: ["ninety point one"], url: "https://stream.example.invalid/1" }, { name: "WXYZ HD2", aliases: ["HD two"], url: "https://stream.example.invalid/2" }]) });
+const HANDOFF_BOTS = ["Writer", "hey crow", "the the the the", "para", "a a a a a", "hd1"];
 const MATCHERS = {
   matchClockFastPath: (s) => matchClockFastPath(s, { now: 0, tz: "UTC" }),
   mentionsRelativeDay,
@@ -52,6 +54,10 @@ const MATCHERS = {
   musicDecideCold: (s) => decide(readRequest(s), MUSIC_IX, {}),
   musicChoose: (s) => choose(MUSIC_CHOICES, s),
   asksForNews,
+  // The voice hand-off intent (bot names come from their owners: made-up, overlapping ones here).
+  wantsHandoff: (s) => wantsHandoff(s, HANDOFF_BOTS),
+  wantsHandoffStatus: (s) => wantsHandoffStatus(s, HANDOFF_BOTS),
+  wantsHandoffStop: (s) => wantsHandoffStop(s, HANDOFF_BOTS),
 };
 const BUDGET_MS = 50;
 /** CPU time of one call, in ms (user + system: not fooled by a busy machine's wall clock). */

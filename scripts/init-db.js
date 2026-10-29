@@ -2857,6 +2857,29 @@ await initTable("card_offers table", `
   CREATE INDEX IF NOT EXISTS idx_card_offers_thread ON card_offers(thread_id, status);
 `);
 
+// voice_handoffs: the log of every hand-off Crow proposes by voice, and every spoken stop
+// (servers/gateway/voice/handoff-store.js). Epoch-ms times from the store's clock; status/kind are
+// validated in JS (no CHECK). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES). Same DDL as
+// VOICE_HANDOFFS_DDL in scripts/migrations/0018-voice-handoffs.mjs — one shape, two rails;
+// additive, no SCHEMA_GENERATION bump.
+await initTable("voice_handoffs table", `
+  CREATE TABLE IF NOT EXISTS voice_handoffs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'handoff',
+    surface TEXT NOT NULL, device_id TEXT NOT NULL, device_name TEXT,
+    bot_id TEXT NOT NULL, task TEXT NOT NULL, asked TEXT,
+    status TEXT NOT NULL,
+    card_id INTEGER, session_id TEXT, thread_id TEXT, target_id TEXT,
+    model_key TEXT, start_now INTEGER NOT NULL DEFAULT 1,
+    outcome TEXT, detail TEXT, lang TEXT,
+    created_at INTEGER NOT NULL, expires_at INTEGER, decided_at INTEGER, ended_at INTEGER,
+    updated_at INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS idx_voice_handoffs_device ON voice_handoffs(device_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_voice_handoffs_card ON voice_handoffs(card_id) WHERE card_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_voice_handoffs_status ON voice_handoffs(status, expires_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_handoffs_phone_open ON voice_handoffs(device_id, kind) WHERE status = 'awaiting_phone';
+`);
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so

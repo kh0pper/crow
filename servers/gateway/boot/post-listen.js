@@ -503,6 +503,11 @@ export async function runPostListenSetup(server, app, deps) {
     }).catch(() => {});
   }).catch((err) => console.warn("[voice-transcript-log] sweep not armed:", err.message));
 
+  // The voice hand-off log (voice/handoff.js): a minute sweep expires stale proposals, recovers a start the
+  // process lost, retries a pending stop through the engine and scrubs old verbatim speech. Never throws.
+  import("../voice/handoff.js").then(({ startHandoffSweep }) => { startHandoffSweep(); })
+    .catch((err) => console.warn("[voice-handoff] sweep not armed:", err.message));
+
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
   // kill switch CROW_DISABLE_CROSSPOST_SCHEDULER=1). Lazy import keeps boot
   // resilient if the crossposting module is absent.

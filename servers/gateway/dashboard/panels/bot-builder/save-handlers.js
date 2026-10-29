@@ -21,6 +21,7 @@ import { applyFilesMode, applySourceModes, applyLearningMode, applyConfirm } fro
 import { applyCommandsMode } from "./bash-mode.js";
 import { selectedWriteTools, toolsFromKeys } from "./sources.js";
 import { normText } from "./ui.js";
+import { oneLine } from "../../shared/bot-display.js";
 import { lines } from "./data-queries.js";
 import { addCompanionsGuarded, grantsArtifactUpdate } from "../../../../../scripts/pi-bots/artifacts-companions.mjs";
 import { skillRequiredTools, skillDeclaredRepoTools, withSkillRequiredTools, addSkillToolsGuarded, unionMayGrant } from "../../../../../scripts/pi-bots/skill-tools.mjs";
@@ -165,6 +166,12 @@ export async function saveBasics(def, b, ctx) {
   }
   if (typeof b.system_prompt === "string" && changed("system_prompt") && normText(b.system_prompt) !== normText(def.system_prompt)) {
     def.system_prompt = b.system_prompt.trim();
+  }
+  // "What it's for": one clean line Crow reads when it picks a bot to hand work to; "" removes it.
+  if (typeof b.bot_description === "string" && changed("bot_description")) {
+    const v = oneLine(b.bot_description, 140);
+    if (v && v !== def.description) def.description = v;
+    else if (!v && def.description !== undefined) delete def.description;
   }
   // Model pickers: only a changed picker writes; an empty choice means
   // "not set" (escalation / voice) or "instance default" (default model).
