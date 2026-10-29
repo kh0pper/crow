@@ -40,6 +40,9 @@ export function roleNamesJs(lang) {
             if (out.indexOf(name) < 0) out.push(name);
           });
           return out;
+        }
+        function rolesLine(tpl, names) {
+          return String(tpl).split("{roles}").join(names.join(", "));
         }`;
 }
 

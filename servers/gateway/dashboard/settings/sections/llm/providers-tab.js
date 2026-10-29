@@ -250,17 +250,24 @@ export function disableMovesCallout(pending, req, lang = "en") {
     </div>`;
 }
 
-/** {id, labels} for the roles (bound, then the ones that follow them) a provider carries, or null. */
-async function rolesThatMove(db, id, lang) {
+/**
+ * {id, labels} for the roles (bound, then the ones that follow them) a
+ * provider carries, or null: none bound, or an error (logged; no warning is
+ * shown and the action goes ahead). `bindingsFn` is a test seam.
+ */
+export async function rolesThatMove(db, id, lang, { bindingsFn } = {}) {
   try {
-    const { providerBindings } = await import("../../../../models/manager.js");
+    const providerBindings = bindingsFn || (await import("../../../../models/manager.js")).providerBindings;
     const b = await providerBindings(db, id);
     const all = [...(b.roles || []), ...(b.reach || [])];
     if (!(b.roles || []).length) return null;
     const customDefs = await readCustomRoleDefs(db).catch(() => ({}));
     const labels = [...new Set(all.map((r) => roleRefLabel("role:" + r.roleId, { lang, customDefs }) || r.roleId))];
     return { id, labels };
-  } catch { return null; }
+  } catch (err) {
+    console.warn(`[providers] roles that move for ${id} unreadable: ${err?.message}`);
+    return null;
+  }
 }
 
 export default {

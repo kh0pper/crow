@@ -1110,7 +1110,7 @@ export function modelCatalogClientJS(lang) {
           }
           if (roleNames.length) {
             var rolesP = document.createElement("p");
-            rolesP.textContent = '${tJs("models.deleteRolesMove", lang)}'.replace("{roles}", roleNames.join(", "));
+            rolesP.textContent = rolesLine('${tJs("models.deleteRolesMove", lang)}', roleNames);
             frag.appendChild(rolesP);
           }
 

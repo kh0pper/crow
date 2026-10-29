@@ -354,3 +354,41 @@ test("DELETE without confirm returns the roles and the roles that follow them; a
     });
   } finally { await h.cleanup(); }
 });
+
+test("DELETE /api/models/:id without confirm gathers roles and reach from every provider serving the model", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { deps } = coreDeps();
+    const rows = [
+      { id: "cat-a", disabled: false, gpuPolicy: { runtime: "native", catalogId: "cat-model", owner: "me" } },
+      { id: "cat-a-alt", disabled: false, gpuPolicy: { runtime: "native", catalogId: "cat-model" } },
+      { id: "cat-a-peer", disabled: false, gpuPolicy: { runtime: "native", catalogId: "cat-model", owner: "peer" } },
+      { id: "unrelated", disabled: false, gpuPolicy: { runtime: "native", catalogId: "other", owner: "me" } },
+    ];
+    const per = {
+      "cat-a": { profiles: [], bots: [], roles: [{ roleId: "everyday" }], reach: [{ roleId: "coordinator", via: "everyday" }] },
+      "cat-a-alt": { profiles: [], bots: [], roles: [{ roleId: "quick" }], reach: [{ roleId: "c-notes", label: "Notes", via: "quick" }] },
+      "cat-a-peer": { profiles: [], bots: [], roles: [{ roleId: "deep" }], reach: [{ roleId: "expert" }] },
+    };
+    const asked = [];
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => createLifecycleCore(deps),
+      ownInstanceIdFn: () => "me",
+      loadStateFn: () => ({ registry: { "cat-model": { file: "model.gguf" } } }),
+      listProvidersAllFn: async () => rows,
+      providerBindingsFn: async (db, id) => { asked.push(id); return per[id] || { profiles: [], bots: [] }; },
+    }, async (base) => {
+      const r = await fetch(`${base}/api/models/cat-model`, { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(r.status, 200);
+      const b = await r.json();
+      assert.equal(b.requiresConfirm, true);
+      assert.deepEqual(b.providers, ["cat-a", "cat-a-alt"]);
+      assert.deepEqual(asked, ["cat-a", "cat-a-alt"], "a peer's row is not asked");
+      assert.deepEqual(b.bindings.roles.map((x) => x.roleId), ["everyday", "quick"]);
+      assert.deepEqual(b.bindings.reach.map((x) => x.roleId), ["coordinator", "c-notes"]);
+      assert.equal(b.bindings.reach[1].label, "Notes");
+    });
+  } finally { await h.cleanup(); }
+});

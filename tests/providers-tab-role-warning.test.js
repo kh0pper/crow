@@ -120,3 +120,25 @@ test("the delete-confirm client names roles (core translated, custom by label) a
   assert.deepEqual(run("es", { roles: [{ roleId: "coordinator" }] }), ["Orquestador"]);
   assert.deepEqual(run("en", undefined), []);
 });
+
+test("the delete-confirm line keeps a custom label containing $& or $' intact", async () => {
+  const { roleNamesJs } = await import("../servers/gateway/dashboard/panels/model-catalog-dialog.js");
+  const fill = new Function(roleNamesJs("en") + "; return rolesLine(arguments[0], arguments[1]);");
+  assert.equal(fill("Moves: {roles}.", ["A$&B", "$'x"]), "Moves: A$&B, $'x.");
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/dashboard/panels/model-catalog.js"), "utf8");
+  assert.doesNotMatch(src, /\.replace\("\{roles\}"/, "model-catalog.js fills {roles} with rolesLine, not .replace");
+  assert.match(src, /rolesLine\('\$\{tJs\("models\.deleteRolesMove", lang\)\}', roleNames\)/);
+});
+
+test("rolesThatMove fails open but logs the error message", async () => {
+  const { rolesThatMove } = await import("../servers/gateway/dashboard/settings/sections/llm/providers-tab.js");
+  const bindingsFn = async () => { throw new Error("db gone x9"); };
+  const seen = [];
+  const orig = console.warn;
+  console.warn = (...a) => seen.push(a.join(" "));
+  let got;
+  try { got = await rolesThatMove(db, "local-chat", "en", { bindingsFn }); } finally { console.warn = orig; }
+  assert.equal(got, null, "no warning shown, the disable goes ahead");
+  assert.ok(seen.some((l) => l.includes("db gone x9")), JSON.stringify(seen));
+});
