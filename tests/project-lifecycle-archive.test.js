@@ -80,3 +80,14 @@ test("audit rows", async () => {
   const { rows } = await db.execute({ sql: "SELECT action, actor_type FROM project_audit_log WHERE project_id=? AND action LIKE 'project.%' ORDER BY id", args: [id] });
   assert.deepEqual(rows.map((r) => [r.action, r.actor_type]), [["project.archive", "system"], ["project.restore", "local"]]);
 });
+
+test("bad actor is refused before anything is written", async () => {
+  const id = await mk("Actor");
+  assert.equal((await archiveProject(db, id, { actor: "root" })).code, "bad_actor");
+  assert.equal((await one("SELECT status FROM project_spaces WHERE id=?", [id])).status, "active");
+  await archiveProject(db, id);
+  assert.equal((await restoreProject(db, id, { actor: "" })).code, "bad_actor");
+  assert.equal((await one("SELECT status FROM project_spaces WHERE id=?", [id])).status, "archived");
+  const n = (await one("SELECT COUNT(*) AS n FROM project_audit_log WHERE project_id=? AND action LIKE 'project.%'", [id])).n;
+  assert.equal(Number(n), 1);
+});

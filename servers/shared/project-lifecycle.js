@@ -6,6 +6,8 @@
 
 import { appendAudit } from "./project-acl.js";
 
+const ACTORS = ["local", "contact", "bot", "system"];
+
 /**
  * canManageProject's rule (live row, local owner member, not revoked, role owner), except that
  * status='archived' is allowed. archived_at set and learner_profile rows are always false.
@@ -34,24 +36,28 @@ async function statusOf(db, projectId) {
 
 /** Archive: status only. Returns { ok } or { ok:false, code: 'not_owner' | 'already_archived' }. */
 export async function archiveProject(db, projectId, { actor = "local" } = {}) {
+  if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
   if (!(await canOwnProject(db, projectId))) return { ok: false, code: "not_owner" };
   if ((await statusOf(db, projectId)) === "archived") return { ok: false, code: "already_archived" };
-  await db.execute({
-    sql: "UPDATE project_spaces SET status = 'archived', updated_at = datetime('now') WHERE id = ?",
+  const r = await db.execute({
+    sql: "UPDATE project_spaces SET status = 'archived', updated_at = datetime('now') WHERE id = ? AND status != 'archived'",
     args: [Number(projectId)],
   });
+  if (!r.rowsAffected) return { ok: false, code: "already_archived" };
   await appendAudit(db, { project_id: Number(projectId), actor_type: actor, action: "project.archive" });
   return { ok: true };
 }
 
 /** Restore: status back to 'active'. Returns { ok } or { ok:false, code: 'not_owner' | 'not_archived' }. */
 export async function restoreProject(db, projectId, { actor = "local" } = {}) {
+  if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
   if (!(await canOwnProject(db, projectId))) return { ok: false, code: "not_owner" };
   if ((await statusOf(db, projectId)) !== "archived") return { ok: false, code: "not_archived" };
-  await db.execute({
-    sql: "UPDATE project_spaces SET status = 'active', updated_at = datetime('now') WHERE id = ?",
+  const r = await db.execute({
+    sql: "UPDATE project_spaces SET status = 'active', updated_at = datetime('now') WHERE id = ? AND status = 'archived'",
     args: [Number(projectId)],
   });
+  if (!r.rowsAffected) return { ok: false, code: "not_archived" };
   await appendAudit(db, { project_id: Number(projectId), actor_type: actor, action: "project.restore" });
   return { ok: true };
 }
