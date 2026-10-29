@@ -107,7 +107,7 @@ async function closedWithin(R, ms) {
 }
 
 /** Raw peer claims `claim` (proving its real key with a cb_sig), claiming CLAIMED as its instance. */
-async function admittedRaw(t, A, B, opts) {
+async function admittedRaw(t, A, B, opts, { claimed = CLAIMED, auth = true } = {}) {
   await addContact(A, B);
   const pa = await newPeer(A, opts);
   const R = await rawTo(t, pa.pm);
@@ -116,13 +116,23 @@ async function admittedRaw(t, A, B, opts) {
   await R.conn.opened;
   const hh = Buffer.from(R.conn.handshakeHash).toString("hex");
   const cbSig = sign(contactCbMessage({ role: "resp", signerCrowId: B.identity.crowId, challengeHex: ch.challenge, handshakeHashHex: hh }), B.identity.ed25519Priv);
-  R.send(
-    { type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, crowId: B.identity.crowId, pubkey: B.identity.ed25519Pubkey, instance_id: CLAIMED },
-    { type: "challenge-response", crowId: B.identity.crowId, pubkey: B.identity.ed25519Pubkey, cb_sig: cbSig },
-    { type: "authenticated" },
-  );
-  assert.ok(await until(() => pa.pm.isConnected(B.identity.crowId), 5000), "control: the contact is admitted");
+  const ask = { type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, crowId: B.identity.crowId, pubkey: B.identity.ed25519Pubkey };
+  if (claimed !== null) ask.instance_id = claimed; // null: no instance_id at all
+  const frames = [ask, { type: "challenge-response", crowId: B.identity.crowId, pubkey: B.identity.ed25519Pubkey, cb_sig: cbSig }];
+  if (auth) frames.push({ type: "authenticated" });
+  R.send(...frames);
+  if (auth) assert.ok(await until(() => pa.pm.isConnected(B.identity.crowId), 5000), "control: the contact is admitted");
+  else assert.ok(await R.next("authenticated"), "pm admitted the raw peer (its authenticated frame arrived)");
   return { pa, R };
+}
+
+/** Write `s` in `n`-byte pieces, one write per piece, yielding between them. */
+async function trickle(R, s, n) {
+  for (let i = 0; i < s.length; i += n) {
+    if (R.closed) return;
+    R.write(s.slice(i, i + n));
+    await new Promise((r) => setImmediate(r));
+  }
 }
 
 /** A `data` frame whose JSON line is exactly `bytes` long (no newline). */
@@ -253,4 +263,74 @@ test("a sibling (instance) connection is exempt: one replicated entry far over t
   assert.ok(await until(() => hasMemory(b.db, 880001), 10_000), "the large entry replicates");
   await sleep(300);
   assert.equal(closed, false, "the sibling link stays open");
+});
+
+test("meta.instanceId is null when the claimed id is not in the enroll-id shape (or absent)", T, async (t) => {
+  for (const claimed of ["bad id!", "-leading-dash", "x".repeat(129), null]) {
+    const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+    const { pa, R } = await admittedRaw(t, A, B, {}, { claimed });
+    R.write(dataLine(100) + "\n");
+    assert.ok(await until(() => pa.peerData.length === 1, 5000), `${JSON.stringify(claimed)}: delivered`);
+    assert.deepEqual(pa.peerData[0][2], { proof: "cb", instanceId: null }, JSON.stringify(claimed));
+  }
+  // Control: the longest valid shape passes through.
+  const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+  const ok = "a" + "b".repeat(127);
+  const { pa, R } = await admittedRaw(t, A, B, {}, { claimed: ok });
+  R.write(dataLine(100) + "\n");
+  assert.ok(await until(() => pa.peerData.length === 1, 5000));
+  assert.deepEqual(pa.peerData[0][2], { proof: "cb", instanceId: ok });
+});
+
+test("a trickled line: over the cap in 4 KiB writes is killed; at the cap it is delivered", { timeout: 60_000 }, async (t) => {
+  {
+    const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+    const { pa, R } = await admittedRaw(t, A, B);
+    await trickle(R, dataLine(CAP), 4096);
+    await sleep(100);
+    assert.equal(R.closed, false, "control: a partial line at the cap stays open");
+    R.write("\n");
+    assert.ok(await until(() => pa.peerData.length === 1, 5000), "the trickled line at the cap is delivered");
+  }
+  {
+    const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+    const { pa, R } = await admittedRaw(t, A, B);
+    await trickle(R, "x".repeat(CAP + 1), 4096);
+    assert.equal(await closedWithin(R, 3000), true, "the trickled over-cap line is killed");
+    assert.deepEqual(pa.peerData, []);
+  }
+});
+
+test("the pre-admission cap still counts a trickled partial line: 65537 bytes in 1 KiB writes kills", T, async (t) => {
+  const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+  await addContact(A, B);
+  const pa = await newPeer(A, { preAuthMs: 10_000 });
+  const R = await rawTo(t, pa.pm);
+  await R.next("challenge");
+  await trickle(R, "x".repeat(65_535), 1024);
+  await sleep(100);
+  assert.equal(R.closed, false, "control: 65535 bytes stays open");
+  R.write("xx");
+  assert.equal(await closedWithin(R, 3000), true, "the byte over 65536 kills");
+});
+
+test("same-chunk transition: the peer's authenticated line and an over-cap partial line in one write is killed by the post-admission cap", T, async (t) => {
+  // The pre-auth byte cap is raised far above the line cap, so only the
+  // post-admission cap can fire.
+  const opts = { preAuthMaxBytes: 16 * CAP, preAuthMs: 10_000 };
+  {
+    const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+    const { pa, R } = await admittedRaw(t, A, B, opts, { auth: false });
+    R.write(JSON.stringify({ type: "authenticated" }) + "\n" + "x".repeat(CAP));
+    assert.ok(await until(() => pa.pm.isConnected(B.identity.crowId), 5000), "control: admitted");
+    await sleep(200);
+    assert.equal(R.closed, false, "control: a partial line at the cap stays open");
+  }
+  {
+    const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+    const { pa, R } = await admittedRaw(t, A, B, opts, { auth: false });
+    R.write(JSON.stringify({ type: "authenticated" }) + "\n" + "x".repeat(CAP + 1));
+    assert.equal(await closedWithin(R, 3000), true, "the over-cap partial line in the same write is killed");
+    assert.deepEqual(pa.peerData, []);
+  }
 });
