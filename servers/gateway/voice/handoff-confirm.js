@@ -7,7 +7,7 @@ import { voiceLine } from "./voice-lines.js";
 import { listHandoffCandidates, cleanName } from "./bot-summaries.js";
 import { HANDOFF_START_BUDGET_MS } from "./handoff-constants.js";
 import { normalizeVoiceSettings } from "../../shared/voice-bot.js";
-import { claimResult } from "../board/result-requesters.js";
+import { claimResult, releaseResult } from "../board/result-requesters.js";
 import { cardDrawerHref } from "../board/card-link.js";
 import { rememberTopic } from "./handoff-topic.js";
 
@@ -144,24 +144,26 @@ function watchFirstTurn(core, eng, h, sessionId) {
 }
 
 /**
- * The spawn settled (inside the budget, or detached): true when the starting → started CAS won. A CAS lost to
- * a stop stops the session that just appeared (engine.stop first, then the session id is written, in separate
- * tries; a stop error leaves detail "stop_pending" for the sweep to retry) and registers no watcher. A CAS lost
- * to the sweep writes the session id and leaves the session running (the card exists, and the result still
- * reaches the operator). A spawn that did not start queues the row and reports it.
+ * The spawn settled (inside the budget, or detached): { won: true } when the starting → started CAS won, else
+ * { won: false, status } with the row's status as re-read. A CAS lost to a stop stops the session that just
+ * appeared (engine.stop first, then the session id is written, in separate tries; a stop error leaves detail
+ * "stop_pending" for the sweep to retry), releases the card's result claim (P32: the hand-off is over) and
+ * registers no watcher. A CAS lost to the sweep, or to a report that landed inside the budget (the row is done
+ * or failed already), writes the session id and leaves the session as it is (the card exists, and the result
+ * still reaches the operator). A spawn that did not start queues the row and reports it.
  */
 async function finishStart(core, db, getEng, h, r) {
   const { store } = core;
   if (r.started !== true) {
     if (await store.transition(db, h.id, ["starting"], "queued", { detail: String(r.code || "start_failed") })) await notifyStartFailed(core, db, h);
-    return false;
+    return { won: false, status: "queued" };
   }
   const ids = { session_id: r.sessionId, thread_id: r.threadId ?? null };
   const eng = await getEng();   // started, so dispatchCard already resolved it: this is the memoized singleton
   if (await store.transition(db, h.id, ["starting"], "started", ids)) {
     watchFirstTurn(core, eng, h, r.sessionId);   // before any other await: the engine replays a turn 1 that already ended
     if (r.threadId) await core.give.fileStartedThread(db, { threadId: r.threadId, projectId: h.projectId });
-    return true;
+    return { won: true };
   }
   const now = await store.get(db, h.id);
   const fields = { ...ids };
@@ -174,10 +176,11 @@ async function finishStart(core, db, getEng, h, r) {
         core.log(`[voice-handoff] ${h.id}: stop of ${r.sessionId} failed, left pending for the sweep (${err?.message || err})`);
       }
     }
+    if (h.cardId != null) releaseResult(h.cardId);
   }
   try { await store.setFields(db, h.id, fields); }
   catch (err) { core.log(`[voice-handoff] ${h.id}: could not record session ${r.sessionId} (${err?.message || err})`); }
-  return false;
+  return { won: false, status: now?.status ?? null };
 }
 
 /**
@@ -194,7 +197,8 @@ async function finishStart(core, db, getEng, h, r) {
  *     autonomy, tags crow-voice), card_id on the row, the result claimed for the voice rail.
  *  6. No start (start_now 0, or the model unavailable now) → queued.
  *  7. The spawn is detached and raced against HANDOFF_START_BUDGET_MS. Settled, started, on an `up` model →
- *     finishStart; "on it" only when its CAS won. Settled and not started → queued. Otherwise "starting up",
+ *     finishStart; "on it" when its CAS won, or when it lost to anything but a stop (a report inside the
+ *     budget ended the row: the bot did start); a stop is said so. Settled and not started → queued. Otherwise "starting up",
  *     and the detached chain finishes the start and reports a failure; it ends in catch(log).finally(...).
  */
 export async function confirm(core, db, id, decision, via) {
@@ -256,8 +260,11 @@ export async function confirm(core, db, id, decision, via) {
     const vars = { bot: h.name, task: h.task };
     if (raced && raced.r.started !== true) return await settle(core, db, h, "queued", String(raced.r.code || "start_failed"), "handoff_queued");
     if (raced && avail === "up") {
-      const won = await finishStart(core, db, getEng, h, raced.r);
-      return won ? { status: "started", say: voiceLine("handoff_started", h.lang, vars) } : { status: "stopped", say: voiceLine("status_stopped", h.lang, vars) };
+      const fin = await finishStart(core, db, getEng, h, raced.r);
+      // "On it" only when the CAS won [rv3 m2]; a stop that landed inside the budget is said so. A row already
+      // done or failed (a report landed inside the budget) did start: it is "on it", never "stopped" (5.1 carry).
+      if (fin.won || fin.status !== "stopped") return { status: "started", say: voiceLine("handoff_started", h.lang, vars) };
+      return { status: "stopped", say: voiceLine("status_stopped", h.lang, vars) };
     }
     detached = true;
     p.then((r) => core.withDb((d) => finishStart(core, d, getEng, h, r)))

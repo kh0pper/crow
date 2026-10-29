@@ -19,8 +19,10 @@
  * WHAT MAY BE DECIDED [rv1 C4]: before any core call the id must be a hand-off id, the decision exactly
  * "confirm" or "decline" (else 400), and the row a kiosk's live `awaiting_phone` row (expires_at > now). The
  * dispatch is on kind: a `handoff` row → core.confirm(…, "phone"), whose CAS from awaiting_phone with the TTL
- * is the final word; a `stop` row → core.decideStop (PR 5), and until that exists a stop row is 404. A row
- * already decided or expired is simply shown again (303), so a double tap creates nothing.
+ * is the final word; a `stop` row → core.decideStop (PR 5, voice/handoff-stop.js: it checks the target is the
+ * same kiosk's and bot's hand-off before any write, then runs core.stop, and never creates a card); a build
+ * without decideStop gives a stop row 404. A row already decided or expired is simply shown again (303), so a
+ * double tap creates nothing.
  *
  * One crow.db client per request, closed in finally. The core is the process singleton the voice turn uses
  * (getHandoffCore: the same store, in-flight set and clock), so a confirm here and a sweep agree.
@@ -81,7 +83,12 @@ function formatTime(ms, lang, opts) {
 /** The status line for a row that is not waiting on this page. */
 function statusLine(row, now, lang, vars) {
   const status = row.status === "awaiting_phone" && !live(row, now) ? "expired" : row.status;
-  if (row.kind === "stop" && ["done", "declined", "failed"].includes(status)) return fill(t(`voiceHandoff.stopStatus.${status}`, lang), vars);
+  // A stop row's lines are its own (P26): a stop in progress, one that expired or one whose target had already
+  // ended never read as a hand-off's "nothing was started".
+  if (row.kind === "stop") {
+    if (status === "failed" && row.detail === "already") return fill(t("voiceHandoff.stopStatus.already", lang), vars);
+    if (["done", "declined", "failed", "starting", "expired"].includes(status)) return fill(t(`voiceHandoff.stopStatus.${status}`, lang), vars);
+  }
   if (status === "failed" && FAILED_REASONS.has(row.detail)) return fill(t(`voiceHandoff.failed.${row.detail}`, lang), vars);
   // A failed row that has a card ran and could not finish (the bot's own failure report, PR 5): its detail is
   // the bot's summary, not a reason code, and "nothing was started" would be false (P26).

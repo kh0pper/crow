@@ -103,6 +103,18 @@ export const VOICE_LINES = Object.freeze({
     // The spoken heads-up on a kiosk (presence.js, Task 5.2), which never hears the task text (P34).
     start_failed_spoken_kiosk: "{bot} couldn't start a task. The details are on your phone.",
     ended_no_result_spoken_kiosk: "{bot} stopped without finishing a task. The card is still on {bot}'s board.",
+    // "Stop it" (handoff-stop.js, PR 5 Task 5.4): the ask, then what really happened. Anything the bot made is kept.
+    stop_propose: "Stop {bot}'s task: {task}?",
+    // A pronoun stop while media or a timer is active (P21): its yes is the confirmation; anything else is the media's.
+    stop_propose_media: "Do you mean {bot}'s task? Say yes, or say stop the music.",
+    stopped: "Okay, I stopped {bot}. Anything it already made is kept.",
+    stop_pending_start: "Okay. {bot} is still starting up, so I'll stop it the moment it does. Anything it makes is kept.",
+    stopped_queued: "Okay, {bot} won't start it. The card stays on {bot}'s board.",
+    stop_already: "{bot} isn't working on that anymore.",
+    stop_requested: "I've asked {bot} to stop. Anything it already made is kept.",
+    stop_none: "I couldn't find that task.",
+    // The kiosk stop's push title (P22); {display} as handoff_phone_title.
+    handoff_stop_phone_title: "Crow on {display}: stop {bot}'s task?",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -180,6 +192,15 @@ export const VOICE_LINES = Object.freeze({
     completion_failed_spoken_kiosk: "{bot} no pudo terminar una tarea. Los detalles están en tu teléfono.",
     start_failed_spoken_kiosk: "{bot} no pudo empezar una tarea. Los detalles están en tu teléfono.",
     ended_no_result_spoken_kiosk: "{bot} se detuvo sin terminar una tarea. La tarjeta sigue en el tablero de {bot}.",
+    stop_propose: "¿Paro la tarea de {bot}: {task}?",
+    stop_propose_media: "¿Te refieres a la tarea de {bot}? Di que sí, o di para la música.",
+    stopped: "Vale, he parado a {bot}. Lo que ya hizo se queda.",
+    stop_pending_start: "Vale. {bot} todavía está arrancando, así que lo pararé en cuanto lo haga. Lo que haga se queda.",
+    stopped_queued: "Vale, {bot} no lo empezará. La tarjeta se queda en el tablero de {bot}.",
+    stop_already: "{bot} ya no está con eso.",
+    stop_requested: "Le he pedido a {bot} que pare. Lo que ya hizo se queda.",
+    stop_none: "No encontré esa tarea.",
+    handoff_stop_phone_title: "Crow en {display}: ¿parar la tarea de {bot}?",
   }),
 });
 

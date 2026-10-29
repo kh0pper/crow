@@ -4151,6 +4151,9 @@ export const translations = {
   "voiceHandoff.stopStatus.done": { en: "Stopped. What {bot} made so far is kept.", es: "Parado. Lo que {bot} hizo hasta ahora se queda." },
   "voiceHandoff.stopStatus.declined": { en: "You kept it running.", es: "La dejaste seguir." },
   "voiceHandoff.stopStatus.failed": { en: "The stop didn't go through.", es: "No se pudo parar." },
+  "voiceHandoff.stopStatus.starting": { en: "Confirmed. Stopping {bot}'s task…", es: "Confirmado. Parando la tarea de {bot}…" },
+  "voiceHandoff.stopStatus.expired": { en: "This expired, so {bot}'s task was left running.", es: "Esto caducó, así que la tarea de {bot} siguió en marcha." },
+  "voiceHandoff.stopStatus.already": { en: "{bot} wasn't working on that anymore, so there was nothing to stop.", es: "{bot} ya no estaba con eso, así que no había nada que parar." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

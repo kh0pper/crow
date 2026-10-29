@@ -336,8 +336,9 @@ test("a phone-surface row forced to awaiting_phone is refused: only a kiosk's ro
   assert.deepEqual(await s.cards(), []);
 });
 
-test("a stop row shows stop wording and is 404 until core.decideStop exists; with it, the POST dispatches there (P8)", async () => {
-  const s = await setup();
+test("a stop row shows stop wording and is 404 on a build without core.decideStop; with it, the POST dispatches there (P8)", async () => {
+  // PR 5 wires the real decideStop onto every core; the guard still holds for a core without one.
+  const s = await setup({ coreOver: (core) => { delete core.decideStop; } });
   const target = await s.insert({ status: "proposed", surface: "phone", device_id: "phone-1" });
   const id = await s.insert({ kind: "stop", target_id: target });
   const html = await (await s.get(id)).text();
@@ -516,6 +517,67 @@ test("a row whose session ended without a result says so on the page (P26, 5.3)"
   const es = await s.insert({ device_id: "kiosk-2", lang: "es" });
   await s.core.store.transition(s.db, es, ["awaiting_phone"], "failed", { card_id: 8, detail: "session_ended_no_result" });
   assert.match(await (await s.get(es)).text(), /Writer se detuvo sin terminarlo\. La tarjeta sigue en el tablero de Writer\./);
+});
+
+test("a kiosk stop confirmed on the page stops the target through the real decideStop and creates no card; declined, it keeps running (5.4, rv1 C4)", async () => {
+  const s = await setup();
+  const target = await s.insert({ status: "started" });
+  await s.core.store.setFields(s.db, target, { session_id: "s1" });
+  const id = await s.insert({ kind: "stop", target_id: target });
+  const page = await (await s.get(id)).text();
+  assert.match(page, /value="confirm">Stop it</);
+  assert.equal((await s.decide(id, "confirm")).status, 303);
+  const st = await s.row(id);
+  assert.equal(st.status, "done");
+  assert.equal(st.detail, "stopped");
+  assert.equal((await s.row(target)).status, "stopped");
+  assert.deepEqual(s.eng.calls.stop, ["s1"]);
+  assert.deepEqual(s.confirms, [], "never confirm");
+  assert.deepEqual(await s.cards(), [], "a stop creates no card");
+  const after = await (await s.get(id)).text();
+  assert.ok(!hasForm(after));
+  assert.match(after, /Stopped\. What Writer made so far is kept\./);
+  // A double tap decides nothing twice.
+  assert.equal((await s.decide(id, "confirm")).status, 303);
+  assert.deepEqual(s.eng.calls.stop, ["s1"]);
+  // Declined: the target keeps running.
+  const t2 = await s.insert({ status: "started", device_id: "kiosk-2" });
+  await s.core.store.setFields(s.db, t2, { session_id: "s2" });
+  const id2 = await s.insert({ kind: "stop", target_id: t2, device_id: "kiosk-2" });
+  assert.equal((await s.decide(id2, "decline")).status, 303);
+  assert.equal((await s.row(id2)).status, "declined");
+  assert.equal((await s.row(t2)).status, "started");
+  assert.deepEqual(s.eng.calls.stop, ["s1"]);
+  assert.match(await (await s.get(id2)).text(), /You kept it running\./);
+  // A stop for a target that is not this kiosk's hand-off is refused (P24): failed bad_target, the generic line.
+  const t3 = await s.insert({ status: "started", device_id: "kiosk-3" });
+  const id3 = await s.insert({ kind: "stop", target_id: t3, device_id: "kiosk-4" });
+  assert.equal((await s.decide(id3, "confirm")).status, 303);
+  assert.equal((await s.row(id3)).detail, "bad_target");
+  assert.equal((await s.row(t3)).status, "started");
+  assert.match(await (await s.get(id3)).text(), /The stop didn't go through\./);
+});
+
+test("a stop row's page lines are its own: starting, expired, and a target that had already ended (P26)", async () => {
+  const s = await setup();
+  const target = await s.insert({ status: "done" });
+  const id = await s.insert({ kind: "stop", target_id: target });
+  assert.equal((await s.decide(id, "confirm")).status, 303);
+  assert.equal((await s.row(id)).detail, "already");
+  const already = await (await s.get(id)).text();
+  assert.match(already, /Writer wasn't working on that anymore, so there was nothing to stop\./);
+  assert.ok(!/nothing was started/.test(already));
+  const starting = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-2" });
+  await s.core.store.transition(s.db, starting, ["awaiting_phone"], "starting");
+  const mid = await (await s.get(starting)).text();
+  assert.ok(!hasForm(mid));
+  assert.match(mid, /Confirmed\. Stopping Writer's task…/);
+  const expired = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-3", lang: "es" });
+  s.now.advance(HANDOFF_PHONE_TTL_MS + 1);
+  const late = await (await s.get(expired)).text();
+  assert.ok(!hasForm(late));
+  assert.match(late, /Esto caducó, así que la tarea de Writer siguió en marcha\./);
+  assert.ok(!/No se empezó nada/.test(late));
 });
 
 test("every voiceHandoff page string is in English and Spanish", () => {

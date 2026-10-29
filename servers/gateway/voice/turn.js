@@ -545,8 +545,9 @@ export function createVoiceTurnRunner(deps) {
 
   /**
    * deps.voiceActions (optional; Crow voice's pending confirmations), every member optional:
-   * - fastPath({ db, device, surface, transcript, lang, tz, bot, executor }) → Promise<null | { say, verb, events? }>:
-   *   runs after STT and the TTS open, before opts.fastPaths. bot and executor are null when the bot cannot be
+   * - fastPath({ db, device, surface, transcript, lang, tz, bot, executor, mediaActive }) → Promise<null | { say, verb, events? }>:
+   *   runs after STT and the TTS open, before opts.fastPaths. mediaActive is opts.mediaActive (a function: the
+   *   surface has media or a timer running) or null when the caller passed none. bot and executor are null when the bot cannot be
    *   loaded (it is never ensured here). A non-null result is spoken and saved like a fast path. A throw is
    *   logged and taken as null.
    * - turnContext({ device }) → { text, pending } | string: SYNCHRONOUS (a returned Promise is logged and
@@ -738,7 +739,9 @@ export function createVoiceTurnRunner(deps) {
         if (vaBot) {
           try { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; } catch (err) { executor = null; log(`[voice-turn] ${device.id} voice actions: no executor (${err?.message || err})`); }
         }
-        try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
+        // opts.mediaActive (P21): the surface's "media or a timer is active" flag, for a pronoun "stop it"; absent means unknown.
+        const mediaActive = typeof opts.mediaActive === "function" ? opts.mediaActive : null;
+        try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor, mediaActive }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
       }
       // An answer turn's words are the bot's: never the endpoint's own no-model paths ("Pause." is not a request).
       if (!fp && !answerTurn && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);

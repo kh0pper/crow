@@ -10,7 +10,7 @@
  *   answerRow(core, db, row, { device, surface, lang })                     the spoken state of one row
  *   reconcileRow(core, db, row, { tdb, eng })                               → the state's line key (or null)
  *   reconcileOpen(core, db)                                                 the sweep's pass over started/quiet rows
- *   rowsInScope(store, db, device, surface, now), resolveRows(transcript, rows, bots)   shared with 5.4 (P20, P23)
+ *   rowsInScope(store, db, device, surface, now), resolveRows(transcript, rows, bots), candidatesOf(core, db, bot)   shared with 5.4 (P20, P23)
  *
  * Scope (P23, amended in review): a kiosk sees only its own device's rows; a personal surface (the phone, the
  * glasses, a dashboard tab) sees ALL the operator's hand-offs, kiosk-started ones included. Both see the open
@@ -238,8 +238,8 @@ export async function reconcileOpen(core, db) {
   return out;
 }
 
-/** The candidates' names and ids (the hand-off tool's list), or none when hand-offs are off or `bot` is not the voice bot. */
-async function candidatesOf(core, db, bot) {
+/** The candidates' names and ids (the hand-off tool's list), or none when hand-offs are off or `bot` is not the voice bot. Shared with 5.4. */
+export async function candidatesOf(core, db, bot) {
   try {
     if (!bot || !normalizeVoiceSettings(bot).handoff.enabled) return [];
     return (await core.summaries.get(db, bot)).filter((c) => SAFE_BOT_ID.test(c.bot_id)).map((c) => ({ bot_id: c.bot_id, name: c.name }));

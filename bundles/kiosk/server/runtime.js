@@ -199,7 +199,7 @@ export function stationSttHotwords(device, profile, stations, on = sttHotwordsOn
   if (!on || (lang && lang !== "en") || profile?.language !== "en") return "";
   return callSignHotwords(stations);
 }
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null, crowVoice = null, voiceDef = null, cloud = false } = {}) {
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", mediaActive = null, wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null, crowVoice = null, voiceDef = null, cloud = false } = {}) {
   const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
@@ -234,6 +234,9 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     // (actionWhen / actionFollowWhen: the kiosk's own tests, set in `shared` above.)
     // Only against the windows really open now (never because music plays).
     displayObjectWhen: (t) => namesDisplayObject(t, ctx.store.list(ctx.deviceId).filter((w) => !(w.kind === "timer" && w.done)).map((w) => w.kind)),
+    // Voice hand-off PR 5 (P21): a pronoun "stop it" is asked about while this display plays media (the
+    // session's `mediaActive`) or has a timer still running, so the task stop never takes the music's words.
+    mediaActive: () => (typeof mediaActive === "function" && mediaActive() === true) || ctx.store.list(ctx.deviceId).some((w) => w.kind === "timer" && !w.done),
     cantDoText: kioskCantDoText(lang),
     notDoneText: kioskNotDoneText(lang),
     notReadyText: kioskNotReadyText(lang),
@@ -450,7 +453,7 @@ export function createKioskRuntime(deps) {
   const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
   /** A display turn's options: this display's media line, the STT hints, and the library's stream envelopes read through
    *  the voice turn's one onToolResult hook (envelope.js decides what is honoured). */
-  const turnOptions = (device, caps, tz, emit, hooks, vb = null) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device, vb), sttHotwords: sttHotwordsFor(device),
+  const turnOptions = (device, caps, tz, emit, hooks, vb = null) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), mediaActive: () => media.active(device.id), sttPrompt: sttPromptFor(device, vb), sttHotwords: sttHotwordsFor(device),
     crowVoice: deps.crowVoice || null, voiceDef: vb?.def || null, cloud: vb?.cloud === true,
     onToolResult: music ? createEnvelopeHandler({ media, deviceId: device.id, music, meta: () => ({ maxVolume: Number(device.kiosk_settings?.max_volume) || 100 }) }) : null });
   /**
