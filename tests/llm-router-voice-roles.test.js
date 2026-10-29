@@ -63,7 +63,8 @@ test("unedited: no binding gives the raw constants and no roles", async () => {
   const { db, cleanup } = fresh();
   try {
     await baseProviders(db);
-    assert.deepEqual(await resolveVoiceKeys(db, { env: NO_ENV }), { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null });
+    // The raw constants have no provider rows here, so neither is proven local (strict, Task 20).
+    assert.deepEqual(await resolveVoiceKeys(db, { env: NO_ENV }), { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true });
   } finally { cleanup(); }
 });
 
@@ -96,7 +97,7 @@ test("env beats role", async () => {
     assert.equal(k.escalateRole, null);
     // Positive control: without the env the chosen bindings win.
     const c = await resolveVoiceKeys(db, { env: NO_ENV });
-    assert.deepEqual(c, { fast: "local-voice/m2", escalate: "local-chat/m1", fastRole: "voice", escalateRole: "everyday" });
+    assert.deepEqual(c, { fast: "local-voice/m2", escalate: "local-chat/m1", fastRole: "voice", escalateRole: "everyday", fastCloud: false, escalateCloud: false });
   } finally { cleanup(); }
 });
 
@@ -124,7 +125,8 @@ test("resolveVoiceKeys never throws: a failing resolver gives the raw constants"
   let k;
   try { k = await resolveVoiceKeys({}, { env: NO_ENV, resolveRoleFn: async () => { throw new Error("boom"); } }); }
   finally { console.warn = warn; }
-  assert.deepEqual(k, { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null });
+  // No role context could be read: nothing is proven local.
+  assert.deepEqual(k, { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true });
   assert.deepEqual(warns.sort(), [
     "[llm-router] role everyday: boom; using the consumer default",
     "[llm-router] role voice: boom; using the consumer default",
@@ -396,18 +398,22 @@ test("voice bot cloud flag via role", async () => {
     // Control: the same role on a local model is not cloud.
     await bind(db, "voice", "local-voice/m2");
     assert.equal((await createVoiceBotLoader()(db)).cloud, false);
-    // An unresolvable role is not cloud (false on any doubt, as today).
+    // An unresolvable role follows the router's fast side, which the turn falls back to (Task 20):
+    // here the raw constant, on loopback.
+    await provider(db, FAST_KEY.split("/")[0], "http://127.0.0.1:8011/v1", [FAST_ID]);
     await bind(db, "voice", "gone/x");
     assert.equal((await createVoiceBotLoader()(db)).cloud, false);
   } finally { cleanup(); }
 });
 
-test("a bare \"role:\" fast model is no role: not cloud", async () => {
+test("a bare \"role:\" fast model is no role: the turn dials it as written, so it is not proven local", async () => {
   const { db, cleanup } = fresh();
   try {
     await baseProviders(db);
+    await provider(db, FAST_KEY.split("/")[0], "http://127.0.0.1:8011/v1", [FAST_ID]);
     await seedVoiceBot(db, { kind: "voice", fast_voice_model: "role:" });
-    assert.equal((await createVoiceBotLoader()(db)).cloud, false);
+    // Even with the router's fast key proven local: "role:" names no provider.
+    assert.equal((await createVoiceBotLoader()(db)).cloud, true);
   } finally { cleanup(); }
 });
 

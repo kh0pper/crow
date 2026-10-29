@@ -29,6 +29,10 @@ import { piModelsFileKeys } from "../../../../../scripts/pi-bots/pi-model-catalo
 import { piSpawnTarget, readPiModelsJson } from "../../../../../scripts/pi-bots/pi_provider_id.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
+import { readCustomRoleDefs } from "../../../../shared/model-roles-store.js";
+import { roleRefLabel } from "../../shared/bot-display.js";
+import { t, fill } from "../../shared/i18n.js";
+import { CORE_ROLES, roleIdOf, isValidCustomRoleId } from "../../../../shared/model-roles.js";
 import { getPeerCapabilities } from "../../capabilities-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
@@ -142,6 +146,33 @@ export async function remoteInvocationOn(db) {
     const raw = await readSetting(db, "feature_flags");
     return !!raw && JSON.parse(raw)?.remote_invocation === true;
   } catch { return false; }
+}
+
+/** Capabilities a bot's model may have (a chat turn); a custom role is always one of these. */
+const BOT_MODEL_CAPABILITIES = new Set(["chat", "vision"]);
+/** A core role a bot may name as its model: a chat-capable role other than the safety classifier. */
+const BOT_MODEL_CORE_ROLES = new Set(CORE_ROLES.filter((r) => BOT_MODEL_CAPABILITIES.has(r.capability) && r.id !== "safety").map((r) => r.id));
+
+/**
+ * Role refs a bot may keep as its model: label(key) is the role's name (null
+ * when the ref is not a known role); known(key) is true for a known role a bot
+ * may use (chat-capable, never safety); refused(key) is true for a known role
+ * a bot may not use (safety, embed, rerank, stt, tts, image, video), which a
+ * save refuses with notForBots. Never throws (a read failure leaves only the
+ * core roles).
+ */
+export async function loadRoleRefs(db, lang = "en") {
+  let customDefs = {};
+  try { customDefs = await readCustomRoleDefs(db); } catch { customDefs = {}; }
+  const label = (key) => roleRefLabel(key, { lang, customDefs });
+  const usable = (key) => {
+    const id = roleIdOf(key);
+    return BOT_MODEL_CORE_ROLES.has(id) || (!CORE_ROLES.some((r) => r.id === id) && isValidCustomRoleId(id));
+  };
+  const known = (key) => label(key) !== null && usable(key);
+  const refused = (key) => typeof key === "string" && label(key) !== null && !usable(key);
+  const notForBots = (key) => fill(t("botbuilder.roleNotForBots", lang), { role: label(key) || "" });
+  return { customDefs, label, known, refused, notForBots };
 }
 
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's

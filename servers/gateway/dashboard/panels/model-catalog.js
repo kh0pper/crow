@@ -50,7 +50,7 @@ import { isModelOrchestrationDisabled } from "../../../shared/model-orchestratio
 import { registeredSnapshot } from "../../models/registered-rows.js";
 import { defaultLifecycleCore } from "../../models/lifecycle-deps.js";
 import { renderRegisteredSection, registeredClientJS } from "./model-catalog-registered.js";
-import { dialogClientJS } from "./model-catalog-dialog.js";
+import { dialogClientJS, roleNamesJs } from "./model-catalog-dialog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // dashboard/panels/model-catalog.js -> dashboard -> gateway -> servers -> repo root
@@ -1067,6 +1067,8 @@ export function modelCatalogClientJS(lang) {
           return providerId ? "/providers/" + encodeURIComponent(providerId) : "/" + encodeURIComponent(modelId);
         }
 
+        ${roleNamesJs(lang)}
+
         function showDeleteConfirm(modelId, bindings, providerId) {
           var frag = document.createElement("div");
 
@@ -1081,10 +1083,13 @@ export function modelCatalogClientJS(lang) {
 
           var profiles = (bindings && bindings.profiles) || [];
           var bots = (bindings && bindings.bots) || [];
+          var roleNames = roleNamesOf(bindings);
           if (profiles.length === 0 && bots.length === 0) {
-            var none = document.createElement("p");
-            none.textContent = '${tJs("models.deleteNoBindings", lang)}';
-            frag.appendChild(none);
+            if (roleNames.length === 0) {
+              var none = document.createElement("p");
+              none.textContent = '${tJs("models.deleteNoBindings", lang)}';
+              frag.appendChild(none);
+            }
           } else {
             var bindIntro = document.createElement("p");
             bindIntro.textContent = '${tJs("models.deleteBindingsIntro", lang)}';
@@ -1102,6 +1107,11 @@ export function modelCatalogClientJS(lang) {
               list.appendChild(li);
             });
             frag.appendChild(list);
+          }
+          if (roleNames.length) {
+            var rolesP = document.createElement("p");
+            rolesP.textContent = rolesLine('${tJs("models.deleteRolesMove", lang)}', roleNames);
+            frag.appendChild(rolesP);
           }
 
           var actions = document.createElement("div");

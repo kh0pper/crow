@@ -390,3 +390,14 @@ test("F9: a bot that follows a role twice is listed once", async () => {
   const all = [...p.consumers.bots, ...p.consumers.unattended].filter((c) => c.id === "b2");
   assert.equal(all.length, 1);
 });
+
+test("the preview's where reads cloud for a row whose stored host is cloud", async () => {
+  await db.execute({ sql: "INSERT INTO providers (id, base_url, api_key, host, models, disabled) VALUES (?,?,?,?,?,0)",
+    args: ["flag-here", "http://127.0.0.1:8031/v1", null, "cloud", JSON.stringify([{ id: "f1" }])] });
+  await db.execute({ sql: "INSERT INTO providers (id, base_url, api_key, host, models, disabled) VALUES (?,?,?,?,?,0)",
+    args: ["flag-box", "http://100.64.20.5:8011/v1", null, "cloud", JSON.stringify([{ id: "f2" }])] });
+  invalidateRoleContext();
+  assert.equal((await preview("everyday", { model: "flag-here/f1" })).next.where, "cloud");
+  assert.equal((await preview("everyday", { model: "flag-box/f2" })).next.where, "cloud");
+  assert.equal((await preview("everyday", { model: "local-chat/m1" })).next.where, "here", "control");
+});

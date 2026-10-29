@@ -132,6 +132,29 @@ export function presetForRow(row) {
   return null;
 }
 
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, ""); } catch { return null; }
+}
+
+/**
+ * The known cloud preset whose HOSTNAME a providers row is on, or null: the
+ * row's host equals, or is a subdomain of, the host of any preset base URL
+ * (main, variants, aliases), whatever the row's path, port or scheme. This is
+ * the known-cloud guard (strict local check, "This is local" marks); use
+ * presetForRow for "which preset was this row made from".
+ */
+export function presetHostFor(row) {
+  const h = hostOf(row?.baseUrl || row?.base_url);
+  if (!h) return null;
+  for (const p of PROVIDER_PRESETS) {
+    for (const u of presetBaseUrls(p)) {
+      const ph = hostOf(u);
+      if (ph && (h === ph || h.endsWith("." + ph))) return p.id;
+    }
+  }
+  return null;
+}
+
 /** True once `now` is past the file's `review_by` date; a missing or invalid date fails closed (stale). */
 export function isRecommendationsStale(now = new Date(), opts) {
   const reviewBy = validDay(loadRecommendations(opts).review_by);

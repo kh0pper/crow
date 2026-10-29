@@ -1995,7 +1995,7 @@ export async function unregisterModel({
  * `pi_bot_defs` table (MPA-only, per `bot-board/data-queries.js`) must still
  * answer this query.
  *
- * @returns {Promise<{ profiles: Array<object>, bots: Array<{bot_id,display_name}>, roles: Array<{roleId,model,seeded}> }>}
+ * @returns {Promise<{ profiles: Array<object>, bots: Array<{bot_id,display_name}>, roles: Array<{roleId,model,seeded,label?}>, reach: Array<{roleId,via,label?}> }>}
  */
 export async function providerBindings(db, providerId) {
   const profiles = [];
@@ -2032,18 +2032,33 @@ export async function providerBindings(db, providerId) {
     /* pi_bot_defs missing on this instance (primary gateway) -> no bot bindings */
   }
 
-  // Role bindings (model_role.<id>) whose model is a key on this provider.
-  // Phase 1 returns them for Phase 2's delete warning; no client reads them yet.
+  // Role bindings (model_role.<id>) whose model is a key on this provider, and
+  // `reach`: every other role whose chain (bound ref or fallbacks) leads to one
+  // of them, so it moves too. `label` is set for a custom role only (its own,
+  // user-entered text: renderers escape it); core labels are translated client-side.
   const roles = [];
+  const reach = [];
   try {
-    const { readBindings } = await import("../../shared/model-roles-store.js");
+    const { readBindings, readCustomRoleDefs } = await import("../../shared/model-roles-store.js");
+    const { rolesReaching } = await import("../../shared/model-consumers.js");
     const prefix = `${providerId}/`;
-    for (const [roleId, b] of Object.entries(await readBindings(db))) {
-      if (typeof b?.model === "string" && b.model.startsWith(prefix)) roles.push({ roleId, model: b.model, seeded: !!b.seeded });
+    const bindings = await readBindings(db);
+    const customDefs = await readCustomRoleDefs(db);
+    const labelOf = (id) => (customDefs[id] && typeof customDefs[id].label === "string" ? { label: customDefs[id].label } : {});
+    for (const [roleId, b] of Object.entries(bindings)) {
+      if (typeof b?.model === "string" && b.model.startsWith(prefix)) roles.push({ roleId, model: b.model, seeded: !!b.seeded, ...labelOf(roleId) });
+    }
+    const seen = new Set(roles.map((r) => r.roleId));
+    for (const r of roles) {
+      for (const id of rolesReaching(r.roleId, { bindings, customDefs })) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        reach.push({ roleId: id, via: r.roleId, ...labelOf(id) });
+      }
     }
   } catch {
     /* no dashboard_settings table -> no role bindings found */
   }
 
-  return { profiles, bots, roles };
+  return { profiles, bots, roles, reach };
 }

@@ -19,6 +19,7 @@
  */
 import { t, tJs, fill } from "../shared/i18n.js";
 import { escapeHtml } from "../shared/components.js";
+import { roleNamesJs } from "./model-catalog-dialog.js";
 
 const STATUS_KEYS = {
   resident: "models.regStatusResident",
@@ -167,8 +168,11 @@ export function registeredClientJS(lang) {
           removeNoBindings: '${tJs("models.regRemoveNoBindings", lang)}',
           removeConfirm: '${tJs("models.regRemoveConfirm", lang)}',
           deletesFile: '${tJs("models.deleteConfirmIntro", lang)}',
-          cancel: '${tJs("models.deleteCancelButton", lang)}'
+          cancel: '${tJs("models.deleteCancelButton", lang)}',
+          rolesMove: '${tJs("models.deleteRolesMove", lang)}'
         };
+
+        ${roleNamesJs(lang)}
 
         function csrf() {
           var m = (document.cookie || "").match(/(?:^|;\\s*)crow_csrf=([^;]*)/);
@@ -267,8 +271,14 @@ export function registeredClientJS(lang) {
           title.textContent = fill(T.removeTitle, { provider: provider });
           box.appendChild(title);
           var p = document.createElement("p");
-          p.textContent = n > 0 ? fill(T.removeBindings, { n: n }) : T.removeNoBindings;
-          box.appendChild(p);
+          var roleNames = roleNamesOf(bindings);
+          p.textContent = n > 0 ? fill(T.removeBindings, { n: n }) : (roleNames.length ? "" : T.removeNoBindings);
+          if (p.textContent) box.appendChild(p);
+          if (roleNames.length) {
+            var rp = document.createElement("p");
+            rp.textContent = fill(T.rolesMove, { roles: roleNames.join(", ") });
+            box.appendChild(rp);
+          }
           // A downloaded entry nobody else uses loses its weights file too.
           if (willDeleteFiles) {
             var warn = document.createElement("p");

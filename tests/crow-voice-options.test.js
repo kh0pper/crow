@@ -103,19 +103,51 @@ function fakeDb({ row, providers = {}, fail = false } = {}) {
   };
 }
 
-test("loadVoiceBot: the voice bot and whether its fast model is a cloud provider (host \"cloud\")", async () => {
-  const cloudDb = fakeDb({ row: { definition: JSON.stringify(cloud), enabled: 1 }, providers: { "cloud-test": { host: "cloud" } } });
-  const c = await createVoiceBotLoader()(cloudDb);
-  assert.equal(c.def.fast_voice_model, "cloud-test/model");
-  assert.equal(c.cloud, true);
-  const localDb = fakeDb({ row: { definition: JSON.stringify(fast), enabled: 1 }, providers: { "crow-voice": { host: "local" } } });
-  assert.equal((await createVoiceBotLoader()(localDb)).cloud, false);
-  const noProvider = fakeDb({ row: { definition: JSON.stringify(cloud), enabled: 1 } });
-  assert.equal((await createVoiceBotLoader()(noProvider)).cloud, false, "no provider row: not cloud");
-  // The provider id is the part before the FIRST "/".
-  const slashes = { ...fast, fast_voice_model: "cloud-test/org/model" };
-  const sDb = fakeDb({ row: { definition: JSON.stringify(slashes), enabled: 1 }, providers: { "cloud-test": { host: "cloud" } } });
-  assert.equal((await createVoiceBotLoader()(sDb)).cloud, true);
+test("loadVoiceBot: the voice bot and whether its fast model is not proven local (strict, roles phase 2 Task 20)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createClient } = await import("@libsql/client");
+  const { invalidateRoleContext } = await import("../servers/shared/model-roles-store.js");
+  const dir = mkdtempSync(join(tmpdir(), "crow-voice-opts-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: join(import.meta.dirname, "..") });
+  const db = createClient({ url: "file:" + join(dir, "crow.db") });
+  invalidateRoleContext();
+  const routerKeys = (fastCloud) => async () => ({ fast: "crow-voice/qwen3.5-4b", fastCloud });
+  const seed = async (def) => {
+    await db.execute("DELETE FROM pi_bot_defs");
+    await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?, 'Crow', ?, 1, NULL)", args: [CROW_VOICE_BOT_ID, JSON.stringify(def)] });
+  };
+  const row = async (id, url, host) => {
+    await db.execute({ sql: "INSERT INTO providers (id, base_url, host, models) VALUES (?, ?, ?, '[]')", args: [id, url, host] });
+    invalidateRoleContext();
+  };
+  try {
+    await row("cloud-test", "https://api.example.com/v1", "cloud");
+    await row("crow-voice", "http://127.0.0.1:8011/v1", "local");
+    await seed(cloud);
+    const c = await createVoiceBotLoader({ resolveVoiceKeysFn: routerKeys(false) })(db);
+    assert.equal(c.def.fast_voice_model, "cloud-test/model");
+    assert.equal(c.cloud, true);
+    await seed(fast);
+    assert.equal((await createVoiceBotLoader({ resolveVoiceKeysFn: routerKeys(true) })(db)).cloud, false, "the def's own loopback key, whatever the router says");
+    // No provider row is not proof of local.
+    await seed({ ...fast, fast_voice_model: "gone/model" });
+    assert.equal((await createVoiceBotLoader({ resolveVoiceKeysFn: routerKeys(false) })(db)).cloud, true, "no provider row: not proven local");
+    // The provider id is the part before the FIRST "/".
+    await seed({ ...fast, fast_voice_model: "cloud-test/org/model" });
+    assert.equal((await createVoiceBotLoader({ resolveVoiceKeysFn: routerKeys(false) })(db)).cloud, true);
+    // No fast key of its own: the router's fast side decides.
+    const { fast_voice_model, ...noKey } = fast;
+    await seed(noKey);
+    assert.equal((await createVoiceBotLoader({ resolveVoiceKeysFn: routerKeys(true) })(db)).cloud, true);
+    assert.equal((await createVoiceBotLoader({ resolveVoiceKeysFn: routerKeys(false) })(db)).cloud, false);
+  } finally {
+    invalidateRoleContext();
+    try { db.close(); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("loadVoiceBot: a missing, disabled or corrupt row, or a db error, is null; nothing throws", async () => {

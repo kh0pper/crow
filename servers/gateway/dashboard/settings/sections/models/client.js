@@ -495,3 +495,339 @@ export function modelsClientJS({ lang = "en" } = {}) {
 })();
 `;
 }
+
+/**
+ * The custom-role sheet (Task 18): "Add a role" and a custom row's "Edit"
+ * open `<dialog id="models-custom">` with a name, a job, what it works with
+ * (text, or text and images) and the "may use big models" switch. Save
+ * posts /api/roles/custom; an edit that changes what the role may use comes
+ * back 409 with a preview (what the role will use after it, who moves, the
+ * cloud line and the unattended ack), and the next Save sends its hash.
+ * Delete (custom roles only, inside the sheet) asks once more, then sends
+ * DELETE /api/roles/custom/<id>; a 409 lists what still uses the role.
+ *
+ * Same rules as the change sheet: textContent only, no backtick, no
+ * unescaped dollar-brace.
+ * @returns {string} the client JS (no <script> wrapper)
+ */
+export function customRolesClientJS({ lang = "en" } = {}) {
+  return `
+(function () {
+  var dlg = document.getElementById('models-custom');
+  if (!dlg) return;
+  var T = {
+    add: '${tJs("models.ui.addRole", lang)}',
+    edit: '${tJs("models.custom.editTitle", lang)}',
+    name: '${tJs("models.custom.name", lang)}',
+    job: '${tJs("models.custom.job", lang)}',
+    capability: '${tJs("models.custom.capability", lang)}',
+    capChat: '${tJs("models.custom.cap.chat", lang)}',
+    capVision: '${tJs("models.custom.cap.vision", lang)}',
+    big: '${tJs("models.custom.bigModels", lang)}',
+    inUse: '${tJs("models.custom.inUse", lang)}',
+    confirmDelete: '${tJs("models.custom.deleteConfirm", lang)}',
+    invalidLabel: '${tJs("models.custom.invalidLabel", lang)}',
+    invalidJob: '${tJs("models.custom.invalidJob", lang)}',
+    nameTaken: '${tJs("models.custom.nameTaken", lang)}',
+    next: '${tJs("models.custom.previewNext", lang)}',
+    none: '${tJs("models.custom.previewNone", lang)}',
+    changes: '${tJs("models.warn.changes", lang)}',
+    cloud: '${tJs("models.warn.cloud", lang)}',
+    ackUnattended: '${tJs("models.warn.ackUnattended", lang)}',
+    changed: '${tJs("models.warn.changed", lang)}',
+    failed: '${tJs("models.ui.failed", lang)}',
+    save: '${tJs("common.save", lang)}',
+    del: '${tJs("common.delete", lang)}',
+    cancel: '${tJs("common.cancel", lang)}',
+    close: '${tJs("common.close", lang)}'
+  };
+  var LABELS = ${scriptJson(labelMap(lang))};
+  var MOVES = ['unattended', 'bots', 'subagents', 'jobs', 'otherCrows'];
+
+  function fill(s, p) {
+    var out = String(s);
+    for (var k in p) out = out.split('{' + k + '}').join(String(p[k]));
+    return out;
+  }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function str(v) { return typeof v === 'string' && v.trim() && v !== 'null' ? v.trim() : ''; }
+  function csrf() {
+    var parts = String(document.cookie || '').split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].trim();
+      if (p.indexOf('crow_csrf=') === 0) {
+        try { return decodeURIComponent(p.slice(10)); } catch (e) { return p.slice(10); }
+      }
+    }
+    return '';
+  }
+  function call(method, path, body) {
+    var headers = { 'Accept': 'application/json', 'X-Crow-Csrf': csrf() };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    var init = { method: method, headers: headers, credentials: 'same-origin' };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    var done = function (r, d) { return { ok: !!r.ok, status: r.status, data: d && typeof d === 'object' ? d : null }; };
+    return fetch(path, init).then(function (r) {
+      var ct = '';
+      try { ct = String((r.headers && typeof r.headers.get === 'function' && r.headers.get('content-type')) || ''); } catch (e) { ct = ''; }
+      if (ct.toLowerCase().indexOf('application/json') === -1) return done(r, null);
+      return r.json().then(function (d) { return done(r, d); }, function () { return done(r, null); });
+    }, function () { return { ok: false, status: 0, data: null }; });
+  }
+  function nameOf(c) {
+    if (!c) return '';
+    return (c.labelKey && LABELS[c.labelKey]) || str(c.label) || str(c.id);
+  }
+  function namesOf(list) {
+    var seen = {}, out = [];
+    (Array.isArray(list) ? list : []).forEach(function (c) {
+      var n = nameOf(c);
+      if (n && !Object.prototype.hasOwnProperty.call(seen, n)) { seen[n] = true; out.push(n); }
+    });
+    return out;
+  }
+
+  var ui = {};
+  var st = { seq: 0 };
+
+  function field(labelText, input) {
+    var lab = el('label', 'mc-field');
+    lab.appendChild(el('span', null, labelText));
+    lab.appendChild(input);
+    ui.form.appendChild(lab);
+    return input;
+  }
+
+  function build() {
+    dlg.textContent = '';
+    var inner = el('div', 'mc-inner');
+    var head = el('div', 'mc-head');
+    ui.title = el('h2', 'mc-title');
+    ui.title.setAttribute('id', 'models-custom-title');
+    var x = el('button', 'mc-close', '×');
+    x.type = 'button';
+    x.setAttribute('aria-label', T.close);
+    x.addEventListener('click', closeSheet);
+    head.appendChild(ui.title);
+    head.appendChild(x);
+    ui.form = el('div', 'mc-form');
+    ui.name = el('input');
+    ui.name.type = 'text';
+    ui.name.setAttribute('maxlength', '40');
+    ui.name.setAttribute('data-custom-name', '');
+    field(T.name, ui.name);
+    ui.job = el('input');
+    ui.job.type = 'text';
+    ui.job.setAttribute('maxlength', '160');
+    ui.job.setAttribute('data-custom-job', '');
+    field(T.job, ui.job);
+    ui.cap = el('select');
+    ui.cap.setAttribute('data-custom-cap', '');
+    [['chat', T.capChat], ['vision', T.capVision]].forEach(function (o) {
+      var opt = el('option', null, o[1]);
+      opt.value = o[0];
+      opt.setAttribute('value', o[0]);
+      ui.cap.appendChild(opt);
+    });
+    field(T.capability, ui.cap);
+    var heavy = el('label', 'mc-check');
+    ui.heavy = el('input');
+    ui.heavy.type = 'checkbox';
+    ui.heavy.setAttribute('data-custom-heavy', '');
+    heavy.appendChild(ui.heavy);
+    heavy.appendChild(el('span', null, T.big));
+    ui.form.appendChild(heavy);
+    // Any change to the form drops a preview the user saw for the old values.
+    [ui.name, ui.job, ui.cap, ui.heavy].forEach(function (n) {
+      n.addEventListener('change', resetPreview);
+      n.addEventListener('input', resetPreview);
+    });
+    ui.warn = el('div', 'mc-warn');
+    ui.warn.setAttribute('data-custom-warn', '');
+    ui.warn.setAttribute('aria-live', 'polite');
+    ui.error = el('p', 'mc-error');
+    ui.error.setAttribute('data-custom-error', '');
+    ui.error.setAttribute('role', 'alert');
+    var actions = el('div', 'mc-actions');
+    ui.del = el('button', 'mr-change mc-delete', T.del);
+    ui.del.type = 'button';
+    ui.del.setAttribute('data-custom-delete', '');
+    ui.del.addEventListener('click', del);
+    var cancel = el('button', 'mr-change mc-cancel', T.cancel);
+    cancel.type = 'button';
+    cancel.addEventListener('click', closeSheet);
+    ui.save = el('button', 'mr-btn mr-add mc-save', T.save);
+    ui.save.type = 'button';
+    ui.save.setAttribute('data-custom-save', '');
+    ui.save.addEventListener('click', save);
+    actions.appendChild(ui.del);
+    actions.appendChild(cancel);
+    actions.appendChild(ui.save);
+    inner.appendChild(head);
+    inner.appendChild(ui.form);
+    inner.appendChild(ui.warn);
+    inner.appendChild(ui.error);
+    inner.appendChild(actions);
+    dlg.appendChild(inner);
+  }
+
+  function closeSheet() {
+    st.seq++;
+    if (typeof dlg.close === 'function') dlg.close();
+    else dlg.removeAttribute('open');
+  }
+
+  function resetPreview() {
+    if (!st.preview && !st.armed) return;
+    st.preview = null;
+    st.ackU = false;
+    st.armed = false;
+    ui.del.textContent = T.del;
+    ui.warn.textContent = '';
+    updateSave();
+  }
+
+  function updateSave() {
+    var needsU = !!(st.preview && st.preview.needs && st.preview.needs.ackUnattended);
+    ui.save.disabled = !!st.busy || (needsU && st.ackU !== true);
+    ui.del.disabled = !!st.busy;
+  }
+
+  function openSheet(btn) {
+    var id = btn ? btn.getAttribute('data-custom-edit') : null;
+    st = { seq: st.seq + 1, id: id || null, preview: null, ackU: false, busy: false, armed: false };
+    ui.title.textContent = id ? T.edit : T.add;
+    ui.name.value = id ? (btn.getAttribute('data-custom-label') || '') : '';
+    ui.job.value = id ? (btn.getAttribute('data-custom-job') || '') : '';
+    ui.cap.value = id && btn.getAttribute('data-custom-capability') === 'vision' ? 'vision' : 'chat';
+    ui.heavy.checked = !!id && btn.getAttribute('data-custom-heavy') === 'true';
+    // Only an existing custom role can be deleted.
+    ui.del.hidden = !id;
+    ui.del.textContent = T.del;
+    ui.warn.textContent = '';
+    ui.error.textContent = '';
+    updateSave();
+    if (typeof dlg.showModal === 'function') { if (!dlg.open) dlg.showModal(); }
+    else dlg.setAttribute('open', '');
+  }
+
+  function line(cls, text) { var p = el('p', cls, text); ui.warn.appendChild(p); return p; }
+
+  function renderPreview(pv, changed) {
+    st.preview = pv;
+    st.ackU = false;
+    ui.warn.textContent = '';
+    if (changed) line('mc-changed', T.changed);
+    var nk = pv.next && (str(pv.next.label) || str(pv.next.key));
+    line('mc-next', nk ? fill(T.next, { model: nk }) : T.none);
+    var cons = pv.consumers || {};
+    var moved = [];
+    MOVES.forEach(function (g) { moved = moved.concat(namesOf(cons[g])); });
+    if (moved.length) {
+      line('mc-changes', T.changes);
+      var ul = el('ul', 'mc-names');
+      moved.forEach(function (n) { ul.appendChild(el('li', null, n)); });
+      ui.warn.appendChild(ul);
+    }
+    if (pv.cloud && typeof pv.cloud === 'object') line('mc-cloud', fill(T.cloud, { host: str(pv.cloud.host) || str(pv.cloud.model) }));
+    if (pv.needs && pv.needs.ackUnattended) {
+      var lab = el('label', 'mc-check');
+      var cb = el('input');
+      cb.type = 'checkbox';
+      cb.setAttribute('data-custom-ack', 'unattended');
+      cb.addEventListener('change', function (e) { st.ackU = !!((e && e.target) || cb).checked; updateSave(); });
+      lab.appendChild(cb);
+      lab.appendChild(el('span', null, T.ackUnattended));
+      ui.warn.appendChild(lab);
+    }
+  }
+
+  function done() {
+    closeSheet();
+    if (window.Turbo && typeof window.Turbo.visit === 'function') window.Turbo.visit(location.href, { action: 'replace' });
+    else location.reload();
+  }
+
+  function fail(text) {
+    ui.error.textContent = text || T.failed;
+    st.busy = false;
+    updateSave();
+  }
+
+  function save() {
+    if (st.busy || ui.save.disabled) return;
+    var label = String(ui.name.value || '').trim();
+    if (!label || label.length > 40) return fail(T.invalidLabel);
+    var body = { label: label, job: String(ui.job.value || '').trim(), capability: ui.cap.value === 'vision' ? 'vision' : 'chat', allowHeavy: ui.heavy.checked === true };
+    if (st.id) body.id = st.id;
+    if (st.preview && typeof st.preview.previewHash === 'string') {
+      body.previewHash = st.preview.previewHash;
+      body.ackUnattended = !!(st.preview.needs && st.preview.needs.ackUnattended) && st.ackU === true;
+      body.ackCloud = !!(st.preview.needs && st.preview.needs.ackCloud);
+    }
+    st.busy = true;
+    ui.error.textContent = '';
+    updateSave();
+    var seq = st.seq;
+    call('POST', '/api/roles/custom', body).then(function (r) {
+      if (seq !== st.seq) return;
+      if (r.ok && r.data && r.data.ok === true) return done();
+      var d = r.data || {};
+      if (r.status === 409 && d.preview && typeof d.preview === 'object' && typeof d.preview.previewHash === 'string') {
+        st.busy = false;
+        renderPreview(d.preview, d.reason === 'preview_changed');
+        return updateSave();
+      }
+      fail(d.reason === 'invalid_label' ? T.invalidLabel : d.reason === 'invalid_job' ? T.invalidJob : d.reason === 'name_taken' ? T.nameTaken : T.failed);
+    });
+  }
+
+  function del() {
+    if (!st.id || st.busy) return;
+    if (!st.armed) {
+      // Ask once more: a role, and the model chosen for it, go together.
+      st.armed = true;
+      st.preview = null;
+      ui.warn.textContent = '';
+      line('mc-confirm', fill(T.confirmDelete, { name: String(ui.name.value || '').trim() || st.id }));
+      ui.del.textContent = T.del;
+      ui.del.setAttribute('data-armed', 'true');
+      return updateSave();
+    }
+    st.busy = true;
+    ui.error.textContent = '';
+    updateSave();
+    var seq = st.seq;
+    call('DELETE', '/api/roles/custom/' + encodeURIComponent(st.id)).then(function (r) {
+      if (seq !== st.seq) return;
+      if (r.ok && r.data && r.data.ok === true) return done();
+      var d = r.data || {};
+      st.armed = false;
+      ui.del.removeAttribute('data-armed');
+      ui.warn.textContent = '';
+      if (r.status === 409 && d.reason === 'in_use') return fail(fill(T.inUse, { names: namesOf(d.consumers).join(', ') }));
+      fail(T.failed);
+    });
+  }
+
+  build();
+  var opens = document.querySelectorAll('[data-custom-add], [data-custom-edit]');
+  for (var i = 0; i < opens.length; i++) {
+    (function (b) { b.addEventListener('click', function () { openSheet(b.hasAttribute('data-custom-edit') ? b : null); }); })(opens[i]);
+  }
+  dlg.addEventListener('click', function (e) { if (e && e.target === dlg) closeSheet(); });
+  if (!window.__crowCustomSheetCacheBound) {
+    window.__crowCustomSheetCacheBound = true;
+    document.addEventListener('turbo:before-cache', function () {
+      var d = document.getElementById('models-custom');
+      if (d && typeof d.close === 'function' && d.open) d.close();
+    });
+  }
+})();
+`;
+}

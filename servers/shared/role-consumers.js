@@ -111,3 +111,39 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
   }
   return out;
 }
+
+/**
+ * What names `role:<roleId>` directly (the custom-role delete check): bot,
+ * gateway and phone slots whose value is the ref (a dead slot is read by
+ * nothing and does not count), and sub-agents mapped to the role. Roles that
+ * name it are the store's own check (deleteCustomRole). Reads this db only:
+ * no tasks store is opened (unattended detection is off), so it is safe
+ * inside the delete's transaction. Keep it that way: it runs between BEGIN
+ * IMMEDIATE and COMMIT, where a real async wait could stall the event loop
+ * (the warning in deleteCustomRole).
+ * @returns {Promise<Array<{kind:string, id:string, label:string, labelKey?:string}>>}
+ */
+export async function customRoleConsumers(db, roleId, { env = process.env } = {}) {
+  const ref = `role:${roleId}`;
+  const slots = await scanSlots(db, { withUnattended: false, includeSubagents: false, env });
+  // Fail closed: a scan that could not read everything cannot prove the role unused.
+  if (slots.incomplete) throw new Error("consumer scan incomplete");
+  const out = [];
+  const seen = new Set();
+  const add = (c) => {
+    const k = `${c.kind}|${c.id}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(c);
+  };
+  for (const s of slots) {
+    if (s.dead || s.value !== ref) continue;
+    add({ kind: s.kind, id: s.id, label: s.label, ...(s.labelKey ? { labelKey: s.labelKey } : {}) });
+  }
+  let map = {};
+  map = parseObject(await readSetting(db, SUBAGENT_MAP_KEY)); // a read error fails the delete closed
+  for (const [name, v] of Object.entries(map)) {
+    if (v?.role === roleId) add({ kind: "subagent", id: name, label: name });
+  }
+  return out;
+}

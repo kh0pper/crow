@@ -8,7 +8,7 @@
 
 import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
-  loadModelOptions, remoteInvocationOn, defaultDefinition,
+  loadModelOptions, loadRoleRefs, remoteInvocationOn, defaultDefinition,
 } from "./data-queries.js";
 import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
@@ -426,9 +426,19 @@ export async function handleBotBuilderPost(req, res, { db }) {
       // resolved later via resolve-profile.js. Empty -> bot uses its default.
       const fvm = (b.fast_voice_model || "").trim();
       if (fvm) def.fast_voice_model = fvm; else delete def.fast_voice_model;
+      {
+        // The safety classifier and the non-chat roles are never a bot's model: refuse, nothing saved.
+        const roleRefs = await loadRoleRefs(db, lang);
+        const no = [def.models.default, def.models.escalation, def.fast_voice_model].find((k) => k && roleRefs.refused(k));
+        if (no) {
+          return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` + encodeURIComponent(roleRefs.notForBots(no)));
+        }
+      }
       try {
         const { opts } = await loadModelOptions(db);
         const validKeys = new Set(opts.map((o) => o.key));
+        const roles = await loadRoleRefs(db);
+        for (const k of [def.models.default, def.models.escalation, def.fast_voice_model]) if (k && roles.known(k)) validKeys.add(k);
         const bad = [];
         if (def.models.default && !validKeys.has(def.models.default)) bad.push("default (" + def.models.default + ")");
         if (def.models.escalation && !validKeys.has(def.models.escalation)) bad.push("escalation (" + def.models.escalation + ")");

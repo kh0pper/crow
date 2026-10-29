@@ -14,6 +14,9 @@ import express from "express";
 import { createClient } from "@libsql/client";
 import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
 import { setBinding, invalidateRoleContext } from "../servers/shared/model-roles-store.js";
+import { markLocal } from "../servers/shared/provider-local-marks.js";
+import { t } from "../servers/gateway/dashboard/shared/i18n.js";
+import { PHONE_STRINGS } from "../bundles/phone/panel/phone.js";
 import { providerBindings } from "../servers/gateway/models/manager.js";
 import { freshLibsql, seedSession, authHeaders, withServer } from "./fixtures/models-routes-harness.mjs";
 
@@ -26,6 +29,11 @@ const PROVIDERS = [
   ["local-voice", "http://127.0.0.1:8011/v1", "local", "m2"],
   ["local-chat", "http://127.0.0.1:8002/v1", "local", "m1"],
   ["cloud-a", "https://api.example.com/v1", "cloud", "m9"],
+  ["cloud-b", "https://203.0.113.9/v1", "cloud", "c1"],
+  // A DNS name with host 'local': not proven local until marked (Task 21).
+  ["box-int", "http://box.example.internal:8011/v1", "local", "m5"],
+  // Flagged cloud on a private address: the stored flag wins (N4).
+  ["flagged", "http://100.64.20.5:8030/v1", "cloud", "m6"],
   // host 'local' on purpose: the role path never trusts the host column.
   ["local-box", "http://box.crow.example.ts.net:8011/v1", "local", "m3"],
 ];
@@ -77,6 +85,7 @@ after(async () => {
 });
 
 const post = (body) => fetch(s.base + "/api/phone/settings", { method: "POST", headers: { "Content-Type": "application/json", "x-test-session": "local" }, body: JSON.stringify({ totp: "123456", ...body }) });
+const NOT_PROVEN = t("phone.localNotProvenLocal", "en");
 const setting = async (k) => (await s.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [k] })).rows[0]?.value;
 
 test("save role ref", async () => {
@@ -89,14 +98,14 @@ test("local slot refuses cloud role", async () => {
   const before = await setting("phone_local_model");
   const r = await post({ localModel: "role:expert" });
   assert.equal(r.status, 400);
-  assert.deepEqual(await r.json(), { error: "invalid_model", message: "The local model cannot use a cloud provider." });
+  assert.deepEqual(await r.json(), { error: "local_not_proven_local", message: NOT_PROVEN });
   assert.equal(await setting("phone_local_model"), before, "nothing stored");
 });
 
 test("local slot refuses an unknown-host role", async () => {
   const r = await post({ localModel: "role:quick" });
   assert.equal(r.status, 400);
-  assert.equal((await r.json()).message, "The local model cannot use a cloud provider.");
+  assert.equal((await r.json()).message, NOT_PROVEN);
   // The same role is fine for the cloud slot: only the local slot is fenced.
   assert.equal((await post({ cloudModel: "role:quick" })).status, 200);
   assert.equal((await post({ cloudModel: "" })).status, 200);
@@ -145,15 +154,111 @@ test("local slot judges the live row it dials, not a stale context", async () =>
   }
 });
 
-test("raw keys unchanged", async () => {
+test("raw keys: the endpoint lookup is unchanged; the local slot applies the strict check", async () => {
   assert.deepEqual(await s.resolveModelSpec(s.db, "local-voice/m2"),
     { base_url: "http://127.0.0.1:8011/v1", api_key: "none", model: "m2", label: "local-voice/m2" });
-  // A raw cloud key in the local slot is still refused by the host column, as today.
-  assert.equal((await post({ localModel: "cloud-a/m9" })).status, 400);
-  // A raw key is never cloud-checked by URL: an unproven host with host='local' passes, as today.
-  assert.equal((await post({ localModel: "local-box/m3" })).status, 200);
+  assert.deepEqual(await s.resolveModelSpec(s.db, "local-voice/m2", { local: true }),
+    { base_url: "http://127.0.0.1:8011/v1", api_key: "none", model: "m2", label: "local-voice/m2" });
+  // A raw cloud key in the local slot is refused.
+  const r = await post({ localModel: "cloud-a/m9" });
+  assert.equal(r.status, 400);
+  assert.deepEqual(await r.json(), { error: "local_not_proven_local", message: NOT_PROVEN });
+  // The cloud slot is not fenced.
+  assert.equal((await post({ cloudModel: "local-box/m3" })).status, 200);
+  assert.equal((await post({ cloudModel: "" })).status, 200);
   assert.equal(await s.resolveModelSpec(s.db, "nope/m"), null);
   assert.equal(await s.resolveModelSpec(s.db, ""), null);
+  assert.equal((await post({ localModel: "nope/m" })).status, 400, "no such provider");
+});
+
+test("raw local key on a DNS name is refused until marked 'This is local'", async () => {
+  const before = await setting("phone_local_model");
+  const r = await post({ localModel: "box-int/m5" });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).message, NOT_PROVEN);
+  assert.equal(await setting("phone_local_model"), before, "nothing stored");
+  assert.deepEqual(await s.resolveModelSpec(s.db, "box-int/m5", { local: true }), { error: "local_now_cloud" });
+  assert.deepEqual(await markLocal(s.db, "box-int", { actor: "test" }), { ok: true });
+  assert.equal((await post({ localModel: "box-int/m5" })).status, 200);
+  assert.equal(await setting("phone_local_model"), "box-int/m5");
+  assert.equal((await s.resolveModelSpec(s.db, "box-int/m5", { local: true })).base_url, "http://box.example.internal:8011/v1");
+});
+
+test("raw local key on a host 'cloud' row at a private address stays refused (N4)", async () => {
+  const r = await post({ localModel: "flagged/m6" });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).message, NOT_PROVEN);
+  assert.deepEqual(await s.resolveModelSpec(s.db, "flagged/m6", { local: true }), { error: "local_now_cloud" });
+});
+
+test("a rebind reaches the local slot at once (no timer)", async () => {
+  assert.deepEqual(await setBinding(s.db, "quick", { model: "local-chat/m1" }), { ok: true });
+  assert.equal((await post({ localModel: "role:quick" })).status, 200);
+  await s.disp.refresh();
+  assert.equal(s.disp.settings().model({ allow_cloud: false }).model, "m1", "positive control");
+  assert.deepEqual(await setBinding(s.db, "quick", { model: "cloud-b/c1" }), { ok: true });
+  // No refresh() call and no 30 s timer: the bindings-change listener refreshes.
+  const deadline = Date.now() + 3000;
+  while (s.disp.settings().model({ allow_cloud: false }) !== null && Date.now() < deadline) await new Promise((r) => setImmediate(r));
+  assert.equal(s.disp.settings().model({ allow_cloud: false }), null);
+  assert.ok(s.warns.some((w) => w.includes("not proven local (local_now_cloud)")), JSON.stringify(s.warns));
+  assert.deepEqual(await setBinding(s.db, "quick", { model: "local-box/m3" }), { ok: true });
+});
+
+test("a mark or unmark reaches the local slot at once (no timer)", async () => {
+  const { unmarkLocal } = await import("../servers/shared/provider-local-marks.js");
+  await s.db.execute({ sql: "INSERT INTO providers (id, base_url, host, models) VALUES (?, ?, ?, ?)", args: ["box-two", "http://box2.example.internal:8011/v1", "local", JSON.stringify([{ id: "m7" }])] });
+  invalidateRoleContext();
+  assert.deepEqual(await markLocal(s.db, "box-two", { actor: "test" }), { ok: true });
+  assert.equal((await post({ localModel: "box-two/m7" })).status, 200);
+  await s.disp.refresh();
+  assert.equal(s.disp.settings().model({ allow_cloud: false }).model, "m7", "positive control");
+  const settle = async (want) => {
+    const deadline = Date.now() + 3000;
+    while ((s.disp.settings().model({ allow_cloud: false })?.model ?? null) !== want && Date.now() < deadline) await new Promise((r) => setImmediate(r));
+    return s.disp.settings().model({ allow_cloud: false })?.model ?? null;
+  };
+  await unmarkLocal(s.db, "box-two");
+  assert.equal(await settle(null), null, "unmarked: refused at once");
+  assert.deepEqual(await markLocal(s.db, "box-two", { actor: "test" }), { ok: true });
+  assert.equal(await settle("m7"), "m7", "marked again: accepted at once");
+});
+
+test("refresh coalesces: one running, at most one waiting, behind a stuck read", async () => {
+  const { coalesced } = await import("../bundles/phone/panel/routes.js");
+  let calls = 0, release;
+  const gate = new Promise((r) => { release = r; });
+  const run = coalesced(async () => { calls++; if (calls === 1) await gate; });
+  const first = run();
+  const waiting = [run(), run(), run(), run()];
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls, 1, "the stuck read holds; nothing else starts");
+  assert.equal(new Set(waiting).size, 1, "every later caller shares the one waiting refresh");
+  release();
+  await first; await waiting[0];
+  assert.equal(calls, 2, "exactly one read after the stuck one");
+  // A failed read rejects its caller and the next call still runs.
+  const failing = coalesced(async () => { throw new Error("db down"); });
+  await assert.rejects(failing(), /db down/);
+  await assert.rejects(failing(), /db down/);
+});
+
+test("a repeated refresh failure warns once per message per minute", async () => {
+  const { warnRefreshFailure } = await import("../bundles/phone/panel/routes.js");
+  s.warns.length = 0;
+  const t0 = 1_000_000;
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-x"), t0), true);
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-x"), t0 + 59_000), false);
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-y"), t0 + 59_000), true, "another message warns");
+  assert.equal(warnRefreshFailure("settings refresh", new Error("stall-x"), t0 + 60_000), true, "a minute later it warns again");
+  assert.equal(s.warns.filter((w) => w.includes("stall-x")).length, 2);
+});
+
+test("the refusal reads the same on the route and in the panel, en and es", () => {
+  assert.equal(NOT_PROVEN, "The local model must run on a provider Crow can prove is local.");
+  assert.equal(PHONE_STRINGS.en.errors.local_not_proven_local, t("phone.localNotProvenLocal", "en"));
+  assert.equal(PHONE_STRINGS.es.errors.local_not_proven_local, t("phone.localNotProvenLocal", "es"));
+  assert.notEqual(t("phone.localNotProvenLocal", "es"), NOT_PROVEN);
 });
 
 test("delete confirm lists roles", async () => {
@@ -185,5 +290,5 @@ test("delete confirm lists roles", async () => {
 
 test("manifest bumped", () => {
   const manifest = JSON.parse(readFileSync(join(ROOT, "bundles", "phone", "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "0.2.6");
+  assert.equal(manifest.version, "0.2.7");
 });

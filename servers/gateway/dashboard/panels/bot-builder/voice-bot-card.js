@@ -16,16 +16,16 @@ export const VOICE_EDITOR_HREF = `/dashboard/bot-builder?bot=${encodeURIComponen
 
 /**
  * @param row  the pi_bot_defs row (bot_id, display_name, enabled, definition)
- * @param opts { lang, req, providerRows, kioskAvailable } — kioskAvailable adds the
+ * @param opts { lang, req, providerRows, kioskAvailable, customDefs } — kioskAvailable adds the
  *             abilities line (voice-use.js fills it from the Kiosk listing).
  */
-export function voiceBotCardHtml(row, { lang = "en", req = null, providerRows = [], kioskAvailable = false } = {}) {
+export function voiceBotCardHtml(row, { lang = "en", req = null, providerRows = [], kioskAvailable = false, customDefs = {} } = {}) {
   void req;   // the card has no form (no CSRF token needed)
   let def = {};
   try { def = JSON.parse(row.definition || "{}") || {}; } catch { def = {}; }
   const name = row.display_name || "Crow";
   const modelKey = normalizeVoiceSettings(def).fast_voice_model || "";
-  const model = friendlyModel(modelKey, providerRows);
+  const model = friendlyModel(modelKey, providerRows, { lang, customDefs });
   const on = Number(row.enabled) === 1;
   const dot = on ? ["on", t("botbuilder.dotOn", lang)] : ["off", t("botbuilder.dotOff", lang)];
   const initial = (Array.from(String(name).trim())[0] || "C").toUpperCase();

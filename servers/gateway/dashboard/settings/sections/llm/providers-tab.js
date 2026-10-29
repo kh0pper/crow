@@ -10,6 +10,10 @@
  * - "Let bots use this provider" (cloud rows only): this box's consent for
  *   the cloud door (servers/shared/cloud-consent.js); off again by itself
  *   when the row's address or key changes.
+ * - "This is local" (rows on a DNS name that Crow cannot prove local): this
+ *   box's mark (servers/shared/provider-local-marks.js), so voice and the
+ *   phone's local slot may use the row; it lapses by itself when the row's
+ *   hostname changes.
  *
  * Every POST redirects back to ?section=llm&tab=providers so Turbo Drive
  * keeps the user on this tab.
@@ -30,6 +34,9 @@ import { getOrCreateLocalInstanceId } from "../../../../instance-registry.js";
 import { isExternalEngine, externalEngineInfo } from "../../../../../shared/provider-engine.js";
 import { getProviderHealth } from "../../../../provider-health.js";
 import { t, fill } from "../../../shared/i18n.js";
+import { csrfInput } from "../../../shared/csrf.js";
+import { roleRefLabel } from "../../../shared/bot-display.js";
+import { readCustomRoleDefs } from "../../../../../shared/model-roles-store.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isDefaultCrowHome } from "../../../../../shared/crow-home.js";
@@ -38,6 +45,7 @@ import {
   readCloudConsent, ensureCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow, consentTokenFor,
   cloudDoorIneligibleReason,
 } from "../../../../../shared/cloud-consent.js";
+import { readLocalMarks, markLocal, unmarkLocal, isMarkableRow, isMarkCurrent, localMarkTokenFor } from "../../../../../shared/provider-local-marks.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -161,6 +169,35 @@ export function botsSwitch(p, { consent, salt, lang = "en" }) {
           </form>`;
 }
 
+/**
+ * The "This is local" checkbox for a row Crow cannot prove local (a DNS
+ * name, not flagged cloud: isMarkableRow); "" otherwise. Ticking it sends an
+ * opaque token for the hostname this page showed (localMarkTokenFor), so a
+ * row whose host changed since the render is refused, not marked. A mark
+ * whose hostname no longer matches shows unticked (it has lapsed).
+ */
+export function localMarkSwitch(p, { localMarks, salt, ownAddrs, lang = "en" }) {
+  if (!isMarkableRow(p, { ownAddrs })) return "";
+  const on = isMarkCurrent(p, localMarks);
+  const label = escapeHtml(t("providers.isLocal", lang));
+  if (!on && !salt) {
+    return `<div class="llm-bots-switch llm-local-mark">
+            <button type="button" role="checkbox" aria-checked="false" disabled><span class="llm-local-box" aria-hidden="true"></span>${label}</button>
+            <div class="llm-bots-unavailable">${escapeHtml(t("providers.botsUnavailable", lang))}</div>
+          </div>`;
+  }
+  const token = on ? "" : `
+            <input type="hidden" name="local_token" value="${escapeHtml(localMarkTokenFor(p, salt))}">`;
+  return `<form method="post" class="llm-bots-switch llm-local-mark">
+            <input type="hidden" name="action" value="${on ? "llm_provider_unmark_local" : "llm_provider_mark_local"}">
+            <input type="hidden" name="id" value="${escapeHtml(p.id)}">${token}
+            <button type="submit" role="checkbox" aria-checked="${on ? "true" : "false"}"><span class="llm-local-box" aria-hidden="true"></span>${label}</button>
+          </form>`;
+}
+
+/** markLocal refusals with their own line (?local=<reason>). */
+const LOCAL_REFUSALS = new Set(["ip_literal", "public_address", "flagged_cloud", "known_cloud"]);
+
 const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
 const USED_BY_MAX = 4;
 
@@ -192,6 +229,47 @@ function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
   return `<td class="llm-cell-usedby" data-label="${label}" title="${escapeHtml(labels.join("\n"))}">${shown}${more}${hint}</td>`;
 }
 
+/**
+ * The Disable confirm for a provider that roles are bound to: names the roles
+ * that move (every label through escapeHtml: custom labels are user text) and
+ * offers Confirm (a POST with confirm=1, behind the session and CSRF rails) or
+ * Cancel. "" when there is nothing to confirm.
+ */
+export function disableMovesCallout(pending, req, lang = "en") {
+  if (!pending || !pending.id || !pending.labels?.length) return "";
+  return `<div class="llm-disable-moves" role="alert" style="margin:0 0 1rem;padding:0.75rem 1rem;background:var(--crow-bg-surface);border-left:3px solid var(--crow-brand-gold);border-radius:4px">
+      <p style="margin:0 0 0.6rem">${escapeHtml(fill(t("providers.disableMoves", lang), { roles: pending.labels.join(", ") }))}</p>
+      <form method="post" style="display:inline">
+        ${csrfInput(req)}
+        <input type="hidden" name="action" value="llm_provider_disable">
+        <input type="hidden" name="id" value="${escapeHtml(pending.id)}">
+        <input type="hidden" name="confirm" value="1">
+        <button class="btn btn-danger btn-sm" type="submit">${escapeHtml(fill(t("providers.disableConfirm", lang), { provider: pending.id }))}</button>
+      </form>
+      <a class="btn btn-secondary btn-sm" href="${BACK}">${escapeHtml(t("models.deleteCancelButton", lang))}</a>
+    </div>`;
+}
+
+/**
+ * {id, labels} for the roles (bound, then the ones that follow them) a
+ * provider carries, or null: none bound, or an error (logged; no warning is
+ * shown and the action goes ahead). `bindingsFn` is a test seam.
+ */
+export async function rolesThatMove(db, id, lang, { bindingsFn } = {}) {
+  try {
+    const providerBindings = bindingsFn || (await import("../../../../models/manager.js")).providerBindings;
+    const b = await providerBindings(db, id);
+    const all = [...(b.roles || []), ...(b.reach || [])];
+    if (!(b.roles || []).length) return null;
+    const customDefs = await readCustomRoleDefs(db).catch(() => ({}));
+    const labels = [...new Set(all.map((r) => roleRefLabel("role:" + r.roleId, { lang, customDefs }) || r.roleId))];
+    return { id, labels };
+  } catch (err) {
+    console.warn(`[providers] roles that move for ${id} unreadable: ${err?.message}`);
+    return null;
+  }
+}
+
 export default {
   /** piAgentDir / tasksDbPaths are test seams; production passes neither. */
   async render({ req, db, lang = "en", piAgentDir, tasksDbPaths }) {
@@ -220,9 +298,13 @@ export default {
     let salt = null;
     try { salt = await ensureCloudConsentSalt(db); } catch (err) { console.warn(`[llm-providers-tab] consent salt: ${err.message}`); }
     const consentCtx = { consent: await readCloudConsent(db), salt, lang };
-    const botsNote = req?.query?.bots === "changed"
+    const localCtx = { localMarks: await readLocalMarks(db), salt, ownAddrs: hostCtx.ownAddrs, lang };
+    const localQ = typeof req?.query?.local === "string" ? req.query.local : "";
+    const botsNote = req?.query?.bots === "changed" || localQ === "changed"
       ? `<p class="llm-bots-changed" role="status">${escapeHtml(t("providers.botsChanged", lang))}</p>`
-      : "";
+      : LOCAL_REFUSALS.has(localQ)
+        ? `<p class="llm-bots-changed" role="status">${escapeHtml(t(`providers.localRefused.${localQ}`, lang))}</p>`
+        : "";
     const buildRow = (p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const idEsc = escapeHtml(p.id);
@@ -234,7 +316,7 @@ export default {
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
-        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}</td>
+        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}${localMarkSwitch(p, localCtx)}</td>
         <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
@@ -313,6 +395,9 @@ export default {
       .llm-bots-switch button[aria-checked="true"] .llm-bots-track::after { left:14px; }
       .llm-bots-switch button[disabled] { cursor:not-allowed; opacity:0.6; }
       .llm-bots-unavailable { font-size:0.75rem; color:var(--crow-text-muted); }
+      .llm-local-box { position:relative; flex:none; width:16px; height:16px; box-sizing:border-box; border:2px solid var(--crow-border); border-radius:3px; background:var(--crow-bg-surface); }
+      .llm-local-mark button[aria-checked="true"] .llm-local-box { background:var(--crow-accent); border-color:var(--crow-accent); }
+      .llm-local-mark button[aria-checked="true"] .llm-local-box::after { content:""; position:absolute; left:3px; top:0; width:4px; height:8px; border:solid var(--crow-bg-surface); border-width:0 2px 2px 0; transform:rotate(45deg); }
       .llm-bots-switch button:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
       .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {
@@ -365,6 +450,7 @@ export default {
     </style>
 
     ${botsNote}
+    ${disableMovesCallout(req?.providerDisableConfirm, req, lang)}
     <p class="llm-section-hint">
       ${escapeHtml(fill(t(active.length === 1 ? "settings.providers.enabledOne" : "settings.providers.enabledN", lang), { n: active.length }))} ${escapeHtml(t("settings.providers.introTail", lang))}
     </p>
@@ -427,7 +513,7 @@ export default {
     </details>`;
   },
 
-  async handleAction({ req, res, db, action }) {
+  async handleAction({ req, res, db, action, lang = "en" }) {
     if (action === "llm_provider_add") {
       const { id, provider_type, base_url, api_key, model_id, description } = req.body;
       if (!id || !base_url) {
@@ -450,6 +536,14 @@ export default {
       return true;
     }
     if (action === "llm_provider_disable") {
+      // Roles bound to this provider move when it goes off: say which, and wait for confirm=1.
+      if (req.body?.confirm !== "1" && typeof req.body?.id === "string") {
+        const pending = await rolesThatMove(db, req.body.id, lang);
+        if (pending) {
+          req.providerDisableConfirm = pending;
+          return { renderSection: "llm" };
+        }
+      }
       await disableProvider(db, req.body.id);
       invalidateProvidersCache();
       res.redirectAfterPost(BACK);
@@ -477,6 +571,23 @@ export default {
         } else {
           await revokeCloudConsent(db, id);
           console.log(`[llm-providers-tab] bots may no longer use ${id}`);
+        }
+      }
+      res.redirectAfterPost(BACK);
+      return true;
+    }
+    if (action === "llm_provider_mark_local" || action === "llm_provider_unmark_local") {
+      const id = typeof req.body?.id === "string" ? req.body.id : "";
+      if (id) {
+        const user = typeof req.dashboardUser === "string" && req.dashboardUser ? req.dashboardUser : "owner";
+        if (action === "llm_provider_mark_local") {
+          const token = typeof req.body?.local_token === "string" ? req.body.local_token : "";
+          const r = await markLocal(db, id, { actor: `dashboard:${user}`, expect: { token } });
+          if (r.ok) console.log(`[llm-providers-tab] ${id} marked local (dashboard:${user})`);
+          else if (r.reason === "changed" || LOCAL_REFUSALS.has(r.reason)) { res.redirectAfterPost(`${BACK}&local=${r.reason}`); return true; }
+        } else {
+          await unmarkLocal(db, id);
+          console.log(`[llm-providers-tab] ${id} no longer marked local (dashboard:${user})`);
         }
       }
       res.redirectAfterPost(BACK);

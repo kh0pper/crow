@@ -585,12 +585,13 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       if (providers.length === 0) {
         return res.status(409).json({ error: `No provider on this instance serves ${modelId}; nothing to remove`, code: "NO_PROVIDER" });
       }
-      const bindings = { profiles: [], bots: [], roles: [] };
+      const bindings = { profiles: [], bots: [], roles: [], reach: [] };
       for (const id of providers) {
         const b = await providerBindingsFn(db, id);
         bindings.profiles.push(...(b?.profiles || []));
         bindings.bots.push(...(b?.bots || []));
         bindings.roles.push(...(b?.roles || []));
+        bindings.reach.push(...(b?.reach || []));
       }
 
       // Guard: without ?confirm=true (or a JSON body { confirm: true }),

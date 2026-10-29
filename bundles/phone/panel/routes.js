@@ -38,34 +38,107 @@ async function rowLookup(db, spec) {
 }
 
 /**
- * A Phone model key to an endpoint. A raw "<provider>/<model>" is today's row
- * lookup, byte for byte. A "role:<id>" takes the full role walk on this
- * instance's bindings, then the same row lookup of the resolved key. With
- * `local`, a role that lands on anything not proven local (isCloudKey: cloud
- * or unknown) gives {error:"local_now_cloud"}: the local slot fails closed.
- * The verdict is taken on the live row the call dials (the role context is
- * memoized and can be up to a second stale), so verdict and endpoint come
- * from one read. Raw keys keep the host-column check in checkModel until Phase 2.
+ * A Phone model key to an endpoint. A raw "<provider>/<model>" is the row
+ * lookup; a "role:<id>" takes the full role walk on this instance's bindings,
+ * then the same row lookup of the resolved key. With `local`, any key (raw or
+ * role) that isStrictCloud calls not proven local (a row flagged host "cloud"
+ * on any hop, N4; or any hop not proven local, with this box's "This is
+ * local" marks) gives {error:"local_now_cloud"}: the local slot fails closed.
+ * A key the old host-column check called local logs one disagreement
+ * (logStrictDisagreement). The verdict is taken on the live row the call
+ * dials (the role context is memoized and can be up to a second stale), so
+ * verdict and endpoint come from one read.
  */
 export async function resolveModelSpec(db, spec, { local = false } = {}) {
-  if (typeof spec !== "string" || !spec.startsWith("role:")) return rowLookup(db, spec);
-  const [{ resolveRole, loadRoleContext }, { isCloudKey }, { providerRowToObject }] = await Promise.all([
-    appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/model-roles.js"), appImport("servers/shared/provider-row.js")]);
-  const { key } = await resolveRole(db, spec, { need: "chat" });
-  if (!key) return null;
+  if (typeof spec !== "string" || !spec) return null;
+  let key = spec;
+  if (spec.startsWith("role:")) {
+    const { resolveRole } = await appImport("servers/shared/model-roles-store.js");
+    ({ key } = await resolveRole(db, spec, { need: "chat" }));
+    if (!key) return null;
+  }
   const live = await liveLookup(db, key);
   if (!live) return null;
   if (local) {
     let cloud = true; // an unreadable context or row is not proof of local
     try {
+      const [{ loadRoleContext }, { isStrictCloud, oldCheckCloud, logStrictDisagreement }, { providerRowToObject }] = await Promise.all([
+        appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/provider-local-marks.js"), appImport("servers/shared/provider-row.js")]);
       const own = providerRowToObject(live.row);
+      const ctx = await loadRoleContext(db);
       // The live row stands in for its context copy; the rest of the context only serves door hops.
-      const providers = [own, ...(await loadRoleContext(db)).providers.filter((p) => p.id !== own.id)];
-      cloud = isCloudKey(key, { providers });
+      const providers = [own, ...ctx.providers.filter((p) => p.id !== own.id)];
+      cloud = isStrictCloud(key, { providers, localMarks: ctx.localMarks });
+      logStrictDisagreement("phone", key, { strictCloud: cloud, oldCloud: oldCheckCloud(key, { providers }) });
     } catch { /* fail closed */ }
     if (cloud) return { error: "local_now_cloud" };
   }
   return live.endpoint;
+}
+
+// A repeated refresh failure warns once per message per minute (a stalled DB would otherwise warn on every
+// rebind and every 30 s tick).
+const WARN_EVERY_MS = 60_000;
+const lastWarned = new Map(); // `${what}|${message}` -> at
+export function warnRefreshFailure(what, err, now = Date.now()) {
+  const msg = String(err?.message || err);
+  const id = `${what}|${msg}`;
+  const at = lastWarned.get(id);
+  if (at !== undefined && now - at < WARN_EVERY_MS) return false;
+  if (lastWarned.size > 100) lastWarned.clear();
+  lastWarned.set(id, now);
+  console.warn(`[phone] ${what}:`, msg);
+  return true;
+}
+
+// The bindings-change and marks-change listeners are registered once per process (setBinding, markLocal and
+// unmarkLocal fire them); they refresh the dispatcher settings of the router that initialised last. A failing
+// refresh only warns.
+let refreshOnChange = null;
+let changeListenersRegistered = false;
+async function listenForRoleChanges(refresh) {
+  refreshOnChange = refresh;
+  if (changeListenersRegistered) return;
+  changeListenersRegistered = true;
+  const onChange = () => {
+    try {
+      const p = refreshOnChange?.();
+      if (p && typeof p.catch === "function") p.catch((e) => warnRefreshFailure("settings refresh after a role or mark change", e));
+    } catch (e) { warnRefreshFailure("settings refresh after a role or mark change", e); }
+  };
+  try {
+    const [{ addBindingsChangeListener }, { addLocalMarksChangeListener }] = await Promise.all([
+      appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/provider-local-marks.js")]);
+    addBindingsChangeListener(onChange);
+    addLocalMarksChangeListener(onChange);
+  } catch (e) {
+    changeListenersRegistered = false;
+    console.warn("[phone] cannot follow role or mark changes at once (the 30 s refresh still applies):", e?.message);
+  }
+}
+
+/**
+ * Coalesce: at most one refresh runs and at most one waits behind it. Callers arriving while one waits share
+ * it (it reads after every change they announce), so a stuck read never queues more than one behind it.
+ */
+export function coalesced(fn) {
+  let running = null, pending = null;
+  const run = () => {
+    if (!running) {
+      running = Promise.resolve().then(fn).finally(() => { running = null; });
+      return running;
+    }
+    if (!pending) pending = running.catch(() => {}).then(() => { pending = null; return run(); });
+    return pending;
+  };
+  return run;
+}
+
+async function readLang(db) {
+  try {
+    const v = (await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] })).rows[0]?.value;
+    return v === "es" ? "es" : "en";
+  } catch { return "en"; }
 }
 
 export default function phoneRouter(authMiddleware, seams = {}) {
@@ -109,17 +182,21 @@ export default function phoneRouter(authMiddleware, seams = {}) {
         perchMessage = deliver.enginePerchMessage(getInteractiveEngine); // no engine yet = transient (no_engine)
       } catch { /* perch unavailable → notify only */ }
       let cached = null, warnedLocalCloud = false;
-      const refresh = async () => {
+      const readNow = async () => {
         const next = await readSettings(db);
         const r = await resolveModelSpec(db, next.localModel, { local: true });
-        // A local role rebound to a cloud upstream: no local model (fail closed), logged once per episode.
-        if (r?.error) { if (!warnedLocalCloud) { warnedLocalCloud = true; console.warn(`[phone] local model ${next.localModel} now resolves to a cloud provider (local_now_cloud): local calls are refused until it is local again`); } }
+        // The local slot on a provider not proven local: no local model (fail closed), logged once per episode.
+        if (r?.error) { if (!warnedLocalCloud) { warnedLocalCloud = true; console.warn(`[phone] local model ${next.localModel} now resolves to a provider not proven local (local_now_cloud): local calls are refused until it is proven local again`); } }
         else warnedLocalCloud = false;
         next.local = r?.error ? null : r;
         next.cloud = await resolveModelSpec(db, next.cloudModel);
         cached = next;
       };
-      await refresh(); setInterval(() => refresh().catch((e) => console.warn("[phone] settings refresh:", e.message)), 30000).unref();
+      // One refresh at a time and at most one waiting (coalesced), so an older read never overwrites a newer one.
+      const refresh = coalesced(readNow);
+      await refresh();
+      await listenForRoleChanges(refresh); // a rebind or a mark change reaches the local slot at once
+      setInterval(() => refresh().catch((e) => warnRefreshFailure("settings refresh", e)), 30000).unref(); // provider edits
       const settings = () => ({ ownerName: cached.ownerName, ownerNumber: cached.ownerNumber, dailyCap: cached.dailyCap, line: "interactive",
         model: (call) => (call.allow_cloud && cached.cloud) ? { ...cached.cloud, label: "cloud:" + cached.cloudModel } : (cached.local || null) });
       const d = (seams.createDispatcher || disp.createDispatcher)({ db, runner,
@@ -260,16 +337,21 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     if (!(await authority.stepUpOk(b.totp))) return res.status(403).json({ error: "totp_required", message: "Enter your current 2FA code." });
     const checkModel = async (spec, { local }) => {
       if (spec === "") return true;
-      if (spec.startsWith("role:")) {
-        const r = await resolveModelSpec(db, spec, { local });
-        if (r?.error) { res.status(400).json({ error: "invalid_model", message: "The local model cannot use a cloud provider." }); return false; }
-        if (!r) { res.status(400).json({ error: "invalid_model", message: `Role "${spec.slice(5)}" is not set up on this Crow.` }); return false; }
-        return true;
+      const role = spec.startsWith("role:");
+      if (!role) {
+        const [pid, ...rest] = spec.split("/");
+        if (!pid || !rest.join("/")) { res.status(400).json({ error: "invalid_model", message: `Model must be "<provider_id>/<model>" with an existing, enabled provider.` }); return false; }
       }
-      const [pid, ...rest] = String(spec).split("/");
-      const row = pid && rest.join("/") ? (await db.execute({ sql: "SELECT host FROM providers WHERE id = ? AND COALESCE(disabled,0)=0", args: [pid] })).rows[0] : null;
-      if (!row) { res.status(400).json({ error: "invalid_model", message: `Model must be "<provider_id>/<model>" with an existing, enabled provider.` }); return false; }
-      if (local && row.host === "cloud") { res.status(400).json({ error: "invalid_model", message: "The local model cannot use a cloud provider." }); return false; }
+      const r = await resolveModelSpec(db, spec, { local });
+      if (r?.error) {
+        const { t } = await appImport("servers/gateway/dashboard/shared/i18n.js");
+        res.status(400).json({ error: "local_not_proven_local", message: t("phone.localNotProvenLocal", await readLang(db)) });
+        return false;
+      }
+      if (!r) {
+        res.status(400).json({ error: "invalid_model", message: role ? `Role "${spec.slice(5)}" is not set up on this Crow.` : `Model must be "<provider_id>/<model>" with an existing, enabled provider.` });
+        return false;
+      }
       return true;
     };
     if (b.localModel != null && !(await checkModel(String(b.localModel), { local: true }))) return;

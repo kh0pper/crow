@@ -166,6 +166,27 @@ test("the editor: every section, the rev of the rendered row, and the stored val
   for (const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) { assert.ok(!m[1].includes("`")); assert.ok(!m[1].includes("${")); }
 });
 
+test("the cloud warning agrees with the turn: a DNS-named row is not proven local until marked (roles phase 2)", async () => {
+  const { markLocal } = await import("../servers/shared/provider-local-marks.js");
+  const { invalidateRoleContext } = await import("../servers/shared/model-roles-store.js");
+  await db.execute({ sql: "INSERT INTO providers (id, base_url, host, models, disabled) VALUES (?,?,?,?,0)",
+    args: ["box-x", "http://box.example.internal:8011/v1", "local", JSON.stringify([{ id: "m1", name: "M1" }])] });
+  invalidateRoleContext();
+  try {
+    await reset({ ...SEED_DEF, fast_voice_model: "box-x/m1" });
+    const before = await editor();
+    assert.ok(before.includes(T("botbuilder.voiceCloudSlower")), "host 'local' on a DNS name still warns");
+    assert.ok(before.includes(T("botbuilder.voiceCloudLeaves").replace("{provider}", "box-x")));
+    assert.deepEqual(await markLocal(db, "box-x", { actor: "test" }), { ok: true });
+    assert.ok(!(await editor()).includes(T("botbuilder.voiceCloudSlower")), "marked: no warning");
+  } finally {
+    await db.execute({ sql: "DELETE FROM providers WHERE id = 'box-x'", args: [] });
+    await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = 'provider_local_marks'", args: [] });
+    invalidateRoleContext();
+    await reset();
+  }
+});
+
 test("cloud warnings show only for a cloud model", async () => {
   await reset();
   const local = await editor();
@@ -735,4 +756,85 @@ test("hand-off strings: en + es, differing, no backtick or dollar-brace", () => 
     assert.notEqual(en, es, k);
     assert.ok(!/[`]|\$\{/.test(en + es), k);
   }
+});
+
+// ── role: refs (roles phase 2, task 22) ─────────────────────────────────────
+
+test("the voice card names a role: model and keeps the raw ref on hover", async () => {
+  await reset({ ...SEED_DEF, fast_voice_model: "role:voice" });
+  const html = await list("en");
+  assert.match(html, /<span class="btb-mchip" title="role:voice">Voice<\/span>/);
+  await reset();
+});
+
+test("a custom role's label is escaped on the card", async () => {
+  const { saveCustomRole } = await import("../servers/shared/model-roles-store.js");
+  const r = await saveCustomRole(db, { label: "<b>Coder</b>", capability: "chat" }, { actor: "test" });
+  assert.ok(r.ok, JSON.stringify(r));
+  await reset({ ...SEED_DEF, fast_voice_model: "role:" + r.id });
+  const html = await list("en");
+  assert.ok(html.includes("&lt;b&gt;Coder&lt;/b&gt;") && !html.includes("<b>Coder</b>"));
+  await reset();
+});
+
+test("the voice editor keeps a role: ref selected first and accepts it on save; an unknown role is refused", async () => {
+  await reset({ ...SEED_DEF, fast_voice_model: "role:voice" });
+  const html = await editor();
+  assert.ok(html.includes('<option value="role:voice" selected>Voice</option>'));
+  const ok = await post(await saveBody({ fast_voice_model: "role:voice" }));
+  assert.ok(!qOf(ok).get("error"), ok);
+  assert.equal((await voiceDef()).fast_voice_model, "role:voice");
+  const bad = await post(await saveBody({ fast_voice_model: "role:nope" }));
+  assert.ok(qOf(bad).get("error"), bad);
+  await reset();
+});
+
+test("a Basics save accepts a role: model without the 'not in registry' warning; an unknown role still warns", async () => {
+  const { saveBasics } = await import("../servers/gateway/dashboard/panels/bot-builder/save-handlers.js");
+  const run = async (key) => {
+    const def = { models: { default: "crow-chat/qwen3.6-35b-a3b" } };
+    const r = await saveBasics(def, { model_default: key }, { db, lang: "en", changed: () => true });
+    return { def, r };
+  };
+  const ok = await run("role:everyday");
+  assert.equal(ok.def.models.default, "role:everyday");
+  assert.deepEqual(ok.r.warn, []);
+  const bad = await run("role:nope");
+  assert.equal(bad.r.warn.length, 1);
+});
+
+test("the Basics model select renders a held role: ref as the first option", async () => {
+  const { renderBasics } = await import("../servers/gateway/dashboard/panels/bot-builder/tab-basics.js");
+  const html = await renderBasics({ req: { headers: {}, csrfToken: "t" }, db, bot: { bot_id: "alpha", display_name: "Alpha" }, botId: "alpha",
+    def: { models: { default: "role:everyday" }, gateways: [{ type: "perch" }] }, lang: "en", hidden: () => "" });
+  const i = html.indexOf('id="bx-model"');
+  assert.ok(html.slice(i, i + 400).includes('<option value="role:everyday" selected>Builder</option>'), html.slice(i, i + 400));
+});
+
+test("a bot's model refuses the safety role and the non-chat roles, with a plain reason; chat roles still save", async () => {
+  const { saveBasics } = await import("../servers/gateway/dashboard/panels/bot-builder/save-handlers.js");
+  for (const key of ["role:safety", "role:stt", "role:tts", "role:image", "role:video", "role:embed", "role:rerank"]) {
+    for (const field of ["model_default", "model_escalation", "fast_voice_model"]) {
+      const def = { models: { default: "crow-chat/qwen3.6-35b-a3b" } };
+      const r = await saveBasics(def, { [field]: key }, { db, lang: "en", changed: () => true });
+      assert.ok(typeof r.error === "string" && r.error.length > 0, `${field}=${key} refused`);
+      assert.ok(!r.error.includes("role:"), "plain reason, no raw ref: " + r.error);
+    }
+  }
+  const es = await saveBasics({ models: {} }, { model_default: "role:safety" }, { db, lang: "es", changed: () => true });
+  assert.notEqual(es.error, (await saveBasics({ models: {} }, { model_default: "role:safety" }, { db, lang: "en", changed: () => true })).error);
+  for (const key of ["role:everyday", "role:vision", "role:voice"]) {
+    const r = await saveBasics({ models: {} }, { model_default: key }, { db, lang: "en", changed: () => true });
+    assert.equal(r.error, undefined, key);
+  }
+  // The legacy AI tab and the voice editor refuse too, and nothing is written.
+  const before = (await otherRows()).find((r) => r.bot_id === "alpha").definition;
+  const legacy = await post({ action: "save_ai", bot_id: "alpha", model_default: "role:safety" });
+  assert.ok(qOf(legacy).get("error"), legacy);
+  assert.equal((await otherRows()).find((r) => r.bot_id === "alpha").definition, before);
+  await reset();
+  const v = await post(await saveBody({ fast_voice_model: "role:tts" }));
+  assert.ok(qOf(v).get("error"), v);
+  assert.notEqual((await voiceDef()).fast_voice_model, "role:tts");
+  await reset();
 });

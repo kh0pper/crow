@@ -17,7 +17,7 @@
 
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
-import { loadModelOptions } from "./data-queries.js";
+import { loadModelOptions, loadRoleRefs } from "./data-queries.js";
 import { missingGatewayFields } from "./gateway-fields.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { resolveEngineStatus, resolveBotRuntimeStatus } from "./engine-gate.js";
@@ -124,7 +124,7 @@ export async function renderReadiness(db, bot, def, lang) {
   let modelReady = false;
   try {
     const { opts } = await loadModelOptions(db);
-    modelReady = !!configured && opts.some((o) => o.key === configured);
+    modelReady = !!configured && (opts.some((o) => o.key === configured) || (await loadRoleRefs(db)).known(configured));
   } catch { modelReady = false; }
   rows.push(row(
     modelReady ? OK : ERR,
