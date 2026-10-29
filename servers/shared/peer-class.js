@@ -216,12 +216,19 @@ function loginOf(headers) {
 const hasForwarding = (headers) => FORWARDING.some((h) => present(headers[h]));
 const hasTailscale = (headers) => Object.keys(headers).some((h) => h.toLowerCase().startsWith("tailscale-"));
 
-/** The "local" rule of classifyPeer, for a caller that has only the socket
- * address and the headers: a loopback socket, no forwarding header and no
- * tailscale-* header. The cloud door's source check. */
+/**
+ * The single loopback rule: the socket is loopback, is NOT a declared proxy,
+ * and the request carries no forwarding header and no tailscale-* header.
+ * A same-box reverse proxy listed in CROW_TRUSTED_PROXIES is a proxy, not
+ * local. classifyPeer's `local` branch derives from this, and the cloud door
+ * and the loopback mounts use it as their source check. Any throw -> false.
+ */
 export function isLocalPeer(remoteAddr, headers = {}) {
-  const h = headers || {};
-  return isLoopbackAddr(normalizeAddr(remoteAddr || "")) && !hasForwarding(h) && !hasTailscale(h);
+  try {
+    const sock = normalizeAddr(remoteAddr || "");
+    const h = headers || {};
+    return !!sock && isLoopbackAddr(sock) && !isTrustedProxy(sock) && !hasForwarding(h) && !hasTailscale(h);
+  } catch { return false; }
 }
 
 /** → { via, client, hops, socket, tailnetLogin, peerUid }. See the table above. */
@@ -233,7 +240,6 @@ export function classifyPeer(req) {
   const hops = forwardedAddrs(headers).map((a) => (a === null ? null : normalizeAddr(a)));
   const out = { via: "unverified", client: sock, hops, socket: sock, tailnetLogin: null, peerUid: null };
   const hasFwd = hasForwarding(headers);
-  const hasTs = hasTailscale(headers);
 
   if (!sock) {
     // no peer address: stays unverified
@@ -243,7 +249,7 @@ export function classifyPeer(req) {
   } else if (!isLoopbackAddr(sock)) {
     out.via = "direct";
     if (hasFwd) undeclaredHint(sock);
-  } else if (!hasFwd && !hasTs) {
+  } else if (isLocalPeer(sock, headers)) {
     out.via = "local";
   } else {
     const xff = headerValues(headers["x-forwarded-for"]).map((v) => v.trim()).filter(Boolean);
