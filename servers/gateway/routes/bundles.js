@@ -4098,14 +4098,20 @@ export default function bundlesRouter() {
         }
 
         // Phase 5-full: soft-disable providers registered by this bundle
+        // The install registered them under the manifest id (registerProviderFromManifest:
+        // bundleId = manifest.id), which is this bundle's id.
+        let providerDb;
         try {
-          const r = await unregisterProvidersByBundle(createDbClient(), addonId);
+          providerDb = createDbClient();
+          const r = await unregisterProvidersByBundle(providerDb, manifest?.id || bundle_id);
           if (r.disabled > 0) {
             appendLog(job, `Disabled ${r.disabled} provider(s) registered by bundle`);
             invalidateProvidersCache();
           }
         } catch (err) {
           appendLog(job, `Provider unregister skipped: ${err.message}`);
+        } finally {
+          try { providerDb?.close(); } catch {}
         }
 
         // Reverse STT/TTS profile seeding from this bundle's manifest. Use the
