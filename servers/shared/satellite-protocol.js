@@ -340,17 +340,31 @@ export function helloSigningString({ nonceC, nonceS, satelliteId }) {
   return `${PREFIXES.hello}${nonceC}\n${nonceS}\n${satelliteId}`;
 }
 
-/** Throws TypeError on malformed inputs; callers treat a throw as a failed pairing. */
-export function pairMac(normalizedCode, { nonceC, nonceS, certSha256: certHash, satelliteId }) {
+/**
+ * The pairing MAC key, HKDF-SHA256(code, info "crow-satellite-pair/v1"), hex. One-way in the
+ * code, so the satellite stores this (never the code) and can still check a MAC when the code
+ * was minted by another process (`cli.js pair-code`). Throws TypeError on a non-normalized code.
+ */
+export function pairMacKey(normalizedCode) {
   need(typeof normalizedCode === "string" && normalizePairCode(normalizedCode) === normalizedCode, "pair code");
+  return Buffer.from(hkdfSync("sha256", Buffer.from(normalizedCode, "utf8"), Buffer.alloc(0), PREFIXES.pair, 32)).toString("hex");
+}
+
+/** pairMac from a pairMacKey; throws TypeError on malformed inputs. */
+export function pairMacWithKey(keyHex, { nonceC, nonceS, certSha256: certHash, satelliteId }) {
+  need(typeof keyHex === "string" && SHA_RE.test(keyHex), "pair key");
   need(typeof nonceC === "string" && NONCE_RE.test(nonceC), "nonceC");
   need(typeof nonceS === "string" && NONCE_RE.test(nonceS), "nonceS");
   need(typeof certHash === "string" && SHA_RE.test(certHash), "certSha256");
   need(isSatelliteId(satelliteId), "satelliteId");
-  const key = Buffer.from(hkdfSync("sha256", Buffer.from(normalizedCode, "utf8"), Buffer.alloc(0), PREFIXES.pair, 32));
-  return createHmac("sha256", key)
+  return createHmac("sha256", Buffer.from(keyHex, "hex"))
     .update(`${PREFIXES.pair}\n${nonceC}\n${nonceS}\n${certHash}\n${satelliteId}`)
     .digest("hex");
+}
+
+/** Throws TypeError on malformed inputs; callers treat a throw as a failed pairing. */
+export function pairMac(normalizedCode, args) {
+  return pairMacWithKey(pairMacKey(normalizedCode), args);
 }
 
 export function macEqualHex(a, b) {
