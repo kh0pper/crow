@@ -135,6 +135,15 @@ before(async () => {
   state.tdb = tdb;
   state.cdb = cdb;
 
+  // The bots these tests sign as are linked to project 1: a bot may only
+  // change its own project's cards (bot write scope, 2026-10-29).
+  await cdb.execute(`CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+    definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  for (const id of ["alex-bot", "bot-capped", "bot-other", "bot-owner", "bot-wire-test", "crow-home", "hank"]) {
+    await cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,1)", args: [id, id] });
+  }
+
   // Project cards board: pending/in_progress/done, 'done' terminal.
   await tdb.execute({
     sql: "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (1,'R4 ACME',?,?,'[]')",
@@ -403,7 +412,9 @@ const signedBoard = (botId, jobId) => {
 
 async function createVia(token, headers, title) {
   const client = await connectClient("/board/mcp", token, headers);
-  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title, project_id: 1 } }));
+  // No project_id: a signed bot's card lands on its own project, an
+  // unattributed one's stays unassigned, a session's stays unassigned.
+  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title } }));
   await client.close();
   return (await state.tdb.execute({
     sql: "SELECT actor_kind, actor_id, job_id FROM board_mutations WHERE item_id=? AND verb='create'",
@@ -500,10 +511,11 @@ test("S5: the job-rail lock exemption needs the job's SIGNED headers", async () 
     await c.close();
     return r;
   };
-  // Unsigned job headers: the lock holds.
+  // Unsigned job headers: refused. An unattributed bot has no project, so the
+  // bot write scope refuses it before the job lock is even consulted.
   const refused = await report({ "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "job-lock-a" }, a.id);
   assert.equal(refused.isError, true);
-  assert.match(refused.content[0].text, /locked/);
+  assert.match(refused.content[0].text, /locked|forbidden_project/);
   // Signed for the job that holds the lock: auto-closes.
   const okRes = await report(signedBoard("hank", "job-lock-b"), b.id);
   assert.ok(!okRes.isError, okRes.content?.[0]?.text);
@@ -769,4 +781,68 @@ test("board_create_item assigned_bot: enabled bot assigns the card; refusals are
   }
   assert.equal(await count(), before, "no card created by a refused call");
   await client.close();
+});
+
+
+// ---- bot write scope (2026-10-29) ----
+
+test("bot write scope: a bot changes only its own project's cards or cards assigned to it, and never approves", async () => {
+  await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,?)", args: ["scope-bot", "scope-bot", 1] });
+  const op = await connectClient("/board/mcp", state.localToken);
+  const own = payload(await op.callTool({ name: "board_create_item", arguments: { title: "own project card", project_id: 1 } }));
+  const other = payload(await op.callTool({ name: "board_create_item", arguments: { title: "other project card", project_id: 2 } }));
+  const given = payload(await op.callTool({ name: "board_create_item", arguments: { title: "given card", project_id: 2, assigned_bot: "scope-bot" } }).catch((e) => ({ id: null, e })));
+  await op.close();
+
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("scope-bot"));
+  const call = (name, args) => bot.callTool({ name, arguments: args });
+
+  // Create: defaults to the bot's own project; another project is refused.
+  const made = payload(await call("board_create_item", { title: "bot card, no project given" }));
+  const madeRow = (await state.tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [made.id] })).rows[0];
+  assert.equal(Number(madeRow.project_id), 1, "a bot's card lands on its own project");
+  const crossCreate = await call("board_create_item", { title: "into another project", project_id: 2 });
+  assert.equal(crossCreate.isError, true);
+  assert.match(crossCreate.content[0].text, /forbidden_project/);
+
+  // Writes: own project ok; another project's card refused.
+  const okMove = await call("board_move_item", { id: own.id, status: "in_progress" });
+  assert.ok(!okMove.isError, okMove.content?.[0]?.text);
+  for (const [name, args] of [
+    ["board_update_item", { id: other.id, title: "hijacked" }],
+    ["board_move_item", { id: other.id, status: "done" }],
+    ["board_archive_item", { id: other.id }],
+    ["board_save_plan", { item_id: other.id, body_md: "x" }],
+    ["board_report_result", { item_id: other.id, outcome: "success" }],
+  ]) {
+    const r = await call(name, args);
+    assert.equal(r.isError, true, name + " on another project's card must be refused");
+    assert.match(r.content[0].text, /forbidden_project/, name);
+  }
+  const otherRow = (await state.tdb.execute({ sql: "SELECT title, status, archived_at FROM tasks_items WHERE id=?", args: [other.id] })).rows[0];
+  assert.equal(otherRow.title, "other project card");
+  assert.notEqual(otherRow.status, "done");
+  assert.equal(otherRow.archived_at, null);
+
+  // A card assigned to the bot from another project stays writable.
+  if (given.id != null) {
+    const g = await call("board_update_item", { id: given.id, description: "working on it" });
+    assert.ok(!g.isError, g.content?.[0]?.text);
+  }
+
+  // Approvals and decisions are the operator's.
+  const plan = payload(await call("board_save_plan", { item_id: own.id, body_md: "the plan" }));
+  const approve = await call("board_approve_plan", { item_id: own.id, version: plan.version ?? 1 });
+  assert.equal(approve.isError, true);
+  assert.match(approve.content[0].text, /operator_only/);
+  const decide = await call("board_decide_result", { item_id: own.id, result_id: 1, decision: "approved" });
+  assert.equal(decide.isError, true);
+  assert.match(decide.content[0].text, /operator_only/);
+  await bot.close();
+
+  // The operator still approves.
+  const op2 = await connectClient("/board/mcp", state.localToken);
+  const ok = await op2.callTool({ name: "board_approve_plan", arguments: { item_id: own.id, version: plan.version ?? 1 } });
+  assert.ok(!ok.isError, ok.content?.[0]?.text);
+  await op2.close();
 });
