@@ -65,7 +65,7 @@ before(async () => {
   job.run("job-otto-1", "otto", "g", "running", process.pid);
   job.run("job-elsewhere-1", "hank", "g", "running", 1); // claimed by another host
   // bot_jobs.principal arrives with a later migration; this scratch DB adds it.
-  d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT");
+  if (!d.prepare("PRAGMA table_info(bot_jobs)").all().some((c) => c.name === "principal")) d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT");
   const pjob = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, card_id, principal) VALUES (?, ?, 'g', ?, ?, ?, ?)");
   pjob.run("job-own-1", "hank", "running", process.pid, null, "owner");
   pjob.run("job-own-else", "hank", "running", 1, null, "owner"); // another host's owner job

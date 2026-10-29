@@ -191,7 +191,7 @@ before(async () => {
   dbPath = join(dir, "crow.db");
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: dbPath }, cwd: join(import.meta.dirname, ".."), stdio: "pipe" });
   const d = new Database(dbPath);
-  d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT"); // arrives with a later migration
+  if (!d.prepare("PRAGMA table_info(bot_jobs)").all().some((c) => c.name === "principal")) d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT");
   const bot = d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?, ?, '{}', 1, ?)");
   bot.run("hank", "Hank", 42);
   bot.run("otto", "Otto", null);

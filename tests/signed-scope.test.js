@@ -24,7 +24,9 @@ before(() => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: plainPath }, cwd: join(import.meta.dirname, ".."), stdio: "pipe" });
   const seed = (p, withPrincipal) => {
     const d = new Database(p);
-    if (withPrincipal) d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT");
+    const has = d.prepare("PRAGMA table_info(bot_jobs)").all().some((c) => c.name === "principal");
+    if (withPrincipal && !has) d.exec("ALTER TABLE bot_jobs ADD COLUMN principal TEXT");
+    if (!withPrincipal && has) d.exec("ALTER TABLE bot_jobs DROP COLUMN principal"); // genuinely lacks it
     const bot = d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?, ?, ?, 1, ?)");
     bot.run("hank", "Hank", "{}", 42);
     bot.run("otto", "Otto", "{}", null);
