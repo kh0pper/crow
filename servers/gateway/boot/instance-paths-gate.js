@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { instancePathsVerdict, INSTANCE_PATHS_EXIT_CODE } from "../../shared/crow-home.js";
+import { applyCredentialFiles } from "../../shared/credentials-env.js";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -41,7 +42,10 @@ export function applyEnvFile(envPath, env = process.env) {
 
 // CROW_APP_ENV_PATH is set only by scripts/run-suite.mjs (a suite run never
 // applies a real checkout .env); prod leaves it unset.
-export function runInstancePathsGate({ env = process.env, envPath = env.CROW_APP_ENV_PATH || resolve(appRoot, ".env"), log = console, exit = process.exit } = {}) {
+export function runInstancePathsGate({ env = process.env, envPath = env.CROW_APP_ENV_PATH || resolve(appRoot, ".env"), log = console, exit = process.exit, credentialRoots } = {}) {
+  // Systemd credentials first (servers/shared/credentials-env.js): a secret
+  // moved from Environment= to LoadCredential= beats a leftover .env line.
+  applyCredentialFiles(env, { roots: credentialRoots, log });
   const envFileKeys = applyEnvFile(envPath, env);
   const verdict = instancePathsVerdict(env, { envFileKeys });
   if (!verdict.ok) {

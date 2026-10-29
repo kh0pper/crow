@@ -7,6 +7,7 @@
  */
 
 import { resolveAddonCommand, checkLauncherArgs } from "../shared/resolve-command.js";
+import { withoutCredentialKeys } from "../shared/credentials-env.js";
 import { spawn } from "node:child_process";
 import { resolveCrowHome as resolveSharedCrowHome } from "../shared/crow-home.js";
 import { execFileSync } from "node:child_process";
@@ -91,7 +92,7 @@ async function connectToServer(integration) {
   // A data backend brings its own allowlisted base env (never the gateway's
   // whole environment); built-in integrations keep the old behaviour.
   const env = {
-    ...(integration.baseEnv || process.env),
+    ...withoutCredentialKeys(integration.baseEnv || process.env),
     ...spawnEnv,
   };
 
@@ -174,7 +175,7 @@ async function connectToServer(integration) {
  */
 export function addonStdioEnv(config = {}, base = process.env, id = null) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
-  return { ...base, ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
+  return { ...withoutCredentialKeys(base), ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
 }
 
 /**

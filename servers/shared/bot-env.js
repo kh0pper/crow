@@ -13,11 +13,14 @@
  * Operator knobs (gateway env, never a bot def):
  *   CROW_BOT_ENV_ALLOW="A,B"   extra names to pass (secret-like names are
  *                              still refused)
- *   CROW_BOT_ENV_PASSTHROUGH=1 old behaviour (full env). While set, no bot
+ *   CROW_BOT_ENV_PASSTHROUGH=1 old behaviour (full env, minus credential-applied
+ *                              keys and peer credentials). While set, no bot
  *                              may have a shell: the permission validator
  *                              refuses ask/auto/allowlist and the bridge
  *                              clamps any stored one to deny.
  */
+
+import { withoutCredentialKeys } from "./credentials-env.js";
 
 const EXACT = new Set([
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM", "TMPDIR",
@@ -56,7 +59,8 @@ export function botEnvScrubbed(env = process.env) {
 }
 
 export function buildBotBaseEnv(source = process.env, { extraAllow = source.CROW_BOT_ENV_ALLOW || "" } = {}) {
-  if (!botEnvScrubbed(source)) return stripPeerCredentialEnv({ ...source });
+  // Even the old full-env mode never hands pi a key applied from systemd credentials.
+  if (!botEnvScrubbed(source)) return stripPeerCredentialEnv({ ...withoutCredentialKeys(source) });
   const extra = new Set(String(extraAllow || "").split(",").map((s) => s.trim()).filter(Boolean));
   const out = {};
   for (const [k, v] of Object.entries(source)) {

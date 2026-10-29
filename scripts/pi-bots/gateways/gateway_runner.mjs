@@ -21,6 +21,8 @@
  * crow.db opened with busy_timeout only, NO journal_mode pragma (established
  * pattern; pi is spawned by the bridge with CROW_JOURNAL_MODE=DELETE).
  */
+// Systemd credentials (LoadCredential=) first, before any other module reads env.
+import "./apply-credentials.mjs";
 import Database from "better-sqlite3";
 import { hostAdapters, getAdapter, isHostManaged } from "./index.mjs";
 import { reapStalePi } from "../pi_lifecycle.mjs";

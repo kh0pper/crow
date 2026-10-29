@@ -34,6 +34,7 @@
  * proved the crow-chat --jinja regex scar does NOT reproduce under pi).
  */
 import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
+import { withoutCredentialKeys } from "../../servers/shared/credentials-env.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -532,7 +533,7 @@ export function probeServerTools(block, opts = {}) {
     try {
       child = spawn(block.command, block.args || [], {
         cwd: block.cwd,
-        env: Object.assign({}, process.env, block.env || {}),
+        env: Object.assign({}, withoutCredentialKeys(process.env), block.env || {}),
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (e) {
