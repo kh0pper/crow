@@ -366,9 +366,12 @@ test("non-Serve peers: pairing routes are 404 with an empty body; /health answer
   assert.equal(forged.text, "");
   const h = await fetch(`http://127.0.0.1:${a.port}/health`);
   assert.equal(h.status, 200);
-  // Unknown routes from Serve are 404 too.
-  const other = await post(a.port, "/satellite/v1/status", {});
+  // Unknown routes from Serve are 404 too; the signed routes refuse an unpaired agent (SAT-3 auth).
+  const other = await post(a.port, "/elsewhere", {});
   assert.equal(other.status, 404);
+  const signed = await post(a.port, "/satellite/v1/status", {});
+  assert.equal(signed.status, 403);
+  assert.equal(signed.json.error, "not_paired");
 });
 
 // ── hello rate limits ───────────────────────────────────────────────────────
