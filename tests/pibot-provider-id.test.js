@@ -176,3 +176,69 @@ test("co-hosted bridge spawn: cloud-a/c1 keeps --provider cloud-a (N1)", async (
     process.env.CROW_DATA_DIR = prev.d;
   }
 });
+
+// --- Fix round 1 -------------------------------------------------------------
+const { isPiBuiltinId, piSpawnTarget, rowIdForPiProvider } = await import("../scripts/pi-bots/pi_provider_id.mjs");
+
+test("fix 1: a case variant of a built-in is a built-in, and fails closed", () => {
+  assert.equal(isPiBuiltinId("OpenAI"), true);
+  assert.equal(piProviderIdFor("OpenAI", { providers: {} }, DEFAULT), null);
+  assert.equal(piProviderIdFor("ZAI", { providers: {} }, DEFAULT), null);
+  assert.equal(piProviderIdFor("OpenAI", { providers: { OpenAI: {} } }, DEFAULT), null, "pi folds it onto the built-in whatever the file says");
+  assert.equal(piProviderIdFor("OpenAI", { providers: { "crow-c-OpenAI": {} } }, DEFAULT), null);
+});
+
+test("fix 1: an id the file holds under more than one case is ambiguous and refused", () => {
+  assert.equal(piProviderIdFor("cloud-a", { providers: { "cloud-a": {}, "Cloud-A": {} } }, DEFAULT), null);
+  assert.equal(piProviderIdFor("Cloud-A", { providers: { "cloud-a": {} } }, DEFAULT), null, "pi would resolve another row's entry");
+  assert.equal(piProviderIdFor("cloud-a", { providers: { "crow-c-Cloud-A": {} } }, DEFAULT), null);
+  assert.equal(piProviderIdFor("Cloud-A", { providers: { "crow-c-Cloud-A": {} } }, DEFAULT), "crow-c-Cloud-A");
+});
+
+test("fix 2: piSpawnTarget is the one rule the pickers share", () => {
+  const json = { providers: { "crow-c-cloud-a": { models: [{ id: "c1" }] } } };
+  assert.deepEqual(piSpawnTarget("cloud-a", "c1", json, DEFAULT), { ok: true, piProvider: "crow-c-cloud-a", key: "crow-c-cloud-a/c1" });
+  assert.deepEqual(piSpawnTarget("openai", "gpt-x", json, DEFAULT), { ok: false, reason: 'model "openai/gpt-x" is not available to the bot engine' });
+});
+
+test("fix 2: rowIdForPiProvider maps a door entry back to its row on the default home only", () => {
+  const def = { HOME: "/home/u", CROW_HOME: "/home/u/.crow" };
+  assert.equal(rowIdForPiProvider("crow-c-cloud-a", { env: def }), "cloud-a");
+  assert.equal(rowIdForPiProvider("crow-local", { env: def }), "crow-local");
+  assert.equal(rowIdForPiProvider("crow-c-cloud-a", { env: { HOME: "/home/u", CROW_HOME: "/home/u/.crow-r4" } }), "crow-c-cloud-a");
+});
+
+test("fix 3: PiRpc spawns with the provider prepareSpawn mapped, without re-reading the file", async () => {
+  writeFileSync(MODELS, JSON.stringify({ providers: {} }));            // a re-read would now refuse "openai"
+  const dir = mkdtempSync(join(tmpdir(), "crow-provider-id-pre-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, 'process.stdout.write(JSON.stringify({ type: "report", argv: process.argv.slice(2) }) + "\\n"); setTimeout(() => process.exit(0), 50);');
+  process.env.CROW_PI_SANDBOX = "off";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "openai", model: "gpt-x", key: "openai/gpt-x" },
+      piProvider: "crow-c-openai", nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "report");
+    await pi.exited;
+    assert.equal(flag(r.argv, "--provider"), "crow-c-openai");
+  } finally { delete process.env.CROW_PI_SANDBOX; }
+});
+
+test("fix 3: prepareSpawn maps the provider (before the bridge writes an active session) and hands it to PiRpc", async () => {
+  const { prepareSpawn } = await import("../scripts/pi-bots/bot-world.mjs");
+  // The providers rows resolveModel validates a def's key against (scratch crow.db).
+  const { default: Database } = await import("better-sqlite3");
+  const d = new Database(join(HOME, "data", "crow.db"));
+  d.exec("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, models TEXT, disabled INTEGER DEFAULT 0)");
+  d.prepare("INSERT OR REPLACE INTO providers (id, models, disabled) VALUES (?, ?, 0)").run("cloud-a", JSON.stringify([{ id: "c1" }]));
+  d.prepare("INSERT OR REPLACE INTO providers (id, models, disabled) VALUES (?, ?, 0)").run("openai", JSON.stringify([{ id: "gpt-x" }]));
+  d.close();
+  writeFileSync(MODELS, JSON.stringify({ providers: { "crow-c-cloud-a": { models: [{ id: "c1" }] } } }));
+  const world = { def: { system_prompt: "x", models: { default: "cloud-a/c1" }, tools: {} }, crowHome: HOME, sessionDir: mkdtempSync(join(tmpdir(), "crow-provider-id-world-")) };
+  const prep = await prepareSpawn(world, {});
+  assert.equal(prep.resolved.provider, "cloud-a", "the row id stays the session's model");
+  assert.equal(prep.piRpcOpts.piProvider, "crow-c-cloud-a");
+  writeFileSync(MODELS, JSON.stringify({ providers: {} }));
+  const bare = { ...world, def: { ...world.def, models: { default: "openai/gpt-x" } } };
+  await assert.rejects(prepareSpawn(bare, {}), (e) => e instanceof PiModelUnavailableError);
+});

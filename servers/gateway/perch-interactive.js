@@ -157,6 +157,7 @@ import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
+import { piProviderIdHere, rowIdForPiProvider } from "../../scripts/pi-bots/pi_provider_id.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
 import { readLease, isFree as isLeaseFree, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
@@ -695,6 +696,9 @@ export function createInteractiveEngine({
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
+  // The env the bridge's provider mapping reads (pi_provider_id.mjs): this
+  // engine's instance env over the process's HOME / PI_MODELS_JSON.
+  const piEnv = () => Object.assign({}, process.env, env);
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
   // Approval-card secret masking (2026-10-26): anchor (by dev/ino) the
@@ -2525,7 +2529,8 @@ export function createInteractiveEngine({
         model: s.currentModelParts.modelId,
         key: s.currentModel,
       });
-      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved });
+      // piProvider was mapped for the def's model: PiRpc re-maps the override.
+      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved, piProvider: undefined });
     }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
@@ -2865,14 +2870,15 @@ export function createInteractiveEngine({
   function onModelSelect(s, m) {
     const model = m && m.model;
     if (!model || !model.provider || !model.id) return;
-    const key = model.provider + "/" + model.id;
+    const provider = rowIdForPiProvider(model.provider, { env: piEnv() }); // crow-c-<row> → <row> (Task 17)
+    const key = provider + "/" + model.id;
     if (s.currentModel === key) return;
-    s.currentModelParts = { provider: model.provider, modelId: model.id };
+    s.currentModelParts = { provider, modelId: model.id };
     s.currentModel = key;
     // onTurnEnd's meterTurn({resolved: s.resolved}) prices whatever
     // s.resolved says NOW, not what the turn started on — so the model that
     // actually served the reply is what gets metered.
-    s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    s.resolved = Object.assign({}, s.resolved, { provider, model: model.id, key });
     s.budgetNotice = null;                        // strand 2: it described the old model
     // Fix round 3 R1: a /model typed in the TUI is an operator choice exactly
     // like the drawer's switch, and must survive a restart too. Never throws
@@ -3953,15 +3959,21 @@ export function createInteractiveEngine({
         emit(s, { type: "log", text: "model choice cleared — the next wake follows the bot's own model" });
       } else {
       const { provider, modelId } = opts.model;
+      // Task 17: the live child knows a consented cloud row as its crow-c-*
+      // door entry (the bridge's own mapping); the session stays in row ids.
+      // A bare built-in PiRpc would refuse is refused here, awake or asleep,
+      // before any warm.
+      const piProvider = piProviderIdHere(provider, { env: piEnv() });
+      if (piProvider == null) throw engineError("bad_request");
       if (s.pi) {
         // Warm BEFORE the switch (spec: pi-lab's local-models starter
         // self-disables when a bot spawns it, so the provider must already be
         // serving before pi's own set_model tries to route to it).
         const slog = sessionLog(s);
         await S.warmModel(provider, slog);
-        const res = await s.pi.commandSince({ type: "set_model", provider, modelId });
+        const res = await s.pi.commandSince({ type: "set_model", provider: piProvider, modelId });
         const data = (res && res.data) || {};
-        const rProvider = data.provider || provider;
+        const rProvider = data.provider ? rowIdForPiProvider(data.provider, { env: piEnv() }) : provider;
         const rId = data.id || modelId;
         const rKey = rProvider + "/" + rId;
         const changed = s.currentModel !== rKey;
@@ -4099,7 +4111,9 @@ export function createInteractiveEngine({
       s.pi.commandSince({ type: "get_available_models" }),
       s.pi.commandSince({ type: "get_available_thinking_levels" }),
     ]);
-    const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
+    // Row ids, like the catalogue control() validates against (Task 17).
+    const models = ((modelsRes && modelsRes.data && modelsRes.data.models) || [])
+      .map((m) => (m && typeof m.provider === "string" ? { ...m, provider: rowIdForPiProvider(m.provider, { env: piEnv() }) } : m));
     const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
     // Read AFTER the RPCs: a model_select the child emitted while we were
     // waiting is the newest truth, and the picker is about to be set from it.

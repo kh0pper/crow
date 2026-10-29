@@ -168,10 +168,12 @@ export function buildManagedEntries(rows, {
   const allow = new Set(cloudAllow);
   const door = cloudDoorPort != null && typeof tokenPath === "string" && tokenPath !== "";
   const out = {};
+  const doors = [];
   for (const r of rows) {
     if (r.disabled || r.gpuPolicy?.local_only === true) continue;
-    // The crow-c- namespace belongs to the door entries (minor c).
-    if (typeof r.id === "string" && r.id.startsWith(DOOR_ID_PREFIX)) {
+    // The crow-c- namespace belongs to the door entries (minor c); pi
+    // matches provider ids without regard to case, so CROW-C- is too.
+    if (typeof r.id === "string" && r.id.toLowerCase().startsWith(DOOR_ID_PREFIX)) {
       log(`[pi-models-sync] provider "${r.id}" skipped: ids starting with "${DOOR_ID_PREFIX}" are reserved for the cloud door`);
       continue;
     }
@@ -181,7 +183,7 @@ export function buildManagedEntries(rows, {
       const models = chatModels(r.models);
       if (!models.length) continue;
       const e = doorEntry(r, models, { cloudDoorPort, consent, consentSalt, tokenPath });
-      if (e) out[doorEntryId(r.id)] = e;
+      if (e) doors.push([r.id, e]);
       continue;
     }
     if (!OPENAI_TYPES.has(r.provider_type)) continue;
@@ -196,19 +198,43 @@ export function buildManagedEntries(rows, {
     const baseUrl = native && doorBase && kind === "native-owned" ? providerDoorUrl(doorBase, r.id) : r.baseUrl;
     out[r.id] = { baseUrl, apiKey: r.apiKey || "none", api: "openai-completions", models };
   }
+  // pi folds provider ids to lower case, so two rows that differ only in case
+  // (Cloud-A, cloud-a) would become ONE pi provider and a bot bound to one
+  // could run on the other's door. Every colliding row is skipped; none is
+  // picked. Direct ids never start with crow-c- (skipped above), so they
+  // cannot collide with a door id.
+  const byLower = new Map();
+  for (const [rowId] of doors) {
+    const lk = doorEntryId(rowId).toLowerCase();
+    byLower.set(lk, (byLower.get(lk) || 0) + 1);
+  }
+  for (const [rowId, e] of doors) {
+    if (byLower.get(doorEntryId(rowId).toLowerCase()) > 1) {
+      log(`[pi-models-sync] provider "${rowId}" skipped: another provider's id differs from it only in case`);
+      continue;
+    }
+    out[doorEntryId(rowId)] = e;
+  }
   return out;
 }
 
 function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 
-export function mergeManaged(fileJson, entries) {
+export function mergeManaged(fileJson, entries, { log = (m) => console.log(m) } = {}) {
   const json = { ...(fileJson || {}), providers: { ...((fileJson && fileJson.providers) || {}) } };
   const prevManaged = new Set(Array.isArray(json[CROW_MANAGED_KEY]) ? json[CROW_MANAGED_KEY] : []);
   const handWritten = new Set(Object.keys(json.providers).filter((id) => !prevManaged.has(id)));
+  const handLower = new Set([...handWritten].map((id) => id.toLowerCase()));
   const added = [], updated = [], removed = [];
   const nextManaged = new Set();
   for (const [id, entry] of Object.entries(entries)) {
     if (handWritten.has(id)) continue;
+    // A door entry that differs from a hand-written id only in case would
+    // merge with it inside pi: the hand-written one keeps its id alone.
+    if (id.toLowerCase().startsWith(DOOR_ID_PREFIX) && handLower.has(id.toLowerCase())) {
+      log(`[pi-models-sync] "${id}" not written: a hand-written provider differs from it only in case`);
+      continue;
+    }
     nextManaged.add(id);
     if (!(id in json.providers)) { json.providers[id] = entry; added.push(id); }
     else if (!same(json.providers[id], entry)) { json.providers[id] = entry; updated.push(id); }

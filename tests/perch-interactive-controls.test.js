@@ -1545,3 +1545,41 @@ test("strand 2 (re-review): after a live switch to a model that fits, a late sub
   const sink = await collect(engine, s.sessionId);
   assert.ok(!sink.events.some((e) => e.type === "log" && /at most 2 tools/.test(e.text)), JSON.stringify(sink.events));
 });
+
+// ---------------------------------------------------------------------------
+// Task 17: a live child knows a consented cloud row as its crow-c-* door
+// entry; the session (state, persistence, metering, catalogue gate) stays in
+// row ids. The mapping only applies on the host-default home (N1).
+// ---------------------------------------------------------------------------
+test("Task 17: an awake switch to a consented cloud row sends pi its crow-c-* id; echoes map back to the row", async () => {
+  const H = mkdtempSync(join(tmpdir(), "perch-door-home-"));
+  const models = join(H, "models.json");
+  writeFileSync(models, JSON.stringify({ providers: { "crow-c-cloud-a": { models: [{ id: "c1" }] } } }));
+  const prev = { HOME: process.env.HOME, PI: process.env.PI_MODELS_JSON };
+  process.env.HOME = H;
+  process.env.PI_MODELS_JSON = models;
+  try {
+    const { engine, state } = makeEngine({
+      env: { CROW_HOME: join(H, ".crow") },
+      providerModels: () => [...CATALOGUE, { provider: "cloud-a", id: "c1", baseUrl: "https://api.example.com/v1" }, { provider: "openai", id: "gpt-x", baseUrl: "https://api.openai.com/v1" }],
+      bridgeOpts: { },
+    });
+    state.availableModels = [{ provider: "crow-c-cloud-a", id: "c1" }, { provider: "crow-local", id: "qwen3.6-35b-a3b" }];
+    const s = await spawned(engine);
+    const pi = state.instances[0];
+    const r = await engine.control(s.sessionId, { model: { provider: "cloud-a", modelId: "c1" } });
+    const sent = pi.commands.find((c) => c.type === "set_model");
+    assert.equal(sent.provider, "crow-c-cloud-a", "pi is told the door entry");
+    assert.equal(r.applied.model, "cloud-a/c1", "the session records the row");
+    assert.equal((await engine.get(s.sessionId)).model, "cloud-a/c1");
+    pi.emit({ type: "model_select", model: { provider: "crow-c-cloud-a", id: "c1" }, previousModel: null, source: "set" });
+    assert.equal((await engine.get(s.sessionId)).model, "cloud-a/c1", "the child's own echo maps back too");
+    const opts = await engine.options(s.sessionId);
+    assert.deepEqual(opts.models.map((m) => m.provider + "/" + m.id), ["cloud-a/c1", "crow-local/qwen3.6-35b-a3b"], "the live list is in row ids, like the catalogue control() checks");
+    await assert.rejects(engine.control(s.sessionId, { model: { provider: "openai", modelId: "gpt-x" } }), (e) => e.code === "bad_request",
+      "a bare built-in PiRpc would refuse is refused here too");
+  } finally {
+    if (prev.HOME === undefined) delete process.env.HOME; else process.env.HOME = prev.HOME;
+    process.env.PI_MODELS_JSON = prev.PI;
+  }
+});

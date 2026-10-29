@@ -292,7 +292,10 @@ export class PiRpc {
     // cloud row runs as its crow-c-* door entry, whose key pi reads from the
     // door token file itself, so no token is placed in this env. A bare pi
     // built-in with no entry refuses here (never the operator's pi login).
-    const piProvider = piProviderIdHere(resolved.provider);
+    // prepareSpawn (and job_runner) map it BEFORE any bot_sessions row is
+    // written and pass it in, so the throw below is only the fallback for a
+    // caller that spawns without them (skill_review).
+    const piProvider = typeof opts.piProvider === "string" && opts.piProvider ? opts.piProvider : piProviderIdHere(resolved.provider);
     if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
     this.piProvider = piProvider;
     // Test seam: nodeBin/cliPath let tests drive the exit-surface path with a

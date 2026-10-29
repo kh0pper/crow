@@ -45,6 +45,7 @@ import { hasActorKey, presignActors } from "./actor-sig.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
+import { piProviderIdHere } from "./pi_provider_id.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { addSkillToolsGuarded } from "./skill-tools.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
@@ -477,6 +478,10 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // M2: fail the turn before spawning when pi cannot use the resolved model.
   const piCheck = await checkPiModel(resolved);
   if (!piCheck.ok) throw new PiModelUnavailableError(piCheck.message);
+  // Task 17: the pi provider (crow-c-* for a consented cloud row), mapped
+  // here, before the bridge records the session as active.
+  const piProvider = piProviderIdHere(resolved.provider);
+  if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
 
   return {
     sysFile,
@@ -486,6 +491,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       def,
       sessionDir: world.sessionDir,
       resolved,
+      piProvider,
       selfAuthoringDir,
       remoteEnabled: world.remoteEnabled,
       botClassifier: world.botClassifier || null,

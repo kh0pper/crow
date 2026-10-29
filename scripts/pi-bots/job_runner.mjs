@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
+import { piProviderIdHere } from "./pi_provider_id.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
@@ -363,6 +364,8 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // M2: fail the job before spawning when pi cannot use the resolved model.
     const piCheck = await checkPiModel(resolved);
     if (!piCheck.ok) throw new PiModelUnavailableError(piCheck.message);
+    const piProvider = piProviderIdHere(resolved.provider);
+    if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
     log(`job ${job.job_id} bot=${job.bot_id} model=${resolved.key}`);
 
     // Warm the bundle (no-op for cloud/already-resident) before the turn.
@@ -372,7 +375,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     await warmModel(resolved.provider, log);
 
     const pi = new bridge.PiRpc({
-      def, sessionDir, resolved, selfAuthoringDir: null,
+      def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
     });

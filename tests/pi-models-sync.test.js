@@ -239,7 +239,10 @@ test("T17: compat carried from the UPSTREAM url", () => {
   const e = buildManagedEntries([z], doorOpts([z]));
   assert.ok(piCompatFor(z.baseUrl, "glm-5.1"), "the fixture has a pi rule");
   assert.deepEqual(e["crow-c-cloud-z"].models[0].compat, piCompatFor(z.baseUrl, "glm-5.1"));
-  assert.equal(e["crow-c-cloud-a"], undefined);
+  // The door URL itself matches none of pi's host rules, so without this
+  // compat pi would send z.ai the generic defaults.
+  assert.equal(piCompatFor(e["crow-c-cloud-z"].baseUrl, "glm-5.1"), null);
+  assert.equal(e["crow-c-cloud-z"].models[0].compat.maxTokensField, "max_tokens");
 });
 
 test("T17: compat per model (OpenRouter's Anthropic cache control on one model only)", () => {
@@ -339,4 +342,39 @@ test("T17: syncPiModelsJson leaves hand-written entries byte-identical (scratch 
   delete stripped[CROW_MANAGED_KEY];
   assert.equal(JSON.stringify(stripped, null, 2) + "\n", text, "removing Crow's entries gives back the original bytes");
   assert.equal(after.includes("fixture-secret-123"), false);
+});
+
+// --- Fix round 1: pi folds provider ids to lower case --------------------------
+test("fix 1: Cloud-A and cloud-a — neither gets an entry, one log line each", () => {
+  const up = cloudRow("Cloud-A");
+  const low = cloudRow("cloud-a");
+  const solo = cloudRow("cloud-b");
+  const logs = [];
+  const e = buildManagedEntries([up, low, solo], { ...doorOpts([up, low, solo]), log: (m) => logs.push(m) });
+  assert.deepEqual(Object.keys(e), ["crow-c-cloud-b"]);
+  assert.equal(logs.length, 2);
+  assert.match(logs.join("\n"), /"Cloud-A".*only in case/);
+  assert.match(logs.join("\n"), /"cloud-a".*only in case/);
+});
+
+test("fix 1: a row whose id starts with CROW-C- in any case is skipped", () => {
+  const x = cloudRow("CROW-C-x");
+  const logs = [];
+  assert.deepEqual(Object.keys(buildManagedEntries([x], { ...doorOpts([x]), log: (m) => logs.push(m) })), []);
+  assert.equal(logs.length, 1);
+});
+
+test("fix 1: a door entry that differs from a hand-written id only in case is not written", () => {
+  const a = cloudRow("cloud-a");
+  const hand = { baseUrl: "http://hand/v1", apiKey: "none", models: [{ id: "h" }] };
+  const logs = [];
+  const { json, added } = mergeManaged({ providers: { "Crow-C-Cloud-A": hand } }, buildManagedEntries([a], doorOpts([a])), { log: (m) => logs.push(m) });
+  assert.deepEqual(added, []);
+  assert.deepEqual(Object.keys(json.providers), ["Crow-C-Cloud-A"]);
+  assert.deepEqual(json.providers["Crow-C-Cloud-A"], hand);
+  assert.equal(logs.length, 1);
+  // and a previously written door entry is removed once the hand-written variant appears
+  const prev = { providers: { "crow-c-cloud-a": { baseUrl: "x" }, "Crow-C-Cloud-A": hand }, [CROW_MANAGED_KEY]: ["crow-c-cloud-a"] };
+  const again = mergeManaged(prev, buildManagedEntries([a], doorOpts([a])), { log: () => {} });
+  assert.deepEqual(again.removed, ["crow-c-cloud-a"]);
 });

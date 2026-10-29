@@ -80,6 +80,10 @@ test("nothing is consented automatically: no seed export, and boot grants nothin
   assert.equal(admin.seedCloudConsentAtBoot, undefined);
   const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/boot/admin-api.js"), "utf8");
   // Task 17: admin-api reads consent for the pi models.json sync, and only reads.
+  // A TRIPWIRE, not a proof: these regexes catch the obvious regression (a
+  // grant, seed or ensure call, or a whole-module import, added to
+  // admin-api.js), but a template-literal import specifier or a helper module
+  // that wraps grantCloudConsent would slip past them. Review such changes.
   const imports = [...src.matchAll(/\{([^}]*)\}\s*=\s*await import\(["'][^"']*cloud-consent\.js["']\)/g)].map((m) => m[1]);
   assert.ok(!/from ["'][^"']*cloud-consent/.test(src), "no static import");
   assert.equal(imports.length, (src.match(/import\(["'][^"']*cloud-consent/g) || []).length, "every import of it names what it takes");

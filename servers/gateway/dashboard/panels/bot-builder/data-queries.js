@@ -9,6 +9,7 @@
 
 import { readdirSync } from "node:fs";
 import { join as pathJoin } from "node:path";
+import { homedir } from "node:os";
 import {
   readCanonicalMcp,
   probeServerTools,
@@ -25,6 +26,7 @@ import {
 import { skillDirs } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 import { piModelsFileKeys } from "../../../../../scripts/pi-bots/pi-model-catalog.mjs";
+import { piSpawnTarget, readPiModelsJson } from "../../../../../scripts/pi-bots/pi_provider_id.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
 import { getPeerCapabilities } from "../../capabilities-cache.js";
@@ -143,19 +145,31 @@ export async function remoteInvocationOn(db) {
 }
 
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's
-export async function loadModelOptions(db, { piKeysFn = () => piModelsFileKeys() } = {}) {
+export async function loadModelOptions(db, {
+  piKeysFn = () => piModelsFileKeys(), piModelsJsonFn = () => readPiModelsJson(),
+  env = process.env,
+} = {}) {
   try {
     const all = await listProvidersAll(db);
     const enabled = all.filter((p) => !p.disabled);
     let known = null;
     try { known = piKeysFn(); } catch { known = null; }
+    // Task 17: mark by the provider the bridge will really spawn (a consented
+    // cloud row runs as its crow-c-* door entry; a bare pi built-in with no
+    // entry is refused by PiRpc, so it is not available whatever the file says).
+    let json = null;
+    try { json = piModelsJsonFn(); } catch { json = null; }
+    const homeDir = env.HOME || homedir();
+    const where = { crowHome: env.CROW_HOME || pathJoin(homeDir, ".crow"), homeDir };
     const opts = [];
     for (const row of enabled) {
       for (const m of row.models || []) {
         const mid = typeof m === "string" ? m : m.id;
         if (!mid) continue;
         const key = `${row.id}/${mid}`;
-        opts.push({ provider: row.id, key, label: (m.name || mid), piKnown: known ? known.has(key) : null });
+        const target = piSpawnTarget(row.id, mid, json, where);
+        const piKnown = !target.ok ? false : known ? known.has(target.key) : null;
+        opts.push({ provider: row.id, key, label: (m.name || mid), piKnown, ...(target.ok ? {} : { piReason: target.reason }) });
       }
     }
     if (!opts.length) return { error: "No providers configured.", opts: [] };
