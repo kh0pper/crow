@@ -17,7 +17,7 @@ services:
     mem_limit: 256m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthcheck"]
+      test: ["CMD", "/usr/bin/miniflux", "-healthcheck", "auto"]
       interval: 30s
       timeout: 10s
       retries: 5
