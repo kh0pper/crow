@@ -23,7 +23,9 @@
  *   PIBOT_TEST_SKIP_USER_ON_TURN=N   the Nth prompt of the session (1-based) records no user message
  *   PIBOT_TEST_CRASH_ON_TURN=N       ack the Nth prompt of the session (1-based), then exit 1
  *   (none of these say "SESSION": SECRET_NAME_RE would strip the knob)
- *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker } per prompt
+ *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker,
+ *                          appendSystemPrompt, appendSystemPromptText } per prompt (the last two: the
+ *                          --append-system-prompt path and that file's text at prompt time, or null)
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -99,7 +101,12 @@ process.stdin.on("data", (chunk) => {
       out({ type: "response", command: "get_session_stats", id: m.id, success: true, data: { tokens: { input: 1, output: 1, cacheRead: 0 } } });
     } else if (m.type === "prompt") {
       const n = priorPrompts();
-      if (env.PIBOT_TEST_CAPTURE) appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1", runMarker: env.CROW_EVAL_RUN_ID ?? null }) + "\n");
+      if (env.PIBOT_TEST_CAPTURE) {
+        const sys = arg("--append-system-prompt") ?? null;
+        let sysText = null;
+        try { if (sys) sysText = readFileSync(sys, "utf8"); } catch { /* unreadable: null */ }
+        appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1", runMarker: env.CROW_EVAL_RUN_ID ?? null, appendSystemPrompt: sys, appendSystemPromptText: sysText }) + "\n");
+      }
       if (Number(env.PIBOT_TEST_SKIP_USER_ON_TURN) !== n + 1) record("user", m.message);
       out({ type: "response", command: "prompt", id: m.id, success: true });
       if (env.PIBOT_TEST_CRASH === "1" || Number(env.PIBOT_TEST_CRASH_ON_TURN) === n + 1) process.exit(1);

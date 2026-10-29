@@ -1020,6 +1020,18 @@ function parseCardIntent(msg) {
 }
 
 export async function handleInbound(opts) {
+  // Eval-only seam (the live pi driver, scripts/lib/live-pi-driver.mjs): a caller-supplied
+  // transform of this spawn's PiRpc options. Refused unless THIS process is an eval scratch (the
+  // guard reads the real process.env, never an option); channel turns never pass one, and then
+  // the guard is never even loaded. The transform is trusted in-process code: the checks below
+  // are a shape fence (eval-guard.mjs), not a sandbox.
+  let evalSeam = null;
+  if (typeof opts.evalSpawnTransform === "function") {
+    const sealedHome = (await import("../lib/eval-guard.mjs")).assertEvalSeam();
+    const transform = opts.evalSpawnTransform; // read once
+    if (typeof transform !== "function") throw new Error("eval spawn transform refused: not a function");
+    evalSeam = { guard: await import("../lib/eval-guard.mjs"), sealedHome, transform };
+  }
   const bot_id = opts.bot_id, gateway_thread_id = opts.gateway_thread_id, user_message = opts.user_message;
   // Gateway-agnostic: the inbound adapter (gmail bridge_tick, discord_gateway)
   // declares its transport. Defaults to gmail for legacy callers that omit it.
@@ -1248,6 +1260,23 @@ export async function handleInbound(opts) {
   // POST /llm/acquire; without this a cold on-demand model (:8003) makes pi
   // return "Connection error" → "(no reply)" on Discord/Gmail. Non-fatal.
   await warmModel(resolved.provider, log);
+
+  // The eval-only spawn transform (guarded at the top of this function), right before pi. What
+  // is checked: the options' key set and values (the transform works on a deep clone and the
+  // bridge takes back ONE value, appendSystemPromptFile, an absolute path inside the home sealed
+  // at guard time), and process.env (the same object, never a Proxy, every key unchanged across
+  // the transform). The spawn is built from the
+  // bridge's own untouched original, and nothing async runs between the checks and new PiRpc,
+  // which reads the live process.env.
+  if (evalSeam !== null) {
+    const original = spawnPrep.piRpcOpts;
+    const clone = evalSeam.guard.cloneSpawnOpts(original);
+    const envBefore = evalSeam.guard.snapshotEnv();
+    const next = await evalSeam.transform(clone);
+    evalSeam.guard.checkEnvUnchanged(envBefore);
+    const f = evalSeam.guard.checkEvalSpawnOpts(original, clone, next, evalSeam.sealedHome);
+    spawnPrep.piRpcOpts = evalSeam.guard.evalSpawnOpts(original, f);
+  }
 
   // piRpcOpts carries {def, sessionDir, resolved, selfAuthoringDir,
   // remoteEnabled, narrowedTools, appendSystemPromptFile}; the resume decision
