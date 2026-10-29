@@ -33,7 +33,11 @@ export const TAB_OF = Object.freeze({
   "bot-board": "board",
   artifacts: "make",
   "project-home": "chat",
+  "project-services": "chat",
 });
+
+/** Panels whose scope is the project their path names (resolveShellPage). */
+export const SLUG_SCOPED_PANELS = new Set(["project-home", "project-services"]);
 
 const SCOPE_MAX_AGE = 34560000; // 400 days, seconds
 const DEFAULT_RETURN = "/dashboard/perch";
@@ -192,14 +196,17 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
     const pending = offerTry || parseCookies(req)[cookieName(TRY_COOKIE)] === "pending";
     return pending ? { variant: "classic", tryNewCard: tryNewCardHtml(lang) } : { variant: "classic" };
   }
-  // The project home (/dashboard/project/:slug) takes its scope from the path:
-  // the slug wins over the cookie and ?project=, and nothing is written (the
-  // GET is read-only; Turbo prefetches it on hover). An unknown or archived
-  // slug resolves to Everything, and the panel answers 404.
-  const homeSlug = panelId === "project-home" && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
+  // A project's own pages (its home, /dashboard/project/:slug, and its
+  // Services, /dashboard/project/:slug/services) take their scope from the
+  // path: the slug wins over the cookie and ?project=, and nothing is written
+  // (the GET is read-only; Turbo prefetches it on hover). An unknown or
+  // archived slug resolves to Everything, and the panel answers 404. Only the
+  // home is the drawer link's own page (homeSlug); Services is in its scope.
+  const pathSlug = SLUG_SCOPED_PANELS.has(panelId) && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
+  const homeSlug = panelId === "project-home" ? pathSlug : null;
   let scope;
-  if (panelId === "project-home") {
-    scope = homeSlug ? (await scopeFromValue(db, homeSlug, { slugOnly: true })).scope : EVERYTHING;
+  if (SLUG_SCOPED_PANELS.has(panelId)) {
+    scope = pathSlug ? (await scopeFromValue(db, pathSlug, { slugOnly: true })).scope : EVERYTHING;
   } else {
     const r = await resolveScope(req, db);
     scope = r.scope;

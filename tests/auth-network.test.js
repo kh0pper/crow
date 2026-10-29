@@ -274,6 +274,8 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       // R1.2 PR 4: the Briefing card's read and the summary's Forget.
       "/dashboard/perch-api/interactive/abc/briefing",
       "/dashboard/perch-api/interactive/abc/forget-summary",
+      // Project services Task 10: a project's Services page.
+      "/dashboard/project/x/services",
       // R1.2 PR 5: the apps launcher's read.
       "/dashboard/shell-api/apps?project=all",
     ]) {
@@ -424,25 +426,27 @@ test("the Services API's own gate: Funnel and off-network refused, no session 40
   }
 });
 
-test("auth-network: /dashboard/project/x needs a session", async () => {
-  // The REAL dashboard router: the project home sits behind dashboardAuth like
-  // every panel page. Off-network is refused; on-network without a session is
-  // sent to the login page; neither reaches the panel.
+for (const PAGE of ["/dashboard/project/x", "/dashboard/project/x/services"]) test(`auth-network: ${PAGE} needs a session`, async () => {
+  // The REAL dashboard router: the project home (and its Services page, with
+  // CROW_SERVICES_UI on) sits behind dashboardAuth like every panel page.
+  // Off-network is refused; on-network without a session is sent to the
+  // login page; neither reaches the panel.
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
+  process.env.CROW_SERVICES_UI = "1";
   const app = express();
   app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
   app.use(dashboardRouter((req, res, next) => next()));
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   try {
     const port = server.address().port;
-    const offNet = await request(port, "/dashboard/project/x");
+    const offNet = await request(port, PAGE);
     assert.equal(offNet.status, 403, "bare loopback, no tailnet identity");
     // Past the network gate (CROW_DASHBOARD_PUBLIC opens it; no tailnet identity is
     // forged): with no session the page still sends you to the login page.
     process.env.CROW_DASHBOARD_PUBLIC = "true";
     let noSession;
     try { noSession = await new Promise((resolve, reject) => {
-      const req = http.request({ host: "127.0.0.1", port, path: "/dashboard/project/x", method: "GET" },
+      const req = http.request({ host: "127.0.0.1", port, path: PAGE, method: "GET" },
         (res) => { res.resume(); res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location })); });
       req.on("error", reject);
       req.end();
@@ -450,6 +454,7 @@ test("auth-network: /dashboard/project/x needs a session", async () => {
     assert.ok(noSession.status === 302 || noSession.status === 303, `a redirect, got ${noSession.status}`);
     assert.equal(noSession.location, "/dashboard/login");
   } finally {
+    delete process.env.CROW_SERVICES_UI;
     server.close();
   }
 });
