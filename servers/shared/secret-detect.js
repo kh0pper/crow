@@ -7,8 +7,10 @@
  *   - known key prefixes: the public-hygiene guard's SECRET_PATTERNS, one source of truth;
  *   - "password: …" phrasing: the value after a password/secret/token/api key label;
  *   - high-entropy tokens: a run of 24+ key characters with ≥ 3.5 bits of entropy per
- *     character, at least one digit and one letter, and not hex-only (so a uuid or a git sha
- *     is never flagged; hex-only means [0-9a-f-] or [0-9A-F-], a dash counting as hex).
+ *     character that mixes upper case, lower case and digits, and is not hex-only (so a uuid or
+ *     a git sha is never flagged; hex-only means [0-9a-f-] or [0-9A-F-], a dash counting as
+ *     hex). The case mix keeps dated paths and model ids (all lower case) out; an all-lower-case
+ *     key is left to the known-prefix list.
  *
  * Pure functions, no I/O. False negatives are expected (that is why the card exists); false
  * positives have the composer's "It's not a secret" escape. `detectorSource()` hands the same
@@ -43,7 +45,7 @@ export function shannonBits(s) {
 
 function looksRandom(run) {
   return run.length >= ENTROPY_MIN_LENGTH
-    && /[0-9]/.test(run) && /[A-Za-z]/.test(run)
+    && /[0-9]/.test(run) && /[a-z]/.test(run) && /[A-Z]/.test(run)
     && !HEX_ONLY.test(run)
     && shannonBits(run) >= ENTROPY_MIN_BITS;
 }
@@ -66,7 +68,8 @@ export function findSecrets(text) {
   }
   const phrase = fresh(PHRASE);
   for (let m; (m = phrase.exec(s));) {
-    // The value is the match's last group, so it ends where the match ends.
+    // The value is the LAST group (group 3: `(word)` inside the label is group 2), and since
+    // `(\S{6,})` closes the pattern it ends exactly where the match ends.
     const end = m.index + m[0].length;
     hits.push({ start: end - m[3].length, end, kind: "phrase" });
   }

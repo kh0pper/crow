@@ -55,6 +55,8 @@ test("entropy token found", () => {
   const text = `use ${ENTROPY} for the login`;
   assert.deepEqual(kinds(text), ["entropy"]);
   assert.deepEqual(spans(text), [ENTROPY]);
+  // Needs all three of upper, lower and digit.
+  assert.deepEqual(findSecrets("tq8vr2mk9pxw4lzb7nyc3hsjqq"), [], "all lower case is left to the prefix list");
   const b64 = "dGhpcyBpcyBhIHNlY3JldCB0b2tlbjEyMw==";
   assert.deepEqual(spans(`blob ${b64}.`), [b64]);
 });
@@ -68,6 +70,10 @@ test("ordinary prose not flagged", () => {
     "abcdefghijklmnopqrstuvwxyzabcdef",        // no digit
     "123456789012345678901234567890",          // no letter
     "My token is in the keychain, not here.",
+    "docs/2026-10-29-credential-card-map",     // dated path: lower case only
+    "qwen3.6-35b-a3b-instruct-q4_k_m",         // model id: lower case only
+    "see docs/2026-10-29-credential-card-map.md and load qwen3.6-35b-a3b-instruct-q4_k_m",
+    "ALLCAPS0RUN1WITH2DIGITS3AND4NO5LOWER",    // no lower case
   ];
   for (const text of prose) assert.deepEqual(findSecrets(text), [], text);
 });
