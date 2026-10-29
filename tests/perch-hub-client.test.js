@@ -5964,12 +5964,11 @@ test("an ask closes the composer's + menu", async () => {
 });
 
 // ---- R1.2 PR 3, Task 2: the Make tab opens on This card --------------------
-test("makeTabHref: card + slug, card only, no card gives the base", async () => {
+test("makeTabHref: a card gives the card scope with no project (no cookie-writing prefetch); no card gives the base", async () => {
   const makeTabHref = await extract("makeTabHref");
-  assert.equal(makeTabHref("/dashboard/make", 12, "hw-club"), "/dashboard/make?scope=card:12&project=hw-club");
-  assert.equal(makeTabHref("/dashboard/make", 12, "a b"), "/dashboard/make?scope=card:12&project=a%20b");
-  assert.equal(makeTabHref("/dashboard/make", 12, null), "/dashboard/make?scope=card:12");
-  assert.equal(makeTabHref("/dashboard/make", null, "hw-club"), "/dashboard/make");
-  assert.equal(makeTabHref("/dashboard/make?project=x", undefined, null), "/dashboard/make?project=x");
-  assert.equal(makeTabHref("/dashboard/extensions?q=artifacts", 12, null), "/dashboard/extensions?q=artifacts", "no Make panel: left alone");
+  assert.equal(makeTabHref("/dashboard/make", 12), "/dashboard/make?scope=card:12");
+  assert.equal(makeTabHref("/dashboard/make?project=hw-club", 12), "/dashboard/make?scope=card:12", "the base project is dropped too");
+  assert.equal(makeTabHref("/dashboard/make", null), "/dashboard/make");
+  assert.equal(makeTabHref("/dashboard/make?project=x", undefined), "/dashboard/make?project=x");
+  assert.equal(makeTabHref("/dashboard/extensions?q=artifacts", 12), "/dashboard/extensions?q=artifacts", "no Make panel: left alone");
 });

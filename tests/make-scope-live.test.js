@@ -144,7 +144,7 @@ test("in a card session the Make tab opens This card", async (t) => {
     const s = await tab(w, h);
     try {
       await s.waitFor("document.getElementById('perch-card-line')&&!document.getElementById('perch-card-line').hidden", "the card line");
-      assert.equal(await s.evalIn(MAKE), "/dashboard/make?scope=card:42&project=" + PROJECT.slug, `${w}px`);
+      assert.equal(await s.evalIn(MAKE), "/dashboard/make?scope=card:42", `${w}px: card mode carries no ?project= (a prefetch would write the scope cookie)`);
     } finally { await s.close(); }
   }
 });

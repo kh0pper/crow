@@ -1975,18 +1975,19 @@ export function perchHubJs(lang = "en") {
   /* R1.2 PR 3: the Make tab opens on This card from a card's chat. The server's
      href is kept in data-shell-href on the first change and restored when the
      session has no card (or closes). Any other base (no Make panel) is left alone. */
-  function makeTabHref(base,cardId,slug){
+  /* Card mode ignores the project, and a ?project= link would rewrite the scope cookie on a Turbo
+     hover prefetch: the card-scoped Make tab carries only the card. */
+  function makeTabHref(base,cardId){
     var b=String(base||'');
     if(!Number.isInteger(cardId)||b.indexOf('/dashboard/make')!==0) return b;
-    return '/dashboard/make?scope=card:'+String(cardId)+(slug?'&project='+encodeURIComponent(String(slug)):'');
+    return '/dashboard/make?scope=card:'+String(cardId);
   }
   function applyMakeTab(c){
     if(typeof document.querySelector!=='function') return;
     var a=document.querySelector('a.shell-tab[data-shell-tab="make"]'); if(!a) return;
     var base=a.getAttribute('data-shell-href');
     if(base==null){ base=a.getAttribute('href')||''; a.setAttribute('data-shell-href',base); }
-    var pr=c&&current.sid?projectOfRow(rowIndex[current.sid],PROJECTS):null;
-    a.setAttribute('href',makeTabHref(base,c?c.id:null,pr?pr.slug:null));
+    a.setAttribute('href',makeTabHref(base,c?c.id:null));
   }
   function setHeadCard(c,href){
     applyMakeTab(c);
