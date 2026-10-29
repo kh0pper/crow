@@ -6,6 +6,9 @@
  *   everything else                   classifyPeer(req).via === "serve" only, else 404 (empty)
  *   unpaired (no live cert):          POST /satellite/v1/pair/hello, POST /satellite/v1/pair/complete
  *   paired:                           both pairing routes 409 {error:"already_paired"}
+ *   /satellite/v1/* (not pair/*)      signed requests only (auth.js), signed JSON answers:
+ *                                     GET status, POST cert, POST unpair (routes.js), plus
+ *                                     whatever `signedRoutes` registers
  *
  * Never imports the dashboard, memory, sharing, router, init-db or crow.db.
  */
@@ -14,6 +17,13 @@ import { classifyPeer } from "../shared/peer-class.js";
 import { AGENT_PROTOCOL } from "../shared/satellite-protocol.js";
 import { openSatelliteDb } from "./db.js";
 import { ensureSatelliteKey, readCert, readPinned, writeCert, writePinned } from "./keys.js";
+import { createSatAuth } from "./auth.js";
+import { recoverStagedCert } from "./certs.js";
+import { registerCoreRoutes } from "./routes.js";
+import { createScheduler } from "./scheduler.js";
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   COMPLETE_PER_SOURCE_PER_MIN, PairRefusal, certIsLive, createHelloLimiter, handleComplete, handleHello, issuePairCode,
 } from "./pairing.js";
@@ -42,7 +52,25 @@ export function resolveBind(env = process.env) {
 /** The pairing source: Serve's class and the tailnet client it names. */
 const sourceOf = (req) => { const p = classifyPeer(req); return `${p.via}:${p.client || "unknown"}`; };
 
-export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log }) {
+const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** The agent checkout's HEAD sha, or null (no git, not a checkout). */
+export function readAppSha(root = APP_ROOT) {
+  try {
+    const s = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return /^[0-9a-f]{40}$/.test(s) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `signedRoutes`: functions (router, ctx) that add routes behind auth (later tasks' bundle, job
+ * and MCP routes); ctx = {db, key, satHome, state, now, out, sendSigned}.
+ */
+export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders }) {
+  // A cert commit a crash interrupted is finished (or discarded) before anything reads the files.
+  recoverStagedCert({ db, key, satHome, now });
   const state = { cert: readCert(satHome), pinned: readPinned(satHome) };
   const isPaired = () => certIsLive(state.cert, state.pinned, key.ed25519_pub, now());
   // A paired cert's serial is always recorded (a crash may have lost the row): never re-accepted.
@@ -70,7 +98,8 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     next();
   });
 
-  app.use(express.json({ limit: "1mb" }));
+  // Pairing parses JSON; the signed routes below keep their raw bytes (the signature covers them).
+  app.use("/satellite/v1/pair", express.json({ limit: "1mb" }));
 
   const refuse = (res, status, code) => res.status(status).json({ error: code });
 
@@ -118,43 +147,62 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     }
   });
 
+  const auth = createSatAuth({ db, key, now, getState: () => state });
+  const signed = express.Router();
+  signed.use(auth.begin);
+  signed.use(express.raw({ type: () => true, limit: "1mb" }));
+  signed.use(auth.verify);
+  const ctx = { db, key, satHome, state, now, out, sendSigned: auth.sendSigned };
+  registerCoreRoutes(signed, { ...ctx, sha, statusReaders });
+  for (const add of signedRoutes) add(signed, ctx);
+  signed.use((_req, res) => auth.sendSigned(res, 404, { error: "not_found" }));
+  app.use("/satellite/v1", signed);
+
   app.use((_req, res) => refuse(res, 404, "not_found"));
 
-  // Body-parser failures (bad JSON, too large) and anything unexpected: JSON, no stack.
+  // Body-parser failures (bad JSON, too large) and anything unexpected: JSON, no stack; signed
+  // when the request was a signed-route request with a well-formed nonce.
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
-    if (err?.type === "entity.parse.failed") return refuse(res, 400, "bad_json");
-    if (err?.type === "entity.too.large") return refuse(res, 413, "too_large");
+    const send = res.locals?.satAudit ? (status, code) => auth.sendSigned(res, status, { error: code }) : (status, code) => refuse(res, status, code);
+    if (res.headersSent) return;
+    if (err?.type === "entity.parse.failed") return send(400, "bad_json");
+    if (err?.type === "entity.too.large") return send(413, "too_large");
     console.error(`[satellite] ${err?.stack || err}`);
-    refuse(res, 500, "internal");
+    send(500, "internal");
   });
 
-  return { app, isPaired };
+  return { app, isPaired, state };
 }
 
 /**
  * Open state, build the app and listen. Guards are the caller's job (index.js).
  * → {server, host, port, app, db, key, home, satelliteId, isPaired, issuePairCode, close}.
  */
-export async function startAgent({ env = process.env, now = Date.now, out = console.log } = {}) {
+export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders } = {}) {
   const satHome = resolveSatHome(env);
   const { host, port } = resolveBind(env);
   const db = openSatelliteDb(satHome);
   const key = ensureSatelliteKey(satHome, { now: now() });
-  const { app, isPaired } = createSatelliteApp({ db, key, satHome, now, out });
+  const { app, isPaired, state } = createSatelliteApp({
+    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders,
+  });
   const server = await new Promise((ok, fail) => {
     const s = app.listen(port, host, () => ok(s));
     s.once("error", fail);
   });
   const addr = server.address();
+  const scheduler = createScheduler({ db, now, log: out, getCert: () => state.cert });
+  scheduler.start();
   let closed = false;
   return {
     server, app, db, key, home: satHome, host: addr.address, port: addr.port, satelliteId: key.satellite_id,
-    isPaired,
+    isPaired, scheduler,
     issuePairCode: () => issuePairCode(db, { now: now() }),
     async close() {
       if (closed) return;
       closed = true;
+      scheduler.stop();
       server.closeAllConnections?.();
       await new Promise((r) => server.close(() => r()));
       db.close();

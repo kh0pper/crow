@@ -5,6 +5,8 @@
  *   $SAT_HOME/cert.json    (0600) the crow-signed cert {payload, sig}
  *   $SAT_HOME/pinned.json  (0600) {crow_id, root_pubkey, mgmt_pubkey, primary_url,
  *                                  primary_instance_id, target_sha}
+ *   $SAT_HOME/cert.next.json (0600) a renewed/rotated cert while it is being committed
+ *                                  (see servers/satellite/certs.js for the write order)
  * Writes are atomic (temp file + rename) through the gateway's writePrivateFile.
  */
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -19,6 +21,7 @@ export const secretsPath = (satHome) => join(satHome, "secrets");
 export const keyPath = (satHome) => join(secretsPath(satHome), "satellite-key.json");
 export const certPath = (satHome) => join(satHome, "cert.json");
 export const pinnedPath = (satHome) => join(satHome, "pinned.json");
+export const stagedCertPath = (satHome) => join(satHome, "cert.next.json");
 
 function validKey(rec) {
   return !!rec && rec.version === 1 && HEX64.test(rec.ed25519_priv ?? "") && HEX64.test(rec.ed25519_pub ?? "")
@@ -56,7 +59,12 @@ export const readCert = (satHome) => readJson(certPath(satHome));
 export const readPinned = (satHome) => readJson(pinnedPath(satHome));
 export const writeCert = (satHome, cert) => writePrivateFile(certPath(satHome), JSON.stringify(cert));
 export const writePinned = (satHome, pinned) => writePrivateFile(pinnedPath(satHome), JSON.stringify(pinned));
+export const readStagedCert = (satHome) => readJson(stagedCertPath(satHome));
+export const writeStagedCert = (satHome, cert) => writePrivateFile(stagedCertPath(satHome), JSON.stringify(cert));
+export const removeStagedCert = (satHome) => rmSync(stagedCertPath(satHome), { force: true });
+/** Unpair: the cert first (the commit marker), then the pin, then any staged cert. */
 export function removePairingFiles(satHome) {
   rmSync(certPath(satHome), { force: true });
   rmSync(pinnedPath(satHome), { force: true });
+  removeStagedCert(satHome);
 }
