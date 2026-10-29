@@ -431,6 +431,9 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     const a = await buildBotWorld({ botId: "plainbot", threadId: "cardbound-a", gatewayType: "perch", cardBound: true, log: () => {} });
     const mcpA = JSON.parse(readFileSync(join(a.sessionDir, ".mcp.json"), "utf8"));
     assert.ok(mcpA.mcpServers.board && !mcpA.mcpServers.board.disabled, "card-bound: board entry minted and active");
+    const { buildToolsCsv: csvOf } = await import("../scripts/pi-bots/bridge.mjs");
+    assert.ok(csvOf(a.def, { resolved: { provider: "stub", model: "m1" }, interactive: true }).csv.split(",").includes("mcp__board__board_report_result"),
+      "card-bound: board_report_result reaches the allowlist (else the run can only time out)");
     assert.equal(mcpA.mcpServers.board.headers["X-Crow-Actor-Id"], "plainbot");
     assert.ok(!("X-Crow-Job-Id" in mcpA.mcpServers.board.headers), "card-bound without a job: no job header");
 
@@ -468,6 +471,15 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     const on = await buildBotWorld({ botId: "projbot", threadId: "proj-free-a", gatewayType: "perch", log: () => {} });
     const mcpOn = JSON.parse(readFileSync(join(on.sessionDir, ".mcp.json"), "utf8"));
     assert.ok(mcpOn.mcpServers.board && !mcpOn.mcpServers.board.disabled, "project bot, cards shown: board entry active in free chat");
+    // ...and the board verbs reach pi's --tools allowlist: a mounted server
+    // whose tools the allowlist filters out is invisible to the model.
+    const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
+    const csvOn = buildToolsCsv(on.def, { resolved: { provider: "stub", model: "m1" }, interactive: true }).csv.split(",");
+    for (const t of ["mcp__board__board_create_item", "mcp__board__board_move_item", "mcp__board__board_list_items", "mcp__board__board_report_result"]) {
+      assert.ok(csvOn.includes(t), t + " in the allowlist");
+    }
+    assert.ok(!csvOn.includes("mcp__board__board_approve_plan"), "approve stays out of the bot's allowlist");
+    assert.ok(!csvOn.includes("mcp__board__board_decide_result"), "decide stays out of the bot's allowlist");
 
     const c2 = new Database(CROW_DB);
     c2.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id=?").run(def("none"), "projbot");
@@ -475,6 +487,7 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     const off = await buildBotWorld({ botId: "projbot", threadId: "proj-free-b", gatewayType: "perch", log: () => {} });
     const mcpOff = JSON.parse(readFileSync(join(off.sessionDir, ".mcp.json"), "utf8"));
     assert.ok(!mcpOff.mcpServers.board || mcpOff.mcpServers.board.disabled, "tracker none: no board in free chat");
+    assert.ok(!buildToolsCsv(off.def, { resolved: { provider: "stub", model: "m1" }, interactive: true }).csv.includes("mcp__board__"), "tracker none: no board verbs");
 
     const c3 = new Database(CROW_DB);
     c3.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id=?").run(def("kanban"), "projbot");
