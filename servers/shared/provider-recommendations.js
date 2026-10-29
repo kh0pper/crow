@@ -68,11 +68,36 @@ export function recommendedFor(presetId, roleId, opts) {
   return list.filter((e) => e && typeof e === "object" && !Array.isArray(e)).map((e) => structuredClone(e));
 }
 
+/**
+ * Every model id the file recommends for a preset (any role, primaries and
+ * alternatives), once each in role order: what the add sheet offers as
+ * checkboxes when the provider has no model list. Only verified ids of a kind
+ * some role takes (never a realtime entry), and never one retiring before
+ * `review_by` (candidatePick's rules).
+ */
+export function recommendedModelIds(presetId, opts) {
+  const reviewBy = validDay(loadRecommendations(opts).review_by);
+  const out = [];
+  for (const roleId of RECOMMENDATION_ROLES) {
+    for (const e of recommendedFor(presetId, roleId, opts)) {
+      if (e.id_verified !== true || !kindFitsRole(roleId, e.kind) || typeof e.model_id !== "string" || !e.model_id) continue;
+      if (!notRetiring(e, reviewBy)) continue;
+      if (!out.includes(e.model_id)) out.push(e.model_id);
+    }
+  }
+  return out;
+}
+
 /** A strict YYYY-MM-DD string that names a real calendar day, else null. */
 function validDay(v) {
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
   const t = new Date(v + "T00:00:00Z");
   return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === v ? v : null;
+}
+
+/** True unless the entry retires on or before `review_by` (a null `retires` never does). */
+function notRetiring(e, reviewBy) {
+  return e.retires == null || !!(reviewBy && validDay(e.retires) && e.retires > reviewBy);
 }
 
 /**
@@ -89,7 +114,7 @@ export function candidatePick(presetId, roleId, { liveModelIds = null } = {}, op
   const eligible = recommendedFor(presetId, roleId, opts).filter((e) =>
     kindFitsRole(roleId, e.kind)
     && e.id_verified === true
-    && (e.retires == null || (reviewBy && validDay(e.retires) && e.retires > reviewBy))
+    && notRetiring(e, reviewBy)
     && (!live || live.has(e.model_id)));
   const stable = eligible.find((e) => e.status === "stable");
   if (stable) return stable;

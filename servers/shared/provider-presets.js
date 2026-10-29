@@ -1,10 +1,21 @@
 /**
- * The eight "Add a provider" presets (roles phase 2b).
+ * The nine "Add a provider" presets (roles phase 2b).
  *
  * Each preset is what the add-provider flow needs to test a pasted key and
  * write one providers row: the base URL (or variants), the adapter type, how
  * the key is sent, the path that proves the key works (`testPath`) and the
  * path that lists models (`modelsPath`). Paths are relative to the base URL.
+ *
+ * Optional fields, for a provider that does not fit that shape:
+ *   - `testRequest` {method:"POST", path, body}: the key test is this one
+ *     request instead of a GET `testPath` (a provider with no listing).
+ *   - `modelsPath: null`: no model list; the sheet offers the preset's
+ *     recommended ids instead, and a typed name is allowed.
+ *   - `probe` {toolChoice, extraBody}: how "Test the picks" asks for the tool
+ *     call (default `tool_choice: "required"`, no extra body).
+ *   - `variantLabelKey`: the i18n label of the variant choice (default "Your plan").
+ *   - `keyNoteKey`: an i18n note shown under the key field for this preset.
+ *   - `keyRejectedKey`: the i18n line for a rejected key on this preset.
  *
  * Every URL, path and header here was checked against the provider's own
  * docs on 2026-10-28; the pages are recorded in the `docs_urls` of
@@ -22,6 +33,17 @@
  *   - zai: no models-list or key-check endpoint is documented. Both paths are
  *     `/models`, confirmed live 2026-10-28 on both bases (200 with a key,
  *     401 with a bad one).
+ *   - modelstudio (Alibaba Cloud Model Studio, the hosted Qwen API): the
+ *     OpenAI-compatible `compatible-mode/v1` base on the DashScope domain, one
+ *     variant per region. A key is bound to the region it was created in (a
+ *     key used in another region gets 401 invalid_api_key). No models-list
+ *     endpoint is documented, so the key is tested with a one-token chat call
+ *     on the cheapest recommended model and there is no listing. The docs say
+ *     Qwen models refuse `tool_choice: "required"` (and so does any model in
+ *     thinking mode; DeepSeek there thinks by default), so the probe asks with
+ *     "auto" and `enable_thinking: false`, and still passes only on a real
+ *     crow_probe call. Singapore (`intl`) is the default and the only region
+ *     with a free quota. Coding Plan and Token Plan keys are not offered.
  *   - other: any OpenAI-compatible server; the URL is typed by the user. The
  *     key may be empty (a local Ollama or llama-server needs none).
  *
@@ -76,6 +98,28 @@ export const PROVIDER_PRESETS = deepFreeze([
     providerType: "openai", baseUrl: "https://api.together.ai/v1",
     aliases: ["https://api.together.xyz/v1"],
     authStyle: "bearer", testPath: "/models", modelsPath: "/models", keyHint: "",
+  },
+  {
+    id: "modelstudio", label: "Alibaba Model Studio (Qwen)", labelKey: "providers.preset.modelstudio",
+    providerType: "openai",
+    variants: [
+      { id: "intl", label: "Alibaba Model Studio (Singapore)", labelKey: "providers.preset.modelstudio.intl", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" },
+      { id: "us", label: "Alibaba Model Studio (US, Virginia)", labelKey: "providers.preset.modelstudio.us", baseUrl: "https://dashscope-us.aliyuncs.com/compatible-mode/v1" },
+      { id: "cn", label: "Alibaba Model Studio (China, Beijing)", labelKey: "providers.preset.modelstudio.cn", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+      { id: "hk", label: "Alibaba Model Studio (China, Hong Kong)", labelKey: "providers.preset.modelstudio.hk", baseUrl: "https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1" },
+    ],
+    authStyle: "bearer",
+    testRequest: {
+      method: "POST", path: "/chat/completions",
+      // Thinking off: qwen3.8-flash thinks by default, and a key test must not wait on it.
+      body: { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1, enable_thinking: false },
+    },
+    modelsPath: null,
+    probe: { toolChoice: "auto", extraBody: { enable_thinking: false } },
+    keyHint: "sk-...",
+    variantLabelKey: "models.add.region",
+    keyNoteKey: "providers.preset.modelstudio.keyNote",
+    keyRejectedKey: "models.add.test.key_rejected_region",
   },
   {
     id: "other", label: "Other (OpenAI-compatible)", labelKey: "providers.preset.other",

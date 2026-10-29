@@ -107,7 +107,7 @@ const walk = (n, out = []) => { out.push(n); for (const c of n.children) walk(c,
 const findAll = (root, pred) => walk(root).filter(pred);
 const byAttr = (root, name, value) => findAll(root, (n) => n.hasAttribute(name) && (value === undefined || n.getAttribute(name) === value));
 
-const NAMES = ["close", "preset", "variantRow", "variant", "urlRow", "url", "key", "test", "testLine", "modelsBox", "filter",
+const NAMES = ["close", "preset", "variantRow", "variantLabel", "variant", "presetNote", "urlRow", "url", "key", "test", "testLine", "modelsBox", "filter",
   "truncated", "list", "typeName", "addName", "save", "saveLine", "picksBox", "stale", "picks", "probe", "recBox", "recList",
   "skipList", "warn", "apply", "result", "error", "done"];
 
@@ -135,6 +135,7 @@ function harness(routes, { open = false } = {}) {
   parts.picksBox.hidden = true;
   parts.urlRow.hidden = true;
   parts.variantRow.hidden = true;
+  parts.presetNote.hidden = true;
   dialog.querySelector = (sel) => {
     const m = /^\[data-ap="([^"]+)"\]$/.exec(sel);
     return m && parts[m[1]] ? parts[m[1]] : null;
@@ -563,4 +564,89 @@ test("after an apply the plan is read again, and the result line stays", async (
 test("render passes its clock to the stale line", async () => {
   const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: new Date("2027-02-01T00:00:00Z") });
   assert.equal(count(html, "mr-recs-stale"), 1);
+});
+
+// --- Alibaba Model Studio: regions, a region-bound key, no model list (ninth preset) ---------
+
+test("the sheet groups each preset's variants, with the four Model Studio regions in en and es", () => {
+  const en = addProviderSheetHtml({ lang: "en" });
+  const sel = en.slice(en.indexOf('data-ap="variant"'), en.indexOf("</select>", en.indexOf('data-ap="variant"')));
+  assert.ok(sel.includes('<optgroup label="Z.AI">') && sel.includes('<optgroup label="Alibaba Model Studio (Qwen)">'), sel);
+  for (const v of ["payg", "coding", "intl", "us", "cn", "hk"]) assert.ok(sel.includes(`value="${v}"`), v);
+  assert.ok(sel.includes("Singapore"), "Singapore label");
+  assert.ok(en.includes(">Alibaba Model Studio (Qwen)<"));
+  const es = addProviderSheetHtml({ lang: "es" });
+  assert.ok(es.includes("Singapur"), "es region label");
+  assert.ok(es.includes("Pekín"), "es region label");
+  assert.ok(es.includes('data-ap="presetNote"'));
+});
+
+test("picking Model Studio shows the region choice, its own options and the region note; another preset hides them", async () => {
+  const h = harness([{ match: isTest, reply: () => json(200, { ok: true, code: "ok", status: 200, models: ["qwen3.8-flash"], host: "x", recommended: [], noListing: true }) }]);
+  h.opener.fire("click");
+  await flush();
+  assert.equal(h.parts.presetNote.hidden, true, "no note for OpenRouter");
+  h.parts.preset.value = "modelstudio";
+  h.parts.preset.fire("change");
+  assert.equal(h.parts.variantRow.hidden, false);
+  assert.equal(h.parts.variantLabel.textContent, "Region");
+  const opts = findAll(h.parts.variant, (n) => n.tagName === "OPTION");
+  assert.deepEqual(opts.map((o) => o.value), ["intl", "us", "cn", "hk"]);
+  assert.ok(opts[0].textContent.includes("Singapore"), opts[0].textContent);
+  assert.equal(h.parts.variant.value, "intl", "Singapore is the default");
+  assert.equal(h.parts.presetNote.hidden, false);
+  assert.ok(h.parts.presetNote.textContent.includes("only works in the region"), h.parts.presetNote.textContent);
+  assert.ok(h.parts.presetNote.textContent.includes("Singapore"), "the free allowance is Singapore only");
+  h.parts.variant.value = "hk";
+  h.parts.key.value = "fixture-pasted-key-777";
+  h.parts.test.fire("click");
+  await flush();
+  assert.equal(h.calls[0].body.presetId, "modelstudio");
+  assert.equal(h.calls[0].body.variantId, "hk");
+  // Z.AI gets its own plan options back, with its own label.
+  h.parts.preset.value = "zai";
+  h.parts.preset.fire("change");
+  assert.equal(h.parts.variantLabel.textContent, "Your plan");
+  assert.deepEqual(findAll(h.parts.variant, (n) => n.tagName === "OPTION").map((o) => o.value), ["payg", "coding"]);
+  assert.equal(h.parts.presetNote.hidden, true);
+  h.parts.preset.value = "openrouter";
+  h.parts.preset.fire("change");
+  assert.equal(h.parts.variantRow.hidden, true);
+});
+
+test("no model list: the test line says so, our picks are the checkboxes (pre-ticked), a typed name can join, Save sends them", async () => {
+  const h = harness([
+    { match: isTest, reply: () => json(200, { ok: true, code: "ok", status: 200, models: ["qwen3.8-max", "kimi-k3", "qwen3.8-flash"], host: "dashscope-intl.aliyuncs.com", recommended: ["qwen3.8-max", "qwen3.8-flash"], noListing: true }) },
+    { match: (u, i) => u === "/api/providers" && i.method === "POST", reply: () => json(400, { ok: false, code: "save_failed" }) },
+  ]);
+  h.opener.fire("click");
+  await flush();
+  h.parts.preset.value = "modelstudio";
+  h.parts.preset.fire("change");
+  h.parts.key.value = "fixture-pasted-key-777";
+  h.parts.test.fire("click");
+  await flush();
+  assert.equal(h.parts.testLine.textContent, "That key works. This provider doesn't share a model list, so choose from our picks below or type a model name.");
+  const boxes = modelBoxes(h);
+  assert.deepEqual(boxes.map((b) => [b.getAttribute("data-ap-model"), b.checked]), [["qwen3.8-max", true], ["qwen3.8-flash", true], ["kimi-k3", false]]);
+  h.parts.typeName.value = "qwen-typed-by-hand";
+  h.parts.addName.fire("click");
+  assert.equal(h.parts.save.disabled, false);
+  h.parts.save.fire("click");
+  await flush();
+  const post = h.calls.find((c) => c.url === "/api/providers");
+  assert.deepEqual(post.body.modelIds, ["qwen3.8-max", "qwen3.8-flash", "qwen-typed-by-hand"]);
+  assert.equal(post.body.variantId, "intl");
+});
+
+test("a rejected Model Studio key mentions the region", async () => {
+  const h = harness([{ match: isTest, reply: () => json(200, { ok: false, code: "key_rejected", status: 401, models: null, host: "dashscope-intl.aliyuncs.com" }) }]);
+  h.opener.fire("click");
+  await flush();
+  h.parts.preset.value = "modelstudio";
+  h.parts.preset.fire("change");
+  h.parts.key.value = "fixture-pasted-key-777";
+  h.parts.test.fire("click");
+  await flush();
+  assert.equal(h.parts.testLine.textContent, "Alibaba Model Studio (Qwen) did not accept that key. Check that you copied all of it, and that you picked the region where you created it.");
 });
