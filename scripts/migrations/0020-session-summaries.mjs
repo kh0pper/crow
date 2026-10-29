@@ -8,6 +8,12 @@
 //   bot_sessions.summary_at     TEXT  when it was written (indexed: the
 //                                     briefing reads "summaries since X")
 //   bot_sessions.summary_flags  TEXT  JSON, e.g. {"outside_content":true}
+//   bot_sessions.briefing       TEXT  the briefing block a Perch session was
+//                                     started with (the source of truth: the
+//                                     engine rewrites the system prompt file
+//                                     from it on every spawn and wake)
+//   bot_sessions.briefing_rank  TEXT  the privacy rank ("0" this box, "1"
+//                                     another box, "2" the cloud) it was built for
 //   memories.project_uuid       TEXT  the project's portable id. project_id is
 //                                     a local FK (project_spaces ids are
 //                                     per-instance), so instance sync nulls it
@@ -30,6 +36,8 @@ export const COLUMNS = Object.freeze([
   ["bot_sessions", "summary", "TEXT"],
   ["bot_sessions", "summary_at", "TEXT"],
   ["bot_sessions", "summary_flags", "TEXT"],
+  ["bot_sessions", "briefing", "TEXT"],
+  ["bot_sessions", "briefing_rank", "TEXT"],
   ["memories", "project_uuid", "TEXT"],
 ]);
 

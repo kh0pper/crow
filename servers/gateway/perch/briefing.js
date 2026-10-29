@@ -24,11 +24,13 @@
  *    never get a briefing, whatever the flag says. An eval that wants one calls
  *    buildBriefing + briefingText and applyBriefing itself.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createDbClient } from "../../db.js";
 import { resolveSqlitePath, tasksDbPath as defaultTasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
+import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
 import { BRIEFING_MARKER, SUMMARY_SOURCE_PREFIX, sessionTainted, privacyRank } from "./session-summary.js";
 import { recallMemoriesReadOnly } from "../../memory/memory-read.js";
 import { deleteMemory } from "../../memory/memory-write.js";
@@ -329,8 +331,9 @@ export function briefingText(fragments) {
  * The file prepareSpawn wrote is never changed: the block goes into a copy
  * (system prompt + "\n\n" + block, mode 600) at a deterministic path,
  * overwritten in place on every spawn and wake, and the returned opts point
- * at it. The path is `opts.file` (Perch passes the session's own,
- * briefingPaths().system), else <piRpcOpts.sessionDir>/briefing-system-prompt.md;
+ * at it, atomically (temp file O_EXCL|O_NOFOLLOW, then rename; a symlink or
+ * other non-file at the destination is refused with an error). The path is `opts.file` (Perch passes its gateway-owned
+ * briefingPromptFile(), written from the DB), else <piRpcOpts.sessionDir>/briefing-system-prompt.md;
  * only an opts with neither gets a temp dir. The input opts are not mutated.
  * No text, or an unreadable source file, returns the opts unchanged (a
  * briefing is never worth losing the system prompt).
@@ -349,61 +352,101 @@ export function applyBriefing(piRpcOpts, text, { file = null } = {}) {
   }
   const dest = file
     || (piRpcOpts.sessionDir ? join(piRpcOpts.sessionDir, "briefing-system-prompt.md") : join(mkdtempSync(join(tmpdir(), "pibot-briefing-")), "sys.md"));
-  mkdirSync(dirname(dest), { recursive: true });
-  writeFileSync(dest, (base ? base + "\n\n" : "") + text, { mode: 0o600 });
+  if (!file) mkdirSync(dirname(dest), { recursive: true });
+  writeAtomic(dest, (base ? base + "\n\n" : "") + text);
   return { ...piRpcOpts, appendSystemPromptFile: dest };
 }
 
-const SID_RE = /^[A-Za-z0-9_-]{1,80}$/;
-
-/**
- * Where a Perch session keeps its briefing, inside its bot's world dir:
- * `text` is the block itself (the Briefing card reads it back after a
- * restart), `system` the system prompt copy applyBriefing writes. Null for a
- * missing dir or an id that is not a plain session id.
- */
-export function briefingPaths(worldDir, sessionId) {
-  const sid = String(sessionId || "");
-  if (!worldDir || !SID_RE.test(sid)) return null;
-  const dir = join(String(worldDir), "briefings");
-  return { dir, text: join(dir, sid + ".md"), system: join(dir, sid + ".system-prompt.md"), meta: join(dir, sid + ".json") };
-}
-
-/** Write the session's briefing text and the rank it was built for (mode 600), overwriting in place. */
-export function storeBriefing(worldDir, sessionId, text, rank = null) {
-  const p = briefingPaths(worldDir, sessionId);
-  if (!p || typeof text !== "string" || !text.trim()) return false;
-  mkdirSync(p.dir, { recursive: true });
-  writeFileSync(p.text, text, { mode: 0o600 });
-  writeFileSync(p.meta, JSON.stringify({ rank: Number.isInteger(rank) ? rank : RANK_HERE }), { mode: 0o600 });
-  return true;
-}
-
-/** The rank a stored briefing was built for; this box when unreadable (the strictest). */
-export function readStoredBriefingRank(worldDir, sessionId) {
-  const p = briefingPaths(worldDir, sessionId);
-  if (!p) return RANK_HERE;
-  try { const r = JSON.parse(readFileSync(p.meta, "utf8")).rank; return Number.isInteger(r) ? r : RANK_HERE; } catch { return RANK_HERE; }
-}
-
-/** The stored briefing text, or null. */
-export function readStoredBriefing(worldDir, sessionId) {
-  const p = briefingPaths(worldDir, sessionId);
-  if (!p) return null;
-  try { const v = readFileSync(p.text, "utf8"); return v.trim() ? v : null; } catch { return null; }
+class UnsafePathError extends Error {
+  constructor(code) { super(code); this.code = code; }
 }
 
 /**
- * The stored briefing for a thread no engine holds a copy of (after a gateway
- * restart): the world dir is the parent of the row's pi_session_dir
- * (startChild stamps <world>/sessions). Read-only.
+ * Write `content` to `dest` without following a link: a temp file in the same
+ * directory opened O_CREAT|O_EXCL|O_NOFOLLOW (mode 600), then a rename over
+ * the destination. A destination that exists and is not a regular file (a
+ * planted symlink, a directory) is refused: UnsafePathError "unsafe_destination".
  */
-export async function storedBriefingForThread(db, threadId) {
+function writeAtomic(dest, content) {
+  let st = null;
+  try { st = lstatSync(dest); } catch { st = null; }
+  if (st && !st.isFile()) throw new UnsafePathError("unsafe_destination");
+  const tmp = join(dirname(dest), "." + randomBytes(8).toString("hex") + ".tmp");
+  const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+  try {
+    const buf = Buffer.from(content, "utf8");
+    let off = 0;
+    while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
+  } catch (e) {
+    try { closeSync(fd); } catch { /* closed */ }
+    try { unlinkSync(tmp); } catch { /* gone */ }
+    throw e;
+  }
+  closeSync(fd);
+  try { renameSync(tmp, dest); } catch (e) { try { unlinkSync(tmp); } catch { /* gone */ } throw e; }
+}
+
+const SID_RE = /^perchlive-[0-9a-f]{8}$/;
+
+/** A real directory (lstat: never a symlink), created mode 700 when missing. */
+function ensureRealDir(path, { create }) {
+  let st = null;
+  try { st = lstatSync(path); } catch { st = null; }
+  if (!st && create) {
+    try { mkdirSync(path, { mode: 0o700 }); } catch (e) { if (e && e.code !== "EEXIST") throw new UnsafePathError("unsafe_directory"); }
+    try { st = lstatSync(path); } catch { st = null; }
+  }
+  if (!st || st.isSymbolicLink() || !st.isDirectory()) throw new UnsafePathError("unsafe_directory");
+}
+
+/**
+ * The gateway-owned file a Perch session's system prompt copy is written to:
+ * <CROW_HOME>/perch-briefings/<botId>/<sid>.system-prompt.md, OUT of the bot's
+ * world tree (a bot can write there). CROW_HOME and both directories below it
+ * must be real directories, never symlinks; the two are created mode 700.
+ * The ids must match BOT_ID_RE and the perchlive-<8 hex> session id.
+ * Throws UnsafePathError ("bad_id", "unsafe_directory"); the caller skips the
+ * briefing. The content is written by applyBriefing({ file }) and never read
+ * back: the DB is the source.
+ */
+export function briefingPromptFile(crowHome, botId, sessionId) {
+  const bot = String(botId || ""), sid = String(sessionId || "");
+  if (!crowHome || !BOT_ID_RE.test(bot) || !SID_RE.test(sid)) throw new UnsafePathError("bad_id");
+  ensureRealDir(String(crowHome), { create: false });
+  const root = join(String(crowHome), "perch-briefings");
+  ensureRealDir(root, { create: true });
+  const dir = join(root, bot);
+  ensureRealDir(dir, { create: true });
+  return join(dir, sid + ".system-prompt.md");
+}
+
+/** Record a session's briefing and its rank on the thread's newest perch-live row. */
+export async function recordBriefing(db, threadId, text, rank = null) {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const r = Number.isInteger(rank) ? rank : RANK_HERE;
+  const w = await db.execute({
+    sql: `UPDATE bot_sessions SET briefing = ?, briefing_rank = ?
+           WHERE id = (SELECT id FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live' ORDER BY id DESC LIMIT 1)`,
+    args: [text, String(r), String(threadId)],
+  });
+  return Number(w.rowsAffected || 0) > 0;
+}
+
+/**
+ * The thread's briefing from the DB, the source of truth (the Briefing card
+ * and every wake read it): { text, rank }, rank this box when unreadable (the
+ * strictest). Null when it has none. Read-only.
+ */
+export async function sessionBriefing(db, threadId) {
   const rows = await rowsOrEmpty(db, {
-    sql: "SELECT pi_session_dir FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live' AND pi_session_dir IS NOT NULL ORDER BY id DESC LIMIT 1",
+    sql: `SELECT briefing, briefing_rank FROM bot_sessions
+           WHERE gateway_thread_id = ? AND kind = 'perch-live' AND briefing IS NOT NULL AND trim(briefing) != ''
+           ORDER BY id DESC LIMIT 1`,
     args: [String(threadId)],
   });
-  return rows[0] ? readStoredBriefing(dirname(String(rows[0].pi_session_dir)), threadId) : null;
+  if (!rows[0]) return null;
+  const rank = /^[0-2]$/.test(String(rows[0].briefing_rank ?? "")) ? Number(rows[0].briefing_rank) : RANK_HERE;
+  return { text: String(rows[0].briefing), rank };
 }
 
 /** The newest perch-live row's summary for a thread, or null. Read-only. */

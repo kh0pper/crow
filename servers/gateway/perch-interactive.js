@@ -152,7 +152,7 @@ import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
-import { applyBriefing, briefingEnabled, briefingPaths, storeBriefing, readStoredBriefing, readStoredBriefingRank, targetRankOf, RANK_HERE } from "./perch/briefing.js";
+import { applyBriefing, briefingEnabled, briefingPromptFile, sessionBriefing, recordBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
 
 /** The privacy rank of the model a child will run on (unknown: the cloud). */
 async function defaultRankModel(key) {
@@ -2446,30 +2446,6 @@ export function createInteractiveEngine({
       });
       prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved });
     }
-    // R1.2 PR 4: the project briefing the spawn route built (s.briefing, set
-    // by spawn() only) rides as a marked section appended to the system
-    // prompt (briefing.js applyBriefing), never the operator's message. It is
-    // kept in the session's own files (briefingPaths: the text, and the system
-    // prompt copy overwritten in place), so every wake re-applies it, even
-    // after a gateway restart. The flag is read per use: off means no session
-    // gets one. A storage failure starts the child without it.
-    if (briefingEnabled(env)) {
-      const bp = briefingPaths(world.sessionDir, s.sessionId);
-      try {
-        if (bp && s.briefing) storeBriefing(world.sessionDir, s.sessionId, s.briefing, s.briefingRank);
-        else if (bp) {
-          s.briefing = readStoredBriefing(world.sessionDir, s.sessionId);
-          s.briefingRank = readStoredBriefingRank(world.sessionDir, s.sessionId);
-        }
-        if (bp && s.briefing) {
-          // Never to a model less private than the one it was built for (a
-          // later model switch, or a restart onto another provider).
-          const rank = await rankModel(prep.resolved && prep.resolved.key);
-          if (rank <= (s.briefingRank ?? RANK_HERE)) prep.piRpcOpts = applyBriefing(prep.piRpcOpts, s.briefing, { file: bp.system });
-          else slog("briefing withheld: this model is less private than the one it was built for");
-        }
-      } catch { slog("briefing could not be stored; starting without it"); }
-    }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
     slog("model warm: " + (s.currentModel || (prep.resolved && prep.resolved.key) || "?"));
@@ -2502,6 +2478,36 @@ export function createInteractiveEngine({
     if (resume && !resumeTranscriptExists(world.sessionDir, resume)) {
       slog("resume transcript missing — waking fresh (" + resume + ")");
       resume = null;
+    }
+    // R1.2 PR 4: the project briefing rides as a marked section appended to
+    // the system prompt (briefing.js applyBriefing), never the operator's
+    // message. The DB row (bot_sessions.briefing / .briefing_rank) is the
+    // source of truth: on every spawn and wake, just before the child starts,
+    // the gateway-owned <CROW_HOME>/perch-briefings/<bot>/<sid>.system-prompt.md
+    // (outside the bot's world tree, written atomically, never through a
+    // symlink) is written FRESH from it, so an edit on disk never survives. A first spawn has no
+    // row yet and uses the route's text (spawn() then records it). The flag is
+    // read per use: off means no session gets one. Any failure starts the
+    // child without it.
+    if (briefingEnabled(env)) {
+      try {
+        const bdb = createDbClient();
+        let row = null;
+        try { row = await sessionBriefing(bdb, s.threadId); } finally { try { bdb.close(); } catch { /* closed */ } }
+        if (row) { s.briefing = row.text; s.briefingRank = row.rank; }
+        if (s.briefing) {
+          // Never to a model less private than the one it was built for (a
+          // later model switch, or a restart onto another provider).
+          const rank = await rankModel(prep.resolved && prep.resolved.key);
+          if (rank <= (s.briefingRank ?? RANK_HERE)) {
+            const file = briefingPromptFile(crowHome, s.botId, s.sessionId);
+            prep.piRpcOpts = applyBriefing(prep.piRpcOpts, s.briefing, { file });
+          } else slog("briefing withheld: this model is less private than the one it was built for");
+        }
+      } catch (e) {
+        // A code only (bad_id, unsafe_directory, unsafe_destination), never content.
+        slog("briefing skipped: " + (e && typeof e.code === "string" ? e.code : "error"));
+      }
     }
     const pi = new S.PiRpc(Object.assign({}, prep.piRpcOpts, {
       piSessionId: resume,
@@ -3445,6 +3451,13 @@ export function createInteractiveEngine({
     // ---------------------------------------------------------------------
     try {
       await startChild(S, s);
+      // R1.2 PR 4: the row now exists; it becomes the briefing's source of truth.
+      if (s.briefing) {
+        const bdb = createDbClient();
+        try { await recordBriefing(bdb, s.threadId, s.briefing, s.briefingRank); }
+        catch { sessionLog(s)("briefing could not be recorded; a wake will start without it"); }
+        finally { try { bdb.close(); } catch { /* closed */ } }
+      }
     } catch (e) {
       sessions.delete(s.sessionId);                  // release the reservation
       if (cid != null) releaseCard(cid, s.sessionId); // …and the card claim
@@ -4586,7 +4599,7 @@ export function createInteractiveEngine({
     briefingOf: (sessionId) => {
       const s = sessions.get(String(sessionId));
       if (!s) return null;
-      return s.briefing || (s.worldRoot ? readStoredBriefing(s.worldRoot, s.sessionId) : null);
+      return s.briefing || null;
     },
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,

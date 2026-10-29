@@ -162,7 +162,7 @@ if (tableExists("bot_sessions")) {
   // Session summaries (R1.2 PR 4): same guarded-ALTER path, same DDL as
   // init-db.js and scripts/migrations/0020-session-summaries.mjs (one shape,
   // three rails). The CREATE body above stays the pre-F3 baseline.
-  for (const col of ["summary", "summary_at", "summary_flags"]) {
+  for (const col of ["summary", "summary_at", "summary_flags", "briefing", "briefing_rank"]) {
     if (!have.includes(col)) {
       db.prepare(`ALTER TABLE bot_sessions ADD COLUMN ${col} TEXT`).run();
       migAdded.push(col);

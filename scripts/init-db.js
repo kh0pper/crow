@@ -2714,6 +2714,8 @@ await initTable("bot_sessions table", `
     summary           TEXT,
     summary_at        TEXT,
     summary_flags     TEXT,
+    briefing          TEXT,
+    briefing_rank     TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2790,6 +2792,12 @@ await addColumnIfMissing("bot_sessions", "archived_at", "TEXT");
 await addColumnIfMissing("bot_sessions", "summary", "TEXT");
 await addColumnIfMissing("bot_sessions", "summary_at", "TEXT");
 await addColumnIfMissing("bot_sessions", "summary_flags", "TEXT");
+// bot_sessions.briefing / .briefing_rank (R1.2 PR 4): the briefing block a
+// Perch session was started with and the privacy rank it was built for. The
+// DB is the source of truth (a bot can write files in its own world dir, never
+// this row). Same rails as the summary columns above.
+await addColumnIfMissing("bot_sessions", "briefing", "TEXT");
+await addColumnIfMissing("bot_sessions", "briefing_rank", "TEXT");
 try {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)");
 } catch (err) {
@@ -2940,7 +2948,7 @@ const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
   "control", "model", "cwd", "escalated", "kind", "narrowed_tools",
-  "label", "archived_at", "summary", "summary_at", "summary_flags",
+  "label", "archived_at", "summary", "summary_at", "summary_flags", "briefing", "briefing_rank",
   "created_at", "updated_at",
 ];
 await (async () => {
@@ -3008,6 +3016,8 @@ await (async () => {
         summary           TEXT,
         summary_at        TEXT,
         summary_flags     TEXT,
+        briefing          TEXT,
+        briefing_rank     TEXT,
         created_at        TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
       )

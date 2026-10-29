@@ -64,7 +64,7 @@ import { acceptResult, decideResult } from "../board/result-service.js";
 import { openDecisionsForThread } from "../board/decision-service.js";
 import { laneState } from "./shell-api.js";
 import { cardDrawerHref, drawerHref } from "../board/card-link.js";
-import { buildBriefing, briefingText, briefingEnabled, sessionSummary, forgetSummary, storedBriefingForThread, targetRankOf } from "../perch/briefing.js";
+import { buildBriefing, briefingText, briefingEnabled, sessionSummary, forgetSummary, sessionBriefing, targetRankOf } from "../perch/briefing.js";
 import { CONFIRM_OUTCOMES, openDecision } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
@@ -1185,11 +1185,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const db = createDbClient();
     try {
-      const eng = resolveEngine();
-      // The engine's copy, else the session's stored file (a gateway restart).
-      const briefing = (eng && typeof eng.briefingOf === "function" ? eng.briefingOf(sid) : null)
-        || await storedBriefingForThread(db, sid);
-      res.json({ briefing: briefing || null, summary: await sessionSummary(db, sid) });
+      // From the DB, the briefing's source of truth (survives a restart).
+      const b = await sessionBriefing(db, sid);
+      res.json({ briefing: b ? b.text : null, summary: await sessionSummary(db, sid) });
     } catch (err) {
       mapEngineError(res, err);
     } finally {
