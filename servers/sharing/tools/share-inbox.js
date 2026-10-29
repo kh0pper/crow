@@ -10,6 +10,7 @@ import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js
 import { generateToken, validateToken, shouldSkipGates } from "../../shared/confirm.js";
 import { ROLES, AclError, assertLocalCapability, appendAudit } from "../../shared/project-acl.js";
 import { withoutProvenance } from "../../research/provenance-schema.js";
+import { isPeerLineOverCap } from "../peer-manager.js";
 
 export function registerShareInboxTools(server, ctx) {
   const { db, identity, peerManager, buildProjectCloneBundle } = ctx;
@@ -163,6 +164,7 @@ export function registerShareInboxTools(server, ctx) {
 
         // Deliver via Hyperswarm if peer online; queue otherwise.
         let deliveryStatus = "pending";
+        let tooLarge = null;
         if (peerManager.isConnected(contactRow.crow_id)) {
           try {
             peerManager.send(contactRow.crow_id, {
@@ -182,8 +184,16 @@ export function registerShareInboxTools(server, ctx) {
               args: [sharedItemId],
             });
           } catch (err) {
-            // deliveryStatus stays 'pending' — row already inserted as 'pending'
-            console.warn(`[sharing] project clone send failed: ${err.message}`);
+            if (isPeerLineOverCap(err)) {
+              // Too large for the peer channel: never retried, never 'delivered'.
+              deliveryStatus = "failed";
+              tooLarge = err;
+              await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [sharedItemId] });
+              console.warn(`[sharing] project clone share #${sharedItemId} to ${contactRow.crow_id} failed: too large to send (${err.bytes} bytes, cap ${err.cap})`);
+            } else {
+              // deliveryStatus stays 'pending' — row already inserted as 'pending'
+              console.warn(`[sharing] project clone send failed: ${err.message}`);
+            }
           }
         }
 
@@ -205,8 +215,11 @@ export function registerShareInboxTools(server, ctx) {
             type: "text",
             text: `Clone-shared project #${item_id} "${projectExists.name}" with ${contactRow.display_name || contactRow.crow_id} as ${effectiveRole}. ` +
                   `Bundle: ${bundle.sources.length} sources, ${bundle.notes.length} notes, ${bundle.backends.length} backend manifests, ${bundle.file_manifest.length} file manifests. ` +
-                  `Delivery: ${deliveryStatus === "delivered" ? "delivered" : "queued (will deliver when peer comes online)"}.`,
+                  `Delivery: ${deliveryStatus === "delivered" ? "delivered"
+                    : tooLarge ? `failed: the bundle is too large to send (${tooLarge.bytes} bytes, cap ${tooLarge.cap})`
+                    : "queued (will deliver when peer comes online)"}.`,
           }],
+          ...(tooLarge ? { isError: true } : {}),
         };
       }
 
@@ -260,7 +273,7 @@ export function registerShareInboxTools(server, ctx) {
       }
 
       // Record the share
-      await db.execute({
+      const recorded = await db.execute({
         sql: `INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status)
               VALUES (?, ?, ?, ?, 'sent', ?)`,
         args: [
@@ -273,6 +286,7 @@ export function registerShareInboxTools(server, ctx) {
       });
 
       // If peer is online, send directly via Hyperswarm data channel
+      let tooLarge = null;
       if (peerManager.isConnected(contactRow.crow_id)) {
         try {
           peerManager.send(contactRow.crow_id, {
@@ -284,17 +298,26 @@ export function registerShareInboxTools(server, ctx) {
             timestamp: new Date().toISOString(),
           });
         } catch (err) {
-          // Send failed — still recorded in shared_items as pending
-          await db.execute({
-            sql: "UPDATE shared_items SET delivery_status = 'pending' WHERE contact_id = ? AND item_id = ? AND share_type = ? AND direction = 'sent' ORDER BY created_at DESC LIMIT 1",
-            args: [contactRow.id, item_id, share_type],
-          });
+          if (isPeerLineOverCap(err)) {
+            // Too large for the peer channel: never retried, never 'delivered'.
+            tooLarge = err;
+            await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [Number(recorded.lastInsertRowid)] });
+            console.warn(`[sharing] share #${Number(recorded.lastInsertRowid)} (${share_type}) to ${contactRow.crow_id} failed: too large to send (${err.bytes} bytes, cap ${err.cap})`);
+          } else {
+            // Send failed — still recorded in shared_items as pending
+            await db.execute({
+              sql: "UPDATE shared_items SET delivery_status = 'pending' WHERE contact_id = ? AND item_id = ? AND share_type = ? AND direction = 'sent' ORDER BY created_at DESC LIMIT 1",
+              args: [contactRow.id, item_id, share_type],
+            });
+          }
         }
       }
 
-      const status = peerManager.isConnected(contactRow.crow_id)
-        ? "delivered"
-        : "queued (will deliver when peer comes online)";
+      const status = tooLarge
+        ? `failed: the item is too large to send (${tooLarge.bytes} bytes, cap ${tooLarge.cap})`
+        : peerManager.isConnected(contactRow.crow_id)
+          ? "delivered"
+          : "queued (will deliver when peer comes online)";
 
       return {
         content: [
@@ -303,6 +326,7 @@ export function registerShareInboxTools(server, ctx) {
             text: `Shared ${share_type} #${item_id} with ${contactRow.display_name || contactRow.crow_id} (${permissions}). Status: ${status}`,
           },
         ],
+        ...(tooLarge ? { isError: true } : {}),
       };
     }
   );

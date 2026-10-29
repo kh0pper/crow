@@ -1,6 +1,7 @@
 /**
  * Crow-to-Crow plan 1, task 1: once a contact is admitted, the pre-admission
- * caps stop counting and each line is held to postAdmitLineMax (262144 bytes,
+ * caps stop counting and each line is held to postAdmitLineMax (32 MiB by
+ * default, clamped to [1 MiB, 128 MiB]; the tests lower it to 1 MiB through
  * CROW_PEER_LINE_MAX_BYTES overrides). A partial line that grows past the cap
  * without a newline is killed, and so is a complete line over it. onPeerData
  * learns the proof and the instance id the peer CLAIMED.
@@ -29,18 +30,21 @@ import {
 } from "./fixtures/sync-fleet.mjs";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { wireInstanceSync } from "../servers/sharing/instance-connect.js";
-import { PeerManager } from "../servers/sharing/peer-manager.js";
+import { PeerManager, PeerLineOverCapError, isPeerLineOverCap } from "../servers/sharing/peer-manager.js";
 import { deriveInstanceIdentity, generateInviteCode, parseInviteCode, sign } from "../servers/sharing/identity.js";
 import { upsertFullContact } from "../servers/sharing/contact-promote.js";
 import { contactCbMessage, wireContactBinding } from "../servers/sharing/contact-binding.js";
 import { initSharingRuntime } from "../servers/sharing/boot.js";
 
 const T = { timeout: 30_000 };
-const CAP = 262_144;
+// The tests drive the cap through the env, at the clamp floor for speed.
+const CAP = 1024 * 1024;
+const CAP_ENV = { CROW_PEER_LINE_MAX_BYTES: String(CAP) };
 const CLAIMED = "inst-claimed-by-peer";
 
 const realWarn = console.warn, realLog = console.log;
-console.warn = () => {}; console.log = () => {};
+const warnings = [];
+console.warn = (...a) => { warnings.push(a.map(String).join(" ")); }; console.log = () => {};
 process.on("exit", () => { console.warn = realWarn; console.log = realLog; });
 
 async function makeSide(t, name) {
@@ -57,7 +61,7 @@ async function addContact(side, other) {
 }
 
 async function newPeer(side, opts = {}) {
-  const pm = new PeerManager(side.identity, { env: {}, ...opts });
+  const pm = new PeerManager(side.identity, { env: CAP_ENV, ...opts });
   pm.p2pDisabled = true;
   await initSharingRuntime({
     db: side.db, identity: side.identity, peerManager: pm,
@@ -143,13 +147,25 @@ function dataLine(bytes) {
   return line;
 }
 
-test("the default cap is 262144 bytes; CROW_PEER_LINE_MAX_BYTES overrides; junk falls back", () => {
+test("the cap defaults to 32 MiB; CROW_PEER_LINE_MAX_BYTES overrides within [1 MiB, 128 MiB]; out of range is clamped, junk gives the default", () => {
   const id = deriveInstanceIdentity(randomBytes(32));
-  assert.equal(new PeerManager(id, { env: {} }).postAdmitLineMax, CAP);
-  assert.equal(new PeerManager(id, { env: { CROW_PEER_LINE_MAX_BYTES: "1024" } }).postAdmitLineMax, 1024);
-  for (const bad of ["0", "-5", "abc", "1e3", ""]) {
-    assert.equal(new PeerManager(id, { env: { CROW_PEER_LINE_MAX_BYTES: bad } }).postAdmitLineMax, CAP, JSON.stringify(bad));
-  }
+  const MiB = 1024 * 1024;
+  const capOf = (v) => new PeerManager(id, { env: v === undefined ? {} : { CROW_PEER_LINE_MAX_BYTES: v } }).postAdmitLineMax;
+  assert.equal(capOf(undefined), 32 * MiB);
+  assert.equal(capOf(String(5 * MiB)), 5 * MiB);
+  assert.equal(capOf(` ${2 * MiB} `), 2 * MiB, "surrounding spaces are trimmed");
+  // Clamped: 0 and too small → 1 MiB; too large (even past Number range) → 128 MiB.
+  for (const v of ["0", "1", "1024", String(MiB - 1)]) assert.equal(capOf(v), MiB, v);
+  for (const v of [String(128 * MiB + 1), "99999999999999", "9".repeat(400)]) assert.equal(capOf(v), 128 * MiB, v.slice(0, 20));
+  // Not a digit string → the default.
+  for (const v of ["-5", "abc", "1e9", "1.5", "", "32MiB"]) assert.equal(capOf(v), 32 * MiB, JSON.stringify(v));
+  // The constructor option is clamped too.
+  assert.equal(new PeerManager(id, { env: {}, postAdmitLineMax: 0 }).postAdmitLineMax, MiB);
+  assert.equal(new PeerManager(id, { env: {}, postAdmitLineMax: Infinity }).postAdmitLineMax, 32 * MiB);
+  // The pre-admission caps are separate and unchanged.
+  const pm = new PeerManager(id, { env: { CROW_PEER_LINE_MAX_BYTES: String(64 * MiB) } });
+  assert.equal(pm.preAuthMaxBytes, 65_536);
+  assert.equal(pm.preAuthMaxLines, 64);
 });
 
 test("an admitted peer sending a line over the cap (no newline) is killed", T, async (t) => {
@@ -160,12 +176,37 @@ test("an admitted peer sending a line over the cap (no newline) is killed", T, a
   assert.deepEqual(pa.peerData, [], "no onPeerData");
 });
 
-test("an admitted peer sending a complete data line over the cap is killed, not delivered", T, async (t) => {
+test("an admitted peer sending a complete data line over the cap is killed, not delivered, and logged by size only", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   const { pa, R } = await admittedRaw(t, A, B);
-  R.write(dataLine(CAP + 1) + "\n");
+  const before = warnings.length;
+  const line = dataLine(CAP + 1).replace('"pad":"x', '"pad":"SECRETMARKER');
+  R.write(line + "\n");
   assert.equal(await closedWithin(R, 3000), true, "destroyed");
   assert.deepEqual(pa.peerData, [], "no onPeerData");
+  const logged = warnings.slice(before).filter((l) => l.startsWith("[peer-manager] contact line over cap "));
+  assert.ok(logged.length >= 1, "an over-cap line is logged");
+  assert.match(logged[0], new RegExp(`^\\[peer-manager\\] contact line over cap ${B.identity.crowId.replace(/[:.]/g, "\\$&")} \\d+$`));
+  assert.ok(Number(logged[0].split(" ").pop()) > CAP, "the size is logged");
+  assert.equal(warnings.some((l) => l.includes("SECRETMARKER")), false, "never the content");
+});
+
+test("send() refuses a frame over the cap before writing anything; a frame at the cap is written", () => {
+  const pm = new PeerManager(deriveInstanceIdentity(randomBytes(32)), { env: CAP_ENV });
+  const writes = [];
+  pm.connections.set("crow:peer", { conn: { write: (d) => writes.push(d) }, authenticated: true });
+  const base = JSON.stringify({ type: "data", payload: { pad: "" } }).length;
+  pm.send("crow:peer", { pad: "x".repeat(CAP - base) });
+  assert.equal(writes.length, 1, "at the cap: written");
+  assert.equal(Buffer.byteLength(writes[0]), CAP + 1, "the line plus its newline");
+  let err = null;
+  try { pm.send("crow:peer", { pad: "x".repeat(CAP - base + 1) }); } catch (e) { err = e; }
+  assert.ok(err instanceof PeerLineOverCapError, "a distinct refusal");
+  assert.ok(isPeerLineOverCap(err));
+  assert.equal(err.bytes, CAP + 1);
+  assert.equal(err.cap, CAP);
+  assert.equal(writes.length, 1, "nothing written for the over-cap frame");
+  assert.equal(isPeerLineOverCap(new Error("Not connected")), false);
 });
 
 test("an admitted line at the cap is delivered, with proof and the claimed instanceId", T, async (t) => {
@@ -181,13 +222,14 @@ test("an admitted line at the cap is delivered, with proof and the claimed insta
   assert.equal(R.closed, false, "still open");
 });
 
-test("CROW_PEER_LINE_MAX_BYTES lowers the post-admission cap", T, async (t) => {
+test("CROW_PEER_LINE_MAX_BYTES inside the clamp is honoured", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
-  const { pa, R } = await admittedRaw(t, A, B, { env: { CROW_PEER_LINE_MAX_BYTES: "2048" } });
-  R.write(dataLine(2048) + "\n");
-  assert.ok(await until(() => pa.peerData.length === 1, 5000), "a line at the lowered cap is delivered");
-  R.write("x".repeat(2049));
-  assert.equal(await closedWithin(R, 3000), true, "a line over the lowered cap is killed");
+  const LOW = CAP + 4096; // any value inside the clamp is honoured
+  const { pa, R } = await admittedRaw(t, A, B, { env: { CROW_PEER_LINE_MAX_BYTES: String(LOW) } });
+  R.write(dataLine(LOW) + "\n");
+  assert.ok(await until(() => pa.peerData.length === 1, 5000), "a line at the set cap is delivered");
+  R.write("x".repeat(LOW + 1));
+  assert.equal(await closedWithin(R, 3000), true, "a line over the set cap is killed");
   assert.equal(pa.peerData.length, 1);
 });
 
@@ -235,7 +277,7 @@ test("a sibling (instance) connection is exempt: one replicated entry far over t
   a.pairKeys.set(b.id, pairKey); b.pairKeys.set(a.id, pairKey);
 
   const node = (side) => {
-    const pm = new PeerManager(identity, { env: { CROW_PEER_LINE_MAX_BYTES: "4096" } });
+    const pm = new PeerManager(identity, { env: CAP_ENV });
     pm.p2pDisabled = true;
     pm.localInstanceId = side.id;
     wireContactBinding(pm, { db: side.db, localInstanceId: () => side.id });
@@ -247,7 +289,7 @@ test("a sibling (instance) connection is exempt: one replicated entry far over t
     return { pm, connected, keys };
   };
   const A = node(a), B = node(b);
-  assert.equal(A.pm.postAdmitLineMax, 4096);
+  assert.equal(A.pm.postAdmitLineMax, CAP);
   const [s1, s2] = await socketPair();
   const x = new NoiseSecretStream(true, s1), y = new NoiseSecretStream(false, s2);
   x.on("error", () => {}); y.on("error", () => {});
@@ -259,7 +301,7 @@ test("a sibling (instance) connection is exempt: one replicated entry far over t
 
   assert.ok(await until(() => A.connected.length === 1 && B.connected.length === 1, 8000), "siblings admitted");
   assert.ok(await until(() => A.keys.length === 1 && B.keys.length === 1, 5000), "feed keys both ways");
-  await writeAndEmit(a, 880001, "y".repeat(20_000));
+  await writeAndEmit(a, 880001, "y".repeat(CAP + 200_000));
   assert.ok(await until(() => hasMemory(b.db, 880001), 10_000), "the large entry replicates");
   await sleep(300);
   assert.equal(closed, false, "the sibling link stays open");
@@ -282,11 +324,11 @@ test("meta.instanceId is null when the claimed id is not in the enroll-id shape 
   assert.deepEqual(pa.peerData[0][2], { proof: "cb", instanceId: ok });
 });
 
-test("a trickled line: over the cap in 4 KiB writes is killed; at the cap it is delivered", { timeout: 60_000 }, async (t) => {
+test("a trickled line: over the cap in 64 KiB writes is killed; at the cap it is delivered", { timeout: 60_000 }, async (t) => {
   {
     const A = await makeSide(t, "A"), B = await makeSide(t, "B");
     const { pa, R } = await admittedRaw(t, A, B);
-    await trickle(R, dataLine(CAP), 4096);
+    await trickle(R, dataLine(CAP), 64 * 1024);
     await sleep(100);
     assert.equal(R.closed, false, "control: a partial line at the cap stays open");
     R.write("\n");
@@ -295,7 +337,7 @@ test("a trickled line: over the cap in 4 KiB writes is killed; at the cap it is 
   {
     const A = await makeSide(t, "A"), B = await makeSide(t, "B");
     const { pa, R } = await admittedRaw(t, A, B);
-    await trickle(R, "x".repeat(CAP + 1), 4096);
+    await trickle(R, "x".repeat(CAP + 1), 64 * 1024);
     assert.equal(await closedWithin(R, 3000), true, "the trickled over-cap line is killed");
     assert.deepEqual(pa.peerData, []);
   }

@@ -86,14 +86,37 @@ function computeTopic(myEd25519Pub, theirEd25519Pub) {
     .digest();
 }
 
-const POST_ADMIT_LINE_MAX_DEFAULT = 262_144;
+// The post-admission line cap: 32 MiB by default, CROW_PEER_LINE_MAX_BYTES
+// overrides, always clamped to [1 MiB, 128 MiB] so a typo cannot disable it.
+// Separate from the pre-admission caps (preAuthMaxBytes) and from the C2C
+// per-kind body caps (c2c/frames.js).
+export const PEER_LINE_MAX_DEFAULT = 32 * 1024 * 1024;
+export const PEER_LINE_MAX_MIN = 1024 * 1024;
+export const PEER_LINE_MAX_MAX = 128 * 1024 * 1024;
 
-/** CROW_PEER_LINE_MAX_BYTES when it is a positive integer, else 262144. */
-function postAdmitLineMaxFromEnv(env) {
-  const raw = env?.CROW_PEER_LINE_MAX_BYTES;
-  const n = typeof raw === "string" && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
-  return Number.isSafeInteger(n) && n > 0 ? n : POST_ADMIT_LINE_MAX_DEFAULT;
+const clampLineMax = (n) => Math.min(PEER_LINE_MAX_MAX, Math.max(PEER_LINE_MAX_MIN, n));
+
+/** CROW_PEER_LINE_MAX_BYTES (digits only) clamped to the bounds; anything else gives the default. */
+export function postAdmitLineMaxFromEnv(env) {
+  const raw = typeof env?.CROW_PEER_LINE_MAX_BYTES === "string" ? env.CROW_PEER_LINE_MAX_BYTES.trim() : "";
+  if (!/^\d+$/.test(raw)) return PEER_LINE_MAX_DEFAULT;
+  return clampLineMax(Number(raw)); // a huge digit string is Infinity or > max: clamped
 }
+
+/**
+ * Thrown by PeerManager.send() when the frame would be over the line cap. Nothing
+ * was written: callers mark the share 'failed' (never 'delivered').
+ */
+export class PeerLineOverCapError extends Error {
+  constructor(bytes, cap) {
+    super(`peer line over cap: ${bytes} bytes > ${cap}`);
+    this.name = "PeerLineOverCapError";
+    this.code = "PEER_LINE_OVER_CAP";
+    this.bytes = bytes;
+    this.cap = cap;
+  }
+}
+export const isPeerLineOverCap = (err) => err?.code === "PEER_LINE_OVER_CAP";
 
 export class PeerManager {
   /**
@@ -105,7 +128,8 @@ export class PeerManager {
    * @param {number} [opts.preAuthMaxBytes] bytes an unadmitted peer may send
    * @param {number} [opts.preAuthMs]       time an unadmitted peer may take
    * @param {number} [opts.postAdmitLineMax] bytes one line of an admitted peer
-   *   may reach (default 262144, or CROW_PEER_LINE_MAX_BYTES in opts.env)
+   *   may reach (default 32 MiB, or CROW_PEER_LINE_MAX_BYTES in opts.env;
+   *   always clamped to [1 MiB, 128 MiB])
    */
   constructor(identity, {
     env = process.env,
@@ -126,7 +150,7 @@ export class PeerManager {
     // contact connection (complete, or a partial one still waiting for its
     // newline) is held to this cap. Sibling connections are exempt (see
     // lineCapped in _handleConnection).
-    this.postAdmitLineMax = postAdmitLineMax;
+    this.postAdmitLineMax = Number.isFinite(postAdmitLineMax) ? clampLineMax(postAdmitLineMax) : PEER_LINE_MAX_DEFAULT;
     // PT-2a: how long a sibling that offered pair binding may take to send
     // its `pair-binding` frame once we have proven ourselves to it.
     this.pairBindingWaitMs = pairBindingWaitMs;
@@ -387,6 +411,15 @@ export class PeerManager {
     let buffer = "";
     let bufferBytes = 0;
     const kill = () => { buffer = ""; bufferBytes = 0; this._kill(conn, state); };
+    // An admitted contact's line over the cap: logged (size only, never the
+    // content, rate-limited per peer) and killed.
+    const overCap = (bytes) => {
+      const who = state.remoteCrowId || "?";
+      if (this._refusalLog.shouldLog(`line_over_cap:${who}`)) {
+        console.warn(`[peer-manager] contact line over cap ${who} ${bytes}`);
+      }
+      kill();
+    };
     conn.on("data", (data) => {
       if (state.refused || state.closed) return;
       const chunk = data.toString();
@@ -401,7 +434,10 @@ export class PeerManager {
       }
 
       for (const line of lines) {
-        if (lineCapped() && Buffer.byteLength(line) > this.postAdmitLineMax) { kill(); return; }
+        if (lineCapped()) {
+          const bytes = Buffer.byteLength(line);
+          if (bytes > this.postAdmitLineMax) { overCap(bytes); return; }
+        }
         if (capped()) {
           state.preBytes += Buffer.byteLength(line) + 1;
           if (state.preBytes > this.preAuthMaxBytes
@@ -419,7 +455,7 @@ export class PeerManager {
       if (capped()) {
         if (state.preBytes + bufferBytes > this.preAuthMaxBytes) kill();
       } else if (lineCapped() && bufferBytes > this.postAdmitLineMax) {
-        kill();
+        overCap(bufferBytes);
       }
     });
 
@@ -908,17 +944,19 @@ export class PeerManager {
   }
 
   /**
-   * Send data to a connected peer.
+   * Send data to a connected peer. A frame over the line cap is refused
+   * BEFORE anything is written (PeerLineOverCapError): the receiver would
+   * kill the link on it, and the item would be lost.
    */
   send(crowId, payload) {
     const peer = this.connections.get(crowId);
     if (!peer || !peer.authenticated) {
       throw new Error(`Not connected to ${crowId}`);
     }
-    peer.conn.write(JSON.stringify({
-      type: "data",
-      payload,
-    }) + "\n");
+    const line = JSON.stringify({ type: "data", payload });
+    const bytes = Buffer.byteLength(line);
+    if (bytes > this.postAdmitLineMax) throw new PeerLineOverCapError(bytes, this.postAdmitLineMax);
+    peer.conn.write(line + "\n");
   }
 
   /**
