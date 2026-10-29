@@ -124,6 +124,46 @@ export function extractUsageFromOpenAIResponse(rawText) {
 }
 
 /**
+ * Extract token usage from a captured Anthropic Messages response: a streamed
+ * SSE transcript (input tokens ride `message_start`.message.usage; the
+ * cumulative output count rides the last `message_delta`.usage, which newer
+ * API versions may also give input tokens on) or a whole non-streaming JSON
+ * body. Returns null when no usage is present. Used by the cloud door tap.
+ *
+ * @param {string} chunkText  the captured upstream body (or its head + tail)
+ * @returns {{input_tokens:number, output_tokens:number}|null}
+ */
+export function extractUsageFromAnthropicStream(chunkText) {
+  if (!chunkText || typeof chunkText !== "string") return null;
+  const num = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
+  try {
+    const obj = JSON.parse(chunkText);
+    if (obj && obj.usage && typeof obj.usage === "object") {
+      return { input_tokens: num(obj.usage.input_tokens) ?? 0, output_tokens: num(obj.usage.output_tokens) ?? 0 };
+    }
+  } catch {
+    // not one JSON body: fall through to SSE parsing
+  }
+  let input = null;
+  let output = null;
+  for (const line of chunkText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    let ev;
+    try { ev = JSON.parse(trimmed.slice(5).trim()); } catch { continue; }
+    if (ev?.type === "message_start" && ev.message?.usage) {
+      input = num(ev.message.usage.input_tokens) ?? input;
+      output = num(ev.message.usage.output_tokens) ?? output;
+    } else if (ev?.type === "message_delta" && ev.usage) {
+      input = num(ev.usage.input_tokens) ?? input;
+      output = num(ev.usage.output_tokens) ?? output;
+    }
+  }
+  if (input === null && output === null) return null;
+  return { input_tokens: input ?? 0, output_tokens: output ?? 0 };
+}
+
+/**
  * Load the currently-in-force price rules (effective_to IS NULL).
  *
  * @param {{execute:Function}} db  a libsql client

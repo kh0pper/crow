@@ -107,7 +107,7 @@ test("rejectFunneled middleware: private paths blocked with Funnel header", asyn
   const server = await startTestApp();
   try {
     const port = server.address().port;
-    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/dashboard/motioneye", "/llm/v1/chat/completions", "/llm/v1/models", "/llm/p/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/models", "/"]) {
+    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/dashboard/motioneye", "/llm/v1/chat/completions", "/llm/v1/models", "/llm/p/x/v1/chat/completions", "/llm/c/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/models", "/"]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }
@@ -125,10 +125,49 @@ test("/llm routers refuse Funnel themselves, even with CROW_DASHBOARD_PUBLIC=tru
   const server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
   try {
-    for (const path of ["/llm/v1/chat/completions", "/llm/p/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/v1/models"]) {
+    for (const path of ["/llm/v1/chat/completions", "/llm/p/x/v1/chat/completions", "/llm/c/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/v1/models"]) {
       const r = await request(server.address().port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, path);
     }
+  } finally {
+    server.close();
+    if (prev === undefined) delete process.env.CROW_DASHBOARD_PUBLIC; else process.env.CROW_DASHBOARD_PUBLIC = prev;
+  }
+});
+
+// Roles Phase 2 (cloud door): /llm/c is never public, and its own gate refuses
+// Funnel by name, before the token check, even with CROW_DASHBOARD_PUBLIC=true.
+test("/llm/c refuses Funnel and is not a public prefix", async () => {
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const p of ["/llm/c/x/v1/chat/completions", "/llm/c/x/v1/messages"]) {
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((x) => p.startsWith(x)), p);
+  }
+  const prev = process.env.CROW_DASHBOARD_PUBLIC;
+  process.env.CROW_DASHBOARD_PUBLIC = "true";
+  const { default: llmRouterRouter } = await import("../servers/gateway/routes/llm-router.js");
+  const app = express();
+  let tokenChecks = 0;
+  app.use(llmRouterRouter({
+    loadProvidersFn: () => ({ providers: {} }),
+    remoteAddressFn: () => "127.0.0.1",
+    cloudTokenAuthFn: async () => { tokenChecks++; return true; },
+  }));
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  try {
+    const r = await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port: server.address().port, path: "/llm/c/x/v1/chat/completions", method: "POST",
+        headers: { "tailscale-funnel-request": "?1", "content-type": "application/json", authorization: "Bearer t" } }, (res) => {
+        let body = "";
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+      });
+      req.on("error", reject);
+      req.end("{}");
+    });
+    assert.equal(r.status, 403);
+    assert.equal(JSON.parse(r.body).error.code, "FUNNEL_REFUSED");
+    assert.equal(tokenChecks, 0);
   } finally {
     server.close();
     if (prev === undefined) delete process.env.CROW_DASHBOARD_PUBLIC; else process.env.CROW_DASHBOARD_PUBLIC = prev;
