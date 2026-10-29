@@ -217,6 +217,26 @@ test("the bot catalog gives a Render add-on its AUTH_HEADER (I1)", () => {
   assert.deepEqual(servers.funkwhale.env, { FUNKWHALE_URL: "http://fw.example", CROW_HOME: home });
 });
 
+test("the bot catalog never renders a derived secret from the environment into a block", () => {
+  const dir = mkdtempSync(join(tmpdir(), "services-render-env-"));
+  const home = join(dir, ".crow");
+  mkdirSync(join(home, "bundles", "render"), { recursive: true });
+  mkdirSync(join(home, "data"), { recursive: true });
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+    render: { command: "npx", args: ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", "Authorization:${AUTH_HEADER}"] },
+  }));
+  const saved = process.env.RENDER_API_KEY;
+  process.env.RENDER_API_KEY = "test-token-11";
+  try {
+    const { servers } = crowServerCatalog(home);
+    const env = servers.render?.env || {};
+    assert.equal(env.AUTH_HEADER, undefined, "no Bearer header built from the environment");
+    assert.ok(!JSON.stringify(servers.render || {}).includes("test-token-11"), "the environment's key is not in the block");
+  } finally {
+    if (saved === undefined) delete process.env.RENDER_API_KEY; else process.env.RENDER_API_KEY = saved;
+  }
+});
+
 test("proxy start: env sources first, then backends, then add-ons; a service add-on with no fields is skipped", async () => {
   const proxy = await import("../servers/gateway/proxy.js");
   const dir = mkdtempSync(join(tmpdir(), "services-wiring-"));

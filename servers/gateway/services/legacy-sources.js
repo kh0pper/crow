@@ -125,7 +125,14 @@ export function isLegacyConfiguredAddon(id, entry, catalog = serviceCatalog(), e
 export function addonDerivedEnv(id, entryEnv, catalog = serviceCatalog(), env = process.env) {
   const service = catalog.find((s) => s.id === id);
   if (!service) return {};
-  return renderDerivedEnv(service, { ...env, ...(entryEnv || {}) });
+  const values = { ...env, ...(entryEnv || {}) };
+  const out = renderDerivedEnv(service, values);
+  // A derived key whose fields are not all set is left out: "Bearer " with no key is no header.
+  for (const [key, spec] of Object.entries(service.derivedEnv || {})) {
+    const names = [...String(spec.template).matchAll(/\$\{([A-Za-z0-9_]+)\}/g)].map((m) => m[1]);
+    if (names.some((n) => !values[n])) delete out[key];
+  }
+  return out;
 }
 
 /**

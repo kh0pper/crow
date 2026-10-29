@@ -345,9 +345,11 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // sessions wherever that pointed). CROW_HOME only: injecting CROW_DB_PATH
       // would trip touchesCrowDb() and apply the journal guard to bundles that
       // never open crow.db.
-      // A service add-on also gets its manifest's derived env (Render's AUTH_HEADER),
-      // rendered from the entry's env over the environment, as the child sees it.
-      const derived = addonDerivedEnv(id, addon.env, undefined, addonEnv);
+      // A service add-on also gets its manifest's derived env (Render's AUTH_HEADER), rendered
+      // from the entry's own env ONLY: those values are already in this block, so nothing new
+      // is written. A field the child would inherit from the environment is never rendered into
+      // the block (that would copy a gateway .env secret into the bot's MCP config).
+      const derived = addonDerivedEnv(id, addon.env, undefined, {});
       r.block.env = { ...(r.block.env || {}), ...derived, CROW_HOME: crowHome };
       // A bare command (uvx, uv, npx) is resolved to an absolute path here:
       // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
