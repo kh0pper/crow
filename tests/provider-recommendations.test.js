@@ -16,6 +16,7 @@ import {
   presetForRow,
   isRecommendationsStale,
   RECOMMENDATION_ROLES,
+  bareModelId,
 } from "../servers/shared/provider-recommendations.js";
 import { CORE_ROLES } from "../servers/shared/model-roles.js";
 
@@ -254,4 +255,50 @@ test("presetForRow", () => {
 test("stale", () => {
   assert.equal(isRecommendationsStale(new Date("2027-02-01")), true);
   assert.equal(isRecommendationsStale(new Date("2026-11-01")), false);
+});
+
+test("a pick honours its entry's kind: realtime voice models are never picked (F1)", () => {
+  // The voice role is the text LLM behind the voice router: a realtime model cannot serve it.
+  assert.equal(candidatePick("openai", "voice", { liveModelIds: null }), null);
+  assert.equal(candidatePick("google", "voice", { liveModelIds: null }), null);
+  assert.equal(candidatePick("openai", "voice", { liveModelIds: ["gpt-realtime-2.1-mini", "gpt-6-luna"] }), null);
+  assert.equal(candidatePick("anthropic", "voice").kind, "chat");
+  for (const presetId of PROVIDER_PRESETS.map((p) => p.id)) {
+    for (const roleId of RECOMMENDATION_ROLES) {
+      const p = candidatePick(presetId, roleId);
+      if (!p) continue;
+      const want = roleId === "embed" ? "embed" : roleId === "rerank" ? "rerank" : "chat";
+      assert.equal(p.kind, want, `${presetId} ${roleId}`);
+    }
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "crow-recs-kind-"));
+  const f = join(dir, "recs.json");
+  const e = (model_id, kind) => ({ model_id, id_verified: true, ...(kind ? { kind } : {}), status: "stable", retires: null });
+  writeFileSync(f, JSON.stringify({
+    schema_version: 1, accessed: "2026-10-28", review_by: "2027-01-28", source_notes: "x",
+    providers: { openai: { roles: {
+      voice: [e("rt", "realtime"), e("au", "audio"), e("lv", "live"), e("plain")],
+      everyday: [e("em", "embed"), e("ch", "chat")],
+      embed: [e("ch2", "chat"), e("em2", "embed")],
+      rerank: [e("em3", "embed"), e("rr", "rerank")],
+      quick: [e("rt2", "realtime")],
+    } } },
+  }));
+  const opts = { file: f };
+  // An entry with no kind counts as chat.
+  assert.equal(candidatePick("openai", "voice", {}, opts).model_id, "plain");
+  assert.equal(candidatePick("openai", "everyday", {}, opts).model_id, "ch");
+  assert.equal(candidatePick("openai", "embed", {}, opts).model_id, "em2");
+  assert.equal(candidatePick("openai", "rerank", {}, opts).model_id, "rr");
+  assert.equal(candidatePick("openai", "quick", {}, opts), null);
+});
+
+test("a listing's models/<id> ids match the bare recommended ids (F2, Google)", () => {
+  const listing = ["models/gemini-3.8-flash", "models/gemini-4-argon", "models/gemini-embedding-2"];
+  assert.equal(candidatePick("google", "everyday", { liveModelIds: listing }).model_id, "gemini-3.8-flash");
+  assert.equal(candidatePick("google", "embed", { liveModelIds: listing }).model_id, "gemini-embedding-2");
+  assert.equal(bareModelId("models/gemini-3.8-flash"), "gemini-3.8-flash");
+  assert.equal(bareModelId("openai/gpt-oss-120b"), "openai/gpt-oss-120b");
+  assert.equal(bareModelId("models/"), "models/");
 });

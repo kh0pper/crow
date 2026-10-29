@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/provider-presets.js";
-import { recommendedFor, candidatePick, presetForRow, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { recommendedFor, candidatePick, presetForRow, entryKind, bareModelId, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { upsertProvider, listProvidersAll } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { isDoorUrl } from "../models/door-resolve.js";
@@ -105,14 +105,23 @@ function codeForError(err) {
   return "unreachable";
 }
 
-/** Model ids from an OpenAI-style `{data:[{id}]}`, an Ollama-style `{models:[{name}]}`, or a bare array. */
+/**
+ * Model ids from an OpenAI-style `{data:[{id}]}`, an Ollama-style
+ * `{models:[{name}]}`, or a bare array. A leading "models/" is dropped
+ * (Google's OpenAI-compatible listing), and an id is listed once.
+ */
 function idsFromListing(body) {
   const list = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : null;
   if (!list) return null;
   const ids = [];
+  const seen = new Set();
   for (const m of list) {
-    const id = typeof m === "string" ? m : (m?.id ?? m?.name);
-    if (typeof id === "string" && id && id.length <= MAX_MODEL_ID_LEN && /^[^\x00-\x1f\x7f]+$/.test(id)) ids.push(id);
+    const raw = typeof m === "string" ? m : (m?.id ?? m?.name);
+    const id = bareModelId(raw);
+    if (typeof id === "string" && id && id.length <= MAX_MODEL_ID_LEN && /^[^\x00-\x1f\x7f]+$/.test(id) && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
   }
   return ids;
 }
@@ -225,18 +234,22 @@ export function providerIdFor(presetId, { rows = [], baseUrl, apiKey } = {}) {
 /** A models[] entry for one id, enriched from the recommendations when the file lists it. */
 export function modelEntryFor(presetId, modelId) {
   const entry = { id: modelId };
-  let embed = false, rerank = false, vision = false, context = null;
+  let embed = false, rerank = false, chat = false, other = null, vision = false, context = null;
   for (const role of RECOMMENDATION_ROLES) {
     for (const e of recommendedFor(presetId, role)) {
       if (e.model_id !== modelId) continue;
-      if (e.kind === "embed") embed = true;
-      if (e.kind === "rerank") rerank = true;
-      if (role === "vision") vision = true;
+      const kind = entryKind(e);
+      if (kind === "embed") embed = true;
+      else if (kind === "rerank") rerank = true;
+      else if (kind === "chat") chat = true;
+      else other ??= kind; // realtime, audio, live: never a chat pick
+      if (role === "vision" && kind === "chat") vision = true;
       if (context == null && Number.isFinite(e.context) && e.context > 0) context = e.context;
     }
   }
   if (embed) entry.task = "embedding";
   else if (rerank) entry.task = "rerank";
+  else if (other && !chat) entry.task = other;
   if (vision) entry.input = ["text", "image"];
   if (context != null) entry.contextWindow = context;
   return entry;

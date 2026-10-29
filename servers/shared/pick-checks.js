@@ -39,3 +39,6 @@ export async function pickCheckOf(db, providerId, modelId, opts = {}) {
 
 /** The check kind a role's pick is stored under: embed picks are probed as embeddings, the rest as chat. */
 export const checkKindFor = (roleId) => (roleId === "embed" ? "embed" : "chat");
+
+/** The entry kinds "Test the picks" has a probe for (an entry with no kind is chat). Rerank and the rest stay "not tested". */
+export const isProbeKind = (kind) => (kind == null || kind === "" ? true : kind === "chat" || kind === "embed");

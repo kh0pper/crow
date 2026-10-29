@@ -20,6 +20,28 @@ export const RECOMMENDATION_ROLES = Object.freeze([
   "coordinator", "quick", "deep", "everyday", "expert", "critic", "vision", "voice", "embed", "rerank",
 ]);
 
+/**
+ * The entry kind each role takes. Chat-family roles take "chat" (or an entry
+ * with no kind); embed and rerank take only their own kind. Realtime, audio
+ * and live kinds fit no role: Crow's voice role is the text LLM behind the
+ * voice router, which a realtime model does not serve.
+ */
+export const entryKind = (e) => (typeof e?.kind === "string" && e.kind ? e.kind : "chat");
+export function kindFitsRole(roleId, kind) {
+  const k = typeof kind === "string" && kind ? kind : "chat";
+  if (roleId === "embed") return k === "embed";
+  if (roleId === "rerank") return k === "rerank";
+  return k === "chat";
+}
+
+/**
+ * A listed model id without a leading "models/" (Google's OpenAI-compatible
+ * listing may answer "models/<id>", while requests and the file use the bare id).
+ */
+export function bareModelId(id) {
+  return typeof id === "string" && id.startsWith("models/") && id.length > 7 ? id.slice(7) : id;
+}
+
 const EMPTY = Object.freeze({ schema_version: 1, accessed: null, review_by: null, source_notes: "", providers: {} });
 const cache = new Map(); // path -> {mtimeMs, data}
 
@@ -55,16 +77,18 @@ function validDay(v) {
 
 /**
  * The entry "Use the recommended models" would choose, or null.
- * Eligible: `id_verified`, `retires` null or after `review_by`, and present in
- * `liveModelIds` when a listing exists (null/undefined = no listing). The first
+ * Eligible: a kind the role takes (`kindFitsRole`), `id_verified`, `retires`
+ * null or after `review_by`, and present in `liveModelIds` when a listing
+ * exists (null/undefined = no listing; "models/<id>" matches "<id>"). The first
  * eligible `stable` entry wins; only when there is none does the first eligible
  * `preview` entry come back, flagged `preview: true`.
  */
 export function candidatePick(presetId, roleId, { liveModelIds = null } = {}, opts) {
   const reviewBy = validDay(loadRecommendations(opts).review_by);
-  const live = Array.isArray(liveModelIds) ? new Set(liveModelIds) : null;
+  const live = Array.isArray(liveModelIds) ? new Set(liveModelIds.map(bareModelId)) : null;
   const eligible = recommendedFor(presetId, roleId, opts).filter((e) =>
-    e.id_verified === true
+    kindFitsRole(roleId, e.kind)
+    && e.id_verified === true
     && (e.retires == null || (reviewBy && validDay(e.retires) && e.retires > reviewBy))
     && (!live || live.has(e.model_id)));
   const stable = eligible.find((e) => e.status === "stable");

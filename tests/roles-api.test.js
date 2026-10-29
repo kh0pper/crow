@@ -612,6 +612,35 @@ test("GET /api/providers/:id/plan: each pick with its check, embed read as embed
   }, addOpts());
 });
 
+test("realtime voice models are never recommended, and /plan marks only probeable kinds probed (F1)", async () => {
+  const listing = ["gpt-realtime-2.1-mini", "gpt-live-1", "gpt-6-luna", "gpt-6.1-sol", "text-embedding-3-large"];
+  const testFn = async () => ({ ok: true, code: "ok", status: 200, models: listing, host: "api.openai.com", baseUrl: "https://api.openai.com/v1" });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", { body: { presetId: "openai", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(r.status, 200);
+    assert.ok(r.json.recommended.includes("gpt-6-luna"));
+    assert.ok(!r.json.recommended.includes("gpt-realtime-2.1-mini"));
+    assert.ok(!r.json.recommended.includes("gpt-live-1"));
+  }, addOpts({ testFn }));
+  await db.execute({
+    sql: "INSERT INTO providers (id, base_url, api_key, host, description, models, disabled) VALUES (?,?,?,?,?,?,0)",
+    args: ["cloud-o", "https://api.openai.com/v1", SECRET, "cloud", "OpenAI", JSON.stringify(listing.map((id) => ({ id })))],
+  });
+  await insOr("cloud-or", [{ id: "anthropic/claude-haiku-5.5" }, { id: "cohere/rerank-4-fast" }]);
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const o = (await call(s, "GET", "/api/providers/cloud-o/plan")).json;
+    assert.ok(!o.picks.some((p) => /realtime|live/.test(p.modelId)), "no realtime pick");
+    const voice = o.picks.find((p) => p.roleId === "voice");
+    assert.equal(voice, undefined, "OpenAI recommends no text model for voice");
+    const or = (await call(s, "GET", "/api/providers/cloud-or/plan")).json;
+    for (const p of [...o.picks, ...or.picks]) {
+      assert.equal(p.probed, p.kind === "chat" || p.kind === "embed", `${p.roleId} ${p.kind}`);
+    }
+    assert.equal(or.picks.find((p) => p.roleId === "rerank").probed, false);
+  }, addOpts());
+});
+
 test("recommended: preview then apply fills a role nothing runs today", async () => {
   await insOr("cloud-or", [{ id: "anthropic/claude-opus-5.5" }]);
   await raw("provider_pick_checks", JSON.stringify({ "cloud-or": { "anthropic/claude-opus-5.5|chat": { ok: true, code: "ok", at: AT } } }));

@@ -143,6 +143,35 @@ test("big list capped at 2,000 ids", async () => {
   assert.equal(out.truncated, true);
 });
 
+test("a Google-shaped listing gives bare model ids (F2)", async () => {
+  const listing = { object: "list", data: [
+    { id: "models/gemini-3.8-flash", object: "model" }, { id: "models/gemini-embedding-2", object: "model" },
+    { id: "gemini-3.8-flash", object: "model" }, { id: "plain-id", object: "model" },
+  ] };
+  const requestFn = stubRequest({ "*": () => reply(200, listing) });
+  const out = await testProviderKey({ presetId: "google", apiKey: "fixture-key-g" }, { requestFn });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.models, ["gemini-3.8-flash", "gemini-embedding-2", "plain-id"]);
+});
+
+test("modelEntryFor writes a task for every non-chat kind; a saved realtime model is not a chat pick (F1)", async () => {
+  assert.equal(modelEntryFor("openai", "gpt-realtime-2.1-mini").task, "realtime");
+  assert.equal(modelEntryFor("google", "gemini-3.8-live").task, "realtime");
+  assert.equal(modelEntryFor("openai", "gpt-6.1-sol").task, undefined);
+  const { listRolePicks } = await import("../servers/shared/role-picks.js");
+  const models = [modelEntryFor("openai", "gpt-realtime-2.1-mini"), modelEntryFor("openai", "gpt-6-luna")];
+  const providers = [{ id: "cloud-a", baseUrl: "https://api.openai.com/v1", host: "cloud", disabled: false, models }];
+  const ctx = {
+    bindings: {}, customDefs: {}, providers, models: { providers: { "cloud-a": { models } } },
+    catalog: [], ownInstanceId: () => "i-test",
+  };
+  for (const roleId of ["voice", "everyday", "quick"]) {
+    const keys = listRolePicks(roleId, { ctx, ownAddrs: new Set() }).map((p) => p.key);
+    assert.ok(keys.includes("cloud-a/gpt-6-luna"), roleId);
+    assert.ok(!keys.includes("cloud-a/gpt-realtime-2.1-mini"), roleId);
+  }
+});
+
 test("providerIdFor: free id, same account reuses, another account gets -2", () => {
   const rows = [{ id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "fixture-key-a" }];
   assert.deepEqual(providerIdFor("anthropic", { rows, baseUrl: "https://api.anthropic.com", apiKey: "k" }), { id: "anthropic", reuse: false });

@@ -9,10 +9,10 @@
  * reduced to a short code.
  */
 import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/provider-presets.js";
-import { candidatePick, presetForRow, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { candidatePick, presetForRow, entryKind, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { safeRequest, readJson } from "../models/safe-upstream.js";
-import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf } from "../../shared/pick-checks.js";
+import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf, isProbeKind } from "../../shared/pick-checks.js";
 
 // The read side lives in pick-checks.js (no request path); re-exported here for existing callers.
 export { PICK_CHECKS_KEY, pickCheckOf };
@@ -112,7 +112,7 @@ async function runProbes(db, providerId, {
   for (const roleId of roles) {
     const pick = candidatePick(presetId, roleId, { liveModelIds }, recOpts);
     // Rerank has no probe shape; it stays "not tested".
-    if (pick && (pick.kind === "chat" || pick.kind === "embed")) picks.push({ roleId, modelId: pick.model_id, kind: pick.kind });
+    if (pick && isProbeKind(pick.kind)) picks.push({ roleId, modelId: pick.model_id, kind: entryKind(pick) });
   }
   const done = new Map(); // `${kind}:${modelId}` -> result
   const out = {};

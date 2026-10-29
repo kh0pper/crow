@@ -40,7 +40,7 @@ import { getOwnAddresses } from "../../shared/locality.js";
 import { loadRoleContext } from "../../shared/model-roles-store.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
 import { listRolePicks, providerLabel } from "../../shared/role-picks.js";
-import { readPickChecks, pickCheckOf, checkKindFor } from "../../shared/pick-checks.js";
+import { readPickChecks, pickCheckOf, checkKindFor, isProbeKind } from "../../shared/pick-checks.js";
 import { candidatePick, presetForRow, isRecommendationsStale, loadRecommendations, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { friendlyModel } from "../dashboard/shared/bot-display.js";
 import { testProviderKey, addProvider, planRecommended, combinedPreview, applyRecommended } from "../ai/add-provider.js";
@@ -388,7 +388,7 @@ export default function rolesApiRouter({
     const opts = planOpts(req);
     const plan = await planRecommended(db, row.id, opts);
     // Each role's candidate pick and its stored check, for the sheet. Only the
-    // row's saved (ticked) models are candidates; rerank is never probed.
+    // row's saved (ticked) models are candidates; only chat and embed picks are probed.
     const presetId = presetForRow(row);
     const listed = listedIds(row);
     const ctx = await loadCtx(db);
@@ -398,14 +398,15 @@ export default function rolesApiRouter({
         const p = candidatePick(presetId, roleId, { liveModelIds: listed.length ? listed : null }, recOpts);
         if (!p?.model_id) continue;
         const key = `${row.id}/${p.model_id}`;
-        const check = p.kind === "rerank"
+        const probed = isProbeKind(p.kind);
+        const check = !probed
           ? null
           : await pickCheckOf(db, row.id, p.model_id, { kind: checkKindFor(roleId), now: opts.now, recOpts });
         picks.push({
           roleId, modelId: p.model_id, key, kind: p.kind,
           label: friendlyModel(key, ctx.providers) || p.model_id,
           providerLabel: providerLabel(row.id, ctx.providers),
-          probed: p.kind !== "rerank",
+          probed,
           check: check ? { ok: check.ok, code: check.code, at: typeof check.at === "string" ? check.at : null } : null,
         });
       }
