@@ -140,7 +140,7 @@ Al visor VNC solo se llega a través del gateway de Crow, con tu sesión del das
 - **Embebido**: en la pestaña Status del panel Browser (iframe), en el recuadro del navegador en vivo y en la hoja **Tomar el control** de un chat
 - **Vista completa**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (mismo HTTPS que tu dashboard)
 
-El visor se conecta solo: no hay una contraseña de VNC aparte. Dentro del contenedor, x11vnc (puerto 5900) y noVNC (puerto 6080) escuchan solo en `127.0.0.1`, y el contenedor se detiene al arrancar si cualquiera de los dos se puede alcanzar en otra dirección. Tu inicio de sesión de Crow es la única credencial, así que no hace falta abrir puertos en el firewall y los puertos directos no se pueden alcanzar desde otro dispositivo.
+El visor se conecta solo: no hay una contraseña de VNC aparte. La pantalla en sí (x11vnc) no está en ningún puerto de red: escucha solo en un socket unix, accesible solo para root, dentro del contenedor. noVNC (puerto 6080) escucha solo en `127.0.0.1` y solo conecta un visor a ese socket con una clave por instancia que Crow genera al instalar (`CROW_BROWSER_VNC_TOKEN` en el `.env` del bundle) y que solo usa el gateway de Crow: la añade de su lado, después de comprobar tu sesión y que la petición viene de la propia página del dashboard. Ninguna página, enlace ni registro la contiene, así que otro programa o una página web en la misma máquina que llegue al puerto 6080 no obtiene ni imagen ni control. El contenedor se detiene al arrancar si la pantalla está en algún puerto TCP o si noVNC se puede alcanzar en una dirección que no sea loopback.
 
 ## Contenedor Docker
 
@@ -175,6 +175,6 @@ La extensión Browser Automation incluye una skill para declarar impuestos vía 
 ## Seguridad
 
 - El **puerto CDP (9222)** se vincula solo a `127.0.0.1`
-- El **VNC** (x11vnc en 5900, noVNC en 6080) se vincula solo a `127.0.0.1`, lo que se comprueba al arrancar el contenedor, y se sirve mediante proxy a través del gateway con autenticación de sesión
+- **VNC**: x11vnc está en un socket unix dentro del contenedor (sin puerto TCP); noVNC (6080) se vincula solo a `127.0.0.1` y necesita la clave por instancia que solo añade el gateway, tras comprobar la sesión y el mismo origen
 - **Ningún puerto expuesto** a la red — todo pasa por el HTTPS del gateway
 - Sin contraseña de VNC: el inicio de sesión del dashboard es la puerta. Si una instalación anterior tiene `CROW_BROWSER_VNC_PASSWORD` en el `.env` del bundle, se ignora

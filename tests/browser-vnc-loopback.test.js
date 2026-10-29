@@ -27,18 +27,45 @@ function command(name) {
   return lines[0].trim();
 }
 
-test("x11vnc listens on loopback only, with no password and no nag", () => {
+test("x11vnc serves RFB on a unix socket only: no TCP port (v4 or v6), no password", () => {
   const x = command("x11vnc");
-  assert.match(x, /\s-localhost(\s|$)/, "-localhost");
+  assert.match(x, /\s-unixsock "\$RFB_SOCK"/, "-unixsock");
+  assert.match(x, /\s-rfbport 0\s/, "-rfbport 0: no IPv4 listener");
+  assert.match(x, /\s-rfbportv6 0\s/, "-rfbportv6 0: no IPv6 listener");
+  assert.match(x, /\s-noipv6(\s|$)/);
   assert.match(x, /\s-nopw(\s|$)/, "-nopw");
-  assert.match(x, /\s-rfbport "\$\{RFB_PORT\}"/);
   assert.doesNotMatch(x, /-passwd|-rfbauth|-usepw|-passwdfile/, "no VNC password of any kind");
+  assert.match(CODE, /^VNC_DIR=\/run\/crow-vnc$/m);
+  assert.match(CODE, /^RFB_SOCK="\$\{VNC_DIR\}\/rfb\.sock"$/m);
+  assert.match(CODE, /mkdir -m 700 "\$VNC_DIR"/, "a root-only directory");
+  assert.match(CODE, /chmod 600 "\$RFB_SOCK"/, "a root-only socket");
+  assert.doesNotMatch(CODE, /RFB_PORT/, "no RFB TCP port anywhere");
 });
 
-test("websockify binds 127.0.0.1 and forwards to the loopback RFB port", () => {
+test("websockify binds 127.0.0.1 and reaches RFB only through the token file (Host-header token)", () => {
   const w = command("websockify");
-  assert.match(w, /\s"127\.0\.0\.1:\$\{NOVNC_PORT\}"\s+"127\.0\.0\.1:\$\{RFB_PORT\}"/);
-  assert.doesNotMatch(w, /\s"?\$\{NOVNC_PORT\}"?\s/, "never a bare port (that is every interface)");
+  assert.match(w, /--token-plugin TokenFile --token-source "\$TOKEN_FILE"/);
+  assert.match(w, /\s--host-token\s/);
+  assert.match(w, /\s"127\.0\.0\.1:\$\{NOVNC_PORT\}"\s*&$/, "127.0.0.1 only, and no fixed target");
+  assert.doesNotMatch(w, /--unix-target|127\.0\.0\.1:\$\{RFB/, "no target reachable without a token");
+  assert.match(CODE, /printf '%s: unix_socket:%s\\n' "\$VNC_TOKEN_VALUE" "\$RFB_SOCK" > "\$TOKEN_FILE"/, "token → the socket");
+  assert.match(CODE, /\( umask 077; printf/, "the token file is written 0600");
+});
+
+test("the token: required and well-formed, out of the environment before any child starts, never printed", () => {
+  const unset = CODE.indexOf("unset VNC_TOKEN\n");
+  assert.ok(unset > -1);
+  for (const child of ["Xvfb \":", "x11vnc -display", "websockify --web", "--remote-debugging-port"]) {
+    assert.ok(unset < CODE.indexOf(child), "unset before " + child);
+  }
+  assert.ok(CODE.indexOf("unset VNC_TOKEN_VALUE") < CODE.indexOf("Xvfb \":"), "the copy is dropped too");
+  assert.match(CODE, /\[\[ "\$VNC_TOKEN_VALUE" =~ \^\[A-Za-z0-9_-\]\{32,256\}\$ \]\]/);
+  assert.match(CODE, /die "VNC_TOKEN is missing or malformed/);
+  for (const line of CODE.split("\n")) {
+    // Only the printf that writes the token file (redirected into it) may name the value.
+    if (/> "\$TOKEN_FILE"/.test(line)) continue;
+    if (/\b(log|echo|die|printf)\b/.test(line)) assert.doesNotMatch(line, /\$\{?VNC_TOKEN/, "never printed: " + line.trim());
+  }
 });
 
 test("the entrypoint no longer needs VNC_PASSWORD, and an old one is ignored without printing it", () => {
@@ -47,16 +74,15 @@ test("the entrypoint no longer needs VNC_PASSWORD, and an old one is ignored wit
   assert.doesNotMatch(CODE, /-passwd/);
 });
 
-test("both VNC ports are checked for loopback-only listeners before Chromium starts", () => {
-  const rfb = CODE.indexOf('require_loopback "${RFB_PORT}"');
+test("before Chromium starts: x11vnc owns no TCP listener, noVNC listens on loopback only", () => {
+  const rfb = CODE.indexOf('no_tcp_listeners "$X11VNC_PID" /proc/net/tcp /proc/net/tcp6');
   const web = CODE.indexOf('require_loopback "${NOVNC_PORT}"');
   const chrome = CODE.indexOf("--remote-debugging-port");
-  assert.ok(rfb > -1, "RFB port checked");
-  assert.ok(web > -1, "noVNC port checked");
+  assert.ok(rfb > -1 && web > -1);
   assert.ok(rfb < chrome && web < chrome, "before Chromium launches");
   assert.ok(CODE.indexOf("x11vnc -display") < rfb, "after x11vnc starts");
   assert.ok(CODE.indexOf("websockify --web") < web, "after websockify starts");
-  // A failed check takes the container down: require_loopback ends in die.
+  assert.match(CODE.slice(rfb, rfb + 200), /\|\| die "x11vnc is listening on a TCP port/);
   const fn = CODE.slice(CODE.indexOf("require_loopback() {"), CODE.indexOf("\n}\n", CODE.indexOf("require_loopback() {")));
   assert.match(fn, /die /, "a non-loopback listener is fatal");
   assert.match(fn, /\/proc\/net\/tcp6?/, "reads the kernel's socket tables");
@@ -104,8 +130,10 @@ test("loopback_only: passes only when the port has listeners and every one is lo
 
 // ---- compose, manifest, env template ---------------------------------------
 
-test("compose passes no VNC password, and its volume, container name and project name are unchanged", () => {
+test("compose passes the token (required), no VNC password, and its downloads mount, names and networking are unchanged", () => {
   assert.doesNotMatch(COMPOSE, /VNC_PASSWORD/);
+  assert.match(COMPOSE, /^\s+- VNC_TOKEN=\$\{CROW_BROWSER_VNC_TOKEN:\?[^}]+\}$/m, "required: compose refuses to start without it");
+  assert.doesNotMatch(COMPOSE, /RFB_PORT/);
   const volumes = COMPOSE.split("\n").filter((l) => /^\s+- \$\{CROW_HOME/.test(l));
   assert.deepEqual(volumes.map((l) => l.trim()), [
     "- ${CROW_HOME:?CROW_HOME is required so each instance writes downloads to its own directory}/browser-downloads:/downloads",
@@ -120,7 +148,15 @@ test("compose passes no VNC password, and its volume, container name and project
 test("the manifest declares no VNC password and says the viewer is loopback-only behind sign-in", () => {
   assert.equal(MANIFEST.version, "1.3.12");
   assert.doesNotMatch(JSON.stringify(MANIFEST), /VNC_PASSWORD/);
-  assert.ok(!(MANIFEST.requires?.env || []).length, "nothing required at install");
+  assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN"]);
+  const tok = MANIFEST.env_vars.find((v) => v.name === "CROW_BROWSER_VNC_TOKEN");
+  assert.equal(tok.generate, "hex32", "Crow generates 32 random bytes per install");
+  assert.equal(tok.secret, true);
+  assert.equal(tok.propagate, false, "never copied into the gateway .env");
+  assert.ok(!tok.keychain, "not a human credential: never shown in Settings → Passwords");
+  assert.ok(!MANIFEST.server.envKeys.includes("CROW_BROWSER_VNC_TOKEN"), "never handed to the MCP server (a bot's process)");
+  assert.equal(MANIFEST.webUI.wsHostTokenEnv, "CROW_BROWSER_VNC_TOKEN", "the gateway proxy adds it");
+  assert.ok(!MANIFEST.ports.includes(5900), "no RFB port");
   for (const lang of ["en", "es"]) {
     const msg = MANIFEST.install_consent_messages[lang];
     assert.match(msg, /127\.0\.0\.1/);

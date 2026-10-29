@@ -21,7 +21,7 @@ Match effort to the target. Don't open a browser to read an API; don't fight a p
 ## Setup
 
 1. `crow_browser_launch` — starts/connects the container and returns the viewer's path on the Crow dashboard (`vnc_url`). (Pass `restart: true` to recycle a stuck browser; pass `proxy_url` to route through a proxy — see Escalation.)
-2. The user watches in the Browser panel or the live browser tile in your chat. The viewer is only reachable through the signed-in Crow dashboard (`/proxy/browser/vnc.html`); its VNC ports listen on 127.0.0.1 only, so never send a `localhost` VNC address.
+2. The user watches in the Browser panel or the live browser tile in your chat. The viewer is only reachable through the signed-in Crow dashboard (`/proxy/browser/vnc.html`); noVNC listens on 127.0.0.1 only and needs a key only the gateway holds, so never send a `localhost` VNC address.
 3. `crow_browser_status` — check container + CDP health any time.
 
 ## Tool reference

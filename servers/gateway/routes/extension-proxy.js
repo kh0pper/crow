@@ -102,6 +102,9 @@ export function getProxiedExtensions(home = CROW_HOME) {
           // backend. Never a path the manifest can point outside CROW_HOME
           // — see readAuthToken().
           authTokenFile: manifest.webUI.authTokenFile || null,
+          // A key in this bundle's own .env holding a WebSocket token the
+          // backend requires as its Host header (websockify --host-token).
+          wsHostTokenEnv: WS_TOKEN_ENV_RE.test(String(manifest.webUI.wsHostTokenEnv || "")) ? manifest.webUI.wsHostTokenEnv : null,
         });
       }
     }
@@ -109,6 +112,47 @@ export function getProxiedExtensions(home = CROW_HOME) {
   } catch {
     return [];
   }
+}
+
+const WS_TOKEN_ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const WS_TOKEN_RE = /^[A-Za-z0-9_-]{32,256}$/;
+
+/**
+ * The WebSocket token a bundle's backend requires, from that bundle's own
+ * `.env` (`webUI.wsHostTokenEnv` names the key), or null.
+ *
+ * The browser bundle's noVNC (websockify --host-token) connects a WebSocket
+ * to RFB only when the upgrade's Host header is this per-instance token, so
+ * a local process or a web page that reaches 127.0.0.1:<noVNC port> directly
+ * gets nothing. The gateway adds it server-side (proxyReqWs below), after
+ * the session check: no page, script or URL ever carries it. Read per
+ * upgrade (lazy), so a token added to the .env needs no gateway restart.
+ * A value that is not a plain token is refused, never sent.
+ */
+export function readWsHostToken(bundleId, envKey, home = CROW_HOME) {
+  if (!envKey || !WS_TOKEN_ENV_RE.test(envKey)) return null;
+  const v = String(readBundleEnv(bundleId, home)[envKey] || "").trim();
+  return WS_TOKEN_RE.test(v) ? v : null;
+}
+
+/**
+ * Defence in depth for a token-carrying upgrade: it must come from a page on
+ * the dashboard's own origin. The Origin header (always sent by browsers on a
+ * WebSocket) must name the host the request was sent to: Host, or the
+ * X-Forwarded-Host a same-box proxy (Tailscale Serve) adds. A missing or
+ * foreign Origin is refused. The session check still runs after this.
+ */
+export function upgradeFromOwnOrigin(req) {
+  const h = req?.headers || {};
+  const raw = Array.isArray(h.origin) ? h.origin[0] : h.origin;
+  if (typeof raw !== "string" || !raw) return false;
+  let origin;
+  try { origin = new URL(raw); } catch { return false; }
+  if (origin.protocol !== "https:" && origin.protocol !== "http:") return false;
+  const asked = [h.host, ...String(h["x-forwarded-host"] || "").split(",")]
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter(Boolean);
+  return asked.includes(origin.host.toLowerCase());
 }
 
 /**
@@ -254,9 +298,17 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         },
         // Same injection for the websocket upgrade, which never passes
         // through the `proxyReq` hook — http-proxy emits `proxyReqWs` for it.
+        // ONE handler (a second `proxyReqWs` key would silently replace this).
         proxyReqWs: (proxyReq) => {
           const token = readAuthToken(ext.authTokenFile);
           if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
+          // The WebSocket token (readWsHostToken): the upstream Host on the
+          // upgrade only, after setupWebSocket's origin and session checks.
+          // Without one the backend refuses the WebSocket (an honest failure).
+          if (ext.wsHostTokenEnv) {
+            const wsToken = readWsHostToken(ext.id, ext.wsHostTokenEnv);
+            if (wsToken) proxyReq.setHeader("Host", wsToken);
+          }
         },
         proxyRes: (proxyRes) => {
           // Allow embedding in iframes (needed for VNC, MinIO console)
@@ -315,8 +367,14 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
     if (proxyInstances.length === 0) return;
 
     server.on("upgrade", (req, socket, head) => {
-      for (const { proxyPath, proxyMiddleware } of proxyInstances) {
+      for (const { ext, proxyPath, proxyMiddleware } of proxyInstances) {
         if (req.url?.startsWith(proxyPath)) {
+          // A token-carrying upgrade only from a page on the dashboard's own origin.
+          if (ext.wsHostTokenEnv && !upgradeFromOwnOrigin(req)) {
+            socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+            socket.destroy();
+            return;
+          }
           // W2-1: upgrades bypass Express, so enforce dashboard auth here.
           authorizeExtensionUpgrade(req).then((ok) => {
             if (!ok) {

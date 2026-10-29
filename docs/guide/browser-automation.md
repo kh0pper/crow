@@ -140,7 +140,7 @@ The VNC viewer is reached only through the Crow gateway, behind your dashboard s
 - **Embedded**: In the Browser panel's Status tab (iframe), the live browser tile, and the **Take over** sheet in a chat
 - **Full view**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (same HTTPS as your dashboard)
 
-The viewer connects on its own: there is no separate VNC password. Inside the container, x11vnc (port 5900) and noVNC (port 6080) listen on `127.0.0.1` only, and the container stops at startup if either one is reachable on any other address. Your Crow sign-in is the only credential, so no firewall ports need to be opened, and the raw ports cannot be reached from another device.
+The viewer connects on its own: there is no separate VNC password. The screen itself (x11vnc) is not on any network port: it listens only on a root-only unix socket inside the container. noVNC (port 6080) listens on `127.0.0.1` only, and connects a viewer to that socket only with a per-instance key that Crow generates at install (`CROW_BROWSER_VNC_TOKEN` in the bundle's `.env`) and that only the Crow gateway uses: it adds the key on its side, after checking your sign-in and that the request comes from the dashboard's own page. No page, link or log ever contains it, so another program or a web page on the same machine that reaches port 6080 gets no picture and no control. The container stops at startup if the screen is on any TCP port or noVNC is reachable on a non-loopback address.
 
 ## Docker Container
 
@@ -175,6 +175,6 @@ The Browser Automation extension includes a skill for filing taxes via IRS Free 
 ## Security
 
 - **CDP port (9222)** binds to `127.0.0.1` only
-- **VNC** (x11vnc on 5900, noVNC on 6080) binds to `127.0.0.1` only, checked at container start, and is proxied through the gateway with session authentication
+- **VNC**: x11vnc is on a unix socket inside the container (no TCP port); noVNC (6080) binds to `127.0.0.1` only and needs the per-instance key that only the gateway adds, after the session and same-origin checks
 - **No ports exposed** to the network — everything goes through the gateway's HTTPS
 - No VNC password: the dashboard sign-in is the gate. An older install's `CROW_BROWSER_VNC_PASSWORD` in the bundle's `.env` is ignored
