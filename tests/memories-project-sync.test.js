@@ -74,6 +74,16 @@ test("outbound nulls project_id and carries project_uuid; the transform is pure"
     assert.equal(sent.row.project_id, null, "project_id is local: null on the wire");
     assert.equal(sent.row.project_uuid, U_SHARED, "project_uuid rides as is");
     assert.equal(row.project_id, 10, "the caller's row is not mutated");
+
+    // A null-uuid memory (every ordinary memory) carries no project_uuid key.
+    const plain = { id: 8, content: "plain", project_id: null, project_uuid: null };
+    await a.db.execute("INSERT INTO memories (id, content) VALUES (8, 'plain')");
+    await probe.emitChange("memories", "insert", plain);
+    await probe.emitChange("memories", "update", { id: 8, content: "plain edited" });
+    const plainSent = captured.filter((e) => e.table === "memories" && e.row.id === 8);
+    assert.equal(plainSent.length, 2);
+    for (const e of plainSent) assert.ok(!("project_uuid" in e.row), `${e.op}: no project_uuid key on the wire`);
+    assert.ok("project_uuid" in plain, "the caller's row is not mutated");
     assert.equal((await mem(a.db, 7)).project_id, 10, "the local row keeps its project");
     try { await probe.close(); } catch {}
   } finally {
@@ -142,10 +152,13 @@ test("summary memory keeps its project across sync (MUTUAL), an unknown uuid lan
     assert.ok(await until(async () => (await mem(b.db, 101)).content === "A summary edited"));
     assert.equal((await mem(b.db, 101)).project_id, 41, "content-only update keeps the project");
 
-    // Clearing the project (project_uuid: null) unfiles it on the peer.
-    await a.mgr.emitChange("memories", "update", { id: 101, project_uuid: null });
-    assert.ok(await until(async () => (await mem(b.db, 101)).project_uuid === null));
-    assert.equal((await mem(b.db, 101)).project_id, null, "clearing project_uuid unfiles");
+    // Clearing the project (project_uuid: null) does NOT propagate: a null
+    // project_uuid never rides the wire (so older peers never see the key).
+    // Accepted cost. The rest of the update still applies.
+    await a.mgr.emitChange("memories", "update", { id: 101, content: "A summary cleared", project_uuid: null });
+    assert.ok(await until(async () => (await mem(b.db, 101)).content === "A summary cleared"));
+    assert.deepEqual(await mem(b.db, 101), { id: 101, content: "A summary cleared", project_id: 41, project_uuid: U_SECOND },
+      "the peer keeps its filing");
 
     // Re-delivery of an insert B already holds is noise, not a conflict.
     const { rows } = await a.db.execute("SELECT * FROM memories WHERE id = 102");
@@ -209,6 +222,54 @@ test("a mixed-version peer that sends no project_uuid leaves it null and breaks 
     assert.equal(await conflicts(b.db), 0);
   } finally {
     link?.close();
+    await fleet.cleanup();
+  }
+});
+
+test("an incoming row with an unknown column applies with the column dropped, logged once per column, no values", async () => {
+  const fleet = await makeFleet();
+  const warn = console.warn;
+  const logged = [];
+  console.warn = (...args) => { logged.push(args.join(" ")); };
+  try {
+    const { a, b, identity } = fleet;
+    const signed = (entry) => ({ ...entry, signature: sign(JSON.stringify(entry), identity.ed25519Priv) });
+    await b.mgr._applyEntry(a.id, signed({
+      table: "memories", op: "insert",
+      row: { id: 501, content: "from a newer peer", category: "general", future_col: "SECRET-VALUE-1" },
+      lamport_ts: 5, instance_id: a.id,
+    }));
+    assert.deepEqual(await mem(b.db, 501), { id: 501, content: "from a newer peer", project_id: null, project_uuid: null });
+    await b.mgr._applyEntry(a.id, signed({
+      table: "memories", op: "update",
+      row: { id: 501, content: "newer peer edit", future_col: "SECRET-VALUE-2", other_future: 1 },
+      lamport_ts: 6, instance_id: a.id,
+    }));
+    assert.equal((await mem(b.db, 501)).content, "newer peer edit", "the update applied too");
+    await b.mgr._applyEntry(a.id, signed({
+      table: "memories", op: "insert",
+      row: { id: 502, content: "second", category: "general", future_col: "SECRET-VALUE-3" },
+      lamport_ts: 7, instance_id: a.id,
+    }));
+    assert.ok(await mem(b.db, 502));
+    const drops = logged.filter((l) => l.includes("dropping inbound column"));
+    assert.deepEqual(drops.sort(), [
+      "[instance-sync] dropping inbound column memories.future_col: not a column of the local table",
+      "[instance-sync] dropping inbound column memories.other_future: not a column of the local table",
+    ], "one line per table and column");
+    assert.ok(!logged.some((l) => l.includes("SECRET-VALUE")), "values are never logged");
+
+    // A column added at runtime is picked up (the cache re-reads on an unknown key).
+    await b.db.execute("ALTER TABLE memories ADD COLUMN future_col TEXT");
+    await b.mgr._applyEntry(a.id, signed({
+      table: "memories", op: "update",
+      row: { id: 502, future_col: "kept" },
+      lamport_ts: 8, instance_id: a.id,
+    }));
+    const { rows } = await b.db.execute("SELECT future_col FROM memories WHERE id = 502");
+    assert.equal(rows[0].future_col, "kept");
+  } finally {
+    console.warn = warn;
     await fleet.cleanup();
   }
 });

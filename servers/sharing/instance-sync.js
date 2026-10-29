@@ -250,7 +250,19 @@ const OUTBOUND_TRANSFORMS = {
   // project_uuid (the project's portable id) rides as is; the receiver maps it
   // back to its own project (mapInboundMemoryProject). Nulled both ways, so the
   // local row passed through here in _checkConflict compares equal on it.
-  memories: (row) => ({ ...row, project_id: null }),
+  // A NULL project_uuid is dropped from the wire so an ordinary memory never
+  // carries the key to a peer whose memories table predates it (0020). The
+  // accepted cost: "remove from project" (uuid -> null) does not propagate.
+  // A summary memory WITH a project still fails to apply on a peer running
+  // pre-0020 code until that peer upgrades (its apply path writes every wire
+  // key); the fleet deploys one commit, so that window is a deploy's length.
+  // Receivers from this version on drop unknown columns instead (see
+  // _localColumnsFilter).
+  memories: (row) => {
+    const out = { ...row, project_id: null };
+    if (out.project_uuid == null) delete out.project_uuid;
+    return out;
+  },
   // source_id is a local FK too (research_sources rows are not synced).
   research_notes: (row) => ({ ...row, project_id: null, source_id: null }),
   // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
@@ -1168,6 +1180,10 @@ export class InstanceSyncManager {
     this.db = db;
     this.localInstanceId = localInstanceId;
     this.dataDir = resolve(resolveDataDir(), "instance-sync");
+    // Generic apply path: table -> Set of local column names (PRAGMA table_info),
+    // and the "table.column" pairs already logged as dropped (one line each).
+    this._tableColumns = new Map();
+    this._droppedColumnsLogged = new Set();
 
     // Per-remote-instance paired feeds
     this.outFeeds = new Map(); // remoteInstanceId → Hypercore (we write)
@@ -2819,6 +2835,9 @@ export class InstanceSyncManager {
     // after OUTBOUND_TRANSFORMS), so a mapped project_id never manufactures a
     // conflict; the mapped row is what gets written, and what a conflict row
     // records as the losing version (so a restore files it locally).
+    // Known gap (accepted): an insert re-delivered after the project appeared
+    // here is not re-mapped (INSERT OR IGNORE + equivalent row = no write); the
+    // next update that names project_uuid files it.
     const applyRow = table === "memories" && op !== "delete"
       ? await mapInboundMemoryProject(this.db, row) : row;
 
@@ -3905,6 +3924,43 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Forward compatibility for the generic apply path: drop incoming keys that
+   * are not columns of the local table (a newer peer may send a column this
+   * instance's schema does not have yet), so the row still applies. Logs one
+   * line per table and column, never the values. The column set is cached per
+   * table; an unknown key re-reads it once, so a column added at runtime is
+   * picked up. On a PRAGMA failure the row is returned unchanged.
+   */
+  async _localColumnsFilter(table, row) {
+    const read = async () => {
+      const { rows } = await this.db.execute(`PRAGMA table_info(${table})`);
+      const set = new Set(rows.map((r) => r.name));
+      this._tableColumns.set(table, set);
+      return set;
+    };
+    let cols;
+    try {
+      cols = this._tableColumns.get(table) || await read();
+      if (Object.keys(row).some((k) => !cols.has(k))) cols = await read();
+    } catch {
+      return row;
+    }
+    if (cols.size === 0) return row; // table missing: let the write report it
+    let out = null;
+    for (const k of Object.keys(row)) {
+      if (cols.has(k)) continue;
+      if (!out) out = { ...row };
+      delete out[k];
+      const tag = `${table}.${k}`;
+      if (!this._droppedColumnsLogged.has(tag)) {
+        this._droppedColumnsLogged.add(tag);
+        console.warn(`[instance-sync] dropping inbound column ${tag}: not a column of the local table`);
+      }
+    }
+    return out || row;
+  }
+
+  /**
    * Apply an insert operation from a remote instance.
    * On INSERT OR IGNORE conflict (rowsAffected === 0): fetch the local row.
    * - row.id == null → warn only (binding undefined to better-sqlite3 throws)
@@ -3917,7 +3973,8 @@ export class InstanceSyncManager {
    * compareRow is the WIRE row for the equivalence check (memories: before
    * project_uuid was mapped to a local project_id); defaults to row.
    */
-  async _applyInsert(table, row, lamportTs, instanceId, compareRow = row) {
+  async _applyInsert(table, wireRow, lamportTs, instanceId, compareRow = wireRow) {
+    const row = await this._localColumnsFilter(table, wireRow);
     const cols = Object.keys(row);
     // Add sync metadata
     if (!cols.includes("lamport_ts")) cols.push("lamport_ts");
@@ -3984,8 +4041,9 @@ export class InstanceSyncManager {
   /**
    * Apply an update operation from a remote instance.
    */
-  async _applyUpdate(table, row, lamportTs) {
-    if (row.id === undefined) return;
+  async _applyUpdate(table, wireRow, lamportTs) {
+    if (wireRow.id === undefined) return;
+    const row = await this._localColumnsFilter(table, wireRow);
 
     const updates = [];
     const params = [];
