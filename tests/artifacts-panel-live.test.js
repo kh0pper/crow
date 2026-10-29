@@ -111,7 +111,7 @@ test("document: the frame loads from the artifact host, a section comment is add
     await t.evalIn("document.querySelector('dialog.cv-preview .cv-primary').click()");
     assert.ok(await waitFor(() => s.messages.length === 1), "the round reached the engine");
     assert.equal(await t.evalIn("!!document.querySelector('.cv-banner button')"), false, "no D4 banner");
-    assert.deepEqual(s.spawns, [{ botId: "bobby" }], "a trusted round: an ordinary new session");
+    assert.deepEqual(s.spawns, [{ botId: "bobby", principal: "other" }], "a trusted round: an ordinary new session");
     assert.match(s.messages[0], /Say which step first/);
   } finally { await t.close(); }
 });
@@ -216,7 +216,7 @@ test("a contact thread included in the round makes a LOCKED new session; its wor
     assert.match(await t.evalIn(note), /new, locked chat with bobby/, "ticking a contact thread says where the round will really go");
     await t.evalIn("document.querySelector('dialog.cv-preview button').click()");
     assert.ok(await waitFor(() => s.messages.length > messagesBefore), "the round reached the engine");
-    assert.deepEqual(s.spawns.at(-1), { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"] }, "a contact thread ⇒ a NEW session LOCKED to Artifacts");
+    assert.deepEqual(s.spawns.at(-1), { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"], principal: "other" }, "a contact thread ⇒ a NEW session LOCKED to Artifacts");
     assert.match(s.messages.at(-1), /CONTACT-WORDS-4477/, "the included contact words ride the snapshot");
     assert.match(s.messages.at(-1), /tighten the intro/);
     const round = (await s.db.execute({ sql: "SELECT untrusted_input, session_id FROM artifact_rounds WHERE artifact_id=? ORDER BY id DESC LIMIT 1", args: [art.id] })).rows[0];
