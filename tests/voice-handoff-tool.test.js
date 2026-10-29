@@ -470,7 +470,7 @@ test("a new proposal takes a foreign pending entry (a routine confirm) and logs 
 test("bad_args also retires the pending proposal", async () => {
   const s = setup({ rounds: [call({ task: TASK, bot: "writer" }), call({ task: "" }, "h2"), says("What should I hand over?")] });
   await s.turn(ASK);
-  await s.turn("no wait, have writer do something else");
+  await s.turn("actually, have writer do something else");   // neither a yes nor a no: the model answers (3.8's fastPath hears a no as a decline)
   assert.equal((await s.rows())[0].status, "expired");
   assert.equal(s.pending.get("phone-1"), null);
 });
