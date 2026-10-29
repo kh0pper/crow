@@ -870,6 +870,36 @@ test("recall filters summary memories by the asking bot's model rank; an unknown
       assert.deepEqual(seen(await c.call("crow_deep_recall", { topic: "ZEBRAGATE", include_sources: ["memories"], per_source_limit: 20 })), expected, label + ": deep_recall");
     } finally { await c.close(); }
   }
+  // Every other MCP read that returns content is gated the same way:
+  // crow_get_memory (a gated summary is "not found"), crow_list_memories,
+  // crow_memory_stats' previews, and crow_dream's report.
+  const hereId = Number(all("SELECT id FROM memories WHERE content LIKE '%herebox%'")[0].id);
+  const cloudId = Number(all("SELECT id FROM memories WHERE content LIKE '%cloudbox%'")[0].id);
+  run("UPDATE memories SET importance = 1, accessed_at = NULL, created_at = '2020-01-01 00:00:00' WHERE content LIKE '%ZEBRAGATE%'");
+  for (const [label, opts, sees] of [["cloud bot", asBot("cloudbot"), false], ["unknown asker", { actor: { kind: "unknown" } }, false], ["local bot", asBot("localbot"), true]]) {
+    const c = await memoryClient(opts);
+    try {
+      const got = await c.call("crow_get_memory", { id: hereId });
+      if (sees) assert.match(got, /herebox/, label + ": get");
+      else assert.equal(got, `{"error":"not_found","id":${hereId}}`, label + ": a gated summary is not found");
+      assert.match(await c.call("crow_get_memory", { id: cloudId }), /cloudbox/, label + ": a cloud-rank summary is visible");
+      const listed = await c.call("crow_list_memories", { limit: 100 });
+      assert.equal(listed.includes("herebox"), sees, label + ": list");
+      assert.match(listed, /cloudbox/);
+      const dream = await c.call("crow_dream", { stale_days: 1, low_importance_threshold: 3 });
+      assert.equal(dream.includes("herebox"), sees, label + ": dream");
+      run("UPDATE memories SET created_at = datetime('now', '+1 day') WHERE id = ?", hereId); // newest, so it would be in the previews
+      const stats = await c.call("crow_memory_stats", {});
+      assert.equal(stats.includes("herebox"), sees, label + ": stats previews");
+      run("UPDATE memories SET created_at = '2020-01-01 00:00:00' WHERE id = ?", hereId);
+    } finally { await c.close(); }
+  }
+  // The context block (instructions and crow://context) never carries a summary.
+  run("UPDATE memories SET importance = 9 WHERE id = ?", hereId);
+  const { generateCrowContext } = await import("../servers/memory/crow-context.js");
+  assert.doesNotMatch(await withDb((db) => generateCrowContext(db, { includeDynamic: true, platform: "generic" })), /herebox/);
+  run("UPDATE memories SET importance = 5 WHERE id = ?", hereId);
+
   // A per-call claim can never raise an unknown asker (an unsigned header or _meta).
   const c = await memoryClient({ actor: { kind: "unknown" }, summaryAskerRank: async () => 0 });
   try {

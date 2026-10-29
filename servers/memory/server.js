@@ -498,9 +498,10 @@ export function createMemoryServer(dbPath, options = {}) {
     {
       id: z.number().describe("Memory ID"),
     },
-    async ({ id }) => {
+    async ({ id }, extra) => {
+      // A summary the asker may not see answers exactly like a missing id.
       const { rows } = await db.execute({
-        sql: "SELECT id, content, category, importance, tags, source, created_at, updated_at, accessed_at, access_count, context, instance_id, project_id FROM memories WHERE id = ?",
+        sql: "SELECT id, content, category, importance, tags, source, created_at, updated_at, accessed_at, access_count, context, instance_id, project_id FROM memories WHERE id = ?" + await summaryGate(extra, ""),
         args: [id],
       });
       if (rows.length === 0) {
@@ -539,8 +540,8 @@ export function createMemoryServer(dbPath, options = {}) {
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ category, tag, min_importance, sort_by, limit, instance_id, project_id }) => {
-      let sql = "SELECT * FROM memories WHERE 1=1";
+    async ({ category, tag, min_importance, sort_by, limit, instance_id, project_id }, extra) => {
+      let sql = "SELECT * FROM memories WHERE 1=1" + await summaryGate(extra, "");
       const params = [];
 
       if (category) {
@@ -709,11 +710,12 @@ export function createMemoryServer(dbPath, options = {}) {
     "crow_memory_stats",
     "Get statistics about stored memories - counts by category, total count, importance distribution.",
     {},
-    async () => {
+    async (_args, extra) => {
       const total = (await db.execute("SELECT COUNT(*) as count FROM memories")).rows[0];
       const byCategory = (await db.execute("SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC")).rows;
       const byImportance = (await db.execute("SELECT importance, COUNT(*) as count FROM memories GROUP BY importance ORDER BY importance DESC")).rows;
-      const recent = (await db.execute("SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories ORDER BY created_at DESC LIMIT 5")).rows;
+      // Counts carry no content; the previews are gated like every recall.
+      const recent = (await db.execute(`SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories WHERE 1=1${await summaryGate(extra, "")} ORDER BY created_at DESC LIMIT 5`)).rows;
 
       let text = `Memory Statistics:\n`;
       text += `  Total memories: ${total.count}\n\n`;
@@ -735,8 +737,10 @@ export function createMemoryServer(dbPath, options = {}) {
       low_importance_threshold: z.number().default(3).describe("Flag old low-importance memories"),
       dry_run: z.boolean().default(true).describe("If true, only report — don't delete or update anything"),
     },
-    async ({ stale_days, low_importance_threshold, dry_run }) => {
+    async ({ stale_days, low_importance_threshold, dry_run }, extra) => {
       const staleDaysModifier = `-${stale_days} days`;
+      // The report quotes content: summaries the asker may not see are left out.
+      const gate = await summaryGate(extra, "");
 
       // 1. Stale memories: not accessed in N days AND importance <= threshold
       const { rows: staleRows } = await db.execute({
@@ -744,7 +748,7 @@ export function createMemoryServer(dbPath, options = {}) {
               FROM memories
               WHERE ((accessed_at IS NULL AND created_at < datetime('now', ?))
                  OR (accessed_at < datetime('now', ?)))
-              AND importance <= ?
+              AND importance <= ?${gate}
               ORDER BY importance ASC, accessed_at ASC`,
         args: [staleDaysModifier, staleDaysModifier, low_importance_threshold],
       });
@@ -781,7 +785,7 @@ export function createMemoryServer(dbPath, options = {}) {
       // Get recent memories grouped by category for duplicate detection
       const { rows: recentMemories } = await db.execute({
         sql: `SELECT id, category, content, importance, created_at
-              FROM memories ORDER BY created_at DESC LIMIT 1000`,
+              FROM memories WHERE 1=1${gate} ORDER BY created_at DESC LIMIT 1000`,
       });
 
       const byCategory = {};
