@@ -157,6 +157,20 @@ test("acquireCheckoutLock on a read-only tree OBSERVES the lock: free → procee
   }
 });
 
+test("acquireCheckoutLock on a read-only tree: a lock it cannot read counts as held (fail closed)", { skip: isRoot && "root ignores mode bits" }, async () => {
+  const fx = fixture();
+  const lock = join(fx.gitDir, "crow-auto-update.lock");
+  try {
+    writeFileSync(lock, `999999999\n2000-01-01T00:00:00.000Z\n`, { mode: 0o000 }); // would read stale, if readable
+    fx.readOnly();
+    const r = await acquireCheckoutLock({ appRoot: fx.work, waitMs: 200, pollMs: 50 });
+    assert.equal(r, null, "an unreadable lock defers instead of proceeding");
+  } finally {
+    try { chmodSync(fx.gitDir, 0o755); chmodSync(lock, 0o644); } catch {}
+    fx.cleanup();
+  }
+});
+
 test("lock staleness: a pid-less lock younger than the write grace is held; another user's live pid (EPERM) is alive", async () => {
   const { _lockPrimitivesForTest } = await import("../servers/gateway/auto-update.js");
   const { lockIsStale } = _lockPrimitivesForTest;
