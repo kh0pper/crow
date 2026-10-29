@@ -56,7 +56,9 @@ beforeEach(async () => {
   await db.executeMultiple("DELETE FROM providers; DELETE FROM dashboard_settings; DELETE FROM dashboard_settings_overrides; DELETE FROM pi_bot_defs;");
   await ins("local-chat", "http://127.0.0.1:8003/v1", [{ id: "m1" }]);
   await ins("local-voice", "http://127.0.0.1:8011/v1", [{ id: "m2" }]);
-  // A public literal: reserved ranges (203.0.113.x) are "unproven", never cloud.
+  // A public literal, so whereItRuns says "cloud". A documentation-range literal
+  // (203.0.113.x) still counts as cloud for isCloudKey, but whereItRuns labels it
+  // "unproven", not "cloud".
   await ins("cloud-a", "https://8.8.8.8/v1", [{ id: "c1" }]);
   await ins("emb-a", "http://127.0.0.1:8020/v1", [{ id: "e1", task: "embed" }, { id: "e2", task: "embed" }]);
   await ins("emb-b", "http://127.0.0.1:8021/v1", [{ id: "e1", task: "embed" }]);
@@ -208,4 +210,84 @@ test("env pin never touched", async () => {
   assert.equal(r.ok, true, r.reason);
   assert.equal(ENV.CROW_EMBED_PROVIDER, "emb-a");
   assert.equal(p.reembed, false); // the env still decides the provider
+});
+
+test("safety onto a cloud model on a disabled provider is refused", async () => {
+  await db.execute("UPDATE providers SET disabled = 1 WHERE id = 'cloud-a'");
+  const change = { model: "cloud-a/c1" };
+  const p = await preview("safety", change);
+  const r = await apply("safety", change, { previewHash: p.previewHash, ackUnattended: true, ackCloud: true });
+  assert.equal(r.reason, "cloud_refused");
+  assert.equal(await rowOf("safety"), null);
+});
+
+test("safety onto a local model with a cloud fallback is refused", async () => {
+  await bind("quick", { model: "cloud-a/c1" });
+  const change = { model: "local-chat/m1", fallback: ["quick"] };
+  const p = await preview("safety", change);
+  assert.equal(p.next.key, "local-chat/m1");
+  const r = await apply("safety", change, { previewHash: p.previewHash, ackUnattended: true, ackCloud: true });
+  assert.equal(r.reason, "cloud_refused");
+  assert.equal(await rowOf("safety"), null);
+});
+
+test("safety onto a local model with only local fallbacks applies", async () => {
+  await bind("quick", { model: "local-voice/m2" });
+  const change = { model: "local-chat/m1", fallback: ["quick"] };
+  const p = await preview("safety", change);
+  assert.equal(p.cloud, null);
+  const r = await apply("safety", change, { previewHash: p.previewHash, ackUnattended: true, ackCloud: true });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(JSON.parse(await rowOf("safety")).model, "local-chat/m1");
+});
+
+test("a quick rebind that moves no job needs no ackUnattended", async () => {
+  ENV.CROW_SMART_ROUTER_FAST = "local-chat/m1"; // the fast tier is set by env: not affected
+  await bind("everyday", { model: "local-voice/m2", fallback: [] });
+  const change = { model: "local-chat/m1" };
+  const p = await preview("quick", change);
+  assert.ok(p.consumers.notAffected.some((c) => c.id === "smart-router:fast"));
+  assert.deepEqual(p.needs, { ackUnattended: false, ackCloud: false });
+  const r = await apply("quick", change, { previewHash: p.previewHash });
+  assert.equal(r.ok, true, r.reason);
+});
+
+test("a fallback-only exposure needs only ackCloud", async () => {
+  await bind("everyday", { model: "local-chat/m1", fallback: ["expert"] });
+  const change = { model: "cloud-a/c1" };
+  const p = await preview("expert", change);
+  assert.ok(p.consumers.jobs.some((c) => c.id === "llm-router:escalate")); // listed, but it does not move
+  assert.deepEqual(p.cloud, { host: "8.8.8.8", viaRole: "expert", model: "cloud-a/c1", now: true });
+  assert.deepEqual(p.needs, { ackUnattended: false, ackCloud: true });
+  let r = await apply("expert", change, { previewHash: p.previewHash });
+  assert.equal(r.reason, "needs_ack_cloud");
+  r = await apply("expert", change, { previewHash: p.previewHash, ackCloud: true });
+  assert.equal(r.ok, true, r.reason);
+});
+
+test("replacePin false leaves the pin in place", async () => {
+  await raw("embed_provider", "emb-a");
+  const change = { model: "emb-b/e1" };
+  const p = await preview("embed", change);
+  const r = await apply("embed", change, { previewHash: p.previewHash, ackUnattended: true, ackCloud: true, replacePin: false });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(await readSetting(db, "embed_provider"), "emb-a");
+});
+
+test("the hash covers the fresh cloud pairs and envPinned", async () => {
+  await ins("cloud-b", "https://8.8.4.4/v1", [{ id: "c2" }]);
+  await bind("expert", { model: "cloud-a/c1" });
+  const change = { model: "local-chat/m1", fallback: ["expert", "critic"] };
+  const a = await preview("everyday", change);
+  await bind("critic", { model: "cloud-b/c2" }); // one more fresh pair, same first pair
+  const b = await preview("everyday", change);
+  assert.deepEqual(b.cloud, a.cloud);
+  assert.equal(b.next.key, a.next.key);
+  assert.notEqual(b.previewHash, a.previewHash);
+
+  const e1 = await preview("embed", { model: "emb-b/e1" });
+  ENV.CROW_EMBED_PROVIDER = "emb-a";
+  const e2 = await preview("embed", { model: "emb-b/e1" });
+  assert.equal(e2.envPinned, true);
+  assert.notEqual(e1.previewHash, e2.previewHash);
 });

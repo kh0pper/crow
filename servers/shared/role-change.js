@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
 import {
   resolveRoleKey, resolveChosenRoleKey, walkRole, isCloudKey, whereItRuns,
-  finalHopRow, isRoleRef, roleIdOf,
+  finalHopRow, isRoleRef, roleIdOf, isRawKey,
 } from "./model-roles.js";
 import { loadRoleContext, setBinding, addBindingsChangeListener, invalidateRoleContext } from "./model-roles-store.js";
 import { scanSlots } from "./model-consumers.js";
@@ -86,18 +86,32 @@ function embedProvider(ctxX, { envValue, pinValue }) {
   return providerHalf(key) || pickProviderByTask(ctxX.providers || [], EMBED_TASKS);
 }
 
-function hashOf(consumers, cloud, pin, nextKey) {
+function hashOf(consumers, cloud, pin, nextKey, fresh, envPinned) {
   const ids = CONSUMER_GROUPS.flatMap((g) => (consumers[g] || []).map((c) => c.id)).sort();
-  return createHash("sha256").update(JSON.stringify([ids, cloud?.host, cloud?.model, pin?.value, nextKey])).digest("hex");
+  const pairs = fresh.map((p) => `${p.viaRole}|${p.key}`).sort();
+  return createHash("sha256").update(JSON.stringify([ids, cloud?.host, cloud?.model, pin?.value, nextKey, pairs, envPinned])).digest("hex");
 }
+
+const resolvedKey = (roleId, c) => {
+  try { return resolveRoleKey(`role:${roleId}`, c).key; } catch { return null; }
+};
 
 /**
  * @typedef {{roleId:string, current:{key:string|null, where:string}, next:{key:string|null, reason:string, chain:string[], where:string},
  *   consumers:object, cloud:null|{host:string|null, viaRole:string, model:string, now:boolean}, refused:Array<{id:string, labelKey:string}>,
  *   reembed:boolean, pin:null|{setting:string, value:string}, envPinned:boolean, needs:{ackUnattended:boolean, ackCloud:boolean}, previewHash:string}} RolePreview
  *
- * `ctx` defaults to a fresh RoleContext; `slots` to one scanSlots(db). The
- * reembed line assumes a setting pin is replaced (an env pin always wins).
+ * `ctx` defaults to a fresh RoleContext; `slots` to one scanSlots(db).
+ *
+ * `reembed` ASSUMES "Replace the pin" is ticked: with a setting pin left in
+ * place the embedding provider does not change at all. The page must show the
+ * re-embed line only while replacePin is ticked. An env pin always wins, so
+ * it gives reembed:false.
+ *
+ * `needs.ackUnattended` (Kevin 10-21, "rebinds that MOVE unattended bots"):
+ * an unattended consumer exists, or a job's resolved key under the change
+ * differs from today's. Exposure through a fallback only is the cloud
+ * warning's business.
  * `localMarks`/`ownAddrs` pass through to the cloud check (the safety check
  * never uses marks, minor e).
  * @returns {Promise<RolePreview>}
@@ -126,9 +140,7 @@ export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, e
   let cloud = null;
   if (fresh.length) {
     const { viaRole, key } = fresh[0];
-    let nowKey = null;
-    try { nowKey = resolveRoleKey(`role:${viaRole}`, ctxX).key; } catch { nowKey = null; }
-    cloud = { host: hostnameOf(finalHopRow(key, { providers: ctx.providers })?.baseUrl) || null, viaRole, model: key, now: nowKey === key };
+    cloud = { host: hostnameOf(finalHopRow(key, { providers: ctx.providers })?.baseUrl) || null, viaRole, model: key, now: resolvedKey(viaRole, ctxX) === key };
   }
 
   const refused = [];
@@ -158,8 +170,13 @@ export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, e
     && embedProvider(ctx, { envValue: str(env?.CROW_EMBED_PROVIDER), pinValue: roleId === "embed" ? pin?.value : null })
       !== embedProvider(ctxX, { envValue: str(env?.CROW_EMBED_PROVIDER), pinValue: null });
 
+  // A job consumer's own role is the head of its via path.
+  const jobMoves = consumers.jobs.some((c) => {
+    const r = Array.isArray(c.via) && c.via.length ? c.via[0] : null;
+    return r !== null && resolvedKey(r, ctx) !== resolvedKey(r, ctxX);
+  });
   const needs = {
-    ackUnattended: consumers.unattended.length + consumers.jobs.length > 0,
+    ackUnattended: consumers.unattended.length > 0 || jobMoves,
     ackCloud: cloud !== null,
   };
   return {
@@ -173,13 +190,15 @@ export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, e
     pin,
     envPinned,
     needs,
-    previewHash: hashOf(consumers, cloud, pin, nxt.key),
+    previewHash: hashOf(consumers, cloud, pin, nxt.key, fresh, envPinned),
   };
 }
 
 /**
  * Apply a rebind the user previewed. Refusals, in order: preview_changed,
- * cloud_refused (safety onto a model not proven local, m4),
+ * cloud_refused (m4: a safety change whose model is a cloud raw key, whatever
+ * that provider's enabled or configured state, or whose chain can reach any
+ * cloud candidate; local marks never count for the classifier),
  * needs_ack_unattended, needs_ack_cloud, then any setBinding refusal.
  * @returns {Promise<{ok:true, preview:RolePreview}|{ok:false, reason:string, preview:RolePreview}>}
  */
@@ -187,12 +206,15 @@ export async function applyRoleChange(db, roleId, change = {}, {
   actor, previewHash, ackUnattended = false, ackCloud = false, replacePin = false,
   env = process.env, localMarks, ownAddrs,
 } = {}) {
-  const preview = await previewRoleChange(db, roleId, change, { env, localMarks, ownAddrs });
+  const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
+  const preview = await previewRoleChange(db, roleId, change, { ctx, env, localMarks, ownAddrs });
   const fail = (reason) => ({ ok: false, reason, preview });
   if (typeof previewHash !== "string" || previewHash !== preview.previewHash) return fail("preview_changed");
-  if (roleId === "safety" && preview.next.key) {
-    const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
-    if (isCloudKey(preview.next.key, { providers: ctx.providers, ...(ownAddrs ? { ownAddrs } : {}) })) return fail("cloud_refused");
+  if (roleId === "safety") {
+    const own = ownAddrs ? { ownAddrs } : {};
+    const m = change.model;
+    if (typeof m === "string" && isRawKey(m) && isCloudKey(m, { providers: ctx.providers, ...own })) return fail("cloud_refused");
+    if (reachableCloud(hypothetical(ctx, roleId, change), ["safety"], own).length) return fail("cloud_refused");
   }
   if (preview.needs.ackUnattended && ackUnattended !== true) return fail("needs_ack_unattended");
   if (preview.needs.ackCloud && ackCloud !== true) return fail("needs_ack_cloud");
