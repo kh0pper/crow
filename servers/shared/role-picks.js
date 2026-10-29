@@ -40,7 +40,7 @@ function roleLabel(roleId, customDefs, lang) {
 }
 
 /** The provider's display name: its description cut at the first " (", else its id. */
-function providerLabel(providerId, providers) {
+export function providerLabel(providerId, providers) {
   const p = (providers || []).find((r) => r && r.id === providerId);
   const d = typeof p?.description === "string" ? p.description.trim() : "";
   if (!d) return providerId;
@@ -95,7 +95,10 @@ function safetyReachesCloud(ctxX, ownAddrs) {
 }
 
 /**
- * @typedef {{key:string, label:string, where:string, provider:string|null, recommended:boolean, allowed:boolean, why?:"cloud_refused"}} Pick
+ * @typedef {{key:string, label:string, where:string, provider:string|null, providerLabel:string|null,
+ *   recommended:boolean, allowed:boolean, why?:"cloud_refused"}} Pick
+ *   `providerLabel` names the provider of a raw pick (two same-named models
+ *   from different providers stay apart); null for "Same as" picks.
  * @param {string} roleId
  * @param {{ctx:object, lang?:string, recommendedFn?:(roleId:string)=>string[], ownAddrs?:Set<string>, localMarks?:object,
  *   pickChecks?:object, now?:Date, recOpts?:object}} opts
@@ -118,12 +121,14 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddr
   try { rec = new Set((recommendedFn(roleId) || []).filter((k) => typeof k === "string")); } catch { rec = new Set(); }
 
   const out = [];
-  const add = (key, label, resolvedKey, ctxX) => {
+  const add = (key, label, resolvedKey, ctxX, raw = false) => {
+    const provider = resolvedKey ? splitKey(resolvedKey).provider || null : null;
     const pick = {
       key,
       label,
       where: where(resolvedKey),
-      provider: resolvedKey ? splitKey(resolvedKey).provider || null : null,
+      provider,
+      providerLabel: raw && provider ? providerLabel(provider, providers) : null,
       recommended: rec.has(key),
       allowed: true,
     };
@@ -144,7 +149,7 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddr
       const key = `${providerId}/${modelId}`;
       const ctxX = hypothetical(ctx, roleId, key);
       if (tryResolve(roleId, ctxX).reason !== "bound") continue;
-      add(key, perProvider ? providerLabel(providerId, providers) : friendlyModel(key, providers), key, ctxX);
+      add(key, perProvider ? providerLabel(providerId, providers) : friendlyModel(key, providers), key, ctxX, true);
       if (perProvider) break; // the provider's first model with a matching task
     }
   }

@@ -3,9 +3,12 @@
  *
  * One page with every role: what fills it, where that runs and its status.
  * "Change" opens the change sheet (`<dialog id="models-change">`, filled by
- * models/client.js through /api/roles); Add a provider is wired by later
- * work. Advanced is today's LLM page (`?section=llm`), still deep-linkable
- * but no longer in the menu.
+ * models/client.js through /api/roles); "Add a provider" opens
+ * `<dialog id="models-add">` (shared/add-provider-ui.js, through
+ * /api/providers), and `?add=1` opens it on load. Advanced is today's LLM
+ * page (`?section=llm`), still deep-linkable but no longer in the menu.
+ * When the provider recommendations are past their review date, one line
+ * says so (Crow fills no role from them until they are reviewed).
  *
  * Search ranking stays out of the list until something fills it on purpose;
  * "Show search ranking" (`?section=models&show=rerank`) renders it anyway.
@@ -14,6 +17,8 @@ import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { buildRoleRows, ROLE_GROUPS, FILLED_STATUSES } from "./models/rows.js";
 import { modelsClientJS } from "./models/client.js";
+import { addProviderSheetHtml, addProviderClientJS } from "../../shared/add-provider-ui.js";
+import { isRecommendationsStale, loadRecommendations } from "../../../../shared/provider-recommendations.js";
 
 const WHERE_CODES = new Set(["here", "other_box", "cloud", "unproven", "missing"]);
 
@@ -98,6 +103,7 @@ const STYLE = `<style>
   .mc-pick:disabled { cursor:not-allowed; opacity:0.7; }
   .mc-pick-label { flex:1 1 auto; min-width:0; }
   .mc-star { color:var(--crow-accent); }
+  .mc-pick-provider { font-size:0.8rem; color:var(--crow-text-muted); }
   .mc-pick-note { flex-basis:100%; font-size:0.8rem; color:var(--crow-text-muted); }
   .mc-warn { display:flex; flex-direction:column; gap:0.35rem; font-size:0.9rem; overflow-wrap:anywhere; }
   .mc-warn p { margin:0; }
@@ -113,8 +119,18 @@ const STYLE = `<style>
   .mc-save:disabled { opacity:0.5; cursor:not-allowed; }
 </style>`;
 
-/** The page from built rows (pure; `show` lists hidden roles to render anyway). */
-export function renderModelsPage(rows, { lang = "en", show = [] } = {}) {
+function staleLine(lang, now) {
+  if (!isRecommendationsStale(now)) return "";
+  const a = loadRecommendations().accessed;
+  const reviewed = typeof a === "string" ? `${fill(t("models.ui.recsReviewed", lang), { date: a })}. ` : "";
+  return `<p class="mr-note mr-recs-stale">${escapeHtml(reviewed + t("models.add.recsStale", lang))}</p>`;
+}
+
+/**
+ * The page from built rows (pure but for the recommendations file's date;
+ * `show` lists hidden roles to render anyway, `openAdd` opens Add a provider).
+ */
+export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false, now = new Date() } = {}) {
   const wanted = new Set(show);
   const visible = rows.filter((r) => !r.hidden || wanted.has(r.id));
   const groups = ROLE_GROUPS.map((g) => {
@@ -130,15 +146,18 @@ export function renderModelsPage(rows, { lang = "en", show = [] } = {}) {
     : "";
   return `${STYLE}
     <div class="mr-top">
-      <button type="button" class="mr-btn mr-add" data-models-add>${escapeHtml(t("models.add.title", lang))}</button>
+      <button type="button" class="mr-btn mr-add" data-models-add aria-haspopup="dialog" aria-controls="models-add">${escapeHtml(t("models.add.title", lang))}</button>
       <div class="mr-top-links">
         <a class="mr-link" href="/dashboard/settings?section=llm" data-turbo-frame="_top">${escapeHtml(t("models.ui.advanced", lang))}</a>
       </div>
     </div>
+    ${staleLine(lang, now)}
     ${groups}
     ${showRerank}
     <dialog id="models-change" class="mc-sheet" aria-labelledby="models-change-title"></dialog>
-    <script>${modelsClientJS({ lang })}</script>`;
+    ${addProviderSheetHtml({ lang, open: openAdd })}
+    <script>${modelsClientJS({ lang })}</script>
+    <script>${addProviderClientJS({ lang })}</script>`;
 }
 
 function showParam(req) {
@@ -176,6 +195,6 @@ export default {
 
   async render({ req, db, lang = "en" }) {
     const rows = await buildRoleRows(db, { lang });
-    return renderModelsPage(rows, { lang, show: showParam(req) });
+    return renderModelsPage(rows, { lang, show: showParam(req), openAdd: String(req?.query?.add ?? "") === "1" });
   },
 };

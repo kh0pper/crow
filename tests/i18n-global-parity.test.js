@@ -90,6 +90,14 @@ const IDENTICAL_OK = new Set([
   // Bot-engine uninstall blast-radius (C4 Task 10)
   "extensions.engineBlastItem", // "{name} ({types})" — pure template shape, no words to translate
   "perch.title", // a product name, identical in both languages
+  // Add a provider presets (roles phase 2b Task 12): provider names are proper nouns
+  "providers.preset.openrouter",
+  "providers.preset.anthropic",
+  "providers.preset.openai",
+  "providers.preset.google",
+  "providers.preset.zai",
+  "providers.preset.groq",
+  "providers.preset.together",
 ]);
 
 const keys = Object.keys(translations);

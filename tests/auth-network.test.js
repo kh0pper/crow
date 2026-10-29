@@ -140,7 +140,9 @@ test("rejectFunneled middleware: /api/roles and /api/providers are never funnel-
   const server = await startTestApp();
   try {
     const port = server.address().port;
-    for (const path of ["/api/roles/voice/picks", "/api/roles/quick/preview", "/api/roles/stt/profile", "/api/providers/test"]) {
+    for (const path of ["/api/roles/voice/picks", "/api/roles/quick/preview", "/api/roles/stt/profile", "/api/providers/test",
+      "/api/providers", "/api/providers/cloud-a/plan", "/api/providers/cloud-a/probe",
+      "/api/providers/cloud-a/recommended/preview", "/api/providers/cloud-a/recommended"]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }
@@ -148,7 +150,8 @@ test("rejectFunneled middleware: /api/roles and /api/providers are never funnel-
     server.close();
   }
   const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
-  for (const path of ["/api/roles/voice/picks", "/api/providers/test"]) {
+  for (const path of ["/api/roles/voice/picks", "/api/providers/test", "/api/providers", "/api/providers/cloud-a/plan",
+    "/api/providers/cloud-a/probe", "/api/providers/cloud-a/recommended/preview", "/api/providers/cloud-a/recommended"]) {
     assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
   }
 });

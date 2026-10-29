@@ -594,3 +594,24 @@ test("F4: a pin with nothing safe to show reads custom setting", async () => {
   assert.ok(text.includes("Replace the pin (custom setting)"));
   assert.equal(text.includes("null"), false);
 });
+
+test("each raw pick names its provider, so same-named models from two providers stay apart", async () => {
+  const twin = {
+    picks: [
+      { key: "cloud-a/gpt-x", label: "gpt-x", where: "cloud", provider: "cloud-a", providerLabel: "OpenRouter <b>", recommended: false, allowed: true },
+      { key: "cloud-b/gpt-x", label: "gpt-x", where: "cloud", provider: "cloud-b", providerLabel: "OpenAI", recommended: false, allowed: true },
+      { key: "role:everyday", label: "Same as Builder", where: "here", provider: "local-chat", providerLabel: null, recommended: false, allowed: true },
+    ],
+  };
+  const h = harness([{ match: isPicks, reply: () => json(200, twin) }]);
+  h.btn.fire("click");
+  await flush();
+  const a = byAttr(h.doc.dialog, "data-mc-pick", "cloud-a/gpt-x")[0];
+  const b = byAttr(h.doc.dialog, "data-mc-pick", "cloud-b/gpt-x")[0];
+  const provOf = (n) => findAll(n, (x) => x.className === "mc-pick-provider");
+  assert.equal(provOf(a).length, 1);
+  assert.equal(provOf(a)[0].textContent, "OpenRouter <b>", "plain text, never markup");
+  assert.equal(provOf(b)[0].textContent, "OpenAI");
+  assert.notEqual(a.textContent, b.textContent);
+  assert.equal(provOf(byAttr(h.doc.dialog, "data-mc-pick", "role:everyday")[0]).length, 0, "a Same as pick names no provider");
+});
