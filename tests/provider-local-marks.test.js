@@ -571,3 +571,25 @@ test("a row on a known cloud preset HOSTNAME is strict cloud and can't be marked
   assert.deepEqual(await markLocal(db, "lookalike", { actor: "t" }), { ok: true });
   assert.deepEqual(await markLocal(db, "suffix", { actor: "t" }), { ok: true });
 });
+
+test("the upgrade logs one line on every run that does work, nothing-to-mark included; a skipped run logs nothing", async () => {
+  const d = fresh(); dbs.push(d);
+  const { db } = d;
+  await ins(db, "local-chat", "http://127.0.0.1:8003/v1", "local", ["m1"]);
+  await setBinding(db, "voice", { model: "local-chat/m1" }, { actor: "test" });
+  invalidateRoleContext();
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  try {
+    const r = await upgradeLocalMarks(db, { lookupFn, ownAddrs: OWN, notifyFn: async () => {}, env: ENV });
+    assert.deepEqual(r, { marked: [], affected: [], errors: [] });
+    const ours = lines.filter((l) => l.startsWith("[roles] local marks upgrade"));
+    assert.equal(ours.length, 1, JSON.stringify(lines));
+    assert.match(ours[0], /nothing to mark/);
+    assert.match(ours[0], /0 candidates/);
+    lines.length = 0;
+    assert.equal((await upgradeLocalMarks(db, { lookupFn, ownAddrs: OWN, notifyFn: async () => {}, env: ENV })).skipped, true);
+    assert.equal(lines.filter((l) => l.startsWith("[roles] local marks upgrade")).length, 0);
+  } finally { console.log = orig; }
+});

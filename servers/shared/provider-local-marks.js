@@ -337,7 +337,8 @@ let upgradeRunning = null; // the run in progress in this process (one box, one 
  * (minor f). When `affected` is non-empty and `provider_local_notice_shown`
  * is unset, `notifyFn` sends one notification and the flag is set; if it
  * throws, the seeded flag also stays unset, so the next boot retries. Two
- * calls at once in one process share one run.
+ * calls at once in one process share one run. Every run that is not skipped
+ * logs one line with its counts, "nothing to mark" included.
  * @returns {Promise<{marked:string[], affected:string[], errors:string[], skipped?:true}>}
  */
 export async function upgradeLocalMarks(db, { lookupFn = dnsPromises.lookup, ownAddrs, notifyFn = defaultNotify, timeoutMs = 3000, env = process.env } = {}) {
@@ -376,7 +377,10 @@ export async function upgradeLocalMarks(db, { lookupFn = dnsPromises.lookup, own
       }
     }
     if (!errors.length && !noticePending) await writeValue(db, LOCAL_MARKS_SEEDED_KEY, new Date().toISOString());
-    if (marked.length || affected.length) console.log(`[roles] local marks upgrade: marked ${marked.join(", ") || "none"}; not proven local ${affected.join(", ") || "none"}`);
+    // One line on every run that did work (the PR gate reads the boot log), "nothing to mark" included.
+    console.log(candidates.length
+      ? `[roles] local marks upgrade: ${candidates.length} candidates; marked ${marked.join(", ") || "none"}; not proven local ${affected.join(", ") || "none"}; lookup failed ${errors.join(", ") || "none"}`
+      : `[roles] local marks upgrade: nothing to mark (0 candidates, ${keys.length} keys checked)`);
     return { marked, affected, errors };
   })();
   upgradeRunning = run;
