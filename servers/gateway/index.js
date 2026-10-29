@@ -744,10 +744,13 @@ await mountPeerPublicApi(app, { authMiddleware, relayDb, loadDynamicBackends });
 // S1: returns all three handles for WS wiring in the listen callback
 const { setupCallsSignaling: _setupCallsSignaling, setupCompanionProxy: _setupCompanionProxy, extensionProxyWsSetup: _extensionProxyWsSetup } = await mountLateRoutes(app, { dashboardAuth });
 
-// LAST in the stack, after every router: a body-parser refusal (the global 1mb parser above all)
+// After every router mounted here: a body-parser refusal (the global 1mb parser above all)
 // answers a fixed { error: "bad_body" } and one fixed log line. Express's default handler would
 // log, and echo outside production, the parser's message, which quotes body text that may hold
 // a pasted secret (credential card §10.3). Every other error passes on unchanged.
+// The companion proxy's routes (/companion/device-config and the /companion proxy) register
+// later, in post-listen; that is harmless because they have no body parser of their own, so a
+// body error can only come from the global parser above, which this handler already follows.
 const { bodyErrorHandler } = await import("./body-error-handler.js");
 app.use(bodyErrorHandler);
 

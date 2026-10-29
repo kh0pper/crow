@@ -14,12 +14,10 @@
 
 const BODY_ERROR_TYPES = new Set(["entity.parse.failed", "entity.too.large", "encoding.unsupported", "charset.unsupported"]);
 
-/** True for an error raised by body-parser (express.json / urlencoded / text / raw). */
+/** True for an error raised by body-parser (express.json / urlencoded / text / raw), matched on
+ *  its `type` only. */
 export function isBodyParserError(err) {
-  if (!err || typeof err !== "object") return false;
-  if (typeof err.type === "string" && BODY_ERROR_TYPES.has(err.type)) return true;
-  const status = Number(err.status || err.statusCode);
-  return (status === 400 || status === 413) && "body" in err;
+  return !!err && typeof err === "object" && typeof err.type === "string" && BODY_ERROR_TYPES.has(err.type);
 }
 
 export function bodyErrorHandler(err, req, res, next) {

@@ -41,6 +41,8 @@ test("password: phrasing found", () => {
     ["API key: qwerty12", "qwerty12"],
     ["secret: opensesame", "opensesame"],
     ["token = abc.def.ghi", "abc.def.ghi"],
+    ["my password is Hunter2Hunter2", "Hunter2Hunter2"],
+    ["The API key is 9f8e7d6c5b", "9f8e7d6c5b"],
   ];
   for (const [text, value] of cases) {
     const hits = findSecrets(text);
@@ -49,6 +51,9 @@ test("password: phrasing found", () => {
     assert.equal(text.slice(hits[0].start, hits[0].end), value, "only the value is the match, not the label: " + text);
   }
   assert.deepEqual(findSecrets("password: short"), [], "values under 6 characters are not flagged");
+  for (const prose of ["The password is incorrect.", "my token is expired", "the secret is simple: be kind"]) {
+    assert.deepEqual(findSecrets(prose), [], "the \"is\" form needs a digit in the value: " + prose);
+  }
 });
 
 test("entropy token found", () => {
@@ -59,6 +64,23 @@ test("entropy token found", () => {
   assert.deepEqual(findSecrets("tq8vr2mk9pxw4lzb7nyc3hsjqq"), [], "all lower case is left to the prefix list");
   const b64 = "dGhpcyBpcyBhIHNlY3JldCB0b2tlbjEyMw==";
   assert.deepEqual(spans(`blob ${b64}.`), [b64]);
+  // A JWT: each dot-separated part is its own run, each flagged.
+  const jwt = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"];
+  assert.deepEqual(spans("Bearer " + jwt.join(".")), jwt);
+  assert.equal(stripSecrets("Bearer " + jwt.join(".")).text, "Bearer [secret removed].[secret removed].[secret removed]");
+  // Random 32-character alphanumeric tokens (the canary's shape) are flagged. A fixed seed keeps
+  // this deterministic: the structure signals miss roughly 1 in 5,000 such tokens by design.
+  const AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let seed = 0x5eed;
+  const next = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 16;
+  for (let i = 0; i < 300; i++) {
+    let t = "";
+    for (let j = 0; j < 32; j++) t += AL[next() % 62];
+    if (!(/[A-Z]/.test(t) && /[a-z]/.test(t) && /[0-9]/.test(t))) continue;
+    assert.deepEqual(kinds(`x ${t} y`), ["entropy"], t);
+  }
+  // A token-shaped segment of a path is still found on its own.
+  assert.deepEqual(spans(`cat /tmp/${ENTROPY}/out`), [ENTROPY]);
 });
 
 test("ordinary prose not flagged", () => {
@@ -74,6 +96,17 @@ test("ordinary prose not flagged", () => {
     "qwen3.6-35b-a3b-instruct-q4_k_m",         // model id: lower case only
     "see docs/2026-10-29-credential-card-map.md and load qwen3.6-35b-a3b-instruct-q4_k_m",
     "ALLCAPS0RUN1WITH2DIGITS3AND4NO5LOWER",    // no lower case
+    // URLs and data: URIs are skipped whole.
+    "https://docs.google.com/document/d/1PKMnwAbCdEfGhIjKlMnOpQrStUvWxYz123/edit",
+    "open https://docs.google.com/document/d/1PKMnwAbCdEfGhIjKlMnOpQrStUvWxYz123/edit please",
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    // Paths are tested a segment at a time.
+    "/home/kevin/Downloads/IMG_20261029_123456",
+    "git push origin feat/R12-CredentialCard-Task1-review",
+    // Names, not tokens: camelCase is mostly words; a GGUF name is short pieces joined.
+    "getUserProfileById2FactorAuthentication",
+    "6-35B-A3B-Instruct-UD-Q4_K_XL",
+    "Qwen3.6-35B-A3B-Instruct-UD-Q4_K_XL.gguf",
   ];
   for (const text of prose) assert.deepEqual(findSecrets(text), [], text);
 });
@@ -115,6 +148,9 @@ test("detectorSource rebuilds the same regexes (what the client will get)", () =
   assert.ok(phrase.test("password: hunter2!x"));
   const run = new RegExp(src.entropy.run.source, src.entropy.run.flags);
   assert.ok(run.test(ENTROPY));
+  assert.ok(new RegExp(src.entropy.skip.source, src.entropy.skip.flags).test("https://example.com/x"));
+  assert.equal(src.entropy.minLongestPiece, 10);
+  assert.equal(src.entropy.maxMeanPiece, 3.5);
   assert.equal(src.entropy.minLength, 24);
   assert.equal(src.entropy.minBits, 3.5);
   assert.doesNotThrow(() => JSON.stringify(src));

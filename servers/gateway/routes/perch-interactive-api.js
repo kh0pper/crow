@@ -46,6 +46,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
+import { isBodyParserError } from "../body-error-handler.js";
 import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
 import { SHOT_KEEP } from "../browser-tile/shots.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
@@ -1902,15 +1903,20 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // hold a pasted secret, and Node's JSON.parse message quotes body text, so the express default
   // handler's stack log would print it. Every parser refusal answers a fixed code and logs one
   // fixed line, never the parser's message (the services-api.js idiom, credential card §10.3).
+  // Any other error keeps its own 4xx/5xx status (500 otherwise) and logs one fixed line of its
+  // name, method and route path, never its message.
   router.use(P, (err, req, res, next) => {
     if (!err || res.headersSent) return next(err);
     const status = Number(err.status || err.statusCode);
-    if (typeof err.type === "string" || (status >= 400 && status < 500)) {
+    if (isBodyParserError(err)) {
       console.warn("[perch-interactive-api] bad body");
       return status === 413 ? jsonError(res, 413, "too_large") : jsonError(res, 400, "bad_body");
     }
-    console.error("[perch-interactive-api] request failed");
-    jsonError(res, 500, "internal");
+    const code = status >= 400 && status <= 599 ? status : 500;
+    const name = typeof err.name === "string" ? err.name.slice(0, 60) : "Error";
+    const route = (req.baseUrl || "") + (req.route && req.route.path ? req.route.path : req.path);
+    console.error(`[perch-interactive-api] request failed: ${name} ${req.method} ${route}`);
+    jsonError(res, code, code >= 500 ? "internal" : "request_failed");
   });
 
   return router;
