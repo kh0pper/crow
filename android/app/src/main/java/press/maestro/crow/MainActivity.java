@@ -187,6 +187,14 @@ public class MainActivity extends AppCompatActivity {
     // Debounce the pull-to-refresh scroll probe so a flurry of touch-downs
     // doesn't re-run the .content-body DOM walk on every tap (W3).
     private long lastScrollProbeMs = 0L;
+    // A pull counts only when it starts in the top part of the page: an ordinary
+    // swipe further down (scrolling, dragging a card) that drifts downward used to
+    // refresh the page.
+    private volatile boolean touchStartedNearTop = false;
+    /** Fraction of the WebView's height, from the top, where a refresh pull may begin. */
+    private static final float PULL_START_ZONE = 0.35f;
+    /** Pull distance that triggers a refresh, in dp (the library default is 64). */
+    private static final int PULL_TRIGGER_DP = 160;
     private FrameLayout statusOverlay;
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
@@ -285,9 +293,11 @@ public class MainActivity extends AppCompatActivity {
         // Only allow pull-to-refresh when WebView content is scrolled to the top.
         // The Crow's Nest uses CSS overflow-y:auto on .content-body, so
         // webView.getScrollY() is always 0. We must check via JavaScript.
+        swipeRefresh.setDistanceToTriggerSync(
+            (int) (PULL_TRIGGER_DP * getResources().getDisplayMetrics().density));
         swipeRefresh.setOnChildScrollUpCallback((parent, child) -> {
             // Disable refresh by default; JS callback re-enables when at top
-            return !isWebViewAtTop;
+            return !(isWebViewAtTop && touchStartedNearTop);
         });
 
         // Poll scroll position via JS on touch-down to detect nested scrollable containers.
@@ -296,6 +306,7 @@ public class MainActivity extends AppCompatActivity {
         // (e.g. .msg-chat-viewport in Messages, <pre> blocks in Skills, etc.).
         webView.setOnTouchListener((v, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                touchStartedNearTop = event.getY() <= v.getHeight() * PULL_START_ZONE;
                 // Debounce: reuse the last result if probed <250ms ago. The DOM
                 // walk is the cost; a burst of taps doesn't need to re-run it.
                 long now = SystemClock.uptimeMillis();
@@ -303,6 +314,10 @@ public class MainActivity extends AppCompatActivity {
                     return false;
                 }
                 lastScrollProbeMs = now;
+                // Fail closed until this touch's probe answers: the answer arrives
+                // asynchronously, and the previous gesture's "at top" must not let
+                // this one refresh a page that is scrolled.
+                isWebViewAtTop = false;
                 // First the scroll containers under the finger, wherever they are on the page (the
                 // side menu is outside .content-body: a downward swipe in a scrolled menu used to
                 // pull to refresh instead of scrolling it back up). Touch coordinates are device
