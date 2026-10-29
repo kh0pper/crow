@@ -33,6 +33,9 @@ import {
 const UUID = "11111111-2222-4333-8444-555555555555";
 const PATH = `/example-tools/${UUID}/mcp`;
 const SECRET = "secret-1-long";
+// main's redactSecrets default floor (MIN_SECRET_LENGTH 4): SHORT4 is redacted, SHORT3 is not.
+const SHORT4 = "Zq7w";
+const SHORT3 = "Qx3";
 const TIMEOUT_MS = 400;
 
 let dir, dbPath, srv, base, sessions, TOKEN, savedDbPath;
@@ -115,7 +118,7 @@ async function authorize({ db, req, params, actor }) {
   if (state.deny) return { ok: false, code: state.deny };
   // A per-request value, so a test can tell the live ctx from a closure.
   const nonce = req.headers["x-test-nonce"] || null;
-  return { ok: true, ctx: { secrets: [SECRET], uuid: params.uuid, botId: actor.botId, nonce } };
+  return { ok: true, ctx: { secrets: [SECRET, SHORT4, SHORT3], uuid: params.uuid, botId: actor.botId, nonce } };
 }
 
 const toolFilter = (ctx, tool) => !state.hide.has(tool.name) && !(ctx.nonce === "deny-echo" && tool.name === "echo");
@@ -584,6 +587,12 @@ test("errors and redaction: a thrown secret -> '<tool> failed.'; known codes -> 
   const ut = await callTool(sid, "usertext");
   assert.equal(textOf(ut), "fine");
   assert.ok(!ut.text.includes("USERTEXT-LEAK") && !ut.text.includes("MESSAGE-LEAK"));
+});
+
+test("redaction uses the shared redactSecrets with its default floor: a 4-char secret is redacted, a 3-char one is not", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "echo", { text: `a ${SHORT4} b ${SHORT3} c` });
+  assert.equal(textOf(r), `ECHO a [redacted] b ${SHORT3} c`);
 });
 
 test("audit: one event per tools/call and per refusal, never args, results, headers or tokens", async () => {

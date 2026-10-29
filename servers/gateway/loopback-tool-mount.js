@@ -36,8 +36,9 @@
  * / thrown message is ignored. Results are shaped here: content types outside
  * `resultCap.contentTypes` (text and image only) are dropped with a one-line
  * note. Items are rebuilt from an allowlist: text -> {type, text} through the
- * redactor with `ctx.secrets`; image -> {type, mimeType, data} only for an
- * allowed mimeType and a base64 string. Resource items and every other type are
+ * shared redactSecrets with `ctx.secrets` (its default length floor);
+ * image -> {type, mimeType, data} only for an allowed mimeType and a base64
+ * string. Resource items and every other type are
  * dropped, and no other upstream field (_meta, annotations, structuredContent,
  * userText, ...) is ever copied. The whole result is capped at
  * `resultCap.maxBytes` (base64 images count). Only `content` + `isError` survive.
@@ -51,7 +52,7 @@ import { createMcpHandler } from "./routes/mcp.js";
 import { loopbackActorGate, noteRefusedOnce, readActorHeaders } from "./loopback-gate.js";
 import { callerContext } from "./caller-context.js";
 import { recordToolCall } from "./session-logger.js";
-import { redactor } from "../shared/redact-secrets.js";
+import { redactSecrets } from "../shared/redact-secrets.js";
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { resolveSignedScope } from "../shared/signed-session.js";
 import { SCOPE_ACTOR_KINDS, verifyScopeActorSig } from "../../scripts/pi-bots/actor-sig.mjs";
@@ -265,12 +266,12 @@ async function runTool(m, tool, args, extra) {
       return fail(code);
     }
     // 6. shaping: allowed content types only, redacted text, content + isError only.
-    const redact = redactor(Array.isArray(live.ctx?.secrets) ? live.ctx.secrets : []);
+    const secrets = Array.isArray(live.ctx?.secrets) ? live.ctx.secrets : [];
     const content = [];
     let dropped = 0;
     for (const item of result.content) {
       const kind = isPlainObject(item) && m.contentTypes.has(item.type) ? item.type : null;
-      if (kind === "text" && typeof item.text === "string") content.push({ type: "text", text: redact(item.text) });
+      if (kind === "text" && typeof item.text === "string") content.push({ type: "text", text: redactSecrets(item.text, secrets) });
       else if (kind === "image" && typeof item.mimeType === "string" && IMAGE_MIME.has(item.mimeType) && typeof item.data === "string" && BASE64_RE.test(item.data)) {
         content.push({ type: "image", mimeType: item.mimeType, data: item.data });
       } else dropped++;
