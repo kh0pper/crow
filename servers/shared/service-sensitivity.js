@@ -66,6 +66,12 @@ export const SENSITIVITY_OVERRIDES_FILENAME = "service-sensitivity-overrides";
 /** The uuid -> serviceId bindings the owner's connect route recorded, beside it. */
 export const CONNECTION_BINDINGS_FILENAME = "service-connection-bindings";
 const SERVICE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// An override's key: "<uuid>|<bound serviceId>", so an override written while a connection was
+// bound to one service never applies under another.
+const OVERRIDE_KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[a-z0-9][a-z0-9-]{0,63}$/i;
+const overrideKey = (uuid, serviceId) => `${uuid}|${serviceId}`;
+/** A missing or mismatched binding: private, and nothing the owner can change. */
+const UNBOUND = Object.freeze({ sensitive: true, locked: true, default: true });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -78,8 +84,8 @@ export function serviceSensitivity(serviceId) {
 
 const envFor = (crowHome) => ({ ...process.env, CROW_HOME: crowHome || resolveCrowHome() });
 
-/** One anchored one-line JSON object file as a Map (keys: uuids, lower-cased; values that pass `ok`). */
-function readUuidMap(name, ok, crowHome) {
+/** One anchored one-line JSON object file as a Map (keys that match keyRe, lower-cased; values that pass `ok`). */
+function readUuidMap(name, ok, crowHome, keyRe = UUID_RE) {
   const out = new Map();
   try {
     const p = anchoredPath(envFor(crowHome), name);
@@ -88,7 +94,7 @@ function readUuidMap(name, ok, crowHome) {
     const obj = JSON.parse(f.lines[0]);
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return out;
     for (const [k, v] of Object.entries(obj)) {
-      if (UUID_RE.test(k) && ok(v)) out.set(k.toLowerCase(), v);
+      if (keyRe.test(k) && ok(v)) out.set(k.toLowerCase(), v);
     }
   } catch {
     out.clear();
@@ -137,22 +143,30 @@ export function connectionBindingOk(conn, { crowHome, bindings } = {}) {
 }
 
 /**
- * The owner's overrides: uuid -> boolean. Only the anchored path is read. A missing, unreadable
- * or corrupt file is an empty map (every connection takes its default); an entry whose key is
- * not a uuid or whose value is not a boolean is left out.
+ * The owner's overrides: "<uuid>|<bound serviceId>" -> boolean. Only the anchored path is read. A
+ * missing, unreadable or corrupt file is an empty map (every connection takes its default); an
+ * entry whose key is not of that shape or whose value is not a boolean is left out.
  * @returns {Map<string, boolean>}
  */
 export function readSensitivityOverrides({ crowHome } = {}) {
-  return readUuidMap(SENSITIVITY_OVERRIDES_FILENAME, (v) => typeof v === "boolean", crowHome);
+  return readUuidMap(SENSITIVITY_OVERRIDES_FILENAME, (v) => typeof v === "boolean", crowHome, OVERRIDE_KEY_RE);
 }
 
-/** {sensitive, locked, default} for one connection ({uuid, serviceId}). */
-export function connectionSensitivity(conn, { crowHome, overrides } = {}) {
-  const s = serviceSensitivity(conn?.serviceId);
-  if (s.locked) return { sensitive: s.default, locked: true, default: s.default };
+/**
+ * {sensitive, locked, default} for one connection ({uuid, serviceId}), decided from its BOUND
+ * service (the binding the owner's connect route recorded), never from the row's service_id alone:
+ * a missing binding, or a row that says another service, is private and locked. The override
+ * counts only under the bound service.
+ */
+export function connectionSensitivity(conn, { crowHome, overrides, bindings } = {}) {
   const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
+  const bmap = bindings instanceof Map ? bindings : readConnectionBindings({ crowHome });
+  const bound = uuid ? bmap.get(uuid) : undefined;
+  if (typeof bound !== "string" || bound !== conn?.serviceId) return { ...UNBOUND };
+  const s = serviceSensitivity(bound);
+  if (s.locked) return { sensitive: s.default, locked: true, default: s.default };
   const map = overrides instanceof Map ? overrides : readSensitivityOverrides({ crowHome });
-  const o = map.get(uuid);
+  const o = map.get(overrideKey(uuid, bound));
   return { sensitive: typeof o === "boolean" ? o : s.default, locked: false, default: s.default };
 }
 
@@ -179,9 +193,11 @@ export class SensitivityError extends Error {
 
 /**
  * The owner's switch: record `sensitive` for one connection. Only the dashboard's owner route
- * calls this (services-api.js, a local password session from another machine + CSRF). A locked
- * service (unknown included) throws SensitivityError('locked'); a write that can't go through the
- * anchored dir throws. Written atomically (temp file, fsync, rename; mode 600). A corrupt file is
+ * calls this (services-api.js, a local password session from another machine + CSRF). A
+ * connection whose row isn't its bound service (or has no binding) throws
+ * SensitivityError('bad_value'); the lock and default come from the BOUND service, and a locked
+ * one (unknown included) throws SensitivityError('locked'); the override is stored under
+ * "<uuid>|<bound serviceId>". A write that can't go through the anchored dir throws. Written atomically (temp file, fsync, rename; mode 600). A corrupt file is
  * replaced by the new map (its contents were already being read as "no override").
  * @returns {{sensitive: boolean, locked: false, default: boolean}}
  */
@@ -189,10 +205,12 @@ export function setSensitivityOverride(conn, sensitive, { crowHome } = {}) {
   if (typeof sensitive !== "boolean") throw new SensitivityError("bad_value");
   const uuid = typeof conn?.uuid === "string" ? conn.uuid.toLowerCase() : "";
   if (!UUID_RE.test(uuid)) throw new SensitivityError("bad_value");
-  const s = serviceSensitivity(conn?.serviceId);
+  const bound = readConnectionBindings({ crowHome }).get(uuid);
+  if (typeof bound !== "string" || bound !== conn?.serviceId) throw new SensitivityError("bad_value");
+  const s = serviceSensitivity(bound);
   if (s.locked) throw new SensitivityError("locked");
   const map = readSensitivityOverrides({ crowHome });
-  map.set(uuid, sensitive);
+  map.set(overrideKey(uuid, bound), sensitive);
   writeUuidMap(SENSITIVITY_OVERRIDES_FILENAME, map, crowHome);
-  return connectionSensitivity({ uuid, serviceId: conn.serviceId }, { crowHome });
+  return connectionSensitivity({ uuid, serviceId: bound }, { crowHome });
 }
