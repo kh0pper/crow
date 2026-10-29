@@ -151,6 +151,27 @@ test("a live transition refuses an expired row", async () => {
   assert.equal(await s.transition(db, id2, ["proposed"], "expired"), true);
 });
 
+test("a confirm transition called without live on an expired row loses", async () => {
+  const db = freshDb();
+  const now = clock();
+  const s = createHandoffStore({ now });
+  const phone = await s.insert(db, base({ surface: "kiosk", status: "awaiting_phone" }));
+  const spoken = await s.insert(db, base({ device_id: "dev-2" }));
+  const fresh = await s.insert(db, base({ device_id: "dev-3" }));
+  now.advance(C.HANDOFF_PROPOSAL_TTL_MS);
+  assert.equal(await s.transition(db, spoken, ["proposed"], "starting"), false, "the TTL is forced on a confirm");
+  now.advance(C.HANDOFF_PHONE_TTL_MS);
+  assert.equal(await s.transition(db, phone, ["awaiting_phone"], "starting"), false);
+  assert.equal(await s.transition(db, phone, ["proposed", "awaiting_phone"], "starting", {}, { live: false }), false);
+  assert.equal((await s.get(db, phone)).status, "awaiting_phone");
+  assert.equal((await s.get(db, spoken)).status, "proposed");
+  // A live row still confirms without the flag, and a non-confirm (no expires_at) is not TTL-checked.
+  const live = await s.insert(db, base({ device_id: "dev-4" }));
+  assert.equal(await s.transition(db, live, ["proposed"], "starting"), true);
+  assert.equal(await s.transition(db, live, ["starting"], "started"), true);
+  assert.equal(await s.transition(db, fresh, ["proposed"], "declined"), true);
+});
+
 test("a second awaiting_phone row for the same device and kind is refused by the index", async () => {
   const db = freshDb();
   const now = clock();
@@ -334,6 +355,23 @@ test("the sweep retries a pending engine stop and clears the detail on success",
   assert.equal((await s.get(db, noSession)).detail, "stop_pending");
   assert.ok(logged.some((l) => l.includes("engine busy")));
   for (const id of [ok, gone, bad]) assert.equal((await s.get(db, id)).status, "stopped");
+});
+
+test("a sweep without retryStop leaves stop_pending rows untouched", async () => {
+  const db = freshDb();
+  const now = clock();
+  const s = createHandoffStore({ now });
+  const id = await s.insert(db, base({ status: "stopped" }));
+  await s.setFields(db, id, { session_id: "ses-1", detail: "stop_pending" });
+  const before = await s.get(db, id);
+  now.advance(60_000);
+  const r = await s.sweep(db);
+  assert.equal(r.retried, 0);
+  assert.deepEqual(await s.get(db, id), before, "nothing claims the stop happened");
+  let called = 0;
+  assert.equal((await s.sweep(db, { retryStop: async () => { called++; } })).retried, 1);
+  assert.equal(called, 1);
+  assert.equal((await s.get(db, id)).detail, null);
 });
 
 test("the sweep scrubs asked on old declined and expired rows and keeps the task", async () => {

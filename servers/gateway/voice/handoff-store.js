@@ -22,6 +22,7 @@ import {
 const PHONE_OPEN_RE = /UNIQUE constraint failed: voice_handoffs\.device_id, voice_handoffs\.kind/;
 const DECIDED = new Set(["starting", "declined"]);
 const ENDED = new Set(["done", "failed", "stopped"]);
+const CONFIRMABLE = new Set(["proposed", "awaiting_phone"]);
 // The columns a transition may write beside its status, and the ones setFields may write on any row.
 const TRANSITION_FIELDS = new Set(["card_id", "session_id", "thread_id", "target_id", "model_key", "outcome", "detail"]);
 const SET_FIELDS = new Set(["card_id", "session_id", "thread_id", "detail"]);
@@ -73,7 +74,8 @@ export function createHandoffStore({ now = Date.now } = {}) {
     for (const k of keys) { sets.push(`${k} = ?`); args.push(fields[k] ?? null); }
     let sql = `UPDATE voice_handoffs SET ${sets.join(", ")} WHERE id = ? AND status IN (${from.map(() => "?").join(",")})`;
     args.push(String(id), ...from);
-    if (live) { sql += " AND expires_at > ?"; args.push(t); }
+    // A confirm (proposed/awaiting_phone → starting) always checks the TTL, whatever the caller passed.
+    if (live || (toStatus === "starting" && from.some((f) => CONFIRMABLE.has(f)))) { sql += " AND expires_at > ?"; args.push(t); }
     const r = await db.execute({ sql, args });
     return r.rowsAffected === 1;
   }
@@ -189,12 +191,13 @@ export function createHandoffStore({ now = Date.now } = {}) {
      *    `inFlight`: their card (the row's card_id, else `findCard`) → queued "recovered", none → failed
      *    "interrupted";
      *  - stopped rows whose engine.stop failed (detail "stop_pending") → `retryStop(session_id)` again,
-     *    clearing the detail once it succeeds (a session already gone counts as stopped);
+     *    clearing the detail once it succeeds (a session already gone counts as stopped); without a
+     *    `retryStop` the pass is skipped and the rows stay pending;
      *  - stop rows left `starting` over HANDOFF_STOP_STUCK_MS → failed "interrupted";
      *  - declined/expired rows older than HANDOFF_ASKED_RETAIN_MS lose `asked`; the task stays.
      * Every status change is a CAS, so a confirm that lands meanwhile wins.
      */
-    async sweep(db, { inFlight = new Set(), findCard = async () => null, retryStop = async () => {} } = {}) {
+    async sweep(db, { inFlight = new Set(), findCard = async () => null, retryStop = null } = {}) {
       const out = { expired: 0, failed: 0, requeued: 0, scrubbed: 0, retried: 0 };
       const t = now();
 
@@ -227,7 +230,8 @@ export function createHandoffStore({ now = Date.now } = {}) {
         if (await transition(db, row.id, ["starting"], "failed", { detail: "interrupted" })) out.failed++;
       }
 
-      const pending = (await db.execute({
+      // No retryStop, no retry: the rows stay stop_pending for a sweep that can actually stop them.
+      const pending = typeof retryStop !== "function" ? [] : (await db.execute({
         sql: `SELECT id, session_id FROM voice_handoffs
                WHERE status = 'stopped' AND detail = 'stop_pending' AND session_id IS NOT NULL`,
         args: [],
