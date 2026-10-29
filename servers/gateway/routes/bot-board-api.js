@@ -67,6 +67,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { createDbClient } from "../../db.js";
+import { activeProjectWhere } from "../../shared/shell-items.js";
 import { jsonError } from "./_error.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { proposalsDir, normalizeSkillName, listProposals } from "../../../scripts/pi-bots/skill_proposals.mjs";
@@ -320,7 +321,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       cdb = createDbClient();
       let projects = [];
       try {
-        projects = (await cdb.execute({ sql: "SELECT id, name, slug, repo_path FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
+        projects = (await cdb.execute({ sql: `SELECT id, name, slug, repo_path FROM project_spaces WHERE ${activeProjectWhere()} ORDER BY id`, args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
       // Decision cards carry their question/options in data_json; expose it as

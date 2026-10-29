@@ -57,6 +57,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { createDbClient } from "../db.js";
+import { activeProjectWhere } from "../shared/shell-items.js";
 import { tasksDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
 import {
   resolveBoardDef, resolveSlugBoardDef,
@@ -197,7 +198,7 @@ async function listBoardsImpl(tdb, cdb, includeArchived) {
   let projects = [];
   try {
     projects = (await cdb.execute({
-      sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id",
+      sql: `SELECT id, name, slug FROM project_spaces WHERE ${activeProjectWhere()} ORDER BY id`,
       args: [],
     })).rows || [];
   } catch { projects = []; }

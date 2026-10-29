@@ -79,7 +79,7 @@ function fixture() {
 
   const c = new Database(dbPath);
   markPriorDone(c);
-  c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT);
+  c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT, status TEXT DEFAULT 'active', type TEXT DEFAULT 'general');
     CREATE TABLE bot_jobs (job_id TEXT PRIMARY KEY, bot_id TEXT, card_id INTEGER, card_action TEXT,
       status TEXT, worker_pid INTEGER, started_at TEXT);
     CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, card_id INTEGER, status TEXT,
