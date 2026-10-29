@@ -30,7 +30,11 @@ async function post(path, token) {
   });
   return { status: r.status, text: await r.text() };
 }
-const OTHER_DOORS = ["/board/mcp", "/memory/mcp", "/peer-relay/inst-bravo-0002/memory/mcp"];
+// The cloud door (/llm/c, roles phase 2c) checks its own token hash only, so a
+// family token from loopback reaches its token check and is refused there.
+const CLOUD_DOOR = "/llm/c/openai/v1/chat/completions";
+const OTHER_DOORS = ["/board/mcp", "/memory/mcp", "/peer-relay/inst-bravo-0002/memory/mcp", CLOUD_DOOR];
+const cloudTok = () => readFileSync(join(A.dir, "llm-cloud-token"), "utf8").trim();
 const FAMILY_PATHS = [`/services-tools/00000000-0000-4000-8000-000000000000/mcp`, "/satellite-tools/a/b/mcp"];
 
 test("both family tokens are minted under secrets/ at 0600", () => {
@@ -50,10 +54,11 @@ test("every other door refuses both family tokens, and no family path answers 2x
     for (const path of OTHER_DOORS) {
       const r = await post(path, readTok(k));
       assert.equal(r.status, 401, `${k} token at ${path}: ${r.text}`);
+      if (path === CLOUD_DOOR) assert.match(r.text, /CLOUD_TOKEN_REFUSED/);
     }
   }
   for (const path of FAMILY_PATHS) {
-    for (const tok of [null, readTok("services"), readTok("satellite")]) {
+    for (const tok of [null, readTok("services"), readTok("satellite"), cloudTok()]) {
       const r = await post(path, tok);
       assert.ok(r.status < 200 || r.status >= 300, `${path} must not answer 2xx, got ${r.status}`);
     }
