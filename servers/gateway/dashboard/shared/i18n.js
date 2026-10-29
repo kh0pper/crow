@@ -1168,7 +1168,6 @@ export const translations = {
   "botbuilder.stopSessionFailed": { en: "Couldn't stop session — try again", es: "No se pudo detener la sesión — intenta de nuevo" },
   // Tab labels (HTML-context) — TABS[i][0] ids are frozen; only display labels are translated
   // Button labels
-  "botbuilder.btnSaveTrackerConfig": { en: "Save Tracker Config", es: "Guardar configuración del rastreador" },
   "botbuilder.btnRegenMcp": { en: "Check tool connections", es: "Revisar las conexiones de herramientas" },
   "botbuilder.btnDisableBot": { en: "Disable bot", es: "Desactivar bot" },
   "botbuilder.btnEnableBot": { en: "Enable bot", es: "Activar bot" },

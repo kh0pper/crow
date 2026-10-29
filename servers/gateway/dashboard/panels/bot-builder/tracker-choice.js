@@ -41,10 +41,14 @@ export function trackerType(def) {
   return tc && typeof tc === "object" && tc.type ? String(tc.type) : "";
 }
 
-/** The "Show this bot its project's cards" switch: kanban and task-list are On; none, unset and missing are Off. */
+/**
+ * The "Show this bot its project's cards" switch: kanban, task-list and an unset or missing type are
+ * On (tracker.mjs runs an unset type as kanban, so the switch shows what the bot gets); none and
+ * custom are not.
+ */
 export function trackerOn(def) {
   const ty = trackerType(def);
-  return ty === "kanban" || ty === "task-list";
+  return ty === "" || ty === "kanban" || ty === "task-list";
 }
 
 /** A custom-tracker bot has no switch: its tracker is left as it is. */
