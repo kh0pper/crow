@@ -4222,6 +4222,11 @@ export const translations = {
   "services.members.line": { en: "Each person connects their own accounts, on their own Crow. Their bots never use yours.", es: "Cada persona conecta sus propias cuentas, en su propio Crow. Sus bots nunca usan las tuyas." },
   "services.ownerOnly.line": { en: "Bots use these only when you start the conversation. Messages from other people never reach your accounts.", es: "Los bots los usan solo cuando tú inicias la conversación. Los mensajes de otras personas nunca llegan a tus cuentas." },
   "services.empty": { en: "Nothing is connected in this project yet.", es: "Aún no hay nada conectado en este proyecto." },
+  // Task 16c: the owner's per-connection Private switch (Services page and Settings → Advanced).
+  "services.private.label": { en: "Treat as private", es: "Tratar como privado" },
+  "services.private.on": { en: "Private: bots can't read this yet", es: "Privado: los bots aún no pueden leerlo" },
+  "services.private.locked": { en: "Always private for this service", es: "Siempre privado en este servicio" },
+  "services.private.notOwner": { en: "Only you can change this, signed in from your own device.", es: "Solo tú puedes cambiar esto, con la sesión iniciada en tu propio dispositivo." },
   // Task 13: entry points to Services (Settings, project home, launcher tile).
   "settings.integrations.moved": { en: "Services now live in each project.", es: "Los servicios ahora están en cada proyecto." },
   "settings.integrations.open": { en: "Open {project}'s services", es: "Abrir los servicios de {project}" },

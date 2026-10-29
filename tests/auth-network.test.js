@@ -391,6 +391,7 @@ test("rejectFunneled middleware: the Services API is never funnel-exposed", asyn
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/test",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/restart",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive",
     "/dashboard/services/api/uninstall-preflight/github"];
   const server = await startTestApp();
   try {
@@ -437,6 +438,14 @@ test("the Services API's own gate: Funnel and off-network refused, no session 40
     let reNoSession;
     try { reNoSession = await request(port, restartPath); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
     assert.equal(reNoSession.status, 401, "restart needs a dashboard session");
+    // Task 16c: the owner's Private switch sits behind the same gate.
+    const sensPath = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive";
+    const seFunnel = await request(port, sensPath, { "tailscale-funnel-request": "?1" });
+    assert.equal(seFunnel.status, 403, "the Private switch is never served over the Funnel");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let seNoSession;
+    try { seNoSession = await request(port, sensPath); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(seNoSession.status, 401, "the Private switch needs a dashboard session");
     assert.equal(opened, 0, "no request reached a handler");
   } finally {
     server.close();
@@ -1045,4 +1054,53 @@ test("dashboard login limiter key: a rotated Tailscale-User-Login on a direct pe
   const key = (login) => { const r = mkReq({ ip: "10.0.0.5", headers: { "tailscale-user-login": login } }); r.ip = "10.0.0.5"; r.crowPeer = classifyPeer(r); return dashboardLoginKey(r); };
   assert.equal(key("a@example.com"), key("b@example.com"));
   assert.equal(key("a@example.com"), "10.0.0.5:");
+});
+
+// Project services Task 16c: the Private switch is the OWNER's alone. With a signed-in session
+// past the gate and CSRF, the real owner rule (isLocalPasswordSessionOn) still refuses a peer SSO
+// session, a session minted by a login on this machine, and any request from this machine.
+test("auth-network: the Services Private switch refuses SSO, onhost and this-machine sessions (403 not_owner)", async () => {
+  const { servicesApiRouter } = await import("../servers/gateway/routes/services-api.js");
+  const { markFromLaptop } = await import("./helpers/off-box.js");
+  let scopes = "dashboard";
+  let wrote = 0;
+  const fakeDb = () => ({
+    execute: async ({ sql }) => {
+      if (/FROM oauth_tokens/.test(sql)) return { rows: [{ scopes }] };
+      wrote++;
+      return { rows: [] };
+    },
+    close() {},
+  });
+  const gate = (req, res, next) => {
+    req.dashboardSession = "s1";
+    if (req.headers["x-test-from"] === "laptop") markFromLaptop(req);
+    next();
+  };
+  const app = express();
+  app.use(servicesApiRouter({ uiEnabled: () => true, sessionGate: gate, dbFactory: fakeDb }));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  const post = (headers) => new Promise((resolve, reject) => {
+    const body = JSON.stringify({ sensitive: false });
+    const r = http.request({ host: "127.0.0.1", port: server.address().port, method: "POST",
+      path: "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive",
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), cookie: "crow_session=s1; crow_csrf=c1", "x-crow-csrf": "c1", ...headers } },
+    (res) => { let t = ""; res.on("data", (c) => (t += c)); res.on("end", () => resolve({ status: res.statusCode, text: t })); });
+    r.on("error", reject);
+    r.end(body);
+  });
+  try {
+    for (const [label, sc, from] of [["sso", "dashboard sso src:peer-1", "laptop"], ["onhost", "dashboard onhost", "laptop"], ["this machine", "dashboard", null]]) {
+      scopes = sc;
+      const r = await post(from ? { "x-test-from": from } : {});
+      assert.equal(r.status, 403, `${label}: ${r.status} ${r.text}`);
+      assert.deepEqual(JSON.parse(r.text), { error: "not_owner" }, label);
+    }
+    assert.equal(wrote, 0, "a refused request never looks up the connection");
+    scopes = "dashboard";
+    const owner = await post({ "x-test-from": "laptop" });
+    assert.equal(owner.status, 404, "the owner gets past the rule (to the connection lookup: none here)");
+  } finally {
+    server.close();
+  }
 });

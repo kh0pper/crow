@@ -488,3 +488,81 @@ test("copy: every error class has en + es; the generic line exists; the Add/Conn
   assert.equal(t("services.error.not_a_vault", "en"), "That folder isn't an Obsidian vault (no .obsidian folder inside).");
   assert.equal(translations["services.connect.satellites"], undefined, "no satellites line in this PR");
 });
+
+// ---- Task 16c: the Private switch ---------------------------------------------------------------
+
+/** linkedom has no `checked` property: reflect the attribute, as a browser does before any click. */
+function withChecked(s) {
+  Object.defineProperty(s.window.HTMLInputElement.prototype, "checked", {
+    configurable: true,
+    get() { return this.hasAttribute("checked"); },
+    set(v) { if (v) this.setAttribute("checked", ""); else this.removeAttribute("checked"); },
+  });
+  return s;
+}
+
+test("Private switch: the row shows the effective state; toggling POSTs {sensitive} with CSRF and takes the answered state", async () => {
+  const conn = { uuid: UUID, serviceId: "github", name: "GitHub", accountLabel: "work", status: "active", lastTestedAt: null, private: { on: false, locked: false } };
+  let answer = { status: 200, body: { ok: true, private: { on: true, locked: false } } };
+  const s = withChecked(boot({ pageData: page({ connections: [conn] }), fetchImpl: () => answer }));
+  const row = s.document.querySelector("[data-svc-row]");
+  const box = row.querySelector("[data-svc-private]");
+  const note = row.querySelector("[data-svc-private-note]");
+  assert.equal(box.checked, false);
+  assert.equal(box.disabled, false);
+  assert.equal(note.textContent, "");
+  assert.equal(row.querySelector(".svc-private-switch").textContent.trim(), "Treat as private");
+  box.checked = true;
+  box.dispatchEvent(new s.window.Event("change", { bubbles: true }));
+  assert.equal(box.disabled, true, "disabled in flight");
+  await s.settle();
+  assert.equal(s.calls.length, 1);
+  assert.equal(s.calls[0].url, `/dashboard/services/api/connection/${UUID}/sensitive`);
+  assert.equal(s.calls[0].method, "POST");
+  assert.equal(s.calls[0].headers["X-Crow-Csrf"], "csrf-abc");
+  assert.deepEqual(JSON.parse(s.calls[0].body), { sensitive: true });
+  assert.equal(box.checked, true);
+  assert.equal(box.disabled, false);
+  assert.equal(note.textContent, "Private: bots can't read this yet");
+  // A refusal (not the owner) puts the box back and says why.
+  answer = { status: 403, body: { error: "not_owner" } };
+  box.checked = false;
+  box.dispatchEvent(new s.window.Event("change", { bubbles: true }));
+  await s.settle();
+  assert.equal(box.checked, true, "back to private");
+  assert.equal(row.querySelector(".svc-row-error").textContent, t("services.private.notOwner", "en"));
+  answer = new Error("offline");
+  box.checked = false;
+  box.dispatchEvent(new s.window.Event("change", { bubbles: true }));
+  await s.settle();
+  assert.equal(box.checked, true);
+  assert.equal(row.querySelector(".svc-row-error").textContent, t("services.error.generic", "en"));
+  assert.equal(s.reloads(), 0);
+});
+
+test("Private switch: a locked service is checked, disabled, says so and never posts; a missing state reads as private; Spanish copy", async () => {
+  const locked = { uuid: UUID, serviceId: "obsidian", name: "Obsidian", accountLabel: "vault", status: "active", lastTestedAt: null, private: { on: true, locked: true } };
+  const bare = { uuid: "00000000-0000-4000-8000-000000000002", serviceId: "github", name: "GitHub", accountLabel: "x", status: "active", lastTestedAt: null };
+  const s = withChecked(boot({ pageData: page({ connections: [locked, bare] }), lang: "es" }));
+  const [r1, r2] = s.document.querySelectorAll("[data-svc-row]");
+  const box = r1.querySelector("[data-svc-private]");
+  assert.equal(box.checked, true);
+  assert.equal(box.disabled, true);
+  assert.equal(r1.querySelector("[data-svc-private-note]").textContent, "Siempre privado en este servicio");
+  assert.equal(r1.querySelector(".svc-private-switch").textContent.trim(), "Tratar como privado");
+  box.dispatchEvent(new s.window.Event("change", { bubbles: true }));
+  await s.settle();
+  assert.equal(s.calls.length, 0, "a disabled box never posts");
+  assert.equal(r2.querySelector("[data-svc-private]").checked, true, "no private state: fail closed, shown private");
+  assert.equal(r2.querySelector("[data-svc-private-note]").textContent, "Privado: los bots aún no pueden leerlo");
+});
+
+test("Private copy: en + es, the plan's voice", () => {
+  for (const k of ["services.private.label", "services.private.on", "services.private.locked", "services.private.notOwner"]) {
+    assert.ok(translations[k]?.en && translations[k]?.es, k);
+  }
+  assert.equal(t("services.private.on", "en"), "Private: bots can't read this yet");
+  assert.equal(t("services.private.on", "es"), "Privado: los bots aún no pueden leerlo");
+  assert.equal(t("services.private.label", "en"), "Treat as private");
+  assert.equal(t("services.private.label", "es"), "Tratar como privado");
+});

@@ -244,7 +244,7 @@ test("phone first: no fixed width above 360 px; every control at least 44 px; th
     const px = Number(m[1]) * (m[2] === "px" ? 1 : 16);
     assert.ok(px <= 360, `min-width ${m[0]}`);
   }
-  for (const sel of [".svc-project", ".svc-add", ".svc-menu > summary", ".svc-menu-item", ".svc-inline"]) {
+  for (const sel of [".svc-project", ".svc-add", ".svc-menu > summary", ".svc-menu-item", ".svc-inline", ".svc-private-switch"]) {
     const rule = css.slice(css.indexOf(`body.shell ${sel} {`));
     assert.match(rule.slice(0, rule.indexOf("}")), /min-height:\s*44px/, `${sel} is a 44 px target`);
   }

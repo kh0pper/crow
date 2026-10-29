@@ -12,6 +12,7 @@ import { listConnections } from "../../../../shared/service-connections.js";
 import { serviceSecretKeys } from "../../../keychain/store.js";
 import { childState, childStderr } from "../../../services/children.js";
 import { serviceById } from "../../../../shared/service-catalog.js";
+import { connectionSensitivity, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
 
 const CHILD_STATES = ["running", "stopped", "starting", "error", "cooling"];
 
@@ -45,12 +46,62 @@ function restartScript() {
       .catch(function () { if (msgEl) msgEl.textContent = labels.child_unavailable || ''; })
       .then(function () { btn.disabled = false; });
   });
+  // Task 16c: the owner's Private switch (owner only; the route refuses anyone else with 403).
+  document.addEventListener('change', function (ev) {
+    var box = ev.target;
+    if (!box || !box.hasAttribute || !box.hasAttribute('data-int-private') || box.disabled) return;
+    var row = box.closest('[data-int-conn]');
+    var note = row ? row.querySelector('[data-int-private-note]') : null;
+    var labels = {};
+    try { labels = JSON.parse(box.getAttribute('data-labels') || '{}'); } catch (e) { labels = {}; }
+    var want = !!box.checked;
+    box.disabled = true;
+    var csrf = '';
+    var parts = document.cookie.split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].trim().split('=');
+      if (kv[0] === 'crow_csrf') csrf = decodeURIComponent(kv.slice(1).join('='));
+    }
+    fetch('/dashboard/services/api/connection/' + encodeURIComponent(box.getAttribute('data-int-private')) + '/sensitive', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf },
+      body: JSON.stringify({ sensitive: want })
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (res) {
+        var p = res.body && res.body.private;
+        if (res.status === 200 && p && typeof p.on === 'boolean') {
+          box.checked = p.on;
+          box.disabled = p.locked === true;
+          if (note) note.textContent = p.locked ? (labels.locked || '') : (p.on ? (labels.on || '') : '');
+          return;
+        }
+        box.checked = !want;
+        box.disabled = false;
+        if (note) note.textContent = res.status === 403 ? (labels.notOwner || '') : (labels.generic || '');
+      })
+      .catch(function () { box.checked = !want; box.disabled = false; if (note) note.textContent = labels.generic || ''; });
+  });
 })();
 <\/script>`;
 }
 
-/** One connection's Advanced row: names and status only, the child's state, Restart, its redacted stderr. */
-function connectionRow(c, keys, lang) {
+/** The Private switch (Task 16c): checked = private; disabled for a locked service. Fail closed: on. */
+function privateSwitch(c, lang, overrides) {
+  let on = true;
+  let locked = false;
+  try { const s = connectionSensitivity(c, { overrides }); on = s.sensitive !== false; locked = s.locked === true; } catch { /* private */ }
+  const labels = {
+    on: t("services.private.on", lang), locked: t("services.private.locked", lang),
+    notOwner: t("services.private.notOwner", lang), generic: t("services.error.generic", lang),
+  };
+  const note = locked ? labels.locked : on ? labels.on : "";
+  return ` · <label class="int-note"><input type="checkbox" data-int-private="${escapeHtml(c.uuid)}" data-labels="${escapeHtml(JSON.stringify(labels))}"${on ? " checked" : ""}${locked ? " disabled" : ""}> ${escapeHtml(t("services.private.label", lang))}</label>
+      <span class="int-note" data-int-private-note role="status">${escapeHtml(note)}</span>`;
+}
+
+/** One connection's Advanced row: names and status only, the child's state, Restart, the Private switch, its redacted stderr. */
+function connectionRow(c, keys, lang, overrides) {
   const status = t(`services.status.${c.status}`, lang);
   const state = childState(c.uuid);
   const name = serviceById(c.serviceId)?.name || c.serviceId;
@@ -64,7 +115,7 @@ function connectionRow(c, keys, lang) {
   return `<li data-int-conn="${escapeHtml(c.uuid)}"><strong>${escapeHtml(c.serviceId)}</strong> ${escapeHtml(c.accountLabel)} <span class="int-note">${escapeHtml(status)}${c.lastError ? ` <code>${escapeHtml(c.lastError)}</code>` : ""}${keys.length ? ` · ${keys.map((k) => escapeHtml(k)).join(", ")}` : ""}</span>
       · <span class="int-note" data-int-child-state>${escapeHtml(t(`services.child.${state}`, lang))}</span>
       <button type="button" class="btn btn-sm" data-int-restart="${escapeHtml(c.uuid)}" data-labels="${escapeHtml(JSON.stringify(labels))}">${escapeHtml(t("settings.integrations.restartChild", lang))}</button>
-      <span class="int-note" data-int-restart-msg role="status"></span>${stderr}</li>`;
+      <span class="int-note" data-int-restart-msg role="status"></span>${privateSwitch(c, lang, overrides)}${stderr}</li>`;
 }
 
 /** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). */
@@ -86,9 +137,10 @@ async function movedHtml({ scope, db, lang }) {
   let conns = "";
   if (db) {
     try {
+      const overrides = readSensitivityOverrides();
       for (const c of await listConnections(db, {})) {
         const keys = [...(await serviceSecretKeys(db, c.uuid))].sort();
-        conns += connectionRow(c, keys, lang);
+        conns += connectionRow(c, keys, lang, overrides);
       }
     } catch (err) { console.warn("[settings] connections listing failed:", err.message); }
   }
