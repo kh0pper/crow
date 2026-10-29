@@ -12,7 +12,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, request } from "node:http";
@@ -44,6 +44,7 @@ function snapshotEnv() {
 async function makeSide(id, ip) {
   const dir = mkdtempSync(join(tmpdir(), `enroll-${id}-`));
   writeFileSync(join(dir, "instance-id"), `${id}\n`);
+  mkdirSync(join(dir, "secrets"), { recursive: true, mode: 0o700 });
   const db = await makeRealDb(dir);
   await db.execute({
     sql: "INSERT INTO crow_instances (id, name, crow_id, gateway_url, tailscale_ip, status) VALUES (?, ?, ?, ?, ?, 'active')",
@@ -51,12 +52,12 @@ async function makeSide(id, ip) {
   });
   return {
     id, ip, dir, db,
-    tokensPath: join(dir, "peer-tokens.json"),
+    tokensPath: join(dir, "secrets", "peer-tokens.json"),
     env: {
       CROW_HOME: dir,
       CROW_DATA_DIR: dir,
       CROW_DB_PATH: join(dir, "crow.db"),
-      CROW_PEER_TOKENS_PATH: join(dir, "peer-tokens.json"),
+      CROW_PEER_TOKENS_PATH: join(dir, "secrets", "peer-tokens.json"),
       CROW_INSTANCES_JSON_PATH: join(dir, "instances.json"),
       CROW_PEER_GATEWAY_URL: `http://${ip}:3001`,
       PORT: "3001",

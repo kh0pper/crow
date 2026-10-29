@@ -32,7 +32,7 @@
 
 import {
   existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, renameSync,
-  openSync, writeSync, closeSync, unlinkSync, fsyncSync, readdirSync, lstatSync,
+  openSync, writeSync, closeSync, unlinkSync, fsyncSync, readdirSync, lstatSync, realpathSync,
 } from "fs";
 import { resolve, dirname, basename, join } from "path";
 import { resolveCrowHome } from "./crow-home.js";
@@ -57,21 +57,53 @@ import { randomBytes } from "crypto";
 // boot, or by the first reader or writer that finds it), and one re-created
 // there later is set aside, never merged (see reconcileLegacyLocked).
 function peerTokensFile() {
-  return process.env.CROW_PEER_TOKENS_PATH
-    || resolve(resolveCrowHome(), "secrets", "peer-tokens.json");
+  return activeOverride() || resolve(resolveCrowHome(), "secrets", "peer-tokens.json");
 }
 
 /** The pre-secrets/ location, or null when an override names the store. */
 function legacyPeerTokensFile() {
-  if (process.env.CROW_PEER_TOKENS_PATH) return null;
+  if (activeOverride()) return null;
   return resolve(resolveCrowHome(), "peer-tokens.json");
+}
+
+/** A path with its existing ancestors' symlinks resolved (the file itself may not exist). */
+function realish(p) {
+  const abs = resolve(p);
+  try { return realpathSync(abs); } catch { /* not there yet */ }
+  try { return join(realpathSync(dirname(abs)), basename(abs)); } catch { return abs; }
+}
+
+/**
+ * CROW_PEER_TOKENS_PATH, when it names a store of its own. An override that
+ * resolves to the OLD default (<CROW_HOME>/peer-tokens.json, as units written
+ * before the move carry) is outdated: it is treated as the old location and
+ * moved into secrets/ like any other, so such a unit does not stay exposed.
+ * An override anywhere else outside <CROW_HOME>/secrets is honoured, with a
+ * warning (once per process, so at every boot) that bot shells can read it.
+ */
+function activeOverride() {
+  const o = process.env.CROW_PEER_TOKENS_PATH;
+  if (!o) return null;
+  const home = resolveCrowHome();
+  const ro = realish(o);
+  if (ro === realish(resolve(home, "peer-tokens.json"))) {
+    warnOnce(`override-legacy:${o}`, `[peer-credentials] CROW_PEER_TOKENS_PATH=${o} names the old default location; it is outdated and ignored: ` +
+      `the store is moved to and used at ${resolve(home, "secrets", "peer-tokens.json")}. Remove the override from the unit.`);
+    return null;
+  }
+  const secretsReal = realish(resolve(home, "secrets"));
+  if (!ro.startsWith(secretsReal + "/")) {
+    warnOnce(`override-exposed:${o}`, `[peer-credentials] WARNING: CROW_PEER_TOKENS_PATH=${o} is outside ${secretsReal}; ` +
+      `the pi sandbox does not hide it, so a bot shell running as this user can read every peer key in it. Move it under ${secretsReal} or drop the override.`);
+  }
+  return o;
 }
 
 function ensureDir() {
   // Anchor on the resolved tokens path: with CROW_PEER_TOKENS_PATH set to an
   // arbitrary location, we must create THAT file's parent, not ~/.crow.
   const dir = dirname(peerTokensFile());
-  if (process.env.CROW_PEER_TOKENS_PATH) {
+  if (activeOverride()) {
     try { mkdirSync(dir, { recursive: true }); } catch {}
     return;
   }

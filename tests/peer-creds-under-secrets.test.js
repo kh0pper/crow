@@ -263,6 +263,43 @@ test("CROW_PEER_TOKENS_PATH is honoured: read and written there; the default-loc
   } finally { delete process.env.CROW_PEER_TOKENS_PATH; }
 });
 
+test("an override naming the OLD default location is outdated: the store moves into secrets/ and is used there, logged once", async () => {
+  const h = home();
+  const bytes = json({ "inst-a": entry("a") });
+  writeFileSync(legacy(h), bytes, { mode: 0o600 });
+  // Spelled through a symlinked home, as a unit might: it still resolves to the old default.
+  const { symlinkSync } = await import("node:fs");
+  const alias = join(scratch, `alias-${n}`);
+  symlinkSync(h, alias);
+  process.env.CROW_PEER_TOKENS_PATH = join(alias, "peer-tokens.json");
+  try {
+    const { out, lines } = captureWarn(() => [PC.peerTokensPath(), PC.migratePeerCredsStore(), PC.loadPeerCreds(), PC.peerTokensPath()]);
+    assert.equal(out[0], moved(h), "resolves to the secrets/ store");
+    assert.equal(out[1].action, "moved");
+    assert.deepEqual(Object.keys(out[2]), ["inst-a"]);
+    assert.equal(readFileSync(moved(h), "utf8"), bytes);
+    assert.ok(!existsSync(legacy(h)), "the exposed file is gone");
+    assert.equal(lines.filter((l) => /outdated/.test(l)).length, 1, "logged once: " + lines.join(" | "));
+  } finally { delete process.env.CROW_PEER_TOKENS_PATH; }
+});
+
+test("an override outside <CROW_HOME>/secrets is honoured, with a loud warning that bots can read it; one inside is quiet", () => {
+  const h = home();
+  const outside = join(scratch, `exposed-${n}`, "tokens.json");
+  process.env.CROW_PEER_TOKENS_PATH = outside;
+  try {
+    const { out, lines } = captureWarn(() => { PC.setPeerCreds("inst-a", entry("a")); return PC.peerTokensPath(); });
+    assert.equal(out, outside, "honoured");
+    assert.ok(existsSync(outside));
+    assert.ok(lines.some((l) => /WARNING/.test(l) && /bot shell/.test(l) && l.includes(outside)), "loud warning: " + lines.join(" | "));
+    const inside = join(h, "secrets", "custom.json");
+    process.env.CROW_PEER_TOKENS_PATH = inside;
+    const q = captureWarn(() => { PC.setPeerCreds("inst-b", entry("b")); return PC.peerTokensPath(); });
+    assert.equal(q.out, inside);
+    assert.ok(!q.lines.some((l) => /bot shell/.test(l)), "no warning inside secrets/: " + q.lines.join(" | "));
+  } finally { delete process.env.CROW_PEER_TOKENS_PATH; }
+});
+
 test("the PT-1 snapshot is not re-taken after the move (its marker moved along)", async () => {
   const h = home();
   writeFileSync(legacy(h), json({ "inst-a": entry("a") }), { mode: 0o600 });

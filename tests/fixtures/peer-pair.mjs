@@ -130,7 +130,10 @@ export class Instance {
     mkdirSync(this.dataDir, { recursive: true });
     this.id = id || `inst-${name}-${randomBytes(4).toString("hex")}`;
     writeFileSync(join(this.dataDir, "instance-id"), `${this.id}\n`);
-    this.tokensPath = join(this.dir, "peer-tokens.json");
+    // The store lives in the hidden secrets dir (an override naming the old
+    // <CROW_HOME>/peer-tokens.json default is treated as outdated and moved).
+    mkdirSync(join(this.dir, "secrets"), { recursive: true, mode: 0o700 });
+    this.tokensPath = join(this.dir, "secrets", "peer-tokens.json");
     this.log = "";
     this.child = null;
   }

@@ -110,7 +110,7 @@ link here — there is no built-in fallback model list.
 | `CROW_UNIFIED_DASHBOARD` | enabled | Federated dashboard across paired instances (`0` disables). |
 | `CROW_DISABLE_INSTANCE_SYNC` | *(unset)* | `1` disables cross-instance sync entirely (Hypercore feeds, Hyperswarm DHT, tailnet-sync dialers). `--no-auth` gateways are always sync-disabled regardless. Pair with `CROW_DISABLE_NOSTR=1` for a fully-offline scratch/test boot. |
 | `CROW_INSTANCE_SYNC_HYPERSWARM` | `1` | `0` turns off only the Hyperswarm instance-sync path (no instance-topic join, no feed-key exchange or replication with siblings over Hyperswarm). Tailnet instance sync, Hyperswarm contacts and Nostr are unaffected. Recommended for installs whose instances reach each other over a tailnet. |
-| `CROW_PEER_TOKENS_PATH` | `<CROW_HOME>/secrets/peer-tokens.json` | Peer credential file override (multi-gateway hosts). The default sits in the secrets directory hidden from bot sandboxes; a store at the older `<CROW_HOME>/peer-tokens.json` is moved there at gateway boot. An override is used as given and never moved. |
+| `CROW_PEER_TOKENS_PATH` | `<CROW_HOME>/secrets/peer-tokens.json` | Peer credential file override (multi-gateway hosts). The default sits in the secrets directory hidden from bot sandboxes; a store at the older `<CROW_HOME>/peer-tokens.json` is moved there at gateway boot. An override naming that old default is ignored and its store moved; any other override is used as given, with a boot warning when it sits outside `secrets/`. |
 | `CROW_CALLS_ENABLED` | `0` | WebRTC calls feature. |
 | `CROW_CALLS_MAX_PEERS` | `4` | Max peers per call room. |
 | `WEBRTC_TURN_URL` / `TURN_SECRET` | *(unset)* | TURN relay for NAT traversal. |
