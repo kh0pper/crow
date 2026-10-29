@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { readFileSync } from "node:fs";
 
 /** Replace the interior of every block and line comment with spaces (keeping
  *  length and newlines), so a `{` or `}` inside a comment can't unbalance the
@@ -640,7 +641,8 @@ function makeResponse(status, body) {
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
 async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", initialSearch = "", split = false,
-                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize, lang = "en" } = {}) {
+                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize, lang = "en",
+                          sheet = false } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs(lang);
 
@@ -678,6 +680,15 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-text-smaller", "perch-text-reset", "perch-text-larger", "perch-text-size-value"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
+  // R1.2 PR 2: new mode is the session sheet existing (client.js SHEET).
+  if (sheet) {
+    const d = makeFakeElement("dialog");
+    d.open = false;
+    d.showModal = function () { this.open = true; };
+    d.close = function () { this.open = false; this._dispatch("close", {}); };
+    d.removeAttribute = function () {};
+    els["perch-session-sheet"] = d;
+  }
 
   const bodyEl = makeFakeElement("body");
   const fetchCalls = [];
@@ -5486,4 +5497,207 @@ test("back without a project goes to the list", async () => {
   const { backTarget } = await headFns();
   assert.equal(backTarget({ projectId: null }, PROJ), null);
   assert.equal(backTarget({ projectId: 3 }, []), null);
+});
+
+// ---------------------------------------------------------------------------
+// R1.2 PR 2: "See what happened" — a turn's tool chips fold into one line
+// (new mode only). Pure helpers by extraction, then the full harness.
+// ---------------------------------------------------------------------------
+
+async function tgStrings(lang) {
+  const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  const t = (k) => translations[k][lang];
+  return { see: t("perch.toolGroupSee"), running: t("perch.toolRunning"), step: t("perch.toolGroupStep"),
+    steps: t("perch.toolGroupSteps"), failedOne: t("perch.toolGroupFailedOne"), failed: t("perch.toolGroupFailed") };
+}
+
+test("groupLabel: running / agents / steps / failed / never all ok", async () => {
+  const groupLabel = await extract("groupLabel");
+  const en = await tgStrings("en"), es = await tgStrings("es");
+  assert.equal(groupLabel({ total: 3, failed: 0, running: 1, agents: ["scout"] }, en), "See what happened · running");
+  assert.equal(groupLabel({ total: 3, failed: 0, running: 0, agents: ["scout", "worker", "scout"] }, en),
+    "See what happened · scout, worker", "unique agent names, in order");
+  assert.equal(groupLabel({ total: 4, failed: 0, running: 0, agents: [] }, en), "See what happened · 4 steps");
+  assert.equal(groupLabel({ total: 1, failed: 0, running: 0, agents: [] }, en), "See what happened · 1 step");
+  assert.equal(groupLabel({ total: 4, failed: 2, running: 0, agents: [] }, en), "See what happened · 4 steps, 2 failed");
+  assert.equal(groupLabel({ total: 4, failed: 1, running: 0, agents: [] }, en), "See what happened · 4 steps, 1 failed");
+  assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: ["scout"] }, en),
+    "See what happened · scout, 1 failed", "a subagent group still shows its failure");
+  assert.equal(groupLabel({ total: 3, failed: 2, running: 0, agents: [] }, es), "Ver qué pasó · 3 pasos, 2 fallaron");
+  for (const c of [{ total: 2, failed: 0, running: 0, agents: [] }, { total: 0, failed: 0, running: 0 }]) {
+    assert.doesNotMatch(groupLabel(c, en), /all ok|ok$/i, "it never says all ok");
+  }
+});
+
+test("chipFailed: isError; known refusal text counts as failed; ordinary text doesn't", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const listSrc = /var KNOWN_REFUSALS=\[[\s\S]*?\];/.exec(src)[0];
+  const chipFailed = await extract("chipFailed", listSrc);
+  // The list is the lease guard's own busy and held texts, verbatim.
+  const guard = readFileSync(new URL("../bundles/browser/server/lease-guard.js", import.meta.url), "utf8");
+  const busy = /busy: "([^"]+)"/.exec(guard)[1], held = /held: "([^"]+)"/.exec(guard)[1];
+  assert.deepEqual(new Function(listSrc + " return KNOWN_REFUSALS;")(), [busy, held]);
+  assert.equal(chipFailed({ isError: true, resultText: "boom" }), true);
+  assert.equal(chipFailed({ isError: false, resultText: busy }), true);
+  assert.equal(chipFailed({ isError: false, resultText: held + "\n\nmore" }), true);
+  assert.equal(chipFailed({ isError: false, resultText: "total 8" }), false);
+  assert.equal(chipFailed({ isError: false, resultText: "note: " + busy }), false, "only a result that STARTS with it");
+  assert.equal(chipFailed({}), false);
+});
+
+test("subagentNames: single, parallel, chain, truncated JSON → []", async () => {
+  const subagentNames = await extract("subagentNames");
+  assert.deepEqual(subagentNames('{"agent":"scout","task":"look"}'), ["scout"]);
+  assert.deepEqual(subagentNames('{"tasks":[{"agent":"scout","task":"a"},{"agent":"worker","task":"b"},{"agent":"scout","task":"c"}]}'),
+    ["scout", "worker"]);
+  assert.deepEqual(subagentNames('{"chain":[{"agent":"planner","task":"a"},{"agent":"worker","task":"{previous}"}]}'),
+    ["planner", "worker"]);
+  assert.deepEqual(subagentNames('{"tasks":[{"agent":"scout","task":"a very long…'), [], "the engine's 600-char cut");
+  assert.deepEqual(subagentNames(null), []);
+  assert.deepEqual(subagentNames('"scout"'), []);
+  assert.deepEqual(subagentNames('{"task":"x"}'), []);
+});
+
+/** The transcript as rows: a group reads "group[<label>|<expanded>|<chip names>]". */
+function rowShape(hub) {
+  return hub.els["perch-transcript"].children.filter((c) => !String(c.className).includes("entry note")).map((c) => {
+    const cls = String(c.className);
+    if (cls.split(" ").includes("tool-group")) {
+      const [lineBtn, body] = c.children;
+      const names = body.children.map((w) => w.children[0].children.find((x) => x.className === "tn").textContent);
+      return "group[" + lineBtn.textContent + "|" + lineBtn.getAttribute("aria-expanded") + "|" + names.join(",") +
+        (lineBtn.className.includes("err") ? "|err" : "") + "]";
+    }
+    if (cls.includes("toolwrap")) return "chip";
+    if (cls.includes("entry bot")) return "bot:" + c.children[1].textContent;
+    if (cls.includes("entry user")) return "user";
+    return cls;
+  });
+}
+
+const TURN_EVENTS = [
+  { type: "message", message: { role: "user", content: "tidy up" } },
+  { type: "message", message: { role: "assistant", content: [
+    { type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } },
+    { type: "toolCall", id: "c2", name: "read", arguments: { path: "a" } }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "a b" }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c2", toolName: "read", content: [{ type: "text", text: "hi" }] } },
+  { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Checking one more" },
+    { type: "toolCall", id: "c3", name: "edit", arguments: { path: "a" } }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c3", toolName: "edit", isError: true, content: [{ type: "text", text: "no" }] } },
+  { type: "message", message: { role: "assistant", content: [{ type: "text", text: "All set" }] } },
+];
+
+test("history groups match live groups", async () => {
+  // Live: the same turn as frames.
+  const live = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(live);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "c1", argsText: '{"command":"ls"}' });
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "c2", argsText: '{"path":"a"}' });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "c1", resultText: "a b", isError: false });
+  es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "c2", resultText: "hi", isError: false });
+  es._serverFrame("text", { text: "Checking one more", turnId: "t1" });
+  es._serverFrame("tool", { phase: "start", name: "edit", toolCallId: "c3" });
+  es._serverFrame("tool", { phase: "end", name: "edit", toolCallId: "c3", resultText: "no", isError: true });
+  es._serverFrame("text", { text: "All set", turnId: "t1" });
+  es._serverFrame("reply", { text: "Checking one moreAll set", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  const liveRows = rowShape(live).filter((r) => r !== "entry note");
+
+  // Reload: the same turn from the transcript.
+  const hist = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events: TURN_EVENTS }) }) });
+  await openChatSession(hist);
+  await new Promise((r) => setTimeout(r, 0));
+  const histRows = rowShape(hist).filter((r) => r !== "user");
+
+  assert.deepEqual(liveRows, [
+    "group[See what happened · 2 steps|false|bash,read]",
+    "bot:Checking one more",
+    "group[See what happened · 1 step, 1 failed|false|edit|err]",
+    "bot:All set",
+  ]);
+  assert.deepEqual(histRows, liveRows, "a reloaded turn looks like the live one");
+});
+
+test("history: a subagent group names its agents from the call's arguments", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "assistant", content: [
+      { type: "toolCall", id: "s1", name: "subagent", arguments: { tasks: [{ agent: "scout", task: "a" }, { agent: "worker", task: "b" }] } }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "s1", toolName: "subagent", content: [{ type: "text", text: "ok" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · scout, worker|false|subagent]"]);
+  const g = hub.els["perch-transcript"].children[1];
+  assert.equal(g.children[1].children[0].children[1].children.length, 2, "no args on a history chip: head + result only");
+});
+
+test("an end without a start counts in new mode only", async () => {
+  for (const sheet of [true, false]) {
+    const hub = await mountHub({ fetchImpl: stdFetch(), sheet });
+    await openChatSession(hub);
+    const es = FakeEventSource.instances[0];
+    es._serverFrame("state", { state: "awake", turnInFlight: true });
+    es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "orphan", resultText: "x", isError: false });
+    es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "r1" });
+    es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "r1", resultText: "y", isError: false });
+    await new Promise((r) => setTimeout(r, 0));
+    const rows = rowShape(hub).filter((r) => r !== "entry note");
+    if (sheet) assert.deepEqual(rows, ["group[See what happened · 2 steps|true|bash,read]"]);
+    else assert.deepEqual(rows, ["chip"], "classic: no chip is minted for a call nobody watched begin");
+  }
+});
+
+test("a running group is expanded, collapses at turn end; text closes a group; ask and file cards stay outside", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "a1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"]);
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "a1", resultText: "ok", isError: false });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["group[See what happened · 1 step|true|bash]"], "still open until the turn ends");
+  es._serverFrame("file", { name: "r.txt", stored: "r.txt", servable: true, size: 3, mime: "text/plain" });
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "a2" });
+  es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "a2", resultText: "ok", isError: false });
+  es._serverFrame("ask_user", { requestId: "q1", method: "confirm", title: "OK?" });
+  es._serverFrame("reply", { text: "done", turnId: "t9" });
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = rowShape(hub);
+  assert.deepEqual(rows.filter((r) => r.startsWith("group")), [
+    "group[See what happened · 1 step|false|bash]", "group[See what happened · 1 step|false|read]"]);
+  assert.ok(rows.indexOf("entry filecard") === 1, "the file card sits between the groups, never inside one");
+  assert.equal(hub.els["perch-ask"].children.length > 0, true, "the ask card has its own pane");
+  // A tap still opens a folded group.
+  const g = hub.els["perch-transcript"].children.find((c) => c.className === "tool-group");
+  g.children[0].onclick();
+  assert.equal(g.children[0].getAttribute("aria-expanded"), "true");
+  assert.equal(g.children[1].hidden, false);
+});
+
+test("classic chips are unchanged (no .tool-group in classic)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "k1" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "k1", resultText: "ok", isError: false });
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "k2" });
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).slice(0, 2), ["chip", "chip"]);
+  assert.ok(!rowShape(hub).some((r) => r.startsWith("group")));
+  // and the history path draws the "[tool: x]" row exactly as before
+  const h2 = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events: TURN_EVENTS }) }) });
+  await openChatSession(h2);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(h2), ["user", "bot:[tool: bash]\n[tool: read]", "chip", "chip",
+    "bot:Checking one more\n[tool: edit]", "chip", "bot:All set"]);
 });

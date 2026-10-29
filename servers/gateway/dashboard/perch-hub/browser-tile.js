@@ -21,7 +21,8 @@ import { tJs } from "../shared/i18n.js";
  *     div.bt-bar > span.bt-dot, span.bt-state (Live | Done), span.bt-host
  *     div.bt-note                          "You had the browser" (done, note operator)
  *     div.bt-actions > button.bt-take (live), button.bt-del (done with a shot)
- * Placed right after the anchor chip (div.toolwrap[data-call=<id>]); with no
+ * Placed right after the anchor chip (div.toolwrap[data-call=<id>]), or after
+ * the div.tool-group holding it in new mode; with no
  * such chip, at the end of the transcript (live) or by created_at among the
  * stamped history rows (a frozen tile from browserShots).
  *
@@ -73,13 +74,28 @@ export function perchBrowserTileJs(lang = "en") {
     return (m&&m[1]!=='page')?m[1]:null;
   }
 
+  /* The transcript row the tile goes after: the anchor chip itself, or in
+     new mode the "See what happened" group holding it (the closest
+     .tool-group), so a folded group never hides the tile. */
   function btChip(tr,anchor){
     if(!anchor) return null;
     var kids=tr.children||[];
     for(var i=0;i<kids.length;i++){
-      if(kids[i].getAttribute&&kids[i].getAttribute('data-call')===anchor) return kids[i];
+      var k=kids[i];
+      if(k.getAttribute&&k.getAttribute('data-call')===anchor) return k;
+      if(String(k.className||'').split(' ').indexOf('tool-group')>=0&&btInGroup(k,anchor)) return k;
     }
     return null;
+  }
+  function btInGroup(g,anchor){
+    var parts=g.children||[];
+    for(var i=0;i<parts.length;i++){
+      var rows=parts[i].children||[];
+      for(var j=0;j<rows.length;j++){
+        if(rows[j].getAttribute&&rows[j].getAttribute('data-call')===anchor) return true;
+      }
+    }
+    return false;
   }
   function btAfter(tr,node,ref){
     /* children is an HTMLCollection in a real document: no indexOf of its own */

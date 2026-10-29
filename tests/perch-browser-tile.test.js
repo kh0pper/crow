@@ -67,7 +67,7 @@ function lift(src, name) {
   throw new Error("unbalanced " + name);
 }
 
-function mount({ innerWidth = 390, io = true } = {}) {
+function mount({ innerWidth = 390, io = true, newMode = false } = {}) {
   const hub = perchHubJs("en");
   const transcript = makeEl("div");
   const status = makeEl("div"); status.hidden = true;
@@ -115,8 +115,15 @@ function mount({ innerWidth = 390, io = true } = {}) {
   if (io) sandbox.IntersectionObserver = FakeIO;
   sandbox.line = (cls, text) => { const d = makeEl("div"); if (cls) d.className = cls; d.textContent = text == null ? "" : String(text); return d; };
   vm.createContext(sandbox);
-  const lifted = ["appendToolChip", "finishToolChip", "csrf", "perchApi"].map((n) => lift(hub, n)).join("\n");
-  vm.runInContext(`(function(){\nvar toolChips={};\n${lifted}\n${perchBrowserTileJs("en")}\n;__export({ browserFrame: browserFrame, browserHistory: browserHistory, resetBrowserTiles: resetBrowserTiles, retireBrowserTiles: retireBrowserTiles, appendToolChip: appendToolChip, finishToolChip: finishToolChip });\n})();`, sandbox);
+  // New mode (R1.2 PR 2): the "See what happened" group code rides along,
+  // with SHEET truthy, so the chips land in a .tool-group the tile must anchor after.
+  const groupFns = ["toolGroupFor", "toolGroupOpen", "toolGroupRefresh", "groupLabel", "chipFailed", "subagentNames", "isSubagentTool"];
+  const lifted = ["appendToolChip", "finishToolChip", "csrf", "perchApi"].concat(newMode ? groupFns : []).map((n) => lift(hub, n)).join("\n");
+  const groupVars = newMode
+    ? "var SHEET={}; var toolGroup=null, toolGroups=[], toolTurn=0; " + /var KNOWN_REFUSALS=\[[\s\S]*?\];/.exec(hub)[0] +
+      " var TG_S={ see:'See what happened', running:'running', step:'1 step', steps:'{n} steps', failedOne:'1 failed', failed:'{n} failed' };\n"
+    : "";
+  vm.runInContext(`(function(){\nvar toolChips={};\n${groupVars}${lifted}\n${perchBrowserTileJs("en")}\n;__export({ browserFrame: browserFrame, browserHistory: browserHistory, resetBrowserTiles: resetBrowserTiles, retireBrowserTiles: retireBrowserTiles, appendToolChip: appendToolChip, finishToolChip: finishToolChip });\n})();`, sandbox);
   const frames = () => calls.filter((c) => c.url.includes("/browser/frame"));
   const pending = () => frames().filter((c) => !c.settled);
   const respond = async (c, status, body) => {
@@ -650,4 +657,32 @@ test("no IntersectionObserver: the tile counts as on screen", async () => {
   const h = mount({ io: false });
   await liveTile(h, "call_1");
   assert.equal(h.pending().length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// R1.2 PR 2: in new mode the chip sits inside a "See what happened" group
+// ---------------------------------------------------------------------------
+test("new mode: the tile anchors after its chip's group, so folding the group never hides it", async () => {
+  const h = mount({ newMode: true });
+  msgRow(h, "on it");
+  h.api.appendToolChip({ name: "mcp__browser__crow_browser_navigate", toolCallId: "call_1", argsText: "{}" });
+  const group = h.transcript.children.find((c) => c.className === "tool-group");
+  assert.ok(group, "the chip went into a group");
+  assert.equal(chipOf(h, "call_1"), undefined, "the chip is not a transcript child any more");
+  const t = await liveTile(h, "call_1");
+  assert.equal(idx(h, t), idx(h, group) + 1, "right after the group");
+  // the same turn's next chip still joins the group (a tile after it does not close it)
+  h.api.appendToolChip({ name: "mcp__browser__crow_browser_click", toolCallId: "call_2", argsText: "{}" });
+  assert.equal(h.transcript.children.filter((c) => c.className === "tool-group").length, 1);
+  assert.equal(group.children[1].children.length, 2);
+  assert.equal(idx(h, t), idx(h, group) + 1, "the tile stays after the group");
+  // a history chip anchors after its group by its raw id too
+  const h2 = mount({ newMode: true });
+  h2.api.appendToolChip({ name: "mcp__browser__crow_browser_snapshot", toolCallId: "hist:call_p" });
+  h2.api.finishToolChip({ toolCallId: "hist:call_p", isError: false, resultText: "ok" });
+  msgRow(h2, "later");
+  const t2 = await liveTile(h2, "call_p");
+  const g2 = h2.transcript.children.find((c) => c.className === "tool-group");
+  assert.equal(g2.children[1].hidden, true, "a finished history group is folded");
+  assert.equal(idx(h2, t2), idx(h2, g2) + 1, "and its tile is outside it, visible");
 });

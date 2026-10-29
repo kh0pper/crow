@@ -517,6 +517,10 @@ export function perchHubJs(lang = "en") {
   var TOOL_RUNNING='${tJs("perch.toolRunning", lang)}';
   var TOOL_DONE='${tJs("perch.toolDone", lang)}';
   var TOOL_FAILED='${tJs("perch.toolFailed", lang)}';
+  /* R1.2 PR 2: the "See what happened" line (new mode only). */
+  var TG_S={ see:'${tJs("perch.toolGroupSee", lang)}', running:TOOL_RUNNING,
+    step:'${tJs("perch.toolGroupStep", lang)}', steps:'${tJs("perch.toolGroupSteps", lang)}',
+    failedOne:'${tJs("perch.toolGroupFailedOne", lang)}', failed:'${tJs("perch.toolGroupFailed", lang)}' };
   var COMMANDS_HIBERNATING='${tJs("perch.commandsHibernating", lang)}';
   /* PR-E (item 12): the chat's inline sent-file cards. */
   var FILE_DOWNLOAD='${tJs("perch.fileDownload", lang)}';
@@ -1516,7 +1520,7 @@ export function perchHubJs(lang = "en") {
     syncListPolling();
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
     clearEl(el('perch-activity-list'));   /* the previous session's log is not this one's */
-    toolChips={};                         /* Wave 3: the chip index dies with the transcript */
+    toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
@@ -1604,6 +1608,16 @@ export function perchHubJs(lang = "en") {
     }
     if(typeof (message&&message.text)==='string') return message.text;
     return '';
+  }
+
+  /* An assistant message's text blocks only, joined as the engine's
+     assistantTextOf joins them (R1.2 PR 2: new mode's history rows). */
+  function assistantTextOnly(message){
+    var content=message&&message.content;
+    if(typeof content==='string') return content;
+    if(!Array.isArray(content)) return '';
+    return content.filter(function(b){ return b&&b.type==='text'&&typeof b.text==='string'; })
+      .map(function(b){ return b.text; }).join('');
   }
 
   /* drawer.js:829, verbatim in effect: mirror the engine, and a stopped
@@ -2025,7 +2039,7 @@ export function perchHubJs(lang = "en") {
     var sid=current.sid, botId=current.botId;
     if(!sid||!botId) return;
     clearEl(el('perch-transcript'));
-    toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
+    toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
@@ -2096,6 +2110,7 @@ export function perchHubJs(lang = "en") {
            turn's frame — "400 invalid_tools" repeats every turn. */
         var tailErr=null;
         var msgs=events.filter(function(e){ return e&&e.type==='message'; });
+        var histCallArgs={};   /* toolCallId -> its arguments, JSON (new mode's agent names) */
         /* Strand 1: pi keeps every errored attempt in the session file and
            its messages carry no turnId. An errored assistant message is the
            TURN's error only when no later assistant message precedes the next
@@ -2121,7 +2136,12 @@ export function perchHubJs(lang = "en") {
           if(String(m.role||'')==='toolResult'){
             var rt=messageText(m);
             if(m.toolCallId!=null) histToolSeen[String(m.toolCallId)]=true;
-            appendToolChip({ name:m.toolName, toolCallId:'hist:'+String(m.toolCallId||'') });
+            var hc={ name:m.toolName, toolCallId:'hist:'+String(m.toolCallId||'') };
+            /* New mode: a subagent group names its agents on reload too, from
+               the call's own arguments (never shown: history chips carry no args). */
+            var ha=SHEET&&isSubagentTool(m.toolName)?histCallArgs[String(m.toolCallId)]:null;
+            if(ha!=null) hc.agents=subagentNames(ha);
+            appendToolChip(hc);
             finishToolChip({ toolCallId:'hist:'+String(m.toolCallId||''), isError:!!m.isError,
               resultText: rt.length>2000?rt.slice(0,2000)+'\\u2026':rt });
             return;
@@ -2132,6 +2152,23 @@ export function perchHubJs(lang = "en") {
              messageText()'s "[tool: name]" line. */
           var txt=messageText(m);
           var errored=String(m.role||'')==='assistant'&&m.stopReason==='error';
+          /* R1.2 PR 2, new mode: a reloaded turn reads like the live one. The
+             live stream draws an assistant message's TEXT only (the engine's
+             assistantTextOf), so the "[tool: x]" lines a pure tool-call
+             message rendered here would split one turn's chips into a group
+             per call. A user line starts the next turn's groups. */
+          if(SHEET){
+            var role=String(m.role||'');
+            if(role==='assistant'){
+              (Array.isArray(m.content)?m.content:[]).forEach(function(b){
+                if(b&&b.type==='toolCall'&&b.id!=null){
+                  try{ histCallArgs[String(b.id)]=JSON.stringify(b.arguments==null?{}:b.arguments); }catch(x){}
+                }
+              });
+              txt=assistantTextOnly(m);
+              if(!txt&&!errored) return;
+            } else if(role==='user'){ toolGroup=null; toolTurn++; }
+          }
           /* An errored attempt with no text is not a bot message: drawing
              it was the empty bubble every failed turn left behind. */
           if(!(errored&&!txt)){
@@ -2518,7 +2555,7 @@ export function perchHubJs(lang = "en") {
     setAttn(false);              /* nor its unanswered-question banner */
     /* Wave 2/3: the new session inherits none of the old one's readings. */
     planState=null; renderPlan();
-    toolChips={}; fileSeen={}; commandsCache=null; hideCmdMenu();
+    toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
     resetFacts();
@@ -2592,6 +2629,9 @@ export function perchHubJs(lang = "en") {
        the \`reply\` — resetting on every true frame would put the duplicate
        straight back. */
     if(next&&!turnInFlight) turnRendered=false;
+    /* R1.2 PR 2: the turn's "See what happened" groups fold at its end. */
+    if(SHEET&&!next&&turnInFlight) toolGroupsEndTurn();
+    if(SHEET&&next&&!turnInFlight){ toolGroup=null; toolTurn++; }
     turnInFlight=next;
     el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
     el('perch-abort').style.display=turnInFlight?'':'none';
@@ -3616,8 +3656,9 @@ export function perchHubJs(lang = "en") {
     var wrap=document.createElement('div'); wrap.className='entry toolwrap';
     /* The live browser tile anchors after this chip by its RAW call id
        (history chips are keyed 'hist:<id>'). */
+    var hist=false;
     if(d&&d.toolCallId!=null){
-      var cid=String(d.toolCallId); if(cid.indexOf('hist:')===0) cid=cid.slice(5);
+      var cid=String(d.toolCallId); if(cid.indexOf('hist:')===0){ cid=cid.slice(5); hist=true; }
       if(cid) wrap.setAttribute('data-call',cid);
     }
     var chip=document.createElement('button'); chip.type='button'; chip.className='tool-chip';
@@ -3633,15 +3674,33 @@ export function perchHubJs(lang = "en") {
     }
     chip.onclick=function(){ details.hidden=!details.hidden; };
     wrap.appendChild(chip); wrap.appendChild(details);
-    tr.appendChild(wrap);
+    /* New mode: the chip goes into its turn's "See what happened" group;
+       classic appends it to the transcript exactly as before. typeof: the
+       browser-tile harness lifts this function without the hub's scope. */
+    var g=(typeof SHEET!=='undefined'&&SHEET)?toolGroupFor(tr):null;
+    if(g){
+      g.total++; g.running++;
+      if(!hist) g.ended=false;           /* a live chip proves the turn is still going */
+      var agents=Array.isArray(d&&d.agents)?d.agents:
+        (isSubagentTool(d&&d.name)?subagentNames(d&&d.argsText):[]);
+      agents.forEach(function(a){ g.agents.push(a); });
+      g.body.appendChild(wrap);
+      toolGroupRefresh(g);
+    } else tr.appendChild(wrap);
     tr.scrollTop=tr.scrollHeight;
-    if(d&&d.toolCallId!=null) toolChips[d.toolCallId]={chip:chip,spin:spin,status:status,details:details};
+    if(d&&d.toolCallId!=null) toolChips[d.toolCallId]={chip:chip,spin:spin,status:status,details:details,group:g};
   }
   function finishToolChip(d){
     var rec=(d&&d.toolCallId!=null)?toolChips[d.toolCallId]:null;
     /* An end without a start means the operator opened mid-call: the rail
        has the line, and minting a chip for a call nobody watched begin
-       would show a "done" with no story. */
+       would show a "done" with no story. In new mode the chip IS minted
+       (finished), so the group's "N steps" counts every step it says
+       happened. */
+    if(!rec&&typeof SHEET!=='undefined'&&SHEET&&d&&d.toolCallId!=null){
+      appendToolChip({ name:d.name, toolCallId:d.toolCallId });
+      rec=toolChips[d.toolCallId];
+    }
     if(!rec) return;
     if(rec.spin&&rec.spin.parentNode) rec.spin.parentNode.removeChild(rec.spin);
     rec.status.textContent=(d&&d.isError)?TOOL_FAILED:TOOL_DONE;
@@ -3651,8 +3710,111 @@ export function perchHubJs(lang = "en") {
       var pr=document.createElement('pre'); pr.textContent=String(d.resultText);
       rec.details.appendChild(pr);
     }
+    if(rec.group){
+      rec.group.running=Math.max(0,rec.group.running-1);
+      if(chipFailed(d)) rec.group.failed++;
+      toolGroupRefresh(rec.group);
+    }
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
   }
+
+  /* ---- R1.2 PR 2: "See what happened" (new mode only) --------------------
+     Consecutive tool chips of one assistant turn sit in one
+       div.tool-group[data-turn] > button.tool-group-line[aria-expanded]
+                                 + div.tool-group-body > .toolwrap…
+     The open group takes the next chip only while it is still the last
+     thing in the transcript (a browser tile right after it does not
+     count): any text, note, card or user line appended after it closes it,
+     and the next tool starts a new group. So ask cards, sent-file cards and
+     decision prompts can never land inside one. Never folded: a group with
+     a running chip is expanded; it collapses when its turn ends with every
+     chip finished. A failed group stays collapsed, its line in the error
+     colour with the count. */
+  var toolGroup=null, toolGroups=[], toolTurn=0;
+  /* The browser lease's refusals arrive as ordinary (isError:false) results;
+     they are still steps that did not happen. Copied verbatim from TEXTS.busy
+     and TEXTS.held in bundles/browser/server/lease-guard.js (the guard the
+     shared lease in servers/shared/browser-lease.js reports through). */
+  var KNOWN_REFUSALS=[
+    'The browser is busy: another bot is using it. Try again in a minute.',
+    'The operator has the browser; call again to continue.'
+  ];
+  function chipFailed(d){
+    if(d&&d.isError) return true;
+    var t=String((d&&d.resultText)||'');
+    for(var i=0;i<KNOWN_REFUSALS.length;i++){ if(t.indexOf(KNOWN_REFUSALS[i])===0) return true; }
+    return false;
+  }
+  /* pi's subagent tool (pi-lab extensions/subagent): single { agent },
+     parallel { tasks:[{agent}] }, chain { chain:[{agent}] }. The args come
+     pre-truncated (600 chars), so a long one does not parse: no names. */
+  function subagentNames(argsText){
+    var o;
+    try{ o=JSON.parse(String(argsText)); }catch(e){ return []; }
+    if(!o||typeof o!=='object') return [];
+    var out=[];
+    function add(a){ if(typeof a==='string'&&a&&out.indexOf(a)<0) out.push(a); }
+    add(o.agent);
+    [o.tasks,o.chain].forEach(function(l){
+      if(Array.isArray(l)) l.forEach(function(t){ if(t&&typeof t==='object') add(t.agent); });
+    });
+    return out;
+  }
+  function isSubagentTool(name){ return /(^|__)subagent$/.test(String(name||'')); }
+  /* s: the language's strings (TG_S). Never "all ok": a finished line says
+     what ran, and a failure is counted. */
+  function groupLabel(c,s){
+    var head=s.see+' \\u00b7 ';
+    var failed=Number(c&&c.failed)||0;
+    var tail=failed>0?', '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'';
+    if(Number(c&&c.running)>0) return head+s.running;
+    var names=[];
+    ((c&&c.agents)||[]).forEach(function(a){ if(a&&names.indexOf(a)<0) names.push(a); });
+    if(names.length) return head+names.join(', ')+tail;
+    var n=Number(c&&c.total)||0;
+    return head+(n===1?s.step:s.steps.replace('{n}',String(n)))+tail;
+  }
+  function toolGroupFor(tr){
+    var g=toolGroup;
+    if(g&&g.node.parentNode===tr&&g.turn===toolTurn){
+      var kids=tr.children||[], i=Array.prototype.indexOf.call(kids,g.node), ok=i>=0;
+      for(var j=i+1;ok&&j<kids.length;j++){
+        if(String(kids[j].className||'').indexOf('ph-btile')<0) ok=false;
+      }
+      if(ok) return g;
+    }
+    var node=document.createElement('div'); node.className='tool-group';
+    node.setAttribute('data-turn',String(toolTurn));
+    var btn=document.createElement('button'); btn.type='button'; btn.className='tool-group-line';
+    var body=document.createElement('div'); body.className='tool-group-body';
+    node.appendChild(btn); node.appendChild(body);
+    g={ node:node, line:btn, body:body, total:0, failed:0, running:0, agents:[], ended:true,
+      open:true, turn:toolTurn };
+    btn.onclick=function(){ toolGroupOpen(g,!g.open); };
+    toolGroupOpen(g,true);
+    tr.appendChild(node);
+    toolGroup=g; toolGroups.push(g);
+    return g;
+  }
+  function toolGroupOpen(g,open){
+    g.open=!!open;
+    g.body.hidden=!g.open;
+    g.line.setAttribute('aria-expanded',g.open?'true':'false');
+  }
+  function toolGroupRefresh(g){
+    g.line.textContent=groupLabel(g,TG_S);
+    g.line.className='tool-group-line'+(g.failed>0?' err':'');
+    if(g.running>0) toolGroupOpen(g,true);
+    else if(g.ended) toolGroupOpen(g,false);
+  }
+  /* The turn ended (setTurnInFlight's true->false): its groups fold once
+     every chip in them is finished; the next turn's tools start fresh. */
+  function toolGroupsEndTurn(){
+    toolGroups.forEach(function(g){ if(!g.ended){ g.ended=true; toolGroupRefresh(g); } });
+    toolGroups=toolGroups.filter(function(g){ return !g.ended||g.running>0; });
+    toolGroup=null;
+  }
+  function resetToolGroups(){ toolGroup=null; toolGroups=[]; toolTurn=0; }
 
   /* ---- PR-E (item 12): inline sent-file cards -----------------------------
      pi-lab's shape: an image renders inline, anything else is a download card

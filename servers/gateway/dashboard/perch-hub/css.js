@@ -575,6 +575,21 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:8px}
    and results are child-controlled data) and cap at 240px scrolling inside
    themselves — a 2000-char result must not become a second transcript. */
 #perch-hub-root .toolwrap{align-self:flex-start;max-width:90%;min-width:0}
+/* R1.2 PR 2 (new mode): a turn's chips fold under one "See what happened"
+   line. A 44 px target; the failure count reads in the error colour. */
+#perch-hub-root .tool-group{align-self:flex-start;max-width:90%;min-width:0;display:flex;
+flex-direction:column;gap:6px}
+#perch-hub-root .tool-group-line{align-self:flex-start;min-height:44px;padding:0 12px 0 4px;
+background:none;border:0;border-radius:10px;color:var(--dim);font:inherit;font-size:13px;
+cursor:pointer;text-align:left;display:inline-flex;align-items:center;gap:6px}
+#perch-hub-root .tool-group-line::before{content:"\\25B8";font-size:11px;transition:transform .15s}
+#perch-hub-root .tool-group-line[aria-expanded="true"]::before{transform:rotate(90deg)}
+#perch-hub-root .tool-group-line:hover{color:var(--ink)}
+#perch-hub-root .tool-group-line.err{color:var(--err)}
+#perch-hub-root .tool-group-body{display:flex;flex-direction:column;gap:6px;padding-left:10px;
+border-left:2px solid var(--line)}
+#perch-hub-root .tool-group-body[hidden]{display:none}
+#perch-hub-root .tool-group-body .toolwrap{max-width:100%}
 #perch-hub-root .tool-chip{display:inline-flex;align-items:center;gap:7px;background:var(--sky);
 border:1px solid var(--line);border-radius:999px;padding:5px 12px;min-height:32px;max-width:100%;
 font:12px "JetBrains Mono",ui-monospace,monospace;color:var(--dim);cursor:pointer;text-align:left}

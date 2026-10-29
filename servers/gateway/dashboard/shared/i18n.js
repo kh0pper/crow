@@ -3564,6 +3564,12 @@ export const translations = {
   "perch.toolRunning": { en: "running", es: "ejecutando" },
   "perch.toolDone": { en: "done", es: "listo" },
   "perch.toolFailed": { en: "failed", es: "falló" },
+  // R1.2 PR 2: a turn's tool chips fold into one "See what happened" line (new mode).
+  "perch.toolGroupSee": { en: "See what happened", es: "Ver qué pasó" },
+  "perch.toolGroupStep": { en: "1 step", es: "1 paso" },
+  "perch.toolGroupSteps": { en: "{n} steps", es: "{n} pasos" },
+  "perch.toolGroupFailedOne": { en: "1 failed", es: "1 falló" },
+  "perch.toolGroupFailed": { en: "{n} failed", es: "{n} fallaron" },
   "perch.commandsHibernating": {
     en: "The session is asleep — send a message first.",
     es: "La sesión está dormida — envía un mensaje primero.",
