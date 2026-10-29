@@ -47,8 +47,6 @@ test("mintRemoteBlocks mints one stdio block per (instance,capability) aimed at 
   assert.equal(b.command, "/usr/bin/node");
   assert.deepEqual(b.args, ["/repo/scripts/pi-bots/crow-remote-proxy.mjs"]);
   assert.deepEqual(b.env, {
-    CROW_REMOTE_INSTANCE_ID: "abc12345deadbeef",
-    CROW_REMOTE_MOUNT: "/memory",
     CROW_REMOTE_RELAY_URL: "http://127.0.0.1:3001/peer-relay/abc12345deadbeef/memory/mcp",
     CROW_REMOTE_RELAY_TOKEN_PATH: "/home/alex/.crow/peer-relay-token",
   }, "exactly the relay env: the peer's URL never reaches the bot");
@@ -112,7 +110,7 @@ test("mintRemoteBlocks warns + keeps the first on an 8-char-prefix block-name co
   assert.equal(Object.keys(blocks).length, 1, "only one block (collision)");
   const name = "crow-remote-abcdef12-crow-memory";
   assert.ok(blocks[name], "the first peer's block is kept");
-  assert.equal(blocks[name].env.CROW_REMOTE_INSTANCE_ID, a, "first wins, not clobbered by second");
+  assert.equal(blocks[name].env.CROW_REMOTE_RELAY_URL, `http://127.0.0.1:3001/peer-relay/${a}/memory/mcp`, "first wins, not clobbered by second");
   assert.ok(warnings.some((w) => w.includes("collides")), "a collision warning was emitted");
 });
 

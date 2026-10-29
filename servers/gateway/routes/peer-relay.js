@@ -2,7 +2,7 @@
  * Peer relay (item 46 PR-B): the ONLY path by which a pi bot reaches a paired
  * peer's MCP mount.
  *
- * Kevin's ruling: no pair key, signing key or peer bearer ever reaches a bot or
+ * The operator's ruling: no pair key, signing key or peer bearer ever reaches a bot or
  * pi process. So a bot's remote-tools proxy (scripts/pi-bots/crow-remote-proxy.mjs)
  * never talks to a peer. It calls this loopback route on its own gateway with
  * the path-scoped relay token and the per-boot signed actor headers; this
@@ -43,7 +43,7 @@ import { defaultPairKey } from "../../shared/sync-pair-binding.js";
 import { getPeerCreds } from "../../shared/peer-credentials.js";
 import { readSetting } from "../dashboard/settings/registry.js";
 import { verifyPeerRelayActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
-import { resolveSignedSession } from "../../shared/signed-session.js";
+import { resolveSignedSession, sessionMatchesTuple } from "../../shared/signed-session.js";
 import { REMOTE_CANON_MOUNT, remoteServersForBot, parseRemoteInvocationFlag } from "../../../scripts/pi-bots/remote-blocks.mjs";
 import { sanitizeActorName } from "../../../scripts/pi-bots/actor-env.mjs";
 import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
@@ -130,7 +130,7 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       // The signature names a session; it must still be this bot's, live, and
       // the thread and gateway it signed must be that session's own.
       const session = await resolveSignedSession(db, { botId: bot, sessionId });
-      if (!session || (threadId ?? "").trim() !== (session.threadId ?? "") || (gatewayType ?? "").trim() !== (session.gatewayType ?? "")) {
+      if (!sessionMatchesTuple(session, { threadId, gatewayType })) {
         return refuse(res, 401, "the signed bot session is not live", { id });
       }
 

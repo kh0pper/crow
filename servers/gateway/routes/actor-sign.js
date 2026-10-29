@@ -44,7 +44,7 @@
  */
 import { Router } from "express";
 import { classifyPeer } from "../../shared/peer-class.js";
-import { resolveSignedSession } from "../../shared/signed-session.js";
+import { resolveSignedSession, sessionMatchesTuple } from "../../shared/signed-session.js";
 import { createBotHostCallerResolver } from "../bot-host-caller.js";
 import { SESSION_ACTOR_KINDS, hasActorKey, signKindForTuple } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
@@ -99,7 +99,9 @@ export async function hostsTurn(template, def, gatewayType) {
 
 const canonical = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
 
-const str = (v) => (typeof v === "string" ? v : v == null ? undefined : typeof v === "number" ? String(v) : null);
+// Trimmed, like every field of the actor-sig MAC: a padded value signs and
+// matches exactly as its trimmed form does (signed-session.js sessionMatchesTuple).
+const str = (v) => (typeof v === "string" ? v.trim() : v == null ? undefined : typeof v === "number" ? String(v) : null);
 
 /**
  * @param {object} o
@@ -172,7 +174,7 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
       if (hasSession) {
         const s = await resolveSignedSession(db, { botId, sessionId });
         if (!s) return fail(403, "not a live session of this bot");
-        if ((threadId ?? "") !== (s.threadId ?? "") || (gatewayType ?? "") !== (s.gatewayType ?? "")) return fail(403, "the tuple is not the session's");
+        if (!sessionMatchesTuple(s, { threadId, gatewayType })) return fail(403, "the tuple is not the session's");
       } else {
         // A generic background job: its own fixed tuple only (job_runner.mjs jobActor).
         if (jobId === undefined || jobId === "" || threadId !== `job-${jobId}` || gatewayType !== "job") return fail(403, "neither a live session nor a running job's tuple");

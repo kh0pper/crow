@@ -1,5 +1,5 @@
 /**
- * Item 46 PR-B (B4), Kevin's ruling: no pair key, signing key or peer bearer
+ * Item 46 PR-B (B4), the operator's ruling: no pair key, signing key or peer bearer
  * ever reaches a bot or pi process. The pi bot's remote proxy talks to a
  * loopback relay on its own gateway, and only the gateway signs.
  *

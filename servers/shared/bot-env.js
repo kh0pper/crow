@@ -1,5 +1,5 @@
 /**
- * The environment a bot's pi process starts with (Kevin ruling 2026-10-08).
+ * The environment a bot's pi process starts with (operator ruling 2026-10-08).
  *
  * It used to be the whole gateway environment — which, once the gateway has
  * loaded the repo .env, includes tokens and passwords — so any bot with a
@@ -39,7 +39,7 @@ export const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASS(WORD|WD)?|CREDENTIAL|AUTH|
 
 /**
  * Env names that point a process at the peer credential store (every pair's
- * bearer and signing key). Item 46 PR-B (Kevin's ruling): no bot or pi process
+ * bearer and signing key). Item 46 PR-B (the operator's ruling): no bot or pi process
  * may hold a peer credential, so these never reach one, not even with the
  * scrub switched off, and a bot def's spawn_env cannot set them.
  */

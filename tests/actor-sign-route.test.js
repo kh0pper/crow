@@ -252,3 +252,18 @@ test("a host is bound to its own instance, its own bots and its own gateway type
     assert.match(r.json.error, /another instance/);
   } finally { units = saved; }
 });
+
+// Final fix wave: one trimming rule for the tuple ↔ session match, the actor-sig
+// MAC's own (fields trimmed on both sides), in the signing relay and the peer relay.
+test("the tuple matches its session with fields trimmed on both sides, as the MAC trims them", async () => {
+  const { sessionMatchesTuple } = await import("../servers/shared/signed-session.js");
+  const s = { threadId: "t-100", gatewayType: "gmail" };
+  assert.equal(sessionMatchesTuple(s, { threadId: " t-100 ", gatewayType: "gmail\t" }), true);
+  assert.equal(sessionMatchesTuple({ threadId: " t-100", gatewayType: "gmail " }, { threadId: "t-100", gatewayType: "gmail" }), true);
+  assert.equal(sessionMatchesTuple(s, { threadId: "t-101", gatewayType: "gmail" }), false);
+  assert.equal(sessionMatchesTuple(s, { threadId: "t-100", gatewayType: undefined }), false);
+  assert.equal(sessionMatchesTuple({ threadId: null, gatewayType: null }, {}), true);
+  const r = await ask({ ...LIVE(), threadId: " t-100 ", kinds: ["peer-relay"] });
+  assert.equal(r.status, 200, "a padded thread is the same thread: " + r.text);
+  assert.equal(verifyPeerRelayActorSig({ ...LIVE(), sig: r.json.sigs["peer-relay"] }), true, "and signs the trimmed tuple");
+});

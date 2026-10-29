@@ -275,8 +275,6 @@ export async function ensurePeerRelayToken(db) {
   return { minted: true };
 }
 
-export const PEER_RELAY_TOKEN_KEYS = { HASH: PEER_RELAY_HASH_KEY, CREATED: PEER_RELAY_CREATED_KEY };
-
 // Kiosk announce token (kiosk spec §4.1): lets the kiosk bundle's stdio MCP
 // server reach the gateway's live display sessions through loopback-only
 // /api/kiosk/internal/*. Same shape as the board/phone tokens (hash in a

@@ -10,7 +10,7 @@
  *    "peer [hex]" in comment labels);
  *  - every row's final label is computed together, to a fixpoint: any two labels that are equal
  *    case-insensitively, trailing separators folded (and any label equal to this instance's own name) are all
- *    suffixed with the first 8 hex of sha256(id) in square brackets ("raven [1a2b3c4d]"; brackets are
+ *    suffixed with the first 8 hex of sha256(id) in square brackets ("delta [1a2b3c4d]"; brackets are
  *    never in a cleaned name), then with 24 hex if they still collide. The base is cut (24, then 13
  *    characters) so the whole label always fits the 40-character comment-author cap.
  * Nothing a caller claims (tool arguments, `_meta`) is ever used. A bot actor signed by the sending GATEWAY
@@ -43,7 +43,7 @@ export function idSuffix(id, full = false) {
 }
 
 /** The comparison key for labels (collision checks only; the displayed name stays as cleaned): lowercase,
- *  trailing separators and spaces folded away ("Raven." = "raven"), then a small ASCII confusable fold:
+ *  trailing separators and spaces folded away ("Delta." = "delta"), then a small ASCII confusable fold:
  *  0→o; 1, i and l → l; 5→s; rn→m; vv→w; cl→d ("Iark" = "1ark" = "lark", "h0me" = "home"). */
 export function labelSkeleton(s) {
   return String(s).toLowerCase().replace(/[\s._-]+$/, "")

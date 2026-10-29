@@ -50,3 +50,14 @@ export async function resolveSignedSession(db, { botId, sessionId } = {}) {
     gatewayType: row.gateway_type == null ? null : String(row.gateway_type),
   };
 }
+
+/**
+ * Is (threadId, gatewayType) this session's own? Fields are trimmed on both
+ * sides and a missing value is "", the same rule the actor-sig MAC applies,
+ * so a tuple that verifies compares the same way everywhere.
+ */
+export function sessionMatchesTuple(session, { threadId, gatewayType } = {}) {
+  if (!session) return false;
+  const f = (v) => (v == null ? "" : String(v).trim());
+  return f(threadId) === f(session.threadId) && f(gatewayType) === f(session.gatewayType);
+}

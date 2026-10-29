@@ -379,7 +379,7 @@ export class PiRpc {
     // Any classifier key a def carried is dropped: only the bridge sets it.
     delete piPolicy.classifier;
     // Stored values read the way the Bot Builder shows them: the retired
-    // "sandbox" runs as auto (Kevin ruling 2026-10-08), unknown as deny.
+    // "sandbox" runs as auto (operator ruling 2026-10-08), unknown as deny.
     // No shell at all while the env scrub is switched off.
     // ONE accessor for the stored mode and the Perch-only rule (shared with
     // the save and peer guards): sandbox/unknown run as deny; ask/auto run
@@ -437,7 +437,7 @@ export class PiRpc {
     if (strippedSpawnEnv.length) {
       console.error("[pi-bots] stripped engine-reserved spawn_env keys from bot def: " + strippedSpawnEnv.join(", "));
     }
-    // Kevin ruling 2026-10-08: an explicit env allowlist — the gateway's .env
+    // Operator ruling 2026-10-08: an explicit env allowlist — the gateway's .env
     // secrets never reach a bot process (servers/shared/bot-env.js).
     const env = Object.assign({}, buildBotBaseEnv(process.env),
       { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),

@@ -39,7 +39,7 @@ test("flag ON: mints the forward-proxy block alongside local servers", () => {
   assert.ok(remote, "remote forward-proxy block minted");
   assert.equal(remote.env.CROW_REMOTE_RELAY_URL, "http://127.0.0.1:3001/peer-relay/g1abcdef/memory/mcp", "the proxy talks to this gateway's relay");
   assert.equal(remote.env.CROW_REMOTE_RELAY_TOKEN_PATH, "/tmp/none/peer-relay-token", "this instance's relay token");
-  assert.equal(remote.env.CROW_REMOTE_MOUNT, "/memory");
+  assert.deepEqual(Object.keys(remote.env).filter((k) => k.startsWith("CROW_REMOTE_")).sort(), ["CROW_REMOTE_RELAY_TOKEN_PATH", "CROW_REMOTE_RELAY_URL"], "only the relay env (no bot: no actor env)");
   assert.ok(!("CROW_REMOTE_GATEWAY_URL" in remote.env), "the peer's URL never reaches the bot");
   assert.ok(!JSON.stringify(remote).includes("peer-tokens"), "no credential-store path in the block");
   assert.equal(remote.router, true, "router mode survives the writer (pi-lab registers mcp__<block>, the csv's name)");

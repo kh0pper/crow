@@ -166,20 +166,7 @@ export function rewriteAudioResult(result, gatewayUrl, instanceId) {
   return result;
 }
 
-/**
- * Peer-authed MCP client to a remote instance's /router/mcp. Reuses the same
- * peer bearer token the proxy's federation client uses (peer-credentials.js),
- * so the remote's instanceAuth middleware recognises us and peer-exposure gates
- * the call against the remote's remote_exposed_tools allowlist.
- */
-/**
- * With `actor` ({ botId, name }, from the gateway's own row for the bound bot)
- * the transport's fetch signs tools/call requests with the gateway-held pair
- * subkey so the peer can name the bot (item 46 PR-B). The key is looked up per
- * call inside this process and never handed to the bot. Without `actor` (the
- * discovery clients) behaviour is unchanged. `getLocalId` is a seam; its
- * production default is the instance registry's id.
- */
+// One "sending unsigned" line per (bot, peer) per hour.
 const UNSIGNED_LOG_WINDOW_MS = 3_600_000;
 const _unsignedLogged = new Map();
 export function _resetVoiceUnsignedLogForTests() { _unsignedLogged.clear(); }
@@ -191,6 +178,19 @@ function noteUnsigned(botId, instanceId) {
   console.error(`[voice-remote] sending unsigned: no pair key for ${instanceId}`);
 }
 
+/**
+ * Peer-authed MCP client to a remote instance's /router/mcp. Reuses the same
+ * peer bearer token the proxy's federation client uses (peer-credentials.js),
+ * so the remote's instanceAuth middleware recognises us and peer-exposure gates
+ * the call against the remote's remote_exposed_tools allowlist.
+ *
+ * With `actor` ({ botId, name }, from the gateway's own row for the bound bot)
+ * the transport's fetch signs tools/call requests with the gateway-held pair
+ * subkey so the peer can name the bot (item 46 PR-B). The key is looked up per
+ * call inside this process and never handed to the bot. Without `actor` (the
+ * discovery clients) behaviour is unchanged. `getLocalId` is a seam; its
+ * production default is the instance registry's id.
+ */
 export async function createRemoteRouterClient({ instanceId, gatewayUrl, actor, getLocalId }) {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
