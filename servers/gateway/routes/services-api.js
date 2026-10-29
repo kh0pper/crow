@@ -113,6 +113,7 @@ function serviceCard(s, installed) {
     serviceId: s.id,
     name: s.name,
     installed: installed.has(s.bundleId),
+    labelFrom: s.labelFrom || null,        // the connect sheet suggests the account name the same way
     fields: (s.fields || []).map((f) => ({ name: f.name, kind: f.kind, labelKey: f.label_key || null, helpKey: f.help_key || null })),
     steps: [...(s.steps || [])],
     stepLinks: { ...(s.stepLinks || {}) },

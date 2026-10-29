@@ -130,6 +130,14 @@ test("a GitHub connection shows its service, account name, On and when it was te
     assert.match(r.body, /data-shell-tab="chat" aria-current="page"/, "Chat's tab is lit, as on the project home");
     // No copy claims bots use a connection yet (botsLive is false).
     assert.doesNotMatch(r.body, /Your bots can use it/);
+    // The Add / Connect sheets' data block (Task 11): catalog cards and copy, never a value.
+    const block = (r.body.match(/<script type="application\/json" data-svc-data>([^<]*)<\/script>/) || [])[1];
+    assert.ok(block, "the page carries the sheets' data block");
+    const data = JSON.parse(block);
+    assert.equal(data.project.slug, "spring");
+    assert.equal(data.botsLive, false);
+    assert.ok(data.groups.paste.some((c) => c.serviceId === "github" && c.installed === true));
+    assert.ok(!r.body.includes(TOKEN), "no stored value anywhere on the page");
   });
 });
 

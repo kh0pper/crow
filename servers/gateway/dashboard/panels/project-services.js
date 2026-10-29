@@ -8,6 +8,7 @@
  * New shell only: classic mode goes to the Projects page. The scope comes from the path
  * (shell/request.js SLUG_SCOPED_PANELS: the slug wins over the cookie and nothing is written; the
  * GET is read-only because Turbo prefetches it). An unknown or archived slug is a 404.
+ * The Add and Connect sheets (Task 11) read the page's JSON block: catalog cards and copy, no value.
  * Hidden from the classic sidebar; reached only through the route above.
  */
 
@@ -20,7 +21,7 @@ import { projectMissingHtml } from "./project-home/html.js";
 import { projectHomeCss } from "./project-home/css.js";
 import { projectServicesHtml } from "./project-services/html.js";
 import { projectServicesCss } from "./project-services/css.js";
-import { projectServicesClientJs } from "./project-services/client.js";
+import { projectServicesClientJs, projectServicesDataScript } from "./project-services/client.js";
 
 export default {
   id: "project-services",
@@ -48,7 +49,7 @@ export default {
     }
     return layout({
       title: t("services.page.title", lang),
-      content: projectServicesCss() + projectServicesHtml(page, lang) + projectServicesClientJs(),
+      content: projectServicesCss() + projectServicesHtml(page, lang) + projectServicesDataScript(page, lang) + projectServicesClientJs(),
     });
   },
 };

@@ -92,6 +92,74 @@ export function projectServicesCss() {
   body.shell .svc-status:empty { display: none; }
   body.shell .svc-add:focus-visible, body.shell .svc-project:focus-visible, body.shell .svc-menu > summary:focus-visible,
   body.shell .svc-menu-item:focus-visible, body.shell .svc-inline:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  /* Add a service and the connect sheet: a centred dialog, a bottom sheet on a phone. */
+  body.shell .svc-sheet {
+    width: 100%; max-width: 32rem; max-height: 90vh; margin: auto; padding: 16px; box-sizing: border-box;
+    overflow-y: auto; border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px);
+    background: var(--crow-bg-surface); color: var(--crow-text-primary);
+  }
+  body.shell .svc-sheet::backdrop { background: rgba(0, 0, 0, 0.35); }
+  body.shell .svc-sheet-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; min-width: 0; }
+  body.shell .svc-sheet-title { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 1.15rem; font-weight: 600; overflow-wrap: anywhere; }
+  body.shell .svc-icon-btn {
+    flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px;
+    border: 0; border-radius: var(--crow-radius-control, 10px); background: none;
+    font: inherit; font-size: 1.25rem; color: var(--crow-text-secondary); cursor: pointer;
+  }
+  body.shell .svc-icon-btn:hover { background: var(--crow-bg-elevated); }
+  body.shell .svc-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  body.shell .svc-field-label { font-size: 0.8rem; color: var(--crow-text-secondary); }
+  body.shell .svc-input {
+    width: 100%; min-height: 44px; padding: 10px 12px; box-sizing: border-box;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-control, 10px);
+    background: var(--crow-bg-elevated); color: var(--crow-text-primary); font: inherit;
+  }
+  body.shell .svc-input[aria-invalid="true"] { border-color: var(--crow-error); }
+  body.shell .svc-help { margin: 0; font-size: 0.8rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  body.shell .svc-groups { display: flex; flex-direction: column; gap: 14px; margin: 14px 0; }
+  body.shell .svc-group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  body.shell .svc-pick-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  body.shell .svc-pick {
+    display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 44px; padding: 10px 12px; box-sizing: border-box;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px); background: var(--crow-bg-surface);
+  }
+  body.shell .svc-pick[hidden], body.shell .svc-group[hidden] { display: none; }
+  body.shell .svc-pick-name { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+  body.shell .svc-pick-btn {
+    flex: none; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 14px;
+    border: 0; border-radius: var(--crow-radius-pill, 999px); background: var(--crow-accent); color: var(--crow-accent-contrast);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  body.shell .svc-pick-btn--install { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
+  body.shell .svc-browse {
+    display: inline-flex; align-items: center; min-height: 44px; font-weight: 600; color: var(--crow-accent);
+  }
+  body.shell .svc-connect { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  body.shell .svc-steps { margin: 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 6px; line-height: 1.5; overflow-wrap: anywhere; }
+  body.shell .svc-step-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--crow-accent); }
+  body.shell .svc-for {
+    margin: 0; padding: 12px 14px; border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px);
+    font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere;
+  }
+  body.shell .svc-error { margin: 0; color: var(--crow-error); overflow-wrap: anywhere; }
+  body.shell .svc-ok { margin: 0; color: var(--crow-success); font-weight: 600; }
+  body.shell .svc-error:empty, body.shell .svc-ok:empty { display: none; }
+  body.shell .svc-submit {
+    display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; padding: 0 16px;
+    border: 0; border-radius: var(--crow-radius-pill, 999px); background: var(--crow-accent); color: var(--crow-accent-contrast);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  body.shell .svc-submit[disabled] { opacity: 0.6; cursor: progress; }
+  body.shell .svc-row-error { font-size: 0.85rem; color: var(--crow-error); overflow-wrap: anywhere; }
+  body.shell .svc-icon-btn:focus-visible, body.shell .svc-input:focus-visible, body.shell .svc-pick-btn:focus-visible,
+  body.shell .svc-browse:focus-visible, body.shell .svc-step-link:focus-visible, body.shell .svc-submit:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  @media (max-width: 480px) {
+    body.shell .svc-sheet {
+      max-width: 100%; max-height: 92vh; margin: auto 0 0;
+      border-radius: var(--crow-radius-card, 12px) var(--crow-radius-card, 12px) 0 0;
+      padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    }
+  }
   /* The page draws its own header (project, title, + Add): the layout's title stays for screen
      readers only (visually hidden, never display:none). */
   body.shell:has([data-svc]) .content-header h2 {
