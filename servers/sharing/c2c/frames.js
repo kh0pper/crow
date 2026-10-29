@@ -106,7 +106,7 @@ export function parseFrame(payload) {
     if (!PLAN1_KINDS.includes(kind)) return { ok: false, reason: "unsupported" };
     const { project_uuid, from_instance_id, to_instance_id, epoch, seq, body } = payload;
     if (typeof project_uuid !== "string" || !HEX32.test(project_uuid)) return bad;
-    if (!isId(from_instance_id) || !isId(to_instance_id)) return bad;
+    if (!isId(from_instance_id) || !(to_instance_id === null || isId(to_instance_id))) return bad;
     const frame = { type: C2C_TYPE, v: 1, kind, project_uuid };
     if (NO_SEQ.has(kind)) {
       if (seq !== undefined) return bad;
