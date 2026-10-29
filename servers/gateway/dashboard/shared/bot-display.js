@@ -82,13 +82,14 @@ export function purposeLine(def, lang = "en", boardOn = false) {
 }
 
 /**
- * Free text as one clean line: line breaks and tabs (and U+2028/2029) become
- * a space, other control characters are dropped, runs of spaces collapse,
+ * Free text as one clean line: line breaks and tabs (and U+0085/2028/2029)
+ * become a space, other control characters and invisible format characters
+ * (\p{Cf}: zero-width and bidi controls) are dropped, runs of spaces collapse,
  * and the result is trimmed and cut at `max` code points.
  */
 export function oneLine(s, max = Infinity) {
   if (typeof s !== "string") return "";
-  const clean = s.replace(/[\r\n\t\u2028\u2029]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+  const clean = s.replace(/[\r\n\t\u0085\u2028\u2029]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]|\p{Cf}/gu, "")
     .replace(/ {2,}/g, " ").trim();
   const cps = Array.from(clean);
   return cps.length > max ? cps.slice(0, max).join("").trimEnd() : clean;

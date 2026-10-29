@@ -113,8 +113,8 @@ export function normalizeVoiceSettings(def) {
     },
     handoff: {
       enabled: typeof handoff.enabled === "boolean" ? handoff.enabled : true,
-      allowed_bots: Array.isArray(handoff.allowed_bots) && handoff.allowed_bots.every((b) => typeof b === "string" && b)
-        ? [...handoff.allowed_bots] : [],
+      // A malformed entry is dropped and the valid ones kept; nothing valid left means [] ("all").
+      allowed_bots: Array.isArray(handoff.allowed_bots) ? handoff.allowed_bots.filter((b) => typeof b === "string" && b) : [],
     },
   };
 }

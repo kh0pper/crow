@@ -16,11 +16,14 @@ import { perchAttached } from "../shared/perch-attached.js";
 import { HANDOFF_SUMMARY_MAX_CHARS, HANDOFF_MAX_CANDIDATES } from "./handoff-constants.js";
 
 const NAME_MAX = 40;
-const MODEL_MAX = 40;
 const MAX_TOOLS = 5;
 const MAX_SKILLS = 4;
 /** A skill name the model may read: a plain slug (anything else could carry instructions). */
 const SAFE_SKILL = /^[a-z0-9][a-z0-9-]{0,40}$/;
+/** An unmapped server id or a model name shown as itself: a plain token, never a sentence (a peer can
+ * patch tools.crow_mcp and models.*). Anything else is dropped. */
+const SAFE_SERVER = /^[a-z0-9][a-z0-9_-]{0,40}$/i;
+const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,39}$/;
 
 const FRIENDLY_SERVERS = {
   "crow-memory": "memory",
@@ -54,7 +57,7 @@ function toolsPart(def) {
   for (const e of list) {
     if (typeof e !== "string" || !e) continue;
     const server = serverOf(e);
-    const name = FRIENDLY_SERVERS[server] || oneLine(server, 40);
+    const name = FRIENDLY_SERVERS[server] || (SAFE_SERVER.test(server) ? server : "");
     if (name && !names.includes(name)) names.push(name);
     if (names.length === MAX_TOOLS) break;
   }
@@ -77,9 +80,12 @@ function purposePart(def, boardOn) {
   return oneLine(purposeLine(def, "en", boardOn));
 }
 
+/** Cut to `max` UTF-16 units (the token budget is what the cap protects), never splitting a surrogate pair. */
 function cut(s, max) {
-  const cps = Array.from(s);
-  return cps.length <= max ? s : cps.slice(0, Math.max(0, max - 1)).join("").trimEnd() + "…";
+  if (s.length <= max) return s;
+  let head = s.slice(0, Math.max(0, max - 1));
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
+  return head.trimEnd() + "…";
 }
 
 /**
@@ -94,7 +100,9 @@ export function botCapabilitySummary(row) {
   const boardOn = boardState(row || {}).state === "on";
   const body = [purposePart(def, boardOn), toolsPart(def), skillsPart(def)].filter(Boolean).join("; ");
   const key = def.models && typeof def.models.default === "string" ? def.models.default : "";
-  const model = key ? oneLine(friendlyModel(key), MODEL_MAX) : "";
+  // A bot on the instance default model (no models.default) gets no model part.
+  const shown = key ? friendlyModel(key) : "";
+  const model = SAFE_MODEL.test(shown) ? shown : "";
   if (!model) return cut(body, HANDOFF_SUMMARY_MAX_CHARS);
   const tail = "model: " + model;
   if (!body) return tail;
