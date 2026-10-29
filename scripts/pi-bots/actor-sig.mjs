@@ -1,6 +1,10 @@
 /**
  * Actor-header binding (S2, 2026-10-02).
  *
+ * Kinds signed with the one per-boot key (each its own MAC domain, so none
+ * replays as another): "bot" (phone), "board", "board-thread", "artifacts",
+ * and "peer-relay" (the loopback relay to paired peers, item 46 PR-B).
+ *
  * A bot's per-turn MCP config carries X-Crow-Actor-{Kind,Id,Thread,Gateway}
  * so /phone/mcp can attribute a call plan to the bot and deliver the result
  * back to the conversation that asked. Those headers sit next to a SHARED
@@ -136,6 +140,26 @@ export function signArtifactsActor({ botId, threadId, gatewayType } = {}) {
 /** Constant-time check of a presented artifacts signature. False without a key. */
 export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = {}) {
   return verifyActorSig({ kind: "artifacts", botId, threadId, gatewayType, sig });
+}
+
+// ---- peer-relay actor headers (item 46 PR-B) ----
+//
+// A pi bot's remote-tools proxy (crow-remote-proxy.mjs) calls a paired peer
+// through the gateway's loopback relay (servers/gateway/routes/peer-relay.js),
+// never directly: no pair key, signing key or peer bearer reaches a bot
+// process. The relay forwards only for a bot it verified with this signature,
+// then signs the peer-bound tools/call with the pair subkey itself. Kind
+// "peer-relay": no phone, board, board-thread or artifacts signature can be
+// replayed here, nor this one there.
+
+/** Signature for the peer-relay actor headers, or null without a key / bot id. */
+export function signPeerRelayActor({ botId, threadId, gatewayType } = {}) {
+  return signActor({ kind: "peer-relay", botId, threadId, gatewayType });
+}
+
+/** Constant-time check of a presented peer-relay signature. False without a key. */
+export function verifyPeerRelayActorSig({ botId, threadId, gatewayType, sig } = {}) {
+  return verifyActorSig({ kind: "peer-relay", botId, threadId, gatewayType, sig });
 }
 
 // ---- board thread binding (redesign P5, Task 5.1) ----

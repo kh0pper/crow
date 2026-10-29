@@ -196,3 +196,21 @@ test("S5: the catalog's board block is signed over (bot, job) and only verifies 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("item 46 PR-B: a peer-relay signature verifies only as a peer-relay signature", async () => {
+  const { signPeerRelayActor, verifyPeerRelayActorSig, signArtifactsActor, verifyArtifactsActorSig } = await import("../scripts/pi-bots/actor-sig.mjs");
+  const R = { botId: "hank", threadId: "discord:42", gatewayType: "discord" };
+  _resetActorKeyForTest();
+  assert.equal(signPeerRelayActor(R), null, "no key → no signature");
+  initGatewayActorKey();
+  const sig = signPeerRelayActor(R);
+  assert.match(sig, /^[0-9a-f]{64}$/);
+  assert.equal(verifyPeerRelayActorSig({ ...R, sig }), true);
+  assert.equal(verifyPeerRelayActorSig({ ...R, botId: "other", sig }), false, "bound to the bot");
+  assert.equal(verifyPeerRelayActorSig({ ...R, threadId: "discord:43", sig }), false, "bound to the thread");
+  assert.equal(verifyPeerRelayActorSig({ ...R, gatewayType: "gmail", sig }), false, "bound to the gateway");
+  assert.equal(verifyArtifactsActorSig({ ...R, sig }), false, "not an artifacts signature");
+  assert.equal(verifyActorSig({ kind: "bot", ...R, sig }), false, "not a phone signature");
+  assert.equal(verifyPeerRelayActorSig({ ...R, sig: signArtifactsActor(R) }), false, "an artifacts signature is not a relay one");
+  assert.equal(verifyPeerRelayActorSig({ ...R, sig: undefined }), false);
+});
