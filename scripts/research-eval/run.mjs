@@ -109,6 +109,7 @@ export async function runUnit({ caseDef, steps, rep, arm, model, mode = "harness
         criteria: scored.criteria, case_pass: scored.case_pass, evidence: scored.evidence,
         undecided: scored.undecided, no_prose: scored.no_prose, off_set_fetches: scored.off_set_fetches,
         flagged_unconfirmed: scored.flagged_unconfirmed, ...tail, judge_reason: scored.judge_reason,
+        judge_calls: scored.judge_calls, judge_spans: scored.judge_spans,
       };
       return { row: orderRow(row), scratch };
     } catch (err) {
@@ -120,14 +121,14 @@ export async function runUnit({ caseDef, steps, rep, arm, model, mode = "harness
     ...base, ok: false, parse_ok: false, contaminated: `transport failure after ${MAX_ATTEMPTS} attempts`,
     wall_s: Math.round((Date.now() - t0) / 10) / 100, completion_tokens: null,
     criteria: null, case_pass: false, evidence: { errors }, undecided: false, no_prose: null, off_set_fetches: [],
-    flagged_unconfirmed: [], ...tail, judge_reason: null,
+    flagged_unconfirmed: [], ...tail, judge_reason: null, judge_calls: 0, judge_spans: 0,
   };
   return { row: orderRow(row), scratch: null };
 }
 
 const ROW_KEYS = ["arm", "model", "config", "case", "type", "rep", "ok", "parse_ok", "contaminated", "wall_s", "completion_tokens",
   "criteria", "case_pass", "evidence", "undecided", "no_prose", "off_set_fetches", "flagged_unconfirmed", "sampling",
-  "judge_reason", "skill_sha", "server_sha", "crow_sha"];
+  "judge_reason", "judge_calls", "judge_spans", "skill_sha", "server_sha", "crow_sha"];
 const orderRow = (r) => Object.fromEntries(ROW_KEYS.map((k) => [k, r[k]]));
 
 /**

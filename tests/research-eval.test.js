@@ -1507,7 +1507,7 @@ const row9 = (arm, caseId, rep, pass, criteria = {}, extra = {}) => ({
   arm, model: "stub", case: caseId, type: extra.type ?? "number", rep, ok: true, parse_ok: true, contaminated: false,
   criteria: { a: "pass", b: pass ? "pass" : "fail", c: "n/a", d: "pass", ...criteria }, case_pass: pass,
   evidence: { reasons: { a: [], b: pass ? [] : ["no page value in the prose"], c: [], d: [] }, prose_hits: { judged: [] } },
-  undecided: criteria.b === "undecided", sampling: { ...SAMPLING9, seed: seedFor9(rep) }, judge_reason: null, ...extra,
+  undecided: criteria.b === "undecided", sampling: { ...SAMPLING9, seed: seedFor9(rep) }, judge_reason: null, judge_calls: 0, judge_spans: 0, ...extra,
 });
 // cases → per-case pass counts out of 3 reps, for one arm.
 const armRows = (arm, passes) => Object.entries(passes).flatMap(([c, k]) => [0, 1, 2].map((rep) => row9(arm, c, rep, rep < k)));
@@ -1603,7 +1603,8 @@ test("refusals: contaminated rows and n<3 refuse a verdict; the CLI exits 6", ()
 
 test("the CLI on a complete two-arm file prints the tables and exits 0, with no gate verdict", () => {
   const rows = [...armRows("A", { rr01: 3, rr02: 2 }), ...armRows("B", { rr01: 1, rr02: 2 })];
-  rows[3] = row9("A", "rr02", 0, true, { b: "undecided" }, { judge_reason: "no judge configured", evidence: { reasons: { a: [], b: [], c: [], d: [] }, prose_hits: { judged: [{ start: 0, end: 4 }] } } });
+  rows[3] = row9("A", "rr02", 0, true, { b: "undecided" }, { judge_reason: "no judge configured", judge_spans: 1, evidence: { reasons: { a: [], b: [], c: [], d: [] } } });
+  rows[6] = row9("B", "rr01", 0, true, {}, { judge_reason: "pass; pass", judge_calls: 2, judge_spans: 2 });
   const f = join(H, "t9-two-arms.jsonl");
   write7(f, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
   const res = spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env: { PATH: process.env.PATH } });
@@ -1611,8 +1612,74 @@ test("the CLI on a complete two-arm file prints the tables and exits 0, with no 
   assert.match(res.stdout, /A {2}rr01 \(number\) {2}pass 3\/3/);
   assert.match(res.stdout, /r0: b: undecided \(no judge configured\)/);
   assert.match(res.stdout, /b: no page value in the prose/);
-  assert.match(res.stdout, /judge: 1 rows reached it, 1 spans sent/);
+  assert.match(res.stdout, /A: headline[^\n]*\n {4}judge calls: 0; {2}spans routed to the judge: 1;/);
+  assert.match(res.stdout, /B: headline[^\n]*\n {4}judge calls: 2; {2}spans routed to the judge: 2;/);
+  assert.doesNotMatch(res.stdout, /upper bound|at most/);
   assert.match(res.stdout, /Undecided rows[^\n]*\n {2}A\/rr02\/rep 0/);
   assert.match(res.stdout, /A vs B: 2 cases; A higher on 1, lower on 1, tied 0; [^\n]*INCONCLUSIVE/);
   assert.doesNotMatch(res.stdout, /NO VERDICT|VERDICT:|PASS {2}|FAIL {2}/);
+});
+
+test("fix 1: an arm missing a whole case is refused (0 scored reps), and the CLI exits 6", () => {
+  const rows = [...armRows("A", { rr01: 3, rr02: 3, rr03: 3 }), ...armRows("B", { rr01: 3, rr02: 3 })];
+  const r = refusals(rows);
+  assert.ok(r.includes("fewer than 3 scored reps: B/rr03 has 0"), r.join("\n"));
+  const f = join(H, "t9-missing-case.jsonl");
+  write7(f, rows.map((x) => JSON.stringify(x)).join("\n") + "\n");
+  const res = spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(res.status, 6, res.stdout + res.stderr);
+  assert.match(res.stdout, /B\/rr03 has 0[\s\S]*NO VERDICT/);
+});
+
+test("fix 1: --cases catches a case absent from every arm", () => {
+  const ids = readdirSync(join(ROOT, "scripts", "research-eval", "cases")).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(readFileSync(join(ROOT, "scripts", "research-eval", "cases", f), "utf8")).id).sort();
+  const present = ids.filter((id) => id !== "rr05");
+  const rows = armRows("A", Object.fromEntries(present.map((id) => [id, 3])));
+  assert.deepEqual(refusals(rows), [], "without the expected set nothing is missing");
+  assert.deepEqual(refusals(rows, { cases: ids }), ["fewer than 3 scored reps: A/rr05 has 0"]);
+  const f = join(H, "t9-absent-everywhere.jsonl");
+  write7(f, rows.map((x) => JSON.stringify(x)).join("\n") + "\n");
+  const env = { PATH: process.env.PATH };
+  assert.equal(spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env }).status, 0);
+  const res = spawnSync(process.execPath, [REPORT, `--cases=${join(ROOT, "scripts", "research-eval", "cases")}`, f], { encoding: "utf8", env });
+  assert.equal(res.status, 6, res.stdout + res.stderr);
+  assert.match(res.stdout, /A\/rr05 has 0[\s\S]*NO VERDICT/);
+  assert.equal(spawnSync(process.execPath, [REPORT, "--bogus", f], { encoding: "utf8", env }).status, 2);
+});
+
+test("fix 2: wilcoxon quantizes |d|, so float thirds tie and float zeros drop like exact thirds", () => {
+  const float = [2 / 3 - 1 / 3, 1 / 3 - 0, 0, -(1 - 2 / 3), -(1 - 2 / 3), -(1 - 2 / 3)];
+  assert.notEqual(Math.abs(float[3]), float[1], "the probe really carries float noise");
+  const t = 1 / 3;
+  assert.equal(wilcoxonSignedRankP(float), wilcoxonSignedRankP([t, t, 0, -t, -t, -t]));
+  assert.equal(wilcoxonSignedRankP([1 - 2 / 3 - 1 / 3]), 1, "a float zero is dropped");
+});
+
+test("fix 3: unequal scored reps within an arm, or across arms for a case, refuse a verdict", () => {
+  const six = [0, 1, 2, 3, 4, 5].map((rep) => row9("A", "rr02", rep, true));
+  const r = refusals([...armRows("A", { rr01: 3 }), ...six]);
+  assert.ok(r.includes("unequal scored reps in arm A: rr01 3, rr02 6"), r.join("\n"));
+  const r2 = refusals([...armRows("A", { rr01: 3 }), ...[0, 1, 2, 3, 4, 5].map((rep) => row9("B", "rr01", rep, true))]);
+  assert.ok(r2.includes("unequal scored reps for case rr01 across arms: A 3, B 6"), r2.join("\n"));
+  assert.deepEqual(refusals([...armRows("A", { rr01: 3, rr02: 3 }), ...armRows("B", { rr01: 0, rr02: 3 })]), []);
+});
+
+test("fix 4: judge_calls is the exact number of real judge invocations; noJudge counts 0 calls but its spans", async () => {
+  const two01 = careful(C01, { prose: `One summary gives $57B; the report itself says $35 billion (${U01}). Another summary says 57bn; the page says $35 billion.` });
+  const calls = [];
+  const r = await scoreRow({ ...two01, judge: rec(calls, "pass") });
+  assert.ok(calls.length >= 2, `the probe routes ${calls.length} spans`);
+  assert.equal(r.judge_calls, calls.length);
+  assert.equal(r.judge_spans, calls.length);
+  const failFirst = [];
+  const rf = await scoreRow({ ...two01, judge: rec(failFirst, "fail") });
+  assert.equal(failFirst.length, 1, "a fail verdict stops the calls");
+  assert.equal(rf.judge_calls, 1);
+  assert.equal(rf.judge_spans, calls.length);
+  const rn = await scoreRow(two01);
+  assert.equal(rn.criteria.b, "undecided");
+  assert.equal(rn.judge_calls, 0);
+  assert.equal(rn.judge_spans, calls.length);
+  const plain = await scoreRow(careful(C01));
+  assert.deepEqual([plain.judge_calls, plain.judge_spans], [0, 0]);
 });

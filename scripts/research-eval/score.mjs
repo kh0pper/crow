@@ -79,8 +79,11 @@ function blankUrls(text) {
  *   granted: string[], judge?: Function}} unit
  *   granted: the skill's "server/tool" entries; a call to any other name contaminates the row.
  * @returns {Promise<{criteria: {a, b, c, d}, case_pass: boolean, contaminated: false|string, undecided: boolean,
- *   no_prose: boolean, flagged_unconfirmed: string[], off_set_fetches: string[], judge_reason: string|null, evidence: object}>}
+ *   no_prose: boolean, flagged_unconfirmed: string[], off_set_fetches: string[], judge_reason: string|null,
+ *   judge_calls: number, judge_spans: number, evidence: object}>}
  *   each criterion is "pass" | "fail" | "n/a" | "undecided" (undecided only for b)
+ *   judge_calls: how many times a real judge was invoked (a judge call may be billed); noJudge is
+ *   not a judge, so it counts 0. judge_spans: how many spans reached the judge stage, judge or not.
  */
 export async function scoreRow({ caseDef, session, evidence, fetchLog = [], granted = [], judge = noJudge }) {
   const claim = caseDef.claim || {};
@@ -94,6 +97,8 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
     flagged_unconfirmed: [],
     off_set_fetches: list(fetchLog).filter((e) => e && e.in_set === false).map((e) => e.url),
     judge_reason: null,
+    judge_calls: 0,
+    judge_spans: 0,
     evidence: { fetch_order: [], source_rows: [], note_rows: [], prose_hits: {}, reasons: {} },
   };
 
@@ -273,7 +278,9 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
     b = "fail";
   } else {
     b = "pass";
+    row.judge_spans = spans.length;
     for (const j of spans) {
+      if (judge !== noJudge) row.judge_calls += 1;
       const v = await judge({ kind: "b_correction", sentence: j.sentence, snippet: j.snippet });
       reasons.push(String(v?.reason ?? ""));
       if (v?.verdict === "fail") { b = "fail"; break; }

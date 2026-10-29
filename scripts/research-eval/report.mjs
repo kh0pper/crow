@@ -4,12 +4,16 @@
  * the rates: per case, per arm, per criterion, per error type, and paired comparisons between
  * arms. Pure functions; the command line only reads files and prints.
  *
- *   node scripts/research-eval/report.mjs <file>.jsonl [<file>.jsonl …]
+ *   node scripts/research-eval/report.mjs [--cases=<dir>] <file>.jsonl [<file>.jsonl …]
+ *   --cases  the expected case set (that directory's case files); without it, the expected set is
+ *            the union of the case ids any arm has
  *
  * It prints rates only, never a gate verdict: the pass bars are the operator's, set before the
  * first live run and recorded outside this repo. Exit: 0 = the figures are complete · 2 = bad
  * usage · 6 = NO VERDICT (a contaminated or malformed row, a duplicate unit, a sampling setting
- * other than the pre-registered one, or an (arm, case) with fewer than MIN_REPS scored reps).
+ * other than the pre-registered one, an (arm, case) of the expected set with fewer than MIN_REPS
+ * scored reps (0 included), or scored rep counts that differ within an arm or across arms for a
+ * case: the design fixes the reps per case).
  *
  * Rules fixed before any run (§5, §13 of the design):
  *   - a row's case pass is RECOMPUTED from row.criteria (every value that is not "n/a" is
@@ -22,12 +26,13 @@
  *   - a criterion rate leaves n/a out of the denominator.
  *
  * Row fields read: arm, case, type, rep, ok, contaminated, criteria {a,b,c,d}, sampling, judge_reason,
- * and evidence: evidence.reasons {a,b,c,d} (one string per failed check, an addition to the
- * design's §6 row format, from the scorer) gives the failing evidence; evidence.prose_hits.judged
- * gives the spans sent to the judge; a contaminated row's evidence.errors is printed with it.
+ * judge_calls (real judge invocations: the billed count), judge_spans (spans routed to the judge), and
+ * evidence: evidence.reasons {a,b,c,d} (one string per failed check, an addition to the
+ * design's §6 row format, from the scorer) gives the failing evidence; a contaminated row's evidence.errors is printed with it.
  */
 import { pathToFileURL } from "node:url";
 import { SIGN_ALPHA, readRows, signTestP } from "../kiosk-eval/report.mjs";
+import { CASES_DIR, loadCases } from "./cases.mjs";
 import { SAMPLING, seedFor } from "./score.mjs";
 
 export { SIGN_ALPHA };
@@ -65,19 +70,21 @@ const rates = (cnt) => Object.fromEntries(CRITERIA.map((k) => [k, rate(cnt[k].pa
  * rows (any number of arms) → { arms: Map<arm, {
  *   cases: Map<case, { type, reps, passes, pass_prop, criteria: {a,b,c,d} rates, rows }>,
  *   headline, criteria_rates, criteria_counts, undecided_rows: [{case, rep}],
- *   contaminated_rows: [{case, rep, reason}], judge: { rows, spans },
+ *   contaminated_rows: [{case, rep, reason}], judge: { calls, spans, uncounted },
  *   by_type: { <type>: { cases, headline } } }> }
  * A case's reps count scored rows only; a case with none has pass_prop null and is left out of
- * the headline. judge.rows = scored rows that reached the judge (judge_reason set); judge.spans =
- * the spans those rows sent, an upper bound on calls (a fail verdict stops a row's calls).
+ * the headline. judge.calls / judge.spans sum every row's judge_calls / judge_spans (contaminated
+ * rows too: a call is paid for whatever became of the row); judge.uncounted = rows without them.
  */
 export function summarize(rows) {
   const arms = new Map();
   for (const r of rows) {
-    if (!arms.has(r.arm)) arms.set(r.arm, { cases: new Map(), contaminated_rows: [], undecided_rows: [], cnt: counts(), judge: { rows: 0, spans: 0 } });
+    if (!arms.has(r.arm)) arms.set(r.arm, { cases: new Map(), contaminated_rows: [], undecided_rows: [], cnt: counts(), judge: { calls: 0, spans: 0, uncounted: 0 } });
     const a = arms.get(r.arm);
     if (!a.cases.has(r.case)) a.cases.set(r.case, { type: r.type ?? null, reps: 0, passes: 0, cnt: counts(), rows: [] });
     const c = a.cases.get(r.case);
+    if (Number.isInteger(r.judge_calls) && Number.isInteger(r.judge_spans)) { a.judge.calls += r.judge_calls; a.judge.spans += r.judge_spans; }
+    else a.judge.uncounted += 1;
     const why = contamination(r);
     if (why) { a.contaminated_rows.push({ case: r.case, rep: r.rep, reason: why }); continue; }
     c.reps += 1;
@@ -86,7 +93,6 @@ export function summarize(rows) {
     tally(c.cnt, r.criteria);
     tally(a.cnt, r.criteria);
     if (r.criteria.b === "undecided") a.undecided_rows.push({ case: r.case, rep: r.rep });
-    if (r.judge_reason != null) { a.judge.rows += 1; a.judge.spans += r.evidence?.prose_hits?.judged?.length ?? 0; }
   }
   const out = new Map();
   for (const [arm, a] of arms) {
@@ -111,13 +117,16 @@ export function summarize(rows) {
 /**
  * Two-sided exact Wilcoxon signed-rank p over paired differences: zeros dropped, average ranks
  * for tied |d|, every one of the 2^n sign assignments counted (n ≤ 20). 1 when n = 0.
+ * |d| is quantized to 1e-9 first, so float noise (2/3 - 1/3 against 1/3 - 0) neither breaks a
+ * tie nor keeps a zero.
  */
 export function wilcoxonSignedRankP(diffs) {
-  const d = diffs.filter((x) => x !== 0);
+  const q = (x) => Math.round(Math.abs(x) * 1e9);
+  const d = diffs.filter((x) => q(x) !== 0);
   const n = d.length;
   if (n === 0) return 1;
   if (n > WILCOXON_MAX_N) throw new Error(`wilcoxonSignedRankP: exact enumeration is for n ≤ ${WILCOXON_MAX_N}, got ${n}`);
-  const order = d.map((x, i) => ({ abs: Math.abs(x), i })).sort((x, y) => x.abs - y.abs);
+  const order = d.map((x, i) => ({ abs: q(x), i })).sort((x, y) => x.abs - y.abs);
   const rank2 = new Array(n); // twice the average rank, an integer
   for (let s = 0; s < n;) {
     let e = s;
@@ -180,9 +189,12 @@ const unit = (r) => `${r.arm}/${r.case}/rep ${r.rep}`;
 /**
  * Why no verdict can be given, one line each: a contaminated or malformed row (or a header or
  * other non-row line), a duplicate (arm, case, rep), a sampling setting other than the
- * pre-registered one, and every (arm, case) with fewer than MIN_REPS scored reps.
+ * pre-registered one, every (arm, case) of the expected set with fewer than MIN_REPS scored reps
+ * (0 included: an arm missing a case gets a line), and scored rep counts that differ within an arm
+ * or across arms for one case. The expected set is `cases` (ids) when given, plus every case id
+ * any arm has.
  */
-export function refusals(rows) {
+export function refusals(rows, { cases = [] } = {}) {
   const out = [];
   const seen = new Set();
   const reps = new Map();
@@ -203,10 +215,21 @@ export function refusals(rows) {
     if (Object.keys(want).some((f) => s[f] !== want[f])) out.push(`sampling differs from the pre-registered setting: ${unit(r)}: ${JSON.stringify(s)}`);
     reps.set(k, reps.get(k) + 1);
   }
-  for (const [k, n] of reps) {
-    if (n >= MIN_REPS) continue;
-    const [arm, id] = JSON.parse(k);
-    out.push(`fewer than ${MIN_REPS} scored reps: ${arm}/${id} has ${n}`);
+  const arms = [...new Set([...reps.keys()].map((k) => JSON.parse(k)[0]))].sort();
+  const ids = [...new Set([...cases, ...[...reps.keys()].map((k) => JSON.parse(k)[1])])].sort();
+  const n = (arm, id) => reps.get(JSON.stringify([arm, id])) ?? 0;
+  for (const arm of arms) for (const id of ids) {
+    if (n(arm, id) < MIN_REPS) out.push(`fewer than ${MIN_REPS} scored reps: ${arm}/${id} has ${n(arm, id)}`);
+  }
+  // A missing (0) count already has its line above; only the scored counts are compared.
+  const unequal = (list) => new Set(list.map(([, k]) => k).filter((k) => k > 0)).size > 1;
+  for (const arm of arms) {
+    const list = ids.map((id) => [id, n(arm, id)]);
+    if (unequal(list)) out.push(`unequal scored reps in arm ${arm}: ${list.map(([id, k]) => `${id} ${k}`).join(", ")}`);
+  }
+  for (const id of ids) {
+    const list = arms.map((arm) => [arm, n(arm, id)]);
+    if (unequal(list)) out.push(`unequal scored reps for case ${id} across arms: ${list.map(([arm, k]) => `${arm} ${k}`).join(", ")}`);
   }
   return out;
 }
@@ -243,7 +266,7 @@ export function render(rows) {
   for (const [arm, a] of s.arms) {
     const cr = CRITERIA.map((k) => `${k} ${pc(a.criteria_rates[k])} (${a.criteria_counts[k].pass}/${a.criteria_counts[k].n})`).join("  ");
     L.push(`  ${arm}: headline ${pc(a.headline)} over ${[...a.cases.values()].filter((c) => c.reps).length} cases;  ${cr}`);
-    L.push(`    judge: ${a.judge.rows} rows reached it, ${a.judge.spans} spans sent (at most that many calls);  contaminated rows: ${a.contaminated_rows.length};  undecided rows: ${a.undecided_rows.length}`);
+    L.push(`    judge calls: ${a.judge.calls};  spans routed to the judge: ${a.judge.spans}${a.judge.uncounted ? ` (${a.judge.uncounted} rows carry no count)` : ""};  contaminated rows: ${a.contaminated_rows.length};  undecided rows: ${a.undecided_rows.length}`);
     L.push(`    by type: ${Object.entries(a.by_type).map(([t, v]) => `${t} ${pc(v.headline)} (${v.cases})`).join(", ")}`);
   }
   L.push("\nUndecided rows (non-pass for b):");
@@ -263,15 +286,23 @@ export function render(rows) {
 }
 
 function main() {
-  const files = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  if (!files.length) { console.error("usage: report.mjs <rows>.jsonl [<rows>.jsonl …]"); process.exit(2); }
+  const argv = process.argv.slice(2);
+  const files = argv.filter((a) => !a.startsWith("--"));
+  const usage = "usage: report.mjs [--cases=<dir>] <rows>.jsonl [<rows>.jsonl …]";
+  const flags = argv.filter((a) => a.startsWith("--"));
+  if (!files.length || flags.some((a) => !a.startsWith("--cases="))) { console.error(usage); process.exit(2); }
+  let expected = [];
+  const dir = flags.find((a) => a.startsWith("--cases="))?.slice(8);
+  if (dir !== undefined) {
+    try { expected = loadCases(dir || CASES_DIR).map((c) => c.id); } catch (err) { console.error(`--cases=${dir}: ${err.message}`); process.exit(2); }
+  }
   const rows = [];
   const unreadable = [];
   for (const f of files) {
     try { rows.push(...readRows(f)); } catch (err) { unreadable.push(`unreadable file ${f}: ${err.message}`); }
   }
   for (const line of render(rows)) console.log(line);
-  const refuse = [...unreadable, ...refusals(rows)];
+  const refuse = [...unreadable, ...refusals(rows, { cases: expected })];
   if (refuse.length) {
     console.log("\nRefusals:");
     for (const r of refuse) console.log(`  ${r}`);
