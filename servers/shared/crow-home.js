@@ -212,3 +212,19 @@ export function readLocalInstanceIdOrNull(env = process.env) {
     return null;
   }
 }
+
+/**
+ * Queue item 19, step 1: a co-hosted instance (its own CROW_HOME) that still
+ * reads the SHARED checkout .env inherits the primary instance's secrets
+ * (tokens, passwords) into its own process. Returns a warning naming the
+ * inherited secret-like KEYS (never values), or null. `appEnvIsDefault` is
+ * true when CROW_APP_ENV_PATH is unset, i.e. the checkout .env was applied.
+ * `secretNameRe` is bot-env.js's SECRET_NAME_RE (passed in to avoid a cycle).
+ */
+export function inheritedSecretsWarning(env, { envFileKeys = new Set(), appEnvIsDefault = true, secretNameRe, homeDir = homedir() } = {}) {
+  if (!appEnvIsDefault || isDefaultCrowHome(env, homeDir) || !secretNameRe) return null;
+  const keys = [...envFileKeys].filter((k) => secretNameRe.test(k) && !/_PATH$|_FILE$|_DIR$|_URL$/.test(k)).sort();
+  if (!keys.length) return null;
+  return `this instance (CROW_HOME=${resolveCrowHome(env)}) inherits ${keys.length} secret-like key(s) from the shared checkout .env: ` +
+    `${keys.join(", ")}. Give it its own app env file (CROW_APP_ENV_PATH) with only the keys it needs.`;
+}
