@@ -134,10 +134,17 @@ test("compose passes the token (required), no VNC password, and its downloads mo
   assert.doesNotMatch(COMPOSE, /VNC_PASSWORD/);
   assert.match(COMPOSE, /^\s+- VNC_TOKEN=\$\{CROW_BROWSER_VNC_TOKEN:\?[^}]+\}$/m, "required: compose refuses to start without it");
   assert.doesNotMatch(COMPOSE, /RFB_PORT/);
-  const volumes = COMPOSE.split("\n").filter((l) => /^\s+- \$\{CROW_HOME/.test(l));
+  const volumes = COMPOSE.split("\n").filter((l) => /^\s+- (\$\{CROW_HOME|chromium-profile:)/.test(l));
   assert.deepEqual(volumes.map((l) => l.trim()), [
     "- ${CROW_HOME:?CROW_HOME is required so each instance writes downloads to its own directory}/browser-downloads:/downloads",
-  ], "the one bind mount, as before");
+    "- chromium-profile:/root/.config/chromium-crow",
+  ], "the downloads bind mount as before, plus the profile's named volume");
+  // A NAMED volume (compose prefixes it with the project: one per instance), never a bind or external one.
+  assert.match(COMPOSE, /\nvolumes:\n  chromium-profile:\n$/, "declared plainly at the end: project-scoped, not external, no fixed name");
+  // The token's directory and the profile volume never overlap.
+  const profile = "/root/.config/chromium-crow", vncDir = /^VNC_DIR=(\S+)$/m.exec(ENTRYPOINT)[1];
+  assert.ok(!vncDir.startsWith(profile) && !profile.startsWith(vncDir), vncDir + " vs " + profile);
+  assert.ok(!/\/run\b/.test(COMPOSE.split("volumes:")[1] || ""), "nothing mounted over /run");
   assert.match(COMPOSE, /^name: \$\{CROW_BROWSER_CONTAINER_NAME:-browser\}$/m);
   assert.match(COMPOSE, /^\s+container_name: \$\{CROW_BROWSER_CONTAINER_NAME:-crow-browser\}$/m);
   assert.match(COMPOSE, /^\s+network_mode: host$/m);

@@ -136,7 +136,7 @@ export function createBrowserServer(options = {}) {
     "Start/restart the browser and connect via CDP. Returns the VNC URL. Pass proxy_url to route through a proxy (recreates the container — set BEFORE navigating; save sessions first).",
     {
       restart: z.boolean().optional().describe("Force restart the container"),
-      proxy_url: z.string().optional().describe("Proxy to route through, e.g. http://host:port or socks5://host:port. Empty string clears it. Recreates the container (loses the current page/session — save_session first)."),
+      proxy_url: z.string().optional().describe("Proxy to route through, e.g. http://host:port or socks5://host:port. Empty string clears it. Recreates the container: the open page is lost; the profile (cookies, logins) is kept on its volume."),
     },
     async ({ restart, proxy_url }) => {
       try {

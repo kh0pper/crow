@@ -166,7 +166,7 @@ docker compose stop       # stop
 docker compose logs -f    # view logs
 ```
 
-The browser's profile (its cookies and saved logins) lives inside the container, not on a volume. `docker compose stop` and `restart` keep it; anything that **removes or re-creates** the container loses it: `docker compose down`, `up --force-recreate`, a rebuild that changes the image, or `crow_browser_launch` with `proxy_url`. Save sessions with `crow_browser_save_session` first.
+The browser's profile (its cookies and saved logins) lives on a named Docker volume, one per instance (`browser_chromium-profile` on the main instance), so stopping, restarting, rebuilding or re-creating the container keeps it. Only `docker compose down -v` (or `docker volume rm`) deletes it. An install from before 1.3.12 keeps its profile inside the old container until an operator moves it once with `scripts/ops/browser-profile-to-volume.sh` (run `--dry-run` first); until then, avoid anything that re-creates that container.
 
 ## FFFF Filing Skill
 

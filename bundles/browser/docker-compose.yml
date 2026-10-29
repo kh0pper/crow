@@ -40,7 +40,20 @@ services:
       # No default: a second instance whose CROW_HOME is unset must fail here rather
       # than silently mount the primary's downloads directory into its container.
       - ${CROW_HOME:?CROW_HOME is required so each instance writes downloads to its own directory}/browser-downloads:/downloads
+      # The Chromium profile (cookies, saved logins) on a NAMED volume, so a
+      # rebuild or a recreate (Configure → Restart, a proxy_url relaunch,
+      # `compose down`/`up`) keeps it. Compose prefixes the volume with the
+      # project name, so each instance has its own: `browser_chromium-profile`
+      # on the primary, `<CROW_BROWSER_CONTAINER_NAME>_chromium-profile` on a
+      # co-hosted one. An install from before 1.3.12 keeps its profile inside
+      # the old container until it is moved, once, with
+      # scripts/ops/browser-profile-to-volume.sh (never run automatically).
+      # `docker compose down -v` deletes the volume, and with it every login.
+      - chromium-profile:/root/.config/chromium-crow
     init: true
     mem_limit: 2g
     shm_size: 1g
     restart: unless-stopped
+
+volumes:
+  chromium-profile:
