@@ -9,11 +9,11 @@
  * matchYesNo is built on PR 1's isAffirmative/isNegative (turn-helpers.js): one yes/no rule for the voice
  * turn. On top of it, a yes that names another bot or carries an action ("yes, but send it to …") is not a
  * plain yes (null: the model hears it as a correction). A correction names a new target: a bot, or one of
- * the CORRECTION_PHRASES below ("give it to", "instead"…); a bare action verb does not make one.
+ * HANDOFF_TARGET_PHRASES ("give it to", "instead"…); a bare action verb does not make one.
  */
 import { isAffirmative, isNegative } from "./turn-helpers.js";
-import { phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
-import { HANDOFF_PROPOSAL_TTL_MS } from "./handoff-constants.js";
+import { phraseWords, listMatches } from "./tool-families.js";
+import { HANDOFF_PROPOSAL_TTL_MS, HANDOFF_TARGET_PHRASES } from "./handoff-constants.js";
 
 /** How long a pending proposal waits for its yes (it lives in handoff-constants.js, re-exported here). */
 export { HANDOFF_PROPOSAL_TTL_MS };
@@ -57,13 +57,9 @@ function stripLeadIns(text) {
   return rest;
 }
 
-// A yes is a correction only when it names a NEW target: one of these phrases, or a bot in otherBots. A verb
-// with only a pronoun object ("yes, add it", "sí, bórralo") is a plain yes, as PR 1's confirm gate reads it.
-const CORRECTION_PHRASES = normalizeIntentLists({
-  en: ["give it to", "send it to", "pass it to", "instead", "rather"],
-  es: ["en vez", "en lugar", "mejor a", "daselo a"],
-});
-
+// A yes is a correction only when it names a NEW target: one of HANDOFF_TARGET_PHRASES (the one list the
+// hand-off request reader shares), or a bot in otherBots. A verb with only a pronoun object ("yes, add it",
+// "sí, bórralo") is a plain yes, as PR 1's confirm gate reads it.
 // A correction lead: "but"/"pero", or words that change the held call ("mejor mañana", "make it four",
 // "at four", "a las cuatro"), each only when more words follow it ("yes, make it" alone is still a yes).
 const CORRECTION_LEADS = [["but"], ["pero"], ["mejor"], ["make", "it"], ["at"], ["a", "las"]];
@@ -83,7 +79,7 @@ export function matchYesNo(transcript, { otherBots = [] } = {}) {
   if (!isAffirmative(t)) return null;
   const words = phraseWords(t);
   const bots = (Array.isArray(otherBots) ? otherBots : []).map((b) => phraseWords(String(b ?? ""))).filter((w) => w.length);
-  if (listMatches(words, bots) || listMatches(words, CORRECTION_PHRASES)) return null;
+  if (listMatches(words, bots) || listMatches(words, HANDOFF_TARGET_PHRASES)) return null;
   // "yes, but at four" / "sí, mejor mañana" / "yes, make it four": a correction lead with more words after it changes what was asked.
   if (leadsCorrection(words)) return null;
   return "yes";

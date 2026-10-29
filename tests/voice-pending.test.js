@@ -4,6 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createPendingStore, matchYesNo, HANDOFF_PROPOSAL_TTL_MS } from "../servers/gateway/voice/pending.js";
 import { NOT_DONE_TEXT } from "../servers/gateway/voice/turn.js";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
@@ -256,4 +257,22 @@ test("pending: which_calendar is a known kind (PR 2.1 Task 6); an unknown kind i
   p.set("dev-w", { kind: "which_calendar", tool: "crow_calendar_add_event", args: { title: "x" }, options: [{ id: "a", name: "A" }] });
   assert.deepEqual(p.get("dev-w").options, [{ id: "a", name: "A" }]);
   assert.throws(() => p.set("dev-w", { kind: "which_list" }));
+});
+
+test("matchYesNo uses the shared target phrases", () => {
+  assert.equal(matchYesNo("yes, hand it to helper"), null, "hand it to is in the shared list");
+  assert.equal(matchYesNo("sí, pásaselo a helper"), null, "pasaselo a is in the shared list");
+  assert.equal(matchYesNo("yes, add it"), "yes");
+});
+
+test("every phrase pending.js used to treat as a correction still does", () => {
+  for (const s of ["yes, give it to helper", "yes, send it to helper", "yes, pass it to helper", "yes instead", "yes rather",
+    "sí, en vez de eso", "sí, en lugar de eso", "sí, mejor a helper", "sí, dáselo a helper"]) {
+    assert.equal(matchYesNo(s), null, s);
+  }
+});
+
+test("pending.js has no phrase list of its own", () => {
+  const src = readFileSync(new URL("../servers/gateway/voice/pending.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /normalizeIntentLists\(/);
 });
