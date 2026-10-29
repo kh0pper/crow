@@ -830,6 +830,22 @@ test("bot write scope: a bot changes only its own project's cards or cards assig
     assert.ok(!g.isError, g.content?.[0]?.text);
   }
 
+  // Autonomy is the operator's: a bot can't create an auto card or raise one.
+  const autoCreate = await call("board_create_item", { title: "self-approving", autonomy: "auto" });
+  assert.equal(autoCreate.isError, true);
+  assert.match(autoCreate.content[0].text, /operator_only/);
+  const autoUpdate = await call("board_update_item", { id: own.id, autonomy: "auto" });
+  assert.equal(autoUpdate.isError, true);
+  assert.match(autoUpdate.content[0].text, /operator_only/);
+  // Re-parenting under another project's card (which re-inherits its project) is refused.
+  const reparent = await call("board_update_item", { id: own.id, parent_id: other.id });
+  assert.equal(reparent.isError, true);
+  assert.match(reparent.content[0].text, /forbidden_project/);
+  const ownRow = (await state.tdb.execute({ sql: "SELECT project_id, autonomy, parent_id FROM tasks_items WHERE id=?", args: [own.id] })).rows[0];
+  assert.equal(Number(ownRow.project_id), 1);
+  assert.equal(ownRow.autonomy, "gated");
+  assert.equal(ownRow.parent_id, null);
+
   // Approvals and decisions are the operator's.
   const plan = payload(await call("board_save_plan", { item_id: own.id, body_md: "the plan" }));
   const approve = await call("board_approve_plan", { item_id: own.id, version: plan.version ?? 1 });
@@ -845,4 +861,13 @@ test("bot write scope: a bot changes only its own project's cards or cards assig
   const ok = await op2.callTool({ name: "board_approve_plan", arguments: { item_id: own.id, version: plan.version ?? 1 } });
   assert.ok(!ok.isError, ok.content?.[0]?.text);
   await op2.close();
+});
+
+test("bot write scope: a bot with no linked project creates an unassigned card, never the instance's only project", async () => {
+  await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,NULL)", args: ["loose-bot", "loose-bot"] });
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("loose-bot"));
+  const made = payload(await bot.callTool({ name: "board_create_item", arguments: { title: "loose card" } }));
+  await bot.close();
+  const row = (await state.tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [made.id] })).rows[0];
+  assert.equal(row.project_id, null);
 });

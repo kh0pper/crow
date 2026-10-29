@@ -421,9 +421,12 @@ export function createBoardMcpServer(options = {}) {
         }
         return createItem(tdb, boardId, fields, actor);
       }
+      if (fields.autonomy != null) assertNotBot(actor, "set a card's autonomy");
       if (fields.parent_id != null) await assertBotMayWriteCard(tdb, cdb, actor, Number(fields.parent_id));
       else fields = { ...fields, project_id: await botCreateProject(cdb, actor, fields.project_id) };
-      return createCard(tdb, fields, actor);
+      // A bot's card never falls back to "the instance's only project": a bot
+      // with no linked project creates an unassigned card.
+      return createCard(tdb, fields, actor, { soleProjectFallback: !actor || actor.kind !== "bot" });
     });
 
   tool(server, "board_update_item",
@@ -445,7 +448,16 @@ export function createBoardMcpServer(options = {}) {
       processing_lease_status: z.string().nullable().optional(),
       data: jsonObject().optional().describe("Tracker item fields as an object of JSON values (merged into the item's data)"),
     },
-    async ({ id, ...fields }, extra) => { const actor = resolveActor(extra); await assertBotMayWriteCard(tdb, cdb, actor, id); return dispatchUpdate(tdb, id, fields, actor); });
+    async ({ id, ...fields }, extra) => {
+      const actor = resolveActor(extra);
+      await assertBotMayWriteCard(tdb, cdb, actor, id);
+      // A bot can't raise its own card to auto (that would let it close its
+      // own work unapproved), and re-parenting re-inherits the new parent's
+      // project, so the new parent must be writable too.
+      if (fields.autonomy != null) assertNotBot(actor, "change a card's autonomy");
+      if (fields.parent_id != null) await assertBotMayWriteCard(tdb, cdb, actor, Number(fields.parent_id));
+      return dispatchUpdate(tdb, id, fields, actor);
+    });
 
   tool(server, "board_move_item",
     "Move a card or tracker item to a new status (def-validated; stamps completed_at on terminal transitions).",
