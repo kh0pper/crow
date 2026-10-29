@@ -1549,7 +1549,7 @@ export function perchHubJs(lang = "en") {
     dictationCancel();           /* dictation.js: a hidden composer must never keep recording or upload */
     cancelHistRetry(); histGen++;   /* 23a: a load or retry for the session being left must not render */
     draftSave();                 /* Shell P2: its unsent words wait for it */
-    closeStream(); current.sid=null; stopIdentRefresh();
+    closeStream(); current.sid=null; stopIdentRefresh(); applyMakeTab(null);
     resetBrowserTiles();         /* no frame poller outlives the chat it belongs to */
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     closeSheet();                /* new mode: the sheet belongs to the session being left */
@@ -1972,7 +1972,25 @@ export function perchHubJs(lang = "en") {
   function stopIdentRefresh(){ if(identTimer){ clearInterval(identTimer); identTimer=null; } }
   /* The card line under the name: "#12 Card title", a link to the card. Fed
      by the card chip's own lookup (card-chip.js), so it adds no request. */
+  /* R1.2 PR 3: the Make tab opens on This card from a card's chat. The server's
+     href is kept in data-shell-href on the first change and restored when the
+     session has no card (or closes). Any other base (no Make panel) is left alone. */
+  /* Card mode ignores the project, and a ?project= link would rewrite the scope cookie on a Turbo
+     hover prefetch: the card-scoped Make tab carries only the card. */
+  function makeTabHref(base,cardId){
+    var b=String(base||'');
+    if(!Number.isInteger(cardId)||b.indexOf('/dashboard/make')!==0) return b;
+    return '/dashboard/make?scope=card:'+String(cardId);
+  }
+  function applyMakeTab(c){
+    if(typeof document.querySelector!=='function') return;
+    var a=document.querySelector('a.shell-tab[data-shell-tab="make"]'); if(!a) return;
+    var base=a.getAttribute('data-shell-href');
+    if(base==null){ base=a.getAttribute('href')||''; a.setAttribute('data-shell-href',base); }
+    a.setAttribute('href',makeTabHref(base,c?c.id:null));
+  }
   function setHeadCard(c,href){
+    applyMakeTab(c);
     var a=el('perch-card-line'); if(!a) return;
     if(!c||!Number.isInteger(c.id)){ a.hidden=true; a.textContent=''; a.removeAttribute('href'); return; }
     a.textContent='#'+String(c.id)+(c.title?' '+String(c.title):'');
@@ -3401,6 +3419,10 @@ export function perchHubJs(lang = "en") {
       document.addEventListener('turbo:before-cache',function(){
         var d=document.getElementById('perch-session-sheet');
         if(d&&d.open&&typeof d.close==='function') d.close();
+        /* R1.2 PR 3: a cached snapshot never carries the card-scoped Make link. */
+        var m=document.querySelector('a.shell-tab[data-shell-tab="make"]');
+        var base=m&&m.getAttribute('data-shell-href');
+        if(base!=null) m.setAttribute('href',base);
       });
     }
   }

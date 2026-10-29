@@ -222,8 +222,8 @@ test("the home renders start, needs-you and earlier sessions for the slug", asyn
 
   // The drawer marks this project's link as the current page; the tabs follow the project.
   assert.match(r.body, /<a href="\/dashboard\/project\/garden" class="shell-project is-current" aria-current="page">/);
-  assert.match(r.body, /<a href="\/dashboard\/project\/garden" class="shell-tab" aria-current="page">/, "Chat's tab is this home, and current");
-  assert.match(r.body, /<a href="\/dashboard\/board\?project=garden" class="shell-tab">[\s\S]*?<span>Board · 4<\/span>/, "Board · N from the count");
+  assert.match(r.body, /<a href="\/dashboard\/project\/garden" class="shell-tab" data-shell-tab="chat" aria-current="page">/, "Chat's tab is this home, and current");
+  assert.match(r.body, /<a href="\/dashboard\/board\?project=garden" class="shell-tab" data-shell-tab="board">[\s\S]*?<span>Board · 4<\/span>/, "Board · N from the count");
 });
 
 test("a project whose cards live elsewhere shows it can't count them; a project with none says so", async () => {

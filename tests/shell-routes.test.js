@@ -251,7 +251,7 @@ test("the shell marks the tab, and hands the layout projects with slugs", async 
   calls.length = 0;
   const perch = await get("/dashboard/perch", { ...NEW, [MODE]: "new" });
   assert.equal(calls.at(-1).shell.tab, "chat");
-  assert.match(perch.body, /href="\/dashboard\/perch" class="shell-tab" aria-current="page"/);
+  assert.match(perch.body, /href="\/dashboard\/perch" class="shell-tab" data-shell-tab="chat" aria-current="page"/);
 
   calls.length = 0;
   await get("/dashboard/memory", { ...NEW, [MODE]: "new" });

@@ -5,7 +5,7 @@
  * so Make stays where it was.
  */
 import { escapeHtml } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 
 const esc = (v) => escapeHtml(v === null || v === undefined ? "" : String(v));
 const ROUTE = "/dashboard/make";
@@ -27,11 +27,38 @@ export const START_TYPES = [
   { id: "diagram", needs: "artifacts", blank: null, labelKey: "shell.typeDiagram", startKey: "shell.startDiagram", tool: null },
 ];
 
-function chips(active, lang) {
+/** The query string a link keeps: the explicit scope and card (never the cookie), plus the filter. */
+function qs({ scope = null, card = null, filter = "all" }) {
+  const parts = [];
+  if (scope) parts.push(`scope=${encodeURIComponent(scope)}`);
+  if (card && !String(scope || "").startsWith("card:")) parts.push(`card=${encodeURIComponent(card)}`);
+  if (filter && filter !== "all") parts.push(`filter=${encodeURIComponent(filter)}`);
+  return parts.length ? `${ROUTE}?${parts.join("&")}` : ROUTE;
+}
+
+/**
+ * Show: This card (card mode, or ?card=), This project (a project or Unassigned chip is set), All.
+ * Plain links, the first row (the type filters are the second). No row when All would be alone.
+ */
+function scopeRow(sc, filter, lang) {
+  if (!sc) return "";
+  const link = (id, label, scope) => {
+    const on = sc.mode === id;
+    return `<a class="mk-scope-chip${on ? " mk-scope-chip-on" : ""}" href="${esc(qs({ scope, card: sc.cardId, filter: filter || "all" }))}"${on ? ' aria-current="true"' : ""}>${esc(label)}</a>`;
+  };
+  const out = [];
+  if (sc.cardId) out.push(link("card", t("shell.makeScopeCard", lang), `card:${sc.cardId}`));
+  if (sc.projectName) out.push(link("project", sc.projectName, "project"));
+  if (!out.length) return "";
+  out.push(link("all", t("shell.makeScopeAll", lang), "all"));
+  return `<div class="mk-scope-chips" role="group" aria-label="${esc(t("shell.makeScopeLabel", lang))}">${out.join("")}</div>`;
+}
+
+function chips(active, lang, sc = null) {
   return `<nav class="mk-chips" aria-label="${esc(t("shell.tabMake", lang))}">${FILTERS.map((f) => {
     const on = f.id === active;
-    const href = f.id === "all" ? ROUTE : `${ROUTE}?filter=${f.id}`;
-    return `<a class="mk-chip${on ? " mk-chip-on" : ""}" href="${href}"${on ? ' aria-current="page"' : ""}>${esc(t(f.key, lang))}</a>`;
+    const href = qs({ scope: sc?.explicit || null, card: sc?.cardId || null, filter: f.id });
+    return `<a class="mk-chip${on ? " mk-chip-on" : ""}" href="${esc(href)}"${on ? ' aria-current="true"' : ""}>${esc(t(f.key, lang))}</a>`;
   }).join("")}</nav>`;
 }
 
@@ -76,7 +103,7 @@ function previewBox(item, type, typeLabel, lang) {
 function previewsBlock(previews, lang) {
   if (!previews) return "";
   if (!previews.enabled) {
-    return `<div class="mk-previews-off"><p>${esc(t("shell.previewsNotEnabled", lang))}</p><p class="mk-disclosure">${esc(t("shell.previewsDisclosure", lang))}</p><form method="post" action="/dashboard/make/previews/enable"><input type="hidden" name="_csrf" value="${esc(previews.csrf || "")}"><input type="hidden" name="back" value="${esc(previews.back || ROUTE)}"><button type="submit" class="btn btn-secondary mk-start-act">${esc(t("shell.previewsEnable", lang))}</button></form></div>`;
+    return `<div class="mk-previews-off"><p>${esc(t("shell.previewsNotEnabled", lang))}</p><form method="post" action="/dashboard/make/previews/enable"><input type="hidden" name="_csrf" value="${esc(previews.csrf || "")}"><input type="hidden" name="back" value="${esc(previews.back || ROUTE)}"><button type="submit" class="mk-start-act mk-linkbtn" aria-label="${esc(t("shell.previewsEnableLabel", lang))}">${esc(t("shell.previewsEnable", lang))}</button></form><details class="mk-previews-what"><summary>${esc(t("shell.previewsWhat", lang))}</summary><p class="mk-disclosure">${esc(t("shell.previewsDisclosure", lang))}</p></details></div>`;
   }
   return previews.lineKey ? `<p class="mk-notice mk-previews-line" role="status">${esc(t(previews.lineKey, lang))}</p>` : "";
 }
@@ -111,12 +138,15 @@ function startRow(type, artifacts, workspace, lang) {
   return `<li class="mk-start-row" data-mk-row="${type.id}"><button type="button" class="mk-start-type" data-mk-type="${type.id}">${label}</button>${blank}</li>`;
 }
 
-/** The "Start something" sheet: one row per type, then the composer (opened by client.js). */
-export function renderStartSheet({ artifacts, workspace, project, lang }) {
+/**
+ * The "Start something" sheet: one row per type, then the composer (opened by client.js). `card`
+ * (This card mode): a blank document posts it, so the new file lands on the card.
+ */
+export function renderStartSheet({ artifacts, workspace, project, card = null, lang }) {
   const proj = project || { id: "unassigned", name: t("shell.unassigned", lang) };
   const pills = START_TYPES.filter((ty) => !startState(ty, artifacts, workspace))
     .map((ty) => `<button type="button" class="mk-pill" data-mk-pill="${ty.id}">${esc(t(ty.labelKey, lang))}</button>`).join("");
-  return `<dialog id="mk-start" class="mk-sheet" data-project="${esc(proj.id)}" aria-label="${esc(t("shell.start", lang))}">
+  return `<dialog id="mk-start" class="mk-sheet" data-project="${esc(proj.id)}"${card ? ` data-card="${esc(card)}"` : ""} aria-label="${esc(t("shell.start", lang))}">
     <div class="mk-sheet-inner">
       <div class="mk-sheet-head"><h2 class="mk-sheet-title">${esc(t("shell.start", lang))}</h2><button type="button" class="mk-sheet-close" data-mk-close aria-label="${esc(t("common.close", lang))}">&times;</button></div>
       <ul class="mk-start-list" data-mk-list>${START_TYPES.map((ty) => startRow(ty, artifacts, workspace, lang)).join("")}</ul>
@@ -150,15 +180,21 @@ export function renderPreviewSheet({ projects, lang }) {
 }
 
 /** @param {{items: object[], artifacts: string, workspace: string}} model */
-export function renderMakePage({ model, filter, lang, project, projects = [], previews = null }) {
+export function renderMakePage({ model, filter, lang, project, projects = [], previews = null, scope = null, startCard = null, noStart = false }) {
   const { items, artifacts, workspace } = model;
+  // A card with more Workspace files than card mode looks up says so, quietly.
+  const capped = scope?.mode === "card" && model.wsCapped ? `<p class="mk-notice" role="status">${esc(fill(t("shell.makeCardCapped", lang), { n: model.wsCapped }))}</p>` : "";
   const bothMissing = artifacts === "missing" && workspace === "missing";
   const notice = workspace === "unavailable" ? `<p class="mk-notice" role="status">${esc(t("shell.workspaceUnavailable", lang))}</p>` : "";
   let body;
   if (bothMissing) body = `<div class="mk-empty">${offers(artifacts, workspace, lang)}</div>`;
-  else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t("shell.makeEmpty", lang))}</p>`;
+  // A card whose Workspace files could not be looked up is not known to be empty: the notice says so.
+  else if (!items.length && scope?.mode === "card" && workspace === "unavailable") body = offers(artifacts, workspace, lang);
+  else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t(scope?.mode === "card" ? "shell.makeCardEmpty" : "shell.makeEmpty", lang))}</p>`;
   else body = `${offers(artifacts, workspace, lang)}<ul class="mk-grid">${items.map((i) => tile(i, lang)).join("")}</ul>`;
-  const startBtn = `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
+  const startBtn = noStart ? "" : `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
+  const head = scope?.mode === "card"
+    ? `<p class="mk-card-head">${esc(fill(t("shell.makeCardHeader", lang), { id: scope.cardId, title: scope.cardTitle || "" }).trim())}</p>` : "";
   const pv = bothMissing ? "" : previewsBlock(previews, lang);
-  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${pv}${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
+  return `<div class="mk-page">${scopeRow(scope, filter, lang)}<div class="mk-bar">${chips(filter, lang, scope)}${startBtn}</div>${head}${pv}${notice}${capped}${body}${noStart ? "" : renderStartSheet({ artifacts, workspace, project, card: startCard, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
 }

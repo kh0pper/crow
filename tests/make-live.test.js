@@ -270,6 +270,47 @@ test("a ready preview fills its tile, and a type tile is the same size (phone an
   }
 });
 
+test("390 px: the previews-off notice is compact (at most two rows, no sideways overflow), details collapsed", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  for (const lang of ["en", "es"]) {
+    await setLang(lang); fixture("artifacts"); await setPreviews(false);
+    const p = await open("/dashboard/make", { width: 390, height: 844 });
+    try {
+      // Two rows at most: one row on most fonts, but the es text can wrap on a runner with
+      // different fallback fonts (CI). The old card took a third of the screen.
+      const h = await p.ev("document.querySelector('.mk-previews-off').getBoundingClientRect().height");
+      assert.ok(h > 0 && h <= 100, `${lang}: off notice is ${h}px (≤ 100, two rows)`);
+      const o = await p.ev("(function(){ var e=document.querySelector('.mk-previews-off'); return e.scrollWidth <= e.clientWidth + 1 && document.documentElement.scrollWidth <= window.innerWidth; })()");
+      assert.equal(o, true, `${lang}: no sideways overflow`);
+      assert.equal(await p.ev("document.querySelector('.mk-previews-what').open"), false);
+      assert.ok(await p.ev("document.querySelector('.mk-previews-what summary').getBoundingClientRect().height") >= 44);
+    } finally { await p.close(); }
+  }
+  await setLang("en");
+});
+
+test("390 px: the scope row comes first, and a very long project name wraps with no sideways scroll", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  fixture("artifacts");
+  const long = "Thecommunitygardenvolunteerscheduleandseedlibraryinventoryfortheentirespringseason" + "x".repeat(40);
+  const c = new Database(join(dir, "crow.db"));
+  c.prepare("INSERT OR IGNORE INTO project_spaces (slug, name, type, status) VALUES ('longname', ?, 'general', 'active')").run(long);
+  c.close();
+  const p = await open("/dashboard/make?project=longname&card=7", { width: 390, height: 844 });
+  try {
+    const g = await p.ev(`(function(){
+      var row=document.querySelector('.mk-scope-chips'), bar=document.querySelector('.mk-bar');
+      var chips=[].map.call(document.querySelectorAll('.mk-scope-chip'), function(a){ var r=a.getBoundingClientRect(); return { l: r.left, r: r.right, text: a.textContent }; });
+      return { row: row ? row.getBoundingClientRect().top : null, bar: bar.getBoundingClientRect().top, chips: chips, vw: window.innerWidth };
+    })()`);
+    assert.ok(g.row !== null && g.row < g.bar, `scope row (${g.row}) above the type filters (${g.bar})`);
+    assert.equal(g.chips.length, 3, "This card, the long project, All");
+    for (const ch of g.chips) assert.ok(ch.l >= 0 && ch.r <= g.vw, `chip ${ch.text.slice(0, 20)} stays inside ${g.vw}px (${Math.round(ch.l)}..${Math.round(ch.r)})`);
+    assert.ok(await p.ev(NO_H_SCROLL), "no sideways scroll");
+    await assertTargets(p, [[".mk-scope-chip", 3, "scope chips"]], "390 long name");
+  } finally { await p.close(); }
+});
+
 test("Artifacts only: the Workspace offer shows with the tiles; previews off shows the switch (phone and desktop)", async (ctx) => {
   if (!chrome) return ctx.skip("no headless Chrome");
   fixture("artifacts"); await setPreviews(false);
