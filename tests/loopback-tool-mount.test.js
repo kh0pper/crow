@@ -22,9 +22,10 @@ import { SessionManager } from "../servers/gateway/session-manager.js";
 import { currentCaller } from "../servers/gateway/caller-context.js";
 import {
   pathScopedToken, SATELLITE_TOOLS_TOKEN, generateLocalToken, generateBoardToken, generatePeerRelayToken,
+  generatePhoneToken, generateModelsToken, generateArtifactsToken, rotateLlmCloudToken,
 } from "../servers/gateway/local-token.js";
 import {
-  initGatewayActorKey, _resetActorKeyForTest, signScopeActor, signActor, signPeerRelayActor,
+  initGatewayActorKey, _resetActorKeyForTest, signScopeActor, signActor, signPeerRelayActor, verifyScopeActorSig,
 } from "../scripts/pi-bots/actor-sig.mjs";
 import {
   mountLoopbackMcp, loopbackErrorText, LOOPBACK_ERROR_TEXT, _buildLoopbackServerForTest,
@@ -216,6 +217,17 @@ before(async () => {
   tokens.board = await generateBoardToken(db);
   tokens.relay = await generatePeerRelayToken(db);
   tokens.otherFamily = await SATELLITE_TOOLS_TOKEN.rotate(db);
+  // The file-backed doors write their raw token under the crow home: keep them in this test's dir.
+  const savedHome = process.env.CROW_HOME;
+  process.env.CROW_HOME = dir;
+  try {
+    tokens.phone = await generatePhoneToken(db);
+    tokens.models = await generateModelsToken(db);
+    tokens.artifacts = await generateArtifactsToken(db);
+    tokens.cloudDoor = await rotateLlmCloudToken(db);
+  } finally {
+    if (savedHome === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = savedHome;
+  }
   db.close();
 
   sessions = new SessionManager();
@@ -306,7 +318,11 @@ test("not local: a forwarding header, instanceAuth, crossHostAuth, a CROW_TRUSTE
 });
 
 test("token x door: only this family's token opens the mount; every other token or none -> 401", async () => {
-  const others = { local: tokens.local, board: tokens.board, relay: tokens.relay, otherFamily: tokens.otherFamily, random: "f".repeat(64) };
+  const others = {
+    local: tokens.local, board: tokens.board, relay: tokens.relay, otherFamily: tokens.otherFamily,
+    phone: tokens.phone, models: tokens.models, artifacts: tokens.artifacts, cloudDoor: tokens.cloudDoor, random: "f".repeat(64),
+  };
+  for (const [name, t] of Object.entries(others)) assert.match(t, /^[0-9a-f]{64}$/, `${name} minted`);
   for (const [name, t] of Object.entries(others)) {
     const r = await send(initBody(), { token: t });
     assert.equal(r.status, 401, name);
@@ -316,7 +332,7 @@ test("token x door: only this family's token opens the mount; every other token 
   assert.equal((await send(initBody(), { token: null })).status, 401, "no token");
   assert.equal((await send(initBody(), { headers: { authorization: `Basic ${TOKEN}` }, token: null })).status, 401, "not a bearer");
   assert.equal(calls.length, 0);
-  assert.ok(audit.length >= 7 && audit.every((e) => e.outcome === "refused:bad_token"));
+  assert.ok(audit.length >= 11 && audit.every((e) => e.outcome === "refused:bad_token"));
 });
 
 test("signatures: missing, other kind, v1, v2 peer-relay, s:12 signed / s:13 sent, archived session, finished job, foreign card tuple -> 403", async () => {
@@ -346,6 +362,20 @@ test("signatures: missing, other kind, v1, v2 peer-relay, s:12 signed / s:13 sen
   // The positive controls: the right card tuple, a live session, a running job.
   for (const a of [jobActor("hank", "job-card-1", { threadId: "board-card-5", gatewayType: "board" }), live, jobActor()]) await open(a);
   assert.equal(calls.length, 0);
+});
+
+test("a valid v3 signature for one bot naming ANOTHER bot's running owner job -> 403 unattributed", async () => {
+  // hank signs j:job-otto-1 under the real scope key: the signature verifies,
+  // but the job belongs to otto, so the scope never resolves to hank.
+  const a = jobActor("hank", "job-otto-1");
+  assert.equal(verifyScopeActorSig(a), true, "the signature itself is valid");
+  const r = await send(initBody(), { actor: a });
+  assert.equal(r.status, 403);
+  assert.equal(r.json?.error?.message, "A signed bot is required.");
+  assert.equal(calls.length, 0, "upstream untouched");
+  assert.ok(audit.some((e) => e.outcome === "refused:unattributed"), JSON.stringify(audit));
+  // The positive control: otto's own signature for the same job opens.
+  await open(jobActor("otto", "job-otto-1"));
 });
 
 test("a throw in each gate step is that step's refusal, never a 500", async () => {
