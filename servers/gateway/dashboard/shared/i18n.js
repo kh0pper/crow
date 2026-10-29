@@ -3565,7 +3565,7 @@ export const translations = {
   "perch.backList": { en: "Back to the sessions", es: "Volver a las sesiones" },
   "perch.appsLabel": { en: "Apps for this project", es: "Apps de este proyecto" },
   "perch.plusLabel": { en: "Attach or dictate", es: "Adjuntar o dictar" },
-  "perch.composerPlaceholderProject": { en: "Message # {project}", es: "Mensaje # {project}" },
+  "perch.composerPlaceholderPill": { en: "Message", es: "Mensaje" },
   "perch.identToday": { en: "today", es: "hoy" },
   "perch.identYesterday": { en: "yesterday", es: "ayer" },
   "perch.sheetTitle": { en: "Session details", es: "Detalles de la sesión" },

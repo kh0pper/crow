@@ -339,7 +339,7 @@ test("a Turbo visit between tabs keeps one shell, and aria-current moves (phone 
   }
 });
 
-test("an open chat's Send is on screen at 390 px, the tab bar is hidden, and the player bar does not cover it", async (ctx) => {
+test("an open chat's Send is on screen at 390 px above the tab bar, and the player bar does not cover it", async (ctx) => {
   if (!chrome) return ctx.skip("no headless Chrome");
   for (const textSize of [null, "xlarge"]) {
     const p = await open("/dashboard/perch#" + SID, { textSize });
@@ -347,8 +347,9 @@ test("an open chat's Send is on screen at 390 px, the tab bar is hidden, and the
       await p.until("document.body.getAttribute('data-view') === 'chat' && !!document.getElementById('perch-bot-name').textContent", "the chat");
       assert.equal(await p.ev("document.documentElement.getAttribute('data-text-size')"), textSize || "default");
       await p.ev(TWO_FRAMES);
-      const m = await p.ev("(function(){ var s=document.getElementById('perch-send').getBoundingClientRect(); return { bottom: s.bottom, top: s.top, h: s.height, tabs: getComputedStyle(document.querySelector('.shell-tabs')).display, vh: innerHeight, sw: document.documentElement.scrollWidth, vw: innerWidth }; })()");
-      assert.equal(m.tabs, "none", "the tab bar is hidden in an open chat");
+      const m = await p.ev("(function(){ var s=document.getElementById('perch-send').getBoundingClientRect(); return { bottom: s.bottom, top: s.top, h: s.height, tabs: getComputedStyle(document.querySelector('.shell-tabs')).display, barTop: document.querySelector('.shell-tabs').getBoundingClientRect().top, vh: innerHeight, sw: document.documentElement.scrollWidth, vw: innerWidth }; })()");
+      assert.notEqual(m.tabs, "none", "the tab bar stays in an open chat (phone review 2026-10-29)");
+      assert.ok(m.bottom <= m.barTop + 0.5, `Send ${m.bottom} ends above the tab bar ${m.barTop}`);
       const gut = await p.ev("(function(){ var h=document.querySelector('.content-header'), cs=getComputedStyle(h); var h2=document.querySelector('.content-header h2').getBoundingClientRect(); /* visually hidden in new mode (1px clip), so no title gutter to check */ return { title: h2.width > 1 ? h2.left : 99, back: document.getElementById('perch-back').getBoundingClientRect().left, avatarRight: innerWidth - document.querySelector('.shell-avatar').getBoundingClientRect().right, input: document.getElementById('perch-input').getBoundingClientRect().left }; })()");
       for (const [k, v] of Object.entries(gut)) assert.ok(v >= 16, `open chat: ${k} inset ${v} ≥ 16 (${textSize || "default"})`);
       assert.ok(m.h > 0 && m.top >= 0 && m.bottom <= m.vh, `Send ${m.top}→${m.bottom} within ${m.vh} (${textSize || "default"})`);
@@ -356,8 +357,9 @@ test("an open chat's Send is on screen at 390 px, the tab bar is hidden, and the
       await p.ev("window.crowPlayer.load('/a.wav', 'Radio'); 1");
       await p.until("document.getElementById('crow-player-bar').offsetHeight > 0 && parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--crow-player-h')) > 0", "the player bar");
       await p.ev(TWO_FRAMES);
-      const b = await p.ev("(function(){ var s=document.getElementById('perch-send').getBoundingClientRect(), bar=document.getElementById('crow-player-bar').getBoundingClientRect(); return { bottom: s.bottom, barTop: bar.top, vh: innerHeight }; })()");
+      const b = await p.ev("(function(){ var s=document.getElementById('perch-send').getBoundingClientRect(), bar=document.getElementById('crow-player-bar').getBoundingClientRect(), tabs=document.querySelector('.shell-tabs').getBoundingClientRect(); return { bottom: s.bottom, barTop: bar.top, tabsTop: tabs.top, tabsBottom: tabs.bottom, vh: innerHeight }; })()");
       assert.ok(b.bottom <= b.barTop + 0.5 && b.bottom <= b.vh, `with the bar, Send bottom ${b.bottom} ≤ bar top ${b.barTop} (${textSize || "default"})`);
+      assert.ok(b.bottom <= b.tabsTop + 0.5 && b.tabsBottom <= b.barTop + 0.5, `the tab bar sits on the player bar and Send above both (${textSize || "default"})`);
       // Back to the list: the tab bar is back.
       await p.ev("document.getElementById('perch-back').click(); 1");
       await p.until("document.body.getAttribute('data-view') !== 'chat'", "the list");

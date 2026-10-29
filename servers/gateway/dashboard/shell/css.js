@@ -9,8 +9,9 @@
  * a fixed bottom bar whose height is published as --shell-tabs-h; at
  * ≥1024px they become a left rail that also lists the projects, and
  * --shell-tabs-h is 0. The Perch app-shell rule in layout.js subtracts
- * --shell-tabs-h from its height, and Perch's phone chat view sets it to 0
- * and hides the bar (perch-hub/css.js) so an open chat gets the full height.
+ * --shell-tabs-h from its height, so an open Perch chat ends on top of the
+ * bar; only while an on-screen keyboard is up does Perch set it to 0 and
+ * hide the bar (perch-hub/css.js, body[data-perch-kb]).
  *
  * NOTE: never write a literal closing style tag inside a comment here.
  */

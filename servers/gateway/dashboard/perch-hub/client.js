@@ -71,6 +71,8 @@ export function perchHubJs(lang = "en") {
   HUB.retire=function(){
     retired=true;
     stopListPolling(); cancelReconnect(); stopWatchdog(); closeStream(); stopIdentRefresh();
+    /* The keyboard flag belongs to this instance's chat (applyVV). */
+    if(document.body&&typeof document.body.removeAttribute==='function') document.body.removeAttribute('data-perch-kb');
     /* The artifact viewer pane holds a document keydown listener while open
        (artifact-card.js): leaving the hub with it open must not strand it. */
     closeArtifactPane();
@@ -1406,7 +1408,9 @@ export function perchHubJs(lang = "en") {
     setToken(root,'perch-narrow',w>0&&w<=NARROW_MAX);
   }
   applyNarrow();
-  bindOnce(window,'resize','narrowResize',function(){ if(live()) applyNarrow(); });
+  /* One resize listener: it also refits the head's context line (a rotation
+     changes whether the day fits beside the project name). */
+  bindOnce(window,'resize','narrowResize',function(){ if(live()){ applyNarrow(); refreshIdent(); } });
 
   /* TEXT SIZE. #407 (2026-10-02) gave Perch its own five-step A− / A / A+;
      since A11Y-TEXTSIZE (2026-10-03) the control is a CONSUMER of the
@@ -1886,8 +1890,6 @@ export function perchHubJs(lang = "en") {
   var IDENT_LANG='${lang === "es" ? "es" : "en"}';
   var SHEET_TITLE_BOT='${tJs("perch.sheetTitleBot", lang)}';
   var BACK_PROJECT='${tJs("perch.backProject", lang)}', BACK_LIST='${tJs("perch.backList", lang)}';
-  var PLACEHOLDER_DEFAULT='${tJs("perch.composerPlaceholder", lang)}';
-  var PLACEHOLDER_PROJECT='${tJs("perch.composerPlaceholderProject", lang)}';
   var APPS_EMPTY='${tJs("shell.appsEmptyProject", lang)}', APPS_LOADING='${tJs("shell.appsLoading", lang)}', APPS_FAILED='${tJs("shell.appsLoadFailed", lang)}';
   /* Classic keeps the 120px ceiling; the new-mode pill is capped by its CSS
      (five lines), so the script only has to follow the content. */
@@ -1924,11 +1926,13 @@ export function perchHubJs(lang = "en") {
       return d.toLocaleDateString(lang==='es'?'es':'en',{month:'short',day:'numeric'});
     }catch(e){ return d.toDateString(); }
   }
+  /* The head's context line: the project's name, then the day when it fits
+     (showIdent drops the day before the name would ellipsize). */
   function identSubtitle(row,projects,now,lang){
     var p=projectOfRow(row,projects);
     var day=identDay(row,now,lang);
     if(!p) return day;
-    return '# '+p.name+(day?' \\u00b7 '+day:'');
+    return p.name+(day?' \\u00b7 '+day:'');
   }
   /* Where Back goes: the session's project home, or null (the list). */
   function backTarget(row,projects){
@@ -1939,12 +1943,33 @@ export function perchHubJs(lang = "en") {
   function showIdent(botName){
     var sheet=el('perch-session-sheet'); if(!sheet) return;
     var row=rowIndex[current.sid];
+    var pr=projectOfRow(row,PROJECTS);
+    var full=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
     var sub=el('perch-ident-sub');
-    if(sub) sub.textContent=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
-    var ci=el('perch-input');
-    if(ci){
-      var pr=projectOfRow(row,PROJECTS);
-      ci.setAttribute('placeholder',pr?PLACEHOLDER_PROJECT.split('{project}').join(String(pr.name)):PLACEHOLDER_DEFAULT);
+    if(sub){
+      sub.textContent=full;
+      /* Phone review 2026-10-29: the day goes before the project name would
+         ellipsize (the sheet below still carries the day). Measured after
+         layout: showIdent can run while the chat view is still opening. */
+      if(pr){
+        var fit=function(){
+          if(!live()||sub.textContent!==full) return;
+          if(sub.scrollWidth>sub.clientWidth) sub.textContent=String(pr.name);
+        };
+        fit();
+        if(typeof requestAnimationFrame==='function') requestAnimationFrame(fit);
+      }
+    }
+    /* The full line, in the session sheet under its title. */
+    var ss=el('perch-sheet-sub');
+    if(ss) ss.textContent=full;
+    /* The header chip names the session's project while it is open (the page
+       was rendered for the scope cookie, which a link without ?project= did
+       not set); the cookie's own label comes back for an unfiled session. */
+    var chip=typeof document.querySelector==='function'?document.querySelector('.shell-scope-name'):null;
+    if(chip){
+      if(chip.getAttribute('data-perch-scope')==null) chip.setAttribute('data-perch-scope',chip.textContent);
+      chip.textContent=pr?String(pr.name):chip.getAttribute('data-perch-scope');
     }
     var t=el('perch-sheet-title');
     if(t) t.textContent=SHEET_TITLE_BOT.split('{bot}').join(String(botName||''));
@@ -4193,11 +4218,24 @@ ${perchTakeOverJs(lang)}
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */
+  /* Phone review 2026-10-29: the shell's Chat/Board/Make bar stays in an open
+     chat, so while an on-screen keyboard is up (more than KB_MIN_PX of the
+     layout viewport hidden at 1x zoom) body[data-perch-kb] lets css.js hide
+     the bar and drop --shell-tabs-h, and the composer rides right above the
+     keyboard. Closing the keyboard clears it and the bar is back. A browser
+     that resizes the layout viewport instead hides nothing here: the fixed
+     bar then sits above the keyboard with the composer above it. */
+  var KB_MIN_PX=120;
   if(window.visualViewport){
     var vv=window.visualViewport;
     var applyVV=function(){
       if(!live()) return;
       var hidden=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
+      var zoomed=typeof vv.scale==='number'&&Math.abs(vv.scale-1)>0.05;
+      if(typeof body.setAttribute==='function'&&typeof body.removeAttribute==='function'){
+        if(hidden>KB_MIN_PX&&!zoomed) body.setAttribute('data-perch-kb','');
+        else body.removeAttribute('data-perch-kb');
+      }
       el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
     };
     bindOnce(vv,'resize','vvResize',applyVV);

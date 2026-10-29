@@ -2,7 +2,7 @@
 // page in the real new shell, in a private headless Chrome, against a
 // scripted perch-api with a session filed to a project. Phone 390 px (en and
 // es): Back is a 44 px "←" icon with an accessible name, and the bot name and
-// "# project · day" line are not clipped. Desktop 1280 px: Back shows for a
+// project line (the project name, then the day if it fits) are not clipped. Desktop 1280 px: Back shows for a
 // filed session (it goes to the project home) and the subtitle is not
 // clipped by the ident button's -8px pull. Skips cleanly without Chrome.
 import { test, before, after } from "node:test";
@@ -161,7 +161,8 @@ for (const lang of ["en", "es"]) {
       assert.equal(m.backText, "←");
       assert.equal(m.backName, lang === "es" ? "Volver al inicio del proyecto" : "Back to the project home");
       assert.ok(m.back.w >= 44 && m.back.h >= 44 && m.back.w <= 48, `Back is a 44 px icon (${m.back.w}x${m.back.h})`);
-      assert.equal(m.sub, "# " + PROJECT.name + " · " + (lang === "es" ? "hoy" : "today"));
+      // Phone review 2026-10-29: the project's name, then the day if it fits.
+      assert.ok(m.sub === PROJECT.name || m.sub === PROJECT.name + " · " + (lang === "es" ? "hoy" : "today"), m.sub);
       assert.equal(m.name, "R4 Assistant");
       assert.equal(m.nameClipped, false, "the bot name is not clipped");
       assert.equal(m.subClipped, false, `the project line is not clipped (${m.subW}px)`);

@@ -353,7 +353,7 @@ test("the Perch height subtracts the tab bar", () => {
   assert.ok(heights[0].includes("100vh") && heights[1].includes("100dvh"));
 });
 
-test("the phone chat view hides the tab bar", () => {
+test("the phone chat view keeps the tab bar, stepping it aside only for an on-screen keyboard", () => {
   const css = perchHubCss();
   const start = css.indexOf(`@media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){`);
   assert.ok(start >= 0, "phone media block present");
@@ -364,8 +364,11 @@ test("the phone chat view hides the tab bar", () => {
     else if (css[i] === "}" && --depth === 0) { end = i; break; }
   }
   const block = css.slice(start, end);
-  assert.ok(block.includes('body.shell[data-view="chat"] .shell-tabs{display:none}'));
-  assert.ok(block.includes('body.shell[data-view="chat"]{--shell-tabs-h:0px}'));
+  // Phone review 2026-10-29: Chat · Board · Make stays in an open chat.
+  assert.ok(!block.includes('body.shell[data-view="chat"] .shell-tabs{display:none}'));
+  assert.ok(!block.includes('body.shell[data-view="chat"]{--shell-tabs-h:0px}'));
+  assert.ok(block.includes('body.shell[data-view="chat"][data-perch-kb] .shell-tabs{display:none}'));
+  assert.ok(block.includes('body.shell[data-view="chat"][data-perch-kb]{--shell-tabs-h:0px}'));
 });
 
 test("the bird header survives", () => {
