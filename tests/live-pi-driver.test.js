@@ -129,8 +129,8 @@ test("two threads: day 2 is a new pi session over the same DB", async (t) => {
   const rows = d.prepare("SELECT gateway_thread_id, pi_session_id FROM bot_sessions WHERE bot_id = ? ORDER BY id").all(BOT);
   d.close();
   assert.deepEqual(rows.map((x) => x.gateway_thread_id), ["day-1", "day-2"]);
-  // No global MCP servers reach the bot: the scratch HOME has no pi mcp.json.
-  assert.equal(existsSync(join(ctx.s.home, ".pi", "agent", "mcp.json")), false);
+  // No global MCP servers reach the bot: the scratch HOME's pi mcp.json is empty.
+  assert.deepEqual(JSON.parse(readFileSync(join(ctx.s.home, ".pi", "agent", "mcp.json"), "utf8")), { mcpServers: {} });
   // models.json gets a stub apiKey; settings.json carries only the caller's packages.
   const written = JSON.parse(readFileSync(join(ctx.s.home, "pi-agent", "models.json"), "utf8"));
   assert.equal(written.providers.stub.apiKey, "stub");

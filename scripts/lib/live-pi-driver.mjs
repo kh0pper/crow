@@ -378,6 +378,13 @@ export async function settledSurvivorsByMarker(runId, { sinceBootSec, rounds = 3
  * timer is the backstop for a wedged child.
  */
 export const TURN_SLACK_MS = 140_000;
+// Observed with real pi 0.85.1 (tests/live-pi-driver-real.test.js): the session file is
+// `<sessionDir>/<ISO timestamp, ":" and "." as "-">_<pi session id>.jsonl` with a uuid v7 id,
+// e.g. 2026-10-29T04-59-46-791Z_01a18607-48e6-720a-aed8-ff0047fec50e.jsonl, and an MCP tool
+// is spelled mcp__<server>__<tool> (mcp__crow-projects__crow_list_projects) in both the request's
+// tools array and the session's toolCall/toolResult lines. A bare server grant (crow_mcp:
+// ["crow-projects"]) pins --tools mcp__crow-projects, the router-mode name, so a non-router
+// server offers no tools; grant "server/tool" to get mcp__server__tool.
 export const SESSION_MISSING = "cannot find the pi session file for a completed turn; refusing to report it";
 
 const CHILD = join(import.meta.dirname, "live-pi-driver-child.mjs");
@@ -507,7 +514,11 @@ export async function runConversation({
   for (const [name, p] of Object.entries(models.providers)) providers[name] = { ...p, apiKey: p.apiKey ?? "stub" };
   writeFileSync(join(agentDir, "models.json"), JSON.stringify({ ...models, providers }, null, 2));
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: piPackages }, null, 2));
-  // Nothing goes in <home>/.pi/agent/mcp.json: absent means no global MCP servers reach the bot.
+  // An EMPTY <home>/.pi/agent/mcp.json: no global MCP servers reach the bot. It must exist: the
+  // bridge's writeBotMcp reads it as the canonical config and, when it is missing, skips the
+  // per-bot config, so a real pi got no crow_mcp tools at all (seen with real pi, Task 6).
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(home, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }));
 
   const meta = {
     packages: await Promise.all(piPackages.map(async (path) => ({ path, sha: await gitSha(path) }))),
