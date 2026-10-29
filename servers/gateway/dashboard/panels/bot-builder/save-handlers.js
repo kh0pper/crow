@@ -21,6 +21,7 @@ import { applyFilesMode, applySourceModes, applyLearningMode, applyConfirm } fro
 import { applyCommandsMode } from "./bash-mode.js";
 import { selectedWriteTools, toolsFromKeys } from "./sources.js";
 import { normText } from "./ui.js";
+import { applyShowCards, trackerIsCustom } from "./tracker-choice.js";
 import { oneLine } from "../../shared/bot-display.js";
 import { lines } from "./data-queries.js";
 import { addCompanionsGuarded, grantsArtifactUpdate } from "../../../../../scripts/pi-bots/artifacts-companions.mjs";
@@ -407,27 +408,16 @@ export async function saveAdvanced(def, b, { db, lang, remoteInvocationOn, row, 
       const next = b.project_id ? Number(b.project_id) : null;
       if (next !== cur) out.column.project_id = next;
     }
-    const tc = def.tracker_config && typeof def.tracker_config === "object" ? def.tracker_config : {};
-    const curType = tc.type || "kanban";
-    const typeChanged = changed("tracker_type") && String(b.tracker_type || curType) !== curType;
-    const ttype = typeChanged ? String(b.tracker_type) : curType;
-    if (!["kanban", "task-list", "custom", "none"].includes(ttype)) return { error: t("botbuilder.abInvalidChoice", lang) };
-    const ntc = { ...tc };
-    let dirty = false;
-    if (typeChanged) { ntc.type = ttype; dirty = true; }
-    if (ttype === "custom") {
-      if (changed("tracker_slug")) { ntc.tracker_slug = String(b.tracker_slug || "").trim(); dirty = true; }
-      if (changed("context_fields")) { ntc.context_fields = String(b.context_fields || "").split(",").map((x) => x.trim()).filter(Boolean); dirty = true; }
-      if (changed("queue_filter_key") || changed("queue_filter_value")) {
-        const qk = String(b.queue_filter_key || "").trim();
-        const qv = String(b.queue_filter_value || "").trim();
-        if (qk && qv) ntc.queue_filter = { [qk]: qv }; else delete ntc.queue_filter;
-        dirty = true;
+    // The switch writes only when it changed. A custom-tracker bot has no switch and its
+    // tracker_config is never touched here, whatever a crafted POST says.
+    if (!trackerIsCustom(def)) {
+      const on = b.show_cards === "on" || b.show_cards === "true";
+      if (on !== (b.show_cards__was === "on")) {
+        const projectId = "project_id" in out.column ? out.column.project_id
+          : (row && row.project_id != null ? Number(row.project_id) : null);
+        applyShowCards(def, { projectId, on });
       }
-    } else if (typeChanged) {
-      delete ntc.tracker_slug; delete ntc.context_fields; delete ntc.queue_filter;
     }
-    if (dirty && !same(ntc, tc)) def.tracker_config = ntc;
     return out;
   } else {
     return { error: t("botbuilder.abInvalidChoice", lang) };
