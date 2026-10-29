@@ -3472,6 +3472,7 @@ export function perchHubJs(lang = "en") {
     var grid=el('perch-apps-grid');
     var pr=projectOfRow(rowIndex[current.sid],PROJECTS);
     if(!grid||!pr) return;
+    plusClose(false);                        /* never under the composer's "+" popover */
     var my=++appsGen;
     appsNote(grid,APPS_LOADING);
     if(typeof APPS_SHEET.showModal==='function') APPS_SHEET.showModal();

@@ -12,7 +12,7 @@ process.env.CROW_DATA_DIR = dir;
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 const REPO = new URL("..", import.meta.url).pathname;
 
-const { listApps, appsForBots, grantedServers, appsForProject, invalidateAppCatalog, _resetCatalogCache, _setClock } =
+const { listApps, appsForBots, grantedServers, appsForProject, invalidateAppCatalog, invalidateProjectApps, cleanPath, NOVNC_PAGE_QUERY, _resetCatalogCache, _setClock } =
   await import("../servers/gateway/apps/catalog.js");
 const { registerPanel } = await import("../servers/gateway/dashboard/panel-registry.js");
 
@@ -21,6 +21,7 @@ function bundle(id, manifest) {
   mkdirSync(join(home, "bundles", id), { recursive: true });
   writeFileSync(join(home, "bundles", id, "manifest.json"), JSON.stringify({ id, name: id, ...manifest }));
 }
+const ALL = ["browser", "ntfy", "notes", "plain", "hidden", "dunder", "pager", "climber", "nested"];
 function install(ids) {
   writeFileSync(join(home, "installed.json"), JSON.stringify(ids.map((id) => ({ id }))));
 }
@@ -40,7 +41,11 @@ before(() => {
   bundle("plain", { description: "no ui" });
   bundle("hidden", { panel: "panel/hidden.js", mcpServers: ["hidden-srv"] });
   bundle("dunder", { webUI: { port: 7001, path: "/" }, mcpServers: ["weird__srv"] });
-  install(["browser", "ntfy", "notes", "plain", "hidden", "dunder"]);
+  // I3: a desktop.path that is not a clean noVNC page makes a page app, never a desktop one.
+  bundle("pager", { webUI: { port: 7002, path: "/" }, desktop: { path: "index.html", lease: true } });
+  bundle("climber", { webUI: { port: 7003, path: "/" }, desktop: { path: "../vnc.html", lease: true } });
+  bundle("nested", { webUI: { port: 7004, path: "/" }, desktop: { path: "/app/novnc/vnc_lite.html" } });
+  install(ALL);
   // The live registry knows notes' panel (route differs from its id); "hidden" is not enabled.
   registerPanel({ id: "notes-panel", bundleId: "notes", route: "/dashboard/notes-panel", handler() {} });
 });
@@ -55,10 +60,11 @@ beforeEach(() => {
 
 test("listApps reads webUI, desktop and panel bundles", () => {
   const apps = listApps({ crowHome: home });
-  assert.deepEqual(apps.map((a) => a.id).sort(), ["browser", "dunder", "notes", "ntfy"]); // "hidden" has no registered panel
+  assert.deepEqual(apps.map((a) => a.id).sort(), ["browser", "climber", "dunder", "nested", "notes", "ntfy", "pager"]); // "hidden" has no registered panel
   const b = apps.find((a) => a.id === "browser");
   assert.equal(b.kind, "desktop");
-  assert.equal(b.href, "/proxy/browser/vnc.html");
+  assert.equal(b.href, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
+  assert.equal(b.label, "browser", "the manifest's name, not webUI.label (\"VNC Viewer\")");
   assert.equal(b.desktopPath, "vnc.html");
   assert.equal(b.leaseDeclared, true);
   assert.deepEqual(b.mcpServers, ["browser", "crow-browser"]);
@@ -66,6 +72,69 @@ test("listApps reads webUI, desktop and panel bundles", () => {
   assert.equal(n.kind, "page");
   assert.equal(n.href, "/dashboard/notes-panel"); // the registered panel's real route
   assert.equal(n.desktopPath, null);
+});
+
+// I3: one noVNC-path rule, at the catalog.
+test("the catalog marks an app desktop only when its desktop.path is a clean noVNC page", () => {
+  const by = Object.fromEntries(listApps({ crowHome: home }).map((a) => [a.id, a]));
+  assert.equal(by.pager.kind, "page", "index.html is not a noVNC page");
+  assert.equal(by.pager.desktopPath, null);
+  assert.equal(by.pager.leaseDeclared, false);
+  assert.equal(by.pager.href, "/proxy/pager/");
+  assert.equal(by.climber.kind, "page", "a path that climbs out");
+  assert.equal(by.climber.desktopPath, null);
+  assert.equal(by.nested.kind, "desktop");
+  assert.equal(by.nested.desktopPath, "app/novnc/vnc_lite.html", "the cleaned path");
+  for (const [p, want] of [["vnc.html", "vnc.html"], ["/vnc.html", "vnc.html"], ["a/b/vnc_lite.html", "a/b/vnc_lite.html"], ["index.html", null],
+    ["../vnc.html", null], ["a/../vnc.html", null], ["./vnc.html", null], ["vnc.html?x=1", null], ["vnc.html.evil", null], ["x/vnc.htm", null], ["", null], [null, null]]) {
+    assert.equal(cleanPath(p), want, String(p));
+  }
+});
+
+// I2: noVNC saves view_only per origin, so every launcher link to a noVNC page pins it off.
+test("every launcher link to a desktop app's noVNC page pins autoconnect, scale and view_only=false", () => {
+  assert.equal(NOVNC_PAGE_QUERY, "?autoconnect=true&resize=scale&view_only=false");
+  for (const a of listApps({ crowHome: home }).filter((x) => x.kind === "desktop")) {
+    assert.equal(a.href, "/proxy/" + a.id + "/" + a.desktopPath + NOVNC_PAGE_QUERY, a.id);
+    assert.equal(new URL(a.href, "https://x.example").searchParams.get("view_only"), "false");
+  }
+  // A page app whose web UI is not a noVNC page keeps its href as it was.
+  assert.equal(listApps({ crowHome: home }).find((a) => a.id === "dunder").href, "/proxy/dunder/");
+});
+
+test("appsForProject is cached per project for 30 s and cleared by a bot-def save", async () => {
+  const { emitBotDefsChanged } = await import("../servers/gateway/dashboard/panels/bot-builder/defs-changed.js");
+  let t = 1000;
+  _setClock(() => t);
+  let queries = 0;
+  const counting = { execute: (q) => { if (/pi_bot_defs/.test(q.sql)) queries++; return db.execute(q); } };
+  seedBot("a", { tools: { crow_mcp: ["browser/browser_navigate"] } });
+  assert.deepEqual((await appsForProject(counting, 1, { crowHome: home })).map((x) => x.id), ["browser"]);
+  seedBot("b", { tools: { crow_mcp: ["notes-srv/x"] } });
+  t += 29_000;
+  assert.deepEqual((await appsForProject(counting, 1, { crowHome: home })).map((x) => x.id), ["browser"], "cached");
+  assert.equal(queries, 1);
+  assert.deepEqual((await appsForProject(counting, 2, { crowHome: home })), [], "per project");
+  assert.equal(queries, 2);
+  t += 2_000;
+  assert.deepEqual((await appsForProject(counting, 1, { crowHome: home })).map((x) => x.id).sort(), ["browser", "notes"], "expired");
+  assert.equal(queries, 3);
+
+  seedBot("c", { tools: { crow_mcp: ["weird__srv/x"] } });   // grants dunder, but nothing cached changes until a save
+  sdb.prepare("UPDATE pi_bot_defs SET enabled = 0 WHERE bot_id = 'a'").run();
+  assert.deepEqual((await appsForProject(counting, 1, { crowHome: home })).map((x) => x.id).sort(), ["browser", "notes"], "still cached");
+  emitBotDefsChanged("a");   // what every Bot Builder save emits
+  assert.deepEqual((await appsForProject(counting, 1, { crowHome: home })).map((x) => x.id).sort(), ["dunder", "notes"], "a save clears it");
+  assert.equal(queries, 4);
+  invalidateProjectApps();
+  await appsForProject(counting, 1, { crowHome: home });
+  assert.equal(queries, 5, "invalidateProjectApps clears it too");
+  invalidateAppCatalog();
+  await appsForProject(counting, 1, { crowHome: home });
+  assert.equal(queries, 6, "an install clears it too");
+  // Another db never shares an answer.
+  const other = { execute: async () => ({ rows: [] }) };
+  assert.deepEqual(await appsForProject(other, 1, { crowHome: home }), []);
 });
 
 test("direct-mode apps keep their own href", () => {
@@ -150,7 +219,7 @@ test("the catalog is cached for 30 s", () => {
     t += 2_000;
     assert.deepEqual(listApps({ crowHome: home }).map((a) => a.id), ["browser"]);
   } finally {
-    install(["browser", "ntfy", "notes", "plain", "hidden", "dunder"]);
+    install(ALL);
   }
 });
 
@@ -162,7 +231,7 @@ test("invalidateAppCatalog drops the cache", () => {
     invalidateAppCatalog();
     assert.deepEqual(listApps({ crowHome: home }).map((a) => a.id), ["browser"]);
   } finally {
-    install(["browser", "ntfy", "notes", "plain", "hidden", "dunder"]);
+    install(ALL);
   }
 });
 

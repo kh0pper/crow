@@ -138,14 +138,17 @@ test("the browser bundle's lease guard reports enforcement at startup, atomicall
   assert.match(errs[0], /lease enforcement not reported: ENOSPC/);
 });
 
+// A known-enforcer table with studio in it (the marker path; the shipped table is the browser only).
+const STUDIO_ENFORCES = Object.freeze({ studio: "2.0.0" });
+
 test("unconfirmed lease gets no take over", () => {
-  const browser = () => appTileInfo("browser", { crowHome: home });
-  assert.deepEqual(browser(), { id: "browser", label: "Browser", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: false },
+  const studio = () => appTileInfo("studio", { crowHome: home, enforcers: STUDIO_ENFORCES });
+  assert.deepEqual(studio(), { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: false },
     "lease declared, no enforced.json: a watch-only tile");
-  enforce("browser", "1.3.11");
-  assert.equal(browser().takeOver, true, "a known enforcer, declared and enforced for the installed version");
-  enforce("browser", "1.3.10");
-  assert.equal(browser().takeOver, false, "enforced for another version");
+  enforce("studio", "2.0.0");
+  assert.equal(studio().takeOver, true, "a known enforcer, declared and enforced for the installed version");
+  enforce("studio", "1.9.0");
+  assert.equal(studio().takeOver, false, "enforced for another version");
 
   enforce("canvas", "1.0.0");
   assert.equal(appTileInfo("canvas", { crowHome: home }).takeOver, false, "enforced but not declared (desktop.lease absent)");
@@ -164,18 +167,9 @@ test("a non-allowlisted app with a valid enforced.json gets no take over; a know
   assert.equal(leaseEnforced("studio", { crowHome: home }), true, "the marker is valid for the installed version");
   assert.equal(appTileInfo("studio", { crowHome: home }).takeOver, false, "but studio is not a known enforcer");
 
-  // The browser installed below its first enforcing version, with a matching marker.
-  const mf = join(home, "bundles", "browser", "manifest.json");
-  const orig = readFileSync(mf, "utf8");
-  try {
-    writeFileSync(mf, JSON.stringify({ ...JSON.parse(orig), version: "1.3.8" }));
-    enforce("browser", "1.3.8");
-    assert.equal(leaseEnforced("browser", { crowHome: home }), true);
-    assert.equal(appTileInfo("browser", { crowHome: home }).takeOver, false, "1.3.8 predates the lease guard");
-    writeFileSync(mf, JSON.stringify({ ...JSON.parse(orig), version: "1.3.9" }));
-    enforce("browser", "1.3.9");
-    assert.equal(appTileInfo("browser", { crowHome: home }).takeOver, true, "1.3.9 is the first");
-  } finally { writeFileSync(mf, orig); }
+  // A known enforcer installed below its first enforcing version, with a matching marker.
+  assert.equal(appTileInfo("studio", { crowHome: home, enforcers: { studio: "2.1.0" } }).takeOver, false, "2.0.0 predates its lease guard");
+  assert.equal(appTileInfo("studio", { crowHome: home, enforcers: { studio: "2.0.0" } }).takeOver, true, "2.0.0 is the first");
 
   for (const [a, b, want] of [["1.3.11", "1.3.9", true], ["1.3.9", "1.3.9", true], ["1.3.8", "1.3.9", false], ["2", "1.3.9", true],
     ["1.3", "1.3.0", true], ["1.3.9-beta", "1.3.9", false], ["", "1.3.9", false], [null, "1.3.9", false]]) {
@@ -186,15 +180,44 @@ test("a non-allowlisted app with a valid enforced.json gets no take over; a know
 // ---------------------------------------------------------------------------
 // the routes, over an engine built from the real helpers
 // ---------------------------------------------------------------------------
-async function routes() {
+// I1 (a): the browser is offered Take over whenever its own /browser/take-over
+// route would accept; it never waits for enforced.json.
+test("the browser's Take over follows its own route, not the marker; every other app keeps the marker rule", () => {
+  assert.equal(readdirSync(home).includes("browser-lease"), false, "no marker, no lease dir");
+  assert.equal(appTileInfo("browser", { crowHome: home }).takeOver, true, "installed: offered with no enforced.json");
+  assert.equal(appTileInfo("browser", { crowHome: home, browserAccepts: () => true }).takeOver, true);
+  assert.equal(appTileInfo("browser", { crowHome: home, browserAccepts: () => false }).takeOver, false, "the route would refuse: not offered");
+  // An old or mismatched marker does not matter to the browser.
+  enforce("browser", "1.3.10");
+  assert.equal(appTileInfo("browser", { crowHome: home }).takeOver, true);
+  // The browser installed below the lease guard's version: its route still accepts, so it is offered.
+  const mf = join(home, "bundles", "browser", "manifest.json");
+  const orig = readFileSync(mf, "utf8");
+  try {
+    writeFileSync(mf, JSON.stringify({ ...JSON.parse(orig), version: "1.3.8" }));
+    _resetCatalogCache();
+    assert.equal(appTileInfo("browser", { crowHome: home }).takeOver, true);
+  } finally { writeFileSync(mf, orig); _resetCatalogCache(); }
+  // Not installed: the route's browserInstalled() is false.
+  const other = mkdtempSync(join(dir, "nobrowser-"));
+  mkdirSync(join(other, "bundles", "browser"), { recursive: true });
+  writeFileSync(join(other, "bundles", "browser", "manifest.json"), JSON.stringify({ id: "browser", name: "Browser", version: "1.3.11", webUI: { port: 6080, path: "/vnc.html" }, desktop: { path: "vnc.html", lease: true } }));
+  writeFileSync(join(other, "installed.json"), "[]");
+  assert.equal(appTileInfo("browser", { crowHome: other }), null, "not installed: no tile at all");
+  // Studio with a valid marker but not a known enforcer: still nothing.
+  enforce("studio", "2.0.0");
+  assert.equal(appTileInfo("studio", { crowHome: home }).takeOver, false);
+});
+
+async function routes({ enforcers } = {}) {
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
   const { default: express } = await import("express");
   const browserCalls = [];
   const browser = createTakeOver({ dir: () => { browserCalls.push("dir"); return appLeaseDir("browser", { crowHome: home }); }, onHeld: () => {}, isAlive: () => true });
   const engine = {
     browserTakeOver: browser,
-    appTile: (id) => appTileInfo(id, { crowHome: home }),
-    appTakeOverOffered: (id) => { const a = appTileInfo(id, { crowHome: home }); return !!a && a.takeOver; },
+    appTile: (id) => appTileInfo(id, { crowHome: home, enforcers }),
+    appTakeOverOffered: (id) => { const a = appTileInfo(id, { crowHome: home, enforcers }); return !!a && a.takeOver; },
     appTakeOvers: createAppTakeOvers({
       browser,
       dirFor: (id) => (desktopApp(id, { crowHome: home }) ? appLeaseDir(id, { crowHome: home }) : null),
@@ -239,12 +262,7 @@ test("take-over route refuses a non-desktop app", async () => {
     assert.equal(await lease.readLease(join(home, "app-lease-studio")), null);
     assert.equal(r.engine.appTakeOvers.get("studio"), null);
 
-    // The browser on the app routes needs the same confirmation.
-    assert.deepEqual(await r.call("POST", "apps/browser/take-over"), { status: 409, body: { error: "lease_not_enforced" } });
-    assert.equal(await lease.readLease(join(home, "browser-lease")), null);
-
-    // Confirmed: the #589 state machine on that app's lease.
-    enforce("browser", "1.3.11");
+    // The browser on the app routes: offered whenever its own route accepts (no marker).
     assert.equal((await r.call("GET", "apps/browser/tile")).body.takeOver, true);
     assert.deepEqual(await r.call("POST", "apps/browser/take-over"), { status: 200, body: { state: "held" } });
     assert.equal((await lease.readLease(join(home, "browser-lease"))).holder.kind, "operator");
@@ -255,15 +273,11 @@ test("take-over route refuses a non-desktop app", async () => {
     // A bot now waits on the operator.
     const acq = await lease.acquire(join(home, "browser-lease"), { kind: "bot", sessionId: "perchlive-9", botId: null });
     assert.equal(acq.ok, false); assert.equal(acq.reason, "operator");
-    // An upgrade since the server started: hand back still works; take over does not.
-    enforce("browser", "1.3.10");
     assert.deepEqual(await r.call("POST", "apps/browser/hand-back"), { status: 200, body: { state: "idle" } });
     assert.equal((await lease.readLease(join(home, "browser-lease"))).holder, null);
-    assert.deepEqual(await r.call("POST", "apps/browser/take-over"), { status: 409, body: { error: "lease_not_enforced" } });
     assert.ok(r.browserCalls.length > 0, "the browser's own controller did the work");
 
     // Another bot holding at take time: 409 other_bot, as on /browser/*.
-    enforce("browser", "1.3.11");
     const real = r.engine.browserTakeOver.takeOver;
     r.engine.browserTakeOver.takeOver = () => Promise.resolve({ state: "other_bot" });
     try {
@@ -272,15 +286,49 @@ test("take-over route refuses a non-desktop app", async () => {
   } finally { await r.close(); }
 });
 
+// The marker path on the routes: an app the enforcer table knows (studio here).
+test("app take-over routes keep the marker rule for a non-browser app; hand back of an app nobody took makes no lease dir", async () => {
+  const r = await routes({ enforcers: STUDIO_ENFORCES });
+  try {
+    assert.deepEqual(await r.call("POST", "apps/studio/hand-back"), { status: 200, body: { state: "idle" } }, "never taken: idle");
+    assert.equal(existsSync(join(home, "app-lease-studio")), false, "hand back created no lease directory");
+    assert.equal(r.engine.appTakeOvers.get("studio"), null, "nor a controller");
+    assert.deepEqual(await r.call("POST", "apps/wiki/hand-back"), { status: 404, body: { error: "not_desktop" } });
+
+    assert.deepEqual(await r.call("POST", "apps/studio/take-over"), { status: 409, body: { error: "lease_not_enforced" } }, "declared, no marker");
+    enforce("studio", "2.0.0");
+    assert.equal((await r.call("GET", "apps/studio/tile")).body.takeOver, true);
+    assert.deepEqual(await r.call("POST", "apps/studio/take-over"), { status: 200, body: { state: "held" } });
+    assert.equal((await lease.readLease(join(home, "app-lease-studio"))).holder.kind, "operator");
+    // An upgrade since its server started: hand back still works; take over does not.
+    enforce("studio", "1.9.0");
+    assert.deepEqual(await r.call("POST", "apps/studio/hand-back"), { status: 200, body: { state: "idle" } });
+    assert.equal((await lease.readLease(join(home, "app-lease-studio"))).holder, null);
+    assert.deepEqual(await r.call("POST", "apps/studio/take-over"), { status: 409, body: { error: "lease_not_enforced" } });
+  } finally { await r.close(); }
+  // A fresh gateway (no controller) with a lease dir on disk: hand back frees it.
+  const r2 = await routes({ enforcers: STUDIO_ENFORCES });
+  try {
+    assert.ok(existsSync(join(home, "app-lease-studio")));
+    assert.deepEqual(await r2.call("POST", "apps/studio/hand-back"), { status: 200, body: { state: "idle" } });
+    assert.ok(r2.engine.appTakeOvers.get("studio"), "made for an existing lease dir");
+  } finally { await r2.close(); }
+});
+
 test("the real engine answers appTile from its own CROW_HOME", async () => {
   process.env.PIBOT_PI_CLI = "/nonexistent/pi-never-spawned-by-this-file.js";
   const { createInteractiveEngine } = await import("../servers/gateway/perch-interactive.js");
   const engine = createInteractiveEngine({ crowHome: home, env: { CROW_HOME: home }, log: () => {}, notifications: {} });
   try {
     assert.deepEqual(engine.appTile("browser"),
-      { id: "browser", label: "Browser", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: false });
-    enforce("browser", "1.3.11");
-    assert.equal(engine.appTile("browser").takeOver, true);
+      { id: "browser", label: "Browser", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: true },
+      "the browser installed: offered with no enforced.json, as /browser/take-over would accept");
+    assert.equal(engine.appTakeOverOffered("browser"), true);
+    const off = createInteractiveEngine({ crowHome: home, env: { CROW_HOME: home }, log: () => {}, notifications: {}, browserLease: { installed: false } });
+    try {
+      assert.equal(off.appTile("browser").takeOver, false, "the engine's browser route would refuse (no browser): not offered");
+      assert.equal(off.appTakeOverOffered("browser"), false);
+    } finally { await off.stopAll({ timeoutMs: 100 }); }
     assert.equal(engine.appTakeOverOffered("studio"), false);
     assert.equal(engine.appTile("wiki"), null);
     assert.equal(engine.appTakeOvers.get("browser"), engine.browserTakeOver, "the browser keeps its own controller");
@@ -314,11 +362,11 @@ const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((r) =>
 function walk(n, fn) { fn(n); for (const c of n.children) walk(c, fn); }
 const byClass = (n, cls) => { const o = []; walk(n, (x) => { if (String(x.className || "").split(/\s+/).includes(cls)) o.push(x); }); return o; };
 
-async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: "studio", label: "Studio", kind: "desktop" }, { id: "wiki", label: "Wiki", kind: "page" }], tile } = {}) {
+async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: "studio", label: "Studio", kind: "desktop" }, { id: "wiki", label: "Wiki", kind: "page" }], tile, lang = "en" } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const { perchBrowserTileJs } = await import("../servers/gateway/dashboard/perch-hub/browser-tile.js");
   const { perchTakeOverJs } = await import("../servers/gateway/dashboard/perch-hub/take-over.js");
-  const src = perchHubJs("en");
+  const src = perchHubJs(lang);
   const lift = (name) => {
     const start = src.indexOf("function " + name + "(");
     let depth = 0;
@@ -330,10 +378,12 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
   const transcript = makeEl("div");
   const root = makeEl("div");
   const input = makeEl("textarea");
+  const mine = makeEl("button"); mine.hidden = false;   /* "You have the browser · Hand back", shown */
   const sheet = newMode ? makeEl("dialog") : null;
   const anchors = links.map((l) => {
     const a = makeEl("a"); a.className = "shell-app";
     a.setAttribute("data-app-id", l.id); a.setAttribute("data-app-kind", l.kind);
+    a.setAttribute("href", l.href || "/proxy/" + l.id + "/vnc.html?autoconnect=true&resize=scale&view_only=false");
     const lb = makeEl("span"); lb.className = "shell-app-label"; lb.textContent = l.label; a.appendChild(lb);
     return a;
   });
@@ -357,13 +407,13 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
       dispatchEvent: (ev) => docT.dispatchEvent(ev),
       querySelectorAll: (sel) => (sel === 'a.shell-app[data-app-kind="desktop"]' ? anchors.filter((a) => a.getAttribute("data-app-kind") === "desktop") : []),
     },
-    el: (id) => ({ "perch-transcript": transcript, "perch-hub-root": root, "perch-input": input, "perch-session-sheet": sheet }[id] || null),
+    el: (id) => ({ "perch-transcript": transcript, "perch-hub-root": root, "perch-input": input, "perch-session-sheet": sheet, "perch-browser-mine": mine }[id] || null),
     live: () => true,
     bindOnce: (target, type, key, fn) => target.addEventListener(type, fn),
     fetch: (url, opts = {}) => {
       const path = String(url).split("?")[0];
-      calls.push({ path, method: opts.method || "GET" });
-      const r = answer(path);
+      calls.push({ path, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : undefined });
+      const r = answer(path, calls[calls.length - 1]);
       return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, json: () => Promise.resolve(r.body) });
     },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
@@ -372,7 +422,7 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
     line: (cls, text) => { const d = makeEl("div"); d.className = cls; d.textContent = text == null ? "" : String(text); return d; },
   };
   vm.createContext(sandbox);
-  vm.runInContext(`(function(){\n${lift("csrf")}\n${lift("perchApi")}\n${perchBrowserTileJs("en")}\n${perchTakeOverJs("en")}\n;globalThis.__reset=resetBrowserTiles;\n})();`, sandbox);
+  vm.runInContext(`(function(){\n${lift("csrf")}\n${lift("perchApi")}\n${perchBrowserTileJs(lang)}\n${perchTakeOverJs(lang)}\n;globalThis.__reset=resetBrowserTiles;\n})();`, sandbox);
   const open = async (appId) => {
     const ev = new CustomEvent("crow:open-app-tile", { detail: { appId }, cancelable: true });
     sandbox.document.dispatchEvent(ev);
@@ -380,7 +430,21 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
     return ev.defaultPrevented;
   };
   const fireTimers = async () => { while (timers.length) timers.shift().fn(); await tick(); };
-  return { sandbox, transcript, root, input, calls, open, fireTimers };
+  return { sandbox, transcript, root, input, mine, calls, open, fireTimers, timers };
+}
+
+const BROWSER_LINK = { id: "browser", label: "Browser Automation", kind: "desktop" };
+const PW_ENTRY = { id: 41, bundle_id: "browser", env_key: "CROW_BROWSER_VNC_PASSWORD", readable: true };
+function browserServer({ takeOver = true, reveal } = {}) {
+  return (path, call) => {
+    if (path.endsWith("/apps/browser/tile")) return { status: 200, body: { id: "browser", label: "Browser Automation", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver } };
+    if (path.endsWith("/browser/take-over") || path.endsWith("/browser/heartbeat")) return { status: 200, body: { state: "held" } };
+    if (path.endsWith("/browser/hand-back")) return { status: 200, body: { state: "idle" } };
+    if (path.endsWith("/keychain/api/entries")) return { status: 200, body: { entries: [PW_ENTRY], reauth_method: "password" } };
+    if (path.endsWith("/keychain/api/reveal")) return reveal ? reveal(call) : { status: 200, body: { secret: "vnc-Secret-77" } };
+    if (path.endsWith("/keychain/api/reauth")) return { status: 200, body: { ok: true } };
+    return { status: 404, body: {} };
+  };
 }
 
 test("the client opens a tile only for a known desktop app in an open new-mode session, watch-only, with Take over when offered", async () => {
@@ -478,7 +542,137 @@ test("the client code is template-safe in both languages", async () => {
       assert.doesNotThrow(() => new Function(js));
     }
   }
-  for (const k of ["perch.appTileWatching", "perch.appTileClose", "perch.appTileUnavailable"]) {
+  for (const k of ["perch.appTileWatching", "perch.appTileClose", "perch.appTileUnavailable", "perch.appTileOpen"]) {
     assert.ok(translations[k] && translations[k].en && translations[k].es, k);
   }
+});
+
+// I4: an app tile for "browser" takes the browser path, password and all.
+test("the browser's app tile takes the browser path: /browser/take-over, the keychain lookup, a view_only=false viewer", async () => {
+  const h = await hub({ links: [BROWSER_LINK], tile: browserServer() });
+  assert.equal(await h.open("browser"), true);
+  const tile = byClass(h.transcript, "ph-atile")[0];
+  assert.equal(byClass(tile, "at-name")[0].textContent, "Browser Automation");
+  assert.equal(byClass(tile, "at-take")[0].hidden, false, "offered (the route would accept)");
+  byClass(tile, "at-take")[0].onclick();
+  await tick();
+  const sheet = byClass(h.root, "ph-tosheet")[0];
+  assert.ok(sheet, "the Take over sheet");
+  assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/dashboard/perch-api/browser/take-over"), "the browser's own route");
+  assert.ok(!h.calls.some((c) => c.path.includes("/apps/browser/take-over")), "never the generic app route");
+  const lookups = h.calls.filter((c) => c.method === "GET" && c.path === "/dashboard/keychain/api/entries");
+  assert.equal(lookups.length, 2, "the tile's lookup and the sheet's own");
+  assert.equal(byClass(sheet, "to-copy")[0].hidden, false, "the sheet's Copy password, as today");
+  assert.equal(byClass(sheet, "to-vnc")[0].getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
+  byClass(sheet, "to-back")[0].onclick();
+  await tick();
+  assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/dashboard/perch-api/browser/hand-back"));
+});
+
+// I1 (b): the browser's watch view meets noVNC's password prompt: the sheet's Copy password, same flow.
+test("the browser's watch-only tile has the sheet's Copy password: keychain lookup, re-auth, reveal, wiped on close", async () => {
+  let reveals = 0;
+  const h = await hub({ links: [BROWSER_LINK], tile: browserServer({ takeOver: false, reveal: () => (++reveals === 1 ? { status: 403, body: { code: "reauth_required" } } : { status: 200, body: { secret: "vnc-Secret-77" } }) }) });
+  await h.open("browser");
+  const tile = byClass(h.transcript, "ph-atile")[0];
+  const copy = byClass(tile, "to-copy")[0];
+  assert.ok(copy, "a Copy password row in the tile");
+  assert.equal(copy.textContent, "Copy password");
+  assert.equal(copy.hidden, false, "the browser entry was found");
+  copy.onclick();
+  await tick();
+  const reauth = byClass(tile, "to-reauth")[0];
+  assert.equal(reauth.hidden, false, "the keychain asks for a re-auth first, as in the sheet");
+  byClass(tile, "to-reauth-input")[0].value = "hunter2";
+  byClass(tile, "to-reauth-go")[0].onclick();
+  await tick();
+  const re = h.calls.find((c) => c.path === "/dashboard/keychain/api/reauth");
+  assert.deepEqual(re.body, { password: "hunter2" });
+  assert.equal(reauth.hidden, true);
+  const pw = byClass(tile, "to-pw")[0];
+  assert.equal(pw.textContent, "vnc-Secret-77", "no clipboard here: shown briefly");
+  assert.deepEqual(h.calls.filter((c) => c.path === "/dashboard/keychain/api/reveal").map((c) => c.body), [{ id: 41, purpose: "copy" }, { id: 41, purpose: "copy" }]);
+  byClass(tile, "at-close")[0].onclick();
+  assert.equal(pw.textContent, "", "closing the tile wipes it");
+  assert.equal(byClass(tile, "to-reauth-input")[0].value, "");
+
+  // Another app's tile has no password row and makes no keychain call.
+  const s2 = await hub();
+  await s2.open("studio");
+  assert.equal(byClass(byClass(s2.transcript, "ph-atile")[0], "to-copy").length, 0);
+  assert.ok(!s2.calls.some((c) => c.path.includes("/keychain/")));
+});
+
+// I1 (c): whenever Take over is not offered, the tile links to the app's page.
+test("the tile offers Open to the app's page whenever Take over is not offered (en + es)", async () => {
+  const watch = await hub({ tile: () => ({ status: 200, body: { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html", takeOver: false } }) });
+  await watch.open("studio");
+  const t = byClass(watch.transcript, "ph-atile")[0];
+  const open = byClass(t, "at-open")[0];
+  assert.equal(open.hidden, false);
+  assert.equal(open.textContent, "Open");
+  assert.equal(open.getAttribute("href"), "/proxy/studio/vnc.html?autoconnect=true&resize=scale&view_only=false", "the launcher's own link");
+  assert.equal(open.getAttribute("data-turbo"), "false");
+
+  const offered = await hub();
+  await offered.open("studio");
+  assert.equal(byClass(byClass(offered.transcript, "ph-atile")[0], "at-open")[0].hidden, true, "Take over offered: no Open");
+
+  const gone = await hub({ tile: () => ({ status: 404, body: { error: "not_desktop" } }) });
+  await gone.open("studio");
+  assert.equal(byClass(byClass(gone.transcript, "ph-atile")[0], "at-open")[0].hidden, false, "can't be shown: Open still");
+
+  const es = await hub({ lang: "es", tile: () => ({ status: 200, body: { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html", takeOver: false } }) });
+  await es.open("studio");
+  assert.equal(byClass(byClass(es.transcript, "ph-atile")[0], "at-open")[0].textContent, "Abrir");
+
+  // A launcher href that is not this app's proxy page gives no Open link.
+  for (const href of ["/dashboard/x", "https://evil.example/", "/proxy/other/vnc.html", "/proxy/studio/../../dashboard", "/proxy/studio//x"]) {
+    const bad = await hub({ links: [{ id: "studio", label: "Studio", kind: "desktop", href }], tile: () => ({ status: 200, body: { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html", takeOver: false } }) });
+    await bad.open("studio");
+    assert.equal(byClass(byClass(bad.transcript, "ph-atile")[0], "at-open").length, 0, href);
+  }
+});
+
+test("another app's sheet never hides the browser's \"You have the browser\" control; the browser's own sheet does", async () => {
+  const h = await hub();
+  await h.open("studio");
+  byClass(byClass(h.transcript, "ph-atile")[0], "at-take")[0].onclick();
+  await tick();
+  assert.ok(byClass(h.root, "ph-tosheet")[0], "studio's sheet is open");
+  assert.equal(h.mine.hidden, false, "the browser's control is untouched");
+  byClass(byClass(h.root, "ph-tosheet")[0], "to-back")[0].onclick();
+  await tick();
+  assert.equal(h.mine.hidden, false);
+
+  const b = await hub({ links: [BROWSER_LINK], tile: browserServer() });
+  await b.open("browser");
+  byClass(byClass(b.transcript, "ph-atile")[0], "at-take")[0].onclick();
+  await tick();
+  assert.equal(b.mine.hidden, true, "the browser's sheet hides it while open, as before");
+});
+
+test("a 1.3.10-shaped installed browser (no desktop, no mcpServers) is a page link the Perch handler leaves alone", async () => {
+  const { listApps } = await import("../servers/gateway/apps/catalog.js");
+  const { clientApp } = await import("../servers/gateway/apps/launcher.js");
+  const old = mkdtempSync(join(dir, "browser-1310-"));
+  const repoMf = JSON.parse(readFileSync(new URL("../bundles/browser/manifest.json", import.meta.url), "utf8"));
+  const { desktop, mcpServers, ...mf1310 } = repoMf;
+  assert.ok(desktop && mcpServers, "the repo manifest has both (so the strip is real)");
+  mkdirSync(join(old, "bundles", "browser"), { recursive: true });
+  writeFileSync(join(old, "bundles", "browser", "manifest.json"), JSON.stringify({ ...mf1310, version: "1.3.10" }));
+  writeFileSync(join(old, "installed.json"), JSON.stringify([{ id: "browser" }]));
+  _resetCatalogCache();
+  const app = listApps({ crowHome: old }).find((a) => a.id === "browser");
+  assert.equal(app.kind, "page");
+  assert.equal(app.desktopPath, null);
+  assert.equal(app.label, "Browser Automation", "the manifest's name, not \"VNC Viewer\"");
+  assert.equal(app.href, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false", "its noVNC page is pinned too");
+  assert.equal(appTileInfo("browser", { crowHome: old }), null, "no tile");
+  const c = clientApp(app);
+  const h = await hub({ links: [{ id: c.id, label: c.label, kind: c.kind, href: c.href }] });
+  assert.equal(await h.open("browser"), false, "not handled: the link navigates");
+  assert.equal(byClass(h.transcript, "ph-atile").length, 0);
+  assert.deepEqual(h.calls, [], "no tile request");
+  _resetCatalogCache();
 });

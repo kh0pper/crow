@@ -1626,10 +1626,14 @@ export function createInteractiveEngine({
     forceBreakAfterMs: FORCE_BREAK_AFTER_MS,
     log,
   });
+  // The browser's Take over is offered whenever its own /browser/take-over
+  // route would accept (browserTakeOver has a lease directory); any other app
+  // needs its declared lease confirmed (app-tile.js takeOverOffered).
+  const browserAccepts = () => browserDir() !== null;
   /** An installed desktop app's tile ({ id, label, src, takeOver }) or null. */
-  function appTile(appId) { return appTileInfo(appId, { crowHome }); }
-  /** May this app be taken over now? (an installed desktop app, lease declared and enforced) */
-  function appTakeOverOffered(appId) { return takeOverOffered(desktopApp(appId, { crowHome }), { crowHome }); }
+  function appTile(appId) { return appTileInfo(appId, { crowHome, browserAccepts }); }
+  /** May this app be taken over now? (the browser: its route accepts; another app: lease declared and enforced) */
+  function appTakeOverOffered(appId) { return takeOverOffered(desktopApp(appId, { crowHome }), { crowHome, browserAccepts }); }
 
   /** The session has a live turn using the browser. */
   function browserTurnLive(sessionId) {

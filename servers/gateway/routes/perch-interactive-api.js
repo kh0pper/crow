@@ -1792,12 +1792,15 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
           return jsonError(res, 409, "lease_not_enforced");
         }
         ctl = ctl || reg.get(id, { create: true });
-      } else if (!ctl && op === "handBack" && eng.appTile(id)) {
-        ctl = reg.get(id, { create: true });
+      } else if (!ctl && op === "handBack") {
+        if (!eng.appTile(id)) return jsonError(res, 404, "not_desktop");
+        // An app nobody took here: free a holding a restarted gateway forgot,
+        // but only where a lease directory exists (never create one).
+        ctl = reg.get(id, { create: true, ifDirExists: true });
       }
       res.set("Cache-Control", "no-store");
       if (!ctl) {
-        if (op === "takeOver" || op === "handBack") return jsonError(res, 404, "not_desktop");
+        if (op === "takeOver") return jsonError(res, 404, "not_desktop");
         return res.json({ state: "idle" });
       }
       if (op === "state") return res.json({ state: ctl.state() });

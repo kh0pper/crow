@@ -4066,6 +4066,7 @@ export const translations = {
   "perch.appTileWatching": { en: "Watching", es: "Mirando" },
   "perch.appTileClose": { en: "Close", es: "Cerrar" },
   "perch.appTileUnavailable": { en: "This app can't be shown here.", es: "Esta app no se puede mostrar aquí." },
+  "perch.appTileOpen": { en: "Open", es: "Abrir" },
   "perch.handBack": { en: "Hand back", es: "Devolver" },
   "perch.copyPassword": { en: "Copy password", es: "Copiar contraseña" },
   "perch.noPassword": { en: "No saved browser password", es: "No hay contraseña guardada del navegador" },

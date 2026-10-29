@@ -24,7 +24,9 @@ import { tJs } from "../shared/i18n.js";
  *    app's sheet runs the same states on POST …/apps/<id>/take-over |
  *    heartbeat | hand-back, has no password row, and never touches the
  *    browser's "You have the browser" control. The browser itself stays on
- *    …/browser/*;
+ *    …/browser/*. The browser's app tile reuses this sheet's Copy password
+ *    row (toPwParts / toFindPassword, the same keychain reveal and re-auth)
+ *    under its watch view, where noVNC asks for the VNC password;
  *  - POST …/browser/take-over → "held": the noVNC viewer loads; "pending": "The
  *    bot is finishing its step…" and a 1 s check until it switches;
  *  - held: a heartbeat every 15 s (the server keeps the holding 5 minutes
@@ -101,30 +103,14 @@ export function perchTakeOverJs(lang = "en") {
     var back=toButton('to-back btn btn-primary',TO_HAND_BACK);
     head.appendChild(host); head.appendChild(back);
     var status=line('to-status',''); status.setAttribute('role','status'); status.hidden=true;
-    var pwRow=document.createElement('div'); pwRow.className='to-pw-row';
-    var copy=toButton('to-copy btn btn-secondary',TO_COPY); copy.hidden=true;
-    var hint=line('to-hint',''); hint.hidden=true;
-    var pw=document.createElement('code'); pw.className='to-pw'; pw.hidden=true;
-    pwRow.appendChild(copy); pwRow.appendChild(hint); pwRow.appendChild(pw);
-    var reauth=document.createElement('div'); reauth.className='to-reauth'; reauth.hidden=true;
-    var rTitle=line('to-reauth-title',TO_REAUTH_TITLE);
-    var rInput=document.createElement('input'); rInput.className='to-reauth-input'; rInput.type='password';
-    rInput.setAttribute('autocomplete','current-password');
-    var rErr=line('to-reauth-error',''); rErr.setAttribute('role','alert');
-    var rGo=toButton('to-reauth-go btn btn-primary',TO_CONFIRM);
-    var rCancel=toButton('to-reauth-cancel btn btn-secondary',TO_CANCEL);
-    reauth.appendChild(rTitle); reauth.appendChild(rInput); reauth.appendChild(rErr); reauth.appendChild(rGo); reauth.appendChild(rCancel);
+    var parts=toPwParts(s);
     var view=document.createElement('div'); view.className='to-view';
-    node.appendChild(head); node.appendChild(status); node.appendChild(pwRow); node.appendChild(reauth); node.appendChild(view);
-    s.node=node; s.status=status; s.back=back; s.copy=copy; s.hint=hint; s.pw=pw; s.view=view;
-    s.reauth=reauth; s.rInput=rInput; s.rErr=rErr; s.host=host;
+    node.appendChild(head); node.appendChild(status); node.appendChild(parts.pwRow); node.appendChild(parts.reauth); node.appendChild(view);
+    s.node=node; s.status=status; s.back=back; s.view=view; s.host=host;
     toSheet=s;
-    toMine(false);
+    if(toIsBrowser(s)) toMine(false);
     (el('perch-hub-root')||document.body).appendChild(node);
     back.onclick=function(){ toHandBack(s); };
-    copy.onclick=function(){ toCopy(s); };
-    rGo.onclick=function(){ toReauth(s); };
-    rCancel.onclick=function(){ s.retry=null; rInput.value=''; reauth.hidden=true; };
     if(back.focus) back.focus();
     if(!toIsBrowser(s)){
       /* another app: no keychain lookup (the browser's VNC password only) */
@@ -144,6 +130,36 @@ export function perchTakeOverJs(lang = "en") {
       toAnswer(s,r);
     });
   }
+
+  /* The password row and its re-auth panel, on s (s.copy, s.hint, s.pw,
+     s.reauth, s.rInput, s.rErr). Built for the sheet, and for the browser's
+     app tile (R1.2 PR 5: its watch view meets the same noVNC password prompt),
+     where s.inTile is set: the same lookup, reveal and re-auth, alive until
+     the tile closes (toPwClose) instead of until the sheet does. */
+  function toPwParts(s){
+    var pwRow=document.createElement('div'); pwRow.className='to-pw-row';
+    var copy=toButton('to-copy btn btn-secondary',TO_COPY); copy.hidden=true;
+    var hint=line('to-hint',''); hint.hidden=true;
+    var pw=document.createElement('code'); pw.className='to-pw'; pw.hidden=true;
+    pwRow.appendChild(copy); pwRow.appendChild(hint); pwRow.appendChild(pw);
+    var reauth=document.createElement('div'); reauth.className='to-reauth'; reauth.hidden=true;
+    var rTitle=line('to-reauth-title',TO_REAUTH_TITLE);
+    var rInput=document.createElement('input'); rInput.className='to-reauth-input'; rInput.type='password';
+    rInput.setAttribute('autocomplete','current-password');
+    var rErr=line('to-reauth-error',''); rErr.setAttribute('role','alert');
+    var rGo=toButton('to-reauth-go btn btn-primary',TO_CONFIRM);
+    var rCancel=toButton('to-reauth-cancel btn btn-secondary',TO_CANCEL);
+    reauth.appendChild(rTitle); reauth.appendChild(rInput); reauth.appendChild(rErr); reauth.appendChild(rGo); reauth.appendChild(rCancel);
+    s.copy=copy; s.hint=hint; s.pw=pw; s.reauth=reauth; s.rInput=rInput; s.rErr=rErr;
+    copy.onclick=function(){ toCopy(s); };
+    rGo.onclick=function(){ toReauth(s); };
+    rCancel.onclick=function(){ s.retry=null; rInput.value=''; reauth.hidden=true; };
+    return { pwRow:pwRow, reauth:reauth };
+  }
+  /* A reply that arrives after its sheet (or its tile's row) closed is dropped. */
+  function toGone(s){ return s.closed||(!s.inTile&&toSheet!==s); }
+  /* The tile's row closes: nothing of the password is left. */
+  function toPwClose(s){ s.closed=true; toWipePassword(s); s.rInput.value=''; s.retry=null; }
 
   function toSetStatus(s,text){ s.status.textContent=text; s.status.hidden=!text; }
 
@@ -212,7 +228,7 @@ export function perchTakeOverJs(lang = "en") {
   /* ---- Copy password (the keychain's own reveal + re-auth, §7 item 13) ---- */
   function toFindPassword(s){
     toKeychain('GET','/entries').then(function(r){
-      if(s.closed||toSheet!==s) return;
+      if(toGone(s)) return;
       var list=(r.status===200&&r.j&&Array.isArray(r.j.entries))?r.j.entries:[];
       var hit=null;
       for(var i=0;i<list.length;i++){
@@ -229,7 +245,7 @@ export function perchTakeOverJs(lang = "en") {
     s.copying=true;
     toKeychain('POST','/reveal',{ id:s.entryId, purpose:'copy' }).then(function(r){
       s.copying=false;
-      if(s.closed||toSheet!==s) return;
+      if(toGone(s)) return;
       if(r.status===403&&r.j&&r.j.code==='reauth_required'){ toNeedAuth(s,function(){ toCopy(s); }); return; }
       if(r.status!==200||typeof r.j.secret!=='string'){ s.hint.textContent=TO_PW_ERROR; s.hint.hidden=false; return; }
       var secret=r.j.secret; r.j.secret=null;
@@ -270,7 +286,7 @@ export function perchTakeOverJs(lang = "en") {
     var body=s.method==='totp'?{ totp_code:v }:{ password:v };
     toKeychain('POST','/reauth',body).then(function(r){
       s.rInput.value='';
-      if(s.closed||toSheet!==s) return;
+      if(toGone(s)) return;
       if(r.status===200){
         s.reauth.hidden=true;
         var next=s.retry; s.retry=null;

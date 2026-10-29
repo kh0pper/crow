@@ -25,6 +25,7 @@
  * thrown to the route, which answers "browser busy" — never a hang.
  */
 import * as sharedLease from "../../shared/browser-lease.js";
+import { existsSync } from "node:fs";
 
 /** Take over waits at most this long for an in-flight bot call (spec §7 item 7). */
 export const IN_CALL_WAIT_MS = 30_000;
@@ -227,15 +228,23 @@ export function createTakeOver({
  * get(appId) returns an existing controller; get(appId, { create: true })
  * makes one. The caller (the take-over route) creates only for an app it has
  * checked, so the map holds at most one controller per installed desktop app.
+ * { create: true, ifDirExists: true } (Hand back of an app this gateway never
+ * took) makes one only when the app's lease directory already exists: with no
+ * directory there is no holding to free, and a hand back must not create one.
  */
 export function createAppTakeOvers({ browser = null, dirFor, ...opts } = {}) {
   const ctls = new Map();
   let closed = false;
   return {
-    get(appId, { create = false } = {}) {
+    get(appId, { create = false, ifDirExists = false } = {}) {
       if (appId === "browser") return browser;
       if (ctls.has(appId)) return ctls.get(appId);
       if (!create || closed) return null;
+      if (ifDirExists) {
+        let d = null;
+        try { d = dirFor(appId); } catch { d = null; }
+        if (!d || !existsSync(d)) return null;
+      }
       const ctl = createTakeOver({
         ...opts,
         dir: () => { try { return dirFor(appId); } catch { return null; } },

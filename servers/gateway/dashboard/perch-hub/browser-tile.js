@@ -439,14 +439,21 @@ export function perchBrowserTileJs(lang = "en") {
          div.at-bar > span.at-name (the app's name), span.at-state (Watching)
          div.at-view > iframe.at-vnc  watch-only noVNC, a src built here from
                                       the server's /proxy/<id>/<path> (checked)
+         div.to-pw-row, div.to-reauth the browser only: the Take over sheet's
+                                      Copy password (the keychain + re-auth,
+                                      take-over.js toPwParts), for the noVNC
+                                      password prompt the watch view shows
          div.at-note                  "can't be shown here" (the server said no)
-         div.at-actions > button.at-take (only when offered), button.at-close
+         div.at-actions > button.at-take (only when offered), a.at-open (the
+                                      app's page, whenever Take over is not
+                                      offered), button.at-close
      Take over opens the Take over sheet with detail.app (take-over.js). The
      browser's own tile (its crow_browser_* trigger, the CDP frames and shots)
      is above and unchanged; non-browser tool calls make no tile. */
   var AT_WATCHING='${tJs("perch.appTileWatching", lang)}';
   var AT_CLOSE='${tJs("perch.appTileClose", lang)}';
   var AT_UNAVAILABLE='${tJs("perch.appTileUnavailable", lang)}';
+  var AT_OPEN='${tJs("perch.appTileOpen", lang)}';
   var AT_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
   var AT_PATH=/^([A-Za-z0-9._~-]+\\/)*vnc(_lite)?[.]html$/;
   var atTiles={}, atGen=0;
@@ -464,6 +471,14 @@ export function perchBrowserTileJs(lang = "en") {
     var text=lb?String(lb.textContent||''):'';
     return text||appId;
   }
+  /* The launcher link's own href for the tile's Open link: a page of this app
+     under its proxy (/proxy/<id>/…), or null. */
+  function atHref(a,appId){
+    var h=a&&a.getAttribute?String(a.getAttribute('href')||''):'';
+    var pre='/proxy/'+appId+'/';
+    if(h.indexOf(pre)!==0||h.length>400||h.indexOf('..')>=0||h.indexOf('//',1)>=0) return null;
+    return h;
+  }
   /* /proxy/<id>/<plain path> from the server's src (its query is dropped: the
      tile builds its own), or null. */
   function atBase(appId,src){
@@ -471,11 +486,11 @@ export function perchBrowserTileJs(lang = "en") {
     if(base.indexOf(pre)!==0||base.length>300||base.indexOf('..')>=0||!AT_PATH.test(base.slice(pre.length))) return null;
     return base;
   }
-  function atOpen(appId,label){
+  function atOpen(appId,label,href){
     var tr=el('perch-transcript'); if(!tr) return null;
     var t=atTiles[appId];
     if(t&&t.node.parentNode) return t;
-    t={ id:appId, label:label, sid:current.sid, base:null, takeOver:false, frame:null };
+    t={ id:appId, label:label, sid:current.sid, base:null, takeOver:false, frame:null, href:href, pwS:null };
     var node=document.createElement('div'); node.className='entry ph-atile';
     node.setAttribute('data-app',appId); node.setAttribute('role','group');
     node.setAttribute('aria-label',label); node.setAttribute('tabindex','-1');
@@ -488,10 +503,15 @@ export function perchBrowserTileJs(lang = "en") {
     var acts=document.createElement('div'); acts.className='at-actions';
     var take=document.createElement('button'); take.type='button'; take.className='at-take'; take.textContent=BT_TAKE_OVER;
     take.hidden=true;
+    var open=null;
+    if(href){
+      open=document.createElement('a'); open.className='at-open btn btn-secondary'; open.textContent=AT_OPEN;
+      open.setAttribute('href',href); open.setAttribute('data-turbo','false'); open.hidden=true;
+    }
     var close=document.createElement('button'); close.type='button'; close.className='at-close'; close.textContent=AT_CLOSE;
-    acts.appendChild(take); acts.appendChild(close);
+    acts.appendChild(take); if(open) acts.appendChild(open); acts.appendChild(close);
     node.appendChild(bar); node.appendChild(view); node.appendChild(note); node.appendChild(acts);
-    t.node=node; t.name=name; t.state=st; t.view=view; t.note=note; t.take=take; t.close=close;
+    t.node=node; t.name=name; t.state=st; t.view=view; t.note=note; t.take=take; t.open=open; t.close=close;
     take.onclick=function(){ atTakeOver(t); };
     close.onclick=function(){ atDrop(t,true); };
     atTiles[appId]=t;
@@ -505,7 +525,7 @@ export function perchBrowserTileJs(lang = "en") {
       if(!live()||gen!==atGen||atTiles[t.id]!==t) return;
       var j=(r&&r.ok&&r.j&&typeof r.j==='object')?r.j:null;
       var base=(j&&j.id===t.id)?atBase(t.id,j.src):null;
-      if(!base){ t.note.textContent=AT_UNAVAILABLE; t.note.hidden=false; t.state.hidden=true; return; }
+      if(!base){ t.note.textContent=AT_UNAVAILABLE; t.note.hidden=false; t.state.hidden=true; if(t.open) t.open.hidden=false; return; }
       t.base=base;
       if(typeof j.label==='string'&&j.label){ t.label=j.label; t.name.textContent=j.label; t.node.setAttribute('aria-label',j.label); }
       var f=document.createElement('iframe'); f.className='at-vnc';
@@ -513,6 +533,17 @@ export function perchBrowserTileJs(lang = "en") {
       f.setAttribute('src',base+'?view_only=true&autoconnect=true&resize=scale');
       t.view.appendChild(f); t.frame=f;
       t.takeOver=j.takeOver===true; t.take.hidden=!t.takeOver;
+      /* never a dead end: no Take over, so the app's own page */
+      if(t.open) t.open.hidden=t.takeOver;
+      /* the browser's noVNC asks for its VNC password: the sheet's own Copy
+         password, under the view (the same keychain lookup and re-auth) */
+      if(t.id==='browser'&&typeof toPwParts==='function'){
+        var ps={ inTile:true, closed:false, pwTimer:null, entryId:null, method:'password', retry:null };
+        var parts=toPwParts(ps);
+        t.node.insertBefore(parts.pwRow,t.note); t.node.insertBefore(parts.reauth,t.note);
+        t.pwS=ps;
+        toFindPassword(ps);
+      }
     });
   }
   function atTakeOver(t){
@@ -522,6 +553,7 @@ export function perchBrowserTileJs(lang = "en") {
   }
   /* Close the tile (not a hand back: a holding stays until its sheet's Hand back). */
   function atDrop(t,byUser){
+    if(t.pwS&&typeof toPwClose==='function'){ toPwClose(t.pwS); t.pwS=null; }
     if(t.frame){ try{ t.frame.setAttribute('src','about:blank'); }catch(e){} }
     if(t.node.parentNode) t.node.parentNode.removeChild(t.node);
     if(atTiles[t.id]===t) delete atTiles[t.id];
@@ -531,9 +563,9 @@ export function perchBrowserTileJs(lang = "en") {
     for(var k in atTiles) atDrop(atTiles[k],false);
     atTiles={}; atGen++;
   }
-  /* Into the tile now (a non-modal drawer), and again once the launcher's
-     dialog has closed (a modal sheet keeps the page inert until then, and its
-     close puts focus back on its opener). */
+  /* Into the tile now, and again once the launcher's dialog has closed (the
+     drawer and the apps sheet are both modal: the page stays inert until the
+     dialog closes, and its close puts focus back on its opener). */
   function atFocus(t){
     var go=function(){ if(live()&&atTiles[t.id]===t&&t.node.focus) t.node.focus(); };
     go();
@@ -544,7 +576,7 @@ export function perchBrowserTileJs(lang = "en") {
     var appId=ev&&ev.detail?ev.detail.appId:null;
     if(typeof appId!=='string'||!AT_ID.test(appId)) return;
     var a=atLauncherLink(appId); if(!a) return;
-    var t=atOpen(appId,atLabelOf(a,appId)); if(!t) return;
+    var t=atOpen(appId,atLabelOf(a,appId),atHref(a,appId)); if(!t) return;
     if(ev.preventDefault) ev.preventDefault();
     atFocus(t);
   });
