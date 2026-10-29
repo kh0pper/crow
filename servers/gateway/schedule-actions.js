@@ -142,6 +142,9 @@ export async function runScheduleNow(db, id, { now = Date.now(), botReady = asyn
   const stmts = [{
     // Coalesced in the same statement: no second job while one is still queued.
     // principal 'owner': "Run now" is the owner pressing the button on the Schedule page (plan decision 1).
+    // Its one caller (dashboard/panels/schedule.js) refuses every POST unless isOwnerRequest, i.e. the
+    // owner's LOCAL password session (local-session.js; an SSO or peer session gets 403), so the stamp
+    // holds the Task 16 fix round 1 (I1) rule. A new caller must make the same check first.
     // A job the cron already queued stays as it is (NULL, not the owner's): the coalesce returns it.
     sql: `INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate, principal)
           SELECT ?, ?, ?, 'queued', ?, 'schedule', ?, ?, 'owner' WHERE NOT EXISTS (SELECT 1 FROM bot_jobs WHERE schedule_id = ? AND status = 'queued')`,
