@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { isDefaultCrowHome } from "../../../../../shared/crow-home.js";
 import { scanSlots, consumersOfModel, piConfigRefs } from "../../../../../shared/model-consumers.js";
 import {
-  readCloudConsent, readCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow,
+  readCloudConsent, ensureCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow, consentTokenFor,
 } from "../../../../../shared/cloud-consent.js";
 
 const BACK = "?section=llm&tab=providers";
@@ -113,14 +113,21 @@ export function duplicateClusters(providers) {
   return out;
 }
 
-/** The "Let bots use this provider" switch for an enabled cloud row; "" otherwise. */
+/**
+ * The "Let bots use this provider" switch for an enabled cloud row; "" otherwise.
+ * Turning it on sends back an opaque token for the address and key this page
+ * showed (never the key or its fingerprint), so a row rewritten between the
+ * render and the click is refused, not consented.
+ */
 export function botsSwitch(p, { consent, salt, lang = "en" }) {
   if (p.disabled || !isCloudRow(p)) return "";
-  const on = consentVerdict(p, consent[p.id], { salt }) === "ok";
+  const on = consentVerdict(p, Object.hasOwn(consent, p.id) ? consent[p.id] : null, { salt }) === "ok";
   const label = escapeHtml(t("providers.botsMayUse", lang));
+  const token = !on && salt ? `
+            <input type="hidden" name="consent_token" value="${escapeHtml(consentTokenFor(p, salt))}">` : "";
   return `<form method="post" class="llm-bots-switch">
             <input type="hidden" name="action" value="${on ? "llm_provider_bots_deny" : "llm_provider_bots_allow"}">
-            <input type="hidden" name="id" value="${escapeHtml(p.id)}">
+            <input type="hidden" name="id" value="${escapeHtml(p.id)}">${token}
             <button type="submit" role="switch" aria-checked="${on ? "true" : "false"}"><span class="llm-bots-track" aria-hidden="true"></span>${label}</button>
           </form>`;
 }
@@ -158,7 +165,7 @@ function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
 
 export default {
   /** piAgentDir / tasksDbPaths are test seams; production passes neither. */
-  async render({ db, lang = "en", piAgentDir, tasksDbPaths }) {
+  async render({ req, db, lang = "en", piAgentDir, tasksDbPaths }) {
     const all = await listProvidersAll(db);
     const providers = all.filter((p) => !HIDDEN_PROVIDERS.has(p.id));
     const dups = duplicateClusters(providers);
@@ -181,7 +188,12 @@ export default {
     let ownInstanceId = null;
     try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
     const hostCtx = { ownAddrs: getOwnAddresses(), ownInstanceId, instanceNames };
-    const consentCtx = { consent: await readCloudConsent(db), salt: await readCloudConsentSalt(db), lang };
+    let salt = null;
+    try { salt = await ensureCloudConsentSalt(db); } catch (err) { console.warn(`[llm-providers-tab] consent salt: ${err.message}`); }
+    const consentCtx = { consent: await readCloudConsent(db), salt, lang };
+    const botsNote = req?.query?.bots === "changed"
+      ? `<p class="llm-bots-changed" role="status">${escapeHtml(t("providers.botsChanged", lang))}</p>`
+      : "";
     const buildRow = (p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const idEsc = escapeHtml(p.id);
@@ -261,6 +273,7 @@ export default {
         .llm-cell-id .llm-pill { margin-top:2px; }
       }
       .llm-bots-switch { margin-top:6px; }
+      .llm-bots-changed { margin:0 0 0.85rem; padding:0.6rem 0.8rem; border-left:3px solid var(--crow-error); background:var(--crow-bg-elevated); border-radius:4px; font-size:0.85rem; }
       .llm-bots-switch button {
         display:inline-flex; align-items:center; gap:8px; min-height:44px; padding:0 4px;
         background:none; border:none; cursor:pointer; color:var(--crow-text-secondary); font:inherit; font-size:0.78rem; text-align:left;
@@ -320,6 +333,7 @@ export default {
       details[open] > .llm-details-summary { background:var(--crow-bg-elevated); }
     </style>
 
+    ${botsNote}
     <p class="llm-section-hint">
       ${escapeHtml(fill(t(active.length === 1 ? "settings.providers.enabledOne" : "settings.providers.enabledN", lang), { n: active.length }))} ${escapeHtml(t("settings.providers.introTail", lang))}
     </p>
@@ -425,8 +439,10 @@ export default {
       if (id) {
         if (action === "llm_provider_bots_allow") {
           const user = typeof req.dashboardUser === "string" && req.dashboardUser ? req.dashboardUser : "owner";
-          const r = await grantCloudConsent(db, id, { actor: `dashboard:${user}` });
+          const consentToken = typeof req.body?.consent_token === "string" ? req.body.consent_token : "";
+          const r = await grantCloudConsent(db, id, { actor: `dashboard:${user}`, expect: { consentToken } });
           if (r.ok) console.log(`[llm-providers-tab] bots may use ${id} (dashboard:${user})`);
+          else if (r.reason === "changed") { res.redirectAfterPost(`${BACK}&bots=changed`); return true; }
         } else {
           await revokeCloudConsent(db, id);
           console.log(`[llm-providers-tab] bots may no longer use ${id}`);

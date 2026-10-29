@@ -211,6 +211,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     recommended: '${tJs("models.ui.recommended", lang)}',
     saved: '${tJs("models.add.saved", lang)}',
     okNoList: '${tJs("models.add.test.okNoList", lang)}',
+    botsFailed: '${tJs("models.add.botsFailed", lang)}',
     truncated: '${tJs("models.add.truncated", lang)}',
     notTested: '${tJs("models.add.notTested", lang)}',
     tryLater: '${tJs("models.add.tryLater", lang)}',
@@ -491,7 +492,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
         st.providerId = d.providerId;
         st.changed = true;
         ui.key.value = '';
-        ui.saveLine.textContent = T.saved;
+        ui.saveLine.textContent = d.consent === 'failed' ? T.saved + ' ' + T.botsFailed : T.saved;
         updateSave();
         ui.picksBox.hidden = false;
         return loadPlan();

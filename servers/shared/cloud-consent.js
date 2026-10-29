@@ -14,18 +14,20 @@
  * stored, and the salt keeps the fingerprint from matching a plain hash of the
  * key anywhere else (N7). Both keys are instance scope: never synced.
  *
+ * A grant records only what the caller saw: the page's opaque token, or the
+ * URL and key addProvider just wrote. Nothing is granted automatically (see
+ * the note at the end of this file).
+ *
  * Writes go straight to the global dashboard_settings table (instance-scope
  * keys are read global-direct), one at a time in this process.
  */
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { normalizeBaseUrl } from "./provider-presets.js";
 import { providerRowToObject } from "./provider-row.js";
 import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "../gateway/models/door-resolve.js";
 
 export const CLOUD_CONSENT_KEY = "llm_cloud_door_rows";
 export const CLOUD_CONSENT_SALT_KEY = "llm_cloud_consent_salt";
-
-const SEED_ACTOR = "seed";
 
 // One consent write at a time in this process (read, change, write back).
 let chain = Promise.resolve();
@@ -101,16 +103,63 @@ async function providerRow(db, id) {
   return rows[0] ? providerRowToObject(rows[0]) : null;
 }
 
+/** A consent expectation: what an entry for `row` would hold, under `salt`. */
+function expectationOf(row, salt) {
+  return { target: targetOf(row), keyFp: keyFingerprint(row, salt) };
+}
+
 /**
- * Agree that bots may use row `rowId` at its current address and key.
- * `{ok:false, reason:"not_found"}` when there is no such row.
+ * The opaque token a page renders for `row` (32 hex): an HMAC over the row's
+ * target and key fingerprint under the salt. It never carries the key or
+ * keyFp, and a different address or key gives a different token.
  */
-export async function grantCloudConsent(db, rowId, { actor } = {}) {
+export function consentTokenFor(row, salt) {
+  const { target, keyFp } = expectationOf(row, salt);
+  return createHmac("sha256", Buffer.from(salt, "hex")).update(JSON.stringify(["consent-token-v1", target, keyFp])).digest("hex").slice(0, 32);
+}
+
+/** This box's salt, minted on first use (render calls this to put a token on the page). */
+export const ensureCloudConsentSalt = (db) => ensureSalt(db);
+
+function sameHex(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+/**
+ * Does `row`, now, still hold what the caller saw? `expect` is either
+ * `{consentToken}` (what a page rendered, `consentTokenFor`) or
+ * `{baseUrl, apiKey}` (what a caller just wrote). Anything else is false.
+ */
+function matchesExpectation(row, salt, expect) {
+  if (!expect || typeof expect !== "object") return false;
+  if (typeof expect.consentToken === "string") return sameHex(expect.consentToken, consentTokenFor(row, salt));
+  if (typeof expect.baseUrl === "string") {
+    const seen = expectationOf({ baseUrl: expect.baseUrl, apiKey: expect.apiKey ?? null }, salt);
+    const now = expectationOf(row, salt);
+    return seen.target === now.target && sameHex(seen.keyFp, now.keyFp);
+  }
+  return false;
+}
+
+/**
+ * Agree that bots may use row `rowId`, but only if it still holds what the
+ * caller saw (`expect`, see matchesExpectation): consent is never recorded
+ * for an address or key the operator did not see or write. Refusals:
+ * `not_found`, `disabled`, `not_cloud` (a local, door or forbidden address:
+ * the cloud door never serves it), `changed` (the row differs from what was
+ * seen, or no expectation was given).
+ * @returns {Promise<{ok:true}|{ok:false, reason:string}>}
+ */
+export async function grantCloudConsent(db, rowId, { actor, expect } = {}) {
   if (typeof rowId !== "string" || !rowId) return { ok: false, reason: "not_found" };
   return locked(async () => {
     const row = await providerRow(db, rowId);
     if (!row) return { ok: false, reason: "not_found" };
+    if (row.disabled) return { ok: false, reason: "disabled" };
+    if (!isCloudRow(row)) return { ok: false, reason: "not_cloud" };
     const salt = await ensureSalt(db);
+    if (!matchesExpectation(row, salt, expect)) return { ok: false, reason: "changed" };
     const all = parseMap(await readValue(db, CLOUD_CONSENT_KEY));
     all[rowId] = entryFor(row, salt, actor);
     await writeValue(db, CLOUD_CONSENT_KEY, JSON.stringify(all));
@@ -133,18 +182,16 @@ export async function revokeCloudConsent(db, rowId) {
 }
 
 /**
- * May bots use `row` now? `consent` is the row's own entry (or the whole map,
- * when `row.id` is set). "ok", or why not: "not_consented" (no usable entry),
- * "host_changed" (origin or path differ), "key_changed" (another key, or no
- * salt to check it with). Pure.
+ * May bots use `row` now? `entry` is the row's OWN consent entry
+ * (`readCloudConsent(db)[rowId]`), never the whole map. "ok", or why not:
+ * "not_consented" (no usable entry), "host_changed" (origin or path differ),
+ * "key_changed" (another key, or no salt to check it with). Pure.
  */
-export function consentVerdict(row, consent, { salt } = {}) {
-  let entry = consent;
-  if (entry && typeof entry === "object" && typeof entry.target !== "string" && row?.id && Object.hasOwn(entry, row.id)) entry = entry[row.id];
+export function consentVerdict(row, entry, { salt } = {}) {
   if (!entry || typeof entry !== "object" || typeof entry.target !== "string" || typeof entry.keyFp !== "string") return "not_consented";
   if (entry.target !== targetOf(row)) return "host_changed";
   if (typeof salt !== "string" || !/^[0-9a-f]{64}$/.test(salt)) return "key_changed";
-  return entry.keyFp === keyFingerprint(row, salt) ? "ok" : "key_changed";
+  return sameHex(entry.keyFp, keyFingerprint(row, salt)) ? "ok" : "key_changed";
 }
 
 /** A row the cloud door could serve: a public address, never a door, loopback, LAN or tailnet one. */
@@ -154,29 +201,12 @@ export function isCloudRow(row) {
   return !isLocalClassTarget(url) && !isForbiddenTarget(url) && !isDoorUrl(url);
 }
 
-/**
- * One-time seed for boxes upgrading into consent: only while the consent key
- * is absent, grant every enabled cloud row whose `instance_id` is this box's
- * own id (rows this box wrote). A row a peer wrote, or one with no instance id
- * at all, is never seeded. With no own id known, nothing is written, so a
- * later boot can still seed.
- */
-export async function seedCloudConsent(db, { ownInstanceId } = {}) {
-  if (typeof ownInstanceId !== "string" || !ownInstanceId) return { seeded: [] };
-  return locked(async () => {
-    if ((await readValue(db, CLOUD_CONSENT_KEY)) != null) return { seeded: [] };
-    const { rows } = await db.execute("SELECT * FROM providers WHERE disabled = 0 ORDER BY id");
-    const mine = rows.map(providerRowToObject).filter((r) => r.instance_id === ownInstanceId && isCloudRow(r));
-    const all = {};
-    if (mine.length) {
-      const salt = await ensureSalt(db);
-      for (const r of mine) all[r.id] = entryFor(r, salt, SEED_ACTOR);
-    }
-    // Insert only if still absent: the seed never overwrites a real grant.
-    await db.execute({
-      sql: "INSERT OR IGNORE INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))",
-      args: [CLOUD_CONSENT_KEY, JSON.stringify(all)],
-    });
-    return { seeded: mine.map((r) => r.id) };
-  });
-}
+// There is deliberately NO automatic seed (fix round 1, Task 15). A one-time
+// "grant the rows this box wrote" pass would have to trust
+// providers.instance_id, and inbound sync keeps whatever instance_id a peer
+// sends, so nothing local proves this box wrote a row. A row is consented only
+// by an explicit act on this box: its own addProvider (for the URL and key it
+// just wrote) or the operator's "Let bots use this provider" switch. Bots do
+// not reach cloud rows through the door before this ships, so nothing that
+// works today stops. The Phase 3 convert pass will offer a one-time consent
+// step for existing cloud rows, shown to the operator.

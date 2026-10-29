@@ -382,7 +382,8 @@ export default function rolesApiRouter({
     const r = await addProvider(db, { ...providerBody(req.body), modelIds }, { testFn });
     if (r?.ok) {
       console.log(`[roles-api] provider ${r.providerId} added by ${actorOf(req)}`);
-      return res.json({ ok: true, providerId: r.providerId });
+      const consent = ["granted", "failed", "not_needed"].includes(r.consent) ? r.consent : "failed";
+      return res.json({ ok: true, providerId: r.providerId, consent });
     }
     const out = { ok: false, code: typeof r?.code === "string" ? r.code : "save_failed" };
     if (Number.isFinite(r?.status)) out.status = r.status;

@@ -494,14 +494,14 @@ test("POST /api/providers refuses on a failed test and writes nothing", async ()
   assert.equal(await providerCount(), before);
 });
 
-test("POST /api/providers saves on a passing test and answers only the id", async () => {
+test("POST /api/providers saves on a passing test and answers only the id and the consent result", async () => {
   const testFn = async () => ({ ok: true, code: "ok", status: 200, models: ["x/y"], host: "openrouter.ai", baseUrl: OR_URL });
   await withServer(async (s) => {
     const r = await call(s, "POST", "/api/providers", {
       body: { presetId: "openrouter", apiKey: "fixture-pasted-key-777", modelIds: ["x/y"] }, headers: csrfHeaders,
     });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json, { ok: true, providerId: "openrouter" });
+    assert.deepEqual(r.json, { ok: true, providerId: "openrouter", consent: "granted" });
   }, addOpts({ testFn }));
   const row = (await db.execute("SELECT api_key, models FROM providers WHERE id = 'openrouter'")).rows[0];
   assert.equal(row.api_key, "fixture-pasted-key-777");

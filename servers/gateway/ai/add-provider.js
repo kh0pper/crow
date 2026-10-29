@@ -293,14 +293,16 @@ function cleanModelIds(modelIds) {
  * Test, then write one providers row. Refuses unless the test passed (or, for
  * `other` with a typed model id, the server simply had no listing). On
  * `reuse`, the stored models are kept and the ticked ones added (I9), so a
- * model a role is bound to is never dropped. `onAdded(providerId)` runs after
- * the write; by default it records this box's consent for bots to use the
- * row (Task 15), on a new row and again on reuse.
+ * model a role is bound to is never dropped. `onAdded(providerId, {baseUrl,
+ * apiKey})` runs after the write with exactly what was written; by default it
+ * records this box's consent for bots to use the row (Task 15), on a new row
+ * and again on reuse, refused if the row changed since. The result's
+ * `consent` is "granted", "failed", or "not_needed" (not a cloud row).
  */
 export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, modelIds } = {}, {
   upsertProviderFn = upsertProvider, invalidateFn = invalidateProvidersCache,
   testFn = testProviderKey, listRowsFn = listProvidersAll,
-  onAdded = (id) => grantCloudConsent(db, id, { actor: "add-provider" }),
+  onAdded = (id, written) => grantCloudConsent(db, id, { actor: "add-provider", expect: written }),
 } = {}) {
   const preset = presetById(presetId);
   if (!preset) return { ok: false, code: "unknown_preset" };
@@ -345,7 +347,7 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
       providerType: preset.providerType,
     });
     invalidateFn();
-    saved = { id, reuse };
+    saved = { id, reuse, written: { baseUrl: rowUrl, apiKey: key || null } };
   } catch (err) {
     console.warn(`[add-provider] save failed: ${err?.message}`);
     return { ok: false, code: "save_failed" };
@@ -353,10 +355,12 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
     release();
   }
   // Outside the try: the row is written, so a failing onAdded must not read as "not saved".
-  if (onAdded) {
-    try { await onAdded(saved.id); } catch (err) { console.warn(`[add-provider] after-save step failed: ${err?.message}`); }
-  }
-  return { ok: true, providerId: saved.id, reuse: saved.reuse, test };
+  let consent = "failed";
+  try {
+    const r = onAdded ? await onAdded(saved.id, saved.written) : null;
+    consent = r?.ok === true ? "granted" : r?.reason === "not_cloud" ? "not_needed" : "failed";
+  } catch (err) { console.warn(`[add-provider] after-save step failed: ${err?.message}`); }
+  return { ok: true, providerId: saved.id, reuse: saved.reuse, consent, test };
 }
 
 // --- "Use the recommended models for roles you haven't set" (Task 11) -------

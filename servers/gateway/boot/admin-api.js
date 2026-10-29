@@ -36,30 +36,6 @@ export async function seedRolesAtBoot(createDb = createDbClient) {
   }
 }
 
-/**
- * Boot step: the one-time cloud-consent seed (rows this box wrote may keep
- * reaching the cloud door after an upgrade; peer-written rows never). Own
- * client, always closed; never throws.
- */
-export async function seedCloudConsentAtBoot(createDb = createDbClient, { ownInstanceId } = {}) {
-  let db;
-  try {
-    db = createDb();
-    const { seedCloudConsent } = await import("../../shared/cloud-consent.js");
-    let own = ownInstanceId;
-    if (own === undefined) {
-      const { getOrCreateLocalInstanceId } = await import("../instance-registry.js");
-      own = getOrCreateLocalInstanceId();
-    }
-    const r = await seedCloudConsent(db, { ownInstanceId: own });
-    if (r.seeded.length) console.log(`[cloud-consent] Bots may use ${r.seeded.length} cloud provider(s) this box added: ${r.seeded.join(", ")}`);
-  } catch (err) {
-    console.warn("[cloud-consent] Seed skipped:", err?.message);
-  } finally {
-    try { db?.close(); } catch {}
-  }
-}
-
 export async function mountAdminApi(app, deps) {
   const { dashboardAuth, noAuth } = deps;
 
@@ -204,8 +180,11 @@ export async function mountAdminApi(app, deps) {
     // --- Model roles seed: instance-owned `model_role.*` rows that track
     // today's defaults until the user edits a role. Never emitted. ---
     await seedRolesAtBoot();
-    // --- Cloud consent seed: once, only while the consent key is absent. ---
-    await seedCloudConsentAtBoot();
+    // No cloud-consent seed here, on purpose: inbound sync keeps a peer-sent
+    // providers.instance_id, so boot cannot prove which rows this box wrote.
+    // Consent comes only from addProvider or the operator's switch
+    // (servers/shared/cloud-consent.js); Phase 3's convert pass offers a
+    // one-time consent step.
     // --- Model roles snapshot for pi ($CROW_HOME/model-roles.json, 0600,
     // atomic). Rewritten after local provider and binding writes (debounced)
     // and on the reconcile interval, which covers replicated provider applies. ---

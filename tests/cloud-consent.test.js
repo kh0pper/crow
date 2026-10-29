@@ -11,9 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmScratch } from "./helpers/safe-rm.js";
 import { createDbClient } from "../servers/db.js";
+import * as consentMod from "../servers/shared/cloud-consent.js";
 import {
-  readCloudConsent, grantCloudConsent, revokeCloudConsent, consentVerdict, seedCloudConsent,
-  readCloudConsentSalt, CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY,
+  readCloudConsent, grantCloudConsent, revokeCloudConsent, consentVerdict, consentTokenFor,
+  readCloudConsentSalt, ensureCloudConsentSalt, CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY,
 } from "../servers/shared/cloud-consent.js";
 import { isInstanceScope, isSyncable } from "../servers/gateway/dashboard/settings/sync-allowlist.js";
 import { addProvider } from "../servers/gateway/ai/add-provider.js";
@@ -57,6 +58,11 @@ async function seeded() {
   await ins(db, "cloud-p", "https://api.example.com/v1", { key: KEY_P, instanceId: PEER });
   return db;
 }
+/** Grant as the switch does: with the token for the row as it is now (what a page would render). */
+async function tick(db, id, actor = "t") {
+  const salt = await ensureCloudConsentSalt(db);
+  return grantCloudConsent(db, id, { actor, expect: { consentToken: consentTokenFor(await rowOf(db, id), salt) } });
+}
 
 test("both keys are instance scope and never synced", () => {
   for (const k of [CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY]) {
@@ -67,47 +73,25 @@ test("both keys are instance scope and never synced", () => {
   assert.equal(CLOUD_CONSENT_SALT_KEY, "llm_cloud_consent_salt");
 });
 
-test("the seed grants only rows this box wrote, once", async () => {
+test("nothing is consented automatically: no seed export, and boot grants nothing", async () => {
+  // A seed would have to trust providers.instance_id, which a peer controls through sync.
+  assert.equal(consentMod.seedCloudConsent, undefined);
+  const admin = await import("../servers/gateway/boot/admin-api.js");
+  assert.equal(admin.seedCloudConsentAtBoot, undefined);
+  const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/boot/admin-api.js"), "utf8");
+  assert.ok(!/(import\(|from )["'][^"']*cloud-consent/.test(src), "admin-api.js never imports consent");
+  assert.ok(!/grantCloudConsent|seedCloudConsent/.test(src));
+  // Rows claiming this box's id (or none) stay unconsented until an explicit act.
   const db = await seeded();
+  await ins(db, "cloud-own", "https://api.example.com/v1/own", { key: KEY_A, instanceId: getOrCreateLocalInstanceId() });
   await ins(db, "cloud-null", "https://api.example.com/v1/n", { key: KEY_P, instanceId: null });
-  await ins(db, "cloud-empty", "https://api.example.com/v1/e", { key: KEY_P, instanceId: "" });
-  await ins(db, "cloud-off", "https://api.example.com/v1/o", { key: KEY_A, disabled: 1 });
-  await ins(db, "local-chat", "http://127.0.0.1:8003/v1");
-  await ins(db, "local-lan", "http://192.168.1.5:8000/v1");
-  const first = await seedCloudConsent(db, { ownInstanceId: OWN });
-  assert.deepEqual(first.seeded, ["cloud-a"]);
-  const c = await readCloudConsent(db);
-  assert.deepEqual(Object.keys(c), ["cloud-a"]);
-  assert.equal(c["cloud-a"].target, "https://api.example.com/v1/acct-a");
-  assert.match(c["cloud-a"].keyFp, /^[0-9a-f]{16}$/);
-  assert.equal(typeof c["cloud-a"].at, "string");
-  assert.equal(c["cloud-a"].by, "seed");
-  assert.equal(await verdictOf(db, "cloud-a"), "ok");
-
-  // Second call: the key exists, nothing happens (even for a new own row).
-  await ins(db, "cloud-b", "https://api.example.com/v1/b", { key: KEY_A });
-  const second = await seedCloudConsent(db, { ownInstanceId: OWN });
-  assert.deepEqual(second.seeded, []);
-  assert.deepEqual(Object.keys(await readCloudConsent(db)), ["cloud-a"]);
-});
-
-test("peer-written rows fail closed: a null or missing instance id is never seeded", async () => {
-  const db = newDb();
-  await ins(db, "cloud-null", "https://api.example.com/v1", { key: KEY_P, instanceId: null });
-  const r = await seedCloudConsent(db, { ownInstanceId: OWN });
-  assert.deepEqual(r.seeded, []);
-  assert.equal(await verdictOf(db, "cloud-null"), "not_consented");
-  // No own id known: nothing is seeded, and the key stays absent so a later boot can.
-  const db2 = newDb();
-  await ins(db2, "cloud-a", "https://api.example.com/v1", { key: KEY_A, instanceId: null });
-  assert.deepEqual((await seedCloudConsent(db2, { ownInstanceId: null })).seeded, []);
-  assert.deepEqual((await seedCloudConsent(db2, { ownInstanceId: "" })).seeded, []);
-  assert.equal(await rawConsent(db2), null);
+  assert.deepEqual(await readCloudConsent(db), {});
+  for (const id of ["cloud-a", "cloud-p", "cloud-own", "cloud-null"]) assert.equal(await verdictOf(db, id), "not_consented", id);
 });
 
 test("a sync-style rewrite of the host, of only the path, or of only the key stops the row", async () => {
   const db = await seeded();
-  await seedCloudConsent(db, { ownInstanceId: OWN });
+  assert.deepEqual(await tick(db, "cloud-a"), { ok: true });
   assert.equal(await verdictOf(db, "cloud-a"), "ok");
 
   await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", "cloud-a"] });
@@ -128,7 +112,7 @@ test("a sync-style rewrite of the host, of only the path, or of only the key sto
 
 test("the stored value holds neither the key nor its plain sha256; the fingerprint is salted per box", async () => {
   const db = await seeded();
-  await seedCloudConsent(db, { ownInstanceId: OWN });
+  await tick(db, "cloud-a");
   const raw = await rawConsent(db);
   const plain = createHash("sha256").update(KEY_A).digest("hex");
   assert.ok(!raw.includes(KEY_A));
@@ -139,46 +123,92 @@ test("the stored value holds neither the key nor its plain sha256; the fingerpri
 
   // Another box, same row and key: another salt, another fingerprint.
   const db2 = await seeded();
-  await seedCloudConsent(db2, { ownInstanceId: OWN });
+  await tick(db2, "cloud-a");
   assert.notEqual(await readCloudConsentSalt(db2), salt);
   assert.notEqual((await readCloudConsent(db2))["cloud-a"].keyFp, (await readCloudConsent(db))["cloud-a"].keyFp);
 
   // The salt is minted once and kept.
-  await grantCloudConsent(db, "cloud-p", { actor: "t" });
+  await tick(db, "cloud-p");
   assert.equal(await readCloudConsentSalt(db), salt);
 });
 
-test("consentVerdict fails closed without a salt or an entry", async () => {
+test("consentVerdict takes the row's own entry only, and fails closed", async () => {
   const db = await seeded();
-  await seedCloudConsent(db, { ownInstanceId: OWN });
+  await tick(db, "cloud-a");
   const row = await rowOf(db, "cloud-a");
-  const entry = (await readCloudConsent(db))["cloud-a"];
-  assert.equal(consentVerdict(row, entry, { salt: null }), "key_changed");
-  assert.equal(consentVerdict(row, undefined, { salt: await readCloudConsentSalt(db) }), "not_consented");
-  assert.equal(consentVerdict(row, null, { salt: await readCloudConsentSalt(db) }), "not_consented");
-  assert.equal(consentVerdict(row, { target: 5 }, { salt: await readCloudConsentSalt(db) }), "not_consented");
+  const all = await readCloudConsent(db);
+  const salt = await readCloudConsentSalt(db);
+  assert.equal(consentVerdict(row, all["cloud-a"], { salt }), "ok");
+  assert.equal(consentVerdict(row, all, { salt }), "not_consented", "the whole map is not an entry");
+  assert.equal(consentVerdict(row, all["cloud-a"], { salt: null }), "key_changed");
+  assert.equal(consentVerdict(row, undefined, { salt }), "not_consented");
+  assert.equal(consentVerdict(row, null, { salt }), "not_consented");
+  assert.equal(consentVerdict(row, { target: 5 }, { salt }), "not_consented");
+});
+
+test("a grant needs what was seen: a token or the written URL and key; a rewrite in between is refused", async () => {
+  const db = await seeded();
+  const salt = await ensureCloudConsentSalt(db);
+  // No expectation at all: refused.
+  assert.deepEqual(await grantCloudConsent(db, "cloud-p", { actor: "t" }), { ok: false, reason: "changed" });
+  assert.deepEqual(await grantCloudConsent(db, "cloud-p", { actor: "t", expect: {} }), { ok: false, reason: "changed" });
+  // The token rendered for the row as it was; then a peer rewrites the host before the click.
+  const seenToken = consentTokenFor(await rowOf(db, "cloud-p"), salt);
+  assert.match(seenToken, /^[0-9a-f]{32}$/);
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", "cloud-p"] });
+  assert.deepEqual(await grantCloudConsent(db, "cloud-p", { actor: "t", expect: { consentToken: seenToken } }), { ok: false, reason: "changed" });
+  assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
+  // A key rewrite between render and click: refused too.
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://api.example.com/v1", "cloud-p"] });
+  const t2 = consentTokenFor(await rowOf(db, "cloud-p"), salt);
+  await db.execute({ sql: "UPDATE providers SET api_key = ? WHERE id = ?", args: ["fixture-cloud-key-q", "cloud-p"] });
+  assert.equal((await grantCloudConsent(db, "cloud-p", { actor: "t", expect: { consentToken: t2 } })).reason, "changed");
+  // The written-values form.
+  assert.equal((await grantCloudConsent(db, "cloud-p", { actor: "t", expect: { baseUrl: "https://api.example.com/v1", apiKey: KEY_P } })).reason, "changed");
+  assert.deepEqual(await grantCloudConsent(db, "cloud-p", { actor: "t", expect: { baseUrl: "https://api.example.com/v1/", apiKey: "fixture-cloud-key-q" } }), { ok: true });
+  assert.equal(await verdictOf(db, "cloud-p"), "ok");
+  // The token never carries the key or keyFp.
+  const entry = (await readCloudConsent(db))["cloud-p"];
+  assert.ok(!seenToken.includes(entry.keyFp));
+});
+
+test("grant refuses rows that are not cloud rows, or are disabled", async () => {
+  const db = newDb();
+  await ins(db, "local-chat", "http://127.0.0.1:8003/v1");
+  await ins(db, "local-lan", "http://192.168.1.5:8000/v1");
+  await ins(db, "tail", "https://crow.example.ts.net/v1");
+  await ins(db, "meta", "http://169.254.169.254/v1");
+  await ins(db, "door", "https://api.example.com/llm/v1");
+  await ins(db, "cloud-off", "https://api.example.com/v1/o", { key: KEY_A, disabled: 1 });
+  const salt = await ensureCloudConsentSalt(db);
+  for (const id of ["local-chat", "local-lan", "tail", "meta", "door"]) {
+    const r = await grantCloudConsent(db, id, { actor: "t", expect: { consentToken: consentTokenFor(await rowOf(db, id), salt) } });
+    assert.deepEqual(r, { ok: false, reason: "not_cloud" }, id);
+  }
+  assert.deepEqual(await grantCloudConsent(db, "cloud-off", { actor: "t", expect: { consentToken: consentTokenFor(await rowOf(db, "cloud-off"), salt) } }), { ok: false, reason: "disabled" });
+  assert.deepEqual(await readCloudConsent(db), {});
 });
 
 test("grant, re-grant and revoke", async () => {
   const db = await seeded();
   assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
-  assert.deepEqual(await grantCloudConsent(db, "cloud-p", { actor: "dashboard:owner" }), { ok: true });
+  assert.deepEqual(await tick(db, "cloud-p", "dashboard:owner"), { ok: true });
   assert.equal(await verdictOf(db, "cloud-p"), "ok");
   assert.equal((await readCloudConsent(db))["cloud-p"].by, "dashboard:owner");
   await db.execute({ sql: "UPDATE providers SET api_key = ? WHERE id = ?", args: ["fixture-cloud-key-q", "cloud-p"] });
   assert.equal(await verdictOf(db, "cloud-p"), "key_changed");
-  await grantCloudConsent(db, "cloud-p", { actor: "dashboard:owner" });
+  await tick(db, "cloud-p", "dashboard:owner");
   assert.equal(await verdictOf(db, "cloud-p"), "ok");
   assert.deepEqual(await revokeCloudConsent(db, "cloud-p"), { ok: true });
   assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
-  assert.equal((await grantCloudConsent(db, "no-such-row", { actor: "t" })).ok, false);
+  assert.equal((await grantCloudConsent(db, "no-such-row", { actor: "t", expect: { consentToken: "0".repeat(32) } })).reason, "not_found");
   assert.equal((await readCloudConsent(db))["no-such-row"], undefined);
 });
 
 test("parallel grants do not lose each other", async () => {
   const db = await seeded();
   for (let i = 0; i < 6; i++) await ins(db, `cloud-${i}`, `https://api.example.com/v1/${i}`, { key: KEY_A });
-  await Promise.all([0, 1, 2, 3, 4, 5].map((i) => grantCloudConsent(db, `cloud-${i}`, { actor: "t" })));
+  await Promise.all([0, 1, 2, 3, 4, 5].map((i) => tick(db, `cloud-${i}`)));
   assert.deepEqual(Object.keys(await readCloudConsent(db)).sort(), [0, 1, 2, 3, 4, 5].map((i) => `cloud-${i}`));
 });
 
@@ -187,73 +217,130 @@ test("parallel grants do not lose each other", async () => {
 function fakeRes() {
   return { redirected: null, redirectAfterPost(u) { this.redirected = u; }, status() { return this; }, type() { return this; }, send() { return this; } };
 }
+/** The <tr> for provider `id` in rendered html. */
+function trOf(h, id) {
+  const at = h.indexOf(`>${id}<`);
+  assert.ok(at > 0, `row ${id} rendered`);
+  const start = h.lastIndexOf("<tr", at);
+  return h.slice(start, h.indexOf("</tr>", at));
+}
+const tokenIn = (tr) => tr.match(/name="consent_token" value="([0-9a-f]{32})"/)?.[1] ?? null;
+const post = (db, action, body) => {
+  const res = fakeRes();
+  return tab.handleAction({ req: { body: { action, ...body }, query: {} }, res, db, action }).then((handled) => ({ handled, res }));
+};
 
-test("the providers tab shows a switch on cloud rows only, and its actions grant and revoke", async () => {
+test("the providers tab shows a switch on each cloud row (own token, never keyFp) and none on local rows", async () => {
   const db = await seeded();
   await ins(db, "local-chat", "http://127.0.0.1:8003/v1");
-  const render = (lang = "en") => tab.render({ db, lang, piAgentDir: null, tasksDbPaths: [] });
+  const render = (lang = "en", query = {}) => tab.render({ req: { query }, db, lang, piAgentDir: null, tasksDbPaths: [] });
   let h = await render();
   const label = t("providers.botsMayUse", "en");
   assert.equal(label, "Let bots use this provider");
   assert.equal(t("providers.botsMayUse", "es"), "Permitir que los bots usen este proveedor");
-  assert.ok(h.includes(label));
-  assert.match(h, /name="action" value="llm_provider_bots_allow"[\s\S]*?name="id" value="cloud-p"/);
-  const localRow = h.slice(h.indexOf(">local-chat<"));
-  const localTr = localRow.slice(0, localRow.indexOf("</tr>"));
-  assert.ok(!localTr.includes("llm_provider_bots_"), "no switch on a local row");
+  const pTr = trOf(h, "cloud-p"), aTr = trOf(h, "cloud-a");
+  for (const tr of [pTr, aTr]) {
+    assert.ok(tr.includes(label));
+    assert.match(tr, /name="action" value="llm_provider_bots_allow"/);
+    assert.match(tr, /role="switch" aria-checked="false"/);
+    assert.ok(tokenIn(tr));
+  }
+  assert.notEqual(tokenIn(pTr), tokenIn(aTr), "each row has its own token");
+  assert.ok(!trOf(h, "local-chat").includes("llm_provider_bots_"), "no switch on a local row");
   assert.ok((await render("es")).includes(t("providers.botsMayUse", "es")));
 
-  const res = fakeRes();
-  const handled = await tab.handleAction({ req: { body: { action: "llm_provider_bots_allow", id: "cloud-p" } }, res, db, action: "llm_provider_bots_allow" });
+  // Allow with the rendered token.
+  const { handled, res } = await post(db, "llm_provider_bots_allow", { id: "cloud-p", consent_token: tokenIn(pTr) });
   assert.equal(handled, true);
   assert.equal(res.redirected, "?section=llm&tab=providers");
   assert.equal(await verdictOf(db, "cloud-p"), "ok");
   assert.equal((await readCloudConsent(db))["cloud-p"].by, "dashboard:owner");
+  assert.equal(await verdictOf(db, "cloud-a"), "not_consented", "only the row clicked");
   h = await render();
-  assert.match(h, /name="action" value="llm_provider_bots_deny"[\s\S]*?name="id" value="cloud-p"/);
-  assert.match(h, /role="switch" aria-checked="true"/);
+  const onTr = trOf(h, "cloud-p");
+  assert.match(onTr, /name="action" value="llm_provider_bots_deny"/);
+  assert.match(onTr, /role="switch" aria-checked="true"/);
+  const entry = (await readCloudConsent(db))["cloud-p"];
+  assert.ok(!h.includes(entry.keyFp), "the page never shows keyFp");
+  assert.ok(!h.includes(KEY_P), "the page never shows the key");
 
-  await tab.handleAction({ req: { body: { action: "llm_provider_bots_deny", id: "cloud-p" } }, res: fakeRes(), db, action: "llm_provider_bots_deny" });
+  await post(db, "llm_provider_bots_deny", { id: "cloud-p" });
   assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
-
-  // A row whose address changed since consent reads as off, so ticking it agrees again.
-  await grantCloudConsent(db, "cloud-p", { actor: "t" });
-  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", "cloud-p"] });
-  h = await render();
-  const pRow = h.slice(h.indexOf(">cloud-p<"));
-  assert.match(pRow.slice(0, pRow.indexOf("</tr>")), /llm_provider_bots_allow/);
+  // Allow with no token, or a wrong one: refused.
+  assert.equal((await post(db, "llm_provider_bots_allow", { id: "cloud-p" })).res.redirected, "?section=llm&tab=providers&bots=changed");
+  await post(db, "llm_provider_bots_allow", { id: "cloud-p", consent_token: tokenIn(aTr) });
+  assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
 });
 
-test("the switch actions go through the settings action path (session- and CSRF-gated)", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/dashboard/index.js"), "utf8");
-  assert.match(src, /router\.use\("\/dashboard", csrfMiddleware\)/);
-  const llm = readFileSync(join(import.meta.dirname, "..", "servers/gateway/dashboard/settings/sections/llm.js"), "utf8");
-  assert.match(llm, /handleAction: providersTab\.handleAction/);
+test("a row rewritten between render and click is refused, with a plain line", async () => {
+  const db = await seeded();
+  const render = (query = {}) => tab.render({ req: { query }, db, lang: "en", piAgentDir: null, tasksDbPaths: [] });
+  const seen = tokenIn(trOf(await render(), "cloud-p"));
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", "cloud-p"] });
+  const { res } = await post(db, "llm_provider_bots_allow", { id: "cloud-p", consent_token: seen });
+  assert.equal(res.redirected, "?section=llm&tab=providers&bots=changed");
+  assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
+  const line = t("providers.botsChanged", "en");
+  assert.equal(line, "This provider changed since the page loaded. Check it and try again.");
+  assert.equal(t("providers.botsChanged", "es"), "Este proveedor cambió desde que se cargó la página. Revísalo y vuelve a intentarlo.");
+  assert.ok((await render({ bots: "changed" })).includes(line));
+  assert.ok(!(await render()).includes(line));
+  // The fresh render's token works for the address shown now.
+  const fresh = tokenIn(trOf(await render(), "cloud-p"));
+  assert.notEqual(fresh, seen);
+  await post(db, "llm_provider_bots_allow", { id: "cloud-p", consent_token: fresh });
+  assert.equal(await verdictOf(db, "cloud-p"), "ok");
+
+  // A consented row whose address then changed reads as off, so ticking it agrees again.
+  await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://203.0.113.9/v1", "cloud-p"] });
+  assert.match(trOf(await render(), "cloud-p"), /llm_provider_bots_allow/);
 });
 
 // --- addProvider grants ------------------------------------------------------
 
+const okTest = async () => ({ ok: true, code: "ok", models: ["c1"], host: "api.openai.com", baseUrl: "https://api.openai.com/v1" });
+
 test("addProvider grants the new row and re-grants on reuse", async () => {
   const db = newDb();
-  const okTest = async () => ({ ok: true, code: "ok", models: ["c1"], host: "api.openai.com", baseUrl: "https://api.openai.com/v1" });
   const out = await addProvider(db, { presetId: "openai", apiKey: KEY_A, modelIds: ["c1"] }, { testFn: okTest, invalidateFn: () => {} });
   assert.equal(out.ok, true);
   assert.equal(out.reuse, false);
+  assert.equal(out.consent, "granted");
   const id = out.providerId;
   assert.equal(await verdictOf(db, id), "ok");
-  // The row is this box's own (upsertProvider stamps its instance id).
-  assert.equal((await db.execute({ sql: "SELECT instance_id FROM providers WHERE id = ?", args: [id] })).rows[0].instance_id, getOrCreateLocalInstanceId());
+  assert.equal((await readCloudConsent(db))[id].by, "add-provider");
 
   await revokeCloudConsent(db, id);
   const again = await addProvider(db, { presetId: "openai", apiKey: KEY_A, modelIds: ["c1"] }, { testFn: okTest, invalidateFn: () => {} });
   assert.equal(again.reuse, true);
   assert.equal(again.providerId, id);
+  assert.equal(again.consent, "granted");
   assert.equal(await verdictOf(db, id), "ok");
 });
 
-test("a failing consent write after the save still reads as saved", async () => {
+test("addProvider consents only to what it wrote: a rewrite before the grant fails it", async () => {
   const db = newDb();
-  const okTest = async () => ({ ok: true, code: "ok", models: ["c1"], host: "api.openai.com", baseUrl: "https://api.openai.com/v1" });
+  const { upsertProvider } = await import("../servers/shared/providers-db.js");
+  // A sync apply lands between the save and the grant.
+  const raceUpsert = async (d, p) => {
+    const r = await upsertProvider(d, p);
+    await d.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://198.51.100.4/v1", p.id] });
+    return r;
+  };
+  const out = await addProvider(db, { presetId: "openai", apiKey: KEY_A, modelIds: ["c1"] }, { testFn: okTest, invalidateFn: () => {}, upsertProviderFn: raceUpsert });
+  assert.equal(out.ok, true);
+  assert.equal(out.consent, "failed");
+  assert.equal(await verdictOf(db, out.providerId), "not_consented");
+});
+
+test("addProvider: a local 'other' server needs no consent; a failing grant still reads as saved", async () => {
+  const db = newDb();
+  const local = await addProvider(db, { presetId: "other", baseUrl: "http://127.0.0.1:8003/v1", apiKey: "", modelIds: ["m1"] }, {
+    testFn: async () => ({ ok: true, code: "ok", models: ["m1"], host: "127.0.0.1", baseUrl: "http://127.0.0.1:8003/v1" }), invalidateFn: () => {},
+  });
+  assert.equal(local.ok, true);
+  assert.equal(local.consent, "not_needed");
+
   const warns = [];
   const orig = console.warn;
   console.warn = (...a) => warns.push(a.join(" "));
@@ -264,38 +351,17 @@ test("a failing consent write after the save still reads as saved", async () => 
     });
   } finally { console.warn = orig; }
   assert.equal(out.ok, true);
+  assert.equal(out.consent, "failed");
   assert.ok(warns.some((w) => /disk full/.test(w)), JSON.stringify(warns));
   assert.ok(!warns.some((w) => w.includes(KEY_A)));
 });
 
-// --- boot step ---------------------------------------------------------------
-
-test("boot wiring: the consent seed runs in the authenticated branch after the reconcile", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/boot/admin-api.js"), "utf8");
-  const r = src.indexOf("await reconcile();");
-  assert.ok(r > 0);
-  const call = src.indexOf("await seedCloudConsentAtBoot();", r);
-  assert.ok(call > r, "seeded after the provider reconcile");
-  assert.ok(src.indexOf("if (noAuth)") < r, "inside the branch that skips --no-auth");
-});
-
-test("the boot seed never throws and always closes its own client", async () => {
-  const { seedCloudConsentAtBoot } = await import("../servers/gateway/boot/admin-api.js");
-  const warns = [];
-  const orig = console.warn;
-  console.warn = (...a) => warns.push(a.join(" "));
-  let closed = 0;
-  try {
-    await seedCloudConsentAtBoot(() => { throw new Error("cannot open"); }, { ownInstanceId: OWN });
-    await seedCloudConsentAtBoot(() => ({ execute: async () => { throw new Error("db gone"); }, close: () => { closed++; throw new Error("close failed"); } }), { ownInstanceId: OWN });
-  } finally { console.warn = orig; }
-  assert.equal(closed, 1);
-  assert.equal(warns.length, 2, JSON.stringify(warns));
-  assert.match(warns[0], /\[cloud-consent\] Seed skipped: cannot open/);
-
-  const db = await seeded();
-  let dbClosed = 0;
-  await seedCloudConsentAtBoot(() => ({ execute: (...a) => db.execute(...a), close: () => { dbClosed++; } }), { ownInstanceId: OWN });
-  assert.equal(dbClosed, 1);
-  assert.deepEqual(Object.keys(await readCloudConsent(db)), ["cloud-a"]);
+test("the add sheet shows a line when the grant failed (en and es)", async () => {
+  assert.match(t("models.add.botsFailed", "en"), /Let bots use this provider/);
+  assert.match(t("models.add.botsFailed", "es"), /Permitir que los bots usen este proveedor/);
+  const ui = readFileSync(join(import.meta.dirname, "..", "servers/gateway/dashboard/shared/add-provider-ui.js"), "utf8");
+  assert.match(ui, /botsFailed: '\$\{tJs\("models\.add\.botsFailed", lang\)\}'/);
+  assert.match(ui, /d\.consent === 'failed' \? T\.saved \+ ' ' \+ T\.botsFailed : T\.saved/);
+  const api = readFileSync(join(import.meta.dirname, "..", "servers/gateway/routes/roles-api.js"), "utf8");
+  assert.match(api, /providerId: r\.providerId, consent \}/);
 });
