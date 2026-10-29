@@ -2529,8 +2529,12 @@ export function createInteractiveEngine({
         model: s.currentModelParts.modelId,
         key: s.currentModel,
       });
-      // piProvider was mapped for the def's model: PiRpc re-maps the override.
-      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved, piProvider: undefined });
+      // piProvider was mapped for the def's model: map the override here,
+      // with this engine's env like every other Perch mapping (never
+      // process.env), and refuse a row the bot engine cannot run.
+      const piProvider = piProviderIdHere(prep.resolved.provider, { env: piEnv() });
+      if (piProvider == null) throw engineError("bad_request");
+      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved, piProvider });
     }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);

@@ -573,6 +573,47 @@ test("hibernate -> message (wake): a model tracked via control() while hibernati
   assert.equal(wakePi.opts.resolved.key, "crow-chat/big-model");
 });
 
+test("final F3b/F4: a session switched to another row wakes on THAT row's provider, mapped with the engine's env", async () => {
+  // The engine env names a host-default home whose models.json holds the door
+  // entry for cloud-b; the process env (another CROW_HOME, another file) would
+  // map cloud-b to itself. The wake must follow the engine env, like every
+  // other Perch mapping.
+  const user = mkdtempSync(join(tmpdir(), "perch-wake-map-"));
+  const file = join(user, "engine-models.json");
+  writeFileSync(file, JSON.stringify({ providers: { "crow-c-cloud-b": { models: [{ id: "m-b" }] } } }));
+  const env = { HOME: user, CROW_HOME: join(user, ".crow"), PI_MODELS_JSON: file };
+  const catalogue = [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }, { provider: "cloud-b", id: "m-b" }, { provider: "openai", id: "gpt-x" }];
+  const { engine, clock, state } = makeEngine({ env, providerModels: () => catalogue });
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  await engine.control(s.sessionId, { model: { provider: "cloud-b", modelId: "m-b" } });
+  await engine.message(s.sessionId, "wake");
+  await tick();
+  const wakePi = state.instances[1];
+  assert.equal(wakePi.opts.resolved.key, "cloud-b/m-b", "the session keeps the row id");
+  assert.equal(wakePi.opts.piProvider, "crow-c-cloud-b", "pi is spawned on the row's door entry");
+});
+
+test("final F4: a wake onto a row the bot engine cannot run (a bare pi built-in) is refused, never spawned on the operator's login", async () => {
+  const user = mkdtempSync(join(tmpdir(), "perch-wake-map-"));
+  const file = join(user, "engine-models.json");
+  // The operator's hand-written "openai" entry lets the switch through, then
+  // goes away before the wake: pi would fall back to its own login.
+  writeFileSync(file, JSON.stringify({ providers: { openai: { models: [{ id: "gpt-x" }] } } }));
+  const env = { HOME: user, CROW_HOME: join(user, ".crow"), PI_MODELS_JSON: file };
+  const catalogue = [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }, { provider: "openai", id: "gpt-x" }];
+  const { engine, clock, state } = makeEngine({ env, providerModels: () => catalogue });
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  await engine.control(s.sessionId, { model: { provider: "openai", modelId: "gpt-x" } });
+  writeFileSync(file, JSON.stringify({ providers: {} }));
+  await assert.rejects(engine.message(s.sessionId, "wake"), /bad_request/);
+  await tick();
+  assert.equal(state.instances.length, 1, "no child was constructed for the refused wake");
+});
+
 // ---------------------------------------------------------------------------
 // 4. permissionMode — binds at wake, never live
 // ---------------------------------------------------------------------------
