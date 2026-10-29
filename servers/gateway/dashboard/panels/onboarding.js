@@ -22,9 +22,11 @@ import { loadCollections } from "./extensions/collections.js";
 import { csrfInput } from "../shared/csrf.js";
 import { buildIdentityBackup, loadInstanceSeed, deriveInstanceIdentity } from "../../../sharing/identity.js";
 import { instanceSeedDir } from "../../../../scripts/pi-bots/instance-paths.mjs";
-import { CLOUD_PRESETS } from "./onboarding/cloud-presets.js";
+import { PROVIDER_PRESETS, presetById } from "../../../shared/provider-presets.js";
+import { candidatePick } from "../../../shared/provider-recommendations.js";
+import { addProviderSheetHtml, addProviderClientJS } from "../shared/add-provider-ui.js";
 import { aiStepClientJS } from "./onboarding/ai-step-client.js";
-import { upsertProvider } from "../../../shared/providers-db.js";
+import { upsertProvider, listProvidersAll } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
 import { seedStarterMemories, createStarterArtifacts, resolveStarterProvider } from "./onboarding/starter-content.js";
 import { setPreviewsEnabled, previewsEnabled, previewRenderer } from "../../preview/renderer.js";
@@ -315,6 +317,16 @@ const AI_OPTIONS_CSS = `
   color: var(--crow-text-primary);
   font-size: var(--crow-text-base);
 }
+.onb-ai-add {
+  min-height: 44px;
+  padding: 0 var(--crow-space-4);
+  border: 0;
+  border-radius: var(--crow-radius-control);
+  background: var(--crow-accent);
+  color: var(--crow-accent-contrast);
+  font: inherit;
+  cursor: pointer;
+}
 .onb-ai-field {
   display: block;
   font-size: var(--crow-text-sm);
@@ -385,7 +397,35 @@ const CLOUD_ERROR_KEYS = {
   bad_preset: "onboarding.ai.cloudErrBadPreset",
   missing_key: "onboarding.ai.cloudErrMissingKey",
   save_failed: "onboarding.ai.cloudErrSaveFailed",
+  model_required: "onboarding.ai.cloudErrModelRequired",
+  // The Add a provider key-test outcomes (servers/gateway/ai/add-provider.js), same copy as the sheet.
+  key_rejected: "models.add.test.key_rejected",
+  bad_key: "models.add.test.bad_key",
+  rate_limited: "models.add.test.rate_limited",
+  unreachable: "models.add.test.unreachable",
+  not_found: "models.add.test.not_found",
+  bad_url: "models.add.test.bad_url",
+  forbidden_target: "models.add.test.forbidden_target",
+  provider_error: "models.add.test.provider_error",
+  unknown_preset: "models.add.err.unknown_preset",
+  bad_model: "models.add.err.bad_model",
 };
+
+/** The error line for a closed-enum code, with {provider}/{host}/{status} filled from validated hints (never the key). */
+function cloudErrorLine(code, query, lang) {
+  const key = Object.hasOwn(CLOUD_ERROR_KEYS, code) ? CLOUD_ERROR_KEYS[code] : null;
+  if (!key) return null;
+  const preset = presetById(typeof query?.cloud_preset === "string" ? query.cloud_preset : "");
+  const status = /^\d{3}$/.test(String(query?.cloud_status ?? "")) ? String(query.cloud_status) : "";
+  let host = "";
+  const url = preset?.baseUrl || preset?.variants?.[0]?.baseUrl;
+  try { host = url ? new URL(url).hostname : ""; } catch { /* no host */ }
+  return fill(t(key, lang), {
+    provider: preset ? t(preset.labelKey, lang) : t("onboarding.ai.cloudThatAddress", lang),
+    host: host || t("onboarding.ai.cloudThatAddress", lang),
+    status,
+  });
+}
 
 /**
  * The meet step's `?err=` closed enum (same discipline as CLOUD_ERROR_KEYS
@@ -404,17 +444,18 @@ const MEET_ERROR_KEYS = {
 function renderAiOptions(lang, ctx = {}) {
   const req = ctx.req || null;
   const cloudOk = !!(req && req.query && req.query.cloud === "ok");
-  const cloudErrorKey = CLOUD_ERROR_KEYS[req && req.query ? req.query.cloud_error : undefined] || null;
-  const cloudChecked = cloudOk || !!cloudErrorKey;
+  const cloudErrorText = cloudErrorLine(req && req.query ? req.query.cloud_error : undefined, req && req.query, lang);
+  const cloudChecked = cloudOk || !!cloudErrorText;
   const localChecked = !cloudChecked;
 
-  const firstPreset = CLOUD_PRESETS[0] || null;
-  const presetOptions = CLOUD_PRESETS.map((p) =>
-    `<option value="${escapeHtml(p.id)}" data-default-model="${escapeHtml(p.defaultModel)}" data-key-hint="${escapeHtml(p.keyHint)}">${escapeHtml(p.label)}</option>`
-  ).join("");
+  const presetOptions = PROVIDER_PRESETS.map((p) =>
+    `<option value="${escapeHtml(p.id)}">${escapeHtml(t(p.labelKey, lang))}</option>`).join("");
+  const zai = PROVIDER_PRESETS.find((p) => Array.isArray(p.variants));
+  const variantOptions = (zai ? zai.variants : []).map((v) =>
+    `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("");
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
-  const cloudError = cloudErrorKey ? callout(t(cloudErrorKey, lang), "error") : "";
+  const cloudError = cloudErrorText ? callout(cloudErrorText, "error") : "";
   const docsHref = docsUrl((lang === "es" ? "es/" : "") + "getting-started/free-cloud-ai");
 
   return `${AI_OPTIONS_CSS}
@@ -455,20 +496,32 @@ function renderAiOptions(lang, ctx = {}) {
     <div id="onb-ai-panel-cloud" class="onb-ai-panel"${cloudChecked ? "" : " hidden"}>
       ${cloudSuccess}
       ${cloudError}
+      <button type="button" class="onb-ai-add" data-models-add aria-haspopup="dialog" aria-controls="models-add">${t("models.add.title", lang)}</button>
+      <noscript>
       <form method="POST" action="/dashboard/onboarding/cloud-provider">
         ${csrfInput(req)}
+        <p class="onb-ai-free-blurb">${t("onboarding.ai.cloudPasteFallback", lang)}</p>
         <label class="onb-ai-field">${t("onboarding.ai.cloudProviderLabel", lang)}
           <select name="preset" id="onb-ai-cloud-preset">${presetOptions}</select>
         </label>
+        <label class="onb-ai-field">${t("models.add.plan", lang)}
+          <select name="variant">${variantOptions}</select>
+        </label>
+        <label class="onb-ai-field">${t("models.add.baseUrl", lang)}
+          <input type="url" name="baseUrl" autocomplete="off" placeholder="https://api.example.com/v1">
+        </label>
         <label class="onb-ai-field">${t("onboarding.ai.cloudKeyLabel", lang)}
-          <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" required placeholder="${escapeHtml(firstPreset ? firstPreset.keyHint : "")}">
+          <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" required>
         </label>
         <label class="onb-ai-field">${t("onboarding.ai.cloudModelLabel", lang)}
-          <input type="text" name="model" id="onb-ai-cloud-model" value="${escapeHtml(firstPreset ? firstPreset.defaultModel : "")}">
+          <input type="text" name="model" id="onb-ai-cloud-model" autocomplete="off">
         </label>
-        <p class="onb-ai-free-blurb">${t("onboarding.ai.cloudFreeTiersBlurb", lang)} <a href="${docsHref}" target="_blank" rel="noopener">${t("onboarding.ai.cloudDocsLinkLabel", lang)}</a></p>
         ${button(t("onboarding.ai.cloudSubmit", lang), { variant: "primary", type: "submit" })}
       </form>
+      </noscript>
+      <p class="onb-ai-free-blurb">${t("onboarding.ai.cloudFreeTiersBlurb", lang)} <a href="${docsHref}" target="_blank" rel="noopener">${t("onboarding.ai.cloudDocsLinkLabel", lang)}</a></p>
+      ${addProviderSheetHtml({ lang })}
+      <script>${addProviderClientJS({ lang })}</script>
     </div>
 
     <div id="onb-ai-panel-skip" class="onb-ai-panel" hidden>
@@ -573,8 +626,8 @@ export async function handleIdentityBackupPost(req, res) {
  * Task 7 review fix round 1: every failure path redirects back to the ai
  * step instead of replacing the whole page with a bare 400/500 — mirrors
  * handleIdentityBackupPost's `back()` discipline above. `cloud_error` is a
- * closed enum (bad_preset | missing_key | save_failed); renderAiOptions
- * maps it to an i18n key and ignores anything else, so an unexpected query
+ * closed enum (CLOUD_ERROR_KEYS: the original three, model_required and the
+ * Add a provider outcomes); renderAiOptions maps it to an i18n key and ignores anything else, so an unexpected query
  * value renders no callout rather than an arbitrary string.
  *
  * Never logs or echoes the API key — mirrors handleIdentityBackupPost's
@@ -585,33 +638,36 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     db = null,
     upsertProviderFn = upsertProvider,
     invalidateCacheFn = invalidateProvidersCache,
+    listRowsFn = listProvidersAll,
+    testFn,
   } = opts;
   const aiIdx = STEP_KEYS.indexOf("ai");
-  const back = (code) =>
-    res.redirectAfterPost(`/dashboard/onboarding?step=${aiIdx}&cloud_error=${encodeURIComponent(code)}`);
+  const base = `/dashboard/onboarding?step=${aiIdx}`;
+  // Codes, a preset id from the closed list and a three-digit status: nothing the user typed.
+  const back = (code, extra = "") => res.redirectAfterPost(`${base}&cloud_error=${encodeURIComponent(code)}${extra}`);
   try {
     const presetId = typeof req.body?.preset === "string" ? req.body.preset : "";
-    const preset = CLOUD_PRESETS.find((p) => p.id === presetId);
+    const preset = presetById(presetId);
     if (!preset) return back("bad_preset");
+    const hint = `&cloud_preset=${encodeURIComponent(preset.id)}`;
     const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
-    if (!apiKey) return back("missing_key");
-    const modelField = typeof req.body?.model === "string" && req.body.model.trim()
-      ? req.body.model.trim()
-      : preset.defaultModel;
+    if (!apiKey && preset.id !== "other") return back("missing_key", hint);
+    const typed = typeof req.body?.model === "string" ? req.body.model.trim() : "";
+    const model = typed || candidatePick(preset.id, "everyday")?.model_id || "";
+    if (!model) return back("model_required", hint);
+    const variantId = typeof req.body?.variant === "string" && req.body.variant ? req.body.variant : undefined;
+    const baseUrl = preset.id === "other" && typeof req.body?.baseUrl === "string" ? req.body.baseUrl.trim() : undefined;
 
-    await upsertProviderFn(db, {
-      id: preset.id,
-      baseUrl: preset.baseUrl,
-      apiKey,
-      host: "cloud",
-      bundleId: null,
-      description: preset.label + " (onboarding)",
-      models: [{ id: modelField }],
-      disabled: false,
-      providerType: preset.providerType,
+    // Loaded here, not at the top: the add flow pulls in the role/consumer modules, which a page render never needs.
+    const { addProvider } = await import("../../ai/add-provider.js");
+    const result = await addProvider(db, { presetId: preset.id, variantId, baseUrl, apiKey, modelIds: [model] }, {
+      upsertProviderFn, invalidateFn: invalidateCacheFn, listRowsFn, ...(testFn ? { testFn } : {}),
     });
-    await invalidateCacheFn();
-    return res.redirectAfterPost(`/dashboard/onboarding?step=${aiIdx}&cloud=ok`);
+    if (!result.ok) {
+      const status = Number.isInteger(result.status) && result.status >= 100 && result.status <= 599 ? `&cloud_status=${result.status}` : "";
+      return back(Object.hasOwn(CLOUD_ERROR_KEYS, result.code) ? result.code : "save_failed", hint + status);
+    }
+    return res.redirectAfterPost(`${base}&cloud=ok`);
   } catch (err) {
     console.error("[onboarding] cloud provider setup failed:", err.message); // message only — never the api key
     return back("save_failed");
@@ -825,7 +881,7 @@ function renderStepBody(stem, lang, ctx = {}) {
       }
       // n == null (no db / query failed): no count claim either way.
       return body + note
-        + linkWrap(deepLink(t("onboarding.openProviders", lang), "/dashboard/settings?section=llm&tab=providers"))
+        + linkWrap(deepLink(t("onboarding.openProviders", lang), "/dashboard/settings?section=models"))
         + renderAiOptions(lang, ctx);
     }
     case "starter":

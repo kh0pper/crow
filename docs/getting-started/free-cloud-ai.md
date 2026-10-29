@@ -6,7 +6,7 @@ If you'd rather run everything locally with no API key and no data leaving your 
 
 ## What the Wizard's Cloud Option Does
 
-When you choose "paste a key" in the setup wizard's AI step, you pick one of five curated providers, paste an API key you generate on that provider's own website, and the wizard writes it straight into Crow's `providers` table — no `.env` editing needed. These five match exactly what ships in the wizard (`servers/gateway/dashboard/panels/onboarding/cloud-presets.js`); Crow supports additional providers (Ollama, Meta AI, DashScope, Z.AI) too, but those aren't in the quick-setup wizard — see the [BYOAI guide](/guide/ai-providers) for the full list and manual `.env` setup.
+When you choose "paste a key" in the setup wizard's AI step, you open "Add a provider", pick one of eight (OpenRouter, Anthropic, OpenAI, Google AI Studio, Z.AI, Groq, Together AI, or any OpenAI-compatible server), paste an API key you generate on that provider's own website, and Crow tests it before writing it to the `providers` table — no `.env` editing needed. The same sheet is on the Models page; see the [BYOAI guide](/guide/ai-providers) for the full list and manual `.env` setup.
 
 ::: warning Facts below checked 2026-07
 Free-tier terms, credit amounts, and rate limits change frequently and are entirely at each provider's discretion — Crow has no control over them and doesn't track changes automatically. Everything below was verified as of **July 2026**; treat it as a starting point, not a guarantee, and check the provider's own pricing page before relying on a "free" tier for anything real. If something here is stale, the provider's pricing page is always the source of truth.

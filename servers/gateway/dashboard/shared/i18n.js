@@ -3048,7 +3048,7 @@ export const translations = {
     en: "{n} model provider(s) are already available on this instance.",
     es: "{n} proveedor(es) de modelos ya están disponibles en esta instancia.",
   },
-  "onboarding.openProviders": { en: "Open Providers", es: "Abrir Proveedores" },
+  "onboarding.openProviders": { en: "Open Models", es: "Abrir Modelos" },
   // ── AI step, three-choice rework (C1/C3 Task 7) ──
   "onboarding.ai.optionLocalTitle": { en: "Run locally (recommended)", es: "Ejecutar localmente (recomendado)" },
   "onboarding.ai.optionLocalDesc": {
@@ -3110,6 +3110,12 @@ export const translations = {
     en: "Could not save this provider — please try again.",
     es: "No se pudo guardar este proveedor — inténtalo de nuevo.",
   },
+  "onboarding.ai.cloudErrModelRequired": {
+    en: "Type a model name for this provider, then try again.",
+    es: "Escribe el nombre de un modelo para este proveedor y vuelve a intentarlo.",
+  },
+  "onboarding.ai.cloudThatAddress": { en: "that address", es: "esa dirección" },
+  "onboarding.ai.cloudPasteFallback": { en: "Without JavaScript, paste the key here.", es: "Sin JavaScript, pega la clave aquí." },
   "onboarding.ai.sizeGb": { en: "{gb} GB", es: "{gb} GB" },
   "onboarding.integrations.title": { en: "Connect your tools", es: "Conecta tus herramientas" },
   "onboarding.integrations.body": {

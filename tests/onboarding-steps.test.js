@@ -44,9 +44,9 @@ test("STEP_KEYS is exactly welcome,ai,integrations,bot,starter,connect,meet,done
 
 test("ai step renders the providers deep link (new tab, noopener)", async () => {
   const html = await render({ step: stepOf("ai") }, { db: providersDb(0) });
-  assert.ok(html.includes("/dashboard/settings?section=llm&amp;tab=providers")
-    || html.includes("/dashboard/settings?section=llm&tab=providers"),
-  "ai step links to the providers tab");
+  assert.ok(html.includes("/dashboard/settings?section=models\"")
+    || html.includes("/dashboard/settings?section=models'"),
+  "ai step links to the Models page");
   assert.ok(html.includes('target="_blank"'), "ai deep link opens a new tab");
   assert.ok(html.includes('rel="noopener"'), "ai deep link sets rel=noopener");
   assert.ok(html.includes(i18n.t("onboarding.ai.body", "en")), "ai step renders its body copy");
@@ -70,8 +70,7 @@ test("ai step survives a db error: no 500, no count callout, deep link intact", 
   const db = { async execute() { throw new Error("db is on fire"); } };
   const html = await render({ step: stepOf("ai") }, { db });
   assert.ok(html.includes("stepper"), "page still renders");
-  assert.ok(html.includes("/dashboard/settings?section=llm&tab=providers")
-    || html.includes("/dashboard/settings?section=llm&amp;tab=providers"), "deep link intact");
+  assert.ok(html.includes("/dashboard/settings?section=models\""), "deep link intact");
   assert.ok(!html.includes(i18n.t("onboarding.aiEmptyNote", "en")), "no empty claim on error");
   const configuredStem = i18n.t("onboarding.aiConfiguredNote", "en").split("{n}")[0].trim();
   assert.ok(!configuredStem || !html.includes(configuredStem), "no configured claim on error");
