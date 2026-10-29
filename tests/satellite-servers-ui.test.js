@@ -124,3 +124,19 @@ test("client script has no backtick; every extensions.servers.* / signals.satell
   const used = readFileSync(new URL("../servers/gateway/dashboard/panels/extensions/servers-client.js", import.meta.url), "utf8");
   for (const m of used.matchAll(/T\("([A-Za-z]+)"\)/g)) assert.ok(keys.includes(`extensions.servers.${m[1]}`), m[1]);
 });
+
+test("L4: the approval dialog shows each tool's argument names and annotations as text", async () => {
+  const list = { satellites: [{ id: SAT, name: "box", status: "active", card: { installed: [{ id: "hosted", tools: { state: "unpinned" } }] } }], crow: {} };
+  const tools = { bundle: "hosted", tools: [{ name: "hosted_make", description: "Make", inputSchema: { type: "object", properties: { title: {}, "<img src=x>": {} }, required: ["title"] }, annotations: { destructiveHint: true, title: "<b>x</b>" } }],
+    tools_sha256: "a".repeat(64), check: { problems: [], tooMany: false }, pin: null, diff: null };
+  const b = boot({ hash: "servers", fetchImpl: (url) => ({ ok: true, status: 200, json: () => Promise.resolve(url === "/api/satellites" ? list : url.endsWith("/tools") ? tools : {}) }) });
+  await b.flush(); await b.flush();
+  b.click([...b.document.querySelectorAll(".sat-card button")].find((x) => x.textContent === "Approve tools"));
+  await b.flush(); await b.flush();
+  const box = b.document.getElementById("sat-modal-box");
+  const li = box.querySelector(".sat-tools li");
+  assert.match(li.querySelector(".sat-tools__args").textContent, /title\*, <img src=x>/);
+  assert.match(li.querySelector(".sat-tools__ann").textContent, /destructiveHint=true, title="<b>x<\/b>"/);
+  assert.equal(box.querySelector("img"), null);
+  assert.equal(box.querySelector(".sat-tools b"), null);
+});

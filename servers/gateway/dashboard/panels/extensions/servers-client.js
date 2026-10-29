@@ -50,6 +50,7 @@ export function serversClientJS(lang) {
       .sat-tools { list-style:none; padding:0; margin:0.5rem 0; font-size:0.85rem; }
       .sat-tools li { padding:0.3rem 0; border-bottom:1px solid var(--crow-border); }
       .sat-tools code { font-weight:600; }
+      .sat-tools__args, .sat-tools__ann { font-size:0.78rem; color:var(--crow-text-muted); }
       .ext-hostpick { display:inline-flex; gap:0.4rem; align-items:center; font-size:0.85rem; margin-right:auto; }
     </style>
     <div class="sat-modal" id="sat-modal" role="dialog" aria-modal="true"><div class="sat-modal__box" id="sat-modal-box"></div></div>
@@ -241,6 +242,12 @@ export function serversClientJS(lang) {
               var li = el("li");
               li.appendChild(el("code", null, t.name));
               li.appendChild(document.createTextNode(" " + (t.description || "")));
+              var schema = t.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : {};
+              var props = schema.properties && typeof schema.properties === "object" ? Object.keys(schema.properties) : [];
+              var req = Array.isArray(schema.required) ? schema.required : [];
+              if (props.length) li.appendChild(el("div", { "class": "sat-tools__args" }, '${T("toolArgs")}' + ": " + props.map(function(n) { return req.indexOf(n) >= 0 ? n + "*" : n; }).join(", ")));
+              var ann = t.annotations && typeof t.annotations === "object" ? Object.keys(t.annotations).map(function(k) { return k + "=" + JSON.stringify(t.annotations[k]); }) : [];
+              if (ann.length) li.appendChild(el("div", { "class": "sat-tools__ann" }, '${T("toolAnnotations")}' + ": " + ann.join(", ")));
               if (bad[t.name]) li.appendChild(el("em", null, " (" + '${T("toolDropped")}' + ")"));
               ul.appendChild(li);
             });

@@ -11,6 +11,7 @@
  * not "ok"; approval (routes/satellites.js) writes a fresh pin, which re-enables them.
  */
 import { canonicalJson, sha256Hex } from "../../shared/satellite-protocol.js";
+import { sanitizeStatus } from "./status-sanitize.js";
 
 export const MAX_TOOLS = 64;
 export const MAX_DESCRIPTION = 300;
@@ -61,14 +62,16 @@ export function formatDiff(d) {
 export function lastRecord(sat) {
   try {
     const r = JSON.parse(sat?.last_status_json || "null");
-    return r && typeof r === "object" ? r : null;
+    return r && typeof r === "object" && !Array.isArray(r) ? r : null;
   } catch { return null; }
 }
 
 /** The satellite's last reported tools[bundle] ({version, sha256} | {version, error}) or null. */
 export function reportedTools(sat, bundle) {
-  const t = lastRecord(sat)?.status?.tools?.[bundle];
-  return t && typeof t === "object" ? t : null;
+  const st = lastRecord(sat)?.status;
+  if (!st || typeof st !== "object" || typeof bundle !== "string") return null;
+  const t = Object.prototype.hasOwnProperty.call(sanitizeStatus(st).tools, bundle) ? sanitizeStatus(st).tools[bundle] : null;
+  return t || null;
 }
 
 /**

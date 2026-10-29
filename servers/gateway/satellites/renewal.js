@@ -72,7 +72,23 @@ export function createCertRenewer({
     }
   }
 
-  async function renewOne(db, sat, { force = false } = {}) {
+  // One cert/key operation per satellite at a time (review M2): renew, rotate and resolve all
+  // take this in-process lock, and each re-reads the row inside it.
+  const locks = new Map();
+  function withLock(satId, fn) {
+    const prev = locks.get(satId) || Promise.resolve();
+    const run = prev.catch(() => {}).then(fn);
+    const tail = run.catch(() => {});
+    locks.set(satId, tail);
+    tail.then(() => { if (locks.get(satId) === tail) locks.delete(satId); });
+    return run;
+  }
+  const fresh = async (db, sat) => {
+    const cur = await getSatellite(db, sat.id);
+    return cur && cur.status !== "revoked" ? cur : null;
+  };
+
+  async function renewOneUnlocked(db, sat, { force = false } = {}) {
     if (!force && !needsRenewal(parseCert(sat), now())) return { renewed: false, code: "not_due" };
     let cert;
     try { cert = newCert(sat, sat.mgmt_pubkey); } catch (err) { return { renewed: false, code: err.code || "cert_failed" }; }
@@ -87,26 +103,31 @@ export function createCertRenewer({
     return { renewed: true, expires_at: cert.payload.expires_at };
   }
 
-  /** Settle a staged key left by an ambiguous rotation: "promoted" | "discarded" | "pending" | "none". */
-  async function resolveStaged(db, sat, staged = loadStagedMgmtKey(sat.id, { env }), cert = null) {
+  /** Settle a staged key left by an ambiguous rotation: "promoted" | "discarded" | "pending" | "none" | "revoked". */
+  async function resolveStagedUnlocked(db, sat, staged = loadStagedMgmtKey(sat.id, { env }), cert = null) {
     if (!staged) return "none";
     const old = await probe(sat);
     if (old === "ok") { discardStagedMgmtKey(sat.id, { env }); return "discarded"; }
     if (old !== "bad_key") return "pending";
-    const fresh = await probe({ ...sat }, staged);
-    if (fresh !== "ok") return "pending";
+    const viaNew = await probe({ ...sat }, staged);
+    if (viaNew !== "ok") return "pending";
     // The row first (conditional), then the key file: a revoked satellite never gets a live key back.
     const extra = { mgmt_pubkey: staged.ed25519_pub };
     const wrote = cert && cert.payload?.mgmt_pubkey === staged.ed25519_pub
       ? await commitCert(db, sat.id, cert, extra)
       : await updateSatelliteIfNotRevoked(db, sat.id, extra); // the cert itself is renewed on the next pass
     if (!wrote) { discardStagedMgmtKey(sat.id, { env }); return "revoked"; }
-    promoteStagedMgmtKey(sat.id, { env });
+    promoteStagedMgmtKey(sat.id, { env, expectedPub: staged.ed25519_pub });
     return "promoted";
   }
 
-  async function rotateKey(db, sat) {
+  async function rotateKeyUnlocked(db, sat) {
     if (!loadMgmtKey(sat.id, { env })) return { rotated: false, code: "no_mgmt_key" };
+    // A staged key from an earlier ambiguous rotation is settled first; while it cannot be,
+    // a new rotation would destroy the only key the satellite may now accept (review M2).
+    const pending = await resolveStagedUnlocked(db, sat);
+    if (pending === "revoked") return { rotated: false, code: "revoked" };
+    if (pending !== "none") return { rotated: false, code: "rotation_pending", resolved: pending };
     const staged = createStagedMgmtKey(sat.id, { env, now: now() });
     let cert;
     try { cert = newCert(sat, staged.ed25519_pub); } catch (err) {
@@ -117,7 +138,7 @@ export function createCertRenewer({
     try {
       r = await satelliteFetch(sat, { method: "POST", path: "/satellite/v1/cert", body: { cert }, caller: "owner-local", fetchImpl, env });
     } catch {
-      const out = await resolveStaged(db, sat, staged, cert);
+      const out = await resolveStagedUnlocked(db, sat, staged, cert);
       if (out === "promoted") return { rotated: true, recovered: true };
       if (out === "revoked") return { rotated: false, code: "revoked" };
       if (out === "discarded") return { rotated: false, code: "not_applied" };
@@ -131,9 +152,18 @@ export function createCertRenewer({
       discardStagedMgmtKey(sat.id, { env });
       return { rotated: false, code: "revoked" };
     }
-    promoteStagedMgmtKey(sat.id, { env });
+    promoteStagedMgmtKey(sat.id, { env, expectedPub: staged.ed25519_pub });
     return { rotated: true };
   }
+
+  const locked = (fn, revokedAnswer) => (db, sat, ...rest) => withLock(sat.id, async () => {
+    const cur = await fresh(db, sat);
+    return cur ? fn(db, cur, ...rest) : revokedAnswer;
+  });
+  const renewOne = locked(renewOneUnlocked, { renewed: false, code: "revoked" });
+  const rotateKey = locked(rotateKeyUnlocked, { rotated: false, code: "revoked" });
+  // resolveStaged(db, sat) only: the staged key and cert arguments are internal to a rotation.
+  const resolveStaged = locked((db, sat) => resolveStagedUnlocked(db, sat), "revoked");
 
   async function warnExpiry(db, sat) {
     const left = certDaysLeft(sat, now());
@@ -158,10 +188,10 @@ export function createCertRenewer({
       for (const s of sats) {
         try {
           if (loadStagedMgmtKey(s.id, { env })) await resolveStaged(db, s);
-          const cur = (await getSatellite(db, s.id)) || s;
-          const r = await renewOne(db, cur);
+          const r = await renewOne(db, s);
           if (!r.renewed && r.code !== "not_due") log(`[satellites] cert renewal for ${s.id}: ${r.code}`);
-          await warnExpiry(db, (await getSatellite(db, s.id)) || cur);
+          const cur = await getSatellite(db, s.id);
+          if (cur && cur.status !== "revoked") await warnExpiry(db, cur);
         } catch (err) {
           log(`[satellites] renewal ${s.id}: ${err?.message}`);
         }

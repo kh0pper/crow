@@ -12,7 +12,7 @@
  *      then renamed into place. Anything else leaves no file.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, constants as fsc, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsc, createReadStream, existsSync, lstatSync, mkdirSync, openSync, renameSync, statfsSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isSatelliteId, signRequest } from "../../shared/satellite-protocol.js";
@@ -33,11 +33,19 @@ function ensurePrivateDir(path) {
   return true;
 }
 
-const fileSha = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
+// Streamed: a backup may be large (review L1).
+const fileSha = (p) => new Promise((ok, fail) => {
+  const h = createHash("sha256");
+  createReadStream(p).on("error", fail).on("data", (d) => h.update(d)).on("end", () => ok(h.digest("hex")));
+});
+
+export const DEFAULT_MAX_BACKUP_BYTES = 2 * 1024 ** 3;
+export const DISK_MARGIN_BYTES = 256 * 1024 ** 2;
 
 /** → {pulled:true, name, path, size, sha256} | {pulled:false, code}. Throws only on a bad bundle id. */
 export async function pullNewestBackup(satId, bundle, {
   db, fetchImpl = globalThis.fetch, env = process.env, root = defaultBackupRoot(), timeoutMs = DEFAULT_PULL_TIMEOUT_MS,
+  maxBytes = DEFAULT_MAX_BACKUP_BYTES, statfs = statfsSync,
 } = {}) {
   if (!BUNDLE_RE.test(String(bundle))) throw new TypeError("pullNewestBackup: bad bundle id");
   if (!isSatelliteId(satId)) return { pulled: false, code: "not_found" };
@@ -58,6 +66,7 @@ export async function pullNewestBackup(satId, bundle, {
   if (typeof name !== "string" || !BACKUP_NAME_RE.test(name) || !Number.isSafeInteger(size) || size < 0 || !/^[0-9a-f]{64}$/.test(String(sha256))) {
     return { pulled: false, code: "bad_manifest" };
   }
+  if (size > maxBytes) return { pulled: false, code: "too_large" };
 
   const satDir = join(root, satId);
   const dir = join(satDir, bundle);
@@ -66,9 +75,15 @@ export async function pullNewestBackup(satId, bundle, {
   if (existsSync(dest)) {
     try {
       const st = lstatSync(dest);
-      if (st.isFile() && st.size === size && fileSha(dest) === sha256) return { pulled: false, code: "up_to_date", name, path: dest };
+      if (st.isFile() && st.size === size && (await fileSha(dest)) === sha256) return { pulled: false, code: "up_to_date", name, path: dest };
     } catch { /* re-download */ }
   }
+
+  // Room for the file plus a margin, before anything is downloaded.
+  try {
+    const f = statfs(dir);
+    if (Number(f.bavail) * Number(f.bsize) < size + DISK_MARGIN_BYTES) return { pulled: false, code: "no_space" };
+  } catch { return { pulled: false, code: "no_space" }; }
 
   const key = loadMgmtKey(satId, { env });
   if (!key) return { pulled: false, code: "no_mgmt_key" };

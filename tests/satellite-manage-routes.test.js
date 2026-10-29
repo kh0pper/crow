@@ -109,9 +109,9 @@ async function setup({ owner = true, decorate = () => {}, protocol = P.AGENT_PRO
     sessionGate: (_q, _r, next) => next(), ownerCheck: async () => owner, service, manager,
   }));
   const server = await new Promise((r) => { const s = xapp.listen(0, "127.0.0.1", () => r(s)); });
-  const call = (method, path, body) => new Promise((resolve, reject) => {
+  const call = (method, path, body, extra = {}) => new Promise((resolve, reject) => {
     const payload = body === undefined ? null : JSON.stringify(body);
-    const req = http.request({ host: "127.0.0.1", port: server.address().port, path, method, headers: payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {} }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port: server.address().port, path, method, headers: { ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}), ...extra } }, (res) => {
       let text = ""; res.on("data", (c) => (text += c));
       res.on("end", () => { let json = null; try { json = JSON.parse(text); } catch {} resolve({ status: res.statusCode, json }); });
     });
@@ -334,5 +334,57 @@ test("coordinator fix: eligibility is re-checked when the job finishes", async (
     writeFileSync(join(s.app, "demo", "manifest.json"), JSON.stringify({ id: "demo", version: "1.0.0" })); // no longer eligible
     await s.call("GET", `/api/satellites/${s.sat}/jobs/${ins.json.job_id}`);
     assert.equal(existsSync(s.paths.installed) && readJ(s.paths.installed).some((r) => r.id === "demo"), false);
+  } finally { s.close(); }
+});
+
+test("fix C: an unpair during the job relay wins — nothing recorded, and the satellite's job records are gone", async () => {
+  const s = await setup();
+  try {
+    const a = await s.call("POST", `/api/satellites/${s.sat}/bundles/install`, { bundle: "demo" });
+    await s.call("POST", `/api/satellites/${s.sat}/bundles/demo/uninstall`, {}).catch(() => {});
+    assert.ok(s.manager.pendingJobs(s.sat) >= 1);
+    const honest = s.fake.table["GET /satellite/v1/jobs/:id"];
+    s.fake.table["GET /satellite/v1/jobs/:id"] = async (ctx) => {
+      await store.markRevoked(s.db, s.sat, new Date().toISOString()); // the revoke lands mid-relay
+      return honest(ctx);
+    };
+    await s.call("GET", `/api/satellites/${s.sat}/jobs/${a.json.job_id}`);
+    assert.equal(existsSync(s.paths.installed) && readJ(s.paths.installed).some((r) => r.id === "demo"), false, "row re-read after the relay");
+    assert.ok(s.manager.pendingJobs(s.sat) >= 1, "the uninstall job record is still there");
+    s.manager.afterUnpair(s.sat);
+    assert.equal(s.manager.pendingJobs(s.sat), 0);
+  } finally { s.close(); }
+});
+
+test("L3: the log text is capped at 256 KiB after parsing", async () => {
+  const s = await setup();
+  try {
+    s.fake.table["GET /satellite/v1/bundles/:id/logs"] = () => ({ status: 200, json: { log: "é".repeat(140 * 1024), truncated: false, extra: "x" } });
+    const r = await s.call("GET", `/api/satellites/${s.sat}/bundles/demo/logs`);
+    assert.equal(r.status, 200);
+    assert.ok(Buffer.byteLength(r.json.log) <= 256 * 1024);
+    assert.equal(r.json.truncated, true);
+    assert.deepEqual(Object.keys(r.json).sort(), ["log", "truncated"]);
+  } finally { s.close(); }
+});
+
+test("L5: every new write route refuses a session-cookie request without the CSRF header, before any network", async () => {
+  const s = await setup();
+  try {
+    const cookie = { cookie: "crow_session=sess; crow_csrf=tok123" };
+    const writes = [
+      ["POST", "rename", { name: "x" }], ["POST", "update", {}], ["POST", "refresh", {}], ["POST", "renew-cert", {}], ["POST", "rotate-key", {}],
+      ["POST", "bundles/install", { bundle: "demo" }], ["POST", "bundles/demo/consent", { token: "x", accept: true }],
+      ["POST", "bundles/demo/uninstall", {}], ["POST", "bundles/demo/repin", {}], ["POST", "bundles/demo/start", {}],
+      ["POST", "bundles/demo/stop", {}], ["POST", "bundles/demo/restart", {}], ["PUT", "bundles/demo/env", { env: {} }],
+      ["POST", "bundles/demo/approve-tools", { tools_sha256: "x" }], ["POST", "unpair", {}],
+    ];
+    for (const [m, p, b] of writes) {
+      const r = await s.call(m, `/api/satellites/${s.sat}/${p}`, b, cookie);
+      assert.equal(r.status, 403, `${m} ${p}`);
+    }
+    assert.equal(s.fake.state.requests.length, 0);
+    const ok = await s.call("POST", `/api/satellites/${s.sat}/rename`, { name: "x" }, { ...cookie, "x-crow-csrf": "tok123" });
+    assert.equal(ok.status, 200);
   } finally { s.close(); }
 });

@@ -96,3 +96,12 @@ test("a symlinked destination dir is refused", async () => {
   assert.deepEqual(readdirSync(elsewhere), []);
   writeFileSync(join(elsewhere, "keep"), "x");
 });
+
+test("L1: over the max size or without disk room → refused before any download", async () => {
+  const s = await setup(FILES);
+  const big = await pullNewestBackup(s.fake.satId, "gitea", { db: s.db, fetchImpl: s.fake.fetchImpl, root: s.root, maxBytes: 5 });
+  assert.equal(big.code, "too_large");
+  const full = await pullNewestBackup(s.fake.satId, "gitea", { db: s.db, fetchImpl: s.fake.fetchImpl, root: s.root, statfs: () => ({ bavail: 10, bsize: 4096 }) });
+  assert.equal(full.code, "no_space");
+  assert.equal(s.fake.state.requests.filter((q) => q.path.includes("/backups/")).length, 0, "nothing downloaded");
+});

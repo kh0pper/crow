@@ -163,3 +163,50 @@ test("coordinator fix: revoked during a renewal or a rotation → no cert commit
   assert.equal(row2.mgmt_pubkey, oldPub);
   assert.equal(row2.status, "revoked");
 });
+
+test("M2: a rotation while an unresolved staged key is pending answers rotation_pending and keeps it", async () => {
+  const a = await setup();
+  a.fake.table["POST /satellite/v1/cert"] = () => { a.fake.state.unreachable = true; return { drop: true }; };
+  const first = await a.renewer.rotateKey(a.db, await store.getSatellite(a.db, a.fake.satId));
+  assert.equal(first.code, "ambiguous");
+  const staged = K.loadStagedMgmtKey(a.fake.satId).ed25519_pub;
+  const second = await a.renewer.rotateKey(a.db, await store.getSatellite(a.db, a.fake.satId));
+  assert.deepEqual([second.rotated, second.code, second.resolved], [false, "rotation_pending", "pending"]);
+  assert.equal(K.loadStagedMgmtKey(a.fake.satId).ed25519_pub, staged, "the pending staged key is not replaced");
+  // Reachable again: the next rotation first settles the old staged key, then rotates.
+  a.fake.state.unreachable = false;
+  delete a.fake.table["POST /satellite/v1/cert"];
+  a.fake.table["POST /satellite/v1/cert"] = ({ body }) => { a.fake.state.mgmtPub = body.cert.payload.mgmt_pubkey; return { status: 200, json: { ok: true } }; };
+  const third = await a.renewer.rotateKey(a.db, await store.getSatellite(a.db, a.fake.satId));
+  assert.deepEqual([third.rotated, third.code], [false, "rotation_pending"], "this call only resolved (discarded) the old staged key");
+  assert.equal(third.resolved, "discarded");
+  const fourth = await a.renewer.rotateKey(a.db, await store.getSatellite(a.db, a.fake.satId));
+  assert.equal(fourth.rotated, true);
+});
+
+test("M2: rotations, renewals and resolves on one satellite never overlap; promote needs the expected key", async () => {
+  const a = await setup({ ageDays: 15 });
+  let inFlight = 0; let maxInFlight = 0;
+  a.fake.table["POST /satellite/v1/cert"] = async ({ body }) => {
+    inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setTimeout(r, 20));
+    a.fake.state.mgmtPub = body.cert.payload.mgmt_pubkey;
+    inFlight--;
+    return { status: 200, json: { ok: true } };
+  };
+  const sat = await store.getSatellite(a.db, a.fake.satId);
+  const rs = await Promise.all([a.renewer.rotateKey(a.db, sat), a.renewer.renewOne(a.db, sat, { force: true }), a.renewer.rotateKey(a.db, sat)]);
+  assert.equal(maxInFlight, 1);
+  assert.equal(rs[0].rotated, true);
+  assert.equal(rs[1].renewed, true, "the renewal re-read the row and signed with the rotated key");
+  assert.equal(rs[2].rotated, true);
+  const row = await store.getSatellite(a.db, a.fake.satId);
+  assert.equal(row.mgmt_pubkey, a.fake.state.mgmtPub);
+  assert.equal(K.loadMgmtKey(a.fake.satId).ed25519_pub, a.fake.state.mgmtPub);
+
+  const st = K.createStagedMgmtKey(a.fake.satId);
+  assert.throws(() => K.promoteStagedMgmtKey(a.fake.satId, { expectedPub: "0".repeat(64) }), /not the expected/);
+  assert.throws(() => K.promoteStagedMgmtKey(a.fake.satId), /not the expected/);
+  assert.equal(K.loadMgmtKey(a.fake.satId).ed25519_pub, a.fake.state.mgmtPub, "live key untouched");
+  assert.equal(K.loadStagedMgmtKey(a.fake.satId).ed25519_pub, st.ed25519_pub);
+});
