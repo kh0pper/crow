@@ -301,7 +301,7 @@ async function fireCorruptionAlertIfDue() {
     const payload = {
       title: "Federation audit DB is corrupted",
       body: "Federation audit DB is corrupted — run `npm run recover-db`; federation still works, audit logging paused.",
-      url: "/dashboard/nest",
+      url: "/dashboard",
       priority: "high", // high → the email channel actually sends
       type: "system",
     };

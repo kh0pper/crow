@@ -43,7 +43,10 @@ const MORE_ENTRIES = [
   { id: "ramble", fallback: "Ramble" },
   { id: "extensions", fallback: "Extensions" },
   { id: "model-catalog", fallback: "Models" },
-].map((e) => ({ ...e, route: `/dashboard/${e.id}`, key: `nav.${e.id}` }));
+  // The classic home. A bare /dashboard/nest sends a new-mode device to Chat,
+  // so this way in asks for the nest explicitly (?open=1).
+  { id: "nest", fallback: "Crow's Nest", route: "/dashboard/nest?open=1" },
+].map((e) => ({ route: `/dashboard/${e.id}`, key: `nav.${e.id}`, ...e }));
 
 /** The sheet's own close button (Escape and a backdrop tap also close it). */
 function closeButton(lang) {

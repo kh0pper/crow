@@ -114,6 +114,18 @@ export async function resolveRequestMode(req, res, db) {
   return decision;
 }
 
+/**
+ * Whether a GET of the Crow's Nest asked for the nest itself, so new mode
+ * renders it rather than sending the device to its new home. ?open=1 is the
+ * canonical explicit form; any other query key beyond ?project= (the nest's
+ * own ?flash= / ?action= returns, the fix-it results) counts too. A bare
+ * /dashboard/nest, or one carrying only ?project=, is a landing.
+ */
+export function nestIsExplicit(query) {
+  if (!query || typeof query !== "object") return false;
+  return Object.keys(query).some((k) => k !== "project");
+}
+
 /** A same-origin /dashboard/ path to land on after a scope change, minus any ?project=. */
 export function safeReturnPath(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 2048) return DEFAULT_RETURN;

@@ -214,7 +214,7 @@ export async function attemptLogin(password, ip) {
               priority: "high",
               title: t("signals.logins.notifTitle", "en").replace("{n}", String(a.count)),
               body: t("signals.logins.notifBody", "en"),
-              action_url: "/dashboard/nest",
+              action_url: "/dashboard/nest?open=1",
             });
             const nowStr = String(Date.now());
             await db.execute({

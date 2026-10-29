@@ -405,7 +405,7 @@ async function loadAlertChannels() {
 export async function fireMigrationAlert({ title, body }) {
   try {
     const ch = await loadAlertChannels();
-    const payload = { title, body, url: "/dashboard/nest", priority: "high", type: "system" };
+    const payload = { title, body, url: "/dashboard", priority: "high", type: "system" };
     await ch.sendNtfyNotification(payload);
     await ch.sendEmailNotification(payload);
   } catch (err) {

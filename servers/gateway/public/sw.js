@@ -5,11 +5,20 @@
  * Handles push events and notification clicks.
  */
 
-const CACHE_NAME = "crow-v2";
+// v3: drops a v2 cache that may hold the nest rendered inside the new shell.
+const CACHE_NAME = "crow-v3";
 const SHELL_ASSETS = ["/dashboard/nest"];
 
+// The offline copy of the nest is kept only when the nest itself answered.
+// A new-mode device's /dashboard/nest redirects to its new home (Chat), and a
+// redirected response may not answer a navigation (redirect: "manual"), so
+// such a device keeps no offline copy: it gets the browser's own offline page,
+// as every other /dashboard/ route does. A failed fetch never fails install.
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE_NAME).then((c) => c.addAll(SHELL_ASSETS)));
+  e.waitUntil(caches.open(CACHE_NAME).then((c) => Promise.all(SHELL_ASSETS.map((path) =>
+    fetch(path, { credentials: "same-origin", redirect: "manual" })
+      .then((r) => (r.ok && r.type === "basic" && !r.redirected ? c.put(path, r) : undefined))
+      .catch(() => undefined)))));
   self.skipWaiting();
 });
 
@@ -54,8 +63,18 @@ self.addEventListener("fetch", (e) => {
   } catch { /* header read on an odd request — let the branches below decide */ }
 
   // Special case: /dashboard/nest is pre-cached for offline shell loading
+  // (a classic device only; see install). Online, the network answers, so a
+  // new-mode device follows its redirect to Chat.
   if (url.endsWith("/dashboard/nest")) {
     e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+    return;
+  }
+  // The PWA's start_url, /dashboard, routes per mode; offline, it falls back
+  // to the same cached nest (present for a classic device only).
+  let path = null;
+  try { path = new URL(url).pathname; } catch { /* odd URL: the branches below decide */ }
+  if (path === "/dashboard" && e.request.mode === "navigate") {
+    e.respondWith(fetch(e.request).catch(() => caches.match("/dashboard/nest").then((r) => r || Response.error())));
     return;
   }
 
@@ -87,14 +106,15 @@ self.addEventListener("push", (e) => {
       body: data.body || "",
       icon: "/icons/crow-icon.svg",
       badge: "/icons/crow-icon.svg",
-      data: { url: data.url || "/dashboard/nest" },
+      data: { url: data.url || "/dashboard" },
     })
   );
 });
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  const url = e.notification.data?.url || "/dashboard/nest";
+  // /dashboard routes per device mode (new → Chat, classic → the nest).
+  const url = e.notification.data?.url || "/dashboard";
   e.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })

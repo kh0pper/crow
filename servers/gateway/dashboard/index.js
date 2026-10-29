@@ -97,7 +97,7 @@ import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
-import { shellRouter, resolveRequestMode, resolveShellPage } from "./shell/request.js";
+import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
@@ -862,8 +862,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const db = createDbClient();
     try {
       const target = String(req.query.target || "");
-      let dest = String(req.query.to || "/dashboard/nest");
-      if (!isSafeDestPath(dest)) dest = "/dashboard/nest";
+      // The default lands on the target's home, which routes per its own mode.
+      let dest = String(req.query.to || "/dashboard");
+      if (!isSafeDestPath(dest)) dest = "/dashboard";
       if (!target) return res.status(400).type("text/plain").send("Missing target.");
 
       const { rows } = await db.execute({
@@ -878,9 +879,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
       if (!eligible || !creds || !creds.signing_key) {
         // Not SSO-eligible — fall back to a direct link (prompts for password)
-        // if we at least have a gateway URL; otherwise back to the local nest.
+        // if we at least have a gateway URL; otherwise back to the local home.
         if (base) return res.redirect(302, `${base}${dest}`);
-        return res.redirect(302, "/dashboard/nest");
+        return res.redirect(302, "/dashboard");
       }
 
       const localId = getOrCreateLocalInstanceId();
@@ -961,6 +962,29 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       } else {
         res.redirect("/dashboard/settings");
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  // The Crow's Nest is the classic home. In new mode a bare landing on it (the
+  // app's launch, a notification tap, an old bookmark, the PWA start_url)
+  // answers 303 to the new home instead of rendering the classic grid inside
+  // the shell. An explicit request still opens it: any query beyond
+  // ?project= counts, and ?open=1 is the canonical form (see nestIsExplicit).
+  // Classic mode, and the classic /dashboard wrapper's rewrite to this path,
+  // pass straight through.
+  router.get("/dashboard/nest", async (req, res, next) => {
+    if (req._crowNest || nestIsExplicit(req.query)) return next();
+    const db = createDbClient();
+    try {
+      if ((await resolveRequestMode(req, res, db)).mode !== "new") return next();
+      const project = typeof req.query.project === "string" && req.query.project !== ""
+        ? "?project=" + encodeURIComponent(req.query.project) : "";
+      return res.redirect(303, "/dashboard/perch" + project);
+    } catch (err) {
+      console.warn("[dashboard] nest landing check failed, rendering the nest:", err.message);
+      return next();
     } finally {
       db.close();
     }

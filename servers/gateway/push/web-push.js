@@ -68,7 +68,7 @@ export async function sendPushToAll(db, { title, body, url }) {
       try {
         await webpush.sendNotification(
           subscription,
-          JSON.stringify({ title, body: body || title, url: url || "/dashboard/nest" }),
+          JSON.stringify({ title, body: body || title, url: url || "/dashboard" }),
           { timeout: timeoutMs }
         );
         // Update last_seen

@@ -281,6 +281,76 @@ test("GET /dashboard in new mode opens Chat and keeps the query", async () => {
   assert.equal(cookieValue(classic.cookies, MODE), "classic");
 });
 
+test("new mode: a bare landing on the nest goes to the new home, and the home has no classic grid", async () => {
+  const jar = { ...NEW, [MODE]: "new" };
+  // A first full load (no Turbo): the app's launch path, a notification tap, the old start_url.
+  for (const path of ["/dashboard", "/dashboard/nest"]) {
+    const r = await get(path, jar);
+    assert.ok([302, 303].includes(r.status), `${path} redirects (got ${r.status})`);
+    assert.equal(r.location, "/dashboard/perch", path);
+    const home = await get(r.location, jar);
+    assert.equal(home.status, 200);
+    assert.match(home.body, /<body class="shell/);
+    assert.doesNotMatch(home.body, /class="nest-app/, `${path} lands with no classic grid markup`);
+  }
+  const nest = await get("/dashboard/nest", jar);
+  assert.equal(nest.status, 303);
+  const q = await get("/dashboard/nest?project=garden", jar);
+  assert.equal(q.status, 303);
+  assert.equal(q.location, "/dashboard/perch?project=garden", "keeps the project");
+  // A device with no mode cookie yet (a new session): decided, persisted, redirected.
+  const fresh = await get("/dashboard/nest", NEW);
+  assert.equal(fresh.location, "/dashboard/perch");
+  assert.equal(cookieValue(fresh.cookies, MODE), "new");
+});
+
+test("new mode: an explicit request still opens the nest", async () => {
+  const jar = { ...NEW, [MODE]: "new" };
+  for (const path of ["/dashboard/nest?open=1", "/dashboard/nest?open=1&project=garden", "/dashboard/nest?flash=fixit_fixed"]) {
+    const r = await get(path, jar);
+    assert.equal(r.status, 200, path);
+    assert.match(r.body, /class="nest-app/, `${path} renders the nest`);
+  }
+});
+
+test("new mode: More of Crow carries the Crow's Nest as an explicit ?open=1 link, and it renders the nest", async () => {
+  const jar = { ...NEW, [MODE]: "new" };
+  const page = await get("/dashboard/perch", jar);
+  assert.equal(page.status, 200);
+  const more = (page.body.match(/<div class="shell-more">[\s\S]*?<\/div>/) || [])[0] || "";
+  assert.match(more, /<a href="\/dashboard\/nest\?open=1" class="shell-more-item">Crow&#39;s Nest<\/a>|<a href="\/dashboard\/nest\?open=1" class="shell-more-item">Crow(&#x27;|')s Nest<\/a>/);
+  assert.doesNotMatch(more, /href="\/dashboard\/nest"/, "never the bare (redirecting) nest");
+  const r = await get("/dashboard/nest?open=1", jar);
+  assert.equal(r.status, 200);
+  assert.match(r.body, /<body class="shell/);
+  assert.match(r.body, /class="nest-app/);
+});
+
+test("classic mode: /dashboard and /dashboard/nest render the nest as before", async () => {
+  const jar = { ...NEW, [MODE]: "classic" };
+  const nest = await get("/dashboard/nest", jar);
+  assert.equal(nest.status, 200);
+  assert.match(nest.body, /class="sidebar/);
+  assert.match(nest.body, /class="nest-app/);
+  const explicit = await get("/dashboard/nest?open=1", jar);
+  assert.equal(explicit.status, 200);
+  assert.match(explicit.body, /class="nest-app/);
+  const home = await get("/dashboard", jar);
+  assert.notEqual(home.location, "/dashboard/perch");
+  if (home.status === 200) assert.match(home.body, /class="nest-app/);
+  else assert.equal(home.location, "/dashboard/nest", "the classic home's first panel is the nest");
+});
+
+test("nestIsExplicit: ?open=1 or any key beyond ?project= is explicit", async () => {
+  const { nestIsExplicit } = await import("../servers/gateway/dashboard/shell/request.js");
+  assert.equal(nestIsExplicit({}), false);
+  assert.equal(nestIsExplicit(undefined), false);
+  assert.equal(nestIsExplicit({ project: "garden" }), false);
+  assert.equal(nestIsExplicit({ open: "1" }), true);
+  assert.equal(nestIsExplicit({ open: "1", project: "garden" }), true);
+  assert.equal(nestIsExplicit({ flash: "backup_ok" }), true);
+});
+
 test("a broken DB falls back to classic and writes no mode cookie", async () => {
   const { resolveRequestMode, resolveShellPage } = await import("../servers/gateway/dashboard/shell/request.js");
   const broken = { async execute() { throw new Error("database disk image is malformed"); } };
