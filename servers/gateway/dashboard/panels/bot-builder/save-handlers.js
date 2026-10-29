@@ -66,36 +66,9 @@ async function saveChannel(def, b, { db, botId, changed }) {
   }
   if (gwType === "crow-messages") return { changed: put(buildCrowMessagesGatewayConfig(b)) };
   if (gwType === "glasses") {
-    const deviceId = String(b.gw_device_id || "").trim();
-    const wasGlasses = priorGw && priorGw.type === "glasses";
-    const priorDeviceId = wasGlasses && priorGw.device_id ? String(priorGw.device_id) : "";
-    // The voice model lives in def.fast_voice_model only (Basics → Model); a
-    // gw.fast_voice_model written by the old editor rides along untouched.
-    const rec = { type: "glasses", ...(deviceId ? { device_id: deviceId } : {}) };
-    const recChanged = put(rec, ["device_id"]);
-    const bindChanged = recChanged || changed("gw_device_id") || changed("gw_type");
-    const profileKeys = { gw_tts_profile_id: "tts_profile_id", gw_stt_profile_id: "stt_profile_id", gw_vision_profile_id: "vision_profile_id" };
-    // Device-store effects run only after the definition write succeeded
-    // (a refused save — stale page, engine gate, policy guard, compare-and-
-    // swap — must change nothing, devices included).
-    const after = async () => {
-      const { updateDeviceProfiles, unbindBotFromOtherDevices } = await import("../../../../shared/device-store.js");
-      if (deviceId) {
-        const patch = {};
-        for (const [field, col] of Object.entries(profileKeys)) {
-          if (field in b && changed(field)) patch[col] = String(b[field] || "").trim();
-        }
-        if (bindChanged) {
-          await unbindBotFromOtherDevices(db, botId, deviceId);
-          if (priorDeviceId && priorDeviceId !== deviceId) await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-          patch.bound_bot_id = botId;
-        }
-        if (Object.keys(patch).length) await updateDeviceProfiles(db, deviceId, patch);
-      } else if (priorDeviceId && bindChanged) {
-        await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-      }
-    };
-    return { changed: recChanged, after, afterLabel: "device binding incomplete: " };
+    // Retired: glasses answer as Crow, so a glasses save binds nothing and writes no device. A stored glasses
+    // record is kept exactly as it is (it renders read-only); only a type switch replaces it, above.
+    return { changed: false };
   }
   if (gwType === "companion") {
     let deviceId = String(b.gw_device_id || "").trim();

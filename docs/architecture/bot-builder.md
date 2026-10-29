@@ -28,8 +28,8 @@ An agent is a definition stored in the `pi_bot_defs` table in Crow's `crow.db`. 
 │   discord_gateway.mjs Discord channel                             │
 │   bridge_tick.mjs     Gmail channel                               │
 ├──────────────────────────────────────────────────────────────────┤
-│  bundles/meta-glasses/  glasses gateway: bound bot drives the     │
-│                         scoped, permission-enforced voice turn    │
+│  bundles/meta-glasses/  glasses gateway: the voice turn,          │
+│                         answering as Crow (crow.voice)            │
 ├──────────────────────────────────────────────────────────────────┤
 │  crow.db (SQLite, WAL)  pi_bot_defs + shared Crow data            │
 └──────────────────────────────────────────────────────────────────┘
@@ -64,11 +64,11 @@ When an agent selects a tool from an extension that is not part of Crow's canoni
 |---|---|---|
 | **Gmail** | `bridge_tick.mjs` | Polls a connected mailbox, drafts or sends replies subject to policy |
 | **Discord** | `discord_gateway.mjs` | A long-lived Discord WebSocket that drives the runtime, with a per-agent user allowlist |
-| **Meta Glasses** | `bundles/meta-glasses/` | A paired device binds to an agent and drives the fast voice turn |
-| **AI Companion** | `bundles/companion/` + the gateway's `/llm/v1` router (`servers/gateway/routes/llm-router.js`) | A kiosk device binds to an agent; the [companion](/architecture/companion)'s OLVV loop runs that agent's persona/avatar/tools, with the router routing fast (4B) → escalate (35B) |
+| **Meta Glasses** | `bundles/meta-glasses/` | Paired glasses answer as Crow, the voice bot (`crow.voice`); there is no per-device bot |
+| **AI Companion** | `bundles/companion/` + the gateway's `/llm/v1` router (`servers/gateway/routes/llm-router.js`) | The [companion](/architecture/companion)'s OLVV loop with the avatar and features set on the bot's Basics tab (channel *AI Companion (kiosk)*); voice itself answers as Crow, with the router routing fast (4B) → escalate (35B) |
 | **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | The agent is reachable as a contact over Crow's peer messaging; authorized senders' encrypted DMs drive the runtime and the agent replies from its own derived identity. See [Crow Messages](#crow-messages-bots-as-contacts) below. |
 
-> The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — so the bound agent's persona/skills/tools drive the turn, but the engine is the voice front end, not pi. See [AI Companion](/architecture/companion).
+> The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — the engine is the voice front end, not pi, and it answers as `crow.voice` (persona, tools and limits come from Crow's voice bot). A companion device's binding carries only its avatar and features. See [AI Companion](/architecture/companion).
 
 ## Crow Messages: bots as contacts
 
@@ -89,18 +89,19 @@ Two structural invariants make rooms safe rather than merely tuned:
 
 ## The voice path
 
-A glasses device carries a `bound_bot_id`. When a device is bound, its voice turn is driven by that agent rather than a generic profile:
+Voice (kiosk, glasses, the phone's Talk to Crow) always answers as the Crow voice bot, `crow.voice`; the per-device `bound_bot_id` is no longer read for voice. Crow's own settings drive the turn:
 
-- **Prompt**: the bound agent's persona and skills, plus a short voice-style addendum.
-- **Tools**: a scoped set. Crow's core tool categories are included when the agent selected a tool under the matching server, and an extension's tools are included only when the agent selected them and the server is connected. A canonical-to-voice-category map decides which selections have a voice equivalent; selections with none are surfaced as a warning in the editor rather than dropped silently.
-- **Model and voice**: the agent's `fast_voice_model`, resolved through Crow's profile system, with the device's speech, text-to-speech, and vision profiles supplying the voices.
-- **Permissions**: a policy-aware dispatch wrapper runs before any tool executes. It resolves the effective action behind any general-purpose tool wrapper, then enforces the agent's confirm and deny sets and its `external_send` mode (downgrading publishes to drafts and blocking true sends). A blocked or confirm-required action is spoken back.
+- **Prompt**: the voice bot's persona and skills, plus a short voice-style addendum.
+- **Tools**: a scoped set. Crow's core tool categories are included when the voice bot selected a tool under the matching server, and an extension's tools only when it selected them and the server is connected. Selections with no voice equivalent are surfaced as a warning in the editor rather than dropped silently.
+- **Model and voice**: the voice bot's `fast_voice_model`, resolved through Crow's profile system, with the device's speech, text-to-speech, and vision profiles supplying the voices.
+- **Permissions**: a policy-aware dispatch wrapper runs before any tool executes. It resolves the effective action behind any general-purpose tool wrapper and enforces the voice bot's deny set. A blocked or confirm-required action is spoken back.
+- **Hand-offs**: Crow can hand bigger jobs to your other bots after a yes. See [Kiosk](/architecture/kiosk#hand-offs).
 
 This wrapper is the security boundary for voice. It closes the gap left by the older name-only confirm gate, which could be bypassed by routing a protected action through a wrapper tool.
 
 ## Deep work
 
-Long-running work is handed off as a background job via the `crow_delegate` tool. The job is enqueued in the shared `bot_jobs` table and run by a pi worker in the Bot Builder host process — a single strong agent doing the multi-step work in one coherent context. The agent acknowledges immediately with a job ID and the result is delivered on a later turn (retrieved with `crow_job_status`, or pushed to the originating channel), since the job outlives the turn that started it. A persistent completion-notification path is a planned follow-on.
+Long-running work is handed off as a background job via the `crow_delegate` tool. The job is enqueued in the shared `bot_jobs` table and run by a pi worker in the Bot Builder host process — a single strong agent doing the multi-step work in one coherent context. The agent acknowledges immediately with a job ID and the result is delivered on a later turn (retrieved with `crow_job_status`, or pushed to the originating channel), since the job outlives the turn that started it. Voice hand-offs have their own completion path: `board/result-requesters.js` routes the finished card's report to one notification (and a spoken heads-up if the operator is still talking), instead of the generic board notice. See [Kiosk](/architecture/kiosk#hand-offs).
 
 ## Opt-in self-authoring
 

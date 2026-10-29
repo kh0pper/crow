@@ -141,11 +141,10 @@ test("an unregistered surface is never spoken to", async () => {
 
 test("a surface must say when it is busy (P27): busy() is required", () => {
   const { impl } = surface("phone");
-  const { busy, ...noBusy } = impl;
+  const { busy: _omitted, ...noBusy } = impl;
   assert.throws(() => P.registerVoiceSurface("phone-1", noBusy), /busy/);
   assert.throws(() => P.registerVoiceSurface("phone-1", { ...impl, surface: "tv" }), /surface/);
   assert.throws(() => P.registerVoiceSurface("", impl), /device id/);
-  assert.equal(typeof busy, "function");
 });
 
 test("a busy target is retried once", async () => {
@@ -169,8 +168,28 @@ test("a busy target is retried once", async () => {
   const odd = surface("phone", { busy: () => { throw new Error("hub gone"); } });
   P.registerVoiceSurface("phone-2", odd.impl);
   assert.deepEqual(await P.announce(opts({ originDeviceId: "phone-2", lineFor: completionLine() })), { spokenOn: null });
-  // The default wait really waits (unref'd), and is what a caller without one gets.
-  assert.equal(typeof P.announce, "function");
+});
+
+test("a caller without a wait gets the default one: it really waits retryMs, on an unref'd timer", async () => {
+  let calls = 0;
+  const later = surface("phone", { busy: () => ++calls === 1 });
+  P.registerVoiceSurface("phone-1", later.impl);
+  const realSetTimeout = globalThis.setTimeout;
+  const timers = [];
+  globalThis.setTimeout = (fn, ms, ...rest) => { const t = realSetTimeout(fn, ms, ...rest); if (ms === 40) timers.push(t); return t; };
+  const keep = realSetTimeout(() => {}, 5000);   // the default timer is unref'd: something else keeps the loop alive
+  const t0 = Date.now();
+  try {
+    const r = await P.announce({ originDeviceId: "phone-1", lineFor: completionLine(), now: () => T0, retryMs: 40, log: () => {} });
+    assert.equal(r.spokenOn, "phone-1");
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    clearTimeout(keep);
+  }
+  assert.ok(Date.now() - t0 >= 35, `waited ${Date.now() - t0} ms`);
+  assert.equal(timers.length, 1, "one wait");
+  assert.equal(timers[0].hasRef(), false, "unref'd: a pending heads-up never holds the process open");
+  assert.equal(later.spoken.length, 1);
 });
 
 test("a turn running on the surface counts as busy, a relay turn included (P27)", async () => {

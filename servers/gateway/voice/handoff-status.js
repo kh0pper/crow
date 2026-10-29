@@ -19,8 +19,10 @@
  * Races and sends: the "ended" notification goes through notifyRow, which is at-most-once (a send that throws
  * is logged, never retried), and only the transition that moved the row sends it. A status read that lands
  * between result-service's result insert and the completion's own CAS ends the row first, so the completion's
- * notice returns null and result-service sends today's generic "needs review" notice instead of the hand-off's:
- * still exactly one notification, never none (the window is a few ms inside one process).
+ * notice returns null and result-service sends today's generic "needs review" notice instead of the hand-off's.
+ * The completion's turn-end mark (markTurnEnd) never runs then, so the bot's Perch "replied" push can go as well:
+ * in that window (a few ms inside one process) the operator may get both, the generic notice and the Perch
+ * push. Never none.
  *
  * Subject (P16): the fast path never takes ordinary speech. It answers when (a) a bot is named (`status_none`
  * when that bot has nothing in scope: truthful, never left to the model), or when (b) the work is named
@@ -37,7 +39,7 @@
  * needs-you, never quiet; `waiting-user` older than HANDOFF_QUIET_AFTER_MS moves the row to `quiet` (the claim
  * is kept), and an `active` session moves a quiet row back to `started` [rv2 N2].
  */
-import { HANDOFF_OPEN, HANDOFF_QUIET_AFTER_MS, PERSONAL_SURFACES } from "./handoff-constants.js";
+import { HANDOFF_OPEN, HANDOFF_QUIET_AFTER_MS, PERSONAL_SURFACES, askedEntry } from "./handoff-constants.js";
 import { wantsHandoffStatus, mayAskStatus, namesWork, isBareStatus, namedBots, asksForHandoff, statusShape } from "./handoff-intent.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf, notifyRow } from "./handoff-confirm.js";
@@ -329,7 +331,7 @@ export async function status(core, db, { device, surface, transcript, lang, bot 
   }
   const picked = await pickRow(db, about);
   if (picked.which) {
-    if (pending && typeof pending.set === "function") pending.set(device.id, { kind: "which", purpose: "status", options: picked.which, asked: transcript });
+    if (pending && typeof pending.set === "function") pending.set(device.id, askedEntry({ kind: "which", purpose: "status", options: picked.which, asked: transcript }));
     return { say: voiceLine("status_which", speak, { list: joinAnd(picked.which.map((w) => w.name), speak) }), verb: "status_which" };
   }
   return picked.row ? answerRow(core, db, picked.row, { device, surface, lang: speak }) : null;

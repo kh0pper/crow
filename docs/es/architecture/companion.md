@@ -34,6 +34,8 @@ El enrutamiento de modelos corre en proceso dentro del gateway: `servers/gateway
 
 `generate-config.py` apunta el `base_url` de OLVV al router cuando `COMPANION_PROXY_URL` está definida (predeterminado `http://localhost:3001/llm/v1`); quítala para hablar directamente con un modelo.
 
+> **La voz es Crow.** El quiosco, los lentes y el teléfono responden como el bot de voz de Crow (`crow.voice`); el vínculo de bot por dispositivo descrito más abajo ya no se usa para la voz, y Crow encarga los trabajos más grandes a tus bots cuando dices que sí. Consulta [Quiosco](/es/architecture/kiosk#encargos).
+
 ## Modelos: voz rápida, escalar para trabajo agéntico
 
 | Rol | Proveedor / modelo | Motor | Notas |
@@ -49,7 +51,7 @@ El companion resuelve los modelos a través de `servers/gateway/ai/resolve-profi
 
 ## Vincular un bot (el canal companion)
 
-Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a un agente del Bot Builder exactamente igual que un dispositivo Meta Glasses: el registro del dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) lleva `bound_bot_id`, y el kiosko muestra la persona/avatar de ese bot más los toggles `companion_features` por dispositivo. Configúralo en la pestaña **Lo básico** del bot (canal *AI Companion*). El par de modelos es global (el router `/llm/v1` del gateway); la variación por dispositivo es solo persona/avatar/voz/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
+Un **dispositivo** companion (una tablet kiosko / pantalla de sala) sigue teniendo un registro de dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) con `bound_bot_id`, y el companion muestra el avatar más los toggles `companion_features` por dispositivo. Se configuran en la pestaña **Lo básico** de un bot (canal *Compañero de IA (quiosco)*). Las respuestas de voz (quiosco, lentes, teléfono) son de Crow, no de ese bot. El par de modelos es global (el router `/llm/v1` del gateway); la variación por dispositivo es solo avatar/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
 
 ### Semántica de `companion_features`
 

@@ -138,14 +138,6 @@ function makeEngine(envOverride = {}) {
   return { engine, clock, bridge, pushes };
 }
 
-async function liveSession(engine, bridge, botId, extra = {}) {
-  const s = await engine.spawn({ botId, ...extra });
-  await tick();
-  await engine.message(s.sessionId, "go");
-  await tick();
-  return { s, pi: bridge._state.instances[bridge._state.instances.length - 1] };
-}
-
 const confirm = (id, title, extra = {}) => ({ type: "extension_ui_request", id, method: "confirm", title, message: "Allow this once?", ...extra });
 
 let cardSeq = 700;   // the card claim outlives an engine (it is a DB row), so each test gets its own card

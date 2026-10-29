@@ -481,9 +481,11 @@ test("abilities: more than four → four and '+N more', the whole list in the ti
 });
 
 test("the no-assistant line points at Crow's voice in Bot Builder; the room hint names Reset to preset (en + es)", () => {
-  assert.equal(STRINGS.en.no_bot, "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.");
-  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.");
+  assert.equal(STRINGS.en.no_bot, "Crow's voice is turned off. Check Crow in Bot Builder.");
+  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada. Revisa Crow en Bot Builder.");
   for (const lang of ["en", "es"]) assert.doesNotMatch(STRINGS[lang].no_bot, /Kiosk|Elige uno|Choose one/, lang);
+  assert.equal(STRINGS.en.err_bot_too_large, "Crow's voice settings are too large for the quick voice model. Open Crow in Bot Builder.");
+  assert.equal(STRINGS.es.err_bot_too_large, "La configuración de voz de Crow es demasiado grande para el modelo de voz rápido. Abre Crow en Bot Builder.");
   assert.match(STRINGS.en.household_hint, /Reset to preset/);
   assert.match(STRINGS.en.household_hint, /Bot Builder → Crow/);
   assert.match(STRINGS.es.household_hint, /Restablecer la configuración base/);

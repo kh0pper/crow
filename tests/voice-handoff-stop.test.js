@@ -342,6 +342,8 @@ test("no declines a stop and leaves the task running; an unanswered stop is take
   assert.equal((await s.row(id)).status, "started");
   assert.equal(s.pending.get(DEVICE.id), null);
   assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+  await s.afterTurn();   // the asking turn's own afterTurn keeps the question (P19, PR 6 fix round 1)
+  assert.equal(s.pending.get(DEVICE.id).kind, "stop");
   assert.equal(await s.ask("what's the weather tomorrow"), null);
   await s.afterTurn();
   assert.equal(s.pending.get(DEVICE.id), null, "a non-relay turn takes an unanswered stop");
@@ -355,6 +357,7 @@ test("a turn that calls crow_handoff (refused) while a stop waits still takes th
   const s = await setup();
   const { id, sid } = await started(s);
   assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+  await s.afterTurn();   // the asking turn's own afterTurn keeps the question (P19, PR 6 fix round 1)
   // Not a yes or no, and no hand-off cue: the tool is not offered, the model's forced call is refused, and the
   // call still counts as called this turn (calledTools) — the stop question is taken all the same.
   const { h, turn } = withTurn(s, [call({ task: "write a poem", bot: "writer" }), says("It'll be sunny. ")]);
@@ -447,6 +450,7 @@ test("a pronoun stop while media plays, or with no media flag, asks which it mea
   // Media active: the ask, and a non-yes falls through (null) and leaves the question to the next turn's take.
   assert.deepEqual(await s.ask("stop it", { mediaActive: () => true }), { say: "Do you mean Writer's task? Say yes, or say stop the music.", verb: "stop_propose_media" });
   assert.equal(s.pending.get(DEVICE.id).kind, "stop");
+  await s.afterTurn();   // the asking turn's own afterTurn keeps the question (P19, PR 6 fix round 1)
   assert.equal(await s.ask("stop the music", { mediaActive: () => true }), null, "falls through to media");
   assert.equal(await s.ask("no", { mediaActive: () => true }), null, "anything but yes falls through");
   assert.deepEqual(s.eng.calls.stop, []);
@@ -481,6 +485,179 @@ test("through the runner: \"stop it\" with a topic and no media is the stop ask,
 });
 
 /* ---------- Scope and resolution (P20, P23) ---------- */
+
+test("a stop said again while its question waits asks again, never declines; another bot's stop asks about that one (PR 6 carry)", async () => {
+  const s = await setup();
+  const { id } = await started(s);
+  const ask = { say: "Stop Writer's task: research radio history?", verb: "stop_propose" };
+  assert.deepEqual(await s.ask("stop writer"), ask);
+  s.now.advance(MIN);
+  assert.deepEqual(await s.ask("stop writer"), ask, "the same stop: the proposal again, not \"Okay, I won't.\"");
+  assert.deepEqual(await s.ask("stop the writer please"), ask);
+  assert.deepEqual(await s.ask("stop it"), ask, "a pronoun stop means the one asked about");
+  const e = s.pending.get(DEVICE.id);
+  assert.equal(e.kind, "stop");
+  assert.equal(e.id, id);
+  assert.equal(e.at, s.now(), "the question's TTL is refreshed");
+  assert.equal((await s.row(id)).status, "started");
+  assert.deepEqual(s.eng.calls.stop, [], "asked, not acted");
+  // Another bot named: that one is asked about instead.
+  const h = await s.handoff({ bot: "helper", session: "s2" });
+  assert.deepEqual(await s.ask("stop helper"), { say: "Stop Helper's task: research radio history?", verb: "stop_propose" });
+  assert.equal(s.pending.get(DEVICE.id).id, h.id);
+  assert.equal((await s.ask("yes")).verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, ["s2"]);
+  assert.equal((await s.row(id)).status, "started", "writer's keeps running");
+  // A bare word is still the answer: "no" and "stop" alone decline.
+  for (const word of ["no", "stop"]) {
+    assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+    assert.deepEqual(await s.ask(word), { say: "Okay, I won't.", verb: "handoff_declined" }, word);
+    assert.equal(s.pending.get(DEVICE.id), null, word);
+  }
+  assert.equal((await s.row(id)).status, "started");
+  assert.deepEqual(s.eng.calls.stop, ["s2"]);
+  s.done();
+});
+
+/* ---------- Through the real runner: a question survives its own turn (P19, PR 6 Task 6.3 fix round 1) ---------- */
+
+test("through the runner: \"stop writer\" then \"yes\" stops it, engine.stop once (a)", async () => {
+  const s = await setup();
+  const { id, sid } = await started(s);
+  const { h, turn } = withTurn(s, []);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal(s.pending.get(DEVICE.id).kind, "stop", "the asking turn's own afterTurn keeps the question");
+  const r = await turn("yes", { mediaActive: () => false });
+  assert.equal(r.fastPath, true);
+  assert.equal(r.timings.verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, [sid], "engine.stop once");
+  assert.equal((await s.row(id)).status, "stopped");
+  assert.equal(h.log.length, 0, "no model round");
+  assert.equal(s.pending.get(DEVICE.id), null);
+  s.done();
+});
+
+test("through the runner: \"stop writer\", an unrelated model turn, then \"yes\" stops nothing; the yes reaches the model with no stop waiting (b)", async () => {
+  const s = await setup();
+  const { id } = await started(s);
+  const { h, turn } = withTurn(s, [says("It'll be sunny. "), says("Okay. ")]);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  const w = await turn("what's the weather tomorrow", { mediaActive: () => false });
+  assert.equal(w.fastPath, false);
+  assert.equal(s.pending.get(DEVICE.id), null, "the turn after the question did not answer it: taken");
+  const r = await turn("yes", { mediaActive: () => false });
+  assert.equal(r.fastPath, false, "the yes is the model's");
+  assert.equal(h.log.length, 2);
+  const sent = JSON.stringify(h.log[1].messages);
+  assert.ok(!/\[Hand-off\] Waiting/.test(sent), "no pending stop in the yes turn's context");
+  assert.deepEqual(s.eng.calls.stop, []);
+  assert.equal((await s.row(id)).status, "started");
+  s.done();
+});
+
+test("through the runner: a relay turn between \"stop writer\" and \"yes\" ends the question (R15's relay rule, unchanged) (c)", async () => {
+  // The relay afterTurn never marks a question as seen, and keeps today's RELAY_KINDS rule: a relay takes a waiting
+  // hand-off, which or stop, so the operator's later yes is the model's and stops nothing.
+  const s = await setup();
+  const { id } = await started(s);
+  const { turn } = withTurn(s, [says("Okay. "), says("Okay. ")]);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  const rr = await turn("the bot's answer", { relayThreadId: "thread-1", relayKind: "answer" });
+  assert.equal(rr.timings.relay, true);
+  assert.equal(s.pending.get(DEVICE.id), null, "the relay took the stop question");
+  const r = await turn("yes", { mediaActive: () => false });
+  assert.equal(r.fastPath, false);
+  assert.deepEqual(s.eng.calls.stop, []);
+  assert.equal((await s.row(id)).status, "started");
+  s.done();
+});
+
+test("through the runner: a which-stop, then \"writer\", then \"yes\" stops writer's task only (d)", async () => {
+  const s = await setup();
+  const w = await s.handoff({ session: "s1" });
+  const hp = await s.handoff({ bot: "helper", session: "s2" });
+  const { h, turn } = withTurn(s, []);
+  assert.equal((await turn("stop the research", { mediaActive: () => false })).timings.verb, "status_which");
+  assert.equal(s.pending.get(DEVICE.id).purpose, "stop");
+  assert.equal((await turn("writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal(s.pending.get(DEVICE.id).id, w.id, "a fresh question about writer's row");
+  assert.equal((await turn("yes", { mediaActive: () => false })).timings.verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, ["s1"]);
+  assert.equal((await s.row(w.id)).status, "stopped");
+  assert.equal((await s.row(hp.id)).status, "started");
+  assert.equal(h.log.length, 0);
+  s.done();
+});
+
+test("through the runner: \"stop writer\" twice in a row still asks, and the yes then stops it (g)", async () => {
+  const s = await setup();
+  const { id, sid } = await started(s);
+  const { turn } = withTurn(s, []);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose", "asked again, never a no");
+  assert.equal(s.pending.get(DEVICE.id).kind, "stop", "the re-asked question has its own grace");
+  assert.equal((await turn("yes", { mediaActive: () => false })).timings.verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, [sid]);
+  assert.equal((await s.row(id)).status, "stopped");
+  s.done();
+});
+
+test("through the runner: a yes said with the stop confirms it, en and es; \"no, stop writer\" asks again (6.3 fix round 2, I1)", async () => {
+  for (const [lang, ask, yes] of [
+    ["en", "stop writer", "yes, stop it"], ["en", "stop writer", "yes stop writer"], ["en", "stop writer", "yes, stop the writer please"],
+    ["es", "detén a writer", "sí, páralo"], ["es", "detén a writer", "sí, detén a writer"],
+  ]) {
+    const s = await setup();
+    const { id, sid } = await started(s, { lang });
+    const { h, turn } = withTurn(s, []);
+    assert.equal((await turn(ask, { lang, mediaActive: () => false })).timings.verb, "stop_propose", ask);
+    const r = await turn(yes, { lang, mediaActive: () => false });
+    assert.equal(r.timings.verb, "stop_stopped", yes);
+    assert.deepEqual(s.eng.calls.stop, [sid], `${yes}: stopped once`);
+    assert.equal((await s.row(id)).status, "stopped");
+    assert.equal(h.log.length, 0);
+    s.done();
+  }
+  // "no, stop writer" is a stop request again: the question is asked again, nothing stops.
+  const s = await setup();
+  const { id } = await started(s);
+  const { turn } = withTurn(s, []);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal((await turn("no, stop writer", { mediaActive: () => false })).timings.verb, "stop_propose", "asked again, not declined");
+  assert.equal(s.pending.get(DEVICE.id).id, id);
+  assert.deepEqual(s.eng.calls.stop, []);
+  s.done();
+});
+
+test("through the runner: a yes with a stop naming ANOTHER bot asks about that bot, never confirms the asked one (6.3 fix round 2)", async () => {
+  const s = await setup();
+  const { id } = await started(s);
+  const hp = await s.handoff({ bot: "helper", session: "s2" });
+  const { turn } = withTurn(s, []);
+  assert.equal((await turn("stop writer", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.deepEqual((await turn("yes, stop helper", { mediaActive: () => false })).timings.verb, "stop_propose");
+  assert.equal(s.pending.get(DEVICE.id).id, hp.id, "the question is now about helper's row");
+  assert.deepEqual(s.eng.calls.stop, []);
+  assert.equal((await turn("yes", { mediaActive: () => false })).timings.verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, ["s2"]);
+  assert.equal((await s.row(id)).status, "started", "writer's keeps running");
+  s.done();
+});
+
+test("a pronoun stop while a stop question waits means the asked row, never the device's last topic (6.3 fix round 2, m5)", async () => {
+  const s = await setup();
+  const w = await s.handoff({ session: "s1" });
+  const hp = await s.handoff({ bot: "helper", session: "s2" });
+  const { rememberTopic, topicFor } = await import("../servers/gateway/voice/handoff-topic.js");
+  assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+  assert.equal(s.pending.get(DEVICE.id).id, w.id);
+  // The device's topic is helper's row ("how's helper doing?"); the question asked is about writer's.
+  rememberTopic(s.core, DEVICE.id, hp.id, { inTurn: false });
+  assert.equal(topicFor(s.core, DEVICE.id).id, hp.id);
+  assert.deepEqual(await s.ask("stop it"), { say: "Stop Writer's task: research radio history?", verb: "stop_propose" });
+  assert.equal(s.pending.get(DEVICE.id).id, w.id, "still writer's");
+  s.done();
+});
 
 test("a named bot with nothing open of its own: already when it just ended, none otherwise; nothing open at all is the model's", async () => {
   const s = await setup();
@@ -869,4 +1046,17 @@ test("the spoken lines follow the row's language for the stop itself and the tur
   assert.deepEqual(await s.ask("sí", { lang: "es" }), { say: "Vale, he parado a Writer. Lo que ya hizo se queda.", verb: "stop_stopped" });
   assert.equal((await s.row(id)).status, "stopped");
   s.done();
+});
+
+test("every pending.set in the hand-off files asks through askedEntry, so each question gets its own one-turn grace (PR 6 fix round 1)", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dir = join(REPO, "servers/gateway/voice");
+  let sites = 0;
+  for (const f of readdirSync(dir).filter((n) => /^handoff.*\.js$/.test(n))) {
+    for (const m of readFileSync(join(dir, f), "utf8").matchAll(/pending\.set\(([^\n]*)/g)) {
+      sites++;
+      assert.match(m[1], /^[^,]+, askedEntry\(/, `${f}: ${m[0]}`);
+    }
+  }
+  assert.equal(sites, 5, "the five sites: handoff.js ×2, handoff-status.js, handoff-stop.js ×2");
 });

@@ -30,11 +30,11 @@ import { modelAvailability } from "./model-availability-voice.js";
 import { matchYesNo, changesContent } from "./pending.js";
 import { matchChoice } from "./own-tools.js";
 import { phraseWords, listMatches } from "./tool-families.js";
-import { HANDOFF_TASK_MAX_CHARS, HANDOFF_OPEN, PERSONAL_SURFACES } from "./handoff-constants.js";
+import { HANDOFF_TASK_MAX_CHARS, HANDOFF_OPEN, PERSONAL_SURFACES, askedEntry } from "./handoff-constants.js";
 import { confirm, langOf, botName, surfaceLabel, announceHandoff } from "./handoff-confirm.js";
 import { createHandoffCompletion } from "./handoff-completion.js";
 import { status as handoffStatus, answerRow, reconcileOpen } from "./handoff-status.js";
-import { stop as handoffStop, decideStop as handoffDecideStop, stopIntent, stopConfirmed, proposeStop } from "./handoff-stop.js";
+import { stop as handoffStop, decideStop as handoffDecideStop, stopIntent, stopConfirmed, proposeStop, stopAgain } from "./handoff-stop.js";
 import { sendToPhone, phoneConfirmPath, displayNameOf } from "./handoff-phone.js";
 import { rememberTopic, bumpExchange } from "./handoff-topic.js";
 import { registerResultKind } from "../board/result-requesters.js";
@@ -56,6 +56,11 @@ const TOOL_KINDS = new Set(["handoff", "which"]);
 const offersTool = (e) => TOOL_KINDS.has(e?.kind) && (e.purpose == null || e.purpose === "handoff");
 // The entries a relay turn's afterTurn clears here (R15: own-tools.js clears routine and which_calendar).
 const RELAY_KINDS = new Set(["handoff", "which", "stop"]);
+// P19, fix round 1 (PR 6 Task 6.3): the marks (askedEntry) of the questions a non-relay afterTurn has already let
+// through. The turn that asks a question (a fast path's "Stop Writer's task?", the model's crow_handoff) runs
+// afterTurn too: that one keeps it, and the NEXT non-relay turn that did not answer it applies the take rules.
+// A relay afterTurn never marks. An entry with no mark was not asked through askedEntry: the take rules at once.
+const SEEN_BY_A_TURN = new WeakSet();
 /** A bot id as the model may read it (the pi-bots BOT_ID_RE): anything else is never offered. */
 const SAFE_BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 /** Any surface but a personal one (PERSONAL_SURFACES), a missing one included, is a shared display: "kiosk" (its hand-off is confirmed on the phone). */
@@ -161,7 +166,7 @@ export async function proposeHandoff(ctx, task, botId) {
   // The other candidates' names: a yes that names one of them is a correction, not a yes (pending.js matchYesNo).
   const names = [...new Set(candidates.filter((c) => c.bot_id !== target.bot_id).flatMap((c) => [c.name, c.bot_id]))]
     .filter((n) => n !== target.name && n !== target.bot_id);
-  pending.set(device.id, { kind: "handoff", id, bot_id: target.bot_id, name: target.name, task, names });
+  pending.set(device.id, askedEntry({ kind: "handoff", id, bot_id: target.bot_id, name: target.name, task, names }));
   const vars = { bot: target.name, task };
   let say = voiceLine(startNow ? "handoff_propose" : "handoff_propose_queued", lang, vars);
   if (startNow && avail === "on_demand") say += voiceLine("handoff_model_starts", lang, vars);
@@ -187,7 +192,7 @@ async function runHandoffCall(ctx, args) {
     const c = ctx.candidates.find((x) => x.bot_id === id);
     return { bot_id: c.bot_id, name: c.name };
   });
-  ctx.pending.set(ctx.device.id, { kind: "which", task, asked: typeof ctx.transcript === "string" ? ctx.transcript : null, options });
+  ctx.pending.set(ctx.device.id, askedEntry({ kind: "which", task, asked: typeof ctx.transcript === "string" ? ctx.transcript : null, options }));
   // The entry keeps every valid option; the spoken question names the first two.
   const say = options.length >= 2
     ? voiceLine("handoff_which", lang, { a: options[0].name, b: options[1].name })
@@ -353,7 +358,8 @@ function namesAnother(transcript, names) {
  *   fastPath     a pending hand-off: yes → core.confirm (the server speaks what really happened), no → declined;
  *                a transcript naming another candidate is a correction (null, even after "no": the model
  *                re-proposes). A pending stop (P19): yes → the stop (handoff-stop.js stopConfirmed: core.stop,
- *                or the phone page from a kiosk), no → declined; on a media ask (stop_propose_media) anything
+ *                or the phone page from a kiosk), no → declined; the stop said again (stopAgain: "stop writer",
+ *                "stop it") asks again, or about the other bot it names, never a no; on a media ask (stop_propose_media) anything
  *                but a yes is the media path's (null, P21). A pending which: an answer naming one option
  *                re-proposes through proposeHandoff (purpose "handoff", or none), answers that bot's status
  *                (purpose "status", P18) or asks to stop its task (purpose "stop"); a no declines. With nothing
@@ -362,7 +368,8 @@ function namesAnother(transcript, names) {
  *                taken only when it is answered. Never on a relay turn (turn.js skips fastPath there).
  *   turnContext  a pending hand-off, stop or which: "[Hand-off] Waiting for a yes or no: …", pending (an action
  *                turn, so a reply claiming the bot started or stopped is held and replaced); it reads only the entry [rv1 C6]
- *   afterTurn    every turn counts one exchange on the device (handoff-topic.js). A turn that left a pending
+ *   afterTurn    every turn counts one exchange on the device (handoff-topic.js). The turn that asked a question
+ *                keeps it (its one-turn grace, SEEN_BY_A_TURN; P19, PR 6 fix round 1); after that, a turn that left a pending
  *                hand-off or which unanswered (no crow_handoff call) takes it and expires a hand-off's row;
  *                an unanswered stop is taken whatever was called, so a later stray "yes" answers nothing
  *                (fix round 1); a routine or which_calendar entry is never
@@ -383,6 +390,12 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
       }
       const speak = langOf(lang);
       if (peek.kind === "stop") {
+        // The stop said again ("stop writer" while "Stop Writer's task?" waits) asks again, never declines (PR 6);
+        // a media ask keeps P21 (anything but a yes is the media path's).
+        if (peek.media !== true) {
+          const again = await stopAgain(core, db, { device, surface, transcript, lang, bot, pending, mediaActive }, peek);
+          if (again) return again;
+        }
         const answer = matchYesNo(transcript);
         // A media ask: only a yes answers it; "stop the music", a no, anything else is the media path's (P21).
         if (!answer || (peek.media === true && answer !== "yes")) return null;
@@ -471,6 +484,11 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
       bumpExchange(core, device.id);
       const e = pending.get(device.id);
       if (!e) return;
+      // The turn that asked the question keeps it (its own afterTurn is the first non-relay one to see it).
+      if (relay !== true && OWN_KINDS.has(e.kind) && e.mark && typeof e.mark === "object" && !SEEN_BY_A_TURN.has(e.mark)) {
+        SEEN_BY_A_TURN.add(e.mark);
+        return;
+      }
       // A crow_handoff call this turn keeps a proposal or a which (the call re-proposed, or was refused and the
       // question still stands); a stop is answered by a yes or no alone, so it is taken whatever was called.
       if (relay === true ? !RELAY_KINDS.has(e.kind) : !OWN_KINDS.has(e.kind) || (offersTool(e) && calledTools.includes(HANDOFF_TOOL_NAME))) return;

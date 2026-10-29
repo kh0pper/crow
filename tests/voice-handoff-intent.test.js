@@ -95,6 +95,14 @@ test("wantsHandoffStop: named, pronoun, or null", () => {
   for (const t of ["eso es para eso", "para eso sirve el martillo"]) assert.equal(wantsHandoffStop(t, BOTS), null, `para eso keeps the para rules: ${t}`);
 });
 
+test("wantsHandoffStop and stopShape: \"al\" (a + el) is read where \"a\" is (PR 6 carry)", () => {
+  for (const t of ["detén al writer", "deten al writer", "para al writer", "cancela al writer por favor", "oye crow, detén al writer"]) {
+    assert.equal(wantsHandoffStop(t, ["Writer"]), "named", t);
+    assert.equal(stopShape(t), true, t);
+  }
+  for (const t of ["para al final", "para al final de la calle", "una nota para al writer"]) assert.equal(wantsHandoffStop(t, ["Writer"]), null, t);
+});
+
 test("wantsHandoffStop: \"para\" means stop only as the first word, with the target ending the sentence", () => {
   for (const t of [
     "escribe una nota para writer",

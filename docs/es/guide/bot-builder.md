@@ -18,7 +18,7 @@ Un agente es una definición con varias partes. El editor las agrupa en cuatro p
 
 | Pestaña | Qué controla |
 |---|---|
-| **Lo básico** | El nombre del agente, su personalidad e instrucciones, su modelo (más un modelo más potente opcional para preguntas difíciles y un modelo de voz rápido para gafas, quiosco y compañero) y el único canal por el que la gente lo contacta: Gmail, Discord, Telegram, Slack, gafas Meta, un quiosco de Compañero de IA, Mensajes de Crow o Perch. Solo se muestran los ajustes del canal elegido. |
+| **Lo básico** | El nombre del agente, su personalidad e instrucciones, su modelo (más un modelo más potente opcional para preguntas difíciles y un modelo de voz rápido para gafas, quiosco y compañero) y el único canal por el que la gente lo contacta: Gmail, Discord, Telegram, Slack, un quiosco de Compañero de IA, Mensajes de Crow o Perch. Solo se muestran los ajustes del canal elegido. |
 | **Capacidades** | Lo que puede hacer: leer o editar archivos en sus carpetas, ejecutar comandos, usar la memoria y qué servicios conectados puede usar. Cada servicio es una fila con **Apagado / Solo lectura / Todo / Personalizado**; Personalizado abre una lista con buscador de las herramientas de ese servicio, cada una marcada como "lee" o "hace cambios". Aquí también se eligen las habilidades. |
 | **Seguridad** | Si el correo que escribe se guarda como borrador para ti o se envía directamente, qué carpetas puede ver y modificar, y las acciones sobre las que siempre debe preguntarte antes. |
 | **Actividad** | Una lista de verificación, el interruptor Activar / Desactivar, las habilidades que esperan tu revisión y sus conversaciones recientes. |
@@ -46,15 +46,21 @@ Un gateway conecta un agente con un lugar donde la gente habla con él. La misma
 
 - **Gmail**: El agente lee y responde correo en un buzón conectado.
 - **Discord**: El agente se une a un servidor de Discord como bot y responde en canales y mensajes directos, con una lista de usuarios permitidos por agente.
-- **Lentes Meta**: Un par de lentes Ray-Ban Meta (Gen 2) emparejados se vincula a un agente. Ese agente entonces dirige el turno de voz rápido: su persona, sus skills, sus herramientas delimitadas y sus permisos, hablados a través de los perfiles de habla y voz que elegiste. Consulta la [guía de Lentes Meta](/es/guide/meta-glasses).
+- **Lentes Meta**: Los lentes Ray-Ban Meta (Gen 2) emparejados responden como Crow, con los perfiles de habla y voz que elegiste. Consulta la [guía de Lentes Meta](/es/guide/meta-glasses).
 - **Crow Messages**: El agente se vuelve accesible como un contacto. Las personas que invites pueden enviarle mensajes, puedes explorar y agregar los bots que corren en tus Crows, y puedes reunir a personas y bots en una sala grupal. Consulta la [guía de Crow Messages](/es/guide/crow-messages).
 - **Perch**: El agente se vuelve conversable directamente en el tablero de tu propio panel. No hay nada que configurar: elegir el canal es toda la configuración, y nada que instalar. Consulta [Perch](#perch-habla-con-un-agente-desde-tu-propio-panel) más abajo.
 
-### Qué bot responde por voz
+### La voz y los encargos
 
-La tarjeta de cada bot dice dónde responde por voz: **Responde por voz en:** nombra las gafas o el Compañero IA vinculados, **Teléfono y panel** cuando responde a Hablar con Crow (con *(automático)* cuando nadie eligió uno y Automático lo escogió) y cada pantalla de kiosco donde está. Con la extensión Kiosk instalada, **⋯ → Usar para la voz…** le asigna Teléfono y panel o una pantalla en un paso. Guarda los mismos ajustes que el panel Kiosk. Una pantalla cambia al momento; Teléfono y panel se aplica la próxima vez que se abra Hablar con Crow. Las gafas y el compañero se configuran en los ajustes de canal del bot, a los que el diálogo enlaza. Una pantalla no puede quedarse sin bot, así que para quitársela a este bot, elige otro bot para ella.
+La voz siempre responde como **Crow**, hables con un quiosco, con tus lentes o con Hablar con Crow en el teléfono. Ya no se elige un bot por dispositivo. Los ajustes de Crow (su modelo, su voz, la memoria y lo demás) están en el bot de voz **Crow** del Bot Builder.
 
-Vincular los lentes a un agente es uno a uno: un dispositivo dirige un agente a la vez, y elegir un nuevo agente para un dispositivo libera el vínculo anterior.
+Crow puede encargarle un trabajo más grande a uno de tus bots. Pide algo que le toque a un bot («que writer redacte una entrada sobre el huerto») y Crow te dice a qué bot se lo daría y de qué trata. No pasa nada hasta que digas que sí. En un quiosco, que es una pantalla compartida, lo confirmas en el teléfono: Crow te manda una notificación y ahí tocas Confirmar.
+
+Cuando dices que sí, el trabajo aparece como una tarjeta en el tablero de ese bot, y Crow te avisa de que el bot ya se puso con ello (o de que todavía está arrancando). Al terminar recibes una sola notificación que abre lo que el bot hizo. Si sigues hablando con Crow, también te dice en voz alta que el bot terminó.
+
+Mientras un bot trabaja puedes preguntar «¿cómo va writer?». Para pararlo, di «para a writer» o «párala». Crow siempre te pregunta antes, y lo que el bot ya hizo se conserva.
+
+Los bots a los que Crow puede encargar trabajo se eligen en los ajustes de voz de Crow: abre **Crow** en el Bot Builder y ve a la sección **Encargos a otros bots**, con un interruptor, la lista de bots permitidos (vacía significa todos los bots activados con su tablero encendido; Crow ofrece como máximo ocho) y un registro de los encargos recientes.
 
 ## Perch: habla con un agente desde tu propio panel
 

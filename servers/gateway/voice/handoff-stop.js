@@ -11,6 +11,7 @@
  *   stopIntent(core, db, ctx)               the fast path for a stop request (wantsHandoffStop) → { say, verb } | null
  *   stopConfirmed(core, db, ctx, entry)     the spoken yes on a pending stop entry
  *   proposeStop(core, db, ctx, row)         ask to stop `row`: the spoken question, or the phone page on a kiosk
+ *   stopAgain(core, db, ctx, entry)         a stop request said while a stop question waits → { say, verb } | null
  *
  * Which hand-off (P20, P23): the scope is the status scope (handoff-status.js rowsInScope: a kiosk sees its own
  * device's rows, a personal surface every device's), open rows only, and the matchers fire only with one open.
@@ -36,8 +37,9 @@
  *   3. One board mutation handoff_stopped (DASHBOARD_ACTOR; via and the hand-off id) on the card [rv1 S].
  *   4. The result claim is released (guarded on a card, P9).
  */
-import { PERSONAL_SURFACES } from "./handoff-constants.js";
-import { wantsHandoffStop, stopShape } from "./handoff-intent.js";
+import { PERSONAL_SURFACES, HANDOFF_OPEN, askedEntry } from "./handoff-constants.js";
+import { wantsHandoffStop, stopShape, namedBots } from "./handoff-intent.js";
+import { matchYesNo } from "./pending.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf } from "./handoff-confirm.js";
 import { rowsInScope, resolveRows, candidatesOf } from "./handoff-status.js";
@@ -223,7 +225,7 @@ export async function proposeStop(core, db, ctx, row, { media = false } = {}) {
   const kiosk = !PERSONAL_SURFACES.has(ctx.surface);
   if (kiosk && !media) return stopToPhone(core, db, ctx, row, name);
   takeForeign(core, pending, device.id);
-  pending.set(device.id, { kind: "stop", id: row.id, bot_id: row.bot_id, name, task: row.task, phone: kiosk, media });
+  pending.set(device.id, askedEntry({ kind: "stop", id: row.id, bot_id: row.bot_id, name, task: row.task, phone: kiosk, media }));
   if (media) return { say: voiceLine("stop_propose_media", lang, { bot: name }), verb: "stop_propose_media" };
   return { say: voiceLine("stop_propose", lang, { bot: name, task: row.task }), verb: "stop_propose" };
 }
@@ -305,6 +307,41 @@ export async function stopIntent(core, db, { device, surface, transcript, lang, 
   if (ids.length === 1) return proposeStop(core, db, ctx, about[0]);
   const which = ids.map((id) => ({ bot_id: id, name: bots.get(id), id: about.find((r) => r.bot_id === id).id }));
   takeForeign(core, pending, device.id);
-  pending.set(device.id, { kind: "which", purpose: "stop", options: which, asked: transcript });
+  pending.set(device.id, askedEntry({ kind: "which", purpose: "stop", options: which, asked: transcript }));
   return { say: voiceLine("status_which", speak, { list: joinAnd(which.map((w) => w.name), speak) }), verb: "status_which" };
+}
+
+/** The transcript names a bot other than `entry`'s: a candidate, or a bot with a row in scope (open or just ended). */
+async function namesAnotherBot(core, db, ctx, entry) {
+  const bots = new Map((await candidatesOf(core, db, ctx.bot)).map((c) => [c.bot_id, c.name]));
+  const { open, ended } = await rowsInScope(core.store, db, ctx.device, ctx.surface, core.now());
+  for (const r of [...open, ...ended]) if (!bots.has(r.bot_id)) bots.set(r.bot_id, await botName(db, r.bot_id));
+  bots.delete(entry.bot_id);
+  return namedBots(ctx.transcript, [...bots].map(([bot_id, name]) => ({ bot_id, name })), { possessive: true }).length > 0;
+}
+
+/**
+ * A stop request said while the stop question `entry` waits (PR 6): "stop writer" again is never a "no".
+ * - A yes said with a stop about the asked row ("yes, stop it", "yes stop writer", "sí, páralo", "sí, detén a
+ *   writer") confirms: null here, and the yes path answers it (6.3 fix round 2). A yes whose stop names another
+ *   bot ("yes, stop helper") is that bot's question instead.
+ * - A pronoun ("stop it", "no, stop it") means the row being asked about, never the device's last topic: its
+ *   question again, with a fresh TTL.
+ * - Any other stop goes through stopIntent, which asks about the row it resolves to and replaces the entry (the
+ *   same row: the proposal again; another bot's: that one's question; "no, stop writer" asks again).
+ * - No stop at all → null: the yes/no reads it, so a bare "no" or "stop" still declines. ctx is stopIntent's.
+ */
+export async function stopAgain(core, db, ctx, entry) {
+  const t = ctx.transcript;
+  const kind = wantsHandoffStop(t, [entry.name, entry.bot_id]);
+  if (kind === null && !stopShape(t)) return null;
+  const yes = matchYesNo(t) === "yes";
+  if (kind === "pronoun") {
+    if (yes) return null;
+    const row = await core.store.get(db, entry.id);
+    if (!row || row.kind !== "handoff" || !HANDOFF_OPEN.includes(row.status)) return null;
+    return proposeStop(core, db, ctx, row, { media: mediaMayBeActive(ctx.mediaActive) });
+  }
+  if (yes && !(await namesAnotherBot(core, db, ctx, entry))) return null;
+  return stopIntent(core, db, ctx);
 }

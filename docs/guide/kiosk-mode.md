@@ -14,37 +14,19 @@ The Crow's Nest header no longer has a **Companion** button. Its one button, the
 
 Music or radio you start from Talk to Crow plays in the dashboard's **player bar** at the bottom of the page, not inside the overlay. It keeps playing after you close the overlay and while you move between panels; the bar's buttons pause, skip and stop it, and a reload of the page brings the bar back (tap ⏯ if the browser held the sound back). It ends when you stop it or log out.
 
-## Per-device customization
+## Who answers, and hand-offs
 
-A kiosk is a **device** bound to a [Bot Builder](/architecture/bot-builder) agent — the same binding model as [Meta Glasses](/guide/meta-glasses). Different displays can run different bots:
+Every display answers as **Crow**, the same voice bot as your glasses and Talk to Crow on your phone. A kiosk is no longer bound to a bot of its own; Crow's persona, model and tool limits are set once on the **Crow** voice bot in the [Bot Builder](/guide/bot-builder). What stays per device is the look of the companion: the avatar and the kiosk features (avatar animation, pet/idle mode, social chat, memory). Set them on a bot's **Basics** tab: choose the channel **AI Companion (kiosk)**, pick or pair the display, and fill in the avatar and features. Pairing the display itself is done in the Kiosk panel.
 
-```
-kitchen-tablet → "Chef"  (avatar A · voice A · social off)
-studio-display → "Aide"  (avatar B · voice B · social on)
-```
+Crow can hand a bigger job to one of your bots. A kiosk is a shared screen, so a yes spoken in the room is never enough: Crow sends a notification to your phone, and you tap Confirm there. When the bot finishes, one notification opens what it made, and if you are still talking to the kiosk Crow says the bot finished. You can ask "how's writer doing?" and say "stop writer" or "stop it"; Crow asks first (on a kiosk, again on your phone) and whatever the bot already made is kept. Which bots Crow may hand work to is set in Crow's voice settings in Bot Builder (**Hand-offs**). See [the kiosk architecture](/architecture/kiosk#hand-offs).
 
-Bind a device on the bot's **Basics** tab → channel **AI Companion (kiosk)**:
+The avatar takes effect on the next kiosk session. The feature toggles apply at different layers: device-config features (`social_chat`, `face_tracking`) are fetched and applied on each kiosk page load; config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
 
-1. **Paired device** — pick the kiosk device, or simply **type a name** in the "…or pair a new kiosk" field and press Save: Crow creates and connects the device for you in one step (no Meta Glasses bundle required). Devices paired in the Meta Glasses panel also appear here; kiosks reuse that store, tagged `device_kind:"companion"`.
-2. **Avatar** — the Live2D model that renders for this kiosk.
-3. **Kiosk features** — toggle avatar animation/lip-sync, pet/idle mode, social (chatroom & DM) features, and automatic memory integration.
-
-Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session. The feature toggles apply at different layers: device-config features (`social_chat`, `face_tracking`) are fetched and applied on each kiosk page load; an older editor's hearing style and voice idle timeout are kept on the device but were never applied, so the editor no longer shows them; config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
-
-### What is and isn't per device
-
-| Per device | Shared across the container |
-|------------|-----------------------------|
-| Persona, avatar, voice | The fast→escalate **model pair** |
-| `companion_features` (avatar animation, pet mode, social/chat, memory) | The base MCP bridges (`crow-wm`, `crow-storage`) |
-| The `crow` memory bridge (per-bot `memory_integration` opt-in) | |
-| Bound bot | |
-
-The model pair is shared because one companion container has a single LLM `base_url` (the gateway's [`/llm/v1` router](/architecture/companion)). The MCP tool set is *mostly* shared — every character gets `crow-wm` and `crow-storage` — but the `crow` memory bridge is added per bot when its `memory_integration` feature is enabled (a config-gen setting; see [MCP bridges](/architecture/companion)). A kiosk that genuinely needs a *different* model pair needs its **own companion container** (own port + `conf.yaml`).
+The model pair is shared by every display because one companion container has a single LLM `base_url` (the gateway's [`/llm/v1` router](/architecture/companion)). A kiosk that genuinely needs a *different* model pair needs its **own companion container** (own port + `conf.yaml`).
 
 ## Social / chat features
 
-The companion's chatroom and DM features are gated by the per-device `social_chat` toggle, so a public-facing kiosk can run avatar-only (no social UI) while a personal display keeps full chat. Toggle it on the bot's Basics tab.
+The companion's chatroom and DM features are gated by the per-device `social_chat` toggle, so a public-facing kiosk can run avatar-only (no social UI) while a personal display keeps full chat. Toggle it on the bot's Basics tab (channel **AI Companion (kiosk)**).
 
 ## Related
 

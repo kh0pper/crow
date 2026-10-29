@@ -207,8 +207,23 @@ test("Basics: one voice-model control, one channel picker that never auto-submit
   const enabled = sets.filter((f) => !f.hasAttribute("disabled"));
   assert.equal(enabled.length, 1);
   assert.equal(enabled[0].getAttribute("data-channel"), "gmail");
-  assert.ok(sets.length >= 9);
+  assert.equal(sets.length, 8, "glasses is retired: not offered for a bot that does not have it");
+  assert.ok(!sets.some((f) => f.getAttribute("data-channel") === "glasses"));
   assert.equal(document.querySelector("#bx-name").getAttribute("value"), "Bot gm");
+});
+
+test("Basics: an existing glasses bot still renders, read-only with 'Glasses now answer as Crow' (en + es), and a save keeps its record", async () => {
+  await putBot("oldgl", { models: { default: "test-prov/model-a" }, gateways: [{ type: "glasses", device_id: "dev-1" }] });
+  const html = await render("oldgl", "basics");
+  const { document } = parseHTML(`<html><body>${html}</body></html>`);
+  const gl = document.querySelector('fieldset.btb-channel[data-channel="glasses"]');
+  assert.ok(gl && !gl.hasAttribute("disabled"), "its channel is the selected one");
+  assert.equal(gl.querySelectorAll("input, select, textarea").length, 0, "nothing to edit");
+  assert.match(gl.textContent, /Glasses now answer as Crow/);
+  const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  assert.match(translations["botbuilder.bxGlassesRetired"].es, /Las gafas ahora responden como Crow/);
+  await post(await formOf("oldgl", "basics"));
+  assert.deepEqual(JSON.parse((await row("oldgl")).definition).gateways, [{ type: "glasses", device_id: "dev-1" }]);
 });
 
 test("Abilities: memory row, one row per source with its account, Read-only only where it means something, failed source kept", async () => {
@@ -320,7 +335,7 @@ test("Basics: an empty name is refused and nothing is written", async () => {
   assert.equal(JSON.parse((await row("gm")).definition).system_prompt, "You are Hank.");
 });
 
-test("Basics: a glasses save never writes gw.fast_voice_model; a companion save keeps hearing style and idle timeout", async () => {
+test("Basics: a glasses post stores nothing (retired); a companion save keeps hearing style and idle timeout", async () => {
   await putBot("comp", COMPANION);
   const body = await formOf("comp", "basics");
   body.gw_social_chat = undefined; delete body.gw_social_chat; // untick one feature
@@ -335,7 +350,7 @@ test("Basics: a glasses save never writes gw.fast_voice_model; a companion save 
   g.gw_type = "glasses";
   await post(g);
   const gd = JSON.parse((await row("gl")).definition);
-  assert.deepEqual(gd.gateways, [{ type: "glasses" }]);
+  assert.deepEqual(gd.gateways, [], "no glasses record is created");
 });
 
 test("Abilities: source modes expand from the rendered catalog; other sources and unrendered ones are kept", async () => {

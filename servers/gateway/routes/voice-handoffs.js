@@ -80,14 +80,31 @@ function formatTime(ms, lang, opts) {
   catch { return new Date(Number(ms)).toISOString(); }
 }
 
-/** The status line for a row that is not waiting on this page. */
-function statusLine(row, now, lang, vars) {
+/**
+ * A done stop row's stop, as it stands now: core.stop's status at the decision (the row's detail) said
+ * "still landing" (pending_start, stopping); the target hand-off says whether it still is (PR 6), read at render
+ * time, never written back. Still landing while the target is stopped with detail pending_start and no session
+ * yet (finishStart has not stopped it), or detail stop_pending (the sweep's retry); anything else is stopped. No
+ * target row: the detail stands.
+ */
+function stopLanding(row, target) {
+  if (row.detail !== "pending_start" && row.detail !== "stopping") return null;
+  if (!target) return row.detail;
+  if (target.status !== "stopped") return null;
+  if (target.detail === "pending_start" && target.session_id == null) return "pending_start";
+  return target.detail === "stop_pending" ? "stopping" : null;
+}
+
+/** The status line for a row that is not waiting on this page. `target` is a stop row's hand-off, or null. */
+function statusLine(row, now, lang, vars, target = null) {
   const status = row.status === "awaiting_phone" && !live(row, now) ? "expired" : row.status;
   // A stop row's lines are its own (P26): a stop in progress, one that expired or one whose target had already
   // ended never read as a hand-off's "nothing was started".
   if (row.kind === "stop") {
-    // done carries core.stop's status as its detail: a stop still landing (pending_start, stopping) is not "Stopped".
-    if (status === "done" && (row.detail === "pending_start" || row.detail === "stopping")) return fill(t(`voiceHandoff.stopStatus.done_${row.detail}`, lang), vars);
+    // done carries core.stop's status as its detail: a stop still landing (pending_start, stopping) is not "Stopped",
+    // until the target says it landed (stopLanding).
+    const landing = status === "done" ? stopLanding(row, target) : null;
+    if (landing) return fill(t(`voiceHandoff.stopStatus.done_${landing}`, lang), vars);
     if (status === "failed" && (row.detail === "already" || row.detail === "not_sent")) return fill(t(`voiceHandoff.stopStatus.${row.detail}`, lang), vars);
     if (["done", "declined", "failed", "starting", "expired"].includes(status)) return fill(t(`voiceHandoff.stopStatus.${status}`, lang), vars);
   }
@@ -168,7 +185,8 @@ ${csrfInput(req)}
 <p class="status">${escapeHtml(t("voiceHandoff.notOwner", lang))}</p>`;
     }
   } else {
-    const line = statusLine(row, now, lang, vars);
+    const target = stop && row.status === "done" && row.target_id ? await core.store.get(db, row.target_id).catch(() => null) : null;
+    const line = statusLine(row, now, lang, vars, target);
     if (line) body += `
 <p class="status">${escapeHtml(line)}</p>`;
     const href = row.card_id != null ? await cardDrawerHref(db, row.card_id).catch(() => null) : null;

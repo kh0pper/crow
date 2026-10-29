@@ -261,8 +261,10 @@ test("no bound bot still answers: the session runs the turn with the shared voic
 });
 
 test("the glasses' no-assistant line points at Crow's voice in Bot Builder (en + es)", () => {
-  assert.equal(STRINGS.en.no_bot, "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.");
-  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.");
+  assert.equal(STRINGS.en.no_bot, "Crow's voice is turned off. Check Crow in Bot Builder.");
+  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada. Revisa Crow en Bot Builder.");
+  assert.equal(STRINGS.en.too_large, "Crow's voice settings are too large for the quick voice model. Open Crow in Bot Builder.");
+  assert.equal(STRINGS.es.too_large, "La configuración de voz de Crow es demasiado grande para el modelo de voz rápido. Abre Crow en Bot Builder.");
 });
 
 test("the bound assistant was switched off: spoken, not silent", async () => {

@@ -78,6 +78,7 @@ export function botBuilderStyles() {
   .btb-ok{color:var(--crow-success);font-weight:600}
   .btb-err{color:var(--crow-error);font-weight:600}
   .btb-status-warn{color:var(--crow-text-secondary);font-weight:600}
+  .btb-check-info{color:var(--crow-text-muted);font-weight:600}
   .btb-muted{color:var(--crow-text-muted)}
 
   /* Snapshot card */

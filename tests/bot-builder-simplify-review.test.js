@@ -399,7 +399,8 @@ test("a refused glasses save (row changed meanwhile) binds, unbinds and re-profi
   await putBot("gRef", { models: { default: "test-prov/model-a" }, gateways: [{ type: "glasses", device_id: "dev-old" }] });
   const before = await devices();
   const body = (await allSaveForms("gRef")).find((f) => f.tb === "basics").body;
-  body.gw_device_id = "dev-new"; // move the bot to the other glasses
+  body.gw_device_id = "dev-new"; // a (now ignored) attempt to move the bot to the other glasses
+  body.system_prompt = "edited persona"; // a real change, so the save writes and the stale row is refused
   const res = await refusedSave("gRef", body);
   assert.match(res.redirected, /error=/, "the save is refused");
   assert.equal(await devices(), before, "no device was bound, unbound or changed");
@@ -415,15 +416,16 @@ test("a refused new-kiosk save pairs no device", async () => {
   assert.equal(await devices(), before, "no kiosk device was created");
 });
 
-test("an accepted glasses save binds the new device after the write", async () => {
-  const { findDevice } = await import("../servers/shared/device-store.js");
+test("an accepted save of a bot with a glasses gateway binds, unbinds and re-profiles no device, and keeps the stored record", async () => {
   await putBot("gOk", { models: { default: "test-prov/model-a" }, gateways: [{ type: "glasses", device_id: "dev-old" }] });
+  const before = await devices();
   const body = (await allSaveForms("gOk")).find((f) => f.tb === "basics").body;
   body.gw_device_id = "dev-new";
+  body.system_prompt = "edited persona";
   const res = await post(body);
   assert.match(res.redirected, /saved=1/, res.redirected);
-  assert.equal((await findDevice(db, "dev-new")).bound_bot_id, "gOk");
-  assert.equal(JSON.parse((await row("gOk")).definition).gateways[0].device_id, "dev-new");
+  assert.equal(await devices(), before, "no device changed");
+  assert.deepEqual(JSON.parse((await row("gOk")).definition).gateways, [{ type: "glasses", device_id: "dev-old" }], "the stored glasses record is kept as it was");
 });
 
 test("a name that mixes a lookup word with a changing verb counts as changing things", async () => {

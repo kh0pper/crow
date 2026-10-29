@@ -155,7 +155,7 @@ test("no dashes for empty fields; friendly model visible with the raw key on hov
 test("purpose line: from the channels; left out when there is nothing to say", async () => {
   const html = await render();
   assert.ok(rowOf(html, "alpha-home").includes("AI Companion on a display"));
-  assert.ok(rowOf(html, "gamma-glasses").includes("Voice assistant on your glasses"));
+  assert.ok(rowOf(html, "gamma-glasses").includes("Glasses now answer as Crow"));
   assert.ok(rowOf(html, "helper").includes("Chats in Perch"));
   assert.ok(!rowOf(html, "beta-home").includes("btb-botcard-purpose"), "no channel, no board: no purpose line");
 });
@@ -260,7 +260,7 @@ test("the run monitor and Quick create stay below the list", async () => {
 
 test("Spanish render carries none of the new English strings", async () => {
   const es = await render("es");
-  const used = ["botbuilder.purposePerch", "botbuilder.purposeGlasses", "botbuilder.purposeCompanion",
+  const used = ["botbuilder.purposePerch", "botbuilder.bxGlassesRetiredShort", "botbuilder.purposeCompanion",
     "botbuilder.updatedAgoDays", "botbuilder.rowNoBoard", "botbuilder.rowOpenBoard", "botbuilder.rowTurnOn",
     "botbuilder.rowGiveTask", "botbuilder.rowSessions", "botbuilder.rowProject", "botbuilder.rowDelete",
     "botbuilder.rowEdit", "botbuilder.newTileHint", "botbuilder.rowMore", "botbuilder.boardOnWarn",
@@ -379,4 +379,12 @@ test("ability line: en + es strings, and the Spanish render carries none of the 
       assert.ok(es.includes(JSON.stringify(translations[k].es).slice(1, -1)), `${k}: the Spanish string ships`);
     }
   } finally { await drop(); }
+});
+
+test("the card's purpose line for a kept glasses channel says glasses now answer as Crow (en + es), not a working voice channel", async () => {
+  const { purposeLine } = await import("../servers/gateway/dashboard/shared/bot-display.js");
+  const def = { gateways: [{ type: "glasses", device_id: "dev-1" }] };
+  assert.match(purposeLine(def, "en"), /Glasses now answer as Crow/);
+  assert.match(purposeLine(def, "es"), /Las gafas ahora responden como Crow/);
+  assert.doesNotMatch(purposeLine(def, "en"), /Voice assistant on your glasses/);
 });

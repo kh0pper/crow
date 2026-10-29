@@ -166,6 +166,8 @@ export function asksForHandoff(transcript) {
 // candidate (hand-offs off, or dropped from the list) is still asked about by name this way.
 const SHAPE_ARTICLES = new Set(["the", "el", "la"]);
 const OF_WORDS = new Set(["of", "de"]);
+// The personal "a" before a stop's target, and its contraction "al" (a + el): "detén a hank", "detén al writer".
+const TO_WORDS = new Set(["a", "al"]);
 const subjectAt = (words, i, max = 2) => {
   const at = i + (SHAPE_ARTICLES.has(words[i]) ? 1 : 0);
   return at < words.length ? { at, max: Math.min(max, words.length - at) } : null;
@@ -234,7 +236,7 @@ const paraOpens = (words, i) => words.slice(0, i).every((w) => PARA_LEADS.has(w)
 /**
  * The transcript has the shape of a stop about something, whatever it is named (5.4, the twin of statusShape):
  * a stop verb (not negated; "para" only sentence-initial) followed by a one- or two-word subject (an optional
- * "a", "the", "el" or "la" before; never only stopwords) that ends the sentence: "stop writer", "cancel the
+ * "a" or "al", "the", "el" or "la" before; never only stopwords) that ends the sentence: "stop writer", "cancel the
  * writer", "detén a hank", "stop the music". A bot that is no longer a candidate is still stopped by name
  * through it; the caller then checks the name against the bots that have work.
  */
@@ -244,7 +246,7 @@ export function stopShape(transcript) {
     if (!STOP_VERBS.has(words[i]) || negated(words, i)) continue;
     if (words[i] === "para" && !paraOpens(words, i)) continue;
     let at = i + 1;
-    if (words[at] === "a") at++;
+    if (TO_WORDS.has(words[at])) at++;
     if (SHAPE_ARTICLES.has(words[at])) at++;
     for (let k = 1; k <= 2 && at + k <= words.length; k++) {
       if (words.slice(at, at + k).every((w) => STOPWORDS.has(w))) continue;
@@ -257,7 +259,7 @@ export function stopShape(transcript) {
 /**
  * "named": a stop verb (stop, cancel, halt, para, detén, cancela) followed by a bot name (an optional "the",
  * "el" or "la" before; its possessive too: "stop hank's research") or a work word ("the research", "la tarea";
- * Spanish may put "a" between: "detén a writer"). "pronoun": "stop it", "cancel that",
+ * Spanish may put "a" or "al" between: "detén a writer", "detén al writer"). "pronoun": "stop it", "cancel that",
  * "páralo", "cancela eso"… ending the sentence ("stop that song" is not one). null otherwise.
  * "para" is also "for" ("una nota para writer"): it is a stop only as the first word (after lead-ins such as
  * "oye crow") with its target ending the sentence. A verb right after a negation ("don't stop writer") is not one.
@@ -274,7 +276,7 @@ export function wantsHandoffStop(transcript, botNames) {
     const isPara = words[i] === "para";
     if (isPara && !paraOpens(words, i)) continue;
     let j = i + 1;
-    if (words[j] === "a") j++;
+    if (TO_WORDS.has(words[j])) j++;
     // An article before the name ("stop the writer", "cancela la writer"); a work target carries its own.
     for (const at of SHAPE_ARTICLES.has(words[j]) ? [j, j + 1] : [j]) {
       const n = matchAt(words, at, targets);

@@ -854,6 +854,9 @@ test("a yes by voice through the turn speaks the server's line and is a fast pat
 test("a topic change expires the proposal, and a pending routine entry survives a non-relay turn", async () => {
   const s = await setup();
   const { id } = await s.propose();
+  // The proposing turn's own afterTurn keeps its question (P19, PR 6 fix round 1); the next turn is the topic change.
+  await s.actions.afterTurn({ db: s.db, device: DEVICE, calledTools: [], relay: false });
+  assert.equal(s.pending.get(DEVICE.id).kind, "handoff");
   const { turn } = withTurn(s, [says("Sunny. ")]);
   await turn("what's the weather tomorrow");
   assert.equal((await s.row(id)).status, "expired");
@@ -891,6 +894,28 @@ test("which, then \"the helper one\", re-proposes helper; \"what's on the menu\"
   assert.deepEqual(await s.answer("no"), { say: "Okay, I won't.", verb: "handoff_declined" });
   assert.equal(s.pending.get(DEVICE.id), null);
   assert.equal((await s.cards()).length, 1);
+  s.done();
+});
+
+test("through the runner: a which hand-off, then \"writer\", proposes; the yes then confirms and the card is made (f; PR 6 fix round 1)", async () => {
+  const s = await setup();
+  const { h, turn } = withTurn(s, [call({ task: TASK, candidates: ["writer", "helper"] })]);
+  await turn("could someone research radio history");
+  assert.equal(h.calls.spoken[0], "That could go to Writer or to Helper — which one?");
+  assert.equal(s.pending.get(DEVICE.id).kind, "which", "the asking turn keeps its which");
+  const p = await turn("writer");
+  assert.equal(p.fastPath, true);
+  assert.equal(p.timings.verb, "handoff_which");
+  const e = s.pending.get(DEVICE.id);
+  assert.equal(e.kind, "handoff", "the which answer's proposal survives its own turn");
+  assert.equal(e.bot_id, "writer");
+  assert.equal((await s.row(e.id)).status, "proposed", "and its row is not expired");
+  const y = await turn("yes");
+  assert.equal(y.fastPath, true);
+  assert.equal(y.timings.verb, "handoff_started");
+  const cards = await s.cards();
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].assigned_bot, "writer");
   s.done();
 });
 

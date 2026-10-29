@@ -59,7 +59,7 @@ const CHANNEL_NAMES = { gmail: "Gmail", discord: "Discord", telegram: "Telegram"
 /** One short phrase per channel type; unknown types add nothing. */
 function channelPhrase(type, lang) {
   if (type === "perch") return t("botbuilder.purposePerch", lang);
-  if (type === "glasses") return t("botbuilder.purposeGlasses", lang);
+  if (type === "glasses") return t("botbuilder.bxGlassesRetiredShort", lang);
   if (type === "companion") return t("botbuilder.purposeCompanion", lang);
   if (CHANNEL_NAMES[type]) return fill(t("botbuilder.purposeAnswersOn", lang), { channel: CHANNEL_NAMES[type] });
   return "";

@@ -57,6 +57,7 @@ before(async () => {
     settings: { readSetting: async (d, k) => settings.get(k) ?? null, writeSetting: async (d, k, v) => { settings.set(k, v); } },
     voice,
     sttWarmup: async () => { calls.warm++; return true; },
+    crowVoice: { CROW_VOICE_BOT_ID: "crow.voice", isVoiceBotId: (id) => id === "crow.voice" },
     resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
     themeCss: () => "",
     files: { publicDir: new URL("../bundles/kiosk/public/", import.meta.url).pathname, birdSvgPath: new URL("../bundles/ramble/server/bird-svg.cjs", import.meta.url).pathname },
@@ -105,7 +106,8 @@ test("the Kiosk listing (what the Kiosk panel polls and the Bot Builder reads) c
   assert.equal(r.status, 200);
   const fit = Object.fromEntries(r.json.bots.map((b) => [b.bot_id, b.fit]));
   assert.deepEqual(fit, { "v-full": "full", "v-huge": "too_large", "v-unknown": null });
-  assert.equal(r.json.dashboard_voice.effective_bot_id, "v-full");
+  assert.equal(r.json.voice.bot_id, "crow.voice");
+  assert.equal("dashboard_voice" in r.json, false);
   assert.equal(r.json.devices[0].bound_bot_id, "v-full");
   assert.deepEqual(calls, before, "no acquire / probe / chat adapter / fetch / STT warm-up / config push on a listing");
   // twice, as the panel's poll does
