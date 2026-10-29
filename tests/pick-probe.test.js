@@ -5,13 +5,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 
 import { probePick, probeRecommended, pickCheckOf } from "../servers/gateway/ai/pick-probe.js";
-import { addProvider } from "../servers/gateway/ai/add-provider.js";
+import { addProvider, testProviderKey } from "../servers/gateway/ai/add-provider.js";
 import { isInstanceScope } from "../servers/gateway/dashboard/settings/sync-allowlist.js";
 
 const KEY = "fixture-key-zz9";
@@ -28,6 +28,12 @@ const openaiRow = { id: "cloud-a", baseUrl: "https://api.openai.com/v1/", apiKey
 const otherRow = { id: "local-chat", baseUrl: "https://api.example.com/v1", apiKey: KEY };
 const toolReply = (name) => reply(200, { choices: [{ message: { tool_calls: [{ function: { name, arguments: "{}" } }] } }] });
 
+function entry(id, kind = "chat") { return { model_id: id, id_verified: true, kind, status: "stable", retires: null }; }
+function writeRec(roles) {
+  const f = join(mkdtempSync(join(tmpdir(), "pickprobe-")), "recs.json");
+  writeFileSync(f, JSON.stringify({ schema_version: 1, accessed: "2026-10-01", review_by: "2027-01-28", source_notes: "", providers: { openai: { roles } } }));
+  return f;
+}
 function recFile(reviewBy) {
   const f = join(mkdtempSync(join(tmpdir(), "pickprobe-")), "recs.json");
   const e = (id, kind = "chat") => ({ model_id: id, id_verified: true, kind, status: "stable", retires: null });
@@ -97,11 +103,11 @@ test("checks expire", async () => {
   const db = await freshDb();
   const file = recFile("2027-01-28");
   await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(() => toolReply("crow_probe")), listRowsFn: async () => [openaiRow], recOpts: { file } });
-  const c = await pickCheckOf(db, "cloud-a", "m-small", { now: new Date("2026-11-01T00:00:00Z"), recOpts: { file } });
+  const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2026-11-01T00:00:00Z"), recOpts: { file } });
   assert.equal(c.ok, true);
   assert.equal(c.code, "ok");
   assert.match(c.at, /^\d{4}-\d\d-\d\dT/);
-  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { now: new Date("2027-02-01T00:00:00Z"), recOpts: { file } }), null);
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2027-02-01T00:00:00Z"), recOpts: { file } }), null);
   assert.equal(await pickCheckOf(db, "cloud-a", "never", { now: new Date("2026-11-01T00:00:00Z"), recOpts: { file } }), null);
 });
 
@@ -118,7 +124,7 @@ test("shared model probed once; results stored in an instance-scope key", async 
   assert.equal(out.rerank, undefined);
   const { rows } = await db.execute("SELECT value FROM dashboard_settings WHERE key='provider_pick_checks'");
   const stored = JSON.parse(rows[0].value);
-  assert.deepEqual(Object.keys(stored["cloud-a"]).sort(), ["m-embed", "m-shared", "m-small"]);
+  assert.deepEqual(Object.keys(stored["cloud-a"]).sort(), ["m-embed|embed", "m-shared|chat", "m-small|chat"]);
   assert.equal(isInstanceScope("provider_pick_checks"), true);
 });
 
@@ -128,22 +134,75 @@ test("the key never reaches a log, a result or the stored checks", async () => {
   const seen = [];
   const orig = { log: console.log, warn: console.warn, error: console.error, info: console.info };
   for (const k of Object.keys(orig)) console[k] = (...a) => seen.push(a.map(String).join(" "));
+  const leaky = () => { throw Object.assign(new Error(`connect failed with ${KEY}`), { code: `E_${KEY}` }); };
   let out, failing;
   try {
-    out = await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(() => toolReply("crow_probe")), listRowsFn: async () => [openaiRow], recOpts: { file } });
-    failing = await probePick(openaiRow, "m", { requestFn: stub(() => { throw new Error(`boom ${KEY}`.replace(KEY, "")); }) });
+    out = await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(leaky), listRowsFn: async () => [openaiRow], recOpts: { file } });
+    failing = await probePick(openaiRow, "m", { requestFn: stub(leaky) });
   } finally { Object.assign(console, orig); }
-  const { rows } = await db.execute("SELECT value FROM dashboard_settings");
+  assert.equal(failing.code, "unreachable");
+  assert.ok(seen.length > 0, "the failure was logged");
+  const { rows } = await db.execute("SELECT key, value FROM dashboard_settings");
   assert.ok(!JSON.stringify([out, failing, rows, seen]).includes(KEY));
 });
 
-test("no silent probe: addProvider makes no probe request", async () => {
-  // addProvider takes no request function for probes at all; the only request seam is testFn (stubbed here).
-  const probeSpy = [];
+test("same model id as chat and as embed keeps both checks", async () => {
+  const db = await freshDb();
+  const file = writeRec({ coordinator: [entry("dual")], embed: [entry("dual", "embed")] });
+  const f = stub((url) => (url.endsWith("/embeddings") ? reply(200, { data: [] }) : toolReply("crow_probe")));
+  await probeRecommended(db, "cloud-a", { roles: ["coordinator", "embed"], requestFn: f, listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const now = new Date("2026-11-01T00:00:00Z");
+  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "chat", now, recOpts: { file } })).ok, true);
+  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "embed", now, recOpts: { file } })).code, "bad_embedding");
+});
+
+test("concurrent runs for two providers both keep their results", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  const rowB = { ...openaiRow, id: "cloud-b" };
+  const slow = stub(async () => { await new Promise((r) => setTimeout(r, 10)); return toolReply("crow_probe"); });
+  const listRowsFn = async () => [openaiRow, rowB];
+  await Promise.all([
+    probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: slow, listRowsFn, recOpts: { file } }),
+    probeRecommended(db, "cloud-b", { roles: ["quick"], requestFn: slow, listRowsFn, recOpts: { file } }),
+  ]);
+  const now = new Date("2026-11-01T00:00:00Z");
+  assert.ok(await pickCheckOf(db, "cloud-a", "m-small", { now, recOpts: { file } }));
+  assert.ok(await pickCheckOf(db, "cloud-b", "m-small", { now, recOpts: { file } }));
+});
+
+test("a stored model listing limits the probed pick", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  const f = stub(() => toolReply("crow_probe"));
+  const out = await probeRecommended(db, "cloud-a", { roles: ["coordinator", "quick"], requestFn: f, listRowsFn: async () => [{ ...openaiRow, models: [{ id: "m-small" }] }], recOpts: { file } });
+  assert.deepEqual(Object.keys(out), ["quick"]);
+  assert.equal(f.calls.length, 1);
+});
+
+test("a body over 1 MB, a body past the deadline and a non-2xx body", async () => {
+  const big = { status: 200, headers: {}, stream: Readable.from([Buffer.alloc(1_100_000, 0x20)]) };
+  assert.equal((await probePick(openaiRow, "m", { requestFn: async () => big })).code, "no_tool_call");
+  assert.equal(big.stream.destroyed, true);
+  const stalled = new Readable({ read() {} });
+  const slow = { status: 200, headers: {}, stream: stalled, deadline: Date.now() + 40 };
+  assert.equal((await probePick(openaiRow, "e", { kind: "embed", requestFn: async () => slow })).code, "bad_embedding");
+  assert.equal(stalled.destroyed, true);
+  const err = { status: 500, headers: {}, stream: Readable.from([Buffer.from("x".repeat(100))]) };
+  assert.equal((await probePick(openaiRow, "m", { requestFn: async () => err })).code, "http_500");
+  assert.equal(err.stream.destroyed, true);
+});
+
+test("no silent probe: the real addProvider flow makes no pick request", async () => {
+  const urls = [];
+  const requestFn = async (url) => { urls.push(url); return reply(200, { data: [{ id: "m" }] }); };
   const r = await addProvider({}, { presetId: "openai", apiKey: KEY, modelIds: ["m"] }, {
-    testFn: async () => ({ ok: true, code: "ok", models: ["m"], host: "api.openai.com", baseUrl: "https://api.openai.com/v1" }),
+    testFn: (input) => testProviderKey(input, { requestFn }),
     listRowsFn: async () => [], upsertProviderFn: async () => {}, invalidateFn: () => {},
   });
   assert.equal(r.ok, true);
-  assert.equal(probeSpy.length, 0);
+  assert.ok(urls.length > 0, "the key test did run");
+  assert.deepEqual(urls.filter((u) => /\/(chat\/completions|embeddings|v1\/messages)$/.test(u)), []);
+  const src = readFileSync(new URL("../servers/gateway/ai/add-provider.js", import.meta.url), "utf8");
+  assert.ok(!/pick-probe/.test(src), "add-provider.js must not import pick-probe.js");
 });

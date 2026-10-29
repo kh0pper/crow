@@ -71,7 +71,7 @@ export async function probePick(row, modelId, { kind = "chat", requestFn = safeR
   try {
     res = await requestFn(req.url, { method: "POST", headers: req.headers, body: req.body, mode: req.mode, timeoutMs });
   } catch (err) {
-    console.warn(`[pick-probe] request failed: ${err?.code || err?.message}`);
+    console.warn(`[pick-probe] request failed: ${typeof err?.code === "string" && err.code.length <= 40 && !err.code.includes(row?.apiKey || row?.api_key || "\u0000") ? err.code : "error"}`);
     return { ok: false, code: "unreachable" };
   }
   const status = Number(res?.status);
@@ -98,16 +98,26 @@ async function readChecks(db) {
  * Probe the candidate pick of each role (a model shared by roles is probed
  * once, sequentially), store the results, and return them per role.
  */
-export async function probeRecommended(db, providerId, {
+let probeChain = Promise.resolve();
+/** One probe run at a time in this process, so concurrent presses cannot drop each other's stored results. */
+export function probeRecommended(db, providerId, opts = {}) {
+  const run = probeChain.then(() => runProbes(db, providerId, opts));
+  probeChain = run.catch(() => {});
+  return run;
+}
+
+async function runProbes(db, providerId, {
   roles = RECOMMENDATION_ROLES, requestFn = safeRequest, listRowsFn = listProvidersAll, timeoutMs, recOpts,
 } = {}) {
   const rows = await listRowsFn(db);
   const row = rows.find((r) => r.id === providerId);
   const presetId = row ? presetForRow(row) : null;
   if (!row || !presetId) return {};
+  const listed = (Array.isArray(row.models) ? row.models : []).map((m) => (typeof m === "string" ? m : m?.id)).filter(Boolean);
+  const liveModelIds = listed.length ? listed : null;
   const picks = [];
   for (const roleId of roles) {
-    const pick = candidatePick(presetId, roleId, {}, recOpts);
+    const pick = candidatePick(presetId, roleId, { liveModelIds }, recOpts);
     // Rerank has no probe shape; it stays "not tested".
     if (pick && (pick.kind === "chat" || pick.kind === "embed")) picks.push({ roleId, modelId: pick.model_id, kind: pick.kind });
   }
@@ -125,7 +135,7 @@ export async function probeRecommended(db, providerId, {
     const mine = { ...(all[providerId] || {}) };
     for (const p of picks) {
       const r = done.get(`${p.kind}:${p.modelId}`);
-      mine[p.modelId] = { ok: r.ok, code: r.code, at };
+      mine[`${p.modelId}|${p.kind}`] = { ok: r.ok, code: r.code, at };
     }
     all[providerId] = mine;
     await db.execute({
@@ -138,9 +148,9 @@ export async function probeRecommended(db, providerId, {
 }
 
 /** The stored check for a model, or null (not tested) when none exists or the recommendations are past `review_by`. */
-export async function pickCheckOf(db, providerId, modelId, { now = new Date(), recOpts } = {}) {
+export async function pickCheckOf(db, providerId, modelId, { kind = "chat", now = new Date(), recOpts } = {}) {
   if (isRecommendationsStale(now, recOpts)) return null;
-  const c = (await readChecks(db))?.[providerId]?.[modelId];
+  const c = (await readChecks(db))?.[providerId]?.[`${modelId}|${kind}`];
   if (!c || typeof c !== "object") return null;
   return { ok: !!c.ok, code: String(c.code), at: c.at };
 }
