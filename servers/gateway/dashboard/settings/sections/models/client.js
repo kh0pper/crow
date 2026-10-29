@@ -5,8 +5,10 @@
  * empty by models.js), lists what may fill the role (GET /api/roles/<id>/picks),
  * previews the choice (POST .../preview, or .../profile/preview for stt/tts)
  * and shows who moves, the cloud sentence, refusals, the re-embed line and the
- * pin box. Save sends the preview's hash and the acks it asked for; success
- * reloads the page with Turbo, and a 409 re-renders the preview it returns.
+ * pin box. Save sends the preview's hash and the acks it asked for (with the
+ * role's stored fallback chain, unchanged); success reloads the page with
+ * Turbo, and a 409 re-renders the preview it returns. The picks are locked
+ * while a Save is in flight, so no pick can drop a save's answer.
  *
  * Every server string reaches the DOM through textContent. A refusal that is
  * not JSON (the CSRF check answers 403 as plain text) shows one generic
@@ -59,6 +61,7 @@ export function modelsClientJS({ lang = "en" } = {}) {
     refused: '${tJs("models.warn.refused", lang)}',
     reembed: '${tJs("models.warn.reembed", lang)}',
     replacePin: '${tJs("models.warn.replacePin", lang)}',
+    customSetting: '${tJs("models.warn.customSetting", lang)}',
     changed: '${tJs("models.warn.changed", lang)}',
     env: '${tJs("models.status.env", lang)}',
     notSet: '${tJs("models.status.not_set", lang)}',
@@ -141,6 +144,7 @@ export function modelsClientJS({ lang = "en" } = {}) {
     ui.list = el('div', 'mc-list');
     ui.warn = el('div', 'mc-warn');
     ui.warn.setAttribute('data-mc-warn', '');
+    ui.warn.setAttribute('aria-live', 'polite');
     ui.error = el('p', 'mc-error');
     ui.error.setAttribute('data-mc-error', '');
     ui.error.setAttribute('role', 'alert');
@@ -172,12 +176,28 @@ export function modelsClientJS({ lang = "en" } = {}) {
   function showError() {
     ui.error.textContent = T.failed;
     st.busy = false;
+    lockPicks(false);
     updateSave();
+  }
+
+  /** Locks every pick during a Save; unlocking restores a refused pick's own disabled state. */
+  function lockPicks(on) {
+    var items = ui.items || [];
+    for (var i = 0; i < items.length; i++) items[i].disabled = !!on || items[i].getAttribute('data-mc-refused') === 'true';
+  }
+
+  /** The acks that apply now: "Replace the pin" can bring in a job the pin held. */
+  function needsNow() {
+    var pv = st.preview;
+    if (!pv) return {};
+    var n = pv.pin && st.replacePin === true && pv.needsIfReplacePin ? pv.needsIfReplacePin : pv.needs;
+    return n && typeof n === 'object' ? n : {};
   }
 
   function updateSave() {
     var pv = st.preview;
-    var needsU = !!(pv && pv.needs && pv.needs.ackUnattended);
+    var needsU = !!needsNow().ackUnattended;
+    if (ui.ackRow) ui.ackRow.hidden = !needsU;
     ui.save.disabled = !pv || !!st.busy || (needsU && st.ackU !== true);
   }
 
@@ -189,8 +209,10 @@ export function modelsClientJS({ lang = "en" } = {}) {
       kind: btn.getAttribute('data-role-kind') || 'chat',
       label: btn.getAttribute('data-role-label') || role,
       base: '/api/roles/' + encodeURIComponent(role),
-      choice: null, preview: null, busy: false, ackU: false, replacePin: false, pickLabels: {}
+      choice: null, preview: null, busy: false, ackU: false, replacePin: false, pickLabels: {}, fallback: null
     };
+    ui.items = [];
+    ui.ackRow = null;
     ui.title.textContent = st.label;
     ui.list.textContent = '';
     ui.warn.textContent = '';
@@ -227,11 +249,12 @@ export function modelsClientJS({ lang = "en" } = {}) {
     }
     if (!allowed) {
       b.disabled = true;
+      b.setAttribute('data-mc-refused', 'true');
       b.setAttribute('aria-disabled', 'true');
       b.appendChild(el('span', 'mc-pick-note', fill(T.refused, { consumer: st.label })));
     }
     b.addEventListener('click', function () {
-      if (b.disabled) return;
+      if (b.disabled || st.busy) return;
       for (var i = 0; i < ui.items.length; i++) ui.items[i].setAttribute('aria-pressed', ui.items[i] === b ? 'true' : 'false');
       onChoose();
     });
@@ -253,9 +276,11 @@ export function modelsClientJS({ lang = "en" } = {}) {
       });
     } else {
       var picks = Array.isArray(data.picks) ? data.picks : [];
+      var fb = data.fallback;
+      st.fallback = Array.isArray(fb) && fb.every(function (f) { return typeof f === 'string'; }) ? fb.slice() : null;
       if (st.kind !== 'media') {
         pickItem('', T.notSet, null, false, true, function () {
-          choose({ model: null, label: T.notSet }, '/preview', { model: null });
+          choose({ model: null, label: T.notSet }, '/preview', chatBody(null));
         });
       }
       picks.forEach(function (p) {
@@ -263,11 +288,18 @@ export function modelsClientJS({ lang = "en" } = {}) {
         var text = str(p.label) || p.key;
         st.pickLabels[p.key] = text;
         pickItem(p.key, text, p.where, p.recommended === true, p.allowed !== false, function () {
-          choose({ model: p.key, label: text }, '/preview', { model: p.key });
+          choose({ model: p.key, label: text }, '/preview', chatBody(p.key));
         });
       });
     }
     if (!ui.items.length) ui.list.appendChild(el('p', 'mc-empty', T.notSetUp));
+  }
+
+  /** A chat-style body: the model plus the stored fallback chain, unchanged, when there is one. */
+  function chatBody(model) {
+    var b = { model: model };
+    if (st.fallback) b.fallback = st.fallback.slice();
+    return b;
   }
 
   function choose(choice, path, body) {
@@ -278,6 +310,7 @@ export function modelsClientJS({ lang = "en" } = {}) {
     st.ackU = false;
     st.replacePin = false;
     st.busy = false;
+    ui.ackRow = null;
     ui.warn.textContent = '';
     ui.error.textContent = '';
     ui.save.textContent = T.save;
@@ -305,7 +338,13 @@ export function modelsClientJS({ lang = "en" } = {}) {
   function line(cls, text) { var p = el('p', cls, text); ui.warn.appendChild(p); return p; }
   function list(items) {
     var ul = el('ul', 'mc-names');
-    items.forEach(function (c) { var n = nameOf(c); if (n) ul.appendChild(el('li', null, n)); });
+    var seen = {};
+    items.forEach(function (c) {
+      var n = nameOf(c);
+      if (!n || Object.prototype.hasOwnProperty.call(seen, n)) return;
+      seen[n] = true;
+      ul.appendChild(el('li', null, n));
+    });
     ui.warn.appendChild(ul);
   }
   function checkbox(attr, value, text, onChange) {
@@ -317,6 +356,7 @@ export function modelsClientJS({ lang = "en" } = {}) {
     lab.appendChild(cb);
     lab.appendChild(el('span', null, text));
     ui.warn.appendChild(lab);
+    cb.row = lab;
     return cb;
   }
 
@@ -325,6 +365,8 @@ export function modelsClientJS({ lang = "en" } = {}) {
     st.ackU = false;
     st.replacePin = false;
     st.busy = false;
+    ui.ackRow = null;
+    lockPicks(false);
     ui.warn.textContent = '';
     ui.error.textContent = '';
     if (changed) line('mc-changed', T.changed);
@@ -332,7 +374,9 @@ export function modelsClientJS({ lang = "en" } = {}) {
     else renderChat(pv);
     if (pv.paired === true) line('mc-paired', T.paired);
     var cloudAck = st.choice && st.choice.speech ? pv.cloud === true : !!(pv.needs && pv.needs.ackCloud);
-    ui.save.textContent = cloudAck ? fill(T.useFor, { model: (st.choice && st.choice.label) || '' }) : T.save;
+    // Clearing a role names no model: the plain Save label, never "Use Not set ...".
+    var clearing = !!(st.choice && !st.choice.speech && st.choice.model === null);
+    ui.save.textContent = cloudAck && !clearing ? fill(T.useFor, { model: (st.choice && st.choice.label) || '' }) : T.save;
     updateSave();
     if (typeof ui.warn.scrollIntoView === 'function') { try { ui.warn.scrollIntoView({ block: 'nearest' }); } catch (e) { /* cosmetic */ } }
   }
@@ -375,16 +419,18 @@ export function modelsClientJS({ lang = "en" } = {}) {
     var re = pv.reembed === true ? line('mc-reembed', T.reembed) : null;
     if (re) re.hidden = !!pv.pin;
     if (pv.pin && typeof pv.pin === 'object') {
-      checkbox('data-mc-pin', '', fill(T.replacePin, { value: str(pv.pin.value) }), function (on) {
+      checkbox('data-mc-pin', '', fill(T.replacePin, { value: str(pv.pin.value) || T.customSetting }), function (on) {
         st.replacePin = on;
         if (re) re.hidden = !on;
-      });
-    }
-    if (pv.needs && pv.needs.ackUnattended) {
-      checkbox('data-mc-ack', 'unattended', T.ackUnattended, function (on) {
-        st.ackU = on;
         updateSave();
       });
+    }
+    var ifPin = pv.pin && pv.needsIfReplacePin && pv.needsIfReplacePin.ackUnattended;
+    if ((pv.needs && pv.needs.ackUnattended) || ifPin) {
+      ui.ackRow = checkbox('data-mc-ack', 'unattended', T.ackUnattended, function (on) {
+        st.ackU = on;
+        updateSave();
+      }).row;
     }
   }
 
@@ -399,16 +445,17 @@ export function modelsClientJS({ lang = "en" } = {}) {
       path = st.base + '/profile';
       body = { profileId: c.profileId, previewHash: pv.previewHash, ackCloud: pv.cloud === true };
     } else {
+      var n = needsNow();
       path = st.base;
-      body = {
-        model: c.model,
-        previewHash: pv.previewHash,
-        ackUnattended: st.ackU === true,
-        ackCloud: !!(pv.needs && pv.needs.ackCloud),
-        replacePin: st.replacePin === true
-      };
+      body = chatBody(c.model);
+      body.previewHash = pv.previewHash;
+      // An ack the current state does not ask for (a hidden box) is never sent.
+      body.ackUnattended = !!n.ackUnattended && st.ackU === true;
+      body.ackCloud = !!n.ackCloud;
+      body.replacePin = st.replacePin === true;
     }
     st.busy = true;
+    lockPicks(true);
     ui.error.textContent = '';
     updateSave();
     var seq = st.seq;
@@ -429,7 +476,7 @@ export function modelsClientJS({ lang = "en" } = {}) {
   }
 
   build();
-  var btns = document.querySelectorAll('[data-role]');
+  var btns = document.querySelectorAll('.mr-change[data-role]');
   for (var i = 0; i < btns.length; i++) {
     (function (b) { b.addEventListener('click', function () { openSheet(b); }); })(btns[i]);
   }

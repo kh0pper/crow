@@ -65,7 +65,8 @@ function makeDoc(buttons) {
     cookie: "crow_lang=en; crow_csrf=tok%2D1",
     createElement: (t) => new El(t),
     getElementById: (id) => (id === "models-change" ? dialog : null),
-    querySelectorAll: (sel) => (sel === "[data-role]" ? buttons : []),
+    // T5: only the Change buttons are bound (the selector is scoped).
+    querySelectorAll: (sel) => (sel === ".mr-change[data-role]" ? buttons : []),
     addEventListener: (t, fn) => { (docListeners[t] ||= []).push(fn); },
     docListeners,
   };
@@ -73,6 +74,7 @@ function makeDoc(buttons) {
 
 function roleButton(id, kind = "chat", label = "Scout") {
   const b = new El("button");
+  b.className = "mr-change";
   b.setAttribute("data-role", id);
   b.setAttribute("data-role-kind", kind);
   b.setAttribute("data-role-label", label);
@@ -390,4 +392,192 @@ test("a media role lists nothing to pick", async () => {
   await flush();
   assert.equal(byAttr(h.doc.dialog, "data-mc-pick").length, 0);
   assert.ok(h.doc.dialog.textContent.includes("Not set up yet"));
+});
+
+// --- final fix wave ------------------------------------------------------------
+
+const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+
+test("T6: the warning area is a polite live region", async () => {
+  const h = harness([{ match: isPicks, reply: () => json(200, PICKS) }]);
+  const warn = byAttr(h.doc.dialog, "data-mc-warn")[0];
+  assert.equal(warn.getAttribute("aria-live"), "polite");
+});
+
+test("T7: Save waits for THE ack box: ticking the pin box does not enable it, unticking the ack disables it again", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ pin: { setting: "embed_provider", value: "old" } })) },
+  ]);
+  await openAndChoose(h);
+  const save = byAttr(h.doc.dialog, "data-mc-save")[0];
+  const pin = byAttr(h.doc.dialog, "data-mc-pin")[0];
+  const ack = byAttr(h.doc.dialog, "data-mc-ack", "unattended")[0];
+  assert.equal(save.disabled, true);
+  pin.checked = true;
+  pin.fire("change", { target: pin });
+  assert.equal(save.disabled, true, "another checkbox never enables Save");
+  ack.checked = true;
+  ack.fire("change", { target: ack });
+  assert.equal(save.disabled, false);
+  ack.checked = false;
+  ack.fire("change", { target: ack });
+  assert.equal(save.disabled, true, "unticked again");
+});
+
+test("T7: a network failure on Save shows the generic error, re-enables Save and never reloads", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ needs: { ackUnattended: false, ackCloud: false } })) },
+    { match: isApply, reply: () => { throw new TypeError("Failed to fetch"); } },
+  ]);
+  await openAndChoose(h);
+  const save = byAttr(h.doc.dialog, "data-mc-save")[0];
+  save.fire("click");
+  await flush();
+  assert.ok(byAttr(h.doc.dialog, "data-mc-error")[0].textContent.includes("reload"));
+  assert.equal(h.doc.dialog.textContent.includes("Failed to fetch"), false);
+  assert.equal(save.disabled, false);
+  assert.equal(h.visits.length, 0);
+  assert.equal(h.doc.dialog.open, true);
+});
+
+test("T7: a double click on Save sends one POST", async () => {
+  const d = deferred();
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ needs: { ackUnattended: false, ackCloud: false } })) },
+    { match: isApply, reply: () => d.promise },
+  ]);
+  await openAndChoose(h);
+  const save = byAttr(h.doc.dialog, "data-mc-save")[0];
+  save.fire("click");
+  save.fire("click");
+  await flush();
+  assert.equal(h.calls.filter((c) => c.url === "/api/roles/quick").length, 1);
+  d.resolve(json(200, { ok: true }));
+  await flush();
+  assert.equal(h.visits.length, 1);
+});
+
+test("T1: the picks are disabled while a Save is in flight, and come back as they were", async () => {
+  const d = deferred();
+  const h = harness([
+    { match: isPicks, reply: () => json(200, { picks: [...PICKS.picks, { key: "cloud-b/c9", label: "c9", where: "cloud", provider: "cloud-b", recommended: false, allowed: false, why: "cloud_refused" }] }) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ needs: { ackUnattended: false, ackCloud: false } })) },
+    { match: isApply, reply: () => d.promise },
+  ]);
+  await openAndChoose(h);
+  byAttr(h.doc.dialog, "data-mc-save")[0].fire("click");
+  await flush();
+  const picks = byAttr(h.doc.dialog, "data-mc-pick");
+  assert.ok(picks.every((p) => p.disabled === true), "all picks locked");
+  const before = h.calls.length;
+  byAttr(h.doc.dialog, "data-mc-pick", "cloud-a/c1")[0].fire("click");
+  await flush();
+  assert.equal(h.calls.length, before, "no preview while saving");
+  d.resolve(json(500, { error: "internal" }));
+  await flush();
+  assert.ok(byAttr(h.doc.dialog, "data-mc-error")[0].textContent.includes("reload"));
+  assert.equal(byAttr(h.doc.dialog, "data-mc-pick", "cloud-a/c1")[0].disabled, false);
+  assert.equal(byAttr(h.doc.dialog, "data-mc-pick", "cloud-b/c9")[0].disabled, true, "a refused pick stays refused");
+});
+
+test("T3: clearing a role with a cloud ack reads plain Save", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({
+      needs: { ackUnattended: false, ackCloud: true },
+      cloud: { host: "api.example.com", viaRole: "quick", model: "cloud-a/c1", now: true },
+    })) },
+  ]);
+  await openAndChoose(h, "");
+  const save = byAttr(h.doc.dialog, "data-mc-save")[0];
+  assert.equal(save.textContent, "Save");
+  assert.equal(save.textContent.includes("Not set"), false);
+});
+
+test("F6: a stored fallback chain is sent unchanged with the new model", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, { ...PICKS, fallback: ["expert", "quick"] }) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ needs: { ackUnattended: false, ackCloud: false } })) },
+    { match: isApply, reply: () => json(200, { ok: true }) },
+  ]);
+  await openAndChoose(h);
+  assert.deepEqual(h.calls[1].body, { model: "local-chat/m1", fallback: ["expert", "quick"] });
+  byAttr(h.doc.dialog, "data-mc-save")[0].fire("click");
+  await flush();
+  assert.deepEqual(h.calls[2].body.fallback, ["expert", "quick"]);
+  assert.equal(h.calls[2].body.model, "local-chat/m1");
+});
+
+test("F6: no stored fallback, no fallback field", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ needs: { ackUnattended: false, ackCloud: false } })) },
+    { match: isApply, reply: () => json(200, { ok: true }) },
+  ]);
+  await openAndChoose(h);
+  byAttr(h.doc.dialog, "data-mc-save")[0].fire("click");
+  await flush();
+  assert.equal("fallback" in h.calls[2].body, false);
+});
+
+test("F9: a name is listed once per group", async () => {
+  const cons = PREVIEW().consumers;
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({ consumers: { ...cons,
+      bots: [cons.bots[0], { ...cons.bots[0], field: "models.escalation" }],
+    } })) },
+  ]);
+  await openAndChoose(h);
+  assert.equal(h.doc.dialog.textContent.split("Day bot").length - 1, 1);
+});
+
+test("F1: ticking Replace the pin brings in the ack the pinned job then needs", async () => {
+  const h = harness([
+    { match: isPicks, reply: () => json(200, PICKS) },
+    { match: isPreview, reply: () => json(200, PREVIEW({
+      consumers: { ...PREVIEW().consumers, unattended: [] },
+      pin: { setting: "embed_provider", value: "old" },
+      needs: { ackUnattended: false, ackCloud: false },
+      needsIfReplacePin: { ackUnattended: true, ackCloud: false },
+    })) },
+    { match: isApply, reply: () => json(200, { ok: true }) },
+  ]);
+  await openAndChoose(h);
+  const save = byAttr(h.doc.dialog, "data-mc-save")[0];
+  const pin = byAttr(h.doc.dialog, "data-mc-pin")[0];
+  const ack = byAttr(h.doc.dialog, "data-mc-ack", "unattended")[0];
+  assert.equal(save.disabled, false, "the pin stays: nothing moves");
+  assert.equal(ack.parentNode.hidden, true, "the ack is not asked yet");
+  pin.checked = true;
+  pin.fire("change", { target: pin });
+  assert.equal(ack.parentNode.hidden, false);
+  assert.equal(save.disabled, true);
+  ack.checked = true;
+  ack.fire("change", { target: ack });
+  assert.equal(save.disabled, false);
+  pin.checked = false;
+  pin.fire("change", { target: pin });
+  assert.equal(ack.parentNode.hidden, true);
+  save.fire("click");
+  await flush();
+  assert.equal(h.calls[2].body.replacePin, false);
+  assert.equal(h.calls[2].body.ackUnattended, false, "a hidden ack is never sent");
+});
+
+test("F4: a pin with nothing safe to show reads custom setting", async () => {
+  const h = harness([
+    { match: (u) => u === "/api/roles/safety/picks", reply: () => json(200, PICKS) },
+    { match: (u) => u === "/api/roles/safety/preview", reply: () => json(200, PREVIEW({
+      roleId: "safety", needs: { ackUnattended: false, ackCloud: false },
+      pin: { setting: "bot_safety_classifier", value: null, custom: true },
+    })) },
+  ], { role: "safety", label: "Classifier" });
+  await openAndChoose(h);
+  const text = h.doc.dialog.textContent;
+  assert.ok(text.includes("Replace the pin (custom setting)"));
+  assert.equal(text.includes("null"), false);
 });

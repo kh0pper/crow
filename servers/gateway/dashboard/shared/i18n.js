@@ -2323,6 +2323,7 @@ export const translations = {
   "models.warn.ackUnattended": { en: "These run on their own. I understand they will switch too.", es: "Estos funcionan solos. Entiendo que también cambiarán." },
   "models.warn.reembed": { en: "Memories saved before this change keep their old search index. To rebuild it, ask Crow to \"re-embed my memories\".", es: "Las memorias guardadas antes de este cambio mantienen su índice anterior. Para reconstruirlo, pide a Crow que \"vuelva a indexar mis memorias\"." },
   "models.warn.replacePin": { en: "Replace the pin ({value})", es: "Reemplazar el ajuste fijado ({value})" },
+  "models.warn.customSetting": { en: "custom setting", es: "ajuste personalizado" },
   "models.warn.changed": { en: "Something changed since you looked. Check the list again.", es: "Algo cambió desde que lo revisaste. Vuelve a mirar la lista." },
   // Sheet chrome (not in the copy table): the recommended star's label and the generic failure.
   "models.ui.recommended": { en: "Recommended", es: "Recomendado" },
