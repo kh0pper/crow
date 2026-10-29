@@ -22,7 +22,7 @@ const CODE = ENTRYPOINT.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 /** One shell command, its backslash continuations joined. */
 function command(name) {
   const joined = CODE.replace(/\\\n\s*/g, " ");
-  const lines = joined.split("\n").filter((l) => new RegExp("^\\s*" + name + "\\s").test(l));
+  const lines = joined.split("\n").filter((l) => new RegExp("^\\s*(PYTHONPATH=\\S+\\s+)?" + name + "\\s").test(l));
   assert.equal(lines.length, 1, `exactly one ${name} command line`);
   return lines[0].trim();
 }
@@ -44,7 +44,10 @@ test("x11vnc serves RFB on a unix socket only: no TCP port (v4 or v6), no passwo
 
 test("websockify binds 127.0.0.1 and reaches RFB only through the token file (Host-header token)", () => {
   const w = command("websockify");
-  assert.match(w, /--token-plugin TokenFile --token-source "\$TOKEN_FILE"/);
+  assert.match(w, /^PYTHONPATH="\$VNC_DIR" websockify /);
+  assert.match(w, /--token-plugin crow_quiet_token\.QuietTokenFile --token-source "\$TOKEN_FILE"/, "the lookup that never logs the token");
+  assert.match(CODE, /class QuietTokenFile\(ReadOnlyTokenFile\):/);
+  assert.match(CODE, /raise WebSockifyServer\.EClose\("token not accepted"\)/, "a miss is refused with a fixed message");
   assert.match(w, /\s--host-token\s/);
   assert.match(w, /\s"127\.0\.0\.1:\$\{NOVNC_PORT\}"\s*&$/, "127.0.0.1 only, and no fixed target");
   assert.doesNotMatch(w, /--unix-target|127\.0\.0\.1:\$\{RFB/, "no target reachable without a token");
@@ -60,7 +63,10 @@ test("the token: required and well-formed, out of the environment before any chi
   }
   assert.ok(CODE.indexOf("unset VNC_TOKEN_VALUE") < CODE.indexOf("Xvfb \":"), "the copy is dropped too");
   assert.match(CODE, /\[\[ "\$VNC_TOKEN_VALUE" =~ \^\[A-Za-z0-9_-\]\{32,256\}\$ \]\]/);
-  assert.match(CODE, /die "VNC_TOKEN is missing or malformed/);
+  assert.match(CODE, /^TOKEN_SRC=\/run\/secrets\/crow-vnc-token$/m, "from a file, not the environment");
+  assert.match(CODE, /VNC_TOKEN_VALUE="\$\(tr -d '\\r\\n' < "\$TOKEN_SRC" 2>\/dev\/null\)"/);
+  assert.doesNotMatch(CODE, /\$\{VNC_TOKEN:-/, "the env var is never read");
+  assert.match(CODE, /die "the viewer token \(\$\{TOKEN_SRC\}\) is missing or malformed/);
   for (const line of CODE.split("\n")) {
     // Only the printf that writes the token file (redirected into it) may name the value.
     if (/> "\$TOKEN_FILE"/.test(line)) continue;
@@ -132,7 +138,12 @@ test("loopback_only: passes only when the port has listeners and every one is lo
 
 test("compose passes the token (required), no VNC password, and its downloads mount, names and networking are unchanged", () => {
   assert.doesNotMatch(COMPOSE, /VNC_PASSWORD/);
-  assert.match(COMPOSE, /^\s+- VNC_TOKEN=\$\{CROW_BROWSER_VNC_TOKEN:\?[^}]+\}$/m, "required: compose refuses to start without it");
+  assert.doesNotMatch(COMPOSE, /^\s+- VNC_TOKEN=/m, "never an environment variable (it would show in docker inspect)");
+  assert.match(COMPOSE, /\n {4}configs:\n {6}- source: vnc_token\n {8}target: \/run\/secrets\/crow-vnc-token\n {8}mode: 0400\n/, "a 0400 file");
+  assert.match(COMPOSE, /\nconfigs:\n  vnc_token:\n    content: \$\{CROW_BROWSER_VNC_TOKEN:\?[^}]+\}\n/, "required: compose refuses to start without it");
+  assert.match(COMPOSE, /^\s+stop_grace_period: 30s$/m, "Chromium gets time to flush on a stop");
+  assert.match(COMPOSE, /^\s+- CROW_INSTANCE=\$\{CROW_HOME:\?[^}]+\}$/m);
+  assert.doesNotMatch(COMPOSE, /-p browser down/, "no advice to run another project's -p");
   assert.doesNotMatch(COMPOSE, /RFB_PORT/);
   const volumes = COMPOSE.split("\n").filter((l) => /^\s+- (\$\{CROW_HOME|chromium-profile:)/.test(l));
   assert.deepEqual(volumes.map((l) => l.trim()), [
@@ -140,11 +151,12 @@ test("compose passes the token (required), no VNC password, and its downloads mo
     "- chromium-profile:/root/.config/chromium-crow",
   ], "the downloads bind mount as before, plus the profile's named volume");
   // A NAMED volume (compose prefixes it with the project: one per instance), never a bind or external one.
-  assert.match(COMPOSE, /\nvolumes:\n  chromium-profile:\n$/, "declared plainly at the end: project-scoped, not external, no fixed name");
+  assert.match(COMPOSE, /\nvolumes:\n  chromium-profile:\n    name: \$\{CROW_BROWSER_CONTAINER_NAME:-browser\}-chromium-profile\n/, "an explicit per-instance name from this bundle's .env, not from -p");
   // The token's directory and the profile volume never overlap.
   const profile = "/root/.config/chromium-crow", vncDir = /^VNC_DIR=(\S+)$/m.exec(ENTRYPOINT)[1];
   assert.ok(!vncDir.startsWith(profile) && !profile.startsWith(vncDir), vncDir + " vs " + profile);
-  assert.ok(!/\/run\b/.test(COMPOSE.split("volumes:")[1] || ""), "nothing mounted over /run");
+  assert.ok(volumes.every((l) => !/:\/run\b/.test(l)), "no volume over /run (the token's directory)");
+  assert.ok(!"/run/secrets/crow-vnc-token".startsWith(vncDir + "/"), "the token file is outside websockify's directory, which the entrypoint recreates");
   assert.match(COMPOSE, /^name: \$\{CROW_BROWSER_CONTAINER_NAME:-browser\}$/m);
   assert.match(COMPOSE, /^\s+container_name: \$\{CROW_BROWSER_CONTAINER_NAME:-crow-browser\}$/m);
   assert.match(COMPOSE, /^\s+network_mode: host$/m);
@@ -223,4 +235,34 @@ test("docs (en + es) no longer tell anyone to enter a VNC password or open the r
   for (const f of readdirSync(new URL("bundles/browser/skills/", REPO))) {
     assert.doesNotMatch(read("bundles/browser/skills/" + f), /localhost:6080/, f);
   }
+});
+
+test("the X display: a real per-start cookie, no TCP and no abstract (host-wide) socket; x11vnc -noremote", () => {
+  const x = command("Xvfb");
+  assert.match(x, /-auth "\$XAUTHORITY" -nolisten tcp -nolisten local/);
+  assert.doesNotMatch(x, /\s-ac(\s|$)/, "access control stays on");
+  assert.match(CODE, /xauth -q -f "\$XAUTHORITY" add ":\$\{DISP_NUM\}" \. "\$\(od -An -N16 -tx1 \/dev\/urandom/);
+  assert.match(CODE, /chmod 600 "\$XAUTHORITY"/);
+  assert.ok(CODE.indexOf("xauth -q") < CODE.indexOf("Xvfb \":"), "the cookie exists before Xvfb starts");
+  assert.match(CODE, /grep -q "@\/tmp\/\.X11-unix\/X\$\{DISP_NUM\}\\\$" \/proc\/net\/unix/, "refuses if an abstract X socket is up");
+  assert.match(command("x11vnc"), /\s-noremote\s/);
+});
+
+test("a graceful stop: SIGTERM goes to Chromium, which gets time to flush before the rest stops", () => {
+  const fn = CODE.slice(CODE.indexOf("shutdown() {"), CODE.indexOf("\n}\n", CODE.indexOf("shutdown() {")));
+  assert.match(fn, /cdp_close \|\| true/, "CDP Browser.close first: Chromium's SIGTERM path does not commit cookies");
+  assert.match(CODE, /"method": "Browser\.close"/);
+  assert.match(fn, /kill -TERM "\$CHROME_PID"/, "SIGTERM only as the fallback");
+  assert.ok(fn.indexOf("cdp_close") < fn.indexOf("kill -TERM"));
+  assert.match(fn, /kill -0 "\$CHROME_PID"/, "waits for Chromium");
+  assert.ok(fn.indexOf("kill -TERM") < fn.indexOf('kill "$X11VNC_PID"'), "Chromium first, the display after");
+  assert.match(CODE, /^trap shutdown TERM INT$/m);
+  assert.ok(CODE.indexOf("trap shutdown TERM INT") < CODE.lastIndexOf('wait "$CHROME_PID"'));
+});
+
+test("the instance marker: the profile names its Crow instance, and a different one refuses to start", () => {
+  assert.match(CODE, /^INSTANCE_MARKER="\$\{PROFILE_DIR\}\/\.crow-instance"$/m);
+  assert.match(CODE, /\[ -n "\$CROW_INSTANCE" \] \|\| die/);
+  assert.match(CODE, /\[ "\$\(cat "\$INSTANCE_MARKER"\)" = "\$CROW_INSTANCE" \] \\\n\s+\|\| die "this browser profile belongs to the Crow instance/);
+  assert.ok(CODE.indexOf("INSTANCE_MARKER\" ]") < CODE.indexOf("--remote-debugging-port"), "checked before Chromium opens the profile");
 });

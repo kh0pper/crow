@@ -16,6 +16,11 @@ NOVNC_PORT="${NOVNC_PORT:-6080}"
 VNC_DIR=/run/crow-vnc
 RFB_SOCK="${VNC_DIR}/rfb.sock"
 TOKEN_FILE="${VNC_DIR}/tokens"
+# The token arrives as a file (compose `configs`, mode 0400, copied into the
+# container at create), never as an environment variable.
+TOKEN_SRC=/run/secrets/crow-vnc-token
+PROFILE_DIR=/root/.config/chromium-crow
+INSTANCE_MARKER="${PROFILE_DIR}/.crow-instance"
 SCREEN="1920x1080x24"
 
 log() { echo "[crow-browser] $*"; }
@@ -28,9 +33,16 @@ die() { echo "[crow-browser] FATAL: $*" >&2; exit 1; }
 #   - RFB (x11vnc) listens on NO TCP port at all: only on a 0600 unix socket in
 #     a 0700 directory inside this container, which host processes cannot see;
 #   - websockify (127.0.0.1 only) connects a WebSocket to that socket only when
-#     the upgrade's Host header is VNC_TOKEN (--host-token), a per-instance
-#     secret in the bundle's .env that only the gateway reads and adds
-#     server-side. No page, URL or log ever carries it.
+#     the upgrade's Host header is the per-instance token (--host-token) that the
+#     gateway adds server-side from the bundle's .env. No page or URL carries
+#     it, and a wrong token is refused without being logged (QuietTokenFile);
+#   - the X display has a real per-container MIT cookie and listens on no TCP
+#     and no abstract socket (abstract sockets belong to the network namespace,
+#     which is the host's here): only the unix socket in this container's own
+#     /tmp. x11vnc runs -noremote.
+# NOT covered here: Chrome DevTools (CDP) on 127.0.0.1:${CDP_PORT} has no
+# authentication, so any process of any uid on this machine can drive the
+# browser through it. That is tracked separately.
 # An older install's .env may still pass VNC_PASSWORD: it is ignored, and
 # never printed.
 if [ -n "${VNC_PASSWORD:-}" ]; then
@@ -38,19 +50,49 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
 fi
 unset VNC_PASSWORD
 
-# The token goes into a root-only file and out of the environment BEFORE any
-# child starts, so neither x11vnc, websockify nor Chromium (and no web page it
-# runs) inherits it. It is never echoed.
-VNC_TOKEN_VALUE="${VNC_TOKEN:-}"
+# The token: read from its 0400 file into websockify's 0600 token file. Never
+# echoed, never exported (a VNC_TOKEN env from an earlier build is dropped).
 unset VNC_TOKEN
+VNC_TOKEN_VALUE="$(tr -d '\r\n' < "$TOKEN_SRC" 2>/dev/null)"
 if ! [[ "$VNC_TOKEN_VALUE" =~ ^[A-Za-z0-9_-]{32,256}$ ]]; then
-  die "VNC_TOKEN is missing or malformed. Crow generates CROW_BROWSER_VNC_TOKEN at install, in this bundle's .env; without it the viewer cannot connect."
+  die "the viewer token (${TOKEN_SRC}) is missing or malformed. Crow generates CROW_BROWSER_VNC_TOKEN at install, in this bundle's .env, and compose hands it in as that file."
 fi
 rm -rf "$VNC_DIR"
 mkdir -m 700 "$VNC_DIR" || die "cannot create ${VNC_DIR}"
 ( umask 077; printf '%s: unix_socket:%s\n' "$VNC_TOKEN_VALUE" "$RFB_SOCK" > "$TOKEN_FILE" ) || die "cannot write the token file"
 unset VNC_TOKEN_VALUE
 
+# websockify's token lookup that never echoes the token it was handed: stock
+# websockify logs "Token '<value>' not found", which would print a valid token
+# whenever the gateway's (.env) and this container's copy differ.
+cat > "${VNC_DIR}/crow_quiet_token.py" <<'PY'
+from websockify.token_plugins import ReadOnlyTokenFile
+from websockify.websockifyserver import WebSockifyServer
+
+
+class QuietTokenFile(ReadOnlyTokenFile):
+    def lookup(self, token):
+        target = super().lookup(token)
+        if target is None:
+            raise WebSockifyServer.EClose("token not accepted")
+        return target
+PY
+chmod 600 "${VNC_DIR}/crow_quiet_token.py"
+
+# --- Which Crow instance this profile belongs to ---
+# The profile volume is named per instance; the marker inside it is the second
+# lock: a volume mounted into another instance's container (a compose -p
+# mistake) refuses to start instead of opening someone else's logins.
+CROW_INSTANCE="${CROW_INSTANCE:-}"
+[ -n "$CROW_INSTANCE" ] || die "CROW_INSTANCE is not set (compose passes this instance's CROW_HOME)"
+mkdir -p "$PROFILE_DIR"
+if [ -f "$INSTANCE_MARKER" ]; then
+  [ "$(cat "$INSTANCE_MARKER")" = "$CROW_INSTANCE" ] \
+    || die "this browser profile belongs to the Crow instance at '$(head -c 200 "$INSTANCE_MARKER")', not '${CROW_INSTANCE}'. Refusing to open another instance's logins: check the volume and the compose project."
+else
+  printf '%s' "$CROW_INSTANCE" > "$INSTANCE_MARKER"
+  log "profile marked for instance ${CROW_INSTANCE}."
+fi
 # loopback_only PORT TABLE... — true only when something LISTENs on PORT in the
 # given /proc/net/tcp{,6}-format tables and every such listener is a loopback
 # address: 127.0.0.0/8, ::1 or ::ffff:127.x. Addresses there are hex in host
@@ -101,13 +143,18 @@ log "Cleaning stale X locks for display :${DISP_NUM}..."
 rm -f "/tmp/.X${DISP_NUM}-lock" "/tmp/.X11-unix/X${DISP_NUM}" 2>/dev/null || true
 mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
-# --- Xauthority so x11vnc never falls into the MIT-MAGIC-COOKIE hunt ---
+# --- A real X cookie, fresh per start (x11vnc and Chromium inherit XAUTHORITY) ---
 export XAUTHORITY=/root/.Xauthority
-touch "$XAUTHORITY"
+rm -f "$XAUTHORITY"
+( umask 077; : > "$XAUTHORITY" )
+xauth -q -f "$XAUTHORITY" add ":${DISP_NUM}" . "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
+  || die "cannot create the X cookie"
+chmod 600 "$XAUTHORITY"
 
-# --- Xvfb ---
+# --- Xvfb: cookie required; no TCP, no abstract socket (host-wide under host
+# networking); only /tmp/.X11-unix/X<n> in this container's own /tmp ---
 log "Starting Xvfb on :${DISP_NUM} (${SCREEN})..."
-Xvfb ":${DISP_NUM}" -screen 0 "${SCREEN}" -ac -nolisten tcp &
+Xvfb ":${DISP_NUM}" -screen 0 "${SCREEN}" -auth "$XAUTHORITY" -nolisten tcp -nolisten local &
 XVFB_PID=$!
 
 # Wait until the X server actually answers (xdpyinfo), not a blind sleep.
@@ -132,14 +179,18 @@ sleep 0.5
 if ! kill -0 "$XVFB_PID" 2>/dev/null; then
   die "Xvfb on :${DISP_NUM} died — another container is already using that display. Set CROW_BROWSER_DISPLAY to a number no other Crow instance uses."
 fi
-log "Xvfb ready (pid ${XVFB_PID})."
+if grep -q "@/tmp/.X11-unix/X${DISP_NUM}\$" /proc/net/unix 2>/dev/null; then
+  die "an abstract X socket for :${DISP_NUM} exists on this host (another Crow browser from before 1.3.12 on the same display number?). Refusing to run: it is reachable by every process on the machine."
+fi
+log "Xvfb ready (pid ${XVFB_PID}), cookie required, no TCP or abstract socket."
 
 # --- x11vnc: RFB on a unix socket only ---
 log "Starting x11vnc on a unix socket..."
 # -unixsock: the only way in. -rfbport 0 -rfbportv6 0 -noipv6: no TCP listener,
-# v4 or v6. -nopw: no VNC password, and no warning about it.
+# v4 or v6. -nopw: no VNC password, and no warning about it. -noremote: no
+# `x11vnc -R` remote control (it could reopen an RFB TCP port).
 x11vnc -display ":${DISP_NUM}" -auth "$XAUTHORITY" -forever -shared \
-  -nopw -unixsock "$RFB_SOCK" -rfbport 0 -rfbportv6 0 -noipv6 -noxdamage -quiet &
+  -nopw -noremote -unixsock "$RFB_SOCK" -rfbport 0 -rfbportv6 0 -noipv6 -noxdamage -quiet &
 X11VNC_PID=$!
 ready=0
 for i in $(seq 1 20); do
@@ -158,7 +209,8 @@ log "x11vnc up (pid ${X11VNC_PID}), RFB on a unix socket only."
 log "Starting noVNC on 127.0.0.1:${NOVNC_PORT} (token required)..."
 # The static noVNC files are served to anyone on loopback; a WebSocket reaches
 # RFB only with the token as its Host header (TokenFile maps it to the socket).
-websockify --web /usr/share/novnc --token-plugin TokenFile --token-source "$TOKEN_FILE" \
+PYTHONPATH="$VNC_DIR" websockify --web /usr/share/novnc \
+  --token-plugin crow_quiet_token.QuietTokenFile --token-source "$TOKEN_FILE" \
   --host-token "127.0.0.1:${NOVNC_PORT}" &
 WEBSOCKIFY_PID=$!
 sleep 1
@@ -211,6 +263,59 @@ echo "  noVNC:     http://127.0.0.1:${NOVNC_PORT}/vnc.html (loopback; open it th
 echo "  CDP:       http://127.0.0.1:${CDP_PORT}/json/version"
 echo "============================================="
 echo ""
+
+# --- Graceful stop: docker stop (SIGTERM via init) reaches this shell only.
+# Hand it to Chromium and wait, so it flushes cookies and logins to the profile
+# (compose stop_grace_period: 30s) instead of being SIGKILLed with the rest. ---
+# Chromium's own SIGTERM path exits WITHOUT committing its cookie store (proven
+# in a throwaway container), so close it the way a user would: CDP
+# Browser.close, then fall back to SIGTERM.
+cdp_close() {
+  python3 - "$CDP_PORT" <<'PY' >/dev/null 2>&1
+import base64, json, os, socket, sys, urllib.request
+port = int(sys.argv[1])
+url = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=3))["webSocketDebuggerUrl"]
+path = url.split(":%d" % port, 1)[1]
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall(("GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (path, port, base64.b64encode(os.urandom(16)).decode())).encode())
+head = b""
+while b"\r\n\r\n" not in head:
+    d = s.recv(4096)
+    if not d:
+        sys.exit(1)
+    head += d
+if b" 101 " not in head.split(b"\r\n")[0]:
+    sys.exit(1)
+msg = json.dumps({"id": 1, "method": "Browser.close"}).encode()
+mask = os.urandom(4)
+s.sendall(bytes([0x81, 0x80 | len(msg)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(msg)))
+try:
+    s.recv(4096)
+except OSError:
+    pass
+PY
+}
+
+shutdown() {
+  log "stopping: closing Chromium..."
+  cdp_close || true
+  for i in $(seq 1 40); do
+    kill -0 "$CHROME_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$CHROME_PID" 2>/dev/null; then
+    kill -TERM "$CHROME_PID" 2>/dev/null
+    for i in $(seq 1 10); do
+      kill -0 "$CHROME_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+  fi
+  kill "$X11VNC_PID" "$WEBSOCKIFY_PID" "$XVFB_PID" 2>/dev/null || true
+  log "stopped."
+  exit 0
+}
+trap shutdown TERM INT
 
 # --- Supervise: if Chromium dies, take the container down so it restarts ---
 wait "$CHROME_PID"

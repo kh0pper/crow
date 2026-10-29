@@ -13,11 +13,15 @@
 //   - a WebSocket without the token (any Host but the token) gets no RFB;
 //   - with the token as its Host header it gets the RFB banner and the
 //     "None" security type (no password prompt);
-//   - the token is in no log line and not in Chromium's environment.
+//   - the token is in no log line (a wrong one neither) and in no environment;
+//   - the X display: no abstract (host-wide) socket, another uid cannot open
+//     it, and `x11vnc -R rfbport:` remote control opens nothing;
+//   - a graceful stop: a cookie written just before `docker stop` survives;
+//   - the instance marker: the profile volume refuses another instance.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, copyFileSync, chmodSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -25,6 +29,7 @@ import { randomBytes } from "node:crypto";
 const IMAGE = process.env.CROW_TEST_BROWSER_IMAGE || "";
 const skip = IMAGE ? false : "set CROW_TEST_BROWSER_IMAGE to a built crow-browser image to run";
 const NAME = `crow-vnc-live-${process.pid}-${randomBytes(3).toString("hex")}`;
+const VOL = NAME + "-profile";
 const TOKEN = randomBytes(32).toString("hex");
 const dir = mkdtempSync(join(tmpdir(), "crow-vnc-live-"));
 const docker = (...args) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60000 });
@@ -32,7 +37,10 @@ const allLogs = () => execFileSync("sh", ["-c", `docker logs ${NAME} 2>&1`], { e
 const inside = (script) => docker("exec", NAME, "python3", "-c", script).trim();
 
 after(() => {
-  if (IMAGE) { try { docker("rm", "-f", NAME); } catch {} }
+  if (IMAGE) {
+    for (const c of [NAME, NAME + "-other"]) { try { docker("rm", "-f", c); } catch {} }
+    try { docker("volume", "rm", VOL); } catch {}
+  }
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -73,14 +81,22 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
   const ep = join(dir, "entrypoint.sh");
   copyFileSync(new URL("../bundles/browser/entrypoint.sh", import.meta.url), ep);
   chmodSync(ep, 0o755);
-  docker("run", "-d", "--name", NAME, "--network", "none", "--init", "--shm-size", "1g", "-m", "2g",
-    "-e", `VNC_TOKEN=${TOKEN}`, "-e", "VNC_PASSWORD=legacy-value", "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE);
-  let logs = "";
-  for (let i = 0; i < 60; i++) {
-    logs = allLogs();
-    if (/Ready \(verified\)|FATAL/.test(logs)) break;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+  const tok = join(dir, "token");
+  writeFileSync(tok, TOKEN + "\n", { mode: 0o644 });   // readable by the container's root; 0400 in compose
+  const runArgs = (name, instance) => ["run", "-d", "--name", name, "--network", "none", "--init", "--shm-size", "1g", "-m", "2g",
+    "--stop-timeout", "30", "-e", `CROW_INSTANCE=${instance}`, "-e", "VNC_PASSWORD=legacy-value", "-e", "VNC_TOKEN=env-token-must-be-ignored",
+    "-v", `${tok}:/run/secrets/crow-vnc-token:ro`, "-v", `${VOL}:/root/.config/chromium-crow`, "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
+  docker(...runArgs(NAME, "/test/instance-a"));
+  const waitReady = async () => {
+    let l = "";
+    for (let i = 0; i < 60; i++) {
+      l = allLogs();
+      if (/Ready \(verified\)|FATAL/.test(l.split("stopped.").at(-1))) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return l;
+  };
+  const logs = await waitReady();
   assert.match(logs, /Ready \(verified\)/, logs.slice(-2000));
   assert.match(logs, /RFB on a unix socket only/);
   assert.match(logs, /websockify listens on loopback only \(port 6080\)/);
@@ -105,7 +121,8 @@ d=os.stat("/run/crow-vnc"); s=os.stat("/run/crow-vnc/rfb.sock"); t=os.stat("/run
 print(oct(d.st_mode & 0o777), stat.S_ISSOCK(s.st_mode), oct(s.st_mode & 0o777), oct(t.st_mode & 0o777))`), "0o700 True 0o600 0o600");
 
   // No token → no RFB. Any Host but the token is refused, the token in the query too.
-  for (const host of ["127.0.0.1:6080", "localhost", "evil.example", randomBytes(32).toString("hex")]) {
+  const WRONG = randomBytes(32).toString("hex");
+  for (const host of ["127.0.0.1:6080", "localhost", "evil.example", WRONG, "env-token-must-be-ignored"]) {
     const r = inside(WS(host));
     assert.doesNotMatch(r, /RFB 003/, `Host ${host.length > 20 ? "(another random token)" : host}: ${r}`);
   }
@@ -122,6 +139,7 @@ s.recv(12); s.sendall(b"RFB 003.008\\n"); print(list(s.recv(2)))`);
   const all = allLogs();
   assert.ok(!all.includes(TOKEN.slice(0, 16)) && !all.includes(TOKEN.slice(-16)), "no part of the token is ever logged");
   assert.ok(!all.includes("legacy-value"), "the legacy password never logged");
+  assert.ok(!all.includes(WRONG.slice(0, 16)), "a wrong token is refused without being logged (QuietTokenFile)");
   // (docker exec itself, and the entrypoint's own initial environ, carry the
   // container's config env: host-root-only. What matters is the children.)
   const holders = inside(`
@@ -136,4 +154,54 @@ for pid in os.listdir("/proc"):
     if b"VNC_TOKEN=" in env: bad.add(cmd.split(b"\\0")[0].decode(errors="replace").split("/")[-1])
 print(",".join(sorted(bad)))`).split(",");
   for (const p of holders) assert.doesNotMatch(p, /chrome|x11vnc|websockify|Xvfb/i, "a child holds the token: " + holders.join(","));
+
+  // ---- C1: the X display is not reachable host-wide, by another uid, or by x11vnc -R ----
+  const unix = docker("exec", NAME, "cat", "/proc/net/unix");
+  assert.doesNotMatch(unix, /@\/tmp\/\.X11-unix\/X/, "no abstract X socket (that namespace is the host's under host networking)");
+  assert.match(docker("exec", NAME, "xdpyinfo", "-display", ":99"), /name of display:\s+:99/, "root, with the cookie: the display works");
+  let nobody = "";
+  try { nobody = execFileSync("docker", ["exec", "-u", "65534", "-e", "XAUTHORITY=/tmp/none", NAME, "xdpyinfo", "-display", ":99"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
+  catch (e) { nobody = "refused:" + String(e.stderr || ""); }
+  assert.match(nobody, /^refused:/, "another uid (no cookie) cannot open the display: " + nobody.slice(0, 200));
+  try { docker("exec", NAME, "timeout", "8", "x11vnc", "-display", ":99", "-R", "rfbport:5999"); } catch {}
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(inside(`
+import socket
+try:
+    socket.create_connection(("127.0.0.1", 5999), timeout=2); print("open")
+except OSError: print("refused")`), "refused", "x11vnc -R rfbport: is refused (-noremote)");
+
+  // ---- I2: a cookie written just before docker stop survives the stop ----
+  const setCookie = `
+const { chromium } = await import("/app/node_modules/playwright/index.mjs");
+const b = await chromium.connectOverCDP("http://127.0.0.1:9222");
+const ctx = b.contexts()[0];
+await ctx.addCookies([{ name: "flush_probe", value: "v", domain: ".example.com", path: "/", expires: Math.floor(Date.now() / 1000) + 86400 }]);
+process.exit(0);`;
+  docker("exec", NAME, "node", "--input-type=module", "-e", setCookie);
+  const t0 = Date.now();
+  docker("stop", "-t", "30", NAME);
+  const took = Date.now() - t0;
+  assert.match(allLogs(), /stopping: closing Chromium\.\.\.[\s\S]*stopped\./, "the entrypoint's TERM trap ran");
+  docker("start", NAME);
+  await waitReady();
+  const names = inside(`
+import sqlite3, os
+p = "/root/.config/chromium-crow/Default/Cookies"
+if not os.path.exists(p): p = "/root/.config/chromium-crow/Default/Network/Cookies"
+print(",".join(r[0] for r in sqlite3.connect("file:%s?mode=ro" % p, uri=True).execute("select name from cookies")))`);
+  assert.match(names, /flush_probe/, "the cookie set right before the stop is in the profile (stop took " + took + " ms)");
+
+  // ---- M5: the profile's instance marker; another instance's container refuses it ----
+  assert.equal(docker("exec", NAME, "cat", "/root/.config/chromium-crow/.crow-instance"), "/test/instance-a");
+  docker("stop", "-t", "30", NAME);
+  docker(...runArgs(NAME + "-other", "/test/instance-b"));
+  let other = "";
+  for (let i = 0; i < 20; i++) {
+    other = execFileSync("sh", ["-c", `docker logs ${NAME}-other 2>&1`], { encoding: "utf8" });
+    if (/FATAL|Ready/.test(other)) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  assert.match(other, /FATAL: this browser profile belongs to the Crow instance at '\/test\/instance-a', not '\/test\/instance-b'/);
+  assert.doesNotMatch(other, /Ready \(verified\)/);
 });

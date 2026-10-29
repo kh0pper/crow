@@ -140,7 +140,7 @@ Al visor VNC solo se llega a través del gateway de Crow, con tu sesión del das
 - **Embebido**: en la pestaña Status del panel Browser (iframe), en el recuadro del navegador en vivo y en la hoja **Tomar el control** de un chat
 - **Vista completa**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (mismo HTTPS que tu dashboard)
 
-El visor se conecta solo: no hay una contraseña de VNC aparte. La pantalla en sí (x11vnc) no está en ningún puerto de red: escucha solo en un socket unix, accesible solo para root, dentro del contenedor. noVNC (puerto 6080) escucha solo en `127.0.0.1` y solo conecta un visor a ese socket con una clave por instancia que Crow genera al instalar (`CROW_BROWSER_VNC_TOKEN` en el `.env` del bundle) y que solo usa el gateway de Crow: la añade de su lado, después de comprobar tu sesión y que la petición viene de la propia página del dashboard. Ninguna página, enlace ni registro la contiene, así que otro programa o una página web en la misma máquina que llegue al puerto 6080 no obtiene ni imagen ni control. El contenedor se detiene al arrancar si la pantalla está en algún puerto TCP o si noVNC se puede alcanzar en una dirección que no sea loopback.
+El visor se conecta solo: no hay una contraseña de VNC aparte. La pantalla (x11vnc y la pantalla X debajo) no está en ningún puerto de red: x11vnc escucha solo en un socket unix, accesible solo para root, dentro del contenedor, y la pantalla X necesita una cookie nueva en cada arranque y no tiene socket TCP ni visible en toda la máquina. noVNC (puerto 6080) escucha solo en `127.0.0.1` y solo conecta un visor con una clave por instancia que Crow genera al instalar (`CROW_BROWSER_VNC_TOKEN` en el `.env` del bundle, entregada al contenedor como un archivo solo para root). El gateway de Crow añade la clave de su lado, después de comprobar tu sesión y que la petición viene de la propia página del dashboard; ninguna página ni enlace la contiene, y una clave equivocada se rechaza sin registrarla. Esto deja **las páginas web y otras máquinas** fuera de la pantalla. **No** deja fuera a los programas que ya se ejecutan en esta máquina con cualquier usuario: Chrome DevTools (CDP, `127.0.0.1:9222`) no tiene autenticación, así que un programa local puede manejar el navegador y leer sus cookies por ahí. Proteger CDP es una tarea aparte. El contenedor se detiene al arrancar si la pantalla está en algún puerto TCP, si hay un socket X visible en toda la máquina o si noVNC se puede alcanzar en una dirección que no sea loopback. Después de cambiar la clave en `.env`, recrea el contenedor.
 
 ## Contenedor Docker
 
@@ -166,7 +166,7 @@ docker compose stop       # detener
 docker compose logs -f    # ver registros
 ```
 
-El perfil del navegador (sus cookies y sesiones iniciadas) vive en un volumen de Docker con nombre, uno por instancia (`browser_chromium-profile` en la instancia principal), así que detener, reiniciar, reconstruir o recrear el contenedor lo conserva. Solo `docker compose down -v` (o `docker volume rm`) lo borra. Una instalación anterior a 1.3.12 mantiene su perfil dentro del contenedor antiguo hasta que un operador lo mueve una vez con `scripts/ops/browser-profile-to-volume.sh` (primero con `--dry-run`); hasta entonces, evita todo lo que recree ese contenedor.
+El perfil del navegador (sus cookies y sesiones iniciadas) vive en un volumen de Docker con nombre, uno por instancia (`browser-chromium-profile` en la instancia principal), así que detener, reiniciar, reconstruir o recrear el contenedor lo conserva. Solo `docker compose down -v` (o `docker volume rm`) lo borra. Una instalación anterior a 1.3.12 mantiene su perfil dentro del contenedor antiguo hasta que un operador lo mueve una vez con `scripts/ops/browser-profile-to-volume.sh` (primero con `--dry-run`); hasta entonces, evita todo lo que recree ese contenedor.
 
 ## Skill de declaración FFFF
 
@@ -174,7 +174,7 @@ La extensión Browser Automation incluye una skill para declarar impuestos vía 
 
 ## Seguridad
 
-- El **puerto CDP (9222)** se vincula solo a `127.0.0.1`
-- **VNC**: x11vnc está en un socket unix dentro del contenedor (sin puerto TCP); noVNC (6080) se vincula solo a `127.0.0.1` y necesita la clave por instancia que solo añade el gateway, tras comprobar la sesión y el mismo origen
+- El **puerto CDP (9222)** se vincula solo a `127.0.0.1`, pero **no tiene autenticación**: cualquier programa que se ejecute en esta máquina, con cualquier usuario, puede manejar el navegador y leer sus cookies por ahí (protegerlo es una tarea aparte)
+- **VNC**: x11vnc está en un socket unix dentro del contenedor (sin puerto TCP); la pantalla X necesita una cookie nueva en cada arranque y no tiene socket TCP ni visible en toda la máquina; noVNC (6080) se vincula solo a `127.0.0.1` y necesita la clave por instancia que añade el gateway, tras comprobar la sesión y el mismo origen
 - **Ningún puerto expuesto** a la red — todo pasa por el HTTPS del gateway
-- Sin contraseña de VNC: el inicio de sesión del dashboard es la puerta. Si una instalación anterior tiene `CROW_BROWSER_VNC_PASSWORD` en el `.env` del bundle, se ignora
+- Sin contraseña de VNC: para las páginas web y otras máquinas, el inicio de sesión del dashboard es la puerta (programas de esta máquina: ver CDP arriba). Una página que sirve otra app bajo `/proxy/` del dashboard comparte el origen del dashboard, así que un fallo en esa app alcanza lo mismo que el dashboard. Si una instalación anterior tiene `CROW_BROWSER_VNC_PASSWORD` en el `.env` del bundle, se ignora

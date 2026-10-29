@@ -498,8 +498,8 @@
       },
       "privileged": true,
       "install_consent_messages": {
-        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools) listens on 127.0.0.1 only. The VNC viewer has no password prompt: you open it from the Crow dashboard, behind your Crow sign-in. Its web port (6080) listens on 127.0.0.1 only and connects to the browser's screen only with a key that Crow generates and only the Crow gateway holds; the screen itself (VNC) is not on any network port. It saves downloads under your Crow folder.",
-        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools) escucha solo en 127.0.0.1. El visor VNC no pide contraseña: lo abres desde el panel de Crow, con tu inicio de sesión de Crow. Su puerto web (6080) escucha solo en 127.0.0.1 y solo se conecta a la pantalla del navegador con una clave que Crow genera y que solo tiene el gateway de Crow; la pantalla en sí (VNC) no está en ningún puerto de red. Guarda las descargas dentro de tu carpeta de Crow."
+        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools) listens on 127.0.0.1 only. The VNC viewer has no password prompt: you open it from the Crow dashboard, behind your Crow sign-in. Its web port (6080) listens on 127.0.0.1 only and shows the browser's screen only with a key that Crow generates and the Crow gateway adds; the screen itself (VNC and X) is on no network port. This keeps web pages and other machines out. It does not keep out programs already running on this machine: the browser's control port (Chrome DevTools, 9222) has no password, so any program here can drive the browser and read its cookies. It saves downloads under your Crow folder.",
+        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools) escucha solo en 127.0.0.1. El visor VNC no pide contraseña: lo abres desde el panel de Crow, con tu inicio de sesión de Crow. Su puerto web (6080) escucha solo en 127.0.0.1 y solo muestra la pantalla del navegador con una clave que Crow genera y que añade el gateway de Crow; la pantalla en sí (VNC y X) no está en ningún puerto de red. Esto deja fuera a las páginas web y a otras máquinas. No deja fuera a los programas que ya se ejecutan en esta máquina: el puerto de control del navegador (Chrome DevTools, 9222) no tiene contraseña, así que cualquier programa de aquí puede manejar el navegador y leer sus cookies. Guarda las descargas dentro de tu carpeta de Crow."
       },
       "server": {
         "command": "node",
@@ -538,7 +538,7 @@
       "env_vars": [
         {
           "name": "CROW_BROWSER_VNC_TOKEN",
-          "description": "The viewer's connection key. Crow generates it at install and keeps it in this bundle's settings file; only the Crow gateway uses it, adding it on its side when you open the viewer. You never type or copy it.",
+          "description": "The viewer's connection key. Crow generates it at install and keeps it in this bundle's settings file; the Crow gateway adds it on its side when you open the viewer, and compose hands it to the container as a root-only file. You never type or copy it. After changing it, recreate the container.",
           "required": true,
           "secret": true,
           "generate": "hex32",

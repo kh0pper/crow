@@ -125,9 +125,14 @@ const WS_TOKEN_RE = /^[A-Za-z0-9_-]{32,256}$/;
  * to RFB only when the upgrade's Host header is this per-instance token, so
  * a local process or a web page that reaches 127.0.0.1:<noVNC port> directly
  * gets nothing. The gateway adds it server-side (proxyReqWs below), after
- * the session check: no page, script or URL ever carries it. Read per
- * upgrade (lazy), so a token added to the .env needs no gateway restart.
- * A value that is not a plain token is refused, never sent.
+ * the session check: no page, script or URL ever carries it. Read FRESH on
+ * every upgrade (never cached), so the gateway always sends the .env's current
+ * token and needs no restart. The container holds the copy compose handed it
+ * at create: after changing the token in the .env, recreate the container.
+ * Until then the two differ and the viewer is refused; the browser bundle's
+ * websockify token lookup (QuietTokenFile) never logs the token it was sent,
+ * so a mismatch prints neither copy. A value that is not a plain token is
+ * refused, never sent.
  */
 export function readWsHostToken(bundleId, envKey, home = CROW_HOME) {
   if (!envKey || !WS_TOKEN_ENV_RE.test(envKey)) return null;
@@ -368,7 +373,9 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
 
     server.on("upgrade", (req, socket, head) => {
       for (const { ext, proxyPath, proxyMiddleware } of proxyInstances) {
-        if (req.url?.startsWith(proxyPath)) {
+        // A path BOUNDARY: /proxy/browser-x/… is not /proxy/browser.
+        const url = String(req.url || "");
+        if (url === proxyPath || url.startsWith(proxyPath + "/") || url.startsWith(proxyPath + "?")) {
           // A token-carrying upgrade only from a page on the dashboard's own origin.
           if (ext.wsHostTokenEnv && !upgradeFromOwnOrigin(req)) {
             socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");

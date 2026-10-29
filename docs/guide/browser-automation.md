@@ -140,7 +140,7 @@ The VNC viewer is reached only through the Crow gateway, behind your dashboard s
 - **Embedded**: In the Browser panel's Status tab (iframe), the live browser tile, and the **Take over** sheet in a chat
 - **Full view**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (same HTTPS as your dashboard)
 
-The viewer connects on its own: there is no separate VNC password. The screen itself (x11vnc) is not on any network port: it listens only on a root-only unix socket inside the container. noVNC (port 6080) listens on `127.0.0.1` only, and connects a viewer to that socket only with a per-instance key that Crow generates at install (`CROW_BROWSER_VNC_TOKEN` in the bundle's `.env`) and that only the Crow gateway uses: it adds the key on its side, after checking your sign-in and that the request comes from the dashboard's own page. No page, link or log ever contains it, so another program or a web page on the same machine that reaches port 6080 gets no picture and no control. The container stops at startup if the screen is on any TCP port or noVNC is reachable on a non-loopback address.
+The viewer connects on its own: there is no separate VNC password. The screen (x11vnc, and the X display under it) is on no network port: x11vnc listens only on a root-only unix socket inside the container, and the X display needs a per-start cookie and has no TCP or host-wide socket. noVNC (port 6080) listens on `127.0.0.1` only, and connects a viewer only with a per-instance key that Crow generates at install (`CROW_BROWSER_VNC_TOKEN` in the bundle's `.env`, handed to the container as a root-only file). The Crow gateway adds the key on its side, after checking your sign-in and that the request comes from the dashboard's own page; no page or link contains it, and a wrong key is refused without being logged. This keeps **web pages and other machines** away from the screen. It does **not** keep out programs already running on this machine as any user: Chrome DevTools (CDP, `127.0.0.1:9222`) has no authentication, so a local program can drive the browser and read its cookies through it. Gating CDP is tracked separately. The container stops at startup if the screen is on any TCP port, an X socket is reachable host-wide, or noVNC is reachable on a non-loopback address. After changing the key in `.env`, recreate the container.
 
 ## Docker Container
 
@@ -166,7 +166,7 @@ docker compose stop       # stop
 docker compose logs -f    # view logs
 ```
 
-The browser's profile (its cookies and saved logins) lives on a named Docker volume, one per instance (`browser_chromium-profile` on the main instance), so stopping, restarting, rebuilding or re-creating the container keeps it. Only `docker compose down -v` (or `docker volume rm`) deletes it. An install from before 1.3.12 keeps its profile inside the old container until an operator moves it once with `scripts/ops/browser-profile-to-volume.sh` (run `--dry-run` first); until then, avoid anything that re-creates that container.
+The browser's profile (its cookies and saved logins) lives on a named Docker volume, one per instance (`browser-chromium-profile` on the main instance), so stopping, restarting, rebuilding or re-creating the container keeps it. Only `docker compose down -v` (or `docker volume rm`) deletes it. An install from before 1.3.12 keeps its profile inside the old container until an operator moves it once with `scripts/ops/browser-profile-to-volume.sh` (run `--dry-run` first); until then, avoid anything that re-creates that container.
 
 ## FFFF Filing Skill
 
@@ -174,7 +174,7 @@ The Browser Automation extension includes a skill for filing taxes via IRS Free 
 
 ## Security
 
-- **CDP port (9222)** binds to `127.0.0.1` only
-- **VNC**: x11vnc is on a unix socket inside the container (no TCP port); noVNC (6080) binds to `127.0.0.1` only and needs the per-instance key that only the gateway adds, after the session and same-origin checks
+- **CDP port (9222)** binds to `127.0.0.1` only, but has **no authentication**: any program running on this machine, as any user, can drive the browser and read its cookies through it (gating it is tracked separately)
+- **VNC**: x11vnc is on a unix socket inside the container (no TCP port); the X display needs a per-start cookie and has no TCP or host-wide socket; noVNC (6080) binds to `127.0.0.1` only and needs the per-instance key that the gateway adds, after the session and same-origin checks
 - **No ports exposed** to the network — everything goes through the gateway's HTTPS
-- No VNC password: the dashboard sign-in is the gate. An older install's `CROW_BROWSER_VNC_PASSWORD` in the bundle's `.env` is ignored
+- No VNC password: for web pages and other machines, the dashboard sign-in is the gate (programs on this machine: see CDP above). A page served by another app under the dashboard's `/proxy/` shares the dashboard's origin, so a flaw in such an app reaches what the dashboard reaches. An older install's `CROW_BROWSER_VNC_PASSWORD` in the bundle's `.env` is ignored

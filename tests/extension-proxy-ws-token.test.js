@@ -152,3 +152,56 @@ test("no client code, page or panel HTML carries the token or names its key", as
     assert.doesNotMatch(readFileSync(new URL("../" + f, import.meta.url), "utf8"), /VNC_TOKEN|[?&]token=/, f);
   }
 });
+
+test("one proxyReqWs per bundle: the bearer for bundles that ask, the Host token only for the browser, nothing else", () => {
+  writeFileSync(join(CROW_HOME, "hub-token"), "hub-bearer");
+  const dirs = [
+    ["perch-hub", { port: 4210, authTokenFile: "hub-token" }, null],
+    ["browser", { ...REPO_MANIFEST.webUI, port: 4211 }, `CROW_BROWSER_VNC_TOKEN=${TOKEN}\n`],
+    ["frigate", { port: 4212, path: "/" }, null],
+  ];
+  for (const [id, webUI, env] of dirs) {
+    const d = join(CROW_HOME, "bundles", id); mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "manifest.json"), JSON.stringify({ id, name: id, webUI }));
+    if (env) writeFileSync(join(d, ".env"), env); else rmSync(join(d, ".env"), { force: true });
+  }
+  writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify(dirs.map(([id]) => ({ id, type: "bundle" }))));
+  const opts = [];
+  extensionProxyFactory((q, s, n) => n(), { createProxy: (o) => { opts.push(o); const mw = (q, s, n) => n(); mw.upgrade = () => {}; return mw; } });
+  const by = Object.fromEntries(opts.map((o) => [o.target, o]));
+  const call = (hook) => { const h = {}; hook({ setHeader: (k, v) => { h[k] = v; }, getHeader: () => undefined }, { headers: {}, body: undefined, readableLength: 0 }); return h; };
+  assert.deepEqual(call(by["http://127.0.0.1:4210"].on.proxyReqWs), { Authorization: "Bearer hub-bearer" });
+  assert.deepEqual(call(by["http://127.0.0.1:4211"].on.proxyReqWs), { Host: TOKEN });
+  assert.deepEqual(call(by["http://127.0.0.1:4212"].on.proxyReqWs), {});
+  assert.equal(call(by["http://127.0.0.1:4211"].on.proxyReq).Host, undefined, "plain HTTP never carries it");
+});
+
+test("upgrade routing has a path boundary: /proxy/browser-x/… goes to browser-x, never to the browser", async () => {
+  const d = (id, webUI, env) => {
+    const p = join(CROW_HOME, "bundles", id); mkdirSync(p, { recursive: true });
+    writeFileSync(join(p, "manifest.json"), JSON.stringify({ id, name: id, webUI }));
+    if (env) writeFileSync(join(p, ".env"), env);
+  };
+  d("browser", { ...REPO_MANIFEST.webUI, port: 4311 }, `CROW_BROWSER_VNC_TOKEN=${TOKEN}\n`);
+  d("browser-x", { port: 4312 });
+  writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([{ id: "browser", type: "bundle" }, { id: "browser-x", type: "bundle" }]));
+  const hits = [];
+  const { setupWebSocket } = extensionProxyFactory((q, s, n) => n(), {
+    createProxy: (o) => { const mw = (q, s, n) => n(); mw.upgrade = () => hits.push(o.target); return mw; },
+  });
+  const server = new EventEmitter(); setupWebSocket(server);
+  const fire = (url, headers) => new Promise((resolve) => {
+    const written = [];
+    const socket = { remoteAddress: "10.0.0.5", write: (x) => written.push(x), destroy: () => resolve(written.join("")) };
+    server.emit("upgrade", { url, headers, socket, connection: socket }, socket, Buffer.alloc(0));
+  });
+  const w = console.warn; console.warn = () => {};
+  try {
+    // A foreign origin: the browser's origin check must NOT be the one answering browser-x.
+    const r = await fire("/proxy/browser-x/ws", { host: "h", origin: "https://evil.example" });
+    assert.match(r, /^HTTP\/1\.1 401/, "browser-x's own path: session check (no browser origin check) — " + r);
+    assert.match(await fire("/proxy/browser/websockify", { host: "h", origin: "https://evil.example" }), /^HTTP\/1\.1 403/);
+    assert.match(await fire("/proxy/browser?x=1", { host: "h", origin: "https://evil.example" }), /^HTTP\/1\.1 403/);
+    assert.deepEqual(hits, []);
+  } finally { console.warn = w; }
+});
