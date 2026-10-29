@@ -1125,6 +1125,7 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
 
         var VIEW_BROWSE = document.getElementById("ext-view-browse");
         var VIEW_INSTALLED = document.getElementById("ext-view-installed");
+        var VIEW_SERVERS = document.getElementById("ext-view-servers");
 
         // A view is hidden by BOTH the [hidden] attribute and .ext-view--hidden
         // (the stylesheet's display:none lives on the class; [hidden] alone loses
@@ -1144,13 +1145,16 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
           });
           setViewHidden(VIEW_BROWSE, view !== "browse");
           setViewHidden(VIEW_INSTALLED, view !== "installed");
+          setViewHidden(VIEW_SERVERS, view !== "servers");
+          // The Servers view (servers-client.js) loads its cards when it is first shown.
+          if (view === "servers" && typeof window.crowServersShown === "function") window.crowServersShown();
         }
 
         document.querySelectorAll(".ext-viewtab").forEach(function(tab) {
           tab.addEventListener("click", function() {
             var view = this.dataset.view;
             showView(view);
-            location.hash = view === "installed" ? "installed" : "";
+            location.hash = view === "browse" ? "" : view;
           });
         });
 
@@ -1520,11 +1524,38 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
           actions.appendChild(closeAction);
 
           if (!addon._installed && !addon._noInstall) {
+            // Host picker (SAT-5): a satellite-eligible bundle can go on this Crow or on an
+            // active paired server (servers-client.js owns the server install dialog).
+            var hostSel = null;
+            var satHosts = addon._satellite && typeof window.crowSatelliteHosts === "function" ? window.crowSatelliteHosts() : [];
+            if (satHosts.length) {
+              var hostWrap = document.createElement("label");
+              hostWrap.className = "ext-hostpick";
+              hostWrap.appendChild(document.createTextNode('${tJs("extensions.servers.installOn", lang)} '));
+              hostSel = document.createElement("select");
+              hostSel.setAttribute("data-testid", "host-picker");
+              var here = document.createElement("option");
+              here.value = "";
+              here.textContent = '${tJs("extensions.servers.thisCrow", lang)}';
+              hostSel.appendChild(here);
+              satHosts.forEach(function(h) {
+                var o = document.createElement("option");
+                o.value = h.id;
+                o.textContent = h.name + ' ${tJs("extensions.servers.serverSuffix", lang)}';
+                hostSel.appendChild(o);
+              });
+              hostWrap.appendChild(hostSel);
+              actions.appendChild(hostWrap);
+            }
             var installAction = document.createElement("button");
             installAction.className = "btn btn-primary";
             installAction.textContent = '${tJs("extensions.install", lang)}';
             installAction.addEventListener("click", function() {
               hideModal();
+              if (hostSel && hostSel.value && typeof window.crowSatelliteInstall === "function") {
+                window.crowSatelliteInstall(addon, hostSel.value);
+                return;
+              }
               showInstallModal(addon.id, addon.name, addon.env_vars || [],
                 (addon.requires || {}).min_ram_mb || 0,
                 (addon.requires || {}).min_disk_mb || 0,
@@ -1896,6 +1927,8 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
         (function applyHash() {
           var hash = (location.hash || "").replace(/^#/, "");
           if (hash === "installed") { showView("installed"); return; }
+          // Notifications and the Nest link to ?view=servers.
+          if ((hash === "servers" || /(^|[?&])view=servers(&|$)/.test(String(location.search || "").slice(1))) && VIEW_SERVERS) { showView("servers"); return; }
           showView("browse");
           applyFilters();
           if (hash === "collections") {

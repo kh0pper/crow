@@ -184,6 +184,10 @@ export function buildExtensionsHTML({
   vaultSecure = false,
   localModels = null,
   searchQuery = "",
+  // SAT-5: paired, non-revoked satellites [{id, name, status}] and the bundle ids that may be
+  // installed on one (satellite-eligible manifests in crow's own checkout).
+  satellites = [],
+  satelliteEligibleIds = [],
   lang,
 }) {
   // Models plan 3a: model bundles (inference: true) leave Browse — they are
@@ -295,6 +299,7 @@ export function buildExtensionsHTML({
   const viewTabsHtml = `<div class="ext-viewtabs" id="ext-viewtabs" role="tablist" aria-label="${t("extensions.pageTitle", lang)}">
       <button type="button" class="ext-viewtab ext-viewtab--active" data-view="browse" role="tab" aria-selected="true" aria-controls="ext-view-browse">${t("extensions.viewBrowse", lang)}</button>
       <button type="button" class="ext-viewtab" data-view="installed" role="tab" aria-selected="false" aria-controls="ext-view-installed">${t("extensions.viewInstalled", lang)} <span class="ext-viewtab__count">${installedCount}</span></button>
+      <button type="button" class="ext-viewtab" data-view="servers" role="tab" aria-selected="false" aria-controls="ext-view-servers">${t("extensions.servers.tab", lang)} <span class="ext-viewtab__count">${satellites.length}</span></button>
     </div>`;
 
   // ─── Search ───
@@ -386,6 +391,20 @@ export function buildExtensionsHTML({
       const registryEntry = available.find((a) => a.id === id);
       const name = registryEntry?.name || id;
       const iconHtml = renderIcon(registryEntry || { id, name, icon: registryEntry?.icon, category: registryEntry?.category }, 32);
+      if (info?.mode === "satellite") {
+        // Hosted on a paired server (SAT-5): managed from the Servers view, no local actions.
+        const host = satellites.find((x) => x.id === info.host);
+        const where = fill(t("extensions.servers.onServer", lang), { name: host?.name || info.host || "?" });
+        return `<div class="ext-installed__item" data-addon-id="${escapeHtml(id)}" data-satellite="${escapeHtml(info.host || "")}" style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both">
+          <div class="ext-installed__icon">${iconHtml}</div>
+          <div class="ext-installed__info">
+            <span class="ext-installed__name">${escapeHtml(name)}</span>
+            ${badge(where, "connected")}
+            <span class="ext-installed__meta">v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}</span>
+          </div>
+          <div class="ext-installed__actions"><a class="btn btn-sm btn-secondary" href="#servers" data-view-link="servers">${t("extensions.servers.manage", lang)}</a></div>
+        </div>`;
+      }
       const status = bundleStatus[id];
       const isDocker = !!status;
       const isRunning = status?.running;
@@ -487,6 +506,14 @@ export function buildExtensionsHTML({
       ${installedListHtml}
       ${storesHtml}
       ${helpHtml}
+    </div>
+    <div class="ext-view ext-view--hidden" id="ext-view-servers" role="tabpanel" hidden>
+      <div class="ext-servers__head">
+        <h2 class="ext-section-title">${t("extensions.servers.title", lang)}</h2>
+        <p class="ext-section-sub">${t("extensions.servers.subtitle", lang)}</p>
+        <button type="button" class="btn btn-primary" id="ext-servers-add" data-testid="add-server">${t("extensions.servers.add", lang)}</button>
+      </div>
+      <div id="ext-servers-list" class="ext-servers__list" aria-live="polite"></div>
     </div>`;
 
   // ─── Add-on registry blob for the client-side detail modal ───
@@ -517,6 +544,8 @@ export function buildExtensionsHTML({
       _iconBg: catColor.bg,
       _iconColor: catColor.color,
       _installed: !!installed[addon.id],
+      // SAT-5 host picker: offered only for satellite-eligible bundles.
+      _satellite: satelliteEligibleIds.includes(addon.id),
       // The detail modal offers Install only when this is false (see addonCard:
       // deprecated, or a requires-bins entry that is not trusted-resolvable).
       _noInstall: isDeprecatedBundle(addon) || trustedBinsMissing(addon).length > 0,
@@ -543,5 +572,9 @@ export function buildExtensionsHTML({
   ).replace(/<\//g, "<\\/");
   const collectionsScript = `<script id="collection-registry" type="application/json">${collectionsJson}<\/script>`;
 
-  return { viewsHtml, addonRegistryScript, collectionsScript };
+  // Active servers for the host picker (names are owner-set text: JSON, escaped by the client).
+  const hostsJson = JSON.stringify(satellites.filter((x) => x.status === "active").map((x) => ({ id: x.id, name: x.name }))).replace(/<\//g, "<\\/");
+  const satelliteHostsScript = `<script id="satellite-hosts" type="application/json">${hostsJson}<\/script>`;
+
+  return { viewsHtml, addonRegistryScript, collectionsScript: collectionsScript + satelliteHostsScript };
 }
