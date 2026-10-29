@@ -729,6 +729,13 @@ test("I1: the shared tool cache is sanitized with the WRITER's values: A's token
     assert.deepEqual(mode.examples, ["[redacted]"]);
     assert.equal(mode.title, "t [redacted]");
     assert.equal(leaky.description, "log in with [redacted]");
+    // Fix round 2: default-deny, every string at any depth and every key.
+    const props = leaky.inputSchema.properties;
+    assert.equal(props.odd.pattern, "^[redacted]$");
+    assert.equal(props.odd.format, "f-[redacted]");
+    assert.equal(props.odd["x-crow-hint"], "h [redacted]");
+    assert.ok(!Object.keys(props).some((k) => k.includes("test-token")) && Object.hasOwn(props, "k_[redacted]"), "an object key is redacted");
+    assert.equal(props.list.items[0].properties.deep["x-note"][0].v, "[redacted]", "nested in an array of objects");
   } finally {
     writeAddons();
     await C.stopAllChildren();
@@ -779,18 +786,17 @@ test("I2b: a child past its max lifetime is retired at its next idle moment and 
     if (prev === undefined) delete process.env.CROW_SERVICE_CHILD_MAX_LIFETIME_MS; else process.env.CROW_SERVICE_CHILD_MAX_LIFETIME_MS = prev;
 
     // Busy past the lifetime: kept until its call settles, then stopped; the next call respawns.
+    // Expired and idle, no call: stopped at its first idle moment; the next call respawns it.
     const g = await github();
     const first = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
-    const slow = first.client.callTool({ name: "sleep", arguments: { ms: 300 } });
+    await first.client.callTool({ name: "whoami", arguments: {} });
     offset = 61 * 60_000;
     let before = spawnCount();
     const again = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
-    assert.equal(again.client, first.client, "an in-flight child is not cut off");
-    assert.equal(spawnCount(), before);
-    await slow;
-    assert.equal(C.childState(g.uuid), "stopped", "stopped at its first idle moment");
-    await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    assert.notEqual(again.client, first.client, "never the expired child");
     assert.equal(spawnCount(), before + 1, "respawned on the next call");
+    await C.stopAllChildren();
+    offset = 0;
 
     // Idle past the lifetime with a link planted meanwhile: the respawn re-runs the walk.
     offset = 0;
@@ -878,4 +884,82 @@ test("m12: listedTools answers only for a servable connection", async () => {
     await withDb((d) => SC.disconnectConnection(d, g.uuid));
     assert.equal(await withDb((d) => C.listedTools(d, g.uuid, { crowHome: HOME })), null);
   } finally { await C.stopAllChildren(); }
+});
+
+// ---- fix round 2 (security review): the lifetime is a hard ceiling --------------------------
+
+test("fix round 2 (a): an expired child is never handed out, even busy: a fresh one starts (single-flight), or busy at the cap", async () => {
+  let offset = 0;
+  C._setChildrenForTest({ clock: () => Date.now() + offset });
+  try {
+    const g = await github();
+    const first = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    const slow = first.client.callTool({ name: "sleep", arguments: { ms: 400 } });
+    offset = 60 * 60_000 + 30_000;   // past the lifetime, inside the grace
+    const before = spawnCount();
+    const [x, y] = await withDb((d) => Promise.all([C.ensureChild(d, g.uuid, { crowHome: HOME }), C.ensureChild(d, g.uuid, { crowHome: HOME })]));
+    assert.notEqual(x.client, first.client, "the expired child is not reused");
+    assert.equal(x.client, y.client, "one fresh start for both callers");
+    assert.equal(spawnCount(), before + 1);
+    assert.equal(JSON.parse((await slow).content[0].text), "slept", "the old call finishes on the retired child");
+    await C.stopAllChildren();
+
+    // At the cap, with the only slot held by a busy expired child: busy, never the expired one.
+    offset = 0;
+    process.env.CROW_SERVICE_CHILD_MAX = "1";
+    const h = await github();
+    const c1 = await withDb((d) => C.ensureChild(d, h.uuid, { crowHome: HOME }));
+    const busyCall = c1.client.callTool({ name: "sleep", arguments: { ms: 400 } });
+    offset = 60 * 60_000 + 30_000;
+    const n = spawnCount();
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, h.uuid, { crowHome: HOME }))), "busy");
+    assert.equal(spawnCount(), n);
+    await busyCall;
+  } finally {
+    delete process.env.CROW_SERVICE_CHILD_MAX;
+    C._setChildrenForTest({ clock: null });
+    await C.stopAllChildren();
+  }
+});
+
+test("fix round 2 (b): a long in-flight call is cut at lifetime + grace and rejects with child_unavailable", async () => {
+  let offset = 0;
+  C._setChildrenForTest({ clock: () => Date.now() + offset });
+  try {
+    const prev = process.env.CROW_SERVICE_CHILD_GRACE_MS;
+    assert.equal(C.childLimits().graceMs, 60_000);
+    for (const [v, want] of [["5000", 5000], ["999", 60_000], ["600001", 60_000]]) {
+      process.env.CROW_SERVICE_CHILD_GRACE_MS = v;
+      assert.equal(C.childLimits().graceMs, want, v);
+    }
+    if (prev === undefined) delete process.env.CROW_SERVICE_CHILD_GRACE_MS; else process.env.CROW_SERVICE_CHILD_GRACE_MS = prev;
+
+    // A busy child that stays current (nobody asked for it after its lifetime).
+    const g = await github();
+    const { client } = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    const long = client.callTool({ name: "sleep", arguments: { ms: 30_000 } });
+    offset = 60 * 60_000 + 30_000;   // past the lifetime, inside the grace
+    const other = await github();
+    await withDb((d) => C.ensureChild(d, other.uuid, { crowHome: HOME }));   // any call checks the deadlines
+    offset = 61 * 60_000 + 1000;     // past lifetime + grace
+    await withDb((d) => C.ensureChild(d, other.uuid, { crowHome: HOME })).catch(() => {});
+    const t0 = Date.now();
+    await assert.rejects(long, (err) => err.code === "child_unavailable");
+    assert.ok(Date.now() - t0 < 5000, "cut at the deadline, not left to finish");
+    assert.equal(C.childState(g.uuid), "stopped");
+
+    // A retired child (replaced while busy) is cut at its own deadline too.
+    offset = 0;
+    const r = await github();
+    const c1 = await withDb((d) => C.ensureChild(d, r.uuid, { crowHome: HOME }));
+    const stuck = c1.client.callTool({ name: "sleep", arguments: { ms: 30_000 } });
+    offset = 60 * 60_000 + 1000;
+    await withDb((d) => C.ensureChild(d, r.uuid, { crowHome: HOME }));        // retires c1, starts a fresh one
+    offset = 61 * 60_000 + 2000;
+    await withDb((d) => C.ensureChild(d, r.uuid, { crowHome: HOME })).catch(() => {});
+    await assert.rejects(stuck, (err) => err.code === "child_unavailable");
+  } finally {
+    C._setChildrenForTest({ clock: null });
+    await C.stopAllChildren();
+  }
 });

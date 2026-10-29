@@ -18,10 +18,14 @@
  *    stopping to make room; none idle → busy. Connect timeout 60 s. The default is 2, not the
  *    plan's 6 (spec §12 budget: three gateways × the cap × one child's RSS ≤ 1.5 GB): a freshly
  *    started npx launcher chain (npm exec + sh + node) measured about 180 MB RSS.
- *  - Lifetime: a child lives at most CROW_SERVICE_CHILD_MAX_LIFETIME_MS (default 1 h, bounded
- *    1 min .. 24 h), however busy. Past it, it is stopped at once if idle or when its last call
- *    settles, and the next call respawns it — which re-runs the folder check and link walk. So a
- *    link planted while a child runs is seen at the next spawn, at most one lifetime later.
+ *  - Lifetime (a hard ceiling): a child is handed out for at most CROW_SERVICE_CHILD_MAX_LIFETIME_MS
+ *    (default 1 h, bounded 1 min .. 24 h). Past it, ensureChild never returns it: idle, it is
+ *    stopped; busy, it is retired (its calls finish on it) and a fresh one starts (single-flight;
+ *    busy at the cap). At lifetime + CROW_SERVICE_CHILD_GRACE_MS (default 60 s, bounded
+ *    1 s .. 10 min) it is stopped whatever is in flight, and those calls reject with
+ *    child_unavailable. Each spawn re-runs the folder check and link walk, so a link planted
+ *    while a child runs is seen at the next spawn, at most one lifetime later; no process lives
+ *    past lifetime + grace.
  *  - Stop: the child's whole process tree (an npx launcher's npm exec → sh → node) is signalled,
  *    not only the direct child, so no grandchild keeps the credentials in its environment.
  *  - Credentials: read from the keychain at each spawn (serviceSecretsFor: active rows only) and
@@ -111,21 +115,35 @@ const maxLifetimeMs = () => {
   return n <= LIFETIME_MAX_MS ? n : DEFAULT_MAX_LIFETIME_MS;
 };
 
+export const DEFAULT_GRACE_MS = 60_000;
+const GRACE_MIN_MS = 1000;
+const GRACE_MAX_MS = 10 * 60_000;
+/** CROW_SERVICE_CHILD_GRACE_MS: an integer 1000..600000 overrides the default 60 s. */
+const graceMs = () => {
+  const n = intEnv("CROW_SERVICE_CHILD_GRACE_MS", DEFAULT_GRACE_MS, GRACE_MIN_MS);
+  return n <= GRACE_MAX_MS ? n : DEFAULT_GRACE_MS;
+};
+
 /** The limits in force now (read from the env on every call). */
 export function childLimits() {
-  return { maxChildren: maxChildren(), idleMs: idleMs(), maxLifetimeMs: maxLifetimeMs() };
+  return { maxChildren: maxChildren(), idleMs: idleMs(), maxLifetimeMs: maxLifetimeMs(), graceMs: graceMs() };
 }
 
 /** uuid → record. A record outlives its process (cooldown, stderr, injected values). */
 const records = new Map();
+/** Children past their lifetime that still had calls in flight when a fresh one replaced them:
+ * closed when their last call settles, or at their grace deadline whatever is in flight. */
+const retiring = new Set();
+/** One process's calls: in flight count and their aborts (a retired child keeps its own). */
+const newHolder = () => ({ inFlight: 0, calls: new Set(), retired: null });
 
 function recordFor(uuid) {
   let r = records.get(uuid);
   if (!r) {
     r = {
       uuid, serviceId: null, bundleId: null, state: "stopped", client: null, transport: null, tools: [],
-      pid: null, startPromise: null, lastUsedAt: 0, inFlight: 0, idleTimer: null, generation: 0,
-      stderr: [], secrets: [], failures: [], coolingUntil: 0, pendingRecord: false, calls: new Set(), startedAt: 0, lifeTimer: null, tree: [],
+      pid: null, startPromise: null, lastUsedAt: 0, h: newHolder(), idleTimer: null, generation: 0,
+      stderr: [], secrets: [], failures: [], coolingUntil: 0, pendingRecord: false, startedAt: 0, lifeTimer: null, tree: [],
     };
     records.set(uuid, r);
   }
@@ -135,6 +153,7 @@ function recordFor(uuid) {
 const cooling = (r) => r.coolingUntil > now();
 const isLive = (r) => r.state === "running" || r.startPromise != null;
 const expired = (r) => r.state === "running" && now() - r.startedAt >= maxLifetimeMs();
+const pastGrace = (startedAt) => now() >= startedAt + maxLifetimeMs() + graceMs();
 
 // ---------------------------------------------------------------------------------------------
 // Environment (M14)
@@ -316,43 +335,93 @@ function scheduleIdle(r) {
   r.idleTimer = setTimeout(() => {
     r.idleTimer = null;
     if (r.state !== "running") return;
-    if (r.inFlight > 0) return scheduleIdle(r);
+    if (r.h.inFlight > 0) return scheduleIdle(r);
     stopChild(r.uuid).catch(() => {});
   }, idleMs());
   r.idleTimer.unref?.();
 }
 
-/** At the cap, stop the least recently used idle child; none idle → busy. Synchronous. */
+/** At the cap (retiring children count: they are still running), stop the least recently used
+ * idle child; none idle → busy. Synchronous. */
 function makeRoom() {
   const live = [...records.values()].filter(isLive);
-  if (live.length < maxChildren()) return;
-  const idle = live.filter((r) => r.state === "running" && r.inFlight === 0).sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+  if (live.length + retiring.size < maxChildren()) return;
+  const idle = live.filter((r) => r.state === "running" && r.h.inFlight === 0).sort((a, b) => a.lastUsedAt - b.lastUsedAt);
   if (!idle.length) throw new ChildError("busy");
   stopChild(idle[0].uuid).catch(() => {});
 }
 
 /** Each call is counted (idle, cap) and gets its own abort, fired when the child goes away: the
  * SDK rejects an open request on close but leaves its timeout timer running; an abort clears it. */
-function wrapClient(r, client) {
+function wrapClient(r, client, h) {
   const callTool = client.callTool.bind(client);
   client.callTool = async (params, resultSchema, options = {}) => {
     const ac = new AbortController();
-    r.calls.add(ac);
+    h.calls.add(ac);
     const signal = options?.signal ? AbortSignal.any([options.signal, ac.signal]) : ac.signal;
-    r.inFlight++;
+    h.inFlight++;
     r.lastUsedAt = now();
     try {
       return await callTool(params, resultSchema, { ...options, signal });
+    } catch (err) {
+      // Cut by Crow (stop, exit, the grace deadline): a fixed class, never the SDK's text.
+      if (ac.signal.aborted) throw new ChildError("child_unavailable");
+      throw err;
     } finally {
-      r.calls.delete(ac);
-      r.inFlight--;
-      touch(r);
-      if (r.state === "running") r.tree = processTree(r.pid);
-      // Past its lifetime: stopped at its first idle moment; the next call respawns it.
-      if (expired(r) && r.inFlight === 0) stopChild(r.uuid).catch(() => {});
+      h.calls.delete(ac);
+      h.inFlight--;
+      if (h.retired) {
+        if (h.inFlight === 0) closeRetired(h.retired);
+      } else if (r.h === h) {
+        touch(r);
+        if (r.state === "running") r.tree = processTree(r.pid);
+        // Past its lifetime: stopped at its first idle moment; the next call respawns it.
+        if (expired(r) && h.inFlight === 0) stopChild(r.uuid).catch(() => {});
+      }
     }
   };
   return client;
+}
+
+/**
+ * Moves the running child out of its record (it keeps its in-flight calls) so a fresh one can
+ * start under the same uuid. Synchronous. It is closed when its last call settles, or at its
+ * grace deadline with whatever is still in flight cut (child_unavailable).
+ */
+function retire(r) {
+  const d = { uuid: r.uuid, h: r.h, transport: r.transport, pid: r.pid, tree: r.tree, startedAt: r.startedAt, timer: null };
+  r.h.retired = d;
+  retiring.add(d);
+  const wait = Math.max(0, r.startedAt + maxLifetimeMs() + graceMs() - now());
+  d.timer = setTimeout(() => closeRetired(d), wait);
+  d.timer.unref?.();
+  r.generation++;
+  if (r.idleTimer) { clearTimeout(r.idleTimer); r.idleTimer = null; }
+  if (r.lifeTimer) { clearTimeout(r.lifeTimer); r.lifeTimer = null; }
+  r.state = "stopped";
+  r.transport = null;
+  r.client = null;
+  r.pid = null;
+  r.tree = [];
+  r.h = newHolder();
+}
+
+function closeRetired(d) {
+  if (!retiring.has(d)) return;
+  retiring.delete(d);
+  if (d.timer) clearTimeout(d.timer);
+  abortCalls(d.h);
+  const tree = d.pid ? [...processTree(d.pid), ...(d.tree || [])] : d.tree || [];
+  console.warn("[services] child exited (retired)");
+  Promise.resolve().then(() => d.transport?.close()).catch(() => {}).then(() => reapTree(tree));
+}
+
+/** The hard ceiling: anything past lifetime + grace is stopped, calls in flight or not. */
+function enforceDeadlines() {
+  for (const d of [...retiring]) if (pastGrace(d.startedAt)) closeRetired(d);
+  for (const r of records.values()) {
+    if (r.state === "running" && pastGrace(r.startedAt)) stopChild(r.uuid).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -409,18 +478,21 @@ function reapTree(tree) {
   t.unref?.();
 }
 
-function abortCalls(r) {
-  for (const ac of r.calls) { try { ac.abort(new Error("child stopped")); } catch { /* settled */ } }
-  r.calls.clear();
+function abortCalls(h) {
+  for (const ac of h.calls) { try { ac.abort(new Error("child stopped")); } catch { /* settled */ } }
+  h.calls.clear();
 }
 
 function onExit(r, transport) {
-  if (r.transport !== transport) return;
+  if (r.transport !== transport) {
+    for (const d of retiring) if (d.transport === transport) closeRetired(d);
+    return;
+  }
   console.warn(`[services] child exited (${r.stderr.length} stderr lines)`);
   r.transport = null;
   r.client = null;
   r.pid = null;
-  abortCalls(r);
+  abortCalls(r.h);
   reapTree(r.tree);
   r.tree = [];
   if (r.lifeTimer) { clearTimeout(r.lifeTimer); r.lifeTimer = null; }
@@ -525,17 +597,23 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
     throw new ChildError("child_unavailable");
   }
   r.transport = transport;
-  r.client = wrapClient(r, client);
+  r.h = newHolder();
+  r.client = wrapClient(r, client, r.h);
   r.pid = transport.pid;
   r.tools = tools;
   r.state = "running";
   r.startedAt = now();
   r.tree = processTree(r.pid);
   if (r.lifeTimer) clearTimeout(r.lifeTimer);
-  r.lifeTimer = setTimeout(() => {
+  // At the lifetime: stopped if idle; at lifetime + grace: stopped whatever is in flight.
+  const atLife = () => {
     r.lifeTimer = null;
-    if (r.generation === generation && r.inFlight === 0) stopChild(r.uuid).catch(() => {});
-  }, maxLifetimeMs());
+    if (r.generation !== generation || r.state !== "running") return;
+    if (r.h.inFlight === 0 || pastGrace(r.startedAt)) return void stopChild(r.uuid).catch(() => {});
+    r.lifeTimer = setTimeout(atLife, Math.max(1, r.startedAt + maxLifetimeMs() + graceMs() - now()));
+    r.lifeTimer.unref?.();
+  };
+  r.lifeTimer = setTimeout(atLife, maxLifetimeMs());
   r.lifeTimer.unref?.();
   // client.onclose, not transport.onclose: the transport's handler belongs to the SDK, which
   // rejects every open request on close (so a pending callTool settles when the child exits).
@@ -560,6 +638,7 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
  * @returns {Promise<{client: import("@modelcontextprotocol/sdk/client/index.js").Client, tools: object[]}>}
  */
 export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(), repair = false } = {}) {
+  enforceDeadlines();
   const existing = records.get(uuid);
   if (existing && cooling(existing)) {
     existing.lastUsedAt = now();
@@ -583,9 +662,11 @@ export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(),
   r.serviceId = service.id;
   r.bundleId = service.bundleId;
   r.lastUsedAt = now();
-  if (r.state === "running" && r.client && expired(r) && r.inFlight === 0) {
-    // Past its lifetime and idle: retire it now (synchronously) and start a fresh one below.
-    stopChild(uuid).catch(() => {});
+  if (r.state === "running" && r.client && expired(r)) {
+    // Never hand out an expired child: idle, it stops now; busy, it is retired (its calls finish
+    // on it, up to its grace deadline) and a fresh one starts below, or busy at the cap.
+    if (r.h.inFlight === 0) stopChild(uuid).catch(() => {});
+    else retire(r);
   }
   if (r.state === "running" && r.client) {
     touch(r);
@@ -615,7 +696,7 @@ export async function stopChild(uuid, { forget = false } = {}) {
   r.client = null;
   r.pid = null;
   r.tree = [];
-  abortCalls(r);
+  abortCalls(r.h);
   if (transport) {
     console.warn(`[services] child exited (${r.stderr.length} stderr lines)`);
     try { await transport.close(); } catch { /* gone */ }
@@ -636,6 +717,7 @@ export async function stopChildrenForBundle(bundleId) {
 
 /** Gateway shutdown and tests: stops every child and forgets every record. */
 export async function stopAllChildren() {
+  for (const d of [...retiring]) closeRetired(d);
   await Promise.all([...records.keys()].map((u) => stopChild(u, { forget: true })));
 }
 
@@ -652,7 +734,7 @@ export function childState(uuid) {
 export function listChildren() {
   return [...records.values()].map((r) => ({
     uuid: r.uuid, serviceId: r.serviceId, state: childState(r.uuid), pid: r.pid,
-    lastUsedAt: r.lastUsedAt || null, inFlight: r.inFlight, stderrLines: r.stderr.length,
+    lastUsedAt: r.lastUsedAt || null, inFlight: r.h.inFlight, stderrLines: r.stderr.length,
   }));
 }
 

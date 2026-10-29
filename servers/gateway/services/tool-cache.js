@@ -10,9 +10,9 @@
  * The cache is per SERVICE, so one connection's tools are what every other project's connection
  * of that service lists: a value injected into the writing child must never reach it.
  * sanitizeToolsForCache (run by children.js at write time with the writer's injected values)
- * drops a tool whose name holds one, and redacts + caps the description and every human-readable
- * schema string (description, title, const, default, enum / examples strings), the same walk as
- * the loopback mount's sanitizeSchema (loopback-tool-mount.js, not exported there).
+ * drops a tool whose name holds one, redacts + caps the description and EVERY string and object
+ * key in its input schema (default-deny), and drops a tool whose serialized form still holds a
+ * writer value.
  * Nothing here logs a tool's text.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -29,31 +29,41 @@ const SCHEMA_MAX_DEPTH = 64;
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const clip = (v, secrets) => redactSecrets(v, secrets).slice(0, DESC_MAX);
 
-/** The mount's sanitizeSchema, mirrored: keys and structure kept, readable strings redacted and capped. */
+/**
+ * Default-deny: EVERY string value at any depth is redacted and capped, and so is every object
+ * key (a key that changes under redaction is replaced by the redacted one); numbers, booleans and
+ * null are kept; past SCHEMA_MAX_DEPTH the subtree is dropped. Stricter than the mount's own
+ * sanitizeSchema (which touches only the readable keywords), since this copy is shared across
+ * connections.
+ */
 export function sanitizeSchema(node, secrets, depth = 0) {
   if (depth > SCHEMA_MAX_DEPTH) return {};
+  if (typeof node === "string") return clip(node, secrets);
   if (Array.isArray(node)) return node.map((v) => sanitizeSchema(v, secrets, depth + 1));
-  if (!isPlainObject(node)) return node;
+  if (!isPlainObject(node)) return typeof node === "number" || typeof node === "boolean" || node === null ? node : null;
   const out = {};
-  for (const [k, v] of Object.entries(node)) {
-    if ((k === "description" || k === "title" || k === "const" || k === "default") && typeof v === "string") out[k] = clip(v, secrets);
-    else if ((k === "enum" || k === "examples") && Array.isArray(v)) out[k] = v.map((x) => (typeof x === "string" ? clip(x, secrets) : sanitizeSchema(x, secrets, depth + 1)));
-    else out[k] = sanitizeSchema(v, secrets, depth + 1);
-  }
+  for (const [k, v] of Object.entries(node)) out[clip(k, secrets)] = sanitizeSchema(v, secrets, depth + 1);
   return out;
 }
 
-/** Tools as they may be cached: a tool whose name holds a secret is dropped; the rest sanitized. */
+/**
+ * Tools as they may be cached: a tool whose name holds a secret is dropped; the rest sanitized;
+ * then a final check on the whole serialized tool, and a tool that still holds any writer value
+ * (one assembled across strings, a cap that cut a marker) is dropped.
+ */
 export function sanitizeToolsForCache(tools, secrets = []) {
   const out = [];
   for (const t of Array.isArray(tools) ? tools : []) {
     if (!isPlainObject(t) || typeof t.name !== "string" || !t.name) continue;
     if (redactSecrets(t.name, secrets) !== t.name) continue;
-    out.push({
+    const clean = {
       name: t.name,
       ...(typeof t.description === "string" ? { description: clip(t.description, secrets) } : {}),
       inputSchema: sanitizeSchema(isPlainObject(t.inputSchema) ? t.inputSchema : { type: "object" }, secrets),
-    });
+    };
+    const text = JSON.stringify(clean);
+    if (redactSecrets(text, secrets) !== text) continue;
+    out.push(clean);
   }
   return out;
 }
