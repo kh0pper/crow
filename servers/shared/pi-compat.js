@@ -69,6 +69,15 @@ export const PI_BUILTIN_PROVIDER_IDS = Object.freeze([
   "zai-coding-cn",
 ]);
 
+/**
+ * The namespace of the pi providers that reach a consented cloud row through
+ * the gateway's cloud door (roles phase 2, Task 17): `crow-c-<rowId>`. No pi
+ * built-in id starts with it (tests/pi-models-sync.test.js checks), so
+ * a door entry never merges with a built-in provider and its auth.
+ */
+export const DOOR_ID_PREFIX = "crow-c-";
+export const doorEntryId = (rowId) => DOOR_ID_PREFIX + rowId;
+
 // A line-for-line transliteration of pi 0.85.1's detectCompat, keeping only
 // the keys whose value can vary (the rest are constants pi sets for every
 // model: supportsUsageInStreaming, supportsFinishReason, requiresToolResultName,

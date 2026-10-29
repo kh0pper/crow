@@ -29,6 +29,20 @@ import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "../gateway/mod
 export const CLOUD_CONSENT_KEY = "llm_cloud_door_rows";
 export const CLOUD_CONSENT_SALT_KEY = "llm_cloud_consent_salt";
 
+const _consentListeners = new Set();
+/** Fire-and-forget listeners called after every grant or revoke in this
+ * process (the pi models.json sync). Returns the unsubscribe. */
+export function onCloudConsentChange(fn) {
+  if (typeof fn !== "function") return () => {};
+  _consentListeners.add(fn);
+  return () => { _consentListeners.delete(fn); };
+}
+function consentChanged(rowId) {
+  for (const fn of _consentListeners) {
+    try { fn({ id: rowId }); } catch (err) { console.warn(`[cloud-consent] change listener failed: ${err.message}`); }
+  }
+}
+
 // One consent write at a time in this process (read, change, write back).
 let chain = Promise.resolve();
 function locked(fn) {
@@ -165,6 +179,7 @@ export async function grantCloudConsent(db, rowId, { actor, expect } = {}) {
     const all = parseMap(await readValue(db, CLOUD_CONSENT_KEY));
     all[rowId] = entryFor(row, salt, actor);
     await writeValue(db, CLOUD_CONSENT_KEY, JSON.stringify(all));
+    consentChanged(rowId);
     return { ok: true };
   });
 }
@@ -178,6 +193,7 @@ export async function revokeCloudConsent(db, rowId) {
     if (Object.hasOwn(all, rowId)) {
       delete all[rowId];
       await writeValue(db, CLOUD_CONSENT_KEY, JSON.stringify(all));
+      consentChanged(rowId);
     }
     return { ok: true };
   });

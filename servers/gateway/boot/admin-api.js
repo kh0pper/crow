@@ -221,6 +221,10 @@ export async function mountAdminApi(app, deps) {
       const { setProviderChangeHook } = await import("../../shared/providers-db.js");
       const { doorBaseUrl, gatewayPort } = await import("../models/door.js");
       const { getOwnTailnetIp } = await import("../../shared/tailnet-ip.js");
+      // Task 17: consented cloud rows reach pi as crow-c-* entries through the
+      // loopback cloud door; consent and salt are re-read on every run.
+      const { readCloudConsent, readCloudConsentSalt, onCloudConsentChange } = await import("../../shared/cloud-consent.js");
+      const { llmCloudTokenPath } = await import("../local-token.js");
       const target = piModelsSyncPath();
       if (target) {
         let timer = null;
@@ -229,7 +233,9 @@ export async function mountAdminApi(app, deps) {
         const run = async () => {
           const db = createDbClient();
           try {
-            const r = await syncPiModelsJson(db, { path: target, doorBase: doorBaseUrl({ tailnetIp: getOwnTailnetIp(), port: gatewayPort() }) });
+            const [consent, consentSalt] = await Promise.all([readCloudConsent(db), readCloudConsentSalt(db)]);
+            const door = { cloudDoorPort: gatewayPort(), consent, consentSalt, tokenPath: llmCloudTokenPath() };
+            const r = await syncPiModelsJson(db, { path: target, doorBase: doorBaseUrl({ tailnetIp: getOwnTailnetIp(), port: gatewayPort() }), ...door });
             if (r.added?.length || r.updated?.length || r.removed?.length) console.log(`[pi-models-sync] ${target}: +${r.added.length} ~${r.updated.length} -${r.removed.length}`);
           } catch (err) {
             console.warn(`[pi-models-sync] ${err.message}`);
@@ -237,7 +243,9 @@ export async function mountAdminApi(app, deps) {
             try { db.close(); } catch { /* already closed */ }
           }
         };
-        setProviderChangeHook(() => { clearTimeout(timer); timer = setTimeout(run, 2000); timer.unref?.(); });
+        const soon = () => { clearTimeout(timer); timer = setTimeout(run, 2000); timer.unref?.(); };
+        setProviderChangeHook(soon);
+        onCloudConsentChange(soon); // "Let bots use this provider" reaches pi in seconds, not the hourly tick
         setInterval(run, reconcileIntervalMs()).unref(); // replicated changes reach pi within the hour
         await run();
       } else {

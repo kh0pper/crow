@@ -12,17 +12,27 @@
  * bundle, door opt-in) and only allow-listed cloud rows
  * (CROW_PI_MODELS_SYNC_CLOUD). Embedding and rerank models are not chat
  * models for pi and are dropped.
+ *
+ * Roles phase 2, Task 17: a cloud row this box consented to (cloud-consent.js)
+ * gets a door entry `crow-c-<rowId>` instead: base URL the gateway's
+ * loopback cloud door, key `!cat '<token file>'` (pi runs it under /bin/sh on
+ * every auth resolve), so the provider key never lands in this file. Each
+ * model carries the `compat` pi would have derived for the UPSTREAM URL
+ * (pi-compat.js), because pi only sees the door's.
  */
 import { readFileSync, writeFileSync, renameSync, chmodSync, mkdirSync, existsSync, lstatSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { doorKindOf, isLocalClassTarget } from "../gateway/models/door-resolve.js";
-import { providerDoorUrl } from "../gateway/models/door.js";
+import { providerDoorUrl, cloudDoorUrl } from "../gateway/models/door.js";
+import { consentVerdict, isCloudRow } from "./cloud-consent.js";
+import { piCompatFor, DOOR_ID_PREFIX, doorEntryId } from "./pi-compat.js";
 import { EMBED_TASKS, RERANK_TASKS } from "./provider-task.js";
 import { listProvidersAll } from "./providers-db.js";
 import { resolvePiCli } from "../../scripts/pi-bots/pi_resolver.mjs";
 
 export const CROW_MANAGED_KEY = "$crowManaged";
+export { DOOR_ID_PREFIX, doorEntryId };
 const OPENAI_TYPES = new Set([null, undefined, "", "openai-compat", "openai"]);
 const NON_CHAT = new Set([...EMBED_TASKS, ...RERANK_TASKS]);
 
@@ -124,17 +134,62 @@ export function validatePiModelsJson(json) {
   return errs;
 }
 
-export function buildManagedEntries(rows, { doorBase, cloudAllow = [] } = {}) {
+/** A path as one /bin/sh single-quoted word: each ' becomes '\\'' (close, escaped quote, reopen). */
+export function shellQuote(path) { return "'" + String(path).replace(/'/g, "'\\''") + "'"; }
+
+const isHttps = (url) => { try { return new URL(url).protocol === "https:"; } catch { return false; } };
+
+/** The door entry for a consented cloud row, or null when the row does not qualify. */
+function doorEntry(r, models, { cloudDoorPort, consent, consentSalt, tokenPath }) {
+  const type = r.provider_type;
+  const anthropic = type === "anthropic";
+  if (!anthropic && !OPENAI_TYPES.has(type)) return null;
+  // The door forwards over https only and never to a local, door or forbidden address.
+  if (!isCloudRow(r) || !isHttps(r.baseUrl)) return null;
+  const entry = consent && typeof consent === "object" && Object.hasOwn(consent, r.id) ? consent[r.id] : null;
+  if (consentVerdict(r, entry, { salt: consentSalt }) !== "ok") return null;
+  // compat is an openai-completions schema; pi's own rules apply to that api only.
+  const withCompat = anthropic ? models : models.map((m) => {
+    const compat = piCompatFor(r.baseUrl, m.id);
+    return compat ? { ...m, compat } : m;
+  });
+  return {
+    baseUrl: cloudDoorUrl(cloudDoorPort, r.id, type),
+    apiKey: "!cat " + shellQuote(tokenPath),
+    api: anthropic ? "anthropic-messages" : "openai-completions",
+    models: withCompat,
+  };
+}
+
+export function buildManagedEntries(rows, {
+  doorBase, cloudAllow = [], cloudDoorPort = null, consent = null, consentSalt = null, tokenPath = null,
+  log = (m) => console.log(m),
+} = {}) {
   const allow = new Set(cloudAllow);
+  const door = cloudDoorPort != null && typeof tokenPath === "string" && tokenPath !== "";
   const out = {};
   for (const r of rows) {
     if (r.disabled || r.gpuPolicy?.local_only === true) continue;
+    // The crow-c- namespace belongs to the door entries (minor c).
+    if (typeof r.id === "string" && r.id.startsWith(DOOR_ID_PREFIX)) {
+      log(`[pi-models-sync] provider "${r.id}" skipped: ids starting with "${DOOR_ID_PREFIX}" are reserved for the cloud door`);
+      continue;
+    }
+    const cloud = !isLocalClassTarget(r.baseUrl) && !allow.has(r.id);
+    if (cloud) {
+      if (!door || !r.baseUrl) continue;
+      const models = chatModels(r.models);
+      if (!models.length) continue;
+      const e = doorEntry(r, models, { cloudDoorPort, consent, consentSalt, tokenPath });
+      if (e) out[doorEntryId(r.id)] = e;
+      continue;
+    }
     if (!OPENAI_TYPES.has(r.provider_type)) continue;
     const kind = doorKindOf({ baseUrl: r.baseUrl, bundleId: r.bundleId, gpuPolicy: r.gpuPolicy, models: r.models });
     if (kind === "unmanaged" && !allow.has(r.id)) continue;
     // Final review minor 2: a managed marker (door_forward, bundleId) on a
-    // public-address row does not bypass the cloud allowlist (the consent gate).
-    if (!isLocalClassTarget(r.baseUrl) && !allow.has(r.id)) continue;
+    // public-address row does not bypass the cloud allowlist (the consent
+    // gate): `cloud` above already sent every such row to the door path.
     const models = chatModels(r.models);
     if (!models.length || !r.baseUrl) continue;
     const native = kind === "native-owned" || kind === "native-foreign";
@@ -185,12 +240,13 @@ export async function syncPiModelsJson(db, {
   path = piModelsSyncPath(),
   doorBase = null,
   cloudAllow = String(process.env.CROW_PI_MODELS_SYNC_CLOUD || "").split(",").map((s) => s.trim()).filter(Boolean),
+  cloudDoorPort = null, consent = null, consentSalt = null, tokenPath = null,
   listProvidersAllFn = listProvidersAll,
   readFileFn = (p) => readFileSync(p, "utf8"),
   writeFileAtomicFn = defaultWriteAtomic,
 } = {}) {
   if (!path) return { disabled: true };
-  const entries = buildManagedEntries(await listProvidersAllFn(db), { doorBase, cloudAllow });
+  const entries = buildManagedEntries(await listProvidersAllFn(db), { doorBase, cloudAllow, cloudDoorPort, consent, consentSalt, tokenPath });
   for (let attempt = 0; attempt < 3; attempt++) {
     const raw = readOrNull(readFileFn, path);
     let current = { providers: {} };

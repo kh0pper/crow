@@ -185,3 +185,158 @@ test("minor 3: the M1 boot hook closes its DB client on every run", async () => 
   assert.ok(at > 0, "the run passes a named client");
   assert.match(src.slice(at, at + 600), /finally \{\s*try \{ db\.close\(\); \}/);
 });
+
+// --- Roles phase 2, Task 17: consented cloud rows reach pi through the door ---
+// as crow-c-<rowId> entries whose key is a `!cat` of the per-boot door token
+// file. Fixture keys never look like real ones.
+import { createHmac } from "node:crypto";
+import { DOOR_ID_PREFIX, doorEntryId } from "../servers/shared/pi-models-sync.js";
+import { PI_BUILTIN_PROVIDER_IDS, piCompatFor } from "../servers/shared/pi-compat.js";
+import { normalizeBaseUrl } from "../servers/shared/provider-presets.js";
+
+const SALT = "ab".repeat(32);
+const TOKEN = "/tmp/x/llm-cloud-token";
+const consentFor = (row, salt = SALT) => ({
+  target: normalizeBaseUrl(row.baseUrl),
+  keyFp: createHmac("sha256", Buffer.from(salt, "hex")).update(String(row.apiKey).trim()).digest("hex").slice(0, 16),
+  at: "2026-10-29T00:00:00.000Z", by: "test",
+});
+const cloudRow = (id, over = {}) => ({ id, baseUrl: "https://api.example.com/v1", apiKey: "fixture-secret-123", bundleId: null, disabled: false,
+  provider_type: "openai-compat", models: [{ id: "c1" }], gpuPolicy: null, ...over });
+const consentMap = (list) => Object.fromEntries(list.map((r) => [r.id, consentFor(r)]));
+const doorOpts = (consentRows, over = {}) => ({ doorBase: DOOR, cloudAllow: [], cloudDoorPort: 3001, consent: consentMap(consentRows), consentSalt: SALT, tokenPath: TOKEN, ...over });
+
+test("T17: door entry carries the file reference, never the key", () => {
+  const a = cloudRow("cloud-a");
+  const b = cloudRow("cloud-b", { apiKey: "fixture-b" });
+  const e = buildManagedEntries([a, b], doorOpts([a], { cloudAllow: ["cloud-b"] }));
+  assert.equal(DOOR_ID_PREFIX, "crow-c-");
+  assert.equal(doorEntryId("cloud-a"), "crow-c-cloud-a");
+  assert.deepEqual(Object.keys(e).sort(), ["cloud-b", "crow-c-cloud-a"]);
+  assert.equal(e["crow-c-cloud-a"].baseUrl, "http://127.0.0.1:3001/llm/c/cloud-a/v1");
+  assert.equal(e["crow-c-cloud-a"].apiKey, "!cat '/tmp/x/llm-cloud-token'");
+  assert.equal(e["crow-c-cloud-a"].api, "openai-completions");
+  assert.deepEqual(e["crow-c-cloud-a"].models, [{ id: "c1" }]);
+  const all = JSON.stringify(e);
+  assert.equal(all.includes("fixture-secret-123"), false, "the consented row's key is nowhere");
+  assert.equal(JSON.stringify(e["cloud-b"]).includes("fixture-b"), true, "the allow-listed row keeps its direct entry (developer opt-in)");
+  assert.equal(JSON.stringify(e["crow-c-cloud-a"]).includes("fixture-b"), false);
+  assert.equal(e["cloud-a"], undefined, "no direct entry under the row's own id");
+});
+
+test("T17: no emitted id is a pi built-in", () => {
+  const list = ["openai", "anthropic", "groq"].map((id) => cloudRow(id, id === "anthropic" ? { provider_type: "anthropic", baseUrl: "https://api.anthropic.com" } : {}));
+  const e = buildManagedEntries(list, doorOpts(list));
+  assert.deepEqual(Object.keys(e).sort(), ["crow-c-anthropic", "crow-c-groq", "crow-c-openai"]);
+  for (const k of Object.keys(e)) assert.equal(PI_BUILTIN_PROVIDER_IDS.includes(k), false, k);
+  assert.equal(PI_BUILTIN_PROVIDER_IDS.some((id) => id.startsWith(DOOR_ID_PREFIX)), false, "no built-in lives in the door namespace");
+  assert.equal(e["crow-c-anthropic"].api, "anthropic-messages");
+  assert.equal(e["crow-c-anthropic"].baseUrl, "http://127.0.0.1:3001/llm/c/anthropic", "pi's anthropic client appends /v1/messages itself");
+});
+
+test("T17: compat carried from the UPSTREAM url", () => {
+  const z = cloudRow("cloud-z", { baseUrl: "https://api.z.ai/api/coding/paas/v4", models: [{ id: "glm-5.1" }] });
+  const e = buildManagedEntries([z], doorOpts([z]));
+  assert.ok(piCompatFor(z.baseUrl, "glm-5.1"), "the fixture has a pi rule");
+  assert.deepEqual(e["crow-c-cloud-z"].models[0].compat, piCompatFor(z.baseUrl, "glm-5.1"));
+  assert.equal(e["crow-c-cloud-a"], undefined);
+});
+
+test("T17: compat per model (OpenRouter's Anthropic cache control on one model only)", () => {
+  const or = cloudRow("cloud-or", { baseUrl: "https://openrouter.ai/api/v1", models: [{ id: "anthropic/claude-sonnet-5.5" }, { id: "openai/gpt-6.1-terra" }] });
+  const e = buildManagedEntries([or], doorOpts([or]));
+  const [claude, gpt] = e["crow-c-cloud-or"].models;
+  assert.equal(claude.compat.cacheControlFormat, "anthropic");
+  assert.equal(gpt.compat?.cacheControlFormat, undefined);
+  assert.deepEqual(gpt.compat, piCompatFor(or.baseUrl, "openai/gpt-6.1-terra"));
+});
+
+test("T17: unconsented or moved rows get no entry", () => {
+  const peer = cloudRow("cloud-peer");
+  const moved = cloudRow("cloud-moved");
+  const rekeyed = cloudRow("cloud-rekeyed");
+  const consent = { "cloud-moved": consentFor({ ...moved, baseUrl: "https://elsewhere.example.com/v1" }), "cloud-rekeyed": consentFor({ ...rekeyed, apiKey: "fixture-old" }) };
+  const e = buildManagedEntries([peer, moved, rekeyed], doorOpts([], { consent }));
+  assert.deepEqual(Object.keys(e), []);
+  const noSalt = buildManagedEntries([peer], doorOpts([peer], { consentSalt: null }));
+  assert.deepEqual(Object.keys(noSalt), [], "no salt to check the key with: no entry");
+});
+
+test("T17: disabled, local_only, plain-http and unsupported-type rows get no door entry", () => {
+  const list = [
+    cloudRow("off", { disabled: true }),
+    cloudRow("lo", { gpuPolicy: { local_only: true } }),
+    cloudRow("plain", { baseUrl: "http://api.example.com/v1" }),
+    cloudRow("gem", { provider_type: "google" }),
+    cloudRow("emb", { models: [{ id: "e", task: "embedding" }] }),
+  ];
+  assert.deepEqual(Object.keys(buildManagedEntries(list, doorOpts(list))), []);
+});
+
+test("T17: cloudDoorPort null gives exactly today's output", () => {
+  const a = cloudRow("cloud-a");
+  const today = buildManagedEntries([...rows, a], { doorBase: DOOR, cloudAllow: ["Qwen Cloud"] });
+  const off = buildManagedEntries([...rows, a], { ...doorOpts([a], { cloudAllow: ["Qwen Cloud"] }), cloudDoorPort: null });
+  assert.deepEqual(off, today);
+});
+
+test("T17: the token path is single-quoted for /bin/sh, an embedded quote escaped as '\\''", () => {
+  const a = cloudRow("cloud-a");
+  const e = buildManagedEntries([a], doorOpts([a], { tokenPath: "/tmp/it's here/llm-cloud-token" }));
+  assert.equal(e["crow-c-cloud-a"].apiKey, "!cat '/tmp/it'\\''s here/llm-cloud-token'");
+  const none = buildManagedEntries([a], doorOpts([a], { tokenPath: null }));
+  assert.deepEqual(Object.keys(none), [], "no token path: no door entry");
+});
+
+test("T17: namespace collision — a row named crow-c-x gets no entry and one log line", () => {
+  const x = cloudRow("crow-c-x");
+  const lx = { ...base, id: "crow-c-local" };
+  const logs = [];
+  const e = buildManagedEntries([x, lx], { ...doorOpts([x]), log: (m) => logs.push(m) });
+  assert.deepEqual(Object.keys(e), []);
+  assert.equal(logs.length, 2, "one line per colliding row");
+  assert.match(logs[0], /crow-c-x/);
+});
+
+test("T17: the merged file validates, and a hand-written crow-c-* entry wins", () => {
+  const a = cloudRow("cloud-a");
+  const hand = { baseUrl: "http://hand/v1", apiKey: "none", models: [{ id: "h" }] };
+  const { json } = mergeManaged({ providers: { "crow-c-cloud-a": hand } }, buildManagedEntries([a], doorOpts([a])));
+  assert.deepEqual(json.providers["crow-c-cloud-a"], hand);
+  assert.deepEqual(json[CROW_MANAGED_KEY], []);
+  const fresh = mergeManaged({ providers: {} }, buildManagedEntries([...rows, a], doorOpts([a]))).json;
+  assert.deepEqual(validatePiModelsJson(fresh), []);
+  assert.ok(fresh.providers["crow-c-cloud-a"]);
+});
+
+test("T17: syncPiModelsJson leaves hand-written entries byte-identical (scratch file only)", async () => {
+  const { mkdtempSync, writeFileSync: wf, readFileSync: rf } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "crow-t17-models-"));
+  const path = join(dir, "models.json");
+  const original = {
+    providers: {
+      "zeta-hand": { models: [{ id: "z", name: "Zed" }], apiKey: "!cat /some/where", baseUrl: "https://zeta.example.com/v1", api: "openai-completions" },
+      "alpha-hand": { baseUrl: "http://100.64.20.5:8003/v1", apiKey: "none", models: [{ id: "a", contextWindow: 8192, compat: { supportsStore: false } }] },
+    },
+    defaultProvider: "zeta-hand",
+  };
+  const text = JSON.stringify(original, null, 2) + "\n";
+  wf(path, text);
+  const a = cloudRow("cloud-a");
+  const r = await syncPiModelsJson({}, { path, ...doorOpts([a]), listProvidersAllFn: async () => [...rows, a] });
+  assert.ok(r.added.includes("crow-c-cloud-a"));
+  const after = rf(path, "utf8");
+  const parsed = JSON.parse(after);
+  assert.deepEqual(Object.keys(parsed.providers).slice(0, 2), ["zeta-hand", "alpha-hand"], "hand-written keys keep their order, first");
+  for (const id of ["zeta-hand", "alpha-hand"]) {
+    const block = JSON.stringify({ [id]: original.providers[id] }, null, 2).split("\n").slice(1, -1).map((l) => "  " + l).join("\n");
+    assert.ok(after.includes(block), `${id} is byte-identical in the written text`);
+  }
+  assert.equal(parsed.defaultProvider, "zeta-hand");
+  const stripped = { ...parsed, providers: Object.fromEntries(Object.entries(parsed.providers).filter(([k]) => !parsed[CROW_MANAGED_KEY].includes(k))) };
+  delete stripped[CROW_MANAGED_KEY];
+  assert.equal(JSON.stringify(stripped, null, 2) + "\n", text, "removing Crow's entries gives back the original bytes");
+  assert.equal(after.includes("fixture-secret-123"), false);
+});

@@ -79,8 +79,14 @@ test("nothing is consented automatically: no seed export, and boot grants nothin
   const admin = await import("../servers/gateway/boot/admin-api.js");
   assert.equal(admin.seedCloudConsentAtBoot, undefined);
   const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/boot/admin-api.js"), "utf8");
-  assert.ok(!/(import\(|from )["'][^"']*cloud-consent/.test(src), "admin-api.js never imports consent");
-  assert.ok(!/grantCloudConsent|seedCloudConsent/.test(src));
+  // Task 17: admin-api reads consent for the pi models.json sync, and only reads.
+  const imports = [...src.matchAll(/\{([^}]*)\}\s*=\s*await import\(["'][^"']*cloud-consent\.js["']\)/g)].map((m) => m[1]);
+  assert.ok(!/from ["'][^"']*cloud-consent/.test(src), "no static import");
+  assert.equal(imports.length, (src.match(/import\(["'][^"']*cloud-consent/g) || []).length, "every import of it names what it takes");
+  for (const names of imports) for (const n of names.split(",").map((x) => x.trim()).filter(Boolean)) {
+    assert.ok(["readCloudConsent", "readCloudConsentSalt", "onCloudConsentChange"].includes(n), `admin-api imports only readers: ${n}`);
+  }
+  assert.ok(!/grantCloudConsent|seedCloudConsent|ensureCloudConsentSalt/.test(src));
   // Rows claiming this box's id (or none) stay unconsented until an explicit act.
   const db = await seeded();
   await ins(db, "cloud-own", "https://api.example.com/v1/own", { key: KEY_A, instanceId: getOrCreateLocalInstanceId() });
@@ -217,6 +223,19 @@ test("grant, re-grant and revoke", async () => {
   assert.equal(await verdictOf(db, "cloud-p"), "not_consented");
   assert.equal((await grantCloudConsent(db, "no-such-row", { actor: "t", expect: { consentToken: "0".repeat(32) } })).reason, "not_found");
   assert.equal((await readCloudConsent(db))["no-such-row"], undefined);
+});
+
+test("T17: grant and revoke tell the change listeners (the pi models.json sync); a refused grant does not", async () => {
+  const db = await seeded();
+  const seen = [];
+  const off = consentMod.onCloudConsentChange((e) => seen.push(e.id));
+  try {
+    await tick(db, "cloud-p");
+    await grantCloudConsent(db, "cloud-p", { actor: "t", expect: {} });
+    await revokeCloudConsent(db, "cloud-p");
+    await revokeCloudConsent(db, "cloud-p");
+  } finally { off(); }
+  assert.deepEqual(seen, ["cloud-p", "cloud-p"], "one for the grant, one for the revoke; none for the refusal or the no-op");
 });
 
 test("parallel grants do not lose each other", async () => {
