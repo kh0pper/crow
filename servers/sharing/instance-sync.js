@@ -150,7 +150,8 @@ export const SYNCED_TABLES = [
 // that heard it; service_connections: a project's connected accounts, whose secrets live in the
 // local-only keychain). The keychain has its own key file, but its rows are still never replicated.
 // Checked at load.
-export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain", "voice_handoffs", "service_connections"]);
+export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain", "voice_handoffs", "service_connections",
+  "satellites", "satellite_revocations", "satellite_tool_pins", "satellite_bot_optins"]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {
     if (synced.includes(t)) throw new Error(`instance-sync: table ${t} is local-only and must never be in SYNCED_TABLES`);
