@@ -101,7 +101,7 @@ import { servingClassRefusal, ServingClassError } from "./models/serving-class.j
 import { isExternalEngine, externalEngineInfo, ExternalEngineError } from "../shared/provider-engine.js";
 import { startExternalEngineMonitor } from "./external-engine-poll.js";
 import { isModelOrchestrationDisabled, OrchestrationDisabledError } from "../shared/model-orchestration.js";
-import { checkComposeModel, dockerVolumeInfo, loadComposeModel, composeEnv, hostGrants, parseDotEnv } from "./compose-guard.js";
+import { checkComposeModel, guardCtx, loadComposeModel, composeEnv, hostGrants, parseDotEnv } from "./compose-guard.js";
 import { resolveCrowHome } from "../shared/crow-home.js";
 import { homedir } from "node:os";
 export { ServingClassError } from "./models/serving-class.js";
@@ -385,7 +385,7 @@ export async function preflightBundleUp(bundleId) {
   const operatorRoots = hostGrants(inv.manifest).pathEnv.map((k) => dot[k]).filter((v) => typeof v === "string" && v.startsWith("/"));
   const verdict = checkComposeModel(loaded.model, {
     bundleDir, manifest: inv.manifest, consentVerified: false,
-    ctx: { crowHome: resolveCrowHome(), dataDir: resolveDataDir(), appRoot: APP_ROOT, home, operatorRoots, volumeInfo: dockerVolumeInfo },
+    ctx: guardCtx({ crowHome: resolveCrowHome(), dataDir: resolveDataDir(), appRoot: APP_ROOT, home, operatorRoots }),
   });
   if (!verdict.valid) throw new ComposeGuardError(bundleId, verdict.reason);
   return inv;

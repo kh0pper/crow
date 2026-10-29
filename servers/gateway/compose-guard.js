@@ -17,7 +17,7 @@
  * shared-storage re-apply. The gpu-orchestrator checks model bundles itself
  * (preflightBundleUp) with the same checkComposeModel.
  */
-import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -315,6 +315,33 @@ export function dockerVolumeInfo(name) {
     if (/no such volume/i.test(String(err?.stderr || "") + String(err?.message || ""))) return null;
     throw new Error(`cannot inspect volume '${String(name).slice(0, 60)}': ${String(err?.stderr || err?.message || err).trim().slice(0, 120)}`);
   }
+}
+
+/**
+ * Bundle ids known on this instance: shipped in the repo (<appRoot>/bundles/*) plus
+ * installed (<crowHome>/installed.json). For the guard's project-ownership rule.
+ */
+export function knownBundleIds(crowHome, appRoot) {
+  const ids = new Set();
+  try { for (const d of readdirSync(join(appRoot, "bundles"), { withFileTypes: true })) if (d.isDirectory()) ids.add(d.name); } catch { /* no repo bundles */ }
+  try {
+    const raw = JSON.parse(readFileSync(join(crowHome, "installed.json"), "utf8"));
+    const list = Array.isArray(raw) ? raw : Object.entries(raw || {}).map(([k, v]) => ({ id: k, ...(v || {}) }));
+    for (const e of list) { const id = typeof e === "string" ? e : e?.id; if (typeof id === "string") ids.add(id); }
+  } catch { /* none installed */ }
+  return [...ids];
+}
+
+/**
+ * THE guard ctx for every path that runs `compose up` on a checked model (bundle
+ * install/Start, the gpu-orchestrator's model containers, the preview renderer).
+ * One builder, so no path can drop the ownership seams: `volumeInfo` (who owns an
+ * existing volume) and `knownBundleIds` (who else could own the compose project).
+ * They are set AFTER the caller's fields, so a caller cannot override them away.
+ * tests/compose-guard-ctx-parity.test.js fails if a call site builds its ctx by hand.
+ */
+export function guardCtx(base = {}) {
+  return { ...base, volumeInfo: dockerVolumeInfo, knownBundleIds: () => knownBundleIds(base.crowHome, base.appRoot) };
 }
 
 // Community bundles may not take the id "crow" or a "crow-" prefix: "crow-<id>" is how

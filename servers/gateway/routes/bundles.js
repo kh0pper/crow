@@ -64,7 +64,7 @@ import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, dockerVolumeInfo, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
+import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -1958,15 +1958,7 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   const id = bundleId || basename(bundleDir);
   const g = grantRootsFor(id, bundleDir, { exclude: operatorRoots !== undefined ? id : null });
   const roots = operatorRoots !== undefined ? operatorRoots : g.operatorRoots;
-  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir(), volumeInfo: dockerVolumeInfo, knownBundleIds: knownBundleIdsForGuard } });
-}
-
-/** Bundle ids known here (installed on this instance + shipped in the repo), for the guard's project rule. */
-function knownBundleIdsForGuard() {
-  const ids = new Set();
-  try { for (const d of readdirSync(APP_BUNDLES, { withFileTypes: true })) if (d.isDirectory()) ids.add(d.name); } catch { /* no repo bundles */ }
-  try { for (const e of getInstalled()) if (e && typeof e.id === "string") ids.add(e.id); } catch { /* no installed.json */ }
-  return [...ids];
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: guardCtx({ crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() }) });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---
