@@ -2366,7 +2366,7 @@ export const translations = {
   "models.add.skip.not_listed": { en: "The recommended model isn't one you saved.", es: "El modelo recomendado no está entre los que guardaste." },
   "models.add.skip.not_tested": { en: "Test the picks first.", es: "Prueba primero las recomendaciones." },
   "models.add.skip.failed_check": { en: "The recommended model failed its check.", es: "El modelo recomendado falló la prueba." },
-  "models.add.skip.unknown": { en: "Not shown on this page.", es: "No se muestra en esta página." },
+  "models.add.skip.unknown": { en: "Crow couldn't find this role here, so it was left alone.", es: "Crow no encontró este rol aquí, así que no lo cambió." },
   "models.add.provider": { en: "Provider", es: "Proveedor" },
   "models.add.plan": { en: "Your plan", es: "Tu plan" },
   "models.add.baseUrl": { en: "Server address", es: "Dirección del servidor" },

@@ -296,7 +296,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
   }
 
   function openSheet() {
-    st = { seq: st.seq + 1, changed: false, busy: false, providerId: null, models: [] };
+    st = { seq: st.seq + 1, changed: false, busy: false, providerId: null, models: [], closed: false };
     ui.key.value = '';
     ui.error.textContent = '';
     ui.picksBox.hidden = true;
@@ -308,15 +308,22 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     else dlg.setAttribute('open', '');
   }
 
-  function closeSheet() {
-    st.seq++;
+  /** Every way the sheet closes (the button, the backdrop, Escape): forget the key; reload once after a save. */
+  function onClosed() {
     ui.key.value = '';
-    if (typeof dlg.close === 'function') dlg.close();
-    else dlg.removeAttribute('open');
+    if (st.closed) return;
+    st.closed = true;
+    st.seq++;
     if (st.changed) {
       if (window.Turbo && typeof window.Turbo.visit === 'function') window.Turbo.visit(location.href, { action: 'replace' });
       else location.reload();
     }
+  }
+
+  function closeSheet() {
+    if (typeof dlg.close === 'function') dlg.close();
+    else dlg.removeAttribute('open');
+    onClosed();
   }
 
   // --- test and models -----------------------------------------------------------
@@ -631,9 +638,15 @@ export function addProviderClientJS({ lang = "en" } = {}) {
       });
       var empty = Array.isArray(d.stillEmpty) ? d.stillEmpty.filter(function (x) { return typeof x === 'string'; }) : [];
       parts.push(empty.length ? fill(T.stillEmpty, { roles: empty.map(roleName).join(', ') }) : T.allSet);
-      ui.result.textContent = parts.join(' ');
+      var text = parts.join(' ');
+      ui.result.textContent = text;
       st.pv = null;
       updateApply();
+      // Read the plan again so the list shows only what is still offered; keep the result line.
+      if (d.applied.length) {
+        var again = loadPlan();
+        if (again && typeof again.then === 'function') again.then(function () { ui.result.textContent = text; });
+      }
     });
   }
 
@@ -664,6 +677,8 @@ export function addProviderClientJS({ lang = "en" } = {}) {
   ui.close.addEventListener('click', closeSheet);
   ui.done.addEventListener('click', closeSheet);
   dlg.addEventListener('click', function (e) { if (e && e.target === dlg) closeSheet(); });
+  // Escape closes a modal dialog natively, without the buttons: the same cleanup.
+  dlg.addEventListener('close', onClosed);
   var openers = document.querySelectorAll('[data-models-add]');
   for (var i = 0; i < openers.length; i++) openers[i].addEventListener('click', openSheet);
   if (dlg.getAttribute('data-open') === '1') openSheet();

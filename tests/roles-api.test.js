@@ -511,7 +511,9 @@ test("a malformed body is refused without echoing or logging it", async () => {
   console.error = (...a) => logged.push(a.join(" "));
   const s = await new Promise((resolve) => { const x = app.listen(0, "127.0.0.1", () => resolve(x)); });
   try {
-    const payload = '{"apiKey":"fixture-pasted-key-777",';
+    // An unquoted value: V8's message quotes this part of the body, so the
+    // default handler would echo and log it.
+    const payload = '{"apiKey":fixture-pasted-key-777}';
     const r = await new Promise((resolve, reject) => {
       const req = http.request({ host: "127.0.0.1", port: s.address().port, path: "/api/providers/test", method: "POST",
         headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {
@@ -523,8 +525,25 @@ test("a malformed body is refused without echoing or logging it", async () => {
       req.end(payload);
     });
     assert.equal(r.status, 400);
-    assert.ok(!r.text.includes("fixture-pasted-key-777"));
-    assert.ok(!logged.join("\n").includes("fixture-pasted-key-777"));
+    assert.equal(JSON.parse(r.text).code, "bad_request");
+    assert.ok(!r.text.includes("fixture-pas"));
+    assert.ok(!logged.join("\n").includes("fixture-pas"));
+    // Over the parser's limit: refused the same way, nothing quoted or logged.
+    const big = JSON.stringify({ apiKey: "fixture-pasted-key-777", pad: "x".repeat(200_000) });
+    const r2 = await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port: s.address().port, path: "/api/providers", method: "POST",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(big) } }, (res) => {
+        let text = "";
+        res.on("data", (c) => (text += c));
+        res.on("end", () => resolve({ status: res.statusCode, text }));
+      });
+      req.on("error", reject);
+      req.end(big);
+    });
+    assert.equal(r2.status, 413);
+    assert.equal(JSON.parse(r2.text).code, "too_large");
+    assert.ok(!r2.text.includes("fixture-pas"));
+    assert.ok(!logged.join("\n").includes("fixture-pas"));
   } finally {
     console.error = origErr;
     s.close();
@@ -619,4 +638,50 @@ test("recommended: preview then apply fills a role nothing runs today", async ()
   }, addOpts());
   const b = JSON.parse(await settingOf("model_role.expert"));
   assert.equal(b.model, "cloud-or/anthropic/claude-opus-5.5");
+});
+
+test("the gateway mounts the body error handler on both API prefixes", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/boot/feature-mounts.js", import.meta.url), "utf8");
+  assert.ok(src.includes('app.use(["/api/roles", "/api/providers"], rolesApiBodyErrorHandler);'));
+  // After the roles router, so a parse error reaching these prefixes meets it.
+  assert.ok(src.indexOf("app.use(rolesApiRouter());") < src.indexOf("rolesApiBodyErrorHandler);"));
+});
+
+test("a typed address is used only for Other; presets ignore it", async () => {
+  const seen = [];
+  const testFn = async (args) => { seen.push(args); return { ok: true, code: "ok", status: 200, models: ["x/y"], host: "h", baseUrl: args.baseUrl || OR_URL }; };
+  await withServer(async (s) => {
+    await call(s, "POST", "/api/providers/test", { body: { presetId: "openrouter", baseUrl: "https://api.example.com/v1", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(seen.at(-1).baseUrl, undefined);
+    await call(s, "POST", "/api/providers/test", { body: { presetId: "other", baseUrl: "https://api.example.com/v1", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(seen.at(-1).baseUrl, "https://api.example.com/v1");
+    const r = await call(s, "POST", "/api/providers", {
+      body: { presetId: "openrouter", baseUrl: "https://api.example.com/v1", apiKey: "fixture-k", modelIds: ["x/y"] }, headers: csrfHeaders,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(seen.at(-1).baseUrl, undefined);
+  }, addOpts({ testFn }));
+  const row = (await db.execute("SELECT base_url FROM providers WHERE id = 'openrouter'")).rows[0];
+  assert.equal(row.base_url, OR_URL);
+});
+
+test("door and bundle rows are not addable providers here", async () => {
+  await insOr("crow-c-peer", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await insOr("bundled", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await db.execute("UPDATE providers SET bundle_id = 'some-bundle' WHERE id = 'bundled'");
+  invalidateRoleContext();
+  let probes = 0;
+  await withServer(async (s) => {
+    for (const id of ["crow-c-peer", "bundled"]) {
+      const plan = await call(s, "GET", `/api/providers/${id}/plan`);
+      assert.equal(plan.status, 404, id);
+      assert.equal(plan.json.error, "not_addable", id);
+      for (const p of ["probe", "recommended/preview", "recommended"]) {
+        const r = await call(s, "POST", `/api/providers/${id}/${p}`, { body: { roles: ["quick"] }, headers: csrfHeaders });
+        assert.equal(r.status, 404, `${id} ${p}`);
+      }
+    }
+  }, addOpts({ probeRequestFn: async () => { probes++; throw new Error("never"); } }));
+  assert.equal(probes, 0);
 });

@@ -176,7 +176,7 @@ test("the client source: no backtick, no innerHTML, the API it needs", () => {
 
 test("the page carries the sheet and the client, and one data-role per Change button", () => {
   const rows = [{ id: "quick", group: "thinking", labelKey: "settings.roles.quick", jobKey: "settings.roleJobs.quick", kind: "chat", status: { code: "not_set" } }];
-  const html = renderModelsPage(rows, { lang: "en" });
+  const html = renderModelsPage(rows, { lang: "en", now: new Date("2026-11-01T00:00:00Z") });
   assert.equal(html.split('id="models-change"').length - 1, 1);
   assert.equal(html.split('data-role="').length - 1, 1);
   assert.ok(html.includes('data-role-kind="chat"'));

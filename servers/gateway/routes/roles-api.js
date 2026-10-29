@@ -94,13 +94,20 @@ function recommendedIds(presetId, models, recOpts) {
 }
 
 /**
- * A malformed JSON body on these routes answers 400 with no detail and logs
- * nothing: the parser's message can quote the body, and a body here may hold
- * a pasted key. Mount after the JSON parser: app.use(["/api/roles", "/api/providers"], it).
+ * The JSON parser's own refusals on these routes: a body that does not parse
+ * (400 `bad_request`) or is over the limit (413 `too_large`). Both answer
+ * without detail and log nothing. A parse error's message can quote part of
+ * the body (an unquoted value, for one), and a body here may hold a pasted
+ * key; Express's default handler would echo that message and log its stack.
+ * Any other error passes on untouched. Mount after the JSON parser:
+ * app.use(["/api/roles", "/api/providers"], it).
  */
 export function rolesApiBodyErrorHandler(err, req, res, next) {
-  if (!err || (err.type !== "entity.parse.failed" && err.status !== 400 && err.statusCode !== 400)) return next(err);
-  if (res.headersSent) return next(err);
+  if (!err || res.headersSent) return next(err);
+  if (err.type === "entity.too.large" || err.status === 413 || err.statusCode === 413) {
+    return res.status(413).json({ ok: false, code: "too_large" });
+  }
+  if (err.type !== "entity.parse.failed" && err.status !== 400 && err.statusCode !== 400) return next(err);
   res.status(400).json({ ok: false, code: "bad_request" });
 }
 
@@ -324,19 +331,27 @@ export default function rolesApiRouter({
 
   // --- Add a provider (roles phase 2b) -----------------------------------------
 
+  // A typed address is only for "Other": a preset always uses its own URL.
   const providerBody = (b) => ({
-    presetId: str(b?.presetId), variantId: str(b?.variantId), baseUrl: str(b?.baseUrl), apiKey: str(b?.apiKey),
+    presetId: str(b?.presetId), variantId: str(b?.variantId),
+    baseUrl: b?.presetId === "other" ? str(b?.baseUrl) : undefined, apiKey: str(b?.apiKey),
   });
   const planOpts = (req) => ({
     env, ...ownOf(req), now: now(), localInstanceId,
     ...(classifierStatusFn ? { classifierStatusFn } : {}), ...(recOpts ? { recOpts } : {}),
   });
-  /** The provider row named by `:id`, or null (answered 404). */
+  /**
+   * The provider row named by `:id`, or null (answered 404). Door rows
+   * (`crow-c-*`, another Crow's model door) and bundle rows (a local engine
+   * an extension manages) are never providers this flow added or checks:
+   * refused as `not_addable`, whatever their URL.
+   */
   async function providerRow(db, req, res) {
     const id = req.params.id;
     const row = PROVIDER_ID.test(id || "") ? ((await loadCtx(db)).providers || []).find((p) => p && p.id === id) : null;
-    if (!row) res.status(404).json({ error: "unknown_provider" });
-    return row || null;
+    if (!row) { res.status(404).json({ error: "unknown_provider" }); return null; }
+    if (row.id.startsWith("crow-c-") || row.bundleId || row.bundle_id) { res.status(404).json({ error: "not_addable" }); return null; }
+    return row;
   }
 
   router.post("/api/providers/test", sessionGate, csrfMiddleware, async (req, res) => {

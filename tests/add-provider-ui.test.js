@@ -17,6 +17,8 @@ import { clearProviderTaskCache } from "../servers/shared/provider-task.js";
 import modelsSection from "../servers/gateway/dashboard/settings/sections/models.js";
 
 const count = (s, needle) => s.split(needle).length - 1;
+/** Pinned before the recommendations' review date, so whole-page renders never drift. */
+const PINNED = new Date("2026-11-01T00:00:00Z");
 
 // --- the sheet's HTML ----------------------------------------------------------
 
@@ -439,7 +441,7 @@ before(async () => {
 after(() => { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
 
 test("sheet html never contains a stored key", async () => {
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED });
   assert.ok(html.includes('id="models-add"'), "the sheet is on the page");
   assert.ok(html.includes("data-models-add"), "the button opens it");
   assert.ok(html.includes("claude-haiku"), "the provider's model is rendered");
@@ -447,9 +449,9 @@ test("sheet html never contains a stored key", async () => {
 });
 
 test("?add=1 marks the sheet to open; without it the sheet stays shut", async () => {
-  const shut = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const shut = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: PINNED });
   assert.equal(shut.includes('data-open="1"'), false);
-  const open = await modelsSection.render({ req: { query: { add: "1" } }, db, lang: "en" });
+  const open = await modelsSection.render({ req: { query: { add: "1" } }, db, lang: "en", now: PINNED });
   assert.equal(count(open, 'data-open="1"'), 1);
 });
 
@@ -462,4 +464,39 @@ test("the Models page says so when the recommendations are past their review dat
   assert.ok(stale.includes("Recommendations last reviewed 2026-10-28"));
   assert.ok(stale.includes("due for review"));
   assert.ok(renderModelsPage([], { lang: "es", now: new Date("2027-02-01T00:00:00Z") }).includes("necesitan revisión"));
+});
+
+test("Escape (the dialog's own close) clears the key and reloads after a save", async () => {
+  const h = harness(fullRoutes());
+  await tested(h);
+  h.dialog.open = false;
+  h.dialog.fire("close");
+  assert.equal(h.parts.key.value, "", "the key leaves the field");
+  assert.equal(h.visits.length, 0, "nothing saved, no reload");
+  await saved(h);
+  h.parts.key.value = "typed-again";
+  h.dialog.open = false;
+  h.dialog.fire("close");
+  assert.equal(h.parts.key.value, "");
+  assert.equal(h.visits.length, 1, "a save reloads the page");
+  h.dialog.fire("close");
+  assert.equal(h.visits.length, 1, "once");
+});
+
+test("after an apply the plan is read again, and the result line stays", async () => {
+  const h = harness(fullRoutes());
+  await saved(h);
+  const ack = byAttr(h.parts.warn, "data-ap-ack", "unattended")[0];
+  ack.checked = true;
+  ack.fire("change");
+  const plans = h.calls.filter((c) => c.url.endsWith("/plan")).length;
+  h.parts.apply.fire("click");
+  await flush();
+  assert.equal(h.calls.filter((c) => c.url.endsWith("/plan")).length, plans + 1);
+  assert.equal(h.parts.result.textContent, "Still empty: Vision, Reviewer. Add another provider for them.");
+});
+
+test("render passes its clock to the stale line", async () => {
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en", now: new Date("2027-02-01T00:00:00Z") });
+  assert.equal(count(html, "mr-recs-stale"), 1);
 });

@@ -193,8 +193,9 @@ export default {
     try { return await modelsPreview(db, lang); } catch { return ""; }
   },
 
-  async render({ req, db, lang = "en" }) {
+  // `now` is the stale line's clock (tests pin it).
+  async render({ req, db, lang = "en", now = new Date() }) {
     const rows = await buildRoleRows(db, { lang });
-    return renderModelsPage(rows, { lang, show: showParam(req), openAdd: String(req?.query?.add ?? "") === "1" });
+    return renderModelsPage(rows, { lang, show: showParam(req), openAdd: String(req?.query?.add ?? "") === "1", now });
   },
 };
