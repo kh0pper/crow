@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -303,6 +303,22 @@ test("an empty or bare-server tool grant is refused unless allowToolless", async
   assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
   const r = await runConversation({ ...base, allowToolless: true });
   assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
+  await ctx.noSurvivors();
+});
+
+test("a def with skills defers the toolless refusal to the child's effective check", async (t) => {
+  const ctx = await setup(t, { over: { threads: [{ id: "day-1", turns: [{ text: "hi" }] }] } });
+  // A <crowHome>/skills copy grants no tools (only the checkout's skills/ do), so the effective
+  // def stays toolless.
+  mkdirSync(join(ctx.s.home, "skills"), { recursive: true });
+  writeFileSync(join(ctx.s.home, "skills", "eval-noop.md"), "---\nname: eval-noop\ndescription: no tools\n---\nNothing.\n");
+  const def = botDef({ skills: ["eval-noop"] });
+  const r = await runConversation({ ...ctx.opts, botDef: def, allowSkills: ["eval-noop"], allowToolless: false });
+  assert.ok(ctx.events.some((e) => e.ev === "spawn"), "the parent let it through to the child");
+  assert.equal(r.ok, false);
+  assert.equal(r.contaminated, "child exited 1");
+  assert.match(r.reason, /effective tools: .*server\/tool/);
+  assert.equal(existsSync(ctx.capture), false, "no pi ever started");
   await ctx.noSurvivors();
 });
 

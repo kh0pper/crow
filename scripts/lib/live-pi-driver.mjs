@@ -153,8 +153,8 @@ export function checkToolSurface(botDef, { allowServers, allowSkills = [], scrat
  * Refuses a grant with no `server/tool` crow_mcp entry. pi's --tools matches exact names, so a
  * bare server (crow_mcp: ["crow-projects"] → mcp__crow-projects, the router-mode name) or an
  * empty list gives pi no MCP tool at all and the row measures nothing (seen with real pi).
- * The parent checks the static def, the child the effective one; `allowToolless` (stub tests)
- * is the only bypass.
+ * The parent checks the static def (skipped when the def lists skills, which may add the grant),
+ * the child always checks the effective one; `allowToolless` (stub tests) is the only bypass.
  */
 export function checkToolGrant(botDef, { allowToolless = false } = {}) {
   if (allowToolless === true) return;
@@ -524,7 +524,8 @@ export async function runConversation({
   checkBotDef(botDef, models, home);
   checkToolSurface(botDef, { allowServers, allowSkills, scratchHome: home });
   if (typeof allowToolless !== "boolean") refuse("allowToolless must be a boolean");
-  checkToolGrant(botDef, { allowToolless });
+  // A def with skills defers to the child's EFFECTIVE check: withSkillTools may add the grant.
+  if (!(Array.isArray(botDef.skills) && botDef.skills.length > 0)) checkToolGrant(botDef, { allowToolless });
   if (!Array.isArray(threads) || !threads.length) refuse("threads must be a non-empty array");
   const ids = new Set();
   for (const th of threads) {
