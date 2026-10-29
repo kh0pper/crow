@@ -87,6 +87,28 @@ test("SIGTERM-ignoring process is SIGKILLed after grace", async () => {
   assert.ok(Date.now() - t0 >= 250, "should have waited out the grace");
 });
 
+test("EPERM on one target does not reject killTree; the pid is a survivor", async () => {
+  const { child, grand } = await startTree(PARENT_SRC());
+  const seen = [];
+  const signalFn = (target, sig) => {
+    seen.push([target, sig]);
+    if (Math.abs(target) === grand) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    process.kill(target, sig);
+  };
+  const { survivors } = await killTree(child.pid, { graceMs: 300, signal: signalFn });
+  assert.deepEqual(survivors, [grand]);
+  assert.equal(alive(child.pid), false, "the rest of the tree was still killed");
+  assert.ok(seen.some(([p, s]) => Math.abs(p) === grand && s === "SIGKILL"), "the EPERM target was retried with SIGKILL");
+  process.kill(grand, "SIGKILL");
+});
+
+test("a non-EPERM/ESRCH signal error still rejects killTree", async () => {
+  const { child } = await startTree(PARENT_SRC());
+  const signalFn = () => { throw Object.assign(new Error("EINVAL"), { code: "EINVAL" }); };
+  await assert.rejects(killTree(child.pid, { graceMs: 100, signal: signalFn }), /EINVAL/);
+  await killTree(child.pid, { graceMs: 300 });
+});
+
 test("includeRoot false spares the root", async () => {
   const { child, grand } = await startTree(PARENT_SRC());
   const { survivors } = await killTree(child.pid, { graceMs: 300, includeRoot: false });

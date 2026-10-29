@@ -167,6 +167,7 @@ export function checkToolGrant(botDef, { allowToolless = false } = {}) {
  * The first failed model call in a pi session JSONL, as a contamination string, or null: an
  * assistant message whose stopReason is "error" or "aborted". pi records a failed call this way
  * and the bridge still reports the turn as asked (seen with real pi: a 400 became "(no reply)").
+ * It also contaminates a turn where pi retried internally and recovered (fail closed, by design).
  */
 export function modelErrorOf(jsonl) {
   for (const line of String(jsonl ?? "").split("\n")) {
@@ -179,6 +180,16 @@ export function modelErrorOf(jsonl) {
     }
   }
   return null;
+}
+
+/** The user messages in a pi session JSONL (unparseable lines skipped). */
+export function userMessagesOf(jsonl) {
+  let n = 0;
+  for (const line of String(jsonl ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    try { const o = JSON.parse(line); if (o && o.type === "message" && o.message && o.message.role === "user") n++; } catch { /* skip */ }
+  }
+  return n;
 }
 
 /**
@@ -262,10 +273,15 @@ export function descendants(pid, { readProc = defaultReadProc, listPids = defaul
   return out;
 }
 
-const signal = (target, sig) => { try { process.kill(target, sig); } catch (e) { if (e.code !== "ESRCH") throw e; } };
+/**
+ * A signal sender that skips a gone target (ESRCH) and one we may not signal (EPERM): the rest
+ * of the set is still signalled, and an EPERM pid stays alive to surface in `survivors`.
+ */
+const safeSignal = (send) => (target, sig) => { try { send(target, sig); } catch (e) { if (e.code !== "ESRCH" && e.code !== "EPERM") throw e; } };
+const signal = safeSignal((target, sig) => process.kill(target, sig));
 
 /** SIGTERM/SIGKILL a snapshot. A pgid is signalled as a group only when every live member is in the set. */
-function signalSet(pids, sig) {
+function signalSet(pids, sig, signal) {
   const set = new Set(pids);
   const groups = new Map();
   for (const n of defaultListPids()) { // one scan: pgid -> members (all live processes)
@@ -301,11 +317,12 @@ async function waitGone(pids, ms) {
  * Kill pid's whole tree (pi runs detached, in its own group, so a group kill of the child alone
  * would orphan it). includeRoot:false kills only the descendants. TERM, wait graceMs, re-walk to
  * catch late children, KILL the remainder, then re-walk once more if the root is still alive.
- * Resolves with whatever is still alive.
+ * Resolves with whatever is still alive, including a pid that refused a signal with EPERM.
  */
-export async function killTree(pid, { graceMs = KILL_GRACE_MS, includeRoot = true } = {}) {
+export async function killTree(pid, { graceMs = KILL_GRACE_MS, includeRoot = true, signal: send = null } = {}) {
   // Our own pid is allowed only for its descendants (the child's parent-death cleanup).
   if (!Number.isInteger(pid) || pid <= 1 || (pid === process.pid && includeRoot)) throw new DriverRefusal(`killTree refuses pid ${pid}`);
+  const sendSig = send ? safeSignal(send) : signal; // `signal` is injectable for tests
   const known = new Set();
   const collect = () => {
     const found = [...(includeRoot && isAlive(pid) ? [pid] : []), ...descendants(pid)].filter((p) => p !== process.pid);
@@ -315,11 +332,11 @@ export async function killTree(pid, { graceMs = KILL_GRACE_MS, includeRoot = tru
   for (let round = 0; round < 2; round++) {
     const snap = collect();
     if (!snap.length) break;
-    signalSet(snap, "SIGTERM");
+    signalSet(snap, "SIGTERM", sendSig);
     await waitGone(snap, graceMs);
     // Late children (spawned after the snapshot, e.g. on SIGTERM) are only reachable through the root.
     const live = [...new Set([...snap, ...collect()])].filter((p) => isAlive(p));
-    if (live.length) { signalSet(live, "SIGKILL"); await waitGone(live, 1000); }
+    if (live.length) { signalSet(live, "SIGKILL", sendSig); await waitGone(live, 1000); }
     if (!isAlive(pid)) break; // root gone: nothing left to re-walk from
     if (!includeRoot && !descendants(pid).length) break;
   }
@@ -500,7 +517,7 @@ function sessionPathsOf(turns, home) {
  */
 export async function runConversation({
   botDef, models, scratchHome, threads, env = {}, allowHosts = [], allowServers, allowSkills = [], piPackages = [],
-  gatewayType = "perch", piCli, turnTimeoutMs = 600_000, turnSlackMs = TURN_SLACK_MS, wallMs,
+  gatewayType = "perch", gatewayPorts = [], piCli, turnTimeoutMs = 600_000, turnSlackMs = TURN_SLACK_MS, wallMs,
   prodMaxPi = LIFECYCLE_DEFAULTS.maxPi, mcpOverrides = null, allowToolless = false, parentEnv = process.env, log = () => {},
 } = {}) {
   const sinceBootSec = bootSecNow();
@@ -518,9 +535,10 @@ export async function runConversation({
   // parentEnv never weakens a guard: the real process.env always applies, parentEnv only adds.
   const protectedEnv = { CROW_SUITE_PROTECTED_ROOTS: [process.env, parentEnv].map((e) => e.CROW_SUITE_PROTECTED_ROOTS || "").join("\n") };
   const home = checkScratchHome(scratchHome, protectedEnv);
+  if (!Array.isArray(gatewayPorts)) refuse("gatewayPorts must be an array");
   const extraPort = parentEnv.CROW_GATEWAY_PORT;
-  const gatewayPorts = extraPort !== undefined && extraPort !== "" && Number.isFinite(Number(extraPort)) ? [Number(extraPort)] : [];
-  checkEndpoints(models, { allowHosts, gatewayPort: process.env.CROW_GATEWAY_PORT, gatewayPorts });
+  const envPorts = extraPort !== undefined && extraPort !== "" && Number.isFinite(Number(extraPort)) ? [Number(extraPort)] : [];
+  checkEndpoints(models, { allowHosts, gatewayPort: process.env.CROW_GATEWAY_PORT, gatewayPorts: [...gatewayPorts, ...envPorts] });
   checkBotDef(botDef, models, home);
   checkToolSurface(botDef, { allowServers, allowSkills, scratchHome: home });
   if (typeof allowToolless !== "boolean") refuse("allowToolless must be a boolean");
@@ -533,6 +551,10 @@ export async function runConversation({
     if (ids.has(th.id)) refuse(`thread ids must be unique (${th.id} repeats)`);
     ids.add(th.id);
     if (!Array.isArray(th.turns) || !th.turns.length) refuse(`thread ${th.id} turns must be a non-empty array`);
+    // A used id would resume that thread's bot_sessions row (and its pi session): never ok.
+    if (existsSync(join(home, `job-${th.id}.json`)) || existsSync(join(home, `progress-${th.id}.ndjson`))) {
+      refuse(`thread ${th.id} was already run in this scratch home (use a fresh scratch or a new thread id)`);
+    }
   }
   if (!Array.isArray(piPackages)) refuse("piPackages must be an array");
   for (const p of piPackages) {
@@ -585,8 +607,9 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
   const errPath = join(home, `driver-${id}.err`);
   writeFileSync(jobPath, JSON.stringify(job));
   writeFileSync(progressPath, "");
-  const outFd = openSync(join(home, `driver-${id}.out`), "a");
-  const errFd = openSync(errPath, "a");
+  // Truncated, never appended: the exit-4 regex and `reason` must quote THIS attempt only.
+  const outFd = openSync(join(home, `driver-${id}.out`), "w");
+  const errFd = openSync(errPath, "w");
   let child;
   try {
     child = spawn(process.execPath, [CHILD, jobPath, progressPath], { cwd: home, env: cenv, stdio: ["ignore", outFd, errFd], detached: true });
@@ -650,7 +673,7 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
     else if (x.code === 4) {
       const last = turns.at(-1);
       const m = /ended with action \S+: (.*)$/m.exec(errTail);
-      why = last ? `turn ${Number(last.turn) + 1} action ${last.action}${m ? `: ${m[1]}` : ""}` : "child exited 4 without a turn-end";
+      why = last ? `turn ${Number(last.turn) + 1}${last.injected ? " (injected answer)" : ""} action ${last.action}${m ? `: ${m[1]}` : ""}` : "child exited 4 without a turn-end";
     } else if (x.code === 6) why = "prod pi capacity";
     else if (x.code === 5) why = "child exited 5 (parent died)";
     else if (x.code !== 0) why = `child exited ${x.code}`;
@@ -674,17 +697,22 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
   }
 
   let sessionPaths = [];
+  // A thread is ONE pi session: a resume that came back with a new id (or a forced-new session)
+  // would otherwise pass with two files.
+  if (!why && new Set(turns.map((e) => e.piSessionId).filter(Boolean)).size > 1) why = "pi session changed mid-thread";
   if (!why) {
     const paths = sessionPathsOf(turns, home);
     if (!paths) why = SESSION_MISSING;
     else sessionPaths = paths;
   }
-  // A failed model call contaminates the whole thread, whichever turn it was (Lane D).
+  // A failed model call contaminates the whole thread, whichever turn it was; so does a
+  // transcript with fewer user messages than the thread had turns (injected answers included).
   for (const p of sessionPaths) {
     if (why) break;
     let text = "";
     try { text = readFileSync(p, "utf8"); } catch (e) { why = `cannot read session ${p}: ${e.message}`; break; }
     why = modelErrorOf(text);
+    if (!why && userMessagesOf(text) < turns.length) why = "session transcript is missing turns";
   }
   return { contaminated: why, reason: why ? tailOf(errPath) || null : null, turns, sessionPaths, flags };
 }

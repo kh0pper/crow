@@ -33,15 +33,15 @@ test("gateway-shaped loopback endpoints are refused", () => {
 });
 
 test("remote host refused unless allowlisted", () => {
-  const m = mk("http://10.0.0.126:8030/v1");
+  const m = mk("http://192.0.2.10:8030/v1");
   assert.throws(() => checkEndpoints(m, {}), DriverRefusal);
-  checkEndpoints(m, { allowHosts: ["10.0.0.126:8030"] });
+  checkEndpoints(m, { allowHosts: ["192.0.2.10:8030"] });
 });
 
 test("IPv6 and default ports", () => {
   checkEndpoints(mk("http://[::1]:8010/v1"), {});
-  checkEndpoints(mk("http://10.0.0.5/v1"), { allowHosts: ["10.0.0.5:80"] });
-  assert.throws(() => checkEndpoints(mk("http://10.0.0.5/v1"), { allowHosts: ["10.0.0.5:8080"] }), DriverRefusal);
+  checkEndpoints(mk("http://198.51.100.5/v1"), { allowHosts: ["198.51.100.5:80"] });
+  assert.throws(() => checkEndpoints(mk("http://198.51.100.5/v1"), { allowHosts: ["198.51.100.5:8080"] }), DriverRefusal);
 });
 
 test("provider without baseUrl refused", () => {

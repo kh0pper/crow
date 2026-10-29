@@ -12,8 +12,9 @@
  * `capacityCount` is a test-only stand-in for countLivePi() (null in a real run).
  *
  * Progress (one appended, synced line per event): start, turn-start, turn-end, capacity, done.
- * Exit codes: 0 all turns ran; 1 guard refusal or crash; 4 a turn's action was not
- * asked/executed (its turn-end is written first); 5 the parent died; 6 prod pi capacity (R6).
+ * Exit codes: 0 all turns ran; 1 guard refusal (including a thread id that already has a
+ * bot_sessions row) or crash; 4 a turn's action was not asked/executed (its turn-end is
+ * written first); 5 the parent died; 6 prod pi capacity (R6).
  *
  * Why the order matters: bridge.mjs reads CROW_DB, TASKS_DB, the turn timeout and the warm
  * target from env at IMPORT time. So the static imports below are node built-ins and the guard
@@ -118,6 +119,8 @@ async function main(argv, env) {
 
   const { countLivePi } = await import("../pi-bots/pi_lifecycle.mjs");
   const { handleInbound, getSession } = await import("../pi-bots/bridge.mjs");
+  // handleInbound resumes any existing (bot, thread) row's pi session: a used id is never run.
+  if (getSession(job.botDef.id, thread)) throw refuse(`thread ${thread} already exists in this scratch`);
 
   const fd = openSync(progressPath, "a");
   const emit = (o) => { if (dying) return; writeSync(fd, JSON.stringify(o) + "\n"); fsyncSync(fd); };

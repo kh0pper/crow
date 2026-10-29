@@ -19,6 +19,10 @@
  *   PIBOT_TEST_MODEL_ERROR_ON_TURN=N  the Nth prompt of the session (1-based) records a failed
  *                          model call the way real pi does: an assistant message with no content,
  *                          stopReason "error" and an errorMessage
+ *   PIBOT_TEST_FRESH_ID_ON_RESUME=1  ignore --session: a resume starts a new pi session id and file
+ *   PIBOT_TEST_SKIP_USER_ON_TURN=N   the Nth prompt of the session (1-based) records no user message
+ *   PIBOT_TEST_CRASH_ON_TURN=N       ack the Nth prompt of the session (1-based), then exit 1
+ *   (none of these say "SESSION": SECRET_NAME_RE would strip the knob)
  *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker } per prompt
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
@@ -42,7 +46,7 @@ const writeSession = env.PIBOT_TEST_NO_JSONL !== "1" && !!sessionDir;
 let replies = [];
 try { replies = JSON.parse(env.PIBOT_TEST_REPLIES || "[]"); } catch { /* none */ }
 
-const resumeId = arg("--session");
+const resumeId = env.PIBOT_TEST_FRESH_ID_ON_RESUME === "1" ? undefined : arg("--session");
 const sessionId = resumeId || randomUUID();
 let sessionFile = null;
 if (writeSession && resumeId) {
@@ -96,9 +100,9 @@ process.stdin.on("data", (chunk) => {
     } else if (m.type === "prompt") {
       const n = priorPrompts();
       if (env.PIBOT_TEST_CAPTURE) appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1", runMarker: env.CROW_EVAL_RUN_ID ?? null }) + "\n");
-      record("user", m.message);
+      if (Number(env.PIBOT_TEST_SKIP_USER_ON_TURN) !== n + 1) record("user", m.message);
       out({ type: "response", command: "prompt", id: m.id, success: true });
-      if (env.PIBOT_TEST_CRASH === "1") process.exit(1);
+      if (env.PIBOT_TEST_CRASH === "1" || Number(env.PIBOT_TEST_CRASH_ON_TURN) === n + 1) process.exit(1);
       if (env.PIBOT_TEST_HANG === "1") continue;
       if (Number(env.PIBOT_TEST_MODEL_ERROR_ON_TURN) === n + 1) {
         const failed = `400: stub model error on turn ${n + 1}`;

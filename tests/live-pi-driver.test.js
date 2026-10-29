@@ -283,6 +283,72 @@ test("model call error on turn 2 only contaminates the whole thread", async (t) 
   await ctx.noSurvivors();
 });
 
+test("a resume that returns a new pi session id contaminates the thread", async (t) => {
+  const ctx = await setup(t, { knobs: { PIBOT_TEST_FRESH_ID_ON_RESUME: "1" } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, false);
+  assert.equal(r.contaminated, "pi session changed mid-thread");
+  assert.equal(r.threads.length, 1, "day 2 never runs");
+  assert.equal(new Set(r.threads[0].turns.map((e) => e.piSessionId)).size, 2, "the stub really forked");
+  await ctx.noSurvivors();
+});
+
+test("a session file missing a turn's user message contaminates the thread", async (t) => {
+  const ctx = await setup(t, { knobs: { PIBOT_TEST_SKIP_USER_ON_TURN: "2" } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, false);
+  assert.equal(r.contaminated, "session transcript is missing turns");
+  assert.equal(r.threads.length, 1);
+  await ctx.noSurvivors();
+});
+
+test("a failed injected answer turn is labelled as injected", async (t) => {
+  const ctx = await setup(t, {
+    knobs: { PIBOT_TEST_REPLIES: JSON.stringify(["Shall I proceed?"]), PIBOT_TEST_CRASH_ON_TURN: "2" },
+    over: { threads: [{ id: "day-1", turns: [{ text: "go", otherwise: "Yes." }] }] },
+  });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, false);
+  assert.match(r.contaminated, /^turn 1 \(injected answer\) action error/);
+  await ctx.noSurvivors();
+});
+
+test("a used thread id is refused before anything is written (job or progress file present)", async (t) => {
+  const ctx = await setup(t, { over: { threads: [{ id: "day-1", turns: [{ text: "hi" }] }] } });
+  const first = await runConversation(ctx.opts);
+  assert.equal(first.ok, true, `${first.contaminated}\n${first.reason}`);
+  const spawns = ctx.events.filter((e) => e.ev === "spawn").length;
+  const before = readFileSync(join(ctx.s.home, "pi-agent", "settings.json"), "utf8");
+  await assert.rejects(runConversation({ ...ctx.opts, piPackages: [ctx.s.home] }),
+    (e) => e instanceof DriverRefusal && /thread day-1 was already run in this scratch home/.test(e.message));
+  rmSync(join(ctx.s.home, "job-day-1.json"));
+  await assert.rejects(runConversation({ ...ctx.opts, piPackages: [ctx.s.home] }),
+    (e) => e instanceof DriverRefusal && /thread day-1 was already run in this scratch home/.test(e.message));
+  assert.equal(ctx.events.filter((e) => e.ev === "spawn").length, spawns, "nothing spawned");
+  assert.equal(readFileSync(join(ctx.s.home, "pi-agent", "settings.json"), "utf8"), before, "nothing written");
+  await ctx.noSurvivors();
+});
+
+test("driver .out/.err are truncated per thread, not appended", async (t) => {
+  const ctx = await setup(t, { over: { threads: [{ id: "day-1", turns: [{ text: "hi" }] }] } });
+  writeFileSync(join(ctx.s.home, "driver-day-1.err"), "ended with action error: stale attempt\n");
+  writeFileSync(join(ctx.s.home, "driver-day-1.out"), "stale\n");
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
+  assert.doesNotMatch(readFileSync(join(ctx.s.home, "driver-day-1.err"), "utf8"), /stale attempt/);
+  assert.doesNotMatch(readFileSync(join(ctx.s.home, "driver-day-1.out"), "utf8"), /stale/);
+  await ctx.noSurvivors();
+});
+
+test("gatewayPorts adds caller-named gateway ports to the refusal", async (t) => {
+  const ctx = await setup(t, { over: { models: models("http://127.0.0.1:4777/v1") } });
+  await assert.rejects(runConversation({ ...ctx.opts, gatewayPorts: [4777] }), (e) => e instanceof DriverRefusal && /port 4777 is a gateway port/.test(e.message));
+  await assert.rejects(runConversation({ ...ctx.opts, gatewayPorts: "4777" }), (e) => e instanceof DriverRefusal && /gatewayPorts/.test(e.message));
+  // The built-in ports still apply alongside the caller's.
+  await assert.rejects(runConversation({ ...ctx.opts, gatewayPorts: [4777], models: models("http://127.0.0.1:3001/v1") }), (e) => e instanceof DriverRefusal && /port 3001/.test(e.message));
+  assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
+});
+
 test("modelErrorOf: error and aborted count, a clean stop does not, the message is capped", () => {
   const line = (message) => JSON.stringify({ type: "message", message });
   assert.equal(modelErrorOf(line({ role: "assistant", content: [], stopReason: "stop" })), null);

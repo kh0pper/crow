@@ -199,6 +199,19 @@ test("refuses a non-boolean allowToolless", async (t) => {
   assert.equal(existsSync(ctx.capture), false);
 });
 
+test("refuses a thread id that already has a session row in this scratch", async (t) => {
+  const ctx = await setup(t);
+  const first = await runChild(t, ctx);
+  assert.equal(first.code, 0, stderr(ctx));
+  assert.equal(captured(ctx).length, 1);
+  const r = await runChild(t, ctx);
+  assert.equal(r.code, 1, stderr(ctx));
+  await assertNoSurvivors(ctx);
+  assert.match(stderr(ctx), /refused: thread thread-1 already exists in this scratch/);
+  assert.equal(captured(ctx).length, 1, "no second pi may start");
+  assert.equal(progress(ctx).filter((e) => e.ev === "start").length, 1, "the refused run emits nothing");
+});
+
 test("runs three turns on one pi session", async (t) => {
   const ctx = await setup(t, {
     job: { thread: { id: "thread-1", turns: [{ text: "first" }, { text: "second" }, { text: "third" }] } },
