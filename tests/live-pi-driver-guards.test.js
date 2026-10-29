@@ -4,7 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -71,7 +71,7 @@ test("session_dir outside scratch refused", () => {
 
 test("scratch home: accepted with crow.db, refused without", () => {
   const home = withDb(tmp());
-  assert.equal(checkScratchHome(home), require_realpath(home));
+  assert.equal(checkScratchHome(home), realpathSync(home));
   assert.throws(() => checkScratchHome(tmp()), DriverRefusal);
   assert.throws(() => checkScratchHome(tmpdir()), DriverRefusal);
 });
@@ -114,9 +114,13 @@ test("tool surface", () => {
     "server/tool not allowed": mut((d) => { d.tools.crow_mcp = ["other/crow_x"]; }),
     "board": mut((d) => { d.tools.crow_mcp = ["board"]; }),
     "spawn_env": mut((d) => { d.spawn_env = { A: "1" }; }),
-    "pi_extensions": mut((d) => { d.pi_extensions = ["x"]; }),
-    "skill_learning auto": mut((d) => { d.skill_learning = "auto"; }),
-    "self_authoring": mut((d) => { d.self_authoring = true; }),
+    "tools.pi_extensions": mut((d) => { d.tools.pi_extensions = ["x"]; }),
+    "top pi_extensions": mut((d) => { d.pi_extensions = ["x"]; }),
+    "policy skill_learning auto": mut((d) => { d.permission_policy.skill_learning = "auto"; }),
+    "top skill_learning auto": mut((d) => { d.skill_learning = "auto"; }),
+    "policy self_authoring": mut((d) => { d.permission_policy.self_authoring = true; }),
+    "top self_authoring": mut((d) => { d.self_authoring = true; }),
+    "remote_mcp": mut((d) => { d.tools.remote_mcp = [{ name: "x" }]; }),
     "multi_agent": mut((d) => { d.permission_policy.multi_agent = true; }),
     "project_id": mut((d) => { d.project_id = 1; }),
     "skill not allowed": mut((d) => { d.skills = ["other"]; }),
@@ -146,7 +150,7 @@ test("child env is an allowlist", () => {
   const documented = new Set([...PARENT_ENV_ALLOW, "NODE_TEST_CONTEXT", "HOME", "CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_APP_ENV_PATH",
     "CROW_DISABLE_NOSTR", "CROW_DISABLE_INSTANCE_SYNC", "CROW_RESEARCH_EVAL", "CROW_ACTOR_KIND", "CROW_ACTOR_BOT_ID", "CROW_JOURNAL_MODE",
     "PI_CODING_AGENT_DIR", "PI_MODELS_JSON", "PIBOT_WARM_GATEWAY_URL", "PIBOT_WARM_TIMEOUT_MS", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL",
-    "PIBOT_MAX_PI", "PIBOT_TURN_TIMEOUT_MS", "PIBOT_PROMPT_ACK_TIMEOUT_MS", "CROW_EVAL_RUN_ID", "PIBOT_PI_CLI", ...Object.keys({ CROW_SESSION_BRIEFING: 1 })]);
+    "PIBOT_MAX_PI", "PIBOT_TURN_TIMEOUT_MS", "PIBOT_PROMPT_ACK_TIMEOUT_MS", "CROW_EVAL_RUN_ID", "PIBOT_PI_CLI", "CROW_SESSION_BRIEFING"]);
   for (const k of Object.keys(e)) assert.ok(documented.has(k) || k.startsWith("LC_"), `undocumented key ${k}`);
   assert.equal(e.LC_ALL, "C");
 });
@@ -178,13 +182,27 @@ test("SECRET_NAME_RE sanity: the allowed flags would trip it (why the parent-onl
   assert.ok(SECRET_NAME_RE.test("CROW_SESSION_BRIEFING"));
 });
 
-import { realpathSync } from "node:fs";
-function require_realpath(p) { return realpathSync(p); }
-
-import { readFileSync } from "node:fs";
 test("the driver module imports no bridge, database or server db code", () => {
   const src = readFileSync(new URL("../scripts/lib/live-pi-driver.mjs", import.meta.url), "utf8");
   for (const m of src.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
     assert.doesNotMatch(m[1], /bridge|better-sqlite3|servers\/db/, m[1]);
   }
+});
+
+test("hardening: case, userinfo, non-array options, bad runId/timeout", () => {
+  assert.throws(() => checkEndpoints(mk("http://127.0.0.1:8010/LLM/v1"), {}), DriverRefusal);
+  assert.throws(() => checkEndpoints(mk("http://127.0.0.1:8010/Proxy/x"), {}), DriverRefusal);
+  assert.throws(() => checkEndpoints(mk("http://user:pw@127.0.0.1:8010/v1"), {}), DriverRefusal);
+  assert.throws(() => checkEndpoints(mk("http://user@127.0.0.1:8010/v1"), {}), DriverRefusal);
+  assert.throws(() => checkEndpoints(mk("http://127.0.0.1:8010/v1"), { gatewayPorts: 3 }), DriverRefusal);
+  assert.throws(() => checkEndpoints(mk("http://127.0.0.1:8010/v1"), { allowHosts: "x" }), DriverRefusal);
+  const home = tmp();
+  const def = { permission_policy: { bash: "deny" } };
+  const good = { allowServers: [], allowSkills: [], scratchHome: home };
+  assert.throws(() => checkToolSurface(def, { ...good, allowServers: "a" }), DriverRefusal);
+  assert.throws(() => checkToolSurface(def, { ...good, allowSkills: "a" }), DriverRefusal);
+  assert.throws(() => checkToolSurface({ ...def, tools: { crow_mcp: "crow-projects" } }, good), DriverRefusal);
+  assert.throws(() => checkToolSurface({ ...def, tools: { pi_builtin: "read" } }, good), DriverRefusal);
+  for (const turnTimeoutMs of [0, -1, NaN, Infinity, "90000", undefined]) assert.throws(() => childEnv({ ...baseArgs, turnTimeoutMs, parent: {} }), DriverRefusal, String(turnTimeoutMs));
+  for (const runId of ["", undefined, 5]) assert.throws(() => childEnv({ ...baseArgs, runId, parent: {} }), DriverRefusal, String(runId));
 });

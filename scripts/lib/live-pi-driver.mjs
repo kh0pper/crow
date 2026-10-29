@@ -41,6 +41,8 @@ const DEFAULT_PORT = { "http:": 80, "https:": 443 };
 export function checkEndpoints(models, { allowHosts = [], gatewayPort = process.env.CROW_GATEWAY_PORT, gatewayPorts = [] } = {}) {
   const providers = models && models.providers;
   if (!providers || typeof providers !== "object" || !Object.keys(providers).length) refuse("models.providers is empty");
+  if (!Array.isArray(allowHosts)) refuse("allowHosts must be an array");
+  if (!Array.isArray(gatewayPorts)) refuse("gatewayPorts must be an array");
   const blocked = new Set([...GATEWAY_PORTS, ...gatewayPorts.map(Number)]);
   if (gatewayPort !== undefined && gatewayPort !== "" && Number.isFinite(Number(gatewayPort))) blocked.add(Number(gatewayPort));
   for (const [name, p] of Object.entries(providers)) {
@@ -48,13 +50,14 @@ export function checkEndpoints(models, { allowHosts = [], gatewayPort = process.
     let u;
     try { u = new URL(p.baseUrl); } catch { refuse(`provider ${name} baseUrl is not a URL`); }
     if (!(u.protocol in DEFAULT_PORT)) refuse(`provider ${name} baseUrl must be http or https`);
+    if (u.username || u.password) refuse(`provider ${name} baseUrl must not carry userinfo`);
     const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
     const port = u.port ? Number(u.port) : DEFAULT_PORT[u.protocol];
     const hostPort = `${host.includes(":") ? `[${host}]` : host}:${port}`;
     const allowed = LOOPBACK.has(host) || allowHosts.some((h) => String(h).toLowerCase() === hostPort || String(h).toLowerCase() === `${host}:${port}`);
     if (!allowed) refuse(`provider ${name} host ${hostPort} is not loopback and not in allowHosts`);
     if (blocked.has(port)) refuse(`provider ${name} port ${port} is a gateway port`);
-    if (`${u.pathname}/`.includes("/llm/") || `${u.pathname}/`.includes("/proxy/")) refuse(`provider ${name} path ${u.pathname} goes through a gateway`);
+    if (/\/(llm|proxy)\//.test(`${u.pathname.toLowerCase()}/`)) refuse(`provider ${name} path ${u.pathname} goes through a gateway`);
   }
 }
 
@@ -110,26 +113,35 @@ export function checkExtraEnv(env) {
 export function checkToolSurface(botDef, { allowServers, allowSkills = [], scratchHome } = {}) {
   const d = botDef || {};
   const pol = d.permission_policy || {};
+  if (!Array.isArray(allowServers)) refuse("allowServers must be an array");
+  if (!Array.isArray(allowSkills)) refuse("allowSkills must be an array");
   if (pol.bash !== "deny") refuse('permission_policy.bash must be "deny"');
   if (pol.multi_agent) refuse("permission_policy.multi_agent must be falsy");
   const tools = d.tools || {};
   const builtin = tools.pi_builtin === undefined ? [] : tools.pi_builtin;
+  if (tools.crow_mcp !== undefined && !Array.isArray(tools.crow_mcp)) refuse("tools.crow_mcp must be an array");
   if (!Array.isArray(builtin) || builtin.some((t) => !["read", "write", "edit"].includes(t))) refuse('tools.pi_builtin must be a subset of ["read","write","edit"]');
   const home = realish(scratchHome);
   for (const w of pol.write_paths || []) {
     if (typeof w !== "string" || !strictlyInside(realish(w), home)) refuse(`write_paths entry ${w} is not strictly inside the scratch home`);
   }
-  const servers = new Set(allowServers || []);
+  const servers = new Set(allowServers);
   for (const e of tools.crow_mcp || []) {
     const server = String(e).split("/")[0];
     if (server === "board") refuse("crow_mcp server board is refused in v1");
     if (!servers.has(server)) refuse(`crow_mcp server ${server} is not in allowServers`);
   }
   const nonEmpty = (v) => (Array.isArray(v) ? v.length > 0 : v && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v));
+  if (nonEmpty(tools.remote_mcp)) refuse("tools.remote_mcp must be absent or empty in v1");
   if (nonEmpty(d.spawn_env)) refuse("spawn_env must be absent or empty");
-  if (nonEmpty(d.pi_extensions)) refuse("pi_extensions must be absent or empty");
-  if (d.skill_learning !== undefined && d.skill_learning !== null && d.skill_learning !== "off") refuse('skill_learning must be absent or "off"');
-  if (d.self_authoring) refuse("self_authoring must be falsy");
+  // The bridge reads these nested (tools / permission_policy); the top-level forms are refused too (fail closed).
+  for (const [where, o] of [["", d], ["tools.", tools]]) {
+    if (nonEmpty(o.pi_extensions)) refuse(`${where}pi_extensions must be absent or empty`);
+  }
+  for (const [where, o] of [["", d], ["permission_policy.", pol]]) {
+    if (o.skill_learning !== undefined && o.skill_learning !== null && o.skill_learning !== "off") refuse(`${where}skill_learning must be absent or "off"`);
+    if (o.self_authoring) refuse(`${where}self_authoring must be falsy`);
+  }
   if (d.project_id !== undefined && d.project_id !== null) refuse("project_id must be absent (v1 bots are project-less)");
   for (const s of d.skills || []) if (!allowSkills.includes(s)) refuse(`skill ${s} is not in allowSkills`);
 }
@@ -141,6 +153,8 @@ export function checkToolSurface(botDef, { allowServers, allowSkills = [], scrat
  */
 export function childEnv({ home, botId, runId, piCli, extraEnv = {}, turnTimeoutMs, parent = process.env }) {
   if (typeof piCli !== "string" || !isAbsolute(piCli)) refuse("piCli must be an absolute path");
+  if (typeof turnTimeoutMs !== "number" || !Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0) refuse("turnTimeoutMs must be a positive finite number");
+  if (typeof runId !== "string" || !runId) refuse("runId must be a non-empty string");
   const extra = checkExtraEnv(extraEnv);
   const testCtx = parent.NODE_TEST_CONTEXT !== undefined;
   const picked = {};
