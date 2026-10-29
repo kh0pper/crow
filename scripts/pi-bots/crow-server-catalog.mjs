@@ -31,7 +31,7 @@ import {
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor } from "./actor-sig.mjs";
 // Leaf module (registry read only): no path back to ext_registry.mjs or mcp_writer.mjs.
-import { isLegacyConfiguredAddon } from "../../servers/gateway/services/legacy-sources.js";
+import { isLegacyConfiguredAddon, addonDerivedEnv } from "../../servers/gateway/services/legacy-sources.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -345,7 +345,10 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // sessions wherever that pointed). CROW_HOME only: injecting CROW_DB_PATH
       // would trip touchesCrowDb() and apply the journal guard to bundles that
       // never open crow.db.
-      r.block.env = { ...(r.block.env || {}), CROW_HOME: crowHome };
+      // A service add-on also gets its manifest's derived env (Render's AUTH_HEADER),
+      // rendered from the entry's env over the environment, as the child sees it.
+      const derived = addonDerivedEnv(id, addon.env, undefined, addonEnv);
+      r.block.env = { ...(r.block.env || {}), ...derived, CROW_HOME: crowHome };
       // A bare command (uvx, uv, npx) is resolved to an absolute path here:
       // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
       // pi child failed with ENOENT and the server silently dropped.

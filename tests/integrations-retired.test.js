@@ -182,3 +182,68 @@ test("getProxyStatus keeps the card shape", async () => {
   for (const k of keys) assert.ok(k in gh, k);
   assert.ok(!cards.some((c) => c.id === "slack" || c.id === "microsoft-teams"));
 });
+
+test("a service add-on's child gets its derived env; a non-service add-on is unchanged (I1)", async () => {
+  const { addonStdioEnv } = await import("../servers/gateway/proxy.js");
+  const render = { command: "npx", args: ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", "Authorization:${AUTH_HEADER}"] };
+  const fromEntry = addonStdioEnv({ ...render, env: { RENDER_API_KEY: "test-token-7" } }, {}, "render");
+  assert.equal(fromEntry.AUTH_HEADER, "Bearer test-token-7");
+  assert.equal(fromEntry.CROW_ADDON_HOST, "gateway");
+  // The key only in the gateway's environment, as the child inherits it.
+  assert.equal(addonStdioEnv(render, { RENDER_API_KEY: "test-token-8" }, "render").AUTH_HEADER, "Bearer test-token-8");
+  // entry.env wins over the environment, the same precedence as the spawn.
+  assert.equal(addonStdioEnv({ ...render, env: { RENDER_API_KEY: "entry" } }, { RENDER_API_KEY: "base" }, "render").AUTH_HEADER, "Bearer entry");
+  const fw = { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "http://fw.example" } };
+  assert.deepEqual(addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale"), addonStdioEnv(fw, { PATH: "/bin" }));
+  assert.deepEqual(addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale"),
+    { PATH: "/bin", FUNKWHALE_URL: "http://fw.example", CROW_ADDON_HOST: "gateway" });
+});
+
+test("the bot catalog gives a Render add-on its AUTH_HEADER (I1)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "services-render-"));
+  const home = join(dir, ".crow");
+  mkdirSync(join(home, "bundles", "render"), { recursive: true });
+  mkdirSync(join(home, "bundles", "funkwhale"), { recursive: true });
+  mkdirSync(join(home, "data"), { recursive: true });
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+    render: { command: "npx", args: ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", "Authorization:${AUTH_HEADER}"], env: { RENDER_API_KEY: "test-token-9" } },
+    funkwhale: { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "http://fw.example" } },
+  }));
+  const { servers, unconfigured } = crowServerCatalog(home);
+  assert.ok(servers.render, `render unconfigured: ${unconfigured.render}`);
+  assert.equal(servers.render.env.AUTH_HEADER, "Bearer test-token-9");
+  assert.equal(servers.render.env.RENDER_API_KEY, "test-token-9");
+  assert.ok(servers.funkwhale, `funkwhale unconfigured: ${unconfigured.funkwhale}`);
+  assert.deepEqual(servers.funkwhale.env, { FUNKWHALE_URL: "http://fw.example", CROW_HOME: home });
+});
+
+test("proxy start: env sources first, then backends, then add-ons; a service add-on with no fields is skipped", async () => {
+  const proxy = await import("../servers/gateway/proxy.js");
+  const dir = mkdtempSync(join(tmpdir(), "services-wiring-"));
+  const home = join(dir, ".crow");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+    render: { command: "npx", args: ["-y", "mcp-remote"] },
+    funkwhale: { command: "node", args: ["server/index.js"] },
+  }));
+  const saved = { CROW_HOME: process.env.CROW_HOME, RENDER_API_KEY: process.env.RENDER_API_KEY };
+  const calls = [];
+  const source = { id: "github", name: "GitHub", command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], envVars: ["GITHUB_PERSONAL_ACCESS_TOKEN"], requires: [], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "test-token-10" } };
+  try {
+    process.env.CROW_HOME = home;
+    delete process.env.RENDER_API_KEY;
+    proxy._setProxyDepsForTest({
+      legacyEnvSources: () => { calls.push("legacyEnvSources"); return [source]; },
+      connectToServer: async (i) => { calls.push(`env:${i.id}`); assert.deepEqual(i.env, source.env); return null; },
+      loadDynamicBackends: async () => { calls.push("backends"); },
+      connectAddonServer: async (id) => { calls.push(`addon:${id}`); return null; },
+    });
+    await proxy.initProxyServers();
+    assert.deepEqual(calls, ["legacyEnvSources", "env:github", "backends", "addon:funkwhale"]);
+  } finally {
+    proxy._setProxyDepsForTest(null);
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});

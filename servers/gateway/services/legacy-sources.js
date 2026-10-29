@@ -116,6 +116,19 @@ export function isLegacyConfiguredAddon(id, entry, catalog = serviceCatalog(), e
 }
 
 /**
+ * The derived env (connect.derived_env) a service add-on's child needs, rendered
+ * from its fields as the child will see them: `entry.env` over `env` (the same
+ * precedence as the spawn). Empty for a non-service add-on.
+ *
+ * Deleted by PR 4 (Home migration); the google-workspace entry by PR 6.
+ */
+export function addonDerivedEnv(id, entryEnv, catalog = serviceCatalog(), env = process.env) {
+  const service = catalog.find((s) => s.id === id);
+  if (!service) return {};
+  return renderDerivedEnv(service, { ...env, ...(entryEnv || {}) });
+}
+
+/**
  * The Settings → Integrations cards, in the old getProxyStatus card shape
  * (without the live status fields getProxyStatus adds): every service, then
  * env-configured Google.

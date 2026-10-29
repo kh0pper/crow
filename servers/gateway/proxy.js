@@ -18,7 +18,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
-import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView } from "./services/legacy-sources.js";
+import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { createDbClient } from "../db.js";
 import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
@@ -169,9 +169,12 @@ async function connectToServer(integration) {
  * marks the one long-lived copy the gateway supervises, so an add-on can keep background work
  * (schedules, polling) out of the short-lived private copies that bots and other MCP clients start
  * from the same mcp-addons.json entry. Set last: an add-on's own env cannot claim or drop it.
+ * With an `id`, a service add-on also gets its manifest's derived env (e.g. Render's AUTH_HEADER),
+ * rendered from `config.env` over `base`.
  */
-export function addonStdioEnv(config = {}, base = process.env) {
-  return { ...base, ...(config.env || {}), CROW_ADDON_HOST: "gateway" };
+export function addonStdioEnv(config = {}, base = process.env, id = null) {
+  const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
+  return { ...base, ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
 }
 
 /**
@@ -225,7 +228,7 @@ async function connectAddonServer(id, config) {
     } else {
       // stdio (default, backward-compatible)
       const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
-      const env = addonStdioEnv(config);
+      const env = addonStdioEnv(config, process.env, id);
       remoteBotActor = remoteBotActorForCwd(cwd);
       // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
       // then the per-user install dirs systemd's PATH lacks.
@@ -354,6 +357,11 @@ function cleanupStaleAddonProcesses() {
   if (cleaned > 0) console.log(`  [proxy] Cleaned up ${cleaned} stale addon process(es)`);
 }
 
+// Test seam: a test swaps the spawn-side functions for fakes (never set in production).
+let _testDeps = null;
+export function _setProxyDepsForTest(deps) { _testDeps = deps || null; }
+function dep(name, real) { return (_testDeps && _testDeps[name]) || real; }
+
 /**
  * Create a combined McpServer that proxies tools from all connected external servers.
  * Call this once at gateway startup; it spawns all configured servers.
@@ -371,7 +379,7 @@ export async function initProxyServers() {
   cleanupStaleAddonProcesses();
 
   // Crow-wide sources configured through .env (deleted by PR 4, Home migration).
-  const configured = legacyEnvSources().filter((i) => {
+  const configured = dep("legacyEnvSources", legacyEnvSources)().filter((i) => {
     if (connectedServers.has(i.id)) return false;
     if (i.requires && i.requires.length > 0) {
       const hasBins = i.requires.every((bin) => {
@@ -391,7 +399,7 @@ export async function initProxyServers() {
     console.log("[proxy] No external integrations configured — /tools/mcp will have no tools.");
     // Still load dynamic backends and bundle-installed MCP addons — they don't
     // require external integrations to be configured.
-    await loadDynamicBackends();
+    await dep("loadDynamicBackends", loadDynamicBackends)();
     await loadAddonServers();
     return;
   }
@@ -400,7 +408,7 @@ export async function initProxyServers() {
 
   // Connect to all servers in parallel
   const results = await Promise.allSettled(
-    configured.map((integration) => connectToServer(integration))
+    configured.map((integration) => dep("connectToServer", connectToServer)(integration))
   );
 
   const successCount = results.filter(
@@ -410,7 +418,7 @@ export async function initProxyServers() {
   console.log(`[proxy] ${successCount}/${configured.length} server(s) connected.`);
 
   // Load dynamic backends from data_backends table
-  await loadDynamicBackends();
+  await dep("loadDynamicBackends", loadDynamicBackends)();
 
   // Load bundle-installed MCP servers from <crow-home>/mcp-addons.json
   await loadAddonServers();
@@ -448,7 +456,7 @@ async function loadAddonServers() {
       continue;
     }
     try {
-      await connectAddonServer(id, config);
+      await dep("connectAddonServer", connectAddonServer)(id, config);
     } catch (err) {
       console.warn(`  [proxy] addon ${id}: ${err.message}`);
     }
