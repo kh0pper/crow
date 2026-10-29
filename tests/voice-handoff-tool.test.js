@@ -448,3 +448,48 @@ test("modelAvailability: a role resolves, a key the catalogue lacks is unknown, 
   const odd = createModelAvailability({ entries: async () => [{ provider: "prov", id: "x" }], annotate: async (l) => l.map((m) => ({ ...m, availability: "maybe" })) });
   assert.equal(await odd(null, "prov/x"), "unknown");
 });
+
+// Fix round 1.
+const THIRD = { bot_id: "scribe", display_name: "Scribe", def: board({ description: "Takes notes" }) };
+
+test("a which keeps every valid option; the spoken line names the first two", async () => {
+  const s = setup({ bots: [WRITER, HELPER, THIRD], rounds: [call({ task: TASK, candidates: ["writer", "helper", "scribe"] })] });
+  await s.turn("could someone research radio history");
+  assert.deepEqual(s.h.calls.spoken, ["That could go to Writer or to Helper — which one?"]);
+  assert.deepEqual(s.pending.get("phone-1").options.map((o) => o.bot_id), ["writer", "helper", "scribe"]);
+});
+
+test("a new proposal takes a foreign pending entry (a routine confirm) and logs it", async () => {
+  const s = setup({ rounds: [call({ task: TASK, bot: "writer" })] });
+  s.pending.set("phone-1", { kind: "routine", call: { name: "crow_task_add" } });
+  await s.turn(ASK);
+  assert.equal(s.pending.get("phone-1").kind, "handoff");
+  assert.ok(s.h.calls.logs.some((m) => /phone-1: a pending routine question was dropped for a hand-off/.test(m)), s.h.calls.logs.join("\n"));
+});
+
+test("bad_args also retires the pending proposal", async () => {
+  const s = setup({ rounds: [call({ task: TASK, bot: "writer" }), call({ task: "" }, "h2"), says("What should I hand over?")] });
+  await s.turn(ASK);
+  await s.turn("no wait, have writer do something else");
+  assert.equal((await s.rows())[0].status, "expired");
+  assert.equal(s.pending.get("phone-1"), null);
+});
+
+test("assessBot counts the hand-off tool when asked (handoffs: true on a personal surface)", async () => {
+  const long = (i) => `Bot ${i} researches long topics in great depth and writes careful reports ${"x".repeat(200)}`;
+  const bots = Array.from({ length: HANDOFF_MAX_CANDIDATES }, (_, i) => ({ bot_id: `bot${i}`, display_name: `Bot ${i}`, def: board({ description: long(i) }) }));
+  const s = setup({ bots });
+  const system = "PERSONA:Crow";
+  const without = estimatePromptTokens([{ role: "system", content: system }], []);
+  let tight = 256;
+  while (without + turnReserveTokens(tight) > tight) tight++;
+  s.h.deps.contextLenFor = async () => tight;
+  const plain = await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID });
+  assert.equal(plain.level, "full", "fits without the tool");
+  const counted = await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID, handoffs: true, surface: "glasses" });
+  assert.notEqual(counted.level, "full", "the tool tips it over");
+  assert.ok(counted.est_tokens > plain.est_tokens);
+  // A kiosk (until PR 4), or hand-offs off, counts nothing.
+  assert.equal((await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID, handoffs: true, surface: "kiosk" })).level, "full");
+  assert.deepEqual(s.pending.get("voice-fit-check"), null, "the fit check leaves no pending entry");
+});

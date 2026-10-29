@@ -28,8 +28,6 @@ export const HANDOFF_TOOL_NAME = "crow_handoff";
 const OWN_KINDS = new Set(["handoff", "which"]);
 /** A bot id as the model may read it (the pi-bots BOT_ID_RE): anything else is never offered. */
 const SAFE_BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-/** A "which one?" names two bots: the spoken question has room for two. */
-const MAX_OPTIONS = 2;
 /** Where a spoken yes is the operator's (a dashboard tab speaks as "phone"); a kiosk joins in PR 4. */
 const PERSONAL_SURFACES = new Set(["phone", "glasses"]);
 
@@ -66,15 +64,19 @@ const langOf = (lang) => (lang === "es" ? "es" : "en");
 const done = (code, say) => ({ ok: true, final: true, effect: false, code, say });
 
 /**
- * The device's pending hand-off (or which) is replaced: its proposed row goes to expired, and the entry is
- * cleared. A correction ("no, give it to helper") is the model calling crow_handoff again, so this is how the
- * old row ends [rv1 S]. A failed expire is logged; the new proposal still goes ahead.
+ * Whatever the device was waiting on is no longer the question: a pending hand-off's proposed row goes to
+ * expired and the entry is taken. A correction ("no, give it to helper") is the model calling crow_handoff
+ * again, so this is how the old row ends [rv1 S]. Another kind's entry (a routine confirm, a which-calendar) is
+ * taken too, and logged, never silently overwritten. A failed expire is logged; the call still goes ahead.
  */
 async function retirePending(ctx) {
   const { core, pending, db, device } = ctx;
-  const prev = pending.get(device.id);
-  if (!prev || !OWN_KINDS.has(prev.kind)) return;
-  pending.clear(device.id);
+  const prev = pending.take(device.id);
+  if (!prev) return;
+  if (!OWN_KINDS.has(prev.kind)) {
+    (ctx.log || console.warn)(`[voice-handoff] ${device.id}: a pending ${prev.kind} question was dropped for a hand-off`);
+    return;
+  }
   if (prev.kind === "handoff" && prev.id) {
     try { await core.store.transition(db, prev.id, ["proposed"], "expired"); }
     catch (err) { (ctx.log || console.warn)(`[voice-handoff] could not expire ${prev.id} (${err?.message || err})`); }
@@ -114,7 +116,7 @@ export async function proposeHandoff(ctx, task, botId) {
 async function runHandoffCall(ctx, args) {
   const a = args && typeof args === "object" ? args : {};
   const task = cleanTask(a.task);
-  if (!task) return { ok: false, code: "bad_args" };
+  if (!task) { await retirePending(ctx); return { ok: false, code: "bad_args" }; }
   const ids = new Set(ctx.candidates.map((c) => c.bot_id));
   const bot = typeof a.bot === "string" ? a.bot.trim() : "";
   const botOk = ids.has(bot);
@@ -122,8 +124,7 @@ async function runHandoffCall(ctx, args) {
     .filter((x) => typeof x === "string").map((x) => x.trim()).filter((x) => ids.has(x) && x !== bot))];
   if (botOk && !others.length) return proposeHandoff(ctx, task, bot);
   const lang = langOf(ctx.lang);
-  const optionIds = [...(botOk ? [bot] : []), ...others].slice(0, MAX_OPTIONS);
-  // The model asked again: whatever this device was waiting on is no longer the question.
+  const optionIds = [...(botOk ? [bot] : []), ...others];
   await retirePending(ctx);
   if (!optionIds.length) return done("none", voiceLine("handoff_none", lang));
   const options = optionIds.map((id) => {
@@ -131,6 +132,7 @@ async function runHandoffCall(ctx, args) {
     return { bot_id: c.bot_id, name: c.name };
   });
   ctx.pending.set(ctx.device.id, { kind: "which", task, asked: typeof ctx.transcript === "string" ? ctx.transcript : null, options });
+  // The entry keeps every valid option; the spoken question names the first two.
   const say = options.length >= 2
     ? voiceLine("handoff_which", lang, { a: options[0].name, b: options[1].name })
     : voiceLine("handoff_which_one", lang, { a: options[0].name });
@@ -148,6 +150,7 @@ async function forTurn(core, ctx) {
   const { db, device, surface, bot, pending } = ctx || {};
   if (!db || !device?.id || !pending || !PERSONAL_SURFACES.has(surface)) return [];
   if (!normalizeVoiceSettings(bot).handoff.enabled) return [];
+  // Every voice turn runs this: it must stay cached-only (the summary cache; the probes below are not awaited).
   const candidates = (await core.summaries.get(db, bot)).filter((c) => SAFE_BOT_ID.test(c.bot_id));
   if (!candidates.length) return [];
   const names = [...new Set(candidates.flatMap((c) => [c.name, c.bot_id]))];
@@ -161,6 +164,7 @@ async function forTurn(core, ctx) {
   return [{
     definition: handoffToolDefinition(candidates),
     when,
+    agents: names,   // turn.js: "<one of these>'s on it" is a claim (action-claims.js)
     execute: async (args) => JSON.stringify(await runHandoffCall(call, args)),
   }];
 }
@@ -196,8 +200,7 @@ export function getHandoffCore() {
  *   afterTurn    a turn that left a pending hand-off or which unanswered (no crow_handoff call) takes it and
  *                expires its row; a routine or which_calendar entry is never touched
  */
-export function createHandoffVoiceActions({ core, pending, now = Date.now } = {}) {
-  void now;   // 3.8's confirm reads the clock
+export function createHandoffVoiceActions({ core, pending } = {}) {
   return {
     async fastPath() { return null; },
     turnContext({ device } = {}) {

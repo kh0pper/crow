@@ -326,14 +326,26 @@ export function createVoiceTurnRunner(deps) {
   /**
    * Bind-time check (Kiosk panel): would this bot's voice prompt fit its quick voice model?
    * Runs the turn's own tool filter and ladder. null = no such enabled bot.
+   * handoffs: true on a personal surface (`surface`: "phone" or "glasses"), so the voice bot's crow_handoff tool
+   * (handoff.js handoffToolDefinition, through deps.handoffs.forTurn) counts as the turn counts it.
+   * TODO(PR 4): the kiosk's fit (bundles/kiosk/server/runtime.js botFit) passes handoffs once the kiosk gets the hand-off.
    * → { level: "full" | "no_skills" | "too_large", ctx (null = unknown), est_tokens, est_no_skills_tokens, reserve_tokens, model }
    */
-  async function assessBot({ db, botId, memoryOn = false, extraTools, denyTools, promptSuffix }) {
+  async function assessBot({ db, botId, memoryOn = false, extraTools, denyTools, promptSuffix, handoffs = false, surface = "phone" }) {
     const bot = await loadBot(db, botId);
     if (!bot) return null;
     const { fastKey: key } = await voiceKeys(db, bot);
     const extra = Array.isArray(extraTools) ? extraTools : [];
     const tools = turnTools(bot, { memoryOn, extra, deny: turnDeny(denyTools, extra) });
+    if (handoffs === true && isVoiceBotDef(bot) && typeof deps.handoffs?.forTurn === "function") {
+      try {
+        // No transcript and a device no turn uses: the tool is built (cached reads only), never offered or run.
+        const got = await deps.handoffs.forTurn({ db, device: { id: "voice-fit-check" }, surface, lang: null, bot, transcript: "" });
+        for (const x of Array.isArray(got) ? got : []) {
+          if (x?.definition?.name && !tools.some((t) => t.name === x.definition.name)) tools.push(x.definition);
+        }
+      } catch (err) { (deps.log || console.log)(`[voice-turn] fit check: hand-off tool not counted (${err?.message || err})`); }
+    }
     const fit = await promptFit({ db, bot, tools, promptSuffix, key });
     return { level: fit.level, ctx: fit.ctx, est_tokens: fit.est, est_no_skills_tokens: fit.est_no_skills, reserve_tokens: fit.reserve, model: key };
   }
@@ -750,6 +762,8 @@ export function createVoiceTurnRunner(deps) {
         } catch (err) { log(`[voice-turn] ${device.id} hand-off tool not loaded (${err?.message || err})`); handoffExtra = []; }
       }
       const handoffNames = new Set(handoffExtra.map((x) => x.definition.name));
+      // The bots the hand-off tool could reach: a claim that one of them is "on it" is read as a claim (action-claims.js).
+      const claimOpts = { agents: handoffExtra.flatMap((x) => (Array.isArray(x.agents) ? x.agents.filter((n) => typeof n === "string") : [])) };
       // A display tool: an extra tool that is not the hand-off (the hand-off acts on a request; a display tool does not).
       const displayTool = (n) => extraByName.has(n) && !handoffNames.has(n);
       const extra = baseExtra.concat(handoffExtra);
@@ -1301,7 +1315,7 @@ export function createVoiceTurnRunner(deps) {
       const gateChunk = async (chunk) => {
         if (gateHit && holding()) { guardHeld += chunk; roundMuted += chunk.trim().length; return; }
         const sentence = gatePending + chunk;
-        if (!backed && (memoryBacked ? claimsBeyondMemory(sentence) : claimsAction(sentence))) {
+        if (!backed && (memoryBacked ? claimsBeyondMemory(sentence, claimOpts) : claimsAction(sentence, claimOpts))) {
           if (!gateHit) {
             gateHit = true;
             gateBlocked = sentence;
@@ -1342,7 +1356,7 @@ export function createVoiceTurnRunner(deps) {
       // gate) and nothing was done, on an add request with an own tool on offer and none called.
       const retryDue = () => addAsked && retryWanted().length > 0 && !ownCarriedOnly && !mustX && !holdEnd && !calendarFallback && !finalRound
         && !backed && !memoryBacked && !unsureBacked && !actionSent && !calledTools.some((n) => ownByName.has(n))
-        && (gateHit || (actionGuard && claimsAction(guardHeld.trim())));
+        && (gateHit || (actionGuard && claimsAction(guardHeld.trim(), claimOpts)));
       // The hint instead of the not-done line: the retry was due (it ran with no call, or could not run), or the claim was
       // about a change or a cancel, with an own tool on offer (Crow's own tools only add).
       // "I can only add new items by voice" is false while another write tool is on offer: then the not-done line.
@@ -1820,7 +1834,7 @@ export function createVoiceTurnRunner(deps) {
           // something (a preamble) is heard only when nothing else was said.
           const said = guardHeld.trim();
           let line = backed ? (spokenChars === 0 ? said : "") : said;
-          const claim = !backed && !!said && (memoryBacked ? claimsBeyondMemory(said) : claimsAction(said));
+          const claim = !backed && !!said && (memoryBacked ? claimsBeyondMemory(said, claimOpts) : claimsAction(said, claimOpts));
           if (gateHit) {
             // The sentence gate muted a claim. (i) a write backed it: the held text is released when nothing was heard
             // after it (an own write's success line ended the turn already); an own failure or a waiting question: the
@@ -1828,10 +1842,10 @@ export function createVoiceTurnRunner(deps) {
             // (the gate's own save, after the loop).
             if (ownFails.size > 0 || ownAsk) {
               if (ownFails.size > 0) timings.own_failed = true;
-              line = ownEndLine(said && !claimsAction(said) ? said : "");
+              line = ownEndLine(said && !claimsAction(said, claimOpts) ? said : "");
             } else if (!claim) line = gateAfter ? "" : said;
             else if (unsureBacked) line = String(opts.unsureText || UNSURE_TEXT);
-            else if (memoryBacked && claimsReminder(said)) line = String(opts.memoOnlyText || MEMO_ONLY_TEXT);
+            else if (memoryBacked && claimsReminder(said, claimOpts)) line = String(opts.memoOnlyText || MEMO_ONLY_TEXT);
             else if (hintDue()) line = hintLine();
             else {
               const recap = recapFor(gateBlocked);
@@ -1842,7 +1856,7 @@ export function createVoiceTurnRunner(deps) {
           } else if (ownFails.size > 0 || ownAsk) {
             // An own call failed, or a question waits for a yes (see the action guard above): held text that claims
             // nothing, the ok own calls' lines, the failure line (if any), then the question. Saved = heard.
-            const claimed = !!said && claimsAction(said);
+            const claimed = !!said && claimsAction(said, claimOpts);
             if (claimed) {
               timings.claim_blocked = true;
               log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action an own tool failed was replaced`);
@@ -1854,7 +1868,7 @@ export function createVoiceTurnRunner(deps) {
           } else if (claim) {
             // After an ok call to a tool of unknown effect the truth is "not sure", never "nothing was changed".
             line = String(unsureBacked ? (opts.unsureText || UNSURE_TEXT)
-              : memoryBacked && claimsReminder(said) ? (opts.memoOnlyText || MEMO_ONLY_TEXT)
+              : memoryBacked && claimsReminder(said, claimOpts) ? (opts.memoOnlyText || MEMO_ONLY_TEXT)
               : actionable.length === 0 ? (opts.cantDoText || CANT_DO_TEXT) : hintDue() ? hintLine() : (opts.notDoneText || NOT_DONE_TEXT));
             timings.claim_blocked = true;
             log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action no tool did was replaced`);
