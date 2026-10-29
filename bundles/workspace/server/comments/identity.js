@@ -40,13 +40,20 @@ export function peopleUidOf(uid, instanceId) {
   return s.length > p.length && s.startsWith(p) ? s.slice(p.length) : null;
 }
 
+// A paired instance's machine comment (actor.js authorFor, item 46): "<bot> (bot from <instance>)" or
+// "Crow (via <instance>)", the whole author, compared after normName.
+const REMOTE_BOT_RE = /^.+ \(bot from .+\)$/s;
+const VIA_PEER_RE = /^crow \(via .+\)$/s;
+
 /**
- * A bot's comment: "<name> (bot)" (actor.js authorFor), the bare "Crow" the gateway writes as authorFor(null), or a
- * people.xml uid of crow-bot. Over-matching only suppresses a verdict, so this errs towards "bot".
+ * A bot's comment: "<name> (bot)" (actor.js authorFor), the bare "Crow" the gateway writes as authorFor(null), a
+ * paired instance's "<bot> (bot from <instance>)" or "Crow (via <instance>)" (so the watcher never answers a peer's
+ * machine comment, and two instances' bots cannot loop), or a people.xml uid of crow-bot. Over-matching only
+ * suppresses a verdict, so this errs towards "bot".
  */
 export function isBotAuthor(author, peopleUid) {
   const n = normName(author);
-  if (n.endsWith(" (bot)") || n === "crow") return true;
+  if (n.endsWith(" (bot)") || n === "crow" || REMOTE_BOT_RE.test(n) || VIA_PEER_RE.test(n)) return true;
   const u = String(peopleUid ?? "");
   return u.endsWith("_crow-bot") || u === "crow-bot";
 }

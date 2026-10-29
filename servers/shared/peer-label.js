@@ -135,7 +135,7 @@ export function peerActorMeta(extra, { allowRemoteBot = false } = {}) {
   const from = auth.extra && typeof auth.extra.peerName === "string" ? auth.extra.peerName : "";
   const ra = auth.extra && auth.extra.remoteActor;
   if (allowRemoteBot && cid && ra && typeof ra === "object" && ra.kind === "bot" && ra.instanceId === cid
-    && typeof ra.id === "string" && ra.id && typeof ra.name === "string") {
+    && typeof ra.id === "string" && ra.id && typeof ra.name === "string" && ra.name) {
     const actor = { kind: "bot", id: `${ra.id}@${cid}`, name: ra.name, instance: cid };
     if (from) actor.from = from;
     return { _meta: { "crow/actor": actor } };

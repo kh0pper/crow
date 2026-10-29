@@ -184,14 +184,19 @@ test("remote bot actor reaches only an entry flagged remoteBotActor (/tools and 
   connectedServers.set("workspace", { client: metaClient("workspace"), tools: [{ name: "ws_tool", inputSchema: { type: "object" } }], status: "connected", isAddon: true, remoteBotActor: true });
   connectedServers.set("other", { client: metaClient("other"), tools: [{ name: "other_tool", inputSchema: { type: "object" } }], status: "connected", isAddon: true });
   const extra = { authInfo: { token: "peer-instance", clientId: "instance:inst-a-1", extra: { peerName: "alpha", remoteActor: { kind: "bot", id: "hank", name: "Hank", instanceId: "inst-a-1" } } } };
-  const tools = createProxyServer()._registeredTools;
-  const cb = (t) => tools[t].callback || tools[t].handler;
-  await cb("ws_tool")({}, extra);
-  await cb("other_tool")({}, extra);
-  const { createRouterServer } = await import("../servers/gateway/router.js");
-  const ct = createRouterServer()._registeredTools.crow_tools;
-  await (ct.callback || ct.handler)({ action: "ws_tool", params: {} }, extra);
-  await (ct.callback || ct.handler)({ action: "other_tool", params: {} }, extra);
+  try {
+    const tools = createProxyServer()._registeredTools;
+    const cb = (t) => tools[t].callback || tools[t].handler;
+    await cb("ws_tool")({}, extra);
+    await cb("other_tool")({}, extra);
+    const { createRouterServer } = await import("../servers/gateway/router.js");
+    const ct = createRouterServer()._registeredTools.crow_tools;
+    await (ct.callback || ct.handler)({ action: "ws_tool", params: {} }, extra);
+    await (ct.callback || ct.handler)({ action: "other_tool", params: {} }, extra);
+  } finally {
+    connectedServers.delete("workspace");
+    connectedServers.delete("other");
+  }
   assert.deepEqual(seen, [
     { label: "workspace", name: "ws_tool", kind: "bot", id: "hank@inst-a-1" },
     { label: "other", name: "other_tool", kind: "peer", id: undefined },

@@ -590,6 +590,15 @@ test("identity helpers: liveOwner rules (a)-(d), isBotAuthor, normName", async (
   assert.equal(I.isBotAuthor("admin", "ocinst_admin"), false);
   assert.equal(I.isBotAuthor(" Crow ", "ocinst_admin"), true, "the gateway's authorFor(null), whatever the uid");
   assert.equal(I.isBotAuthor("Crowley", null), false);
+  // Item 46 PR-B: a paired instance's machine comment is never answered (no bot-to-bot loops across instances).
+  assert.equal(I.isBotAuthor("Hank (bot from alpha)", "ocinst_admin"), true);
+  assert.equal(I.isBotAuthor(" HANK (BOT FROM alpha [1a2b3c4d]) ", null), true, "case-folded, trimmed");
+  assert.equal(I.isBotAuthor("Crow (via alpha)", "ocinst_admin"), true);
+  assert.equal(I.isBotAuthor("crow (VIA peer [1a2b3c4d])", null), true);
+  assert.equal(I.isBotAuthor("Crow (via )", null), false, "no instance name: not the gateway's label");
+  assert.equal(I.isBotAuthor("Hank (bot from )", null), false);
+  assert.equal(I.isBotAuthor("Crowbar (via alpha)", null), false);
+  assert.equal(I.isBotAuthor("my note (bot from x) later", null), false, "only the whole label counts");
   assert.equal(I.normName(" A\u0301dmin "), I.normName("\u00C1dmin"), "NFC: decomposed = composed");
   assert.equal(I.normName("  ADMIN "), "admin");
   assert.equal(I.historyOf({ date: "not a date", watchSince: 0, firstSighting: false }), "unknown");

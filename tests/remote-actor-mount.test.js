@@ -2,13 +2,15 @@
  * Item 46 PR-B: the receiving gateway's MCP mount verifies a peer gateway's signed remote actor.
  *
  * A real mountMcpServer on a loopback port, a tiny MCP server whose tool echoes extra.authInfo.extra, and a
- * scratch peer-tokens.json (mode 0600) in the suite's scratch CROW_HOME holding each peer's signing_key. The
+ * private peer-tokens.json (mode 0600, via CROW_PEER_TOKENS_PATH in its own temp dir, removed after) holding each
+ * peer's signing_key. The
  * peer identity is set by a stand-in for instanceAuthMiddleware (req.instanceAuth), as the bearer check would.
  * Every negative leg has a positive control in the same harness, and no failure ever refuses the call.
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, chmodSync } from "node:fs";
+import { writeFileSync, chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import express from "express";
@@ -18,7 +20,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { mountMcpServer } from "../servers/gateway/routes/mcp.js";
 import { SessionManager } from "../servers/gateway/session-manager.js";
 import { getOrCreateLocalInstanceId } from "../servers/gateway/instance-registry.js";
-import { resolveCrowHome } from "../servers/shared/crow-home.js";
 import {
   signRemoteActor, signingFetch, REMOTE_ACTOR_HEADER, REMOTE_ACTOR_SIG_HEADER,
   _resetRemoteActorNonces, _resetRemoteActorLog,
@@ -29,7 +30,7 @@ const CHARLIE = "inst-charlie-0003";
 const KEYS = { [ALPHA]: randomBytes(32).toString("hex"), [CHARLIE]: randomBytes(32).toString("hex") };
 const PEER_HEADER = "x-test-peer"; // test stand-in for the bearer: names which peer instanceAuth resolved
 
-let http, base, localId, sm;
+let http, base, localId, sm, tokensDir, savedTokensPath;
 
 function makeServer() {
   const s = new McpServer({ name: "echo", version: "0" });
@@ -42,7 +43,11 @@ function makeServer() {
 before(async () => {
   assert.ok(process.env.CROW_SUITE_SCRATCH, "runs only in the scratch suite env");
   const store = Object.fromEntries(Object.entries(KEYS).map(([id, k]) => [id, { signing_key: k }]));
-  const p = join(resolveCrowHome(), "peer-tokens.json");
+  // Never in the suite's shared scratch CROW_HOME: peer-tokens.json is resolved per call from this env.
+  tokensDir = mkdtempSync(join(tmpdir(), "remote-actor-mount-"));
+  savedTokensPath = process.env.CROW_PEER_TOKENS_PATH;
+  const p = join(tokensDir, "peer-tokens.json");
+  process.env.CROW_PEER_TOKENS_PATH = p;
   writeFileSync(p, JSON.stringify(store), { mode: 0o600 });
   chmodSync(p, 0o600);
   localId = getOrCreateLocalInstanceId();
@@ -64,6 +69,9 @@ after(async () => {
   await sm.closeAll().catch(() => {});
   http.closeAllConnections();
   await new Promise((r) => http.close(r));
+  if (savedTokensPath === undefined) delete process.env.CROW_PEER_TOKENS_PATH;
+  else process.env.CROW_PEER_TOKENS_PATH = savedTokensPath;
+  rmSync(tokensDir, { recursive: true, force: true });
 });
 beforeEach(() => { _resetRemoteActorNonces(); _resetRemoteActorLog(); });
 

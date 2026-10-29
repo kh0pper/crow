@@ -236,6 +236,7 @@ test("peerActorMeta bot branch: a remoteActor not for the bearer's instance, or 
   assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, kind: "peer" }) }, on), PEER_FORM);
   assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, id: "" }) }, on), PEER_FORM);
   assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, name: 5 }) }, on), PEER_FORM);
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, name: "" }) }, on), PEER_FORM, "an empty name is the peer form");
   assert.deepEqual(peerActorMeta({ authInfo: peerWith("hank") }, on), PEER_FORM);
   const noCid = { token: "peer-instance", extra: { peerName: "wren", remoteActor: RA } };
   assert.equal(peerActorMeta({ authInfo: noCid }, on)._meta["crow/actor"].kind, "peer", "no bearer instance: never a bot");
