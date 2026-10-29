@@ -464,6 +464,8 @@ test("a transform may change only appendSystemPromptFile, inside the scratch", a
     ["envHome", /process\.env\.CROW_HOME was changed/],
     ["envSet", /process\.env\.CROW_PI_SANDBOX was added/],
     ["envDelete", /process\.env\.CROW_GATEWAY_URL was removed/],
+    ["envProxy", /process\.env was replaced/],
+    ["envReplaced", /process\.env was replaced/],
   ];
   let n = 0;
   for (const [transform, re] of cases) {
@@ -536,6 +538,27 @@ test("checkEvalSpawnOpts: the re-review's bypasses are refused and the original 
   assert.deepEqual(run((o) => ({ ...o, appendSystemPromptFile: join(home, "x", "ok.md") })), { f: join(home, "x", "ok.md") });
   assert.deepEqual(run((o) => o), { f: "/base.md" });
   assert.throws(() => checkEvalSpawnOpts(mk(), cloneSpawnOpts(mk()), mk()), /no sealed home/, "the sealed home is required");
+});
+
+test("checkEnvUnchanged: a replaced or proxied process.env is refused before its contents are compared", async () => {
+  const { snapshotEnv, checkEnvUnchanged } = await import("../scripts/lib/eval-guard.mjs");
+  const real = process.env;
+  const attempt = (mutate) => {
+    const snap = snapshotEnv();
+    try { mutate(); checkEnvUnchanged(snap); return null; } catch (e) { return e.message; } finally { process.env = real; }
+  };
+  assert.equal(attempt(() => {}), null, "an untouched env passes");
+  // A stateful Proxy that shows the original view to every read: identity still catches it.
+  assert.equal(attempt(() => { process.env = new Proxy(real, {}); }), "eval spawn transform refused: process.env was replaced");
+  assert.equal(attempt(() => { process.env = { ...real }; }), "eval spawn transform refused: process.env was replaced", "even an identical copy");
+  assert.equal(attempt(() => { process.env = { ...real, CROW_PI_SANDBOX: "0" }; }), "eval spawn transform refused: process.env was replaced");
+  // A Proxy already in place when the snapshot was taken is refused too.
+  process.env = new Proxy(real, {});
+  try {
+    const snap = snapshotEnv();
+    assert.throws(() => checkEnvUnchanged(snap), /process\.env is a Proxy/);
+  } finally { process.env = real; }
+  assert.equal(process.env, real);
 });
 
 test("cloneSpawnOpts keeps an own __proto__ key, and a non-plain value is named in the refusal", async () => {

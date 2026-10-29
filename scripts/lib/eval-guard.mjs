@@ -67,7 +67,8 @@ export function assertEvalSeam() {
  *    appendSystemPromptFile (an absolute, normalized path strictly inside the home sealed at
  *    guard time); every other key must be unchanged in key set and value, and the spawn is built
  *    from the bridge's own untouched original;
- *  - process.env: snapshotted before the transform and compared after it, with no async gap
+ *  - process.env: its identity (never replaced, never a Proxy) and every key, snapshotted before
+ *    the transform and compared after it, with no async gap
  *    between that check and new PiRpc, which builds the spawn env from the live process.env.
  * Accepted residuals: functions in the options are shared by reference (a transform could set
  * properties on one), and the transform can see everything in the options, including secrets in
@@ -112,14 +113,24 @@ function holdsNonPlain(v, seen = new Set()) {
 }
 const nonPlainNote = (v) => (holdsNonPlain(v) ? " (it holds a non-plain value, such as a class instance, that the clone may not keep: refused even when unchanged)" : "");
 
-/** A shallow copy of every process.env key, taken before an eval-only transform runs. */
+/**
+ * Taken before an eval-only transform runs: the process.env object itself (its identity: in
+ * Node, process.env is assignable) and a shallow copy of every key.
+ */
 export function snapshotEnv() {
-  return { ...process.env };
+  return { ref: process.env, values: { ...process.env } };
 }
 
-/** Throws unless process.env has exactly the snapshot's keys and values. */
-export function checkEnvUnchanged(before) {
+/**
+ * Throws unless process.env is still the very same, non-Proxy object (a reassigned or proxied env
+ * could show the snapshot one view and the spawn another), with exactly the snapshot's keys and
+ * values.
+ */
+export function checkEnvUnchanged(snapshot) {
   const refuse = (rule) => { throw new Error(`eval spawn transform refused: ${rule}`); };
+  if (process.env !== snapshot.ref) refuse("process.env was replaced");
+  if (types.isProxy(process.env)) refuse("process.env is a Proxy");
+  const before = snapshot.values;
   const now = { ...process.env };
   for (const k of Object.keys(before)) {
     if (!Object.hasOwn(now, k)) refuse(`process.env.${k} was removed`);

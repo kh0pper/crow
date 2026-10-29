@@ -1264,7 +1264,8 @@ export async function handleInbound(opts) {
   // The eval-only spawn transform (guarded at the top of this function), right before pi. What
   // is checked: the options' key set and values (the transform works on a deep clone and the
   // bridge takes back ONE value, appendSystemPromptFile, an absolute path inside the home sealed
-  // at guard time), and process.env (unchanged across the transform). The spawn is built from the
+  // at guard time), and process.env (the same object, never a Proxy, every key unchanged across
+  // the transform). The spawn is built from the
   // bridge's own untouched original, and nothing async runs between the checks and new PiRpc,
   // which reads the live process.env.
   if (evalSeam !== null) {
