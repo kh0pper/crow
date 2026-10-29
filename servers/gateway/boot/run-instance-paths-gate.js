@@ -8,6 +8,8 @@
  * processes' /proc root/environ. Open-and-close probes only; nothing is read.
  * CROW_ISOLATION_CHECK=0 turns the line off.
  */
+// A satellite host (CROW_PROFILE=satellite) is refused (exit 78) before the .env or the gate.
+import "./satellite-profile-guard.js";
 import { runInstancePathsGate } from "./instance-paths-gate.js";
 import { isolationReport, formatIsolationLine, defaultSensitivePaths } from "../../shared/isolation-check.js";
 
