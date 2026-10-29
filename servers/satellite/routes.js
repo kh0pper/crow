@@ -2,7 +2,7 @@
  * The core signed management routes (SAT-3, spec §3.2, §3.3, §8), mounted on agent.js's signed
  * router (so every one has passed auth.js and answers through sendSigned):
  *
- *   GET  /satellite/v1/status   collectStatus (≤ 64 KiB)
+ *   GET  /satellite/v1/status   collectStatus (≤ 64 KiB), with tools: {<bundle>: {version, sha256}}
  *   POST /satellite/v1/cert     {cert} → renew or rotate (certs.js) → {ok, serial, expires_at, rotated}
  *   POST /satellite/v1/unpair   delete cert.json + pinned.json (vault, bundles, installed.json,
  *                               secrets and satellite.db stay), back to unpaired mode, a fresh
@@ -14,10 +14,10 @@ import { removePairingFiles } from "./keys.js";
 import { issuePairCode, pairCodeLines } from "./pairing.js";
 import { collectStatus } from "./status.js";
 
-export function registerCoreRoutes(router, { db, key, satHome, state, now, out, sendSigned, sha, statusReaders = {} }) {
+export function registerCoreRoutes(router, { db, key, satHome, state, now, out, sendSigned, sha, statusReaders = {}, toolsStatus = () => ({}) }) {
   router.get("/status", (_req, res) => {
     sendSigned(res, 200, collectStatus({
-      satelliteId: key.satellite_id, sha, cert: state.cert, installed: readInstalled(installedPath(satHome)), satHome, ...statusReaders,
+      satelliteId: key.satellite_id, sha, cert: state.cert, installed: readInstalled(installedPath(satHome)), tools: toolsStatus(), satHome, ...statusReaders,
     }));
   });
 

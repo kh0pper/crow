@@ -8,7 +8,8 @@
  *   paired:                           both pairing routes 409 {error:"already_paired"}
  *   /satellite/v1/* (not pair/*)      signed requests only (auth.js), signed JSON answers:
  *                                     GET status, POST cert, POST unpair (routes.js), bundle
- *                                     management + jobs (bundles.js), plus whatever
+ *                                     management + jobs (bundles.js), POST mcp/<bundle>
+ *                                     (mcp-host.js), POST update (update.js), plus whatever
  *                                     `signedRoutes` registers
  *
  * Never imports the dashboard, memory, sharing, router, init-db or crow.db.
@@ -22,8 +23,10 @@ import { createSatAuth } from "./auth.js";
 import { recoverStagedCert } from "./certs.js";
 import { registerCoreRoutes } from "./routes.js";
 import { registerBundleRoutes } from "./bundles.js";
+import { createMcpHost, registerMcpRoutes } from "./mcp-host.js";
 import { createScheduler } from "./scheduler.js";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -71,8 +74,11 @@ export function readAppSha(root = APP_ROOT) {
  * and MCP routes); ctx = {db, key, satHome, state, now, out, sendSigned}. `bundleDeps`: the
  * bundle manager's injectable runners and readers (composeRunner, dockerRunner, readText,
  * mcpPids, npmRunner, appBundlesDir); omitted, the real docker / compose / proc are used.
+ * `mcpOptions`: the MCP host's timings (idleMs, killGraceMs, ...; tests shorten them).
+ * The MCP host's running-child pids feed the install gate's current-use reader unless
+ * bundleDeps.mcpPids is given.
  */
-export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn, bundleDeps = {} }) {
+export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn, bundleDeps = {}, mcpOptions = {} }) {
   // A cert commit a crash interrupted is finished (or discarded) before anything reads the files.
   recoverStagedCert({ db, key, satHome, now });
   const state = { cert: readCert(satHome), pinned: readPinned(satHome) };
@@ -157,8 +163,14 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
   signed.use(express.raw({ type: () => true, limit: "1mb" }));
   signed.use(auth.verify);
   const ctx = { db, key, satHome, state, now, out, sendSigned: auth.sendSigned };
-  registerCoreRoutes(signed, { ...ctx, sha, statusReaders });
-  registerBundleRoutes(signed, { ...ctx, ...bundleDeps });
+  const readManifest = (id) => { try { return JSON.parse(readFileSync(join(satHome, "bundles", id, "manifest.json"), "utf8")); } catch { return null; } };
+  const mcpHost = createMcpHost({ db, satHome, readText: bundleDeps.readText, manifestFor: readManifest, ...mcpOptions });
+  registerCoreRoutes(signed, { ...ctx, sha, statusReaders, toolsStatus: mcpHost.toolsStatus });
+  registerBundleRoutes(signed, {
+    ...ctx, mcpPids: (id) => mcpHost.pids(id), ...bundleDeps,
+    toolCache: { refresh: (id, version) => mcpHost.refreshToolCache(id, version), remove: (id) => mcpHost.removeBundle(id) },
+  });
+  registerMcpRoutes(signed, { host: mcpHost, satHome, sendSigned: auth.sendSigned });
   for (const add of signedRoutes) add(signed, ctx);
   signed.use((_req, res) => auth.sendSigned(res, 404, { error: "not_found" }));
   app.use("/satellite/v1", signed);
@@ -177,20 +189,20 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     send(500, "internal");
   });
 
-  return { app, isPaired, state, refusals: auth.refusals };
+  return { app, isPaired, state, refusals: auth.refusals, mcpHost };
 }
 
 /**
  * Open state, build the app and listen. Guards are the caller's job (index.js).
  * → {server, host, port, app, db, key, home, satelliteId, isPaired, issuePairCode, close}.
  */
-export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog, bundleDeps } = {}) {
+export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog, bundleDeps, mcpOptions } = {}) {
   const satHome = resolveSatHome(env);
   const { host, port } = resolveBind(env);
   const db = openSatelliteDb(satHome);
   const key = ensureSatelliteKey(satHome, { now: now() });
-  const { app, isPaired, state, refusals } = createSatelliteApp({
-    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog, bundleDeps,
+  const { app, isPaired, state, refusals, mcpHost } = createSatelliteApp({
+    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog, bundleDeps, mcpOptions,
   });
   const server = await new Promise((ok, fail) => {
     const s = app.listen(port, host, () => ok(s));
@@ -199,16 +211,20 @@ export async function startAgent({ env = process.env, now = Date.now, out = cons
   const addr = server.address();
   const scheduler = createScheduler({ db, now, log: out, getCert: () => state.cert });
   scheduler.start();
+  // A bundle whose version changed (or whose cache is missing) gets its tool list re-cached.
+  const reconciled = mcpHost.reconcile().catch((err) => out(`satellite: tool cache reconcile failed: ${err?.message || err}`));
   let closed = false;
   return {
     server, app, db, key, home: satHome, host: addr.address, port: addr.port, satelliteId: key.satellite_id,
-    isPaired, scheduler, refusals,
+    isPaired, scheduler, refusals, mcpHost,
     issuePairCode: () => issuePairCode(db, { now: now() }),
     async close() {
       if (closed) return;
       closed = true;
       scheduler.stop();
       refusals.flush();
+      await mcpHost.stopAll();
+      await reconciled;
       server.closeAllConnections?.();
       await new Promise((r) => server.close(() => r()));
       db.close();
