@@ -346,6 +346,17 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[models] Failed to mount:", err.message);
   }
 
+  // --- Mount project Services API (project services Task 9) ---
+  // Same JSON session gate as the model catalog API, CSRF on every POST, 404
+  // while CROW_SERVICES_UI is off. Never Funnel-public.
+  try {
+    const { default: servicesApiRouter } = await import("../routes/services-api.js");
+    app.use(servicesApiRouter());
+    console.log("Services API mounted at /dashboard/services/api");
+  } catch (err) {
+    console.warn("[services-api] Failed to mount:", err.message);
+  }
+
   // --- Mount Roles API (roles Phase 2, the Models page) ---
   // Same JSON session gate as the model catalog API, plus CSRF on every POST
   // (routes/roles-api.js). Never Funnel-public.

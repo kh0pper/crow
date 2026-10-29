@@ -383,6 +383,47 @@ test("dashboardAuth refuses an unauthenticated /dashboard/perch-api/interactive 
   assert.equal(noSession.redirected, "/dashboard/login");
 });
 
+// Project services Task 9: the Services JSON API is dashboard-only.
+test("rejectFunneled middleware: the Services API is never funnel-exposed", async () => {
+  const paths = ["/dashboard/services/api/project/home", "/dashboard/services/api/project/home/connect",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/test",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect"];
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+});
+
+test("the Services API's own gate: Funnel and off-network refused, no session 401, the handler never runs", async () => {
+  const { servicesApiRouter } = await import("../servers/gateway/routes/services-api.js");
+  let opened = 0;
+  const app = express();
+  app.use(servicesApiRouter({ uiEnabled: () => true, dbFactory: () => { opened++; throw new Error("handler reached"); } }));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  try {
+    const port = server.address().port;
+    const funnel = await request(port, "/dashboard/services/api/project/home", { "tailscale-funnel-request": "?1" });
+    assert.equal(funnel.status, 403);
+    const offNet = await request(port, "/dashboard/services/api/project/home");
+    assert.equal(offNet.status, 403, "bare loopback, no tailnet identity");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let noSession;
+    try { noSession = await request(port, "/dashboard/services/api/project/home"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(noSession.status, 401);
+    assert.equal(opened, 0, "no request reached a handler");
+  } finally {
+    server.close();
+  }
+});
+
 test("auth-network: /dashboard/project/x needs a session", async () => {
   // The REAL dashboard router: the project home sits behind dashboardAuth like
   // every panel page. Off-network is refused; on-network without a session is
