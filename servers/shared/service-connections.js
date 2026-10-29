@@ -43,7 +43,30 @@ const AUDIT_ACTORS = new Set(["local", "contact", "bot", "system"]);
 const COLS = `id, uuid, project_id, owner_contact_id, service_id, bundle_id, method, account_label, label_slug,
   config, status, source_connection_id, last_tested_at, last_error, created_at, updated_at`;
 
-const iso = (v) => (v instanceof Date ? v.toISOString() : typeof v === "string" && v ? v : new Date().toISOString());
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+const VALUE_MAX = 4096;
+const CONTROL_RE = /\p{Cc}/u;
+
+/** A timestamp as ISO text: undefined/null → now; a valid Date or ISO 8601 string → normalised; else bad_value. */
+function iso(v) {
+  if (v == null) return new Date().toISOString();
+  const d = v instanceof Date ? v : typeof v === "string" && ISO_RE.test(v) ? new Date(v) : null;
+  if (!d || Number.isNaN(d.getTime())) throw new ConnectionError("bad_value");
+  return d.toISOString();
+}
+
+/** Task 9's field rule, enforced here too (the store is the only writer): trimmed, ≤ 4096 chars, no control characters. */
+function cleanValue(v) {
+  if (typeof v !== "string") throw new ConnectionError("bad_value");
+  const t = v.trim();
+  if (t === "") throw new ConnectionError("missing_field");
+  if (t.length > VALUE_MAX || CONTROL_RE.test(t)) throw new ConnectionError("bad_value");
+  return t;
+}
+
+const toSet = (names) => (names instanceof Set ? names : new Set(names || []));
+/** Archived projects never surface: their connections are not served, listed or counted. */
+const NOT_ARCHIVED = "project_id IN (SELECT id FROM project_spaces WHERE status != 'archived' AND archived_at IS NULL)";
 const num = (v) => (v == null ? null : Number(v));
 
 function parseConfig(text) {
@@ -120,8 +143,8 @@ function requireLabel(accountLabel) {
  * connection in the project already has that block name. Task 9 calls it before the live test
  * (M5), so a credential never leaves Crow for a name that cannot be saved. The slug index is still
  * the final word under concurrency (createConnection maps its UNIQUE error).
- * @param {{projectId:number, serviceId:string, accountLabel:string, reservedNames?:Set<string>}} p
- *   reservedNames: from RESERVED_BLOCK_NAMES (never read from ~/.pi here)
+ * @param {{projectId:number, serviceId:string, accountLabel:string, reservedNames?:Set<string>|string[]}} p
+ *   reservedNames: from RESERVED_BLOCK_NAMES (never read from ~/.pi here); a Set or an array
  */
 export async function checkLabelFree(db, { projectId, serviceId, accountLabel, reservedNames = new Set() } = {}) {
   requireProjectId(projectId);
@@ -129,7 +152,7 @@ export async function checkLabelFree(db, { projectId, serviceId, accountLabel, r
   const label = requireLabel(accountLabel);
   const slug = labelSlug(label);
   const block = blockNameFor(serviceId, label);
-  if (reservedNames && reservedNames.has(block)) throw new ConnectionError("label_taken");
+  if (toSet(reservedNames).has(block)) throw new ConnectionError("label_taken");
   const { rows } = await db.execute({
     sql: `SELECT service_id, label_slug FROM service_connections
           WHERE project_id = ? AND owner_contact_id IS NULL AND ${LIVE}`,
@@ -147,6 +170,9 @@ function isSlugConflict(err) {
   return /UNIQUE constraint failed/i.test(msg) && /idx_service_connections_slug|label_slug/.test(msg);
 }
 
+// Strict: every declared field is required, secrets only in `secret` fields, config only in the
+// others. An oauth service (roadmap) keeps tokens that are not declared fields; it will need its
+// own path here.
 function splitValues(service, config, secrets) {
   if (config == null) config = {};
   if (secrets == null) secrets = {};
@@ -154,41 +180,51 @@ function splitValues(service, config, secrets) {
     throw new ConnectionError("bad_value");
   }
   const kinds = new Map(service.fields.map((f) => [f.name, f.kind]));
-  for (const [k, v] of Object.entries(config)) {
-    if (!kinds.has(k) || kinds.get(k) === "secret" || typeof v !== "string") throw new ConnectionError("bad_value");
+  for (const k of Object.keys(config)) {
+    if (!kinds.has(k) || kinds.get(k) === "secret") throw new ConnectionError("bad_value");
   }
-  for (const [k, v] of Object.entries(secrets)) {
-    if (kinds.get(k) !== "secret" || typeof v !== "string") throw new ConnectionError("bad_value");
+  for (const k of Object.keys(secrets)) {
+    if (kinds.get(k) !== "secret") throw new ConnectionError("bad_value");
   }
+  const out = { config: {}, secrets: {} };
   for (const [name, kind] of kinds) {
-    const v = kind === "secret" ? secrets[name] : config[name];
-    if (typeof v !== "string" || v.trim() === "") throw new ConnectionError("missing_field");
+    const src = kind === "secret" ? secrets : config;
+    if (!Object.hasOwn(src, name)) throw new ConnectionError("missing_field");
+    out[kind === "secret" ? "secrets" : "config"][name] = cleanValue(src[name]);
   }
-  return { config, secrets };
+  return out;
 }
 
 /**
  * Creates one connection. Order (M8): insert with status 'error' / last_error
- * 'child_unavailable', save every secret, then flip to 'active'. A failure in between leaves an
- * 'error' row (shown as Not working, removable by Disconnect), never an active row without its
- * secrets. Two concurrent creates whose labels share a slug ("Work" / "work!") cannot both pass:
- * the slug index refuses the second insert, mapped to label_taken.
+ * 'child_unavailable', save every secret, then flip to 'active'. If anything throws after the
+ * insert, best-effort cleanup deletes that uuid's secrets, then its (still non-active) row, then
+ * the ORIGINAL error is rethrown (cleanup errors are swallowed, never logged). A crash between the
+ * steps leaves at worst an 'error' row, never an active row without its secrets. No transaction:
+ * the shared client would capture unrelated concurrent writes. Two concurrent creates whose labels
+ * share a slug ("Work" / "work!") cannot both pass: the slug index refuses the second insert,
+ * mapped to label_taken.
  *
- * `saveServiceSecret` is injectable for tests only. `registry` is passed to serviceById (tests).
+ * Test seams (tests only; production callers must not pass them): `saveServiceSecret`,
+ * `deleteServiceSecrets`, `_registryForTest` (handed to serviceById, so it can invent a service).
  * A KeychainKeyMissingError from the keychain is thrown unchanged (checked before the insert).
  * @returns {Promise<Connection>} never a secret
  */
 export async function createConnection(
   db,
   { projectId, ownerContactId = null, serviceId, accountLabel, config = {}, secrets = {}, testedAt = null, sourceConnectionId = null } = {},
-  { key, actor = "local", reservedNames = new Set(), saveServiceSecret = defaultSaveServiceSecret, registry } = {},
+  {
+    key, actor = "local", reservedNames = new Set(),
+    saveServiceSecret = defaultSaveServiceSecret, deleteServiceSecrets = defaultDeleteServiceSecrets, _registryForTest,
+  } = {},
 ) {
-  const service = typeof serviceId === "string" && serviceId ? serviceById(serviceId, registry ? { registry } : undefined) : null;
+  const service = typeof serviceId === "string" && serviceId ? serviceById(serviceId, _registryForTest ? { registry: _registryForTest } : undefined) : null;
   if (!service || service.crowWide) throw new ConnectionError("unknown_service");
   // Local user only (spec §6.6): nothing creates a contact-owned row yet.
   if (ownerContactId != null) throw new ConnectionError("bad_value");
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
   if (sourceConnectionId != null && !Number.isInteger(sourceConnectionId)) throw new ConnectionError("bad_value");
+  const testedText = testedAt == null ? null : iso(testedAt);
   await requireLiveProject(db, projectId);
   const label = requireLabel(accountLabel);
   const values = splitValues(service, config, secrets);
@@ -213,23 +249,37 @@ export async function createConnection(
     throw err;
   }
 
-  for (const [envKey, secret] of secretEntries) {
-    await saveServiceSecret(db, key, {
-      connectionUuid: uuid,
-      bundleId: service.bundleId,
-      envKey,
-      label: `${service.name} — ${label} — ${envKey}`,
-      secret,
+  try {
+    for (const [envKey, secret] of secretEntries) {
+      await saveServiceSecret(db, key, {
+        connectionUuid: uuid,
+        bundleId: service.bundleId,
+        envKey,
+        label: `${service.name} — ${label} — ${envKey}`,
+        secret,
+      });
+    }
+    await db.execute({
+      sql: `UPDATE service_connections SET status = 'active', last_error = NULL, last_tested_at = ?, updated_at = datetime('now')
+            WHERE uuid = ?`,
+      args: [testedText, uuid],
     });
+  } catch (err) {
+    await undoCreate(db, uuid, deleteServiceSecrets);
+    throw err;
   }
-
-  await db.execute({
-    sql: `UPDATE service_connections SET status = 'active', last_error = NULL, last_tested_at = ?, updated_at = datetime('now')
-          WHERE uuid = ?`,
-    args: [testedAt == null ? null : iso(testedAt), uuid],
-  });
   await appendAudit(db, { project_id: projectId, actor_type: actor, action: "service.connect", target: uuid, payload: { service_id: service.id } });
   return getConnection(db, uuid);
+}
+
+// Best-effort, silent: only a row that never went active is removed, secrets first.
+async function undoCreate(db, uuid, deleteServiceSecrets) {
+  try {
+    const r = (await db.execute({ sql: "SELECT status FROM service_connections WHERE uuid = ?", args: [uuid] })).rows[0];
+    if (r && r.status === "active") return;
+    await deleteServiceSecrets(db, uuid);
+    await db.execute({ sql: "DELETE FROM service_connections WHERE uuid = ? AND status != 'active'", args: [uuid] });
+  } catch { /* the original error wins; never log */ }
 }
 
 /** @returns {Promise<Connection|null>} */
@@ -241,9 +291,10 @@ export async function getConnection(db, uuid) {
 
 /**
  * Connections for a dashboard view. `ownerContactId`: undefined = any owner, null = the local
- * user only. Disconnected rows only with includeDisconnected.
+ * user only. Disconnected rows only with includeDisconnected; archived projects' rows only with
+ * includeArchivedProjects.
  */
-export async function listConnections(db, { projectId, ownerContactId, serviceId, includeDisconnected = false } = {}) {
+export async function listConnections(db, { projectId, ownerContactId, serviceId, includeDisconnected = false, includeArchivedProjects = false } = {}) {
   const where = [];
   const args = [];
   if (projectId !== undefined) { where.push("project_id = ?"); args.push(projectId); }
@@ -251,6 +302,7 @@ export async function listConnections(db, { projectId, ownerContactId, serviceId
   else if (ownerContactId !== undefined) { where.push("owner_contact_id = ?"); args.push(ownerContactId); }
   if (serviceId != null) { where.push("service_id = ?"); args.push(serviceId); }
   if (!includeDisconnected) where.push(LIVE);
+  if (!includeArchivedProjects) where.push(NOT_ARCHIVED);
   const { rows } = await db.execute({
     sql: `SELECT ${COLS} FROM service_connections ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY service_id, label_slug, id`,
     args,
@@ -260,12 +312,14 @@ export async function listConnections(db, { projectId, ownerContactId, serviceId
 
 /**
  * The active connections a turn in `projectId` may use. `owner` null = the local user (the only
- * owner in this release). `projectId == null` (a chat or job outside any project) → [].
+ * owner in this release). `projectId == null` (a chat or job outside any project) → []. An
+ * archived project serves nothing unless includeArchivedProjects.
  */
-export async function connectionsFor(db, { projectId, owner = null, serviceId = null } = {}) {
+export async function connectionsFor(db, { projectId, owner = null, serviceId = null, includeArchivedProjects = false } = {}) {
   if (projectId == null) return [];
   const args = [projectId];
   let sql = `SELECT ${COLS} FROM service_connections WHERE project_id = ? AND status = 'active'`;
+  if (!includeArchivedProjects) sql += ` AND ${NOT_ARCHIVED}`;
   if (owner == null) sql += " AND owner_contact_id IS NULL";
   else { sql += " AND owner_contact_id = ?"; args.push(owner); }
   if (serviceId != null) { sql += " AND service_id = ?"; args.push(serviceId); }
@@ -273,11 +327,11 @@ export async function connectionsFor(db, { projectId, owner = null, serviceId = 
   return rows.map(toConnection);
 }
 
-/** Service ids connected (not disconnected) in any OTHER project, for "Also on your Crow". */
+/** Service ids connected (not disconnected) in any OTHER non-archived project, for "Also on your Crow". */
 export async function otherProjectServiceIds(db, projectId) {
   const { rows } = await db.execute({
     sql: `SELECT DISTINCT service_id FROM service_connections
-          WHERE project_id != ? AND owner_contact_id IS NULL AND ${LIVE} ORDER BY service_id`,
+          WHERE project_id != ? AND owner_contact_id IS NULL AND ${LIVE} AND ${NOT_ARCHIVED} ORDER BY service_id`,
     args: [projectId ?? -1],
   });
   return rows.map((r) => r.service_id);
@@ -311,41 +365,48 @@ export async function recordChildFailure(db, uuid) {
 }
 
 /**
- * Disconnects: the row goes 'disconnected' first (so it is never active without secrets), then
- * its keychain secrets are deleted, then the audit row. Unknown uuid → not_found.
- * `deleteServiceSecrets` is injectable for tests only.
+ * Disconnects: the keychain secrets are deleted first (if that throws, the row is untouched and a
+ * retry starts over), then the row goes 'disconnected', then the audit row. Safe to repeat: an
+ * already-disconnected uuid re-deletes any leftover secrets and writes no second audit row.
+ * Unknown uuid → not_found. `deleteServiceSecrets` is a test seam (tests only).
  */
 export async function disconnectConnection(db, uuid, { actor = "local", deleteServiceSecrets = defaultDeleteServiceSecrets } = {}) {
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
   const conn = await getConnection(db, uuid);
   if (!conn) throw new ConnectionError("not_found");
-  const wasLive = conn.status !== "disconnected";
-  await db.execute({
-    sql: "UPDATE service_connections SET status = 'disconnected', updated_at = datetime('now') WHERE uuid = ?",
-    args: [uuid],
-  });
   await deleteServiceSecrets(db, uuid);
-  if (wasLive) {
+  if (conn.status !== "disconnected") {
+    await db.execute({
+      sql: "UPDATE service_connections SET status = 'disconnected', updated_at = datetime('now') WHERE uuid = ?",
+      args: [uuid],
+    });
     await appendAudit(db, { project_id: conn.projectId, actor_type: actor, action: "service.disconnect", target: uuid, payload: { service_id: conn.serviceId } });
   }
   return getConnection(db, uuid);
 }
 
 /**
- * Uninstall of `bundleId`: its active and error connections become needs_install (last_error
- * kept, so a reinstall restores each to what it was). Returns the projects affected.
+ * Uninstall of `bundleId`: its active, error and needs_reauth connections become needs_install
+ * (last_error kept, so a reinstall restores each to active or error). A needs_reauth row with no
+ * last_error gets 'auth_failed', so it comes back as error (Not working) and a fresh test decides.
+ * Reports the projects of the rows this UPDATE actually changed (RETURNING), so a row that changes
+ * state concurrently is never reported without being marked, or marked without being reported.
  * @returns {Promise<Array<{projectId:number, slug:string, name:string}>>}
  */
 export async function markConnectionsNeedInstall(db, bundleId) {
   if (typeof bundleId !== "string" || !bundleId) return [];
-  const { rows } = await db.execute({
-    sql: `SELECT DISTINCT p.id, p.slug, p.name FROM service_connections c JOIN project_spaces p ON p.id = c.project_id
-          WHERE c.bundle_id = ? AND c.status IN ('active', 'error') ORDER BY p.slug`,
+  const changed = await db.execute({
+    sql: `UPDATE service_connections SET status = 'needs_install',
+            last_error = CASE WHEN status = 'needs_reauth' AND last_error IS NULL THEN 'auth_failed' ELSE last_error END,
+            updated_at = datetime('now')
+          WHERE bundle_id = ? AND status IN ('active', 'error', 'needs_reauth') RETURNING project_id`,
     args: [bundleId],
   });
-  await db.execute({
-    sql: "UPDATE service_connections SET status = 'needs_install', updated_at = datetime('now') WHERE bundle_id = ? AND status IN ('active', 'error')",
-    args: [bundleId],
+  const ids = [...new Set(changed.rows.map((r) => Number(r.project_id)))];
+  if (ids.length === 0) return [];
+  const { rows } = await db.execute({
+    sql: `SELECT id, slug, name FROM project_spaces WHERE id IN (${ids.map(() => "?").join(", ")}) ORDER BY slug`,
+    args: ids,
   });
   return rows.map((r) => ({ projectId: Number(r.id), slug: r.slug, name: r.name }));
 }

@@ -162,12 +162,15 @@ test("reserved name: a label whose block name is a reserved Crow server name is 
   assert.deepEqual([...reserved].sort(), ["brave-search", "crow-memory", "google-workspace", "google-workspace-alex"]);
   await rejectsWith(S.checkLabelFree(ctx.db, { projectId: ctx.ids.home, serviceId: "google-workspace", accountLabel: "alex", reservedNames: reserved }), "label_taken");
   await rejectsWith(
-    S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "google-workspace", accountLabel: "Alex", secrets: { GW_TOKEN: TOKEN_1 } }, { key: ctx.key, reservedNames: reserved, registry: list }),
+    S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "google-workspace", accountLabel: "Alex", secrets: { GW_TOKEN: TOKEN_1 } }, { key: ctx.key, reservedNames: reserved, _registryForTest: list }),
     "label_taken",
   );
-  const ok = await S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "google-workspace", accountLabel: "Work", secrets: { GW_TOKEN: TOKEN_1 } }, { key: ctx.key, reservedNames: reserved, registry: list });
+  const ok = await S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "google-workspace", accountLabel: "Work", secrets: { GW_TOKEN: TOKEN_1 } }, { key: ctx.key, reservedNames: reserved, _registryForTest: list });
   assert.equal(ok.blockName, "google-workspace-work");
   assert.deepEqual(S.RESERVED_BLOCK_NAMES(), new Set());
+  // An array works as well as a Set.
+  await rejectsWith(S.checkLabelFree(ctx.db, { projectId: ctx.ids.home, serviceId: "google-workspace", accountLabel: "alex", reservedNames: ["google-workspace-alex"] }), "label_taken");
+  await S.checkLabelFree(ctx.db, { projectId: ctx.ids.home, serviceId: "github", accountLabel: "alex", reservedNames: null });
 });
 
 test("two accounts one service", async () => {
@@ -189,25 +192,81 @@ test("archived project refused", async () => {
   assert.equal((await rowsOf(ctx.db)).length, 0);
 });
 
-test("not active until secrets saved (M8): a throwing saveServiceSecret leaves an error row", async () => {
+test("not active until secrets saved (M8): a throwing saveServiceSecret is cleaned up, the retry succeeds", async () => {
   const ctx = await fresh();
   let calls = 0;
   const failing = async () => { calls++; throw new Error("disk full"); };
-  await assert.rejects(gh(ctx, "Main", {}, { saveServiceSecret: failing }), /disk full/);
+  await assert.rejects(gh(ctx, "Main", {}, { saveServiceSecret: failing }), /disk full/, "the original error is rethrown");
   assert.equal(calls, 1);
-  const rows = await rowsOf(ctx.db);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].status, "error");
-  assert.equal(rows[0].last_error, "child_unavailable");
+  assert.equal((await rowsOf(ctx.db)).length, 0, "the row is removed");
   assert.deepEqual(await S.connectionsFor(ctx.db, { projectId: ctx.ids.spring }), []);
-  // The stub sees the row in 'error' when it runs (the insert came first).
+  const retry = await gh(ctx, "Main");
+  assert.equal(retry.status, "active");
+  // The stub sees the row in 'error' while it runs (the insert came first).
   let seen;
   const peek = async (db, _key, { connectionUuid }) => { seen = (await S.getConnection(db, connectionUuid)).status; throw new Error("stop"); };
   await assert.rejects(gh(ctx, "Other", {}, { saveServiceSecret: peek }), /stop/);
   assert.equal(seen, "error");
   // No key: refused before anything is written.
   await assert.rejects(gh(ctx, "Third", {}, { key: null }), (e) => e.code === "KEYCHAIN_KEY_MISSING");
-  assert.equal((await rowsOf(ctx.db)).length, 2);
+  assert.equal((await rowsOf(ctx.db)).length, 1);
+});
+
+test("a two-secret service whose second save fails leaves no secret behind", async () => {
+  const ctx = await fresh();
+  let n = 0;
+  let uuid;
+  const secondFails = async (db, key, args) => {
+    uuid = args.connectionUuid;
+    if (++n === 2) throw new Error("second failed");
+    return K.saveServiceSecret(db, key, args);
+  };
+  await assert.rejects(
+    S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "trello", accountLabel: "Board", secrets: { TRELLO_API_KEY: TOKEN_1, TRELLO_TOKEN: TOKEN_2 } }, { key: ctx.key, saveServiceSecret: secondFails }),
+    /second failed/,
+  );
+  assert.equal(n, 2);
+  assert.equal((await K.serviceSecretKeys(ctx.db, uuid)).size, 0);
+  assert.equal((await rowsOf(ctx.db, "SELECT * FROM crow_keychain WHERE kind = 'service'")).length, 0);
+  assert.equal((await rowsOf(ctx.db)).length, 0);
+  const ok = await S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "trello", accountLabel: "Board", secrets: { TRELLO_API_KEY: TOKEN_1, TRELLO_TOKEN: TOKEN_2 } }, { key: ctx.key });
+  assert.equal((await K.serviceSecretKeys(ctx.db, ok.uuid)).size, 2);
+});
+
+test("a crash between the steps (cleanup fails too) still leaves a non-active row", async () => {
+  const ctx = await fresh();
+  // The process "dies" after the insert: the secret save throws and every later write fails.
+  let dead = false;
+  const db = { execute: (q) => (dead && /^\s*(DELETE|UPDATE)/.test(typeof q === "string" ? q : q.sql) ? Promise.reject(new Error("crashed")) : ctx.db.execute(q)) };
+  const crash = async () => { dead = true; throw new Error("boom"); };
+  const dels = async () => { throw new Error("crashed"); };
+  await assert.rejects(S.createConnection(db, { projectId: ctx.ids.spring, serviceId: "github", accountLabel: "Main", secrets: { [GH]: TOKEN_1 } }, { key: ctx.key, saveServiceSecret: crash, deleteServiceSecrets: dels }), /boom/, "the original error wins over cleanup errors");
+  const rows = await rowsOf(ctx.db);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "error");
+  assert.equal(rows[0].last_error, "child_unavailable");
+  assert.deepEqual(await S.connectionsFor(ctx.db, { projectId: ctx.ids.spring }), []);
+});
+
+test("values: trimmed, at most 4096 characters, no control characters; timestamps must be ISO", async () => {
+  const ctx = await fresh();
+  const z = (cfg, sec, label = "L") => S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "zotero", accountLabel: label, config: cfg, secrets: sec }, { key: ctx.key });
+  const ok = await z({ ZOTERO_USER_ID: "  12345  " }, { ZOTERO_API_KEY: ` ${TOKEN_1}\n` });
+  assert.deepEqual(ok.config, { ZOTERO_USER_ID: "12345" });
+  assert.equal((await K.serviceSecretsFor(ctx.db, ctx.key, ok.uuid, { allowedKeys: ["ZOTERO_API_KEY"] })).ZOTERO_API_KEY, TOKEN_1);
+  await rejectsWith(z({ ZOTERO_USER_ID: "1" }, { ZOTERO_API_KEY: "x".repeat(4097) }, "B"), "bad_value");
+  await z({ ZOTERO_USER_ID: "1" }, { ZOTERO_API_KEY: "x".repeat(4096) }, "C");
+  await rejectsWith(z({ ZOTERO_USER_ID: "1\u0007" }, { ZOTERO_API_KEY: TOKEN_1 }, "D"), "bad_value");
+  await rejectsWith(z({ ZOTERO_USER_ID: "1" }, { ZOTERO_API_KEY: "ab\tcd" }, "E"), "bad_value");
+  await rejectsWith(z({ ZOTERO_USER_ID: 7 }, { ZOTERO_API_KEY: TOKEN_1 }, "F"), "bad_value");
+  await rejectsWith(z({ ZOTERO_USER_ID: "   " }, { ZOTERO_API_KEY: TOKEN_1 }, "G"), "missing_field");
+  await rejectsWith(gh(ctx, "T1", { testedAt: "garbage" }), "bad_value");
+  await rejectsWith(gh(ctx, "T2", { testedAt: "2026-10-02" }), "bad_value");
+  const t = await gh(ctx, "T3", { testedAt: "2026-10-02T01:02:03+02:00" });
+  assert.equal(t.lastTestedAt, "2026-10-01T23:02:03.000Z");
+  await rejectsWith(S.recordTest(ctx.db, t.uuid, { ok: true, now: "yesterday" }), "bad_value");
+  await rejectsWith(S.recordTest(ctx.db, t.uuid, { ok: true, now: new Date("nope") }), "bad_value");
+  assert.equal((await rowsOf(ctx.db)).length, 3, "refusals write nothing");
 });
 
 test("null owner: contact-owned rows are refused on create and never served to bots", async () => {
@@ -273,6 +332,22 @@ test("disconnect deletes secrets and audits without secret text", async () => {
   await rejectsWith(S.disconnectConnection(ctx.db, "no-such-uuid"), "not_found");
 });
 
+test("disconnect deletes secrets first and is safe to repeat", async () => {
+  const ctx = await fresh();
+  const c = await gh(ctx, "Main");
+  await assert.rejects(S.disconnectConnection(ctx.db, c.uuid, { deleteServiceSecrets: async () => { throw new Error("locked"); } }), /locked/);
+  assert.equal((await S.getConnection(ctx.db, c.uuid)).status, "active", "a failed delete leaves the row as it was");
+  assert.equal((await K.serviceSecretKeys(ctx.db, c.uuid)).size, 1);
+  // A disconnected row with leftover secrets (an older failure) is cleaned by a repeat.
+  await ctx.db.execute({ sql: "UPDATE service_connections SET status = 'disconnected' WHERE uuid = ?", args: [c.uuid] });
+  const again = await S.disconnectConnection(ctx.db, c.uuid);
+  assert.equal(again.status, "disconnected");
+  assert.equal((await K.serviceSecretKeys(ctx.db, c.uuid)).size, 0);
+  await S.disconnectConnection(ctx.db, c.uuid);
+  const audit = await rowsOf(ctx.db, "SELECT action FROM project_audit_log WHERE action = 'service.disconnect'");
+  assert.equal(audit.length, 0, "a repeat on an already-disconnected row writes no audit row");
+});
+
 test("uninstall round trip", async () => {
   const ctx = await fresh();
   const c = await gh(ctx, "Main");
@@ -287,6 +362,39 @@ test("uninstall round trip", async () => {
   assert.equal((await S.getConnection(ctx.db, c.uuid)).status, "active");
   assert.equal((await S.getConnection(ctx.db, broken.uuid)).status, "error", "an error row comes back as error");
   assert.deepEqual(await S.markConnectionsNeedInstall(ctx.db, "brave-search"), []);
+});
+
+test("uninstall covers needs_reauth rows, reported from the rows the update changed", async () => {
+  const ctx = await fresh();
+  const a = await gh(ctx, "Main", { projectId: ctx.ids.home });
+  const b = await gh(ctx, "Reauth");
+  await ctx.db.execute({ sql: "UPDATE service_connections SET status = 'needs_reauth' WHERE uuid = ?", args: [b.uuid] });
+  const gone = await gh(ctx, "Gone", { projectId: ctx.ids.home });
+  await S.disconnectConnection(ctx.db, gone.uuid);
+  const affected = await S.markConnectionsNeedInstall(ctx.db, "github");
+  assert.deepEqual(affected.map((p) => p.slug), ["home", "spring"]);
+  assert.equal((await S.getConnection(ctx.db, b.uuid)).status, "needs_install");
+  assert.equal((await S.getConnection(ctx.db, gone.uuid)).status, "disconnected");
+  assert.deepEqual(await S.markConnectionsNeedInstall(ctx.db, "github"), [], "a second run changes and reports nothing");
+  assert.equal(await S.restoreConnectionsAfterInstall(ctx.db, "github"), 2);
+  assert.equal((await S.getConnection(ctx.db, a.uuid)).status, "active");
+  const back = await S.getConnection(ctx.db, b.uuid);
+  assert.equal(back.status, "error");
+  assert.equal(back.lastError, "auth_failed");
+});
+
+test("archived projects: their connections are not served, listed or counted unless asked", async () => {
+  const ctx = await fresh();
+  const c = await gh(ctx, "Main");
+  await ctx.db.execute({ sql: "UPDATE project_spaces SET status = 'archived' WHERE id = ?", args: [ctx.ids.spring] });
+  assert.deepEqual(await S.connectionsFor(ctx.db, { projectId: ctx.ids.spring }), []);
+  assert.deepEqual(await S.listConnections(ctx.db, { projectId: ctx.ids.spring }), []);
+  assert.deepEqual(await S.listConnections(ctx.db, {}), []);
+  assert.deepEqual(await S.otherProjectServiceIds(ctx.db, ctx.ids.home), []);
+  assert.deepEqual((await S.connectionsFor(ctx.db, { projectId: ctx.ids.spring, includeArchivedProjects: true })).map((x) => x.uuid), [c.uuid]);
+  assert.equal((await S.listConnections(ctx.db, { projectId: ctx.ids.spring, includeArchivedProjects: true })).length, 1);
+  await ctx.db.execute({ sql: "UPDATE project_spaces SET status = 'active', archived_at = datetime('now') WHERE id = ?", args: [ctx.ids.spring] });
+  assert.deepEqual(await S.connectionsFor(ctx.db, { projectId: ctx.ids.spring }), []);
 });
 
 test("authority", async () => {
