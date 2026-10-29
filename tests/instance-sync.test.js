@@ -1229,10 +1229,14 @@ async function seedCtxRow(db, { section_key, section_title = "Test", content = "
 
 // ── Test 15: Update replicates ────────────────────────────────────────────────
 
-test("15. crow_context update replicates: full-row update applies content+enabled+sort_order; device-scoped row untouched; project-scoped (INTEGER IS ?) applies", async () => {
+test("15. crow_context update replicates: full-row update applies content+enabled+sort_order; device-scoped row untouched; project-scoped (by project_uuid -> INTEGER IS ?) applies", async () => {
   const INST = "inst-t15";
   const REMOTE = "remote-t15";
   const { mgr, db } = makeManager(INST);
+  // The wire names a project by its portable uuid; this instance's id for it is 42.
+  // (Test 7b may already have created project 42 in this shared DB: reuse its uuid.)
+  await db.execute({ sql: "INSERT OR IGNORE INTO project_spaces (id, uuid, slug, name) VALUES (42, '15151515151515151515151515151515', 't15', 't15')", args: [] });
+  const T15_UUID = (await db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = 42", args: [] })).rows[0].uuid;
 
   // Global row
   await seedCtxRow(db, { section_key: "identity", content: "old", enabled: 1, sort_order: 5, lamport_ts: 10 });
@@ -1248,10 +1252,10 @@ test("15. crow_context update replicates: full-row update applies content+enable
     row: { section_key: "identity", section_title: "Identity", content: "new-content", enabled: 0, sort_order: 99, device_id: null, project_id: null },
     lamport_ts: 50, instance_id: REMOTE,
   }));
-  // Project-scoped update (newer ts, INTEGER project_id)
+  // Project-scoped update (newer ts, the new wire shape: project_uuid, no project_id)
   feed.push(signEntry({
     table: "crow_context", op: "update",
-    row: { section_key: "identity", section_title: "Identity", content: "proj-new", enabled: 1, sort_order: 10, device_id: null, project_id: 42 },
+    row: { section_key: "identity", section_title: "Identity", content: "proj-new", enabled: 1, sort_order: 10, device_id: null, project_uuid: T15_UUID },
     lamport_ts: 50, instance_id: REMOTE,
   }));
 

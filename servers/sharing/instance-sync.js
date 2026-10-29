@@ -48,7 +48,7 @@ const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
  * @param {object} dbRow — a row returned by a SELECT * FROM crow_context query
  * @returns {object} wire object safe to pass to emitChange
  */
-export function buildCrowContextWireRow(dbRow) {
+export function buildCrowContextWireRow(dbRow, projectUuid = null) {
   return {
     section_key:   dbRow.section_key,
     section_title: dbRow.section_title,
@@ -56,9 +56,40 @@ export function buildCrowContextWireRow(dbRow) {
     sort_order:    dbRow.sort_order,
     enabled:       dbRow.enabled,  // INTEGER 0/1 from DB
     device_id:     dbRow.device_id   ?? null,
+    // The LOCAL project id stays on the caller's row: the Lamport stamp
+    // (sync-stamp.js) finds the row by it. OUTBOUND_TRANSFORMS.crow_context
+    // removes it from the wire; project_uuid is what a peer maps.
     project_id:    dbRow.project_id  ?? null,
+    project_uuid:  projectUuid ?? null,
   };
 }
+
+/**
+ * The portable id of a local project (project_spaces.uuid), for a
+ * crow_context emit. null for a null id or a project this instance lacks;
+ * the caller then does not emit a project-scoped row (shouldSyncRow refuses
+ * one without a uuid anyway).
+ */
+export async function crowContextProjectUuid(db, projectId) {
+  if (projectId == null) return null;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = ?", args: [projectId] });
+    const uuid = rows[0]?.uuid;
+    return typeof uuid === "string" && uuid !== "" ? uuid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Project-scoped crow_context sections sync only when this is exactly "1".
+ * An un-upgraded receiver ignores project_uuid and would apply a project
+ * section as its GLOBAL section of the same key (and a delete would remove
+ * the global one), so this stays off until every paired peer runs the
+ * receiver (mapInboundContextProject). Must be set for the gateway AND for
+ * the stdio memory server, which queues through the same gate.
+ */
+export const contextProjectSyncEnabled = (env = process.env) => String(env.CROW_CONTEXT_PROJECT_SYNC ?? "") === "1";
 
 // Tables that participate in core sync
 export const SYNCED_TABLES = [
@@ -126,6 +157,35 @@ export function assertLocalOnlyDisjoint(synced, localOnly) {
   }
 }
 assertLocalOnlyDisjoint(SYNCED_TABLES, LOCAL_ONLY_TABLES);
+
+// Synced tables applied by their own natural-key handlers in _applyEntry (never
+// the generic id-keyed appliers). Summary memories (a memories subset keyed on
+// source) are routed the same way, but memories as a table is generic.
+export const NATURAL_KEY_TABLES = Object.freeze([
+  "dashboard_settings", "crow_context", "contacts", "messages", "contact_groups",
+  "ramble_marks", "ramble_settings", "ramble_blocks", "ramble_eggs", "ramble_pet",
+  "ramble_trades", "ramble_cells", "ramble_wallet",
+]);
+
+// Which key an INBOUND delete on a generic-path table may use. Most of these
+// ids are INTEGER AUTOINCREMENT: the same number names unrelated rows on two
+// siblings, so a delete by id would remove the wrong row.
+//   "id"   — the id is portable (TEXT ids), or a legacy path kept on purpose
+//            (memories: the live delete-propagation path; its id class is a
+//            separate, queued fix);
+//   "uuid" — delete by the row's uuid column, never by the id;
+//   null   — no portable key: every inbound delete is refused.
+// A table missing here is refused too; tests/instance-sync-delete-guard.test.js
+// requires an entry for every synced table not in NATURAL_KEY_TABLES.
+export const DELETE_KEY_POLICY = Object.freeze({
+  crow_instances: "id",
+  providers: "id",
+  memories: "id",
+  research_notes: "uuid",
+  glasses_note_sessions: null,
+  shared_items: null,
+  relay_config: null,
+});
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
 export const EXCLUDED_COLUMNS = {
@@ -249,6 +309,38 @@ export async function mapInboundMemoryProject(db, row) {
   return { ...row, project_id: projectId };
 }
 
+/**
+ * Inbound crow_context: project_id is local, project_uuid is portable. The
+ * wire project_id is NEVER applied. Returns { row, drop }: `row` is a copy
+ * with project_id set to this instance's project_spaces.id for the uuid (or
+ * null for a global/device section) and no project_uuid key; `drop` is a
+ * reason string when the entry must not be applied at all:
+ *   - a raw project_id with no usable uuid (an un-upgraded sender: its id
+ *     names one of ITS projects, maybe an unrelated one here);
+ *   - a uuid this instance has no live project for (none, or archived: an
+ *     archived project is a tombstone; parking the entry would need a schema
+ *     change; the next edit of the section re-delivers it);
+ *   - a malformed uuid, or a failed lookup (never lands unfiled-as-global).
+ * Pure: never mutates the input. Exported for tests.
+ */
+export async function mapInboundContextProject(db, row) {
+  const { project_id: wireProjectId, project_uuid: uuid, ...rest } = row;
+  const global = { row: { ...rest, project_id: null }, drop: null };
+  const dropped = (why) => ({ row: { ...rest, project_id: null }, drop: why });
+  if (uuid == null || uuid === "") {
+    return wireProjectId == null ? global : dropped("raw project_id from an un-upgraded sender");
+  }
+  if (typeof uuid !== "string" || uuid.length > 200) return dropped("malformed project uuid");
+  try {
+    // An archived project is a tombstone: never file a section under it.
+    const { rows } = await db.execute({ sql: "SELECT id FROM project_spaces WHERE uuid = ? AND archived_at IS NULL", args: [uuid] });
+    if (rows.length === 0) return dropped("unknown or archived project uuid");
+    return { row: { ...rest, project_id: Number(rows[0].id) }, drop: null };
+  } catch (err) {
+    return dropped(`project uuid lookup failed (${err.message})`);
+  }
+}
+
 function dropInboundColumns(table, row) {
   const drop = INBOUND_DROPPED_COLUMNS[table];
   if (!drop || !row || typeof row !== "object") return row;
@@ -282,6 +374,15 @@ const OUTBOUND_TRANSFORMS = {
   // _checkConflict / _applyInsert: the local row loses the same keys the wire
   // row lacks, so the compare is like with like.
   memories: (row) => {
+    const { project_id, ...out } = row;
+    if (out.project_uuid == null) delete out.project_uuid;
+    return out;
+  },
+  // crow_context.project_id is a local FK too: the caller's row keeps it (the
+  // stamp finds the row by it), the wire carries project_uuid instead
+  // (mapInboundContextProject). A null project_uuid (global or device
+  // section) carries no key, so the wire matches what old receivers expect.
+  crow_context: (row) => {
     const { project_id, ...out } = row;
     if (out.project_uuid == null) delete out.project_uuid;
     return out;
@@ -452,6 +553,15 @@ export function shouldSyncRow(table, row) {
     }
     const host = hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
     if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
+    return true;
+  }
+  if (table === "crow_context") {
+    // A project-scoped section rides only behind the gate and with its
+    // portable uuid (contextProjectSyncEnabled). Inbound, a new sender's row
+    // carries no project_id, so this refuses only an old sender's raw id.
+    if (row && row.project_id != null) {
+      return contextProjectSyncEnabled() && typeof row.project_uuid === "string" && row.project_uuid !== "";
+    }
     return true;
   }
   if (table === "crow_instances") {
@@ -2856,8 +2966,19 @@ export class InstanceSyncManager {
     // an inbound op whose id merely collides (memory ids are per-instance
     // AUTOINCREMENT). The incoming row's own source is checked by
     // shouldSyncRow above; this checks the LOCAL row it would hit.
-    if ((op === "update" || op === "delete") && row.id !== undefined && await this._isLocallyProtected(table, row.id)) {
-      console.warn(`[instance-sync] skipped inbound ${op} on protected local ${table} id=${row.id}`);
+    // A delete may only name its row by the table's portable key
+    // (DELETE_KEY_POLICY); keyId is this instance's id for that row, which
+    // the protection and conflict checks below must test (a uuid-keyed
+    // delete's wire id is the sender's, not ours).
+    let keyId = row.id;
+    if (op === "delete") {
+      const key = await this._resolveDeleteKey(table, row);
+      if (!key) return;
+      keyId = key.id;
+    }
+
+    if ((op === "update" || op === "delete") && keyId !== undefined && await this._isLocallyProtected(table, keyId)) {
+      console.warn(`[instance-sync] skipped inbound ${op} on protected local ${table} id=${keyId}`);
       return;
     }
 
@@ -2874,8 +2995,8 @@ export class InstanceSyncManager {
     const applyRow = table === "memories" && op !== "delete"
       ? await mapInboundMemoryProject(this.db, row) : row;
 
-    if ((op === "update" || op === "delete") && row.id !== undefined) {
-      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row, op, applyRow);
+    if ((op === "update" || op === "delete") && keyId !== undefined) {
+      const conflict = await this._checkConflict(table, keyId, lamport_ts, instance_id, row, op, applyRow);
       if (conflict === "skip") return; // Local version wins
     }
 
@@ -2965,6 +3086,16 @@ export class InstanceSyncManager {
       console.warn("[instance-sync] _applyCrowContext: missing section_key — skipping");
       return;
     }
+
+    // The wire project_id is never applied: project_uuid maps to this
+    // instance's id for the project, or the entry is dropped (the mapped row
+    // has no project_uuid key, so the PRAGMA filter below sees no stray key).
+    const mapped = await mapInboundContextProject(this.db, row);
+    if (mapped.drop) {
+      console.warn(`[instance-sync] _applyCrowContext: ${op} of ${JSON.stringify(String(row.section_key).slice(0, 64))} dropped: ${mapped.drop}`);
+      return;
+    }
+    row = mapped.row;
 
     const sk = row.section_key;
     const devId = row.device_id ?? null;
@@ -4149,12 +4280,41 @@ export class InstanceSyncManager {
    * Apply a delete operation from a remote instance.
    */
   async _applyDelete(table, row) {
+    const policy = Object.hasOwn(DELETE_KEY_POLICY, table) ? DELETE_KEY_POLICY[table] : null;
+    if (policy === "uuid") {
+      if (typeof row.uuid !== "string" || row.uuid === "") return this._refuseDelete(table, "no uuid");
+      await this.db.execute({ sql: `DELETE FROM ${quoteIdent(table)} WHERE "uuid" = ?`, args: [row.uuid] });
+      return;
+    }
+    if (policy !== "id") return this._refuseDelete(table, "no portable key");
     if (row.id === undefined) return;
+    await this.db.execute({ sql: `DELETE FROM ${quoteIdent(table)} WHERE "id" = ?`, args: [row.id] });
+  }
 
-    await this.db.execute({
-      sql: `DELETE FROM ${table} WHERE id = ?`,
-      args: [row.id],
-    });
+  _refuseDelete(table, why) {
+    console.error(`[instance-sync] REFUSED inbound delete on ${String(table).slice(0, 64)}: ${why} — entry not applied`);
+    return null;
+  }
+
+  /**
+   * The local row an inbound delete names, by the table's DELETE_KEY_POLICY:
+   * { id } (this instance's id for the row) or null (refused, or no such row
+   * here: nothing to delete).
+   */
+  async _resolveDeleteKey(table, row) {
+    const policy = Object.hasOwn(DELETE_KEY_POLICY, table) ? DELETE_KEY_POLICY[table] : undefined;
+    if (policy === "id") return row.id === undefined ? null : { id: row.id };
+    if (policy === "uuid") {
+      if (typeof row.uuid !== "string" || row.uuid === "") return this._refuseDelete(table, "keyed by id, not uuid (ids are per-instance)");
+      try {
+        const { rows } = await this.db.execute({ sql: `SELECT "id" FROM ${quoteIdent(table)} WHERE "uuid" = ?`, args: [row.uuid] });
+        return rows.length ? { id: rows[0].id } : null;
+      } catch (err) {
+        console.warn(`[instance-sync] delete key lookup on ${table} failed (not applied):`, err.message);
+        return null;
+      }
+    }
+    return this._refuseDelete(table, policy === null ? "the table has no portable key" : "no delete-key policy");
   }
 
   /**

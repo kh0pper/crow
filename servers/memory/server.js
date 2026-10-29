@@ -949,14 +949,17 @@ export function createMemoryServer(dbPath, options = {}) {
       // carries the actual committed values (not the partial param set, which omits
       // enabled/sort_order when not provided, and never carries the pre-update values).
       {
-        const { buildCrowContextWireRow } = await import("../sharing/instance-sync.js").catch(() => ({}));
+        const { buildCrowContextWireRow, crowContextProjectUuid } = await import("../sharing/instance-sync.js").catch(() => ({}));
         if (buildCrowContextWireRow) {
           const { rows: emitRows } = await db.execute({
             sql: `SELECT * FROM crow_context WHERE ${whereClause}`,
             args: whereArgs,
           });
           if (emitRows.length > 0) {
-            emitOrQueue(syncManager, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+            // The wire carries the project's uuid, never the local id (a
+            // project row without one is refused by shouldSyncRow).
+            const uuid = await crowContextProjectUuid(db, emitRows[0].project_id ?? null);
+            emitOrQueue(syncManager, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0], uuid)).catch(() => {});
           }
         }
       }
@@ -994,14 +997,15 @@ export function createMemoryServer(dbPath, options = {}) {
         // Emit sync entry — post-INSERT re-select captures enabled (DB default)
         // so the wire row is always complete regardless of which fields the tool call provided.
         {
-          const { buildCrowContextWireRow } = await import("../sharing/instance-sync.js").catch(() => ({}));
+          const { buildCrowContextWireRow, crowContextProjectUuid } = await import("../sharing/instance-sync.js").catch(() => ({}));
           if (buildCrowContextWireRow) {
             const { rows: emitRows } = await db.execute({
               sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
               args: [section_key, device_id ?? null, project_id ?? null],
             });
             if (emitRows.length > 0) {
-              emitOrQueue(syncManager, db, "crow_context", "insert", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+              const uuid = await crowContextProjectUuid(db, emitRows[0].project_id ?? null);
+              emitOrQueue(syncManager, db, "crow_context", "insert", buildCrowContextWireRow(emitRows[0], uuid)).catch(() => {});
             }
           }
         }
@@ -1084,6 +1088,14 @@ export function createMemoryServer(dbPath, options = {}) {
 
       const whereClause = whereParts.join(" AND ");
 
+      // The project's portable uuid, read BEFORE the delete (the wire never
+      // carries the local id; a project delete without a uuid is not emitted:
+      // shouldSyncRow refuses it). Keys match the WHERE clause above, where a
+      // falsy id or device means the unscoped section.
+      const { crowContextProjectUuid } = await import("../sharing/instance-sync.js").catch(() => ({}));
+      const scopedProjectId = project_id || null;
+      const projectUuid = scopedProjectId != null && crowContextProjectUuid ? await crowContextProjectUuid(db, scopedProjectId) : null;
+
       const result = await db.execute({
         sql: `DELETE FROM crow_context WHERE ${whereClause}`,
         args: whereArgs,
@@ -1091,7 +1103,7 @@ export function createMemoryServer(dbPath, options = {}) {
       invalidateContextCache();
 
       // Emit sync entry
-      emitOrQueue(syncManager, db, "crow_context", "delete", { section_key, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
+      emitOrQueue(syncManager, db, "crow_context", "delete", { section_key, device_id: device_id || null, project_id: scopedProjectId, project_uuid: projectUuid }).catch(() => {});
 
       const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
       const target = scope ? ` (${scope})` : "";
