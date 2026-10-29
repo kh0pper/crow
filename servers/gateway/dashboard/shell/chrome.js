@@ -266,12 +266,22 @@ export function shellDrawer({ scope, projects, lang, counts, homeSlug, apps, get
   </dialog>`;
 }
 
-/** The avatar sheet: Settings, Models, What Crow can reach, and the classic switch. */
-export function shellAvatarSheet({ lang }) {
+/**
+ * The account sheet: Settings, Models, What Crow can reach, and the classic
+ * switch. With `tray` (the header bird's or bell's notifications tray,
+ * notifications.js, trusted server markup) it is the ONE "Notifications and
+ * settings" sheet the mascot opens (phone review 2026-10-29): the tray first,
+ * then the settings links, and no separate avatar button exists.
+ */
+export function shellAvatarSheet({ lang, tray }) {
   const settings = label("nav.settings", "Settings", lang);
-  return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet" aria-label="${escapeHtml(t("shell.account", lang))}">
+  const merged = typeof tray === "string" && tray !== "";
+  const name = escapeHtml(t(merged ? "shell.notifSettings" : "shell.account", lang));
+  return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet${merged ? " shell-crow-sheet" : ""}" aria-label="${name}">
     <div class="shell-sheet-inner">
-      ${closeButton(lang)}
+      ${closeButton(lang)}${merged ? `
+      <div class="shell-crow-tray">${tray}</div>
+      <h3 class="shell-heading">${escapeHtml(t("shell.settingsHeading", lang))}</h3>` : ""}
       <a href="/dashboard/settings" class="shell-sheet-link">${escapeHtml(settings)}</a>
       <a href="/dashboard/settings?section=models" class="shell-sheet-link">${escapeHtml(t("settings.section.models", lang))}</a>
       <a href="/dashboard/settings?section=integrations" class="shell-sheet-link">${escapeHtml(t("shell.reach", lang))}</a>

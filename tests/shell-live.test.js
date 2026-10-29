@@ -254,7 +254,6 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
               await assertTargets(p, [
                 [".shell-tab", 3, "tabs"],
                 [".shell-scope", 1, "scope chip"],
-                [".shell-avatar", 1, "avatar"],
                 ["#crow-bird-btn", 1, "bird"],
                 // The rail (Garden, Kitchen) only exists on the desktop layout.
                 ...(width >= 900 ? [[".shell-rail-projects .shell-project", 2, "rail projects"]] : []),
@@ -296,11 +295,13 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
               assert.equal(await p.ev(NO_H_SCROLL), true);
               await p.key("Escape", "Escape", 27);
               await p.until("!document.getElementById('shell-drawer').open", "the drawer to close");
-              await p.click(".shell-avatar");
+              await p.click("#crow-bird-btn");
               await p.until(OPEN_SHEET("shell-avatar"), "the avatar sheet");
               await p.ev(TWO_FRAMES);
+              assert.equal(await p.ev("document.querySelectorAll('.shell-avatar').length"), 0, "no separate avatar button: the mascot opens the sheet");
               await assertTargets(p, [
-                ["#shell-avatar .shell-sheet-link", 1, "avatar sheet links"],
+                ["#shell-avatar .shell-sheet-link", 3, "sheet settings links"],
+                ["#shell-avatar #crow-talk-row", 1, "the Talk to Crow row"],
                 ["#shell-avatar .shell-sheet-close", 1, "avatar sheet close"],
               ], tag);
               await p.key("Escape", "Escape", 27);
@@ -350,7 +351,7 @@ test("an open chat's Send is on screen at 390 px above the tab bar, and the play
       const m = await p.ev("(function(){ var s=document.getElementById('perch-send').getBoundingClientRect(); return { bottom: s.bottom, top: s.top, h: s.height, tabs: getComputedStyle(document.querySelector('.shell-tabs')).display, barTop: document.querySelector('.shell-tabs').getBoundingClientRect().top, vh: innerHeight, sw: document.documentElement.scrollWidth, vw: innerWidth }; })()");
       assert.notEqual(m.tabs, "none", "the tab bar stays in an open chat (phone review 2026-10-29)");
       assert.ok(m.bottom <= m.barTop + 0.5, `Send ${m.bottom} ends above the tab bar ${m.barTop}`);
-      const gut = await p.ev("(function(){ var h=document.querySelector('.content-header'), cs=getComputedStyle(h); var h2=document.querySelector('.content-header h2').getBoundingClientRect(); /* visually hidden in new mode (1px clip), so no title gutter to check */ return { title: h2.width > 1 ? h2.left : 99, back: document.getElementById('perch-back').getBoundingClientRect().left, avatarRight: innerWidth - document.querySelector('.shell-avatar').getBoundingClientRect().right, input: document.getElementById('perch-input').getBoundingClientRect().left }; })()");
+      const gut = await p.ev("(function(){ var h=document.querySelector('.content-header'), cs=getComputedStyle(h); var h2=document.querySelector('.content-header h2').getBoundingClientRect(); /* visually hidden in new mode (1px clip), so no title gutter to check */ return { title: h2.width > 1 ? h2.left : 99, back: document.getElementById('perch-back').getBoundingClientRect().left, birdRight: innerWidth - document.querySelector('#crow-bird-btn').getBoundingClientRect().right, input: document.getElementById('perch-input').getBoundingClientRect().left }; })()");
       for (const [k, v] of Object.entries(gut)) assert.ok(v >= 16, `open chat: ${k} inset ${v} ≥ 16 (${textSize || "default"})`);
       assert.ok(m.h > 0 && m.top >= 0 && m.bottom <= m.vh, `Send ${m.top}→${m.bottom} within ${m.vh} (${textSize || "default"})`);
       assert.ok(m.sw <= m.vw, "no horizontal scroll");
@@ -415,7 +416,7 @@ test("classic and new styling never stack: the Try card's switch, the avatar's s
     assert.match(n.nav, /\/dashboard\/perch$/, "a fresh navigation entry for the shell page");
     // Back to classic from the avatar sheet.
     await p.ev("window.__shellMark = 1; true");
-    await p.click(".shell-avatar");
+    await p.click("#crow-bird-btn");
     await p.until(OPEN_SHEET("shell-avatar"), "the avatar sheet");
     await p.click("#shell-avatar .shell-mode-btn");
     await p.until("!document.body.classList.contains('shell') && !!document.querySelector('.sidebar') && window.__shellMark === undefined", "classic");
@@ -470,7 +471,7 @@ test("the drawer and the avatar sheet open, trap focus, close on Escape and on t
   if (!chrome) return ctx.skip("no headless Chrome");
   const p = await open("/dashboard/memory");
   try {
-    for (const [opener, id] of [[".shell-scope", "shell-drawer"], [".shell-avatar", "shell-avatar"]]) {
+    for (const [opener, id] of [[".shell-scope", "shell-drawer"], ["#crow-bird-btn", "shell-avatar"]]) {
       await p.ev(`document.querySelector(${JSON.stringify(opener)}).focus(); true`);
       await p.key("Enter", "Enter", 13);
       await p.until(OPEN_SHEET(id), id);
@@ -515,7 +516,7 @@ test("a reopen before the close event lands keeps the drawer's and the avatar sh
   if (!chrome) return ctx.skip("no headless Chrome");
   const p = await open("/dashboard/memory");
   try {
-    for (const [opener, id] of [[".shell-scope", "shell-drawer"], [".shell-avatar", "shell-avatar"]]) {
+    for (const [opener, id] of [[".shell-scope", "shell-drawer"], ["#crow-bird-btn", "shell-avatar"]]) {
       await p.click(opener);
       await p.until(OPEN_SHEET(id), id);
       const r = await p.ev(`(function(){
@@ -637,7 +638,7 @@ test("screenshots for review (only with SHELL_SHOTS_DIR)", async (ctx) => {
         await p.ev(TWO_FRAMES);
         await shot(p, `shell-${name}-drawer-${theme}-en.png`);
         await p.key("Escape", "Escape", 27);
-        await p.click(".shell-avatar");
+        await p.click("#crow-bird-btn");
         await p.until(OPEN_SHEET("shell-avatar"), "the avatar sheet");
         await p.ev(TWO_FRAMES);
         await shot(p, `shell-${name}-avatar-${theme}-en.png`);
@@ -652,7 +653,115 @@ test("screenshots for review (only with SHELL_SHOTS_DIR)", async (ctx) => {
       }
       const b = await open("/dashboard/bot-board", { width, height, dark });
       try { await b.settled(); await shot(b, `shell-${name}-board-${theme}-en.png`); } finally { await b.close(); }
+      const bb = await open("/dashboard/bot-builder", { width, height, dark });
+      try { await bb.settled(); await shot(bb, `shell-${name}-bot-builder-${theme}-en.png`); } finally { await bb.close(); }
     }
   }
   assert.ok(existsSync(join(out, "shell-desktop-chat-dark-en.png")));
+});
+
+// Phone review 2026-10-29: on a phone the header row is the project chip and
+// the mascot, nothing else. The page title is the page's own heading on a
+// line under the row (Bot Builder, Models), or for screen readers only where
+// the chip already says where you are (a project home).
+const HEADER_ROW = `(function(){
+  function shown(e){ if(!e) return false; var cs=getComputedStyle(e); return cs.display!=='none'&&cs.visibility!=='hidden'&&e.getClientRects().length>0; }
+  var h=document.querySelector('.content-header'), h2=h.querySelector('h2'), chip=h.querySelector('.shell-scope'),
+      name=h.querySelector('.shell-scope-name'), chev=chip.querySelector('svg'), icons=h.querySelector('.header-icons');
+  var cb=chip.getBoundingClientRect(), vb=chev.getBoundingClientRect(), hb=h2.getBoundingClientRect();
+  var row=[].slice.call(h.children).filter(function(c){ return c!==h2&&shown(c); }).map(function(c){ return c.className; });
+  var iconButtons=icons?[].slice.call(icons.querySelectorAll('button,[role="button"]')).filter(shown).map(function(b){ return b.id; }):[];
+  return { row: row, iconButtons: iconButtons, avatars: document.querySelectorAll('.shell-avatar').length,
+    chipName: name.textContent, nameClipped: name.scrollWidth > name.clientWidth + 0.5,
+    chevInChip: vb.left >= cb.left - 0.5 && vb.right <= cb.right + 0.5 && vb.width > 0, chipRight: cb.right, vw: innerWidth,
+    h2Text: h2.textContent, h2Hidden: hb.width <= 1 && hb.height <= 1, h2Below: hb.top >= cb.bottom - 0.5,
+    h2Clipped: h2.scrollWidth > h2.clientWidth + 0.5, h2Left: hb.left,
+    sw: document.documentElement.scrollWidth };
+})()`;
+
+for (const lang of ["en", "es"]) {
+  test(`390×844 ${lang}: Bot Builder, Models and a project home keep the header row to the chip and the mascot, nothing clipped`, async (ctx) => {
+    if (!chrome) return ctx.skip("no headless Chrome");
+    await setLang(lang);
+    try {
+      for (const [path, heading] of [["/dashboard/bot-builder", true], ["/dashboard/model-catalog", true], ["/dashboard/project/garden", false]]) {
+        for (const textSize of [null, "xlarge"]) {
+          const tag = `${path} ${lang} ${textSize || "default"}`;
+          const p = await open(path, { textSize });
+          try {
+            const m = await p.ev(HEADER_ROW);
+            assert.deepEqual(m.row, ["shell-scope", "header-icons"], `the row is the chip and the mascot (${tag}) ${JSON.stringify(m)}`);
+            assert.deepEqual(m.iconButtons, ["crow-bird-btn"], `the mascot is the header's one button (${tag})`);
+            assert.equal(m.avatars, 0, `no avatar button (${tag})`);
+            assert.equal(m.nameClipped, false, `the chip's name "${m.chipName}" is not clipped (${tag})`);
+            assert.equal(m.chevInChip, true, `the chevron sits inside the chip (${tag})`);
+            assert.ok(m.chipRight <= m.vw, `the chip is on screen (${tag})`);
+            if (heading) {
+              assert.equal(m.h2Hidden, false, `the title is shown as the page's heading (${tag})`);
+              assert.equal(m.h2Below, true, `the title sits under the chip's row (${tag}) ${JSON.stringify(m)}`);
+              assert.equal(m.h2Clipped, false, `the title "${m.h2Text}" is not truncated (${tag})`);
+              assert.ok(m.h2Left >= 16, `the title keeps the 16 px gutter (${tag})`);
+            } else {
+              assert.equal(m.h2Hidden, true, `the chip names the project: the title is for screen readers only (${tag})`);
+              assert.ok(m.h2Text.length > 0, "the title is still in the page");
+            }
+            assert.ok(m.sw <= m.vw, `no sideways scroll (${tag})`);
+          } finally { await p.close(); }
+        }
+      }
+    } finally { await setLang("en"); }
+  });
+}
+
+test("the mascot opens ONE sheet: notifications first, then Settings, What Crow can reach and the classic switch (en, es)", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  for (const lang of ["en", "es"]) {
+    await setLang(lang);
+    try {
+      for (const width of [390, 1280]) {
+        const p = await open("/dashboard/bot-builder", { width, height: 844 });
+        try {
+          const bird = await p.ev(`(function(){ var b=document.getElementById('crow-bird-btn');
+            return { tag: b.tagName, label: b.getAttribute('aria-label'), popup: b.getAttribute('aria-haspopup'), controls: b.getAttribute('aria-controls'),
+              badge: !!b.querySelector('#crow-bubble'), trayInHeader: !!document.querySelector('.content-header #crow-dropdown') }; })()`);
+          assert.deepEqual(bird, { tag: "BUTTON", label: lang === "es" ? "Notificaciones y ajustes" : "Notifications and settings",
+            popup: "dialog", controls: "shell-avatar", badge: true, trayInHeader: false }, `the mascot (${lang} ${width})`);
+          await p.click("#crow-bird-btn");
+          await p.until(OPEN_SHEET("shell-avatar"), "the merged sheet");
+          await p.until("!!document.getElementById('notif-list') && document.getElementById('notif-list').textContent.trim() !== '' ", "the notifications list");
+          const s = await p.ev(`(function(){ var d=document.getElementById('shell-avatar');
+            function pos(sel){ var e=d.querySelector(sel); return e ? (e.compareDocumentPosition(d.querySelector('a[href="/dashboard/settings"]')) & 4 ? 'before' : 'after') : null; }
+            return { label: d.getAttribute('aria-label'), list: !!d.querySelector('#notif-list'), listShown: d.querySelector('#crow-dropdown').getBoundingClientRect().height > 0,
+              settings: !!d.querySelector('a[href="/dashboard/settings"]'), reach: !!d.querySelector('a[href="/dashboard/settings?section=integrations"]'),
+              classic: !!d.querySelector('form[action="/dashboard/mode"] .shell-mode-btn'), talk: !!d.querySelector('#crow-talk-row'),
+              order: pos('#notif-list'), modal: d.matches(':modal'), sw: document.documentElement.scrollWidth, vw: innerWidth }; })()`);
+          assert.deepEqual(s, { label: lang === "es" ? "Notificaciones y ajustes" : "Notifications and settings", list: true, listShown: true,
+            settings: true, reach: true, classic: true, talk: true, order: "before", modal: true, sw: s.vw, vw: s.vw }, `the merged sheet (${lang} ${width})`);
+          await p.key("Escape", "Escape", 27);
+          await p.until("!document.getElementById('shell-avatar').open", "the sheet to close");
+          await p.until("document.activeElement === document.getElementById('crow-bird-btn')", "focus back on the mascot");
+          // The close event (a task after close()) resets the tray and aria-expanded.
+          await p.until("document.getElementById('crow-bird-btn').getAttribute('aria-expanded') === 'false' && document.getElementById('crow-dropdown').style.display === 'none'", "the tray reset on close");
+          // The tray's Talk row closes the sheet before the overlay opens over the page.
+          await p.click("#crow-bird-btn");
+          await p.until(OPEN_SHEET("shell-avatar"), "the sheet again");
+          await p.click("#shell-avatar #crow-talk-row");
+          await p.until("document.getElementById('crow-talk-overlay').classList.contains('active') && !document.getElementById('shell-avatar').open", "the talk overlay, the sheet closed");
+          await p.ev("window.closeCrowTalk(); 1");
+        } finally { await p.close(); }
+      }
+    } finally { await setLang("en"); }
+  }
+});
+
+test("a long-press on the mascot talks to Crow and does not open the sheet", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const p = await open("/dashboard/bot-builder");
+  try {
+    await p.hold("#crow-bird-btn", 900);
+    await p.until("document.getElementById('crow-talk-overlay').classList.contains('active')", "the talk overlay");
+    await p.ev(TWO_FRAMES);
+    assert.equal(await p.ev("document.getElementById('shell-avatar').open"), false, "the long-press opened no sheet");
+    await p.ev("window.closeCrowTalk(); 1");
+  } finally { await p.close(); }
 });

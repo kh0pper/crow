@@ -4006,6 +4006,9 @@ export const translations = {
   "shell.notNow": { en: "Not now", es: "Ahora no" },
   "settings.section.crowMode": { en: "New Crow", es: "El nuevo Crow" },
   "shell.account": { en: "Settings and mode", es: "Ajustes y modo" },
+  "shell.notifSettings": { en: "Notifications and settings", es: "Notificaciones y ajustes" },
+  "shell.notifSettingsHold": { en: "Notifications and settings. Press and hold to talk to Crow.", es: "Notificaciones y ajustes. Mantén pulsado para hablar con Crow." },
+  "shell.settingsHeading": { en: "Settings", es: "Ajustes" },
 
   // ─── Make tab (P4) ───
   "shell.makeAll": { en: "All", es: "Todo" },

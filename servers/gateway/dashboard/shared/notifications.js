@@ -302,8 +302,14 @@ export function sharedNotifJs(lang) {
  * tray's first row is "Talk to Crow" and a long-press on the bell opens the
  * voice overlay (shared/crow-talk.js). Otherwise neither exists.
  */
-export function headerIconsHtml(lang, { talkAvailable } = {}) {
+export function headerIconsHtml(lang, { talkAvailable, sheet } = {}) {
   const talk = talkAvailable === true;
+  // New shell (sheet): the bell is a real button that opens the shell's
+  // "Notifications and settings" sheet; its tray renders inside that sheet
+  // (headerIconsTrayHtml), not here.
+  const bellAttrs = sheet
+    ? ` role="button" tabindex="0" aria-haspopup="dialog" aria-controls="shell-avatar" aria-expanded="false" data-shell-tray="notif-dropdown" aria-label="${t("shell.notifSettings", lang)}" title="${t(talk ? "shell.notifSettingsHold" : "shell.notifSettings", lang)}"${talk ? " data-crow-talk" : ""}`
+    : ` title="${t(talk ? "talk.bellLabelHold" : "notif.notifications", lang)}"${talk ? ` data-crow-talk role="button" tabindex="0" aria-controls="notif-dropdown" aria-expanded="false" aria-label="${t("talk.bellLabelHold", lang)}"` : ""}`;
   return `
 <div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="${t("notif.systemHealth", lang)}">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -315,17 +321,13 @@ export function headerIconsHtml(lang, { talkAvailable } = {}) {
     <div id="health-stats" class="dropdown-body">${t("common.loading", lang)}</div>
   </div>
 </div>
-<div class="header-icon-btn" id="notif-icon-btn" onclick="toggleNotifDropdown(event)" title="${t(talk ? "talk.bellLabelHold" : "notif.notifications", lang)}"${talk ? ` data-crow-talk role="button" tabindex="0" aria-controls="notif-dropdown" aria-expanded="false" aria-label="${t("talk.bellLabelHold", lang)}"` : ""}>
+<div class="header-icon-btn" id="notif-icon-btn" onclick="toggleNotifDropdown(event)"${bellAttrs}>
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
     <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
   </svg>
   <span id="notif-badge" class="notif-badge" style="display:none">0</span>
-  <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>
-  <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">${talk ? crowTalkRowHtml(lang, { holdTarget: "bell" }) : ""}
-    <div class="dropdown-title">${t("notif.notifications", lang)} <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button></div>
-    <div id="notif-list" class="dropdown-body" aria-live="polite" aria-atomic="false">${t("common.loading", lang)}</div>
-  </div>
+  <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>${sheet ? "" : headerIconsTrayHtml(lang, { talkAvailable })}
 </div>
 `;
 }
@@ -561,6 +563,16 @@ export const headerIconsCss = `
   }
 `;
 
+/** The bell's tray: the Talk row (when armed), the title and the list. */
+export function headerIconsTrayHtml(lang, { talkAvailable } = {}) {
+  const talk = talkAvailable === true;
+  return `
+  <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">${talk ? crowTalkRowHtml(lang, { holdTarget: "bell" }) : ""}
+    <div class="dropdown-title">${t("notif.notifications", lang)} <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button></div>
+    <div id="notif-list" class="dropdown-body" aria-live="polite" aria-atomic="false">${t("common.loading", lang)}</div>
+  </div>`;
+}
+
 export function headerIconsJs(lang) {
   return `
 (function() {
@@ -683,12 +695,19 @@ export function headerIconsJs(lang) {
  * (shared/crow-talk.js); without it the bird is not armed and a long-press is
  * an ordinary tap.
  */
-export function tamagotchiHtml(lang, { talkAvailable } = {}) {
+export function tamagotchiHtml(lang, { talkAvailable, sheet } = {}) {
   const talk = talkAvailable === true;
   const birdLabel = t(talk ? "talk.birdLabelHold" : "talk.birdLabel", lang);
+  // New shell (sheet, phone review 2026-10-29): the bird is the header's one
+  // button. A tap opens the shell's "Notifications and settings" sheet
+  // (shell/chrome.js, which holds tamagotchiTrayHtml); a long-press still
+  // talks to Crow. The badge stays on the bird.
+  const birdAttrs = sheet
+    ? `aria-haspopup="dialog" aria-controls="shell-avatar" aria-expanded="false" data-shell-tray="crow-dropdown" aria-label="${t("shell.notifSettings", lang)}" title="${t(talk ? "shell.notifSettingsHold" : "shell.notifSettings", lang)}"`
+    : `aria-haspopup="true" aria-controls="crow-dropdown" aria-expanded="false" aria-label="${birdLabel}" title="${birdLabel}"`;
   return `
 <div class="crow-tama-wrap" id="crow-tama-wrap">
-  <button type="button" class="crow-tama-btn" id="crow-bird-btn" onclick="toggleCrowDropdown(event)" aria-haspopup="true" aria-controls="crow-dropdown" aria-expanded="false" aria-label="${birdLabel}" title="${birdLabel}"${talk ? " data-crow-talk" : ""}>
+  <button type="button" class="crow-tama-btn" id="crow-bird-btn" onclick="toggleCrowDropdown(event)" ${birdAttrs}${talk ? " data-crow-talk" : ""}>
   <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" aria-hidden="true" focusable="false">
     ${CROW_BODY_GROUP}
     <!-- Thought bubble (notification count) -->
@@ -699,7 +718,15 @@ export function tamagotchiHtml(lang, { talkAvailable } = {}) {
     <!-- Alarmed exclamation -->
     <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="var(--crow-body-font)">!</text>
   </svg>
-  </button>
+  </button>${sheet ? "" : tamagotchiTrayHtml(lang, { talkAvailable })}
+</div>
+`;
+}
+
+/** The bird's tray: the Talk row (when armed), status, health and the list. */
+export function tamagotchiTrayHtml(lang, { talkAvailable } = {}) {
+  const talk = talkAvailable === true;
+  return `
   <!-- Combined dropdown -->
   <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">${talk ? crowTalkRowHtml(lang, { holdTarget: "bird" }) : ""}
     <div class="dropdown-title">
@@ -716,9 +743,7 @@ export function tamagotchiHtml(lang, { talkAvailable } = {}) {
       <span class="crow-health-metric" id="crow-uptime">--</span>
     </div>
     <div id="notif-list" class="dropdown-body" aria-live="polite" aria-atomic="false">${t("common.loading", lang)}</div>
-  </div>
-</div>
-`;
+  </div>`;
 }
 
 export const tamagotchiCss = `

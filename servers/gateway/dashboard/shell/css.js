@@ -78,7 +78,7 @@ export function shellCss() {
     flex-shrink: 1;
     min-width: 0;
   }
-  body.shell .shell-scope-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.shell .shell-scope-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   body.shell .shell-scope svg { flex-shrink: 0; color: var(--crow-text-secondary); }
   body.shell .shell-avatar {
     display: inline-flex;
@@ -181,6 +181,26 @@ export function shellCss() {
   }
   body.shell .shell-sheet-close:hover { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
   body.shell .shell-sheet-close:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  /* The "Notifications and settings" sheet holds the mascot's tray
+     (notifications.js): shown in place, whatever the tray's own inline
+     display says (its classic open/close toggles keep running), and drawn
+     as part of the sheet rather than as a floating dropdown. */
+  body.shell .shell-crow-tray .crow-dropdown,
+  body.shell .shell-crow-tray .header-dropdown {
+    display: block !important;
+    position: static;
+    min-width: 0;
+    max-width: none;
+    width: auto;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+    animation: none;
+  }
+  body.shell .shell-crow-tray .dropdown-title { padding-left: 0; padding-right: 0; }
+  body.shell .shell-crow-tray .crow-health-bar { padding-left: 0; padding-right: 0; }
+  body.shell .shell-crow-tray .dropdown-body { padding-left: 0; padding-right: 0; max-height: 40dvh; }
   /* The no-showModal fallback (open attribute only): pin the sheet on top. */
   body.shell .shell-sheet[open]:not(:modal) { position: fixed; inset: auto 0 0; z-index: 1200; }
   body.shell .shell-heading {
@@ -303,6 +323,28 @@ export function shellCss() {
   body.shell .shell-apps-chip:focus-visible,
   body.shell .shell-app:focus-visible,
   body.shell .shell-apps-goto:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+
+  /* ─── Phones: the header row is the chip and the mascot only ───
+     (phone review 2026-10-29). The page title leaves the row: on a page
+     with its own tab (Chat, Board, Make) the chip and the lit tab already
+     say where you are, so it is for screen readers only; on any other page
+     (Bot Builder, Models, Settings…) it is the page's own heading on a line
+     of its own under the row. Either way the chip gets the room it needs. */
+  @media (max-width: 899px) {
+    body.shell .content-header { flex-wrap: wrap; row-gap: 6px; }
+    body.shell .content-header h2 {
+      order: 10;
+      flex: 1 0 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      overflow: visible;
+    }
+    body.shell .content-header.shell-header--tab h2 {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+    }
+    body.shell .shell-scope { max-width: calc(100vw - 32px - 44px - 1.5rem); flex: 0 1 auto; }
+  }
 
   /* ─── Desktop: the tabs become a left rail with the project list ─── */
   @media (min-width: 1024px) {
