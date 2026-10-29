@@ -10,6 +10,7 @@
 
 import Hyperswarm from "hyperswarm";
 import { shouldInitInstanceSync } from "./instance-sync.js";
+import { StringDecoder } from "node:string_decoder";
 import { createHash, randomBytes } from "node:crypto";
 import { sign, verify, crowIdMatchesKey } from "./identity.js";
 import { contactCbMessage, decideContactProof, RefusalLog } from "./contact-binding.js";
@@ -86,6 +87,69 @@ function computeTopic(myEd25519Pub, theirEd25519Pub) {
     .digest();
 }
 
+// The post-admission line cap. @hyperswarm/secret-stream refuses one write
+// over MAX_ATOMIC_WRITE (256^3 - 1 = 16,777,215 bytes, index.js:13, checked
+// at :481): the write returns OK, then both ends are destroyed. The cap (the
+// default and the ceiling) sits 64 KiB below that; CROW_PEER_LINE_MAX_BYTES
+// may lower it to the 1 MiB floor, never disable it. Separate from the
+// pre-admission caps (preAuthMaxBytes) and the C2C per-kind body caps
+// (c2c/frames.js).
+export const SECRET_STREAM_MAX_ATOMIC_WRITE = 256 * 256 * 256 - 1;
+export const PEER_LINE_MAX_MAX = SECRET_STREAM_MAX_ATOMIC_WRITE - 64 * 1024; // 16,711,679
+export const PEER_LINE_MAX_DEFAULT = PEER_LINE_MAX_MAX;
+export const PEER_LINE_MAX_MIN = 1024 * 1024;
+
+const clampLineMax = (n) => Math.min(PEER_LINE_MAX_MAX, Math.max(PEER_LINE_MAX_MIN, n));
+
+const _lineMaxWarned = new Set();
+const warnLineMaxOnce = (raw, msg) => {
+  if (_lineMaxWarned.has(raw)) return;
+  _lineMaxWarned.add(raw);
+  console.warn(`[peer-manager] CROW_PEER_LINE_MAX_BYTES ${msg}`);
+};
+
+/**
+ * CROW_PEER_LINE_MAX_BYTES (digits only) clamped to the bounds; anything else
+ * gives the default. A clamped or ignored value is warned about once.
+ */
+export function postAdmitLineMaxFromEnv(env) {
+  const v = env?.CROW_PEER_LINE_MAX_BYTES;
+  if (v === undefined || v === null || v === "") return PEER_LINE_MAX_DEFAULT;
+  const raw = String(v).trim();
+  if (!/^\d+$/.test(raw)) {
+    warnLineMaxOnce(raw, `ignored (not a byte count); using ${PEER_LINE_MAX_DEFAULT}`);
+    return PEER_LINE_MAX_DEFAULT;
+  }
+  const n = Number(raw);
+  const capped = clampLineMax(n); // a huge digit string is Infinity or > max: clamped
+  if (capped !== n) warnLineMaxOnce(raw, `clamped to ${capped} (allowed ${PEER_LINE_MAX_MIN}..${PEER_LINE_MAX_MAX})`);
+  return capped;
+}
+
+/**
+ * The `line_max` a peer advertised in its `authenticated` frame: an integer
+ * clamped to [1 MiB, our ceiling], or null (missing or malformed: an older
+ * peer, or junk) so the sender falls back to its own cap.
+ */
+export function parsePeerLineMax(v) {
+  return Number.isSafeInteger(v) ? clampLineMax(v) : null;
+}
+
+/**
+ * Thrown by PeerManager.send() when the frame would be over the line cap. Nothing
+ * was written: callers mark the share 'failed' (never 'delivered').
+ */
+export class PeerLineOverCapError extends Error {
+  constructor(bytes, cap) {
+    super(`peer line over cap: ${bytes} bytes > ${cap}`);
+    this.name = "PeerLineOverCapError";
+    this.code = "PEER_LINE_OVER_CAP";
+    this.bytes = bytes;
+    this.cap = cap;
+  }
+}
+export const isPeerLineOverCap = (err) => err?.code === "PEER_LINE_OVER_CAP";
+
 export class PeerManager {
   /**
    * @param {object} identity
@@ -95,6 +159,9 @@ export class PeerManager {
    * @param {number} [opts.preAuthMaxLines] lines an unadmitted peer may send
    * @param {number} [opts.preAuthMaxBytes] bytes an unadmitted peer may send
    * @param {number} [opts.preAuthMs]       time an unadmitted peer may take
+   * @param {number} [opts.postAdmitLineMax] bytes one line of an admitted peer
+   *   may reach (default 16,711,679, or CROW_PEER_LINE_MAX_BYTES in opts.env;
+   *   always clamped to [1 MiB, 16,711,679])
    */
   constructor(identity, {
     env = process.env,
@@ -103,6 +170,7 @@ export class PeerManager {
     preAuthMaxBytes = 65_536,
     preAuthMs = 15_000,
     pairBindingWaitMs = 10_000,
+    postAdmitLineMax = postAdmitLineMaxFromEnv(env),
   } = {}) {
     this.identity = identity;
     this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
@@ -110,6 +178,11 @@ export class PeerManager {
     this.preAuthMaxLines = preAuthMaxLines;
     this.preAuthMaxBytes = preAuthMaxBytes;
     this.preAuthMs = preAuthMs;
+    // After admission the pre-auth caps no longer apply; each line of a
+    // contact connection (complete, or a partial one still waiting for its
+    // newline) is held to this cap. Sibling connections are exempt (see
+    // lineCapped in _handleConnection).
+    this.postAdmitLineMax = Number.isFinite(postAdmitLineMax) ? clampLineMax(postAdmitLineMax) : PEER_LINE_MAX_DEFAULT;
     // PT-2a: how long a sibling that offered pair binding may take to send
     // its `pair-binding` frame once we have proven ourselves to it.
     this.pairBindingWaitMs = pairBindingWaitMs;
@@ -132,7 +205,15 @@ export class PeerManager {
     this.topics = new Map(); // crowId -> topic buffer
     this.instanceSyncTopic = null; // Buffer — the instance sync DHT topic
     this.onPeerConnected = null; // callback(crowId, conn)
-    this.onPeerData = null; // callback(crowId, data)
+    // callback(crowId, payload, meta) — a `data` frame of an admitted CONTACT.
+    // meta = { proof: "cb"|"sig", instanceId: string|null }. instanceId is the
+    // id the peer CLAIMED in its challenge (state.peerInstanceId, null unless
+    // it matches ENROLL_ID_RE): all of a
+    // contact's instances share one key, so nothing proves it. Use it for
+    // routing only, never for authorization. (Only a sibling's
+    // state.remoteInstanceId can be proven, by PT-2a pair binding; sibling
+    // connections never reach onPeerData.)
+    this.onPeerData = null;
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null) — instance-to-instance connections
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — a proven sibling advertised its outgoing Hypercore feed key
@@ -291,6 +372,7 @@ export class PeerManager {
       closed: false,
       deciding: false,
       peerAuthed: false,   // the peer's own `authenticated` frame was handled
+      peerLineMax: null,   // the line_max in its `authenticated` frame (parsePeerLineMax)
       peerAuthSeen: false, // ...or has at least arrived on the stream (caps)
       mutual: false,       // we admitted it AND it admitted us: side effects run
       answered: false,
@@ -351,18 +433,50 @@ export class PeerManager {
     // line on arrival: once we have decided and the peer's own
     // `authenticated` has come in on the stream, what follows is post-admission.
     const capped = () => !(state.mutual || (state.authenticated && state.peerAuthSeen));
+    // Post-admission per-line cap, CONTACT connections only: an admitted
+    // sibling's stream also carries Hypercore replication (instance-connect.js
+    // replicate(id, conn)), whose JSON blocks have no raw newline, so a line
+    // cap there would cut a sibling replicating one large entry.
+    const lineCapped = () => !capped() && state.kind === "contact";
+    // `buffer` is the leftover partial line; `bufferBytes` its UTF-8 length,
+    // kept as a running count so a line trickled in many chunks is never
+    // re-measured (or re-split) from the start.
     let buffer = "";
+    let bufferBytes = 0;
+    // UTF-8 split across two chunks is held until its last byte arrives.
+    const decoder = new StringDecoder("utf8");
+    const kill = () => { buffer = ""; bufferBytes = 0; this._kill(conn, state); };
+    // An admitted contact's line over the cap: logged (size only, never the
+    // content, rate-limited per peer) and killed.
+    const overCap = (bytes) => {
+      const who = state.remoteCrowId || "?";
+      if (this._refusalLog.shouldLog(`line_over_cap:${who}`)) {
+        console.warn(`[peer-manager] contact line over cap ${who} ${bytes}`);
+      }
+      kill();
+    };
     conn.on("data", (data) => {
       if (state.refused || state.closed) return;
-      buffer += data.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop(); // Keep incomplete line
+      const chunk = typeof data === "string" ? data : decoder.write(data);
+      let lines = [];
+      if (chunk.includes("\n")) {
+        lines = (buffer + chunk).split("\n");
+        buffer = lines.pop(); // Keep incomplete line
+        bufferBytes = Buffer.byteLength(buffer);
+      } else {
+        buffer += chunk;
+        bufferBytes += Buffer.byteLength(chunk);
+      }
 
       for (const line of lines) {
+        if (lineCapped()) {
+          const bytes = Buffer.byteLength(line);
+          if (bytes > this.postAdmitLineMax) { overCap(bytes); return; }
+        }
         if (capped()) {
           state.preBytes += Buffer.byteLength(line) + 1;
           if (state.preBytes > this.preAuthMaxBytes
-              || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { this._kill(conn, state); return; }
+              || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { kill(); return; }
         }
         if (!line.trim()) continue;
         let msg;
@@ -373,7 +487,11 @@ export class PeerManager {
         if (msg?.type === "pair-binding") { this._onPairBindingFrame(msg, state); continue; }
         chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
       }
-      if (capped() && state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
+      if (capped()) {
+        if (state.preBytes + bufferBytes > this.preAuthMaxBytes) kill();
+      } else if (lineCapped() && bufferBytes > this.postAdmitLineMax) {
+        overCap(bufferBytes);
+      }
     });
 
     // Remove only OUR entry: a refused or superseded connection closing must
@@ -421,6 +539,7 @@ export class PeerManager {
         // The other side admitted us. Recorded whenever it arrives; the
         // admission side effects wait for both halves.
         state.peerAuthed = true;
+        state.peerLineMax = parsePeerLineMax(msg.line_max);
         if (state.authenticated && !state.mutual) await this._completeAdmit(conn, state);
         break;
       default:
@@ -694,7 +813,8 @@ export class PeerManager {
     state.kind = kind;
     state.admitMsg = msg;
 
-    conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
+    // line_max: the longest line we accept; the peer's send() keeps under it.
+    conn.write(JSON.stringify({ type: "authenticated", line_max: this.postAdmitLineMax }) + "\n");
 
     await this._sendDeferredReply(conn, state);
 
@@ -731,6 +851,7 @@ export class PeerManager {
       conn,
       authenticated: true,
       pubkey: state.kind === "contact" ? state.pinnedKey : this.identity.ed25519Pubkey,
+      peerLineMax: state.peerLineMax ?? null, // null: an older peer, send() uses our own cap
     });
 
     if (state.kind === "instance") {
@@ -812,7 +933,10 @@ export class PeerManager {
     if (!state.mutual || state.refused) return;
     if (state.kind === "contact" && msg.type === "data") {
       if (state.remoteCrowId && this.onPeerData) {
-        try { await this.onPeerData(state.remoteCrowId, msg.payload); } catch {}
+        // The claimed id is passed only in the enroll-id shape; anything else is null.
+        const claimed = state.peerInstanceId;
+        const meta = { proof: state.proof, instanceId: typeof claimed === "string" && ENROLL_ID_RE.test(claimed) ? claimed : null };
+        try { await this.onPeerData(state.remoteCrowId, msg.payload, meta); } catch {}
       }
       return;
     }
@@ -858,17 +982,27 @@ export class PeerManager {
   }
 
   /**
-   * Send data to a connected peer.
+   * Send data to a connected peer. A frame over the line cap (ours, or the
+   * peer's advertised line_max if lower) is refused BEFORE anything is
+   * written (PeerLineOverCapError): the receiver would kill the link on it,
+   * and the item would be lost.
    */
   send(crowId, payload) {
     const peer = this.connections.get(crowId);
     if (!peer || !peer.authenticated) {
       throw new Error(`Not connected to ${crowId}`);
     }
-    peer.conn.write(JSON.stringify({
-      type: "data",
-      payload,
-    }) + "\n");
+    const line = JSON.stringify({ type: "data", payload });
+    const bytes = Buffer.byteLength(line);
+    const cap = this.lineMaxFor(crowId);
+    if (bytes > cap) throw new PeerLineOverCapError(bytes, cap);
+    peer.conn.write(line + "\n");
+  }
+
+  /** The longest line we may send `crowId`: our cap, or the peer's advertised line_max if lower. */
+  lineMaxFor(crowId) {
+    const peerMax = this.connections.get(crowId)?.peerLineMax;
+    return Number.isSafeInteger(peerMax) ? Math.min(this.postAdmitLineMax, peerMax) : this.postAdmitLineMax;
   }
 
   /**

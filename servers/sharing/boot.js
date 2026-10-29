@@ -32,6 +32,7 @@ import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { wireContactBinding } from "./contact-binding.js";
 import { crowIdMatchesKey } from "./identity.js";
+import { isPeerLineOverCap } from "./peer-manager.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
@@ -453,9 +454,32 @@ export async function handleHandshakeComplete(db, eventIds, senderPubkey, displa
  *   - Otherwise → rebuild bundle fresh, send, mark 'delivered' on success.
  * Plain rows (mode NULL):
  *   - Existing tableMap path, behavior unchanged.
+ * Either kind:
+ *   - Over the peer line cap (PeerLineOverCapError, refused before any write)
+ *     → mark 'failed', notify, continue: the rows after it still go out.
+ *   - A send that throws anything else (a failed write) or a connection that
+ *     is gone or destroyed → stop the pass; the rows left stay 'pending' for
+ *     the next connection. Nothing more is written to a dying connection.
  */
 export async function deliverPendingShares({ db, peerManager, contact, identityCrowId, buildProjectCloneBundle }) {
   const crowId = contact.crow_id;
+  // A real PeerManager exposes its connections; a missing or destroyed entry
+  // means the link is gone. (Test doubles without `connections` never stop.)
+  const linkGone = () => {
+    const conns = peerManager?.connections;
+    if (!conns || typeof conns.get !== "function") return false;
+    const entry = conns.get(crowId);
+    return !entry || entry.conn?.destroyed === true;
+  };
+  let writeFailed = false;
+  const sendShare = (frame) => {
+    try {
+      peerManager.send(crowId, frame);
+    } catch (err) {
+      if (!isPeerLineOverCap(err)) writeFailed = true;
+      throw err;
+    }
+  };
   const pending = await db.execute({
     sql: `SELECT * FROM shared_items WHERE contact_id = ? AND direction = 'sent' AND delivery_status = 'pending'`,
     args: [contact.id],
@@ -463,6 +487,10 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
 
   let delivered = 0;
   for (const share of pending.rows) {
+    if (linkGone()) {
+      console.warn(`[sharing] pending shares to ${crowId}: connection gone, stopping the pass (the rest stay pending)`);
+      break;
+    }
     try {
       // --- Clone re-delivery path ---
       if (share.mode === "clone" && share.share_type === "project") {
@@ -506,7 +534,7 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
         // Rebuild the bundle fresh (snapshot-at-delivery semantics).
         const bundle = await buildProjectCloneBundle(share.item_id);
 
-        peerManager.send(crowId, {
+        sendShare({
           type: "share",
           share_type: "project",
           mode: "clone",
@@ -553,7 +581,7 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
       }
       if (itemDataRows.length === 0) continue;
 
-      peerManager.send(crowId, {
+      sendShare({
         type: "share",
         share_type: share.share_type,
         payload: withoutProvenance(itemDataRows[0], mapEntry.table),
@@ -568,8 +596,30 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
       });
       delivered++;
     } catch (err) {
+      if (isPeerLineOverCap(err)) {
+        // Too large for the peer channel: retrying can never succeed, and
+        // nothing was written. Marked failed, never 'delivered'.
+        try {
+          await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [share.id] });
+        } catch {}
+        console.warn(`[sharing] pending share #${share.id} (${share.share_type}) to ${crowId} failed: too large to send (${err.bytes} bytes, cap ${err.cap})`);
+        // Visible to the user; the share's content never goes in it.
+        try {
+          await createNotification(db, {
+            title: `Share of ${share.share_type} to ${contact.display_name || crowId} failed: too large (${err.bytes} bytes, limit ${err.cap})`,
+            type: "peer",
+            source: "sharing:share",
+            action_url: "/dashboard/messages",
+          });
+        } catch {}
+        continue;
+      }
       // Delivery failed — row stays 'pending', retried next connection
       console.warn(`[sharing] pending share #${share.id} (${share.share_type}) delivery error: ${err.message}`);
+      if (writeFailed) {
+        console.warn(`[sharing] pending shares to ${crowId}: a write failed, stopping the pass (the rest stay pending)`);
+        break;
+      }
     }
   }
 
@@ -919,7 +969,8 @@ export async function initSharingRuntime(managers, helpers) {
   };
 
   // Handle data from connected peers (shares, revokes, etc.)
-  peerManager.onPeerData = async (crowId, payload) => {
+  // meta = { proof, instanceId } (instanceId is claimed, routing only); unused here.
+  peerManager.onPeerData = async (crowId, payload, _meta) => {
     if (!payload?.type) return;
 
     const contact = await db.execute({
