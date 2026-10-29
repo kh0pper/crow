@@ -47,6 +47,7 @@ const { SessionManager } = await import("../servers/gateway/session-manager.js")
 const { SERVICES_TOKEN, generateBoardToken } = await import("../servers/gateway/local-token.js");
 const { initGatewayActorKey, _resetActorKeyForTest, signScopeActor } = await import("../scripts/pi-bots/actor-sig.mjs");
 const PI = await import("../servers/gateway/perch-interactive.js");
+const SENS = await import("../servers/shared/service-sensitivity.js");
 
 const GH = "GITHUB_PERSONAL_ACCESS_TOKEN";
 const GH_TOKEN = "test-token-1";
@@ -252,6 +253,7 @@ test("refusals never start the child: every refused initialize leaves the child 
     ["disconnected", U.old, {}, 409, "This connection is turned off.", "not_active"],
     ["archived project", U.attic, { actor: sessActor("b2") }, 409, "This connection is turned off.", "not_active"],
     ["owner_contact_id = 1", U.contact, {}, 403, "Not available on this turn.", "owner_mismatch"],
+    ["a sensitive connection (Task 16c: notion is private by default)", U.notion, {}, 409, "This connection is turned off.", "not_active"],
     ["unknown uuid", "00000000-0000-4000-8000-00000000dead", {}, 404, null, "not_found"],
   ];
   for (const [label, uuid, o, status, message, outcome] of cases) {
@@ -464,10 +466,93 @@ test("error text: a child error carrying the token is '<tool> failed.' only", as
 });
 
 test("init failure: no cached list and a child that cannot start → 502 child_unavailable, no session", async () => {
-  const r = await init(U.notion);
-  assert.equal(r.status, 502);
-  assert.equal(errMsg(r), "This service isn't running right now.");
-  assert.equal(r.sid, null);
+  // notion is private by default (Task 16c): the owner turns that off for this connection first.
+  SENS.setSensitivityOverride({ uuid: U.notion, serviceId: "notion" }, false, { crowHome: HOME });
+  try {
+    const r = await init(U.notion);
+    assert.equal(r.status, 502);
+    assert.equal(errMsg(r), "This service isn't running right now.");
+    assert.equal(r.sid, null);
+  } finally {
+    SENS.setSensitivityOverride({ uuid: U.notion, serviceId: "notion" }, true, { crowHome: HOME });
+  }
+});
+
+// ---- Task 16c: sensitive connections never reach a bot ----------------------------------------------
+
+test("Task 16c: a sensitive connection is refused for initialize, list and call (private_unavailable as not_active), before and after the owner switches it", async () => {
+  const privateCode = (uuid) => withDb(async (d) => {
+    const a = { scope: "session", botId: "b1", defProjectId: P.spring, sessionProjectId: P.spring };
+    return M.authorizeServiceCall(d, a, uuid, { crowHome: HOME, repoSkillsDir: SKILLS });
+  });
+  const refused = (r, label) => {
+    assert.equal(r.status, 409, `${label}: ${r.status} ${r.text}`);
+    assert.equal(errMsg(r), "This connection is turned off.", label);
+    assert.equal(lastOutcome(), "refused:not_active", label);
+  };
+  // Before: notion is private by default; nothing it is asked starts it.
+  assert.deepEqual(await privateCode(U.notion), { ok: false, code: "not_active", reason: "private_unavailable" });
+  const ghSid = await open(U.gh);
+  const spawns = spawnCount();
+  for (const [label, run] of [
+    ["initialize", () => init(U.notion)],
+    ["tools/list, no session", () => listTools(U.notion, undefined)],
+    ["tools/call, no session", () => callTool(U.notion, undefined, "whoami")],
+    ["tools/list, another connection's session", () => listTools(U.notion, ghSid)],
+    ["tools/call, another connection's session", () => callTool(U.notion, ghSid, "whoami")],
+  ]) {
+    audit.length = 0;
+    refused(await run(), `notion ${label}`);
+  }
+  assert.equal(spawnCount(), spawns, "a sensitive connection's child is never started");
+
+  // A non-sensitive connection works.
+  assert.deepEqual(names(await listTools(U.gh, ghSid)), ["reveal", "whoami"]);
+  assert.ok(JSON.parse(textOf(await callTool(U.gh, ghSid, "whoami"))).keys.includes(GH));
+  assert.equal((await privateCode(U.gh)).ok, true);
+
+  // After: the owner switches github to private. The live session's next list and call are refused.
+  SENS.setSensitivityOverride({ uuid: U.gh, serviceId: "github" }, true, { crowHome: HOME });
+  try {
+    assert.equal((await privateCode(U.gh)).reason, "private_unavailable");
+    audit.length = 0;
+    refused(await listTools(U.gh, ghSid), "github tools/list after the switch");
+    audit.length = 0;
+    refused(await callTool(U.gh, ghSid, "whoami"), "github tools/call after the switch");
+    audit.length = 0;
+    refused(await init(U.gh), "github initialize after the switch");
+  } finally {
+    SENS.setSensitivityOverride({ uuid: U.gh, serviceId: "github" }, false, { crowHome: HOME });
+  }
+  // Switched back: it works again.
+  const sid = await open(U.gh);
+  assert.ok(JSON.parse(textOf(await callTool(U.gh, sid, "whoami"))).keys.includes(GH));
+});
+
+test("Task 16c: a corrupt override file never opens a private-by-default connection, and an unknown service is refused", async () => {
+  const file = join(HOME, "secrets", SENS.SENSITIVITY_OVERRIDES_FILENAME);
+  const saved = existsSync(file) ? readFileSync(file, "utf8") : null;
+  writeFileSync(file, "{corrupt", { mode: 0o600 });
+  try {
+    audit.length = 0;
+    const r = await init(U.notion);
+    assert.equal(r.status, 409);
+    assert.equal(lastOutcome(), "refused:not_active");
+    assert.equal((await init(U.gh)).status, 200, "github's default (not private) still serves");
+  } finally {
+    if (saved !== null) writeFileSync(file, saved, { mode: 0o600 });
+  }
+  // A row whose service the registry doesn't name (a bot can write crow.db), selected by its bot:
+  // sensitive and locked, so refused even with every earlier check passing.
+  raw((d) => d.prepare("UPDATE service_connections SET service_id = 'mystery' WHERE uuid = ?").run(U.home));
+  setDef("b5", ["mystery"]);
+  try {
+    const r = await withDb((d) => M.authorizeServiceCall(d, { scope: "job", botId: "b5", defProjectId: P.home }, U.home, { crowHome: HOME }));
+    assert.deepEqual(r, { ok: false, code: "not_active", reason: "private_unavailable" });
+  } finally {
+    setDef("b5", ["github"]);
+    raw((d) => d.prepare("UPDATE service_connections SET service_id = 'github' WHERE uuid = ?").run(U.home));
+  }
 });
 
 test("an 'error' row ensureChild still retries (child_unavailable) keeps listing and calling; a failed live test is not_active", async () => {

@@ -28,6 +28,11 @@
  * install lands, the button only connects: a failed connect leaves the extension installed and
  * pressing again never reinstalls.
  *
+ * The Private switch (Task 16c): a row's [data-svc-private] checkbox POSTs
+ * .../connection/<uuid>/sensitive {sensitive} with the CSRF token. The answer's effective state
+ * sets the box and its note; a refusal puts the box back and shows the not-owner line (403) or
+ * the generic line. A locked service's box is rendered disabled and never posts.
+ *
  * Typed secrets: a secret input is type=password with autocomplete=new-password (so a browser
  * never fills a saved password into it), has no name attribute (a stray native submit can't
  * serialise it) and no value attribute. Its value goes only into the connect POST body; it never
@@ -60,6 +65,7 @@ const STATIC_KEYS = [
   "services.install.step1", "services.install.step1Help", "services.install.step2", "services.install.step2Help",
   "services.install.submit", "services.install.footnote", "extensions.binsNotTrusted",
   "services.install.hasConnection", "services.install.showRow",
+  "services.private.on", "services.private.locked", "services.private.notOwner",
   "services.group.signin", "services.group.paste", "services.group.builtin",
   ...ERROR_CODES.map((c) => `services.error.${c}`),
   ...STATUSES.map((s) => `services.status.${s}`),
@@ -235,6 +241,45 @@ export function projectServicesClientJs() {
       if (action === 'test') failedTest(row, null);
     });
   }
+
+  // ---- The Private switch (Task 16c) -------------------------------------------------------
+  function privateNote(row, on, locked) {
+    var note = row.querySelector('[data-svc-private-note]');
+    if (note) note.textContent = locked ? T('services.private.locked') : (on ? T('services.private.on') : '');
+  }
+  function postPrivate(row, box) {
+    var uuid = row.getAttribute('data-uuid') || '';
+    var want = !!box.checked;
+    box.disabled = true;
+    function undo(text) {
+      box.checked = !want;
+      box.disabled = false;
+      rowError(row, text);
+    }
+    fetch(API + encodeURIComponent(uuid) + '/sensitive', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() },
+      body: JSON.stringify({ sensitive: want })
+    }).then(function (r) {
+      return r.json().then(function (j) { return j; }, function () { return null; }).then(function (j) {
+        if (r.status === 200 && j && j.ok === true && j.private && typeof j.private.on === 'boolean') {
+          var line = row.querySelector('.svc-row-error');
+          if (line) line.textContent = '';
+          box.checked = j.private.on;
+          box.disabled = j.private.locked === true;
+          privateNote(row, j.private.on, j.private.locked === true);
+          return;
+        }
+        undo(r.status === 403 ? T('services.private.notOwner') : T('services.error.generic'));
+      });
+    }, function () { undo(T('services.error.generic')); });
+  }
+  root.addEventListener('change', function (e) {
+    var box = e.target;
+    if (!box || !box.hasAttribute || !box.hasAttribute('data-svc-private') || box.disabled) return;
+    var row = box.closest('[data-svc-row]');
+    if (row) postPrivate(row, box);
+  });
 
   root.addEventListener('toggle', function (e) {
     var d = e.target;

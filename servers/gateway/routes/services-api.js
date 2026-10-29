@@ -8,6 +8,11 @@
  *   POST /dashboard/services/api/connection/:uuid/disconnect    idempotent; stops the connection's child
  *   POST /dashboard/services/api/connection/:uuid/restart       Settings → Advanced (R8): stop the child,
  *                                                               clear its cooldown, start it once (Task 14)
+ *   POST /dashboard/services/api/connection/:uuid/sensitive     {sensitive: bool}: the owner's "Private"
+ *                                                               switch (Task 16c). OWNER ONLY: a local
+ *                                                               password session from another machine
+ *                                                               (isLocalPasswordSessionOn), else 403
+ *                                                               not_owner; a locked service 400 bad_value
  *   GET  /dashboard/services/api/uninstall-preflight/:id        read-only: {affectedProjects:[{slug, name}]}
  *                                                               for the Extensions uninstall confirm (Task 12)
  *
@@ -49,6 +54,8 @@ import { testConnection as defaultTestConnection, normalizeAddress, folderRefusa
 import { servicesUiEnabled } from "../services/ui-flag.js";
 import { ChildError, childState, ensureChild, resetChildFailures, stopChild } from "../services/children.js";
 import { requireDashboardSessionJson } from "./models.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
+import { SensitivityError, connectionSensitivity, readSensitivityOverrides, setSensitivityOverride } from "../../shared/service-sensitivity.js";
 import { crowServerCatalog } from "../../../scripts/pi-bots/crow-server-catalog.mjs";
 import { readCanonicalMcp } from "../../../scripts/pi-bots/mcp_writer.mjs";
 
@@ -92,8 +99,11 @@ async function findProject(db, slug) {
 
 const toSet = (v) => (v instanceof Set ? v : new Set(Array.isArray(v) ? v : []));
 
-/** One connection as the dashboard sees it: no value, ever. */
-export async function connectionView(db, conn, service, { installed }) {
+/**
+ * One connection as the dashboard sees it: no value, ever. `private` is its effective
+ * sensitivity (Task 16c: on = bots can't read it yet; locked = the owner can't turn it off).
+ */
+export async function connectionView(db, conn, service, { installed, crowHome = resolveCrowHome(), overrides } = {}) {
   const { status, labelKey } = connectionDisplayStatus(conn, { installed });
   const saved = await serviceSecretKeys(db, conn.uuid);
   const fields = {};
@@ -111,7 +121,18 @@ export async function connectionView(db, conn, service, { installed }) {
     lastTestedAt: conn.lastTestedAt,
     lastError: conn.lastError,
     fields,
+    private: privateView(conn, { crowHome, overrides }),
   };
+}
+
+/** {on, locked}; any failure reads as private (fail closed). */
+function privateView(conn, { crowHome, overrides }) {
+  try {
+    const s = connectionSensitivity(conn, { crowHome, overrides });
+    return { on: s.sensitive !== false, locked: s.locked === true };
+  } catch {
+    return { on: true, locked: false };
+  }
 }
 
 function serviceCard(s, installed) {
@@ -134,7 +155,7 @@ function serviceCard(s, installed) {
  * @param {string} slug
  * @param {{installedIds?: Set<string>|string[], lang?: string}} [opts]
  */
-export async function loadServicesPage(db, slug, { installedIds = new Set(), lang = "en" } = {}) {
+export async function loadServicesPage(db, slug, { installedIds = new Set(), lang = "en", crowHome = resolveCrowHome() } = {}) {
   void lang; // the payload carries i18n keys; the page renders them in its language
   const project = await findProject(db, slug);
   if (!project) return null;
@@ -142,10 +163,11 @@ export async function loadServicesPage(db, slug, { installedIds = new Set(), lan
   const catalog = serviceCatalog();
   const byId = new Map(catalog.map((s) => [s.id, s]));
   const conns = await listConnections(db, { projectId: project.id, ownerContactId: null });
+  const overrides = readSensitivityOverrides({ crowHome });
   const connections = [];
   for (const c of conns) {
     const s = byId.get(c.serviceId);
-    connections.push(await connectionView(db, c, s, { installed: s ? installed.has(s.bundleId) : false }));
+    connections.push(await connectionView(db, c, s, { installed: s ? installed.has(s.bundleId) : false, crowHome, overrides }));
   }
   const here = new Set(conns.map((c) => c.serviceId));
   const alsoOnCrow = (await otherProjectServiceIds(db, project.id))
@@ -224,6 +246,8 @@ function langOf(req) {
  * @param {(values: string[]) => void} [o.recordSecrets] masking record (default recordServiceSecretValues)
  * @param {() => void} [o.refreshMasking] re-collect this gateway's in-memory masking sets (default refreshGatewaySecretValues)
  * @param {Function} [o.audit] / [o.notify] the keychain's new-key audit and notice (keyCreatedHook)
+ * @param {(db: object, req: object) => Promise<boolean>} [o.ownerCheck] the owner rule for the
+ *   Private switch (default isLocalPasswordSessionOn; tests use the real one)
  */
 export function servicesApiRouter({
   dbFactory = createDbClient,
@@ -237,6 +261,7 @@ export function servicesApiRouter({
   refreshMasking,
   audit,
   notify,
+  ownerCheck = isLocalPasswordSessionOn,
 } = {}) {
   const home = () => crowHome || resolveCrowHome();
   const installed = () => toSet(installedIds ? installedIds() : installedBundleIds(home()));
@@ -284,7 +309,7 @@ export function servicesApiRouter({
   };
 
   router.get(`${SERVICES_API_BASE}/project/:slug`, withDb(async (req, res, db) => {
-    const page = await loadServicesPage(db, req.params.slug, { installedIds: installed(), lang: langOf(req) });
+    const page = await loadServicesPage(db, req.params.slug, { installedIds: installed(), lang: langOf(req), crowHome: home() });
     if (!page) return res.status(404).json({ error: "unknown_project" });
     res.json(page);
   }));
@@ -354,7 +379,7 @@ export function servicesApiRouter({
       throw err;
     }
     refresh();
-    res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true }) });
+    res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true, crowHome: home() }) });
   }));
 
   /** A live, local-owner connection in a live project, or a 404 / 400 already sent. */
@@ -421,6 +446,36 @@ export function servicesApiRouter({
       console.warn("[services] restart failed: child_unavailable");
       res.status(502).json({ error: "child_unavailable", childState: childState(conn.uuid) });
     }
+  }));
+
+  // Task 16c: the owner's "Private" switch for one connection. Owner only, and stricter than the
+  // other routes: a local password session from another machine (isLocalPasswordSessionOn, which
+  // refuses a peer SSO session, a session minted by a login on this machine and any request from
+  // this machine itself), checked before the connection is even looked up. A locked service
+  // (obsidian, or one the registry doesn't name) can't be changed: 400 bad_value. The override is
+  // written only to the hidden secrets dir (service-sensitivity.js). Turning private ON also stops
+  // the connection's child, so a bot's call in flight ends now; the mount refuses every later
+  // request. The owner's own Test again / Restart keep working either way.
+  router.post(`${SERVICES_API_BASE}/connection/:uuid/sensitive`, jsonBody, withDb(async (req, res, db) => {
+    let owner = false;
+    try { owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
+    if (!owner) return res.status(403).json({ error: "not_owner" });
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    if (typeof body.sensitive !== "boolean") return res.status(400).json({ error: "bad_value" });
+    const conn = await ownConnection(req, res, db);
+    if (!conn) return;
+    let after;
+    try {
+      after = setSensitivityOverride(conn, body.sensitive, { crowHome: home() });
+    } catch (err) {
+      if (err instanceof SensitivityError) return res.status(400).json({ error: "bad_value" });
+      console.error("[services] private switch not saved");
+      return res.status(500).json({ ok: false });
+    }
+    if (after.sensitive) {
+      try { await stopChild(conn.uuid); } catch { console.warn("[services] private switch: child stop failed"); }
+    }
+    res.json({ ok: true, private: { on: after.sensitive, locked: after.locked } });
   }));
 
   // The Extensions uninstall confirm: which projects' connections the uninstall would pause. Read

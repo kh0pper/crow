@@ -269,7 +269,8 @@ test("views say set/unset; retest updates status; disconnect is idempotent and h
     const c = await connectGh(s);
     assert.equal(c.status, 201);
     const conn = c.json.connection;
-    assert.deepEqual(Object.keys(conn).sort(), ["accountLabel", "fields", "labelKey", "lastError", "lastTestedAt", "name", "serviceId", "status", "uuid"]);
+    assert.deepEqual(Object.keys(conn).sort(), ["accountLabel", "fields", "labelKey", "lastError", "lastTestedAt", "name", "private", "serviceId", "status", "uuid"]);
+    assert.deepEqual(conn.private, { on: false, locked: false }, "Task 16c: github starts not private, the owner may turn it on");
     assert.equal(conn.status, "active");
     assert.equal(conn.labelKey, "services.status.active");
     assert.ok(conn.lastTestedAt);
@@ -543,4 +544,119 @@ test("m5: defaultReservedNames: the catalog's servers and unconfigured names plu
     assert.deepEqual((await connectGh(s, "Work")).json, { error: "label_taken" }, "github-work is a catalog server");
     assert.equal(ctx.test.calls.length, 0);
   }, { reservedNames: () => defaultReservedNames(HOME, inputs) });
+});
+
+// ---- Task 16c: the owner's Private switch ---------------------------------------------------------
+
+const { markFromLaptop } = await import("./helpers/off-box.js");
+const { hashToken } = await import("../servers/gateway/dashboard/auth.js");
+const SENS = await import("../servers/shared/service-sensitivity.js");
+
+/** Sessions: owner (a password login), sso (a peer sign-in), onhost (a login made on this machine). */
+async function seedSessions(ctx) {
+  const future = new Date(Date.now() + 86400000).toISOString();
+  for (const [tok, scopes] of [["own-1", "dashboard"], ["sso-1", "dashboard sso src:peer-1"], ["onhost-1", "dashboard onhost"]]) {
+    await ctx.db.execute({
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+      args: [hashToken(tok), scopes, future],
+    });
+  }
+}
+// The session cookie names the session; x-test-from: laptop makes the request come from another
+// machine (helpers/off-box.js). The real owner rule (isLocalPasswordSessionOn) decides.
+const realGate = (req, res, next) => {
+  const m = /crow_session=([\w-]+)/.exec(String(req.headers.cookie || ""));
+  if (!m) return res.status(401).json({ error: "Not authenticated" });
+  req.dashboardSession = m[1];
+  if (req.headers["x-test-from"] === "laptop") markFromLaptop(req);
+  next();
+};
+const as = (tok, { laptop = true } = {}) => ({ cookie: `crow_session=${tok}; crow_csrf=tok9`, "x-crow-csrf": "tok9", ...(laptop ? { "x-test-from": "laptop" } : {}) });
+const sensPath = (uuid) => `/dashboard/services/api/connection/${uuid}/sensitive`;
+const OVERRIDES = join(HOME, "secrets", SENS.SENSITIVITY_OVERRIDES_FILENAME);
+
+test("Task 16c: the owner turns Private on and off; the page shows it; the override lives only in the hidden secrets dir", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await seedSessions(ctx);
+  await withApp(ctx, async (s) => {
+    const c = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Main", values: { [GH]: "test-token-sens" } }, headers: as("own-1") });
+    assert.equal(c.status, 201);
+    const uuid = c.json.connection.uuid;
+    assert.deepEqual(c.json.connection.private, { on: false, locked: false });
+    const on = await call(s, "POST", sensPath(uuid), { body: { sensitive: true }, headers: as("own-1") });
+    assert.equal(on.status, 200, on.text);
+    assert.deepEqual(on.json, { ok: true, private: { on: true, locked: false } });
+    const page = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") });
+    assert.deepEqual(page.json.connections.find((x) => x.uuid === uuid).private, { on: true, locked: false });
+    assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
+    assert.equal(JSON.parse(readFileSync(OVERRIDES, "utf8"))[uuid], true, "written in <home>/secrets");
+    assert.equal(existsSync(join(HOME, SENS.SENSITIVITY_OVERRIDES_FILENAME)), false);
+    assert.equal(existsSync(join(ctx.dir, SENS.SENSITIVITY_OVERRIDES_FILENAME)), false, "never in the data dir");
+    const off = await call(s, "POST", sensPath(uuid), { body: { sensitive: false }, headers: as("own-1") });
+    assert.deepEqual(off.json, { ok: true, private: { on: false, locked: false } });
+    assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "github" }, { crowHome: HOME }), false);
+    // The owner's own Test again still works on a private connection.
+    await call(s, "POST", sensPath(uuid), { body: { sensitive: true }, headers: as("own-1") });
+    const t = await call(s, "POST", `/dashboard/services/api/connection/${uuid}/test`, { headers: as("own-1") });
+    assert.equal(t.status, 200);
+    assert.equal(t.json.ok, true, "sensitivity only affects bots");
+    // Bad bodies.
+    for (const body of [{}, { sensitive: "true" }, { sensitive: 1 }, { sensitive: null }]) {
+      const r = await call(s, "POST", sensPath(uuid), { body, headers: as("own-1") });
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.deepEqual(r.json, { error: "bad_value" });
+    }
+    assert.equal((await call(s, "POST", sensPath("00000000-0000-4000-8000-00000000dead"), { body: { sensitive: true }, headers: as("own-1") })).status, 404);
+  }, { sessionGate: realGate });
+});
+
+test("Task 16c: a locked service (obsidian, or one the registry doesn't name) can't be changed over the route", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await seedSessions(ctx);
+  await withApp(ctx, async (s) => {
+    const c = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Vault", values: { [GH]: "test-token-lock" } }, headers: as("own-1") });
+    const uuid = c.json.connection.uuid;
+    for (const serviceId of ["obsidian", "mystery-service"]) {
+      await ctx.db.execute({ sql: "UPDATE service_connections SET service_id = ? WHERE uuid = ?", args: [serviceId, uuid] });
+      for (const sensitive of [false, true]) {
+        const r = await call(s, "POST", sensPath(uuid), { body: { sensitive }, headers: as("own-1") });
+        assert.equal(r.status, 400, `${serviceId} ${sensitive}`);
+        assert.deepEqual(r.json, { error: "bad_value" });
+      }
+      assert.equal(SENS.isSensitiveConnection({ uuid, serviceId }, { crowHome: HOME }), true, serviceId);
+      const page = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") });
+      assert.deepEqual(page.json.connections.find((x) => x.uuid === uuid).private, { on: true, locked: true }, serviceId);
+    }
+    let file = {};
+    try { file = JSON.parse(readFileSync(OVERRIDES, "utf8")); } catch { file = {}; }
+    assert.equal(Object.hasOwn(file, uuid), false, "nothing was written for a locked service");
+  }, { sessionGate: realGate });
+});
+
+test("Task 16c: only the owner: an SSO session, a session from a login on this machine, a request from this machine, no session and no CSRF are all refused, and nothing changes", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await seedSessions(ctx);
+  await withApp(ctx, async (s) => {
+    const c = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Main", values: { [GH]: "test-token-own" } }, headers: as("own-1") });
+    const uuid = c.json.connection.uuid;
+    const cases = [
+      ["sso", as("sso-1"), 403, { error: "not_owner" }],
+      ["onhost", as("onhost-1"), 403, { error: "not_owner" }],
+      ["owner session, from this machine", as("own-1", { laptop: false }), 403, { error: "not_owner" }],
+      ["no session", { "x-crow-csrf": "tok9", "x-test-from": "laptop" }, 401, null],
+      ["no csrf", { cookie: "crow_session=own-1; crow_csrf=tok9", "x-test-from": "laptop" }, 403, null],
+      ["peer signed", { ...as("own-1"), "x-crow-signature": "sig" }, 403, null],
+    ];
+    for (const [label, headers, status, json] of cases) {
+      const r = await call(s, "POST", sensPath(uuid), { body: { sensitive: true }, headers });
+      assert.equal(r.status, status, `${label}: ${r.status} ${r.text}`);
+      if (json) assert.deepEqual(r.json, json, label);
+      assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "github" }, { crowHome: HOME }), false, `${label}: unchanged`);
+    }
+  }, { sessionGate: realGate });
+  // Flag off: 404, before anything.
+  await withApp(ctx, async (s) => {
+    const r = await call(s, "POST", sensPath("00000000-0000-4000-8000-000000000001"), { body: { sensitive: true }, headers: as("own-1") });
+    assert.equal(r.status, 404);
+  }, { sessionGate: realGate, uiEnabled: () => false });
 });

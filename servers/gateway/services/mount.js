@@ -9,7 +9,8 @@
  * owns the in-flight caps, the fixed error text, result shaping and redaction (with
  * `ctx.secrets`) and the audit. None of that is repeated here.
  *
- * This module adds the services checks (plan checks 2–6, minus the owner turn the helper ran):
+ * This module adds the services checks (plan checks 2–6 and Task 16c's check 7, minus the owner
+ * turn the helper ran):
  *  3. the connection exists (else not_found) and is the local owner's (owner_contact_id IS
  *     NULL, else owner_mismatch);
  *  4. one project: the bot def's project (pi_bot_defs.project_id, the authority), and for an s:
@@ -20,7 +21,17 @@
  *     tool) or as `service/tool` entries (only those tools), else not_selected;
  *  6. the connection can be served: active, or an 'error' row ensureChild retries on its own
  *     (child_unavailable, listableConnection), in a project that is not archived (else
- *     not_active).
+ *     not_active);
+ *  7. the connection is not SENSITIVE (Task 16c, roles spec §11.6: no bot gets sensitive content
+ *     until the Private role and bot containment ship). isSensitiveConnection is the one rule
+ *     (servers/shared/service-sensitivity.js: the code-declared default and lock, then the
+ *     owner's override from the hidden secrets dir); any doubt is sensitive. It is checked on
+ *     EVERY request, so a listing, a call and an initialize are all refused, and a connection
+ *     the owner switches to private mid-session is refused from its next request on. The
+ *     refusal is private_unavailable in spirit; the shared helper's authorize codes are a fixed
+ *     table (loopback-tool-mount.js AUTHZ_STATUS) with no custom code, so it answers not_active
+ *     (409, the helper's fixed "This connection is turned off.") and carries
+ *     `reason: "private_unavailable"` for callers of authorizeServiceCall (the helper ignores it).
  * authorizeServiceCall takes the VERIFIED actor, never the request, so the satellite channel
  * (services PR 9) can call it with an actor it verified itself.
  *
@@ -32,6 +43,7 @@
 import { createDbClient as defaultCreateDbClient } from "../../db.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { getConnection, servableConnection } from "../../shared/service-connections.js";
+import { isSensitiveConnection } from "../../shared/service-sensitivity.js";
 import { mountLoopbackMcp } from "../loopback-tool-mount.js";
 import { SERVICES_TOKEN } from "../local-token.js";
 import { effectiveCrowMcp, splitEntry } from "../../../scripts/pi-bots/skill-tools.mjs";
@@ -50,6 +62,26 @@ export const SERVICES_CALL_TIMEOUT_MS = 60_000;
 export const SERVICES_MAX_IN_FLIGHT = 4;
 
 const refuse = (code) => ({ ok: false, code });
+/** Check 7's refusal: the helper's fixed not_active, with the real reason for direct callers. */
+const privateUnavailable = () => ({ ok: false, code: "not_active", reason: "private_unavailable" });
+
+/**
+ * For You's morning job (For You spec §11, Kevin 2026-10-29): ONE named exception to "only my
+ * own turns" (services §6.6). Its prepare job may make READ-ONLY calendar and mail reads on the
+ * operator's own connections with no turn, nothing else may use the path, and its output is shown
+ * only to the operator. It is to be an explicit, tested authority on this mount, never a
+ * synthesized owner turn.
+ *
+ * NOT BUILT. This is the one place it plugs in, and it is OFF: the flag is a constant false and
+ * the hook refuses everything, so an actor that is neither a session nor a job is not_granted.
+ * Turning it on needs, at least: its own verified actor kind or scope from lane B's helper (the
+ * helper's owner-turn check runs before authorize, so a turn-less job never reaches here today);
+ * a read-only tool allow-list declared in code; the operator's own connections only (step 3);
+ * and check 7 still applies (mail and calendar are sensitive, roles spec §11.4: their lines go
+ * through the Private role). Tests pin it off (services-sensitivity.test.js).
+ */
+export const FOR_YOU_READ_AUTHORITY_ENABLED = false;
+export function forYouReadAuthority(_actor, _connection) { return false; }
 
 /**
  * What a crow_mcp list selects of one service: `null` when nothing, `{allowedTools: null}`
@@ -75,7 +107,7 @@ async function botDef(db, botId) {
 }
 
 /**
- * Checks 3–6 for a verified actor (a resolveSignedScope result: scope, botId, defProjectId,
+ * Checks 3–7 for a verified actor (a resolveSignedScope result: scope, botId, defProjectId,
  * sessionProjectId for s:). Request-independent. Any throw is not_granted (fail closed).
  * `ctx.secrets` is a LIVE getter over the values injected into this connection's child at its
  * last spawn, so the helper redacts results with what the child actually holds.
@@ -84,6 +116,8 @@ async function botDef(db, botId) {
 export async function authorizeServiceCall(db, actor, uuid, { crowHome = resolveCrowHome(), repoSkillsDir } = {}) {
   try {
     if (!actor || typeof actor !== "object" || typeof actor.botId !== "string") return refuse("not_granted");
+    // The For You authority's slot (FOR_YOU_READ_AUTHORITY_ENABLED above): the only other actor
+    // this may ever accept. It is off, so every other scope is not_granted.
     if (actor.scope !== "session" && actor.scope !== "job") return refuse("not_granted");
     // 3.
     const connection = await getConnection(db, uuid);
@@ -101,6 +135,8 @@ export async function authorizeServiceCall(db, actor, uuid, { crowHome = resolve
     // 6. servable: the one rule children.js serves by (servableConnection's owner + archive
     // predicate, then listableConnection's status rule), never a second copy of it.
     if (!listableConnection(await servableConnection(db, uuid, { allowError: true }))) return refuse("not_active");
+    // 7. never a sensitive connection (fail closed: isSensitiveConnection is true on any doubt).
+    if (isSensitiveConnection(connection, { crowHome })) return privateUnavailable();
     const ctx = {
       uuid: connection.uuid,
       connection,

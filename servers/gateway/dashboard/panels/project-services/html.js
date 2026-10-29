@@ -7,7 +7,11 @@
  * and the empty state.
  *
  * No value is ever rendered: a row shows the account name, never a field. Every operator- or
- * service-supplied string goes through escapeHtml. The copy is the plan's exact copy; nothing
+ * service-supplied string goes through escapeHtml.
+ *
+ * Each row also carries the owner's "Private" switch (Task 16c): the connection's effective
+ * sensitivity (on = bots can't read it yet), disabled with the "always private" note for a locked
+ * service. A missing or malformed `private` reads as on (fail closed). The client posts it. The copy is the plan's exact copy; nothing
  * here says bots use a connection yet (botsLive is false until the PR that makes them).
  */
 
@@ -50,6 +54,18 @@ function iconLetter(name) {
   return c ? c.toUpperCase() : "?";
 }
 
+/** The Private switch: checked = private; a locked service is checked and disabled. */
+function privateSwitch(c, lang) {
+  const p = c.private && typeof c.private === "object" ? c.private : {};
+  const on = p.on !== false;
+  const locked = p.locked === true;
+  const note = locked ? t("services.private.locked", lang) : on ? t("services.private.on", lang) : "";
+  return `<span class="svc-private">
+          <label class="svc-private-switch"><input type="checkbox" data-svc-private${on ? " checked" : ""}${locked ? " disabled" : ""}> <span>${escapeHtml(t("services.private.label", lang))}</span></label>
+          <span class="svc-private-note" data-svc-private-note>${escapeHtml(note)}</span>
+        </span>`;
+}
+
 function connectionRow(c, project, lang, now) {
   const status = PILL_STATUSES.has(c.status) ? c.status : "error";
   const when = c.lastTestedAt ? testedWhen(c.lastTestedAt, lang, now) : "";
@@ -60,7 +76,7 @@ function connectionRow(c, project, lang, now) {
     : `<button type="button" class="svc-menu-item" data-svc-retest>${escapeHtml(t("services.retest", lang))}</button>`;
   return `<li class="svc-row" data-svc-row data-uuid="${escapeHtml(c.uuid)}" data-service="${escapeHtml(c.serviceId)}">
         <span class="svc-icon" aria-hidden="true">${escapeHtml(iconLetter(c.name))}</span>
-        <span class="svc-text"><span class="svc-name">${escapeHtml(c.name)}</span>${sub ? `<span class="svc-sub">${escapeHtml(sub)}</span>` : ""}</span>
+        <span class="svc-text"><span class="svc-name">${escapeHtml(c.name)}</span>${sub ? `<span class="svc-sub">${escapeHtml(sub)}</span>` : ""}${privateSwitch(c, lang)}</span>
         <span class="svc-pill svc-pill--${status}">${escapeHtml(t(`services.status.${status}`, lang))}</span>
         <details class="svc-menu">
           <summary aria-label="${escapeHtml(`${c.name} (${c.accountLabel})`)}"><span aria-hidden="true">&#8943;</span></summary>
