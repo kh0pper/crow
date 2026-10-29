@@ -227,6 +227,8 @@ test("defers without projects", async () => {
   }
 });
 
+const SLUG_DUP = /UNIQUE constraint failed: index 'idx_service_connections_slug'/;
+
 function insertConn(d, { uuid, owner = null, slug = "work", status = "active", project = 1, service = "github" }) {
   d.prepare(`INSERT INTO service_connections (uuid, project_id, owner_contact_id, service_id, method, account_label, label_slug, status)
              VALUES (?, ?, ?, ?, 'token', 'Work', ?, ?)`).run(uuid, project, owner, service, slug, status);
@@ -237,10 +239,10 @@ test("null owner unique: two project-wide rows with one slug collide", () => {
   try {
     mod.run({ dbPath: d.name });
     insertConn(d, { uuid: "u1" });
-    assert.throws(() => insertConn(d, { uuid: "u2" }), /UNIQUE/);
+    assert.throws(() => insertConn(d, { uuid: "u2" }), SLUG_DUP);
     // A named owner is a separate namespace from project-wide (NULL) rows.
     insertConn(d, { uuid: "u3", owner: 7 });
-    assert.throws(() => insertConn(d, { uuid: "u4", owner: 7 }), /UNIQUE/);
+    assert.throws(() => insertConn(d, { uuid: "u4", owner: 7 }), SLUG_DUP);
   } finally {
     d.close();
   }
@@ -252,10 +254,10 @@ test("slug unique: a disconnected row frees its slug", () => {
     mod.run({ dbPath: d.name });
     insertConn(d, { uuid: "u1", status: "disconnected" });
     insertConn(d, { uuid: "u2" });
-    assert.throws(() => insertConn(d, { uuid: "u3" }), /UNIQUE/);
+    assert.throws(() => insertConn(d, { uuid: "u3" }), SLUG_DUP);
     insertConn(d, { uuid: "u4", slug: "personal" });
     insertConn(d, { uuid: "u5", service: "gitea" });
-    assert.throws(() => insertConn(d, { uuid: "u2", slug: "other" }), /UNIQUE/, "uuid is unique");
+    assert.throws(() => insertConn(d, { uuid: "u2", slug: "other" }), /UNIQUE constraint failed: service_connections\.uuid/, "uuid is unique");
     assert.equal(d.prepare("SELECT COUNT(*) AS n FROM service_connections").get().n, 4);
   } finally {
     d.close();
@@ -299,7 +301,7 @@ test("keychain ensure on an old table adds connection_uuid and the service index
     const ins = `INSERT INTO crow_keychain (kind, label, env_key, secret_sealed, key_id, origin, connection_uuid)
                  VALUES ('service', 'gh', 'GITHUB_TOKEN', 's', 'k1', 'typed', 'conn-1')`;
     await db.execute(ins);
-    await assert.rejects(db.execute(ins), /UNIQUE/);
+    await assert.rejects(db.execute(ins), /UNIQUE constraint failed: crow_keychain\.connection_uuid, crow_keychain\.env_key/);
   } finally {
     db.close();
   }
@@ -315,6 +317,49 @@ test("keychain ensure on an old table adds connection_uuid and the service index
     } finally {
       db2.close();
     }
+  }
+});
+
+test("keychain ensure: two concurrent first calls on an old table share one ALTER", async () => {
+  const p = join(tmp("m0019-kc-race-"), "crow.db");
+  const d = new Database(p);
+  d.exec(OLD_KEYCHAIN);
+  d.close();
+  const db = createDbClient(p);
+  try {
+    const alters = [];
+    const exec = db.execute.bind(db);
+    db.execute = (q, ...rest) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/ALTER TABLE crow_keychain/.test(sql)) alters.push(sql);
+      return exec(q, ...rest);
+    };
+    const [a, b] = [K.ensureKeychainTable(db), K.ensureKeychainTable(db)];
+    assert.equal(a, b, "the second caller gets the first call's promise");
+    await Promise.all([a, b]);
+    assert.deepEqual(alters, [S.KEYCHAIN_CONNECTION_COLUMN.ddl]);
+    await K.ensureKeychainTable(db);
+    assert.equal(alters.length, 1, "a settled ensure is not re-run");
+    const c = (await exec("PRAGMA table_info(crow_keychain)")).rows.map((r) => r.name);
+    assert.equal(c.filter((n) => n === "connection_uuid").length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("keychain ensure: a failed ensure is forgotten, so the next call retries", async () => {
+  const p = join(tmp("m0019-kc-retry-"), "crow.db");
+  const db = createDbClient(p);
+  try {
+    const real = db.executeMultiple.bind(db);
+    let fail = true;
+    db.executeMultiple = (sql) => (fail ? Promise.reject(new Error("boom")) : real(sql));
+    await assert.rejects(K.ensureKeychainTable(db), /boom/);
+    fail = false;
+    await K.ensureKeychainTable(db);
+    assert.ok((await db.execute("SELECT 1 FROM sqlite_master WHERE name='idx_crow_keychain_service'")).rows.length);
+  } finally {
+    db.close();
   }
 });
 

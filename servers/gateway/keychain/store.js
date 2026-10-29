@@ -31,15 +31,25 @@ function requireKey(key) {
   if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) throw new KeychainKeyMissingError();
 }
 
-const ensured = new WeakSet();
-export async function ensureKeychainTable(db) {
-  if (ensured.has(db)) return;
+// Per client, the in-flight (then settled) ensure. Concurrent first callers share one promise, so
+// the PRAGMA-then-ALTER below runs once; a failed ensure is forgotten, so the next call retries.
+const ensuring = new WeakMap();
+export function ensureKeychainTable(db) {
+  let p = ensuring.get(db);
+  if (!p) {
+    p = runKeychainEnsure(db);
+    ensuring.set(db, p);
+    p.catch(() => { if (ensuring.get(db) === p) ensuring.delete(db); });
+  }
+  return p;
+}
+
+async function runKeychainEnsure(db) {
   await db.executeMultiple(KEYCHAIN_DDL);
   // A table created before migration 0019 lacks connection_uuid: add it before the index on it.
   const cols = (await db.execute("PRAGMA table_info(crow_keychain)")).rows.map((r) => r.name);
   if (!cols.includes(KEYCHAIN_CONNECTION_COLUMN.column)) await db.execute(KEYCHAIN_CONNECTION_COLUMN.ddl);
   await db.executeMultiple(KEYCHAIN_SERVICE_INDEX_DDL);
-  ensured.add(db);
 }
 
 function toEntry(r, { now, keyId } = {}) {

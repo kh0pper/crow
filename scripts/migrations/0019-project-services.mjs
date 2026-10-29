@@ -58,7 +58,7 @@ export function run({ dbPath, log = () => {} }) {
         db.exec(KEYCHAIN_SERVICE_INDEX_DDL);
         note("idx_crow_keychain_service: ensured");
       }
-    })();
+    }).immediate(); // take the write lock up front (0013/0015): no read-then-upgrade BUSY_SNAPSHOT
   } finally {
     db.close();
   }

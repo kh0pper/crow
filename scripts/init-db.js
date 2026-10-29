@@ -161,6 +161,7 @@ await initTable("data_backends table", `
 // --- Migrate existing tables: add new columns if missing ---
 
 // Resolves true only when it ran the ALTER (existing callers ignore the value).
+// For a { table, column, ddl } constant shared with a migration, use ensureSchemaColumn (top of file).
 async function addColumnIfMissing(table, column, definition) {
   try {
     const cols = await db.execute({ sql: `PRAGMA table_info(${table})` });
