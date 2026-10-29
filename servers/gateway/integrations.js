@@ -65,7 +65,7 @@ export const INTEGRATIONS = [
     envVars: ["SLACK_BOT_TOKEN"],
     keyUrl: "https://api.slack.com/apps",
     keyInstructions: "Create New App → OAuth & Permissions → add scopes (channels:history, channels:read, chat:write, users:read) → Install to Workspace → copy Bot Token (xoxb-...).",
-    docsUrl: docsUrl("integrations/slack"),
+    docsUrl: null, // page removed with the Slack/Teams cleanup (services PR 1)
     category: "communication",
   },
   {
@@ -107,7 +107,7 @@ export const INTEGRATIONS = [
     envVars: ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
     keyUrl: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps",
     keyInstructions: "Register an app in Azure AD → add Graph permissions (Chat.Read, ChannelMessage.Read.All, ChannelMessage.Send) → create a client secret.",
-    docsUrl: docsUrl("integrations/microsoft-teams"),
+    docsUrl: null, // page removed with the Slack/Teams cleanup (services PR 1)
     category: "communication",
   },
   {
