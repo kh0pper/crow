@@ -22,6 +22,12 @@ const M = await import("../servers/gateway/services/mount.js");
 const FILE = join(HOME, "secrets", SENS.SENSITIVITY_OVERRIDES_FILENAME);
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const conn = (serviceId, n) => ({ uuid: uuid(n), serviceId });
+/** The connection with its binding recorded, as the owner's connect route makes it. */
+function bound(serviceId, n) {
+  SENS.recordConnectionBinding(conn(serviceId, n), { crowHome: HOME });
+  return conn(serviceId, n);
+}
+const key = (n, serviceId) => `${uuid(n)}|${serviceId}`;
 /** The connection as the owner's connect route makes it (its binding recorded), then the check. */
 function sens(serviceId, n) {
   try { SENS.recordConnectionBinding(conn(serviceId, n), { crowHome: HOME }); } catch { /* an invalid id: no binding */ }
@@ -59,14 +65,14 @@ test("an unknown service is sensitive and locked; a malformed connection is sens
   assert.equal(SENS.isSensitiveConnection({}), true);
   assert.equal(SENS.isSensitiveConnection({ uuid: uuid(1) }), true);
   assert.equal(sens("mystery", 1), true);
-  assert.throws(() => SENS.setSensitivityOverride(conn("mystery", 1), false, { crowHome: HOME }), (e) => e.code === "locked");
-  assert.throws(() => SENS.setSensitivityOverride(conn("obsidian", 1), false, { crowHome: HOME }), (e) => e.code === "locked");
+  assert.throws(() => SENS.setSensitivityOverride(bound("mystery", 1), false, { crowHome: HOME }), (e) => e.code === "locked");
+  assert.throws(() => SENS.setSensitivityOverride(bound("obsidian", 1), false, { crowHome: HOME }), (e) => e.code === "locked");
   assert.equal(existsSync(FILE), false, "a locked refusal writes nothing");
 });
 
 test("the owner's override: locked ? default : (override ?? default); written atomically, mode 600, in the hidden secrets dir", () => {
-  assert.deepEqual(SENS.setSensitivityOverride(conn("github", 2), true, { crowHome: HOME }), { sensitive: true, locked: false, default: false });
-  assert.deepEqual(SENS.setSensitivityOverride(conn("notion", 3), false, { crowHome: HOME }), { sensitive: false, locked: false, default: true });
+  assert.deepEqual(SENS.setSensitivityOverride(bound("github", 2), true, { crowHome: HOME }), { sensitive: true, locked: false, default: false });
+  assert.deepEqual(SENS.setSensitivityOverride(bound("notion", 3), false, { crowHome: HOME }), { sensitive: false, locked: false, default: true });
   assert.equal(sens("github", 2), true);
   assert.equal(sens("notion", 3), false);
   assert.equal(sens("github", 4), false, "another connection keeps its default");
@@ -74,16 +80,16 @@ test("the owner's override: locked ? default : (override ?? default); written at
   const st = statSync(FILE);
   assert.equal(st.mode & 0o777, 0o600);
   assert.equal(statSync(join(HOME, "secrets")).mode & 0o777, 0o700);
-  assert.deepEqual(JSON.parse(readFileSync(FILE, "utf8")), { [uuid(2)]: true, [uuid(3)]: false });
+  assert.deepEqual(JSON.parse(readFileSync(FILE, "utf8")), { [key(2, "github")]: true, [key(3, "notion")]: false }, "keyed by uuid and bound service");
   // An override recorded for a connection whose service is (now) locked is ignored.
   assert.equal(SENS.isSensitiveConnection({ uuid: uuid(3), serviceId: "obsidian" }, { crowHome: HOME }), true);
-  assert.throws(() => SENS.setSensitivityOverride(conn("github", 2), "no", { crowHome: HOME }), (e) => e.code === "bad_value");
+  assert.throws(() => SENS.setSensitivityOverride(bound("github", 2), "no", { crowHome: HOME }), (e) => e.code === "bad_value");
   assert.throws(() => SENS.setSensitivityOverride({ uuid: "../x", serviceId: "github" }, true, { crowHome: HOME }), (e) => e.code === "bad_value");
 });
 
 test("a corrupt, unreadable or wrong-mode override file is the DEFAULT for every connection, never 'not sensitive'", () => {
-  SENS.setSensitivityOverride(conn("github", 5), true, { crowHome: HOME });
-  SENS.setSensitivityOverride(conn("notion", 6), false, { crowHome: HOME });
+  SENS.setSensitivityOverride(bound("github", 5), true, { crowHome: HOME });
+  SENS.setSensitivityOverride(bound("notion", 6), false, { crowHome: HOME });
   const good = readFileSync(FILE, "utf8");
   const cases = [
     ["not JSON", "{oops\n"],
@@ -99,19 +105,19 @@ test("a corrupt, unreadable or wrong-mode override file is the DEFAULT for every
   }
   plant(FILE, good, 0o644);
   assert.equal(sens("notion", 6), true, "a 644 file is not trusted: notion's default");
-  plant(FILE, JSON.stringify({ [uuid(6)]: "false", [uuid(5)]: 1, "not-a-uuid": false }) + "\n");
+  plant(FILE, JSON.stringify({ [key(6, "notion")]: "false", [key(5, "github")]: 1, "not-a-uuid|notion": false, [uuid(6)]: false }) + "\n");
   assert.equal(sens("notion", 6), true, "a non-boolean value is no override");
   assert.equal(sens("github", 5), false);
   // The next owner write replaces a corrupt file with a good one.
   plant(FILE, "{oops\n");
-  SENS.setSensitivityOverride(conn("notion", 6), false, { crowHome: HOME });
+  SENS.setSensitivityOverride(bound("notion", 6), false, { crowHome: HOME });
   assert.equal(sens("notion", 6), false);
-  assert.deepEqual(JSON.parse(readFileSync(FILE, "utf8")), { [uuid(6)]: false });
+  assert.deepEqual(JSON.parse(readFileSync(FILE, "utf8")), { [key(6, "notion")]: false });
 });
 
 test("the store reads only the anchored secrets dir: a file a bot could write elsewhere, or a dir planted at the secrets path, overrides nothing", () => {
-  SENS.setSensitivityOverride(conn("notion", 7), true, { crowHome: HOME });
-  const planted = JSON.stringify({ [uuid(7)]: false, [uuid(8)]: false }) + "\n";
+  SENS.setSensitivityOverride(bound("notion", 7), true, { crowHome: HOME });
+  const planted = JSON.stringify({ [key(7, "notion")]: false, [key(8, "notion")]: false }) + "\n";
   // Bot-writable places: the Crow home itself, its data dir, the bundles dir.
   for (const dir of [HOME, join(HOME, "data"), join(HOME, "bundles")]) {
     mkdirSync(dir, { recursive: true });
@@ -129,8 +135,8 @@ test("the store reads only the anchored secrets dir: a file a bot could write el
     plant(join(real, SENS.SENSITIVITY_OVERRIDES_FILENAME), planted);
     assert.equal(sens("notion", 7), true, "the real (moved) file still says private");
     assert.equal(sens("notion", 8), true, "the planted file is never read");
-    SENS.setSensitivityOverride(conn("github", 9), true, { crowHome: HOME });
-    assert.equal(JSON.parse(readFileSync(join(moved, SENS.SENSITIVITY_OVERRIDES_FILENAME), "utf8"))[uuid(9)], true, "writes follow the anchor too");
+    SENS.setSensitivityOverride(bound("github", 9), true, { crowHome: HOME });
+    assert.equal(JSON.parse(readFileSync(join(moved, SENS.SENSITIVITY_OVERRIDES_FILENAME), "utf8"))[key(9, "github")], true, "writes follow the anchor too");
     assert.deepEqual(JSON.parse(readFileSync(join(real, SENS.SENSITIVITY_OVERRIDES_FILENAME), "utf8")), JSON.parse(planted), "the planted file is untouched");
   } finally {
     rmScratch(real);
@@ -159,9 +165,11 @@ test("fix round 1: the binding. A row whose service_id isn't the one the owner c
   // A bot rewrites the row: obsidian -> github. An open service now, but not the one connected.
   assert.equal(SENS.connectionBindingOk({ uuid: u, serviceId: "github" }, { crowHome: HOME }), false);
   assert.equal(SENS.isSensitiveConnection({ uuid: u, serviceId: "github" }, { crowHome: HOME }), true);
-  // Even with an owner override saying "not private" for that uuid as github.
+  // The switch refuses a flipped row (bad_value), and the view is private and locked.
+  assert.throws(() => SENS.setSensitivityOverride({ uuid: u, serviceId: "github" }, false, { crowHome: HOME }), (e) => e.code === "bad_value");
+  assert.deepEqual(SENS.connectionSensitivity({ uuid: u, serviceId: "github" }, { crowHome: HOME }), { sensitive: true, locked: true, default: true });
+  // A planted override for that uuid as github (or bare uuid) applies to nothing.
   SENS.recordConnectionBinding({ uuid: uuid(41), serviceId: "github" }, { crowHome: HOME });
-  SENS.setSensitivityOverride({ uuid: u, serviceId: "github" }, false, { crowHome: HOME });
   assert.equal(SENS.isSensitiveConnection({ uuid: u, serviceId: "github" }, { crowHome: HOME }), true);
   assert.equal(SENS.isSensitiveConnection({ uuid: uuid(41), serviceId: "github" }, { crowHome: HOME }), false, "a correct row");
   assert.equal(statSync(BINDINGS).mode & 0o777, 0o600);
@@ -177,4 +185,26 @@ test("fix round 1: the binding. A row whose service_id isn't the one the owner c
   plant(BINDINGS, good);
   plant(join(HOME, SENS.CONNECTION_BINDINGS_FILENAME), JSON.stringify({ [uuid(43)]: "github" }) + "\n");
   assert.equal(SENS.connectionBindingOk({ uuid: uuid(43), serviceId: "github" }, { crowHome: HOME }), false);
+});
+
+test("security review: an override counts only under the service it was written for (uuid + bound serviceId)", () => {
+  const n = 50;
+  // Bound as github, the owner turns Private on.
+  SENS.setSensitivityOverride(bound("github", n), true, { crowHome: HOME });
+  assert.equal(SENS.isSensitiveConnection(conn("github", n), { crowHome: HOME }), true);
+  // The binding now says trello (an unlocked, open-by-default service), row too: github's override doesn't apply.
+  SENS.recordConnectionBinding(conn("trello", n), { crowHome: HOME });
+  assert.equal(SENS.isSensitiveConnection(conn("trello", n), { crowHome: HOME }), false, "trello's own default");
+  assert.deepEqual(SENS.connectionSensitivity(conn("trello", n), { crowHome: HOME }), { sensitive: false, locked: false, default: false });
+  // A github "not private" override doesn't open the connection once the binding says obsidian.
+  const m = 51;
+  SENS.setSensitivityOverride(bound("github", m), false, { crowHome: HOME });
+  SENS.recordConnectionBinding(conn("obsidian", m), { crowHome: HOME });
+  assert.deepEqual(SENS.connectionSensitivity(conn("obsidian", m), { crowHome: HOME }), { sensitive: true, locked: true, default: true });
+  assert.equal(SENS.isSensitiveConnection(conn("obsidian", m), { crowHome: HOME }), true);
+  // And the row flipped back to github while the binding says obsidian: refused and private.
+  assert.equal(SENS.isSensitiveConnection(conn("github", m), { crowHome: HOME }), true);
+  assert.throws(() => SENS.setSensitivityOverride(conn("github", m), false, { crowHome: HOME }), (e) => e.code === "bad_value");
+  // Lock and default come from the bound service: bound obsidian is locked.
+  assert.throws(() => SENS.setSensitivityOverride(conn("obsidian", m), false, { crowHome: HOME }), (e) => e.code === "locked");
 });

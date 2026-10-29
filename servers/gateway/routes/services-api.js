@@ -57,7 +57,7 @@ import { ChildError, childState, ensureChild, resetChildFailures, stopChild } fr
 import { requireDashboardSessionJson } from "./models.js";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import {
-  SensitivityError, connectionBindingOk, connectionSensitivity, readConnectionBindings, readSensitivityOverrides, recordConnectionBinding, setSensitivityOverride,
+  SensitivityError, connectionSensitivity, readConnectionBindings, readSensitivityOverrides, recordConnectionBinding, setSensitivityOverride,
 } from "../../shared/service-sensitivity.js";
 import { crowServerCatalog } from "../../../scripts/pi-bots/crow-server-catalog.mjs";
 import { readCanonicalMcp } from "../../../scripts/pi-bots/mcp_writer.mjs";
@@ -131,8 +131,8 @@ export async function connectionView(db, conn, service, { installed, crowHome = 
 /** {on, locked}; any failure, or a row that isn't the service the owner connected, reads as private and locked. */
 function privateView(conn, { crowHome, overrides, bindings }) {
   try {
-    if (!connectionBindingOk(conn, { crowHome, bindings })) return { on: true, locked: true };
-    const s = connectionSensitivity(conn, { crowHome, overrides });
+    // Decided from the bound service: a missing or mismatched binding is private and locked.
+    const s = connectionSensitivity(conn, { crowHome, overrides, bindings });
     return { on: s.sensitive !== false, locked: s.locked === true };
   } catch {
     return { on: true, locked: false };

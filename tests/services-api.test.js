@@ -592,7 +592,7 @@ test("Task 16c: the owner turns Private on and off; the page shows it; the overr
     const page = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") });
     assert.deepEqual(page.json.connections.find((x) => x.uuid === uuid).private, { on: true, locked: false });
     assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
-    assert.equal(JSON.parse(readFileSync(OVERRIDES, "utf8"))[uuid], true, "written in <home>/secrets");
+    assert.equal(JSON.parse(readFileSync(OVERRIDES, "utf8"))[`${uuid}|github`], true, "written in <home>/secrets, keyed by uuid and bound service");
     assert.equal(existsSync(join(HOME, SENS.SENSITIVITY_OVERRIDES_FILENAME)), false);
     assert.equal(existsSync(join(ctx.dir, SENS.SENSITIVITY_OVERRIDES_FILENAME)), false, "never in the data dir");
     const off = await call(s, "POST", sensPath(uuid), { body: { sensitive: false }, headers: as("own-1") });
@@ -637,7 +637,7 @@ test("Task 16c: a locked service (obsidian, or one the registry doesn't name) ca
     assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "trello" }, { crowHome: HOME }), true);
     let file = {};
     try { file = JSON.parse(readFileSync(OVERRIDES, "utf8")); } catch { file = {}; }
-    assert.equal(Object.hasOwn(file, uuid), false, "nothing was written for a locked service");
+    assert.ok(!Object.keys(file).some((k) => k.startsWith(uuid)), "nothing was written for a locked service");
   }, { sessionGate: realGate });
 });
 
@@ -693,4 +693,30 @@ test("Task 16c: a binding write that fails undoes the connect: 500 generic, no r
     assert.equal(SENS.connectionBindingOk({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
     assert.equal((await ctx.db.execute("SELECT COUNT(*) AS n FROM service_connections")).rows[0].n, 1);
   }, { recordBinding });
+});
+
+test("security review: the switch refuses a row whose service_id was flipped (bound obsidian, row now github); lock and default come from the binding", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await seedSessions(ctx);
+  await withApp(ctx, async (s) => {
+    const c = await call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: "Notes", values: { [GH]: "test-token-flip" } }, headers: as("own-1") });
+    const uuid = c.json.connection.uuid;
+    // Make it an obsidian connection as the owner made it (row and binding), then a bot flips the row to github.
+    await ctx.db.execute({ sql: "UPDATE service_connections SET service_id = 'obsidian' WHERE uuid = ?", args: [uuid] });
+    SENS.recordConnectionBinding({ uuid, serviceId: "obsidian" }, { crowHome: HOME });
+    const locked = await call(s, "POST", sensPath(uuid), { body: { sensitive: false }, headers: as("own-1") });
+    assert.equal(locked.status, 400, "bound obsidian: locked");
+    await ctx.db.execute({ sql: "UPDATE service_connections SET service_id = 'github' WHERE uuid = ?", args: [uuid] });
+    for (const sensitive of [false, true]) {
+      const r = await call(s, "POST", sensPath(uuid), { body: { sensitive }, headers: as("own-1") });
+      assert.equal(r.status, 400, `flipped row, sensitive=${sensitive}`);
+      assert.deepEqual(r.json, { error: "bad_value" });
+    }
+    const page = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") });
+    assert.deepEqual(page.json.connections.find((x) => x.uuid === uuid).private, { on: true, locked: true });
+    assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
+    let file = {};
+    try { file = JSON.parse(readFileSync(OVERRIDES, "utf8")); } catch { file = {}; }
+    assert.ok(!Object.keys(file).some((k) => k.startsWith(uuid)), "nothing written for it");
+  }, { sessionGate: realGate });
 });

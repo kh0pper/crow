@@ -12,7 +12,7 @@ import { listConnections } from "../../../../shared/service-connections.js";
 import { serviceSecretKeys } from "../../../keychain/store.js";
 import { childState, childStderr } from "../../../services/children.js";
 import { serviceById } from "../../../../shared/service-catalog.js";
-import { connectionBindingOk, connectionSensitivity, readConnectionBindings, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
+import { connectionSensitivity, readConnectionBindings, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
 
 const CHILD_STATES = ["running", "stopped", "starting", "error", "cooling"];
 
@@ -91,7 +91,7 @@ function privateSwitch(c, lang, overrides, bindings) {
   let on = true;
   let locked = true;   // a row that isn't the service the owner connected stays private and locked
   try {
-    if (connectionBindingOk(c, { bindings })) { const s = connectionSensitivity(c, { overrides }); on = s.sensitive !== false; locked = s.locked === true; }
+    const s = connectionSensitivity(c, { overrides, bindings }); on = s.sensitive !== false; locked = s.locked === true;
   } catch { on = true; locked = true; }
   const labels = {
     on: t("services.private.on", lang), locked: t("services.private.locked", lang),
