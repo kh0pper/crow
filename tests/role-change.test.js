@@ -242,6 +242,7 @@ test("safety onto a local model with only local fallbacks applies", async () => 
 });
 
 test("a quick rebind that moves no job needs no ackUnattended", async () => {
+  await smartChat(true); // the router only reads tiers while smart chat is on
   ENV.CROW_SMART_ROUTER_FAST = "local-chat/m1"; // the fast tier is set by env: not affected
   await bind("everyday", { model: "local-voice/m2", fallback: [] });
   const change = { model: "local-chat/m1" };
@@ -290,4 +291,102 @@ test("the hash covers the fresh cloud pairs and envPinned", async () => {
   const e2 = await preview("embed", { model: "emb-b/e1" });
   assert.equal(e2.envPinned, true);
   assert.notEqual(e1.previewHash, e2.previewHash);
+});
+
+// --- final fix wave ---------------------------------------------------------
+
+const smartChat = (on) => raw("feature_flags", JSON.stringify({ smart_chat: on }));
+
+test("F1: with smart chat off the smart router is not listed and does not move", async () => {
+  await bind("everyday", { model: "local-voice/m2", fallback: [] });
+  const change = { model: "local-chat/m1" };
+  const p = await preview("quick", change);
+  assert.ok(!p.consumers.jobs.some((c) => String(c.id).startsWith("smart-router:")));
+  assert.equal(p.needs.ackUnattended, false);
+  const r = await apply("quick", change, { previewHash: p.previewHash });
+  assert.equal(r.ok, true, r.reason);
+});
+
+test("F1: with smart chat on the smart router follows the chosen role and moves", async () => {
+  await smartChat(true);
+  await bind("everyday", { model: "local-voice/m2", fallback: [] });
+  const change = { model: "local-chat/m1" };
+  const p = await preview("quick", change);
+  assert.ok(p.consumers.jobs.some((c) => c.id === "smart-router:fast"));
+  assert.equal(p.needs.ackUnattended, true);
+  const r = await apply("quick", change, { previewHash: p.previewHash });
+  assert.equal(r.reason, "needs_ack_unattended");
+});
+
+test("F1: a pinned embed job moves only when Replace the pin is ticked", async () => {
+  await raw("embed_provider", "emb-a");
+  const change = { model: "emb-b/e1" };
+  const p = await preview("embed", change);
+  assert.ok(p.consumers.jobs.some((c) => c.id === "embed"));
+  assert.equal(p.needs.ackUnattended, false);
+  assert.equal(p.needsIfReplacePin.ackUnattended, true);
+  let r = await apply("embed", change, { previewHash: p.previewHash, replacePin: true });
+  assert.equal(r.reason, "needs_ack_unattended");
+  assert.equal(await readSetting(db, "embed_provider"), "emb-a");
+  r = await apply("embed", change, { previewHash: p.previewHash });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(await readSetting(db, "embed_provider"), "emb-a");
+});
+
+test("F1: an unpinned embed job still moves", async () => {
+  const p = await preview("embed", { model: "emb-b/e1" });
+  assert.equal(p.needs.ackUnattended, true);
+  assert.equal(p.pin, null);
+});
+
+test("F4: the classifier pin never echoes credentials or a query string", async () => {
+  const blob = JSON.stringify({ url: "https://user:hunter2@api.example.com/v1?token=abc123", model: "cls-model" });
+  await raw("bot_safety_classifier", blob);
+  let p = await preview("safety", { model: "local-chat/m1" });
+  assert.equal(p.pin.setting, "bot_safety_classifier");
+  assert.equal(p.pin.value, "cls-model");
+  let text = JSON.stringify(p);
+  for (const bad of ["hunter2", "user:", "token", "abc123"]) assert.ok(!JSON.stringify(p.pin).includes(bad), bad);
+  assert.ok(!p.pin.value.includes("{"));
+  assert.ok(!text.includes("hunter2"));
+
+  await raw("bot_safety_classifier", "https://user:hunter2@api.example.com/v1?token=abc123");
+  p = await preview("safety", { model: "local-chat/m1" });
+  assert.equal(p.pin.value, "api.example.com");
+  assert.ok(!JSON.stringify(p).includes("hunter2"));
+  assert.ok(!JSON.stringify(p).includes("abc123"));
+
+  await raw("bot_safety_classifier", JSON.stringify({ name: "My checker", secret: "hunter2" }));
+  p = await preview("safety", { model: "local-chat/m1" });
+  assert.equal(p.pin.value, "My checker");
+  assert.ok(!JSON.stringify(p).includes("hunter2"));
+
+  await raw("bot_safety_classifier", JSON.stringify({ secret: "hunter2" }));
+  p = await preview("safety", { model: "local-chat/m1" });
+  assert.equal(p.pin.value, null);
+  assert.equal(p.pin.custom, true);
+  assert.ok(!JSON.stringify(p).includes("hunter2"));
+
+  await raw("bot_safety_classifier", "local-chat/m1");
+  p = await preview("safety", { model: "local-voice/m2" });
+  assert.equal(p.pin.value, "m1");
+});
+
+test("F4: a pin change still changes the hash even though the shown value is the same", async () => {
+  await raw("bot_safety_classifier", JSON.stringify({ url: "http://127.0.0.1:9001/v1", model: "cls-model" }));
+  const a = await preview("safety", { model: "local-chat/m1" });
+  await raw("bot_safety_classifier", JSON.stringify({ url: "http://127.0.0.1:9002/v1", model: "cls-model" }));
+  const b = await preview("safety", { model: "local-chat/m1" });
+  assert.equal(a.pin.value, b.pin.value);
+  assert.notEqual(a.previewHash, b.previewHash);
+});
+
+test("F9: a bot that follows a role twice is listed once", async () => {
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?,?,?)",
+    args: ["b2", "B2", JSON.stringify({ models: { default: "role:quick", escalation: "role:quick" }, gateways: [] })],
+  });
+  const p = await preview("quick", { model: "local-chat/m1" });
+  const all = [...p.consumers.bots, ...p.consumers.unattended].filter((c) => c.id === "b2");
+  assert.equal(all.length, 1);
 });

@@ -190,7 +190,8 @@ export function isCloudKey(key, opts) {
 export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r) => [r.id, `settings.roleJobs.${r.id}`])));
 
 /**
- * Where does a model run? "here" (loopback or one of this box's addresses),
+ * Where does a model run? "here" (loopback or one of this box's addresses,
+ * judged on the final hop after the door walk),
  * "other_box" (local-network but not ours), "cloud" (proven public), "unproven"
  * (a name or literal that cannot be proven local OR public: 0.0.0.0, ::, NAT64
  * and other reserved or embedded literals), "missing" (no provider row, no model
@@ -217,7 +218,9 @@ export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultRes
     }
     return "cloud";
   }
-  const h = hostnameOf(first.baseUrl);
+  // Judged on the final hop: a loopback door forwarding to a network box runs on that box.
+  const last = finalHopRow(key, { providers, resolveDoor }) || first;
+  const h = hostnameOf(last.baseUrl);
   return h && (own.has(h) || addressClass(h) === "loopback") ? "here" : "other_box";
 }
 

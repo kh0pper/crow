@@ -49,9 +49,12 @@ const entry = (s, via) => ({
  * from one `scanSlots(db, {withUnattended: true, includeSubagents: false})`;
  * without them this scans once itself. `roleCtx` (a RoleContext) defaults to
  * loadRoleContext(db); `bindings`/`customDefs` default to its own.
+ * `smartChat: false` drops the smart-router tiers: the router reads no tier
+ * while feature_flags.smart_chat is off (undefined keeps them).
+ * Each group lists a consumer (kind + id) once.
  * @returns {Promise<RoleConsumers>}
  */
-export async function listRoleConsumers(db, roleId, { slots, bindings, customDefs, env = process.env, isPrimary, roleCtx } = {}) {
+export async function listRoleConsumers(db, roleId, { slots, bindings, customDefs, env = process.env, isPrimary, roleCtx, smartChat } = {}) {
   const rc = roleCtx || await loadRoleContext(db);
   bindings ??= rc.bindings || {};
   customDefs ??= rc.customDefs || {};
@@ -74,6 +77,7 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
 
   for (const s of slots) {
     if (s.kind !== "job") continue;
+    if (smartChat === false && String(s.id).startsWith("smart-router:")) continue;
     const via = paths.get(JOB_ROLES[s.id]);
     if (!via) continue;
     (String(s.field).startsWith("env:") ? out.notAffected : out.jobs).push(entry(s, via));
@@ -95,6 +99,15 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
   try { resolved = resolveRoleKey(`role:${roleId}`, { ...rc, bindings, customDefs })?.key || null; } catch (e) { warn(`role:${roleId} did not resolve`, e); resolved = null; }
   if (resolved) {
     for (const s of slots) if (s.kind === "bot" && s.value === resolved) out.keepsOwnModel.push(entry(s, []));
+  }
+  for (const g of Object.keys(out)) {
+    const seen = new Set();
+    out[g] = out[g].filter((c) => {
+      const k = `${c.kind}|${c.id}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   }
   return out;
 }

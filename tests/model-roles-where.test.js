@@ -43,3 +43,15 @@ test("jobs", () => {
   assert.equal(t(ROLE_JOB_KEYS.voice, "es"), "Responde cuando hablas con Crow");
   for (const k of Object.values(ROLE_JOB_KEYS)) assert.notEqual(t(k, "en"), k);
 });
+test("F3: the chip is judged on the final hop: a loopback door to a network box is the other box", () => {
+  const ps = [
+    row("door-lan", "http://127.0.0.1:3001/llm/p/lan-box/v1", { bundleId: "b-door" }),
+    row("lan-box", "http://100.64.20.9:8080/v1"),
+    row("door-own", "http://127.0.0.1:3001/llm/p/own-box/v1", { bundleId: "b-door" }),
+    row("own-box", "http://100.64.20.5:8080/v1"),
+  ];
+  const o = { providers: ps, ownAddrs: new Set(["100.64.20.5"]) };
+  assert.equal(whereItRuns("door-lan/m1", o), "other_box");
+  assert.equal(whereItRuns("door-own/m1", o), "here");
+  assert.equal(whereItRuns("lan-box/m1", o), "other_box");
+});

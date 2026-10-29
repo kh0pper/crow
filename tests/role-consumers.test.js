@@ -203,3 +203,15 @@ test("a failed sub-agent read or role resolve logs one line and still lists", as
     console.warn = () => {};
   }
 });
+
+test("smartChat:false drops the smart-router tiers; undefined keeps them; each consumer listed once", async () => {
+  const off = await list("everyday", { smartChat: false });
+  assert.ok(!off.jobs.some((c) => String(c.id).startsWith("smart-router:")));
+  assert.ok(byId(off.jobs, "llm-router:escalate"));
+  const on = await list("everyday");
+  assert.ok(on.jobs.some((c) => c.id === "smart-router:code"));
+  const slots = await scan();
+  const dup = slots.find((s) => s.kind === "bot" && s.id === "b1");
+  const r = await listRoleConsumers(db, "quick", { slots: [...slots, { ...dup, field: "models.escalation" }], roleCtx: await roleCtx(), isPrimary: true });
+  assert.equal(r.bots.filter((c) => c.id === "b1").length, 1);
+});
