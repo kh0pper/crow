@@ -86,7 +86,7 @@ function verifiedRemoteActor(req, prefix) {
  * @param {Map} sessions - Session store from SessionManager
  * @param {Function} createServer - Factory function returning McpServer
  */
-function createMcpHandler(sessions, createServer, serverName) {
+export function createMcpHandler(sessions, createServer, serverName) {
   const postHandler = async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     try {
