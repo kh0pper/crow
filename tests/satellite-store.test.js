@@ -113,3 +113,35 @@ test("missing tables: readers are empty/null/false, writers throw not_migrated",
   assert.equal(S.isNotMigrated(new Error("boom")), false);
   assert.equal(S.isNotMigrated(null), false);
 });
+
+test("satellitesMigrated: true with the tables, false without", async () => {
+  const a = fresh(); await a.ready;
+  assert.equal(await S.satellitesMigrated(a.db), true);
+  const b = fresh(false); await b.ready;
+  assert.equal(await S.satellitesMigrated(b.db), false);
+});
+
+test("replaceRevokedSatellite replaces only a revoked row, in place", async () => {
+  const { db, ready } = fresh(); await ready;
+  await S.insertSatellite(db, row());
+  const next = { ...row(), name: "Again", mgmt_pubkey: "mk2", cert_json: "{\"n\":2}", cert_serial: "s2", last_seen_at: "t2" };
+  assert.equal(await S.replaceRevokedSatellite(db, next), false, "active row untouched");
+  assert.equal((await S.getSatellite(db, "sat-1")).mgmt_pubkey, "mk");
+  await S.updateSatelliteStatus(db, "sat-1", { status: "unreachable", unreachable_since: "t" });
+  assert.equal(await S.replaceRevokedSatellite(db, next), false, "unreachable row untouched");
+  await S.markRevoked(db, "sat-1", "2026-10-29T01:00:00Z");
+  await S.updateSatelliteStatus(db, "sat-1", { last_status_json: "{\"old\":1}" });
+  assert.equal(await S.replaceRevokedSatellite(db, next), true);
+  const r = await S.getSatellite(db, "sat-1");
+  assert.equal(r.status, "active");
+  assert.equal(r.revoked_at, null);
+  assert.equal(r.unreachable_since, null);
+  assert.equal(r.last_status_json, null);
+  assert.equal(r.name, "Again");
+  assert.equal(r.mgmt_pubkey, "mk2");
+  assert.equal(r.cert_serial, "s2");
+  assert.equal((await S.listSatellites(db)).length, 1);
+  await assert.rejects(() => S.replaceRevokedSatellite(db, { id: "sat-1" }), /missing/);
+  const m = fresh(false); await m.ready;
+  await assert.rejects(() => S.replaceRevokedSatellite(m.db, next), { code: "not_migrated" });
+});

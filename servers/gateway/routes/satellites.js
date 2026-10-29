@@ -88,7 +88,9 @@ export default function satellitesRouter({
 
   router.post("/api/satellites/pair/complete", csrfMiddleware, handle("pair complete", async (db, req, res) => {
     const b = req.body || {};
-    res.json(await service.completePairing({ db, pairing_id: b.pairing_id, code: b.code, name: b.name }));
+    res.json(await service.completePairing({
+      db, pairing_id: b.pairing_id, code: b.code, name: b.name, confirm_without_whois: b.confirm_without_whois === true,
+    }));
   }));
 
   router.post("/api/satellites/:id/unpair", csrfMiddleware, handle("unpair", async (db, req, res) => {
