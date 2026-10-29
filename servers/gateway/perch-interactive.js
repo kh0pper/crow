@@ -152,7 +152,13 @@ import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
-import { applyBriefing, briefingEnabled } from "./perch/briefing.js";
+import { applyBriefing, briefingEnabled, briefingPaths, storeBriefing, readStoredBriefing, readStoredBriefingRank, targetRankOf, RANK_HERE } from "./perch/briefing.js";
+
+/** The privacy rank of the model a child will run on (unknown: the cloud). */
+async function defaultRankModel(key) {
+  const db = createDbClient();
+  try { return await targetRankOf(db, key); } finally { try { db.close(); } catch { /* closed */ } }
+}
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
@@ -698,6 +704,11 @@ export function createInteractiveEngine({
   // hibernate and on close. Only the process singleton turns it on (it passes
   // SESSION_SUMMARIZER); test engines inject a stub or run without one.
   summarize = null,
+  // R1.2 PR 4: the privacy rank (briefing.js: this box 0, another box 1, the
+  // cloud 2; unknown counts as the cloud) of the model a child will run on.
+  // A briefing is applied only to a model at least as private as the one it
+  // was built for. A seam for tests; the default reads the providers.
+  rankModel = defaultRankModel,
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
@@ -825,8 +836,10 @@ export function createInteractiveEngine({
       /** Operator-set name, persisted on the row. NULL means "no name", and
        *  every render falls back to the short session id. */
       label: null,
-      /** R1.2 PR 4: the project briefing block (spawn() sets it), or null. */
+      /** R1.2 PR 4: the project briefing block (spawn() sets it), or null,
+       *  and the privacy rank of the model it was built for (null: this box). */
       briefing: null,
+      briefingRank: null,
       /** Open-anywhere B4: the session's working directory. NULL until the
        *  first startChild resolves it (world.cwd), or an operator chooses one
        *  via spawn({cwd}) / control({cwd}). It is pi's process cwd, the dir
@@ -2436,9 +2449,27 @@ export function createInteractiveEngine({
     // R1.2 PR 4: the project briefing the spawn route built (s.briefing, set
     // by spawn() only) rides as a marked section appended to the system
     // prompt (briefing.js applyBriefing), never the operator's message. It is
-    // re-applied on every wake so a resumed session keeps the same context.
-    // The flag is read per use: off means no session gets one.
-    if (s.briefing && briefingEnabled(env)) prep.piRpcOpts = applyBriefing(prep.piRpcOpts, s.briefing);
+    // kept in the session's own files (briefingPaths: the text, and the system
+    // prompt copy overwritten in place), so every wake re-applies it, even
+    // after a gateway restart. The flag is read per use: off means no session
+    // gets one. A storage failure starts the child without it.
+    if (briefingEnabled(env)) {
+      const bp = briefingPaths(world.sessionDir, s.sessionId);
+      try {
+        if (bp && s.briefing) storeBriefing(world.sessionDir, s.sessionId, s.briefing, s.briefingRank);
+        else if (bp) {
+          s.briefing = readStoredBriefing(world.sessionDir, s.sessionId);
+          s.briefingRank = readStoredBriefingRank(world.sessionDir, s.sessionId);
+        }
+        if (bp && s.briefing) {
+          // Never to a model less private than the one it was built for (a
+          // later model switch, or a restart onto another provider).
+          const rank = await rankModel(prep.resolved && prep.resolved.key);
+          if (rank <= (s.briefingRank ?? RANK_HERE)) prep.piRpcOpts = applyBriefing(prep.piRpcOpts, s.briefing, { file: bp.system });
+          else slog("briefing withheld: this model is less private than the one it was built for");
+        }
+      } catch { slog("briefing could not be stored; starting without it"); }
+    }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
     slog("model warm: " + (s.currentModel || (prep.resolved && prep.resolved.key) || "?"));
@@ -3351,7 +3382,7 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null, briefing = null }) {
+  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null, briefing = null, briefingRank = null }) {
     if (!botId) throw engineError("bad_request");
     // Artifacts (untrusted rounds, spec §7.3): a session that must start
     // NARROWED. A JSON array of tool ids to disable — the same contract as
@@ -3390,9 +3421,9 @@ export function createInteractiveEngine({
     // NULL = no explicit choice — the world builder keeps its own resolution.
     s.cwd = cwd || null;
     // R1.2 PR 4: the briefing text (briefing.js briefingText), built by the
-    // spawn route from the DB. Kept in memory only: after a gateway restart a
-    // woken session runs without it.
+    // spawn route from the DB; startChild keeps it in the session's files.
     s.briefing = typeof briefing === "string" && briefing.trim() ? briefing : null;
+    s.briefingRank = Number.isInteger(briefingRank) ? briefingRank : null;
     // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
     // after — reserveWithEviction's eviction path awaits the victim's
     // hibernate() before this call resumes, and a concurrent second caller's
@@ -4554,7 +4585,8 @@ export function createInteractiveEngine({
     /** R1.2 PR 4: the briefing block a resident session was started with, or null. */
     briefingOf: (sessionId) => {
       const s = sessions.get(String(sessionId));
-      return (s && s.briefing) || null;
+      if (!s) return null;
+      return s.briefing || (s.worldRoot ? readStoredBriefing(s.worldRoot, s.sessionId) : null);
     },
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,

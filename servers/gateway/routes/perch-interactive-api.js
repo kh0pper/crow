@@ -64,7 +64,7 @@ import { acceptResult, decideResult } from "../board/result-service.js";
 import { openDecisionsForThread } from "../board/decision-service.js";
 import { laneState } from "./shell-api.js";
 import { cardDrawerHref, drawerHref } from "../board/card-link.js";
-import { buildBriefing, briefingText, briefingEnabled, sessionSummary, forgetSummary } from "../perch/briefing.js";
+import { buildBriefing, briefingText, briefingEnabled, sessionSummary, forgetSummary, storedBriefingForThread, targetRankOf } from "../perch/briefing.js";
 import { CONFIRM_OUTCOMES, openDecision } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
@@ -495,7 +495,7 @@ function deliveredExists(sid, name) {
   finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
 }
 
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key) } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
   async function piNames(env) {
@@ -628,14 +628,18 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // R1.2 PR 4: { briefing: true } asks for the project's briefing. The
       // server rebuilds it from the DB itself; no client text is ever read.
       // Best effort: a failure here starts the session without one.
-      let briefing = null;
+      // It carries only what the receiving model may see: targetRank is where
+      // the bot's model runs (unknown counts as the cloud).
+      let briefing = null, briefingRank = null;
       if (body.briefing === true && projectId != null && briefingEnabled()) {
-        try { briefing = briefingText(await buildBriefing(db, { projectId }, { tasksDbPath: TASKS_DB })) || null; }
-        catch { console.warn("[perch] could not build the briefing"); briefing = null; }
+        try {
+          briefingRank = await rankBriefingTarget(db, def.models && def.models.default);
+          briefing = briefingText(await buildBriefing(db, { projectId, targetRank: briefingRank }, { tasksDbPath: TASKS_DB })) || null;
+        } catch { console.warn("[perch] could not build the briefing"); briefing = null; }
       }
 
       const eng = resolveEngine();
-      const result = await eng.spawn(briefing ? { botId, cwd, briefing } : { botId, cwd });
+      const result = await eng.spawn(briefing ? { botId, cwd, briefing, briefingRank } : { botId, cwd });
       if (result && result.threadId) {
         // The session is already running: a filing failure must not fail the spawn.
         try { await ensureItem(db, "perch_thread", result.threadId, { projectId, setBy: given ? "operator" : "origin" }); }
@@ -1175,14 +1179,16 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
 
   // ---- GET /interactive/:sid/briefing — the Briefing card and the summary ----
   // R1.2 PR 4. `briefing` is the exact block the session was started with
-  // (null when none, or when the engine no longer holds the session);
+  // (null when none);
   // `summary` is the thread's own summary for the sheet's Session tab. Read-only.
   router.get(P + "/interactive/:sid/briefing", async (req, res) => {
     const sid = String(req.params.sid);
     const db = createDbClient();
     try {
       const eng = resolveEngine();
-      const briefing = eng && typeof eng.briefingOf === "function" ? eng.briefingOf(sid) : null;
+      // The engine's copy, else the session's stored file (a gateway restart).
+      const briefing = (eng && typeof eng.briefingOf === "function" ? eng.briefingOf(sid) : null)
+        || await storedBriefingForThread(db, sid);
       res.json({ briefing: briefing || null, summary: await sessionSummary(db, sid) });
     } catch (err) {
       mapEngineError(res, err);

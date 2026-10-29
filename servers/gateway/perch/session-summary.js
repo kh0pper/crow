@@ -309,7 +309,7 @@ class SummaryError extends Error {
 export async function summarizeSession(db, session, deps = {}) {
   const {
     threadId, sessionModelKey = null, transcriptPath = null, projectId = null, projectUuid = null,
-    tainted = true, visited = false, label = null, summaryAt = null, trigger = "close",
+    tainted = true, visited = false, label = null, summaryAt = null, trigger = "close", forgottenAt = null,
   } = session || {};
   const env = deps.env || process.env;
   const now = deps.now || Date.now;
@@ -345,6 +345,12 @@ export async function summarizeSession(db, session, deps = {}) {
       const at = parseSqliteTime(summaryAt);
       // summary_at has whole-second precision: compare at that precision.
       if (Number.isFinite(at) && Math.floor(mtimeMs / 1000) * 1000 <= at) return skip("unchanged");
+    }
+    // Forget is sticky (briefing.js forgetSummary): no new summary until the
+    // transcript has changed after the Forget.
+    if (forgottenAt) {
+      const at = parseSqliteTime(forgottenAt);
+      if (!Number.isFinite(at) || Math.floor(mtimeMs / 1000) * 1000 <= at) return skip("forgotten");
     }
     const turns = readTranscriptTail(transcriptPath);
     if (!turns.length) return skip("empty_transcript");
@@ -440,6 +446,12 @@ async function writeSummary(db, w, { syncManager }) {
   }
 }
 
+/** summary_flags.forgotten_at (set by Forget), or null. */
+export function forgottenAtOf(raw) {
+  if (raw == null || raw === "") return null;
+  try { const f = JSON.parse(String(raw)); return f && typeof f.forgotten_at === "string" ? f.forgotten_at : null; } catch { return null; }
+}
+
 /** threadId → {rerun, deps} for the in-flight job (at most one per thread). */
 const inFlight = new Map();
 
@@ -485,7 +497,7 @@ async function runByThread(db, id, deps) {
     let row;
     try {
       row = (await db.execute({
-        sql: "SELECT id, bot_id, model, pi_session_dir, pi_session_id, label, summary_at FROM bot_sessions " +
+        sql: "SELECT id, bot_id, model, pi_session_dir, pi_session_id, label, summary_at, summary_flags FROM bot_sessions " +
           "WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
         args: [id],
       })).rows[0];
@@ -511,6 +523,7 @@ async function runByThread(db, id, deps) {
       tainted,
       label: row.label || null,
       summaryAt: row.summary_at || null,
+      forgottenAt: forgottenAtOf(row.summary_flags),
       trigger: deps.trigger === "idle" ? "idle" : "close",
     }, deps);
   })().catch(() => {
