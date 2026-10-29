@@ -173,7 +173,7 @@ export async function threadsByCard(db, ids) {
  * (nothing has made a card yet): it is never opened, so never created.
  */
 async function loadBoard(db, scope, engine) {
-  const empty = { counts: countsOf(Object.fromEntries(LANES.map((l) => [l, []]))), lanes: Object.fromEntries(LANES.map((l) => [l, []])), defs: new Map([[null, DEFAULT_BOARD_DEF]]), lockMap: new Map(), threads: new Map(), birds: new Map(), hrefByCard: new Map() };
+  const empty = { counts: countsOf(Object.fromEntries(LANES.map((l) => [l, []]))), lanes: Object.fromEntries(LANES.map((l) => [l, []])), defs: new Map([[null, DEFAULT_BOARD_DEF]]), lockMap: new Map(), threads: new Map(), birds: new Map(), hrefByCard: new Map(), slugByProject: new Map() };
   if (!existsSync(TASKS_DB)) return empty;
   let tdb;
   try {
@@ -191,7 +191,9 @@ async function loadBoard(db, scope, engine) {
     const birds = await liveBirdsByCard(engine, db);
     // Details/tap links: the one "open this card" rule, one bots lookup for every shown card.
     const hrefByCard = await drawerHrefs(db, LANES.flatMap((l) => lanes[l]));
-    return { counts, lanes, defs, lockMap, threads, birds, hrefByCard };
+    // A conversation link carries its card's project (board/html.js cardHref).
+    const slugByProject = new Map((await activeProjects(db)).map((p) => [Number(p.id), String(p.slug)]));
+    return { counts, lanes, defs, lockMap, threads, birds, hrefByCard, slugByProject };
   } catch (err) {
     if (!/no such table/i.test(String(err && err.message))) console.warn("[board] load failed:", err && err.message);
     return empty;

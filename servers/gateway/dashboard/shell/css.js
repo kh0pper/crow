@@ -201,6 +201,8 @@ export function shellCss() {
   body.shell .shell-crow-tray .dropdown-title { padding-left: 0; padding-right: 0; }
   body.shell .shell-crow-tray .crow-health-bar { padding-left: 0; padding-right: 0; }
   body.shell .shell-crow-tray .dropdown-body { padding-left: 0; padding-right: 0; max-height: 40dvh; }
+  body.shell .shell-crow-tray .dropdown-title .btn { min-height: 44px; min-width: 44px; }
+  body.shell .shell-crow-sep { width: 100%; margin: 8px 0 0; border: none; border-top: 1px solid var(--crow-border); }
   /* The no-showModal fallback (open attribute only): pin the sheet on top. */
   body.shell .shell-sheet[open]:not(:modal) { position: fixed; inset: auto 0 0; z-index: 1200; }
   body.shell .shell-heading {
@@ -329,8 +331,9 @@ export function shellCss() {
      with its own tab (Chat, Board, Make) the chip and the lit tab already
      say where you are, so it is for screen readers only; on any other page
      (Bot Builder, Models, Settings…) it is the page's own heading on a line
-     of its own under the row. Either way the chip gets the room it needs. */
-  @media (max-width: 899px) {
+     of its own under the row. Either way the chip gets the room it needs.
+     The same breakpoint as the bottom bar: below the desktop rail. */
+  @media (max-width: 1023px) {
     body.shell .content-header { flex-wrap: wrap; row-gap: 6px; }
     body.shell .content-header h2 {
       order: 10;
@@ -343,7 +346,8 @@ export function shellCss() {
       position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
       overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
     }
-    body.shell .shell-scope { max-width: calc(100vw - 32px - 44px - 1.5rem); flex: 0 1 auto; }
+    /* Room for the header icons: the mascot, or the bell variant's two. */
+    body.shell .shell-scope { max-width: calc(100vw - 32px - 2 * 44px - 1.5rem); flex: 0 1 auto; }
   }
 
   /* ─── Desktop: the tabs become a left rail with the project list ─── */

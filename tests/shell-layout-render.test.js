@@ -420,7 +420,7 @@ test("classic and tray-less renders keep their tray in the header and the avatar
 
 test("phones: the title leaves the header row (own line, or screen-reader only on a tab page), and the chip name can shrink", () => {
   const css = shellCss();
-  const m = css.match(/@media \(max-width: 899px\) \{[\s\S]*?\n  \}/);
+  const m = css.match(/@media \(max-width: 1023px\) \{[\s\S]*?\n  \}/);
   assert.ok(m, "the phone header block");
   assert.match(m[0], /body\.shell \.content-header \{ flex-wrap: wrap;/);
   assert.match(m[0], /body\.shell \.content-header h2 \{[^}]*order: 10;[^}]*flex: 1 0 100%;/);

@@ -5895,7 +5895,7 @@ test("a group folding at turn end hands focus from its body to its line", async 
   assert.equal(hub.doc.activeElement, g.children[0], "focus moved to the line, not lost");
 });
 
-test("new mode: the composer keeps its short placeholder, the header chip names the session's project, the sheet carries the full line", async () => {
+test("new mode: the composer keeps its short placeholder, the chip is left to the server's scope, the sheet carries the full line", async () => {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const src = perchHubJs("en");
   const grab = (startMark, endMark) => {
@@ -5924,11 +5924,11 @@ test("new mode: the composer keeps its short placeholder, the header chip names 
   )(nodes, chip);
   showIdent.showIdent("Bot");
   assert.equal(nodes["perch-input"].attrs.placeholder, "Message", "the placeholder no longer carries the project");
-  assert.equal(chip.textContent, "Alpha <b>", "the chip names the session's project (textContent, never HTML)");
+  assert.equal(chip.textContent, "Everything", "the chip names the real scope: the client never relabels it");
   assert.equal(nodes["perch-sheet-sub"].textContent, "Alpha <b> \u00b7 today", "the sheet carries the full context line");
   showIdent.setSid("s2");
   showIdent.showIdent("Bot");
-  assert.equal(chip.textContent, "Everything", "an unfiled session gives the chip back to the page's scope");
+  assert.equal(chip.textContent, "Everything");
   assert.equal(nodes["perch-input"].attrs.placeholder, "Message");
 });
 
@@ -5982,4 +5982,16 @@ test("makeTabHref: a card gives the card scope with no project (no cookie-writin
   assert.equal(makeTabHref("/dashboard/make", null), "/dashboard/make");
   assert.equal(makeTabHref("/dashboard/make?project=x", undefined), "/dashboard/make?project=x");
   assert.equal(makeTabHref("/dashboard/extensions?q=artifacts", 12), "/dashboard/extensions?q=artifacts", "no Make panel: left alone");
+});
+
+test("sessionHref: a filed session outside the view's scope opens with ?project=<slug>; inside it, or unfiled, it opens in place", async () => {
+  const projectOfRow = await extract("projectOfRow");
+  const sessionHref = await extract("sessionHref", "var projectOfRow=" + projectOfRow.toString() + ";");
+  const P = [{ id: 3, slug: "hw-club", name: "Homework Club" }, { id: 4, slug: "a b", name: "Spaced" }];
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 3 }, P, "all"), "/dashboard/perch?project=hw-club#s1");
+  assert.equal(sessionHref({ sessionId: "s 2", projectId: 4 }, P, "unassigned"), "/dashboard/perch?project=a%20b#s%202");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 4 }, P, "3"), "/dashboard/perch?project=a%20b#s1", "another project's session");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 3 }, P, "3"), null, "already in its project: in place");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: null }, P, "all"), null, "unfiled: in place");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 3 }, [], null), null, "classic (no projects): in place");
 });

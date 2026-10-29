@@ -80,8 +80,10 @@ export function shellClientJs() {
           if (typeof dlg.showModal === 'function') dlg.showModal();
           else dlg.setAttribute('open', '');
         });
-        // The bell is a div with role=button: Enter and Space press it.
-        if (tb.tagName !== 'BUTTON') tb.addEventListener('keydown', function (e) {
+        // The bell is a div with role=button: Enter and Space press it. An
+        // armed bell (data-crow-talk) already gets that from crow-talk.js; a
+        // second press would toggle the tray straight back.
+        if (tb.tagName !== 'BUTTON' && !tb.hasAttribute('data-crow-talk')) tb.addEventListener('keydown', function (e) {
           if (e.key !== 'Enter' && e.key !== ' ') return;
           e.preventDefault();
           e.currentTarget.click();
@@ -98,9 +100,9 @@ export function shellClientJs() {
             var row = e.target && e.target.closest ? e.target.closest('.crow-talk-row') : null;
             if (!row) return;
             var dlg = e.currentTarget;
-            if (typeof btn.focus === 'function') btn.focus();
             dlg.__shellOpener = null;
             closeSheet(dlg);
+            if (typeof btn.focus === 'function') btn.focus();
           }; })(tb), true);
         }
       }

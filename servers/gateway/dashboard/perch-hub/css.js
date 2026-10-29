@@ -436,6 +436,11 @@ border:1px solid var(--line);border-radius:24px;background:var(--card);padding:4
 #perch-hub-root #perch-composer.pill textarea{flex:1 1 0;min-width:0;width:auto;box-sizing:border-box;border:0;background:transparent;
 box-shadow:none;outline:none;resize:none;margin:0;padding:11px 8px;font:inherit;line-height:1.5;
 min-height:44px;max-height:calc(7.5em + 22px);overflow-y:auto}
+/* iOS Safari zooms the page into any field whose text is under 16px; on a
+   touch screen (and at phone/tablet widths) the pill field is 16px. */
+@media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px), (pointer:coarse){
+  #perch-hub-root #perch-composer.pill textarea{font-size:16px}
+}
 #perch-hub-root #perch-composer.pill #perch-plus{flex:none;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;
 border-radius:22px;display:inline-flex;align-items:center;justify-content:center}
 #perch-hub-root #perch-composer.pill #perch-plus svg{width:20px;height:20px}

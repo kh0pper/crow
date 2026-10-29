@@ -737,6 +737,18 @@ test("the mascot opens ONE sheet: notifications first, then Settings, What Crow 
               order: pos('#notif-list'), modal: d.matches(':modal'), sw: document.documentElement.scrollWidth, vw: innerWidth }; })()`);
           assert.deepEqual(s, { label: lang === "es" ? "Notificaciones y ajustes" : "Notifications and settings", list: true, listShown: true,
             settings: true, reach: true, classic: true, talk: true, order: "before", modal: true, sw: s.vw, vw: s.vw }, `the merged sheet (${lang} ${width})`);
+          // A visible Notifications heading leads the tray; no second heading above Settings.
+          const heads = await p.ev("[...document.querySelectorAll('#shell-avatar .shell-heading')].map(function(h){ return h.textContent.trim(); })");
+          assert.deepEqual(heads, [lang === "es" ? "Notificaciones" : "Notifications"]);
+          await assertTargets(p, [["#shell-avatar .dropdown-title .btn", 1, "Clear all"]], `${lang} ${width}`);
+          // A click inside the open sheet leaves the mascot expanded and the tray shown.
+          await p.click("#shell-avatar .shell-crow-heading");
+          await p.ev(TWO_FRAMES);
+          assert.deepEqual(await p.ev("({ x: document.getElementById('crow-bird-btn').getAttribute('aria-expanded'), d: document.getElementById('crow-dropdown').style.display, open: document.getElementById('shell-avatar').open })"),
+            { x: "true", d: "block", open: true }, "a click inside the sheet resets nothing");
+          // The hold hint is the mascot's description, not part of its name.
+          assert.equal(await p.ev("(function(){ var b=document.getElementById('crow-bird-btn'), d=document.getElementById(b.getAttribute('aria-describedby')); return d ? d.textContent : null; })()"),
+            lang === "es" ? "Notificaciones y ajustes. Mantén pulsado para hablar con Crow." : "Notifications and settings. Press and hold to talk to Crow.");
           await p.key("Escape", "Escape", 27);
           await p.until("!document.getElementById('shell-avatar').open", "the sheet to close");
           await p.until("document.activeElement === document.getElementById('crow-bird-btn')", "focus back on the mascot");
@@ -764,4 +776,35 @@ test("a long-press on the mascot talks to Crow and does not open the sheet", asy
     assert.equal(await p.ev("document.getElementById('shell-avatar').open"), false, "the long-press opened no sheet");
     await p.ev("window.closeCrowTalk(); 1");
   } finally { await p.close(); }
+});
+
+test("the bell variant (mascot off): Enter opens the sheet once and it stays expanded; a tap opens it too", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { createDbClient } = await import("../servers/db.js");
+  const { writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js");
+  const set = async (v) => { const d = createDbClient(); try { await writeSetting(d, "tamagotchi_enabled", v); } finally { d.close(); } };
+  await set("false");
+  try {
+    for (const width of [390, 1280]) {
+      const p = await open("/dashboard/bot-builder", { width, height: 844 });
+      try {
+        const bell = await p.ev(`(function(){ var b=document.getElementById('notif-icon-btn');
+          return b ? { role: b.getAttribute('role'), label: b.getAttribute('aria-label'), controls: b.getAttribute('aria-controls'), armed: b.hasAttribute('data-crow-talk'),
+            mascot: !!document.getElementById('crow-bird-btn'), avatars: document.querySelectorAll('.shell-avatar').length } : null; })()`);
+        assert.deepEqual(bell, { role: "button", label: "Notifications and settings", controls: "shell-avatar", armed: true, mascot: false, avatars: 0 });
+        await p.ev("window.__opens = 0; document.getElementById('shell-avatar').addEventListener('close', function(){ window.__closes = (window.__closes||0) + 1; }); var d=document.getElementById('shell-avatar'), o=d.showModal; d.showModal=function(){ window.__opens++; return o.call(d); }; document.getElementById('notif-icon-btn').focus(); 1");
+        await p.key("Enter", "Enter", 13);
+        await p.until(OPEN_SHEET("shell-avatar"), "the sheet from Enter");
+        await p.ev("new Promise(function(r){ setTimeout(r,300); })");
+        assert.deepEqual(await p.ev("({ opens: window.__opens, open: document.getElementById('shell-avatar').open, x: document.getElementById('notif-icon-btn').getAttribute('aria-expanded'), list: !!document.querySelector('#shell-avatar #notif-list') })"),
+          { opens: 1, open: true, x: "true", list: true }, `Enter opens it once and it stays expanded (${width})`);
+        await p.key("Escape", "Escape", 27);
+        await p.until("!document.getElementById('shell-avatar').open", "the sheet to close");
+        await p.until("document.getElementById('notif-icon-btn').getAttribute('aria-expanded') === 'false'", "the bell reset");
+        await p.click("#notif-icon-btn");
+        await p.until(OPEN_SHEET("shell-avatar"), "the sheet from a tap");
+        assert.equal(await p.ev("window.__opens"), 2);
+      } finally { await p.close(); }
+    }
+  } finally { await set("true"); }
 });

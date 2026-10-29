@@ -75,6 +75,7 @@ before(async () => {
   CDP = chrome.cdp; HOST = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+  const { tamagotchiHtml, tamagotchiTrayHtml } = await import("../servers/gateway/dashboard/shared/notifications.js");
   const turbo = readFileSync(join(REPO, "servers/gateway/public/vendor/turbo-8.0.5.umd.js"));
   server = http.createServer(async (req, res) => {
     if (req.url.startsWith("/dashboard/perch-api/")) return serveApi(req, res);
@@ -89,11 +90,14 @@ before(async () => {
     }
     const lang = /[?&]lang=es\b/.test(req.url) ? "es" : "en";
     req.crowMode = { mode: "new" };
-    req.crowScope = { all: true };
-    // The chip starts at Everything, as on a phone that opened the session
-    // from a link without ?project=.
+    // A link into a filed session carries ?project=<slug>, and the server
+    // renders that project's scope (shell/request.js resolveScope).
+    const scope = new RegExp("[?&]project=" + PROJECT.slug + "\\b").test(req.url) ? { projectId: PROJECT.id, slug: PROJECT.slug } : { all: true };
+    req.crowScope = scope;
+    // The real header: the mascot, with its tray in the one sheet (no avatar).
     const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang,
-      variant: "shell", shell: { scope: { all: true }, projects: [PROJECT], tab: "chat", getPanel: () => null } });
+      headerIcons: tamagotchiHtml(lang, { sheet: true }),
+      variant: "shell", shell: { scope, projects: [PROJECT], tab: "chat", getPanel: () => null, tray: tamagotchiTrayHtml(lang) } });
     const db = { execute: async () => ({ rows: [PROJECT] }) };
     const html = await perchHubPanel.handler(req, res, { lang, layout, db });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
@@ -153,7 +157,8 @@ async function tab({ lang = "en", dark = false, fakeVV = false } = {}) {
   await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });
   await cdp("Page.enable");
   if (fakeVV) await cdp("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_VV });
-  await cdp("Page.navigate", { url: `http://${HOST}:${port}/dashboard/perch${lang === "es" ? "?lang=es" : ""}#${SID}` });
+  const q = [lang === "es" ? "lang=es" : "", "project=" + PROJECT.slug].filter(Boolean).join("&");
+  await cdp("Page.navigate", { url: `http://${HOST}:${port}/dashboard/perch?${q}#${SID}` });
   await waitFor("document.body.getAttribute('data-view')==='chat'&&!!document.getElementById('perch-bot-name').textContent" +
     "&&!!document.getElementById('perch-ident-sub').textContent&&document.querySelectorAll('#perch-transcript .msg, #perch-transcript > *').length>4",
   "the chat, its head and its transcript");
@@ -189,7 +194,9 @@ const GEOMETRY = `(function(){
     apps:box(document.getElementById('perch-apps-btn')), appsShown:shown(document.getElementById('perch-apps-btn')),
     name:name.textContent, nameClipped:name.scrollWidth>name.clientWidth,
     sub:sub.textContent, subClipped:sub.scrollWidth>sub.clientWidth,
-    chip:chip?chip.textContent:null, scrollers:scrollers, transcriptScrolls:tr.scrollHeight>tr.clientHeight });
+    chip:chip?chip.textContent:null, chipClipped:chip?chip.scrollWidth>chip.clientWidth+0.5:null,
+    avatars:document.querySelectorAll('.shell-avatar').length, bird:box(document.getElementById('crow-bird-btn')),
+    fieldFont:parseFloat(getComputedStyle(input).fontSize), kb:document.body.hasAttribute('data-perch-kb'), scrollers:scrollers, transcriptScrolls:tr.scrollHeight>tr.clientHeight });
 })()`;
 
 function assertLayout(m, lang, label) {
@@ -215,8 +222,13 @@ function assertLayout(m, lang, label) {
   for (const k of ["back", "ident", "apps"]) assert.ok(m[k].w >= 44 && m[k].h >= 44, at(k + " is a 44 px target"));
   assert.ok(m.ident.l - m.back.r >= 8, at("8 px between Back and the name"));
   assert.ok(m.apps.l - m.ident.r >= 8, at("8 px between the name and the apps button"));
-  // The chip names the session's project.
+  // The real header: the server-rendered chip names the session's project
+  // (the link carried ?project=), unclipped; the mascot is the only button.
   assert.equal(m.chip, PROJECT.name, at("the header chip names the session's project"));
+  assert.equal(m.chipClipped, false, at("the chip's name is not clipped"));
+  assert.equal(m.avatars, 0, at("no separate avatar button"));
+  assert.ok(m.bird && m.bird.w >= 44 && m.bird.h >= 44, at("the mascot is a 44 px target"));
+  assert.ok(m.fieldFont >= 16, at("the field's text is at least 16px (no iOS focus zoom)"));
   // Nothing pans: no sideways scroll, the document does not scroll, the
   // transcript is the only scroller.
   assert.ok(m.sw <= m.vw, at("no horizontal scroll"));
@@ -260,7 +272,15 @@ test("390x844: an open on-screen keyboard hides the bar and lifts the composer; 
   try {
     assert.equal(await s.evalIn("window.visualViewport===window.__fakeVV"), true, "the stand-in viewport is in place");
     const KB = 300;
+    // Covered but no text field focused (say, a pinch-zoom report): the bar stays.
     await s.evalIn(`(function(){ var v=window.__fakeVV; v.height=innerHeight-${KB}; v.dispatchEvent(new Event('resize')); return 1; })()`);
+    await s.evalIn("new Promise(function(r){ setTimeout(r,50); })");
+    assert.equal(await s.evalIn("document.body.hasAttribute('data-perch-kb')"), false, "no keyboard without a focused text field");
+    // A pinch zoom (height shrinks by the scale) is not a keyboard either.
+    await s.evalIn(`(function(){ var v=window.__fakeVV; document.getElementById('perch-input').focus(); v.scale=2; v.height=innerHeight/2; v.dispatchEvent(new Event('resize')); return 1; })()`);
+    await s.evalIn("new Promise(function(r){ setTimeout(r,50); })");
+    assert.equal(await s.evalIn("document.body.hasAttribute('data-perch-kb')"), false, "a zoom is not a keyboard");
+    await s.evalIn(`(function(){ var v=window.__fakeVV; v.scale=1; v.height=innerHeight-${KB}; v.dispatchEvent(new Event('resize')); return 1; })()`);
     await s.waitFor("getComputedStyle(document.querySelector('.shell-tabs')).display==='none'", "the bar to hide for the keyboard");
     await s.evalIn("new Promise(function(r){ requestAnimationFrame(function(){ requestAnimationFrame(r); }); })");
     const open = await s.json(GEOMETRY);
@@ -269,5 +289,16 @@ test("390x844: an open on-screen keyboard hides the bar and lifts the composer; 
     await s.waitFor("getComputedStyle(document.querySelector('.shell-tabs')).display!=='none'", "the bar to come back");
     await s.evalIn("new Promise(function(r){ requestAnimationFrame(function(){ requestAnimationFrame(r); }); })");
     assertLayout(await s.json(GEOMETRY), "en", "after the keyboard closed");
+  } finally { await s.close(); }
+});
+
+test("390x844: a blur brings the bar back even while the viewport still reports the keyboard", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab({ fakeVV: true });
+  try {
+    await s.evalIn("(function(){ document.getElementById('perch-input').focus(); var v=window.__fakeVV; v.height=innerHeight-300; v.dispatchEvent(new Event('resize')); return 1; })()");
+    await s.waitFor("document.body.hasAttribute('data-perch-kb')", "the keyboard flag");
+    await s.evalIn("document.getElementById('perch-input').blur(); 1");
+    await s.waitFor("!document.body.hasAttribute('data-perch-kb')&&getComputedStyle(document.querySelector('.shell-tabs')).display!=='none'", "the bar back after the blur");
   } finally { await s.close(); }
 });

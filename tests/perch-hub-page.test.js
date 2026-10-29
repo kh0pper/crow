@@ -604,7 +604,8 @@ test("the Wave-1 client wiring: Enter/Shift rule, grow-on-input, watchdog, reviv
   // The server ping is what the watchdog measures silence against.
   assert.match(js, /addEventListener\('ping'/);
   // Revive on pageshow and online too, through the generation-checked registry.
-  assert.match(js, /bindOnce\(window,'pageshow','pageshow',reviveStream\)/);
+  // pageshow revives the stream (and, since the phone review, re-checks the keyboard flag).
+  assert.match(js, /bindOnce\(window,'pageshow','pageshow',function\(\)\{ reviveStream\(\);/);
   assert.match(js, /bindOnce\(window,'online','online',reviveStream\)/);
   // Resync-on-reconnect: the retry slot carries it.
   assert.match(js, /openStream\(mySid,true\)/);

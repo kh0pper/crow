@@ -308,7 +308,7 @@ export function headerIconsHtml(lang, { talkAvailable, sheet } = {}) {
   // "Notifications and settings" sheet; its tray renders inside that sheet
   // (headerIconsTrayHtml), not here.
   const bellAttrs = sheet
-    ? ` role="button" tabindex="0" aria-haspopup="dialog" aria-controls="shell-avatar" aria-expanded="false" data-shell-tray="notif-dropdown" aria-label="${t("shell.notifSettings", lang)}" title="${t(talk ? "shell.notifSettingsHold" : "shell.notifSettings", lang)}"${talk ? " data-crow-talk" : ""}`
+    ? ` role="button" tabindex="0" aria-haspopup="dialog" aria-controls="shell-avatar" aria-expanded="false" data-shell-tray="notif-dropdown" aria-label="${t("shell.notifSettings", lang)}" title="${t("shell.notifSettings", lang)}"${talk ? ` data-crow-talk aria-describedby="notif-hold-desc"` : ""}`
     : ` title="${t(talk ? "talk.bellLabelHold" : "notif.notifications", lang)}"${talk ? ` data-crow-talk role="button" tabindex="0" aria-controls="notif-dropdown" aria-expanded="false" aria-label="${t("talk.bellLabelHold", lang)}"` : ""}`;
   return `
 <div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="${t("notif.systemHealth", lang)}">
@@ -327,7 +327,7 @@ export function headerIconsHtml(lang, { talkAvailable, sheet } = {}) {
     <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
   </svg>
   <span id="notif-badge" class="notif-badge" style="display:none">0</span>
-  <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>${sheet ? "" : headerIconsTrayHtml(lang, { talkAvailable })}
+  <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>${sheet ? (talk ? `<span id="notif-hold-desc" hidden>${t("shell.notifSettingsHold", lang)}</span>` : "") : headerIconsTrayHtml(lang, { talkAvailable })}
 </div>
 `;
 }
@@ -595,6 +595,9 @@ export function headerIconsJs(lang) {
   function setNotifDropdown(open) {
     var dd = document.getElementById('notif-dropdown');
     if (!dd) return;
+    // New shell: the tray lives in the open "Notifications and settings"
+    // sheet, which owns its state until it closes (shell/client.js).
+    if (!open && dd.closest && dd.closest('dialog[open]')) return;
     dd.style.display = open ? 'block' : 'none';
     var owner = document.getElementById('notif-icon-btn');
     if (owner && owner.hasAttribute('aria-expanded')) owner.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -703,7 +706,7 @@ export function tamagotchiHtml(lang, { talkAvailable, sheet } = {}) {
   // (shell/chrome.js, which holds tamagotchiTrayHtml); a long-press still
   // talks to Crow. The badge stays on the bird.
   const birdAttrs = sheet
-    ? `aria-haspopup="dialog" aria-controls="shell-avatar" aria-expanded="false" data-shell-tray="crow-dropdown" aria-label="${t("shell.notifSettings", lang)}" title="${t(talk ? "shell.notifSettingsHold" : "shell.notifSettings", lang)}"`
+    ? `aria-haspopup="dialog" aria-controls="shell-avatar" aria-expanded="false" data-shell-tray="crow-dropdown" aria-label="${t("shell.notifSettings", lang)}" title="${t("shell.notifSettings", lang)}"${talk ? ` aria-describedby="crow-bird-hold-desc"` : ""}`
     : `aria-haspopup="true" aria-controls="crow-dropdown" aria-expanded="false" aria-label="${birdLabel}" title="${birdLabel}"`;
   return `
 <div class="crow-tama-wrap" id="crow-tama-wrap">
@@ -718,7 +721,7 @@ export function tamagotchiHtml(lang, { talkAvailable, sheet } = {}) {
     <!-- Alarmed exclamation -->
     <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="var(--crow-body-font)">!</text>
   </svg>
-  </button>${sheet ? "" : tamagotchiTrayHtml(lang, { talkAvailable })}
+  </button>${sheet ? (talk ? `<span id="crow-bird-hold-desc" hidden>${t("shell.notifSettingsHold", lang)}</span>` : "") : tamagotchiTrayHtml(lang, { talkAvailable })}
 </div>
 `;
 }
@@ -913,6 +916,9 @@ export function tamagotchiJs(lang) {
   function setCrowDropdown(open) {
     var dd = document.getElementById('crow-dropdown');
     if (!dd) return;
+    // New shell: the tray lives in the open "Notifications and settings"
+    // sheet, which owns its state until it closes (shell/client.js).
+    if (!open && dd.closest && dd.closest('dialog[open]')) return;
     dd.style.display = open ? 'block' : 'none';
     var bird = document.getElementById('crow-bird-btn');
     if (bird) bird.setAttribute('aria-expanded', open ? 'true' : 'false');

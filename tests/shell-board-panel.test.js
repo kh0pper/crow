@@ -188,7 +188,8 @@ test("a card with a conversation opens it", async () => {
   const { html } = await render({ project: slug1 });
   const m = html.match(/<li class="sb-card" data-card="5">[\s\S]*?<\/li>/);
   assert.ok(m, "card 5 is rendered");
-  assert.match(m[0], /class="sb-open" href="\/dashboard\/perch#perchlive-z"/, "the newest perch-live thread");
+  // The card is filed in a live project, so the link carries its scope.
+  assert.match(m[0], /class="sb-open" href="\/dashboard\/perch\?project=[^"#]+#perchlive-z"/, "the newest perch-live thread");
   // Details opens the card's drawer on the board of the bot on its project
   // (the classic client's #open=N deep link, openCardById): plan, results,
   // history and decision, not the no-JS card view.
@@ -399,7 +400,7 @@ test("a live conversation wins over a newer archived one", async () => {
   const { html } = await render({ project: slug2 });
   const m = html.match(new RegExp(`<li class="sb-card" data-card="${ids.betaOpen}">[\\s\\S]*?</li>`));
   assert.ok(m);
-  assert.match(m[0], /class="sb-open" href="\/dashboard\/perch#perchlive-live"/);
+  assert.match(m[0], new RegExp(`class="sb-open" href="/dashboard/perch\\?project=${encodeURIComponent(slug2)}#perchlive-live"`));
 });
 
 test("a card no bot's board holds still opens its full card view", async () => {
@@ -450,4 +451,14 @@ test("the face's Accept is dropped on a card with an open decision; Reject stays
   assert.match(li(901), /data-result-action="accept"/, "a plain recorded result keeps Accept");
   assert.doesNotMatch(li(902), /data-result-action="accept"/, "Accept can never succeed under an open decision");
   assert.match(li(902), /data-result-action="reject"/);
+});
+
+test("a card's conversation link carries ?project=<slug> for a card filed in a live project", async () => {
+  const { cardHref } = await import("../servers/gateway/dashboard/panels/board/html.js");
+  const threads = new Map([[7, "perchlive-x"], [8, "perchlive-y"]]);
+  const slugs = new Map([[3, "hw club"]]);
+  assert.equal(cardHref({ id: 7, project_id: 3 }, threads, new Map(), slugs), "/dashboard/perch?project=hw%20club#perchlive-x");
+  assert.equal(cardHref({ id: 8, project_id: null }, threads, new Map(), slugs), "/dashboard/perch#perchlive-y", "unfiled: no project");
+  assert.equal(cardHref({ id: 8, project_id: 9 }, threads, new Map(), slugs), "/dashboard/perch#perchlive-y", "not a live project: no project");
+  assert.equal(cardHref({ id: 7, project_id: 3 }, threads, new Map()), "/dashboard/perch#perchlive-x", "no slug map (project home rewrites its own)");
 });

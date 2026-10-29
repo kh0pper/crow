@@ -280,8 +280,9 @@ export function shellAvatarSheet({ lang, tray }) {
   return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet${merged ? " shell-crow-sheet" : ""}" aria-label="${name}">
     <div class="shell-sheet-inner">
       ${closeButton(lang)}${merged ? `
+      <h3 class="shell-heading shell-crow-heading">${escapeHtml(t("notif.notifications", lang))}</h3>
       <div class="shell-crow-tray">${tray}</div>
-      <h3 class="shell-heading">${escapeHtml(t("shell.settingsHeading", lang))}</h3>` : ""}
+      <hr class="shell-crow-sep">` : ""}
       <a href="/dashboard/settings" class="shell-sheet-link">${escapeHtml(settings)}</a>
       <a href="/dashboard/settings?section=models" class="shell-sheet-link">${escapeHtml(t("settings.section.models", lang))}</a>
       <a href="/dashboard/settings?section=integrations" class="shell-sheet-link">${escapeHtml(t("shell.reach", lang))}</a>
