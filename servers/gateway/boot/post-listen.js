@@ -413,7 +413,7 @@ export async function runPostListenSetup(server, app, deps) {
               priority: "high",
               title: issue.label,
               body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
-              action_url: "/dashboard/nest",
+              action_url: "/dashboard/nest?open=1",
             }),
           });
           lastMap = cycle.lastMap;

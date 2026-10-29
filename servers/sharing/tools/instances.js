@@ -200,7 +200,7 @@ export function registerInstancesTools(server, ctx) {
           title: `Instance registered: ${name}`,
           type: "system",
           source: "instance-registry",
-          action_url: "/dashboard/nest",
+          action_url: "/dashboard",
         });
       } catch {}
 

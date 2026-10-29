@@ -74,7 +74,7 @@ export default {
             });
           }
         }
-        res.redirectAfterPost("/dashboard/nest");
+        res.redirectAfterPost("/dashboard/nest?open=1");
         return;
       }
       if (action === "unpin") {
@@ -86,7 +86,7 @@ export default {
           sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nest_pinned_items', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
           args: [JSON.stringify(pinned), JSON.stringify(pinned)],
         });
-        res.redirectAfterPost("/dashboard/nest");
+        res.redirectAfterPost("/dashboard/nest?open=1");
         return;
       }
     }

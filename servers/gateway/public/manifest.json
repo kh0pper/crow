@@ -3,7 +3,7 @@
   "name": "Crow's Nest",
   "short_name": "Crow",
   "description": "AI-powered personal platform",
-  "start_url": "/dashboard/nest",
+  "start_url": "/dashboard",
   "scope": "/dashboard",
   "display": "standalone",
   "background_color": "#1d1d1f",

@@ -38,7 +38,8 @@ export async function mountPublicEndpoints(app, deps) {
   });
 
   // --- Root redirect (convenience for managed hosting users) ---
-  app.get("/", (req, res) => res.redirect("/dashboard/nest"));
+  // /dashboard routes per device mode (new → Chat, classic → the nest).
+  app.get("/", (req, res) => res.redirect("/dashboard"));
 
   // --- Room Token Validation (used by companion for WebSocket auth) ---
   app.get("/api/room/validate", (req, res) => {

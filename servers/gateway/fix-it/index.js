@@ -31,7 +31,7 @@ function boundStore(db) {
           await createNotification(db, {
             title: item.title, body: item.why || null,
             type: "system", source: "fix-it", priority: "high",
-            action_url: "/dashboard/nest",
+            action_url: "/dashboard/nest?open=1",
           });
         } catch (err) { console.warn("[fix-it] push failed:", err.message); }
       }

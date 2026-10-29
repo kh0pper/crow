@@ -25,7 +25,9 @@ const manifest = JSON.parse(readFileSync(join(PUB, "manifest.json"), "utf8"));
 test("manifest: standalone app scoped to the dashboard, start_url inside scope", () => {
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.scope, "/dashboard");
-  assert.equal(manifest.start_url, "/dashboard/nest");
+  // /dashboard routes per device mode (new → Chat, classic → the nest), so an
+  // installed app never opens on the classic grid inside the new shell.
+  assert.equal(manifest.start_url, "/dashboard");
   assert.ok(manifest.start_url.startsWith(manifest.scope), "start_url must live inside scope");
   assert.equal(manifest.id, "/dashboard");
 });
@@ -62,6 +64,25 @@ test("sw.js: perch-api and SSE routes pass through, unintercepted, before any da
       assert.match(line, /return;?\s*$/, "bypass must return without respondWith: " + line.trim());
     }
   }
+});
+
+test("sw.js: notifications default to /dashboard, and the offline nest copy is never a redirect", () => {
+  const sw = readFileSync(join(PUB, "sw.js"), "utf8");
+  assert.ok(sw.includes('data: { url: data.url || "/dashboard" }'), "push default url");
+  assert.ok(sw.includes('e.notification.data?.url || "/dashboard"'), "notification-click default url");
+  assert.doesNotMatch(sw, /\|\| "\/dashboard\/nest"/, "no /dashboard/nest default left");
+  // Install caches the nest only when it answered itself (a new-mode device's
+  // nest redirects to Chat; a redirected response cannot answer a navigation).
+  assert.match(sw, /redirect: "manual"/);
+  assert.match(sw, /r\.ok && r\.type === "basic" && !r\.redirected \? c\.put\(/);
+  assert.doesNotMatch(sw, /addAll\(SHELL_ASSETS\)/, "addAll follows redirects and would store one");
+  assert.doesNotMatch(sw, /const CACHE_NAME = "crow-v2"/, "the cache is renamed so an old in-shell nest copy is dropped");
+});
+
+test("web-push: a notification with no url opens /dashboard", () => {
+  const src = readFileSync(join(REPO, "servers/gateway/push/web-push.js"), "utf8");
+  assert.ok(src.includes('url: url || "/dashboard" }'));
+  assert.ok(!src.includes('"/dashboard/nest"'));
 });
 
 test("rendered head: install metas — apple title + PNG apple-touch-icon", async () => {
