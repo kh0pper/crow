@@ -14,6 +14,7 @@
  * (lookup only); the label is t(labelKey, lang). Registration order is kept.
  */
 import { t } from "../dashboard/shared/i18n.js";
+import { activeProjectWhere } from "../../shared/shell-items.js";
 
 const tiles = [];
 
@@ -48,17 +49,23 @@ export function launcherTiles(ctx) {
 
 /**
  * The dashboard user is the local owner, so "may change this project" means
- * the scoped project is a live project_spaces row (the caller resolved it with
- * the live-project rule) whose local member row (contact_id IS NULL, not
- * revoked; servers/shared/project-acl.js) is the owner. Everything, Unassigned
- * and a visited project (no local-owner row) are false.
+ * the scoped project is a live project_spaces row (the live-project rule,
+ * checked here, not trusted from the caller) whose local member row
+ * (contact_id IS NULL, not revoked; servers/shared/project-acl.js) is the
+ * owner. One query. Everything, Unassigned, an archived project and a visited
+ * project (no local-owner row) are false.
  */
 export async function canManageProject(db, scope) {
   if (!scope || scope.all || scope.unassigned || scope.projectId == null) return false;
   try {
-    const { effectiveCapabilities } = await import("../../shared/project-acl.js");
-    const eff = await effectiveCapabilities(db, Number(scope.projectId), null);
-    return !!eff && eff.role === "owner";
+    const { rows } = await db.execute({
+      sql: `SELECT m.role FROM project_spaces ps
+              JOIN project_members m ON m.project_id = ps.id AND m.contact_id IS NULL AND m.revoked_at IS NULL
+             WHERE ps.id = ? AND ${activeProjectWhere("ps")}
+             LIMIT 1`,
+      args: [Number(scope.projectId)],
+    });
+    return !!rows[0] && rows[0].role === "owner";
   } catch (err) {
     console.warn("[launcher] canManage lookup failed:", err.message);
     return false;

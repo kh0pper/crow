@@ -3,8 +3,9 @@
  *
  *   GET /dashboard/shell-api/apps?project=<slug>|all
  *     -> { scope, projectSlug, apps: [{ id, label, kind, href, icon, directPort?, path? }], tiles: [{ id, label, icon, href }] }
- *        project=<slug>: the apps the project's enabled bots can use (a live
- *        project only; anything else is 404 not_found). project=all (or none):
+ *        project=<slug>: the apps the project's enabled bots can use; an unknown
+ *        or archived slug is 200 { scope: "project", projectSlug: null, apps: [],
+ *        tiles: [] }. project=all (or none):
  *        every installed app.
  *
  * Read-only. MOUNT: dashboard/index.js, beside the shell API, AFTER dashboardAuth
@@ -41,7 +42,9 @@ export function appsApiRouter(dashboardAuth) {
           sql: `SELECT id, slug FROM project_spaces WHERE slug = ? AND ${ACTIVE_PROJECT_WHERE} LIMIT 1`,
           args: [q],
         });
-        if (!rows[0]) return jsonError(res, 404, "not_found");
+        // An unknown or archived slug is a project with nothing to offer, not
+        // an error: the sheet shows its empty line.
+        if (!rows[0]) return res.json({ scope: "project", projectSlug: null, apps: [], tiles: [] });
         scope = { projectId: Number(rows[0].id), slug: String(rows[0].slug) };
       }
       res.json(await launcherFor(db, scope, { lang: langOf(req) }));

@@ -100,11 +100,15 @@ export function shellClientJs() {
       // A direct-mode app cannot sit behind the subpath proxy: its link is
       // https://<this hostname>:<port><path> (the nest panel's rule).
       function fixDirect(a) {
+        // The port is an integer 1..65535 and the path a same-host absolute
+        // path ("/x", never "//x"); anything else keeps the fallback href.
         var port = a.getAttribute('data-direct-port');
         if (!port || !/^[0-9]{1,5}$/.test(port)) return;
+        var n = Number(port);
+        if (n < 1 || n > 65535) return;
         var path = a.getAttribute('data-direct-path') || '/';
-        if (path.charAt(0) !== '/') path = '/' + path;
-        a.setAttribute('href', 'https://' + location.hostname + ':' + port + path);
+        if (!/^\\/(?!\\/)/.test(path)) return;
+        a.setAttribute('href', 'https://' + location.hostname + ':' + n + path);
       }
       function tile(x, extra) {
         var a = document.createElement('a');

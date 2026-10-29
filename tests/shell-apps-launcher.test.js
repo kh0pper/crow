@@ -127,8 +127,29 @@ test("All apps is the full catalog", async () => {
   const proj = await (await fetch(`${base}/dashboard/shell-api/apps?project=owned`, { headers: { cookie: "crow_session=good" } })).json();
   assert.deepEqual(proj.apps.map((a) => a.id), ["browser"]);
   assert.equal(proj.projectSlug, "owned");
-  const missing = await fetch(`${base}/dashboard/shell-api/apps?project=nope`, { headers: { cookie: "crow_session=good" } });
-  assert.equal(missing.status, 404);
+  // (6) The API sends what the launcher draws, nothing about the bots behind it.
+  const raw = JSON.stringify([body, proj]);
+  for (const k of ["mcpServers", "desktopPath", "leaseDeclared", "fallbackHref", "bot_id", "botId"]) {
+    assert.ok(!raw.includes(`"${k}"`), `no ${k} key in the response`);
+  }
+  assert.ok(!raw.includes("b1"), "no bot id in the response");
+});
+
+test("an unknown or archived slug is an empty project, not an error", async () => {
+  const empty = { scope: "project", projectSlug: null, apps: [], tiles: [] };
+  const unknown = await fetch(`${base}/dashboard/shell-api/apps?project=nope`, { headers: { cookie: "crow_session=good" } });
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(await unknown.json(), empty);
+  const c = new Database(DB_FILE);
+  c.prepare("INSERT INTO project_spaces (slug, name, status, archived_at) VALUES ('gone','gone','archived',datetime('now'))").run();
+  const goneId = Number(c.prepare("SELECT id FROM project_spaces WHERE slug='gone'").get().id);
+  c.prepare("INSERT INTO project_members (project_id, contact_id, role) VALUES (?, NULL, 'owner')").run(goneId);
+  c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('b-gone','G',?,1,?)")
+    .run(JSON.stringify({ tools: { crow_mcp: ["browser/browser_navigate"] } }), goneId);
+  c.close();
+  const archived = await fetch(`${base}/dashboard/shell-api/apps?project=gone`, { headers: { cookie: "crow_session=good" } });
+  assert.equal(archived.status, 200);
+  assert.deepEqual(await archived.json(), empty, "an archived project lists nothing, even with a granting bot");
 });
 
 test("empty This project offers All apps", async () => {
@@ -153,6 +174,20 @@ test("canManage: true only for a live project the local owner owns", async () =>
   assert.equal(await canManageProject(db, scopeOf(P_OWNED, "owned")), true, "owned");
   assert.equal(await canManageProject(db, scopeOf(P_VISITED, "visited")), false, "a visited project: no local-owner row");
   assert.equal(await canManageProject(db, scopeOf(P_VIEWER, "viewer")), false, "a local viewer row is not the owner");
+  // Liveness is checked by canManageProject itself, not trusted from the caller.
+  const c = new Database(DB_FILE);
+  const arch = Number(c.prepare("INSERT INTO project_spaces (slug, name) VALUES ('was-owned','was-owned')").run().lastInsertRowid);
+  c.prepare("INSERT INTO project_members (project_id, contact_id, role) VALUES (?, NULL, 'owner')").run(arch);
+  c.close();
+  assert.equal(await canManageProject(db, scopeOf(arch, "was-owned")), true, "owned while live");
+  const c2 = new Database(DB_FILE);
+  c2.prepare("UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?").run(arch);
+  c2.close();
+  assert.equal(await canManageProject(db, scopeOf(arch, "was-owned")), false, "archived");
+  let queries = 0;
+  const spy = { execute: (q) => { queries++; return db.execute(q); } };
+  await canManageProject(spy, scopeOf(P_OWNED, "owned"));
+  assert.equal(queries, 1, "one query");
 });
 
 test("launcher tiles: a stub registration renders after the app tiles, in order, by when(ctx)", async () => {
@@ -190,6 +225,62 @@ test("no tile registered: launcherFor never asks for canManage", async () => {
   const out = await launcherFor(spy, scopeOf(P_OWNED, "owned"));
   assert.deepEqual(out.tiles, []);
   assert.equal(calls, 0);
+});
+
+test("the drawer still renders when listApps throws", async () => {
+  const { listApps } = await import("../servers/gateway/apps/catalog.js");
+  const broken = join(dir, "broken-home");
+  mkdirSync(broken, { recursive: true });
+  // An installed.json entry whose id is not a string makes the catalog's path join throw.
+  writeFileSync(join(broken, "installed.json"), JSON.stringify([{ id: { not: "a string" } }]));
+  assert.throws(() => listApps({ crowHome: broken }), "the setup really breaks the catalog");
+  const warn = console.warn; console.warn = () => {};
+  let apps;
+  try { apps = await launcherFor(db, { all: true }, { crowHome: broken }); } finally { console.warn = warn; }
+  assert.deepEqual(apps.apps, []);
+  const html = shellDrawer({ scope: { all: true }, projects: projects(), lang: "en", apps, getPanel });
+  assert.match(html, /<dialog id="shell-drawer"/);
+  assert.match(section(html), /<p class="shell-apps-empty">No apps installed yet/);
+  assert.match(html, /href="\/dashboard\/project\/owned"/, "the projects still render");
+});
+
+test("a tile whose when() or href() throws is skipped", () => {
+  registerLauncherTile({ id: "bad-when", labelKey: "shell.more", when: () => { throw new Error("boom"); }, href: () => "/dashboard/x" });
+  registerLauncherTile({ id: "bad-href", labelKey: "shell.more", when: () => true, href: () => { throw new Error("boom"); } });
+  registerLauncherTile({ id: "good", labelKey: "shell.more", when: () => true, href: () => "/dashboard/good" });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    assert.deepEqual(launcherTiles({ scope: "all", projectSlug: null, lang: "en", canManage: false }).map((x) => x.id), ["good"]);
+  } finally { console.warn = warn; }
+});
+
+test("direct mode: only an integer port 1..65535 and a same-host path build a URL", async () => {
+  const { clientApp, validDirect } = await import("../servers/gateway/apps/launcher.js");
+  const app = (directPort, path) => clientApp({ id: "x", label: "X", kind: "page", href: null, directPort, path, fallbackHref: "/dashboard/extensions" });
+  assert.deepEqual([app(2586, "/").directPort, app(2586, "/").path], [2586, "/"]);
+  assert.equal(app(65535, "/a").directPort, 65535);
+  assert.equal(app("8080", "/a").directPort, 8080);
+  for (const [port, path] of [[0, "/"], [65536, "/"], [-1, "/"], [80.5, "/"], ["80a", "/"], [NaN, "/"], [8080, "//evil.example"], [8080, "evil"], [8080, "http://x/"]]) {
+    const a = app(port, path);
+    assert.ok(!("directPort" in a) && !("path" in a), `${port} ${path}: no direct target`);
+    assert.equal(a.href, "/dashboard/extensions", `${port} ${path}: the fallback href`);
+  }
+  assert.equal(validDirect(null, "/"), null);
+  // The client applies the same rule to whatever markup carries.
+  const { shellClientJs } = await import("../servers/gateway/dashboard/shell/client.js");
+  const js = shellClientJs();
+  const body = js.slice(js.indexOf("function fixDirect(a) {"), js.indexOf("function tile(x, extra)"));
+  const fixDirect = new Function("location", body + "; return fixDirect;")({ hostname: "h.example" });
+  const link = (port, path) => {
+    const at = { "data-direct-port": port, "data-direct-path": path, href: "/dashboard/extensions" };
+    const a = { getAttribute: (k) => (k in at ? at[k] : null), setAttribute: (k, v) => { at[k] = v; } };
+    fixDirect(a);
+    return at.href;
+  };
+  assert.equal(link("2586", "/"), "https://h.example:2586/");
+  for (const [port, path] of [["0", "/"], ["65536", "/"], ["99999", "/"], ["80a", "/"], ["8080", "//evil.example"], ["8080", "evil"]]) {
+    assert.equal(link(port, path), "/dashboard/extensions", `client ${port} ${path}`);
+  }
 });
 
 test("client code stays template-safe", async () => {

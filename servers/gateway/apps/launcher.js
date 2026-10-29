@@ -24,8 +24,23 @@ export function defaultCrowHome() {
 export function clientApp(a) {
   const out = { id: a.id, label: String(a.label), kind: a.kind, href: a.href || a.fallbackHref || "/dashboard/extensions",
     icon: appIconSvg(a.icon) || appIconSvg("package") };
-  if (a.directPort != null) { out.directPort = Number(a.directPort); out.path = String(a.path || "/"); }
+  const direct = validDirect(a.directPort, a.path);
+  if (direct) { out.directPort = direct.port; out.path = direct.path; }
   return out;
+}
+
+/**
+ * A direct-mode target the client may build a URL from: an integer port in
+ * 1..65535 and a same-host absolute path ("/x", never "//x"). Anything else is
+ * null, and the app keeps its fallback href.
+ */
+export function validDirect(port, path) {
+  if (port == null || port === "") return null;
+  const n = typeof port === "number" ? port : /^[0-9]{1,5}$/.test(String(port)) ? Number(port) : NaN;
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
+  const p = path == null || path === "" ? "/" : String(path);
+  if (!/^\/(?!\/)/.test(p)) return null;
+  return { port: n, path: p };
 }
 
 export function clientTile(x) {

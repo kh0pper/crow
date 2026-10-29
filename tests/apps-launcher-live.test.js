@@ -24,6 +24,10 @@ let chrome = null, available = false, server = null, port = 0;
 let filed = true;
 const apiCalls = [];
 const streams = new Set();
+function emit(type, data) {
+  for (const res of streams) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+  return streams.size;
+}
 
 let clientApp, clientTile;
 // Raw catalog-shaped apps; launcher.js clientApp turns them into what the API sends.
@@ -238,6 +242,30 @@ test("the session apps button opens the sheet", async (t) => {
     await sleep(300);
     assert.equal(await u.evalIn("document.getElementById('perch-apps-btn').hidden"), true);
   } finally { await u.close(); filed = true; }
+});
+
+test("an ask arriving while the apps sheet is open closes it", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  filed = true;
+  const s = await tab(390, 844, `/dashboard/perch#${SID}`, PERCH_READY);
+  try {
+    for (const end = Date.now() + 5000; !streams.size && Date.now() < end;) await sleep(100);
+    assert.ok(streams.size > 0, "the session's event stream is open");
+    await s.click("#perch-apps-btn");
+    await s.waitFor("document.getElementById('perch-apps-sheet').open", "the apps sheet");
+    emit("ask_user", { requestId: "q-apps", method: "confirm", title: "Delete the draft?" });
+    await s.waitFor("!document.getElementById('perch-apps-sheet').open", "the ask to close the apps sheet");
+    await s.waitFor("!!document.querySelector('#perch-ask .ask-card')", "the ask card");
+    await sleep(200); // let the dialog's queued close event run before reading focus
+    const m = await s.json(`(function(){
+      var card=document.querySelector('#perch-ask .ask-card'), btn=card.querySelector('button');
+      var b=btn.getBoundingClientRect(), hit=document.elementFromPoint(b.left+b.width/2,b.top+b.height/2);
+      return JSON.stringify({hit:!!hit&&(hit===btn||btn.contains(hit)), active:document.activeElement&&document.activeElement.id});
+    })()`);
+    assert.equal(m.hit, true, "the ask card's button is hit-testable, not under a modal");
+    assert.notEqual(m.active, "perch-apps-btn", "the closing sheet does not pull focus back to the apps button");
+    assert.equal(await s.evalIn("document.querySelector('#perch-ask .ask-card').contains(document.activeElement)"), true, "the ask has focus");
+  } finally { await s.close(); }
 });
 
 test("no session opens the page", async (t) => {

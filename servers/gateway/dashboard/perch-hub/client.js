@@ -3034,6 +3034,17 @@ export function perchHubJs(lang = "en") {
     /* New mode: an ask is never hidden (spec 9.4). The card and the banner
        live in the chat, which the modal sheet makes inert, so it closes. */
     if(SHEET&&SHEET.open) closeSheet();
+    /* R1.2 PR 5: so does the apps sheet. The browser hands focus back to the
+       apps button as the modal closes, so the ask takes it once its card is
+       drawn (the ask, not the apps button, is what needs the operator). */
+    if(APPS_SHEET&&APPS_SHEET.open){
+      appsSkipFocus=true; closeAppsSheet();
+      setTimeout(function(){
+        if(!live()) return;
+        var f=document.querySelector('#perch-ask button,#perch-ask input,#perch-ask textarea,#perch-ask select');
+        if(f&&f.focus) f.focus();
+      },0);
+    }
     plusClose(false);                        /* nor under the composer's "+" popover */
     /* 2026-10-20: an expired question stays on screen, read-only, so the
        operator sees what was asked; the session still waits for them. */
@@ -3446,6 +3457,7 @@ export function perchHubJs(lang = "en") {
      to the apps button when it is parked. */
   var APPS_SHEET=el('perch-apps-sheet');
   var appsGen=0;
+  var appsSkipFocus=false;                  /* one-shot: the next close leaves focus alone (renderAsk) */
   function closeAppsSheet(){
     if(!APPS_SHEET||!APPS_SHEET.open) return;
     if(typeof APPS_SHEET.close==='function'){ APPS_SHEET.close(); return; }
@@ -3483,6 +3495,7 @@ export function perchHubJs(lang = "en") {
     APPS_SHEET.addEventListener('click',function(e){ if(e.target===APPS_SHEET) closeAppsSheet(); });
     APPS_SHEET.addEventListener('close',function(){
       appsGen++;                            /* a late answer never paints a closed sheet */
+      if(appsSkipFocus){ appsSkipFocus=false; return; }
       if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
       var a=document.activeElement;
       if(a&&a!==document.body&&a!==document.documentElement&&!APPS_SHEET.contains(a)) return;
