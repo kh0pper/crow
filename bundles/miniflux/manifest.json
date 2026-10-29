@@ -1,7 +1,8 @@
 {
   "id": "miniflux",
   "name": "Miniflux",
-  "version": "1.0.4",
+  "version": "1.0.5",
+  "refreshFiles": ["docker-compose.yml"],
   "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
   "type": "bundle",
   "author": "Crow",

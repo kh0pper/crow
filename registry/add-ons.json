@@ -4107,7 +4107,10 @@
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "version": "1.0.4",
+      "version": "1.0.5",
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
       "type": "bundle",
       "author": "Crow",
@@ -6120,7 +6123,10 @@
     {
       "id": "searxng",
       "name": "SearXNG",
-      "version": "1.0.2",
+      "version": "1.0.3",
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "description": "Privacy-respecting metasearch engine — aggregates results from 70+ sources (Google, Bing, DuckDuckGo, Wikipedia, GitHub, arXiv, more) without tracking",
       "type": "bundle",
       "author": "Crow",
