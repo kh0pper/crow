@@ -22,7 +22,7 @@ import {
 } from "./embeddings.js";
 import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
-import { insertMemory, updateMemory } from "./memory-write.js";
+import { insertMemory, updateMemory, deleteMemory } from "./memory-write.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
@@ -660,10 +660,7 @@ export function createMemoryServer(dbPath, options = {}) {
         }
       }
 
-      await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
-
-      // Emit sync entry
-      emitOrQueue(syncManager, db, "memories", "delete", { id, source: memory.source ?? null }).catch(() => {});
+      await deleteMemory(db, id, { syncManager });
 
       return { content: [{ type: "text", text: `Memory #${id} deleted.` }] };
     }

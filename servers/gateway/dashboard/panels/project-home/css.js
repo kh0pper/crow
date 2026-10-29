@@ -60,6 +60,13 @@ export function projectHomeCss() {
   body.shell .ph-row:focus-visible, body.shell .ph-link:focus-visible,
   body.shell .ph-pick select:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
   body.shell .ph-missing { align-items: flex-start; gap: 12px; }
+  /* Where you left off (R1.2 PR 4). A summary row stacks its title over its text. */
+  body.shell .ph-summary { flex-direction: column; align-items: flex-start; gap: 4px; }
+  body.shell .ph-summary .ph-row-title { flex: none; font-weight: 600; }
+  body.shell .ph-summary-text { color: var(--crow-text-secondary); font-size: 0.9rem; overflow-wrap: anywhere; }
+  body.shell .ph-kind--outside { background: var(--crow-bg-elevated, var(--crow-bg-surface)); color: var(--crow-text-secondary); border: 1px solid var(--crow-border); }
+  body.shell .ph-mem-sheet .ph-list { margin-top: 8px; }
+  body.shell .ph-memory .ph-row-title { font-size: 0.9rem; }
   /* The chip already names the project: the header title stays for screen
      readers only (visually hidden, never display:none). */
   body.shell:has([data-ph]) .content-header h2 {

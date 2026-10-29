@@ -414,6 +414,16 @@ ${sheet ? pillRow(lang) : `      <textarea id="perch-input" placeholder="${escap
           <span class="text-size-value" id="perch-text-size-value" >${escapeHtml(t("settings.textSize.default", lang))}</span>
         </div></div>
     </div>
+    <!-- R1.2 PR 4: this session's summary (briefing-card.js fills it from GET
+         /interactive/:sid/briefing) and Forget. After the text size on
+         purpose: hidden until a summary exists, it never moves Rename / Close. -->
+    <div class="summary-card" id="perch-summary" hidden>
+      <div class="field-label">${escapeHtml(t("perch.summaryHeading", lang))}</div>
+      <p class="summary-text" id="perch-summary-text"></p>
+      <p class="summary-note" id="perch-summary-note" hidden>${escapeHtml(t("perch.summaryOutside", lang))}</p>
+      <button type="button" class="quiet" id="perch-summary-forget">${escapeHtml(t("perch.summaryForget", lang))}</button>
+      <p class="summary-status" id="perch-summary-status" role="status" aria-live="polite"></p>
+    </div>
     </section>
     <!-- Files tab: (PR-B, item 18) a read-only browser of the session's cwd
          (breadcrumbs + dirs/files, an in-app TEXT viewer) ABOVE the existing

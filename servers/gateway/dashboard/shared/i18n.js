@@ -3484,6 +3484,14 @@ export const translations = {
   "perch.tabSession": { en: "Session", es: "Sesión" },
   "perch.tabFiles": { en: "Files", es: "Archivos" },
   "perch.tabActivity": { en: "Activity", es: "Actividad" },
+  // R1.2 PR 4: the Briefing card and the summary in the Session tab.
+  "perch.briefingCard": { en: "Briefing", es: "Puesta al día" },
+  "perch.summaryHeading": { en: "Summary", es: "Resumen" },
+  "perch.summaryOutside": { en: "Included outside content", es: "Incluyó contenido externo" },
+  "perch.summaryForget": { en: "Forget", es: "Olvidar" },
+  "perch.summaryForgetConfirm": { en: "Forget this summary? Its memory is deleted too.", es: "¿Olvidar este resumen? También se borra su memoria." },
+  "perch.summaryForgotten": { en: "Summary forgotten.", es: "Resumen olvidado." },
+  "perch.summaryForgetFailed": { en: "Could not forget the summary.", es: "No se pudo olvidar el resumen." },
   // R1.2 PR 2: the new-mode sheet that holds Session, Files and Activity,
   // opened from the bot's name.
   "perch.sheetTitleBot": { en: "{bot} · Session details", es: "{bot} · Detalles de la sesión" },
@@ -4052,6 +4060,21 @@ export const translations = {
   "shell.projectPage": { en: "Project", es: "Proyecto" },
   "shell.projectMissing": { en: "This project isn't here", es: "Este proyecto no está aquí" },
   "shell.backToProjects": { en: "Back to projects", es: "Volver a los proyectos" },
+  // ─── Where you left off (R1.2 PR 4) ───
+  "shell.leftOff": { en: "Where you left off", es: "Dónde lo dejaste" },
+  "shell.noSummaries": { en: "No earlier sessions summarised yet", es: "Aún no hay resúmenes de sesiones anteriores" },
+  "shell.botSummary": { en: "{bot}'s summary", es: "Resumen de {bot}" },
+  "shell.summaryAnon": { en: "Session summary", es: "Resumen de la sesión" },
+  "shell.outsideContent": { en: "Included outside content", es: "Incluyó contenido externo" },
+  "shell.factsSince": { en: "On the Board since then", es: "En el Tablero desde entonces" },
+  "shell.factMoved": { en: "Moved to {status}", es: "Movida a {status}" },
+  "shell.factResult": { en: "Result recorded · {outcome}", es: "Resultado registrado · {outcome}" },
+  "shell.factDecided": { en: "Decision answered", es: "Decisión respondida" },
+  "shell.factDecidedChoice": { en: "Decision answered: {choice}", es: "Decisión respondida: {choice}" },
+  "shell.memoryNotes": { en: "Pulled from memory: {n} notes", es: "Tomado de la memoria: {n} notas" },
+  "shell.memoryNotesOne": { en: "Pulled from memory: 1 note", es: "Tomado de la memoria: 1 nota" },
+  "shell.seeThem": { en: "see them", es: "verlas" },
+  "shell.memorySheet": { en: "Pulled from memory", es: "Tomado de la memoria" },
 
   // ─── Browser tile ───
   "perch.browserLive": { en: "Live", es: "En vivo" },

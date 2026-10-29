@@ -1,5 +1,5 @@
 /**
- * The memory server's own insert and update writes, shared by the
+ * The memory server's own insert, update and delete writes, shared by the
  * crow_store_memory / crow_update_memory tools and by gateway code that files
  * a memory itself (the session summary job, servers/gateway/perch/
  * session-summary.js). One path, so every writer gets the same sync emit.
@@ -76,5 +76,20 @@ export async function updateMemory(db, id, f, { syncManager = null, source = nul
     try { onContent(id, fields.content); } catch { /* embedding is best effort */ }
   }
   emitOrQueue(syncManager, db, "memories", "update", { id, ...fields, source: source ?? null }).catch(() => {});
+  return true;
+}
+
+/**
+ * DELETE one memory and emit its sync entry (the crow_delete_memory tool's
+ * write, and the briefing's Forget). Returns false when there was no such row.
+ * @param {object} db
+ * @param {number} id
+ * @param {{syncManager?:object|null}} [opts]
+ */
+export async function deleteMemory(db, id, { syncManager = null } = {}) {
+  const { rows } = await db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
+  if (!rows.length) return false;
+  await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
+  emitOrQueue(syncManager, db, "memories", "delete", { id, source: rows[0].source ?? null }).catch(() => {});
   return true;
 }

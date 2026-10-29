@@ -152,6 +152,7 @@ import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
+import { applyBriefing, briefingEnabled } from "./perch/briefing.js";
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
@@ -824,6 +825,8 @@ export function createInteractiveEngine({
       /** Operator-set name, persisted on the row. NULL means "no name", and
        *  every render falls back to the short session id. */
       label: null,
+      /** R1.2 PR 4: the project briefing block (spawn() sets it), or null. */
+      briefing: null,
       /** Open-anywhere B4: the session's working directory. NULL until the
        *  first startChild resolves it (world.cwd), or an operator chooses one
        *  via spawn({cwd}) / control({cwd}). It is pi's process cwd, the dir
@@ -2430,6 +2433,12 @@ export function createInteractiveEngine({
       });
       prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved });
     }
+    // R1.2 PR 4: the project briefing the spawn route built (s.briefing, set
+    // by spawn() only) rides as a marked section appended to the system
+    // prompt (briefing.js applyBriefing), never the operator's message. It is
+    // re-applied on every wake so a resumed session keeps the same context.
+    // The flag is read per use: off means no session gets one.
+    if (s.briefing && briefingEnabled(env)) prep.piRpcOpts = applyBriefing(prep.piRpcOpts, s.briefing);
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
     slog("model warm: " + (s.currentModel || (prep.resolved && prep.resolved.key) || "?"));
@@ -3342,7 +3351,7 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null }) {
+  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null, briefing = null }) {
     if (!botId) throw engineError("bad_request");
     // Artifacts (untrusted rounds, spec §7.3): a session that must start
     // NARROWED. A JSON array of tool ids to disable — the same contract as
@@ -3380,6 +3389,10 @@ export function createInteractiveEngine({
     // hard and throws bad_cwd on a non-directory; the route maps that to 400).
     // NULL = no explicit choice — the world builder keeps its own resolution.
     s.cwd = cwd || null;
+    // R1.2 PR 4: the briefing text (briefing.js briefingText), built by the
+    // spawn route from the DB. Kept in memory only: after a gateway restart a
+    // woken session runs without it.
+    s.briefing = typeof briefing === "string" && briefing.trim() ? briefing : null;
     // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
     // after — reserveWithEviction's eviction path awaits the victim's
     // hibernate() before this call resumes, and a concurrent second caller's
@@ -4538,6 +4551,11 @@ export function createInteractiveEngine({
     get,
     list,
     stopAll,
+    /** R1.2 PR 4: the briefing block a resident session was started with, or null. */
+    briefingOf: (sessionId) => {
+      const s = sessions.get(String(sessionId));
+      return (s && s.briefing) || null;
+    },
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,
     /** Artifacts chat-first pointer frames (spec v1.6 D25) — resident sessions

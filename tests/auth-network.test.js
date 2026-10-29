@@ -232,6 +232,9 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/dashboard/perch-api/browser/state",
       // R1.2: a project's home.
       "/dashboard/project/x",
+      // R1.2 PR 4: the Briefing card's read and the summary's Forget.
+      "/dashboard/perch-api/interactive/abc/briefing",
+      "/dashboard/perch-api/interactive/abc/forget-summary",
       // R1.2 PR 5: the apps launcher's read.
       "/dashboard/shell-api/apps?project=all",
     ]) {
@@ -349,6 +352,42 @@ test("auth-network: /dashboard/project/x needs a session", async () => {
     }); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
     assert.ok(noSession.status === 302 || noSession.status === 303, `a redirect, got ${noSession.status}`);
     assert.equal(noSession.location, "/dashboard/login");
+  } finally {
+    server.close();
+  }
+});
+
+test("auth-network: Forget a summary needs a session (and the CSRF rail)", async () => {
+  // R1.2 PR 4: POST /dashboard/perch-api/interactive/:sid/forget-summary deletes
+  // a memory. Through the REAL dashboard router it sits behind dashboardAuth
+  // and then csrfMiddleware (the perch API's mount slot); the CSRF refusal
+  // itself is exercised in tests/project-briefing.test.js.
+  const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
+  const app = express();
+  app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
+  app.use(express.json());
+  app.use(dashboardRouter((req, res, next) => next()));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  const post = (port) => new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: "/dashboard/perch-api/interactive/perchlive-x/forget-summary", method: "POST",
+      headers: { "content-type": "application/json", "x-crow-csrf": "tok", cookie: "crow_csrf=tok" } },
+    (res) => { res.resume(); res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location })); });
+    req.on("error", reject);
+    req.end("{}");
+  });
+  try {
+    const port = server.address().port;
+    assert.equal((await post(port)).status, 403, "bare loopback, no tailnet identity");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let noSession;
+    try { noSession = await post(port); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.ok(noSession.status === 302 || noSession.status === 303, `a redirect, got ${noSession.status}`);
+    assert.equal(noSession.location, "/dashboard/login");
+    const src = (await import("node:fs")).readFileSync(new URL("../servers/gateway/dashboard/index.js", import.meta.url), "utf8");
+    const at = (needle) => src.indexOf(needle);
+    assert.ok(at('router.use("/dashboard", dashboardAuth);') < at('router.use("/dashboard", csrfMiddleware);'));
+    assert.ok(at('router.use("/dashboard", csrfMiddleware);') < at("router.use(perchInteractiveApiRouter(dashboardAuth));"),
+      "the interactive API (Forget included) is mounted after both rails");
   } finally {
     server.close();
   }

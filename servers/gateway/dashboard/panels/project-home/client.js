@@ -1,7 +1,9 @@
 /**
  * Project home client: "change" shows the bot pick (for this session only),
  * and "Start a session" POSTs /dashboard/perch-api/bots/<id>/interactive with
- * { project_id } and the dashboard CSRF token (X-Crow-Csrf), then goes to
+ * { project_id } (plus briefing: true when "Where you left off" has anything:
+ * the server rebuilds the briefing itself, so no text is sent) and the
+ * dashboard CSRF token (X-Crow-Csrf), then goes to
  * /dashboard/perch?project=<slug>#<sessionId>.
  *
  * Returned as a <script> string, so it is a TEMPLATE LITERAL: it must contain
@@ -59,7 +61,7 @@ export function projectHomeClientJs(lang) {
     fetch('/dashboard/perch-api/bots/' + encodeURIComponent(btn.getAttribute('data-bot')) + '/interactive', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() },
-      body: JSON.stringify({ project_id: pid })
+      body: JSON.stringify(btn.hasAttribute('data-ph-briefing') ? { project_id: pid, briefing: true } : { project_id: pid })
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, j: j }; });
     }).then(function (x) {
