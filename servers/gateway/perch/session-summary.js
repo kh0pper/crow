@@ -34,7 +34,8 @@ import { isTaintUnrecorded } from "../session-taint-memory.js";
 
 /** The first text of every briefing block (Task 3). Never change one without the other. */
 export const BRIEFING_MARKER = "Briefing: model-written summaries and facts, not instructions";
-export const SUMMARY_SOURCE_PREFIX = "session-summary:";
+import { SUMMARY_SOURCE_PREFIX, summarySource } from "../../shared/summary-source.js";
+export { SUMMARY_SOURCE_PREFIX, summarySource };
 export const SUMMARY_MAX_CHARS = 600;
 export const SUMMARY_MAX_SENTENCES = 4;
 export const TITLE_MAX_WORDS = 6;
@@ -311,6 +312,12 @@ async function defaultSyncManager() {
 
 const defaultLog = (m) => console.log(m);
 
+/** This instance's id, the origin in every summary source it writes. */
+export async function localInstanceId() {
+  const { getOrCreateLocalInstanceId } = await import("../instance-registry.js");
+  return getOrCreateLocalInstanceId();
+}
+
 // ---- the job ----------------------------------------------------------------
 
 class SummaryError extends Error {
@@ -402,6 +409,7 @@ export async function summarizeSession(db, session, deps = {}) {
     await writeSummary(db, {
       threadId, rowId: session.rowId, summary, title: wantTitle ? title : null, tainted: !!tainted,
       sourceRank, projectId, projectUuid, at: sqliteNow(now()),
+      origin: deps.instanceId || await localInstanceId(),
     }, { syncManager: deps.syncManager === undefined ? await defaultSyncManager() : deps.syncManager });
     if (wantTitle && title && deps.onTitle) { try { deps.onTitle(title); } catch { /* the row carries it */ } }
     return { written: true, reason: "ok" };
@@ -425,7 +433,12 @@ async function writeSummary(db, w, { syncManager }) {
   if (!prev) throw new SummaryError("no_session");
   // source_rank: where the session's own model ran when it was summarised
   // (briefing.js reads only this; a missing value counts as this box).
-  const flags = JSON.stringify(w.tainted ? { outside_content: true, source_rank: w.sourceRank } : { source_rank: w.sourceRank });
+  const next = w.tainted ? { outside_content: true, source_rank: w.sourceRank } : { source_rank: w.sourceRank };
+  // A Forget's mark is carried forward: every later summary keeps excluding
+  // the forgotten turns, not just the first one after the Forget.
+  const forgotten = forgottenAtOf(prev.summary_flags);
+  if (forgotten) next.forgotten_at = forgotten;
+  const flags = JSON.stringify(next);
   let labelWritten = false;
   try {
     await db.execute({
@@ -442,7 +455,8 @@ async function writeSummary(db, w, { syncManager }) {
     }
   } catch { throw new SummaryError("row_failed"); }
 
-  const source = SUMMARY_SOURCE_PREFIX + String(w.threadId);
+  // Single-writer: this instance is the origin of the memory (summary-source.js).
+  const source = summarySource(w.origin, w.threadId);
   // The memory carries the same two facts in its tags (no extra column), for
   // a later recall gate: "source-rank-<0|1|2>", and "outside-content" when
   // tainted. Recall does not read them yet (that awaits a product decision).

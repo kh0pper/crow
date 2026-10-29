@@ -31,7 +31,7 @@ import { dirname, join, resolve } from "node:path";
 import { createDbClient } from "../../db.js";
 import { resolveSqlitePath, tasksDbPath as defaultTasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
-import { BRIEFING_MARKER, SUMMARY_SOURCE_PREFIX, sessionTainted, privacyRank } from "./session-summary.js";
+import { BRIEFING_MARKER, SUMMARY_SOURCE_PREFIX, summarySource, localInstanceId, sessionTainted, privacyRank } from "./session-summary.js";
 import { recallMemoriesReadOnly } from "../../memory/memory-read.js";
 import { deleteMemory } from "../../memory/memory-write.js";
 
@@ -498,36 +498,106 @@ export async function recordBriefing(db, threadId, text, rank = null, refs = [])
 }
 
 /**
+ * Strip from ONE row's stored briefing every quoted summary whose thread id
+ * `drop(threadId)` names, atomically: a compare-and-set on the row's
+ * (briefing, briefing_refs), re-read and retried when another writer (a
+ * concurrent Forget, a spawn's recordBriefing) changed it meanwhile. A block
+ * left with nothing becomes NULL. Returns true when the row changed.
+ */
+async function stripRow(db, rowId, drop, { attempts = 8 } = {}) {
+  for (let n = 0; n < attempts; n++) {
+    const rows = await rowsOrEmpty(db, { sql: "SELECT briefing, briefing_refs FROM bot_sessions WHERE id = ?", args: [rowId] });
+    if (!rows[0] || rows[0].briefing_refs == null) return false;
+    const oldText = rows[0].briefing, oldRefs = rows[0].briefing_refs;
+    let refs;
+    try { refs = JSON.parse(String(oldRefs)); } catch { return false; }
+    if (!Array.isArray(refs)) return false;
+    let text = oldText == null ? "" : String(oldText);
+    let hit = false;
+    // From the end, so the earlier indexes stay valid.
+    for (let i = refs.length - 1; i >= 0; i--) {
+      if (!drop(String(refs[i]))) continue;
+      text = stripBriefingSummary(text, i);
+      refs.splice(i, 1);
+      hit = true;
+    }
+    if (!hit) return false;
+    const keep = !!text.trim();
+    const w = await db.execute({
+      sql: "UPDATE bot_sessions SET briefing = ?, briefing_refs = ? WHERE id = ? AND briefing IS ? AND briefing_refs IS ?",
+      args: [keep ? text : null, keep ? JSON.stringify(refs) : null, rowId, oldText ?? null, oldRefs],
+    });
+    if (Number(w.rowsAffected || 0) > 0) return true;
+    // Lost the race: someone changed the row since the read. Read it again.
+  }
+  return false;
+}
+
+/**
  * Forget reaches other sessions' briefings: strip `threadId`'s summary from
  * every stored briefing whose refs name it (the engine writes each session's
- * system prompt file fresh from this row on its next wake). A briefing left
- * with nothing becomes NULL. Returns how many rows changed.
+ * system prompt file fresh from this row on its next wake). Returns how many
+ * rows changed.
  */
 async function stripForgottenFromBriefings(db, threadId) {
   const id = String(threadId);
   const rows = await rowsOrEmpty(db, {
-    sql: "SELECT id, briefing, briefing_refs FROM bot_sessions WHERE briefing_refs IS NOT NULL AND instr(briefing_refs, ?) > 0",
+    sql: "SELECT id FROM bot_sessions WHERE briefing_refs IS NOT NULL AND instr(briefing_refs, ?) > 0",
     args: [JSON.stringify(id)],
   });
   let changed = 0;
-  for (const r of rows) {
-    let refs;
-    try { refs = JSON.parse(String(r.briefing_refs)); } catch { refs = null; }
-    if (!Array.isArray(refs)) continue;
-    let text = r.briefing == null ? "" : String(r.briefing);
-    // From the end, so the earlier indexes stay valid (a thread is quoted once).
-    for (let i = refs.length - 1; i >= 0; i--) {
-      if (String(refs[i]) !== id) continue;
-      text = stripBriefingSummary(text, i);
-      refs.splice(i, 1);
-    }
-    await db.execute({
-      sql: "UPDATE bot_sessions SET briefing = ?, briefing_refs = ? WHERE id = ?",
-      args: [text.trim() ? text : null, text.trim() ? JSON.stringify(refs) : null, r.id],
-    });
-    changed++;
-  }
+  for (const r of rows) if (await stripRow(db, r.id, (t) => t === id)) changed++;
   return changed;
+}
+
+/**
+ * After recordBriefing: a Forget may have run between buildBriefing and the
+ * record (it stripped every stored briefing, but this one was not stored
+ * yet). Drop any ref whose thread now has no summary, and strip its text.
+ * Returns true when the row changed.
+ */
+/** The ref'd thread ids that no longer have a summary (forgotten since the build). */
+async function forgottenRefs(db, refs) {
+  const gone = new Set();
+  for (const t of new Set((refs || []).map(String))) {
+    const s = await rowsOrEmpty(db, {
+      sql: "SELECT 1 FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live' AND summary IS NOT NULL AND trim(summary) != '' LIMIT 1",
+      args: [t],
+    });
+    if (!s.length) gone.add(t);
+  }
+  return gone;
+}
+
+/**
+ * The in-memory twin of reconcileBriefing, for a block not stored yet (the
+ * engine runs it just before a first spawn starts its child): { text, refs }
+ * without the summaries of threads that have none now. text "" when nothing is left.
+ */
+export async function pruneBriefing(db, text, refs) {
+  const list = Array.isArray(refs) ? refs.map(String) : [];
+  const gone = await forgottenRefs(db, list);
+  let out = String(text || "");
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (!gone.has(list[i])) continue;
+    out = stripBriefingSummary(out, i);
+    list.splice(i, 1);
+  }
+  return { text: out, refs: out ? list : [] };
+}
+
+export async function reconcileBriefing(db, threadId) {
+  const rows = await rowsOrEmpty(db, {
+    sql: "SELECT id, briefing_refs FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live' AND briefing_refs IS NOT NULL ORDER BY id DESC LIMIT 1",
+    args: [String(threadId)],
+  });
+  if (!rows[0]) return false;
+  let refs;
+  try { refs = JSON.parse(String(rows[0].briefing_refs)); } catch { return false; }
+  if (!Array.isArray(refs) || !refs.length) return false;
+  const gone = await forgottenRefs(db, refs);
+  if (!gone.size) return false;
+  return stripRow(db, rows[0].id, (t) => gone.has(t));
 }
 
 /**
@@ -578,12 +648,15 @@ async function defaultSyncManager() {
  * every other session's stored briefing that quotes it (briefing_refs).
  * @returns {Promise<{forgotten:boolean, memoryDeleted:boolean}>}
  */
-export async function forgetSummary(db, threadId, { syncManager, now = Date.now() } = {}) {
+export async function forgetSummary(db, threadId, { syncManager, now = Date.now(), instanceId = null } = {}) {
   const id = String(threadId || "");
   if (!id) return { forgotten: false, memoryDeleted: false };
   const sm = syncManager === undefined ? await defaultSyncManager() : syncManager;
   let memoryDeleted = false;
-  const mems = await rowsOrEmpty(db, { sql: "SELECT id FROM memories WHERE source = ?", args: [SUMMARY_SOURCE_PREFIX + id] });
+  // This instance's own summary of its own thread (single-writer source).
+  let source;
+  try { source = summarySource(instanceId || await localInstanceId(), id); } catch { source = null; }
+  const mems = source ? await rowsOrEmpty(db, { sql: "SELECT id FROM memories WHERE source = ?", args: [source] }) : [];
   for (const m of mems) {
     if (await deleteMemory(db, Number(m.id), { syncManager: sm })) memoryDeleted = true;
   }

@@ -23,6 +23,7 @@ import {
 import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { insertMemory, updateMemory, deleteMemory } from "./memory-write.js";
+import { isSummaryMemorySource, SUMMARY_SOURCE_RESERVED } from "../shared/summary-source.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
@@ -95,6 +96,10 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Project ID for project-scoped memories"),
     },
     async ({ content, category, context, tags, source, importance, instance_id, project_id }) => {
+      // The session-summary source is reserved for the summary job.
+      if (isSummaryMemorySource(source)) {
+        return { content: [{ type: "text", text: "Refused: the source prefix \"session-summary:\" is reserved for session summaries. Use another source." }], isError: true };
+      }
       // One insert path (memory-write.js), shared with the gateway's session
       // summary job: the INSERT, the async embedding and the sync emit.
       // No project_uuid here on purpose: deferred until every paired instance
@@ -576,6 +581,11 @@ export function createMemoryServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
       }
 
+      // A session summary is written only by the summary job on its origin
+      // instance (single-writer): never edited here, on any instance.
+      if (isSummaryMemorySource(rows[0].source)) {
+        return { content: [{ type: "text", text: `Refused: memory #${id}: ${SUMMARY_SOURCE_RESERVED}` }], isError: true };
+      }
       // One update path (memory-write.js): the UPDATE, the re-embed and the sync emit.
       const changed = await updateMemory(db, id, { content, category, tags, importance, context }, {
         syncManager, source: rows[0].source ?? null, onContent: storeEmbedding,

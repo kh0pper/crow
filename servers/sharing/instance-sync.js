@@ -12,6 +12,7 @@
  * data → log to sync_conflicts and notify the operator.
  */
 
+import { SUMMARY_SOURCE_PREFIX, isSummaryMemorySource, parseSummarySource } from "../shared/summary-source.js";
 import Hypercore from "hypercore";
 import { mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -219,11 +220,9 @@ function quoteIdent(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
 }
 
-/** A session summary's memory source (session-summary.js SUMMARY_SOURCE_PREFIX). */
-export const SUMMARY_MEMORY_SOURCE_PREFIX = "session-summary:";
-export function isSummaryMemorySource(source) {
-  return typeof source === "string" && source.startsWith(SUMMARY_MEMORY_SOURCE_PREFIX) && source.length > SUMMARY_MEMORY_SOURCE_PREFIX.length;
-}
+/** A session summary's memory source (servers/shared/summary-source.js). */
+export const SUMMARY_MEMORY_SOURCE_PREFIX = SUMMARY_SOURCE_PREFIX;
+export { isSummaryMemorySource };
 
 /**
  * Inbound memories: project_id is local, project_uuid is portable. A row that
@@ -3970,6 +3969,15 @@ export class InstanceSyncManager {
    *     usual lamport conflict check against THAT row), or, with none, a new
    *     row is inserted under a fresh local id. The wire id is never written;
    *   - delete: the local row with that source is deleted (same conflict check).
+   *     A delete is accepted from any instance; no tombstone is kept.
+   * Single-writer: an insert or update is accepted ONLY when the entry's
+   * origin instance id equals the origin named in the source
+   * (session-summary:<origin>:<threadId>); anything else (another instance's
+   * stale copy, the old one-part source) is refused. This relies on
+   * fleet-internal trust: the entry's instance_id is the signed claim of a
+   * same-identity peer, and it is only bound to the feed it arrived on when
+   * entryOriginMode() is "enforce" (PT-2b). In "observe" mode a trusted peer
+   * could still claim another origin.
    * project_uuid is mapped to the local project as for any memory. A key the
    * local table lacks rejects the entry (_wireColumnsValid), as on the generic
    * path.
@@ -3991,29 +3999,43 @@ export class InstanceSyncManager {
       return;
     }
     if (op !== "insert" && op !== "update") return;
+    const parsed = parseSummarySource(source);
+    if (!parsed || parsed.origin !== String(instanceId)) {
+      console.warn(`[instance-sync] refused inbound ${op} on a summary memory not written by its origin`);
+      return;
+    }
 
     const mapped = await mapInboundMemoryProject(this.db, wire);
     if (!(await this._wireColumnsValid("memories", mapped, op))) return;
 
-    if (localId != null) {
-      // The same summary already lives here: an update of THAT row, LWW.
-      const verdict = await this._checkConflict("memories", localId, lamportTs, instanceId, wire, "update", mapped);
+    // The same summary already lives here: an update of THAT row, LWW.
+    const updateLocal = async (rowId) => {
+      const verdict = await this._checkConflict("memories", rowId, lamportTs, instanceId, wire, "update", mapped);
       if (verdict === "skip") return;
       const keys = Object.keys(mapped);
       await this.db.execute({
         sql: `UPDATE "memories" SET ${[...keys.map((k) => `${quoteIdent(k)} = ?`), '"lamport_ts" = ?'].join(", ")} WHERE "id" = ?`,
-        args: [...keys.map((k) => mapped[k] ?? null), lamportTs, localId],
+        args: [...keys.map((k) => mapped[k] ?? null), lamportTs, rowId],
       });
-      return;
-    }
+    };
+    if (localId != null) return updateLocal(localId);
 
     const ins = { ...mapped };
     if (ins.instance_id === undefined) ins.instance_id = instanceId;
     const cols = Object.keys(ins);
-    await this.db.execute({
-      sql: `INSERT INTO "memories" (${[...cols.map(quoteIdent), '"lamport_ts"'].join(", ")}) VALUES (${[...cols.map(() => "?"), "?"].join(", ")})`,
-      args: [...cols.map((c) => ins[c] ?? null), lamportTs],
-    });
+    try {
+      await this.db.execute({
+        sql: `INSERT INTO "memories" (${[...cols.map(quoteIdent), '"lamport_ts"'].join(", ")}) VALUES (${[...cols.map(() => "?"), "?"].join(", ")})`,
+        args: [...cols.map((c) => ins[c] ?? null), lamportTs],
+      });
+    } catch (err) {
+      // idx_memories_session_summary_source: a row with this source appeared
+      // since the SELECT (a local write raced us). Not lost: update it instead.
+      if (!/UNIQUE constraint failed/i.test(String(err && err.message))) throw err;
+      const { rows: raced } = await this.db.execute({ sql: "SELECT id FROM memories WHERE source = ? ORDER BY id LIMIT 1", args: [source] });
+      if (!raced[0]) throw err;
+      await updateLocal(raced[0].id);
+    }
   }
 
   /**
@@ -4354,7 +4376,9 @@ export class InstanceSyncManager {
     if (table !== "memories") return false;
     try {
       const { rows } = await this.db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
-      return isLocalOnlyMemorySource(rows?.[0]?.source);
+      // A summary memory is applied only by its source (_applySummaryMemory):
+      // a generic id-keyed op whose id merely collides never rewrites or deletes it.
+      return isLocalOnlyMemorySource(rows?.[0]?.source) || isSummaryMemorySource(rows?.[0]?.source);
     } catch {
       return false;
     }

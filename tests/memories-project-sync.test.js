@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { summarizeSessionByThread } from "../servers/gateway/perch/session-summary.js";
 import { forgetSummary } from "../servers/gateway/perch/briefing.js";
+import { summarySource } from "../servers/shared/summary-source.js";
 
 const U_SHARED = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const U_SECOND = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -255,25 +256,23 @@ test("a mixed-version peer that sends no project_uuid leaves it null and breaks 
 });
 
 
-test("a peer's summary memory lands on this instance's row for that source: one row, never a second", async () => {
-  // idx_memories_session_summary_source (0020): one memory per summary source,
-  // and instance sync applies a summary memory BY that source (I2).
+test("two instances' sessions with the same thread id stay apart: the source names its origin", async () => {
+  // Single-writer summary sources (session-summary:<origin>:<thread>): A's and
+  // B's sessions can share a thread id and still never clobber each other.
   const fleet = await makeFleet();
   let link;
   try {
     const { a, b } = fleet;
     link = await linkPeers(a, b);
-    const SRC = "session-summary:perchlive-shared";
-    await b.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (300, 'B local summary', ?)", args: [SRC] });
-    await a.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (301, 'A summary', ?)", args: [SRC] });
+    const SRC_A = summarySource(a.id, "perchlive-shared"), SRC_B = summarySource(b.id, "perchlive-shared");
+    await b.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (300, 'B local summary', ?)", args: [SRC_B] });
+    await a.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (301, 'A summary', ?)", args: [SRC_A] });
     const { rows } = await a.db.execute("SELECT * FROM memories WHERE id = 301");
     await a.mgr.emitChange("memories", "insert", { ...rows[0] });
-    // A later entry on the same feed still applies: the apply loop moved on.
-    await writeMemory(a, { id: 302, content: "after the collision" });
+    await writeMemory(a, { id: 302, content: "after it" });
     assert.ok(await until(async () => !!(await mem(b.db, 302))), "the feed drained");
-    const { rows: same } = await b.db.execute({ sql: "SELECT id, content FROM memories WHERE source = ?", args: [SRC] });
-    assert.deepEqual(same.map((r) => [Number(r.id), r.content]), [[300, "A summary"]], "B's one row for the source took the newer version");
-    assert.equal(await mem(b.db, 301), null, "the wire id is never written");
+    assert.deepEqual((await bySource(b.db, SRC_B)).map((r) => [r.id, r.content]), [[300, "B local summary"]], "B's own session is untouched");
+    assert.deepEqual((await bySource(b.db, SRC_A)).map((r) => r.content), ["A summary"], "A's lands as its own row");
   } finally {
     link?.close();
     await fleet.cleanup();
@@ -297,7 +296,7 @@ test("summary memories sync by source: an id collision never makes an insert, up
     // B's id 500 is an UNRELATED memory; A's summary memory happens to have id 500 too.
     await b.db.execute("INSERT INTO memories (id, content, source) VALUES (500, 'B unrelated note', 'manual')");
     link = await linkPeers(a, b);
-    const SRC = "session-summary:perchlive-0000aaaa";
+    const SRC = summarySource(a.id, "perchlive-0000aaaa");
     await a.db.execute({ sql: "INSERT INTO memories (id, content, source, project_id, project_uuid) VALUES (500, 'A summary v1', ?, 10, ?)", args: [SRC, U_SHARED] });
     const { rows } = await a.db.execute("SELECT * FROM memories WHERE id = 500");
     await a.mgr.emitChange("memories", "insert", { ...rows[0] });
@@ -354,6 +353,7 @@ const jobDeps = (side, output, nowIso = "2026-10-29T12:00:00Z") => ({
   where: () => "here",
   complete: async () => "SUMMARY: " + output,
   syncManager: side.mgr,
+  instanceId: side.id, // the origin in the source: this side's sync instance id
 });
 
 test("real seam: summarizeSessionByThread on A crosses the real link to B (filed and unfiled), and Forget on A removes it on B", async () => {
@@ -370,7 +370,7 @@ test("real seam: summarizeSessionByThread on A crosses the real link to B (filed
     assert.equal((await summarizeSessionByThread(a.db, FILED, jobDeps(a, "The bot planned the shared beds."))).written, true);
     assert.equal((await summarizeSessionByThread(a.db, UNFILED, jobDeps(a, "The bot planned the only-A beds."))).written, true);
 
-    const sF = "session-summary:" + FILED, sU = "session-summary:" + UNFILED;
+    const sF = summarySource(a.id, FILED), sU = summarySource(a.id, UNFILED);
     assert.ok(await until(async () => (await bySource(b.db, sF)).length === 1 && (await bySource(b.db, sU)).length === 1), "both summaries reach B");
     const [f] = await bySource(b.db, sF);
     const [u] = await bySource(b.db, sU);
@@ -379,7 +379,7 @@ test("real seam: summarizeSessionByThread on A crosses the real link to B (filed
     assert.deepEqual([u.project_id, u.project_uuid], [null, U_ONLY_A], "unfiled on B, uuid kept");
 
     // Forget on A: the memory is gone on B too.
-    const r = await forgetSummary(a.db, FILED, { syncManager: a.mgr });
+    const r = await forgetSummary(a.db, FILED, { syncManager: a.mgr, instanceId: a.id });
     assert.equal(r.memoryDeleted, true);
     assert.equal((await bySource(a.db, sF)).length, 0);
     assert.ok(await until(async () => (await bySource(b.db, sF)).length === 0), "Forget on A reaches B");
@@ -411,7 +411,7 @@ test("un-migrated receiver (CURRENT behaviour, pinned): a summary memory with pr
     await writeMemory(a, { id: 777, content: "a later plain memory" });
     const exists = async (id) => (await b.db.execute({ sql: "SELECT 1 FROM memories WHERE id = ?", args: [id] })).rows.length === 1;
     assert.ok(await until(() => exists(777)), "the feed moved past the rejected entry");
-    const { rows: none } = await b.db.execute({ sql: "SELECT id FROM memories WHERE source = ?", args: ["session-summary:" + T1] });
+    const { rows: none } = await b.db.execute({ sql: "SELECT id FROM memories WHERE source = ?", args: [summarySource(a.id, T1)] });
     assert.equal(none.length, 0, "dropped: B's table has no project_uuid column");
 
     // B upgrades (0020 adds the column). The dropped insert is NOT re-applied:
@@ -420,18 +420,96 @@ test("un-migrated receiver (CURRENT behaviour, pinned): a summary memory with pr
     await writeMemory(a, { id: 778, content: "after B's upgrade" });
     assert.ok(await until(async () => !!(await mem(b.db, 778))));
     await sleep(150);
-    const { rows: still } = await b.db.execute({ sql: "SELECT id FROM memories WHERE source = ?", args: ["session-summary:" + T1] });
+    const { rows: still } = await b.db.execute({ sql: "SELECT id FROM memories WHERE source = ?", args: [summarySource(a.id, T1)] });
     assert.equal(still.length, 0, "not retried after the upgrade (the entry is lost on B)");
 
     // A later re-summary (an update on the wire) heals it: summary memories upsert by source.
     appendFileSync(file, JSON.stringify({ type: "message", timestamp: "2026-10-29T12:30:00.000Z", message: { role: "user", content: "And water them." } }) + "\n");
     utimesSync(file, new Date("2026-10-29T12:30:00Z"), new Date("2026-10-29T12:30:00Z"));
     assert.equal((await summarizeSessionByThread(a.db, T1, jobDeps(a, "The bot planned and watered the beds.", "2026-10-29T13:00:00Z"))).written, true);
-    assert.ok(await until(async () => (await bySource(b.db, "session-summary:" + T1))[0]?.content === "The bot planned and watered the beds."), "healed by the update");
-    assert.equal((await bySource(b.db, "session-summary:" + T1))[0].project_id, 40);
+    assert.ok(await until(async () => (await bySource(b.db, summarySource(a.id, T1)))[0]?.content === "The bot planned and watered the beds."), "healed by the update");
+    assert.equal((await bySource(b.db, summarySource(a.id, T1)))[0].project_id, 40);
   } finally {
     link?.close();
     await fleet.cleanup();
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ---- re-review fix wave: single-writer, protection, the insert race -------------
+
+test("single-writer: only the origin named in the source may insert or update a summary memory; anyone may delete it", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b, identity } = fleet;
+    const signed = (entry) => ({ ...entry, signature: sign(JSON.stringify(entry), identity.ed25519Priv) });
+    const apply = (op, row, ts) => b.mgr._applyEntry(a.id, signed({ table: "memories", op, row, lamport_ts: ts, instance_id: a.id }));
+    const SRC_B = summarySource(b.id, "perchlive-0000b0b0");
+    await b.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (600, 'B own summary', ?)", args: [SRC_B] });
+
+    // A (not the origin) updates or re-inserts B's summary: refused, even with a higher lamport.
+    await apply("update", { id: 1, content: "A clobbers B", source: SRC_B }, 900);
+    await apply("insert", { id: 2, content: "A re-inserts B", source: SRC_B }, 901);
+    assert.deepEqual((await bySource(b.db, SRC_B)).map((r) => [r.id, r.content]), [[600, "B own summary"]]);
+    // A third origin's source, or the old one-part form: refused too.
+    const SRC_C = summarySource("instC", "perchlive-0000c0c0");
+    await apply("insert", { id: 3, content: "claims C", source: SRC_C }, 902);
+    await apply("insert", { id: 4, content: "old form", source: "session-summary:perchlive-0000d0d0" }, 903);
+    assert.deepEqual(await bySource(b.db, SRC_C), []);
+    assert.deepEqual(await bySource(b.db, "session-summary:perchlive-0000d0d0"), []);
+    // The origin itself is accepted.
+    const SRC_A = summarySource(a.id, "perchlive-0000a0a0");
+    await apply("insert", { id: 5, content: "A own summary", source: SRC_A }, 904);
+    assert.deepEqual((await bySource(b.db, SRC_A)).map((r) => r.content), ["A own summary"]);
+    // A plain delete is accepted from anyone (no tombstone).
+    await apply("delete", { id: 7, source: SRC_B }, 905);
+    assert.deepEqual(await bySource(b.db, SRC_B), [], "deleted by source");
+  } finally {
+    await fleet.cleanup();
+  }
+});
+
+test("a generic id-keyed op never rewrites or deletes a local summary memory whose id merely collides", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b, identity } = fleet;
+    const signed = (entry) => ({ ...entry, signature: sign(JSON.stringify(entry), identity.ed25519Priv) });
+    const SRC_B = summarySource(b.id, "perchlive-0000b1b1");
+    await b.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (610, 'B summary at 610', ?)", args: [SRC_B] });
+    // A's ordinary memory 610 (no summary source) is updated, then deleted.
+    await b.mgr._applyEntry(a.id, signed({ table: "memories", op: "update", row: { id: 610, content: "A ordinary edit", source: "manual" }, lamport_ts: 950, instance_id: a.id }));
+    await b.mgr._applyEntry(a.id, signed({ table: "memories", op: "delete", row: { id: 610, source: "manual" }, lamport_ts: 951, instance_id: a.id }));
+    assert.deepEqual((await bySource(b.db, SRC_B)).map((r) => [r.id, r.content]), [[610, "B summary at 610"]], "protected");
+  } finally {
+    await fleet.cleanup();
+  }
+});
+
+test("a sync insert that races a local write on the summary-source index is applied as an update, not lost", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b, identity } = fleet;
+    const signed = (entry) => ({ ...entry, signature: sign(JSON.stringify(entry), identity.ed25519Priv) });
+    const SRC_A = summarySource(a.id, "perchlive-0000a1a1");
+    // Between the applier's SELECT-by-source and its INSERT, a row with the
+    // same source appears (a racing local write).
+    const realExecute = b.db.execute.bind(b.db);
+    let raced = false;
+    b.db.execute = async (q) => {
+      const r = await realExecute(q);
+      const sql = typeof q === "string" ? q : q.sql;
+      if (!raced && /^SELECT id FROM memories WHERE source = \? ORDER BY id LIMIT 1/.test(sql)) {
+        raced = true;
+        await realExecute({ sql: "INSERT INTO memories (id, content, source, lamport_ts) VALUES (620, 'raced local row', ?, 1)", args: [SRC_A] });
+      }
+      return r;
+    };
+    try {
+      await b.mgr._applyEntry(a.id, signed({ table: "memories", op: "insert", row: { id: 9, content: "A summary v1", source: SRC_A }, lamport_ts: 960, instance_id: a.id }));
+    } finally { b.db.execute = realExecute; }
+    assert.equal(raced, true, "the race was staged");
+    assert.deepEqual((await bySource(b.db, SRC_A)).map((r) => [r.id, r.content]), [[620, "A summary v1"]], "the insert landed as an update by source");
+  } finally {
+    await fleet.cleanup();
   }
 });

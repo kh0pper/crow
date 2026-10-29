@@ -80,6 +80,7 @@ function makeDeps(o = {}) {
     where: (k) => whereMap[k] || "missing",
     complete: o.complete || (async (req) => { calls.complete.push(req); return o.output ?? GOOD; }),
     log: (m) => calls.logs.push(m),
+    instanceId: ORIGIN,
     syncManager: { feedsDisabled: false, emitChange: async (table, op, row) => { calls.emits.push({ table, op, row }); return null; } },
     ...(o.extra || {}),
   };
@@ -92,7 +93,10 @@ async function withDb(fn) {
 }
 const byThread = (threadId, deps) => withDb((db) => mod.summarizeSessionByThread(db, threadId, deps));
 const sessionRow = (threadId) => one("SELECT * FROM bot_sessions WHERE gateway_thread_id=? ORDER BY id DESC LIMIT 1", threadId);
-const memoriesFor = (threadId) => all("SELECT * FROM memories WHERE source=?", "session-summary:" + threadId);
+/** This test's instance: the origin in every summary source the job writes here. */
+const ORIGIN = "0123456789abcdef0123456789abcdef";
+const SRC = (threadId) => "session-summary:" + ORIGIN + ":" + threadId;
+const memoriesFor = (threadId) => all("SELECT * FROM memories WHERE source=?", SRC(threadId));
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: REPO });
@@ -133,7 +137,7 @@ test("writes a summary and one memory", async () => {
   const ins = calls.emits.filter((e) => e.table === "memories" && e.op === "insert");
   assert.equal(ins.length, 1);
   assert.equal(ins[0].row.project_uuid, s.uuid);
-  assert.equal(ins[0].row.source, "session-summary:" + s.threadId);
+  assert.equal(ins[0].row.source, SRC(s.threadId), "single-writer: session-summary:<origin>:<thread>");
 
   // One model call to role:quick, the prompt built from the transcript (Dates line stripped).
   assert.equal(calls.complete.length, 1);
@@ -469,8 +473,8 @@ test("a busy thread runs once more when the in-flight job finishes, however many
 
 test("one memory per summary source: the unique index, and a row that already exists is updated", async () => {
   const s = seedSession();
-  run("INSERT INTO memories (content, category, source) VALUES ('older copy', 'project', ?)", "session-summary:" + s.threadId);
-  assert.throws(() => run("INSERT INTO memories (content, category, source) VALUES ('dup', 'project', ?)", "session-summary:" + s.threadId), /UNIQUE/);
+  run("INSERT INTO memories (content, category, source) VALUES ('older copy', 'project', ?)", SRC(s.threadId));
+  assert.throws(() => run("INSERT INTO memories (content, category, source) VALUES ('dup', 'project', ?)", SRC(s.threadId)), /UNIQUE/);
   run("INSERT INTO memories (content, source) VALUES ('a', 'other-source')");
   run("INSERT INTO memories (content, source) VALUES ('b', 'other-source')"); // only summary sources are unique
   const { deps, calls } = makeDeps();
@@ -731,4 +735,68 @@ test("after a Forget only the later turns are read", async () => {
   assert.doesNotMatch(calls.complete[0].prompt, /FORGOTTEN/, "the forgotten turns are never summarised again");
   // An unstamped turn after a Forget is left out (fail closed).
   assert.deepEqual(mod.readTranscriptTail(s.file, { afterMs: Date.parse("2026-10-29T12:30:00Z") }), []);
+});
+
+// ---------------------------------------------------------------------------
+// re-review fix wave
+// ---------------------------------------------------------------------------
+
+test("Forget's mark is carried forward: two summaries after a Forget both exclude the forgotten turns", async () => {
+  const s = seedSession({ messages: [{ role: "user", content: "FORGOTTEN-TURN one" }, { role: "assistant", content: "FORGOTTEN-REPLY one" }] });
+  const stamp = (iso, role, text) => JSON.stringify({ type: "message", timestamp: iso, message: { role, content: text } });
+  const lines = readFileSync(s.file, "utf8").trim().split("\n").map((l) => JSON.parse(l))
+    .map((e) => (e.type === "message" ? { ...e, timestamp: "2026-10-29T10:00:00.000Z" } : e));
+  writeFileSync(s.file, lines.map((e) => JSON.stringify(e)).join("\n") + "\n" + stamp("2026-10-29T12:10:00.000Z", "user", "LATER-ONE") + "\n");
+  utimesSync(s.file, new Date("2026-10-29T12:10:00Z"), new Date("2026-10-29T12:10:00Z"));
+  run("UPDATE bot_sessions SET summary_flags=? WHERE gateway_thread_id=?", JSON.stringify({ forgotten_at: "2026-10-29 11:00:00" }), s.threadId);
+
+  const first = makeDeps({ nowOffset: 900_000 }); // 12:15
+  assert.equal((await byThread(s.threadId, first.deps)).written, true);
+  assert.doesNotMatch(first.calls.complete[0].prompt, /FORGOTTEN/);
+  assert.equal(JSON.parse(sessionRow(s.threadId).summary_flags).forgotten_at, "2026-10-29 11:00:00", "the mark survives the new flags");
+
+  appendFileSync(s.file, stamp("2026-10-29T12:40:00.000Z", "user", "LATER-TWO") + "\n");
+  utimesSync(s.file, new Date("2026-10-29T12:40:00Z"), new Date("2026-10-29T12:40:00Z"));
+  const second = makeDeps({ nowOffset: 3_000_000 }); // 12:50
+  assert.equal((await byThread(s.threadId, second.deps)).written, true);
+  assert.match(second.calls.complete[0].prompt, /LATER-ONE[\s\S]*LATER-TWO/);
+  assert.doesNotMatch(second.calls.complete[0].prompt, /FORGOTTEN/, "the second summary still excludes them");
+});
+
+test("the session-summary source is reserved: crow_store_memory refuses it, crow_update_memory refuses to edit a summary", async () => {
+  const { createMemoryServer } = await import("../servers/memory/server.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const server = createMemoryServer(DB_FILE);
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "t", version: "1" });
+  await Promise.all([server.connect(st), client.connect(ct)]);
+  try {
+    const call = async (name, args) => { const r = await client.callTool({ name, arguments: args }); return { text: r.content.map((c) => c.text).join("\n"), isError: !!r.isError }; };
+    const before = all("SELECT id FROM memories").length;
+    const stored = await call("crow_store_memory", { content: "forged", category: "project", source: "session-summary:x:perchlive-00000000", importance: 5 });
+    assert.equal(stored.isError, true);
+    assert.match(stored.text, /reserved/);
+    assert.equal(all("SELECT id FROM memories").length, before, "nothing stored");
+    // A summary memory, from this instance or a peer: never edited by the tool.
+    const s = seedSession();
+    assert.equal((await byThread(s.threadId, makeDeps().deps)).written, true);
+    const m = memoriesFor(s.threadId)[0];
+    const upd = await call("crow_update_memory", { id: Number(m.id), content: "edited by hand" });
+    assert.equal(upd.isError, true);
+    assert.match(upd.text, /session summary/);
+    assert.equal(memoriesFor(s.threadId)[0].content, m.content, "unchanged");
+    // An ordinary memory still updates, and an ordinary source still stores.
+    const ok = await call("crow_store_memory", { content: "plain", category: "general", source: "manual", importance: 5 });
+    assert.equal(ok.isError, false);
+  } finally { try { await client.close(); } catch { /* closed */ } }
+  // The contact share import renames a reserved source.
+  const { importedShareSource, parseSummarySource, summarySource } = await import("../servers/shared/summary-source.js");
+  assert.equal(importedShareSource("session-summary:a:perchlive-1"), "shared:session-summary:a:perchlive-1");
+  assert.equal(importedShareSource("manual"), "manual");
+  const boot = readFileSync(join(REPO, "servers/sharing/boot.js"), "utf8");
+  assert.match(boot, /const importSource = importedShareSource\(payload\.payload\.source \|\| ""\);/);
+  assert.doesNotMatch(boot, /payload\.payload\.source \|\| "",/, "the raw source is never written");
+  assert.deepEqual(parseSummarySource(summarySource("abc", "perchlive-1")), { origin: "abc", threadId: "perchlive-1" });
+  assert.equal(parseSummarySource("session-summary:perchlive-1"), null, "the old one-part form has no origin");
 });

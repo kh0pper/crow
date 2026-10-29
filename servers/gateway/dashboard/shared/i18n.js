@@ -544,6 +544,7 @@ export const translations = {
   "memory.actionsLabel": { en: "Actions", es: "Acciones" },
   "memory.save": { en: "Save", es: "Guardar" },
   "memory.cancel": { en: "Cancel", es: "Cancelar" },
+  "memory.summaryReadOnly": { en: "This memory is a session summary. Only the session summary job writes it, so it cannot be edited here. To remove it, use Forget on the session, or delete it.", es: "Esta memoria es el resumen de una sesión. Solo la tarea de resúmenes la escribe, así que no se puede editar aquí. Para quitarla, usa Olvidar en la sesión o elimínala." },
   "memory.edit": { en: "Edit", es: "Editar" },
   "memory.delete": { en: "Delete", es: "Eliminar" },
   "memory.deleteConfirm": { en: "Delete this memory?", es: "¿Eliminar esta memoria?" },

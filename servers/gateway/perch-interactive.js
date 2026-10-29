@@ -152,7 +152,7 @@ import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
-import { applyBriefing, briefingEnabled, briefingPromptFile, removeBriefingPromptFile, sessionBriefing, recordBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
+import { applyBriefing, briefingEnabled, briefingPromptFile, removeBriefingPromptFile, sessionBriefing, recordBriefing, reconcileBriefing, pruneBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
 
 /** The privacy rank of the model a child will run on (unknown: the cloud). */
 async function defaultRankModel(key) {
@@ -3542,6 +3542,20 @@ export function createInteractiveEngine({
     // synchronous claim: two callers racing THIS process still need the
     // in-memory exclusion below, which no await-laden pre-check can provide.
     if (cid != null) await checkCardFree(cid);
+    // R1.2 PR 4: a Forget that ran after the route built the briefing: drop
+    // its summary before the child ever sees it (reconcileBriefing after the
+    // record covers a Forget that lands while the child starts). Done here,
+    // ahead of the synchronous block below, which must not await.
+    const brief = { text: typeof briefing === "string" && briefing.trim() ? briefing : null, refs: Array.isArray(briefingRefs) ? briefingRefs.map(String) : [] };
+    if (brief.text && brief.refs.length) {
+      const pdb = createDbClient();
+      try {
+        const pruned = await pruneBriefing(pdb, brief.text, brief.refs);
+        brief.text = pruned.text || null;
+        brief.refs = pruned.refs;
+      } catch { brief.text = null; brief.refs = []; } // unsure: no briefing at all
+      finally { try { pdb.close(); } catch { /* closed */ } }
+    }
     // ---- one synchronous block: gates + reservation + card claim, no await
     // between any of them (spec §5.1 — the P1 F3 TOCTOU class, extended to
     // the card claim) ----
@@ -3555,9 +3569,9 @@ export function createInteractiveEngine({
     s.cwd = cwd || null;
     // R1.2 PR 4: the briefing text (briefing.js briefingText), built by the
     // spawn route from the DB; startChild keeps it in the session's files.
-    s.briefing = typeof briefing === "string" && briefing.trim() ? briefing : null;
+    s.briefing = brief.text;
     s.briefingRank = Number.isInteger(briefingRank) ? briefingRank : null;
-    s.briefingRefs = Array.isArray(briefingRefs) ? briefingRefs.map(String) : [];
+    s.briefingRefs = brief.refs;
     // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
     // after — reserveWithEviction's eviction path awaits the victim's
     // hibernate() before this call resumes, and a concurrent second caller's
@@ -3582,7 +3596,14 @@ export function createInteractiveEngine({
       // R1.2 PR 4: the row now exists; it becomes the briefing's source of truth.
       if (s.briefing) {
         const bdb = createDbClient();
-        try { s.briefingRecorded = await recordBriefing(bdb, s.threadId, s.briefing, s.briefingRank, s.briefingRefs); }
+        try {
+          s.briefingRecorded = await recordBriefing(bdb, s.threadId, s.briefing, s.briefingRank, s.briefingRefs);
+          // Reconcile with a Forget that ran meanwhile (it could not see this row yet).
+          if (s.briefingRecorded && await reconcileBriefing(bdb, s.threadId)) {
+            const now = await sessionBriefing(bdb, s.threadId);
+            s.briefing = now ? now.text : null;
+          }
+        }
         catch { sessionLog(s)("briefing could not be recorded; a wake will start without it"); }
         finally { try { bdb.close(); } catch { /* closed */ } }
       }

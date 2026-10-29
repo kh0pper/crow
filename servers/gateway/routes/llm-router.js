@@ -510,6 +510,9 @@ export async function completeText({ model, prompt, maxTokens = 400, timeoutMs =
   if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
   // The box is spoken for (an operator window, a benchmark): a background
   // job adds no load at all, even to a model that is already up.
+  // The reservation's allow list (isStartAllowed: crow-embed and the like) is
+  // ignored on purpose: it permits STARTING an exempt model, while this job is
+  // optional work that simply waits for the window to end.
   let held = null;
   try { held = reservationFn(); } catch { held = { corrupt: true }; } // unreadable: fail closed
   if (held) throw new CompleteTextSkipped("box_reserved");
