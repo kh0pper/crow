@@ -106,6 +106,7 @@ export const LOOPBACK_ERROR_TEXT = Object.freeze({
     not_selected: NOT_THIS_TURN.en, owner_mismatch: NOT_THIS_TURN.en, not_granted: NOT_THIS_TURN.en,
     not_found: "",
     not_active: "This connection is turned off.",
+    private_unavailable: "This connection is private. Bots can't read it yet.",
     busy: "Busy, try again in a moment.",
     child_unavailable: "This service isn't running right now.",
     not_installed: "This service isn't running right now.",
@@ -126,6 +127,7 @@ export const LOOPBACK_ERROR_TEXT = Object.freeze({
     not_selected: NOT_THIS_TURN.es, owner_mismatch: NOT_THIS_TURN.es, not_granted: NOT_THIS_TURN.es,
     not_found: "",
     not_active: "Esta conexión está desactivada.",
+    private_unavailable: "Esta conexión es privada. Los bots todavía no pueden leerla.",
     busy: "Ocupado, inténtalo de nuevo en un momento.",
     child_unavailable: "Este servicio no está en marcha ahora mismo.",
     not_installed: "Este servicio no está en marcha ahora mismo.",
@@ -153,13 +155,13 @@ export function loopbackErrorText(code, { lang = "en", tool = "The tool", kib = 
 // with "Not available on this turn." (fail closed).
 const AUTHZ_STATUS = Object.freeze({
   not_owner_turn: 403, scope_unknown: 403, wrong_project: 403, not_selected: 403, owner_mismatch: 403, not_granted: 403,
-  not_found: 404, not_active: 409,
+  not_found: 404, not_active: 409, private_unavailable: 403,
 });
 // Codes an upstream may throw (or return as `{code}`) for a tool call. Any other
 // value, or a thrown Error's own `code` (ECONNREFUSED, ...), is "<tool> failed.".
 const TOOL_CODES = new Set([
   "busy", "child_unavailable", "not_installed", "unreachable", "tools_changed",
-  "not_owner_turn", "scope_unknown", "wrong_project", "not_selected", "owner_mismatch", "not_granted", "not_active",
+  "not_owner_turn", "scope_unknown", "wrong_project", "not_selected", "owner_mismatch", "not_granted", "not_active", "private_unavailable",
 ]);
 
 const FAMILY_RE = /^[a-z][a-z0-9-]{1,40}$/;
