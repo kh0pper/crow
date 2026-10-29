@@ -106,6 +106,33 @@ export function shellClientJs() {
           }; })(tb), true);
         }
       }
+      // The "Needs attention" group: fetched each time the sheet opens (the
+      // open attribute is the one signal that covers every opener), and the
+      // alert landing (?sheet=attention) opens the sheet once, then drops the
+      // parameter so a reload or Back does not reopen it.
+      var attnSlot = document.querySelector('[data-shell-attention]');
+      if (attnSlot) {
+        var attnDlg = attnSlot.closest('dialog');
+        var loadAttention = function () {
+          fetch('/dashboard/attention/fragment', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.text() : null; })
+            .then(function (html) { if (html !== null) attnSlot.innerHTML = html; })
+            .catch(function () {});
+        };
+        if (attnDlg && typeof MutationObserver === 'function') {
+          new MutationObserver(function () { if (attnDlg.open) loadAttention(); })
+            .observe(attnDlg, { attributes: true, attributeFilter: ['open'] });
+        }
+        if (/[?&]sheet=attention(&|$)/.test(location.search)) {
+          var attnBtn = attnDlg ? document.querySelector('[data-shell-tray][aria-controls="' + attnDlg.id + '"]') : null;
+          if (attnBtn) attnBtn.click();
+          try {
+            var attnUrl = new URL(location.href);
+            attnUrl.searchParams.delete('sheet');
+            history.replaceState(history.state, '', attnUrl.pathname + attnUrl.search + attnUrl.hash);
+          } catch (e) {}
+        }
+      }
       var sheets = document.querySelectorAll('dialog.shell-sheet');
       for (var j = 0; j < sheets.length; j++) {
         var dlg = sheets[j];

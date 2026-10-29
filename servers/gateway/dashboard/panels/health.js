@@ -13,9 +13,12 @@ import { collectHealthSignals, invalidateHealthCache } from "./nest/health-signa
 import { getPeerOverview } from "../overview-cache.js";
 import { readSetting, writeSetting } from "../settings/registry.js";
 import { Router } from "express";
+import { parseCookies } from "../auth.js";
+import { SUPPORTED_LANGS } from "../shared/i18n.js";
 import { resolveRequestMode, safeReturnPath } from "../shell/request.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { t } from "../shared/i18n.js";
+import { attentionGroupHtml } from "../shell/attention.js";
 import { renderFixItCards } from "../../fix-it/index.js";
 
 async function resolveLocalInstanceName(db, lang) {
@@ -55,6 +58,7 @@ const ATTENTION_FALLBACK = "/dashboard/attention";
  * Health attention routes. Mount after dashboardAuth + csrfMiddleware, and
  * before the /dashboard/:panelId catch-all.
  *   POST /dashboard/health/ack  - "This is expected" for a foreign Funnel mapping.
+ *   GET  /dashboard/attention/fragment - the sheet's "Needs attention" group.
  *   GET  /dashboard/attention   - where alert notifications land: the sheet in
  *                                 new mode, the nest's health card in classic.
  */
@@ -85,6 +89,23 @@ export function healthAttentionRouter({ createDbClient }) {
     const back = safeReturnPath(raw);
     // safeReturnPath's fallback is the shell's Chat; this route's is the attention route.
     return res.redirect(303, back === "/dashboard/perch" && raw !== "/dashboard/perch" ? ATTENTION_FALLBACK : back);
+  });
+
+  // The sheet's "Needs attention" group, loaded each time the sheet opens.
+  router.get("/dashboard/attention/fragment", async (req, res) => {
+    const cookieLang = parseCookies(req).crow_lang;
+    const lang = SUPPORTED_LANGS.includes(cookieLang) ? cookieLang : "en";
+    const db = createDbClient();
+    let issues = [];
+    try {
+      issues = (await collectHealthSignals(db, { lang })).issues || [];
+    } catch {
+      issues = [];
+    } finally {
+      db.close();
+    }
+    res.set("Cache-Control", "no-store");
+    res.type("text/html").send(attentionGroupHtml(issues, lang));
   });
 
   router.get("/dashboard/attention", async (req, res) => {
