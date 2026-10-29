@@ -175,7 +175,7 @@ Subscription (live one-way sync) and federated read are planned follow-on milest
 
 ## Archive vs delete
 
-Phase 1 uses **soft archive**: changing a project's status to `archived` sets `archived_at` and hides the project from active listings. Sources, notes, members, audit, and the workspace directory are preserved. The project can be unarchived from the dashboard at any time.
+Phase 1 uses **soft archive**: changing a project's status to `archived` hides the project from active listings. It does not set `archived_at`: that column means "deleted", and bots on an archived project keep working. Restore sets the status back to `active`. Sources, notes, members, audit, and the workspace directory are preserved. The project can be unarchived from the dashboard at any time.
 
 Hard delete (drop the workspace dir, cascade everything) is not implemented in Phase 1 — file your decision before re-implementing as a one-way operation.
 
