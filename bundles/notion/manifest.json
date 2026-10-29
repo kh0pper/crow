@@ -11,7 +11,7 @@
     "wiki",
     "notes"
   ],
-  "icon": "notebook",
+  "icon": "book",
   "server": {
     "command": "npx",
     "args": [

@@ -11,7 +11,7 @@
     "lms",
     "courses"
   ],
-  "icon": "school",
+  "icon": "graduation-cap",
   "server": {
     "command": "npx",
     "args": [

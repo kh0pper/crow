@@ -916,7 +916,7 @@
         "lms",
         "courses"
       ],
-      "icon": "school",
+      "icon": "graduation-cap",
       "server": {
         "command": "npx",
         "args": [
@@ -2039,7 +2039,7 @@
         "code",
         "issues"
       ],
-      "icon": "github",
+      "icon": "git",
       "server": {
         "command": "npx",
         "args": [
@@ -4638,7 +4638,7 @@
         "wiki",
         "notes"
       ],
-      "icon": "notebook",
+      "icon": "book",
       "server": {
         "command": "npx",
         "args": [

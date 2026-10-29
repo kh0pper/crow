@@ -12,7 +12,7 @@
     "code",
     "issues"
   ],
-  "icon": "github",
+  "icon": "git",
   "server": {
     "command": "npx",
     "args": [
