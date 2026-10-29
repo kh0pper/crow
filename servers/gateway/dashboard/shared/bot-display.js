@@ -3,12 +3,14 @@
  * (queue item 20, option A). Pure: no DB, no DOM, no clock of their own.
  *
  *   boardState(row)              — can this bot hold cards? on | off | custom
- *   friendlyModel(key, providers) — "Qwen3.6 35B A3B" instead of the raw key
+ *   friendlyModel(key, providers, {lang, customDefs}) — "Qwen3.6 35B A3B" instead of the raw key; a role: ref shows the role's label
+ *   roleRefLabel(key, {lang, customDefs}) — the label of a known role: ref, else null
  *   purposeLine(def, lang, on)    — one line on what the bot does
  *   agoText(isoUtc, now, lang)    — "updated 9 days ago"
  *   oneLine(s, max)               — free text as one clean line
  */
 import { t, fill } from "./i18n.js";
+import { ROLE_LABEL_KEYS, isRoleRef, roleIdOf, isValidCustomRoleId } from "../../../shared/model-roles.js";
 
 function parseDef(definition) {
   if (definition && typeof definition === "object") return definition;
@@ -34,13 +36,28 @@ export function boardState(row) {
 }
 
 /**
+ * The label of a role: ref naming a core role (translated) or a custom role
+ * in customDefs (its own, user-entered label: callers escape it). Null for a
+ * non-ref or an unknown role.
+ */
+export function roleRefLabel(key, { lang = "en", customDefs = {} } = {}) {
+  if (!isRoleRef(key)) return null;
+  const id = roleIdOf(key);
+  if (Object.prototype.hasOwnProperty.call(ROLE_LABEL_KEYS, id)) return t(ROLE_LABEL_KEYS[id], lang);
+  const l = isValidCustomRoleId(id) ? customDefs?.[id]?.label : null;
+  return typeof l === "string" && l.trim() ? l.trim() : null;
+}
+
+/**
  * The provider's display name for a model key ("provider/model"), cut at the
  * first " (" so a "(local, chat)" suffix does not crowd a row. Falls back to
  * the part after the provider, then to the key itself.
  */
-export function friendlyModel(key, providerRows) {
+export function friendlyModel(key, providerRows, { lang = "en", customDefs = {} } = {}) {
   if (!key) return "";
   const s = String(key);
+  const role = roleRefLabel(s, { lang, customDefs });
+  if (role) return role;
   const slash = s.indexOf("/");
   if (slash < 0) return s;
   const prov = s.slice(0, slash), mid = s.slice(slash + 1);

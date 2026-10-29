@@ -118,3 +118,12 @@ test("agoText takes a key prefix, so the Unassigned lane can say \"added N ago\"
   assert.equal(agoText("2026-10-16 11:59:30", now, "es", "botboard.added"), "añadida ahora mismo");
   assert.equal(agoText("2026-10-14 12:00:00", now, "en"), "updated 2 days ago", "the default stays \"updated\"");
 });
+
+test("friendlyModel: a role: ref shows the role's label (core in en/es, custom by its label); unknown stays raw", () => {
+  assert.equal(friendlyModel("role:voice", []), "Voice");
+  assert.equal(friendlyModel("role:voice", [], { lang: "es" }), "Voz");
+  assert.equal(friendlyModel("role:c-coder", [], { customDefs: { "c-coder": { label: "Coder" } } }), "Coder");
+  assert.equal(friendlyModel("role:c-coder", []), "role:c-coder", "no def, no label");
+  assert.equal(friendlyModel("role:nope", [], { customDefs: {} }), "role:nope");
+  assert.equal(friendlyModel("crow-chat/plain-model", PROVIDERS, { lang: "es" }), "plain-model", "raw keys unchanged");
+});

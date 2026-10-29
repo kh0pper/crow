@@ -8,7 +8,7 @@
 
 import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
-  loadModelOptions, remoteInvocationOn, defaultDefinition,
+  loadModelOptions, loadRoleRefs, remoteInvocationOn, defaultDefinition,
 } from "./data-queries.js";
 import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
@@ -429,6 +429,8 @@ export async function handleBotBuilderPost(req, res, { db }) {
       try {
         const { opts } = await loadModelOptions(db);
         const validKeys = new Set(opts.map((o) => o.key));
+        const roles = await loadRoleRefs(db);
+        for (const k of [def.models.default, def.models.escalation, def.fast_voice_model]) if (k && roles.known(k)) validKeys.add(k);
         const bad = [];
         if (def.models.default && !validKeys.has(def.models.default)) bad.push("default (" + def.models.default + ")");
         if (def.models.escalation && !validKeys.has(def.models.escalation)) bad.push("escalation (" + def.models.escalation + ")");

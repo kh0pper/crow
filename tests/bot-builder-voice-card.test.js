@@ -757,3 +757,56 @@ test("hand-off strings: en + es, differing, no backtick or dollar-brace", () => 
     assert.ok(!/[`]|\$\{/.test(en + es), k);
   }
 });
+
+// ── role: refs (roles phase 2, task 22) ─────────────────────────────────────
+
+test("the voice card names a role: model and keeps the raw ref on hover", async () => {
+  await reset({ ...SEED_DEF, fast_voice_model: "role:voice" });
+  const html = await list("en");
+  assert.match(html, /<span class="btb-mchip" title="role:voice">Voice<\/span>/);
+  await reset();
+});
+
+test("a custom role's label is escaped on the card", async () => {
+  const { saveCustomRole } = await import("../servers/shared/model-roles-store.js");
+  const r = await saveCustomRole(db, { label: "<b>Coder</b>", capability: "chat" }, { actor: "test" });
+  assert.ok(r.ok, JSON.stringify(r));
+  await reset({ ...SEED_DEF, fast_voice_model: "role:" + r.id });
+  const html = await list("en");
+  assert.ok(html.includes("&lt;b&gt;Coder&lt;/b&gt;") && !html.includes("<b>Coder</b>"));
+  await reset();
+});
+
+test("the voice editor keeps a role: ref selected first and accepts it on save; an unknown role is refused", async () => {
+  await reset({ ...SEED_DEF, fast_voice_model: "role:voice" });
+  const html = await editor();
+  assert.ok(html.includes('<option value="role:voice" selected>Voice</option>'));
+  const ok = await post(await saveBody({ fast_voice_model: "role:voice" }));
+  assert.ok(!qOf(ok).get("error"), ok);
+  assert.equal((await voiceDef()).fast_voice_model, "role:voice");
+  const bad = await post(await saveBody({ fast_voice_model: "role:nope" }));
+  assert.ok(qOf(bad).get("error"), bad);
+  await reset();
+});
+
+test("a Basics save accepts a role: model without the 'not in registry' warning; an unknown role still warns", async () => {
+  const { saveBasics } = await import("../servers/gateway/dashboard/panels/bot-builder/save-handlers.js");
+  const run = async (key) => {
+    const def = { models: { default: "crow-chat/qwen3.6-35b-a3b" } };
+    const r = await saveBasics(def, { model_default: key }, { db, lang: "en", changed: () => true });
+    return { def, r };
+  };
+  const ok = await run("role:everyday");
+  assert.equal(ok.def.models.default, "role:everyday");
+  assert.deepEqual(ok.r.warn, []);
+  const bad = await run("role:nope");
+  assert.equal(bad.r.warn.length, 1);
+});
+
+test("the Basics model select renders a held role: ref as the first option", async () => {
+  const { renderBasics } = await import("../servers/gateway/dashboard/panels/bot-builder/tab-basics.js");
+  const html = await renderBasics({ req: { headers: {}, csrfToken: "t" }, db, bot: { bot_id: "alpha", display_name: "Alpha" }, botId: "alpha",
+    def: { models: { default: "role:everyday" }, gateways: [{ type: "perch" }] }, lang: "en", hidden: () => "" });
+  const i = html.indexOf('id="bx-model"');
+  assert.ok(html.slice(i, i + 400).includes('<option value="role:everyday" selected>Builder</option>'), html.slice(i, i + 400));
+});

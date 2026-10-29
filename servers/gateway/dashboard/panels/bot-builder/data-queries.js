@@ -29,6 +29,8 @@ import { piModelsFileKeys } from "../../../../../scripts/pi-bots/pi-model-catalo
 import { piSpawnTarget, readPiModelsJson } from "../../../../../scripts/pi-bots/pi_provider_id.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
+import { readCustomRoleDefs } from "../../../../shared/model-roles-store.js";
+import { roleRefLabel } from "../../shared/bot-display.js";
 import { getPeerCapabilities } from "../../capabilities-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
@@ -142,6 +144,18 @@ export async function remoteInvocationOn(db) {
     const raw = await readSetting(db, "feature_flags");
     return !!raw && JSON.parse(raw)?.remote_invocation === true;
   } catch { return false; }
+}
+
+/**
+ * Role refs a bot may keep as its model: label(key) is the role's name (null
+ * when the ref is not a known role); known(key) tests it. Never throws (a
+ * read failure leaves only the core roles).
+ */
+export async function loadRoleRefs(db, lang = "en") {
+  let customDefs = {};
+  try { customDefs = await readCustomRoleDefs(db); } catch { customDefs = {}; }
+  const label = (key) => roleRefLabel(key, { lang, customDefs });
+  return { customDefs, label, known: (key) => label(key) !== null };
 }
 
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's

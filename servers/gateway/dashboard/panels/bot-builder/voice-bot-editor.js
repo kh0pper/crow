@@ -41,7 +41,7 @@ import { boardState, oneLine } from "../../shared/bot-display.js";
 import { resolveRoutineBackends } from "../../../voice/own-tools.js";
 import { fastVoiceKeyFor } from "../../../voice/crow-voice.js";
 import { connectedAddonToolNames, createToolExecutor } from "../../../ai/tool-executor.js";
-import { loadModelOptions } from "./data-queries.js";
+import { loadModelOptions, loadRoleRefs } from "./data-queries.js";
 import { rowRev, defRev } from "./def-adapter.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { abilityLineHtml, voiceAbilityScript } from "./voice-use.js";
@@ -189,7 +189,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
   if (prompt.length > PROMPT_MAX) return back(res, "error=voice_prompt_too_long");
   const model = String(b.fast_voice_model ?? "").trim();
   const { opts } = await loadModelOptions(db);
-  if (!opts.some((o) => o.key === model)) return back(res, "error=voice_model_invalid");
+  if (!opts.some((o) => o.key === model) && !(await loadRoleRefs(db)).known(model)) return back(res, "error=voice_model_invalid");
   const escalation = String(b.escalation ?? "");
   if (escalation !== "default" && escalation !== "off") return back(res, "error=voice_escalation_invalid");
   const profile = async (field, key) => {
@@ -262,12 +262,14 @@ export async function handleVoiceBotPreset(req, res, { db }) {
 
 const opt = (value, label, selected) => `<option value="${escapeHtml(value)}"${selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
 
-function modelSelect(name, form, opts, current, { blank = false } = {}) {
+function modelSelect(name, form, opts, current, { blank = false, roleLabel = null } = {}) {
   const byProv = {};
   for (const o of opts) (byProv[o.provider] = byProv[o.provider] || []).push(o);
   const known = opts.some((o) => o.key === current);
+  // A role: ref the bot holds stays selected first (its label escaped by opt), so saving untouched keeps it.
   return `<select name="${name}" id="btb-v-${name}" form="${form}">` +
-    (blank || !known ? opt("", "—", !known) : "") +
+    (roleLabel ? opt(current, roleLabel, true) : "") +
+    (blank || (!known && !roleLabel) ? opt("", "—", !known && !roleLabel) : "") +
     Object.keys(byProv).map((p) => `<optgroup label="${escapeHtml(p)}">` + byProv[p].map((o) => opt(o.key, o.label, o.key === current)).join("") + `</optgroup>`).join("") +
     `</select>`;
 }
@@ -428,6 +430,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const v = normalizeVoiceSettings(def);
   const rev = voiceRev(row);
   const { opts } = await loadModelOptions(db);
+  const roles = await loadRoleRefs(db, lang);
   const ttsProfiles = await loadProfiles(db, "tts_profiles");
   const sttProfiles = await loadProfiles(db, "stt_profiles");
   const model = v.fast_voice_model || "";
@@ -470,7 +473,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     : "";
   const modelSec = sec("botbuilder.voiceModelTitle",
     `<label for="btb-v-fast_voice_model">${escapeHtml(t("botbuilder.voiceFastModel", lang))}</label>` +
-    modelSelect("fast_voice_model", "btb-vsave", opts, model) +
+    modelSelect("fast_voice_model", "btb-vsave", opts, model, { roleLabel: roles.label(model) }) +
     `<label for="btb-v-escalation">${escapeHtml(t("botbuilder.voiceEscTitle", lang))}</label>` +
     `<select name="escalation" id="btb-v-escalation" form="btb-vsave">` +
     opt("default", t("botbuilder.voiceEscDefault", lang), v.escalation === "default") +

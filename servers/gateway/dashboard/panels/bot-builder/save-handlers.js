@@ -12,7 +12,7 @@
  * `error` refuses the whole save (nothing written), `column` carries
  * column updates (display_name).
  */
-import { loadModelOptions } from "./data-queries.js";
+import { loadModelOptions, loadRoleRefs } from "./data-queries.js";
 import { normalizeGatewayFields, buildCrowMessagesGatewayConfig, missingGatewayFields } from "./gateway-fields.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 import { parseReadPathsInput } from "../../../../../scripts/pi-bots/bot-read-paths.mjs";
@@ -164,7 +164,8 @@ export async function saveBasics(def, b, ctx) {
     try {
       const { opts } = await loadModelOptions(ctx.db);
       const valid = new Set(opts.map((o) => o.key));
-      const bad = [def.models && def.models.default, def.models && def.models.escalation, def.fast_voice_model].filter((k) => k && !valid.has(k));
+      const roles = await loadRoleRefs(ctx.db);
+      const bad = [def.models && def.models.default, def.models && def.models.escalation, def.fast_voice_model].filter((k) => k && !valid.has(k) && !roles.known(k));
       if (bad.length) out.warn.push(fill(t("botbuilder.bxModelsUnavailable", lang), { models: bad.join(", ") }));
     } catch { /* validation never blocks a save */ }
   }

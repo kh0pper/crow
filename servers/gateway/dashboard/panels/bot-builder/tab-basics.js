@@ -15,7 +15,7 @@
 import { escapeHtml, actionBar } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t, fill } from "../../shared/i18n.js";
-import { loadModelOptions } from "./data-queries.js";
+import { loadModelOptions, loadRoleRefs } from "./data-queries.js";
 import { renderGatewayFields, engineGateRequiredDomFields } from "./gateway-fields.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { isEngineAbsent } from "./engine-gate.js";
@@ -23,13 +23,16 @@ import { card } from "./ui.js";
 
 export const CHANNEL_TYPES = ["gmail", "discord", "telegram", "slack", "glasses", "companion", "crow-messages", "perch", "none"];
 
-function modelOptions(byProv, sel, lang) {
+function modelOptions(byProv, sel, lang, roleLabel = null) {
   // A stored model this Crow no longer offers stays selected (and saved) as
   // itself — a save never quietly switches or drops a model.
   const known = Object.values(byProv).some((list) => list.some((m) => m.key === sel));
-  const missing = sel && !known
+  // A held role: ref shows the role's name first and stays selected (a save keeps it).
+  const role = sel && !known && roleLabel
+    ? `<option value="${escapeHtml(sel)}" selected>${escapeHtml(roleLabel)}</option>` : "";
+  const missing = sel && !known && !roleLabel
     ? `<option value="${escapeHtml(sel)}" selected>${escapeHtml(fill(t("botbuilder.bxModelMissing", lang), { key: sel }))}</option>` : "";
-  return missing + Object.keys(byProv).map((p) =>
+  return role + missing + Object.keys(byProv).map((p) =>
     `<optgroup label="${escapeHtml(p)}">` +
     byProv[p].map((m) =>
       `<option value="${escapeHtml(m.key)}"${m.key === sel ? " selected" : ""}>${escapeHtml(m.label)}` +
@@ -66,6 +69,7 @@ function field(label, inner, hint = "", id = "") {
 export async function renderBasics(ctx) {
   const { req, db, bot, def, botId, lang, hidden } = ctx;
   const { opts: mOpts, error: mErr } = await loadModelOptions(db);
+  const roles = await loadRoleRefs(db, lang);
   const byProv = {};
   for (const o of mOpts) (byProv[o.provider] = byProv[o.provider] || []).push(o);
   const models = def.models || {};
@@ -86,12 +90,12 @@ export async function renderBasics(ctx) {
     field(t("botbuilder.bxModel", lang),
       `<select id="bx-model" name="model_default" class="btb-select">` +
       (models.default ? "" : `<option value="" selected>${escapeHtml(t("botbuilder.bxModelInstanceDefault", lang))}</option>`) +
-      `${modelOptions(byProv, models.default, lang)}</select>`, "", "bx-model") +
+      `${modelOptions(byProv, models.default, lang, roles.label(models.default))}</select>`, "", "bx-model") +
     field(t("botbuilder.bxStronger", lang),
-      `<select id="bx-esc" name="model_escalation" class="btb-select"><option value="">${escapeHtml(t("botbuilder.bxNone", lang))}</option>${modelOptions(byProv, models.escalation, lang)}</select>`,
+      `<select id="bx-esc" name="model_escalation" class="btb-select"><option value="">${escapeHtml(t("botbuilder.bxNone", lang))}</option>${modelOptions(byProv, models.escalation, lang, roles.label(models.escalation))}</select>`,
       t("botbuilder.bxStrongerHint", lang), "bx-esc") +
     field(t("botbuilder.bxVoiceModel", lang),
-      `<select id="bx-voice" name="fast_voice_model" class="btb-select"><option value="">${escapeHtml(t("botbuilder.bxVoiceSame", lang))}</option>${modelOptions(byProv, def.fast_voice_model, lang)}</select>`,
+      `<select id="bx-voice" name="fast_voice_model" class="btb-select"><option value="">${escapeHtml(t("botbuilder.bxVoiceSame", lang))}</option>${modelOptions(byProv, def.fast_voice_model, lang, roles.label(def.fast_voice_model))}</select>`,
       t("botbuilder.bxVoiceModelHint", lang), "bx-voice"));
 
   // ---- channel ----
