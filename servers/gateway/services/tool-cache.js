@@ -5,18 +5,58 @@
  *
  * One file, `<crowHome>/service-tools-cache.json` (mode 0600), keyed `serviceId@bundleVersion`:
  * a version change is a miss, and a write drops the service's other versions. Each tool keeps
- * its name, description and input schema only (no annotations, _meta or output schema). The
- * caller redacts descriptions before writing (children.js does, with the connection's values).
+ * its name, description and input schema only (no annotations, _meta or output schema).
+ *
+ * The cache is per SERVICE, so one connection's tools are what every other project's connection
+ * of that service lists: a value injected into the writing child must never reach it.
+ * sanitizeToolsForCache (run by children.js at write time with the writer's injected values)
+ * drops a tool whose name holds one, and redacts + caps the description and every human-readable
+ * schema string (description, title, const, default, enum / examples strings), the same walk as
+ * the loopback mount's sanitizeSchema (loopback-tool-mount.js, not exported there).
  * Nothing here logs a tool's text.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { redactSecrets } from "../../shared/redact-secrets.js";
 
 export const TOOL_CACHE_FILE = "service-tools-cache.json";
 const MAX_TOOLS = 500;
 const NAME_MAX = 128;
-const DESC_MAX = 8192;
+const DESC_MAX = 2048;          // the mount's per-string cap
+const SCHEMA_MAX_DEPTH = 64;
+
+const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const clip = (v, secrets) => redactSecrets(v, secrets).slice(0, DESC_MAX);
+
+/** The mount's sanitizeSchema, mirrored: keys and structure kept, readable strings redacted and capped. */
+export function sanitizeSchema(node, secrets, depth = 0) {
+  if (depth > SCHEMA_MAX_DEPTH) return {};
+  if (Array.isArray(node)) return node.map((v) => sanitizeSchema(v, secrets, depth + 1));
+  if (!isPlainObject(node)) return node;
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    if ((k === "description" || k === "title" || k === "const" || k === "default") && typeof v === "string") out[k] = clip(v, secrets);
+    else if ((k === "enum" || k === "examples") && Array.isArray(v)) out[k] = v.map((x) => (typeof x === "string" ? clip(x, secrets) : sanitizeSchema(x, secrets, depth + 1)));
+    else out[k] = sanitizeSchema(v, secrets, depth + 1);
+  }
+  return out;
+}
+
+/** Tools as they may be cached: a tool whose name holds a secret is dropped; the rest sanitized. */
+export function sanitizeToolsForCache(tools, secrets = []) {
+  const out = [];
+  for (const t of Array.isArray(tools) ? tools : []) {
+    if (!isPlainObject(t) || typeof t.name !== "string" || !t.name) continue;
+    if (redactSecrets(t.name, secrets) !== t.name) continue;
+    out.push({
+      name: t.name,
+      ...(typeof t.description === "string" ? { description: clip(t.description, secrets) } : {}),
+      inputSchema: sanitizeSchema(isPlainObject(t.inputSchema) ? t.inputSchema : { type: "object" }, secrets),
+    });
+  }
+  return out;
+}
 
 const cachePath = (crowHome) => join(crowHome, TOOL_CACHE_FILE);
 const cacheKey = (serviceId, version) => `${serviceId}@${version || "unknown"}`;

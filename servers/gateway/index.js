@@ -840,6 +840,15 @@ async function gracefulShutdown() {
     // Module missing or stop threw — never block the exit on it.
   }
 
+  // Step 5c — project service connections' children (services/children.js): their own
+  // registry, so shutdownAll() above never sees them. Bounded like 5b.
+  try {
+    const { stopAllChildren } = await import("./services/children.js");
+    await Promise.race([stopAllChildren(), new Promise((resolve) => setTimeout(resolve, 5000))]);
+  } catch {
+    // Never block the exit on it.
+  }
+
   // Step 6 — best-effort WAL checkpoint
   try {
     const _walDb = createDbClient();

@@ -436,11 +436,12 @@ export async function disconnectConnection(db, uuid, { actor = "local", disconne
  * project_spaces row: service_connections.project_id cascades, and without it the keychain rows
  * would be left 'active' with no connection (once disconnected they stay masked, never served).
  * Safe to repeat. @returns {Promise<{disconnected:number}>} connections that changed state.
+ *
+ * Running children are not stopped here (this shared store can't reach the gateway's child
+ * registry): every call to them is refused at once (servableConnection → not_active) and the
+ * idle stop reaps them (servers/gateway/services/children.js). A caller in the gateway may also
+ * call stopChild(uuid) per connection.
  */
-// Running children are not stopped here (this shared store can't reach the gateway's child
-// registry): every call to them is refused at once (servableConnection → not_active) and the
-// idle stop reaps them (servers/gateway/services/children.js). A caller in the gateway may also
-// call stopChild(uuid) per connection.
 export async function disconnectProjectConnections(db, projectId, { actor = "local" } = {}) {
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
   const { rows } = await db.execute({ sql: "SELECT uuid, status FROM service_connections WHERE project_id = ? ORDER BY id", args: [projectId] });

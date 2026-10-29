@@ -24,7 +24,8 @@ import { lookup as dnsLookup } from "node:dns";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve as resolvePath, join } from "node:path";
 import { isIP } from "node:net";
-import { networkInterfaces } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
+import { fileURLToPath } from "node:url";
 import { classifyIp, parseIPv6 } from "../../shared/ip-classify.js";
 import { getOwnAddresses } from "../../shared/locality.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
@@ -298,6 +299,9 @@ function realOr(p) {
  *  - `forbidden_target`: after realpath, inside or containing this instance's home (its secrets,
  *    bundles' .env files, data/crow.db) or any other Crow home's secrets dir on this host
  *    (checkedInstanceSecretsDirs: the scan plus every other-instance dir this instance hid before, the same rule the bot launcher uses). A scan that can't be completed, or a remembered dir that is gone or replaced, refuses (fail closed);
+ *    Also always guarded: /proc, /sys and /dev (a link to /proc/<pid>/environ would hand a child
+ *    the gateway's environment), the user's ~/.ssh (env.HOME, else the OS home), and the Crow
+ *    source dir's .env plus CROW_APP_ENV_PATH when set (SYSTEM_GUARDED / guardedFiles below);
  *  - `not_a_vault`: `expectEntry` given and not present (a name, never a path).
  * Options: `crowHome`, `env` and `instanceScan` (passed to checkedInstanceSecretsDirs), or
  * `otherSecretsDirs` to supply the other homes' secrets dirs directly. `scanLinks` (the spawn
@@ -307,6 +311,15 @@ function realOr(p) {
  * followed by real path (loops end), and a dangling link refuses.
  */
 export const MAX_LINK_SCAN_ENTRIES = 100_000;
+export const SYSTEM_GUARDED = Object.freeze(["/proc", "/sys", "/dev"]);
+const REPO_ENV = fileURLToPath(new URL("../../../.env", import.meta.url));
+
+/** The same-user secrets outside any Crow home that a folder may never reach. */
+function guardedExtras(env) {
+  const out = [...SYSTEM_GUARDED, join(env.HOME || homedir(), ".ssh"), REPO_ENV];
+  if (typeof env.CROW_APP_ENV_PATH === "string" && isAbsolute(env.CROW_APP_ENV_PATH)) out.push(env.CROW_APP_ENV_PATH);
+  return out;
+}
 
 export function folderRefusal(path, {
   crowHome = resolveCrowHome(),
@@ -326,6 +339,7 @@ export function folderRefusal(path, {
   }
   const home = resolvePath(crowHome);
   const guarded = new Set([home, realOr(home), join(home, "secrets"), realOr(join(home, "secrets"))]);
+  for (const g of guardedExtras(env)) { guarded.add(resolvePath(g)); guarded.add(realOr(g)); }
   try {
     const others = otherSecretsDirs ?? checkedInstanceSecretsDirs({ ...env, CROW_HOME: home }, instanceScan);
     for (const d of others) { guarded.add(resolvePath(d)); guarded.add(realOr(d)); }
@@ -374,7 +388,7 @@ function plantedLinkRefusal(root, guarded, maxEntries) {
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
-      continue;   // unreadable subfolder: the child can't read it either
+      return "forbidden_target";   // unreadable: it may hold a named link the walk can't see
     }
     for (const ent of entries) {
       if (++seen > maxEntries) return "forbidden_target";

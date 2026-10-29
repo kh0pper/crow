@@ -10,7 +10,7 @@ import http from "node:http";
 import express from "express";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,14 +56,23 @@ const BUNDLES = ["github", "notion", "obsidian"];
 function writeInstalled(versions = {}) {
   writeFileSync(join(HOME, "installed.json"), JSON.stringify(BUNDLES.map((id) => ({ id, type: "mcp-server", version: versions[id] || "1.0.0" }))));
 }
-function writeAddons(extraEnv = {}) {
+/** The add-on entries, plus each fixture's knobs in its folder's echo-control.json
+ * (`{ECHO_EXIT: "1"}` → exit, `{ECHO_STDERR: "1"}` → stderr, `{leakSchema: true}`). */
+function writeAddons(knobs = {}) {
   const entries = {};
   for (const id of BUNDLES) {
-    mkdirSync(join(HOME, "bundles", id), { recursive: true });
-    entries[id] = { command: "node", args: [FIXTURE], env: { ECHO_SPAWN_LOG: SPAWNS, ...(extraEnv[id] || {}) } };
+    const dir = join(HOME, "bundles", id);
+    mkdirSync(dir, { recursive: true });
+    const k = knobs[id] || {};
+    writeFileSync(join(dir, "echo-control.json"), JSON.stringify({
+      spawnLog: SPAWNS, exit: k.ECHO_EXIT === "1", stderr: k.ECHO_STDERR === "1", leakSchema: !!k.leakSchema,
+    }));
+    entries[id] = { command: "node", args: [FIXTURE], env: {} };
   }
-  // A Crow-wide token in the shared entry must never reach a project's child.
+  // A Crow-wide token in the shared entry, under its field name and under another name, must
+  // never reach a project's child.
   entries.github.env[GH] = "test-token-crowwide";
+  entries.github.env.GITHUB_TOKEN = "test-token-legacy";
   writeFileSync(join(HOME, "mcp-addons.json"), JSON.stringify(entries), { mode: 0o600 });
 }
 writeInstalled();
@@ -129,6 +138,7 @@ test("secret in env, never argv: the connection's token reaches the child's envi
     assert.ok(who.keys.includes(GH), "the field is in the env");
     assert.ok(who.keys.includes("CROW_ADDON_HOST") && who.keys.includes("CROW_HOME"));
     assert.ok(!who.keys.includes("BRAVE_API_KEY"), "the gateway's own env is an allowlist (M14)");
+    assert.ok(!who.keys.includes("GITHUB_TOKEN"), "nothing from the add-on entry's env (m11)");
     assert.equal(who.argc, 2, "argv is node + the fixture, nothing more");
     const h = await call(conn.uuid, "envhash", { name: GH });
     assert.equal(h.sha256, sha("test-token-9"), "the connection's token, not the Crow-wide one in mcp-addons.json");
@@ -143,7 +153,7 @@ test("secret in env, never argv: the connection's token reaches the child's envi
   }
 });
 
-test("connectionChildEnv: allowlisted base keys, CROW_* host keys, entry env minus fields, then values, then derived", () => {
+test("connectionChildEnv: allowlisted base keys, CROW_* host keys, then the declared fields, then derived; never the entry env", () => {
   const service = serviceById("notion");
   const env = C.connectionChildEnv({
     addonEntry: { env: { NOTION_TOKEN: "test-token-old", OPENAPI_MCP_HEADERS: "stale", EXTRA: "1", CROW_ADDON_HOST: "gateway" } },
@@ -151,7 +161,8 @@ test("connectionChildEnv: allowlisted base keys, CROW_* host keys, entry env min
     base: { PATH: "/usr/bin", HOME: "/home/alex", XDG_RUNTIME_DIR: "/run/user/1000", https_proxy: "http://proxy.example.lan:3128", BRAVE_API_KEY: "test-token-77", CROW_DB_PATH: "/x" },
     crowHome: "/home/alex/.crow",
   });
-  assert.deepEqual(Object.keys(env).sort(), ["CROW_ADDON_HOST", "CROW_HOME", "EXTRA", "HOME", "NOTION_TOKEN", "OPENAPI_MCP_HEADERS", "PATH", "XDG_RUNTIME_DIR", "https_proxy"].sort());
+  assert.deepEqual(Object.keys(env).sort(), ["CROW_ADDON_HOST", "CROW_HOME", "HOME", "NOTION_TOKEN", "OPENAPI_MCP_HEADERS", "PATH", "XDG_RUNTIME_DIR", "https_proxy"].sort(),
+    "the entry env (EXTRA, a stale header) contributes nothing");
   assert.equal(env.CROW_ADDON_HOST, "service");
   assert.equal(env.NOTION_TOKEN, "test-token-5");
   assert.equal(env.OPENAPI_MCP_HEADERS, '{"Authorization":"Bearer test-token-5","Notion-Version":"2022-06-28"}');
@@ -302,7 +313,7 @@ test("cache, no start: after one start, eight connections list tools with zero s
     const before = spawnCount();
     for (const c of conns) {
       const tools = await withDb((d) => C.listedTools(d, c.uuid, { crowHome: HOME }));
-      assert.deepEqual(tools.map((t) => t.name).sort(), ["crash", "envhash", "sleep", "whoami"]);
+      assert.deepEqual(tools.map((t) => t.name).sort(), ["crash", "envhash", "grandchild", "sleep", "whoami"]);
       assert.deepEqual(Object.keys(tools[0]).sort(), ["description", "inputSchema", "name"]);
       assert.equal(C.childState(c.uuid), "stopped");
     }
@@ -432,20 +443,25 @@ test("a repair start never revives a failed live test (auth_failed stays for Tes
   } finally { await C.stopAllChildren(); }
 });
 
-test("shapeServiceResult: text only, redacted across items with the child's own values, capped", async () => {
+test("shapeServiceResult: the mount's rules, with the child's own values passed as secrets", async () => {
   try {
     const conn = await github("test-token-31");
     await call(conn.uuid, "whoami");
+    const secrets = C.childSecretValues(conn.uuid);
     const shaped = C.shapeServiceResult({
-      content: [{ type: "text", text: "a test-tok" }, { type: "text", text: "en-31 b" }, { type: "resource", resource: { text: "test-token-31" } }],
+      content: [{ type: "text", text: "a test-tok" }, { type: "text", text: "en-31 b" }, { type: "resource", resource: { text: "test-token-31" } },
+        { type: "image", mimeType: "image/png", data: "QUJD" }, { type: "image", mimeType: "text/html", data: "QUJD" }],
       isError: true, _meta: { x: 1 }, structuredContent: { t: "test-token-31" },
-    }, conn.uuid);
+    }, { secrets, tool: "whoami" });
     assert.deepEqual(Object.keys(shaped).sort(), ["content", "isError"]);
     assert.ok(!JSON.stringify(shaped).includes("test-token-31") && !JSON.stringify(shaped).includes("en-31"));
     assert.ok(shaped.content[0].text.includes("[redacted]"));
-    const big = C.shapeServiceResult({ content: [{ type: "text", text: "x".repeat(100) + "test-token-31" + "y".repeat(100) }] }, conn.uuid, { maxBytes: 105 });
-    assert.equal(big.truncated, true);
-    assert.ok(Buffer.byteLength(big.content[0].text) <= 105 && !big.content[0].text.includes("test-tok"));
+    assert.deepEqual(shaped.content[2], { type: "image", mimeType: "image/png", data: "QUJD" }, "an allowed image is kept");
+    assert.equal(shaped.content[3].text, "2 item(s) of a type this connection does not return were left out.");
+    const big = C.shapeServiceResult({ content: [{ type: "text", text: "x".repeat(3000) }] }, { secrets, maxBytes: 1024 });
+    assert.deepEqual(big, { content: [{ type: "text", text: "Result too large (3 KiB)." }], isError: true });
+    assert.deepEqual(C.shapeServiceResult(null, { tool: "whoami" }), { content: [{ type: "text", text: "whoami failed." }], isError: true });
+    assert.deepEqual(C.shapeServiceResult({ code: "busy" }, { lang: "es" }), { content: [{ type: "text", text: "Ocupado, inténtalo de nuevo en un momento." }], isError: true });
   } finally { await C.stopAllChildren(); }
 });
 
@@ -510,7 +526,7 @@ test("restart route (R8): stops, clears the cooldown, starts once; 404 for a dis
       const before = spawnCount();
       const r = await post(s, path, AUTH);
       assert.equal(r.status, 200, r.text);
-      assert.deepEqual(r.json, { ok: true, childState: "running", tools: 4 });
+      assert.deepEqual(r.json, { ok: true, childState: "running", tools: 5 });
       assert.equal(spawnCount(), before + 1);
       const row = await withDb((d) => SC.getConnection(d, conn.uuid));
       assert.equal(row.status, "active", "the start disproved child_unavailable");
@@ -688,4 +704,178 @@ test("fix round 0 (security review): the link walk follows symlinked folders, en
   } finally {
     rmScratch(OTHER);
   }
+});
+
+// ---- fix round 1 (review) ---------------------------------------------------------------------
+
+test("I1: the shared tool cache is sanitized with the WRITER's values: A's token never reaches what B reads", async () => {
+  writeAddons({ github: { leakSchema: true } });
+  try {
+    const a = await github("test-token-81");
+    const b = await github("test-token-82");
+    await call(a.uuid, "whoami");
+    await C.stopAllChildren();
+    const file = readFileSync(join(HOME, TC.TOOL_CACHE_FILE), "utf8");
+    assert.ok(!file.includes("test-token-81"), "the cache file never holds A's token");
+    const tools = await withDb((d) => C.listedTools(d, b.uuid, { crowHome: HOME }));
+    const text = JSON.stringify(tools);
+    assert.ok(!text.includes("test-token-81"));
+    assert.ok(!tools.some((t) => t.name.startsWith("tok_")), "a tool whose name carries the token is dropped");
+    const leaky = tools.find((t) => t.name === "leaky");
+    assert.ok(leaky, "the rest are kept");
+    const mode = leaky.inputSchema.properties.mode;
+    assert.equal(mode.default, "[redacted]");
+    assert.deepEqual(mode.enum, ["plain", "[redacted]"]);
+    assert.deepEqual(mode.examples, ["[redacted]"]);
+    assert.equal(mode.title, "t [redacted]");
+    assert.equal(leaky.description, "log in with [redacted]");
+  } finally {
+    writeAddons();
+    await C.stopAllChildren();
+  }
+});
+
+test("I2a: links into /proc, /sys, /dev, ~/.ssh, the app .env, or an unreadable subfolder are refused", async () => {
+  const { folderRefusal, SYSTEM_GUARDED } = await import("../servers/gateway/services/connect-test.js");
+  assert.deepEqual([...SYSTEM_GUARDED], ["/proc", "/sys", "/dev"]);
+  const USER = mkdtempSync(join(tmpdir(), "crow-svcchild-user-"));
+  try {
+    mkdirSync(join(USER, ".ssh"));
+    writeFileSync(join(USER, "app.env"), "X=1\n");
+    const env = { HOME: USER, CROW_APP_ENV_PATH: join(USER, "app.env") };
+    const opts = { crowHome: HOME, expectEntry: ".obsidian", otherSecretsDirs: [], scanLinks: true, env };
+    const cases = { proc: "/proc/self/environ", sys: "/sys/kernel", dev: "/dev/null", ssh: join(USER, ".ssh"), appenv: join(USER, "app.env") };
+    for (const [name, target] of Object.entries(cases)) {
+      const v = vault(`g-${name}`);
+      symlinkSync(target, join(v, "note.md"));
+      assert.equal(folderRefusal(v, opts), "forbidden_target", name);
+    }
+    assert.equal(folderRefusal(vault("g-plain"), opts), null, "a plain vault still passes");
+    // The Crow source dir's .env: a folder containing it is refused (path rule, file or not).
+    assert.equal(folderRefusal(REPO, { ...opts, expectEntry: null, scanLinks: false }), "forbidden_target");
+    // A folder holding ~/.ssh is refused even without the walk.
+    assert.equal(folderRefusal(USER, { ...opts, expectEntry: null, scanLinks: false }), "forbidden_target");
+    // An unreadable subfolder: fail closed.
+    const locked = vault("g-locked");
+    mkdirSync(join(locked, "private"));
+    chmodSync(join(locked, "private"), 0o000);
+    try {
+      assert.equal(folderRefusal(locked, opts), "forbidden_target");
+    } finally { chmodSync(join(locked, "private"), 0o700); }
+  } finally { rmScratch(USER); }
+});
+
+test("I2b: a child past its max lifetime is retired at its next idle moment and respawned, which re-runs the walk", async () => {
+  let offset = 0;
+  C._setChildrenForTest({ clock: () => Date.now() + offset });
+  try {
+    // Bounds of the override.
+    const prev = process.env.CROW_SERVICE_CHILD_MAX_LIFETIME_MS;
+    assert.equal(C.childLimits().maxLifetimeMs, 3_600_000);
+    for (const [v, want] of [["120000", 120000], ["59999", 3_600_000], ["86400001", 3_600_000], ["x", 3_600_000]]) {
+      process.env.CROW_SERVICE_CHILD_MAX_LIFETIME_MS = v;
+      assert.equal(C.childLimits().maxLifetimeMs, want, v);
+    }
+    if (prev === undefined) delete process.env.CROW_SERVICE_CHILD_MAX_LIFETIME_MS; else process.env.CROW_SERVICE_CHILD_MAX_LIFETIME_MS = prev;
+
+    // Busy past the lifetime: kept until its call settles, then stopped; the next call respawns.
+    const g = await github();
+    const first = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    const slow = first.client.callTool({ name: "sleep", arguments: { ms: 300 } });
+    offset = 61 * 60_000;
+    let before = spawnCount();
+    const again = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    assert.equal(again.client, first.client, "an in-flight child is not cut off");
+    assert.equal(spawnCount(), before);
+    await slow;
+    assert.equal(C.childState(g.uuid), "stopped", "stopped at its first idle moment");
+    await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    assert.equal(spawnCount(), before + 1, "respawned on the next call");
+
+    // Idle past the lifetime with a link planted meanwhile: the respawn re-runs the walk.
+    offset = 0;
+    const v = vault("life-v");
+    const ob = await connect("obsidian", { config: { OBSIDIAN_VAULT_PATH: v } });
+    await withDb((d) => C.ensureChild(d, ob.uuid, { crowHome: HOME }));
+    symlinkSync(SECRETS, join(v, "planted"));
+    const running = await withDb((d) => C.ensureChild(d, ob.uuid, { crowHome: HOME }));
+    assert.ok(running.client, "within its lifetime, the running child is served");
+    offset = 61 * 60_000;
+    before = spawnCount();
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, ob.uuid, { crowHome: HOME }))), "child_unavailable");
+    assert.equal(spawnCount(), before, "the re-walk refused it before any spawn");
+    assert.equal((await withDb((d) => SC.getConnection(d, ob.uuid))).lastError, "forbidden_target");
+  } finally {
+    C._setChildrenForTest({ clock: null });
+    await C.stopAllChildren();
+  }
+});
+
+test("m7: stopping a child reaps its whole process tree", async () => {
+  try {
+    const g = await github();
+    const { pid } = await call(g.uuid, "grandchild");
+    assert.doesNotThrow(() => process.kill(pid, 0), "the grandchild runs");
+    await C.stopChild(g.uuid);
+    const t = Date.now();
+    let alive = true;
+    while (alive && Date.now() - t < 4000) {
+      try { process.kill(pid, 0); await sleep(50); } catch { alive = false; }
+    }
+    assert.equal(alive, false, "the grandchild is gone too");
+  } finally { await C.stopAllChildren(); }
+});
+
+test("m10: a failed shared start rejects both callers with one spawn", async () => {
+  writeAddons({ github: { ECHO_EXIT: "1" } });
+  try {
+    const g = await github();
+    const before = spawnCount();
+    const out = await withDb((d) => Promise.allSettled([C.ensureChild(d, g.uuid, { crowHome: HOME }), C.ensureChild(d, g.uuid, { crowHome: HOME })]));
+    assert.deepEqual(out.map((o) => o.status), ["rejected", "rejected"]);
+    assert.deepEqual(out.map((o) => o.reason.code), ["child_unavailable", "child_unavailable"]);
+    assert.equal(spawnCount(), before + 1);
+  } finally {
+    writeAddons();
+    await C.stopAllChildren();
+  }
+});
+
+test("m10: three key-missing calls reach the cooldown, with no spawn", async () => {
+  try {
+    const g = await github();
+    const before = spawnCount();
+    for (let i = 0; i < 3; i++) assert.equal(await codeOf(withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME, key: null }))), "child_unavailable");
+    assert.equal(C.childState(g.uuid), "cooling");
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }))), "child_unavailable", "even with the key back, during the cooldown");
+    assert.equal(spawnCount(), before);
+  } finally { await C.stopAllChildren(); }
+});
+
+test("m3/m10: a disconnect that lands while the credentials are read aborts the spawn", async () => {
+  try {
+    const g = await github();
+    C._setChildrenForTest({ beforeSpawn: async (uuid) => {
+      if (uuid !== g.uuid) return;
+      await withDb((d) => SC.disconnectConnection(d, uuid));
+      await C.stopChild(uuid, { forget: true });
+    } });
+    const before = spawnCount();
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }))), "child_unavailable");
+    assert.equal(spawnCount(), before, "never spawned with the just-disconnected credentials");
+    assert.equal(C.childState(g.uuid), "stopped");
+  } finally {
+    C._setChildrenForTest({ beforeSpawn: null });
+    await C.stopAllChildren();
+  }
+});
+
+test("m12: listedTools answers only for a servable connection", async () => {
+  try {
+    const g = await github();
+    await call(g.uuid, "whoami");
+    assert.ok(await withDb((d) => C.listedTools(d, g.uuid, { crowHome: HOME })));
+    await withDb((d) => SC.disconnectConnection(d, g.uuid));
+    assert.equal(await withDb((d) => C.listedTools(d, g.uuid, { crowHome: HOME })), null);
+  } finally { await C.stopAllChildren(); }
 });
