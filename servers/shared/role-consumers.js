@@ -31,6 +31,9 @@ const parseObject = (raw) => {
   } catch { return {}; }
 };
 
+/** One line per failure; the list is still returned (a lookup that failed lists nothing extra). */
+const warn = (what, e) => console.warn(`[roles] listRoleConsumers: ${what}: ${String(e?.message || e)}`);
+
 const entry = (s, via) => ({
   kind: s.kind, id: s.id, label: s.label,
   ...(s.labelKey ? { labelKey: s.labelKey } : {}),
@@ -52,12 +55,15 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
   const rc = roleCtx || await loadRoleContext(db);
   bindings ??= rc.bindings || {};
   customDefs ??= rc.customDefs || {};
-  slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false });
+  slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false, env });
   isPrimary ??= isDefaultCrowHome(env);
 
   const extraIds = slots.filter((s) => isRoleRef(s.value)).map((s) => roleIdOf(s.value));
   const paths = rolePathsTo(roleId, { bindings, customDefs, extraIds });
   const out = { unattended: [], bots: [], subagents: [], jobs: [], otherCrows: [], notAffected: [], keepsOwnModel: [] };
+
+  // A dead slot (gateways[i].fast_voice_model) is read by nothing: never listed.
+  slots = slots.filter((s) => !s.dead);
 
   for (const s of consumersOfRole(slots, roleId, { bindings, customDefs })) {
     const e = entry(s, paths.get(roleIdOf(s.value)));
@@ -75,7 +81,7 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
 
   if (isPrimary) {
     let map = {};
-    try { map = parseObject(await readSetting(db, SUBAGENT_MAP_KEY)); } catch { map = {}; }
+    try { map = parseObject(await readSetting(db, SUBAGENT_MAP_KEY)); } catch (e) { warn("sub-agent map unreadable", e); map = {}; }
     for (const [name, v] of Object.entries(map)) {
       const via = typeof v?.role === "string" ? paths.get(v.role) : undefined;
       if (via) out.subagents.push({ kind: "subagent", id: name, label: name, field: SUBAGENT_MAP_KEY, via });
@@ -86,7 +92,7 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
   // wait for satellite Part 2.
 
   let resolved = null;
-  try { resolved = resolveRoleKey(`role:${roleId}`, { ...rc, bindings, customDefs })?.key || null; } catch { resolved = null; }
+  try { resolved = resolveRoleKey(`role:${roleId}`, { ...rc, bindings, customDefs })?.key || null; } catch (e) { warn(`role:${roleId} did not resolve`, e); resolved = null; }
   if (resolved) {
     for (const s of slots) if (s.kind === "bot" && s.value === resolved) out.keepsOwnModel.push(entry(s, []));
   }

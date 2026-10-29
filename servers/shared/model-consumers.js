@@ -159,12 +159,14 @@ export function piConfigRefs(piAgentDir) {
  * Slots from job/phone sources carry `labelKey` (an i18n.js key) next to the
  * English `label`; bot slots label with the bot's display name.
  *
+ * `env` (default process.env) is where the job slots' env overrides are read.
+ *
  * `withUnattended: false` skips the unattended detection entirely (no tasks
  * store is opened) and slots carry `unattended: null`.
  *
  * @returns {Promise<Array<{kind:string,id:string,label:string,labelKey?:string,field:string,value:*,unattended:boolean|null,peerManaged:boolean,dead?:boolean,pinnedInPi?:boolean,providerOnly?:boolean,dynamic?:boolean}> & {incomplete:boolean}>}
  */
-export async function scanSlots(db, { includeSubagents = false, piAgentDir = null, tasksDbPaths, withUnattended = true } = {}) {
+export async function scanSlots(db, { includeSubagents = false, piAgentDir = null, tasksDbPaths, withUnattended = true, env = process.env } = {}) {
   const slots = [];
   let incomplete = false;
   const note = (e) => { if (!isAbsent(e)) incomplete = true; };
@@ -204,7 +206,7 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
   const job = (id, label, labelKey, field, value, extra = {}) =>
     slots.push({ kind: "job", id, label, labelKey, field, value, unattended: true, peerManaged: false, ...extra });
   const envOr = (name, dflt, id, label, labelKey) => {
-    const e = str(process.env[name]);
+    const e = str(env[name]);
     job(id, label, labelKey, e ? `env:${name}` : "default", e || dflt);
   };
   envOr("COMPANION_FAST_MODEL", VOICE_ROUTE_DEFAULTS.fast, "llm-router:fast", "Voice router (fast)", "settings.providers.job.voiceFast");
@@ -213,7 +215,7 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
   // vision tier too. A tier with no baked default (vision) is dynamic: null.
   for (const tier of Object.keys(SMART_TIER_ROLES)) {
     // `default` has no env reader in smart-router.js (it is not run through tierDefault).
-    const e = tier === "default" ? null : str(process.env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`]);
+    const e = tier === "default" ? null : str(env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`]);
     const value = e || str(DEFAULT_ROUTES[tier]);
     const field = e ? `env:CROW_SMART_ROUTER_${tier.toUpperCase()}` : "default";
     job(`smart-router:${tier}`, `Smart router (${tier})`, `settings.providers.job.smart.${tier}`, field, value, value ? { providerOnly: true } : { providerOnly: true, dynamic: true });
@@ -223,7 +225,7 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
     ["embed", "Memory embeddings", "settings.providers.job.embed", "CROW_EMBED_PROVIDER", "embed_provider"],
     ["rerank", "Memory rerank", "settings.providers.job.rerank", "CROW_RERANK_PROVIDER", "rerank_provider"],
   ]) {
-    const e = str(process.env[envName]);
+    const e = str(env[envName]);
     const s = e ? null : await setting(key);
     if (e || s) job(id, label, labelKey, e ? `env:${envName}` : `setting:${key}`, e || s, { providerOnly: true });
     else job(id, label, labelKey, `setting:${key}`, null, { dynamic: true, providerOnly: true });

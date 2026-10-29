@@ -150,3 +150,56 @@ test("scans once itself when no slots are passed", async () => {
   const r = await listRoleConsumers(db, "quick", { roleCtx: await roleCtx(), isPrimary: true });
   assert.ok(byId(r.bots, "b1"));
 });
+
+test("dead slots are never listed", async () => {
+  const slots = await scan();
+  const dead = { kind: "gateway", id: "b9", label: "B9", field: "gateways[0].fast_voice_model", value: "role:quick", unattended: false, peerManaged: false, dead: true };
+  const r = await listRoleConsumers(db, "quick", { slots: [...slots, dead], roleCtx: await roleCtx(), isPrimary: true });
+  for (const group of Object.values(r)) assert.equal(byId(group, "b9"), undefined);
+});
+
+test("a phone slot lands in jobs", async () => {
+  await db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES (?,?)", args: ["phone_local_model", "role:quick"] });
+  try {
+    const r = await list("quick");
+    const p = byId(r.jobs, "phone_local_model");
+    assert.ok(p);
+    assert.equal(p.kind, "phone");
+    assert.equal(p.labelKey, "settings.providers.phone.local");
+    assert.deepEqual(p.via, ["quick"]);
+    assert.equal(byId(r.bots, "phone_local_model"), undefined);
+  } finally {
+    await db.execute("DELETE FROM dashboard_settings WHERE key = 'phone_local_model'");
+  }
+});
+
+test("env passed in is honoured when listRoleConsumers scans itself", async () => {
+  assert.equal(process.env.COMPANION_ESCALATION_MODEL, undefined);
+  const env = { COMPANION_ESCALATION_MODEL: "local-chat/m9" };
+  const r = await listRoleConsumers(db, "quick", { roleCtx: await roleCtx(), isPrimary: true, env });
+  assert.equal(byId(r.notAffected, "llm-router:escalate").field, "env:COMPANION_ESCALATION_MODEL");
+  assert.equal(byId(r.jobs, "llm-router:escalate"), undefined);
+});
+
+test("a failed sub-agent read or role resolve logs one line and still lists", async () => {
+  const lines = [];
+  console.warn = (...a) => lines.push(a.join(" "));
+  try {
+    const failing = {
+      execute: (q) => (Array.isArray(q?.args) && q.args.includes("model_role_subagents")
+        ? Promise.reject(new Error("database is locked")) : db.execute(q)),
+    };
+    const rc = await roleCtx();
+    // a provider on an instance-id host with no ownInstanceId makes resolveRoleKey throw
+    const bad = { ...rc, ownInstanceId: undefined, providers: rc.providers.map((p) => ({ ...p, host: "a".repeat(32) })) };
+    const r = await listRoleConsumers(failing, "quick", { slots: await scan(), roleCtx: bad, isPrimary: true });
+    assert.deepEqual(r.subagents, []);
+    assert.deepEqual(r.keepsOwnModel, []);
+    assert.ok(byId(r.bots, "b1"));
+    assert.equal(lines.filter((l) => /sub-agent map unreadable: database is locked/.test(l)).length, 1);
+    assert.equal(lines.filter((l) => /role:quick did not resolve/.test(l)).length, 1);
+    assert.ok(lines.every((l) => l.startsWith("[roles] listRoleConsumers:")));
+  } finally {
+    console.warn = () => {};
+  }
+});
