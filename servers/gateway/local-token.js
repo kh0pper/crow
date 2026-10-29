@@ -462,6 +462,75 @@ export async function validateLlmCloudToken(db, token) {
 
 export const LLM_CLOUD_TOKEN_KEYS = { HASH: LLM_CLOUD_HASH_KEY, CREATED: LLM_CLOUD_CREATED_KEY };
 
+// Path-scoped token factory (loopback mount helper, spec §2.1): ONE shape for
+// every loopback-mounted family (services, satellite tools, ...). The raw token
+// lives at <crowHome>/secrets/<name>-token (0600), only its sha256 in a
+// local-scope setting under the family's OWN hash key, so validate() accepts
+// that family's token and nothing else: no local/board/phone/... token opens a
+// family mount, and a family token opens no other validator (none of them
+// consult these keys). `home` (string or () => string) overrides the crow home
+// for tests. Rotated on EVERY boot (see boot/mcp-mounts.js), never "ensure".
+export function pathScopedToken({ name, hashKey, createdKey, home }) {
+  const root = () => (typeof home === "function" ? home() : home) || crowHome();
+  const path = () => join(root(), "secrets", `${name}-token`);
+  return {
+    name,
+    path,
+    /** Same ordering as rotateLlmCloudToken: a reader sees the old token or
+     *  the new one, never a partial or world-readable file, and the file and
+     *  the stored hash match after every failure:
+     *    1. temp file (wx, 0600) + chmod: failure changes nothing;
+     *    2. store the new hash: failure drops the temp file;
+     *    3. rename over the old file: failure puts the old hash back. */
+    async rotate(db) {
+      const token = randomBytes(32).toString("hex");
+      const p = path();
+      mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
+      const tmp = `${p}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+      const dropTmp = () => { try { unlinkSync(tmp); } catch { /* already gone */ } };
+      try {
+        writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+        chmodSync(tmp, 0o600);
+      } catch (err) { dropTmp(); throw err; }
+      let oldHash;
+      try {
+        oldHash = await readSetting(db, hashKey);
+        await writeSetting(db, hashKey, sha256Hex(token), { scope: "local" });
+      } catch (err) { dropTmp(); throw err; }
+      try {
+        renameSync(tmp, p);
+      } catch (err) {
+        dropTmp();
+        try {
+          if (oldHash) await writeSetting(db, hashKey, oldHash, { scope: "local" });
+          else await deleteLocalSetting(db, hashKey);
+        } catch (restoreErr) {
+          // The next boot rotates again; until then the stored hash matches no file.
+          console.warn(`[${name}-token] could not put the old hash back after a failed rename: ${restoreErr.message}`);
+        }
+        throw err;
+      }
+      try { await writeSetting(db, createdKey, new Date().toISOString(), { scope: "local" }); } catch { /* informational only */ }
+      return token;
+    },
+    /** Timing-safe check against this family's hash ONLY. */
+    async validate(db, token) {
+      try {
+        if (!token || typeof token !== "string") return false;
+        const stored = await readSetting(db, hashKey);
+        if (!stored) return false;
+        const a = Buffer.from(sha256Hex(token), "hex");
+        const b = Buffer.from(stored, "hex");
+        return a.length === b.length && timingSafeEqual(a, b);
+      } catch { return false; }
+    },
+  };
+}
+
+// Key names follow this file's existing `mcp_<x>_token_hash` / `_created` shape.
+export const SERVICES_TOKEN = pathScopedToken({ name: "services", hashKey: "mcp_services_token_hash", createdKey: "mcp_services_token_created" });
+export const SATELLITE_TOOLS_TOKEN = pathScopedToken({ name: "satellite-tools", hashKey: "mcp_satellite_tools_token_hash", createdKey: "mcp_satellite_tools_token_created" });
+
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
 // /blog-mcp/mcp; see mcp.js:194-196 and the single-segment mountMcpServer

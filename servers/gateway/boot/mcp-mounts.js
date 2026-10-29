@@ -22,7 +22,7 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken, SERVICES_TOKEN, SATELLITE_TOOLS_TOKEN } from "../local-token.js";
 import { peerRelayRouter } from "../routes/peer-relay.js";
 import { actorSignRouter } from "../routes/actor-sign.js";
 import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
@@ -350,6 +350,20 @@ export async function mountMcpServers(app, deps) {
     }
   } catch (err) {
     console.warn(`[gateway] ensurePeerRelayToken failed: ${err.message}`);
+  }
+  // Loopback-mount family tokens (pathScopedToken): fresh on every boot.
+  for (const [tok, label] of [[SERVICES_TOKEN, "services-tools"], [SATELLITE_TOOLS_TOKEN, "satellite-tools"]]) {
+    try {
+      const tokenDb = createDbClient();
+      try {
+        await tok.rotate(tokenDb);
+        console.log(`[gateway] ${label} token rotated`);
+      } finally {
+        try { tokenDb.close(); } catch {}
+      }
+    } catch (err) {
+      console.warn(`[gateway] ${label} token rotation failed: ${err.message}`);
+    }
   }
   app.use(peerRelayRouter({ createDbClient }));
   // Item 46 PR-B: the loopback signing relay for the key-less bot hosts
