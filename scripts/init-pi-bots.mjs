@@ -159,8 +159,18 @@ if (tableExists("bot_sessions")) {
     db.prepare("ALTER TABLE bot_sessions ADD COLUMN escalated INTEGER DEFAULT 0").run();
     migAdded.push("escalated");
   }
+  // Session summaries (R1.2 PR 4): same guarded-ALTER path, same DDL as
+  // init-db.js and scripts/migrations/0020-session-summaries.mjs (one shape,
+  // three rails). The CREATE body above stays the pre-F3 baseline.
+  for (const col of ["summary", "summary_at", "summary_flags", "briefing", "briefing_rank", "briefing_refs"]) {
+    if (!have.includes(col)) {
+      db.prepare(`ALTER TABLE bot_sessions ADD COLUMN ${col} TEXT`).run();
+      migAdded.push(col);
+    }
+  }
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)").run();
 }
-console.log(`  bot_sessions migration: ${migAdded.length ? "added [" + migAdded.join(",") + "]" : "no-op (model,escalated already present)"}`);
+console.log(`  bot_sessions migration: ${migAdded.length ? "added [" + migAdded.join(",") + "]" : "no-op (model,escalated,summary* already present)"}`);
 
 // --- Project Space Phase 1, M3 migration (2026-05-26) ---
 // Promote pi_bot_defs.definition.project_id (JSON field) to a real column.

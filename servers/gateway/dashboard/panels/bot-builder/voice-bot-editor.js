@@ -29,7 +29,6 @@ import { escapeHtml, section } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t, fill, translations } from "../../shared/i18n.js";
 import { readSetting } from "../../settings/registry.js";
-import { listProvidersAll } from "../../../../shared/providers-db.js";
 import {
   CROW_VOICE_BOT_ID, VOICE_PRESETS, DEFAULT_PERSONA, voiceBotDefinition, normalizeVoiceSettings,
   ROUTINE_BACKENDS, CONFIRM_LEVELS, isVoiceBotId, isVoiceBotDef,
@@ -40,8 +39,9 @@ import { createHandoffStore } from "../../../voice/handoff-store.js";
 import { drawerHrefs } from "../../../board/card-link.js";
 import { boardState, oneLine } from "../../shared/bot-display.js";
 import { resolveRoutineBackends } from "../../../voice/own-tools.js";
+import { fastVoiceKeyFor } from "../../../voice/crow-voice.js";
 import { connectedAddonToolNames, createToolExecutor } from "../../../ai/tool-executor.js";
-import { loadModelOptions } from "./data-queries.js";
+import { loadModelOptions, loadRoleRefs } from "./data-queries.js";
 import { rowRev, defRev } from "./def-adapter.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { abilityLineHtml, voiceAbilityScript } from "./voice-use.js";
@@ -189,7 +189,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
   if (prompt.length > PROMPT_MAX) return back(res, "error=voice_prompt_too_long");
   const model = String(b.fast_voice_model ?? "").trim();
   const { opts } = await loadModelOptions(db);
-  if (!opts.some((o) => o.key === model)) return back(res, "error=voice_model_invalid");
+  if (!opts.some((o) => o.key === model) && !(await loadRoleRefs(db)).known(model)) return back(res, "error=voice_model_invalid");
   const escalation = String(b.escalation ?? "");
   if (escalation !== "default" && escalation !== "off") return back(res, "error=voice_escalation_invalid");
   const profile = async (field, key) => {
@@ -262,12 +262,14 @@ export async function handleVoiceBotPreset(req, res, { db }) {
 
 const opt = (value, label, selected) => `<option value="${escapeHtml(value)}"${selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
 
-function modelSelect(name, form, opts, current, { blank = false } = {}) {
+function modelSelect(name, form, opts, current, { blank = false, roleLabel = null } = {}) {
   const byProv = {};
   for (const o of opts) (byProv[o.provider] = byProv[o.provider] || []).push(o);
   const known = opts.some((o) => o.key === current);
+  // A role: ref the bot holds stays selected first (its label escaped by opt), so saving untouched keeps it.
   return `<select name="${name}" id="btb-v-${name}" form="${form}">` +
-    (blank || !known ? opt("", "—", !known) : "") +
+    (roleLabel ? opt(current, roleLabel, true) : "") +
+    (blank || (!known && !roleLabel) ? opt("", "—", !known && !roleLabel) : "") +
     Object.keys(byProv).map((p) => `<optgroup label="${escapeHtml(p)}">` + byProv[p].map((o) => opt(o.key, o.label, o.key === current)).join("") + `</optgroup>`).join("") +
     `</select>`;
 }
@@ -377,12 +379,14 @@ async function handoffSection(db, v, lang, sec, hint) {
       .filter((r) => !isVoiceBotId(String(r.bot_id)) && !isVoiceBotDef(parseDef(r)));
   } catch { bots = []; }
   const allowed = v.handoff.allowed_bots;
+  let customDefs = {};
+  try { customDefs = await (await import("../../../../shared/model-roles-store.js")).readCustomRoleDefs(db); } catch { customDefs = {}; }
   const items = bots.map((r) => {
     const id = String(r.bot_id);
     const off = boardState(r).state !== "on";
     return `<li><input type="hidden" name="allowed_bots_shown" value="${escapeHtml(id)}" form="btb-vsave"><label class="btb-vcheck"><input type="checkbox" name="allowed_bots" value="${escapeHtml(id)}" form="btb-vsave"${allowed.includes(id) ? " checked" : ""}> ` +
       `<b>${escapeHtml(cleanName(r.display_name, id))}</b></label> ` +
-      `<span class="btb-hint">${escapeHtml(botCapabilitySummary(r))}</span>` +
+      `<span class="btb-hint">${escapeHtml(botCapabilitySummary(r, { customDefs }))}</span>` +
       (Number(r.enabled) ? "" : ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBotOff", lang))}</span>`) +
       (off ? ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBoardOff", lang))}</span>` : "") + `</li>`;
   }).join("");
@@ -428,14 +432,16 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const v = normalizeVoiceSettings(def);
   const rev = voiceRev(row);
   const { opts } = await loadModelOptions(db);
-  let providerRows = [];
-  try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }
+  const roles = await loadRoleRefs(db, lang);
   const ttsProfiles = await loadProfiles(db, "tts_profiles");
   const sttProfiles = await loadProfiles(db, "stt_profiles");
   const model = v.fast_voice_model || "";
-  const provId = model.includes("/") ? model.slice(0, model.indexOf("/")) : "";
-  const provRow = providerRows.find((p) => p && p.id === provId);
-  const cloud = !!provRow && provRow.host === "cloud";
+  // The turn's own strict check (isStrictCloud through fastVoiceKeyFor), on the key the turn dials, so the
+  // warning agrees with the turn: anything not proven local warns.
+  const dialed = await fastVoiceKeyFor(db, def);
+  const cloud = dialed.cloud;
+  const dialedKey = dialed.key || model;
+  const provId = dialedKey.includes("/") ? dialedKey.slice(0, dialedKey.indexOf("/")) : dialedKey;
   const memoryOn = crowMcpOf(def).some(isMemoryTool);
   const name = row.display_name || "Crow";
   const sec = (key, body) => `<div class="btb-vsec"><h3>${escapeHtml(t(key, lang))}</h3>${body}</div>`;
@@ -469,7 +475,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     : "";
   const modelSec = sec("botbuilder.voiceModelTitle",
     `<label for="btb-v-fast_voice_model">${escapeHtml(t("botbuilder.voiceFastModel", lang))}</label>` +
-    modelSelect("fast_voice_model", "btb-vsave", opts, model) +
+    modelSelect("fast_voice_model", "btb-vsave", opts, model, { roleLabel: roles.label(model) }) +
     `<label for="btb-v-escalation">${escapeHtml(t("botbuilder.voiceEscTitle", lang))}</label>` +
     `<select name="escalation" id="btb-v-escalation" form="btb-vsave">` +
     opt("default", t("botbuilder.voiceEscDefault", lang), v.escalation === "default") +

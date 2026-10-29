@@ -19,7 +19,7 @@ import { LEGACY_PINS } from "../../../../../shared/role-change.js";
 import { pickProviderByTask, EMBED_TASKS, RERANK_TASKS } from "../../../../../shared/provider-task.js";
 import { speechProfileWhere } from "../../../../../shared/speech-where.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings } from "../../../../../shared/voice-bot.js";
-import { resolveVoiceKeys } from "../../../../routes/llm-router.js";
+import { resolveVoiceKeys } from "../../../../../shared/voice-keys.js";
 import { getClassifierStatus } from "../../../panels/bot-builder/classifier-status.js";
 import { getDefaultTtsProfile, getTtsProfiles } from "../../../../ai/tts/index.js";
 import { getDefaultSttProfile, getSttProfiles } from "../../../../ai/stt/index.js";
@@ -27,7 +27,7 @@ import { friendlyModel } from "../../../shared/bot-display.js";
 import { readSetting } from "../../registry.js";
 import { getOwnAddresses } from "../../../../../shared/locality.js";
 
-/** Page groups, in order. `custom` is filled by the custom-roles work (Task 18). */
+/** Page groups, in order. `custom` lists the user's own roles (Task 18), sorted by name. */
 export const ROLE_GROUPS = Object.freeze([
   Object.freeze({ id: "thinking", roles: Object.freeze(["coordinator", "quick", "deep", "everyday", "expert", "critic"]) }),
   Object.freeze({ id: "speech", roles: Object.freeze(["voice", "stt", "tts"]) }),
@@ -171,7 +171,11 @@ async function chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStat
       row.status = { code: seeded ? "default" : "ready" };
       row.model = modelOf(id === "voice" ? voiceKeys?.fast || r.key : r.key, ctx, whereOpts);
     } else if (r.reason === "fallback") {
-      row.status = { code: "fallback", role: r.chain[r.chain.length - 1] };
+      const via = r.chain[r.chain.length - 1];
+      row.status = { code: "fallback", role: via };
+      // A custom role has no translated name: the row carries the user's own.
+      const vl = ctx.customDefs?.[via]?.label;
+      if (typeof vl === "string" && vl) row.status.roleLabel = vl;
       row.model = modelOf(r.key, ctx, whereOpts);
     } else if (r.reason === "unset") {
       if (CONSUMER_DEFAULT.has(id)) {
@@ -223,7 +227,7 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
  * @param {object} [opts.env]               env for pins and overrides (default process.env)
  * @param {string} [opts.lang]              accepted for the callers' symmetry; rows carry codes, not copy
  * @param {Set<string>} [opts.ownAddrs]     this box's addresses (default: probed)
- * @param {object} [opts.localMarks]
+ * @param {object} [opts.localMarks]        "This is local" marks (default: the role context's; never applied to safety)
  * @param {() => string} [opts.localInstanceId]  test seam for the role context
  * @param {Function} [opts.classifierStatusFn]   test seam (default getClassifierStatus)
  * @param {Function} [opts.classifierLookup]     DNS lookup handed to the classifier status (the menu preview passes one that never touches the network)
@@ -232,7 +236,10 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
 export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, localInstanceId, classifierStatusFn = getClassifierStatus, classifierLookup } = {}) {
   const ctx = await loadRoleContext(db, { maxAgeMs: 0, ...(localInstanceId ? { getOrCreateLocalInstanceId: localInstanceId } : {}) });
   // This box's addresses: probed once for all rows, not per model.
+  // Marks: the caller's, else the context's ("This is local"); never for safety (minor e).
+  localMarks ??= ctx.localMarks;
   const whereOpts = { ownAddrs: ownAddrs || getOwnAddresses(), ...(localMarks ? { localMarks } : {}) };
+  const unmarkedWhere = { ownAddrs: whereOpts.ownAddrs };
   // Voice keys from the same context the rows use.
   const resolveRoleFn = async (_db, key, { need, chosenOnly } = {}) => (chosenOnly ? resolveChosenRoleKey : resolveRoleKey)(key, { ...ctx, need });
   let voiceKeys = null;
@@ -250,10 +257,21 @@ export async function buildRoleRows(db, { env = process.env, ownAddrs, localMark
       } else if (SPEECH[id]) {
         row = await speechRow(db, def, { whereOpts, voiceDef });
       } else {
-        row = await chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
+        row = await chatRow(db, def, ctx, { env, whereOpts: id === "safety" ? unmarkedWhere : whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
       }
       rows.push({ ...row, group: g.id, labelKey: ROLE_LABEL_KEYS[id], jobKey: ROLE_JOB_KEYS[id] });
     }
+  }
+  // The user's own roles: chat-style rows that carry their own name and job (no translation keys).
+  const custom = Object.entries(ctx.customDefs || {})
+    .map(([id, d]) => ({ id, label: typeof d.label === "string" && d.label ? d.label : id, job: typeof d.job === "string" ? d.job : "", d }))
+    .sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+  for (const c of custom) {
+    const row = await chatRow(db, { id: c.id, capability: c.d.capability || "chat" }, ctx, { env, whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
+    rows.push({
+      ...row, group: "custom", custom: true, label: c.label, job: c.job,
+      capability: c.d.capability || "chat", allowHeavy: c.d.allowHeavy === true, labelKey: null, jobKey: null,
+    });
   }
   return rows;
 }

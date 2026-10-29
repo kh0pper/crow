@@ -1401,6 +1401,19 @@ try {
 
 await addColumnIfMissing("memories", "instance_id", "TEXT DEFAULT NULL");
 await addColumnIfMissing("memories", "project_id", "INTEGER DEFAULT NULL");
+// memories.project_uuid (session summaries, R1.2 PR 4): the project's portable
+// id (project_spaces.uuid). project_id is a local FK — project_spaces ids are
+// per-instance — so instance sync nulls project_id on the wire and the
+// receiver maps project_uuid back to its own project (or leaves it unfiled).
+// NULL on every existing row. Also added by scripts/migrations/0020.
+await addColumnIfMissing("memories", "project_uuid", "TEXT");
+// One memory per session summary: the summary job's upsert relies on it. Same
+// DDL as scripts/migrations/0020 (SUMMARY_SOURCE_INDEX_SQL).
+try {
+  await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_session_summary_source ON memories(source) WHERE source LIKE 'session-summary:%'");
+} catch (err) {
+  console.warn(`Warning: could not create idx_memories_session_summary_source: ${err.message}`);
+}
 
 try {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_instance_id ON memories(instance_id)");
@@ -2722,6 +2735,12 @@ await initTable("bot_sessions table", `
     narrowed_tools    TEXT,
     label             TEXT,
     archived_at       TEXT,
+    summary           TEXT,
+    summary_at        TEXT,
+    summary_flags     TEXT,
+    briefing          TEXT,
+    briefing_rank     TEXT,
+    briefing_refs     TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2785,6 +2804,34 @@ await addColumnIfMissing("bot_sessions", "cwd", "TEXT");
 // migration to add the column or its /roost SELECT 500s). Additive-only — no
 // SCHEMA_GENERATION bump.
 await addColumnIfMissing("bot_sessions", "archived_at", "TEXT");
+
+// bot_sessions.summary / .summary_at / .summary_flags (session summaries,
+// R1.2 PR 4): a finished session's short summary, when it was written, and a
+// JSON flag bag (e.g. {"outside_content":true}). NULL on every existing row
+// ("no summary yet"). Same both-places idiom as `archived_at` above: CREATE
+// body for fresh installs, these guarded ALTERs for pre-existing ones, listed
+// in BOT_SESSIONS_CANONICAL_COLUMNS so the control-CHECK rebuild carries them,
+// AND the standalone rail scripts/migrations/0020-session-summaries.mjs (plus
+// guarded ALTERs in init-pi-bots.mjs). summary_at is indexed: the briefing
+// reads "summaries since X". Additive-only — no SCHEMA_GENERATION bump.
+await addColumnIfMissing("bot_sessions", "summary", "TEXT");
+await addColumnIfMissing("bot_sessions", "summary_at", "TEXT");
+await addColumnIfMissing("bot_sessions", "summary_flags", "TEXT");
+// bot_sessions.briefing / .briefing_rank (R1.2 PR 4): the briefing block a
+// Perch session was started with and the privacy rank it was built for. The
+// DB is the source of truth (a bot can write files in its own world dir, never
+// this row). Same rails as the summary columns above.
+await addColumnIfMissing("bot_sessions", "briefing", "TEXT");
+await addColumnIfMissing("bot_sessions", "briefing_rank", "TEXT");
+// bot_sessions.briefing_refs (R1.2 PR 4): a JSON array of the thread ids whose
+// summaries the briefing quotes, so a Forget can strip that summary from every
+// other session's stored briefing. Same rails.
+await addColumnIfMissing("bot_sessions", "briefing_refs", "TEXT");
+try {
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)");
+} catch (err) {
+  console.warn(`Warning: could not create idx_bot_sessions_summary_at: ${err.message}`);
+}
 
 // perch_session_files (PR-E, audit item 12): durable history of files the
 // agent SENT to a perch chat via send_user_file's crow-file: relay. One row
@@ -2941,7 +2988,7 @@ await initTable("voice_handoffs table", `
 // is never reached, so the next run retries the migration.
 //
 // I13: PRAGMA table_info(bot_sessions) is diffed against the canonical
-// 20-column list BEFORE any DDL — an unrecognized host-present column (or a
+// 26-column list BEFORE any DDL — an unrecognized host-present column (or a
 // canonical column gone missing) aborts the migration instead of silently
 // vanishing with its data, matching the reference rebuild's C2/N1 guard.
 //
@@ -2959,7 +3006,8 @@ const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
   "control", "model", "cwd", "escalated", "kind", "narrowed_tools",
-  "label", "archived_at", "created_at", "updated_at",
+  "label", "archived_at", "summary", "summary_at", "summary_flags", "briefing", "briefing_rank", "briefing_refs",
+  "created_at", "updated_at",
 ];
 await (async () => {
   const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
@@ -3023,6 +3071,12 @@ await (async () => {
         narrowed_tools    TEXT,
         label             TEXT,
         archived_at       TEXT,
+        summary           TEXT,
+        summary_at        TEXT,
+        summary_flags     TEXT,
+        briefing          TEXT,
+        briefing_rank     TEXT,
+        briefing_refs     TEXT,
         created_at        TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
       )

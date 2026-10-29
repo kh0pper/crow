@@ -12,6 +12,7 @@
  * data → log to sync_conflicts and notify the operator.
  */
 
+import { SUMMARY_SOURCE_PREFIX, isSummaryMemorySource, parseSummarySource } from "../shared/summary-source.js";
 import Hypercore from "hypercore";
 import { mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -202,7 +203,11 @@ export const EXCLUDED_COLUMNS = {
 // conflict row). An un-upgraded or hostile peer may still send these keys.
 // research_notes.source_id is a local FK (source rows are not synced, ids are per-instance), so
 // a peer's value would point a note at an unrelated local source, e.g. a quotes_checked one.
+// memories.project_id is a local FK too (project_spaces ids are per-instance): an un-upgraded
+// peer still sends its own id, which would file the memory under an unrelated local project.
+// The receiver derives project_id from project_uuid instead (mapInboundMemoryProject).
 export const INBOUND_DROPPED_COLUMNS = {
+  memories: ["project_id"],
   research_notes: ["provenance", "quote_found", "locator", "source_id",
     "created_by", "withdrawn_at", "withdrawn_by", "withdrawn_reason"],
 };
@@ -214,6 +219,34 @@ const SQL_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // SYNCED_TABLES entries; the doubling of `"` is belt-and-braces.
 function quoteIdent(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+/** A session summary's memory source (servers/shared/summary-source.js). */
+export const SUMMARY_MEMORY_SOURCE_PREFIX = SUMMARY_SOURCE_PREFIX;
+export { isSummaryMemorySource };
+
+/**
+ * Inbound memories: project_id is local, project_uuid is portable. A row that
+ * carries project_uuid (even null) gets project_id set to the local
+ * project_spaces.id with that uuid, or NULL when this instance has no such
+ * project (the memory lands unfiled; project_uuid is kept). A row without the
+ * key (an un-upgraded peer, or an update that does not touch the project)
+ * is returned unchanged, so project_id is left as it is. Pure: never mutates
+ * the input. Exported for tests.
+ */
+export async function mapInboundMemoryProject(db, row) {
+  if (!row || typeof row !== "object" || !Object.prototype.hasOwnProperty.call(row, "project_uuid")) return row;
+  const uuid = row.project_uuid;
+  let projectId = null;
+  if (typeof uuid === "string" && uuid !== "") {
+    try {
+      const { rows } = await db.execute({ sql: "SELECT id FROM project_spaces WHERE uuid = ?", args: [uuid] });
+      if (rows.length > 0) projectId = Number(rows[0].id);
+    } catch (err) {
+      console.warn("[instance-sync] memories project_uuid lookup failed (landing unfiled):", err.message);
+    }
+  }
+  return { ...row, project_id: projectId };
 }
 
 function dropInboundColumns(table, row) {
@@ -229,7 +262,30 @@ function dropInboundColumns(table, row) {
 // representation — e.g. research_notes.project_id is a local FK (project rows
 // aren't synced), so we NULL it on the wire. Synced notes show up on peers
 // as project-less (null project_id).
+// A new synced column ships (schema on every peer) BEFORE anything populates it:
+// the generic apply path fails loudly on a column the local table lacks.
 const OUTBOUND_TRANSFORMS = {
+  // memories.project_id is a local FK (project_spaces ids are per-instance), so
+  // it is left off the wire entirely: upgraded receivers derive it from
+  // project_uuid (mapInboundMemoryProject), and an un-upgraded receiver's
+  // update then keeps its own filing instead of being unfiled. A NULL
+  // project_uuid is left off too, so an ordinary memory never carries the key
+  // to a peer whose memories table predates it (0020); the accepted cost is
+  // that "remove from project" (uuid -> null) does not propagate. A summary
+  // memory WITH a project is REJECTED by a peer whose memories table lacks
+  // project_uuid (_wireColumnsValid: unknown column), and it is NOT retried
+  // when that peer upgrades: the peer's checkpoint advances past the rejected
+  // entry, so the insert is lost there. A later update of the same summary
+  // heals it (summary memories apply by source, upserting:
+  // _applySummaryMemory). This is why CROW_SESSION_SUMMARIES stays off until
+  // the whole fleet runs 0020. Also applied to the LOCAL row in
+  // _checkConflict / _applyInsert: the local row loses the same keys the wire
+  // row lacks, so the compare is like with like.
+  memories: (row) => {
+    const { project_id, ...out } = row;
+    if (out.project_uuid == null) delete out.project_uuid;
+    return out;
+  },
   // source_id is a local FK too (research_sources rows are not synced).
   research_notes: (row) => ({ ...row, project_id: null, source_id: null }),
   // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
@@ -2781,6 +2837,20 @@ export class InstanceSyncManager {
       return;
     }
 
+    // Session-summary memories (R1.2 PR 4) apply by their natural key, the
+    // source "session-summary:<threadId>", never by the raw id: memory ids are
+    // per-instance AUTOINCREMENT, so an id-keyed update or delete could hit an
+    // unrelated local memory. Routed before the id-keyed protection check,
+    // which would test the wrong row.
+    if (table === "memories" && isSummaryMemorySource(row && row.source)) {
+      try {
+        await this._applySummaryMemory(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on a summary memory:`, err.message);
+      }
+      return;
+    }
+
     // Locally protected rows (review I1): a maker-lab learner memory or a
     // starter row never syncs OUT, and must not be overwritten or deleted by
     // an inbound op whose id merely collides (memory ids are per-instance
@@ -2793,8 +2863,19 @@ export class InstanceSyncManager {
 
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
+    // memories: project_uuid -> this instance's project_id. The equivalence
+    // checks compare the WIRE row (project_id absent/null, like the local row
+    // after OUTBOUND_TRANSFORMS), so a mapped project_id never manufactures a
+    // conflict; the mapped row is what gets written, and what a conflict row
+    // records as the losing version (so a restore files it locally).
+    // Known gap (accepted): an insert re-delivered after the project appeared
+    // here is not re-mapped (INSERT OR IGNORE + equivalent row = no write); the
+    // next update that names project_uuid files it.
+    const applyRow = table === "memories" && op !== "delete"
+      ? await mapInboundMemoryProject(this.db, row) : row;
+
     if ((op === "update" || op === "delete") && row.id !== undefined) {
-      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row, op);
+      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row, op, applyRow);
       if (conflict === "skip") return; // Local version wins
     }
 
@@ -2807,10 +2888,10 @@ export class InstanceSyncManager {
     try {
       switch (op) {
         case "insert":
-          await this._applyInsert(table, row, lamport_ts, instance_id);
+          await this._applyInsert(table, applyRow, lamport_ts, instance_id, row);
           break;
         case "update":
-          await this._applyUpdate(table, row, lamport_ts, instance_id);
+          await this._applyUpdate(table, applyRow, lamport_ts, instance_id);
           if (notePrior) await this._invalidateNoteQuoteCheck(row, notePrior);
           break;
         case "delete":
@@ -3726,9 +3807,12 @@ export class InstanceSyncManager {
    * drop real concurrent edits of rows both instances received from one origin.
    *
    * @param {string} op - 'update' or 'delete' (caller gates before calling)
+   * @param {object} [loggedRow] - the incoming row as it would be written
+   *   (memories: project_id mapped from project_uuid), recorded as the losing
+   *   version; defaults to incomingRow. Comparison always uses incomingRow.
    * @returns {Promise<"apply"|"skip">}
    */
-  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op) {
+  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op, loggedRow = incomingRow) {
     try {
       const { rows } = await this.db.execute({
         sql: `SELECT * FROM ${table} WHERE id = ?`,
@@ -3767,7 +3851,7 @@ export class InstanceSyncManager {
           table, String(rowId),
           localRow.instance_id || this.localInstanceId, incomingInstanceId,
           localTs, incomingTs,
-          JSON.stringify(localRow), JSON.stringify(incomingRow),
+          JSON.stringify(localRow), JSON.stringify(loggedRow),
           op || "update",
         );
         if (inserted) await this._notifyConflict();
@@ -3880,6 +3964,82 @@ export class InstanceSyncManager {
   }
 
   /**
+   * A session-summary memory (source "session-summary:<threadId>"), applied by
+   * that natural key (idx_memories_session_summary_source keeps it unique):
+   *   - insert / update: the local row with that source is updated (after the
+   *     usual lamport conflict check against THAT row), or, with none, a new
+   *     row is inserted under a fresh local id. The wire id is never written;
+   *   - delete: the local row with that source is deleted (same conflict check).
+   *     A delete is accepted from any instance; no tombstone is kept.
+   * Single-writer: an insert or update is accepted ONLY when the entry's
+   * origin instance id equals the origin named in the source
+   * (session-summary:<origin>:<threadId>); anything else (another instance's
+   * stale copy, the old one-part source) is refused. This relies on
+   * fleet-internal trust: the entry's instance_id is the signed claim of a
+   * same-identity peer, and it is only bound to the feed it arrived on when
+   * entryOriginMode() is "enforce" (PT-2b). In "observe" mode a trusted peer
+   * could still claim another origin.
+   * project_uuid is mapped to the local project as for any memory. A key the
+   * local table lacks rejects the entry (_wireColumnsValid), as on the generic
+   * path.
+   */
+  async _applySummaryMemory(op, row, lamportTs, instanceId) {
+    const source = String(row.source);
+    const { rows: localRows } = await this.db.execute({
+      sql: "SELECT id FROM memories WHERE source = ? ORDER BY id LIMIT 1",
+      args: [source],
+    });
+    const localId = localRows[0] ? localRows[0].id : null;
+    const { id: _wireId, lamport_ts: _ts, ...wire } = row;
+
+    if (op === "delete") {
+      if (localId == null) return;
+      const verdict = await this._checkConflict("memories", localId, lamportTs, instanceId, wire, "delete");
+      if (verdict === "skip") return;
+      await this.db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [localId] });
+      return;
+    }
+    if (op !== "insert" && op !== "update") return;
+    const parsed = parseSummarySource(source);
+    if (!parsed || parsed.origin !== String(instanceId)) {
+      console.warn(`[instance-sync] refused inbound ${op} on a summary memory not written by its origin`);
+      return;
+    }
+
+    const mapped = await mapInboundMemoryProject(this.db, wire);
+    if (!(await this._wireColumnsValid("memories", mapped, op))) return;
+
+    // The same summary already lives here: an update of THAT row, LWW.
+    const updateLocal = async (rowId) => {
+      const verdict = await this._checkConflict("memories", rowId, lamportTs, instanceId, wire, "update", mapped);
+      if (verdict === "skip") return;
+      const keys = Object.keys(mapped);
+      await this.db.execute({
+        sql: `UPDATE "memories" SET ${[...keys.map((k) => `${quoteIdent(k)} = ?`), '"lamport_ts" = ?'].join(", ")} WHERE "id" = ?`,
+        args: [...keys.map((k) => mapped[k] ?? null), lamportTs, rowId],
+      });
+    };
+    if (localId != null) return updateLocal(localId);
+
+    const ins = { ...mapped };
+    if (ins.instance_id === undefined) ins.instance_id = instanceId;
+    const cols = Object.keys(ins);
+    try {
+      await this.db.execute({
+        sql: `INSERT INTO "memories" (${[...cols.map(quoteIdent), '"lamport_ts"'].join(", ")}) VALUES (${[...cols.map(() => "?"), "?"].join(", ")})`,
+        args: [...cols.map((c) => ins[c] ?? null), lamportTs],
+      });
+    } catch (err) {
+      // idx_memories_session_summary_source: a row with this source appeared
+      // since the SELECT (a local write raced us). Not lost: update it instead.
+      if (!/UNIQUE constraint failed/i.test(String(err && err.message))) throw err;
+      const { rows: raced } = await this.db.execute({ sql: "SELECT id FROM memories WHERE source = ? ORDER BY id LIMIT 1", args: [source] });
+      if (!raced[0]) throw err;
+      await updateLocal(raced[0].id);
+    }
+  }
+
+  /**
    * Apply an insert operation from a remote instance.
    * On INSERT OR IGNORE conflict (rowsAffected === 0): fetch the local row.
    * - row.id == null → warn only (binding undefined to better-sqlite3 throws)
@@ -3888,8 +4048,11 @@ export class InstanceSyncManager {
    *   Nostr+sync delivery is the live example)
    * - Local row equivalent → benign re-delivery, done
    * - Local row differs → log conflict op='insert' + notify (D7 surfacing)
+   *
+   * compareRow is the WIRE row for the equivalence check (memories: before
+   * project_uuid was mapped to a local project_id); defaults to row.
    */
-  async _applyInsert(table, row, lamportTs, instanceId) {
+  async _applyInsert(table, row, lamportTs, instanceId, compareRow = row) {
     if (!(await this._wireColumnsValid(table, row, "insert"))) return;
     const cols = Object.keys(row);
     // Add sync metadata
@@ -3936,7 +4099,7 @@ export class InstanceSyncManager {
       // a false insert-conflict for an otherwise-identical row.
       const transform = OUTBOUND_TRANSFORMS[table];
       const localForCompare = transform ? transform({ ...localRow }) : localRow;
-      if (rowsEquivalent(localForCompare, row)) {
+      if (rowsEquivalent(localForCompare, compareRow)) {
         return; // Benign re-delivery
       }
 
@@ -4214,7 +4377,9 @@ export class InstanceSyncManager {
     if (table !== "memories") return false;
     try {
       const { rows } = await this.db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
-      return isLocalOnlyMemorySource(rows?.[0]?.source);
+      // A summary memory is applied only by its source (_applySummaryMemory):
+      // a generic id-keyed op whose id merely collides never rewrites or deletes it.
+      return isLocalOnlyMemorySource(rows?.[0]?.source) || isSummaryMemorySource(rows?.[0]?.source);
     } catch {
       return false;
     }

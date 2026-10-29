@@ -91,14 +91,15 @@ export default {
     <div class="llm-tab-body">${body}</div>`;
   },
 
-  async handleAction({ req, res, db, action }) {
+  async handleAction({ req, res, db, action, lang }) {
     // Tab handlers are tried in order; first match wins. Each handler is
     // responsible for using res.redirectAfterPost('?section=llm&tab=<id>')
     // so Turbo keeps the user on the current tab after a POST.
     for (const tab of TABS) {
       if (!tab.handleAction) continue;
-      const handled = await tab.handleAction({ req, res, db, action });
-      if (handled) return true;
+      const handled = await tab.handleAction({ req, res, db, action, lang });
+      // An object ({ renderSection }) asks the panel to render this section as the POST response.
+      if (handled) return handled;
     }
     return false;
   },

@@ -1000,6 +1000,19 @@ min-height:44px;padding:6px 8px;font-size:13px;border-color:transparent;backgrou
 @media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-session-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
 }
+/* --- R1.2 PR 4: the Briefing card and the session summary ---------------------
+   A collapsed card at the top of the transcript (a 44 px tap target on its
+   title), and the Session tab's summary with Forget. */
+#perch-hub-root .perch-briefing{align-self:stretch;width:100%;min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--sky);margin:0 0 10px}
+#perch-hub-root .perch-briefing .briefing-title{display:flex;align-items:center;min-height:44px;padding:0 12px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dim)}
+#perch-hub-root .perch-briefing .briefing-body{padding:0 12px 12px;font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}
+#perch-hub-root .summary-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:10px 0;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+#perch-hub-root .summary-card[hidden],#perch-hub-root .summary-note[hidden]{display:none}
+#perch-hub-root .summary-text{font-size:13.5px;overflow-wrap:anywhere}
+#perch-hub-root .summary-note{font-size:12.5px;color:var(--dim)}
+#perch-hub-root #perch-summary-forget{min-height:44px;min-width:44px}
+#perch-hub-root .summary-status{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .summary-status:empty{display:none}
 /* --- R1.2 PR 5: the session head's apps button and its sheet ---------------
    The button is a 44 px grid icon at the head row's end; the sheet is shaped
    like the session sheet and holds the shell's launcher grid. */

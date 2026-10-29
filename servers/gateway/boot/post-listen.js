@@ -18,6 +18,7 @@ import { initProxyServers, loadRemoteInstances } from "../proxy.js";
 import { startAutoUpdate } from "../auto-update.js";
 import { startScheduler } from "../scheduler.js";
 import { createDbClient } from "../../db.js";
+import { upgradeLocalMarksAtBoot } from "./admin-api.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
 // --no-auth (e.g. grackle's loopback companion MCP bridge) is never the
@@ -251,6 +252,10 @@ export async function runPostListenSetup(server, app, deps) {
 
   // Crow voice bot: create the reserved row once (never rewritten after).
   setImmediate(() => { ensureVoiceBotAtBoot({ noAuth }); });
+
+  // "This is local" one-time upgrade (DNS with a bounded timeout): after
+  // listen, never on the boot path.
+  setImmediate(() => { upgradeLocalMarksAtBoot({ noAuth }); });
 
   // Start auto-update checker
   startAutoUpdate(createDbClient(), { noAuth }).catch((err) => {

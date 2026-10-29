@@ -264,3 +264,17 @@ test("allowed_bots drops only the malformed entries", async () => {
   assert.deepEqual(ids(await listHandoffCandidates(db, voiceDef(["writer", ""]))), ["writer"]);
   assert.deepEqual(ids(await listHandoffCandidates(db, voiceDef(["", null]))), ["other", "writer"]);
 });
+
+test("a role-based model reads as the role's name: core roles in English, custom roles by their label", async () => {
+  const row = (def) => ({ bot_id: "b", display_name: "B", definition: JSON.stringify(def), project_id: 1 });
+  assert.match(botCapabilitySummary(row({ description: "R", models: { default: "role:everyday" } })), /; model: Builder$/);
+  const custom = row({ description: "R", models: { default: "role:c-notes" } });
+  assert.match(botCapabilitySummary(custom, { customDefs: { "c-notes": { label: "Notetaker", capability: "chat" } } }), /; model: Notetaker$/);
+  // The candidate list reads the custom definitions from the DB.
+  const db = freshDb([{ bot_id: "notes", def: board({ models: { default: "role:c-notes" } }) }]);
+  await db.execute("CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)");
+  await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES (?,?)",
+    args: ["model_role_def.c-notes", JSON.stringify({ label: "Notetaker", job: "j", capability: "chat" })] });
+  const [c] = await listHandoffCandidates(db, voiceDef());
+  assert.match(c.summary, /model: Notetaker$/, c.summary);
+});

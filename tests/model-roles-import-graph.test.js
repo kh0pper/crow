@@ -53,3 +53,15 @@ test("isRawKey has one definition, exported by model-roles.js", async () => {
     assert.match(src, /import \{[^}]*\bisRawKey\b[^}]*\} from "\.\/model-roles\.js"/, `${f} imports isRawKey from model-roles.js`);
   }
 });
+
+test("no import cycle between the marks module and the binding store: the store reads marks from a leaf", async () => {
+  const { seen } = importedUrls("servers/shared/model-roles-store.js");
+  assert.equal(seen.filter((u) => u.endsWith("servers/shared/provider-local-marks.js")).length, 0,
+    "model-roles-store.js must not load provider-local-marks.js (which imports the store)");
+  const leaf = importedUrls("servers/shared/provider-local-marks-read.js");
+  assert.equal(leaf.seen.filter((u) => u !== leaf.target).length, 0, "the marks reader is a no-import leaf");
+  const marks = await import("../servers/shared/provider-local-marks.js");
+  const read = await import("../servers/shared/provider-local-marks-read.js");
+  assert.equal(marks.readLocalMarks, read.readLocalMarks, "one readLocalMarks");
+  assert.equal(marks.LOCAL_MARKS_KEY, read.LOCAL_MARKS_KEY);
+});

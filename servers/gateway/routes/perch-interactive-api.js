@@ -67,6 +67,7 @@ import { acceptResult, decideResult } from "../board/result-service.js";
 import { openDecisionsForThread } from "../board/decision-service.js";
 import { laneState } from "./shell-api.js";
 import { cardDrawerHref, drawerHref } from "../board/card-link.js";
+import { buildBriefing, briefingText, briefingRefs, briefingEnabled, sessionSummary, forgetSummary, sessionBriefing, targetRankOf } from "../perch/briefing.js";
 import { CONFIRM_OUTCOMES, openDecision } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
@@ -360,7 +361,7 @@ function deliveredExists(sid, name) {
   finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
 }
 
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key) } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
   async function piNames(env) {
@@ -490,8 +491,24 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         catch (err) { if (!(err && err.name === "AclError")) console.warn("[perch] could not check the bot's project:", err.message); }
       }
 
+      // R1.2 PR 4: { briefing: true } asks for the project's briefing. The
+      // server rebuilds it from the DB itself; no client text is ever read.
+      // Best effort: a failure here starts the session without one.
+      // It carries only what the receiving model may see: targetRank is where
+      // the bot's model runs (unknown counts as the cloud).
+      // briefingRefs: the thread ids it quotes, so a Forget can strip one later.
+      let briefing = null, briefingRank = null, refs = [];
+      if (body.briefing === true && projectId != null && briefingEnabled()) {
+        try {
+          briefingRank = await rankBriefingTarget(db, def.models && def.models.default);
+          const fragments = await buildBriefing(db, { projectId, targetRank: briefingRank }, { tasksDbPath: TASKS_DB });
+          briefing = briefingText(fragments) || null;
+          refs = briefing ? briefingRefs(fragments) : [];
+        } catch { console.warn("[perch] could not build the briefing"); briefing = null; refs = []; }
+      }
+
       const eng = resolveEngine();
-      const result = await eng.spawn({ botId, cwd });
+      const result = await eng.spawn(briefing ? { botId, cwd, briefing, briefingRank, briefingRefs: refs } : { botId, cwd });
       if (result && result.threadId) {
         // The session is already running: a filing failure must not fail the spawn.
         try { await ensureItem(db, "perch_thread", result.threadId, { projectId, setBy: given ? "operator" : "origin" }); }
@@ -1026,6 +1043,56 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     } finally {
       try { db.close(); } catch { /* already closed */ }
       if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- GET /interactive/:sid/briefing — the Briefing card and the summary ----
+  // R1.2 PR 4. `briefing` is what the session's child actually received:
+  // null with CROW_SESSION_BRIEFING=0, and null when this wake withheld the
+  // block (a less private model) or had none. A session whose child has not
+  // started in this process (after a restart, before its wake) shows the DB's
+  // block, the one its next wake is given when the rank allows.
+  // `summary` is the thread's own summary for the sheet's Session tab. Read-only.
+  router.get(P + "/interactive/:sid/briefing", async (req, res) => {
+    const sid = String(req.params.sid);
+    const db = createDbClient();
+    try {
+      let briefing = null;
+      if (briefingEnabled()) {
+        let eng = null;
+        try { eng = resolveEngine(); } catch { eng = null; }
+        const delivered = eng && typeof eng.briefingDelivered === "function" ? eng.briefingDelivered(sid) : undefined;
+        if (delivered !== undefined) briefing = delivered || null;
+        else {
+          // From the DB, the briefing's source of truth (survives a restart).
+          const b = await sessionBriefing(db, sid);
+          briefing = b ? b.text : null;
+        }
+      }
+      res.json({ briefing, summary: await sessionSummary(db, sid) });
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- POST /interactive/:sid/forget-summary — Forget (sheet → Session) ----
+  // Deletes the summary's memory through the memory-write path (the delete
+  // syncs) and clears the row's summary columns. Session-authed + CSRF (the
+  // dashboard router's rails, see this router's mount). 404 when there was
+  // nothing to forget.
+  router.post(P + "/interactive/:sid/forget-summary", async (req, res) => {
+    const sid = String(req.params.sid);
+    const db = createDbClient();
+    try {
+      const r = await forgetSummary(db, sid);
+      if (!r.forgotten) return jsonError(res, 404, "no_summary");
+      res.json({ ok: true });
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
     }
   });
 

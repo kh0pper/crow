@@ -15,6 +15,9 @@
  *   sessions kind='perch-live' threads FILED to this project in shell_items
  *            (the filing, not the bot's home project), unarchived and not
  *            stopped (Perch can open only those), newest first, at most 10.
+ *   briefing "Where you left off" (R1.2 PR 4): perch/briefing.js's fragments,
+ *            each fact with the Board's own card link; null when
+ *            CROW_SESSION_BRIEFING=0 (read per request).
  */
 
 import { CROW_VOICE_BOT_ID } from "../../../../shared/voice-bot.js";
@@ -23,6 +26,7 @@ import { drawerHrefs } from "../../../board/card-link.js";
 import { needsYouCounts, needsYouItems } from "../board/needs-you.js";
 import { threadsByCard } from "../board.js";
 import { cardHref } from "../board/html.js";
+import { buildBriefing, briefingEnabled } from "../../../perch/briefing.js";
 
 export const SESSION_LIMIT = 10;
 const COORDINATOR = "role:coordinator";
@@ -137,32 +141,50 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
     needsYouCount = m.has(id) ? m.get(id) : null;
   }
   const items = await needsYouItems(db, project, { engine, ...opts, limit: 3 });
-  const ids = items.cards.map((c) => Number(c.id));
-  let threads = new Map();
-  let hrefs = new Map();
-  try {
-    threads = await threadsByCard(db, ids);
-    hrefs = await drawerHrefs(db, items.cards);
-  } catch (err) { console.warn("[project-home] card links failed:", err && err.message); }
-  // A card that opens its conversation carries the project like a session row does
-  // (Perch scopes to it) and is never prefetched (the visit writes the scope cookie).
-  const needsYou = items.cards.map((c) => {
-    const href = cardHref(c, threads, hrefs);
-    const conversation = href.startsWith("/dashboard/perch#");
-    return {
-      title: String(c.title || ""),
-      kind: c.kind,
-      conversation,
-      href: conversation ? `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${href.slice("/dashboard/perch#".length)}` : href,
-    };
-  });
+  const links = await cardLinks(db, project, items.cards);
+  const needsYou = items.cards.map((c) => ({ title: String(c.title || ""), kind: c.kind, ...links(c) }));
   const labels = await sessionLabels(db, items.waiting.map((w) => w.sid));
   for (const w of items.waiting) {
     needsYou.push({ title: labels.get(w.sid) || null, kind: null, waiting: true, href: `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${encodeURIComponent(w.sid)}` });
   }
 
   const sessions = await earlierSessions(db, id);
-  return { lead, bots, needsYou, needsYouCount, sessions };
+
+  let briefing = null;
+  if (briefingEnabled()) {
+    try {
+      briefing = await buildBriefing(db, project, opts);
+      const factLinks = await cardLinks(db, project, briefing.facts.map((f) => ({ id: f.cardId, project_id: id })));
+      briefing.facts = briefing.facts.map((f) => ({ ...f, ...factLinks({ id: f.cardId }) }));
+    } catch (err) {
+      console.warn("[project-home] briefing failed:", err && err.message);
+      briefing = { project: null, summaries: [], facts: [], memories: [], empty: true };
+    }
+  }
+  return { lead, bots, needsYou, needsYouCount, sessions, briefing };
+}
+
+/**
+ * The Board's card-link rule for this page: (card) -> { href, conversation }.
+ * A card that opens its conversation carries the project like a session row
+ * does (Perch scopes to it) and is never prefetched (the visit writes the
+ * scope cookie); otherwise its drawer (board/card-link.js).
+ */
+async function cardLinks(db, project, cards) {
+  let threads = new Map();
+  let hrefs = new Map();
+  try {
+    threads = await threadsByCard(db, cards.map((c) => Number(c.id)));
+    hrefs = await drawerHrefs(db, cards);
+  } catch (err) { console.warn("[project-home] card links failed:", err && err.message); }
+  return (c) => {
+    const href = cardHref(c, threads, hrefs);
+    const conversation = href.startsWith("/dashboard/perch#");
+    return {
+      conversation,
+      href: conversation ? `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${href.slice("/dashboard/perch#".length)}` : href,
+    };
+  };
 }
 
 /** SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) or an ISO string → Date, or null. */

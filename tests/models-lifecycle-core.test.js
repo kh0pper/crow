@@ -327,3 +327,68 @@ test("round 2 (b): a throw while choosing evicting/starting fails the job instea
   assert.match(j.error, /orchestrator unavailable/);
   assert.equal(deps.jobs.activeFor("crow-chat"), null);
 });
+
+test("DELETE without confirm returns the roles and the roles that follow them; a mock without roles still works", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { deps } = coreDeps();
+    const withRoles = { profiles: [], bots: [], roles: [{ roleId: "everyday", model: "crow-chat/chat-model", seeded: false }], reach: [{ roleId: "coordinator", via: "everyday" }] };
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => createLifecycleCore(deps),
+      providerBindingsFn: async () => withRoles,
+    }, async (base) => {
+      const fb = await (await fetch(`${base}/api/models/providers/crow-chat`, { headers: authHeaders(token), method: "DELETE" })).json();
+      assert.equal(fb.requiresConfirm, true);
+      assert.equal(fb.bindings.roles[0].roleId, "everyday");
+      assert.equal(fb.bindings.reach[0].roleId, "coordinator");
+    });
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => createLifecycleCore(deps),
+      providerBindingsFn: async () => ({ profiles: [], bots: [] }),
+    }, async (base) => {
+      const fb = await (await fetch(`${base}/api/models/providers/crow-chat`, { headers: authHeaders(token), method: "DELETE" })).json();
+      assert.equal(fb.requiresConfirm, true);
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("DELETE /api/models/:id without confirm gathers roles and reach from every provider serving the model", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { deps } = coreDeps();
+    const rows = [
+      { id: "cat-a", disabled: false, gpuPolicy: { runtime: "native", catalogId: "cat-model", owner: "me" } },
+      { id: "cat-a-alt", disabled: false, gpuPolicy: { runtime: "native", catalogId: "cat-model" } },
+      { id: "cat-a-peer", disabled: false, gpuPolicy: { runtime: "native", catalogId: "cat-model", owner: "peer" } },
+      { id: "unrelated", disabled: false, gpuPolicy: { runtime: "native", catalogId: "other", owner: "me" } },
+    ];
+    const per = {
+      "cat-a": { profiles: [], bots: [], roles: [{ roleId: "everyday" }], reach: [{ roleId: "coordinator", via: "everyday" }] },
+      "cat-a-alt": { profiles: [], bots: [], roles: [{ roleId: "quick" }], reach: [{ roleId: "c-notes", label: "Notes", via: "quick" }] },
+      "cat-a-peer": { profiles: [], bots: [], roles: [{ roleId: "deep" }], reach: [{ roleId: "expert" }] },
+    };
+    const asked = [];
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => createLifecycleCore(deps),
+      ownInstanceIdFn: () => "me",
+      loadStateFn: () => ({ registry: { "cat-model": { file: "model.gguf" } } }),
+      listProvidersAllFn: async () => rows,
+      providerBindingsFn: async (db, id) => { asked.push(id); return per[id] || { profiles: [], bots: [] }; },
+    }, async (base) => {
+      const r = await fetch(`${base}/api/models/cat-model`, { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(r.status, 200);
+      const b = await r.json();
+      assert.equal(b.requiresConfirm, true);
+      assert.deepEqual(b.providers, ["cat-a", "cat-a-alt"]);
+      assert.deepEqual(asked, ["cat-a", "cat-a-alt"], "a peer's row is not asked");
+      assert.deepEqual(b.bindings.roles.map((x) => x.roleId), ["everyday", "quick"]);
+      assert.deepEqual(b.bindings.reach.map((x) => x.roleId), ["coordinator", "c-notes"]);
+      assert.equal(b.bindings.reach[1].label, "Notes");
+    });
+  } finally { await h.cleanup(); }
+});

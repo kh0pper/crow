@@ -10,7 +10,7 @@
 
 import { escapeHtml, section, formField, actionBar, docsUrl } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
-import { loadModelOptions } from "./data-queries.js";
+import { loadModelOptions, loadRoleRefs } from "./data-queries.js";
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
@@ -47,7 +47,7 @@ function hueOf(id) {
  * popover under the footer (inline on a phone) and carries every other
  * action the old table offered. Empty fields are left out, never dashed.
  */
-function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
+function botCardHtml(bt, { i, lang, req, now, providerRows, active, customDefs = {} }) {
   let def = {};
   try { def = JSON.parse(bt.definition || "{}") || {}; } catch { def = {}; }
   const id = String(bt.bot_id);
@@ -55,7 +55,7 @@ function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
   const name = bt.display_name || id;
   const board = boardState(bt);
   const modelKey = (def.models && def.models.default) || "";
-  const model = friendlyModel(modelKey, providerRows);
+  const model = friendlyModel(modelKey, providerRows, { lang, customDefs });
   const purpose = purposeLine(def, lang, board.state === "on");
   const ago = agoText(bt.updated_at, now, lang);
   const dot = !bt.enabled ? ["off", t("botbuilder.dotOff", lang)]
@@ -152,12 +152,13 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req, ki
   } catch { /* defensive */ }
   let providerRows = [];
   try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }
+  const { customDefs } = await loadRoleRefs(db, lang);
   const now = Date.now();
   const activeIds = new Set(sessions.filter((s) => s.status === "active" && Number(s.n) > 0).map((s) => s.bot_id));
   const voiceRow = bots.find((bt) => isVoiceBotId(String(bt.bot_id))) || null;
   const ordinary = bots.filter((bt) => bt !== voiceRow);
-  const cards = (voiceRow ? [voiceBotCardHtml(voiceRow, { lang, req, providerRows, kioskAvailable: !!kioskAvailable })] : [])
-    .concat(ordinary.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id) })));
+  const cards = (voiceRow ? [voiceBotCardHtml(voiceRow, { lang, req, providerRows, kioskAvailable: !!kioskAvailable, customDefs })] : [])
+    .concat(ordinary.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id), customDefs })));
   // The give dialog ships only when some bot can take a card. It sits
   // OUTSIDE the list section: the layout's .card animates a transform, which
   // would make it the containing block of the dialog's position:fixed.

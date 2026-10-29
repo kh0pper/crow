@@ -139,9 +139,11 @@ async function generateDynamicSections(db) {
       lines.push("");
     }
 
+    // Session summaries never ride the context block (it reaches any model,
+    // ungated by the summary recall rank: servers/memory/summary-recall.js).
     // User preferences (high importance)
     const { rows: prefs } = await db.execute(
-      "SELECT substr(content, 1, 200) as preview FROM memories WHERE category = 'preference' AND importance >= 8 ORDER BY updated_at DESC LIMIT 10"
+      "SELECT substr(content, 1, 200) as preview FROM memories WHERE (source IS NULL OR source NOT LIKE 'session-summary:%') AND category = 'preference' AND importance >= 8 ORDER BY updated_at DESC LIMIT 10"
     );
     if (prefs.length > 0) {
       lines.push("### Key Preferences");
@@ -163,7 +165,7 @@ async function generateDynamicSections(db) {
 
     // Recent important memories
     const { rows: recent } = await db.execute(
-      "SELECT substr(content, 1, 150) as preview, category, importance FROM memories WHERE importance >= 8 ORDER BY created_at DESC LIMIT 5"
+      "SELECT substr(content, 1, 150) as preview, category, importance FROM memories WHERE (source IS NULL OR source NOT LIKE 'session-summary:%') AND importance >= 8 ORDER BY created_at DESC LIMIT 5"
     );
     if (recent.length > 0) {
       lines.push("### Recent Important Memories");

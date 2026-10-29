@@ -18,6 +18,33 @@
  * ABSOLUTE RULE: no backticks inside the returned <script>.
  */
 import { tJs } from "../shared/i18n.js";
+import { CORE_ROLES, ROLE_LABEL_KEYS } from "../../../shared/model-roles.js";
+
+/**
+ * Client snippet shared by the delete confirms: ROLE_LABELS (core role id to its
+ * translated label) and roleNamesOf(bindings), the names of the roles that move
+ * (bound roles, then the ones that follow them; a custom role's own label, else
+ * its id). The caller renders them with textContent only. No backtick here: this
+ * text is emitted inside a template literal.
+ */
+export function roleNamesJs(lang) {
+  const labels = CORE_ROLES.map((r) => "'" + r.id + "': '" + tJs(ROLE_LABEL_KEYS[r.id], lang) + "'").join(", ");
+  return `var ROLE_LABELS = { ${labels} };
+        function roleNamesOf(b) {
+          var out = [];
+          var rows = ((b && b.roles) || []).concat((b && b.reach) || []);
+          rows.forEach(function (r) {
+            if (!r || typeof r.roleId !== "string") return;
+            var name = Object.prototype.hasOwnProperty.call(ROLE_LABELS, r.roleId) ? ROLE_LABELS[r.roleId]
+              : (typeof r.label === "string" && r.label ? r.label : r.roleId);
+            if (out.indexOf(name) < 0) out.push(name);
+          });
+          return out;
+        }
+        function rolesLine(tpl, names) {
+          return String(tpl).split("{roles}").join(names.join(", "));
+        }`;
+}
 
 export function dialogClientJS(lang) {
   return `

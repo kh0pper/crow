@@ -151,6 +151,14 @@ import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
+import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
+import { applyBriefing, briefingEnabled, briefingPromptFile, removeBriefingPromptFile, sessionBriefing, recordBriefing, reconcileBriefing, pruneBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
+
+/** The privacy rank of the model a child will run on (unknown: the cloud). */
+async function defaultRankModel(key) {
+  const db = createDbClient();
+  try { return await targetRankOf(db, key); } finally { try { db.close(); } catch { /* closed */ } }
+}
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
@@ -693,6 +701,15 @@ export function createInteractiveEngine({
   // the process singleton turns it on (getInteractiveEngine); test engines
   // never watch a browser.
   browserWatch = false,
+  // R1.2 PR 4: the session summary job, run fire-and-forget after an idle
+  // hibernate and on close. Only the process singleton turns it on (it passes
+  // SESSION_SUMMARIZER); test engines inject a stub or run without one.
+  summarize = null,
+  // R1.2 PR 4: the privacy rank (briefing.js: this box 0, another box 1, the
+  // cloud 2; unknown counts as the cloud) of the model a child will run on.
+  // A briefing is applied only to a model at least as private as the one it
+  // was built for. A seam for tests; the default reads the providers.
+  rankModel = defaultRankModel,
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
@@ -823,6 +840,19 @@ export function createInteractiveEngine({
       /** Operator-set name, persisted on the row. NULL means "no name", and
        *  every render falls back to the short session id. */
       label: null,
+      /** R1.2 PR 4: the project briefing block (spawn() sets it), or null,
+       *  and the privacy rank of the model it was built for (null: this box). */
+      briefing: null,
+      briefingRank: null,
+      /** The thread ids whose summaries the briefing quotes (briefing_refs). */
+      briefingRefs: [],
+      /** True once the briefing is on the row: from then on the DB alone
+       *  decides (a Forget may have stripped it to nothing). */
+      briefingRecorded: false,
+      /** What the last child started in this process actually received:
+       *  the block, or null (none, flag off, or withheld for rank).
+       *  undefined until a child starts here. */
+      briefingDelivered: undefined,
       /** Open-anywhere B4: the session's working directory. NULL until the
        *  first startChild resolves it (world.cwd), or an operator chooses one
        *  via spawn({cwd}) / control({cwd}). It is pi's process cwd, the dir
@@ -2569,6 +2599,39 @@ export function createInteractiveEngine({
       slog("resume transcript missing — waking fresh (" + resume + ")");
       resume = null;
     }
+    // R1.2 PR 4: the project briefing rides as a marked section appended to
+    // the system prompt (briefing.js applyBriefing), never the operator's
+    // message. The DB row (bot_sessions.briefing / .briefing_rank) is the
+    // source of truth: on every spawn and wake, just before the child starts,
+    // the gateway-owned <CROW_HOME>/perch-briefings/<bot>/<sid>.system-prompt.md
+    // (outside the bot's world tree, written atomically, never through a
+    // symlink) is written FRESH from it, so an edit on disk never survives. A first spawn has no
+    // row yet and uses the route's text (spawn() then records it). The flag is
+    // read per use: off means no session gets one. Any failure starts the
+    // child without it.
+    s.briefingDelivered = null;
+    if (briefingEnabled(env)) {
+      try {
+        const bdb = createDbClient();
+        let row = null;
+        try { row = await sessionBriefing(bdb, s.threadId); } finally { try { bdb.close(); } catch { /* closed */ } }
+        if (row) { s.briefing = row.text; s.briefingRank = row.rank; }
+        else if (s.briefingRecorded) { s.briefing = null; s.briefingRank = null; } // stripped by a Forget
+        if (s.briefing) {
+          // Never to a model less private than the one it was built for (a
+          // later model switch, or a restart onto another provider).
+          const rank = await rankModel(prep.resolved && prep.resolved.key);
+          if (rank <= (s.briefingRank ?? RANK_HERE)) {
+            const file = briefingPromptFile(crowHome, s.botId, s.sessionId);
+            prep.piRpcOpts = applyBriefing(prep.piRpcOpts, s.briefing, { file });
+            s.briefingDelivered = s.briefing;
+          } else slog("briefing withheld: this model is less private than the one it was built for");
+        }
+      } catch (e) {
+        // A code only (bad_id, unsafe_directory, unsafe_destination), never content.
+        slog("briefing skipped: " + (e && typeof e.code === "string" ? e.code : "error"));
+      }
+    }
     const pi = new S.PiRpc(Object.assign({}, prep.piRpcOpts, {
       piSessionId: resume,
       // Open-anywhere B3/B4: pi's process cwd is the operator's chosen dir.
@@ -3488,7 +3551,7 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null }) {
+  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null, briefing = null, briefingRank = null, briefingRefs = [] }) {
     if (!botId) throw engineError("bad_request");
     // Artifacts (untrusted rounds, spec §7.3): a session that must start
     // NARROWED. A JSON array of tool ids to disable — the same contract as
@@ -3515,6 +3578,20 @@ export function createInteractiveEngine({
     // synchronous claim: two callers racing THIS process still need the
     // in-memory exclusion below, which no await-laden pre-check can provide.
     if (cid != null) await checkCardFree(cid);
+    // R1.2 PR 4: a Forget that ran after the route built the briefing: drop
+    // its summary before the child ever sees it (reconcileBriefing after the
+    // record covers a Forget that lands while the child starts). Done here,
+    // ahead of the synchronous block below, which must not await.
+    const brief = { text: typeof briefing === "string" && briefing.trim() ? briefing : null, refs: Array.isArray(briefingRefs) ? briefingRefs.map(String) : [] };
+    if (brief.text && brief.refs.length) {
+      const pdb = createDbClient();
+      try {
+        const pruned = await pruneBriefing(pdb, brief.text, brief.refs);
+        brief.text = pruned.text || null;
+        brief.refs = pruned.refs;
+      } catch { brief.text = null; brief.refs = []; } // unsure: no briefing at all
+      finally { try { pdb.close(); } catch { /* closed */ } }
+    }
     // ---- one synchronous block: gates + reservation + card claim, no await
     // between any of them (spec §5.1 — the P1 F3 TOCTOU class, extended to
     // the card claim) ----
@@ -3526,6 +3603,11 @@ export function createInteractiveEngine({
     // hard and throws bad_cwd on a non-directory; the route maps that to 400).
     // NULL = no explicit choice — the world builder keeps its own resolution.
     s.cwd = cwd || null;
+    // R1.2 PR 4: the briefing text (briefing.js briefingText), built by the
+    // spawn route from the DB; startChild keeps it in the session's files.
+    s.briefing = brief.text;
+    s.briefingRank = Number.isInteger(briefingRank) ? briefingRank : null;
+    s.briefingRefs = brief.refs;
     // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
     // after — reserveWithEviction's eviction path awaits the victim's
     // hibernate() before this call resumes, and a concurrent second caller's
@@ -3566,6 +3648,20 @@ export function createInteractiveEngine({
     }
     try {
       await startChild(S, s);
+      // R1.2 PR 4: the row now exists; it becomes the briefing's source of truth.
+      if (s.briefing) {
+        const bdb = createDbClient();
+        try {
+          s.briefingRecorded = await recordBriefing(bdb, s.threadId, s.briefing, s.briefingRank, s.briefingRefs);
+          // Reconcile with a Forget that ran meanwhile (it could not see this row yet).
+          if (s.briefingRecorded && await reconcileBriefing(bdb, s.threadId)) {
+            const now = await sessionBriefing(bdb, s.threadId);
+            s.briefing = now ? now.text : null;
+          }
+        }
+        catch { sessionLog(s)("briefing could not be recorded; a wake will start without it"); }
+        finally { try { bdb.close(); } catch { /* closed */ } }
+      }
     } catch (e) {
       sessions.delete(s.sessionId);                  // release the reservation
       if (cid != null) releaseCard(cid, s.sessionId); // …and the card claim
@@ -3835,7 +3931,7 @@ export function createInteractiveEngine({
     // previously saw nothing at all. Narrate the moments they wait on.
     emit(s, { type: "log", text: "cycling: stopping the child and rebuilding its world (spawn-bound settings apply now)" });
     try {
-      await hibernate(s);                              // no-op if already hibernating
+      await hibernate(s, { summary: false });          // no-op if already hibernating
       // ---- one synchronous block: reservation, no await between check+flip
       const pending = reserveWithEviction(S, s);
       // -----------------------------------------------------------------
@@ -4065,7 +4161,7 @@ export function createInteractiveEngine({
       await writeCwd(s);
       applied.cwd = dir;
       bindsAtWake.cwd = dir;
-      if (s.pi) await hibernate(s);
+      if (s.pi) await hibernate(s, { summary: false });
       emit(s, { type: "log", text: "working directory → " + dir + " — resumes there on the next message" });
     }
 
@@ -4374,6 +4470,14 @@ export function createInteractiveEngine({
         args: [stamp, id],
       });
       if (!res || res.rowsAffected === 0) throw engineError("no_such_session");
+      // R1.2 PR 4: an archived session's gateway-owned system prompt copy
+      // goes (the row keeps the block; a wake writes the file fresh).
+      if (archived) {
+        try {
+          const { rows } = await db.execute({ sql: "SELECT DISTINCT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live'", args: [id] });
+          for (const r of rows) removeBriefingPromptFile(crowHome, r.bot_id, id);
+        } catch { /* best effort */ }
+      }
       return { ok: true, archived: !!archived, archivedAt: stamp };
     } finally {
       try { db.close(); } catch { /* already closed */ }
@@ -4405,6 +4509,8 @@ export function createInteractiveEngine({
     emit(s, stateEvent(s));
     // Live browser tile: the operator stopped it, so the turn keeps its shot.
     await finishBrowser(s, turn, { allowShot: true });
+    summarizeLater(s, "close");                      // R1.2 PR 4, fire-and-forget
+    removeBriefingPromptFile(crowHome, s.botId, s.sessionId); // R1.2 PR 4: the row keeps the block
     return { ok: true };
   }
 
@@ -4564,8 +4670,35 @@ export function createInteractiveEngine({
     return out;
   }
 
-  /** Hibernate: close the child, keep the row. */
-  async function hibernate(s) {
+  /**
+   * R1.2 PR 4: queue the session summary job for this session, fire-and-
+   * forget. It starts on a later macrotask with its own DB client, so neither
+   * hibernate() nor stop() ever waits on it or sees its failure. The job reads
+   * CROW_SESSION_SUMMARIES itself, per use.
+   */
+  function summarizeLater(s, trigger) {
+    if (typeof summarize !== "function") return;
+    if (!summariesEnabled(env)) return;              // flag off: not even a DB client
+    const threadId = s.threadId;
+    const sessionModelKey = servingModel(s);
+    const onTitle = (title) => {
+      if (s.label) return;                           // an operator rename wins
+      s.label = normalizeLabel(title);
+      emit(s, stateEvent(s));
+    };
+    setImmediate(() => {
+      let db = null;
+      Promise.resolve()
+        .then(() => { db = createDbClient(); return summarize(db, threadId, { trigger, sessionModelKey, onTitle, env }); })
+        .catch(() => { log(threadId + ": [summary] job failed"); })
+        .finally(() => { if (db) { try { db.close(); } catch { /* already closed */ } } });
+    });
+  }
+
+  /** Hibernate: close the child, keep the row. `summary: false` for the
+   *  close-then-respawn callers (cycle, a cwd change): the session is not
+   *  going idle, so it is not summarised. */
+  async function hibernate(s, { summary = true } = {}) {
     // Track 3 Task 7 (spec I5): an assertion-style guard — hibernate must
     // NEVER destroy a session with a pending ask_user card. cycle() refuses
     // first (cycle_busy) and safe-victim eviction never selects a pendingUi
@@ -4590,6 +4723,7 @@ export function createInteractiveEngine({
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
     emit(s, stateEvent(s));
     await finishBrowser(s, null);                    // live browser tile: release on close
+    if (summary) summarizeLater(s, "idle");
   }
 
   /**
@@ -4752,6 +4886,20 @@ export function createInteractiveEngine({
     get,
     list,
     stopAll,
+    /** R1.2 PR 4: the briefing block a resident session was started with, or null. */
+    briefingOf: (sessionId) => {
+      const s = sessions.get(String(sessionId));
+      if (!s) return null;
+      return s.briefing || null;
+    },
+    /** R1.2 PR 4: what the session's last child started in this process
+     *  actually received (the block, or null when none was applied: the flag
+     *  off, withheld for rank, a refused path). undefined when no child of
+     *  this session has started in this process (the caller reads the DB). */
+    briefingDelivered: (sessionId) => {
+      const s = sessions.get(String(sessionId));
+      return s ? s.briefingDelivered : undefined;
+    },
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,
     /** Artifacts chat-first pointer frames (spec v1.6 D25) — resident sessions
@@ -4827,8 +4975,12 @@ let singleton = null;
  *   `createIfMissing:false`: a gateway that never ran an interactive session
  *   must not mint an engine (and a lease file) on its way out.
  */
+/** The summariser the process singleton's hibernate and close hooks call:
+ *  exactly the exported entry point the pi-lab benchmark drives too. */
+export const SESSION_SUMMARIZER = summarizeSessionByThread;
+
 export function getInteractiveEngine({ createIfMissing = true } = {}) {
-  if (!singleton && createIfMissing) singleton = createInteractiveEngine({ browserWatch: true });
+  if (!singleton && createIfMissing) singleton = createInteractiveEngine({ browserWatch: true, summarize: SESSION_SUMMARIZER });
   return singleton;
 }
 

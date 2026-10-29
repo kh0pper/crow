@@ -22,6 +22,10 @@ import {
 } from "./embeddings.js";
 import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
+import { insertMemory, updateMemory, deleteMemory } from "./memory-write.js";
+import { isSummaryMemorySource, SUMMARY_SOURCE_RESERVED } from "../shared/summary-source.js";
+import { summaryRecallClause, askerRank } from "./summary-recall.js";
+import { actorFromEnv, resolveCallActor } from "../research/actor.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
@@ -35,6 +39,25 @@ export function createMemoryServer(dbPath, options = {}) {
   // Optional sync manager for instance-to-instance replication.
   // When set, mutations emit change entries to connected instances.
   const syncManager = options.syncManager || null;
+
+  // Session-summary recall gate (spec §9.11, summary-recall.js): who is asking,
+  // and how private its model is. Only the BUILD-TIME actor can raise an
+  // asker above the cloud: a bot named in the process env, which the gateway
+  // writes into each bot's stdio block (scripts/pi-bots/actor-env.mjs). A
+  // per-call claim (an x-crow-actor header, a crow/actor _meta) is unsigned
+  // here, so it may only narrow: a call whose actor differs from a bot base,
+  // and every caller of a gateway mount (no bot in env), ranks as the cloud.
+  const baseActor = options.actor || actorFromEnv(process.env);
+  const actorThread = options.actorThread !== undefined ? options.actorThread : (process.env.CROW_ACTOR_THREAD || null);
+  const rankAsker = options.summaryAskerRank || ((actor) => askerRank(db, actor, { threadId: actorThread }));
+  async function summaryGate(extra, alias = "m.") {
+    let rank = 2;
+    try {
+      const call = resolveCallActor(baseActor, extra);
+      if (baseActor && baseActor.kind === "bot" && call && call.kind === "bot" && call.id === baseActor.id) rank = await rankAsker(baseActor, extra);
+    } catch { rank = 2; }
+    return summaryRecallClause(rank, alias);
+  }
 
   // --- Phase 4: BLOB-based semantic memory ---
   // Cache provider-health check so we don't probe on every write. Keyed on the
@@ -94,21 +117,19 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Project ID for project-scoped memories"),
     },
     async ({ content, category, context, tags, source, importance, instance_id, project_id }) => {
-      const result = await db.execute({
-        sql: "INSERT INTO memories (content, category, context, tags, source, importance, instance_id, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        args: [content, category, context ?? null, tags ?? null, source ?? null, importance, instance_id ?? null, project_id ?? null],
-      });
-      const memoryId = Number(result.lastInsertRowid);
-
-      // Store embedding asynchronously (non-blocking)
-      storeEmbedding(memoryId, content);
-
-      // Emit sync entry (non-blocking)
-      emitOrQueue(syncManager, db, "memories", "insert", {
-        id: memoryId, content, category, context: context ?? null,
-        tags: tags ?? null, source: source ?? null, importance,
-        instance_id: instance_id ?? null, project_id: project_id ?? null,
-      }).catch(() => {});
+      // The session-summary source is reserved for the summary job.
+      if (isSummaryMemorySource(source)) {
+        return { content: [{ type: "text", text: "Refused: the source prefix \"session-summary:\" is reserved for session summaries. Use another source." }], isError: true };
+      }
+      // One insert path (memory-write.js), shared with the gateway's session
+      // summary job: the INSERT, the async embedding and the sync emit.
+      // No project_uuid here on purpose: deferred until every paired instance
+      // runs migration 0020. A memory carrying the key is rejected by a peer
+      // whose memories table lacks the column, and that entry is never
+      // retried (the peer's checkpoint moves past it).
+      const memoryId = await insertMemory(db, {
+        content, category, context, tags, source, importance, instance_id, project_id,
+      }, { syncManager, onStored: storeEmbedding });
 
       return {
         content: [
@@ -133,7 +154,8 @@ export function createMemoryServer(dbPath, options = {}) {
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ query, category, min_importance, limit, semantic, instance_id, project_id }) => {
+    async ({ query, category, min_importance, limit, semantic, instance_id, project_id }, extra) => {
+      const gate = await summaryGate(extra, "m.");
       // Try semantic search first if requested and available
       let semanticRows = [];
 
@@ -153,7 +175,7 @@ export function createMemoryServer(dbPath, options = {}) {
               const ids = topCandidates.map((c) => c.memory_id);
               if (ids.length > 0) {
                 const placeholders = ids.map(() => "?").join(",");
-                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})`;
+                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})${await summaryGate(extra, "")}`;
                 const fetchArgs = [...ids];
                 if (category) { fetchSql += " AND category = ?"; fetchArgs.push(category); }
                 if (min_importance) { fetchSql += " AND importance >= ?"; fetchArgs.push(min_importance); }
@@ -210,6 +232,7 @@ export function createMemoryServer(dbPath, options = {}) {
           sql += " AND m.project_id = ?";
           params.push(project_id);
         }
+        sql += gate;
 
         sql += " ORDER BY rank LIMIT ?";
         params.push(limit);
@@ -258,7 +281,7 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter by project ID"),
       include_maker_lab: z.boolean().optional().describe("When true, include memories tagged source='maker-lab'. Default false."),
     },
-    async ({ context, limit, instance_id, project_id, include_maker_lab }) => {
+    async ({ context, limit, instance_id, project_id, include_maker_lab }, extra) => {
       const contextWords = context.split(/\s+/).filter((w) => w.length > 2).slice(0, 10).join(" ");
       const safeQuery = sanitizeFtsQuery(contextWords);
 
@@ -278,6 +301,7 @@ export function createMemoryServer(dbPath, options = {}) {
       if (!include_maker_lab) {
         sql += " AND (m.source IS NULL OR m.source != 'maker-lab')";
       }
+      sql += await summaryGate(extra, "m.");
 
       sql += " ORDER BY rank LIMIT ?";
       params.push(limit);
@@ -311,7 +335,7 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter research sources/notes by project ID"),
       min_importance: z.number().min(1).max(10).optional().describe("Min importance for memories"),
     },
-    async ({ topic, per_source_limit, include_sources, project_id, min_importance }) => {
+    async ({ topic, per_source_limit, include_sources, project_id, min_importance }, extra) => {
       const safeQuery = sanitizeFtsQuery(topic);
       const safeLike = escapeLikePattern(topic);
       const sources = include_sources || ["memories", "research_sources", "research_notes", "blog_posts"];
@@ -331,6 +355,7 @@ export function createMemoryServer(dbPath, options = {}) {
             const params = [safeQuery];
             if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
             if (min_importance) { sql += " AND m.importance >= ?"; params.push(min_importance); }
+            sql += await summaryGate(extra, "m.");
             sql += " ORDER BY rank LIMIT ?";
             params.push(per_source_limit);
 
@@ -473,9 +498,10 @@ export function createMemoryServer(dbPath, options = {}) {
     {
       id: z.number().describe("Memory ID"),
     },
-    async ({ id }) => {
+    async ({ id }, extra) => {
+      // A summary the asker may not see answers exactly like a missing id.
       const { rows } = await db.execute({
-        sql: "SELECT id, content, category, importance, tags, source, created_at, updated_at, accessed_at, access_count, context, instance_id, project_id FROM memories WHERE id = ?",
+        sql: "SELECT id, content, category, importance, tags, source, created_at, updated_at, accessed_at, access_count, context, instance_id, project_id FROM memories WHERE id = ?" + await summaryGate(extra, ""),
         args: [id],
       });
       if (rows.length === 0) {
@@ -514,8 +540,8 @@ export function createMemoryServer(dbPath, options = {}) {
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ category, tag, min_importance, sort_by, limit, instance_id, project_id }) => {
-      let sql = "SELECT * FROM memories WHERE 1=1";
+    async ({ category, tag, min_importance, sort_by, limit, instance_id, project_id }, extra) => {
+      let sql = "SELECT * FROM memories WHERE 1=1" + await summaryGate(extra, "");
       const params = [];
 
       if (category) {
@@ -581,34 +607,17 @@ export function createMemoryServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
       }
 
-      const updates = [];
-      const params = [];
-      if (content !== undefined) { updates.push("content = ?"); params.push(content); }
-      if (category !== undefined) { updates.push("category = ?"); params.push(category); }
-      if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
-      if (importance !== undefined) { updates.push("importance = ?"); params.push(importance); }
-      if (context !== undefined) { updates.push("context = ?"); params.push(context); }
-
-      if (updates.length === 0) {
+      // A session summary is written only by the summary job on its origin
+      // instance (single-writer): never edited here, on any instance.
+      if (isSummaryMemorySource(rows[0].source)) {
+        return { content: [{ type: "text", text: `Refused: memory #${id}: ${SUMMARY_SOURCE_RESERVED}` }], isError: true };
+      }
+      // One update path (memory-write.js): the UPDATE, the re-embed and the sync emit.
+      const changed = await updateMemory(db, id, { content, category, tags, importance, context }, {
+        syncManager, source: rows[0].source ?? null, onContent: storeEmbedding,
+      });
+      if (!changed) {
         return { content: [{ type: "text", text: "No updates provided." }] };
-      }
-
-      updates.push("updated_at = datetime('now')");
-      params.push(id);
-
-      await db.execute({ sql: `UPDATE memories SET ${updates.join(", ")} WHERE id = ?`, args: params });
-
-      // Re-embed if content changed (non-blocking)
-      if (content !== undefined) {
-        storeEmbedding(id, content);
-      }
-
-      // Emit sync entry
-      {
-        const updated = { id, content, category, tags, importance, context, source: rows[0].source ?? null };
-        // Remove undefined fields
-        for (const k of Object.keys(updated)) { if (updated[k] === undefined) delete updated[k]; }
-        emitOrQueue(syncManager, db, "memories", "update", updated).catch(() => {});
       }
 
       return { content: [{ type: "text", text: `Memory #${id} updated.` }] };
@@ -691,10 +700,7 @@ export function createMemoryServer(dbPath, options = {}) {
         }
       }
 
-      await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
-
-      // Emit sync entry
-      emitOrQueue(syncManager, db, "memories", "delete", { id, source: memory.source ?? null }).catch(() => {});
+      await deleteMemory(db, id, { syncManager });
 
       return { content: [{ type: "text", text: `Memory #${id} deleted.` }] };
     }
@@ -704,11 +710,12 @@ export function createMemoryServer(dbPath, options = {}) {
     "crow_memory_stats",
     "Get statistics about stored memories - counts by category, total count, importance distribution.",
     {},
-    async () => {
+    async (_args, extra) => {
       const total = (await db.execute("SELECT COUNT(*) as count FROM memories")).rows[0];
       const byCategory = (await db.execute("SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC")).rows;
       const byImportance = (await db.execute("SELECT importance, COUNT(*) as count FROM memories GROUP BY importance ORDER BY importance DESC")).rows;
-      const recent = (await db.execute("SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories ORDER BY created_at DESC LIMIT 5")).rows;
+      // Counts carry no content; the previews are gated like every recall.
+      const recent = (await db.execute(`SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories WHERE 1=1${await summaryGate(extra, "")} ORDER BY created_at DESC LIMIT 5`)).rows;
 
       let text = `Memory Statistics:\n`;
       text += `  Total memories: ${total.count}\n\n`;
@@ -730,8 +737,10 @@ export function createMemoryServer(dbPath, options = {}) {
       low_importance_threshold: z.number().default(3).describe("Flag old low-importance memories"),
       dry_run: z.boolean().default(true).describe("If true, only report — don't delete or update anything"),
     },
-    async ({ stale_days, low_importance_threshold, dry_run }) => {
+    async ({ stale_days, low_importance_threshold, dry_run }, extra) => {
       const staleDaysModifier = `-${stale_days} days`;
+      // The report quotes content: summaries the asker may not see are left out.
+      const gate = await summaryGate(extra, "");
 
       // 1. Stale memories: not accessed in N days AND importance <= threshold
       const { rows: staleRows } = await db.execute({
@@ -739,7 +748,7 @@ export function createMemoryServer(dbPath, options = {}) {
               FROM memories
               WHERE ((accessed_at IS NULL AND created_at < datetime('now', ?))
                  OR (accessed_at < datetime('now', ?)))
-              AND importance <= ?
+              AND importance <= ?${gate}
               ORDER BY importance ASC, accessed_at ASC`,
         args: [staleDaysModifier, staleDaysModifier, low_importance_threshold],
       });
@@ -776,7 +785,7 @@ export function createMemoryServer(dbPath, options = {}) {
       // Get recent memories grouped by category for duplicate detection
       const { rows: recentMemories } = await db.execute({
         sql: `SELECT id, category, content, importance, created_at
-              FROM memories ORDER BY created_at DESC LIMIT 1000`,
+              FROM memories WHERE 1=1${gate} ORDER BY created_at DESC LIMIT 1000`,
       });
 
       const byCategory = {};

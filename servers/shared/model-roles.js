@@ -21,6 +21,7 @@ import { isIP } from "node:net";
 import { EMBED_TASKS, RERANK_TASKS } from "./provider-task.js";
 import { servingClassOf } from "../gateway/models/serving-class.js";
 import { doorKindOf, isDoorUrl } from "../gateway/models/door-resolve.js";
+import { presetHostFor } from "./provider-recommendations.js";
 
 export const MAX_CHAIN_DEPTH = 4;
 const MAX_VISITS = 16;
@@ -137,7 +138,16 @@ function defaultResolveDoor(row, providers) {
  *               unparseable baseUrl, a door whose upstream cannot be named, or
  *               more than MAX_DOOR_HOPS hops.
  * The result is the worst hop: cloud, else unknown, else local. isCloudKey
- * treats "unknown" as cloud. `host === "cloud"` on a row is never consulted.
+ * treats "unknown" as cloud.
+ *
+ * `localMarks` ({[rowId]: {host}}, provider-local-marks.js: the operator's
+ * "This is local", instance scope) turns an "unknown" DNS-name hop local, but
+ * only while the row's current hostname equals the recorded `host` (a peer
+ * rewriting the base URL lapses it), the row's stored `host` is not
+ * "cloud", and its base URL is not on a known cloud preset's hostname (presetHostFor). A mark never touches an IP-literal hop: a public, reserved or
+ * documentation literal stays what its address says. Without marks,
+ * `host === "cloud"` on a row is never consulted. The classifier and safety
+ * never pass marks.
  */
 const MAX_DOOR_HOPS = 3;
 const PUBLIC_CLASSES = new Set(["public4", "public6"]);
@@ -149,7 +159,16 @@ function hopVerdict(h, own, localSuffixes) {
   return localSuffixes.some((sfx) => h.endsWith(sfx.toLowerCase())) ? "local" : "unknown";
 }
 
-export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs, localSuffixes = DEFAULT_LOCAL_SUFFIXES } = {}) {
+/** Does a current "This is local" mark cover this hop? */
+function markedLocal(row, h, localMarks) {
+  if (!localMarks || typeof localMarks !== "object" || isIP(h) || row?.host === "cloud") return false;
+  if (presetHostFor(row) !== null) return false; // a known cloud preset host (api.z.ai, ...) is never local
+  if (typeof row?.id !== "string" || !Object.hasOwn(localMarks, row.id)) return false;
+  const m = localMarks[row.id];
+  return !!m && typeof m.host === "string" && m.host === h;
+}
+
+export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
   const { provider, model } = splitKey(key);
   let row = providerById(providers, provider);
   if (!row || !model) return "unknown";
@@ -158,7 +177,8 @@ export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, 
   for (let hops = 0; hops <= MAX_DOOR_HOPS; hops++) {
     const h = hostnameOf(row.baseUrl);
     if (!h) return "unknown";
-    const v = hopVerdict(h, own, localSuffixes);
+    let v = hopVerdict(h, own, localSuffixes);
+    if (v === "unknown" && markedLocal(row, h, localMarks)) v = "local";
     if (v === "cloud") return "cloud";
     if (v === "unknown") sawUnknown = true;
     const up = resolveDoor(row, providers);
@@ -180,6 +200,19 @@ export function finalHopRow(key, { providers, resolveDoor = defaultResolveDoor }
   return null;
 }
 
+/** Every row a key's door walk visits, in order (the key's own row first, at most MAX_DOOR_HOPS + 1). */
+export function chainRows(key, { providers, resolveDoor = defaultResolveDoor } = {}) {
+  const out = [];
+  let row = providerById(providers, splitKey(key).provider);
+  for (let hops = 0; row && hops <= MAX_DOOR_HOPS; hops++) {
+    out.push(row);
+    const up = resolveDoor(row, providers);
+    if (up === row) break;
+    row = up;
+  }
+  return out;
+}
+
 /** The one cloud predicate (voice, phone, warnings): errs toward warning, so
  *  anything not proven local counts as cloud. */
 export function isCloudKey(key, opts) {
@@ -196,13 +229,18 @@ export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r)
  * (a name or literal that cannot be proven local OR public: 0.0.0.0, ::, NAT64
  * and other reserved or embedded literals), "missing" (no provider row, no model
  * half, or a role: ref - callers resolve a role first). localMarks is passed to
- * cloudStatus, which ignores it until marks exist.
+ * cloudStatus (a current mark makes a DNS-name hop local). A key whose door
+ * walk visits a row with stored `host === "cloud"` is "cloud" whatever its
+ * address (the owner's ruling for the Models page: the chip matches what voice
+ * and the phone call it). This only shapes the chip; cloudStatus and
+ * isCloudKey do not read `host`.
  */
 export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultResolveDoor, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
   if (isRoleRef(key)) return "missing";
   const { provider, model } = splitKey(key);
   const first = providerById(providers, provider);
   if (!first || !model) return "missing";
+  if (chainRows(key, { providers, resolveDoor }).some((r) => r.host === "cloud")) return "cloud";
   const own = ownAddrs || getOwnAddresses();
   const status = cloudStatus(key, { providers, resolveDoor, ownAddrs: own, localSuffixes, localMarks });
   if (status === "unknown") return "unproven";
@@ -271,16 +309,19 @@ export function parseBindingValue(raw) {
   return out;
 }
 
-const CUSTOM_CAPABILITIES = ["chat", "vision"];
+/** What a custom role may need. Never safety, voice, speech or a classifier: those stay core-only. */
+export const CUSTOM_CAPABILITIES = Object.freeze(["chat", "vision"]);
 
 function parseCustomDef(raw) {
   let v;
   try { v = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
   if (!v || typeof v !== "object" || Array.isArray(v) || !CUSTOM_CAPABILITIES.includes(v.capability)) return null;
-  // Spec 10-21 §3.2: a definition is {label, job, capability}; anything else is dropped.
+  // Spec 10-21 §3.2: a definition is {label, job, capability}, plus Phase 2's
+  // "may use big models" switch, kept only when it is boolean true; anything else is dropped.
   const def = { capability: v.capability };
   if (typeof v.label === "string") def.label = v.label;
   if (typeof v.job === "string") def.job = v.job;
+  if (v.allowHeavy === true) def.allowHeavy = true;
   return def;
 }
 

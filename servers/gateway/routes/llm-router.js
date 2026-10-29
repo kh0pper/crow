@@ -58,14 +58,16 @@ import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { requesterTag } from "../requester-tag.js";
-import { ReservedError } from "../box-reservation.js";
+import { ReservedError, readReservation } from "../box-reservation.js";
 import { ServingClassError } from "../models/serving-class.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { loadProviders } from "../../shared/providers.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
-import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, isDoorUrl, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { isForeignInstanceHost } from "../../shared/provider-host.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { providerDoorUrl } from "../models/door.js";
 import { createCloudDoor, CLOUD_DOOR_DEFAULTS } from "../models/cloud-door.js";
 import { validateLlmCloudToken } from "../local-token.js";
@@ -74,12 +76,12 @@ import { providerRowToObject } from "../../shared/provider-row.js";
 import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../shared/relative-dates.js";
 import { withTurnContext } from "../voice/context-echo.js";
 import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
-import { VOICE_ROUTE_DEFAULTS } from "../../shared/voice-route-defaults.js";
 import { resolveRole } from "../../shared/model-roles-store.js";
+import { resolveVoiceKeys, logRoleMiss, VOICE_RAW_KEYS } from "../../shared/voice-keys.js";
 import { isRoleRef } from "../../shared/model-roles.js";
 
-const FAST_KEY = process.env.COMPANION_FAST_MODEL || VOICE_ROUTE_DEFAULTS.fast;
-const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || VOICE_ROUTE_DEFAULTS.escalate;
+// The raw fast/escalate keys are computed once, in servers/shared/voice-keys.js.
+const { fast: FAST_KEY, escalate: ESC_KEY } = VOICE_RAW_KEYS;
 // Disable visible chain-of-thought on the fast voice route (set "0" to keep it).
 const FAST_DISABLE_THINKING = (process.env.COMPANION_FAST_DISABLE_THINKING || "1") !== "0";
 
@@ -426,40 +428,8 @@ export function chooseVoiceRoute(messages, { hasTools = false, actionIntent = fa
   return { route: "fast", reason: null, key: keys.fast };
 }
 
-const loggedRoleMisses = new Set();
-function logRoleMiss(what, r) {
-  const msg = `${what}: ${r?.reason || "unknown"}`;
-  if (loggedRoleMisses.has(msg)) return;
-  loggedRoleMisses.add(msg);
-  console.warn(`[llm-router] role ${msg}; using the consumer default`);
-}
-
-/**
- * The voice route's keys for THIS request. Per side: the env var (read now), else the CHOSEN role binding
- * (role:voice for fast, role:everyday for escalate; a seeded or missing binding is not chosen), else the raw
- * constant. A chosen role that resolves to nothing (its model not configured; voice has no fallback chain) falls
- * to the raw constant, never to another role's model. Never throws.
- * → { fast, escalate, fastRole, escalateRole } (a *Role is the role id when the role gave the key, else null)
- */
-export async function resolveVoiceKeys(dbc, { env = process.env, resolveRoleFn = resolveRole } = {}) {
-  const side = async (envName, roleId, raw) => {
-    const e = env?.[envName];
-    if (typeof e === "string" && e) return { key: e, role: null };
-    try {
-      const r = await resolveRoleFn(dbc, `role:${roleId}`, { need: "chat", chosenOnly: true });
-      if (r && typeof r.key === "string" && r.key) return { key: r.key, role: roleId };
-      if (r?.reason !== "not_chosen") logRoleMiss(roleId, r);
-    } catch (err) {
-      logRoleMiss(roleId, { reason: err?.message || String(err) });
-    }
-    return { key: raw, role: null };
-  };
-  const [f, e] = await Promise.all([
-    side("COMPANION_FAST_MODEL", "voice", FAST_KEY),
-    side("COMPANION_ESCALATION_MODEL", "everyday", ESC_KEY),
-  ]);
-  return { fast: f.key, escalate: e.key, fastRole: f.role, escalateRole: e.role };
-}
+// resolveVoiceKeys lives in the light servers/shared/voice-keys.js (Task 20, m9); re-exported here for its callers.
+export { resolveVoiceKeys };
 
 /**
  * A bot's fast voice model key: a raw key comes back unchanged; a `role:` ref resolves by the full walk (an
@@ -486,11 +456,105 @@ async function voiceKeysFor(deps) {
   } catch (err) {
     logRoleMiss("voice keys", { reason: err?.message || String(err) });
   }
-  return { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null };
+  // No keys read: nothing is proven local (the strict check, Task 20).
+  return { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true };
 }
 
 export const resolveVoiceKey = (key) => resolveKey(key);
+
+/** completeText's resolver: resolveKey's answer plus the row's `host` (the
+ *  owner check needs it), uncached. */
+async function resolveDirectKey(key) {
+  const [providerId, modelId] = splitKey(key);
+  const r = await resolveProviderConfig(db(), providerId, modelId);
+  return {
+    baseUrl: (r.baseUrl || r.base_url || "").replace(/\/$/, ""),
+    model: r.model || r.modelId || r.model_id || modelId,
+    apiKey: r.apiKey || r.api_key || "none",
+    host: r.host || "local",
+    providerType: r.provider_type || r.providerType || null,
+  };
+}
+
+/** Provider kinds that load a model on the first request (a lazy loader is a
+ *  model starter): completeText never sends them anything. */
+const LAZY_LOADER_RE = /ollama|llama[-_ ]?swap|lemonade|lm[-_ ]?studio|localai/i;
+/** Ollama's well-known port, for a row whose kind was never recorded. */
+const LAZY_LOADER_PORT_RE = /:11434(\/|$)/;
+export function isLazyLoader(up) {
+  return !!up && (LAZY_LOADER_RE.test(String(up.providerType || "")) || LAZY_LOADER_PORT_RE.test(String(up.baseUrl || "")));
+}
+
+/** completeText's skip: `reason` is a fixed code (box_reserved, lazy_loader, ...). */
+export class CompleteTextSkipped extends Error {
+  constructor(reason) { super("completeText: skipped, " + reason); this.reason = reason; }
+}
 export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
+
+/**
+ * One non-streaming completion for gateway-internal jobs (the session summary
+ * job): resolve a raw `provider/model` key the way the router does, POST one
+ * chat request, and return the reply text. Metered like a routed turn.
+ *
+ * It NEVER starts or warms a model: background jobs must not be a new
+ * on-demand model starter (box reservations and operator windows). A model
+ * that is not up fails the call, and the caller writes nothing.
+ * While a box reservation is held it sends nothing (CompleteTextSkipped
+ * "box_reserved"), and it never sends to a provider whose kind loads models
+ * lazily (ollama, llama-swap, lemonade and the like: "lazy_loader"); only a
+ * direct, already-running llama-server-style endpoint is used.
+ * Thinking tags in the reply are stripped. Throws on any failure; the error
+ * message never quotes the prompt or the reply.
+ *
+ * @param {{model:string, prompt:string, maxTokens?:number, timeoutMs?:number}} req
+ * @returns {Promise<string>}
+ */
+export async function completeText({ model, prompt, maxTokens = 400, timeoutMs = 60_000 } = {}, {
+  resolveKeyFn = resolveDirectKey, fetchFn = fetch, recordUsageFn = (event) => recordUsageEvent(db(), event),
+  ownInstanceIdFn = getOrCreateLocalInstanceId, reservationFn = () => readReservation(),
+} = {}) {
+  if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
+  // The box is spoken for (an operator window, a benchmark): a background
+  // job adds no load at all, even to a model that is already up.
+  // The reservation's allow list (isStartAllowed: crow-embed and the like) is
+  // ignored on purpose: it permits STARTING an exempt model, while this job is
+  // optional work that simply waits for the window to end.
+  let held = null;
+  try { held = reservationFn(); } catch { held = { corrupt: true }; } // unreadable: fail closed
+  if (held) throw new CompleteTextSkipped("box_reserved");
+  const up = await resolveKeyFn(model);
+  if (!up || !up.baseUrl) throw new Error("completeText: no base url for the model");
+  if (isLazyLoader(up)) throw new CompleteTextSkipped("lazy_loader");
+  // Never through a door: a /llm/v1 (or /llm/p/<id>/v1) base URL is another
+  // gateway's router, which can start a model on demand there and applies the
+  // companion heuristics; a row owned by another instance (a native-foreign
+  // row, or a co-hosted peer's) is that instance's to start, not ours.
+  if (isDoorUrl(up.baseUrl)) throw new Error("completeText: refused, the model is behind a door");
+  if (isForeignInstanceHost(up.host, ownInstanceIdFn)) throw new Error("completeText: refused, another instance's model");
+  const res = await fetchFn(`${up.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(up.apiKey) },
+    body: JSON.stringify({ model: up.model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, stream: false }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`completeText: upstream status ${res.status}`);
+  let json;
+  try { json = await res.json(); } catch { throw new Error("completeText: invalid upstream body"); }
+  try {
+    const usage = extractUsageFromOpenAIResponse(JSON.stringify(json));
+    if (usage) {
+      await recordUsageFn({
+        tenantId: resolveTenantId(), surface: "llm", providerId: splitKey(model)[0], providerType: null,
+        modelId: up.model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedTokens: usage.cachedTokens,
+      });
+    }
+  } catch { /* metering is best effort */ }
+  const content = json?.choices?.[0]?.message?.content;
+  const text = typeof content === "string"
+    ? content
+    : (Array.isArray(content) ? content.map((c) => (c && typeof c.text === "string" ? c.text : "")).join("") : "");
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^[\s\S]*?<\/think>/i, "").trim();
+}
 
 /** Is the fast model answering right now? A 2 s GET on its models list —
  *  same shape as the orchestrator's readiness probe, kept local so the
@@ -521,6 +585,8 @@ async function handleChat(req, res, deps) {
   let routeLabel = escalate ? `escalate(${escReason})` : "fast";
   // Only a role-resolved key is labelled, so an unedited instance logs exactly what it did before.
   const roleOf = () => (key === keys.fast ? keys.fastRole : key === keys.escalate ? keys.escalateRole : null);
+  // Not proven local (strict, Task 20): a key the resolver did not judge counts as cloud.
+  const cloudOf = () => (key === keys.fast ? keys.fastCloud !== false : key === keys.escalate ? keys.escalateCloud !== false : true);
 
   // Voice quality: the fast model (Qwen3.5-4B) emits its chain-of-thought as
   // PLAIN text ("Thinking Process: ...") that the avatar would speak aloud, so
@@ -606,7 +672,7 @@ async function handleChat(req, res, deps) {
   const url = `${up.baseUrl}/chat/completions`;
   const t0 = Date.now();
   const role = roleOf();
-  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model})${role ? ` role=${role}` : ""} stream=${!!body.stream} requester=${requester}`);
+  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model})${role ? ` role=${role}` : ""} cloud=${cloudOf()} stream=${!!body.stream} requester=${requester}`);
 
   let upstream;
   try {

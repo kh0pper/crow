@@ -36,6 +36,28 @@ export async function seedRolesAtBoot(createDb = createDbClient) {
   }
 }
 
+/**
+ * One-time "This is local" upgrade (servers/shared/provider-local-marks.js
+ * upgradeLocalMarks: guarded by its own setting, bounded DNS timeout). Called
+ * from the listen callback through setImmediate (boot/post-listen.js), so DNS
+ * never sits on the boot path. Skipped on a --no-auth gateway (it shares the
+ * primary's DB; the primary runs it). Own client, always closed. Never throws.
+ */
+export async function upgradeLocalMarksAtBoot({ noAuth = false, dbFactory = createDbClient, upgradeFn } = {}) {
+  if (noAuth) return { skipped: true };
+  let db;
+  try {
+    db = dbFactory();
+    const run = upgradeFn || (await import("../../shared/provider-local-marks.js")).upgradeLocalMarks;
+    return await run(db);
+  } catch (err) {
+    console.warn("[roles] Local marks upgrade skipped:", err?.message);
+    return { error: err?.message || String(err) };
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
 export async function mountAdminApi(app, deps) {
   const { dashboardAuth, noAuth } = deps;
 

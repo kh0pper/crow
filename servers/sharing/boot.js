@@ -33,6 +33,7 @@ import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { wireContactBinding } from "./contact-binding.js";
 import { crowIdMatchesKey } from "./identity.js";
 import { isPeerLineOverCap } from "./peer-manager.js";
+import { importedShareSource } from "../shared/summary-source.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
@@ -986,6 +987,9 @@ export async function initSharingRuntime(managers, helpers) {
         let importedItemId = 0;
 
         if (payload.share_type === "memory") {
+          // The session-summary source is reserved for this instance's summary
+          // job: a shared memory carrying it is renamed, never imported as one.
+          const importSource = importedShareSource(payload.payload.source || "");
           const result = await db.execute({
             sql: `INSERT INTO memories (content, category, importance, context, source, tags)
                   VALUES (?, ?, ?, ?, ?, ?)`,
@@ -994,7 +998,7 @@ export async function initSharingRuntime(managers, helpers) {
               payload.payload.category || "general",
               payload.payload.importance || 5,
               payload.payload.context || "",
-              payload.payload.source || "",
+              importSource,
               payload.payload.tags || "",
             ],
           });
@@ -1009,7 +1013,7 @@ export async function initSharingRuntime(managers, helpers) {
             category: payload.payload.category || "general",
             importance: payload.payload.importance || 5,
             context: payload.payload.context || "",
-            source: payload.payload.source || "",
+            source: importSource,
             tags: payload.payload.tags || "",
             instance_id: null,
             project_id: null,

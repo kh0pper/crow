@@ -158,6 +158,12 @@ export const INSTANCE_SCOPE_KEYS = {
   // Provider rows sync, so consent must not: each box agrees for itself.
   llm_cloud_door_rows:        "Cloud rows bots may use, pinned to address and key (per install)",
   llm_cloud_consent_salt:     "Salt for the cloud-consent key fingerprints (per install)",
+  // "This is local" marks (servers/shared/provider-local-marks.js). Provider
+  // rows sync, so a mark must not: each box vouches for itself, pinned to
+  // the hostname it saw. The upgrade and notice flags are per box too.
+  provider_local_marks:        "Provider rows marked local on this box, pinned to hostname (per install)",
+  provider_local_marks_seeded: "One-time local-marks upgrade done (per install)",
+  provider_local_notice_shown: "Not-proven-local notice sent or dismissed (per install)",
 };
 
 /**

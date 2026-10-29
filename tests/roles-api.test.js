@@ -288,8 +288,11 @@ test("tts default", async () => {
 
 test("custom reserved", async () => {
   await withServer(async (s) => {
+    // Task 18: POST /api/roles/custom is the custom-role create route, never a bind of a role named "custom".
     const r = await call(s, "POST", "/api/roles/custom", { body: { model: "local-chat/m1", previewHash: "x" } });
-    assert.equal(r.status, 404);
+    assert.equal(r.status, 400);
+    assert.equal(r.json.reason, "invalid_label");
+    assert.equal(await settingOf("model_role.custom"), null);
     const g = await call(s, "GET", "/api/roles/custom/picks");
     assert.equal(g.status, 404);
   });
