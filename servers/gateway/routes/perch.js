@@ -350,11 +350,11 @@ async function saveNarrowing(db, botId, threadId, json) {
  * deleted bot and answers like a missing session. Any other readdir errno is
  * a real failure.
  */
-function resolveTranscriptFile(dir, sessionId) {
+function resolveTranscriptFile(dir, sessionId, listings = null) {
   if (!dir) return { none: "no_dir" };
   let names;
   try {
-    names = readdirSync(dir);
+    names = listDir(dir, listings);
   } catch (err) {
     if (err && err.code === "ENOENT") return existsSync(dirname(dir)) ? { none: "no_turn_yet" } : { none: "no_dir" };
     return { error: err };
@@ -365,11 +365,30 @@ function resolveTranscriptFile(dir, sessionId) {
   return hits.length ? { file: join(dir, hits[hits.length - 1]) } : { none: "no_turn_yet" };
 }
 
-/** The transcript file's mtime as "YYYY-MM-DD HH:MM:SS" (UTC), or null on any miss. */
-function transcriptActivity(row) {
+/**
+ * readdirSync through an optional per-request cache (a Map dir -> names, or
+ * dir -> the error it threw), so /roost lists each sessions directory once
+ * however many of its sessions it reports. No cache: a plain read.
+ */
+function listDir(dir, listings) {
+  if (!listings) return readdirSync(dir);
+  if (!listings.has(dir)) {
+    try { listings.set(dir, { names: readdirSync(dir) }); }
+    catch (err) { listings.set(dir, { err }); }
+  }
+  const hit = listings.get(dir);
+  if (hit.err) throw hit.err;
+  return hit.names;
+}
+
+/**
+ * The transcript file's mtime as "YYYY-MM-DD HH:MM:SS" (UTC), or null on any
+ * miss. `listings`: the caller's per-request directory cache (listDir).
+ */
+function transcriptActivity(row, listings = null) {
   try {
     if (!row) return null;
-    const found = resolveTranscriptFile(row.pi_session_dir, row.pi_session_id);
+    const found = resolveTranscriptFile(row.pi_session_dir, row.pi_session_id, listings);
     if (!found.file) return null;
     return statSync(found.file).mtime.toISOString().slice(0, 19).replace("T", " ");
   } catch {
@@ -746,6 +765,8 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
       try { projectOfThread = await threadProjects(db, liveThreads, botIdOf, botProjectOf); }
       catch (err) { console.warn("[perch] could not read thread projects for /roost:", err?.message || err); }
 
+      // One readdir per sessions directory per /roost call (transcriptActivity).
+      const dirListings = new Map();
       const birds = rows.map((row) => {
         const def = parseDef(row);
         const attached = perchAttached(def);
@@ -770,7 +791,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             // When the conversation last moved: the pi transcript's mtime
             // (UTC "YYYY-MM-DD HH:MM:SS"), null when there is no file yet.
             // bot_sessions.updated_at would lie: renames bump it, messages don't.
-            lastActivityAt: transcriptActivity(dbRow),
+            lastActivityAt: transcriptActivity(dbRow, dirListings),
           };
         });
         // spec §3.2 priority fold: waiting-on-you > working > hibernating >

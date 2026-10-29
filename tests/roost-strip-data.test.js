@@ -23,6 +23,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import Database from "better-sqlite3";
 
 const dir = mkdtempSync(join(tmpdir(), "roost-strip-"));
@@ -110,6 +111,10 @@ before(async () => {
     utimesSync(f, mtime, mtime);
     c.prepare("UPDATE bot_sessions SET pi_session_dir=?, pi_session_id=?, updated_at=datetime('now') WHERE gateway_thread_id=?").run(sdir, uuid, thread);
   }
+  // asker-a shares asker-b's sessions directory (one bot world, one sessions/
+  // dir) with no file of its own: /roost must list that directory ONCE.
+  c.prepare("UPDATE bot_sessions SET pi_session_dir=?, pi_session_id=? WHERE gateway_thread_id=?")
+    .run(join(dir, "pisess-asker-b"), "uuid-asker-a-none", "asker-a");
   // arch-1: awake in the engine fixture above, but archived on its row.
   insSession.run("arch", "perch", "arch-1", "perch-live", "active", null, "run");
   c.prepare("UPDATE bot_sessions SET archived_at=?, label=? WHERE gateway_thread_id=?")
@@ -285,4 +290,25 @@ test("GET /roost's lastActivityAt is the transcript's mtime, not the row's updat
   assert.ok(Date.now() - new Date(fresh.lastActivityAt.replace(" ", "T") + "Z").getTime() < 60000, "a fresh transcript reads as now");
   assert.equal(old.lastActivityAt, "2026-01-05 10:00:00", "a session renamed today but silent since January is not today");
   assert.equal(none.lastActivityAt, null, "no transcript file: null");
+});
+
+test("GET /roost lists a sessions directory once, however many of its sessions it reports", async () => {
+  const fs = createRequire(import.meta.url)("node:fs");
+  const shared = join(dir, "pisess-asker-b");
+  const real = fs.readdirSync;
+  let reads = 0;
+  fs.readdirSync = function (p, ...rest) { if (String(p) === shared) reads++; return real.call(this, p, ...rest); };
+  syncBuiltinESMExports();
+  try {
+    const { body } = await getJson(base, "/roost");
+    const asker = Object.fromEntries(byId(body.birds).asker.sessions.map((s) => [s.sessionId, s]));
+    assert.equal(asker["asker-b"].lastActivityAt, "2026-01-05 10:00:00", "the shared listing still finds asker-b's file");
+    assert.equal(asker["asker-a"].lastActivityAt, null, "and finds none for asker-a");
+    assert.equal(reads, 1, "two sessions in one directory: one readdir");
+    await getJson(base, "/roost");
+    assert.equal(reads, 2, "the cache lives for one call: the next /roost reads the directory fresh");
+  } finally {
+    fs.readdirSync = real;
+    syncBuiltinESMExports();
+  }
 });
