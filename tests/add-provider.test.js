@@ -457,6 +457,7 @@ import { createDbClient } from "../servers/db.js";
 import { invalidateRoleContext } from "../servers/shared/model-roles-store.js";
 import { clearProviderTaskCache } from "../servers/shared/provider-task.js";
 import { planRecommended, combinedPreview, applyRecommended } from "../servers/gateway/ai/add-provider.js";
+import { checkStamp } from "../servers/shared/pick-checks.js";
 
 const PLAN_NOW = new Date("2026-10-28T12:00:00Z");
 const PLAN_OWN = new Set();
@@ -488,6 +489,11 @@ const OK_CHECKS = {
   },
 };
 
+// Stored checks carry the stamp of the row they ran against (F3).
+const PLAN_STAMP = checkStamp({ apiKey: PLAN_KEY, baseUrl: "https://api.openai.com/v1" });
+const stampChecks = (checks) => Object.fromEntries(Object.entries(checks).map(([pid, byModel]) => [pid,
+  Object.fromEntries(Object.entries(byModel).filter(([, c]) => c).map(([k, c]) => [k, pid === "cloud-a" ? { ...PLAN_STAMP, ...c } : c]))]));
+
 async function planDb({ localEmbed = true, checks = OK_CHECKS, everyday = true, smartChat = false } = {}) {
   const dir = mkTmp(joinPath(osTmp(), "plan-rec-"));
   const db = createDbClient(joinPath(dir, "crow.db"));
@@ -513,7 +519,7 @@ async function planDb({ localEmbed = true, checks = OK_CHECKS, everyday = true, 
   await ins("cloud-a", "https://api.openai.com/v1", CLOUD_MODELS, PLAN_KEY, "cloud");
   await raw("model_role.voice", JSON.stringify({ model: "local-voice/m2", seeded: true }));
   if (everyday) await raw("model_role.everyday", JSON.stringify({ model: "local-chat/m1" }));
-  if (checks) await raw("provider_pick_checks", JSON.stringify(checks));
+  if (checks) await raw("provider_pick_checks", JSON.stringify(stampChecks(checks)));
   if (smartChat) await raw("feature_flags", JSON.stringify({ smart_chat: true }));
   invalidateRoleContext();
   clearProviderTaskCache();
@@ -581,6 +587,30 @@ test("a pick the row does not list is not_listed; an embed pick needs an embed c
     // A chat check of the same id does not count for embed.
     assert.equal(whyOf(plan.skipped, "embed"), "not_tested");
   } finally { h.close(); }
+});
+
+test("the same id re-added with a new key, or at a new address, is not tested (F3)", async () => {
+  for (const [col, value] of [["api_key", "fixture-key-rotated"], ["base_url", "https://api.openai.com/v1/proxy"]]) {
+    const h = await planDb();
+    try {
+      assert.deepEqual((await planRecommended(h.db, "cloud-a", planOpts())).apply.map((x) => x.roleId), ["expert"]);
+      if (col === "api_key") {
+        await h.db.execute("DELETE FROM providers WHERE id = 'cloud-a'");
+        await h.db.execute({
+          sql: "INSERT INTO providers (id, base_url, api_key, host, models, disabled) VALUES ('cloud-a', ?, ?, 'cloud', ?, 0)",
+          args: ["https://api.openai.com/v1", value, JSON.stringify(CLOUD_MODELS)],
+        });
+      } else {
+        await h.db.execute({ sql: `UPDATE providers SET ${col} = ? WHERE id = 'cloud-a'`, args: [value] });
+      }
+      invalidateRoleContext();
+      const plan = await planRecommended(h.db, "cloud-a", planOpts());
+      assert.deepEqual(plan.apply, [], col);
+      assert.deepEqual(plan.optIn, [], col);
+      // (An address off the preset is not a preset row at all; the check stamp is covered in pick-probe.)
+      if (col === "api_key") for (const r of ["expert", "quick", "embed"]) assert.equal(whyOf(plan.skipped, r), "not_tested", `${col} ${r}`);
+    } finally { h.close(); }
+  }
 });
 
 test("a provider with no preset offers nothing", async () => {

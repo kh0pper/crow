@@ -69,7 +69,7 @@ export function recommendedKeysFor(roleId, { ctx, pickChecks, now, recOpts } = {
     const listed = listedIds(p);
     for (const e of recommendedFor(presetId, roleId, recOpts)) {
       if (e.id_verified !== true || !kindFitsRole(roleId, e.kind) || typeof e.model_id !== "string" || !listed.has(e.model_id)) continue;
-      if (checkIn(pickChecks, p.id, e.model_id, { kind, now, recOpts })?.ok) out.push(`${p.id}/${e.model_id}`);
+      if (checkIn(pickChecks, p.id, e.model_id, { kind, now, recOpts, row: p })?.ok) out.push(`${p.id}/${e.model_id}`);
     }
   }
   return out;

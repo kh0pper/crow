@@ -12,7 +12,7 @@ import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/pr
 import { candidatePick, presetForRow, entryKind, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { safeRequest, readJson } from "../models/safe-upstream.js";
-import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf, isProbeKind } from "../../shared/pick-checks.js";
+import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf, isProbeKind, checkStamp } from "../../shared/pick-checks.js";
 
 // The read side lives in pick-checks.js (no request path); re-exported here for existing callers.
 export { PICK_CHECKS_KEY, pickCheckOf };
@@ -126,9 +126,10 @@ async function runProbes(db, providerId, {
   if (done.size) {
     const all = await readPickChecks(db);
     const mine = { ...(all[providerId] || {}) };
+    const { fp, url } = checkStamp(row); // a fingerprint, never the key
     for (const p of picks) {
       const r = done.get(`${p.kind}:${p.modelId}`);
-      mine[`${p.modelId}|${p.kind}`] = { ok: r.ok, code: r.code, at };
+      mine[`${p.modelId}|${p.kind}`] = { ok: r.ok, code: r.code, at, fp, url };
     }
     all[providerId] = mine;
     await db.execute({

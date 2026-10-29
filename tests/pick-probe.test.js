@@ -103,12 +103,12 @@ test("checks expire", async () => {
   const db = await freshDb();
   const file = recFile("2027-01-28");
   await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(() => toolReply("crow_probe")), listRowsFn: async () => [openaiRow], recOpts: { file } });
-  const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2026-11-01T00:00:00Z"), recOpts: { file } });
+  const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2026-11-01T00:00:00Z"), recOpts: { file }, row: openaiRow });
   assert.equal(c.ok, true);
   assert.equal(c.code, "ok");
   assert.match(c.at, /^\d{4}-\d\d-\d\dT/);
-  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2027-02-01T00:00:00Z"), recOpts: { file } }), null);
-  assert.equal(await pickCheckOf(db, "cloud-a", "never", { now: new Date("2026-11-01T00:00:00Z"), recOpts: { file } }), null);
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2027-02-01T00:00:00Z"), recOpts: { file }, row: openaiRow }), null);
+  assert.equal(await pickCheckOf(db, "cloud-a", "never", { now: new Date("2026-11-01T00:00:00Z"), recOpts: { file }, row: openaiRow }), null);
 });
 
 test("shared model probed once; results stored in an instance-scope key", async () => {
@@ -152,8 +152,8 @@ test("same model id as chat and as embed keeps both checks", async () => {
   const f = stub((url) => (url.endsWith("/embeddings") ? reply(200, { data: [] }) : toolReply("crow_probe")));
   await probeRecommended(db, "cloud-a", { roles: ["coordinator", "embed"], requestFn: f, listRowsFn: async () => [openaiRow], recOpts: { file } });
   const now = new Date("2026-11-01T00:00:00Z");
-  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "chat", now, recOpts: { file } })).ok, true);
-  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "embed", now, recOpts: { file } })).code, "bad_embedding");
+  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "chat", now, recOpts: { file }, row: openaiRow })).ok, true);
+  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "embed", now, recOpts: { file }, row: openaiRow })).code, "bad_embedding");
 });
 
 test("concurrent runs for two providers both keep their results", async () => {
@@ -167,8 +167,8 @@ test("concurrent runs for two providers both keep their results", async () => {
     probeRecommended(db, "cloud-b", { roles: ["quick"], requestFn: slow, listRowsFn, recOpts: { file } }),
   ]);
   const now = new Date("2026-11-01T00:00:00Z");
-  assert.ok(await pickCheckOf(db, "cloud-a", "m-small", { now, recOpts: { file } }));
-  assert.ok(await pickCheckOf(db, "cloud-b", "m-small", { now, recOpts: { file } }));
+  assert.ok(await pickCheckOf(db, "cloud-a", "m-small", { now, recOpts: { file }, row: openaiRow }));
+  assert.ok(await pickCheckOf(db, "cloud-b", "m-small", { now, recOpts: { file }, row: rowB }));
 });
 
 test("a stored model listing limits the probed pick", async () => {
@@ -254,4 +254,30 @@ test("check storage lives in a read-only module with no request path", async () 
     assert.ok(!/pick-probe/.test(s), `${f} must not mention pick-probe`);
     assert.ok(specifiersOf(s).some((x) => x.endsWith("/pick-checks.js")), `${f} reads checks through pick-checks.js`);
   }
+});
+
+test("a check is tied to the key and the address it ran with (F3)", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(() => toolReply("crow_probe")), listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const now = new Date("2026-11-01T00:00:00Z");
+  const opts = { kind: "chat", now, recOpts: { file } };
+  assert.equal((await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: openaiRow })).ok, true);
+  // The same address with a trailing slash or upper-case host is the same address.
+  assert.equal((await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: { ...openaiRow, baseUrl: "https://API.openai.com/v1" } })).ok, true);
+  // The same id re-added with a new key, or pointed elsewhere: not tested.
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: { ...openaiRow, apiKey: "fixture-key-other" } }), null);
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: { ...openaiRow, baseUrl: "https://api.example.com/v1" } }), null);
+  // No row to compare with: not tested.
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", opts), null);
+  // The stored fingerprint is a truncated sha256, never the key.
+  const { rows } = await db.execute("SELECT value FROM dashboard_settings WHERE key='provider_pick_checks'");
+  const c = JSON.parse(rows[0].value)["cloud-a"]["m-small|chat"];
+  assert.match(c.fp, /^[0-9a-f]{16}$/);
+  assert.equal(c.url, "https://api.openai.com/v1");
+  assert.ok(!rows[0].value.includes(KEY));
+  // A check stored before stamps existed reads as not tested.
+  await db.execute({ sql: "UPDATE dashboard_settings SET value = ? WHERE key='provider_pick_checks'",
+    args: [JSON.stringify({ "cloud-a": { "m-small|chat": { ok: true, code: "ok", at: "2026-10-30T00:00:00Z" } } })] });
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: openaiRow }), null);
 });

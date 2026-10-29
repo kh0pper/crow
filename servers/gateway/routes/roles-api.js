@@ -401,7 +401,7 @@ export default function rolesApiRouter({
         const probed = isProbeKind(p.kind);
         const check = !probed
           ? null
-          : await pickCheckOf(db, row.id, p.model_id, { kind: checkKindFor(roleId), now: opts.now, recOpts });
+          : await pickCheckOf(db, row.id, p.model_id, { kind: checkKindFor(roleId), now: opts.now, recOpts, row });
         picks.push({
           roleId, modelId: p.model_id, key, kind: p.kind,
           label: friendlyModel(key, ctx.providers) || p.model_id,

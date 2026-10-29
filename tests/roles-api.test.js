@@ -375,6 +375,7 @@ test("F8: own addresses are probed once per request when not injected", async ()
 
 import { Readable } from "node:stream";
 import { candidatePick } from "../servers/shared/provider-recommendations.js";
+import { checkStamp } from "../servers/shared/pick-checks.js";
 
 const OR_URL = "https://openrouter.ai/api/v1";
 const NOW = () => new Date("2026-11-01T12:00:00Z"); // before the file's review_by
@@ -387,10 +388,13 @@ const insOr = (id, models, description = "OpenRouter") => db.execute({
 const providerCount = async () => Number((await db.execute("SELECT COUNT(*) AS n FROM providers")).rows[0].n);
 const csrfHeaders = { cookie: "crow_session=s1; crow_csrf=tok9", "x-crow-csrf": "tok9" };
 const addOpts = (extra = {}) => ({ now: NOW, classifierStatusFn: noClassifier, ...extra });
+// A stored check carries the stamp of the row it ran against (F3): cloud-or is OR_URL with SECRET.
+const OR_STAMP = checkStamp({ apiKey: SECRET, baseUrl: OR_URL });
+const orChecks = (byModel) => JSON.stringify({ "cloud-or": Object.fromEntries(Object.entries(byModel).map(([k, c]) => [k, { ...OR_STAMP, ...c }])) });
 
 test("picks: a preset pick whose stored check passed is starred (the route reads the checks)", async () => {
   await insOr("cloud-or", [{ id: "anthropic/claude-haiku-5.5" }]);
-  await raw("provider_pick_checks", JSON.stringify({ "cloud-or": { "anthropic/claude-haiku-5.5|chat": { ok: true, code: "ok", at: AT } } }));
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-haiku-5.5|chat": { ok: true, code: "ok", at: AT } }));
   invalidateRoleContext();
   await withServer(async (s) => {
     const r = await call(s, "GET", "/api/roles/quick/picks");
@@ -406,7 +410,7 @@ test("picks: a preset pick whose stored check passed is starred (the route reads
 
 test("picks: a failed check gives no star", async () => {
   await insOr("cloud-or", [{ id: "anthropic/claude-haiku-5.5" }]);
-  await raw("provider_pick_checks", JSON.stringify({ "cloud-or": { "anthropic/claude-haiku-5.5|chat": { ok: false, code: "no_tool_call", at: AT } } }));
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-haiku-5.5|chat": { ok: false, code: "no_tool_call", at: AT } }));
   invalidateRoleContext();
   await withServer(async (s) => {
     const r = await call(s, "GET", "/api/roles/quick/picks");
@@ -583,12 +587,12 @@ test("POST /api/providers/:id/probe calls the probe seam once per distinct pick"
 test("GET /api/providers/:id/plan: each pick with its check, embed read as embed, rerank never tested", async () => {
   const models = ["anthropic/claude-haiku-5.5", "qwen/qwen3-embedding-8b", "cohere/rerank-4-fast"];
   await insOr("cloud-or", models.map((id) => ({ id })));
-  await raw("provider_pick_checks", JSON.stringify({ "cloud-or": {
+  await raw("provider_pick_checks", orChecks({
     "anthropic/claude-haiku-5.5|chat": { ok: true, code: "ok", at: AT },
     // A chat check of the embedding model does not count for embed.
     "qwen/qwen3-embedding-8b|chat": { ok: true, code: "ok", at: AT },
     "cohere/rerank-4-fast|chat": { ok: true, code: "ok", at: AT },
-  } }));
+  }));
   invalidateRoleContext();
   await withServer(async (s) => {
     const r = await call(s, "GET", "/api/providers/cloud-or/plan");
@@ -605,7 +609,7 @@ test("GET /api/providers/:id/plan: each pick with its check, embed read as embed
     const none = await call(s, "GET", "/api/providers/nope/plan");
     assert.equal(none.status, 404);
   }, addOpts());
-  await raw("provider_pick_checks", JSON.stringify({ "cloud-or": { "qwen/qwen3-embedding-8b|embed": { ok: true, code: "ok", at: AT } } }));
+  await raw("provider_pick_checks", orChecks({ "qwen/qwen3-embedding-8b|embed": { ok: true, code: "ok", at: AT } }));
   await withServer(async (s) => {
     const r = await call(s, "GET", "/api/providers/cloud-or/plan");
     assert.equal(r.json.picks.find((p) => p.roleId === "embed").check.ok, true);
@@ -643,7 +647,7 @@ test("realtime voice models are never recommended, and /plan marks only probeabl
 
 test("recommended: preview then apply fills a role nothing runs today", async () => {
   await insOr("cloud-or", [{ id: "anthropic/claude-opus-5.5" }]);
-  await raw("provider_pick_checks", JSON.stringify({ "cloud-or": { "anthropic/claude-opus-5.5|chat": { ok: true, code: "ok", at: AT } } }));
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-opus-5.5|chat": { ok: true, code: "ok", at: AT } }));
   invalidateRoleContext();
   await withServer(async (s) => {
     const plan = (await call(s, "GET", "/api/providers/cloud-or/plan")).json;

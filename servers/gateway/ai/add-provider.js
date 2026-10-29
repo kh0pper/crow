@@ -401,7 +401,7 @@ export async function planRecommended(db, providerId, opts = {}) {
     const pick = candidatePick(presetId, roleId, { liveModelIds: listed }, recOpts);
     const key = pick ? `${providerId}/${pick.model_id}` : null;
     if (!key || !resolvesTo(ctx, roleId, key)) { skip("not_listed"); continue; }
-    const check = checkIn(checks, providerId, pick.model_id, { kind: checkKindFor(roleId), now, recOpts });
+    const check = checkIn(checks, providerId, pick.model_id, { kind: checkKindFor(roleId), now, recOpts, row });
     if (!check) { skip("not_tested"); continue; }
     if (!check.ok) { skip("failed_check"); continue; }
 

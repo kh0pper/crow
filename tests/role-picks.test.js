@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { listRolePicks } from "../servers/shared/role-picks.js";
+import { checkStamp } from "../servers/shared/pick-checks.js";
 
 const origWarn = console.warn;
 before(() => { console.warn = () => {}; });
@@ -151,28 +152,34 @@ const recCtx = () => {
   const ps = [...PROVIDERS, OPENAI];
   return makeCtx({ providers: ps, models: modelsOf(ps) });
 };
+// Stored checks carry the stamp of the row they ran against (F3).
+const stamp = (byProvider, rowOf = () => OPENAI) => Object.fromEntries(Object.entries(byProvider).map(([pid, m]) =>
+  [pid, Object.fromEntries(Object.entries(m).map(([k, c]) => [k, { ...checkStamp(rowOf(pid)), ...c }]))]));
 const starred = (roleId, opts) => listRolePicks(roleId, { ctx: recCtx(), ownAddrs: OWN, ...REC, ...opts }).filter((p) => p.recommended).map((p) => p.key);
 
 test("default recommendedFn: only listed picks that passed their check", () => {
   // No checks stored: nothing is recommended.
   assert.deepEqual(starred("everyday"), []);
-  const pickChecks = { "cloud-o": {
+  const pickChecks = stamp({ "cloud-o": {
     "gpt-6.1-sol|chat": { ok: false, code: "no_tool_call" },
     "gpt-6-luna|chat": { ok: true, code: "ok" },
     "text-embedding-3-large|chat": { ok: true, code: "ok" },
-  } };
+  } });
   assert.deepEqual(starred("everyday", { pickChecks }), ["cloud-o/gpt-6-luna"]);
   // Embed picks read the embed check only.
   assert.deepEqual(starred("embed", { pickChecks }), []);
-  const withEmbed = { "cloud-o": { ...pickChecks["cloud-o"], "text-embedding-3-large|embed": { ok: true, code: "ok" } } };
+  const withEmbed = stamp({ "cloud-o": { ...pickChecks["cloud-o"], "text-embedding-3-large|embed": { ok: true, code: "ok" } } });
+  // A check made with another key gives no star.
+  const otherKey = stamp({ "cloud-o": { "gpt-6-luna|chat": { ok: true, code: "ok" } } }, () => ({ ...OPENAI, apiKey: "fixture-key-old" }));
+  assert.deepEqual(starred("everyday", { pickChecks: otherKey }), []);
   assert.deepEqual(starred("embed", { pickChecks: withEmbed }), ["cloud-o/text-embedding-3-large"]);
   // Past review_by every check reads "not tested".
   assert.deepEqual(starred("everyday", { pickChecks, now: new Date("2027-02-01T00:00:00Z") }), []);
   // Rows with no preset recommend nothing, whatever is stored.
-  assert.deepEqual(starred("everyday", { pickChecks: { "local-chat": { "m1|chat": { ok: true, code: "ok" } } } }), []);
+  assert.deepEqual(starred("everyday", { pickChecks: stamp({ "local-chat": { "m1|chat": { ok: true, code: "ok" } } }, () => PROVIDERS[0]) }), []);
 });
 
 test("an injected recommendedFn still wins over the default", () => {
-  const pickChecks = { "cloud-o": { "gpt-6-luna|chat": { ok: true, code: "ok" } } };
+  const pickChecks = stamp({ "cloud-o": { "gpt-6-luna|chat": { ok: true, code: "ok" } } });
   assert.deepEqual(starred("everyday", { pickChecks, recommendedFn: () => ["local-chat/m1"] }), ["local-chat/m1"]);
 });
