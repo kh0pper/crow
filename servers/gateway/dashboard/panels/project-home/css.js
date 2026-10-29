@@ -23,6 +23,29 @@ ${sessionUiCss("body.shell")}
   body.shell .ph-kind--outside { background: var(--crow-bg-elevated, var(--crow-bg-surface)); color: var(--crow-text-secondary); border: 1px solid var(--crow-border); }
   body.shell .ph-mem-sheet .ph-list { margin-top: 8px; }
   body.shell .ph-memory .ph-row-title { font-size: 0.9rem; }
+  /* Bots (§14): full-width rows with a 44 px Edit; the add and move controls stack on a phone. */
+  body.shell .ph-bot .ph-edit { flex: none; margin-left: auto; }
+  body.shell .ph-add { margin: 0 0 8px; }
+  body.shell .ph-add summary { cursor: pointer; list-style: none; }
+  body.shell .ph-add summary::-webkit-details-marker { display: none; }
+  body.shell .ph-add[open] { display: flex; flex-direction: column; }
+  body.shell .ph-move-form { display: flex; flex-direction: column; align-items: stretch; gap: 8px; margin: 0 0 8px; }
+  body.shell .ph-move-form .ph-pick { margin: 0; }
+  body.shell .ph-move-form .ph-pick select { width: 100%; box-sizing: border-box; }
+  body.shell .ph-move-form .ph-link { justify-content: center; }
+  body.shell .ph-confirm {
+    padding: 12px; border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px);
+    background: var(--crow-bg-surface);
+  }
+  body.shell .ph-confirm-h { margin: 0 0 6px; font-weight: 600; overflow-wrap: anywhere; }
+  body.shell .ph-banner { margin: 0; padding: 10px 12px; border-radius: var(--crow-radius-card, 12px); border: 1px solid var(--crow-border); overflow-wrap: anywhere; }
+  body.shell .ph-banner--ok { background: var(--crow-accent-muted); color: var(--crow-text-primary); }
+  body.shell .ph-banner--err { background: var(--crow-bg-surface); color: var(--crow-text-primary); border-color: var(--crow-accent); }
+  body.shell .ph-add summary:focus-visible, body.shell .ph-move-form select:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  @media (min-width: 600px) {
+    body.shell .ph-move-form { flex-direction: row; align-items: flex-end; }
+    body.shell .ph-move-form .ph-pick { flex: 1 1 auto; min-width: 0; }
+  }
   /* The chip already names the project: the header title stays for screen
      readers only (visually hidden, never display:none). */
   body.shell:has([data-ph]) .content-header h2 {

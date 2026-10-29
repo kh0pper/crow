@@ -12,6 +12,7 @@ import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { needsYouLabel } from "../board/needs-you-label.js";
 import { relativeDay } from "./data.js";
+import { csrfInput } from "../../shared/csrf.js";
 import { servicesUiEnabled } from "../../../services/ui-flag.js";
 import { sessionCardHtml, sessionCardModel, startControlHtml } from "../../shared/session-cards.js";
 
@@ -21,6 +22,60 @@ const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 /** t(key) with {name} filled; split/join, so a "$" in a value is never a replace pattern. */
 const fill = (key, lang, vals) => Object.entries(vals).reduce((out, [k, v]) => out.split("{" + k + "}").join(String(v ?? "")), t(key, lang));
 const CLOSE_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+
+const MOVE_ERRORS = Object.freeze({
+  voice_bot: "projectHome.errVoice", unknown_bot: "projectHome.errUnknown", same_project: "projectHome.errSame",
+  custom_tracker: "botbuilder.boardOnCustom", no_project: "projectHome.errNoProject", stale: "projectHome.errStale",
+});
+
+/** The result line after a move: a success status, or an alert naming why nothing changed. */
+function noticeHtml(data, lang) {
+  if (data.movedName) return `<p class="ph-banner ph-banner--ok" role="status" data-ph-moved>${escapeHtml(fill("projectHome.moved", lang, { bot: data.movedName }))}</p>`;
+  const n = data.notice;
+  if (!n || !n.error) return "";
+  const msg = n.error === "conflict"
+    ? fill("projectHome.errConflict", lang, { path: n.path || "" })
+    : t(MOVE_ERRORS[n.error] || "projectHome.errOther", lang);
+  return `<p class="ph-banner ph-banner--err" role="alert" data-ph-error="${escapeHtml(n.error)}">${escapeHtml(msg)}</p>`;
+}
+
+/** Bots (§14): the project's bots with Edit, and for a viewer who may change it, Add a bot and Move a bot here. */
+function botsSection(data, project, lang, req) {
+  const head = `<h3 class="ph-h" id="ph-bots-h">${escapeHtml(t("projectHome.bots", lang))}</h3>`;
+  const rows = data.bots.map((b) => `<li><div class="ph-row ph-bot"><span class="ph-row-title">${escapeHtml(b.name)}</span><a class="ph-link ph-edit" href="/dashboard/bot-builder?bot=${encodeURIComponent(b.id)}" aria-label="${escapeHtml(fill("projectHome.editBot", lang, { bot: b.name }))}">${escapeHtml(t("projectHome.edit", lang))}</a></div></li>`).join("");
+  const list = rows ? `<ul class="ph-list ph-bot-list">${rows}</ul>` : `<p class="ph-line">${escapeHtml(t("projectHome.noBots", lang))}</p>`;
+  let controls = "";
+  if (data.canManage) {
+    const home = `/dashboard/project/${encodeURIComponent(project.slug)}`;
+    if (data.confirm) {
+      const c = data.confirm;
+      controls = `<div class="ph-confirm" role="group" aria-labelledby="ph-confirm-h" data-ph-confirm>
+        <p class="ph-confirm-h" id="ph-confirm-h">${escapeHtml(fill("projectHome.moveConfirm", lang, { bot: c.name, from: c.fromName, project: project.name }))}</p>
+        <p class="ph-sub">${escapeHtml(t("projectHome.moveWhat", lang))}</p>
+        <form method="POST" action="${home}" class="ph-move-form">
+          ${csrfInput(req)}
+          <input type="hidden" name="action" value="move_bot">
+          <input type="hidden" name="bot_id" value="${escapeHtml(c.id)}">
+          <button type="submit" class="ph-start-btn">${escapeHtml(t("projectHome.moveGo", lang))}</button>
+          <a class="ph-link" href="${home}">${escapeHtml(t("common.cancel", lang))}</a>
+        </form>
+      </div>`;
+    } else {
+      const options = data.movable.map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(fill("projectHome.moveOption", lang, { bot: b.name, from: b.fromName }))}</option>`).join("");
+      const move = data.movable.length
+        ? `<form method="GET" action="${home}" class="ph-move-form ph-move-pick">
+            <label class="ph-pick"><span>${escapeHtml(t("projectHome.moveHere", lang))}</span><select name="move" data-ph-move-select>${options}</select></label>
+            <button type="submit" class="ph-start-btn" data-ph-move-go>${escapeHtml(t("projectHome.moveContinue", lang))}</button>
+          </form>`
+        : `<p class="ph-sub">${escapeHtml(t("projectHome.moveNone", lang))}</p>`;
+      controls = `<details class="ph-add"><summary class="ph-link">${escapeHtml(t("projectHome.addBot", lang))}</summary>
+          <a class="ph-link ph-new-bot" href="/dashboard/bot-builder?new=1&amp;project=${Number(project.id)}">${escapeHtml(t("projectHome.newBot", lang))}</a>
+        </details>
+        ${move}`;
+    }
+  }
+  return `<section class="ph-section ph-bots" aria-labelledby="ph-bots-h">${head}${list}${controls}</section>`;
+}
 
 const OUTCOME_KEY = Object.freeze({ success: "board.resultOutcomeSuccess", failure: "board.resultOutcomeFailure", partial: "board.resultOutcomePartial" });
 
@@ -105,13 +160,15 @@ function sessionsSection(data, project, lang, now) {
 }
 
 /** The home page body. */
-export function projectHomeHtml(data, project, lang, { now = new Date(), servicesUi = servicesUiEnabled() } = {}) {
+export function projectHomeHtml(data, project, lang, { now = new Date(), servicesUi = servicesUiEnabled(), req = null } = {}) {
   // The Services link exists only while CROW_SERVICES_UI is on; off, the markup is exactly as before.
   const services = servicesUi
     ? `\n    <nav class="ph-head"><a class="ph-link ph-services" href="/dashboard/project/${encodeURIComponent(project.slug)}/services">${escapeHtml(t("projectHome.services", lang))}</a></nav>`
     : "";
   return `<div class="ph" data-ph data-project-id="${Number(project.id)}" data-project-slug="${escapeHtml(project.slug)}">${services}
+    ${noticeHtml(data, lang)}
     ${startControlHtml(data, lang, { projectId: Number(project.id), projectSlug: project.slug })}
+    ${botsSection(data, project, lang, req)}
     ${leftOffSection(data, project, lang, now)}
     ${needsSection(data, project, lang)}
     ${sessionsSection(data, project, lang, now)}
@@ -124,4 +181,9 @@ export function projectMissingHtml(lang) {
     <p class="ph-line">${escapeHtml(t("shell.projectMissing", lang))}</p>
     <button type="button" class="ph-start-btn" data-shell-open="shell-drawer" aria-haspopup="dialog" aria-controls="shell-drawer">${escapeHtml(t("shell.backToProjects", lang))}</button>
   </div>`;
+}
+
+/** The 403 body: a POST by someone who may not change this project. */
+export function projectForbiddenHtml(lang) {
+  return `<div class="ph ph-missing"><p class="ph-line" role="alert">${escapeHtml(t("projectHome.forbidden", lang))}</p></div>`;
 }

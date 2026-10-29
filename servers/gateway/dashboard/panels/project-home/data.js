@@ -15,6 +15,8 @@
  *   sessions kind='perch-live' threads FILED to this project in shell_items
  *            (the filing, not the bot's home project), unarchived and not
  *            stopped (Perch can open only those), newest first, at most 10.
+ *   canManage / movable / confirm  the Bots section's change controls (canManageProject; the other
+ *            non-voice bots, loaded only when canManage; the one ?move names, if movable).
  *   briefing "Where you left off" (R1.2 PR 4): perch/briefing.js's fragments,
  *            each fact with the Board's own card link; null when
  *            CROW_SESSION_BRIEFING=0 (read per request).
@@ -27,6 +29,7 @@ import { needsYouCounts, needsYouItems } from "../board/needs-you.js";
 import { threadsByCard } from "../board.js";
 import { cardHref } from "../board/html.js";
 import { buildBriefing, briefingEnabled } from "../../../perch/briefing.js";
+import { t } from "../../shared/i18n.js";
 
 export const SESSION_LIMIT = 10;
 const COORDINATOR = "role:coordinator";
@@ -69,6 +72,43 @@ async function botRows(db, sql, args) {
  *  The Chat tab's start control outside a project (Everything, Unassigned). */
 export async function attachableBots(db) {
   return botRows(db, "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id != ?", [CROW_VOICE_BOT_ID]);
+}
+
+/**
+ * The other bots Move can take here: every non-voice bot not already on this
+ * project, by name: [{ id, name, fromName }]. fromName is the project it is in
+ * now (its name), or "No project" in `lang`. Read-only.
+ */
+export async function movableBots(db, projectId, lang = "en") {
+  let rows = [];
+  try {
+    rows = (await db.execute({
+      sql: `SELECT d.bot_id, d.display_name, p.name AS project_name, p.slug AS project_slug
+              FROM pi_bot_defs d LEFT JOIN project_spaces p ON p.id = d.project_id
+             WHERE d.bot_id != ? AND (d.project_id IS NULL OR d.project_id != ?)`,
+      args: [CROW_VOICE_BOT_ID, Number(projectId)],
+    })).rows || [];
+  } catch (err) {
+    if (!ABSENT_RE.test(String(err && err.message))) throw err;
+  }
+  return rows
+    .map((r) => ({
+      id: String(r.bot_id),
+      name: String(r.display_name || r.bot_id),
+      fromName: r.project_name || r.project_slug ? String(r.project_name || r.project_slug) : t("projectHome.noProject", lang),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+}
+
+/** The display name of one bot (for the "is now in this project" line), or null. */
+async function botName(db, botId) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [String(botId)] });
+    return rows[0] ? String(rows[0].display_name || botId) : null;
+  } catch (err) {
+    if (!ABSENT_RE.test(String(err && err.message))) throw err;
+    return null;
+  }
 }
 
 /** The lead rule over projectBots' list (already in name order). */
@@ -144,7 +184,7 @@ async function sessionLabels(db, sids) {
  * Everything the home draws.
  * @param project { id, slug, name, tasks_db_uri }
  */
-export async function loadProjectHome(db, project, { engine = null, tasksDbPath, counts = null } = {}) {
+export async function loadProjectHome(db, project, { engine = null, tasksDbPath, counts = null, canManage = false, moveId = null, movedId = null, lang = "en" } = {}) {
   const id = Number(project.id);
   const bots = await projectBots(db, id);
   const lead = leadOf(bots);
@@ -177,7 +217,11 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
       briefing = { project: null, summaries: [], facts: [], memories: [], empty: true };
     }
   }
-  return { lead, bots, needsYou, needsYouCount, sessions, briefing };
+  // Bots section (§14): the move picker and confirm load only for a viewer who may change the project.
+  const movable = canManage ? await movableBots(db, id, lang) : [];
+  const confirm = canManage && moveId ? movable.find((b) => b.id === String(moveId)) || null : null;
+  const movedName = movedId ? await botName(db, movedId) : null;
+  return { lead, bots, needsYou, needsYouCount, sessions, briefing, canManage: !!canManage, movable, confirm, movedName };
 }
 
 /**
