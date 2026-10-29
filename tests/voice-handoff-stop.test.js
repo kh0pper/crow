@@ -370,6 +370,16 @@ test("a turn that calls crow_handoff (refused) while a stop waits still takes th
   s.done();
 });
 
+test("the proposal's own words echoed back are a stop: an article, a possessive, Spanish \"de\" (final review I1)", async () => {
+  for (const phrase of ["stop the writer", "cancel the writer", "stop writer's task", "para la investigación de writer"]) {
+    const s = await setup();
+    await started(s);
+    assert.deepEqual(await s.ask(phrase), { say: "Stop Writer's task: research radio history?", verb: "stop_propose" }, phrase);
+    assert.equal(s.pending.get(DEVICE.id).kind, "stop", phrase);
+    s.done();
+  }
+});
+
 test("a bot that is no longer a candidate is still stopped by name through its open row (stopShape, fix round 1)", async () => {
   const s = await setup();
   const { id, sid } = await started(s);

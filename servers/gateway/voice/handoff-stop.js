@@ -288,7 +288,7 @@ export async function stopIntent(core, db, { device, surface, transcript, lang, 
   }
 
   const botList = [...bots].map(([bot_id, name]) => ({ bot_id, name }));
-  const { named, rows } = resolveRows(transcript, open, botList);
+  const { named, rows } = resolveRows(transcript, open, botList, { possessive: true });
   let about = open;
   if (named.length) {
     if (!rows.length) {

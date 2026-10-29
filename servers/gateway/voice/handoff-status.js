@@ -88,8 +88,8 @@ export async function rowsInScope(store, db, device, surface, now) {
  * The rows the transcript is about (P20): a named bot (a whole name or id) → that bot's rows; nothing
  * named → every row given. `bots` is [{ bot_id, name }]. → { named: [bot ids], rows }.
  */
-export function resolveRows(transcript, rows, bots) {
-  const named = namedBots(transcript, bots);
+export function resolveRows(transcript, rows, bots, opts) {
+  const named = namedBots(transcript, bots, opts);
   if (!named.length) return { named, rows };
   const set = new Set(named);
   return { named, rows: rows.filter((r) => set.has(r.bot_id)) };

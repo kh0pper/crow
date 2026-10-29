@@ -52,6 +52,8 @@ export const HANDOFF_TOOL_NAME = "crow_handoff";
 const OWN_KINDS = new Set(["handoff", "which", "stop"]);
 /** The pending kinds that keep the crow_handoff tool offered on the next turn (a correction re-proposes). */
 const TOOL_KINDS = new Set(["handoff", "which"]);
+// A which asked for a status or a stop is answered by naming a bot, never by a new hand-off (final review m1).
+const offersTool = (e) => TOOL_KINDS.has(e?.kind) && (e.purpose == null || e.purpose === "handoff");
 // The entries a relay turn's afterTurn clears here (R15: own-tools.js clears routine and which_calendar).
 const RELAY_KINDS = new Set(["handoff", "which", "stop"]);
 /** A bot id as the model may read it (the pi-bots BOT_ID_RE): anything else is never offered. */
@@ -212,7 +214,7 @@ async function forTurn(core, ctx) {
   const names = [...new Set(candidates.flatMap((c) => [c.name, c.bot_id]))];
   // Offered while a proposal or a which waits (a correction calls the tool again); a pending stop is answered
   // by a yes or no alone, so it offers nothing.
-  const when = (t) => wantsHandoff(t, names) || TOOL_KINDS.has(pending.get(device.id)?.kind);
+  const when = (t) => wantsHandoff(t, names) || offersTool(pending.get(device.id));
   if (when(ctx.transcript)) {
     for (const c of candidates) {
       Promise.resolve().then(() => core.availability(db, c.model_key)).catch(() => {});
@@ -471,7 +473,7 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
       if (!e) return;
       // A crow_handoff call this turn keeps a proposal or a which (the call re-proposed, or was refused and the
       // question still stands); a stop is answered by a yes or no alone, so it is taken whatever was called.
-      if (relay === true ? !RELAY_KINDS.has(e.kind) : !OWN_KINDS.has(e.kind) || (TOOL_KINDS.has(e.kind) && calledTools.includes(HANDOFF_TOOL_NAME))) return;
+      if (relay === true ? !RELAY_KINDS.has(e.kind) : !OWN_KINDS.has(e.kind) || (offersTool(e) && calledTools.includes(HANDOFF_TOOL_NAME))) return;
       pending.take(device.id);
       if (e.kind === "handoff" && e.id) await core.store.transition(db, e.id, ["proposed"], "expired");
     },

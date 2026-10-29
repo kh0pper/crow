@@ -62,6 +62,10 @@ function botPhrases(botNames) {
   return out;
 }
 
+/** Each bot phrase and its possessive ("hank's research" reaches us as "hanks research"; the spoken proposal
+ * is "Stop hank's research?", so an operator echoing it back names hank). */
+const withPossessives = (phrases) => phrases.flatMap((p) => [p, [...p.slice(0, -1), `${p[p.length - 1]}s`]]);
+
 /** The length of the first phrase in `phrases` that starts at words[i], or 0. */
 function matchAt(words, i, phrases) {
   for (const p of phrases) {
@@ -161,6 +165,7 @@ export function asksForHandoff(transcript) {
 // "ya terminó <x>", with <x> one or two words (an optional "the"/"el"/"la" before). A bot that is no longer a
 // candidate (hand-offs off, or dropped from the list) is still asked about by name this way.
 const SHAPE_ARTICLES = new Set(["the", "el", "la"]);
+const OF_WORDS = new Set(["of", "de"]);
 const subjectAt = (words, i, max = 2) => {
   const at = i + (SHAPE_ARTICLES.has(words[i]) ? 1 : 0);
   return at < words.length ? { at, max: Math.min(max, words.length - at) } : null;
@@ -208,16 +213,18 @@ export function isBareStatus(transcript) {
 /**
  * The bots the transcript names, as ids: a whole name or id anywhere in it ("how's writer doing", "any news
  * on bot hank"). `bots` is [{ bot_id, name }]; a name made only of stopwords never matches. Each id once, in
- * the order they were given.
+ * the order they were given. `possessive` (a stop) also reads "hanks" as hank; a status keeps whole names, so
+ * "how are the writers doing" names no one.
  */
-export function namedBots(transcript, bots) {
+export function namedBots(transcript, bots, { possessive = false } = {}) {
   const words = phraseWords(transcript);
   if (!words.length || !Array.isArray(bots)) return [];
   const out = [];
   for (const b of bots.slice(0, MAX_PHRASES)) {
     const id = b && typeof b.bot_id === "string" ? b.bot_id : null;
     if (!id || out.includes(id)) continue;
-    if (listMatches(words, botPhrases([b.name, id]))) out.push(id);
+    const phrases = botPhrases([b.name, id]);
+    if (listMatches(words, possessive ? withPossessives(phrases) : phrases)) out.push(id);
   }
   return out;
 }
@@ -248,8 +255,9 @@ export function stopShape(transcript) {
 }
 
 /**
- * "named": a stop verb (stop, cancel, halt, para, detén, cancela) followed by a bot name or a work word ("the
- * research", "la tarea"; Spanish may put "a" between: "detén a writer"). "pronoun": "stop it", "cancel that",
+ * "named": a stop verb (stop, cancel, halt, para, detén, cancela) followed by a bot name (an optional "the",
+ * "el" or "la" before; its possessive too: "stop hank's research") or a work word ("the research", "la tarea";
+ * Spanish may put "a" between: "detén a writer"). "pronoun": "stop it", "cancel that",
  * "páralo", "cancela eso"… ending the sentence ("stop that song" is not one). null otherwise.
  * "para" is also "for" ("una nota para writer"): it is a stop only as the first word (after lead-ins such as
  * "oye crow") with its target ending the sentence. A verb right after a negation ("don't stop writer") is not one.
@@ -257,14 +265,20 @@ export function stopShape(transcript) {
 export function wantsHandoffStop(transcript, botNames) {
   const words = phraseWords(transcript);
   if (!words.length) return null;
-  const targets = [...LISTS.stopTargets, ...botPhrases(botNames)];
+  const bots = withPossessives(botPhrases(botNames));
+  const targets = [...LISTS.stopTargets, ...bots];
+  // "para la investigacion de hank": a work target may carry its bot after "de" / "of" and still end there.
+  const endAfter = (at) => (OF_WORDS.has(words[at]) ? at + 1 + (matchAt(words, at + 1, bots) || -1) : at);
   for (let i = 0; i < words.length; i++) {
     if (!STOP_VERBS.has(words[i]) || negated(words, i)) continue;
     const isPara = words[i] === "para";
     if (isPara && !paraOpens(words, i)) continue;
-    for (const j of words[i + 1] === "a" ? [i + 1, i + 2] : [i + 1]) {
-      const n = matchAt(words, j, targets);
-      if (n && (!isPara || endsAt(words, j + n))) return "named";
+    let j = i + 1;
+    if (words[j] === "a") j++;
+    // An article before the name ("stop the writer", "cancela la writer"); a work target carries its own.
+    for (const at of SHAPE_ARTICLES.has(words[j]) ? [j, j + 1] : [j]) {
+      const n = matchAt(words, at, targets);
+      if (n && (!isPara || endsAt(words, endAfter(at + n)))) return "named";
     }
   }
   for (let i = 0; i < words.length; i++) {

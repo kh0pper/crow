@@ -82,6 +82,16 @@ test("wantsHandoffStop: named, pronoun, or null", () => {
   for (const t of ["don't stop writer", "do not cancel the research", "never halt that task", "don't stop it", "i said dont cancel that"]) assert.equal(wantsHandoffStop(t, BOTS), null, t);
   assert.equal(wantsHandoffStop("no, stop writer", BOTS), "named", "a leading no is not a negation");
   assert.equal(wantsHandoffStop("don't stop writer", BOTS), null);
+  // Final review I1: an article before the name, and the possessive the proposal itself speaks ("Stop Writer's task?").
+  for (const t of ["stop the writer", "cancel the writer", "stop writer's task", "stop hank's research", "stop bot hanks task", "para la investigación de writer", "cancela la investigacion de bot hank"]) {
+    assert.equal(wantsHandoffStop(t, ["Writer", "hank", "bot-hank"]), "named", t);
+  }
+  for (const t of ["para la casa", "para la investigacion de", "una nota para la writer", "don't stop the writer", "stop the music"]) {
+    assert.equal(wantsHandoffStop(t, ["Writer", "hank"]), null, t);
+  }
+  const pair = [{ bot_id: "bot-hank", name: "hank" }, { bot_id: "w", name: "Writer" }];
+  assert.deepEqual(namedBots("stop hank's research", pair, { possessive: true }), ["bot-hank"], "a stop's possessive names its bot");
+  assert.deepEqual(namedBots("how are the writers doing", pair), [], "a status keeps the whole-name rule (a plural is no name)");
   for (const t of ["eso es para eso", "para eso sirve el martillo"]) assert.equal(wantsHandoffStop(t, BOTS), null, `para eso keeps the para rules: ${t}`);
 });
 
