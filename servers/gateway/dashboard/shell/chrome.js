@@ -212,13 +212,14 @@ export function shellDrawer({ scope, projects, lang, counts, homeSlug, getPanel 
   </dialog>`;
 }
 
-/** The avatar sheet: Settings, What Crow can reach, and the classic switch. */
+/** The avatar sheet: Settings, Models, What Crow can reach, and the classic switch. */
 export function shellAvatarSheet({ lang }) {
   const settings = label("nav.settings", "Settings", lang);
   return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet" aria-label="${escapeHtml(t("shell.account", lang))}">
     <div class="shell-sheet-inner">
       ${closeButton(lang)}
       <a href="/dashboard/settings" class="shell-sheet-link">${escapeHtml(settings)}</a>
+      <a href="/dashboard/settings?section=models" class="shell-sheet-link">${escapeHtml(t("settings.section.models", lang))}</a>
       <a href="/dashboard/settings?section=integrations" class="shell-sheet-link">${escapeHtml(t("shell.reach", lang))}</a>
       <form method="post" action="/dashboard/mode" class="shell-mode-form"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="classic"><button type="submit" class="shell-sheet-link shell-mode-btn">${escapeHtml(t("shell.useClassic", lang))}</button></form>
     </div>

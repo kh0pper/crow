@@ -62,7 +62,8 @@ test("menu previews get the db: LLM counts enabled providers, Data hygiene scans
     ];
     const html = await renderSettingsMenu(sections, db, "en");
 
-    assert.equal(previewOf(html, "llm"), "2 providers", "counts enabled providers only");
+    // The LLM page is hidden from the menu (the Models page is the entry), so read its preview directly.
+    assert.equal(await sections[0].getPreview({ settings: {}, db, lang: "en" }), "2 providers", "counts enabled providers only");
     assert.equal(previewOf(html, "data-hygiene"), "clean");
     // Paired Instances is hidden from the menu until a peer exists (hiddenUnless: "peer"),
     // so read its preview directly.
