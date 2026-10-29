@@ -68,6 +68,23 @@ export function recommendedFor(presetId, roleId, opts) {
   return list.filter((e) => e && typeof e === "object" && !Array.isArray(e)).map((e) => structuredClone(e));
 }
 
+/**
+ * Every model id the file recommends for a preset (any role, primaries and
+ * alternatives), once each in role order: what the add sheet offers as
+ * checkboxes when the provider has no model list. Only verified ids of a kind
+ * some role takes (never a realtime entry).
+ */
+export function recommendedModelIds(presetId, opts) {
+  const out = [];
+  for (const roleId of RECOMMENDATION_ROLES) {
+    for (const e of recommendedFor(presetId, roleId, opts)) {
+      if (e.id_verified !== true || !kindFitsRole(roleId, e.kind) || typeof e.model_id !== "string" || !e.model_id) continue;
+      if (!out.includes(e.model_id)) out.push(e.model_id);
+    }
+  }
+  return out;
+}
+
 /** A strict YYYY-MM-DD string that names a real calendar day, else null. */
 function validDay(v) {
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;

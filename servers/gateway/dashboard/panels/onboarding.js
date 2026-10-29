@@ -450,9 +450,11 @@ function renderAiOptions(lang, ctx = {}) {
 
   const presetOptions = PROVIDER_PRESETS.map((p) =>
     `<option value="${escapeHtml(p.id)}">${escapeHtml(t(p.labelKey, lang))}</option>`).join("");
-  const zai = PROVIDER_PRESETS.find((p) => Array.isArray(p.variants));
-  const variantOptions = (zai ? zai.variants : []).map((v) =>
-    `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("");
+  // Each preset's plans or regions under its own name; the POST keeps only the chosen preset's.
+  const variantOptions = PROVIDER_PRESETS.filter((p) => Array.isArray(p.variants) && p.variants.length).map((p) =>
+    `<optgroup label="${escapeHtml(t(p.labelKey, lang))}">` +
+    p.variants.map((v) => `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("") +
+    "</optgroup>").join("");
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
   const cloudError = cloudErrorText ? callout(cloudErrorText, "error") : "";
@@ -504,7 +506,7 @@ function renderAiOptions(lang, ctx = {}) {
         <label class="onb-ai-field">${t("onboarding.ai.cloudProviderLabel", lang)}
           <select name="preset" id="onb-ai-cloud-preset">${presetOptions}</select>
         </label>
-        <label class="onb-ai-field">${t("models.add.plan", lang)}
+        <label class="onb-ai-field">${t("models.add.planOrRegion", lang)}
           <select name="variant">${variantOptions}</select>
         </label>
         <label class="onb-ai-field">${t("models.add.baseUrl", lang)}
@@ -658,7 +660,9 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     const pick = pickFn(preset.id, "everyday");
     const model = typed || (pick && !pick.preview ? pick.model_id : "") || "";
     if (!model) return back("model_required", hint);
-    const variantId = typeof req.body?.variant === "string" && req.body.variant ? req.body.variant : undefined;
+    // A variant from another preset's group (the one list holds them all) means the default.
+    const rawVariant = typeof req.body?.variant === "string" ? req.body.variant : "";
+    const variantId = (preset.variants || []).some((v) => v.id === rawVariant) ? rawVariant : undefined;
     const baseUrl = preset.id === "other" && typeof req.body?.baseUrl === "string" ? req.body.baseUrl.trim() : undefined;
 
     // Loaded here, not at the top: the add flow pulls in the role/consumer modules, which a page render never needs.

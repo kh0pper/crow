@@ -98,6 +98,7 @@ const IDENTICAL_OK = new Set([
   "providers.preset.zai",
   "providers.preset.groq",
   "providers.preset.together",
+  "providers.preset.modelstudio",
 ]);
 
 const keys = Object.keys(translations);

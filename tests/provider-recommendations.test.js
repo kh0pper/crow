@@ -26,14 +26,23 @@ const EXCLUDED = ["safety", "stt", "tts", "image", "video"];
 
 test("presets: order, frozen, shape", () => {
   assert.deepEqual(PROVIDER_PRESETS.map((p) => p.id),
-    ["openrouter", "anthropic", "openai", "google", "zai", "groq", "together", "other"]);
+    ["openrouter", "anthropic", "openai", "google", "zai", "groq", "together", "modelstudio", "other"]);
   assert.ok(Object.isFrozen(PROVIDER_PRESETS));
   for (const p of PROVIDER_PRESETS) {
     assert.ok(Object.isFrozen(p), `${p.id} frozen`);
     assert.equal(typeof p.labelKey, "string");
     assert.ok(["bearer", "anthropic"].includes(p.authStyle), `${p.id} authStyle`);
-    assert.equal(typeof p.testPath, "string");
-    assert.equal(typeof p.modelsPath, "string");
+    // A key test is a GET testPath, or a POST testRequest for a provider with no listing.
+    if (p.testRequest) {
+      assert.equal(p.testPath, undefined, `${p.id} has one key test`);
+      assert.equal(p.testRequest.method, "POST");
+      assert.match(p.testRequest.path, /^\//);
+      assert.equal(typeof p.testRequest.body, "object");
+      assert.ok(p.modelsPath === null, `${p.id} has no listing`);
+    } else {
+      assert.equal(typeof p.testPath, "string");
+      assert.equal(typeof p.modelsPath, "string");
+    }
     assert.equal(typeof p.keyHint, "string");
     if (p.id === "other") {
       assert.equal(p.baseUrl, undefined);
@@ -58,6 +67,76 @@ test("presets: order, frozen, shape", () => {
     ["coding", "https://api.z.ai/api/coding/paas/v4"],
   ]);
   assert.equal(presetById("nope"), null);
+});
+
+test("modelstudio: four regions, Singapore first, a POST key test, no listing, a probe without required", () => {
+  const p = presetById("modelstudio");
+  assert.equal(p.label, "Alibaba Model Studio (Qwen)");
+  assert.equal(p.labelKey, "providers.preset.modelstudio");
+  assert.equal(p.providerType, "openai");
+  assert.equal(p.authStyle, "bearer");
+  assert.equal(p.baseUrl, undefined);
+  assert.deepEqual(p.variants.map((v) => [v.id, v.baseUrl]), [
+    ["intl", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"],
+    ["us", "https://dashscope-us.aliyuncs.com/compatible-mode/v1"],
+    ["cn", "https://dashscope.aliyuncs.com/compatible-mode/v1"],
+    ["hk", "https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1"],
+  ]);
+  for (const v of p.variants) assert.equal(v.labelKey, `providers.preset.modelstudio.${v.id}`);
+  assert.deepEqual(p.testRequest, {
+    method: "POST", path: "/chat/completions",
+    body: { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1 },
+  });
+  assert.equal(p.modelsPath, null);
+  assert.deepEqual(p.probe, { toolChoice: "auto", extraBody: { enable_thinking: false } });
+  // The region choice and the region-bound key are explained in plain words.
+  assert.equal(p.variantLabelKey, "models.add.region");
+  assert.equal(p.keyNoteKey, "providers.preset.modelstudio.keyNote");
+  assert.equal(p.keyRejectedKey, "models.add.test.key_rejected_region");
+  assert.ok(Object.isFrozen(p.testRequest.body.messages[0]));
+  // The test model is one the file recommends with a verified id.
+  assert.ok(recommendedFor("modelstudio", "quick").some((e) => e.model_id === p.testRequest.body.model && e.id_verified));
+  // No other preset carries a probe override: they keep tool_choice required.
+  for (const q of PROVIDER_PRESETS) if (q.id !== "modelstudio") assert.equal(q.probe, undefined, q.id);
+});
+
+test("modelstudio recommendations: verified ids, no rerank, embed is text-embedding-v4, voice is a text model, notes kept", () => {
+  const raw = JSON.parse(readFileSync(FILE, "utf8"));
+  const ms = raw.providers.modelstudio;
+  assert.ok(ms, "modelstudio entry");
+  assert.ok(ms.none_found.includes("rerank"));
+  assert.equal(ms.roles.rerank, undefined);
+  assert.equal(candidatePick("modelstudio", "rerank"), null);
+  const embed = candidatePick("modelstudio", "embed", { liveModelIds: null });
+  assert.equal(embed.model_id, "text-embedding-v4");
+  assert.equal(embed.kind, "embed");
+  for (const e of ms.roles.voice || []) assert.equal(e.kind, "chat", "no realtime voice entry");
+  assert.equal(candidatePick("modelstudio", "voice").model_id, "qwen3.8-flash");
+  for (const [roleId, entries] of Object.entries(ms.roles)) {
+    for (const e of entries) {
+      assert.equal(e.id_verified, true, `${roleId} ${e.model_id}`);
+      if (e.price.unit === "unknown") assert.equal(e.price.price_verified, false, `${e.model_id} unknown price`);
+    }
+  }
+  // Primaries from the research.
+  const primaries = Object.fromEntries(["coordinator", "quick", "deep", "everyday", "expert", "critic", "vision"]
+    .map((r) => [r, candidatePick("modelstudio", r, { liveModelIds: null }).model_id]));
+  assert.deepEqual(primaries, {
+    coordinator: "qwen3.8-max", quick: "qwen3.8-flash", deep: "qwen3.8-max", everyday: "qwen3.7-plus",
+    expert: "qwen3.8-max", critic: "deepseek-v4-pro-0813", vision: "qwen3.7-plus",
+  });
+  // The free quota is Singapore-only; the distribution note keeps its unverified wording.
+  assert.match(ms.notes.free_quota, /Singapore/);
+  assert.match(ms.notes.distribution, /unverified|not retrieved|not resolved|unresolved/i);
+  assert.match(ms.notes.distribution, /own key/);
+  assert.ok(ms.docs_urls.includes("https://help.aliyun.com/en/model-studio/base-url"));
+});
+
+test("modelstudio: no listing skips the live filter; ticked ids narrow it", () => {
+  assert.equal(candidatePick("modelstudio", "coordinator", { liveModelIds: null }).model_id, "qwen3.8-max");
+  assert.equal(candidatePick("modelstudio", "coordinator", {}).model_id, "qwen3.8-max");
+  assert.equal(candidatePick("modelstudio", "coordinator", { liveModelIds: ["kimi-k3"] }).model_id, "kimi-k3");
+  assert.equal(candidatePick("modelstudio", "coordinator", { liveModelIds: [] }), null);
 });
 
 test("file shape", () => {
@@ -247,6 +326,7 @@ test("presetForRow", () => {
   assert.equal(presetForRow({ baseUrl: "https://API.Anthropic.com/" }), "anthropic");
   assert.equal(presetForRow({ baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/" }), "google");
   assert.equal(presetForRow({ baseUrl: "https://api.together.xyz/v1" }), "together");
+  for (const v of presetById("modelstudio").variants) assert.equal(presetForRow({ baseUrl: v.baseUrl + "/" }), "modelstudio", v.id);
   assert.equal(presetForRow({ baseUrl: "https://api.example.com/v1" }), null);
   assert.equal(presetForRow({}), null);
   assert.equal(presetForRow(null), null);

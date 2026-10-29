@@ -131,7 +131,8 @@ const discard = (res) => { try { res?.stream?.destroy?.(); } catch {} };
 /**
  * Test a key. Returns `{ok, code, status?, models, host, baseUrl?, truncated?}`:
  * never the key. `models` is the listing (≤ 2,000 ids), or null when there is
- * none; a listing that fails after the key passed still gives `ok`.
+ * none; a listing that fails after the key passed still gives `ok`. A preset
+ * with a `testRequest` (no listing) is tested with that one POST instead.
  */
 export async function testProviderKey({ presetId, variantId, baseUrl, apiKey } = {}, { requestFn = safeRequest, timeoutMs = 8000 } = {}) {
   const preset = presetById(presetId);
@@ -153,11 +154,30 @@ export async function testProviderKey({ presetId, variantId, baseUrl, apiKey } =
   // One budget for the whole test: both requests and both bodies.
   const deadline = Date.now() + timeoutMs;
   const left = () => deadline - Date.now();
-  const call = async (path) => {
+  const call = async (path, extra = { method: "GET" }) => {
     if (left() <= 0) return { err: Object.assign(new Error("out of time"), { code: "TIMEOUT" }) };
-    try { return { res: await requestFn(base + path, { method: "GET", headers, mode, timeoutMs: left() }) }; }
+    try { return { res: await requestFn(base + path, { ...extra, headers: { ...headers, ...(extra.headers || {}) }, mode, timeoutMs: left() }) }; }
     catch (err) { return { err }; }
   };
+
+  // A provider with no listing proves the key with one small POST (its
+  // `testRequest`): same codes, same deadline, and no models to return.
+  if (preset.testRequest) {
+    const tr = preset.testRequest;
+    const sent = await call(tr.path, {
+      method: tr.method, headers: { "content-type": "application/json" }, body: JSON.stringify(tr.body),
+    });
+    if (sent.err) return out(codeForError(sent.err));
+    const tcode = codeForStatus(sent.res.status);
+    if (tcode !== "ok") {
+      discard(sent.res);
+      return out(tcode, { status: sent.res.status, baseUrl: base });
+    }
+    // The answer must finish inside the budget; what it says does not matter.
+    try { await readJson(sent.res, { maxBytes: 200_000, deadline }); }
+    catch (err) { if (err?.code === "TIMEOUT") return out("unreachable"); }
+    return { ok: true, code: "ok", status: sent.res.status, models: null, host, baseUrl: base };
+  }
 
   // Anthropic pages its listing (20 by default); ask for the largest page.
   const modelsPath = preset.authStyle === "anthropic" ? `${preset.modelsPath}?limit=1000` : preset.modelsPath;

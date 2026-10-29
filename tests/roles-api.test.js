@@ -450,6 +450,35 @@ test("POST /api/providers/test: a passing key lists models and the recommended o
   }, addOpts({ testFn }));
 });
 
+test("POST /api/providers/test: a provider with no model list offers its recommended ids, the picks pre-ticked", async () => {
+  const testFn = async () => ({ ok: true, code: "ok", status: 200, models: null, host: "dashscope-intl.aliyuncs.com", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", { body: { presetId: "modelstudio", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.noListing, true);
+    for (const id of ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus", "deepseek-v4-pro-0813", "kimi-k3", "text-embedding-v4"]) {
+      assert.ok(r.json.models.includes(id), id);
+    }
+    assert.equal(new Set(r.json.models).size, r.json.models.length, "each id once");
+    assert.deepEqual([...r.json.recommended].sort(), ["deepseek-v4-pro-0813", "qwen3.7-plus", "qwen3.8-flash", "qwen3.8-max", "text-embedding-v4"]);
+  }, addOpts({ testFn }));
+  // A failed test offers nothing; a preset with a listing never gets the flag.
+  const failFn = async () => ({ ok: false, code: "key_rejected", status: 401, models: null, host: "dashscope-intl.aliyuncs.com" });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", { body: { presetId: "modelstudio", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.models, null);
+    assert.equal(r.json.noListing, undefined);
+  }, addOpts({ testFn: failFn }));
+  const orNull = async () => ({ ok: true, code: "ok", status: 200, models: null, host: "openrouter.ai", baseUrl: OR_URL });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", { body: { presetId: "openrouter", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(r.json.models, null);
+    assert.equal(r.json.noListing, undefined);
+  }, addOpts({ testFn: orNull }));
+});
+
 test("POST /api/providers refuses on a failed test and writes nothing", async () => {
   const before = await providerCount();
   const testFn = async () => ({ ok: false, code: "key_rejected", status: 401, models: null, host: "openrouter.ai" });

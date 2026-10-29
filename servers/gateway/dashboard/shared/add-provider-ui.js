@@ -2,10 +2,12 @@
  * "Add a provider" on the Models page (roles phase 2b): the sheet and its
  * browser side.
  *
- * Steps: pick a provider (the Z.AI plan choice; a server address only for
- * "Other"), paste one key, Test (POST /api/providers/test, one plain line per
- * outcome), tick models (recommended ones pre-ticked and starred, a filter past
- * 20, a "type a model name" field), Save (POST /api/providers). Then each
+ * Steps: pick a provider (a plan or region choice for a preset with variants,
+ * such as Z.AI or Model Studio; a server address only for "Other"), paste one
+ * key, Test (POST /api/providers/test, one plain line per outcome), tick
+ * models (recommended ones pre-ticked and starred, a filter past 20, a "type a
+ * model name" field; a provider with no model list offers its recommended ids),
+ * Save (POST /api/providers). Then each
  * recommended pick with its stored check, "Test the picks" (the only trigger
  * of a probe), "Use the recommended models" with opt-ins unticked, one combined
  * warning, and the roles still empty.
@@ -58,6 +60,15 @@ function copyMap(prefix, codes, lang) {
 }
 
 const presetLabel = (p, lang) => t(p.labelKey, lang);
+const hasVariants = (p) => Array.isArray(p.variants) && p.variants.length > 0;
+
+/** Every preset's variants, one optgroup per preset (the client keeps only the chosen preset's). */
+function variantOptionsHtml(lang) {
+  return PROVIDER_PRESETS.filter(hasVariants).map((p) =>
+    `<optgroup label="${escapeHtml(presetLabel(p, lang))}">` +
+    p.variants.map((v) => `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("") +
+    "</optgroup>").join("");
+}
 
 function reviewedDate() {
   const a = loadRecommendations().accessed;
@@ -120,9 +131,7 @@ export function addProviderSheetHtml({ lang = "en", open = false } = {}) {
   const e = (k) => escapeHtml(t(k, lang));
   const options = PROVIDER_PRESETS.map((p) =>
     `<option value="${escapeHtml(p.id)}">${escapeHtml(presetLabel(p, lang))}</option>`).join("");
-  const zai = PROVIDER_PRESETS.find((p) => Array.isArray(p.variants));
-  const variants = (zai?.variants || []).map((v) =>
-    `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("");
+  const variants = variantOptionsHtml(lang);
   const reviewed = reviewedDate();
   return `${STYLE}
     <dialog id="models-add" class="mc-sheet ap-sheet" aria-labelledby="models-add-title"${open ? ' data-open="1"' : ""}>
@@ -134,7 +143,7 @@ export function addProviderSheetHtml({ lang = "en", open = false } = {}) {
         <label class="ap-field">${e("models.add.provider")}
           <select data-ap="preset">${options}</select>
         </label>
-        <label class="ap-field" data-ap="variantRow" hidden>${e("models.add.plan")}
+        <label class="ap-field" data-ap="variantRow" hidden><span data-ap="variantLabel">${e("models.add.plan")}</span>
           <select data-ap="variant">${variants}</select>
         </label>
         <label class="ap-field" data-ap="urlRow" hidden>${e("models.add.baseUrl")}
@@ -143,6 +152,7 @@ export function addProviderSheetHtml({ lang = "en", open = false } = {}) {
         <label class="ap-field">${e("models.add.key")}
           <input type="password" data-ap="key" autocomplete="off" autocapitalize="off" spellcheck="false">
         </label>
+        <p class="ap-note" data-ap="presetNote" hidden></p>
         <p class="ap-note">${e("models.add.keyNote")}</p>
         <div><button type="button" class="ap-btn" data-ap="test">${e("models.add.testBtn")}</button></div>
         <p class="ap-line" data-ap="testLine" aria-live="polite"></p>
@@ -182,7 +192,11 @@ export function addProviderSheetHtml({ lang = "en", open = false } = {}) {
 /** @returns {string} the client JS (no <script> wrapper) */
 export function addProviderClientJS({ lang = "en" } = {}) {
   const presets = PROVIDER_PRESETS.map((p) => ({
-    id: p.id, label: presetLabel(p, lang), hint: p.keyHint || "", variants: Array.isArray(p.variants) && p.variants.length > 0,
+    id: p.id, label: presetLabel(p, lang), hint: p.keyHint || "",
+    variants: hasVariants(p) ? p.variants.map((v) => ({ id: v.id, label: t(v.labelKey, lang) })) : [],
+    variantLabel: t(p.variantLabelKey || "models.add.plan", lang),
+    note: p.keyNoteKey ? t(p.keyNoteKey, lang) : "",
+    rejected: p.keyRejectedKey ? t(p.keyRejectedKey, lang) : "",
   }));
   return `
 (function () {
@@ -192,6 +206,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     failed: '${tJs("models.ui.failed", lang)}',
     recommended: '${tJs("models.ui.recommended", lang)}',
     saved: '${tJs("models.add.saved", lang)}',
+    okNoList: '${tJs("models.add.test.okNoList", lang)}',
     truncated: '${tJs("models.add.truncated", lang)}',
     notTested: '${tJs("models.add.notTested", lang)}',
     tryLater: '${tJs("models.add.tryLater", lang)}',
@@ -229,7 +244,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
 
   function q(name) { return dlg.querySelector('[data-ap="' + name + '"]'); }
   var ui = {};
-  ['close', 'preset', 'variantRow', 'variant', 'urlRow', 'url', 'key', 'test', 'testLine', 'modelsBox', 'filter', 'truncated',
+  ['close', 'preset', 'variantRow', 'variantLabel', 'variant', 'presetNote', 'urlRow', 'url', 'key', 'test', 'testLine', 'modelsBox', 'filter', 'truncated',
     'list', 'typeName', 'addName', 'save', 'saveLine', 'picksBox', 'stale', 'picks', 'probe', 'recBox', 'recList', 'skipList',
     'warn', 'apply', 'result', 'error', 'done'].forEach(function (n) { ui[n] = q(n); });
   if (!ui.preset || !ui.key) return;
@@ -284,7 +299,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
   function form() {
     var p = presetNow();
     var b = { presetId: p.id, apiKey: String(ui.key.value || '') };
-    if (p.variants && ui.variant) b.variantId = String(ui.variant.value || '');
+    if (p.variants.length && ui.variant) b.variantId = String(ui.variant.value || '');
     if (p.id === 'other' && ui.url) b.baseUrl = String(ui.url.value || '').trim();
     return b;
   }
@@ -304,9 +319,24 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     updateSave();
   }
 
+  /** Only the chosen preset's variants are offered; the first (the default) is selected. */
+  function syncVariants(p) {
+    if (!ui.variant) return;
+    ui.variant.textContent = '';
+    p.variants.forEach(function (v) {
+      var o = el('option', null, v.label);
+      o.value = v.id;
+      ui.variant.appendChild(o);
+    });
+    if (p.variants.length) ui.variant.value = p.variants[0].id;
+    if (ui.variantLabel) ui.variantLabel.textContent = p.variantLabel;
+  }
+
   function syncPreset() {
     var p = presetNow();
-    ui.variantRow.hidden = !p.variants;
+    ui.variantRow.hidden = !p.variants.length;
+    syncVariants(p);
+    if (ui.presetNote) { ui.presetNote.textContent = p.note; ui.presetNote.hidden = !p.note; }
     ui.urlRow.hidden = p.id !== 'other';
     try { ui.key.setAttribute('placeholder', p.hint || ''); } catch (e) { /* cosmetic */ }
     resetTest();
@@ -348,7 +378,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
   function codeText(d) {
     var p = presetNow();
     var code = d && typeof d.code === 'string' ? d.code : '';
-    var s = (code && has(TEST, code) && code !== 'ok' && TEST[code]) || (code && has(ERR, code) && ERR[code]) || '';
+    var s = (code === 'key_rejected' && p.rejected) || (code && has(TEST, code) && code !== 'ok' && TEST[code]) || (code && has(ERR, code) && ERR[code]) || '';
     if (!s) return T.failed;
     return fill(s, { provider: p.label, host: str(d.host) || p.label, status: d.status != null ? d.status : '?' });
   }
@@ -368,7 +398,8 @@ export function addProviderClientJS({ lang = "en" } = {}) {
       var models = Array.isArray(d.models) ? d.models.filter(function (m) { return typeof m === 'string'; }) : [];
       if (d.ok) {
         st.testOk = true;
-        ui.testLine.textContent = fill(TEST.ok, { n: models.length });
+        // No model list from this provider: the choices are Crow's picks for it.
+        ui.testLine.textContent = d.noListing === true ? T.okNoList : fill(TEST.ok, { n: models.length });
         renderModels(models, Array.isArray(d.recommended) ? d.recommended : [], d.truncated === true);
       } else {
         ui.testLine.textContent = codeText(d);

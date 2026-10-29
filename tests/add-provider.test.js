@@ -835,3 +835,118 @@ test("stillEmpty lists only built-in visible core chat roles", async () => {
     for (const x of ["stt", "tts", "rerank", "image", "video"]) assert.ok(!r.stillEmpty.includes(x), x);
   } finally { h.close(); }
 });
+
+// --- Alibaba Model Studio: a POST key test, no listing (ninth preset) ----------------
+
+const MS_INTL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+
+/** A requestFn stub that keeps each request's method and parsed body. */
+function stubPost(routes) {
+  const calls = [];
+  const fn = async (url, opts) => {
+    calls.push({ url, method: opts?.method, headers: { ...(opts?.headers || {}) }, mode: opts?.mode, timeoutMs: opts?.timeoutMs,
+      body: typeof opts?.body === "string" ? JSON.parse(opts.body) : opts?.body });
+    const r = routes[url] ?? routes["*"];
+    if (r instanceof Error) throw r;
+    if (typeof r === "function") return r(url, opts);
+    return reply(404);
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test("modelstudio: the key test is one POST to chat/completions in cloud mode; a 2xx is ok with no models", async () => {
+  const requestFn = stubPost({ "*": () => reply(200, { choices: [{ message: { content: "o" } }] }) });
+  const out = await testProviderKey({ presetId: "modelstudio", apiKey: " fixture-ms-key-1 " }, { requestFn });
+  assert.equal(out.ok, true);
+  assert.equal(out.code, "ok");
+  assert.equal(out.models, null, "no listing");
+  assert.equal(out.baseUrl, MS_INTL);
+  assert.equal(out.host, "dashscope-intl.aliyuncs.com");
+  assert.equal(requestFn.calls.length, 1, "no second listing request");
+  const c = requestFn.calls[0];
+  assert.equal(c.url, `${MS_INTL}/chat/completions`);
+  assert.equal(c.method, "POST");
+  assert.equal(c.mode, "cloud");
+  assert.equal(c.headers.Authorization, "Bearer fixture-ms-key-1");
+  assert.equal(c.headers["content-type"], "application/json");
+  assert.deepEqual(c.body, { model: "qwen3.8-flash", messages: [{ role: "user", content: "ok" }], max_tokens: 1 });
+  assert.ok(c.timeoutMs > 0 && c.timeoutMs <= 8000);
+});
+
+test("modelstudio: the region variant picks its base URL; an unknown region is bad_url", async () => {
+  const want = {
+    us: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+    cn: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    hk: "https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",
+    intl: MS_INTL,
+  };
+  for (const [variantId, base] of Object.entries(want)) {
+    const requestFn = stubPost({ "*": () => reply(200, {}) });
+    const out = await testProviderKey({ presetId: "modelstudio", variantId, apiKey: "fixture-ms-key-1" }, { requestFn });
+    assert.equal(out.ok, true, variantId);
+    assert.equal(requestFn.calls[0].url, `${base}/chat/completions`, variantId);
+  }
+  const never = stubPost({ "*": () => reply(200, {}) });
+  assert.equal((await testProviderKey({ presetId: "modelstudio", variantId: "payg", apiKey: "fixture-ms-key-1" }, { requestFn: never })).code, "bad_url");
+  assert.equal((await testProviderKey({ presetId: "modelstudio", apiKey: "  " }, { requestFn: never })).code, "bad_key");
+  assert.equal(never.calls.length, 0);
+});
+
+test("modelstudio: the POST test keeps the same codes", async () => {
+  const cases = [
+    [() => reply(401, { error: { code: "invalid_api_key" } }), "key_rejected"],
+    [() => reply(403), "key_rejected"],
+    [() => reply(429), "rate_limited"],
+    [() => reply(404), "not_found"],
+    [() => reply(400, { error: { code: "InvalidParameter" } }), "provider_error"],
+    [() => reply(500), "provider_error"],
+    [errWith("TIMEOUT"), "unreachable"],
+    [errWith("ECONNREFUSED"), "unreachable"],
+    [errWith("UPSTREAM_ADDRESS_REFUSED"), "forbidden_target"],
+  ];
+  for (const [r, code] of cases) {
+    const requestFn = stubPost({ "*": r });
+    const out = await testProviderKey({ presetId: "modelstudio", apiKey: "fixture-ms-key-1" }, { requestFn });
+    assert.equal(out.code, code, code);
+    assert.equal(out.ok, false);
+    assert.equal(out.models, null);
+    assert.equal(requestFn.calls.length, 1);
+  }
+});
+
+test("modelstudio: an answer that never finishes is unreachable within the one deadline", async () => {
+  const stalled = () => ({ status: 200, headers: {}, stream: new Readable({ read() {} }) });
+  const requestFn = stubPost({ "*": stalled });
+  const started = Date.now();
+  const out = await testProviderKey({ presetId: "modelstudio", apiKey: "fixture-ms-key-1" }, { requestFn, timeoutMs: 300 });
+  assert.equal(out.code, "unreachable");
+  assert.ok(Date.now() - started < 1500);
+  assert.ok(requestFn.calls[0].timeoutMs <= 300);
+});
+
+test("modelstudio: addProvider saves recommended and typed ids with no listing; a bad typed id is bad_model", async () => {
+  const msTest = { ok: true, code: "ok", status: 200, models: null, host: "dashscope-intl.aliyuncs.com", baseUrl: MS_INTL };
+  const h = harness({ test: msTest });
+  const out = await addProvider({}, { presetId: "modelstudio", apiKey: "fixture-ms-key-1", modelIds: ["qwen3.8-flash", "text-embedding-v4", "qwen-typed-by-hand"] }, h.seams);
+  assert.equal(out.ok, true);
+  assert.equal(out.providerId, "modelstudio");
+  const w = h.writes[0];
+  assert.equal(w.baseUrl, MS_INTL);
+  assert.equal(w.host, "cloud");
+  assert.equal(w.providerType, "openai");
+  assert.equal(w.description, "Alibaba Model Studio (Singapore)");
+  assert.deepEqual(w.models, [
+    { id: "qwen3.8-flash", input: ["text", "image"], contextWindow: 1000000 },
+    { id: "text-embedding-v4", task: "embedding", contextWindow: 8192 },
+    { id: "qwen-typed-by-hand" },
+  ]);
+  const bad = harness({ test: msTest });
+  for (const modelIds of [["bad\nid"], ["x".repeat(300)]]) {
+    assert.equal((await addProvider({}, { presetId: "modelstudio", apiKey: "fixture-ms-key-1", modelIds }, bad.seams)).code, "bad_model");
+  }
+  assert.equal(bad.writes.length, 0);
+  // A failed test still refuses: not_found is a pass only for "other".
+  const nf = harness({ test: { ok: false, code: "not_found", status: 404, models: null, host: "dashscope-intl.aliyuncs.com" } });
+  assert.equal((await addProvider({}, { presetId: "modelstudio", apiKey: "fixture-ms-key-1", modelIds: ["qwen3.8-flash"] }, nf.seams)).code, "not_found");
+});

@@ -86,7 +86,7 @@ test("ai step cloud form posts to /dashboard/onboarding/cloud-provider with ever
   assert.ok(html.includes('method="POST"'), "form is a POST");
   assert.ok(!html.includes('data-turbo="false"'), "cloud form stays Turbo-enabled (redirects to wizard itself)");
   assert.ok(html.includes('name="_csrf"'), "csrf input present");
-  assert.equal(PROVIDER_PRESETS.length, 8, "eight presets");
+  assert.equal(PROVIDER_PRESETS.length, 9, "nine presets");
   for (const preset of PROVIDER_PRESETS) {
     assert.ok(html.includes(`value="${preset.id}"`), `preset option value for ${preset.id} rendered`);
     assert.ok(html.includes(i18n.t(preset.labelKey, "en")), `preset label for ${preset.id} rendered`);
@@ -271,6 +271,29 @@ test("cloud-provider POST: the Z.AI plan variant picks its base URL", async () =
     upsertProviderFn: async (db, provider) => { calls.push(provider); }, invalidateCacheFn: async () => {},
   });
   assert.equal(calls[0].baseUrl, "https://api.z.ai/api/coding/paas/v4");
+});
+
+test("cloud-provider POST: a Model Studio region picks its base URL; another preset's variant falls back to the default region", async () => {
+  for (const [variant, want] of [["hk", "hk"], ["payg", undefined], ["", undefined]]) {
+    const seen = [];
+    const res = makeRes();
+    await handleCloudProviderPost(makePostReq({ preset: "modelstudio", variant, apiKey: "fixture-key-123", model: "qwen3.8-flash" }), res, {
+      db: {}, listRowsFn: noRows,
+      testFn: async (args) => { seen.push(args.variantId); return { ok: true, code: "ok", models: null, host: "dashscope-intl.aliyuncs.com", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" }; },
+      upsertProviderFn: async () => {}, invalidateCacheFn: async () => {},
+    });
+    assert.equal(seen[0], want, JSON.stringify(variant));
+    assert.ok(res.redirected.includes("cloud=ok"), variant);
+  }
+});
+
+test("the no-script form lists each preset's variants under its own name, with the Model Studio regions", async () => {
+  const page = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  const html = page.slice(page.indexOf("<noscript>"), page.indexOf("</noscript>"));
+  assert.ok(html.length > 0, "the no-script form");
+  assert.ok(html.includes('<optgroup label="Z.AI">'), "Z.AI group");
+  assert.ok(html.includes('<optgroup label="Alibaba Model Studio (Qwen)">'), "Model Studio group");
+  for (const v of ["payg", "coding", "intl", "us", "cn", "hk"]) assert.ok(html.includes(`<option value="${v}">`), v);
 });
 
 test("cloud-provider POST: unknown preset id -> cloud_error=bad_preset, never tests or writes", async () => {
