@@ -728,7 +728,8 @@ const SIDE_EFFECTS = [
   { what: "onInstanceKeyReceived(", re: /\.onInstanceKeyReceived\s*\(/g, allowed: ["_completeAdmit", "_dispatchAdmitted"] },
   { what: "_completeAdmit(", re: /\._completeAdmit\s*\(/g, allowed: ["_admit", "_handleMessage"] },
   { what: "onPeerData(", re: /\.onPeerData\s*\(/g, allowed: ["_dispatchAdmitted"] },
-  { what: '{ type: "authenticated" }', re: /\{\s*type\s*:\s*"authenticated"\s*\}/g, allowed: ["_admit"] },
+  // [,}]: the frame also carries line_max (the peer line cap exchange).
+  { what: '{ type: "authenticated" }', re: /\{\s*type\s*:\s*"authenticated"\s*[,}]/g, allowed: ["_admit"] },
   { what: '"instance-key" send', re: /type\s*:\s*"instance-key"/g, allowed: ["_admit"] },
   { what: "bare sign(", re: /\bsign\s*\((?!\s*contactCbMessage\s*\()/g, allowed: ["_sendDeferredReply"] },
   { what: "_sendDeferredReply(", re: /\._sendDeferredReply\s*\(/g, allowed: ["_admit"] },
@@ -801,6 +802,7 @@ test("H-C11 positive control: a planted side effect in a temp copy fails the sca
     ["connections.set(", '    this.connections.set("x", { conn, authenticated: true });\n'],
     ["bare sign(", "    const s = sign(msg.challenge, this.identity.ed25519Priv);\n"],
     ['{ type: "authenticated" }', '    conn.write(JSON.stringify({ type: "authenticated" }) + "\\n");\n'],
+    ['{ type: "authenticated" }', '    conn.write(JSON.stringify({ type: "authenticated", line_max: 1 }) + "\\n");\n'],
     ["onPeerConnected(", "    this.onPeerConnected(remoteCrowId, conn);\n"],
     ["_completeAdmit(", "    this._completeAdmit(conn, state);\n"],
     ["verify(... msg.pubkey", "    verify(nonce, msg.signature, msg.pubkey);\n"],
