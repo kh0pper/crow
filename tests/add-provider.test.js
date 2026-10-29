@@ -418,3 +418,253 @@ test("reuse keeps the stored bundleId and description", async () => {
   assert.equal(h2.writes[0].description, "OpenAI");
   assert.equal(h2.writes[0].bundleId, null);
 });
+
+// --- Task 11: "Use the recommended models for roles you haven't set" ---------
+
+import { mkdtempSync as mkTmp, writeFileSync as writeTmp, rmSync as rmTmp } from "node:fs";
+import { tmpdir as osTmp } from "node:os";
+import { join as joinPath } from "node:path";
+import { createDbClient } from "../servers/db.js";
+import { invalidateRoleContext } from "../servers/shared/model-roles-store.js";
+import { clearProviderTaskCache } from "../servers/shared/provider-task.js";
+import { planRecommended, combinedPreview, applyRecommended } from "../servers/gateway/ai/add-provider.js";
+
+const PLAN_NOW = new Date("2026-10-28T12:00:00Z");
+const PLAN_OWN = new Set();
+const PLAN_KEY = "fixture-key-p11";
+const recEntry = (id, kind = "chat") => ({ model_id: id, id_verified: true, kind, status: "stable", retires: null });
+function planRecFile() {
+  const f = joinPath(mkTmp(joinPath(osTmp(), "plan-recs-")), "recs.json");
+  writeTmp(f, JSON.stringify({
+    schema_version: 1, accessed: "2026-10-01", review_by: "2027-01-28", source_notes: "",
+    providers: { openai: { roles: {
+      coordinator: [recEntry("gpt-6.1-sol")],
+      deep: [recEntry("gpt-6.1-sol")],
+      quick: [recEntry("gpt-6-luna")],
+      everyday: [recEntry("gpt-6-luna")],
+      expert: [recEntry("gpt-6-luna")],
+      voice: [recEntry("gpt-6-luna")],
+      embed: [recEntry("text-embedding-3-large", "embed")],
+    } } },
+  }));
+  return f;
+}
+const PLAN_REC = { file: planRecFile() };
+const CLOUD_MODELS = [{ id: "gpt-6.1-sol" }, { id: "gpt-6-luna" }, { id: "text-embedding-3-large", task: "embedding" }];
+const OK_CHECKS = {
+  "cloud-a": {
+    "gpt-6-luna|chat": { ok: true, code: "ok", at: "2026-10-28T00:00:00Z" },
+    "text-embedding-3-large|embed": { ok: true, code: "ok", at: "2026-10-28T00:00:00Z" },
+    "gpt-6.1-sol|chat": { ok: false, code: "no_tool_call", at: "2026-10-28T00:00:00Z" },
+  },
+};
+
+async function planDb({ localEmbed = true, checks = OK_CHECKS, everyday = true, smartChat = false } = {}) {
+  const dir = mkTmp(joinPath(osTmp(), "plan-rec-"));
+  const db = createDbClient(joinPath(dir, "crow.db"));
+  await db.executeMultiple(`
+    CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT NOT NULL, api_key TEXT, host TEXT, bundle_id TEXT,
+      description TEXT, models TEXT NOT NULL DEFAULT '[]', disabled INTEGER DEFAULT 0, lamport_ts INTEGER DEFAULT 0,
+      instance_id TEXT, provider_type TEXT, gpu_policy TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+    CREATE TABLE dashboard_settings_overrides (key TEXT, instance_id TEXT, value TEXT, updated_at TEXT, PRIMARY KEY (key, instance_id));
+    CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER DEFAULT 1);
+    CREATE TABLE schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL, cron_expression TEXT NOT NULL DEFAULT '* * * * *');
+    CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, tasks_db_uri TEXT);
+    CREATE TABLE crow_instances (id TEXT PRIMARY KEY, name TEXT, status TEXT, trusted INTEGER DEFAULT 0);
+  `);
+  const ins = (id, url, models, key = null, host = "local") => db.execute({
+    sql: "INSERT INTO providers (id, base_url, api_key, host, models, disabled) VALUES (?,?,?,?,?,0)",
+    args: [id, url, key, host, JSON.stringify(models)],
+  });
+  const raw = (k, v) => db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES (?,?)", args: [k, v] });
+  await ins("local-chat", "http://127.0.0.1:8003/v1", [{ id: "m1" }]);
+  await ins("local-voice", "http://127.0.0.1:8011/v1", [{ id: "m2" }]);
+  if (localEmbed) await ins("local-emb", "http://127.0.0.1:8020/v1", [{ id: "e1", task: "embedding" }]);
+  await ins("cloud-a", "https://api.openai.com/v1", CLOUD_MODELS, PLAN_KEY, "cloud");
+  await raw("model_role.voice", JSON.stringify({ model: "local-voice/m2", seeded: true }));
+  if (everyday) await raw("model_role.everyday", JSON.stringify({ model: "local-chat/m1" }));
+  if (checks) await raw("provider_pick_checks", JSON.stringify(checks));
+  if (smartChat) await raw("feature_flags", JSON.stringify({ smart_chat: true }));
+  invalidateRoleContext();
+  clearProviderTaskCache();
+  return { db, raw, close: () => { try { db.close(); } catch {} rmTmp(dir, { recursive: true, force: true }); } };
+}
+const planOpts = (extra = {}) => ({
+  env: {}, ownAddrs: PLAN_OWN, now: PLAN_NOW, recOpts: PLAN_REC,
+  localInstanceId: () => "i-self", classifierStatusFn: async () => ({ state: "missing" }), ...extra,
+});
+const whyOf = (list, roleId) => list.find((x) => x.roleId === roleId)?.why;
+const bindingOf = async (db, id) =>
+  (await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [`model_role.${id}`] })).rows[0]?.value ?? null;
+
+test("fresh-install defaults are opt-in (I8)", async () => {
+  const h = await planDb();
+  try {
+    const plan = await planRecommended(h.db, "cloud-a", planOpts());
+    // embed runs today through the automatic pick: offered, never pre-ticked.
+    assert.equal(whyOf(plan.optIn, "embed"), "runs_today");
+    assert.equal(plan.optIn.find((x) => x.roleId === "embed").key, "cloud-a/text-embedding-3-large");
+    assert.ok(plan.optIn.find((x) => x.roleId === "embed").current, "the model running today is shown");
+    assert.equal(whyOf(plan.optIn, "voice"), "seeded");
+    assert.ok(plan.optIn.find((x) => x.roleId === "voice").current?.key, "what voice runs today is shown");
+    // quick falls back to the chosen everyday today: opt-in, not pre-ticked.
+    assert.equal(whyOf(plan.optIn, "quick"), "runs_today");
+    assert.equal(whyOf(plan.skipped, "everyday"), "set");
+    assert.deepEqual(plan.apply.map((x) => x.roleId), ["expert"]);
+    assert.equal(plan.apply[0].key, "cloud-a/gpt-6-luna");
+    assert.equal(typeof plan.apply[0].preview.previewHash, "string");
+    for (const r of ["critic", "vision", "rerank"]) assert.equal(whyOf(plan.skipped, r), "none_offered", r);
+    // A plan never carries the key.
+    assert.ok(!JSON.stringify(plan).includes(PLAN_KEY));
+  } finally { h.close(); }
+});
+
+test("failed or untested picks are never applied", async () => {
+  const h = await planDb();
+  try {
+    const plan = await planRecommended(h.db, "cloud-a", planOpts());
+    assert.equal(whyOf(plan.skipped, "coordinator"), "failed_check");
+    assert.equal(whyOf(plan.skipped, "deep"), "failed_check");
+    assert.ok(!plan.apply.some((x) => x.key === "cloud-a/gpt-6.1-sol"));
+    assert.ok(!plan.optIn.some((x) => x.key === "cloud-a/gpt-6.1-sol"));
+  } finally { h.close(); }
+  const empty = await planDb({ checks: null });
+  try {
+    const plan = await planRecommended(empty.db, "cloud-a", planOpts());
+    assert.deepEqual(plan.apply, []);
+    assert.deepEqual(plan.optIn, []);
+    for (const r of ["coordinator", "deep", "quick", "everyday", "expert", "voice", "embed"]) {
+      assert.equal(whyOf(plan.skipped, r), "not_tested", r);
+    }
+  } finally { empty.close(); }
+});
+
+test("a pick the row does not list is not_listed; an embed pick needs an embed check", async () => {
+  const h = await planDb({
+    checks: { "cloud-a": { ...OK_CHECKS["cloud-a"], "text-embedding-3-large|embed": undefined, "text-embedding-3-large|chat": { ok: true, code: "ok" } } },
+  });
+  try {
+    await h.db.execute({ sql: "UPDATE providers SET models = ? WHERE id = 'cloud-a'", args: [JSON.stringify([{ id: "gpt-6.1-sol" }, { id: "text-embedding-3-large", task: "embedding" }])] });
+    invalidateRoleContext();
+    const plan = await planRecommended(h.db, "cloud-a", planOpts());
+    assert.equal(whyOf(plan.skipped, "expert"), "not_listed");
+    // A chat check of the same id does not count for embed.
+    assert.equal(whyOf(plan.skipped, "embed"), "not_tested");
+  } finally { h.close(); }
+});
+
+test("a provider with no preset offers nothing", async () => {
+  const h = await planDb();
+  try {
+    const plan = await planRecommended(h.db, "local-chat", planOpts());
+    assert.deepEqual(plan.apply, []);
+    assert.deepEqual(plan.optIn, []);
+    assert.ok(plan.skipped.every((s) => s.why === "none_offered"));
+    assert.deepEqual(await planRecommended(h.db, "no-such-row", planOpts()), { apply: [], optIn: [], skipped: [] });
+  } finally { h.close(); }
+});
+
+test("cloud embed is never pre-ticked", async () => {
+  const h = await planDb({ localEmbed: false });
+  try {
+    const plan = await planRecommended(h.db, "cloud-a", planOpts());
+    assert.ok(plan.optIn.some((x) => x.roleId === "embed"));
+    assert.ok(!plan.apply.some((x) => x.roleId === "embed"));
+  } finally { h.close(); }
+  // Even when nothing runs embeddings today (rows say not_set), a cloud pick stays opt-in.
+  const h2 = await planDb({ localEmbed: false });
+  try {
+    const { buildRoleRows } = await import("../servers/gateway/dashboard/settings/sections/models/rows.js");
+    const buildRowsFn = async (db, o) => (await buildRoleRows(db, o)).map((r) => (r.id === "embed" ? { ...r, status: { code: "not_set" }, model: null } : r));
+    const plan = await planRecommended(h2.db, "cloud-a", planOpts({ buildRowsFn }));
+    const e = plan.optIn.find((x) => x.roleId === "embed");
+    assert.ok(e, "embed is opt-in");
+    assert.equal(e.why, "cloud");
+    assert.ok(!plan.apply.some((x) => x.roleId === "embed"));
+  } finally { h2.close(); }
+});
+
+test("one warning: the combined preview lists a shared consumer once", async () => {
+  const h = await planDb({ everyday: false, smartChat: true });
+  try {
+    const plan = await planRecommended(h.db, "cloud-a", planOpts());
+    assert.deepEqual(plan.apply.map((x) => x.roleId).sort(), ["everyday", "expert", "quick"]);
+    // The router's fast tier follows quick, which falls back to everyday: two previews list it.
+    const per = plan.apply.reduce((n, x) => n + x.preview.consumers.jobs.filter((c) => c.id === "smart-router:fast").length, 0);
+    assert.ok(per >= 2, `listed by ${per} item previews`);
+    const c = await combinedPreview(h.db, plan.apply, planOpts());
+    assert.equal(c.needs.ackCloud, true);
+    assert.equal(c.consumers.jobs.filter((x) => x.id === "smart-router:fast").length, 1);
+    assert.equal(c.cloud.host, "api.openai.com");
+    assert.match(c.previewHash, /^[0-9a-f]{64}$/);
+    // The hash changes when any one item's preview changes (a new bot now follows expert).
+    await h.db.execute({
+      sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?,?,?)",
+      args: ["b-new", "B", JSON.stringify({ models: { default: "role:expert" }, gateways: [] })],
+    });
+    invalidateRoleContext();
+    const c2 = await combinedPreview(h.db, plan.apply, planOpts());
+    assert.notEqual(c2.previewHash, c.previewHash);
+  } finally { h.close(); }
+});
+
+test("apply needs acks and a fresh hash", async () => {
+  const h = await planDb({ everyday: false, smartChat: true });
+  try {
+    const opts = planOpts();
+    const plan = await planRecommended(h.db, "cloud-a", opts);
+    const roles = [...plan.apply.map((x) => x.roleId), "voice"];
+    const items = roles.map((r) => [...plan.apply, ...plan.optIn].find((x) => x.roleId === r));
+    const { previewHash } = await combinedPreview(h.db, items, opts);
+    const before = await Promise.all(roles.map((r) => bindingOf(h.db, r)));
+
+    const noAck = await applyRecommended(h.db, "cloud-a", { ...opts, roles, previewHash, actor: "test" });
+    assert.deepEqual(noAck.applied, []);
+    assert.deepEqual(noAck.refused.map((x) => x.roleId).sort(), [...roles].sort());
+    assert.ok(noAck.refused.every((x) => x.reason === "needs_ack_unattended" || x.reason === "needs_ack_cloud"));
+    const cloudOnly = await applyRecommended(h.db, "cloud-a", { ...opts, roles, previewHash, actor: "test", ackUnattended: true });
+    assert.ok(cloudOnly.refused.every((x) => x.reason === "needs_ack_cloud"));
+    const stale = await applyRecommended(h.db, "cloud-a", { ...opts, roles, previewHash: "0".repeat(64), actor: "test", ackUnattended: true, ackCloud: true });
+    assert.ok(stale.refused.length === roles.length && stale.refused.every((x) => x.reason === "preview_changed"));
+    const bogus = await applyRecommended(h.db, "cloud-a", { ...opts, roles: [...roles, "coordinator"], previewHash, actor: "test", ackUnattended: true, ackCloud: true });
+    assert.deepEqual(bogus.applied, []);
+    assert.equal(bogus.refused.find((x) => x.roleId === "coordinator").reason, "not_offered");
+    assert.deepEqual(await Promise.all(roles.map((r) => bindingOf(h.db, r))), before, "nothing written");
+
+    const ok = await applyRecommended(h.db, "cloud-a", { ...opts, roles, previewHash, actor: "test", ackUnattended: true, ackCloud: true });
+    assert.deepEqual(ok.refused, []);
+    assert.deepEqual(ok.applied.map((x) => x.roleId).sort(), [...roles].sort());
+    for (const r of roles) {
+      const b = JSON.parse(await bindingOf(h.db, r));
+      assert.equal(b.model, "cloud-a/gpt-6-luna", r);
+      assert.notEqual(b.seeded, true, r);
+      assert.equal(b.by, "test");
+    }
+    // Visible core chat roles still empty: vision has no pick here; rerank and media never count.
+    assert.ok(ok.stillEmpty.includes("vision"));
+    for (const r of [...roles, "rerank", "image", "video", "stt", "tts"]) assert.ok(!ok.stillEmpty.includes(r), r);
+  } finally { h.close(); }
+});
+
+test("a write failing midway is reported as partial, never as success", async () => {
+  const h = await planDb({ everyday: false });
+  try {
+    const opts = planOpts();
+    const plan = await planRecommended(h.db, "cloud-a", opts);
+    const { previewHash } = await combinedPreview(h.db, plan.apply, opts);
+    const roles = plan.apply.map((x) => x.roleId);
+    const { applyRoleChange } = await import("../servers/shared/role-change.js");
+    let n = 0;
+    const applyRoleChangeFn = async (...a) => (++n === 2 ? { ok: false, reason: "follows_primary" } : applyRoleChange(...a));
+    const r = await applyRecommended(h.db, "cloud-a", { ...opts, roles, previewHash, actor: "test", ackUnattended: true, ackCloud: true, applyRoleChangeFn });
+    assert.equal(r.applied.length, roles.length - 1);
+    assert.deepEqual(r.refused, [{ roleId: roles[1], reason: "follows_primary" }]);
+    const thrown = await applyRecommended(h.db, "cloud-a", {
+      ...opts, roles: [roles[1]], previewHash: (await combinedPreview(h.db, [plan.apply[1]], opts)).previewHash,
+      actor: "test", ackUnattended: true, ackCloud: true, applyRoleChangeFn: async () => { throw new Error("disk"); },
+    });
+    assert.deepEqual(thrown.applied, []);
+    assert.deepEqual(thrown.refused, [{ roleId: roles[1], reason: "save_failed" }]);
+  } finally { h.close(); }
+});

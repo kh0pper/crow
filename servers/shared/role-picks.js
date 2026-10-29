@@ -15,6 +15,8 @@ import {
 import { friendlyModel } from "../gateway/dashboard/shared/bot-display.js";
 import { getOwnAddresses } from "./locality.js";
 import { t, fill } from "../gateway/dashboard/shared/i18n.js";
+import { presetForRow, recommendedFor } from "./provider-recommendations.js";
+import { checkIn, checkKindFor } from "../gateway/ai/pick-checks.js";
 
 const WHERE_RANK = Object.freeze({ here: 0, other_box: 1, cloud: 2, unproven: 3, missing: 4 });
 /** I12: only the provider matters at run time for these, so one pick per provider. */
@@ -46,6 +48,33 @@ function providerLabel(providerId, providers) {
   return cut > 0 ? d.slice(0, cut) : d;
 }
 
+const listedIds = (p) => new Set((Array.isArray(p?.models) ? p.models : [])
+  .map((m) => (typeof m === "string" ? m : m?.id)).filter((id) => typeof id === "string" && id));
+
+/**
+ * The default recommendation: for each enabled provider made from a preset,
+ * the role's recommended entries that the row lists and whose stored check
+ * passed (`pickChecks`, the object pick-checks.js reads). No checks, no
+ * preset, or recommendations past review: nothing is recommended.
+ */
+export function recommendedKeysFor(roleId, { ctx, pickChecks, now, recOpts } = {}) {
+  if (!ctx || !pickChecks || typeof pickChecks !== "object") return [];
+  const enabled = ctx.models?.providers || {};
+  const kind = checkKindFor(roleId);
+  const out = [];
+  for (const p of ctx.providers || []) {
+    if (!p?.id || !Object.hasOwn(enabled, p.id)) continue;
+    const presetId = presetForRow(p);
+    if (!presetId) continue;
+    const listed = listedIds(p);
+    for (const e of recommendedFor(presetId, roleId, recOpts)) {
+      if (e.id_verified !== true || typeof e.model_id !== "string" || !listed.has(e.model_id)) continue;
+      if (checkIn(pickChecks, p.id, e.model_id, { kind, now, recOpts })?.ok) out.push(`${p.id}/${e.model_id}`);
+    }
+  }
+  return out;
+}
+
 /** ctx with roleId bound to {model, fallback: []}; ctx itself is never mutated. */
 const hypothetical = (ctx, roleId, model) =>
   ({ ...ctx, bindings: { ...(ctx.bindings || {}), [roleId]: { model, fallback: [], seeded: false } } });
@@ -68,11 +97,14 @@ function safetyReachesCloud(ctxX, ownAddrs) {
 /**
  * @typedef {{key:string, label:string, where:string, provider:string|null, recommended:boolean, allowed:boolean, why?:"cloud_refused"}} Pick
  * @param {string} roleId
- * @param {{ctx:object, lang?:string, recommendedFn?:(roleId:string)=>string[], ownAddrs?:Set<string>, localMarks?:object}} opts
- *   localMarks only shapes `where`; the safety check never uses them.
+ * @param {{ctx:object, lang?:string, recommendedFn?:(roleId:string)=>string[], ownAddrs?:Set<string>, localMarks?:object,
+ *   pickChecks?:object, now?:Date, recOpts?:object}} opts
+ *   localMarks only shapes `where`; the safety check never uses them. Without
+ *   `recommendedFn`, a pick is recommended by recommendedKeysFor (a listed
+ *   preset pick whose stored check passed; `pickChecks` from readPickChecks).
  * @returns {Pick[]}
  */
-export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn = () => [], ownAddrs, localMarks } = {}) {
+export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddrs, localMarks, pickChecks, now, recOpts } = {}) {
   if (!ctx) return [];
   const capability = capabilityOf(roleId, ctx.customDefs);
   if (!capability || MEDIA_CAPABILITIES.includes(capability)) return [];
@@ -81,6 +113,7 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn = () => 
   const own = { ownAddrs };
   const where = (key) => (key ? whereItRuns(key, { providers, localMarks, ...own }) : "missing");
 
+  recommendedFn ??= (id) => recommendedKeysFor(id, { ctx, pickChecks, now, recOpts });
   let rec;
   try { rec = new Set((recommendedFn(roleId) || []).filter((k) => typeof k === "string")); } catch { rec = new Set(); }
 

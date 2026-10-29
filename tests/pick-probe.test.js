@@ -206,3 +206,23 @@ test("no silent probe: the real addProvider flow makes no pick request", async (
   const src = readFileSync(new URL("../servers/gateway/ai/add-provider.js", import.meta.url), "utf8");
   assert.ok(!/pick-probe/.test(src), "add-provider.js must not import pick-probe.js");
 });
+
+test("check storage lives in a read-only module with no request path", async () => {
+  const src = readFileSync(new URL("../servers/gateway/ai/pick-checks.js", import.meta.url), "utf8");
+  const imports = [...src.matchAll(/^\s*import\s[^;]*?from\s+["']([^"']+)["']/gm)].map((m) => m[1]);
+  assert.ok(imports.length > 0);
+  for (const spec of imports) {
+    assert.ok(!/safe-upstream|pick-probe|^node:(https?|http2|net|tls|dgram|dns)$|undici|node-fetch/.test(spec), `pick-checks.js imports ${spec}`);
+  }
+  assert.ok(!/\bfetch\s*\(|\bimport\s*\(/.test(src), "no fetch, no dynamic import");
+  const checks = await import("../servers/gateway/ai/pick-checks.js");
+  const probe = await import("../servers/gateway/ai/pick-probe.js");
+  assert.equal(probe.pickCheckOf, checks.pickCheckOf, "pick-probe re-exports the one reader");
+  assert.equal(probe.PICK_CHECKS_KEY, checks.PICK_CHECKS_KEY);
+  // add-provider and role-picks read checks only through pick-checks.js.
+  for (const f of ["../servers/gateway/ai/add-provider.js", "../servers/shared/role-picks.js"]) {
+    const s = readFileSync(new URL(f, import.meta.url), "utf8");
+    assert.ok(!/pick-probe/.test(s), `${f} must not mention pick-probe`);
+    assert.ok(/pick-checks\.js/.test(s), `${f} reads checks through pick-checks.js`);
+  }
+});

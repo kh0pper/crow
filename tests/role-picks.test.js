@@ -130,3 +130,49 @@ test("order: recommended first, then here, other box, cloud, unproven; ties by l
 test("media and unknown roles return []", () => {
   for (const id of ["stt", "tts", "image", "video", "nope"]) assert.deepEqual(picks(id), []);
 });
+
+// --- Task 11: the default recommendedFn ---------------------------------------
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const recFile = (() => {
+  const f = join(mkdtempSync(join(tmpdir(), "picks-recs-")), "recs.json");
+  const e = (id, kind = "chat") => ({ model_id: id, id_verified: true, kind, status: "stable", retires: null });
+  writeFileSync(f, JSON.stringify({
+    schema_version: 1, accessed: "2026-10-01", review_by: "2027-01-28", source_notes: "",
+    providers: { openai: { roles: { everyday: [e("gpt-6.1-sol"), e("gpt-6-luna")], embed: [e("text-embedding-3-large", "embed")] } } },
+  }));
+  return f;
+})();
+const REC = { recOpts: { file: recFile }, now: new Date("2026-10-28T12:00:00Z") };
+const OPENAI = row("cloud-o", "https://api.openai.com/v1", [{ id: "gpt-6.1-sol" }, { id: "gpt-6-luna" }, { id: "text-embedding-3-large", task: "embedding" }]);
+const recCtx = () => {
+  const ps = [...PROVIDERS, OPENAI];
+  return makeCtx({ providers: ps, models: modelsOf(ps) });
+};
+const starred = (roleId, opts) => listRolePicks(roleId, { ctx: recCtx(), ownAddrs: OWN, ...REC, ...opts }).filter((p) => p.recommended).map((p) => p.key);
+
+test("default recommendedFn: only listed picks that passed their check", () => {
+  // No checks stored: nothing is recommended.
+  assert.deepEqual(starred("everyday"), []);
+  const pickChecks = { "cloud-o": {
+    "gpt-6.1-sol|chat": { ok: false, code: "no_tool_call" },
+    "gpt-6-luna|chat": { ok: true, code: "ok" },
+    "text-embedding-3-large|chat": { ok: true, code: "ok" },
+  } };
+  assert.deepEqual(starred("everyday", { pickChecks }), ["cloud-o/gpt-6-luna"]);
+  // Embed picks read the embed check only.
+  assert.deepEqual(starred("embed", { pickChecks }), []);
+  const withEmbed = { "cloud-o": { ...pickChecks["cloud-o"], "text-embedding-3-large|embed": { ok: true, code: "ok" } } };
+  assert.deepEqual(starred("embed", { pickChecks: withEmbed }), ["cloud-o/text-embedding-3-large"]);
+  // Past review_by every check reads "not tested".
+  assert.deepEqual(starred("everyday", { pickChecks, now: new Date("2027-02-01T00:00:00Z") }), []);
+  // Rows with no preset recommend nothing, whatever is stored.
+  assert.deepEqual(starred("everyday", { pickChecks: { "local-chat": { "m1|chat": { ok: true, code: "ok" } } } }), []);
+});
+
+test("an injected recommendedFn still wins over the default", () => {
+  const pickChecks = { "cloud-o": { "gpt-6-luna|chat": { ok: true, code: "ok" } } };
+  assert.deepEqual(starred("everyday", { pickChecks, recommendedFn: () => ["local-chat/m1"] }), ["local-chat/m1"]);
+});

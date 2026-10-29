@@ -9,11 +9,13 @@
  * reduced to a short code.
  */
 import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/provider-presets.js";
-import { candidatePick, presetForRow, isRecommendationsStale, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { candidatePick, presetForRow, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { safeRequest, readJson } from "../models/safe-upstream.js";
+import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf } from "./pick-checks.js";
 
-export const PICK_CHECKS_KEY = "provider_pick_checks";
+// The read side lives in pick-checks.js (no request path); re-exported here for existing callers.
+export { PICK_CHECKS_KEY, pickCheckOf };
 const PROBE_TOOL = "crow_probe";
 const PROMPT = "Call crow_probe with ok set to true.";
 const TOOL_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] };
@@ -85,15 +87,6 @@ export async function probePick(row, modelId, { kind = "chat", requestFn = safeR
   return { ok: code === "ok", code };
 }
 
-async function readChecks(db) {
-  try {
-    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [PICK_CHECKS_KEY] });
-    const v = rows[0]?.value;
-    const parsed = v ? JSON.parse(v) : {};
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch { return {}; }
-}
-
 /**
  * Probe the candidate pick of each role (a model shared by roles is probed
  * once, sequentially), store the results, and return them per role.
@@ -131,7 +124,7 @@ async function runProbes(db, providerId, {
     out[p.roleId] = { modelId: p.modelId, ok: r.ok, code: r.code };
   }
   if (done.size) {
-    const all = await readChecks(db);
+    const all = await readPickChecks(db);
     const mine = { ...(all[providerId] || {}) };
     for (const p of picks) {
       const r = done.get(`${p.kind}:${p.modelId}`);
@@ -145,12 +138,4 @@ async function runProbes(db, providerId, {
     });
   }
   return out;
-}
-
-/** The stored check for a model, or null (not tested) when none exists or the recommendations are past `review_by`. */
-export async function pickCheckOf(db, providerId, modelId, { kind = "chat", now = new Date(), recOpts } = {}) {
-  if (isRecommendationsStale(now, recOpts)) return null;
-  const c = (await readChecks(db))?.[providerId]?.[`${modelId}|${kind}`];
-  if (!c || typeof c !== "object") return null;
-  return { ok: !!c.ok, code: String(c.code), at: c.at };
 }

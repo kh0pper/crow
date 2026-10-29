@@ -7,12 +7,21 @@
  * stored row: it is never returned, and nothing here logs it (errors are
  * logged by `err.message`, which never carries headers).
  */
+import { createHash } from "node:crypto";
 import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/provider-presets.js";
-import { recommendedFor, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { recommendedFor, candidatePick, presetForRow, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { upsertProvider, listProvidersAll } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { isDoorUrl } from "../models/door-resolve.js";
 import { safeRequest, readJson, preflightRefused } from "../models/safe-upstream.js";
+// Read-only check storage: this module never runs a pick check itself.
+import { readPickChecks, checkIn, checkKindFor } from "./pick-checks.js";
+import { resolveRoleKey, isCloudKey } from "../../shared/model-roles.js";
+import { loadRoleContext } from "../../shared/model-roles-store.js";
+import { scanSlots } from "../../shared/model-consumers.js";
+import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
+import { getOwnAddresses } from "../../shared/locality.js";
+import { buildRoleRows } from "../dashboard/settings/sections/models/rows.js";
 
 const MAX_MODEL_IDS = 2000;
 const MAX_MODEL_ID_LEN = 256;
@@ -310,4 +319,217 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
   // Outside the try: the row is written, so a failing onAdded must not read as "not saved".
   if (onAdded) await onAdded(saved.id);
   return { ok: true, providerId: saved.id, reuse: saved.reuse, test };
+}
+
+// --- "Use the recommended models for roles you haven't set" (Task 11) -------
+
+/** Roles whose cloud pick is never pre-ticked (I8): what they send is your whole memory or search. */
+const NEVER_PRETICK_CLOUD = new Set(["embed", "rerank"]);
+const RUNS_TODAY = new Set(["default", "fallback"]);
+const SET_STATUSES = new Set(["env", "pinned"]);
+
+const listedIdsOf = (row) => (Array.isArray(row?.models) ? row.models : [])
+  .map((m) => (typeof m === "string" ? m : m?.id)).filter((id) => typeof id === "string" && id);
+
+/** The change a pick makes: the model, keeping the role's stored chain (as a Change from the page does). */
+function changeFor(ctx, roleId, key) {
+  const fb = ctx?.bindings?.[roleId]?.fallback;
+  return Array.isArray(fb) ? { model: key, fallback: [...fb] } : { model: key };
+}
+
+/** True when binding `key` makes the role resolve to it (the resolver's own rules, as listRolePicks). */
+function resolvesTo(ctx, roleId, key) {
+  const ctxX = { ...ctx, bindings: { ...(ctx.bindings || {}), [roleId]: { model: key, fallback: [], seeded: false } } };
+  try {
+    const r = resolveRoleKey(`role:${roleId}`, ctxX);
+    return r.reason === "bound" && r.key === key;
+  } catch { return false; }
+}
+
+const freshCtx = (db, localInstanceId) =>
+  loadRoleContext(db, { maxAgeMs: 0, ...(localInstanceId ? { getOrCreateLocalInstanceId: localInstanceId } : {}) });
+
+const rowsOf = (db, { buildRowsFn = buildRoleRows, env, ownAddrs, localMarks, localInstanceId, classifierStatusFn, classifierLookup }) =>
+  buildRowsFn(db, { env, ownAddrs, localMarks, localInstanceId, classifierStatusFn, classifierLookup });
+
+/**
+ * What "Use the recommended models" would do for one provider.
+ *
+ * A pick is offered only when the provider is made from a preset, the row
+ * lists the pick, the resolver would use it, and its stored check passed
+ * (else `none_offered`, `not_listed`, `not_tested`, `failed_check`). An
+ * offered pick is pre-ticked (`apply`) only for a role whose row says
+ * `not_set`; a seeded role, a role running a default or fallback today, and
+ * any cloud pick for embed or rerank are `optIn` (I8; `why: "cloud"` for the
+ * last when nothing runs it today). Roles the operator chose, or that an env
+ * var or setting pin fills, are `set`.
+ *
+ * Never carries the key. Seams: `buildRowsFn`, `classifierStatusFn`,
+ * `classifierLookup`, `localInstanceId`, `recOpts`, `now`.
+ * @returns {Promise<{apply:Array<{roleId,key,preview}>, optIn:Array<{roleId,key,current,why}>, skipped:Array<{roleId,why}>}>}
+ */
+export async function planRecommended(db, providerId, opts = {}) {
+  const { env = process.env, localMarks, now = new Date(), recOpts, localInstanceId } = opts;
+  const ownAddrs = opts.ownAddrs || getOwnAddresses();
+  const ctx = opts.ctx || await freshCtx(db, localInstanceId);
+  const out = { apply: [], optIn: [], skipped: [] };
+  const row = (ctx.providers || []).find((p) => p && p.id === providerId);
+  if (!row) return out;
+  const presetId = presetForRow(row);
+  const listed = listedIdsOf(row);
+  const checks = await readPickChecks(db);
+  const rows = new Map((await rowsOf(db, { ...opts, env, ownAddrs })).map((r) => [r.id, r]));
+  let slots = null;
+
+  for (const roleId of RECOMMENDATION_ROLES) {
+    const skip = (why) => out.skipped.push({ roleId, why });
+    if (!presetId || !candidatePick(presetId, roleId, {}, recOpts)) { skip("none_offered"); continue; }
+    const pick = candidatePick(presetId, roleId, { liveModelIds: listed }, recOpts);
+    const key = pick ? `${providerId}/${pick.model_id}` : null;
+    if (!key || !resolvesTo(ctx, roleId, key)) { skip("not_listed"); continue; }
+    const check = checkIn(checks, providerId, pick.model_id, { kind: checkKindFor(roleId), now, recOpts });
+    if (!check) { skip("not_tested"); continue; }
+    if (!check.ok) { skip("failed_check"); continue; }
+
+    const r = rows.get(roleId);
+    const code = r?.status?.code;
+    if (!r || r.chosen || r.pin || SET_STATUSES.has(code)) { skip("set"); continue; }
+    const current = r.model || null;
+    if (r.seeded) { out.optIn.push({ roleId, key, current, why: "seeded" }); continue; }
+    if (RUNS_TODAY.has(code)) { out.optIn.push({ roleId, key, current, why: "runs_today" }); continue; }
+    if (code !== "not_set") { skip("set"); continue; }
+    if (NEVER_PRETICK_CLOUD.has(roleId) && isCloudKey(key, { providers: ctx.providers, localMarks, ownAddrs })) {
+      out.optIn.push({ roleId, key, current, why: "cloud" });
+      continue;
+    }
+    slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false, env });
+    const preview = await previewRoleChange(db, roleId, changeFor(ctx, roleId, key), { ctx, slots, env, localMarks, ownAddrs });
+    out.apply.push({ roleId, key, preview });
+  }
+  return out;
+}
+
+const consumerId = (c) => `${c?.kind}|${c?.id}`;
+
+/** The union of each item's preview, plus the changes it was computed for (internal). */
+async function combine(db, items, opts = {}) {
+  const { env = process.env, localMarks, localInstanceId } = opts;
+  const ownAddrs = opts.ownAddrs || getOwnAddresses();
+  const ctx = await freshCtx(db, localInstanceId);
+  const seen = new Set();
+  const list = [];
+  for (const it of Array.isArray(items) ? items : []) {
+    if (!it || typeof it.roleId !== "string" || typeof it.key !== "string" || seen.has(it.roleId)) continue;
+    seen.add(it.roleId);
+    list.push({ roleId: it.roleId, key: it.key, change: changeFor(ctx, it.roleId, it.key) });
+  }
+  const slots = list.length ? await scanSlots(db, { withUnattended: true, includeSubagents: false, env }) : [];
+  const consumers = {}, consumerSeen = {};
+  const clouds = [], cloudSeen = new Set();
+  const refused = [], refusedSeen = new Set();
+  const needs = { ackUnattended: false, ackCloud: false };
+  let reembed = false;
+  for (const it of list) {
+    const p = await previewRoleChange(db, it.roleId, it.change, { ctx, slots, env, localMarks, ownAddrs });
+    it.previewHash = p.previewHash;
+    for (const [group, entries] of Object.entries(p.consumers || {})) {
+      consumers[group] ??= [];
+      consumerSeen[group] ??= new Set();
+      for (const c of entries || []) {
+        if (consumerSeen[group].has(consumerId(c))) continue;
+        consumerSeen[group].add(consumerId(c));
+        consumers[group].push(c);
+      }
+    }
+    if (p.cloud && !cloudSeen.has(`${p.cloud.host}|${p.cloud.model}`)) {
+      cloudSeen.add(`${p.cloud.host}|${p.cloud.model}`);
+      clouds.push(p.cloud);
+    }
+    for (const x of p.refused || []) if (!refusedSeen.has(x.id)) { refusedSeen.add(x.id); refused.push(x); }
+    needs.ackUnattended ||= !!p.needs?.ackUnattended;
+    needs.ackCloud ||= !!p.needs?.ackCloud;
+    reembed ||= !!p.reembed;
+  }
+  const parts = list.map((it) => [it.roleId, it.key, it.previewHash]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const previewHash = createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+  return {
+    result: {
+      consumers, cloud: clouds[0] || null, clouds, refused, reembed, needs,
+      items: list.map(({ roleId, key, previewHash: h }) => ({ roleId, key, previewHash: h })),
+      previewHash,
+    },
+    list,
+    ownAddrs,
+  };
+}
+
+/**
+ * One warning for several picks: the union of each item's previewRoleChange
+ * (each consumer once per group), `needs` the OR of theirs, `cloud` the first
+ * cloud line (`clouds` all of them). The hash covers every item's own hash,
+ * so it changes when any one preview changes.
+ * @param {Array<{roleId:string, key:string}>} items
+ * @returns {Promise<{consumers, cloud, clouds, refused, reembed, needs, items, previewHash}>}
+ */
+export async function combinedPreview(db, items, opts = {}) {
+  return (await combine(db, items, opts)).result;
+}
+
+function stillEmptyOf(rows) {
+  return rows.filter((r) => r.kind === "chat" && r.id !== "rerank" && !r.hidden && r.status?.code === "not_set").map((r) => r.id);
+}
+
+/**
+ * Apply the ticked roles from a plan, after the one combined warning.
+ *
+ * Refuses every role, writing nothing, when a role is not offered by a fresh
+ * plan (`not_offered`; the others `preview_changed`), when the combined hash
+ * is stale (`preview_changed`), or when an ack the combined preview needs is
+ * missing. Otherwise each role goes through applyRoleChange with the same
+ * acks, one at a time: the first with the hash the user saw, each later one
+ * with a hash taken after the writes before it (the combined hash already
+ * covered them). A write that fails is listed in `refused` and the rest are
+ * still tried, so `applied` is exactly what was written.
+ * @returns {Promise<{applied:Array<{roleId,key}>, refused:Array<{roleId,reason}>, stillEmpty:string[]}>}
+ */
+export async function applyRecommended(db, providerId, {
+  roles, previewHash, actor, ackUnattended = false, ackCloud = false, applyRoleChangeFn = applyRoleChange, ...seams
+} = {}) {
+  delete seams.ctx; // every stage reads the live state
+  seams.ownAddrs ||= getOwnAddresses();
+  const { env = process.env, localMarks } = seams;
+  const wanted = [...new Set((Array.isArray(roles) ? roles : []).filter((r) => typeof r === "string"))];
+  const applied = [], refused = [];
+  const finish = async () => ({ applied, refused, stillEmpty: stillEmptyOf(await rowsOf(db, { ...seams, env })) });
+  const refuseAll = (reasonOf) => { for (const roleId of wanted) refused.push({ roleId, reason: reasonOf(roleId) }); return finish(); };
+  if (!wanted.length) return finish();
+
+  const plan = await planRecommended(db, providerId, seams);
+  const offered = new Map([...plan.apply, ...plan.optIn].map((x) => [x.roleId, x.key]));
+  if (wanted.some((r) => !offered.has(r))) return refuseAll((r) => (offered.has(r) ? "preview_changed" : "not_offered"));
+
+  const { result, list } = await combine(db, wanted.map((roleId) => ({ roleId, key: offered.get(roleId) })), seams);
+  if (typeof previewHash !== "string" || previewHash !== result.previewHash) return refuseAll(() => "preview_changed");
+  if (result.needs.ackUnattended && ackUnattended !== true) return refuseAll(() => "needs_ack_unattended");
+  if (result.needs.ackCloud && ackCloud !== true) return refuseAll(() => "needs_ack_cloud");
+
+  let wrote = false;
+  for (const it of list) {
+    let r;
+    try {
+      const hash = wrote
+        ? (await previewRoleChange(db, it.roleId, it.change, { env, localMarks, ownAddrs: seams.ownAddrs })).previewHash
+        : it.previewHash;
+      r = await applyRoleChangeFn(db, it.roleId, it.change, {
+        actor, previewHash: hash, ackUnattended, ackCloud, env, localMarks, ownAddrs: seams.ownAddrs,
+      });
+    } catch (err) {
+      console.warn(`[add-provider] apply ${it.roleId} failed: ${err?.message}`);
+      r = { ok: false, reason: "save_failed" };
+      wrote = true; // unknown: judge the next one on the live state
+    }
+    if (r?.ok) { applied.push({ roleId: it.roleId, key: it.key }); wrote = true; }
+    else refused.push({ roleId: it.roleId, reason: typeof r?.reason === "string" ? r.reason : "save_failed" });
+  }
+  return finish();
 }
