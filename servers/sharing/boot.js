@@ -32,6 +32,7 @@ import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { wireContactBinding } from "./contact-binding.js";
 import { crowIdMatchesKey } from "./identity.js";
+import { isPeerLineOverCap } from "./peer-manager.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
@@ -568,6 +569,15 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
       });
       delivered++;
     } catch (err) {
+      if (isPeerLineOverCap(err)) {
+        // Too large for the peer channel: retrying can never succeed, and
+        // nothing was written. Marked failed, never 'delivered'.
+        try {
+          await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [share.id] });
+        } catch {}
+        console.warn(`[sharing] pending share #${share.id} (${share.share_type}) to ${crowId} failed: too large to send (${err.bytes} bytes, cap ${err.cap})`);
+        continue;
+      }
       // Delivery failed — row stays 'pending', retried next connection
       console.warn(`[sharing] pending share #${share.id} (${share.share_type}) delivery error: ${err.message}`);
     }
