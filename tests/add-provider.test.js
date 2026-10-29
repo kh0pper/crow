@@ -10,6 +10,8 @@ import { Readable } from "node:stream";
 
 import { testProviderKey, providerIdFor, modelEntryFor, addProvider } from "../servers/gateway/ai/add-provider.js";
 import { gatewayPort } from "../servers/gateway/models/door.js";
+import { safeRequest } from "../servers/gateway/models/safe-upstream.js";
+import { createServer } from "node:http";
 
 function reply(status, body = {}, headers = {}) {
   const buf = Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
@@ -345,4 +347,74 @@ test("other accepts an empty key and sends no Authorization; presets still need 
   const rows = [{ id: first.providerId, baseUrl: base, apiKey: null, models: [{ id: "llama-x" }] }];
   const again = await addProvider({}, { presetId: "other", baseUrl: base, apiKey: "", modelIds: ["llama-x"] }, { ...seams, listRowsFn: async () => rows });
   assert.deepEqual([again.providerId, again.reuse], [first.providerId, true]);
+});
+
+test("a base URL with a query or fragment is bad_url", async () => {
+  const never = stubRequest({ "*": () => reply(200, modelsBody(["m"])) });
+  for (const baseUrl of ["http://192.168.1.20:8080/v1?x=1", "http://192.168.1.20:8080/v1#frag", "http://192.168.1.20:8080/v1?", "https://api.openai.com/v1?x=1#f"]) {
+    const presetId = baseUrl.includes("openai") ? "openai" : "other";
+    const out = await testProviderKey({ presetId, baseUrl, apiKey: "fixture-key-a" }, { requestFn: never });
+    assert.equal(out.code, "bad_url", baseUrl);
+  }
+  assert.equal(never.calls.length, 0);
+});
+
+test("a slow-drip key test gives unreachable within the timeout", async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    const t = setInterval(() => res.write(" "), 300);
+    res.on("close", () => clearInterval(t));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const lookupFn = (name, opts, cb) => (opts?.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4));
+    const requestFn = (url, opts) => safeRequest(url, { ...opts, lookupFn });
+    const started = Date.now();
+    const out = await testProviderKey({ presetId: "other", baseUrl: `http://drip.test:${port}/v1`, apiKey: "fixture-key-a" }, { requestFn, timeoutMs: 1000 });
+    const took = Date.now() - started;
+    assert.equal(out.code, "unreachable");
+    assert.equal(out.ok, false);
+    assert.ok(took < 1500, `took ${took} ms`);
+  } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
+});
+
+test("two concurrent adds with different keys land under different ids", async () => {
+  const rows = [{ id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "fixture-key-a", models: [] }];
+  const seams = {
+    listRowsFn: async () => rows.map((r) => ({ ...r })),
+    upsertProviderFn: async (db, p) => {
+      await new Promise((r) => setTimeout(r, 20)); // a slow write widens the race
+      const i = rows.findIndex((r) => r.id === p.id);
+      if (i >= 0) rows[i] = { ...p }; else rows.push({ ...p });
+      return { id: p.id };
+    },
+    invalidateFn: () => {},
+    testFn: async () => okTest(),
+  };
+  const [b, c] = await Promise.all([
+    addProvider({}, { presetId: "openai", apiKey: "fixture-key-b", modelIds: ["gpt-6.1-sol"] }, seams),
+    addProvider({}, { presetId: "openai", apiKey: "fixture-key-c", modelIds: ["gpt-6.1-sol"] }, seams),
+  ]);
+  assert.deepEqual([b.providerId, c.providerId].sort(), ["openai-2", "openai-3"]);
+  assert.deepEqual(rows.map((r) => [r.id, r.apiKey]).sort(), [["openai", "fixture-key-a"], ["openai-2", "fixture-key-b"], ["openai-3", "fixture-key-c"]]);
+  // A failed write releases the lock for the next add.
+  const failing = await addProvider({}, { presetId: "openai", apiKey: "fixture-key-d", modelIds: [] }, { ...seams, upsertProviderFn: async () => { throw new Error("busy"); } });
+  assert.equal(failing.code, "save_failed");
+  const next = await addProvider({}, { presetId: "openai", apiKey: "fixture-key-d", modelIds: [] }, seams);
+  assert.equal(next.providerId, "openai-4");
+});
+
+test("reuse keeps the stored bundleId and description", async () => {
+  const rows = [{ id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "fixture-key-a", bundleId: "some-bundle", description: "Work account", models: [] }];
+  const h = harness({ rows, test: okTest() });
+  const out = await addProvider({}, { presetId: "openai", apiKey: "fixture-key-a", modelIds: ["gpt-6.1-sol"] }, h.seams);
+  assert.equal(out.reuse, true);
+  assert.equal(h.writes[0].bundleId, "some-bundle");
+  assert.equal(h.writes[0].description, "Work account");
+  // A stored row without a description gets the preset label.
+  const h2 = harness({ rows: [{ ...rows[0], description: null, bundleId: null }], test: okTest() });
+  await addProvider({}, { presetId: "openai", apiKey: "fixture-key-a", modelIds: [] }, h2.seams);
+  assert.equal(h2.writes[0].description, "OpenAI");
+  assert.equal(h2.writes[0].bundleId, null);
 });

@@ -11,16 +11,23 @@ import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/pr
 import { recommendedFor, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { upsertProvider, listProvidersAll } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
-import { getOwnAddresses } from "../../shared/locality.js";
-import { classifyIp } from "../../shared/ip-classify.js";
-import { isForbiddenTarget, isDoorUrl } from "../models/door-resolve.js";
-import { gatewayPort } from "../models/door.js";
-import { safeRequest, readJson, addressRefused } from "../models/safe-upstream.js";
+import { isDoorUrl } from "../models/door-resolve.js";
+import { safeRequest, readJson, preflightRefused } from "../models/safe-upstream.js";
 
 const MAX_MODEL_IDS = 2000;
 const MAX_MODEL_ID_LEN = 256;
 const MAX_ID_LEN = 32;
 const DOOR_ID_PREFIX = "crow-c-";
+
+// One add at a time in this process (the gateway is the only writer of these rows).
+let addChain = Promise.resolve();
+function acquireAddLock() {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const ready = addChain.then(() => release);
+  addChain = addChain.then(() => held);
+  return ready;
+}
 
 /** Trimmed key, or null when empty or holding anything outside printable ASCII without spaces. */
 function cleanKey(apiKey) {
@@ -59,20 +66,19 @@ function authHeaders(preset, key) {
   return { Authorization: `Bearer ${key}` };
 }
 
-const isHttpUrl = (u) => u.protocol === "http:" || u.protocol === "https:";
-
-/** A target this gateway must never send a key to, checked before any request. */
-function refusedTarget(u, mode) {
-  if (isForbiddenTarget(u.href) || isDoorUrl(u.href)) return true;
-  const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
-  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  // m13: a loopback or own address on this gateway's port is the gateway itself.
-  if (port === gatewayPort()) {
-    const own = getOwnAddresses();
-    if (own.has(host) || host === "localhost" || ["loopback", "unspecified"].includes(classifyIp(host).cls)) return true;
-  }
-  if (classifyIp(host).cls !== "invalid" && addressRefused(host, { mode, port })) return true;
-  return false;
+/**
+ * "bad_url", "forbidden_target" or null for a base URL, before any request.
+ * The address rule is safeRequest's own (`preflightRefused`, which also
+ * covers this gateway's port on any own address, m13); the door path is
+ * refused here because safeRequest itself must still reach doors.
+ */
+function targetCode(raw, mode) {
+  // A query or fragment would land in the middle of every request path.
+  if (typeof raw !== "string" || /[?#]/.test(raw)) return "bad_url";
+  const r = preflightRefused(raw, { mode });
+  if (r === "BAD_URL") return "bad_url";
+  if (r || isDoorUrl(raw)) return "forbidden_target";
+  return null;
 }
 
 function codeForStatus(status) {
@@ -117,16 +123,21 @@ export async function testProviderKey({ presetId, variantId, baseUrl, apiKey } =
   try { u = raw ? new URL(raw) : null; } catch {}
   const host = u ? u.hostname.replace(/^\[|\]$/g, "") : null;
   const out = (code, extra = {}) => ({ ok: code === "ok", code, models: null, host, ...extra });
-  if (!u || !isHttpUrl(u) || u.username || u.password) return out("bad_url");
+  if (!u) return out("bad_url");
   const mode = preset.id === "other" ? "other" : "cloud";
-  if (refusedTarget(u, mode)) return out("forbidden_target");
+  const refused = targetCode(raw, mode);
+  if (refused) return out(refused);
   const key = keyFor(preset, apiKey);
   if (key == null) return out("bad_key");
 
   const base = u.href.replace(/\/+$/, "");
   const headers = authHeaders(preset, key);
+  // One budget for the whole test: both requests and both bodies.
+  const deadline = Date.now() + timeoutMs;
+  const left = () => deadline - Date.now();
   const call = async (path) => {
-    try { return { res: await requestFn(base + path, { method: "GET", headers, mode, timeoutMs }) }; }
+    if (left() <= 0) return { err: Object.assign(new Error("out of time"), { code: "TIMEOUT" }) };
+    try { return { res: await requestFn(base + path, { method: "GET", headers, mode, timeoutMs: left() }) }; }
     catch (err) { return { err }; }
   };
 
@@ -151,12 +162,17 @@ export async function testProviderKey({ presetId, variantId, baseUrl, apiKey } =
   let truncated = false;
   if (!listing.err && codeForStatus(listing.res.status) === "ok") {
     try {
-      const ids = idsFromListing(await readJson(listing.res, { maxBytes: 2_000_000 }));
+      const ids = idsFromListing(await readJson(listing.res, { maxBytes: 2_000_000, deadline }));
       if (ids) {
         truncated = ids.length > MAX_MODEL_IDS;
         models = ids.slice(0, MAX_MODEL_IDS);
       }
-    } catch { models = null; }
+    } catch (err) {
+      // The test's own answer never finished: the server is not usable. (A
+      // separate listing that stalls is only a list failure: ok, models null.)
+      if (err?.code === "TIMEOUT" && listing === first) return out("unreachable");
+      models = null;
+    }
   } else discard(listing.res);
   return { ok: true, code: "ok", status: first.res.status, models, host, baseUrl: base, ...(truncated ? { truncated: true } : {}) };
 }
@@ -257,12 +273,16 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
   if (!rowUrl) return { ok: false, code: "bad_url" };
 
   let saved;
+  // Serialized: choosing a free id and writing it is one step, so two adds in
+  // flight at once (a double submit, two tabs) cannot both take `openai-2`.
+  const release = await acquireAddLock();
   try {
     const rows = await listRowsFn(db);
     const { id, reuse } = providerIdFor(preset.id, { rows, baseUrl: rowUrl, apiKey: key });
     let models = ticked.map((m) => modelEntryFor(preset.id, m));
+    const storedRow = reuse ? rows.find((r) => r.id === id) : null;
     if (reuse) {
-      const stored = rows.find((r) => r.id === id)?.models;
+      const stored = storedRow?.models;
       const kept = (Array.isArray(stored) ? stored : []).filter((m) => (typeof m === "string" ? m : m?.id));
       const have = new Set(kept.map((m) => (typeof m === "string" ? m : m.id)));
       models = [...kept, ...models.filter((m) => !have.has(m.id))];
@@ -272,8 +292,9 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
       baseUrl: rowUrl,
       apiKey: key || null,
       host: preset.id === "other" ? undefined : "cloud",
-      bundleId: null,
-      description: labelFor(preset, variantId),
+      // On reuse the row's own bundle link and description are kept.
+      bundleId: storedRow ? (storedRow.bundleId ?? storedRow.bundle_id ?? null) : null,
+      description: (storedRow && storedRow.description) || labelFor(preset, variantId),
       models,
       disabled: false,
       providerType: preset.providerType,
@@ -283,6 +304,8 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
   } catch (err) {
     console.warn(`[add-provider] save failed: ${err?.message}`);
     return { ok: false, code: "save_failed" };
+  } finally {
+    release();
   }
   // Outside the try: the row is written, so a failing onAdded must not read as "not saved".
   if (onAdded) await onAdded(saved.id);

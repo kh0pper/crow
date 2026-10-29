@@ -10,7 +10,8 @@ import { createServer } from "node:http";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 
-import { safeRequest, readJson, guardedLookup, addressRefused } from "../servers/gateway/models/safe-upstream.js";
+import { safeRequest, readJson, guardedLookup, addressRefused, ownAddresses, preflightRefused } from "../servers/gateway/models/safe-upstream.js";
+import { setInterfaceTableForTests } from "../servers/shared/ip-classify.js";
 
 function fakeServer(handler = (req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); }) {
   const hits = [];
@@ -191,4 +192,56 @@ test("bad url and timeout", async () => {
       (e) => e.code === "TIMEOUT",
     );
   } finally { s.server.closeAllConnections(); await s.close(); }
+});
+
+test("a slow-drip body cannot outlast timeoutMs (headers and body share one deadline)", async () => {
+  const s = await fakeServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    const t = setInterval(() => { if (!res.write(" ")) {} }, 300);
+    res.on("close", () => clearInterval(t));
+  });
+  try {
+    const started = Date.now();
+    const r = await safeRequest(`http://fake.test:${s.port}/v1/models`, {
+      mode: "cloud", lookupFn: answer("127.0.0.1"), allowAddressFn: (n) => n === "fake.test", timeoutMs: 1000,
+    });
+    await assert.rejects(readJson(r), (e) => e.code === "TIMEOUT");
+    const took = Date.now() - started;
+    assert.ok(took < 1500, `took ${took} ms`);
+    assert.ok(took >= 900, `took ${took} ms`);
+  } finally { s.server.closeAllConnections(); await s.close(); }
+});
+
+test("own addresses include docker and bridge interfaces, for the gateway-port rule", () => {
+  const table = {
+    lo: [{ address: "127.0.0.1", family: "IPv4" }],
+    docker0: [{ address: "172.17.0.1", family: "IPv4" }],
+    "br-0a1b2c": [{ address: "192.168.250.1", family: "IPv4" }],
+    eth0: [{ address: "100.64.20.5", family: "IPv4" }, { address: "fe80::1%eth0", family: "IPv6" }],
+  };
+  const own = ownAddresses(table);
+  for (const a of ["172.17.0.1", "192.168.250.1", "100.64.20.5", "fe80::1", "localhost"]) assert.ok(own.has(a), a);
+  const rule = (a, port) => addressRefused(a, { mode: "other", port, gatewayPortValue: 3001, ownAddrs: own });
+  assert.equal(rule("172.17.0.1", 3001), true);
+  assert.equal(rule("192.168.250.1", 3001), true);
+  assert.equal(rule("100.64.20.5", 3001), true);
+  assert.equal(rule("172.17.0.1", 11434), false);    // a server in a container on another port is fine
+  assert.equal(rule("192.168.1.20", 3001), false);   // another box on the LAN on the same port is fine
+  assert.equal(preflightRefused("http://172.17.0.1:3001/v1", { mode: "other", gatewayPortValue: 3001, ownAddrs: own }), "FORBIDDEN_TARGET");
+  assert.equal(preflightRefused("http://localhost:3001/v1", { mode: "other", gatewayPortValue: 3001, ownAddrs: own }), "FORBIDDEN_TARGET");
+  assert.equal(preflightRefused("http://localhost:11434/v1", { mode: "other", gatewayPortValue: 3001, ownAddrs: own }), null);
+  assert.equal(preflightRefused("ftp://x/", { mode: "other" }), "BAD_URL");
+});
+
+test("cloud mode refuses this box's own public address and its on-link neighbours", () => {
+  const cloud = (a, ownAddrs = new Set()) => addressRefused(a, { mode: "cloud", port: 443, gatewayPortValue: 3001, ownAddrs });
+  // 8.8.4.4 is public: only the own-address branch can refuse it.
+  assert.equal(cloud("8.8.4.4"), false);
+  assert.equal(cloud("8.8.4.4", new Set(["8.8.4.4"])), true);
+  assert.equal(cloud("::ffff:8.8.4.4", new Set(["8.8.4.4"])), true);
+  setInterfaceTableForTests(() => ({ eth0: [{ address: "8.8.4.10", netmask: "255.255.255.0", cidr: "8.8.4.10/24", family: "IPv4" }] }));
+  try {
+    assert.equal(cloud("8.8.4.77"), true);   // on-link with this box
+    assert.equal(cloud("8.8.8.8"), false);
+  } finally { setInterfaceTableForTests(null); }
 });
