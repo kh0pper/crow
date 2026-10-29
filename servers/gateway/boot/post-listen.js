@@ -505,8 +505,15 @@ export async function runPostListenSetup(server, app, deps) {
 
   // The voice hand-off log (voice/handoff.js): a minute sweep expires stale proposals, recovers a start the
   // process lost, retries a pending stop through the engine and scrubs old verbatim speech. Never throws.
-  import("../voice/handoff.js").then(({ startHandoffSweep }) => { startHandoffSweep(); })
-    .catch((err) => console.warn("[voice-handoff] sweep not armed:", err.message));
+  // Then the "voice" result kind is registered (a hand-off card's final report sends the completion notice)
+  // and the in-memory claims are warmed from the open rows; the DB fallback covers whatever the warm-up missed.
+  import("../voice/handoff.js").then(async ({ startHandoffSweep, registerVoiceResultKind }) => {
+    startHandoffSweep();
+    registerVoiceResultKind();
+    const { restoreResultRequesters } = await import("../board/result-requesters.js");
+    const db = createDbClient();
+    try { await restoreResultRequesters(db); } finally { try { db.close(); } catch {} }
+  }).catch((err) => console.warn("[voice-handoff] sweep or result kind not armed:", err.message));
 
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
   // kill switch CROW_DISABLE_CROSSPOST_SCHEDULER=1). Lazy import keeps boot

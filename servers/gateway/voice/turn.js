@@ -27,6 +27,7 @@ import { transcriptBufferOn, reloadTranscriptSetting, voiceTranscripts } from ".
 import { transcriptLogOn, voiceTranscriptLog } from "./transcript-log.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 import { botDefsGeneration, watchBotDefs } from "./defs-generation.js";
+import { trackTurn } from "./presence.js";
 
 /**
  * A voice bot (kind "voice") also asks a spoken yes before these: a schedule or a change to the
@@ -544,8 +545,9 @@ export function createVoiceTurnRunner(deps) {
 
   /**
    * deps.voiceActions (optional; Crow voice's pending confirmations), every member optional:
-   * - fastPath({ db, device, surface, transcript, lang, tz, bot, executor }) → Promise<null | { say, verb, events? }>:
-   *   runs after STT and the TTS open, before opts.fastPaths. bot and executor are null when the bot cannot be
+   * - fastPath({ db, device, surface, transcript, lang, tz, bot, executor, mediaActive }) → Promise<null | { say, verb, events? }>:
+   *   runs after STT and the TTS open, before opts.fastPaths. mediaActive is opts.mediaActive (a function: the
+   *   surface has media or a timer running) or null when the caller passed none. bot and executor are null when the bot cannot be
    *   loaded (it is never ensured here). A non-null result is spoken and saved like a fast path. A throw is
    *   logged and taken as null.
    * - turnContext({ device }) → { text, pending } | string: SYNCHRONOUS (a returned Promise is logged and
@@ -737,7 +739,9 @@ export function createVoiceTurnRunner(deps) {
         if (vaBot) {
           try { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; } catch (err) { executor = null; log(`[voice-turn] ${device.id} voice actions: no executor (${err?.message || err})`); }
         }
-        try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
+        // opts.mediaActive (P21): the surface's "media or a timer is active" flag, for a pronoun "stop it"; absent means unknown.
+        const mediaActive = typeof opts.mediaActive === "function" ? opts.mediaActive : null;
+        try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor, mediaActive }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
       }
       // An answer turn's words are the bot's: never the endpoint's own no-model paths ("Pause." is not a request).
       if (!fp && !answerTurn && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);
@@ -2051,7 +2055,14 @@ export function createVoiceTurnRunner(deps) {
   }
 
   // transcripts: the opt-in transcript buffer (null without one), read by the kiosk's admin route through deps.voice.
-  return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo, get transcripts() { return deps.transcripts || null; } };
+  /** Every turn (a relay turn included) is marked running on its device for its whole length, so presence.js never
+   *  speaks a heads-up into it (P27). */
+  async function trackedTurn(opts) {
+    const done = trackTurn(opts?.device?.id);
+    try { return await runVoiceTurn(opts); } finally { done(); }
+  }
+
+  return { runVoiceTurn: trackedTurn, speakText, transcribe, assessBot, abilitiesOf, convo, get transcripts() { return deps.transcripts || null; } };
 }
 
 // One pibots:defs-changed subscription per process, however many runners defaultVoiceDeps() feeds. The generation

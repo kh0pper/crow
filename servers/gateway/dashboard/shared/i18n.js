@@ -4146,9 +4146,17 @@ export const translations = {
   "voiceHandoff.failed.not_sent": { en: "This couldn't be sent to your phone, so it can't be confirmed. Ask Crow again.", es: "No se pudo enviar a tu teléfono, así que no se puede confirmar. Pídeselo a Crow otra vez." },
   "voiceHandoff.failed.not_allowed": { en: "Hand-offs to {bot} are turned off now, so nothing was started.", es: "Los encargos a {bot} están desactivados ahora, así que no se empezó nada." },
   "voiceHandoff.failed.interrupted": { en: "Crow was interrupted while starting it, so nothing was started.", es: "Crow se interrumpió al empezarlo, así que no se empezó nada." },
+  "voiceHandoff.failed.finish": { en: "{bot} couldn't finish it. The details are on {bot}'s board.", es: "{bot} no pudo terminarlo. Los detalles están en el tablero de {bot}." },
+  "voiceHandoff.failed.session_ended_no_result": { en: "{bot} stopped without finishing it. The card is still on {bot}'s board.", es: "{bot} se detuvo sin terminarlo. La tarjeta sigue en el tablero de {bot}." },
   "voiceHandoff.stopStatus.done": { en: "Stopped. What {bot} made so far is kept.", es: "Parado. Lo que {bot} hizo hasta ahora se queda." },
   "voiceHandoff.stopStatus.declined": { en: "You kept it running.", es: "La dejaste seguir." },
   "voiceHandoff.stopStatus.failed": { en: "The stop didn't go through.", es: "No se pudo parar." },
+  "voiceHandoff.stopStatus.starting": { en: "Confirmed. Stopping {bot}'s task…", es: "Confirmado. Parando la tarea de {bot}…" },
+  "voiceHandoff.stopStatus.expired": { en: "This expired, so {bot}'s task was left running.", es: "Esto caducó, así que la tarea de {bot} siguió en marcha." },
+  "voiceHandoff.stopStatus.already": { en: "{bot} wasn't working on that anymore, so there was nothing to stop.", es: "{bot} ya no estaba con eso, así que no había nada que parar." },
+  "voiceHandoff.stopStatus.done_pending_start": { en: "Confirmed. {bot}'s task will stop as soon as it starts. Anything it makes is kept.", es: "Confirmado. La tarea de {bot} se parará en cuanto empiece. Lo que haga se queda." },
+  "voiceHandoff.stopStatus.done_stopping": { en: "Confirmed. {bot}'s task is stopping now. What it made so far is kept.", es: "Confirmado. La tarea de {bot} se está parando. Lo que hizo hasta ahora se queda." },
+  "voiceHandoff.stopStatus.not_sent": { en: "This couldn't be sent to your phone, so {bot}'s task kept running. Ask Crow again.", es: "No se pudo enviar a tu teléfono, así que la tarea de {bot} siguió en marcha. Pídeselo a Crow otra vez." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

@@ -493,3 +493,17 @@ test("assessBot counts the hand-off tool when asked (handoffs: true, on any surf
   assert.notEqual((await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID, handoffs: true, surface: "kiosk" })).level, "full");
   assert.deepEqual(s.pending.get("voice-fit-check"), null, "the fit check leaves no pending entry");
 });
+
+test("a pending which offers crow_handoff only when it was asked for a hand-off, never for a status or a stop (final review m1)", async () => {
+  const s = setup();
+  const device = { ...s.h.device, id: "phone-1", name: "Phone" };
+  const offered = async (entry) => {
+    s.pending.set("phone-1", entry);
+    const [tool] = await s.core.forTurn({ db: s.db, device, bot: CROW, pending: s.pending, surface: "phone", lang: "en", transcript: "the second one" });
+    return tool.when("the second one");
+  };
+  assert.equal(await offered({ kind: "which", task: TASK, asked: ASK, options: [] }), true, "a hand-off which (no purpose)");
+  assert.equal(await offered({ kind: "which", purpose: "handoff", task: TASK, asked: ASK, options: [] }), true);
+  assert.equal(await offered({ kind: "which", purpose: "status", options: [] }), false);
+  assert.equal(await offered({ kind: "which", purpose: "stop", options: [] }), false);
+});
