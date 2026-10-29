@@ -3349,6 +3349,18 @@ export const translations = {
   "perch.tabSession": { en: "Session", es: "Sesión" },
   "perch.tabFiles": { en: "Files", es: "Archivos" },
   "perch.tabActivity": { en: "Activity", es: "Actividad" },
+  // R1.2 PR 2: the new-mode sheet that holds Session, Files and Activity,
+  // opened from the bot's name.
+  "perch.sheetTitleBot": { en: "{bot} · Session details", es: "{bot} · Detalles de la sesión" },
+  // The new-mode head's Back is a 44 px "←" icon: these are its accessible
+  // names, filed (the project's home) and unfiled (the Chat list).
+  "perch.backProject": { en: "Back to the project home", es: "Volver al inicio del proyecto" },
+  "perch.backList": { en: "Back to the sessions", es: "Volver a las sesiones" },
+  "perch.plusLabel": { en: "Attach or dictate", es: "Adjuntar o dictar" },
+  "perch.composerPlaceholderProject": { en: "Message # {project}", es: "Mensaje # {project}" },
+  "perch.identToday": { en: "today", es: "hoy" },
+  "perch.identYesterday": { en: "yesterday", es: "ayer" },
+  "perch.sheetTitle": { en: "Session details", es: "Detalles de la sesión" },
   "perch.changeDirectory": { en: "Change directory", es: "Cambiar directorio" },
   "perch.cwdChangeNote": {
     en: "The session sleeps and wakes in the new directory; the next message starts a fresh context there.",
@@ -3557,6 +3569,12 @@ export const translations = {
   "perch.toolRunning": { en: "running", es: "ejecutando" },
   "perch.toolDone": { en: "done", es: "listo" },
   "perch.toolFailed": { en: "failed", es: "falló" },
+  // R1.2 PR 2: a turn's tool chips fold into one "See what happened" line (new mode).
+  "perch.toolGroupSee": { en: "See what happened", es: "Ver qué pasó" },
+  "perch.toolGroupStep": { en: "1 step", es: "1 paso" },
+  "perch.toolGroupSteps": { en: "{n} steps", es: "{n} pasos" },
+  "perch.toolGroupFailedOne": { en: "1 failed", es: "1 falló" },
+  "perch.toolGroupFailed": { en: "{n} failed", es: "{n} fallaron" },
   "perch.commandsHibernating": {
     en: "The session is asleep — send a message first.",
     es: "La sesión está dormida — envía un mensaje primero.",

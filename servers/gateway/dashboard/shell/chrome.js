@@ -133,15 +133,22 @@ function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" 
   const cur = currentValue(scope, projects);
   const btn = (value, text, sub = "") =>
     `<button type="submit" class="shell-project${value === cur ? " is-current" : ""}" name="scope" value="${escapeHtml(value)}"${value === cur ? ' aria-current="true"' : ""}><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span>${sub ? `<span class="shell-project-sub">${escapeHtml(sub)}</span>` : ""}</span></button>`;
+  // Projects that share a display name (case-insensitive, trimmed) show their
+  // slug as a muted second line so the rows can be told apart.
+  const nameKey = (p) => String(p.name ?? "").trim().toLowerCase();
+  const nameCount = new Map();
+  for (const p of projects || []) nameCount.set(nameKey(p), (nameCount.get(nameKey(p)) || 0) + 1);
   const link = (p) => {
     const slug = projectValue(p);
+    const dup = nameCount.get(nameKey(p)) > 1;
+    const slugLine = dup ? `<span class="shell-project-sub shell-project-slug">${escapeHtml(slug)}</span>` : "";
     // On a project's home its link is the current page; elsewhere the project
     // the scope points at is marked the same way, as the current item only.
     const open = homeSlug != null && homeSlug === slug;
     const scoped = !open && homeSlug == null && cur === slug;
     const lbl = counts instanceof Map && counts.has(Number(p.id)) ? needsYouLabel(counts.get(Number(p.id)), lang) : null;
     const mark = open ? ' aria-current="page"' : scoped ? ' aria-current="true"' : "";
-    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open || scoped ? " is-current" : ""}"${mark}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${lbl ? `<span class="shell-project-sub">${lbl === "?" ? `<span aria-hidden="true">?</span><span class="shell-sr">${escapeHtml(t("shell.cantCount", lang))}</span>` : escapeHtml(lbl)}</span>` : ""}</span></a>`;
+    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open || scoped ? " is-current" : ""}"${mark}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${slugLine}${lbl ? `<span class="shell-project-sub">${lbl === "?" ? `<span aria-hidden="true">?</span><span class="shell-sr">${escapeHtml(t("shell.cantCount", lang))}</span>` : escapeHtml(lbl)}</span>` : ""}</span></a>`;
   };
   const edge = (href, text) => `<a href="${href}" class="shell-project shell-project--edge"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span></span></a>`;
   const rows = [

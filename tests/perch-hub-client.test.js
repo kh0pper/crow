@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { readFileSync } from "node:fs";
 
 /** Replace the interior of every block and line comment with spaces (keeping
  *  length and newlines), so a `{` or `}` inside a comment can't unbalance the
@@ -640,7 +641,8 @@ function makeResponse(status, body) {
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
 async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", initialSearch = "", split = false,
-                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize, lang = "en" } = {}) {
+                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize, lang = "en",
+                          sheet = false } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs(lang);
 
@@ -678,6 +680,15 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-text-smaller", "perch-text-reset", "perch-text-larger", "perch-text-size-value"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
+  // R1.2 PR 2: new mode is the session sheet existing (client.js SHEET).
+  if (sheet) {
+    const d = makeFakeElement("dialog");
+    d.open = false;
+    d.showModal = function () { this.open = true; };
+    d.close = function () { this.open = false; this._dispatch("close", {}); };
+    d.removeAttribute = function () {};
+    els["perch-session-sheet"] = d;
+  }
 
   const bodyEl = makeFakeElement("body");
   const fetchCalls = [];
@@ -5432,4 +5443,522 @@ test("a combined card shown without its questions (unmaskable) still says why an
   assert.equal(byClass(card, "ask-send").length, 0, "nothing to send");
   assert.equal(byClass(card, "quiet").length, 1, "Cancel is offered");
   assert.equal(hub.els["perch-attn"].hidden, false, "the banner says the bot waits");
+});
+
+// ---- R1.2 PR 2, Task 2: the calm head -------------------------------------
+const HEAD_EXTRA = "var IDENT_TODAY='today',IDENT_YESTERDAY='yesterday';";
+const PROJ = [{ id: 3, slug: "hw-club", name: "Homework Club" }, { id: 4, slug: "a b", name: "Spaced" }];
+
+async function headFns() {
+  const projectOfRow = await extract("projectOfRow");
+  const identDay = await extract("identDay", HEAD_EXTRA);
+  const identSubtitle = new Function("projectOfRow", "identDay", (await (async () => {
+    const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+    const src = perchHubJs("en"); const s = src.indexOf("function identSubtitle");
+    return src.slice(s, braceMatchEnd(src, s) + 1) + "; return identSubtitle;";
+  })()))(projectOfRow, identDay);
+  const backTarget = await extract("backTarget", "var projectOfRow=" + projectOfRow.toString() + ";");
+  return { projectOfRow, identSubtitle, backTarget };
+}
+
+test("projectOfRow finds the project by id; null when unfiled or unknown", async () => {
+  const { projectOfRow } = await headFns();
+  assert.deepEqual(projectOfRow({ projectId: 3 }, PROJ), { slug: "hw-club", name: "Homework Club" });
+  assert.equal(projectOfRow({ projectId: null }, PROJ), null);
+  assert.equal(projectOfRow({ projectId: 99 }, PROJ), null);
+  assert.equal(projectOfRow(undefined, PROJ), null);
+});
+
+test("identSubtitle: today / yesterday / weekday / date / no project", async () => {
+  const { identSubtitle } = await headFns();
+  const now = new Date(2026, 9, 28, 15, 0, 0);          // Wed 28 Oct 2026, local
+  const stamp = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000 * 0 ).toISOString().slice(0, 19).replace("T", " ");
+  const at = (y, m, d) => stamp(new Date(Date.UTC(y, m, d, 12, 0, 0)));   // midday UTC: same local day in any sane zone offset check below
+  const row = (lastActivityAt) => ({ projectId: 3, lastActivityAt });
+  // Build local-noon stamps so the local calendar day is unambiguous.
+  const local = (y, m, d) => { const x = new Date(y, m, d, 12, 0, 0); return x.toISOString().slice(0, 19).replace("T", " "); };
+  assert.equal(identSubtitle(row(local(2026, 9, 28)), PROJ, now, "en"), "# Homework Club · today");
+  assert.equal(identSubtitle(row(local(2026, 9, 27)), PROJ, now, "en"), "# Homework Club · yesterday");
+  assert.equal(identSubtitle(row(local(2026, 9, 24)), PROJ, now, "en"), "# Homework Club · Saturday");
+  assert.match(identSubtitle(row(local(2026, 8, 1)), PROJ, now, "en"), /^# Homework Club · Sep 1$/);
+  assert.equal(identSubtitle({ projectId: 3, lastActivityAt: null }, PROJ, now, "en"), "# Homework Club");
+  assert.equal(identSubtitle({ projectId: null, lastActivityAt: local(2026, 9, 28) }, PROJ, now, "en"), "today");
+  assert.equal(identSubtitle({ projectId: null, lastActivityAt: null }, PROJ, now, "en"), "");
+  void at;
+});
+
+test("back with a project goes to its home", async () => {
+  const { backTarget } = await headFns();
+  assert.equal(backTarget({ projectId: 3 }, PROJ), "/dashboard/project/hw-club");
+  assert.equal(backTarget({ projectId: 4 }, PROJ), "/dashboard/project/a%20b");
+});
+
+test("back without a project goes to the list", async () => {
+  const { backTarget } = await headFns();
+  assert.equal(backTarget({ projectId: null }, PROJ), null);
+  assert.equal(backTarget({ projectId: 3 }, []), null);
+});
+
+// ---------------------------------------------------------------------------
+// R1.2 PR 2: "See what happened" — a turn's tool chips fold into one line
+// (new mode only). Pure helpers by extraction, then the full harness.
+// ---------------------------------------------------------------------------
+
+async function tgStrings(lang) {
+  const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  const t = (k) => translations[k][lang];
+  return { see: t("perch.toolGroupSee"), running: t("perch.toolRunning"), step: t("perch.toolGroupStep"),
+    steps: t("perch.toolGroupSteps"), failedOne: t("perch.toolGroupFailedOne"), failed: t("perch.toolGroupFailed") };
+}
+
+test("groupLabel: running / agents / steps / failed / never all ok", async () => {
+  const groupLabel = await extract("groupLabel");
+  const en = await tgStrings("en"), es = await tgStrings("es");
+  assert.equal(groupLabel({ total: 3, failed: 0, running: 1, agents: ["scout"] }, en), "See what happened · running");
+  assert.equal(groupLabel({ total: 3, failed: 0, running: 0, agents: ["scout", "worker", "scout"] }, en),
+    "See what happened · scout, worker", "unique agent names, in order");
+  assert.equal(groupLabel({ total: 4, failed: 0, running: 0, agents: [] }, en), "See what happened · 4 steps");
+  assert.equal(groupLabel({ total: 1, failed: 0, running: 0, agents: [] }, en), "See what happened · 1 step");
+  assert.equal(groupLabel({ total: 4, failed: 2, running: 0, agents: [] }, en), "See what happened · 4 steps, 2 failed");
+  assert.equal(groupLabel({ total: 4, failed: 1, running: 0, agents: [] }, en), "See what happened · 4 steps, 1 failed");
+  assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: ["scout"] }, en),
+    "See what happened · scout, 1 failed", "a subagent group still shows its failure");
+  assert.equal(groupLabel({ total: 3, failed: 0, running: 0, others: 2, agents: ["scout"] }, en),
+    "See what happened · scout · 3 steps", "subagents beside other tools: names · N steps");
+  assert.equal(groupLabel({ total: 3, failed: 1, running: 0, others: 2, agents: ["scout"] }, en),
+    "See what happened · scout · 3 steps, 1 failed");
+  assert.equal(groupLabel({ total: 3, failed: 2, running: 0, agents: [] }, es), "Ver qué pasó · 3 pasos, 2 fallaron");
+  assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, true), "See what happened · running",
+    "chips all done but the turn still running: running");
+  assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, false), "See what happened · 2 steps");
+  assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: [] }, en, true), "See what happened · running · 1 failed",
+    "a running group says its failure in words");
+  assert.equal(groupLabel({ total: 3, failed: 2, running: 1, agents: [] }, es), "Ver qué pasó · " +
+    es.running + " · 2 fallaron");
+  for (const c of [{ total: 2, failed: 0, running: 0, agents: [] }, { total: 0, failed: 0, running: 0 }]) {
+    assert.doesNotMatch(groupLabel(c, en), /all ok|ok$/i, "it never says all ok");
+  }
+});
+
+test("chipFailed: isError; known refusal text counts as failed; ordinary text doesn't", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const listSrc = /var KNOWN_REFUSALS=\[[\s\S]*?\];/.exec(src)[0];
+  const chipFailed = await extract("chipFailed", listSrc);
+  // The list is the lease guard's own busy and held texts, verbatim.
+  const guard = readFileSync(new URL("../bundles/browser/server/lease-guard.js", import.meta.url), "utf8");
+  const busy = /busy: "([^"]+)"/.exec(guard)[1], held = /held: "([^"]+)"/.exec(guard)[1];
+  const handedBack = /handedBack: "([^"]+)"/.exec(guard)[1];
+  assert.deepEqual(new Function(listSrc + " return KNOWN_REFUSALS;")(), [busy, held, handedBack]);
+  assert.equal(chipFailed({ isError: false, resultText: handedBack }), true);
+  assert.equal(chipFailed({ isError: true, resultText: "boom" }), true);
+  assert.equal(chipFailed({ isError: false, resultText: busy }), true);
+  assert.equal(chipFailed({ isError: false, resultText: held + "\n\nmore" }), true);
+  assert.equal(chipFailed({ isError: false, resultText: "total 8" }), false);
+  assert.equal(chipFailed({ isError: false, resultText: "note: " + busy }), false, "only a result that STARTS with it");
+  assert.equal(chipFailed({}), false);
+});
+
+test("subagentNames: single, parallel, chain, truncated JSON → []", async () => {
+  const subagentNames = await extract("subagentNames");
+  assert.deepEqual(subagentNames('{"agent":"scout","task":"look"}'), ["scout"]);
+  assert.deepEqual(subagentNames('{"tasks":[{"agent":"scout","task":"a"},{"agent":"worker","task":"b"},{"agent":"scout","task":"c"}]}'),
+    ["scout", "worker"]);
+  assert.deepEqual(subagentNames('{"chain":[{"agent":"planner","task":"a"},{"agent":"worker","task":"{previous}"}]}'),
+    ["planner", "worker"]);
+  assert.deepEqual(subagentNames('{"tasks":[{"agent":"scout","task":"a very long…'), [], "the engine's 600-char cut");
+  assert.deepEqual(subagentNames(null), []);
+  assert.deepEqual(subagentNames('"scout"'), []);
+  assert.deepEqual(subagentNames('{"task":"x"}'), []);
+});
+
+/** The transcript as rows: a group reads "group[<label>|<expanded>|<chip names>]". */
+function rowShape(hub) {
+  return hub.els["perch-transcript"].children.filter((c) => !String(c.className).includes("entry note")).map((c) => {
+    const cls = String(c.className);
+    if (cls.split(" ").includes("tool-group")) {
+      const [lineBtn, body] = c.children;
+      const names = body.children.map((w) => w.children[0].children.find((x) => x.className === "tn").textContent);
+      return "group[" + lineBtn.textContent + "|" + lineBtn.getAttribute("aria-expanded") + "|" + names.join(",") +
+        (lineBtn.className.includes("err") ? "|err" : "") + "]";
+    }
+    if (cls.includes("toolwrap")) return "chip";
+    if (cls.includes("entry bot")) return "bot:" + c.children[1].textContent;
+    if (cls.includes("entry user")) return "user";
+    return cls;
+  });
+}
+
+const TURN_EVENTS = [
+  { type: "message", message: { role: "user", content: "tidy up" } },
+  { type: "message", message: { role: "assistant", content: [
+    { type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } },
+    { type: "toolCall", id: "c2", name: "read", arguments: { path: "a" } }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "a b" }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c2", toolName: "read", content: [{ type: "text", text: "hi" }] } },
+  { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Checking one more" },
+    { type: "toolCall", id: "c3", name: "edit", arguments: { path: "a" } }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c3", toolName: "edit", isError: true, content: [{ type: "text", text: "no" }] } },
+  { type: "message", message: { role: "assistant", content: [{ type: "text", text: "All set" }] } },
+];
+
+test("history groups match live groups", async () => {
+  // Live: the same turn as frames.
+  const live = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(live);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "c1", argsText: '{"command":"ls"}' });
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "c2", argsText: '{"path":"a"}' });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "c1", resultText: "a b", isError: false });
+  es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "c2", resultText: "hi", isError: false });
+  es._serverFrame("text", { text: "Checking one more", turnId: "t1" });
+  es._serverFrame("tool", { phase: "start", name: "edit", toolCallId: "c3" });
+  es._serverFrame("tool", { phase: "end", name: "edit", toolCallId: "c3", resultText: "no", isError: true });
+  es._serverFrame("text", { text: "All set", turnId: "t1" });
+  es._serverFrame("reply", { text: "Checking one moreAll set", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  const liveRows = rowShape(live).filter((r) => r !== "entry note");
+
+  // Reload: the same turn from the transcript.
+  const hist = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events: TURN_EVENTS }) }) });
+  await openChatSession(hist);
+  await new Promise((r) => setTimeout(r, 0));
+  const histRows = rowShape(hist).filter((r) => r !== "user");
+
+  assert.deepEqual(liveRows, [
+    "group[See what happened · 2 steps|false|bash,read]",
+    "bot:Checking one more",
+    "group[See what happened · 1 step, 1 failed|false|edit|err]",
+    "bot:All set",
+  ]);
+  assert.deepEqual(histRows, liveRows, "a reloaded turn looks like the live one");
+});
+
+test("a reload mid-turn reads running and folds at the reply", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "m1", name: "bash", arguments: {} }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "m1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+  ];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({
+    "/transcript": () => gate.then(() => makeResponse(200, { events })) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });   // the replayed state lands before the history
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · running|true|bash]"],
+    "the running turn's history group reads running and stays open");
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 1 step|false|bash]"],
+    "the turn's end folds it");
+});
+
+test("a reload mid-turn whose state frame arrives AFTER the history reads running and folds at the reply", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "m1", name: "bash", arguments: {} }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "m1", toolName: "bash", isError: true, content: [{ type: "text", text: "no" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · 1 step, 1 failed|false|bash|err]"], "idle so far: folded");
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });   // the late replay
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · running · 1 failed|true|bash|err]"],
+    "the batch's last turn is the running one: live again, its failure still in words");
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "m2" });
+  es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "m2", resultText: "ok", isError: false });
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 2 steps, 1 failed|false|bash,read|err]"],
+    "the turn's later tools join the same group, and its end folds it with the finished label");
+});
+
+test("after an idle history, a turn the operator sends starts a new group (the previous turn stays folded)", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "toolResult", toolCallId: "p1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: false });   // the replay says idle
+  es._serverFrame("state", { state: "awake", turnInFlight: true });    // then a new turn
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "p2" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), [
+    "group[See what happened · 1 step|false|bash]", "group[See what happened · running|true|read]"]);
+});
+
+test("idle state replayed BEFORE the history, then a new turn: a fresh group, the finished one stays folded", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "toolResult", toolCallId: "n1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+  ];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({
+    "/transcript": () => gate.then(() => makeResponse(200, { events })) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: false });   // the subscribe replay: idle
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  es._serverFrame("state", { state: "awake", turnInFlight: true });    // a turn from another client or the board
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "n2" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), [
+    "group[See what happened · 1 step|false|bash]", "group[See what happened · running|true|read]"]);
+});
+
+test("a reply that lands while the history loads: buffered tool frames replay as a finished, folded group", async () => {
+  const events = [{ type: "message", message: { role: "user", content: "go" } }];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({
+    "/transcript": () => gate.then(() => makeResponse(200, { events })) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "b1" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "b1", resultText: "ok", isError: false });
+  es._serverFrame("reply", { text: "all done", turnId: "tb" });
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 1 step|false|bash]"],
+    "never \"running\" after the reply");
+});
+
+test("a reload of a finished turn stays folded (no turn in flight)", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "toolResult", toolCallId: "f1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · 1 step|false|bash]"]);
+});
+
+test("history: a subagent group names its agents from the call's arguments", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "assistant", content: [
+      { type: "toolCall", id: "s1", name: "subagent", arguments: { tasks: [{ agent: "scout", task: "a" }, { agent: "worker", task: "b" }] } }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "s1", toolName: "subagent", content: [{ type: "text", text: "ok" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · scout, worker|false|subagent]"]);
+  const g = hub.els["perch-transcript"].children[1];
+  assert.equal(g.children[1].children[0].children[1].children.length, 2, "no args on a history chip: head + result only");
+});
+
+test("an end without a start counts in new mode only", async () => {
+  for (const sheet of [true, false]) {
+    const hub = await mountHub({ fetchImpl: stdFetch(), sheet });
+    await openChatSession(hub);
+    const es = FakeEventSource.instances[0];
+    es._serverFrame("state", { state: "awake", turnInFlight: true });
+    es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "orphan", resultText: "x", isError: false });
+    es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "r1" });
+    es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "r1", resultText: "y", isError: false });
+    await new Promise((r) => setTimeout(r, 0));
+    const rows = rowShape(hub).filter((r) => r !== "entry note");
+    if (sheet) assert.deepEqual(rows, ["group[See what happened · running|true|bash,read]"], "the turn still runs");
+    else assert.deepEqual(rows, ["chip"], "classic: no chip is minted for a call nobody watched begin");
+  }
+});
+
+test("a running group is expanded, collapses at turn end; text closes a group; ask and file cards stay outside", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "a1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"]);
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "a1", resultText: "ok", isError: false });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"],
+    "every chip finished but the model still works: running, and open until the turn ends");
+  es._serverFrame("file", { name: "r.txt", stored: "r.txt", servable: true, size: 3, mime: "text/plain" });
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "a2" });
+  es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "a2", resultText: "ok", isError: false });
+  es._serverFrame("ask_user", { requestId: "q1", method: "confirm", title: "OK?" });
+  es._serverFrame("reply", { text: "done", turnId: "t9" });
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = rowShape(hub);
+  assert.deepEqual(rows.filter((r) => r.startsWith("group")), [
+    "group[See what happened · 1 step|false|bash]", "group[See what happened · 1 step|false|read]"]);
+  assert.ok(rows.indexOf("entry filecard") === 1, "the file card sits between the groups, never inside one");
+  assert.equal(hub.els["perch-ask"].children.length > 0, true, "the ask card has its own pane");
+  // A tap still opens a folded group.
+  const g = hub.els["perch-transcript"].children.find((c) => c.className === "tool-group");
+  g.children[0].onclick();
+  assert.equal(g.children[0].getAttribute("aria-expanded"), "true");
+  assert.equal(g.children[1].hidden, false);
+});
+
+test("classic chips are unchanged (no .tool-group in classic)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "k1" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "k1", resultText: "ok", isError: false });
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "k2" });
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).slice(0, 2), ["chip", "chip"]);
+  assert.ok(!rowShape(hub).some((r) => r.startsWith("group")));
+  // and the history path draws the "[tool: x]" row exactly as before
+  const h2 = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events: TURN_EVENTS }) }) });
+  await openChatSession(h2);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(h2), ["user", "bot:[tool: bash]\n[tool: read]", "chip", "chip",
+    "bot:Checking one more\n[tool: edit]", "chip", "bot:All set"]);
+});
+
+test("a refusal chip reads failed in new mode and done in classic", async () => {
+  const busy = "The browser is busy: another bot is using it. Try again in a minute.";
+  for (const sheet of [true, false]) {
+    const hub = await mountHub({ fetchImpl: stdFetch(), sheet });
+    await openChatSession(hub);
+    const es = FakeEventSource.instances[0];
+    es._serverFrame("tool", { phase: "start", name: "mcp__browser__crow_browser_click", toolCallId: "rf1" });
+    es._serverFrame("tool", { phase: "end", name: "mcp__browser__crow_browser_click", toolCallId: "rf1", resultText: busy, isError: false });
+    await new Promise((r) => setTimeout(r, 0));
+    const wraps = [];
+    const walk = (n) => { if (String(n.className).includes("toolwrap")) wraps.push(n); (n.children || []).forEach(walk); };
+    walk(hub.els["perch-transcript"]);
+    const chip = wraps[0].children[0];
+    assert.equal(chip.children[1].textContent, sheet ? "failed" : "done");
+    assert.equal(chip.className, sheet ? "tool-chip err" : "tool-chip");
+  }
+});
+
+test("a group's line controls its body by a unique id; a mixed subagent turn reads names · N steps", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "subagent", toolCallId: "m1", argsText: '{"agent":"scout","task":"x"}' });
+  es._serverFrame("tool", { phase: "end", name: "subagent", toolCallId: "m1", resultText: "ok", isError: false });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "m2" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "m2", resultText: "ok", isError: false });
+  es._serverFrame("text", { text: "between", turnId: "t1" });
+  es._serverFrame("tool", { phase: "start", name: "subagent", toolCallId: "m3", argsText: '{"agent":"worker","task":"y"}' });
+  es._serverFrame("tool", { phase: "end", name: "subagent", toolCallId: "m3", resultText: "ok", isError: false });
+  es._serverFrame("reply", { text: "x", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  const groups = hub.els["perch-transcript"].children.filter((c) => c.className === "tool-group");
+  assert.equal(groups.length, 2);
+  const ids = groups.map((g) => g.children[1].id);
+  assert.ok(ids[0] && ids[1] && ids[0] !== ids[1], "unique body ids");
+  groups.forEach((g) => assert.equal(g.children[0].getAttribute("aria-controls"), g.children[1].id));
+  assert.equal(groups[0].children[0].textContent, "See what happened · scout · 2 steps");
+  assert.equal(groups[1].children[0].textContent, "See what happened · worker", "subagents alone: names only");
+});
+
+test("a group folding at turn end hands focus from its body to its line", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), sheet: true });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "f1" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "f1", resultText: "ok", isError: false });
+  await new Promise((r) => setTimeout(r, 0));
+  const g = hub.els["perch-transcript"].children.find((c) => c.className === "tool-group");
+  const chip = g.children[1].children[0].children[0];
+  chip.focus();
+  assert.equal(hub.doc.activeElement, chip);
+  es._serverFrame("reply", { text: "x", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(g.children[1].hidden, true, "folded");
+  assert.equal(hub.doc.activeElement, g.children[0], "focus moved to the line, not lost");
+});
+
+test("new mode: the composer placeholder names the session's project from the embedded #perch-projects JSON", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const grab = (startMark, endMark) => {
+    const a = src.indexOf(startMark);
+    assert.ok(a > -1, startMark + " missing");
+    return src.slice(a, src.indexOf(endMark, a) + endMark.length);
+  };
+  const nodes = {
+    "perch-projects": { textContent: JSON.stringify([{ id: 7, slug: "alpha", name: "Alpha <b>" }]) },
+    "perch-session-sheet": {},
+    "perch-input": { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+  };
+  const prelude = `var document={getElementById:function(i){return N[i]||null;}};
+    function el(i){return document.getElementById(i);}
+    var N=arguments[0]; var current={sid:'s1'}; var rowIndex={s1:{projectId:7},s2:{projectId:null}};
+    var PLACEHOLDER_PROJECT='Message # {project}', PLACEHOLDER_DEFAULT='Message';
+    function identSubtitle(){return '';} function backTarget(){return null;}
+    ` + grab("var PROJECTS=(function", "})();") + "\n" + grab("function projectOfRow", "\n  }\n") + "\n";
+  const showIdent = new Function(
+    prelude + src.slice(src.indexOf("function showIdent"), braceMatchEnd(src, src.indexOf("function showIdent")) + 1) +
+    "; return {showIdent:showIdent,setSid:function(s){current.sid=s;}};",
+  )(nodes);
+  showIdent.showIdent("Bot");
+  assert.equal(nodes["perch-input"].attrs.placeholder, "Message # Alpha <b>");
+  showIdent.setSid("s2");
+  showIdent.showIdent("Bot");
+  assert.equal(nodes["perch-input"].attrs.placeholder, "Message");
+});
+
+test("new mode: the day line refreshes on return to the tab and every 10 minutes, without a /roost poll", async () => {
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false, lastActivityAt: now }] }] };
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/roost": () => makeResponse(200, roost) }) });
+  hub.els["perch-ident-sub"] = makeFakeElement("span");
+  await openChatSession(hub);
+  const sub = hub.els["perch-ident-sub"];
+  assert.equal(sub.textContent, "today");
+  const tick = [...hub.timerDelays.entries()].find(([, ms]) => ms === 600000);
+  assert.ok(tick, "a 10-minute refresh runs while the session is open");
+  const roosts = () => hub.fetchCalls.filter((c) => c.path.startsWith("/roost")).length;
+  const before = roosts();
+  sub.textContent = "stale";
+  hub.timers.get(tick[0])();
+  assert.equal(sub.textContent, "today", "the timer redraws the day line from the row and today's date");
+  sub.textContent = "stale";
+  hub.doc.visibilityState = "visible";
+  hub.doc._dispatch("visibilitychange", {});
+  assert.equal(sub.textContent, "today", "a return to the tab redraws it");
+  assert.equal(roosts(), before, "neither asks /roost");
+  hub.location.hash = "";
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.timers.has(tick[0]), false, "leaving the session stops the refresh");
+});
+
+test("classic: no day-line refresh timer", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  assert.equal([...hub.timerDelays.values()].includes(600000), false);
+});
+
+test("an ask closes the composer's + menu", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const s = src.indexOf("function renderAsk(card)");
+  const body = src.slice(s, braceMatchEnd(src, s) + 1);
+  assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);\s*plusClose\(false\);/, "renderAsk closes the sheet and the + menu");
 });

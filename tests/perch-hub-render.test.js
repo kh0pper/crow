@@ -1565,3 +1565,203 @@ test("review L9 live: reloaded history rows carry their time (data-ts) so a feed
     ]);
   } finally { resetApi(); await s.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// R1.2 PR 2, Task 1: in new mode (the panel hands perchHubContent a scope) the
+// Chat·Session·Files·Activity tab bar is gone and Session, Files and Activity
+// open in a sheet from the bot's name. Static: the rendered markup only. The
+// live half is tests/perch-session-sheet-live.test.js.
+// ---------------------------------------------------------------------------
+import { createHash } from "node:crypto";
+
+async function renderPerch(lang, opts) {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  return perchHubContent(lang, { state: "ready" }, opts);
+}
+/** From the tab bar through the end of the Activity section. */
+function classicTabsSlice(html) {
+  const a = html.indexOf('<nav id="perch-tabs"');
+  const end = html.indexOf("</section>", html.indexOf('id="perch-tab-activity"')) + "</section>".length;
+  assert.ok(a > 0 && end > a, "the classic tab bar and sections are present");
+  return html.slice(a, end);
+}
+const sha = (s) => createHash("sha256").update(s).digest("hex");
+/** One element's opening tag, by id. */
+function openTag(html, id) {
+  const m = html.match(new RegExp(`<[a-z0-9]+[^>]*\\sid="${id}"[^>]*>`));
+  return m ? m[0] : null;
+}
+const NEW = { scope: { all: true } };
+
+test("classic render is unchanged", async () => {
+  // Pinned from the build before the sheet existed: classic Perch's tab bar,
+  // its four sections and its head must stay byte-identical. Update these
+  // only for a change that MEANS to touch classic Perch.
+  const PINS = {
+    en: { tabs: "8531f31bf496cf60eb740557951aca4dfaab24f8f24b094381ce45164d6b66af",
+      head: "048286e387d9721effbaa09b37155f48a4df2b60c5b157ef27b745061ff43096" },
+    es: { tabs: "1b2342f85e0e5d92b9578b39479ec91a068850292a0471aec4e89a5cafcb530c",
+      head: "f2a1635b13058fef450e71b7a0cf277d0ab112469bc1717a5cd586a6f7f014b6" },
+  };
+  for (const lang of ["en", "es"]) {
+    for (const html of [await renderPerch(lang), await renderPerch(lang, {})]) {
+      assert.equal(sha(classicTabsSlice(html)), PINS[lang].tabs, `${lang}: classic tab bar + sections`);
+      const head = html.slice(html.indexOf('<div class="perch-head">'), html.indexOf('<nav id="perch-tabs"'));
+      assert.equal(sha(head), PINS[lang].head, `${lang}: classic head`);
+      assert.doesNotMatch(html, /id="(perch-session-sheet|perch-ident-btn|perch-sheet-tabs)"/, "no sheet markup in classic");
+    }
+  }
+});
+
+test("new mode: no tab bar, sections inside the sheet with the same ids", async () => {
+  const html = await renderPerch("en", NEW);
+  const classic = await renderPerch("en");
+  assert.doesNotMatch(html, /id="perch-tabs"/, "the tab bar is not rendered");
+  const dlg = openTag(html, "perch-session-sheet");
+  assert.equal(dlg, '<dialog id="perch-session-sheet" class="perch-sheet" aria-labelledby="perch-sheet-title">');
+  assert.match(html, /id="perch-sheet-title"[^>]*>Session details</, "the dialog's label exists");
+  const start = html.indexOf(dlg), stop = html.indexOf("</dialog>", start);
+  const inside = html.slice(start, stop);
+  for (const name of ["session", "files", "activity"]) {
+    const id = `perch-tab-${name}`;
+    assert.ok(inside.includes(`id="${id}"`), `${id} sits inside the sheet`);
+    assert.equal(openTag(html, id), openTag(classic, id), `${id}: same tag, id and role`);
+    // Contents unchanged: the section body is the classic one, byte for byte.
+    const body = (h) => { const a = h.indexOf(openTag(h, id)); return h.slice(a, h.indexOf("</section>", a)); };
+    assert.equal(body(html), body(classic), `${id}: same contents`);
+  }
+  // The chat stays outside the sheet, always on screen.
+  assert.ok(html.indexOf('id="perch-tab-chat"') < start, "the chat is not in the sheet");
+  assert.doesNotMatch(openTag(html, "perch-tab-chat"), /\shidden/, "the chat section never ships hidden");
+  // The raw sid in the head is hidden; the Session section still shows it.
+  assert.match(openTag(html, "perch-session-meta"), /\shidden/);
+  assert.ok(inside.includes('id="perch-session-id"'), "the session id stays in the Session section");
+});
+
+test("new mode: the ident is a button controlling the sheet", async () => {
+  const html = await renderPerch("en", NEW);
+  const btn = openTag(html, "perch-ident-btn");
+  assert.ok(btn && btn.startsWith("<button "), "the bot name is a button");
+  assert.match(btn, /type="button"/);
+  assert.match(btn, /aria-haspopup="dialog"/);
+  assert.match(btn, /aria-controls="perch-session-sheet"/);
+  const a = html.indexOf(btn), b = html.indexOf("</button>", a);
+  assert.ok(html.slice(a, b).includes('id="perch-bot-name"'), "#perch-bot-name is inside the button");
+  assert.ok(openTag(html, "perch-bot-name").startsWith("<span "), "phrasing content inside a button");
+  // Described, not named, by "Session details": the hint sits outside the
+  // button (so the bot name stays its name) and is visually hidden.
+  assert.match(btn, /aria-describedby="perch-ident-desc"/);
+  assert.ok(!html.slice(a, b).includes('id="perch-ident-desc"'), "the description is not inside the button");
+  assert.match(html, /<span class="vh" id="perch-ident-desc">Session details<\/span>/);
+  assert.match(await renderPerch("es", NEW), /<span class="vh" id="perch-ident-desc">Detalles de la sesión<\/span>/);
+});
+
+test("the sheet has session/files/activity tabs and a close button", async () => {
+  const html = await renderPerch("en", NEW);
+  const start = html.indexOf('<dialog id="perch-session-sheet"'), inside = html.slice(start, html.indexOf("</dialog>", start));
+  const strip = inside.slice(inside.indexOf('id="perch-sheet-tabs"'), inside.indexOf('<section'));
+  assert.match(openTag(html, "perch-sheet-tabs"), /role="tablist"/);
+  const tabs = [...strip.matchAll(/<button[^>]*data-tab="([a-z]+)"[^>]*>/g)];
+  assert.deepEqual(tabs.map((m) => m[1]), ["session", "files", "activity"]);
+  for (const [tag, name] of tabs) {
+    assert.match(tag, /type="button"/);
+    assert.match(tag, /role="tab"/);
+    // The section's aria-labelledby still resolves: the strip reuses the ids.
+    assert.match(tag, new RegExp(`id="perch-tab-btn-${name}"`));
+    assert.match(tag, new RegExp(`aria-controls="perch-tab-${name}"`));
+  }
+  const label = (n) => strip.slice(strip.indexOf(`data-tab="${n}"`)).match(/<span>([^<]+)<\/span>/)[1];
+  assert.deepEqual(["session", "files", "activity"].map(label), ["Session", "Files", "Activity"]);
+  const close = openTag(html, "perch-sheet-close");
+  assert.ok(close && close.startsWith("<button ") && inside.includes(close), "a close button in the sheet");
+  assert.match(close, /type="button"/);
+  assert.match(close, /aria-label="Close"/);
+});
+
+test("en and es strings", async () => {
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  assert.equal(t("perch.sheetTitle", "en"), "Session details");
+  assert.equal(t("perch.sheetTitle", "es"), "Detalles de la sesión");
+  const es = await renderPerch("es", NEW);
+  assert.match(es, /id="perch-sheet-title"[^>]*>Detalles de la sesión</);
+  const strip = es.slice(es.indexOf('id="perch-sheet-tabs"'), es.indexOf("<section", es.indexOf('id="perch-sheet-tabs"')));
+  assert.match(strip, /aria-label="Vistas de la sesión"/);
+  assert.deepEqual([...strip.matchAll(/<span>([^<]+)<\/span>/g)].map((m) => m[1]), ["Sesión", "Archivos", "Actividad"]);
+  assert.match(openTag(es, "perch-sheet-close"), /aria-label="Cerrar"/);
+});
+
+// ---- R1.2 PR 2, Task 2: the head ------------------------------------------
+test("the projects JSON escapes </script>", async () => {
+  const html = await renderPerch("en", { scope: { all: true }, projects: [{ id: 1, slug: "x", name: "</script><b>hi" }] });
+  const m = html.match(/<script type="application\/json" id="perch-projects">([\s\S]*?)<\/script>/);
+  assert.ok(m, "the projects script is there");
+  assert.ok(!m[1].includes("<"), "no raw < inside the JSON");
+  assert.deepEqual(JSON.parse(m[1]), [{ id: 1, slug: "x", name: "</script><b>hi" }]);
+  assert.ok(!(await renderPerch("en", {})).includes('id="perch-projects"'), "classic carries no projects");
+});
+
+test("new-mode head has no sid text", async () => {
+  const html = await renderPerch("en", { scope: { all: true }, projects: [] });
+  const head = html.slice(html.indexOf('class="perch-ident"'), html.indexOf('<div class="meta" id="perch-session-meta"'));
+  assert.match(head, /id="perch-ident-sub"/);
+  assert.match(head, /id="perch-card-line"[^>]*hidden/);
+  const text = head.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  assert.ok(!/perchlive|\bsid\b/i.test(text), "no session id text in the head");
+  assert.match(html, /id="perch-session-meta"[^>]*hidden/);
+  const classic = await renderPerch("en", {});
+  assert.ok(!classic.includes('id="perch-ident-sub"') && !classic.includes('id="perch-card-line"'));
+});
+
+// ---------------------------------------------------------------------------
+// R1.2 PR 2, Task 4: the composer pill (new mode only).
+// ---------------------------------------------------------------------------
+function composerSlice(html) {
+  const a = html.indexOf('<div id="perch-composer"');
+  const b = html.indexOf("</section>", a);
+  assert.ok(a > 0 && b > a, "the composer is present");
+  return html.slice(a, b);
+}
+
+test("classic composer is unchanged", async () => {
+  // Pinned from the build before the pill existed.
+  const PINS = {
+    en: "da01565e16ee4952d7d4a51b4957e6d3d442a77e68eca37049565bf8c75f0af0",
+    es: "63b3f704e40765a0d1e6882e6ab9a76e09551f9f1610889f7462c9c125514b91",
+  };
+  for (const lang of ["en", "es"]) {
+    const html = await renderPerch(lang);
+    assert.equal(sha(composerSlice(html)), PINS[lang], `${lang}: classic composer`);
+    assert.doesNotMatch(composerSlice(html), /perch-plus|class="pill/, "no pill in classic");
+  }
+});
+
+test("new mode: plus menu holds attach and dictate with ids unchanged", async () => {
+  const html = await renderPerch("en", NEW);
+  const c = composerSlice(html);
+  assert.match(c, /<div id="perch-composer" class="pill">/);
+  const plus = openTag(c, "perch-plus");
+  assert.match(plus, /aria-label="Attach or dictate"/);
+  assert.match(plus, /aria-expanded="false"/);
+  assert.match(plus, /aria-controls="perch-plus-menu"/);
+  assert.doesNotMatch(plus, /aria-haspopup/, "a disclosure, not a menu widget");
+  const menu = c.slice(c.indexOf('<div id="perch-plus-menu"'), c.indexOf('<div id="perch-draft-note"'));
+  assert.ok(menu.includes('id="perch-attach"') && menu.includes('id="perch-dictate"'), "both live in the menu");
+  assert.match(openTag(menu, "perch-plus-menu"), /\shidden>/, "the menu ships closed");
+  assert.match(openTag(menu, "perch-dictate"), /\shidden/, "dictate ships hidden until its probe passes");
+  for (const id of ["perch-input", "perch-send", "perch-abort", "perch-cmdmenu", "perch-file-input", "perch-draft-note", "perch-dictation-bar"]) {
+    assert.ok(c.includes(`id="${id}"`), `${id} keeps its id`);
+  }
+  assert.ok(c.indexOf('id="perch-input"') < c.indexOf('id="perch-send"'), "the input precedes Send in the pill row");
+  assert.doesNotMatch(c, /class="send-row"/);
+});
+
+test("new-mode Perch hides the header h2 visually (never display:none); classic css has no such rule", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js").catch(() => ({}));
+  const mod = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const fn = perchHubCss || Object.values(mod).find((v) => typeof v === "function");
+  const css = String(fn("en"));
+  const m = css.match(/body\.shell:has\(#perch-session-sheet\) \.content-header h2\{[^}]*\}/);
+  assert.ok(m, "scoped to the new-mode sheet");
+  assert.match(m[0], /clip:rect\(0 0 0 0\)/);
+  assert.doesNotMatch(m[0], /display:\s*none/);
+});

@@ -413,6 +413,34 @@ body.shell #perch-draft-note[hidden]{display:none}
    up to the 120px ceiling above, then scrolls inside itself — a pasted
    essay must not push Send off screen, the one sin this page's whole flex
    chain exists to prevent. */
+/* R1.2 PR 2, new mode only: the chip already names the project, so the header
+   title is for screen readers only (visually hidden, never display:none). */
+body.shell:has(#perch-session-sheet) .content-header h2{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+/* R1.2 PR 2, new mode only (html.js renders .pill only with the sheet): the
+   composer is a one-line pill. The textarea starts at one line and grows to
+   five (line-height 1.5, so the ceiling follows the text size), then scrolls
+   inside itself. "+" opens #perch-plus-menu, a popover that grows UPWARD from
+   the composer (the same containing block the slash menu uses), holding
+   Attach and Dictate. Every target is 44px. */
+#perch-hub-root #perch-composer.pill .pill-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:6px;min-width:0;
+border:1px solid var(--line);border-radius:24px;background:var(--card);padding:4px}
+#perch-hub-root #perch-composer.pill .pill-row:focus-within{border-color:var(--teal)}
+#perch-hub-root #perch-composer.pill textarea{flex:1 1 auto;min-width:0;box-sizing:border-box;border:0;background:transparent;
+box-shadow:none;outline:none;resize:none;margin:0;padding:11px 8px;font:inherit;line-height:1.5;
+min-height:44px;max-height:calc(7.5em + 22px);overflow-y:auto}
+#perch-hub-root #perch-composer.pill #perch-plus{flex:none;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;
+border-radius:22px;display:inline-flex;align-items:center;justify-content:center}
+#perch-hub-root #perch-composer.pill #perch-plus svg{width:20px;height:20px}
+#perch-hub-root #perch-composer.pill #perch-plus[hidden]{display:none}
+#perch-hub-root #perch-composer.pill #perch-send,#perch-hub-root #perch-composer.pill #perch-abort{flex:none;min-height:44px;border-radius:22px;padding:0 16px}
+#perch-plus-menu{position:absolute;bottom:100%;left:0;margin-bottom:6px;min-width:200px;max-width:100%;background:var(--card);
+border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.18);overflow:hidden;z-index:21}
+#perch-plus-menu[hidden]{display:none}
+#perch-hub-root #perch-plus-menu button{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;text-align:left;
+border:0;border-bottom:1px solid var(--line);border-radius:0;background:none;color:var(--ink);padding:10px 14px}
+#perch-hub-root #perch-plus-menu button:last-of-type{border-bottom:0}
+#perch-hub-root #perch-plus-menu button[hidden]{display:none}
 /* Wave 1: copy buttons, ported from pi-lab (copy-msg floats in the message,
    copy-pre pins to its code fence's corner). Deliberately quiet: they are
    chrome on somebody's answer, not controls competing with the composer.
@@ -575,6 +603,21 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:8px}
    and results are child-controlled data) and cap at 240px scrolling inside
    themselves — a 2000-char result must not become a second transcript. */
 #perch-hub-root .toolwrap{align-self:flex-start;max-width:90%;min-width:0}
+/* R1.2 PR 2 (new mode): a turn's chips fold under one "See what happened"
+   line. A 44 px target; the failure count reads in the error colour. */
+#perch-hub-root .tool-group{align-self:flex-start;max-width:90%;min-width:0;display:flex;
+flex-direction:column;gap:6px}
+#perch-hub-root .tool-group-line{align-self:flex-start;min-height:44px;padding:0 12px 0 4px;
+background:none;border:0;border-radius:10px;color:var(--dim);font:inherit;font-size:13px;
+cursor:pointer;text-align:left;display:inline-flex;align-items:center;gap:6px}
+#perch-hub-root .tool-group-line::before{content:"\\25B8";font-size:11px;transition:transform .15s}
+#perch-hub-root .tool-group-line[aria-expanded="true"]::before{transform:rotate(90deg)}
+#perch-hub-root .tool-group-line:hover{color:var(--ink)}
+#perch-hub-root .tool-group-line.err{color:var(--err)}
+#perch-hub-root .tool-group-body{display:flex;flex-direction:column;gap:6px;padding-left:10px;
+border-left:2px solid var(--line)}
+#perch-hub-root .tool-group-body[hidden]{display:none}
+#perch-hub-root .tool-group-body .toolwrap{max-width:100%}
 #perch-hub-root .tool-chip{display:inline-flex;align-items:center;gap:7px;background:var(--sky);
 border:1px solid var(--line);border-radius:999px;padding:5px 12px;min-height:32px;max-width:100%;
 font:12px "JetBrains Mono",ui-monospace,monospace;color:var(--dim);cursor:pointer;text-align:left}
@@ -866,6 +909,71 @@ border-top:1px solid var(--line);flex-shrink:0}
      and reads as a horizontal tab row, not a phone bar. */
   #perch-tabs{order:0;border-top:none;border-bottom:1px solid var(--line);padding:6px 0}
   #perch-hub-root #perch-tabs button{flex:0 0 auto;flex-direction:row;gap:6px;font-size:13px;padding:8px 14px}
+}
+/* --- R1.2 PR 2, new mode: the session sheet -------------------------------
+   No tab bar: the bot name (#perch-ident-btn) opens a modal <dialog> holding
+   the Session, Files and Activity sections, and the chat stays on screen
+   behind it. Shaped like the shell's sheets (shell/css.js .shell-sheet): a
+   bottom sheet on phones, centred from the split breakpoint up, an 85dvh
+   cap, a 44px round close and a 16px gutter.
+   Colours stay on Perch's own palette, which is what the sections inside
+   are painted with. The [open] flex column makes .perch-sheet-inner, and in
+   it the visible section (a flex:1 scroller, see the tab-panel rule), the
+   only thing that scrolls. */
+#perch-hub-root .perch-ident-btn{display:flex;align-items:center;gap:6px;max-width:calc(100% + 8px);min-height:44px;padding:4px 8px;margin-left:-8px;border-color:transparent;background:transparent;color:var(--ink);text-align:left}
+#perch-hub-root .perch-ident-btn:hover{background:var(--teal-soft)}
+/* The head row in new mode: Back is a 44 px "←" icon (html.js
+   backIconButton), and the ident takes the rest of the row so the bot name
+   and the "# project · day" line ellipsize only past the row's real width.
+   (2,2,0) outranks the phone chat-head rule for #perch-back. Desktop: the
+   Sessions list beside the chat is the way back to the list, so Back shows
+   only for a filed session ([data-home], client.js showIdent), where it goes
+   to the project home. */
+#perch-hub-root .perch-head #perch-back.perch-back-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;font-size:20px;line-height:1}
+#perch-hub-root .perch-head .perch-ident:has(#perch-ident-btn){flex:1 1 auto;min-width:0}
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
+  #perch-hub-root .perch-head #perch-back.perch-back-icon{display:none}
+  #perch-hub-root .perch-head #perch-back.perch-back-icon[data-home]{display:inline-flex}
+}
+#perch-hub-root .perch-ident-btn .title{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#perch-hub-root .perch-ident-text{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+#perch-hub-root .perch-ident-sub{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--dim)}
+#perch-hub-root .perch-ident-sub:empty{display:none}
+#perch-hub-root .perch-card-line{display:block;max-width:100%;min-height:44px;line-height:44px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--dim);text-decoration:none}
+#perch-hub-root .perch-card-line[hidden]{display:none}
+#perch-hub-root .perch-ident-btn svg{width:16px;height:16px;flex-shrink:0;color:var(--dim)}
+#perch-session-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;max-height:85dvh;
+border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;background:var(--card);color:var(--ink);box-shadow:0 -8px 32px rgba(0,0,0,.18)}
+#perch-session-sheet[open]{display:flex;flex-direction:column}
+#perch-session-sheet::backdrop{background:rgba(0,0,0,.4)}
+/* The no-showModal fallback (open attribute only): pin it on top. */
+#perch-session-sheet[open]:not(:modal){position:fixed;inset:auto 0 0;z-index:1200}
+#perch-hub-root .perch-sheet-inner{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;
+padding:8px 16px calc(16px + env(safe-area-inset-bottom, 0px))}
+#perch-hub-root .perch-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
+#perch-hub-root .perch-sheet-title{font-size:15px;font-weight:600;min-width:0}
+#perch-hub-root .perch-sheet-close{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;margin-right:-8px;border-radius:50%;border-color:transparent;background:transparent}
+#perch-hub-root .perch-sheet-close:hover{background:var(--teal-soft)}
+#perch-hub-root .perch-sheet-close svg{width:20px;height:20px}
+#perch-sheet-tabs{display:flex;gap:4px;flex-shrink:0;border-bottom:1px solid var(--line);padding-bottom:6px}
+/* Two ids, as for #perch-tabs: outrank the base "#perch-hub-root button". */
+#perch-hub-root #perch-sheet-tabs button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;
+min-height:44px;padding:6px 8px;font-size:13px;border-color:transparent;background:transparent;color:var(--dim)}
+#perch-sheet-tabs svg{width:18px;height:18px;flex-shrink:0}
+#perch-hub-root #perch-sheet-tabs button[aria-selected="true"]{color:var(--teal);background:var(--teal-soft)}
+/* The sheet is phone territory at every width: every control in it is a
+   44px target (the Session section's selects, Change directory, the
+   plan-mode checkbox, the narrowing rows and the Files crumbs were sized for a pointer). Two ids outrank the base
+   "#perch-hub-root button"; the plan-mode checkbox keeps its native look, just larger. */
+#perch-hub-root #perch-session-sheet button,#perch-hub-root #perch-session-sheet select{min-height:44px}
+/* A one-letter crumb (the "/" root, a short folder) measured 13px wide. */
+#perch-hub-root #perch-session-sheet button{min-width:44px}
+#perch-hub-root #perch-session-sheet #perch-plan-mode{width:44px;height:44px;align-self:flex-start;accent-color:var(--teal)}
+/* The tool-narrowing checkboxes stay native size: their <label> row is the
+   target, so the row gets the 44px floor instead. */
+#perch-hub-root #perch-session-sheet .narrow-tool{min-height:44px}
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
+  #perch-session-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
 }
 `);
 }

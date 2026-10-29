@@ -94,3 +94,17 @@ test("projectColor is stable and within the six", () => {
   }
   assert.equal(seen.size, 6);
 });
+
+test("duplicate names get their slug as a second line; unique names don't", () => {
+  const dup = [
+    { id: 1, slug: "alpha", name: "Plans" },
+    { id: 2, slug: "alpha-2", name: " plans " },
+    { id: 3, slug: "gamma", name: "Gamma" },
+  ];
+  for (const html of [shellDrawer({ ...base, projects: dup }), shellTabsNav({ ...base, projects: dup, tab: "chat" })]) {
+    const row = (slug) => html.match(new RegExp(`href="/dashboard/project/${slug}".*?</a>`, "s"))[0];
+    assert.match(row("alpha"), /shell-project-slug">alpha</);
+    assert.match(row("alpha-2"), /shell-project-slug">alpha-2</);
+    assert.doesNotMatch(row("gamma"), /shell-project-slug/);
+  }
+});

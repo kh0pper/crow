@@ -32,7 +32,8 @@ export function perchDictationCss() {
 #perch-composer[data-dictation="starting"]>#perch-input,#perch-composer[data-dictation="starting"]>.send-row,
 #perch-composer[data-dictation="recording"]>#perch-input,#perch-composer[data-dictation="recording"]>.send-row,
 #perch-composer[data-dictation="transcribing"]>#perch-input,#perch-composer[data-dictation="transcribing"]>.send-row,
-#perch-composer[data-dictation="error"]>#perch-input,#perch-composer[data-dictation="error"]>.send-row{display:none}
+#perch-composer[data-dictation="error"]>#perch-input,#perch-composer[data-dictation="error"]>.send-row,
+#perch-composer[data-dictation]:not([data-dictation="idle"])>.pill-row,#perch-composer[data-dictation]:not([data-dictation="idle"])>#perch-plus-menu{display:none}
 #perch-dictation-bar{display:flex;align-items:center;gap:8px;min-width:0;min-height:52px}
 #perch-dictation-bar[hidden]{display:none}
 #perch-hub-root .dict-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:44px;min-height:44px;flex:none;padding:10px 14px}

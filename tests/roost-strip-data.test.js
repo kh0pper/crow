@@ -20,9 +20,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import Database from "better-sqlite3";
 
 const dir = mkdtempSync(join(tmpdir(), "roost-strip-"));
@@ -100,6 +101,20 @@ before(async () => {
   // exactly as it does for cardId.
   c.prepare("UPDATE bot_sessions SET label=? WHERE gateway_thread_id=?").run("named on the row only", "asker-b");
   insSession.run("sleepy", "perch", "sleepy-1", "perch-live", "waiting-user", null, "run");
+  // lastActivityAt reads the pi transcript's mtime: chatty-1 has a fresh file,
+  // asker-b an OLD one although its row was just renamed (updated_at = now).
+  for (const [thread, uuid, mtime] of [["chatty-1", "uuid-chatty", new Date()], ["asker-b", "uuid-asker", new Date("2026-01-05T10:00:00Z")]]) {
+    const sdir = join(dir, "pisess-" + thread);
+    mkdirSync(sdir, { recursive: true });
+    const f = join(sdir, "2026-01-05T10-00-00-000Z_" + uuid + ".jsonl");
+    writeFileSync(f, "{}\n");
+    utimesSync(f, mtime, mtime);
+    c.prepare("UPDATE bot_sessions SET pi_session_dir=?, pi_session_id=?, updated_at=datetime('now') WHERE gateway_thread_id=?").run(sdir, uuid, thread);
+  }
+  // asker-a shares asker-b's sessions directory (one bot world, one sessions/
+  // dir) with no file of its own: /roost must list that directory ONCE.
+  c.prepare("UPDATE bot_sessions SET pi_session_dir=?, pi_session_id=? WHERE gateway_thread_id=?")
+    .run(join(dir, "pisess-asker-b"), "uuid-asker-a-none", "asker-a");
   // arch-1: awake in the engine fixture above, but archived on its row.
   insSession.run("arch", "perch", "arch-1", "perch-live", "active", null, "run");
   c.prepare("UPDATE bot_sessions SET archived_at=?, label=? WHERE gateway_thread_id=?")
@@ -263,4 +278,37 @@ test("GET /roost's archived list is DB-derived — present even when the engine 
   const a = body.archived.find((x) => x.sessionId === "arch-1");
   assert.ok(a, "archived is read from bot_sessions, independent of the engine");
   assert.equal(a.botId, "arch");
+});
+
+test("GET /roost's lastActivityAt is the transcript's mtime, not the row's updated_at", async () => {
+  const { body } = await getJson(base, "/roost");
+  const all = body.birds.flatMap((b) => b.sessions);
+  const fresh = all.find((x) => x.sessionId === "chatty-1");
+  const old = all.find((x) => x.sessionId === "asker-b");
+  const none = all.find((x) => x.sessionId === "sleepy-1");
+  assert.match(fresh.lastActivityAt, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+  assert.ok(Date.now() - new Date(fresh.lastActivityAt.replace(" ", "T") + "Z").getTime() < 60000, "a fresh transcript reads as now");
+  assert.equal(old.lastActivityAt, "2026-01-05 10:00:00", "a session renamed today but silent since January is not today");
+  assert.equal(none.lastActivityAt, null, "no transcript file: null");
+});
+
+test("GET /roost lists a sessions directory once, however many of its sessions it reports", async () => {
+  const fs = createRequire(import.meta.url)("node:fs");
+  const shared = join(dir, "pisess-asker-b");
+  const real = fs.readdirSync;
+  let reads = 0;
+  fs.readdirSync = function (p, ...rest) { if (String(p) === shared) reads++; return real.call(this, p, ...rest); };
+  syncBuiltinESMExports();
+  try {
+    const { body } = await getJson(base, "/roost");
+    const asker = Object.fromEntries(byId(body.birds).asker.sessions.map((s) => [s.sessionId, s]));
+    assert.equal(asker["asker-b"].lastActivityAt, "2026-01-05 10:00:00", "the shared listing still finds asker-b's file");
+    assert.equal(asker["asker-a"].lastActivityAt, null, "and finds none for asker-a");
+    assert.equal(reads, 1, "two sessions in one directory: one readdir");
+    await getJson(base, "/roost");
+    assert.equal(reads, 2, "the cache lives for one call: the next /roost reads the directory fresh");
+  } finally {
+    fs.readdirSync = real;
+    syncBuiltinESMExports();
+  }
 });

@@ -69,7 +69,7 @@ export function perchHubJs(lang = "en") {
   function live(){ return !retired&&HUB.gen===GEN; }
   HUB.retire=function(){
     retired=true;
-    stopListPolling(); cancelReconnect(); stopWatchdog(); closeStream();
+    stopListPolling(); cancelReconnect(); stopWatchdog(); closeStream(); stopIdentRefresh();
     /* The artifact viewer pane holds a document keydown listener while open
        (artifact-card.js): leaving the hub with it open must not strand it. */
     closeArtifactPane();
@@ -374,7 +374,8 @@ export function perchHubJs(lang = "en") {
                   /* /roost carries the operator's name alongside the id
                      (routes/perch.js) — null when there isn't one. */
                   label:(s.label==null||s.label==='')?null:String(s.label),
-                  projectId:s.projectId==null?null:Number(s.projectId)});
+                  projectId:s.projectId==null?null:Number(s.projectId),
+                  lastActivityAt:(typeof s.lastActivityAt==='string'&&s.lastActivityAt)?s.lastActivityAt:null});
       });
     });
     /* Blocked-on-you first: those are the only rows that need you right now. */
@@ -516,6 +517,10 @@ export function perchHubJs(lang = "en") {
   var TOOL_RUNNING='${tJs("perch.toolRunning", lang)}';
   var TOOL_DONE='${tJs("perch.toolDone", lang)}';
   var TOOL_FAILED='${tJs("perch.toolFailed", lang)}';
+  /* R1.2 PR 2: the "See what happened" line (new mode only). */
+  var TG_S={ see:'${tJs("perch.toolGroupSee", lang)}', running:TOOL_RUNNING,
+    step:'${tJs("perch.toolGroupStep", lang)}', steps:'${tJs("perch.toolGroupSteps", lang)}',
+    failedOne:'${tJs("perch.toolGroupFailedOne", lang)}', failed:'${tJs("perch.toolGroupFailed", lang)}' };
   var COMMANDS_HIBERNATING='${tJs("perch.commandsHibernating", lang)}';
   /* PR-E (item 12): the chat's inline sent-file cards. */
   var FILE_DOWNLOAD='${tJs("perch.fileDownload", lang)}';
@@ -1128,6 +1133,10 @@ export function perchHubJs(lang = "en") {
   }
 
   function openBrowseModal(opts){
+    /* New mode: "Change directory" sits in the session sheet, a modal
+       dialog. Everything outside the top layer is inert while it is open,
+       this overlay included, so the sheet closes first. */
+    if(SHEET&&SHEET.open){ sheetSkipFocus=true; closeSheet(); }
     buildBrowseModal();
     var m=el('perch-browse-modal'); if(!m) return;
     browse.open=true;
@@ -1306,6 +1315,7 @@ export function perchHubJs(lang = "en") {
            mid-choice. Park the payload; closing the menu draws it. */
         if(openRowMenu()){ deferredList={rows:listRows(r.j,SCOPE),archived:(r.j.archived||[])}; return; }
         renderList(listRows(r.j,SCOPE),(r.j.archived||[]));
+        if(current.sid&&rowIndex[current.sid]) showIdent(current.botName||current.botId);   /* the head's day line and Back label follow the fresh row */
         return;
       }
       /* A failed /roost is NOT an empty roost, and the old else branch said
@@ -1470,7 +1480,7 @@ export function perchHubJs(lang = "en") {
     openStream(current.sid,true);
   }
   bindOnce(document,'visibilitychange','visibility',function(){
-    if(document.visibilityState==='visible') reviveStream();
+    if(document.visibilityState==='visible'){ reviveStream(); refreshIdent(); }
   });
   bindOnce(window,'pageshow','pageshow',reviveStream);
   bindOnce(window,'online','online',reviveStream);
@@ -1510,7 +1520,7 @@ export function perchHubJs(lang = "en") {
     syncListPolling();
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
     clearEl(el('perch-activity-list'));   /* the previous session's log is not this one's */
-    toolChips={};                         /* Wave 3: the chip index dies with the transcript */
+    toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
@@ -1539,9 +1549,10 @@ export function perchHubJs(lang = "en") {
     dictationCancel();           /* dictation.js: a hidden composer must never keep recording or upload */
     cancelHistRetry(); histGen++;   /* 23a: a load or retry for the session being left must not render */
     draftSave();                 /* Shell P2: its unsent words wait for it */
-    closeStream(); current.sid=null;
+    closeStream(); current.sid=null; stopIdentRefresh();
     resetBrowserTiles();         /* no frame poller outlives the chat it belongs to */
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
+    closeSheet();                /* new mode: the sheet belongs to the session being left */
     setView('list'); startListPolling(); loadList();
   }
 
@@ -1599,6 +1610,16 @@ export function perchHubJs(lang = "en") {
     return '';
   }
 
+  /* An assistant message's text blocks only, joined as the engine's
+     assistantTextOf joins them (R1.2 PR 2: new mode's history rows). */
+  function assistantTextOnly(message){
+    var content=message&&message.content;
+    if(typeof content==='string') return content;
+    if(!Array.isArray(content)) return '';
+    return content.filter(function(b){ return b&&b.type==='text'&&typeof b.text==='string'; })
+      .map(function(b){ return b.text; }).join('');
+  }
+
   /* drawer.js:829, verbatim in effect: mirror the engine, and a stopped
      session is never in flight whatever the frame says. */
   function turnFlagFor(st){ return (st&&st.state==='stopped')?false:!!(st&&st.turnInFlight); }
@@ -1622,6 +1643,7 @@ export function perchHubJs(lang = "en") {
 
   function openStream(sid,resync){
     closeStream();
+    stateSeen=false;   /* R1.2 PR 2: this stream has not replayed its state yet (histSettledIdle) */
     /* EXPLICIT REPLACE, by identity. closeStream() above can only reach the
        connection THIS instance holds; a stream opened for this session by an
        older instance (or by a path that lost its handle) is named only by the
@@ -1658,6 +1680,7 @@ export function perchHubJs(lang = "en") {
       });
     };
     on('state',function(d){
+      stateSeen=true;
       setTurnInFlight(turnFlagFor(d));
       cardTurnState(d.state);                 /* P5: a turn ending may mean a card offer or a lane move */
       /* An expired card leaves once the engine drops it (the next message). */
@@ -1848,6 +1871,114 @@ export function perchHubJs(lang = "en") {
     e.textContent=label==null?'':String(label);
     e.hidden=!label;
   }
+
+  /* ---- new mode: the calm head (R1.2 PR 2) -------------------------------
+     The bot's friendly name, a "# project · day" line, Back to the project
+     home and the card line. Pure helpers first (unit-tested by extraction);
+     every string reaches the DOM through textContent. */
+  var IDENT_TODAY='${tJs("perch.identToday", lang)}';
+  var IDENT_YESTERDAY='${tJs("perch.identYesterday", lang)}';
+  var IDENT_LANG='${lang === "es" ? "es" : "en"}';
+  var SHEET_TITLE_BOT='${tJs("perch.sheetTitleBot", lang)}';
+  var BACK_PROJECT='${tJs("perch.backProject", lang)}', BACK_LIST='${tJs("perch.backList", lang)}';
+  var PLACEHOLDER_DEFAULT='${tJs("perch.composerPlaceholder", lang)}';
+  var PLACEHOLDER_PROJECT='${tJs("perch.composerPlaceholderProject", lang)}';
+  /* Classic keeps the 120px ceiling; the new-mode pill is capped by its CSS
+     (five lines), so the script only has to follow the content. */
+  var PILL=!!document.getElementById('perch-session-sheet');
+  var PROJECTS=(function(){
+    var n=document.getElementById('perch-projects'); if(!n) return [];
+    try{ var v=JSON.parse(n.textContent||'[]'); return Array.isArray(v)?v:[]; }catch(e){ return []; }
+  })();
+  /* The session row's project, from the active-projects list the page
+     carries. An unfiled session, or one whose project is not active, has none. */
+  function projectOfRow(row,projects){
+    if(!row||row.projectId==null||!Array.isArray(projects)) return null;
+    var id=Number(row.projectId);
+    for(var i=0;i<projects.length;i++){
+      var p=projects[i];
+      if(p&&Number(p.id)===id) return {slug:p.slug,name:p.name};
+    }
+    return null;
+  }
+  /* "today" / "yesterday" / a weekday (within the last week) / a short date,
+     from the row's last-activity stamp (UTC "YYYY-MM-DD HH:MM:SS"). '' when
+     the row carries none or it does not parse. */
+  function identDay(row,now,lang){
+    var s=row&&row.lastActivityAt; if(!s) return '';
+    var d=new Date(String(s).replace(' ','T')+'Z');
+    if(isNaN(d.getTime())) return '';
+    var a=new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime();
+    var b=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
+    var days=Math.round((b-a)/86400000);
+    if(days<=0) return IDENT_TODAY;
+    if(days===1) return IDENT_YESTERDAY;
+    try{
+      if(days<7) return d.toLocaleDateString(lang==='es'?'es':'en',{weekday:'long'});
+      return d.toLocaleDateString(lang==='es'?'es':'en',{month:'short',day:'numeric'});
+    }catch(e){ return d.toDateString(); }
+  }
+  function identSubtitle(row,projects,now,lang){
+    var p=projectOfRow(row,projects);
+    var day=identDay(row,now,lang);
+    if(!p) return day;
+    return '# '+p.name+(day?' \\u00b7 '+day:'');
+  }
+  /* Where Back goes: the session's project home, or null (the list). */
+  function backTarget(row,projects){
+    var p=projectOfRow(row,projects);
+    return p?'/dashboard/project/'+encodeURIComponent(p.slug):null;
+  }
+  /* Head pieces that depend on the row; no-ops in classic Perch (no sheet). */
+  function showIdent(botName){
+    var sheet=el('perch-session-sheet'); if(!sheet) return;
+    var row=rowIndex[current.sid];
+    var sub=el('perch-ident-sub');
+    if(sub) sub.textContent=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
+    var ci=el('perch-input');
+    if(ci){
+      var pr=projectOfRow(row,PROJECTS);
+      ci.setAttribute('placeholder',pr?PLACEHOLDER_PROJECT.split('{project}').join(String(pr.name)):PLACEHOLDER_DEFAULT);
+    }
+    var t=el('perch-sheet-title');
+    if(t) t.textContent=SHEET_TITLE_BOT.split('{bot}').join(String(botName||''));
+    /* Back is a "←" icon (html.js backIconButton): only its accessible name
+       changes. data-home marks a filed session, which is what shows Back on
+       desktop too (css.js), where the list beside the chat is otherwise
+       the way back. */
+    var back=el('perch-back');
+    if(back){
+      var home=!!backTarget(row,PROJECTS);
+      var nm=home?BACK_PROJECT:BACK_LIST;
+      back.setAttribute('aria-label',nm); back.setAttribute('title',nm);
+      if(home) back.setAttribute('data-home',''); else if(back.removeAttribute) back.removeAttribute('data-home');
+    }
+  }
+  /* The day line ("today" becomes "yesterday" at midnight) on a phone, where
+     the list is hidden and its /roost poll (loadList's showIdent) stopped:
+     redrawn from the open session's row as it is plus the current date, on
+     a return to the tab and every 10 minutes while a session is open. No
+     /roost request. New mode only (showIdent is a no-op without the sheet). */
+  var IDENT_REFRESH_MS=600000, identTimer=null;
+  function refreshIdent(){
+    if(!live()||!current.sid) return;
+    showIdent(current.botName||current.botId);
+  }
+  function startIdentRefresh(){
+    stopIdentRefresh();
+    if(!el('perch-session-sheet')) return;
+    identTimer=setInterval(refreshIdent,IDENT_REFRESH_MS);
+  }
+  function stopIdentRefresh(){ if(identTimer){ clearInterval(identTimer); identTimer=null; } }
+  /* The card line under the name: "#12 Card title", a link to the card. Fed
+     by the card chip's own lookup (card-chip.js), so it adds no request. */
+  function setHeadCard(c,href){
+    var a=el('perch-card-line'); if(!a) return;
+    if(!c||!Number.isInteger(c.id)){ a.hidden=true; a.textContent=''; a.removeAttribute('href'); return; }
+    a.textContent='#'+String(c.id)+(c.title?' '+String(c.title):'');
+    if(href) a.setAttribute('href',href);
+    a.hidden=false;
+  }
   function showHeader(botId,botName){
     /* Wave 1: the bot id is remembered for the session's life —
        resync-on-reconnect re-fetches the transcript BY BOT, and the cold
@@ -1857,11 +1988,15 @@ export function perchHubJs(lang = "en") {
     el('perch-bot-name').textContent=botName||botId;
     /* The session id is the identity the close confirm and every API path
        use. It shows in the head on desktop; on phones (queue item 13) the
-       head hides it and the Session tab's #perch-session-id carries it. */
+       head hides it and the Session tab's #perch-session-id carries it. In
+       new mode html.js ships the head's copy hidden at every width; the
+       sheet's Session section carries it. */
     el('perch-session-meta').textContent=current.sid||'';
     el('perch-session-id').textContent=current.sid||'';
     var known=rowIndex[current.sid];
     showSessionName(known?known.label:null);
+    showIdent(botName||botId);
+    startIdentRefresh();
   }
   /* Unbounded exponential backoff — the 2026-09-12 phone finding. The old cap
      (5 tries, fixed 2s) was written for a desktop browser and a gateway
@@ -1939,7 +2074,7 @@ export function perchHubJs(lang = "en") {
     var sid=current.sid, botId=current.botId;
     if(!sid||!botId) return;
     clearEl(el('perch-transcript'));
-    toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
+    toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
@@ -2010,6 +2145,7 @@ export function perchHubJs(lang = "en") {
            turn's frame — "400 invalid_tools" repeats every turn. */
         var tailErr=null;
         var msgs=events.filter(function(e){ return e&&e.type==='message'; });
+        var histCallArgs={};   /* toolCallId -> its arguments, JSON (new mode's agent names) */
         /* Strand 1: pi keeps every errored attempt in the session file and
            its messages carry no turnId. An errored assistant message is the
            TURN's error only when no later assistant message precedes the next
@@ -2035,7 +2171,12 @@ export function perchHubJs(lang = "en") {
           if(String(m.role||'')==='toolResult'){
             var rt=messageText(m);
             if(m.toolCallId!=null) histToolSeen[String(m.toolCallId)]=true;
-            appendToolChip({ name:m.toolName, toolCallId:'hist:'+String(m.toolCallId||'') });
+            var hc={ name:m.toolName, toolCallId:'hist:'+String(m.toolCallId||'') };
+            /* New mode: a subagent group names its agents on reload too, from
+               the call's own arguments (never shown: history chips carry no args). */
+            var ha=SHEET&&isSubagentTool(m.toolName)?histCallArgs[String(m.toolCallId)]:null;
+            if(ha!=null) hc.agents=subagentNames(ha);
+            appendToolChip(hc);
             finishToolChip({ toolCallId:'hist:'+String(m.toolCallId||''), isError:!!m.isError,
               resultText: rt.length>2000?rt.slice(0,2000)+'\\u2026':rt });
             return;
@@ -2046,6 +2187,23 @@ export function perchHubJs(lang = "en") {
              messageText()'s "[tool: name]" line. */
           var txt=messageText(m);
           var errored=String(m.role||'')==='assistant'&&m.stopReason==='error';
+          /* R1.2 PR 2, new mode: a reloaded turn reads like the live one. The
+             live stream draws an assistant message's TEXT only (the engine's
+             assistantTextOf), so the "[tool: x]" lines a pure tool-call
+             message rendered here would split one turn's chips into a group
+             per call. A user line starts the next turn's groups. */
+          if(SHEET){
+            var role=String(m.role||'');
+            if(role==='assistant'){
+              (Array.isArray(m.content)?m.content:[]).forEach(function(b){
+                if(b&&b.type==='toolCall'&&b.id!=null){
+                  try{ histCallArgs[String(b.id)]=JSON.stringify(b.arguments==null?{}:b.arguments); }catch(x){}
+                }
+              });
+              txt=assistantTextOnly(m);
+              if(!txt&&!errored) return;
+            } else if(role==='user'){ toolGroup=null; toolTurn++; }
+          }
           /* An errored attempt with no text is not a bot message: drawing
              it was the empty bubble every failed turn left behind. */
           if(!(errored&&!txt)){
@@ -2056,6 +2214,7 @@ export function perchHubJs(lang = "en") {
           if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
         });
+        if(SHEET){ toolGroupsSettleHistory(); histSettledIdle=!turnInFlight&&!stateSeen; }   /* R1.2 PR 2: a reload mid-turn reads "running", whichever arrives first */
         settleSeamEchoes(userTexts);
         flushHistBuf(batchTexts, pair[1].items, tailErr, pair[1].shots);
       });
@@ -2401,6 +2560,8 @@ export function perchHubJs(lang = "en") {
      contents never bleed into this one while loadOptions() is in flight. */
   function resetControls(){
     switchTab('chat');           /* D2: a session opens on the conversation, never on the tab the last one was left on */
+    /* New mode: switchTab('chat') only closes the sheet. sheetTab is kept ON
+       PURPOSE, so the sheet reopens on the tab last used, across sessions. */
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
@@ -2430,7 +2591,7 @@ export function perchHubJs(lang = "en") {
     setAttn(false);              /* nor its unanswered-question banner */
     /* Wave 2/3: the new session inherits none of the old one's readings. */
     planState=null; renderPlan();
-    toolChips={}; fileSeen={}; commandsCache=null; hideCmdMenu();
+    toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
     resetFacts();
@@ -2504,6 +2665,17 @@ export function perchHubJs(lang = "en") {
        the \`reply\` — resetting on every true frame would put the duplicate
        straight back. */
     if(next&&!turnInFlight) turnRendered=false;
+    /* R1.2 PR 2: the turn's "See what happened" groups fold at its end. */
+    if(SHEET&&!next&&turnInFlight) toolGroupsEndTurn();
+    /* A history batch that settled idle and is followed by the session's
+       first state frame saying a turn runs: the replay arrived late, so the
+       batch's last turn IS the running one. Its groups go live again
+       (toolGroupsSettleHistory) instead of a new turn starting. */
+    var lateState=histSettledIdle; histSettledIdle=false;
+    if(SHEET&&next&&!turnInFlight){
+      if(lateState){ turnInFlight=true; toolGroupsSettleHistory(); }
+      else { toolGroup=null; toolTurn++; }
+    }
     turnInFlight=next;
     el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
     el('perch-abort').style.display=turnInFlight?'':'none';
@@ -2568,6 +2740,7 @@ export function perchHubJs(lang = "en") {
     input.value=v==null?'':String(v);
     input.style.height='auto';
     if(v) input.style.height=Math.min(input.scrollHeight||72,120)+'px';
+    if(v&&PILL) input.style.height=(input.scrollHeight||44)+'px';
     /* A marker this page is not itself waiting on belongs to a send that was
        cut off by a reload: if the draft is that very text, say so. */
     if(!sendingNow[sid]){
@@ -2601,6 +2774,7 @@ export function perchHubJs(lang = "en") {
   bindOnce(window,'pagehide','draftPagehide',function(){ if(live()) draftSave(); });
 
   function send(){
+    histSettledIdle=false;                 /* a turn the operator starts is a new turn */
     var input=el('perch-input'); if(!input) return;
     var text=input.value;
     if(!sendable(text)||!current.sid) return;
@@ -2833,6 +3007,10 @@ export function perchHubJs(lang = "en") {
     clearEl(pane);
     askShown=card&&card.requestId?card:null;
     if(!card||!card.requestId){ setAttn(false); return; }
+    /* New mode: an ask is never hidden (spec 9.4). The card and the banner
+       live in the chat, which the modal sheet makes inert, so it closes. */
+    if(SHEET&&SHEET.open) closeSheet();
+    plusClose(false);                        /* nor under the composer's "+" popover */
     /* 2026-10-20: an expired question stays on screen, read-only, so the
        operator sees what was asked; the session still waits for them. */
     if(card.expired){
@@ -3030,6 +3208,71 @@ export function perchHubJs(lang = "en") {
     };
   }
 
+  /* R1.2 PR 2, new mode: the composer's "+" popover (html.js pillRow). It
+     holds Attach and Dictate; it is a popover, not a modal: Escape closes it
+     and returns focus to "+", a tap outside closes it, and focus is never
+     trapped. "+" hides when neither entry is available, and re-checks when
+     dictation's probe shows or hides the mic (dictShowMic calls plusSync). */
+  var plusBtn=el('perch-plus'), plusMenu=el('perch-plus-menu');
+  function plusSync(){
+    if(!plusBtn||!plusMenu) return;
+    var mic=el('perch-dictate');
+    var any=!!attachBtn||!!(mic&&!mic.hidden);
+    plusBtn.hidden=!any;
+    if(!any) plusClose(false);
+  }
+  function plusClose(refocus){
+    if(!plusBtn||!plusMenu||plusMenu.hidden) return;
+    plusMenu.hidden=true;
+    plusBtn.setAttribute('aria-expanded','false');
+    if(refocus&&plusBtn.focus) plusBtn.focus();
+  }
+  /* A disclosure, not a menu widget (no aria-haspopup): opening it moves
+     focus to its first visible entry. */
+  function plusFirstItem(){
+    var bs=plusMenu?plusMenu.querySelectorAll('button'):[];
+    for(var i=0;i<bs.length;i++){ if(!bs[i].hidden) return bs[i]; }
+    return null;
+  }
+  if(plusBtn&&plusMenu){
+    plusBtn.onclick=function(){
+      if(plusMenu.hidden){
+        plusMenu.hidden=false; plusBtn.setAttribute('aria-expanded','true');
+        var first=plusFirstItem(); if(first&&first.focus) first.focus();
+      }
+      else plusClose(false);
+    };
+    plusMenu.addEventListener('click',function(e){
+      var b=e.target&&e.target.closest?e.target.closest('button'):null;
+      if(!b) return;
+      plusClose(false);                    /* choosing an entry closes the menu */
+      /* The chosen entry just hid with the menu: focus that was left on it
+         (or fell to the page) goes to the composer. A control the choice
+         focused on purpose keeps it. */
+      var a=document.activeElement;
+      if(!a||a===document.body||a===b||plusMenu.contains(a)){
+        var ci=el('perch-input'); if(ci&&ci.focus) ci.focus();
+      }
+    });
+    bindOnce(document,'keydown','plusEsc',function(e){
+      if(e.key==='Escape'&&plusMenu&&!plusMenu.hidden){ plusClose(true); }
+    });
+    bindOnce(document,'pointerdown','plusOutside',function(e){
+      if(!plusMenu||plusMenu.hidden) return;
+      var tg=e.target;
+      if(plusMenu.contains(tg)||plusBtn.contains(tg)) return;
+      plusClose(false);
+    });
+    /* Focus leaving the composer closes the menu (never steals focus). */
+    var plusComposer=el('perch-composer');
+    if(plusComposer) plusComposer.addEventListener('focusout',function(e){
+      var to=e.relatedTarget;
+      if(to&&plusComposer.contains(to)) return;
+      plusClose(false);
+    });
+    plusSync();
+  }
+
   /* Carried-over fix: send(), closeSession() and the abort path were all
      written by an earlier task but never connected to the DOM — the chat
      view rendered and Send did nothing. #perch-back sets location.hash=''
@@ -3051,11 +3294,18 @@ export function perchHubJs(lang = "en") {
     composerInput.oninput=function(){
       this.style.height='auto';
       this.style.height=Math.min(this.scrollHeight||72,120)+'px';
+      if(PILL) this.style.height=(this.scrollHeight||44)+'px';       /* the pill's CSS caps it at five lines */
       maybeCmdMenu(this.value);            /* Wave 3: '/' opens the command menu */
       draftSaveSoon();                     /* Shell P2: the unsent draft survives a reload */
     };
   }
   el('perch-back').onclick=function(){ location.hash=''; };
+  /* New mode with a filed session: Back goes to its project's home instead.
+     Unfiled (and classic, which has no sheet) keeps the hash route above. */
+  if(el('perch-session-sheet')) el('perch-back').onclick=function(){
+    var to=backTarget(rowIndex[current.sid],PROJECTS);
+    if(to) location.href=to; else location.hash='';
+  };
   function abortTurn(){
     if(!current.sid) return;
     perchApi('POST','/interactive/'+encodeURIComponent(current.sid)+'/abort');
@@ -3078,10 +3328,25 @@ export function perchHubJs(lang = "en") {
      convenience nobody deep-links to. */
   var TAB_NAMES=['chat','session','files','activity'];
   var tab='chat';
+  /* R1.2 PR 2, new mode only: no tab bar. Session, Files and Activity live
+     in the #perch-session-sheet dialog, opened from the bot's name, and the
+     chat is ALWAYS on screen behind it. Its presence is the marker (html.js
+     renders it only when the panel hands in a scope). In that mode 'chat'
+     means "back to the conversation": the sheet closes and the last-used
+     sheet tab is kept for the next open. */
+  var SHEET=el('perch-session-sheet');
+  var sheetTab='session';
+  /* One-shot: the next close event leaves focus alone. Set when the sheet
+     closes to hand focus to something else (the browse picker): close()
+     queues the event, so its refocus would land AFTER the picker took focus. */
+  var sheetSkipFocus=false;
   function switchTab(name){
     if(TAB_NAMES.indexOf(name)<0) name='chat';
+    if(SHEET&&name==='chat'){ closeSheet(); return; }
     tab=name;
+    if(SHEET) sheetTab=name;
     TAB_NAMES.forEach(function(nm){
+      if(SHEET&&nm==='chat') return;          /* the chat never hides in new mode */
       var sec=el('perch-tab-'+nm), btn=el('perch-tab-btn-'+nm);
       if(sec) sec.hidden=(nm!==name);
       if(btn) btn.setAttribute('aria-selected',nm===name?'true':'false');
@@ -3094,6 +3359,51 @@ export function perchHubJs(lang = "en") {
     var btn=el('perch-tab-btn-'+nm);
     if(btn) btn.onclick=function(){ switchTab(nm); };
   });
+  /* The sheet follows the shell sheets (shell/client.js): showModal, so
+     Escape is native; a click whose target is the dialog itself landed on
+     the backdrop (.perch-sheet-inner fills the box); the close button; and
+     focus returns to the bot-name button on every close path. */
+  function closeSheet(){
+    if(!SHEET||!SHEET.open) return;
+    if(typeof SHEET.close==='function'){ SHEET.close(); return; }
+    SHEET.removeAttribute('open');
+    var b=el('perch-ident-btn'); if(current.sid&&b&&b.focus) b.focus();
+  }
+  function openSheet(){
+    if(!SHEET||SHEET.open) return;
+    switchTab(sheetTab);
+    if(typeof SHEET.showModal==='function') SHEET.showModal();
+    else SHEET.setAttribute('open','');
+    var sel=el('perch-tab-btn-'+sheetTab); if(sel&&sel.focus) sel.focus();
+  }
+  if(SHEET){
+    var identBtn=el('perch-ident-btn');
+    if(identBtn) identBtn.onclick=openSheet;
+    var sheetCloseBtn=el('perch-sheet-close');
+    if(sheetCloseBtn) sheetCloseBtn.onclick=closeSheet;
+    SHEET.addEventListener('click',function(e){ if(e.target===SHEET) closeSheet(); });
+    SHEET.addEventListener('close',function(){
+      if(sheetSkipFocus){ sheetSkipFocus=false; return; }
+      if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
+      /* The shell sheets' rule: return focus only when it is PARKED (nowhere,
+         on body/html, or still inside the closing dialog). A control that
+         took focus right after the close keeps it. */
+      var a=document.activeElement;
+      if(a&&a!==document.body&&a!==document.documentElement&&!SHEET.contains(a)) return;
+      var b=el('perch-ident-btn');
+      if(b&&document.contains(b)&&b.focus) b.focus();
+    });
+    /* Turbo snapshots the body before it leaves; an open modal in that
+       snapshot comes back open on Back. Once per document, like the shell's
+       own guard, and it resolves the sheet by id at call time. */
+    if(!HUB.sheetCacheBound){
+      HUB.sheetCacheBound=true;
+      document.addEventListener('turbo:before-cache',function(){
+        var d=document.getElementById('perch-session-sheet');
+        if(d&&d.open&&typeof d.close==='function') d.close();
+      });
+    }
+  }
 
   /* Session tab: "Change directory" reopens the SAME browse modal the
      launcher uses (one picker, two callers) and POSTs control({cwd}). The
@@ -3459,8 +3769,9 @@ export function perchHubJs(lang = "en") {
     var wrap=document.createElement('div'); wrap.className='entry toolwrap';
     /* The live browser tile anchors after this chip by its RAW call id
        (history chips are keyed 'hist:<id>'). */
+    var hist=false;
     if(d&&d.toolCallId!=null){
-      var cid=String(d.toolCallId); if(cid.indexOf('hist:')===0) cid=cid.slice(5);
+      var cid=String(d.toolCallId); if(cid.indexOf('hist:')===0){ cid=cid.slice(5); hist=true; }
       if(cid) wrap.setAttribute('data-call',cid);
     }
     var chip=document.createElement('button'); chip.type='button'; chip.className='tool-chip';
@@ -3476,26 +3787,184 @@ export function perchHubJs(lang = "en") {
     }
     chip.onclick=function(){ details.hidden=!details.hidden; };
     wrap.appendChild(chip); wrap.appendChild(details);
-    tr.appendChild(wrap);
+    /* New mode: the chip goes into its turn's "See what happened" group;
+       classic appends it to the transcript exactly as before. typeof: the
+       browser-tile harness lifts this function without the hub's scope. */
+    var g=(typeof SHEET!=='undefined'&&SHEET)?toolGroupFor(tr):null;
+    if(g){
+      g.total++; g.running++;
+      /* A live chip proves the turn is still going, but only while one is
+         in flight: frames replayed by flushHistBuf after the turn's reply
+         belong to a finished turn and fold as such. */
+      if(!hist&&typeof turnInFlight!=='undefined'&&turnInFlight) g.ended=false;
+      var agents=Array.isArray(d&&d.agents)?d.agents:
+        (isSubagentTool(d&&d.name)?subagentNames(d&&d.argsText):[]);
+      if(!isSubagentTool(d&&d.name)) g.others++;
+      agents.forEach(function(a){ g.agents.push(a); });
+      g.body.appendChild(wrap);
+      toolGroupRefresh(g);
+    } else tr.appendChild(wrap);
     tr.scrollTop=tr.scrollHeight;
-    if(d&&d.toolCallId!=null) toolChips[d.toolCallId]={chip:chip,spin:spin,status:status,details:details};
+    if(d&&d.toolCallId!=null) toolChips[d.toolCallId]={chip:chip,spin:spin,status:status,details:details,group:g};
   }
   function finishToolChip(d){
     var rec=(d&&d.toolCallId!=null)?toolChips[d.toolCallId]:null;
     /* An end without a start means the operator opened mid-call: the rail
        has the line, and minting a chip for a call nobody watched begin
-       would show a "done" with no story. */
+       would show a "done" with no story. In new mode the chip IS minted
+       (finished), so the group's "N steps" counts every step it says
+       happened. */
+    if(!rec&&typeof SHEET!=='undefined'&&SHEET&&d&&d.toolCallId!=null){
+      appendToolChip({ name:d.name, toolCallId:d.toolCallId });
+      rec=toolChips[d.toolCallId];
+    }
     if(!rec) return;
     if(rec.spin&&rec.spin.parentNode) rec.spin.parentNode.removeChild(rec.spin);
-    rec.status.textContent=(d&&d.isError)?TOOL_FAILED:TOOL_DONE;
-    if(d&&d.isError) rec.chip.className='tool-chip err';
+    /* New mode: a refusal (chipFailed) reads as failed on the chip too, so the
+       chip agrees with its group's count. Classic judges isError only. */
+    var bad=rec.group?chipFailed(d):!!(d&&d.isError);
+    rec.status.textContent=bad?TOOL_FAILED:TOOL_DONE;
+    if(bad) rec.chip.className='tool-chip err';
     if(d&&d.resultText!=null){
       rec.details.appendChild(line('td-h',(d&&d.isError)?'error':'result'));
       var pr=document.createElement('pre'); pr.textContent=String(d.resultText);
       rec.details.appendChild(pr);
     }
+    if(rec.group){
+      rec.group.running=Math.max(0,rec.group.running-1);
+      if(bad) rec.group.failed++;
+      toolGroupRefresh(rec.group);
+    }
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
   }
+
+  /* ---- R1.2 PR 2: "See what happened" (new mode only) --------------------
+     Consecutive tool chips of one assistant turn sit in one
+       div.tool-group[data-turn] > button.tool-group-line[aria-expanded]
+                                 + div.tool-group-body > .toolwrap…
+     The open group takes the next chip only while it is still the last
+     thing in the transcript (a browser tile right after it does not
+     count): any text, note, card or user line appended after it closes it,
+     and the next tool starts a new group. So ask cards, sent-file cards and
+     decision prompts can never land inside one. Never folded: a group with
+     a running chip is expanded; it collapses when its turn ends with every
+     chip finished. A failed group stays collapsed, its line in the error
+     colour with the count. */
+  var toolGroup=null, toolGroups=[], toolTurn=0;
+  var toolGroupSeq=0;   /* body ids for aria-controls; never reset, so an id is never reused */
+  /* The browser lease's refusals arrive as ordinary (isError:false) results;
+     they are still steps that did not happen. Copied verbatim from TEXTS.busy,
+     TEXTS.held and TEXTS.handedBack in bundles/browser/server/lease-guard.js (the guard the
+     shared lease in servers/shared/browser-lease.js reports through). */
+  var KNOWN_REFUSALS=[
+    'The browser is busy: another bot is using it. Try again in a minute.',
+    'The operator has the browser; call again to continue.',
+    'The operator handed the browser back; call again.'
+  ];
+  function chipFailed(d){
+    if(d&&d.isError) return true;
+    var t=String((d&&d.resultText)||'');
+    for(var i=0;i<KNOWN_REFUSALS.length;i++){ if(t.indexOf(KNOWN_REFUSALS[i])===0) return true; }
+    return false;
+  }
+  /* pi's subagent tool (pi-lab extensions/subagent): single { agent },
+     parallel { tasks:[{agent}] }, chain { chain:[{agent}] }. The args come
+     pre-truncated (600 chars), so a long one does not parse: no names. */
+  function subagentNames(argsText){
+    var o;
+    try{ o=JSON.parse(String(argsText)); }catch(e){ return []; }
+    if(!o||typeof o!=='object') return [];
+    var out=[];
+    function add(a){ if(typeof a==='string'&&a&&out.indexOf(a)<0) out.push(a); }
+    add(o.agent);
+    [o.tasks,o.chain].forEach(function(l){
+      if(Array.isArray(l)) l.forEach(function(t){ if(t&&typeof t==='object') add(t.agent); });
+    });
+    return out;
+  }
+  function isSubagentTool(name){ return /(^|__)subagent$/.test(String(name||'')); }
+  /* s: the language's strings (TG_S). Never "all ok": a finished line says
+     what ran, and a failure is counted. turnRunning: the group's turn is
+     still going (the model is working), so even with every chip finished
+     the line says "running" until the turn ends. */
+  function groupLabel(c,s,turnRunning){
+    var head=s.see+' \\u00b7 ';
+    var failed=Number(c&&c.failed)||0;
+    var tail=failed>0?', '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'';
+    /* Running never hides a failure: "running · 1 failed" until the turn ends. */
+    if(Number(c&&c.running)>0||turnRunning) return head+s.running+(failed>0?' \\u00b7 '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'');
+    var names=[];
+    ((c&&c.agents)||[]).forEach(function(a){ if(a&&names.indexOf(a)<0) names.push(a); });
+    var n=Number(c&&c.total)||0;
+    var steps=(n===1?s.step:s.steps.replace('{n}',String(n)));
+    /* subagents alone: their names; with other tools beside them: names · N steps */
+    if(names.length) return head+names.join(', ')+(Number(c&&c.others)>0?' \u00b7 '+steps:'')+tail;
+    return head+steps+tail;
+  }
+  function toolGroupFor(tr){
+    var g=toolGroup;
+    if(g&&g.node.parentNode===tr&&g.turn===toolTurn){
+      var kids=tr.children||[], i=Array.prototype.indexOf.call(kids,g.node), ok=i>=0;
+      for(var j=i+1;ok&&j<kids.length;j++){
+        if(String(kids[j].className||'').indexOf('ph-btile')<0) ok=false;
+      }
+      if(ok) return g;
+    }
+    var node=document.createElement('div'); node.className='tool-group';
+    node.setAttribute('data-turn',String(toolTurn));
+    var btn=document.createElement('button'); btn.type='button'; btn.className='tool-group-line';
+    var body=document.createElement('div'); body.className='tool-group-body';
+    body.id='perch-tg-'+(++toolGroupSeq);
+    btn.setAttribute('aria-controls',body.id);
+    node.appendChild(btn); node.appendChild(body);
+    g={ node:node, line:btn, body:body, total:0, failed:0, running:0, others:0, agents:[], ended:true,
+      open:true, turn:toolTurn };
+    btn.onclick=function(){ toolGroupOpen(g,!g.open); };
+    toolGroupOpen(g,true);
+    tr.appendChild(node);
+    toolGroup=g; toolGroups.push(g);
+    return g;
+  }
+  function toolGroupOpen(g,open){
+    /* Folding a body that holds focus would drop it on <body>: hand it to the line first. */
+    if(!open&&g.open&&typeof document!=='undefined'&&document.activeElement&&g.body.contains&&
+       g.body.contains(document.activeElement)&&g.line.focus) g.line.focus();
+    g.open=!!open;
+    g.body.hidden=!g.open;
+    g.line.setAttribute('aria-expanded',g.open?'true':'false');
+  }
+  function toolGroupRefresh(g){
+    g.line.textContent=groupLabel(g,TG_S,!g.ended);
+    g.line.className='tool-group-line'+(g.failed>0?' err':'');
+    if(g.running>0) toolGroupOpen(g,true);
+    else if(g.ended) toolGroupOpen(g,false);
+    /* else: every chip finished but the turn is still going, so it stays open until the turn ends */
+  }
+  /* The turn ended (setTurnInFlight's true->false): its groups fold once
+     every chip in them is finished; the next turn's tools start fresh. */
+  function toolGroupsEndTurn(){
+    toolGroups.forEach(function(g){ if(!g.ended){ g.ended=true; toolGroupRefresh(g); } });
+    toolGroups=toolGroups.filter(function(g){ return !g.ended||g.running>0; });
+    toolGroup=null;
+  }
+  /* History settled while a turn runs (a reload mid-turn): the last turn's
+     groups are that running turn's, so they are live again. Their line reads
+     "running" and they stay open until the turn ends (toolGroupsEndTurn). */
+  /* True from an idle history settle until the next state change or send:
+     the window in which a late replayed state frame belongs to the batch's
+     last turn (setTurnInFlight). */
+  var histSettledIdle=false;
+  /* Whether the current stream has delivered a state frame. The engine
+     replays its state on subscribe, so an idle replay seen BEFORE the
+     history settles already said "no turn": the window must not open then,
+     or the next turn (from another client, the board) would rejoin the
+     finished turn's groups. Reset in openStream, set in on('state'). */
+  var stateSeen=false;
+  function toolGroupsSettleHistory(){
+    if(!turnInFlight) return;
+    toolGroups.forEach(function(g){ if(g.ended&&g.turn===toolTurn){ g.ended=false; toolGroupOpen(g,true); toolGroupRefresh(g); } });
+  }
+  function resetToolGroups(){ toolGroup=null; toolGroups=[]; toolTurn=0; histSettledIdle=false; }
 
   /* ---- PR-E (item 12): inline sent-file cards -----------------------------
      pi-lab's shape: an image renders inline, anything else is a download card
