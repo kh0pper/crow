@@ -312,3 +312,25 @@ test("adding a manual password through the UI records it for approval cards (its
     assert.ok(list.split("\n").includes(createHash("sha256").update("Op3rator_pw-x").digest("hex")));
   } finally { s.close(); }
 });
+
+test("delete: an orphan service row (connection row gone) is purgeable; one with a live connection is refused 409", async () => {
+  const { SERVICE_CONNECTIONS_DDL } = await import("../servers/shared/project-services-schema.js");
+  const s = await setup();
+  try {
+    await s.db.executeMultiple(SERVICE_CONNECTIONS_DDL);
+    await s.db.execute("CREATE TABLE IF NOT EXISTS project_spaces (id INTEGER PRIMARY KEY, slug TEXT, name TEXT)");
+    await s.db.execute("INSERT INTO project_spaces (id, slug, name) VALUES (1, 'p', 'P')");
+    const conn = (uuid) => s.db.execute({ sql: "INSERT INTO service_connections (uuid, project_id, service_id, bundle_id, method, account_label, label_slug) VALUES (?, 1, 'github', 'github', 'token', ?, ?)", args: [uuid, uuid, uuid] });
+    await conn("u-live"); await conn("u-gone");
+    const live = await K.saveServiceSecret(s.db, s.key(), { connectionUuid: "u-live", bundleId: "github", envKey: "A", label: "L", secret: "test-token-live-1", origin: "typed" });
+    const gone = await K.saveServiceSecret(s.db, s.key(), { connectionUuid: "u-gone", bundleId: "github", envKey: "A", label: "L", secret: "test-token-gone-1", origin: "typed" });
+    await s.db.execute("DELETE FROM service_connections WHERE uuid = 'u-gone'");
+    assert.equal((await s.call("/reauth", { body: { password: "right-password" } })).status, 200);
+    const refused = await s.call("/delete", { body: { id: live.id } });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error, "service_row");
+    assert.equal((await s.call("/delete", { body: { id: gone.id } })).status, 200);
+    assert.equal((await s.db.execute("SELECT 1 FROM crow_keychain WHERE id = " + gone.id)).rows.length, 0);
+    assert.equal((await s.db.execute("SELECT 1 FROM crow_keychain WHERE id = " + live.id)).rows.length, 1);
+  } finally { s.close(); }
+});

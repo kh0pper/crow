@@ -388,6 +388,25 @@ export async function disconnectConnection(db, uuid, { actor = "local", disconne
 }
 
 /**
+ * Disconnects EVERY connection of a project, whatever its status and whether or not the project is
+ * archived, the way disconnectConnection does (secrets 'disconnected' first, then the row, one
+ * audit row per connection that changed). A project delete MUST call this before deleting the
+ * project_spaces row: service_connections.project_id cascades, and without it the keychain rows
+ * would be left 'active' with no connection (once disconnected they stay masked, never served).
+ * Safe to repeat. @returns {Promise<{disconnected:number}>} connections that changed state.
+ */
+export async function disconnectProjectConnections(db, projectId, { actor = "local" } = {}) {
+  if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
+  const { rows } = await db.execute({ sql: "SELECT uuid, status FROM service_connections WHERE project_id = ? ORDER BY id", args: [projectId] });
+  let disconnected = 0;
+  for (const r of rows) {
+    await disconnectConnection(db, r.uuid, { actor });
+    if (r.status !== "disconnected") disconnected++;
+  }
+  return { disconnected };
+}
+
+/**
  * Uninstall of `bundleId`: its active, error and needs_reauth connections become needs_install
  * (last_error kept, so a reinstall restores each to active or error). A needs_reauth row with no
  * last_error gets 'auth_failed', so it comes back as error (Not working) and a fresh test decides.

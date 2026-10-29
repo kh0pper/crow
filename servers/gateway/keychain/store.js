@@ -277,13 +277,18 @@ export async function consumeFirstView(db, key, id, { now } = {}) {
 }
 
 /**
- * Deletes one entry. A service row of a live connection is refused (KeychainServiceRowError):
+ * Deletes one entry. A service row of a live (not-disconnected) connection is refused (KeychainServiceRowError):
  * disconnect its connection first. A disconnected service row may be deleted: that is how the
  * owner purges a disconnected connection's secret for good (it then stops being masked).
  */
 export async function deleteEntry(db, id) {
   await ensureKeychainTable(db);
-  const r = await db.execute({ sql: "DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected')", args: [Number(id)] });
+  // An orphan (its connection row is gone, e.g. a project was deleted) is purgeable like a disconnected one.
+  const hasConnections = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'service_connections'")).rows.length > 0;
+  const orphan = hasConnections
+    ? "NOT EXISTS (SELECT 1 FROM service_connections c WHERE c.uuid = crow_keychain.connection_uuid AND c.status != 'disconnected')"
+    : "0"; // no table: nothing proves it an orphan
+  const r = await db.execute({ sql: `DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected' OR ${orphan})`, args: [Number(id)] });
   if (r.rowsAffected > 0) return true;
   const svc = await db.execute({ sql: "SELECT 1 FROM crow_keychain WHERE id = ? AND kind = 'service'", args: [Number(id)] });
   if (svc.rows.length) throw new KeychainServiceRowError();

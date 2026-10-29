@@ -33,8 +33,9 @@ async function fresh() {
     const r = await db.execute({ sql: "INSERT INTO project_spaces (slug, name) VALUES (?, ?) RETURNING id", args: [slug, slug[0].toUpperCase() + slug.slice(1)] });
     ids[slug] = Number(r.rows[0].id);
   }
-  const key = createKeychainKey({ crowHome: mkdtempSync(join(tmpdir(), "crow-svcconn-home-")) });
-  return { db, key, ids };
+  const crowHome = mkdtempSync(join(tmpdir(), "crow-svcconn-home-"));
+  const key = createKeychainKey({ crowHome });
+  return { db, key, ids, env: { CROW_HOME: crowHome, CROW_DATA_DIR: dir } };
 }
 
 const gh = (ctx, label, extra = {}, opts = {}) =>
@@ -411,4 +412,35 @@ test("authority", async () => {
 test("ConnectionError takes only the plan's error classes", () => {
   assert.equal(new S.ConnectionError("label_taken").code, "label_taken");
   assert.throws(() => new S.ConnectionError("key_missing"), TypeError);
+});
+
+test("disconnectProjectConnections: every connection of the project, archived too; masked, never served; repeat is a no-op; other projects untouched", async () => {
+  const SV = await import("../servers/shared/secret-values.js");
+  const { collectSecretValueSets } = await import("../servers/shared/secret-values-collect.js");
+  const strong = (n) => "test-token-" + n + "Zq9x".repeat(4);
+  const ctx = await fresh();
+  const a = await gh(ctx, "A", { secrets: { [GH]: strong("a") } });
+  const b = await gh(ctx, "B", { secrets: { [GH]: strong("b") } });
+  const other = await S.createConnection(ctx.db, { projectId: ctx.ids.home, serviceId: "github", accountLabel: "Keep", secrets: { [GH]: strong("o") } }, { key: ctx.key });
+  await S.disconnectConnection(ctx.db, b.uuid); // already disconnected: not counted
+  const c = await gh(ctx, "C", { secrets: { [GH]: strong("c") } });
+  await ctx.db.execute({ sql: "UPDATE service_connections SET status = 'error' WHERE uuid = ?", args: [c.uuid] });
+  await ctx.db.execute({ sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?", args: [ctx.ids.spring] });
+  SV.recordServiceSecretValues([strong("a"), strong("b"), strong("c")], ctx.env);
+
+  assert.deepEqual(await S.disconnectProjectConnections(ctx.db, ctx.ids.spring), { disconnected: 2 });
+  const mine = await rowsOf(ctx.db, `SELECT status FROM service_connections WHERE project_id = ${ctx.ids.spring}`);
+  assert.ok(mine.length === 3 && mine.every((r) => r.status === "disconnected"));
+  const kc = await rowsOf(ctx.db, "SELECT connection_uuid, status FROM crow_keychain WHERE kind = 'service'");
+  for (const r of kc) assert.equal(r.status, r.connection_uuid === other.uuid ? "active" : "disconnected");
+  assert.equal((await S.getConnection(ctx.db, other.uuid)).status, "active", "another project untouched");
+  for (const x of [a, b, c]) assert.deepEqual(await K.serviceSecretsFor(ctx.db, ctx.key, x.uuid, { allowedKeys: [GH] }), {}, "never served");
+  const display = collectSecretValueSets({ env: ctx.env }).display;
+  for (const n of ["a", "b", "c"]) assert.ok(display.includes(strong(n)), "still masked");
+  const audits = await rowsOf(ctx.db, "SELECT target FROM project_audit_log WHERE action = 'service.disconnect' AND project_id = " + ctx.ids.spring);
+  assert.equal(audits.length, 3, "b was audited by its own disconnect; a and c by the helper; no duplicates");
+  assert.deepEqual(await S.disconnectProjectConnections(ctx.db, ctx.ids.spring), { disconnected: 0 }, "repeat is a no-op");
+  assert.equal((await rowsOf(ctx.db, "SELECT 1 FROM project_audit_log WHERE action = 'service.disconnect' AND project_id = " + ctx.ids.spring)).length, 3);
+  assert.deepEqual(await S.disconnectProjectConnections(ctx.db, 99999), { disconnected: 0 });
+  SV.primeSecretValues([], []);
 });
