@@ -243,6 +243,23 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
   }
 });
 
+// Voice hand-off PR 4: the phone confirm page carries a one-tap Confirm that starts a bot.
+test("rejectFunneled middleware: the voice hand-off confirm page is never funnel-exposed", async () => {
+  const server = await startTestApp();
+  const paths = ["/dashboard/voice/handoffs/x", "/dashboard/voice/handoffs/x/decide"];
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+});
+
 test("dashboardAuth refuses an unauthenticated /dashboard/perch-api request instead of calling next()", async () => {
   // The perch API mounts behind dashboardAuth (bot-board-api idiom). Proven
   // here at the middleware, since a session-less caller must never reach a

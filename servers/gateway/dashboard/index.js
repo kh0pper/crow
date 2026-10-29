@@ -96,6 +96,7 @@ import { appsApiRouter } from "../routes/apps-api.js";
 import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
+import voiceHandoffsRouter from "../routes/voice-handoffs.js";
 import { shellRouter, resolveRequestMode, resolveShellPage } from "./shell/request.js";
 
 /**
@@ -745,6 +746,12 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // the configured STT profile. Same slot, same reasons (session + CSRF rails,
   // Funnel refused upstream); see routes/perch-dictation.js's header.
   router.use(perchDictationRouter(dashboardAuth));
+
+  // The voice hand-off's phone confirm page (a kiosk's hand-off, confirmed on
+  // the operator's phone). Same slot, same rails: session + CSRF, Funnel
+  // refused upstream, its own dashboardAuth on its prefix; see
+  // routes/voice-handoffs.js's header.
+  router.use(voiceHandoffsRouter(dashboardAuth));
 
   // The shell's POST /dashboard/mode and /dashboard/scope (redesign P2): after
   // dashboardAuth and csrfMiddleware, like every state-changing dashboard route.

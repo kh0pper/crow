@@ -163,13 +163,13 @@ test("a forTurn that throws is logged and gives no tool", async () => {
   assert.ok(s.h.calls.logs.some((m) => /hand-off tool not loaded \(boom\)/.test(m)));
 });
 
-test("not offered on a kiosk (until PR 4): a force-call gets not_offered and writes nothing", async () => {
-  const s = setup({ rounds: [call({ task: TASK, bot: "writer" }), says("Sorry. ")] });
-  const r = await s.turn(ASK, { surface: "kiosk" });
-  assert.deepEqual(s.h.log[0].tools, []);
-  assert.deepEqual(r.timings.tools, ["crow_handoff:not_offered"]);
-  assert.deepEqual(await s.rows(), []);
-  assert.equal(s.pending.get("phone-1"), null);
+test("offered on a kiosk too (PR 4), where the proposal goes to the phone, never a spoken yes", async () => {
+  const s = setup({ rounds: [call({ task: TASK, bot: "writer" })] });
+  s.core.notify = async () => ({ id: 1 });
+  await s.turn(ASK, { surface: "kiosk" });
+  assert.ok(s.h.log[0].tools.includes(HANDOFF_TOOL_NAME));
+  assert.deepEqual((await s.rows()).map((r) => [r.surface, r.status]), [["kiosk", "awaiting_phone"]]);
+  assert.equal(s.pending.get("phone-1"), null, "no pending entry (tests/voice-handoff-kiosk.test.js has the rest)");
 });
 
 test("hand-offs off on the voice bot, or no candidate: no tool", async () => {
@@ -475,7 +475,7 @@ test("bad_args also retires the pending proposal", async () => {
   assert.equal(s.pending.get("phone-1"), null);
 });
 
-test("assessBot counts the hand-off tool when asked (handoffs: true on a personal surface)", async () => {
+test("assessBot counts the hand-off tool when asked (handoffs: true, on any surface)", async () => {
   const long = (i) => `Bot ${i} researches long topics in great depth and writes careful reports ${"x".repeat(200)}`;
   const bots = Array.from({ length: HANDOFF_MAX_CANDIDATES }, (_, i) => ({ bot_id: `bot${i}`, display_name: `Bot ${i}`, def: board({ description: long(i) }) }));
   const s = setup({ bots });
@@ -489,7 +489,7 @@ test("assessBot counts the hand-off tool when asked (handoffs: true on a persona
   const counted = await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID, handoffs: true, surface: "glasses" });
   assert.notEqual(counted.level, "full", "the tool tips it over");
   assert.ok(counted.est_tokens > plain.est_tokens);
-  // A kiosk (until PR 4), or hand-offs off, counts nothing.
-  assert.equal((await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID, handoffs: true, surface: "kiosk" })).level, "full");
+  // A kiosk counts it too (PR 4: the kiosk is offered the tool).
+  assert.notEqual((await s.h.runner.assessBot({ db: s.db, botId: CROW_VOICE_BOT_ID, handoffs: true, surface: "kiosk" })).level, "full");
   assert.deepEqual(s.pending.get("voice-fit-check"), null, "the fit check leaves no pending entry");
 });

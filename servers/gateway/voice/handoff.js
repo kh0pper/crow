@@ -10,7 +10,8 @@
  *                                     engine, openTasksDb, notify, inFlight, forTurn, confirm }
  *   createHandoffCore(seams)          the same, built from seams (tests)
  *   createHandoffVoiceActions(...)    the runner's deps.voiceActions member (pending.js chainVoiceActions)
- *   proposeHandoff(ctx, task, botId)  the propose branch (the "which" answer re-proposes through it)
+ *   proposeHandoff(ctx, task, botId)  the propose branch (the "which" answer re-proposes through it); on a
+ *                                     kiosk (PR 4) it pushes the proposal to the operator's phone instead
  *   startHandoffSweep(...)            the minute sweep over the log, armed once at boot
  *
  * The capability summaries live only in the tool description, never in the system message (prefix cache).
@@ -43,8 +44,12 @@ const OWN_KINDS = new Set(["handoff", "which"]);
 const RELAY_KINDS = new Set(["handoff", "which", "stop"]);
 /** A bot id as the model may read it (the pi-bots BOT_ID_RE): anything else is never offered. */
 const SAFE_BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-/** Where a spoken yes is the operator's (a dashboard tab speaks as "phone"); a kiosk joins in PR 4. */
+/** Where a spoken yes is the operator's (a dashboard tab speaks as "phone"). */
 const PERSONAL_SURFACES = new Set(["phone", "glasses"]);
+/** Any other surface, a missing one included, is a shared display: "kiosk" (its hand-off is confirmed on the phone). */
+const handoffSurface = (surface) => (PERSONAL_SURFACES.has(surface) ? surface : "kiosk");
+/** The page a kiosk hand-off's push opens (the phone confirm page, Task 4.2). */
+export const phoneConfirmPath = (id) => "/dashboard/voice/handoffs/" + id;
 
 const DESCRIPTION_HEAD = "Hand a bigger job (research, a document, an automation) to one of the user's bots. It runs in the background. Do not do the job yourself. Pick the bot that fits from this list; if two could fit or you are not sure, leave bot empty and put both in candidates.\nBots:\n";
 
@@ -99,16 +104,82 @@ async function retirePending(ctx) {
 }
 
 /**
+ * The kiosk branch (PR 4): a shared display never takes a spoken yes. The proposal becomes an `awaiting_phone`
+ * row and one high-priority push that opens the phone confirm page; no pending entry is set, so a "yes" in the
+ * room is an ordinary turn. Whatever the device was waiting on (a "which" this answers) is retired first.
+ *  - One open phone confirmation per kiosk [rv2 m4]: while one is live, handoff_already_sent, no push, no row.
+ *    A phone_open from the insert (a race) re-runs openPhone once, which moves out a row that has just expired,
+ *    and retries the insert once; only a second phone_open is already-sent [rv3 m4].
+ *  - "Sent" only when the push went out [rv1 C5]: a notify that returns null (the type is off) or throws moves
+ *    the row to failed "not_sent" (markNotSent). Null says the alerts are off (handoff_phone_off); a throw says
+ *    the phone could not be reached just now (handoff_phone_failed).
+ */
+async function proposeToPhone(ctx, task, target, lang) {
+  const { core, db, device, transcript } = ctx;
+  const { store } = core;
+  await retirePending(ctx);
+  const already = () => done("already_sent", voiceLine("handoff_already_sent", lang));
+  if (await store.openPhone(db, device.id, "handoff")) return already();
+  const avail = await core.availability(db, target.model_key);
+  const insert = () => store.insert(db, {
+    kind: "handoff", surface: "kiosk", device_id: device.id, device_name: device.name ?? null, bot_id: target.bot_id,
+    task, asked: typeof transcript === "string" ? transcript : null, status: "awaiting_phone",
+    model_key: target.model_key ?? null, start_now: target.perch && avail !== "unavailable" ? 1 : 0, lang,
+  });
+  let id;
+  try {
+    id = await insert();
+  } catch (err) {
+    if (err?.code !== "phone_open") throw err;
+    if (await store.openPhone(db, device.id, "handoff")) return already();
+    try { id = await insert(); } catch (err2) { if (err2?.code === "phone_open") return already(); throw err2; }
+  }
+  const name = typeof device.name === "string" ? device.name.trim() : "";
+  const display = name || voiceLine("handoff_display_fallback", lang);
+  let n = null;
+  let threw = false;
+  try {
+    n = await core.notify(db, {
+      type: "attention", priority: "high", title: voiceLine("handoff_phone_title", lang, { display, bot: target.name }),
+      body: task, action_url: phoneConfirmPath(id), source: "crow-voice",
+    });
+  } catch (err) { threw = true; (ctx.log || console.warn)(`[voice-handoff] ${id}: phone notification failed (${err?.message || err})`); }
+  if (n != null) return done("sent_to_phone", voiceLine("handoff_sent_to_phone", lang));
+  await markNotSent(ctx, id);
+  // A null is the type turned off (the operator can fix it); a throw is a passing failure: try again soon.
+  return threw ? done("phone_failed", voiceLine("handoff_phone_failed", lang)) : done("phone_off", voiceLine("handoff_phone_off", lang));
+}
+
+/**
+ * The push did not go out: awaiting_phone → failed "not_sent", retried once. A row left awaiting_phone would
+ * answer every next ask with "already sent" for the whole 30 min, so when both tries throw the row is moved to
+ * expired instead (its own try); only that failing too is left to the sweep, and logged.
+ */
+async function markNotSent(ctx, id) {
+  const { store } = ctx.core;
+  const log = ctx.log || console.warn;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try { await store.transition(ctx.db, id, ["awaiting_phone"], "failed", { detail: "not_sent" }); return; }
+    catch (err) { log(`[voice-handoff] ${id}: could not mark not_sent, try ${attempt} (${err?.message || err})`); }
+  }
+  try { await store.transition(ctx.db, id, ["awaiting_phone"], "expired", { detail: "not_sent" }); }
+  catch (err) { log(`[voice-handoff] ${id}: could not expire the unsent row (${err?.message || err})`); }
+}
+
+/**
  * The propose branch: a `proposed` row (asked = the transcript, lang and device from the turn), the pending
- * entry 3.8's yes reads, and the server's spoken proposal.
+ * entry 3.8's yes reads, and the server's spoken proposal. On a kiosk, or any surface but a phone or the
+ * glasses, the proposal goes to the phone instead (proposeToPhone), for the tool and the "which" answer alike.
  * ctx: { core, pending, db, device, surface, lang, transcript, candidates }. botId must be one of the candidates.
- * → { ok: true, final: true, effect: false, code: "proposed", say }
+ * → { ok: true, final: true, effect: false, code: "proposed" | "sent_to_phone" | "phone_off" | "phone_failed" | "already_sent", say }
  */
 export async function proposeHandoff(ctx, task, botId) {
-  const { core, pending, db, device, surface, transcript, candidates } = ctx;
+  const { core, pending, db, device, transcript, candidates } = ctx;
   const lang = langOf(ctx.lang);
   const target = candidates.find((c) => c.bot_id === botId);
   if (!target) throw new Error(`proposeHandoff: ${JSON.stringify(botId)} is not a candidate`);
+  const surface = handoffSurface(ctx.surface);
+  if (surface === "kiosk") return proposeToPhone(ctx, task, target, lang);
   await retirePending(ctx);
   const avail = await core.availability(db, target.model_key);
   const startNow = target.perch && avail !== "unavailable" ? 1 : 0;
@@ -155,15 +226,17 @@ async function runHandoffCall(ctx, args) {
 }
 
 /**
- * The turn's crow_handoff tool, or [] when there is none: a kiosk (or an unknown surface: PR 4 gives the kiosk
- * its phone confirm), hand-offs off on the voice bot, or no candidate. The tool is offered (when) on a hand-off
- * request (wantsHandoff, with the candidates' names and ids) or while this device waits on a hand-off or a
- * which; an offered turn starts the candidates' model probes so the proposal finds them warm.
+ * The turn's crow_handoff tool, or [] when there is none: hand-offs off on the voice bot, or no candidate. It is
+ * built on every surface; any surface but a phone or the glasses (a missing one too) is a kiosk, whose proposal
+ * goes to the phone (proposeToPhone). The tool is offered (when) on a hand-off request (wantsHandoff, with the
+ * candidates' names and ids) or while this device waits on a hand-off or a which; an offered turn starts the
+ * candidates' model probes so the proposal finds them warm.
  * ctx: { db, device, surface, lang, bot, transcript, pending }
  */
 async function forTurn(core, ctx) {
-  const { db, device, surface, bot, pending } = ctx || {};
-  if (!db || !device?.id || !pending || !PERSONAL_SURFACES.has(surface)) return [];
+  const { db, device, bot, pending } = ctx || {};
+  if (!db || !device?.id || !pending) return [];
+  const surface = handoffSurface(ctx.surface);
   if (!normalizeVoiceSettings(bot).handoff.enabled) return [];
   // Every voice turn runs this: it must stay cached-only (the summary cache; the probes below are not awaited).
   const candidates = (await core.summaries.get(db, bot)).filter((c) => SAFE_BOT_ID.test(c.bot_id));
@@ -206,8 +279,8 @@ function cardDescription(row, now) {
     + "When you are done, call board_report_result. Keep anything you write; nothing is undone if this task is stopped.";
 }
 
-/** The bot's display name for the spoken lines, whatever its state now (a refused bot is still named). */
-async function botName(db, botId) {
+/** The bot's display name for the spoken lines and the phone page, whatever its state now (a refused bot is still named). */
+export async function botName(db, botId) {
   try {
     const row = (await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0];
     return cleanName(row && row.display_name, botId);

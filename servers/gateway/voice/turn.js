@@ -339,9 +339,9 @@ export function createVoiceTurnRunner(deps) {
   /**
    * Bind-time check (Kiosk panel): would this bot's voice prompt fit its quick voice model?
    * Runs the turn's own tool filter and ladder. null = no such enabled bot.
-   * handoffs: true on a personal surface (`surface`: "phone" or "glasses"), so the voice bot's crow_handoff tool
-   * (handoff.js handoffToolDefinition, through deps.handoffs.forTurn) counts as the turn counts it.
-   * TODO(PR 4): the kiosk's fit (bundles/kiosk/server/runtime.js botFit) passes handoffs once the kiosk gets the hand-off.
+   * handoffs: true (with the caller's `surface`: "phone", "glasses" or "kiosk"), so the voice bot's crow_handoff tool
+   * (handoff.js handoffToolDefinition, through deps.handoffs.forTurn) counts as the turn counts it; the kiosk's
+   * fit (bundles/kiosk/server/runtime.js botFit) passes it with surface "kiosk".
    * → { level: "full" | "no_skills" | "too_large", ctx (null = unknown), est_tokens, est_no_skills_tokens, reserve_tokens, model }
    */
   async function assessBot({ db, botId, memoryOn = false, extraTools, denyTools, promptSuffix, handoffs = false, surface = "phone" }) {
