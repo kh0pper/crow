@@ -188,7 +188,9 @@ export function registerShareInboxTools(server, ctx) {
               // Too large for the peer channel: never retried, never 'delivered'.
               deliveryStatus = "failed";
               tooLarge = err;
-              await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [sharedItemId] });
+              try {
+                await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [sharedItemId] });
+              } catch {}
               console.warn(`[sharing] project clone share #${sharedItemId} to ${contactRow.crow_id} failed: too large to send (${err.bytes} bytes, cap ${err.cap})`);
             } else {
               // deliveryStatus stays 'pending' — row already inserted as 'pending'
@@ -301,7 +303,9 @@ export function registerShareInboxTools(server, ctx) {
           if (isPeerLineOverCap(err)) {
             // Too large for the peer channel: never retried, never 'delivered'.
             tooLarge = err;
-            await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [Number(recorded.lastInsertRowid)] });
+            try {
+              await db.execute({ sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?", args: [Number(recorded.lastInsertRowid)] });
+            } catch {}
             console.warn(`[sharing] share #${Number(recorded.lastInsertRowid)} (${share_type}) to ${contactRow.crow_id} failed: too large to send (${err.bytes} bytes, cap ${err.cap})`);
           } else {
             // Send failed — still recorded in shared_items as pending
