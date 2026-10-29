@@ -60,8 +60,11 @@ test("a delete on A drains nothing that changes B's notes, context or memories, 
     await b.db.execute("INSERT INTO research_notes (id, content) VALUES (990001, 'control victim')");
     await emitOrQueue(null, a.db, "research_notes", "delete", { id: 990001 });
     await drainOnce(a.mgr, a.db, {});
-    assert.ok(await until(async () => (await rows(b.db, "SELECT id FROM research_notes WHERE id = 990001")).length === 0, 15_000),
-      "control: a note delete keyed by id DOES remove B's unrelated row (the hazard)");
+    // Since #647 the receiver refuses a generic delete keyed by a per-instance id, so the old
+    // hazard is closed at both ends: a marker sent after it lands, and B's row is still there.
+    assert.ok(await markerReaches(a, b, 900077), "control: a marker after the delete reaches B (the delete was processed)");
+    assert.equal((await rows(b.db, "SELECT id FROM research_notes WHERE id = 990001")).length, 1,
+      "control: a note delete keyed by a per-instance id no longer removes B's unrelated row (#647)");
 
     const snapshot = async () => ({
       notes: await rows(b.db, "SELECT * FROM research_notes ORDER BY id"),
