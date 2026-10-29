@@ -14,6 +14,10 @@
 //                                     from it on every spawn and wake)
 //   bot_sessions.briefing_rank  TEXT  the privacy rank ("0" this box, "1"
 //                                     another box, "2" the cloud) it was built for
+//   bot_sessions.briefing_refs  TEXT  JSON array of the thread ids whose
+//                                     summaries the briefing quotes, in order
+//                                     (Forget strips that thread's line from
+//                                     every briefing that quotes it)
 //   memories.project_uuid       TEXT  the project's portable id. project_id is
 //                                     a local FK (project_spaces ids are
 //                                     per-instance), so instance sync nulls it
@@ -38,6 +42,7 @@ export const COLUMNS = Object.freeze([
   ["bot_sessions", "summary_flags", "TEXT"],
   ["bot_sessions", "briefing", "TEXT"],
   ["bot_sessions", "briefing_rank", "TEXT"],
+  ["bot_sessions", "briefing_refs", "TEXT"],
   ["memories", "project_uuid", "TEXT"],
 ]);
 
@@ -45,9 +50,12 @@ export const SUMMARY_AT_INDEX_SQL =
   "CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)";
 
 // One memory per session summary (source = "session-summary:<threadId>"): the
-// job's upsert relies on it. Thread ids are per-instance and unique, so the
-// same source on two instances is the same memory (it syncs as an update).
-// Same DDL as init-db.js.
+// job's upsert relies on it, and so does instance sync, which applies a
+// summary memory by this natural key, never by its raw id (memory ids are
+// per-instance AUTOINCREMENT: the same summary has a different id on each
+// instance). An inbound insert or update with such a source updates the local
+// row holding it, or inserts one under a fresh local id; a delete removes the
+// row by source (instance-sync.js _applySummaryMemory). Same DDL as init-db.js.
 export const SUMMARY_SOURCE_INDEX_SQL =
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_session_summary_source ON memories(source) WHERE source LIKE 'session-summary:%'";
 

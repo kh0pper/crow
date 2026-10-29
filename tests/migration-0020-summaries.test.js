@@ -13,7 +13,7 @@ import Database from "better-sqlite3";
 import { run, id } from "../scripts/migrations/0020-session-summaries.mjs";
 
 const REPO = new URL("..", import.meta.url).pathname;
-const SUMMARY_COLS = ["summary", "summary_at", "summary_flags", "briefing", "briefing_rank"];
+const SUMMARY_COLS = ["summary", "summary_at", "summary_flags", "briefing", "briefing_rank", "briefing_refs"];
 
 /** The pre-0020 shape: bot_sessions as 0006 leaves it, memories with project_id. */
 function legacyDb({ sessions = true, memories = true } = {}) {
@@ -65,6 +65,7 @@ const EXPECTED_SESSION_SHAPE = {
   summary_flags: { type: "TEXT", notnull: 0, dflt_value: null },
   briefing: { type: "TEXT", notnull: 0, dflt_value: null },
   briefing_rank: { type: "TEXT", notnull: 0, dflt_value: null },
+  briefing_refs: { type: "TEXT", notnull: 0, dflt_value: null },
 };
 
 test("0020 adds the columns on every rail, idempotent, deferred when tables are absent", () => {
@@ -72,10 +73,10 @@ test("0020 adds the columns on every rail, idempotent, deferred when tables are 
   try {
     const first = run({ dbPath, log: () => {} });
     assert.equal(first.applied, true);
-    assert.deepEqual(first.results, ["added", "added", "added", "added", "added", "added"]);
+    assert.deepEqual(first.results, ["added", "added", "added", "added", "added", "added", "added"]);
     const second = run({ dbPath, log: () => {} });
     assert.equal(second.applied, true);
-    assert.deepEqual(second.results, ["no-op", "no-op", "no-op", "no-op", "no-op", "no-op"], "a second run is a clean no-op");
+    assert.deepEqual(second.results, ["no-op", "no-op", "no-op", "no-op", "no-op", "no-op", "no-op"], "a second run is a clean no-op");
     assert.deepEqual(shape(dbPath, "bot_sessions", SUMMARY_COLS), EXPECTED_SESSION_SHAPE);
     assert.deepEqual(shape(dbPath, "memories", ["project_uuid"]), { project_uuid: { type: "TEXT", notnull: 0, dflt_value: null } });
     assert.deepEqual(indexCols(dbPath, "idx_bot_sessions_summary_at"), { table: "bot_sessions", cols: ["summary_at"] });

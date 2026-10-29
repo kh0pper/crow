@@ -2716,6 +2716,7 @@ await initTable("bot_sessions table", `
     summary_flags     TEXT,
     briefing          TEXT,
     briefing_rank     TEXT,
+    briefing_refs     TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2798,6 +2799,10 @@ await addColumnIfMissing("bot_sessions", "summary_flags", "TEXT");
 // this row). Same rails as the summary columns above.
 await addColumnIfMissing("bot_sessions", "briefing", "TEXT");
 await addColumnIfMissing("bot_sessions", "briefing_rank", "TEXT");
+// bot_sessions.briefing_refs (R1.2 PR 4): a JSON array of the thread ids whose
+// summaries the briefing quotes, so a Forget can strip that summary from every
+// other session's stored briefing. Same rails.
+await addColumnIfMissing("bot_sessions", "briefing_refs", "TEXT");
 try {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)");
 } catch (err) {
@@ -2953,7 +2958,7 @@ await initTable("voice_handoffs table", `
 // is never reached, so the next run retries the migration.
 //
 // I13: PRAGMA table_info(bot_sessions) is diffed against the canonical
-// 23-column list BEFORE any DDL — an unrecognized host-present column (or a
+// 26-column list BEFORE any DDL — an unrecognized host-present column (or a
 // canonical column gone missing) aborts the migration instead of silently
 // vanishing with its data, matching the reference rebuild's C2/N1 guard.
 //
@@ -2971,7 +2976,7 @@ const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
   "control", "model", "cwd", "escalated", "kind", "narrowed_tools",
-  "label", "archived_at", "summary", "summary_at", "summary_flags", "briefing", "briefing_rank",
+  "label", "archived_at", "summary", "summary_at", "summary_flags", "briefing", "briefing_rank", "briefing_refs",
   "created_at", "updated_at",
 ];
 await (async () => {
@@ -3041,6 +3046,7 @@ await (async () => {
         summary_flags     TEXT,
         briefing          TEXT,
         briefing_rank     TEXT,
+        briefing_refs     TEXT,
         created_at        TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
       )
