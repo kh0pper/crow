@@ -18,6 +18,7 @@ import { appendAudit } from "./project-acl.js";
 import {
   saveServiceSecret as defaultSaveServiceSecret,
   deleteServiceSecrets as defaultDeleteServiceSecrets,
+  disconnectServiceSecrets as defaultDisconnectServiceSecrets,
   KeychainKeyMissingError,
 } from "../gateway/keychain/store.js";
 
@@ -365,16 +366,17 @@ export async function recordChildFailure(db, uuid) {
 }
 
 /**
- * Disconnects: the keychain secrets are deleted first (if that throws, the row is untouched and a
- * retry starts over), then the row goes 'disconnected', then the audit row. Safe to repeat: an
- * already-disconnected uuid re-deletes any leftover secrets and writes no second audit row.
- * Unknown uuid → not_found. `deleteServiceSecrets` is a test seam (tests only).
+ * Disconnects: the keychain secrets are marked 'disconnected' first (kept, never served, still
+ * masked; the owner deletes them for good from the keychain page; if marking throws, the row is
+ * untouched and a retry starts over), then the row goes 'disconnected', then the audit row. Safe
+ * to repeat: an already-disconnected uuid re-marks any leftover active secret and writes no
+ * second audit row. Unknown uuid → not_found. `disconnectServiceSecrets` is a test seam (tests only).
  */
-export async function disconnectConnection(db, uuid, { actor = "local", deleteServiceSecrets = defaultDeleteServiceSecrets } = {}) {
+export async function disconnectConnection(db, uuid, { actor = "local", disconnectServiceSecrets = defaultDisconnectServiceSecrets } = {}) {
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
   const conn = await getConnection(db, uuid);
   if (!conn) throw new ConnectionError("not_found");
-  await deleteServiceSecrets(db, uuid);
+  await disconnectServiceSecrets(db, uuid);
   if (conn.status !== "disconnected") {
     await db.execute({
       sql: "UPDATE service_connections SET status = 'disconnected', updated_at = datetime('now') WHERE uuid = ?",

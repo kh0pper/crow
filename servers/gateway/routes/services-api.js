@@ -34,6 +34,8 @@ import {
   createConnection, disconnectConnection, getConnection, listConnections, otherProjectServiceIds, recordTest,
 } from "../../shared/service-connections.js";
 import { recordServiceSecretValues } from "../../shared/secret-values.js";
+import { refreshGatewaySecretValues } from "../../shared/secret-values-collect.js";
+import { keyCreatedHook } from "../keychain/api.js";
 import { ensureWriteKey, serviceSecretKeys, serviceSecretsFor } from "../keychain/store.js";
 import { loadKeychainKey } from "../keychain/key.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
@@ -212,6 +214,8 @@ function langOf(req) {
  * @param {string} [o.crowHome] where the keychain key and installed.json live (default CROW_HOME)
  * @param {() => Set<string>|string[]} [o.reservedNames] block names a label may not take (tests inject them)
  * @param {(values: string[]) => void} [o.recordSecrets] masking record (default recordServiceSecretValues)
+ * @param {() => void} [o.refreshMasking] re-collect this gateway's in-memory masking sets (default refreshGatewaySecretValues)
+ * @param {Function} [o.audit] / [o.notify] the keychain's new-key audit and notice (keyCreatedHook)
  */
 export function servicesApiRouter({
   dbFactory = createDbClient,
@@ -222,11 +226,20 @@ export function servicesApiRouter({
   crowHome,
   reservedNames,
   recordSecrets,
+  refreshMasking,
+  audit,
+  notify,
 } = {}) {
   const home = () => crowHome || resolveCrowHome();
   const installed = () => toSet(installedIds ? installedIds() : installedBundleIds(home()));
   const reserved = () => (reservedNames ? reservedNames() : defaultReservedNames(home()));
-  const record = recordSecrets || ((values) => recordServiceSecretValues(values, crowHome ? { ...process.env, CROW_HOME: crowHome } : process.env));
+  const maskEnv = () => (crowHome ? { ...process.env, CROW_HOME: crowHome } : process.env);
+  const record = recordSecrets || ((values) => recordServiceSecretValues(values, maskEnv()));
+  // After a connect or disconnect: this gateway's card and log masks change now, not at the next spawn.
+  const refresh = () => {
+    try { (refreshMasking || (() => refreshGatewaySecretValues({ env: maskEnv() })))(); } catch { console.warn("[services] masking refresh failed"); }
+  };
+  const hookDeps = { ...(audit ? { audit } : {}), ...(notify ? { notify } : {}) };
   const router = Router();
 
   router.use(SERVICES_API_BASE, sessionGate, (req, res, next) => {
@@ -293,7 +306,9 @@ export function servicesApiRouter({
       throw err;
     }
     // The key before anything leaves Crow: a key fault is the keychain's, not the token's.
-    const key = Object.keys(values.secrets).length ? await ensureWriteKey(db, { crowHome: home() }) : null;
+    const key = Object.keys(values.secrets).length
+      ? await ensureWriteKey(db, { crowHome: home(), onNewKey: keyCreatedHook({ db, ip: req.ip, ...hookDeps }) })
+      : null;
 
     const result = await testConnection(service, { values: { ...values.config, ...values.secrets }, crowHome: home(), lang: langOf(req) });
     if (!result || result.ok !== true) {
@@ -324,6 +339,7 @@ export function servicesApiRouter({
       if (err instanceof ConnectionError) return fail(res, err.code);
       throw err;
     }
+    refresh();
     res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true }) });
   }));
 
@@ -363,8 +379,10 @@ export function servicesApiRouter({
   router.post(`${SERVICES_API_BASE}/connection/:uuid/disconnect`, withDb(async (req, res, db) => {
     const conn = await ownConnection(req, res, db, { allowDisconnected: true });
     if (!conn) return;
-    // Idempotent; the masking hash stays recorded.
+    // Idempotent. The secrets stay in the keychain as 'disconnected' (never served, still masked;
+    // the keychain page deletes them for good), and the masking hash stays recorded.
     await disconnectConnection(db, conn.uuid, { actor: "local" });
+    refresh();
     res.json({ ok: true });
   }));
 

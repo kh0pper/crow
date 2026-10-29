@@ -158,9 +158,16 @@ export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
   const operator = manual.filter((v) => hashes.has(cardHashOf(v)) && cardStrong(v) && !steerable.has(v));
   // Extension rows only: a service row counts through the operator's hash list
   // alone (below), whatever its shape, so a row a bot inserted masks nothing.
+  // Before project services the only kinds were 'manual' and 'extension', so
+  // for every older row this is exactly the old "kind !== manual" rule.
   const minted = entries
     .filter((e) => e.kind === "extension" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
     .map((e) => e.secret);
+  // A disconnected connection's rows are kept (status 'disconnected') and read
+  // here like any other: its value stays masked until the owner deletes it.
+  // On cards the safeShape filter still drops a domain-shaped value (dots and
+  // letters/digits/dashes only, e.g. some HA or Discord tokens): by design, a
+  // card never hides a host name. Display paths mask it.
   const serviceHashes = readServiceHashes(env);
   const service = entries
     .filter((e) => e.kind === "service" && serviceHashes.has(cardHashOf(e.secret)) && cardStrong(e.secret))
@@ -183,8 +190,11 @@ export function collectSecretValues(opts = {}) {
  * values file with the card set. Never throws.
  * @returns {{path: string, count: number, written: boolean}|null} null when nothing was written
  */
+let lastCardTrusted = false;   // the last pi spawn's sandbox state in THIS process (bridge.mjs passes cardTrusted)
+
 export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
+  lastCardTrusted = opts.cardTrusted !== false;
   try {
     const sets = collectSecretValueSets(opts);
     // Untrusted (no sandbox): a bot could have written either hash list, so
@@ -204,6 +214,17 @@ export function refreshSecretValuesFile(opts = {}) {
     if (typeof opts.log === "function") opts.log("secret values file not written: " + ((e && e.message) || e));
     return null;
   }
+}
+
+/**
+ * Re-collect this process's in-memory sets now, without writing a file and with
+ * the card trust of the last pi spawn here (none yet: no card values, as before
+ * this call). The gateway calls it after a project-service connect or
+ * disconnect, so its own approval-card and log masks change at once instead of
+ * at the next spawn. Never throws.
+ */
+export function refreshGatewaySecretValues(opts = {}) {
+  return refreshSecretValuesFile({ ...opts, write: false, cardTrusted: lastCardTrusted });
 }
 
 /** Strong enough to hide text on a card: 8+ characters, not a plain word. */

@@ -166,6 +166,35 @@ test("an unreadable service row (old key) is replaced by its import: the restore
   assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), { A: SECRET_A });
 });
 
+test("disconnectServiceSecrets keeps one connection's rows as 'disconnected': never served, still read for masking, deletable from the keychain page", async () => {
+  const { db, key } = fresh();
+  const a = await save(db, key, "A", SECRET_A);
+  await K.saveServiceSecret(db, key, { connectionUuid: "u-8", bundleId: "github", envKey: "A", secret: SECRET_X });
+  assert.deepEqual(await K.disconnectServiceSecrets(db, "u-7"), { disconnected: 1 });
+  assert.deepEqual(await K.disconnectServiceSecrets(db, "u-7"), { disconnected: 0 }, "safe to repeat");
+  assert.deepEqual(await K.disconnectServiceSecrets(db, ""), { disconnected: 0 });
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-7", { allowedKeys: ["A"] }), {}, "never served");
+  assert.equal((await K.serviceSecretKeys(db, "u-7")).size, 0);
+  assert.deepEqual(await K.serviceSecretsFor(db, key, "u-8", { allowedKeys: ["A"] }), { A: SECRET_X }, "another connection is untouched");
+  const listed = (await K.listEntries(db, { keyId: key.id })).find((e) => e.id === a.id);
+  assert.equal(listed.status, "disconnected");
+  assert.ok(!JSON.stringify(listed).includes(SECRET_A));
+  // An export / import round trip keeps it disconnected (never served after a restore).
+  const exported = await K.exportableEntries(db, key);
+  const fresh2 = fresh();
+  await K.importEntries(fresh2.db, fresh2.key, exported);
+  const imported = (await K.listEntries(fresh2.db, {})).find((e) => e.connection_uuid === "u-7");
+  assert.equal(imported.status, "disconnected");
+  // A bundle reinstall never revives it.
+  await K.markBundleRemoved(db, "github");
+  await K.reactivateBundleEntries(db, "github", []);
+  assert.equal((await K.getEntry(db, a.id)).status, "disconnected");
+  // The keychain page may delete a disconnected service row (the owner's purge); a live one is still refused.
+  await assert.rejects(K.deleteEntry(db, (await K.listEntries(db, {})).find((e) => e.connection_uuid === "u-8").id), (e) => e.code === "KEYCHAIN_SERVICE_ROW");
+  assert.equal(await K.deleteEntry(db, a.id), true);
+  assert.equal(await K.getEntry(db, a.id), null);
+});
+
 test("deleteEntry refuses a service row; deleteServiceSecrets removes exactly one connection's rows", async () => {
   const { db, key } = fresh();
   const a = await save(db, key, "A", SECRET_A);
@@ -263,6 +292,12 @@ test("the delete route answers 409 {error:'service_row'} for a service row, audi
     const events = (await db.execute("SELECT event_type, details FROM audit_log")).rows;
     assert.ok(!events.some((e) => e.event_type === "keychain_delete"), "a refused delete is not audited as a delete");
     for (const blob of [del.text, list.text, JSON.stringify(events), logs.join("\n")]) assert.ok(!blob.includes(SECRET_A));
+    // Once its connection is disconnected, the keychain page's Delete purges it for good.
+    await K.disconnectServiceSecrets(db, "u-7");
+    const purge = await call("/delete", { id });
+    assert.equal(purge.status, 200);
+    assert.equal((await rowsOf(db)).length, 0, "gone");
+    assert.ok((await db.execute("SELECT event_type FROM audit_log")).rows.some((e) => e.event_type === "keychain_delete"));
   } finally {
     Object.assign(console, orig);
     server.close();

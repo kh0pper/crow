@@ -561,7 +561,9 @@ export function getCardValues() {
  * The values that may hide text on an approval card THIS process renders
  * (secret-mask.js card mode, the gateway's Perch cards): the card set plus the
  * operator-recorded, strong project-service values. The service values stay in
- * this process: they never reach pi (getCardValues is that set).
+ * this process: they never reach pi (getCardValues is that set). safeShape
+ * drops a domain-shaped value (e.g. a dotted token of letters, digits and
+ * dashes) here by design: a card never hides a host name; display paths mask it.
  */
 export function getApprovalCardValues() {
   return normalizeValues([...memCardValues, ...memServiceCardValues]).filter(safeShape);

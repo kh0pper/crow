@@ -469,3 +469,15 @@ test("R14 — a refused delete of a project connection's key keeps the row and s
   assert.notEqual(es, t("services.keychain.deleteServiceRow", "en"));
   assert.match(renderPasswordsPage({ entries: [svc], method: "password", vaultAvailable: false, lang: "es" }), new RegExp(es));
 });
+
+test("a disconnected project connection's key is tagged Disconnected (en/es) and keeps its Delete button", () => {
+  const entries = [{ id: 9, kind: "service", label: "GitHub — Main — GITHUB_PERSONAL_ACCESS_TOKEN", bundle_id: "github", env_key: "GITHUB_PERSONAL_ACCESS_TOKEN", username: null, url: null, origin: "typed", status: "disconnected", updated_at: "2026-10-29T12:00:00.000Z", readable: true }];
+  for (const lang of ["en", "es"]) {
+    const html = renderPasswordsPage({ entries, method: "password", vaultAvailable: false, lang });
+    assert.ok(html.includes(t("passwords.statusDisconnected", lang)), lang);
+    assert.ok(!html.includes(t("passwords.statusActive", lang)), lang);
+    assert.match(html, /class="btn btn-sm btn-secondary pw-delete">/);
+  }
+  assert.equal(t("passwords.statusDisconnected", "en"), "Disconnected");
+  assert.equal(t("passwords.statusDisconnected", "es"), "Desconectado");
+});

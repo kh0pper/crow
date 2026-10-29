@@ -312,13 +312,15 @@ test("status", async () => {
   assert.equal(S.connectionDisplayStatus(tested, { installed: true }).status, "active");
 });
 
-test("disconnect deletes secrets and audits without secret text", async () => {
+test("disconnect keeps the secrets as 'disconnected' (never served) and audits without secret text", async () => {
   const ctx = await fresh();
   const c = await gh(ctx, "Main", { secrets: { [GH]: TOKEN_3 } });
   const d = await S.disconnectConnection(ctx.db, c.uuid);
   assert.equal(d.status, "disconnected");
-  assert.deepEqual(await K.serviceSecretsFor(ctx.db, ctx.key, c.uuid, { allowedKeys: [GH] }), {});
-  assert.equal((await K.serviceSecretKeys(ctx.db, c.uuid)).size, 0);
+  assert.deepEqual(await K.serviceSecretsFor(ctx.db, ctx.key, c.uuid, { allowedKeys: [GH] }), {}, "never served");
+  assert.equal((await K.serviceSecretKeys(ctx.db, c.uuid)).size, 0, "the view reads unset");
+  const kept = await rowsOf(ctx.db, "SELECT status FROM crow_keychain WHERE kind = 'service'");
+  assert.deepEqual(kept.map((r) => r.status), ["disconnected"], "kept for masking");
   assert.deepEqual(await S.connectionsFor(ctx.db, { projectId: ctx.ids.spring }), []);
   assert.equal((await S.listConnections(ctx.db, { projectId: ctx.ids.spring })).length, 0);
   assert.equal((await S.listConnections(ctx.db, { projectId: ctx.ids.spring, includeDisconnected: true })).length, 1);
@@ -332,13 +334,13 @@ test("disconnect deletes secrets and audits without secret text", async () => {
   await rejectsWith(S.disconnectConnection(ctx.db, "no-such-uuid"), "not_found");
 });
 
-test("disconnect deletes secrets first and is safe to repeat", async () => {
+test("disconnect marks secrets first and is safe to repeat", async () => {
   const ctx = await fresh();
   const c = await gh(ctx, "Main");
-  await assert.rejects(S.disconnectConnection(ctx.db, c.uuid, { deleteServiceSecrets: async () => { throw new Error("locked"); } }), /locked/);
-  assert.equal((await S.getConnection(ctx.db, c.uuid)).status, "active", "a failed delete leaves the row as it was");
+  await assert.rejects(S.disconnectConnection(ctx.db, c.uuid, { disconnectServiceSecrets: async () => { throw new Error("locked"); } }), /locked/);
+  assert.equal((await S.getConnection(ctx.db, c.uuid)).status, "active", "a failed mark leaves the row as it was");
   assert.equal((await K.serviceSecretKeys(ctx.db, c.uuid)).size, 1);
-  // A disconnected row with leftover secrets (an older failure) is cleaned by a repeat.
+  // A disconnected row with leftover active secrets (an older failure) is re-marked by a repeat.
   await ctx.db.execute({ sql: "UPDATE service_connections SET status = 'disconnected' WHERE uuid = ?", args: [c.uuid] });
   const again = await S.disconnectConnection(ctx.db, c.uuid);
   assert.equal(again.status, "disconnected");
@@ -375,6 +377,10 @@ test("uninstall covers needs_reauth rows, reported from the rows the update chan
   assert.deepEqual(affected.map((p) => p.slug), ["home", "spring"]);
   assert.equal((await S.getConnection(ctx.db, b.uuid)).status, "needs_install");
   assert.equal((await S.getConnection(ctx.db, gone.uuid)).status, "disconnected");
+  await K.markBundleRemoved(ctx.db, "github");
+  await K.reactivateBundleEntries(ctx.db, "github", []);
+  const goneRows = await rowsOf(ctx.db, `SELECT status FROM crow_keychain WHERE connection_uuid = '${gone.uuid}'`);
+  assert.deepEqual(goneRows.map((r) => r.status), ["disconnected"], "an uninstall and reinstall never touch (or revive) a disconnected secret");
   assert.deepEqual(await S.markConnectionsNeedInstall(ctx.db, "github"), [], "a second run changes and reports nothing");
   assert.equal(await S.restoreConnectionsAfterInstall(ctx.db, "github"), 2);
   assert.equal((await S.getConnection(ctx.db, a.uuid)).status, "active");

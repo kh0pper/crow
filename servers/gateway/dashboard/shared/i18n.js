@@ -2839,6 +2839,7 @@ export const translations = {
   "passwords.colUpdated": { en: "Updated", es: "Actualizada" },
   "passwords.statusActive": { en: "In use", es: "En uso" },
   "passwords.statusRemoved": { en: "Extension removed", es: "Extensión eliminada" },
+  "passwords.statusDisconnected": { en: "Disconnected", es: "Desconectado" },
   "passwords.statusUnreadable": { en: "Unreadable — key missing", es: "Ilegible: falta la clave" },
   "passwords.noReauth": { en: "Revealing, copying, deleting and exporting passwords need Crow to confirm it's you, but this Crow has no dashboard password and no two-factor authentication. Set one in Settings → Change Password or Two-Factor Auth first.", es: "Para mostrar, copiar, eliminar o exportar contraseñas, Crow tiene que confirmar que eres tú, pero esta instancia no tiene contraseña del panel ni autenticación de dos factores. Configura una primero en Ajustes → Cambiar contraseña o Autenticación 2FA." },
   "passwords.deleteGeneratedConfirm": { en: "Crow generated this and keeps no other copy. Without it you may not be able to sign in to the extension, or read data it encrypted. Delete it anyway?", es: "Crow generó esto y no guarda otra copia. Sin ello quizá no puedas entrar en la extensión ni leer los datos que cifró. ¿Eliminarlo de todos modos?" },

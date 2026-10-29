@@ -22,7 +22,9 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
     const ext = e.kind === "manual" ? t("passwords.manual", lang) : escapeHtml(e.bundle_id || "");
     const status = e.readable === false
       ? `<span class="pw-unreadable">${t("passwords.statusUnreadable", lang)}</span>`
-      : e.status === "extension_removed" ? t("passwords.statusRemoved", lang) : t("passwords.statusActive", lang);
+      : e.status === "extension_removed" ? t("passwords.statusRemoved", lang)
+      // A disconnected project connection's key: kept only so it stays masked; Delete purges it.
+      : e.status === "disconnected" ? t("passwords.statusDisconnected", lang) : t("passwords.statusActive", lang);
     // Only http(s) becomes a link: escapeHtml stops attribute breakout, not javascript: URLs.
     const url = e.url ? (/^https?:\/\//i.test(String(e.url)) ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.url)}</a>` : escapeHtml(e.url)) : "";
     const readable = e.readable !== false;

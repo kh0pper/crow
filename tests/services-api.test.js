@@ -27,7 +27,9 @@ const { servicesUiEnabled } = await import("../servers/gateway/services/ui-flag.
 const { serviceSecretsFor } = await import("../servers/gateway/keychain/store.js");
 const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
 const SV = await import("../servers/shared/secret-values.js");
-const { collectSecretValueSets } = await import("../servers/shared/secret-values-collect.js");
+const { collectSecretValueSets, refreshGatewaySecretValues, refreshSecretValuesFile } = await import("../servers/shared/secret-values-collect.js");
+const { maskSecretsDetailed } = await import("../servers/shared/secret-mask.js");
+const K = await import("../servers/gateway/keychain/store.js");
 
 const GH = "GITHUB_PERSONAL_ACCESS_TOKEN";
 const CANARY = "canary-7f3a9";
@@ -60,6 +62,8 @@ function fakeTest(result = { ok: true }) {
   return f;
 }
 
+const maskEnv = (ctx) => ({ ...process.env, CROW_HOME: HOME, CROW_DATA_DIR: ctx.dir });
+
 async function startApp(ctx, opts = {}) {
   const app = express();
   // The gateway's global parser skips this prefix (index.js _hasOwnParser): none here either.
@@ -71,6 +75,7 @@ async function startApp(ctx, opts = {}) {
     uiEnabled: () => true,
     crowHome: HOME,
     reservedNames: () => new Set(["github-reserved"]),
+    refreshMasking: () => refreshGatewaySecretValues({ env: maskEnv(ctx), dbPath: ctx.path }),
     ...opts,
   }));
   return new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
@@ -307,6 +312,58 @@ test("(e) masking, connect write path: the saved secret's hash is recorded and t
     assert.ok(SV.readServiceHashes({ ...process.env, CROW_HOME: HOME }).has(SV.cardHashOf(TOKEN)), "disconnect keeps the hash");
   });
   SV.primeSecretValues([], []);
+});
+
+test("rulings 1 + 6: the gateway's masks change at once on connect; after disconnect the value is still masked but never served; a keychain-page delete purges it", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  const TOKEN = "test-token-" + "Live7" + "Ab3x".repeat(4);   // shell-safe: may hide text on a card
+  refreshSecretValuesFile({ env: maskEnv(ctx), dbPath: ctx.path, write: false });   // a sandboxed spawn ran in this process
+  await withApp(ctx, async (s) => {
+    const c = await connectGh(s, "Live", TOKEN);
+    assert.equal(c.status, 201);
+    const card = () => maskSecretsDetailed("curl -H 'Authorization: Bearer " + TOKEN + "' https://api.example.test", { card: true }).text;
+    assert.equal(card().includes(TOKEN), false, "the gateway's card mask has it with no new spawn");
+    assert.ok(SV.getApprovalCardValues().includes(TOKEN));
+    assert.equal(SV.getCardValues().includes(TOKEN), false, "never the set pi is handed");
+    const uuid = c.json.connection.uuid;
+    assert.equal((await call(s, "POST", `/dashboard/services/api/connection/${uuid}/disconnect`, { headers: AUTH })).status, 200);
+    assert.equal(card().includes(TOKEN), false, "still masked on the card after disconnect");
+    SV.invalidateSecretValues();
+    assert.ok(SV.getSecretValues().includes(TOKEN), "and on display paths");
+    assert.deepEqual(await K.serviceSecretsFor(ctx.db, loadKeychainKey({ crowHome: HOME }), uuid, { allowedKeys: [GH] }), {}, "never served");
+    const row = (await ctx.db.execute({ sql: "SELECT id, status FROM crow_keychain WHERE connection_uuid = ?", args: [uuid] })).rows[0];
+    assert.equal(row.status, "disconnected");
+    // The owner purges it from the keychain page; the next refresh drops it.
+    assert.equal(await K.deleteEntry(ctx.db, Number(row.id)), true);
+    refreshGatewaySecretValues({ env: maskEnv(ctx), dbPath: ctx.path });
+    assert.equal(SV.getApprovalCardValues().includes(TOKEN), false, "gone from the card mask");
+    SV.invalidateSecretValues();
+    assert.equal(SV.getSecretValues().includes(TOKEN), false, "gone from display masking");
+  });
+  // Untrusted (the last spawn here was unsandboxed): a refresh never puts a value on cards.
+  refreshSecretValuesFile({ env: maskEnv(ctx), dbPath: ctx.path, write: false, cardTrusted: false });
+  await withApp(ctx, async (s) => {
+    assert.equal((await connectGh(s, "Untrusted", TOKEN + "2")).status, 201);
+    assert.equal(SV.getApprovalCardValues().includes(TOKEN + "2"), false);
+    SV.invalidateSecretValues();
+    assert.ok(SV.getSecretValues().includes(TOKEN + "2"), "display still masks it");
+  });
+  SV.primeSecretValues([], []);
+});
+
+test("ruling 5b: a key created by the connect route while rows exist is audited and the owner told, like the keychain API", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  const { createKeychainKey } = await import("../servers/gateway/keychain/key.js");
+  const other = createKeychainKey({ crowHome: mkdtempSync(join(tmpdir(), "crow-svcapi-oldkey-")) });
+  await K.addManualSecret(ctx.db, other, { label: "Old machine", secret: "test-token-9" });
+  const newHome = mkdtempSync(join(tmpdir(), "crow-svcapi-newkey-"));
+  const audits = [];
+  const notes = [];
+  await withApp(ctx, async (s) => {
+    assert.equal((await connectGh(s, "Main", "test-token-10")).status, 201);
+  }, { crowHome: newHome, audit: async (_db, ev, d) => audits.push([ev, d.details]), notify: async (_db, n) => notes.push(n.title), recordSecrets: () => {} });
+  assert.deepEqual(audits, [["keychain_key_created", { orphaned: 1 }]]);
+  assert.deepEqual(notes, ["New Crow keychain key created"]);
 });
 
 test("a recordSecrets seam is called with the secret values only, before the save", async () => {
