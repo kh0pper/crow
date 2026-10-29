@@ -157,7 +157,9 @@ const SERVICE_OK = new Set([
   "oom_score_adj", "privileged", "cap_add", "security_opt", "network_mode", "pid", "ipc", "uts", "userns_mode",
   "cgroup", "devices", "volumes", "env_file", "build", "label_file", "volumes_from",
 ]);
-const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "external_links", "isolation", "storage_opt",
+// Exported read-only for the satellite rules (servers/satellite/compose-rules.js), which refuse
+// every one of these outright: one list, no drift.
+export const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "external_links", "isolation", "storage_opt",
   "credential_spec", "oom_kill_disable", "use_api_socket", "post_start", "pre_stop", "develop", "models", "provider"]);
 const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "configs"]);
 // Top-level entries of a bundle folder that the gateway reads or runs.
