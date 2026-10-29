@@ -296,6 +296,8 @@ test("the error table: en + es, every code, KiB and tool substitution", () => {
   assert.equal(loopbackErrorText("unattributed"), "A signed bot is required.");
   for (const c of ["not_owner_turn", "scope_unknown", "wrong_project", "not_selected", "owner_mismatch", "not_granted"]) assert.equal(loopbackErrorText(c), "Not available on this turn.");
   assert.equal(loopbackErrorText("not_active"), "This connection is turned off.");
+  assert.equal(loopbackErrorText("private_unavailable"), "This connection is private. Bots can't read it yet.");
+  assert.equal(loopbackErrorText("private_unavailable", { lang: "es" }), "Esta conexión es privada. Los bots todavía no pueden leerla.");
   assert.equal(loopbackErrorText("busy"), "Busy, try again in a moment.");
   assert.equal(loopbackErrorText("child_unavailable"), "This service isn't running right now.");
   assert.equal(loopbackErrorText("not_installed"), "This service isn't running right now.");
@@ -481,6 +483,7 @@ test("sessions are bound to bot + scope: another bot's session id -> 404, the sa
 test("authorize runs on every request: refusal at initialize and later inside an open session", async () => {
   for (const [code, status, msg] of [
     ["not_active", 409, "This connection is turned off."], ["not_owner_turn", 403, "Not available on this turn."],
+    ["private_unavailable", 403, "This connection is private. Bots can't read it yet."],
     ["something_new", 403, "Not available on this turn."], ["null", 403, "Not available on this turn."], ["throw", 403, "Not available on this turn."],
   ]) {
     state.deny = code;
