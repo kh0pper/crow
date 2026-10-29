@@ -19,8 +19,10 @@
  * Races and sends: the "ended" notification goes through notifyRow, which is at-most-once (a send that throws
  * is logged, never retried), and only the transition that moved the row sends it. A status read that lands
  * between result-service's result insert and the completion's own CAS ends the row first, so the completion's
- * notice returns null and result-service sends today's generic "needs review" notice instead of the hand-off's:
- * still exactly one notification, never none (the window is a few ms inside one process).
+ * notice returns null and result-service sends today's generic "needs review" notice instead of the hand-off's.
+ * The completion's turn-end mark (markTurnEnd) never runs then, so the bot's Perch "replied" push can go as well:
+ * in that window (a few ms inside one process) the operator may get both, the generic notice and the Perch
+ * push. Never none.
  *
  * Subject (P16): the fast path never takes ordinary speech. It answers when (a) a bot is named (`status_none`
  * when that bot has nothing in scope: truthful, never left to the model), or when (b) the work is named
