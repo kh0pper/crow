@@ -20,8 +20,14 @@
  *
  * Known gap: the child's HOME is the scratch home, so the bridge's instance-secrets masking
  * (servers/shared/secret-values.js instanceSecretsDirs) looks for sibling instances under the
- * scratch home and does not mask the real ones. The eval bot gets no shell, and its file tools
- * are confined to write_paths inside the scratch.
+ * scratch home and does not mask the real ones. The eval bot gets no shell, and read, write and
+ * edit are confined to the scratch: every write_paths AND read_paths entry must resolve strictly
+ * inside it. The bridge's "bypass" mode (read_paths ["/"]) is set only by Perch's interactive
+ * route; handleInbound never sets it.
+ *
+ * A same-uid unreadable process that appears during a run and is reparented to init fails the
+ * thread closed ("unreadable (not signalled)", named by comm and cmdline). If it is a stray from
+ * another session, the remedy is a retry under MAX_ATTEMPTS.
  *
  * The design and live results are kept in the private engineering notes.
  *
@@ -142,8 +148,11 @@ export function checkToolSurface(botDef, { allowServers, allowSkills = [], scrat
   if (tools.crow_mcp !== undefined && !Array.isArray(tools.crow_mcp)) refuse("tools.crow_mcp must be an array");
   if (!Array.isArray(builtin) || builtin.some((t) => !["read", "write", "edit"].includes(t))) refuse('tools.pi_builtin must be a subset of ["read","write","edit"]');
   const home = realish(scratchHome);
-  for (const w of pol.write_paths || []) {
-    if (typeof w !== "string" || !strictlyInside(realish(w), home)) refuse(`write_paths entry ${w} is not strictly inside the scratch home`);
+  // pi-lab's gate lets read/grep/find/ls reach every read_paths root, so both lists are fenced.
+  for (const key of ["write_paths", "read_paths"]) {
+    for (const w of pol[key] || []) {
+      if (typeof w !== "string" || !strictlyInside(realish(w), home)) refuse(`${key} entry ${w} is not strictly inside the scratch home`);
+    }
   }
   const servers = new Set(allowServers);
   for (const e of tools.crow_mcp || []) {
@@ -418,6 +427,18 @@ export function survivorsByMarker(runId, { sinceBootSec, readProc = defaultReadP
   return out;
 }
 
+/** "pid (comm X; cmdline Y)" per pid, for a reason string; cmdline only when readable (capped). */
+export function describePids(pids, { readProc = defaultReadProc } = {}) {
+  return pids.map((p) => {
+    let comm = "?";
+    let cmd = "";
+    try { comm = readProc(`/proc/${p}/comm`).trim() || "?"; } catch { /* gone or hidden */ }
+    try { cmd = readProc(`/proc/${p}/cmdline`).split("\0").filter(Boolean).join(" "); } catch { /* unreadable */ }
+    if (cmd.length > 200) cmd = `${cmd.slice(0, 200)}...`;
+    return `${p} (comm ${comm}${cmd ? `; cmdline ${cmd}` : ""})`;
+  }).join(", ");
+}
+
 /**
  * survivorsByMarker until it settles: only pids present in every one of `rounds` scans `gapMs`
  * apart. A same-uid process that is merely exiting (environ EACCES for a moment) drops out; a
@@ -531,11 +552,14 @@ function sessionPathsOf(turns, home) {
  * failure resolves `{ ok: false, contaminated }` and the remaining threads do not run.
  * `parentEnv` (default process.env) is the env the child's allowlist reads; process.env itself
  * is never written. `turnSlackMs` may be negative (tests); the parent timer is clamped to 1 s.
+ * `prodMaxPi` (an integer >= 2) defaults to LIFECYCLE_DEFAULTS.maxPi only when PIBOT_MAX_PI is
+ * unset here: a stray export would silently raise it. `capacityCount` is the child's test-only
+ * stand-in for countLivePi() (the child refuses it outside NODE_TEST_CONTEXT).
  */
 export async function runConversation({
   botDef, models, scratchHome, threads, env = {}, allowHosts = [], allowServers, allowSkills = [], piPackages = [],
   gatewayType = "perch", gatewayPorts = [], piCli, turnTimeoutMs = 600_000, turnSlackMs = TURN_SLACK_MS, wallMs,
-  prodMaxPi = LIFECYCLE_DEFAULTS.maxPi, mcpOverrides = null, allowToolless = false, parentEnv = process.env, log = () => {},
+  prodMaxPi, capacityCount = null, mcpOverrides = null, allowToolless = false, parentEnv = process.env, log = () => {},
 } = {}) {
   const sinceBootSec = bootSecNow();
   const runId = randomUUID();
@@ -547,7 +571,13 @@ export async function runConversation({
   if (!existsSync(piCli) || !statSync(piCli).isFile()) refuse(`piCli ${piCli} does not exist`);
   if (typeof wallMs !== "number" || !Number.isFinite(wallMs) || wallMs <= 0) refuse("wallMs is required (a positive finite number of ms)");
   if (typeof turnSlackMs !== "number" || !Number.isFinite(turnSlackMs)) refuse("turnSlackMs must be a finite number");
-  if (!Number.isInteger(prodMaxPi) || prodMaxPi < 1) refuse("prodMaxPi must be a positive integer");
+  if (prodMaxPi === undefined) {
+    if (process.env.PIBOT_MAX_PI !== undefined) refuse("PIBOT_MAX_PI is set in this process; pass prodMaxPi explicitly (read it from the prod gateway unit)");
+    prodMaxPi = LIFECYCLE_DEFAULTS.maxPi;
+  }
+  // The child refuses at countLivePi() >= prodMaxPi - 1, so below 2 no turn could ever run.
+  if (!Number.isInteger(prodMaxPi) || prodMaxPi < 2) refuse("prodMaxPi must be an integer >= 2 (one slot stays for prod)");
+  if (capacityCount !== null && (!Number.isInteger(capacityCount) || capacityCount < 0)) refuse("capacityCount must be null or a non-negative integer");
   if (typeof gatewayType !== "string" || !gatewayType) refuse("gatewayType must be a non-empty string");
   // parentEnv never weakens a guard: the real process.env always applies, parentEnv only adds.
   const protectedEnv = { CROW_SUITE_PROTECTED_ROOTS: [process.env, parentEnv].map((e) => e.CROW_SUITE_PROTECTED_ROOTS || "").join("\n") };
@@ -607,7 +637,7 @@ export async function runConversation({
   for (const thread of threads) {
     if (Date.now() >= wallEnd) { contaminated = "conversation exceeded wallMs"; break; }
     const r = await runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wallEnd, say, job: {
-      botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount: null, mcpOverrides, runId, thread,
+      botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount, mcpOverrides, runId, thread,
     } });
     if (meta.flags === null && r.flags) meta.flags = r.flags;
     out.push({ id: thread.id, sessionPaths: r.sessionPaths, turns: r.turns });
@@ -710,7 +740,7 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
     for (const p of confirmed) signal(p, "SIGKILL");
     await waitGone(confirmed, 1000);
     const unconfirmed = marked.filter((p) => !confirmed.includes(p));
-    why = `${why ? `${why}; ` : ""}run processes survived the thread: ${confirmed.join(",") || "none"} killed${unconfirmed.length ? `, ${unconfirmed.join(",")} unreadable (not signalled)` : ""}`;
+    why = `${why ? `${why}; ` : ""}run processes survived the thread: ${confirmed.join(",") || "none"} killed${unconfirmed.length ? `, ${describePids(unconfirmed)} unreadable (not signalled)` : ""}`;
   }
 
   let sessionPaths = [];

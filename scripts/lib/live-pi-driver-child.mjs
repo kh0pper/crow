@@ -43,7 +43,7 @@ function readJob(path, env) {
   if (typeof job.runId !== "string" || job.runId !== env.CROW_EVAL_RUN_ID) throw refuse("job.runId must equal CROW_EVAL_RUN_ID");
   if (job.allowToolless !== undefined && typeof job.allowToolless !== "boolean") throw refuse("job.allowToolless must be a boolean");
   if (job.gatewayType !== undefined && (typeof job.gatewayType !== "string" || !job.gatewayType)) throw refuse("job.gatewayType must be a string");
-  if (!Number.isInteger(job.prodMaxPi) || job.prodMaxPi < 1) throw refuse("job.prodMaxPi must be a positive integer");
+  if (!Number.isInteger(job.prodMaxPi) || job.prodMaxPi < 2) throw refuse("job.prodMaxPi must be an integer >= 2");
   if (job.capacityCount !== undefined && job.capacityCount !== null) {
     if (env.NODE_TEST_CONTEXT === undefined) throw refuse("job.capacityCount is test-only (no NODE_TEST_CONTEXT)");
     if (!Number.isInteger(job.capacityCount) || job.capacityCount < 0) throw refuse("job.capacityCount must be a non-negative integer");

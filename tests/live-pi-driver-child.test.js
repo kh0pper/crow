@@ -182,6 +182,23 @@ test("refuses a tool surface outside allowServers", async (t) => {
   assert.equal(existsSync(ctx.capture), false);
 });
 
+test("refuses read_paths outside the scratch home", async (t) => {
+  const ctx = await setup(t, { job: { botDef: botDef({ permission_policy: { bash: "deny", write_paths: [], read_paths: ["/"] } }) } });
+  const r = await runChild(t, ctx);
+  assert.equal(r.code, 1, stderr(ctx));
+  await assertNoSurvivors(ctx);
+  assert.match(stderr(ctx), /read_paths entry \/ is not strictly inside the scratch home/);
+  assert.equal(existsSync(ctx.capture), false);
+});
+
+test("refuses a job prodMaxPi below 2", async (t) => {
+  const ctx = await setup(t, { job: { prodMaxPi: 1 } });
+  const r = await runChild(t, ctx);
+  assert.equal(r.code, 1, stderr(ctx));
+  assert.match(stderr(ctx), /prodMaxPi/);
+  assert.equal(existsSync(ctx.capture), false);
+});
+
 test("refuses an effective tool grant with no server/tool entry", async (t) => {
   const ctx = await setup(t, { job: { allowToolless: false } });
   const r = await runChild(t, ctx);

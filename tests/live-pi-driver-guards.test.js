@@ -95,9 +95,12 @@ test("extra env allowlist", () => {
 
 test("tool surface", () => {
   const home = tmp();
+  // A symlink INSIDE the scratch that points OUT of it: realish resolves it before the check.
+  const outside = tmp();
+  symlinkSync(outside, join(home, "out-link"));
   const ok = () => ({
     id: "b", models: { default: "stub/m1" },
-    permission_policy: { bash: "deny", write_paths: [join(home, "w")] },
+    permission_policy: { bash: "deny", write_paths: [join(home, "w")], read_paths: [join(home, "r")] },
     tools: { pi_builtin: ["read", "write", "edit"], crow_mcp: ["crow-projects", "crow-projects/crow_add_source"] },
     spawn_env: {}, pi_extensions: [], skills: ["research-pipeline"],
   });
@@ -110,6 +113,13 @@ test("tool surface", () => {
     "pi_builtin bash": mut((d) => { d.tools.pi_builtin = ["bash"]; }),
     "write_paths /tmp": mut((d) => { d.permission_policy.write_paths = ["/tmp"]; }),
     "write_paths home itself": mut((d) => { d.permission_policy.write_paths = [home]; }),
+    "read_paths /tmp": mut((d) => { d.permission_policy.read_paths = ["/tmp"]; }),
+    "read_paths /": mut((d) => { d.permission_policy.read_paths = ["/"]; }),
+    "read_paths home itself": mut((d) => { d.permission_policy.read_paths = [home]; }),
+    "read_paths outside": mut((d) => { d.permission_policy.read_paths = [outside]; }),
+    "read_paths symlink out": mut((d) => { d.permission_policy.read_paths = [join(home, "out-link")]; }),
+    "read_paths below a symlink out": mut((d) => { d.permission_policy.read_paths = [join(home, "out-link", "secrets")]; }),
+    "read_paths not a string": mut((d) => { d.permission_policy.read_paths = [7]; }),
     "server not allowed": mut((d) => { d.tools.crow_mcp = ["other"]; }),
     "server/tool not allowed": mut((d) => { d.tools.crow_mcp = ["other/crow_x"]; }),
     "board": mut((d) => { d.tools.crow_mcp = ["board"]; }),

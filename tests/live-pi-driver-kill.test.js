@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { descendants, killTree, survivorsByMarker, bootSecNow, KILL_GRACE_MS } from "../scripts/lib/live-pi-driver.mjs";
+import { descendants, killTree, survivorsByMarker, bootSecNow, describePids, KILL_GRACE_MS } from "../scripts/lib/live-pi-driver.mjs";
 
 const spawned = new Set();
 const track = (pid) => { if (pid > 1) spawned.add(pid); return pid; };
@@ -213,6 +213,23 @@ test("unreadable new pid with ppid 1 is a survivor", () => {
 test("unreadable new pid under our uid's systemd is a survivor; under another uid's is not", () => {
   assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: withParent("systemd"), listPids: () => [9] }), [9]);
   assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: withParent("systemd", process.getuid() + 1), listPids: () => [9] }), []);
+});
+
+test("describePids names each unreadable survivor by comm, and cmdline when readable", () => {
+  const eacces = () => Object.assign(new Error("EACCES"), { code: "EACCES" });
+  const files = {
+    "/proc/42/comm": "gpg-agent\n",
+    "/proc/42/cmdline": "gpg-agent\0--homedir\0/x\0--daemon\0",
+    "/proc/43/comm": "helper\n",
+    "/proc/44/cmdline": "",
+    "/proc/45/comm": "long\n",
+    "/proc/45/cmdline": `${"a".repeat(300)}\0`,
+  };
+  const readProc = (p) => { if (p in files) return files[p]; throw eacces(); };
+  assert.equal(describePids([42, 43, 44], { readProc }),
+    "42 (comm gpg-agent; cmdline gpg-agent --homedir /x --daemon), 43 (comm helper), 44 (comm ?)");
+  assert.equal(describePids([45], { readProc }), `45 (comm long; cmdline ${"a".repeat(200)}...)`);
+  assert.equal(describePids([], { readProc }), "");
 });
 
 test("survivorsByMarker requires sinceBootSec", () => {

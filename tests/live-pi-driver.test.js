@@ -415,6 +415,55 @@ test("pre-spawn refusals: piCli, piPackages, threads, wallMs", async (t) => {
   assert.equal(existsSync(join(ctx.s.home, "pi-agent", "models.json")), false, "nothing is written before the guards pass");
 });
 
+test("prodMaxPi: a stray PIBOT_MAX_PI in the parent env is refused unless prodMaxPi is passed", async (t) => {
+  const ctx = await setup(t);
+  const opts = { ...ctx.opts };
+  delete opts.prodMaxPi;
+  const saved = process.env.PIBOT_MAX_PI;
+  try {
+    process.env.PIBOT_MAX_PI = "99";
+    await assert.rejects(runConversation(opts), (e) => e instanceof DriverRefusal && /PIBOT_MAX_PI is set.*pass prodMaxPi explicitly/.test(e.message));
+    await assert.rejects(runConversation({ ...opts, prodMaxPi: undefined }), (e) => e instanceof DriverRefusal && /PIBOT_MAX_PI/.test(e.message));
+  } finally { if (saved === undefined) delete process.env.PIBOT_MAX_PI; else process.env.PIBOT_MAX_PI = saved; }
+  assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
+  assert.equal(existsSync(join(ctx.s.home, "pi-agent", "models.json")), false);
+});
+
+test("prodMaxPi must be an integer of at least 2 (one slot stays for prod)", async (t) => {
+  const ctx = await setup(t);
+  for (const bad of [1, 0, -3, 2.5, "2", null, Number.NaN]) {
+    await assert.rejects(runConversation({ ...ctx.opts, prodMaxPi: bad }),
+      (e) => e instanceof DriverRefusal && /prodMaxPi must be an integer >= 2/.test(e.message), String(bad));
+  }
+  assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
+});
+
+test("child exit 6 maps to contaminated prod pi capacity through runConversation", async (t) => {
+  const ctx = await setup(t, { over: { prodMaxPi: 2, capacityCount: 1 } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, false);
+  assert.equal(r.contaminated, "prod pi capacity");
+  assert.match(r.reason, /prod pi capacity 1\/2/);
+  assert.equal(r.threads.length, 1, "day 2 never runs");
+  assert.deepEqual(r.threads[0].turns, []);
+  assert.ok(ctx.events.some((e) => e.ev === "progress" && e.line.ev === "capacity"));
+  assert.equal(existsSync(ctx.capture), false, "no pi ever started");
+  await ctx.noSurvivors();
+  await assert.rejects(runConversation({ ...ctx.opts, threads: [{ id: "x", turns: [{ text: "x" }] }], capacityCount: -1 }),
+    (e) => e instanceof DriverRefusal && /capacityCount/.test(e.message));
+});
+
+test("mcpOverrides reaches the child's job file", async (t) => {
+  const mcpOverrides = { "fixture-server": { command: "/bin/true", args: ["--x"] } };
+  const ctx = await setup(t, { over: { mcpOverrides } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
+  for (const id of ["day-1", "day-2"]) {
+    assert.deepEqual(JSON.parse(readFileSync(join(ctx.s.home, `job-${id}.json`), "utf8")).mcpOverrides, mcpOverrides, id);
+  }
+  await ctx.noSurvivors();
+});
+
 test("parentEnv never weakens the guards", async (t) => {
   const ctx = await setup(t);
   const saved = { ...process.env };
