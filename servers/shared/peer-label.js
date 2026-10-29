@@ -13,8 +13,8 @@
  *    suffixed with the first 8 hex of sha256(id) in square brackets ("raven [1a2b3c4d]"; brackets are
  *    never in a cleaned name), then with 24 hex if they still collide. The base is cut (24, then 13
  *    characters) so the whole label always fits the 40-character comment-author cap.
- * Nothing a caller claims (tool arguments, `_meta`) is ever used. A signed bot actor that upgrades this
- * to "<bot> (bot from <name>)" comes later, from the sending gateway (the private engineering notes).
+ * Nothing a caller claims (tool arguments, `_meta`) is ever used. A bot actor signed by the sending GATEWAY
+ * upgrades this to "<bot> (bot from <name>)" (PR-B, peerActorMeta below; the private engineering notes).
  */
 import { createHash } from "node:crypto";
 
@@ -120,14 +120,52 @@ export async function resolvePeerLabel(db, row, localId) {
  * The `_meta` a gateway forwards to the server it calls for a peer's tool call:
  * `{ kind: "peer", instance, from }` (only the fields it knows), or `{}` for any non-peer caller.
  * Built only from the server-side auth record (req.auth, set by mountMcpServer), never from the call.
+ *
+ * With `allowRemoteBot` (only a server that understands it: see remoteBotActorAllowed), a peer call whose
+ * auth record carries a verified `remoteActor` (the peer GATEWAY signed which of its bots made the call,
+ * servers/shared/remote-actor.js) for the bearer's own instance is forwarded as
+ * `{ kind: "bot", id: "<bot>@<instance>", name, instance, from }` (`from` only when known). Consumers must
+ * treat `kind: "bot"` WITH `instance` as a remote bot (never a local one, never the owner) and split the id
+ * on the LAST "@". Anything else, or no option, is the peer form above.
  */
-export function peerActorMeta(extra) {
+export function peerActorMeta(extra, { allowRemoteBot = false } = {}) {
   const auth = extra && extra.authInfo;
   if (!auth || auth.token !== PEER_TOKEN) return {};
-  const actor = { kind: "peer" };
   const cid = typeof auth.clientId === "string" && auth.clientId.startsWith("instance:") ? auth.clientId.slice(9) : "";
-  if (cid) actor.instance = cid;
   const from = auth.extra && typeof auth.extra.peerName === "string" ? auth.extra.peerName : "";
+  const ra = auth.extra && auth.extra.remoteActor;
+  if (allowRemoteBot && cid && ra && typeof ra === "object" && ra.kind === "bot" && ra.instanceId === cid
+    && typeof ra.id === "string" && ra.id && typeof ra.name === "string") {
+    const actor = { kind: "bot", id: `${ra.id}@${cid}`, name: ra.name, instance: cid };
+    if (from) actor.from = from;
+    return { _meta: { "crow/actor": actor } };
+  }
+  const actor = { kind: "peer" };
+  if (cid) actor.instance = cid;
   if (from) actor.from = from;
   return { _meta: { "crow/actor": actor } };
+}
+
+/**
+ * Add-ons that understand the remote bot form of `crow/actor`, with the first version that does. An older
+ * copy would read `kind: "bot"` as a LOCAL bot, so it keeps getting the peer form. Shared by the proxy's
+ * add-on connect (servers/gateway/proxy.js) and, through the entry flag, router.js.
+ */
+export const REMOTE_BOT_ACTOR_MIN = Object.freeze({ workspace: "0.4.3" });
+
+const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+/** True only for a manifest `{ id, version }` in REMOTE_BOT_ACTOR_MIN at or above its version (plain x.y.z). */
+export function remoteBotActorAllowed(manifest) {
+  if (!manifest || typeof manifest !== "object") return false;
+  const id = manifest.id;
+  if (typeof id !== "string" || !Object.hasOwn(REMOTE_BOT_ACTOR_MIN, id)) return false;
+  const v = SEMVER_RE.exec(typeof manifest.version === "string" ? manifest.version : "");
+  const min = SEMVER_RE.exec(REMOTE_BOT_ACTOR_MIN[id]);
+  if (!v || !min) return false;
+  for (let i = 1; i <= 3; i++) {
+    const a = Number(v[i]), b = Number(min[i]);
+    if (a !== b) return a > b;
+  }
+  return true;
 }

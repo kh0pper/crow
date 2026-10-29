@@ -147,6 +147,17 @@ User asks: "Search all instances for tax notes"
   → Local AI merges all results and presents to user
 ```
 
+### Who wrote a peer's comment
+
+When a paired instance writes here (for example a Workspace comment), the author label says only what the sending gateway knows:
+
+- **`Crow (via alpha)`**: the paired instance this instance calls `alpha` made the call. The name is this instance's own `crow_instances` row for it, with a short id suffix (`alpha [1a2b3c4d]`) when two peers share a name. Nothing the call carries (tool arguments, `_meta`) is used.
+- **`Hank (bot from alpha)`**: `alpha`'s gateway asserts that its own bot Hank made the call. Only that gateway signs, and only for a bot it has already verified; no key ever reaches a bot or its process. The proof is an HMAC under the pair subkey `crow/remote-actor/v1`, derived from the pair's `signing_key`.
+
+On the wire the sender adds two headers to a `tools/call` POST: `x-crow-remote-actor` (base64url JSON naming the bot, the sender, this instance as audience, the mount, a timestamp, a nonce and a digest of the tool call) and `x-crow-remote-actor-sig`. This instance checks them against the key of the bearer-authenticated peer, so one peer can never speak as another, and rejects stale, replayed, mis-addressed or altered calls. Every failure downgrades the label to `Crow (via <name>)`; none refuses the call, and a peer's call is never treated as the owner. Outcomes are logged at most once an hour per peer and reason (`[remote-actor] accepted …` / `downgraded …`), never with a key or header.
+
+Servers receive the verified bot as `_meta["crow/actor"] = { kind: "bot", id: "<bot>@<instance>", name, instance, from }`. A `kind: "bot"` with `instance` is a remote bot, never a local one: split the id on the last `@`. Only add-ons that understand this form get it: the gateway reads each stdio add-on's own `manifest.json` at connect, and today only Workspace 0.4.3 or later qualifies. Every other add-on, and every HTTP-transport add-on, keeps receiving `{ kind: "peer", instance, from }`.
+
 ### Cached Summaries
 
 To avoid redundant federation calls, the gateway caches lightweight summaries from remote instances:

@@ -26,7 +26,7 @@ import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
 import bus from "../shared/event-bus.js";
 import { rowIsTrusted } from "../shared/peer-trust.js";
-import { peerActorMeta } from "../shared/peer-label.js";
+import { peerActorMeta, remoteBotActorAllowed } from "../shared/peer-label.js";
 
 /** GET <gatewayUrl>/health with a 5 s cap; throws on non-2xx or timeout. */
 async function probePeerHealth(gatewayUrl) {
@@ -169,6 +169,17 @@ export function addonStdioEnv(config = {}, base = process.env) {
 }
 
 /**
+ * Whether the add-on running from `cwd` understands a peer's remote bot actor (item 46 PR-B): its own
+ * manifest.json says Workspace at or above the version in REMOTE_BOT_ACTOR_MIN. Read once at connect; any
+ * read or parse failure is false, so the add-on keeps getting the "Crow (via <name>)" peer form.
+ */
+export function remoteBotActorForCwd(cwd) {
+  if (typeof cwd !== "string" || !cwd) return false;
+  try { return remoteBotActorAllowed(JSON.parse(readFileSync(join(cwd, "manifest.json"), "utf8"))); }
+  catch { return false; }
+}
+
+/**
  * Connect to an MCP server installed as a bundle addon (from ~/.crow/mcp-addons.json).
  * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
  */
@@ -178,6 +189,8 @@ async function connectAddonServer(id, config) {
 
   try {
     let transport;
+    // Only a stdio add-on whose own manifest opts in gets the remote bot form; HTTP add-ons never do.
+    let remoteBotActor = false;
     if (transportMode === "http") {
       // Remote HTTP MCP server (e.g. Google's gmailmcp.googleapis.com).
       // OAuth flow is handled by the SDK via authProvider; see
@@ -207,6 +220,7 @@ async function connectAddonServer(id, config) {
       // stdio (default, backward-compatible)
       const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
       const env = addonStdioEnv(config);
+      remoteBotActor = remoteBotActorForCwd(cwd);
       // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
       // then the per-user install dirs systemd's PATH lacks.
       const rc = resolveAddonCommand(config.command, { sha256: config.command_sha256, cwd });
@@ -244,6 +258,7 @@ async function connectAddonServer(id, config) {
       tools,
       status: "connected",
       isAddon: true,
+      remoteBotActor,
     });
 
     transport.onclose = () => {
@@ -615,8 +630,9 @@ export function createProxyServer(filter) {
             const result = await entry.client.callTool({
               name: tool.name,
               arguments: args,
-              // A paired instance's call says so ({kind:"peer", from}); nothing the caller sent is forwarded.
-              ...peerActorMeta(extra),
+              // A paired instance's call says so ({kind:"peer", from}, or its gateway's verified bot for an
+              // add-on that opted in); nothing the caller sent is forwarded.
+              ...peerActorMeta(extra, { allowRemoteBot: !!entry.remoteBotActor }),
             });
             return result;
           } catch (error) {

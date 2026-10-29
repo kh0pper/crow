@@ -2,7 +2,7 @@
 // id suffix when that name is not unique, and never with anything the caller claims.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanPeerName, idSuffix, peerDisplayName, peerLabels, labelSkeleton, resolvePeerLabel, peerActorMeta } from "../servers/shared/peer-label.js";
+import { cleanPeerName, idSuffix, peerDisplayName, peerLabels, labelSkeleton, resolvePeerLabel, peerActorMeta, remoteBotActorAllowed, REMOTE_BOT_ACTOR_MIN } from "../servers/shared/peer-label.js";
 
 const A = { id: "inst-a-1a2b3c4d", name: "wren" };
 const sfx = (id) => idSuffix(id);
@@ -213,3 +213,53 @@ test("the research router forwards a peer in the same shape (and still never as 
   assert.equal(resolveCallActor(OWNER, forwardActorMeta(extra)).kind, "unknown");
 });
 
+
+// Item 46 PR-B: a peer gateway's verified bot (req.auth.extra.remoteActor, set by mountMcpServer) is forwarded
+// as {kind:"bot", id:"<bot>@<instance>", name, instance, from} only to a server that opted in (allowRemoteBot).
+const RA = { kind: "bot", id: "hank", name: "Hank", instanceId: "inst-a-1a2b3c4d" };
+const peerWith = (remoteActor, extra = {}) => ({ token: "peer-instance", clientId: "instance:inst-a-1a2b3c4d", extra: { peerName: "wren", remoteActor, ...extra } });
+const PEER_FORM = { _meta: { "crow/actor": { kind: "peer", instance: "inst-a-1a2b3c4d", from: "wren" } } };
+
+test("peerActorMeta bot branch: only with allowRemoteBot", () => {
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith(RA) }, { allowRemoteBot: true }),
+    { _meta: { "crow/actor": { kind: "bot", id: "hank@inst-a-1a2b3c4d", name: "Hank", instance: "inst-a-1a2b3c4d", from: "wren" } } });
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith(RA) }), PEER_FORM, "no option: the peer form");
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith(RA) }, { allowRemoteBot: false }), PEER_FORM);
+  const noName = { token: "peer-instance", clientId: "instance:inst-a-1a2b3c4d", extra: { remoteActor: RA } };
+  assert.deepEqual(peerActorMeta({ authInfo: noName }, { allowRemoteBot: true })._meta["crow/actor"],
+    { kind: "bot", id: "hank@inst-a-1a2b3c4d", name: "Hank", instance: "inst-a-1a2b3c4d" }, "no peerName: from omitted");
+});
+
+test("peerActorMeta bot branch: a remoteActor not for the bearer's instance, or malformed, is the peer form", () => {
+  const on = { allowRemoteBot: true };
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, instanceId: "inst-c-99990000" }) }, on), PEER_FORM);
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, kind: "peer" }) }, on), PEER_FORM);
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, id: "" }) }, on), PEER_FORM);
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith({ ...RA, name: 5 }) }, on), PEER_FORM);
+  assert.deepEqual(peerActorMeta({ authInfo: peerWith("hank") }, on), PEER_FORM);
+  const noCid = { token: "peer-instance", extra: { peerName: "wren", remoteActor: RA } };
+  assert.equal(peerActorMeta({ authInfo: noCid }, on)._meta["crow/actor"].kind, "peer", "no bearer instance: never a bot");
+});
+
+test("peerActorMeta: local and OAuth callers get {} even with a remoteActor present", () => {
+  const on = { allowRemoteBot: true };
+  assert.deepEqual(peerActorMeta({ authInfo: { token: "local-mcp", clientId: "instance:inst-a-1a2b3c4d", extra: { remoteActor: RA } } }, on), {});
+  assert.deepEqual(peerActorMeta({ authInfo: { token: "oauth-xyz", extra: { remoteActor: RA } } }, on), {});
+  assert.deepEqual(peerActorMeta(undefined, on), {});
+});
+
+test("remoteBotActorAllowed: workspace at or above 0.4.3 only", () => {
+  assert.deepEqual(REMOTE_BOT_ACTOR_MIN, { workspace: "0.4.3" });
+  assert.equal(remoteBotActorAllowed({ id: "workspace", version: "0.4.2" }), false);
+  assert.equal(remoteBotActorAllowed({ id: "workspace", version: "0.4.3" }), true);
+  assert.equal(remoteBotActorAllowed({ id: "workspace", version: "0.10.0" }), true);
+  assert.equal(remoteBotActorAllowed({ id: "workspace", version: "1.0.0" }), true);
+  assert.equal(remoteBotActorAllowed({ id: "workspace", version: "0.3.9" }), false);
+  for (const v of [undefined, null, "", "garbage", "0.4", "0.4.3.1", "v0.4.3", 43, "0.4.3-beta"]) {
+    assert.equal(remoteBotActorAllowed({ id: "workspace", version: v }), false, String(v));
+  }
+  assert.equal(remoteBotActorAllowed({ id: "research", version: "9.9.9" }), false);
+  assert.equal(remoteBotActorAllowed({ id: "constructor", version: "9.9.9" }), false);
+  assert.equal(remoteBotActorAllowed(null), false);
+  assert.equal(remoteBotActorAllowed("workspace"), false);
+});

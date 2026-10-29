@@ -217,3 +217,59 @@ test("actor.js keeps a trailing [hex] suffix even when the name part is too long
   assert.equal(resolveActor({}, meta("wren [0123abcd]")).from, "wren [0123abcd]");
   assert.equal(Array.from(resolveActor({}, meta(long)).from).length, 40, "no suffix: plain 40-character cap");
 });
+
+// Item 46 PR-B: a peer gateway's verified bot arrives as {kind:"bot", id:"<bot>@<instance>", name, instance, from}
+// (servers/shared/peer-label.js peerActorMeta, only for Workspace >= 0.4.3). It reads "<bot> (bot from <from>)".
+const RBOT = { kind: "bot", id: "hank@inst-a-1a2b3c4d", name: "Hank", instance: "inst-a-1a2b3c4d", from: "alpha" };
+
+test("WS-R1: a remote bot's comment and reply read 'Hank (bot from alpha)'", async () => {
+  put("r1.docx");
+  const a = await callAs("ws_docs_add_comment", { path: "S/r1.docx", content: "hola", quoted_text: "Marinar la carne" }, RBOT);
+  assert.equal(a.success, true, JSON.stringify(a));
+  assert.equal((await comments("S/r1.docx")).find((x) => x.id === a.data.comment_id).author, "Hank (bot from alpha)");
+  const rep = await callAs("ws_docs_reply_comment", { path: "S/r1.docx", comment_id: a.data.comment_id, content: "Sí" }, RBOT);
+  assert.equal((await comments("S/r1.docx")).find((x) => x.id === a.data.comment_id).replies.find((r) => r.id === rep.data.comment_id).author, "Hank (bot from alpha)");
+});
+
+test("WS-R2..R6: remote bot resolveActor/authorFor", async () => {
+  const { resolveActor, authorFor } = await import("../bundles/workspace/server/actor.js");
+  const meta = (a) => ({ _meta: { "crow/actor": a } });
+  const r1 = resolveActor({}, meta(RBOT));
+  assert.deepEqual(r1, RBOT);
+  assert.deepEqual(authorFor(r1), { author: "Hank (bot from alpha)", initials: "HAB" });
+  // WS-R2: the gateway's id suffix on a same-named peer is preserved.
+  assert.equal(authorFor(resolveActor({}, meta({ ...RBOT, from: "alpha [1a2b3c4d]" }))).author, "Hank (bot from alpha [1a2b3c4d])");
+  // WS-R3: a parenthesized from (or name) cannot fake a nested label.
+  const r3 = authorFor(resolveActor({}, meta({ ...RBOT, name: "Hank) (x", from: "alpha (bot from home)" }))).author;
+  assert.equal(r3, "Hank x (bot from alpha bot from home)");
+  // WS-R4: an env bot beats a _meta remote bot.
+  assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "alex", CROW_ACTOR_BOT_NAME: "alex" }, meta(RBOT)), { kind: "bot", id: "alex", name: "alex" });
+  // WS-R5: a remote bot is never the owner.
+  const r5 = resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, meta(RBOT));
+  assert.equal(r5.kind, "bot"); assert.equal(authorFor(r5).author, "Hank (bot from alpha)");
+  // WS-R6: an instance with no usable from never reads as a local bot.
+  for (const from of [undefined, "", "()", "‮"]) {
+    const au = authorFor(resolveActor({}, meta({ ...RBOT, from }))).author;
+    assert.ok(au.startsWith("Crow (via peer ["), `${String(from)} -> ${au}`);
+    assert.ok(!au.includes("(bot)"), au);
+  }
+  const { createHash } = await import("node:crypto");
+  const h8 = createHash("sha256").update(RBOT.instance).digest("hex").slice(0, 8);
+  assert.equal(authorFor({ kind: "bot", name: "Hank", instance: RBOT.instance }).author, `Crow (via peer [${h8}])`);
+  // An instance that is not a valid id is never dropped into a local bot: it fails toward the peer form.
+  assert.equal(authorFor(resolveActor({}, meta({ ...RBOT, instance: "bad id!" }))).author, "Crow (via alpha)");
+  assert.equal(authorFor(resolveActor({}, meta({ ...RBOT, instance: "bad id!", from: "" }))).author, "Crow");
+  // A bot without instance keeps item 46's local label, unchanged.
+  assert.deepEqual(resolveActor({}, meta(HANK)), HANK);
+  assert.deepEqual(authorFor(HANK), { author: "hank (bot)", initials: "HAB" });
+});
+
+test("queued remote-bot comment keeps 'Hank (bot from alpha)' at close-time apply", async () => {
+  put("r2.docx", "oo-rich.docx");
+  const key = fake.openInEditor("S/r2.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const r = await callAs("ws_docs_add_comment", { path: "S/r2.docx", content: "en cola rbot", quoted_text: "Marinar la carne" }, RBOT);
+  assert.equal(r.data.queued, true, JSON.stringify(r));
+  fake.node("S/r2.docx").lock = null; fake.state.sessions.delete(key);
+  await W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } })();
+  assert.equal((await comments("S/r2.docx")).find((x) => x.content === "en cola rbot").author, "Hank (bot from alpha)");
+});
