@@ -64,7 +64,7 @@ import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
+import { checkComposeModel, dockerVolumeProject, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -1958,7 +1958,7 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   const id = bundleId || basename(bundleDir);
   const g = grantRootsFor(id, bundleDir, { exclude: operatorRoots !== undefined ? id : null });
   const roots = operatorRoots !== undefined ? operatorRoots : g.operatorRoots;
-  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() } });
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir(), volumeProject: dockerVolumeProject } });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---

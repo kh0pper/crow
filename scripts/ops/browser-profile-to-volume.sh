@@ -3,12 +3,14 @@
 # Chromium profile (cookies, saved logins) from the container's own layer onto
 # the named volume the browser bundle's compose declares since 1.3.12.
 #
-# NEVER run automatically. An operator runs it once per instance, inside tmux,
-# in a registered maintenance window, after reading --dry-run's plan.
+# NEVER run automatically. An operator runs it once per instance, inside tmux
+# or screen (it refuses otherwise, unless --no-tty-guard), in a registered
+# maintenance window with bots paused, after reading --dry-run's plan.
+# Needs Docker Compose 2.23.1 or newer (checked).
 #
 #   scripts/ops/browser-profile-to-volume.sh \
 #     --container crow-browser --project browser \
-#     --source <checkout>/bundles/browser [--domains example.com,example.org] [--dry-run]
+#     --source <checkout>/bundles/browser [--domains example.com,example.org] [--dry-run] [--no-tty-guard]
 #   scripts/ops/browser-profile-to-volume.sh --delete-backup <home>/browser-profile-backup/<stamp>
 #
 # Steps (each refuses loudly; nothing is changed before step 2):
@@ -18,7 +20,13 @@
 #      instance's explicitly named profile volume; that volume does not exist.
 #   2. tag the old image crow-browser-prev:<project>-<stamp> (the nightly
 #      `docker image prune` cannot remove it: the rollback image).
-#   3. BUILD the new image while the old container keeps running.
+#   3. BUILD the new image to a temporary tag (crow-browser-next:...) while the
+#      old container keeps running; the compose image name moves to it only at
+#      step 7, so a `compose up` in between cannot replace the old container.
+#      Then arm an out-of-process deadman (systemd-run --user, 15 min): unless
+#      this run marks itself done or rolled back, it restores the old
+#      container's restart policy and starts it, if the old container is still
+#      the one there and is not running.
 #   4. close Chromium gracefully (restart policy paused; CDP Browser.close,
 #      SIGTERM only as a fallback; wait), then docker stop.
 #   5. docker cp the profile out (a tar stream: owners, modes kept) to
@@ -34,11 +42,13 @@
 # up puts back the bundle files, the .env and the old image name, removes a
 # volume this run created, restores the restart policy and starts the OLD
 # container again, unchanged. If the recreate removed the old container, it
-# says so and prints the recovery commands.
+# says so and prints the recovery commands. A SIGKILL, an OOM kill or a dead
+# tmux server skip all of that: the deadman covers those.
 #
 # Test seams (tests/browser-profile-to-volume.test.js): DOCKER (the docker
-# binary), CROW_MIGRATE_NOW (the timestamp), CROW_MIGRATE_CDP_WAIT and
-# CROW_MIGRATE_CLOSE_WAIT (seconds).
+# binary), CROW_MIGRATE_NOW (the timestamp), CROW_MIGRATE_CDP_WAIT,
+# CROW_MIGRATE_CLOSE_WAIT and CROW_MIGRATE_DEADMAN_SECS (seconds),
+# CROW_MIGRATE_SYSTEMD_RUN / CROW_MIGRATE_SYSTEMCTL (the systemd binaries).
 set -uo pipefail
 
 DOCKER="${DOCKER:-docker}"
@@ -49,12 +59,14 @@ SERVICE=crow-browser
 # that hold the logins), relative to /root/.config.
 KEY_FILES="chromium-crow/Default/Cookies chromium-crow/Default/Network/Cookies chromium-crow/Default/Login?Data chromium-crow/Local?State chromium-crow/Default/Preferences"
 
-CONTAINER="" PROJECT="" SOURCE="" DOMAINS="" DRY_RUN=0 DELETE_BACKUP=""
+CONTAINER="" PROJECT="" SOURCE="" DOMAINS="" DRY_RUN=0 DELETE_BACKUP="" TTY_GUARD=1
+SYSTEMD_RUN="${CROW_MIGRATE_SYSTEMD_RUN:-systemd-run}"
+SYSTEMCTL="${CROW_MIGRATE_SYSTEMCTL:-systemctl}"
 
 say() { echo "[profile-to-volume] $*"; }
 fail() { echo "[profile-to-volume] REFUSED: $*" >&2; exit 1; }
 usage() {
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -65,6 +77,7 @@ while [ $# -gt 0 ]; do
     --source) SOURCE="${2:-}"; shift 2 ;;
     --domains) DOMAINS="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --no-tty-guard) TTY_GUARD=0; shift ;;
     --delete-backup) DELETE_BACKUP="${2:-}"; [ -n "$DELETE_BACKUP" ] || usage; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
@@ -78,6 +91,8 @@ if [ -n "$DELETE_BACKUP" ]; then
   [[ "$(basename "$real")" =~ ^[0-9]{8}-[0-9]{6}$ ]] && [ "$(basename "$(dirname "$real")")" = "browser-profile-backup" ] \
     || fail "'$real' is not <home>/browser-profile-backup/<stamp>"
   [ -f "$real/profile.tar" ] || fail "'$real' has no profile.tar: not a backup this script made"
+  [ -d "$(dirname "$(dirname "$real")")/bundles/browser" ] \
+    || fail "'$real' is not under a Crow instance's data dir (no bundles/browser beside browser-profile-backup)"
   [ "$(stat -c %u "$real")" = "$(id -u)" ] || fail "'$real' is not yours"
   if [ "$DRY_RUN" = 1 ]; then say "dry run: would delete $real"; exit 0; fi
   rm -rf -- "$real"
@@ -99,6 +114,11 @@ done
 grep -q "${VOLUME_KEY}:${PROFILE_DIR}" "$SOURCE/docker-compose.yml" \
   || fail "--source's compose has no ${VOLUME_KEY} volume on ${PROFILE_DIR}: not the 1.3.12+ browser bundle"
 
+# configs `content:` (the token file) needs Docker Compose 2.23.1+.
+CV="$("$DOCKER" compose version --short 2>/dev/null | sed 's/^v//')"
+[ -n "$CV" ] || fail "cannot run '$DOCKER compose version'"
+[ "$(printf '%s\n%s\n' 2.23.1 "$CV" | sort -V | head -n 1)" = "2.23.1" ] || fail "Docker Compose $CV is older than 2.23.1 (the new compose's token file needs it)"
+
 # ---- 1. checks --------------------------------------------------------------
 label() { "$DOCKER" inspect "$CONTAINER" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null; }
 "$DOCKER" inspect "$CONTAINER" --format '{{.Name}}' >/dev/null 2>&1 || fail "no container named '$CONTAINER'"
@@ -111,7 +131,7 @@ BUNDLE_DIR="$(dirname "${COMPOSE_FILE_USED%%,*}")"
 [ -n "$COMPOSE_FILE_USED" ] && [ -f "$BUNDLE_DIR/docker-compose.yml" ] || fail "cannot find the bundle dir of '$CONTAINER' (compose file label: '$COMPOSE_FILE_USED')"
 [ "$(basename "$BUNDLE_DIR")" = "browser" ] && [ "$(basename "$(dirname "$BUNDLE_DIR")")" = "bundles" ] \
   || fail "'$BUNDLE_DIR' is not an installed <home>/bundles/browser"
-INSTANCE_HOME="$(dirname "$(dirname "$BUNDLE_DIR")")"
+INSTANCE_HOME="$(realpath -m -- "$(dirname "$(dirname "$BUNDLE_DIR")")")"
 ENV_FILE="$BUNDLE_DIR/.env"
 [ -f "$ENV_FILE" ] || fail "no $ENV_FILE"
 if "$DOCKER" inspect "$CONTAINER" --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' | grep -qx "$PROFILE_DIR"; then
@@ -139,7 +159,7 @@ print(c.get("name", ""), s.get("container_name", ""), c.get("volumes", {}).get(v
 unset RENDERED
 [ "$R_NAME" = "$PROJECT" ] || fail "the new compose renders project '$R_NAME', not '$PROJECT' (check CROW_BROWSER_CONTAINER_NAME / COMPOSE_PROJECT_NAME in $ENV_FILE)"
 [ "$R_CONTAINER" = "$CONTAINER" ] || fail "the new compose renders container '$R_CONTAINER', not '$CONTAINER'"
-VOLUME="${PROJECT}-${VOLUME_KEY}"
+VOLUME="${PROJECT}_${VOLUME_KEY}"
 [ "$R_VOLUME" = "$VOLUME" ] || fail "the new compose renders profile volume '$R_VOLUME', expected '$VOLUME'"
 if "$DOCKER" volume inspect "$VOLUME" >/dev/null 2>&1; then
   fail "volume '$VOLUME' already exists: refusing to overwrite it (inspect it, and remove it yourself if it is empty)"
@@ -150,13 +170,19 @@ fi
 STAMP="${CROW_MIGRATE_NOW:-$(date +%Y%m%d-%H%M%S)}"
 BACKUP="$INSTANCE_HOME/browser-profile-backup/$STAMP"
 PREV_TAG="crow-browser-prev:${PROJECT}-${STAMP}"
+NEXT_TAG="crow-browser-next:${PROJECT}-${STAMP}"
+DEADMAN_UNIT="crow-browser-deadman-${PROJECT}-${STAMP}"
 BUILD_NAME="${PROJECT}-crow-browser"
-CDP_PORT="$(sed -n 's/^CROW_BROWSER_CDP_PORT=//p' "$ENV_FILE" | tail -n 1)"; CDP_PORT="${CDP_PORT:-9222}"
+# The CDP port THIS container uses (its own env), never the .env's: a mismatch
+# would close another instance's Chromium.
+CDP_PORT="$("$DOCKER" inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^CDP_PORT=\([0-9]\{1,5\}\)$/\1/p' | tail -n 1)"
+CDP_PORT="${CDP_PORT:-9222}"
 
 say "container:  $CONTAINER (project $PROJECT, running=$WAS_RUNNING, restart=$POLICY)"
 say "bundle dir: $BUNDLE_DIR"
 say "old image:  kept as $PREV_TAG (the rollback image; prune-proof)"
-say "new image:  built as $BUILD_NAME from $SOURCE BEFORE the old container stops"
+say "new image:  built as $NEXT_TAG from $SOURCE BEFORE the old container stops; named $BUILD_NAME only at install"
+say "deadman:    $DEADMAN_UNIT restarts the old container after ${CROW_MIGRATE_DEADMAN_SECS:-900}s unless this run finishes"
 say "backup:     $BACKUP (mode 700)"
 say "volume:     $VOLUME → $PROFILE_DIR"
 say "then:       new compose, recreate (no rebuild), wait for CDP on 127.0.0.1:$CDP_PORT"
@@ -164,11 +190,14 @@ if [ "$DRY_RUN" = 1 ]; then
   say "dry run: all checks passed, nothing changed."
   exit 0
 fi
-[ -n "${TMUX:-}${STY:-}" ] || say "note: not inside tmux/screen. A dropped session is rolled back, but run it inside tmux."
+if [ -z "${TMUX:-}${STY:-}" ] && [ "$TTY_GUARD" = 1 ]; then
+  fail "run this inside tmux or screen (a dropped SSH session mid-run would leave prod down until the deadman fires); --no-tty-guard overrides"
+fi
+for b in "$SYSTEMD_RUN" "$SYSTEMCTL"; do command -v "$b" >/dev/null 2>&1 || fail "'$b' not found: the deadman needs systemd (user)"; done
 
 # CDP Browser.close on 127.0.0.1:<port> (a raw WebSocket; python3 only).
 cdp_close() {
-  python3 - "$1" <<'PY' >/dev/null 2>&1
+  timeout 10 python3 - "$1" <<'PY' >/dev/null 2>&1
 import base64, json, os, socket, sys, urllib.request
 port = int(sys.argv[1])
 url = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=3))["webSocketDebuggerUrl"]
@@ -194,40 +223,94 @@ except OSError:
 PY
 }
 
+# ---- the deadman (out of process) ------------------------------------------------
+# A detached transient systemd unit: if neither "done" nor "rolled-back" is in
+# $BACKUP/state when it fires, and the container there is still the OLD one
+# (its image) and not running, it restores the restart policy and starts it.
+arm_deadman() {
+  local dm="$BACKUP/deadman.sh" dockerbin
+  dockerbin="$(command -v "$DOCKER")"
+  {
+    echo '#!/bin/sh'
+    echo "# crow-browser profile migration deadman for $CONTAINER (armed $STAMP)"
+    echo "grep -qxE 'done|rolled-back' '$BACKUP/state' 2>/dev/null && exit 0"
+    echo "img=\"\$('$dockerbin' inspect '$CONTAINER' --format '{{.Image}}' 2>/dev/null)\""
+    echo "run=\"\$('$dockerbin' inspect '$CONTAINER' --format '{{.State.Running}}' 2>/dev/null)\""
+    echo "[ \"\$img\" = '$IMAGE' ] || exit 0"
+    echo "[ \"\$run\" = true ] && exit 0"
+    echo "'$dockerbin' update --restart='$POLICY' '$CONTAINER'"
+    echo "'$dockerbin' start '$CONTAINER'"
+    echo "'$dockerbin' rmi '$NEXT_TAG' >/dev/null 2>&1"
+    echo "echo fired > '$BACKUP/state'"
+  } > "$dm"
+  chmod 700 "$dm"
+  "$SYSTEMD_RUN" --user --quiet --collect --unit="$DEADMAN_UNIT" --on-active="${CROW_MIGRATE_DEADMAN_SECS:-900}s" /bin/sh "$dm" \
+    || { echo "cannot arm the deadman ($SYSTEMD_RUN)" >&2; return 1; }
+  DEADMAN_ARMED=1
+}
+disarm_deadman() {
+  { echo "$1" > "$BACKUP/state"; } 2>/dev/null
+  if [ "$DEADMAN_ARMED" = 1 ]; then "$SYSTEMCTL" --user stop "${DEADMAN_UNIT}.timer" >/dev/null 2>&1; fi
+  DEADMAN_ARMED=0
+  return 0
+}
+
 # ---- rollback until the new container is up ----------------------------------
-STAGE=start BUILT=0 POLICY_CHANGED=0 CREATED_VOLUME=0
+STAGE=start RETAGGED=0 POLICY_CHANGED=0 CREATED_VOLUME=0 DEADMAN_ARMED=0
+# Every rollback message tolerates a dead terminal (EPIPE/EIO after a dropped
+# SSH session) and is also kept in $BACKUP/rollback.log.
+note() {
+  echo "[profile-to-volume] $*" >&2 2>/dev/null || true
+  if [ -d "$BACKUP" ]; then { echo "[profile-to-volume] $*" >> "$BACKUP/rollback.log"; } 2>/dev/null || true; fi
+}
+cleanup_hint() {
+  if [ -d "$BACKUP" ]; then
+    note "backup kept: $BACKUP (holds the cookies, effectively unencrypted); delete it once you are sure: $0 --delete-backup $BACKUP"
+  fi
+  note "previous image kept: $PREV_TAG; remove it when no longer needed: docker rmi $PREV_TAG"
+}
 rollback() {
   local code=$?
-  [ "$STAGE" = done ] && exit "$code"
+  set +e
   trap - EXIT INT TERM HUP
-  echo "[profile-to-volume] FAILED or interrupted during '$STAGE': putting things back" >&2
+  trap '' PIPE
+  [ "$STAGE" = done ] && exit "$code"
+  [ "$STAGE" = start ] && exit "$code"
+  note "FAILED or interrupted during '$STAGE': putting things back"
   if [ "$STAGE" = recreate ]; then
     if [ "$("$DOCKER" inspect "$CONTAINER" --format '{{.Image}}' 2>/dev/null)" != "$IMAGE" ]; then
-      echo "[profile-to-volume] the recreate already replaced the old container. NOT rolling back automatically." >&2
-      echo "[profile-to-volume] the profile is in volume $VOLUME and $BACKUP/profile.tar; the old image is $PREV_TAG;" >&2
-      echo "[profile-to-volume] the old bundle files are in $BACKUP/bundle-files. Retry: cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME docker compose -p $PROJECT up -d --no-build" >&2
+      note "the recreate already replaced the old container. NOT rolling back automatically."
+      note "the profile is in volume $VOLUME and $BACKUP/profile.tar; the old image is $PREV_TAG;"
+      note "the old bundle files are in $BACKUP/bundle-files. Retry: cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME docker compose -p $PROJECT up -d --no-build"
+      note "the deadman ($DEADMAN_UNIT) stays armed but will not touch a replaced container."
+      cleanup_hint
       exit 1
     fi
   fi
   if [ -d "$BACKUP/bundle-files" ]; then
-    for f in docker-compose.yml entrypoint.sh Dockerfile .env; do
-      [ -e "$BACKUP/bundle-files/$f" ] && cp -p "$BACKUP/bundle-files/$f" "$BUNDLE_DIR/$f"
+    for f in docker-compose.yml entrypoint.sh Dockerfile .dockerignore .env; do
+      if [ -e "$BACKUP/bundle-files/$f" ]; then cp -p "$BACKUP/bundle-files/$f" "$BUNDLE_DIR/$f"; fi
     done
   fi
-  if [ "$CREATED_VOLUME" = 1 ]; then
-    "$DOCKER" volume rm "$VOLUME" >/dev/null 2>&1 && echo "[profile-to-volume] removed the volume this run created ($VOLUME)" >&2 \
-      || echo "[profile-to-volume] could not remove $VOLUME: remove it before any later 'compose up': docker volume rm $VOLUME" >&2
+  if [ "$CREATED_VOLUME" = 1 ] && "$DOCKER" volume inspect "$VOLUME" >/dev/null 2>&1; then
+    if "$DOCKER" volume rm "$VOLUME" >/dev/null 2>&1; then note "removed the volume this run created ($VOLUME)"
+    else note "could not remove $VOLUME: remove it before any later 'compose up': docker volume rm $VOLUME"; fi
   fi
-  [ "$BUILT" = 1 ] && "$DOCKER" tag "$IMAGE" "$BUILD_NAME" >/dev/null 2>&1
-  [ "$POLICY_CHANGED" = 1 ] && "$DOCKER" update --restart="$POLICY" "$CONTAINER" >/dev/null 2>&1
+  if [ "$RETAGGED" = 1 ]; then "$DOCKER" tag "$IMAGE" "$BUILD_NAME" >/dev/null 2>&1; fi
+  "$DOCKER" rmi "$NEXT_TAG" >/dev/null 2>&1
+  if [ "$POLICY_CHANGED" = 1 ]; then "$DOCKER" update --restart="$POLICY" "$CONTAINER" >/dev/null 2>&1; fi
+  local started=1
   if [ "$WAS_RUNNING" = "true" ]; then
-    "$DOCKER" start "$CONTAINER" >/dev/null 2>&1 && echo "[profile-to-volume] the old container '$CONTAINER' is running again, unchanged" >&2 \
-      || echo "[profile-to-volume] could not start '$CONTAINER' again: docker start $CONTAINER" >&2
+    if "$DOCKER" start "$CONTAINER" >/dev/null 2>&1; then note "the old container '$CONTAINER' is running again, unchanged"
+    else started=0; note "could not start '$CONTAINER' again: docker start $CONTAINER (the deadman stays armed and retries)"; fi
   fi
+  [ "$started" = 1 ] && disarm_deadman rolled-back
+  cleanup_hint
   exit 1
 }
 trap rollback EXIT
 trap 'exit 130' INT TERM HUP
+trap '' PIPE
 set -e
 
 # ---- 2. keep the old image ---------------------------------------------------
@@ -237,9 +320,16 @@ say "old image tagged $PREV_TAG"
 
 # ---- 3. build first, while the old container still serves ---------------------
 STAGE=build
-BUILT=1
-"$DOCKER" build -t "$BUILD_NAME" "$SOURCE"
-say "new image built ($BUILD_NAME)."
+"$DOCKER" build -t "$NEXT_TAG" "$SOURCE"
+say "new image built ($NEXT_TAG)."
+
+# ---- 3b. the deadman, before anything takes prod down ---------------------------
+STAGE=deadman
+mkdir -p "$BACKUP"
+chmod 700 "$INSTANCE_HOME/browser-profile-backup" "$BACKUP"
+echo armed > "$BACKUP/state"
+arm_deadman
+say "deadman armed: $DEADMAN_UNIT (${CROW_MIGRATE_DEADMAN_SECS:-900}s)"
 
 # ---- 4. a graceful stop: Chromium flushes cookies and logins first ------------
 STAGE=stop
@@ -264,14 +354,12 @@ say "stopping $CONTAINER..."
 
 # ---- 5. back up ---------------------------------------------------------------
 STAGE=backup
-mkdir -p "$BACKUP"
-chmod 700 "$INSTANCE_HOME/browser-profile-backup" "$BACKUP"
 ( umask 077; "$DOCKER" cp "$CONTAINER:$PROFILE_DIR" - > "$BACKUP/profile.tar" )
 [ -s "$BACKUP/profile.tar" ] || { echo "empty profile backup" >&2; false; }
 FIRST="$(tar -tf "$BACKUP/profile.tar" | sed -n 1p)"
 [[ "$FIRST" == chromium-crow/* ]] || { echo "unexpected backup layout" >&2; false; }
 mkdir -p "$BACKUP/bundle-files"
-for f in docker-compose.yml entrypoint.sh Dockerfile .env; do
+for f in docker-compose.yml entrypoint.sh Dockerfile .dockerignore .env; do
   [ -e "$BUNDLE_DIR/$f" ] && cp -p "$BUNDLE_DIR/$f" "$BACKUP/bundle-files/$f"
 done
 # sha256 of the login-bearing files, from the tar itself.
@@ -290,8 +378,8 @@ say "profile backed up: $BACKUP/profile.tar ($(du -h "$BACKUP/profile.tar" | cut
 
 # ---- 6. the volume --------------------------------------------------------------
 STAGE=volume
+CREATED_VOLUME=1   # before the create (step 1 proved it absent; the rollback checks it exists)
 "$DOCKER" volume create --label "com.docker.compose.project=$PROJECT" --label "com.docker.compose.volume=$VOLUME_KEY" "$VOLUME" >/dev/null
-CREATED_VOLUME=1
 "$DOCKER" run --rm -i --network none --user 0:0 --entrypoint tar -v "$VOLUME:$PROFILE_DIR" "$IMAGE" \
   -xpf - --numeric-owner -C /root/.config < "$BACKUP/profile.tar"
 COUNT_TAR="$(tar -tf "$BACKUP/profile.tar" | wc -l)"
@@ -307,6 +395,7 @@ STAGE=install
 cp "$SOURCE/docker-compose.yml" "$BUNDLE_DIR/docker-compose.yml"
 install -m 755 "$SOURCE/entrypoint.sh" "$BUNDLE_DIR/entrypoint.sh"
 cp "$SOURCE/Dockerfile" "$BUNDLE_DIR/Dockerfile"
+if [ -f "$SOURCE/.dockerignore" ]; then cp "$SOURCE/.dockerignore" "$BUNDLE_DIR/.dockerignore"; fi
 if ! grep -q '^CROW_BROWSER_VNC_TOKEN=.\{32,\}' "$ENV_FILE"; then
   TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   sed -i '/^CROW_BROWSER_VNC_TOKEN=/d' "$ENV_FILE"
@@ -315,12 +404,17 @@ if ! grep -q '^CROW_BROWSER_VNC_TOKEN=.\{32,\}' "$ENV_FILE"; then
   say "added CROW_BROWSER_VNC_TOKEN to $ENV_FILE (not printed)"
 fi
 chmod 600 "$ENV_FILE"
+RETAGGED=1
+"$DOCKER" tag "$NEXT_TAG" "$BUILD_NAME"
 STAGE=recreate
 say "recreating $CONTAINER with the new compose (no rebuild)..."
 ( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" "$DOCKER" compose -p "$PROJECT" up -d --no-build --force-recreate )
 STAGE=done
 trap - EXIT INT TERM HUP
 set +e
+disarm_deadman done
+"$DOCKER" rmi "$NEXT_TAG" >/dev/null 2>&1   # the tag only: the image is $BUILD_NAME now
+say "deadman disarmed."
 
 # ---- 8. CDP -------------------------------------------------------------------
 WAIT="${CROW_MIGRATE_CDP_WAIT:-90}"

@@ -40,9 +40,11 @@ services:
       # The Chromium profile (cookies, saved logins) on a NAMED volume, so a
       # rebuild or a recreate (Configure → Restart, a proxy_url relaunch,
       # `compose down`/`up`) keeps it. Its name is explicit and per instance
-      # (`browser-chromium-profile` on the primary,
-      # `<CROW_BROWSER_CONTAINER_NAME>-chromium-profile` on a co-hosted one),
-      # from this bundle's .env, not from `-p`. An install from before 1.3.12 keeps its profile inside
+      # (`browser_chromium-profile` on the primary,
+      # `<CROW_BROWSER_CONTAINER_NAME>_chromium-profile` on a co-hosted one),
+      # from this bundle's .env, not from `-p`. The "_" matters: bundle ids
+      # have no "_", so no other bundle's project can claim this name (the
+      # compose guard also refuses a volume another project created). An install from before 1.3.12 keeps its profile inside
       # the old container until it is moved, once, with
       # scripts/ops/browser-profile-to-volume.sh (never run automatically).
       # `docker compose down -v` deletes the volume, and with it every login.
@@ -54,6 +56,8 @@ services:
     # so not in `docker inspect`). An old .env's VNC password line is harmless:
     # it is simply not passed any more. After changing the token in .env,
     # recreate the container (the gateway reads the new one on every upgrade).
+    # `configs: content:` needs Docker Compose 2.23.1 or newer; an older Compose
+    # refuses this file (it fails closed).
     configs:
       - source: vnc_token
         target: /run/secrets/crow-vnc-token
@@ -68,7 +72,7 @@ services:
 
 volumes:
   chromium-profile:
-    name: ${CROW_BROWSER_CONTAINER_NAME:-browser}-chromium-profile
+    name: ${CROW_BROWSER_CONTAINER_NAME:-browser}_chromium-profile
 
 configs:
   vnc_token:

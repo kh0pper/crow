@@ -151,7 +151,8 @@ test("compose passes the token (required), no VNC password, and its downloads mo
     "- chromium-profile:/root/.config/chromium-crow",
   ], "the downloads bind mount as before, plus the profile's named volume");
   // A NAMED volume (compose prefixes it with the project: one per instance), never a bind or external one.
-  assert.match(COMPOSE, /\nvolumes:\n  chromium-profile:\n    name: \$\{CROW_BROWSER_CONTAINER_NAME:-browser\}-chromium-profile\n/, "an explicit per-instance name from this bundle's .env, not from -p");
+  assert.match(COMPOSE, /\nvolumes:\n  chromium-profile:\n    name: \$\{CROW_BROWSER_CONTAINER_NAME:-browser\}_chromium-profile\n/, "an explicit per-instance name from this bundle's .env, not from -p; '_' so no bundle id can claim it by prefix");
+  assert.match(COMPOSE, /needs Docker Compose 2\.23\.1 or newer/, "the configs: content: minimum is documented");
   // The token's directory and the profile volume never overlap.
   const profile = "/root/.config/chromium-crow", vncDir = /^VNC_DIR=(\S+)$/m.exec(ENTRYPOINT)[1];
   assert.ok(!vncDir.startsWith(profile) && !profile.startsWith(vncDir), vncDir + " vs " + profile);
@@ -263,6 +264,17 @@ test("a graceful stop: SIGTERM goes to Chromium, which gets time to flush before
 test("the instance marker: the profile names its Crow instance, and a different one refuses to start", () => {
   assert.match(CODE, /^INSTANCE_MARKER="\$\{PROFILE_DIR\}\/\.crow-instance"$/m);
   assert.match(CODE, /\[ -n "\$CROW_INSTANCE" \] \|\| die/);
-  assert.match(CODE, /\[ "\$\(cat "\$INSTANCE_MARKER"\)" = "\$CROW_INSTANCE" \] \\\n\s+\|\| die "this browser profile belongs to the Crow instance/);
+  assert.match(CODE, /\[ "\$\(realpath -m -- "\$\(cat "\$INSTANCE_MARKER"\)"\)" = "\$CROW_INSTANCE" \] \\\n\s+\|\| die "this browser profile belongs to the Crow instance/);
   assert.ok(CODE.indexOf("INSTANCE_MARKER\" ]") < CODE.indexOf("--remote-debugging-port"), "checked before Chromium opens the profile");
+});
+
+test("round 3: Browser.close is bounded (timeout 10), and the marker compares canonical paths on both sides", () => {
+  assert.match(CODE, /^  timeout 10 python3 - "\$CDP_PORT" <<'PY' >\/dev\/null 2>&1$/m);
+  const fn = CODE.slice(CODE.indexOf("shutdown() {"), CODE.indexOf("\n}\n", CODE.indexOf("shutdown() {")));
+  assert.match(fn, /for i in \$\(seq 1 30\); do/, "15 s for Chromium to close itself, inside the 30 s grace period");
+  assert.match(CODE, /CROW_INSTANCE="\$\(realpath -m -- "\$CROW_INSTANCE"\)"/);
+  assert.match(CODE, /\[ "\$\(realpath -m -- "\$\(cat "\$INSTANCE_MARKER"\)"\)" = "\$CROW_INSTANCE" \]/);
+  const script = readFileSync(new URL("scripts/ops/browser-profile-to-volume.sh", REPO), "utf8");
+  assert.match(script, /^  timeout 10 python3 - "\$1" <<'PY' >\/dev\/null 2>&1$/m);
+  assert.match(script, /^INSTANCE_HOME="\$\(realpath -m -- /m);
 });

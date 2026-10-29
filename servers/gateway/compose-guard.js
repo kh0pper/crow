@@ -22,6 +22,7 @@ import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 // A value Compose sees for a `${VAR:?}` the install left blank (a collection member,
 // finished later with Configure): relative, so it resolves inside the bundle dir.
@@ -289,6 +290,26 @@ function isShippedPreviewSeccomp(opt) {
  * `coreAllowance` names a core allowance (above); bundles never pass one.
  * @returns {{valid: true} | {valid: false, reason: string}}
  */
+/** True when a bundle `id` may own compose project `project` (<id>, crow-<id>, or either + "-suffix"). */
+export function ownableProject(id, project) {
+  const p = String(project || "");
+  return [id, `crow-${id}`].some((b) => p === b || p.startsWith(`${b}-`));
+}
+
+/**
+ * The compose project label of an existing docker volume, "" when it has none, or
+ * null when there is no such volume (or no docker). For ctx.volumeProject.
+ */
+export function dockerVolumeProject(name) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(String(name))) return null;
+  try {
+    return execFileSync("docker", ["volume", "inspect", "--format", '{{index .Labels "com.docker.compose.project"}}', name],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim();
+  } catch {
+    return null;
+  }
+}
+
 export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
   if (coreAllowance !== undefined && !CORE_ALLOWANCES.has(coreAllowance)) return { valid: false, reason: `unknown core allowance '${String(coreAllowance).slice(0, 40)}'` };
   const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified && manifest?.origin !== "community");
@@ -602,6 +623,18 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     let r;
     if ((r = checkKeys(vol, ["name", "driver", "driver_opts", "external", "labels"], `volume ${name}`))) return r;
     if (!vol.external && vol.name && !inProject(String(vol.name))) return refuse(`volume '${name}' is named outside this project (${String(vol.name).slice(0, 60)}): another bundle's data`);
+    // A volume that already exists belongs to whichever compose project created it
+    // (its com.docker.compose.project label). The name rule above is prefix-based, so
+    // a bundle whose id extends another's (browser-chromium vs browser) could still
+    // name a volume the other created; refuse unless that project is one this
+    // bundle may own itself. Unlabelled volumes keep Compose's own adoption rule.
+    if (!vol.external && ownId && typeof ctx?.volumeProject === "function") {
+      const real = String(vol.name || `${project}_${name}`);
+      const owner = ctx.volumeProject(real);
+      if (owner && !ownableProject(ownId, owner)) {
+        return refuse(`volume '${real.slice(0, 60)}' already exists and belongs to compose project '${String(owner).slice(0, 60)}': another bundle's data`);
+      }
+    }
     // An external volume is another project's data (another extension's database…).
     if (vol.external && (r = needPriv(`the external volume '${vol.name || name}'`))) return r;
     if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
@@ -655,7 +688,12 @@ export function composeEnv(base, crowHome) {
   for (const [k, v] of Object.entries(base || {})) {
     if (COMPOSE_ENV_KEYS.has(k) || /^LC_[A-Z]+$/.test(k) || (/^DOCKER_[A-Z_]+$/.test(k) && k !== "DOCKER_DEFAULT_PLATFORM")) env[k] = v;
   }
-  env.CROW_HOME = crowHome;
+  // Canonical (symlinks and trailing slashes resolved): the browser bundle stamps
+  // its profile with this path and refuses a different one on the next start, so
+  // the gateway and an operator's script must pass the same spelling.
+  let home = crowHome;
+  try { home = realpathSync(crowHome); } catch { if (typeof crowHome === "string" && crowHome) home = resolvePath(crowHome); }
+  env.CROW_HOME = home;
   return env;
 }
 

@@ -166,7 +166,7 @@ docker compose stop       # detener
 docker compose logs -f    # ver registros
 ```
 
-El perfil del navegador (sus cookies y sesiones iniciadas) vive en un volumen de Docker con nombre, uno por instancia (`browser-chromium-profile` en la instancia principal), así que detener, reiniciar, reconstruir o recrear el contenedor lo conserva. Solo `docker compose down -v` (o `docker volume rm`) lo borra. Una instalación anterior a 1.3.12 mantiene su perfil dentro del contenedor antiguo hasta que un operador lo mueve una vez con `scripts/ops/browser-profile-to-volume.sh` (primero con `--dry-run`); hasta entonces, evita todo lo que recree ese contenedor.
+El perfil del navegador (sus cookies y sesiones iniciadas) vive en un volumen de Docker con nombre, uno por instancia (`browser_chromium-profile` en la instancia principal), así que detener, reiniciar, reconstruir o recrear el contenedor lo conserva. Solo `docker compose down -v` (o `docker volume rm`) lo borra. El bundle necesita Docker Compose 2.23.1 o posterior (entrega la clave del visor al contenedor como un archivo `configs` de compose). Una instalación anterior a 1.3.12 mantiene su perfil dentro del contenedor antiguo hasta que un operador lo mueve una vez con `scripts/ops/browser-profile-to-volume.sh` (primero con `--dry-run`); hasta entonces, evita todo lo que recree ese contenedor.
 
 ## Skill de declaración FFFF
 

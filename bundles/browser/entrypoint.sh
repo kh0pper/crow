@@ -85,9 +85,12 @@ chmod 600 "${VNC_DIR}/crow_quiet_token.py"
 # mistake) refuses to start instead of opening someone else's logins.
 CROW_INSTANCE="${CROW_INSTANCE:-}"
 [ -n "$CROW_INSTANCE" ] || die "CROW_INSTANCE is not set (compose passes this instance's CROW_HOME)"
+# Compared canonically on both sides (a symlinked or trailing-slash CROW_HOME is
+# the same instance). The path is the HOST's, so -m: it need not exist here.
+CROW_INSTANCE="$(realpath -m -- "$CROW_INSTANCE")"
 mkdir -p "$PROFILE_DIR"
 if [ -f "$INSTANCE_MARKER" ]; then
-  [ "$(cat "$INSTANCE_MARKER")" = "$CROW_INSTANCE" ] \
+  [ "$(realpath -m -- "$(cat "$INSTANCE_MARKER")")" = "$CROW_INSTANCE" ] \
     || die "this browser profile belongs to the Crow instance at '$(head -c 200 "$INSTANCE_MARKER")', not '${CROW_INSTANCE}'. Refusing to open another instance's logins: check the volume and the compose project."
 else
   printf '%s' "$CROW_INSTANCE" > "$INSTANCE_MARKER"
@@ -271,7 +274,7 @@ echo ""
 # in a throwaway container), so close it the way a user would: CDP
 # Browser.close, then fall back to SIGTERM.
 cdp_close() {
-  python3 - "$CDP_PORT" <<'PY' >/dev/null 2>&1
+  timeout 10 python3 - "$CDP_PORT" <<'PY' >/dev/null 2>&1
 import base64, json, os, socket, sys, urllib.request
 port = int(sys.argv[1])
 url = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=3))["webSocketDebuggerUrl"]
@@ -300,7 +303,7 @@ PY
 shutdown() {
   log "stopping: closing Chromium..."
   cdp_close || true
-  for i in $(seq 1 40); do
+  for i in $(seq 1 30); do
     kill -0 "$CHROME_PID" 2>/dev/null || break
     sleep 0.5
   done
