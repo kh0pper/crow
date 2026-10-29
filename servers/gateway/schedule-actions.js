@@ -141,8 +141,10 @@ export async function runScheduleNow(db, id, { now = Date.now(), botReady = asyn
   const deliver = spec.deliver_to == null ? null : typeof spec.deliver_to === "string" ? spec.deliver_to : JSON.stringify(spec.deliver_to);
   const stmts = [{
     // Coalesced in the same statement: no second job while one is still queued.
-    sql: `INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate)
-          SELECT ?, ?, ?, 'queued', ?, 'schedule', ?, ? WHERE NOT EXISTS (SELECT 1 FROM bot_jobs WHERE schedule_id = ? AND status = 'queued')`,
+    // principal 'owner': "Run now" is the owner pressing the button on the Schedule page (plan decision 1).
+    // A job the cron already queued stays as it is (NULL, not the owner's): the coalesce returns it.
+    sql: `INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate, principal)
+          SELECT ?, ?, ?, 'queued', ?, 'schedule', ?, ?, 'owner' WHERE NOT EXISTS (SELECT 1 FROM bot_jobs WHERE schedule_id = ? AND status = 'queued')`,
     args: [jobId, botId, String(spec.goal), deliver, id, spec.escalate ? 1 : 0, id],
   }];
   if (await hasRunsTable(db)) {

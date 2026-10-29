@@ -78,7 +78,7 @@ test("startAfterGive returns the thread id of the started session", async () => 
   setStatus({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
   const { cardId, row } = await svc.createTaskForBot(db, tdb, "writer", { title: "Start me" });
   const ctx = { db, tdb };
-  const out = await svc.startAfterGive(ctx, { row, getEng: fakeEngine, botId: "writer", cardId, start: true, note: "go" });
+  const out = await svc.startAfterGive(ctx, { row, getEng: fakeEngine, botId: "writer", cardId, start: true, note: "go", principal: "owner" });
   assert.equal(out.started, true);
   assert.equal(out.sessionId, "s1");
   assert.equal(out.threadId, "t-77");
@@ -97,7 +97,7 @@ test("a perch-less bot is assigned, not started", async () => {
   const row = raw.prepare("SELECT * FROM pi_bot_defs WHERE bot_id='plain'").get();
   raw.close();
   const { id } = await (await import("../servers/gateway/board/card-service.js")).createCard(tdb, { title: "No perch", project_id: PID, assigned_bot: "plain" }, svc.DASHBOARD_ACTOR);
-  const out = await svc.startAfterGive({ db, tdb }, { row, getEng: fakeEngine, botId: "plain", cardId: id, start: true });
+  const out = await svc.startAfterGive({ db, tdb }, { row, getEng: fakeEngine, botId: "plain", cardId: id, start: true, principal: "owner" });
   assert.equal(out.assigned, true);
   assert.equal(out.started, false);
   assert.equal(out.code, "perch_not_attached");

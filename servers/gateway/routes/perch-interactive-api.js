@@ -508,7 +508,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       }
 
       const eng = resolveEngine();
-      const result = await eng.spawn(briefing ? { botId, cwd, briefing, briefingRank, briefingRefs: refs } : { botId, cwd });
+      // The owner's own dashboard: the one place a Perch spawn is the owner's
+      // turn (project services, plan decision 1; the engine has no default).
+      const result = await eng.spawn(briefing ? { botId, cwd, briefing, briefingRank, briefingRefs: refs, principal: "owner" } : { botId, cwd, principal: "owner" });
       if (result && result.threadId) {
         // The session is already running: a filing failure must not fail the spawn.
         try { await ensureItem(db, "perch_thread", result.threadId, { projectId, setBy: given ? "operator" : "origin" }); }
@@ -609,7 +611,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     try {
       const eng = resolveEngine();
       const text = notes.lines.length ? notes.lines.join("\n") + "\n\n" + message : message;
-      const result = await eng.message(sid, text, images);
+      // The owner typed it here (the offer lines are fixed gateway text).
+      const result = await eng.message(sid, text, images, { principal: "owner" });
       res.status(202).json({ turnId: result.turnId });
     } catch (err) {
       if (notes.claims.length) {
@@ -781,7 +784,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const ctx = { db, tdb: null };
     try {
       const row = await loadBotRow(db, botId);
-      const result = await dispatchCard(ctx, { row, getEng: resolveEngine, botId, cardId, note });
+      const result = await dispatchCard(ctx, { row, getEng: resolveEngine, botId, cardId, note, principal: "owner" });
       res.status(201).json(result);
     } catch (err) {
       mapEngineError(res, err);
@@ -832,7 +835,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       await updateCard(ctx.tdb, cardId, { project_id: projectId, assigned_bot: botId }, DASHBOARD_ACTOR);
       const children = await moveDescendants(ctx.tdb, cardId, projectId);
       await giveAudit(db, row, cardId, { start: body.start === true, ...(children ? { children } : {}) });
-      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note })));
+      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note, principal: "owner" })));
     } catch (err) {
       mapEngineError(res, err);
     } finally {
@@ -858,7 +861,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     try {
       const { cardId, row } = await createTaskForBot(db, () => (ctx.tdb = createDbClient(TASKS_DB)), botId,
         { title, audit: { start: body.start === true } });
-      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note })));
+      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note, principal: "owner" })));
     } catch (err) {
       mapEngineError(res, err);
     } finally {

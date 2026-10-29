@@ -162,7 +162,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.9.4",
+      "version": "0.9.5",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",
@@ -5104,7 +5104,7 @@
     {
       "id": "phone",
       "name": "Phone",
-      "version": "0.2.7",
+      "version": "0.2.8",
       "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
       "type": "bundle",
       "author": "Crow",

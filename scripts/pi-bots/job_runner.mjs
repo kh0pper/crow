@@ -111,6 +111,10 @@ export function enqueueJob(opts) {
     const job_id = opts.job_id || generateJobId();
     const deliver_to = opts.deliver_to == null ? null
       : (typeof opts.deliver_to === "string" ? opts.deliver_to : JSON.stringify(opts.deliver_to));
+    // principal stays NULL (not the owner's turn): plan decision 1 ("only my own turns"). Nothing that
+    // reaches this enqueue (the cron scheduler, the CLI, the pi-bots side) records who asked, so its jobs
+    // never use the owner's connected accounts (Known bound: schedules record no creator). Stale-claim
+    // recovery re-queues the SAME row, so an owner job keeps its own principal.
     c.prepare(
       "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate) " +
       "VALUES (?,?,?,'queued',?,?,?,?)"

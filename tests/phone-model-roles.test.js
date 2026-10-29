@@ -290,5 +290,5 @@ test("delete confirm lists roles", async () => {
 
 test("manifest bumped", () => {
   const manifest = JSON.parse(readFileSync(join(ROOT, "bundles", "phone", "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "0.2.7");
+  assert.equal(manifest.version, "0.2.8");
 });

@@ -255,7 +255,9 @@ export async function confirm(core, db, id, decision, via) {
     let engP = null;
     const getEng = () => (engP ??= core.engine());
     // ctx.db is the assignment guard's crow.db read (dispatchCard); it is used only before the spawn.
-    const p = core.give.startAfterGive({ db, tdb }, { row: created.row, getEng, botId: row.bot_id, cardId: created.cardId, start: true, note: "" });
+    // Project services: a hand-off is not the owner's own turn yet (rev 4 H3; owner ruling 2026-10-29: phone-confirmed
+    // and glasses hand-offs become the owner's in roadmap PR 10, the kiosk never), so no connected accounts.
+    const p = core.give.startAfterGive({ db, tdb }, { row: created.row, getEng, botId: row.bot_id, cardId: created.cardId, start: true, note: "", principal: "other" });
     const raced = await Promise.race([p.then((r) => ({ r })), core.wait(HANDOFF_START_BUDGET_MS).then(() => null)]);
     const vars = { bot: h.name, task: h.task };
     if (raced && raced.r.started !== true) return await settle(core, db, h, "queued", String(raced.r.code || "start_failed"), "handoff_queued");

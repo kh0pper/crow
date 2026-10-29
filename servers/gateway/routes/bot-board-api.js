@@ -166,9 +166,12 @@ async function ensureBotJobs(cdb) {
 async function enqueueCardJob(cdb, { botId, cardId, action, goal }) {
   await ensureBotJobs(cdb);
   const jobId = "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  // principal 'owner': this enqueue runs only from the owner's dashboard dispatch route (session-authed,
+  // CSRF-checked), so the job is the owner's own turn and may use the project's connected accounts (plan
+  // decision 1, rev 4 H2: a job is the owner's exactly when principal = 'owner').
   await cdb.execute({
-    sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id, card_action) "
-       + "VALUES (?, ?, ?, 'queued', NULL, 'card', ?, ?)",
+    sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id, card_action, principal) "
+       + "VALUES (?, ?, ?, 'queued', NULL, 'card', ?, ?, 'owner')",
     args: [jobId, botId, goal, cardId, action],
   });
   return jobId;

@@ -235,7 +235,8 @@ test("delivery: an untrusted round always gets a NEW session LOCKED to the Artif
     sessions: [{ sessionId: "s-live", botId: "bobby", threadId: "perchlive-origin", state: "idle" }],
     async list() { return this.sessions; },
     async spawn(o) { calls.push(["spawn", o]); if (this.full) throw Object.assign(new Error("interactive_capacity"), { code: "interactive_capacity" }); return { sessionId: "s-new", threadId: "perchlive-new" }; },
-    async message(id, text) {
+    async message(id, text, _images, opts) {
+      assert.deepEqual(opts, { principal: "other" }, "every delivered round is other");
       calls.push(["message", id, text.slice(0, 40)]);
       if (id === "s-new" && taintAtSend === null) {
         // The ARTIFACT_SESSION_TAINT ROW itself (sessionIsClean would read
@@ -253,7 +254,8 @@ test("delivery: an untrusted round always gets a NEW session LOCKED to the Artif
   const r = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, include: [t1.threadId] });
   const out = await deliverRound(s.db, r, { engine, botDef: def });
   assert.equal(out.threadId, "perchlive-new");
-  assert.deepEqual(calls[0], ["spawn", { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"] }], "never the live origin session");
+  // Project services: a delivered round is never the owner's own turn (plan decision 1).
+  assert.deepEqual(calls[0], ["spawn", { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"], principal: "other" }], "never the live origin session");
   assert.equal(taintAtSend, true, "the taint record exists BEFORE the round text is sent (review C2-R2)");
   assert.equal((await rounds.getRound(s.db, r.id)).session_id, "perchlive-new");
   await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "ok" });
@@ -720,7 +722,7 @@ test("R2-H1: a change in the snapshot's provenance downgrades the round to untru
   await s.db.execute({ sql: "UPDATE artifact_comments SET tainted=1 WHERE thread_id=? AND author_kind='bot'", args: [t.threadId] });
   const out = await deliverRound(s.db, await rounds.getRound(s.db, r.id), { engine, botDef: { tools: { crow_mcp: ["artifacts"] } } });
   assert.equal(out.threadId, "perchlive-prov-l");
-  assert.deepEqual(spawns, [{ botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"] }]);
+  assert.deepEqual(spawns, [{ botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"], principal: "other" }]);
   assert.equal((await rounds.getRound(s.db, r.id)).untrusted, true);
 });
 

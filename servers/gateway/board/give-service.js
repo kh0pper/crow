@@ -88,7 +88,8 @@ export async function assertBotUnblocked(db, botId) {
  * Perch checks pass: resolving it creates the interactive-engine singleton,
  * which a refused dispatch (or a give that never starts) must not do.
  */
-export async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance = false }) {
+export async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance = false, principal }) {
+  requirePrincipal(principal);
   await assertBotUnblocked(ctx.db, botId);
   if (resolveEngineStatus().state !== "ready") throw routeFail("engine_required", "engine_required", 409);
   const def = row ? parseDef(row) : {};
@@ -99,7 +100,7 @@ export async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skip
   await loadDispatchableCard(ctx.tdb, cardId);
 
   await eng.checkCardFree(cardId);
-  const result = await eng.spawn({ botId, cardId });
+  const result = await eng.spawn({ botId, cardId, principal });
 
   // Provenance: the assigned_bot write goes through the SAME service
   // updateCard()/board_update_item's route uses (bot-board-api.js's own
@@ -130,19 +131,33 @@ export async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skip
   // to fire — see perch-interactive.js's own header note). Never awaited
   // — the route responds as soon as the session exists, not once the
   // agent turn finishes.
-  eng.message(result.sessionId, note).catch(() => {});
+  eng.message(result.sessionId, note, undefined, { principal }).catch(() => {});
   return result;
+}
+
+/**
+ * Who started the turn a dispatch starts (project services, plan decision 1
+ * and rev 4 H3): REQUIRED, no default. "owner" only from the owner's own
+ * dashboard (Give, dispatch); every voice hand-off passes "other" until
+ * roadmap PR 10. Anything else is a programming error and throws before any
+ * check or spawn, so a new caller cannot forget to say.
+ */
+function requirePrincipal(principal) {
+  if (principal !== "owner" && principal !== "other") {
+    throw Object.assign(new TypeError("dispatch principal must be \"owner\" or \"other\""), { code: "principal_required" });
+  }
 }
 
 /** After a give: the response, and — only on an explicit boolean
  * start:true ("Start right away" defaults OFF) — the dispatch core. A start
  * that fails does NOT undo the give: the card is visibly on the bot's board
  * and can be started from there; the response says why it did not start. */
-export async function startAfterGive(ctx, { row, getEng, botId, cardId, start, note }) {
+export async function startAfterGive(ctx, { row, getEng, botId, cardId, start, note, principal }) {
+  requirePrincipal(principal);
   const out = { ok: true, assigned: true, started: false, cardId };
   if (start !== true) return out;
   try {
-    const r = await dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance: true });
+    const r = await dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance: true, principal });
     return { ...out, started: true, sessionId: r.sessionId, threadId: r.threadId };
   } catch (err) {
     return { ...out, code: String((err && err.code) || "start_failed") };
