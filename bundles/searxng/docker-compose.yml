@@ -63,7 +63,7 @@ services:
             sed -i "s|^  secret_key:.*|  secret_key: \"$$SEARXNG_SECRET_KEY\"|" "$$CONFIG" || true
           fi
         fi
-        exec /usr/local/searxng/dockerfiles/docker-entrypoint.sh
+        exec /usr/local/searxng/entrypoint.sh
     init: true
     mem_limit: 512m
     restart: unless-stopped
