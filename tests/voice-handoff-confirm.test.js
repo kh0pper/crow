@@ -566,6 +566,13 @@ test("a yes after expiry creates nothing", async () => {
   const r = await s.core.confirm(s.db, id, "yes", "voice");
   assert.equal(r.status, "expired");
   assert.equal(r.say, line("handoff_failed"));
+  // A no on an expired proposal just declines.
+  const s3 = await setup();
+  const { id: id3 } = await s3.propose();
+  s3.now.advance(HANDOFF_PROPOSAL_TTL_MS + 1);
+  assert.deepEqual(await s3.core.confirm(s3.db, id3, "no", "voice"), { status: "expired", say: "Okay, I won't." });
+  assert.equal((await s3.row(id3)).status, "expired");
+  s3.done();
   assert.deepEqual(await s.cards(), []);
   assert.equal((await s.row(id)).status, "expired");
   assert.equal(s.eng.calls.spawn.length, 0);
@@ -707,9 +714,40 @@ test("a long yes never speaks on it without a card", async () => {
   const r = await s.row(id);
   assert.equal(r.status, "failed");
   assert.equal(r.card_id, null);
-  assert.ok(r.detail, "the error code is kept");
+  assert.equal(r.detail, "tasks_db");
   assert.equal(s.eng.calls.spawn.length, 0);
   assert.equal(s.core.inFlight.size, 0);
+  s.done();
+});
+
+test("a tasks store that cannot be opened fails the row at once, never leaving it starting for the sweep", async () => {
+  const s = await setup();
+  const { id } = await s.propose();
+  s.core.openTasksDb = () => { throw new Error("tasks.db is locked"); };
+  const fp = await s.answer("yes");
+  assert.deepEqual(fp, { say: line("handoff_failed"), verb: "handoff_failed" });
+  const r = await s.row(id);
+  assert.equal(r.status, "failed");
+  assert.equal(r.detail, "tasks_db");
+  assert.equal(s.core.inFlight.size, 0);
+  // A give refusal keeps its own code.
+  const s2 = await setup();
+  const { id: id2 } = await s2.propose();
+  s2.core.give.createTaskForBot = async () => { throw Object.assign(new Error("no board"), { code: "no_board", http: 409 }); };
+  await s2.answer("yes");
+  assert.equal((await s2.row(id2)).detail, "no_board");
+  s.done(); s2.done();
+});
+
+test("a no that changes the task is a correction, not a decline", async () => {
+  const s = await setup();
+  const { id } = await s.propose();
+  assert.equal(await s.answer("no, have writer write a summary instead"), null);
+  assert.equal(await s.answer("no, make it about radio drama"), null);
+  assert.equal((await s.row(id)).status, "proposed");
+  assert.equal(s.pending.get(DEVICE.id).id, id, "still waiting: the model re-proposes");
+  assert.deepEqual(await s.answer("no thanks"), { say: "Okay, I won't.", verb: "handoff_declined" });
+  assert.equal((await s.row(id)).status, "declined");
   s.done();
 });
 
@@ -811,7 +849,7 @@ test("which, then \"the helper one\", re-proposes helper; \"what's on the menu\"
   assert.equal(e.bot_id, "helper");
   const r = await s.row(e.id);
   assert.equal(r.status, "proposed");
-  assert.equal(r.asked, "the helper one");
+  assert.equal(r.asked, "could someone research radio history", "the original request, not the answer to which one");
   assert.equal(r.surface, "phone");
   // And a yes to that re-proposal hands it to helper.
   assert.equal((await s.answer("yes")).say, "Okay, Helper's on it.");
@@ -838,9 +876,11 @@ test("turnContext names the pending hand-off or the which options, and nothing e
 test("startHandoffSweep runs the store's sweep with the in-flight set, the card finder and the engine's stop (R8), armed once", async () => {
   const seen = [];
   const eng = { calls: [], stop: async (sid) => { eng.calls.push(sid); return { ok: true }; } };
+  let present = eng;
+  const asked = [];
   const core = createHandoffCore({
     store: { sweep: async (db, opts) => { seen.push({ db, opts }); return { expired: 0 }; } },
-    summaries: { get: async () => [] }, engine: async () => eng, log: () => {},
+    summaries: { get: async () => [] }, engine: async (o) => { asked.push(o); return present; }, log: () => {},
   });
   const fake = { execute: async () => ({ rows: [] }), closed: 0, close() { fake.closed++; } };
   const sweep = startHandoffSweep({ core, intervalMs: 3_600_000, openDb: () => fake });
@@ -854,6 +894,9 @@ test("startHandoffSweep runs the store's sweep with the in-flight set, the card 
     assert.equal(seen[0].opts.findCard, findHandoffCard);
     await seen[0].opts.retryStop("s-9");
     assert.deepEqual(eng.calls, ["s-9"], "retryStop is the engine's stop");
+    assert.deepEqual(asked, [{ createIfMissing: false }], "the sweep never mints an engine");
+    present = null;
+    await assert.rejects(seen[0].opts.retryStop("s-9"), (e) => e.code === "no_such_session", "no engine: nothing to stop");
   } finally { sweep.stop(); }
   const { readFileSync } = await import("node:fs");
   assert.match(readFileSync(join(REPO, "servers/gateway/boot/post-listen.js"), "utf8"), /startHandoffSweep\(\)/, "armed at boot");

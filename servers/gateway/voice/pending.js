@@ -67,6 +67,11 @@ const leadsCorrection = (words) => CORRECTION_LEADS.some((lead) => {
   for (let i = 0; i + lead.length < words.length; i++) if (lead.every((w, j) => words[i + j] === w)) return true;
   return false;
 });
+/** The transcript carries a correction lead with more words after it ("no, make it about radio drama"): what was
+ * asked is being changed, so a no is not a plain decline either (the hand-off fastPath lets the model re-propose). */
+export function hasCorrectionLead(transcript) {
+  return leadsCorrection(phraseWords(transcript));
+}
 
 /**
  * "yes" | "no" | null. yes: isAffirmative, and the utterance names no bot in otherBots (ids or names), no

@@ -24,7 +24,7 @@ import { createSummaryCache, listHandoffCandidates, cleanName } from "./bot-summ
 import { createVoiceBotLoader } from "./crow-voice.js";
 import { botDefsGeneration } from "./defs-generation.js";
 import { modelAvailability } from "./model-availability-voice.js";
-import { matchYesNo } from "./pending.js";
+import { matchYesNo, hasCorrectionLead } from "./pending.js";
 import { matchChoice } from "./own-tools.js";
 import { phraseWords, listMatches } from "./tool-families.js";
 import { HANDOFF_TASK_MAX_CHARS, HANDOFF_START_BUDGET_MS } from "./handoff-constants.js";
@@ -233,14 +233,15 @@ async function settle(core, db, h, to, detail, key) {
   return { status: to, say: voiceLine(key, h.lang, vars) };
 }
 
-/** A confirm CAS that lost: the row is past its TTL (still in `from`) → expired; otherwise it was decided already. */
-async function lostConfirm(core, db, h, from) {
+/** A confirm CAS that lost: the row is past its TTL (still in `from`) → expired (a no still just declines);
+ * otherwise it was decided already. */
+async function lostConfirm(core, db, h, from, decision) {
   const now = await core.store.get(db, h.id);
   if (!now) return { status: "none" };
   const vars = { bot: h.name, task: h.task };
   if (from.includes(now.status)) {
     await core.store.transition(db, h.id, from, "expired");
-    return { status: "expired", say: voiceLine("handoff_failed", h.lang, vars) };
+    return { status: "expired", say: decision === "no" ? voiceLine("declined", h.lang) : voiceLine("handoff_failed", h.lang, vars) };
   }
   return { status: "already", say: voiceLine("handoff_already", h.lang, vars) };
 }
@@ -347,9 +348,9 @@ async function confirm(core, db, id, decision, via) {
   const h = { id, lang: langOf(row.lang), name: await botName(db, row.bot_id), task: row.task, deviceId: row.device_id, cardId: null, projectId: null };
   if (decision === "no") {
     if (await store.transition(db, id, from, "declined", {}, { live: true })) return { status: "declined", say: voiceLine("declined", h.lang) };
-    return lostConfirm(core, db, h, from);
+    return lostConfirm(core, db, h, from, "no");
   }
-  if (!(await store.transition(db, id, from, "starting", {}, { live: true }))) return lostConfirm(core, db, h, from);
+  if (!(await store.transition(db, id, from, "starting", {}, { live: true }))) return lostConfirm(core, db, h, from, "yes");
   core.inFlight.add(id);
   let detached = false;
   let tdb = null;
@@ -359,18 +360,21 @@ async function confirm(core, db, id, decision, via) {
     if (!target) return await settle(core, db, h, "failed", "not_allowed", "handoff_failed");
     h.name = target.name;
 
-    tdb = core.openTasksDb();
     let created;
     try {
+      tdb = core.openTasksDb();
       created = await core.give.createTaskForBot(db, tdb, row.bot_id, {
         title: cutOnWord(row.task, TITLE_MAX), description: cardDescription(row, core.now()), tags: "crow-voice",
         audit: { via: "voice", surface: row.surface, handoff_id: id },
       });
     } catch (err) {
-      if (err?.cardId == null) return await settle(core, db, h, "failed", String(err?.code || err?.message || "create_failed"), "handoff_failed");
+      // No card: a give refusal keeps its code; anything else (the tasks store could not be opened or written)
+      // is "tasks_db". The row settles now, never left `starting` for the sweep.
+      if (err?.cardId == null) return await settle(core, db, h, "failed", err?.http && err?.code ? String(err.code) : "tasks_db", "handoff_failed");
       // The card exists (the audit row after it failed): it is on the board, and it waits there.
       h.cardId = err.cardId;
       await store.setFields(db, id, { card_id: err.cardId });
+      claimResult(err.cardId, "voice");
       core.log(`[voice-handoff] ${id}: card ${err.cardId} created, give audit failed (${err?.message || err})`);
       return await settle(core, db, h, "queued", String(err?.code || "audit_failed"), "handoff_queued");
     }
@@ -406,9 +410,10 @@ async function confirm(core, db, id, decision, via) {
 
 // ---- The core and its seams ---------------------------------------------------------------------------------
 
-async function defaultEngine() {
+/** The interactive engine; `createIfMissing: false` gives null when this process never minted one. */
+async function defaultEngine({ createIfMissing = true } = {}) {
   const { getInteractiveEngine } = await import("../perch-interactive.js");
-  return getInteractiveEngine();
+  return getInteractiveEngine({ createIfMissing });
 }
 
 /** A short-lived crow.db client for work that outlives the voice turn (the detached start, the turn-1 report). */
@@ -430,7 +435,7 @@ async function defaultAnnounce(args) {
 
 /**
  * A hand-off core from its seams. `give` is the give-service (createTaskForBot, startAfterGive,
- * fileStartedThread), `engine` an async getter for the interactive engine, `openTasksDb` the tasks.db client
+ * fileStartedThread), `engine` an async getter for the interactive engine (`{ createIfMissing }`), `openTasksDb` the tasks.db client
  * a confirm opens and closes, `notify` createNotification, `withDb` a short-lived crow.db for detached work,
  * `wait` the start-budget timer, `announce` presence's (PR 5). 5.3 and 5.4 add status and stop.
  */
@@ -462,7 +467,12 @@ export function createHandoffCore({
  */
 export function startHandoffSweep({ core = getHandoffCore(), intervalMs = 60_000, openDb = () => createDbClient() } = {}) {
   if (core.sweep) return core.sweep;
-  const retryStop = (sid) => core.engine().then((eng) => eng.stop(sid));
+  // No engine in this process means no session to stop: the pending stop is settled, never an engine minted.
+  const retryStop = async (sid) => {
+    const eng = await core.engine({ createIfMissing: false });
+    if (!eng) throw Object.assign(new Error("no_such_session"), { code: "no_such_session" });
+    return eng.stop(sid);
+  };
   const runOnce = async () => {
     const db = openDb();
     try { return await core.store.sweep(db, { inFlight: core.inFlight, findCard: findHandoffCard, retryStop }); }
@@ -511,6 +521,9 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
         if (namesAnother(transcript, peek.names)) return null;
         const answer = matchYesNo(transcript, { otherBots: peek.names });
         if (!answer) return null;
+        // A no that changes the task ("no, have writer write a summary instead", "no, make it about radio drama")
+        // is a correction too: the model re-proposes. A bare no declines.
+        if (answer === "no" && (wantsHandoff(transcript, [...(peek.names || []), peek.name, peek.bot_id]) || hasCorrectionLead(transcript))) return null;
         const entry = pending.take(id);   // act on what take() returned, never the earlier copy
         if (!entry || entry.kind !== "handoff" || entry.id !== peek.id) return null;
         const r = await core.confirm(db, entry.id, answer, "voice");
@@ -528,7 +541,8 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
         return { say: voiceLine("handoff_failed", speak, { bot: pick.name }), verb: "handoff_failed" };
       }
       // proposeHandoff retires the which entry itself (the entry is replaced by the proposal's).
-      const out = await proposeHandoff({ core, pending, db, device, surface, lang: speak, transcript, candidates, log: core.log }, peek.task, pick.bot_id);
+      // The card's "Operator's words" is the original request, not the answer to "which one?".
+      const out = await proposeHandoff({ core, pending, db, device, surface, lang: speak, transcript: peek.asked ?? transcript, candidates, log: core.log }, peek.task, pick.bot_id);
       return { say: out.say, verb: "handoff_which" };
     },
     turnContext({ device } = {}) {
