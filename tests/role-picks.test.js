@@ -183,3 +183,16 @@ test("an injected recommendedFn still wins over the default", () => {
   const pickChecks = stamp({ "cloud-o": { "gpt-6-luna|chat": { ok: true, code: "ok" } } });
   assert.deepEqual(starred("everyday", { pickChecks, recommendedFn: () => ["local-chat/m1"] }), ["local-chat/m1"]);
 });
+
+test("a pick on a row whose stored host is cloud reads cloud, on loopback or a private address", () => {
+  const ps = [
+    ...PROVIDERS,
+    row("flag-here", "http://127.0.0.1:8031/v1", [{ id: "f1" }], { host: "cloud" }),
+    row("flag-box", "http://100.64.20.5:8011/v1", [{ id: "f2" }], { host: "cloud" }),
+  ];
+  const got = listRolePicks("everyday", { ctx: makeCtx({ providers: ps, models: modelsOf(ps) }), ownAddrs: OWN });
+  const where = Object.fromEntries(got.map((p) => [p.key, p.where]));
+  assert.equal(where["flag-here/f1"], "cloud");
+  assert.equal(where["flag-box/f2"], "cloud");
+  assert.equal(where["local-chat/m1"], "here", "control");
+});

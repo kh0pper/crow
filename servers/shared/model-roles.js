@@ -229,13 +229,18 @@ export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r)
  * (a name or literal that cannot be proven local OR public: 0.0.0.0, ::, NAT64
  * and other reserved or embedded literals), "missing" (no provider row, no model
  * half, or a role: ref - callers resolve a role first). localMarks is passed to
- * cloudStatus (a current mark makes a DNS-name hop local).
+ * cloudStatus (a current mark makes a DNS-name hop local). A key whose door
+ * walk visits a row with stored `host === "cloud"` is "cloud" whatever its
+ * address (the owner's ruling for the Models page: the chip matches what voice
+ * and the phone call it). This only shapes the chip; cloudStatus and
+ * isCloudKey do not read `host`.
  */
 export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultResolveDoor, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
   if (isRoleRef(key)) return "missing";
   const { provider, model } = splitKey(key);
   const first = providerById(providers, provider);
   if (!first || !model) return "missing";
+  if (chainRows(key, { providers, resolveDoor }).some((r) => r.host === "cloud")) return "cloud";
   const own = ownAddrs || getOwnAddresses();
   const status = cloudStatus(key, { providers, resolveDoor, ownAddrs: own, localSuffixes, localMarks });
   if (status === "unknown") return "unproven";
