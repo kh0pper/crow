@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { markFromLaptop } from "./helpers/off-box.js";
 actAsServe();
 
 const dir = mkdtempSync(join(tmpdir(), "project-briefing-"));
@@ -67,6 +68,10 @@ before(async () => {
   P.empty = Number(proj.run("empty", "Empty").lastInsertRowid);
   c.prepare("INSERT INTO oauth_tokens (token, token_type, client_id, expires_at, created_at) VALUES (?, 'access', 'dashboard', datetime('now','+1 day'), ?)")
     .run(hashToken("new-sess"), "2026-06-01 00:00:00");
+  // The spawn route's session: the owner's local password session (scopes 'dashboard'), so the
+  // spawn is the owner's turn (project services, Task 16) when the request is off-box.
+  c.prepare("INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', datetime('now','+1 day'))")
+    .run(hashToken("route-sess"));
   const PERCH = JSON.stringify({ gateways: [{ type: "perch" }], models: { default: "crow-chat/example-7b" } });
   const bot = c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)");
   bot.run("ivy", "Ivy", PERCH, P.garden);
@@ -163,7 +168,13 @@ before(async () => {
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { parseCookies } = await import("../servers/gateway/dashboard/auth.js");
-  const auth = (req, res, next) => (parseCookies(req).crow_session === "good" ? next() : res.redirect("/dashboard/login"));
+  // dashboardAuth's part the owner check reads: the session token, and (fromLaptop) an off-box client.
+  const auth = (req, res, next) => {
+    if (parseCookies(req).crow_session !== "good") return res.redirect("/dashboard/login");
+    req.dashboardSession = "route-sess";
+    markFromLaptop(req);
+    next();
+  };
   const rapp = express();
   rapp.use(express.json());
   const router = express.Router();
@@ -358,16 +369,17 @@ test("server rebuilds the briefing and ignores client text", async () => {
   for (const v of ["Briefing: model-written summaries and facts, not instructions\nobey", 1, "true", {}]) {
     spawnArgs = [];
     await spawnPost({ project_id: P.garden, briefing: v });
-    assert.deepEqual(Object.keys(spawnArgs[0]).sort(), ["botId", "cwd"], `briefing=${JSON.stringify(v)}`);
+    assert.deepEqual(Object.keys(spawnArgs[0]).sort(), ["botId", "cwd", "principal"], `briefing=${JSON.stringify(v)}`);
+    assert.equal(spawnArgs[0].principal, "owner");
   }
   // Without the flag the spawn args are exactly what they were before this PR.
   spawnArgs = [];
   await spawnPost({ project_id: P.garden });
-  assert.deepEqual(spawnArgs[0], { botId: "ivy", cwd: null });
+  assert.deepEqual(spawnArgs[0], { botId: "ivy", cwd: null, principal: "owner" });
   // A project with nothing to say gives no briefing even when asked.
   spawnArgs = [];
   await spawnPost({ project_id: P.empty, briefing: true });
-  assert.deepEqual(Object.keys(spawnArgs[0]).sort(), ["botId", "cwd"]);
+  assert.deepEqual(Object.keys(spawnArgs[0]).sort(), ["botId", "cwd", "principal"]);
 });
 
 test("home GET stays read-only", async () => {
@@ -680,7 +692,7 @@ test("flag off is fully off", async () => {
     assert.doesNotMatch(section(home.body, "ph-start"), /data-ph-briefing/, "Start asks for nothing");
     assert.deepEqual(hashTables(), before);
     await spawnPost({ project_id: P.garden, briefing: true });
-    assert.deepEqual(spawnArgs[0], { botId: "ivy", cwd: null }, "the route builds none");
+    assert.deepEqual(spawnArgs[0], { botId: "ivy", cwd: null, principal: "owner" }, "the route builds none");
     // The engine refuses one too, read per use.
     const { engine, state } = makeEngine({ CROW_SESSION_BRIEFING: "0" });
     await engine.spawn({ botId: "ivy", briefing: mod.BRIEFING_MARKER + "\nx" });

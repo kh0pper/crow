@@ -113,7 +113,7 @@ test("Send feedback: only the owner's ticked threads go; a contact thread makes 
   const r = await req("POST", `/api/artifacts/${s.art.id}/rounds`, { body: { include: [t1.body.threadId, c.threadId] } });
   assert.equal(r.status, 201);
   assert.equal(r.body.round.untrusted, true);
-  assert.deepEqual(s.spawns.at(-1), { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"] });
+  assert.deepEqual(s.spawns.at(-1), { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"], principal: "other" });
   assert.equal((await req("POST", `/api/artifacts/${s.art.id}/rounds`, { body: { include: [t1.body.threadId] } })).status, 409, "one active round");
 });
 
