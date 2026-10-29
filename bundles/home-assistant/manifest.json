@@ -1,22 +1,39 @@
 {
   "id": "home-assistant",
   "name": "Home Assistant",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Control your smart home through Home Assistant — lights, temperature, switches, and more",
   "type": "mcp-server",
   "author": "Crow",
   "category": "smart-home",
   "featured": true,
-  "tags": ["smart-home", "iot", "automation", "devices", "sensors"],
+  "tags": [
+    "smart-home",
+    "iot",
+    "automation",
+    "devices",
+    "sensors"
+  ],
   "icon": "home",
   "server": {
     "command": "npx",
-    "args": ["-y", "hass-mcp"],
-    "envKeys": ["HA_URL", "HA_TOKEN"]
+    "args": [
+      "-y",
+      "hass-mcp"
+    ],
+    "envKeys": [
+      "HA_URL",
+      "HA_TOKEN"
+    ]
   },
-  "skills": ["skills/home-assistant.md"],
+  "skills": [
+    "skills/home-assistant.md"
+  ],
   "requires": {
-    "env": ["HA_URL", "HA_TOKEN"],
+    "env": [
+      "HA_URL",
+      "HA_TOKEN"
+    ],
     "min_ram_mb": 256,
     "min_disk_mb": 100
   },
@@ -35,5 +52,49 @@
   ],
   "ports": [],
   "webUI": null,
-  "notes": "Connects to an existing Home Assistant instance. Includes safety checkpoints for physical device control."
+  "notes": "Connects to an existing Home Assistant instance. Includes safety checkpoints for physical device control.",
+  "connect": {
+    "method": "token",
+    "group": "network",
+    "fields": [
+      {
+        "name": "HA_URL",
+        "kind": "address",
+        "label_key": "services.field.HA_URL"
+      },
+      {
+        "name": "HA_TOKEN",
+        "kind": "secret",
+        "label_key": "services.field.HA_TOKEN"
+      }
+    ],
+    "steps": [
+      "services.steps.home-assistant.1",
+      "services.steps.home-assistant.2",
+      "services.steps.home-assistant.3"
+    ],
+    "step_links": {
+      "services.steps.home-assistant.1": "${HA_URL}/profile/security"
+    },
+    "discover": {
+      "kind": "http",
+      "url": "http://127.0.0.1:8123/api/",
+      "expect": [
+        200,
+        401
+      ],
+      "mdns": "homeassistant.local"
+    },
+    "test": {
+      "kind": "http",
+      "url": "${HA_URL}/api/",
+      "headers": {
+        "Authorization": "Bearer ${HA_TOKEN}"
+      },
+      "expect": [
+        200
+      ]
+    },
+    "label_from": "address"
+  }
 }

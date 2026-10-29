@@ -1,0 +1,63 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "version": "1.0.0",
+  "description": "Repos, issues, pull requests, code search",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "development",
+  "tags": [
+    "github",
+    "git",
+    "code",
+    "issues"
+  ],
+  "icon": "git",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-github"
+    ],
+    "envKeys": [
+      "GITHUB_PERSONAL_ACCESS_TOKEN"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+      "description": "GitHub personal access token",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "kind": "secret",
+        "label_key": "services.field.GITHUB_PERSONAL_ACCESS_TOKEN"
+      }
+    ],
+    "steps": [
+      "services.steps.github.1",
+      "services.steps.github.2",
+      "services.steps.github.3"
+    ],
+    "test": {
+      "kind": "http",
+      "url": "https://api.github.com/user",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
+        "User-Agent": "crow"
+      },
+      "expect": [
+        200
+      ]
+    }
+  },
+  "ports": [],
+  "webUI": null
+}

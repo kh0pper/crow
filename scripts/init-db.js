@@ -7,6 +7,9 @@ import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/s
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./pi-bots/bot-jobs-schema.mjs";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
+import {
+  SERVICE_CONNECTIONS_DDL, CHAT_PROJECT_COLUMN, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL,
+} from "../servers/shared/project-services-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -23,6 +26,20 @@ async function initTable(label, sql) {
   } catch (err) {
     console.error(`Failed to initialize ${label}:`, err.message);
     process.exit(1);
+  }
+}
+
+// Adds a { table, column, ddl } column constant (servers/shared/project-services-schema.js) when
+// its table exists and lacks it. The ALTER is the constant's own string, byte-identical to the
+// migration rail's (0019).
+async function ensureSchemaColumn({ table, column, ddl }) {
+  try {
+    const cols = await db.execute(`PRAGMA table_info(${table})`);
+    if (!cols.rows.length || cols.rows.some((r) => r.name === column)) return;
+    await db.execute(ddl);
+    console.log(`  ✓ Added ${column} column to ${table}`);
+  } catch (err) {
+    console.warn(`Warning: could not check/add ${table}.${column}: ${err.message}`);
   }
 }
 
@@ -144,6 +161,7 @@ await initTable("data_backends table", `
 // --- Migrate existing tables: add new columns if missing ---
 
 // Resolves true only when it ran the ALTER (existing callers ignore the value).
+// For a { table, column, ddl } constant shared with a migration, use ensureSchemaColumn (top of file).
 async function addColumnIfMissing(table, column, definition) {
   try {
     const cols = await db.execute({ sql: `PRAGMA table_info(${table})` });
@@ -1533,6 +1551,12 @@ try {
   }
 } catch { /* table may not exist yet on first run */ }
 
+// chat_conversations.project_id: the project a chat belongs to (migration 0019, project services).
+// No backfill: existing threads stay in "Everything" and see no project services. Same ALTER as
+// scripts/migrations/0019-project-services.mjs — one shape, two rails; additive, no
+// SCHEMA_GENERATION bump.
+await ensureSchemaColumn(CHAT_PROJECT_COLUMN);
+
 await initTable("chat_messages table", `
   CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2828,6 +2852,12 @@ await initTable("shell_items table", `
   CREATE INDEX IF NOT EXISTS idx_shell_items_card ON shell_items(card_id) WHERE card_id IS NOT NULL;
 `);
 
+// service_connections: a project's connected accounts (project services). LOCAL ONLY
+// (instance-sync LOCAL_ONLY_TABLES). project_spaces exists by this point, and ON DELETE CASCADE
+// removes a deleted project's connections. Same DDL as scripts/migrations/0019-project-services.mjs
+// (SERVICE_CONNECTIONS_DDL) — one shape, two rails; additive, no SCHEMA_GENERATION bump.
+await initTable("service_connections table", SERVICE_CONNECTIONS_DDL);
+
 // bot_sessions thread index: a thread's newest perch-live session (shell-items threadCard, the 0010
 // backfill) is looked up by these columns. Same DDL as BOT_SESSIONS_THREAD_INDEX_DDL in
 // scripts/migrations/0010-shell-items.mjs. bot_sessions and its kind column exist by this point.
@@ -3260,6 +3290,10 @@ await addColumnIfMissing("contacts", "advertised_by_instance_id", "TEXT"); // NU
 // Additive: keychain/store.js also CREATE-IF-NOT-EXISTS this lazily, so existing
 // installs need no SCHEMA_GENERATION bump.
 await initTable("crow_keychain table", KEYCHAIN_DDL);
+// crow_keychain.connection_uuid (migration 0019): on a pre-0019 table, add the column before the
+// index on it; a fresh table already has it from KEYCHAIN_DDL. Same steps as ensureKeychainTable.
+await ensureSchemaColumn(KEYCHAIN_CONNECTION_COLUMN);
+await initTable("crow_keychain service index", KEYCHAIN_SERVICE_INDEX_DDL);
 
 // Stamp the schema generation so the gateway boot gate can detect when an
 // out-of-band code update introduced migrations that a plain restart missed.

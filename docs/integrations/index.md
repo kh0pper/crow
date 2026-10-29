@@ -32,13 +32,11 @@ Add API keys to enable these. For cloud deployments, add keys in your [Render da
 |---|---|---|---|
 | **GitHub** | `GITHUB_PERSONAL_ACCESS_TOKEN` | Repos, issues, PRs, code search | [GitHub Settings](https://github.com/settings/tokens) |
 | **Brave Search** | `BRAVE_API_KEY` | Web search, local search | [Brave API](https://brave.com/search/api/) |
-| **Slack** | `SLACK_BOT_TOKEN` | Messages, channels, threads | [Slack Apps](https://api.slack.com/apps) |
 | **Notion** | `NOTION_TOKEN` | Pages, databases, comments | [Notion Integrations](https://www.notion.so/my-integrations) |
 | **Trello** | `TRELLO_API_KEY`, `TRELLO_TOKEN` | Boards, cards, lists | [Trello Power-Ups](https://trello.com/power-ups/admin) |
 | **Discord** | `DISCORD_BOT_TOKEN` | Servers, channels, messages | [Discord Developer Portal](https://discord.com/developers/applications) |
 | **Google Workspace** | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat | [Google Cloud Console](https://console.cloud.google.com/apis/credentials) |
 | **Canvas LMS** | `CANVAS_API_TOKEN`, `CANVAS_BASE_URL` | Courses, assignments, grades | Canvas account settings |
-| **Microsoft Teams** | `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID` | Messages, channels, teams | [Azure Portal](https://portal.azure.com) |
 | **Zotero** | `ZOTERO_API_KEY`, `ZOTERO_USER_ID` | Citations, library management | [Zotero Settings](https://www.zotero.org/settings/keys) |
 | **arXiv** | *(none)* | Academic paper search, full text | Works out of the box |
 | **Obsidian** | `OBSIDIAN_VAULT_PATH` | Vault search, note sync | Local path to vault |
@@ -51,13 +49,11 @@ Detailed step-by-step setup instructions for each integration:
 
 - [GitHub](./github) — Personal access tokens, required scopes
 - [Brave Search](./brave-search) — Free API key signup
-- [Slack](./slack) — Bot token, OAuth scopes, workspace installation
 - [Notion](./notion) — Internal integration setup, page sharing
 - [Trello](./trello) — Power-Up API key and token
 - [Discord](./discord) — Bot token, message content intent
 - [Google Workspace](./google-workspace) — OAuth credentials, API enablement
 - [Canvas LMS](./canvas-lms) — Access token, institution URL
-- [Microsoft Teams](./microsoft-teams) — Azure AD app registration
 - [Zotero](./zotero) — API key and user ID
 - [Home Assistant](./home-assistant) — Long-lived access token
 - [Obsidian](./obsidian) — Vault path configuration

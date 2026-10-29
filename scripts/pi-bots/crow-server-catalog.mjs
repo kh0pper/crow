@@ -30,6 +30,8 @@ import {
 } from "../server-registry.js";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor } from "./actor-sig.mjs";
+// Leaf module (registry read only): no path back to ext_registry.mjs or mcp_writer.mjs.
+import { isLegacyConfiguredAddon, addonDerivedEnv } from "../../servers/gateway/services/legacy-sources.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -319,7 +321,14 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
     else servers[spec.name] = block;
     coreNames.push(spec.name);
   }
+  // A service add-on's fields count as set in its entry, the repo .env, or the
+  // caller's environment (the child inherits it), as in the gateway's proxy.
+  const addonEnv = { ...repoEnv, ...process.env };
   for (const [id, addon] of Object.entries(readAddons(crowHome))) {
+    if (!isLegacyConfiguredAddon(id, addon, undefined, addonEnv)) {
+      unconfigured[id] = "service: its account fields are not set";
+      continue;
+    }
     const cwd = resolve(addon.cwd || join(crowHome, "bundles", id));
     if (!existsSync(cwd)) {
       unconfigured[id] = `bundle not installed on this instance (${cwd})`;
@@ -336,7 +345,12 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // sessions wherever that pointed). CROW_HOME only: injecting CROW_DB_PATH
       // would trip touchesCrowDb() and apply the journal guard to bundles that
       // never open crow.db.
-      r.block.env = { ...(r.block.env || {}), CROW_HOME: crowHome };
+      // A service add-on also gets its manifest's derived env (Render's AUTH_HEADER), rendered
+      // from the entry's own env ONLY: those values are already in this block, so nothing new
+      // is written. A field the child would inherit from the environment is never rendered into
+      // the block (that would copy a gateway .env secret into the bot's MCP config).
+      const derived = addonDerivedEnv(id, addon.env, undefined, {});
+      r.block.env = { ...(r.block.env || {}), ...derived, CROW_HOME: crowHome };
       // A bare command (uvx, uv, npx) is resolved to an absolute path here:
       // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
       // pi child failed with ENOENT and the server silently dropped.

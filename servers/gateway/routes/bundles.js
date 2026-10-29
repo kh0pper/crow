@@ -18,6 +18,7 @@
 
 import { invalidateAppCatalog } from "../apps/catalog.js";
 import { launcherPin } from "../../shared/resolve-command.js";
+import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import bus from "../../shared/event-bus.js";
@@ -2504,6 +2505,19 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
 
   // PR 0: dependency check — refuse install if any required bundle is missing
   const manifest = getManifest(bundleId);
+
+  // requires-bins gate: a bin the add-on launches bare (uvx) must resolve as
+  // trusted (root-owned, system dirs) or the installed entry is refused at
+  // spawn. Not bypassed by force_install — the install would never start.
+  // Lifts by itself once the bin is installed system-wide.
+  const untrustedBins = trustedBinsMissing(manifest);
+  if (untrustedBins.length > 0) {
+    return {
+      ok: false, status: 409, code: "bins_not_trusted",
+      error: `Bundle '${bundleId}' needs ${untrustedBins.join(", ")} installed system-wide (root-owned, in /usr/local/bin or /usr/bin), not in a home folder, before Crow can run it`,
+      extra: { code: "bins_not_trusted", bins: untrustedBins },
+    };
+  }
   const requiredBundles = manifest?.requires?.bundles || [];
   if (requiredBundles.length > 0) {
     const installedIds = new Set(installed.map((i) => i.id));

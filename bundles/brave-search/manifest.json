@@ -1,0 +1,62 @@
+{
+  "id": "brave-search",
+  "name": "Brave Search",
+  "version": "1.0.0",
+  "description": "Web search for research and fact-checking",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "development",
+  "tags": [
+    "search",
+    "web",
+    "research"
+  ],
+  "icon": "search",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-brave-search"
+    ],
+    "envKeys": [
+      "BRAVE_API_KEY"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "BRAVE_API_KEY",
+      "description": "Brave Search API key",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "BRAVE_API_KEY",
+        "kind": "secret",
+        "label_key": "services.field.BRAVE_API_KEY"
+      }
+    ],
+    "steps": [
+      "services.steps.brave-search.1",
+      "services.steps.brave-search.2",
+      "services.steps.brave-search.3"
+    ],
+    "test": {
+      "kind": "http",
+      "url": "https://api.search.brave.com/res/v1/web/search?q=crow&count=1",
+      "headers": {
+        "X-Subscription-Token": "${BRAVE_API_KEY}",
+        "Accept": "application/json"
+      },
+      "expect": [
+        200
+      ]
+    }
+  },
+  "ports": [],
+  "webUI": null
+}

@@ -1,0 +1,76 @@
+{
+  "id": "zotero",
+  "name": "Zotero",
+  "version": "1.0.0",
+  "description": "Citation and reference management",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": [
+    "zotero",
+    "citations",
+    "references"
+  ],
+  "icon": "book-open",
+  "server": {
+    "command": "uvx",
+    "args": [
+      "zotero-mcp"
+    ],
+    "envKeys": [
+      "ZOTERO_API_KEY",
+      "ZOTERO_USER_ID"
+    ]
+  },
+  "requires": {
+    "bins": [
+      "uvx"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "ZOTERO_API_KEY",
+      "description": "Zotero API key",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "ZOTERO_USER_ID",
+      "description": "Zotero user ID",
+      "required": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "ZOTERO_API_KEY",
+        "kind": "secret",
+        "label_key": "services.field.ZOTERO_API_KEY"
+      },
+      {
+        "name": "ZOTERO_USER_ID",
+        "kind": "text",
+        "label_key": "services.field.ZOTERO_USER_ID"
+      }
+    ],
+    "steps": [
+      "services.steps.zotero.1",
+      "services.steps.zotero.2",
+      "services.steps.zotero.3"
+    ],
+    "test": {
+      "kind": "http",
+      "url": "https://api.zotero.org/users/${ZOTERO_USER_ID}/items?limit=1",
+      "headers": {
+        "Zotero-API-Key": "${ZOTERO_API_KEY}"
+      },
+      "expect": [
+        200
+      ]
+    }
+  },
+  "ports": [],
+  "webUI": null
+}

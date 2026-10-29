@@ -33,23 +33,29 @@ async function main() {
   console.log("GENERATED SCAFFOLDING");
   console.log("=".repeat(60));
 
-  // 1. integrations.js entry
-  console.log("\n--- 1. Add to servers/gateway/integrations.js ---\n");
-  console.log(`{
-  id: "${serviceId}",
-  name: "${serviceName}",
-  description: "Connect to ${serviceName}",
-  npmPackage: "${npmPackage}",
-  envVars: [
-    {
-      name: "${envVarName}",
-      description: "API key from ${serviceName}",
-      helpUrl: "${keyUrl}"
-    }
-  ],
-  command: "npx",
-  args: ["-y", "${npmPackage}"],
-}`);
+  // 1. Bundle manifest with a connect block
+  console.log(`\n--- 1. Add bundles/${serviceId}/manifest.json with a connect block ---\n`);
+  console.log(JSON.stringify({
+    id: serviceId,
+    name: serviceName,
+    version: "1.0.0",
+    description: `Connect to ${serviceName}`,
+    type: "mcp-server",
+    author: "Crow",
+    category: "productivity",
+    server: { command: "npx", args: ["-y", npmPackage], envKeys: [envVarName] },
+    env_vars: [{ name: envVarName, description: `API key from ${serviceName}`, required: true, secret: true }],
+    connect: {
+      method: "token",
+      group: "paste",
+      fields: [{ name: envVarName, kind: "secret", label_key: `services.field.${envVarName}` }],
+      steps: [`services.steps.${serviceId}.1`, `services.steps.${serviceId}.2`],
+    },
+    ports: [],
+    webUI: null,
+  }, null, 2));
+  console.log(`\nAdd the label_key and steps keys (en + es) to servers/gateway/dashboard/shared/i18n.js; the key page is ${keyUrl}.`);
+  console.log("Then run 'npm run build-registry' to add the bundle to registry/add-ons.json.");
 
   // 2. Add to server registry
   console.log("\n--- 2. Add to scripts/server-registry.js EXTERNAL_SERVERS ---\n");

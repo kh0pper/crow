@@ -329,6 +329,7 @@ export function extensionStyles() {
 .ext-card__footer { margin-top:auto; padding-top:0.6rem; width:100%; }
 .ext-card__footer .btn { width:100%; justify-content:center; }
 .ext-card__footer .badge { display:block; text-align:center; }
+.ext-card__binsnote { margin:0.4rem 0 0; font-size:0.75rem; color:var(--crow-text-muted); }
 
 /* Community stores (collapsible) */
 .ext-stores { margin-bottom:1.5rem; }

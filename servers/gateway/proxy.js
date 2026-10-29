@@ -18,7 +18,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
-import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
+import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { createDbClient } from "../db.js";
 import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
@@ -73,12 +73,21 @@ export function resolveCrowHome() {
   return resolveSharedCrowHome();
 }
 
+/** The listed vars that are set in the gateway's environment. */
+function envFromVars(vars = []) {
+  const env = {};
+  for (const v of vars) if (process.env[v]) env[v] = process.env[v];
+  return env;
+}
+
 /**
  * Spawn a single external server, connect, and discover its tools.
+ * `integration.env` (a legacy source) is the child's own vars; otherwise the
+ * listed `envVars` are read from the gateway's environment (data backends).
  * Returns { client, childProcess, tools } or null on failure.
  */
 async function connectToServer(integration) {
-  const spawnEnv = getSpawnEnv(integration);
+  const spawnEnv = integration.env || envFromVars(integration.envVars);
   // A data backend brings its own allowlisted base env (never the gateway's
   // whole environment); built-in integrations keep the old behaviour.
   const env = {
@@ -86,11 +95,8 @@ async function connectToServer(integration) {
     ...spawnEnv,
   };
 
-  // Support argsTransform for servers that need env values in args (e.g., Render bearer token)
   let command = integration.command;
-  let args = integration.argsTransform
-    ? integration.argsTransform(spawnEnv)
-    : integration.args;
+  let args = integration.args;
 
   // Data backends: the last check runs here, synchronously, with no await
   // between it and the spawn inside client.connect() below.
@@ -163,9 +169,12 @@ async function connectToServer(integration) {
  * marks the one long-lived copy the gateway supervises, so an add-on can keep background work
  * (schedules, polling) out of the short-lived private copies that bots and other MCP clients start
  * from the same mcp-addons.json entry. Set last: an add-on's own env cannot claim or drop it.
+ * With an `id`, a service add-on also gets its manifest's derived env (e.g. Render's AUTH_HEADER),
+ * rendered from `config.env` over `base`.
  */
-export function addonStdioEnv(config = {}, base = process.env) {
-  return { ...base, ...(config.env || {}), CROW_ADDON_HOST: "gateway" };
+export function addonStdioEnv(config = {}, base = process.env, id = null) {
+  const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
+  return { ...base, ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
 }
 
 /**
@@ -181,7 +190,7 @@ export function remoteBotActorForCwd(cwd) {
 
 /**
  * Connect to an MCP server installed as a bundle addon (from ~/.crow/mcp-addons.json).
- * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
+ * Unlike connectToServer(), this takes the add-on entry's flat env dict.
  */
 async function connectAddonServer(id, config) {
   const CONNECT_TIMEOUT_MS = 60_000;
@@ -219,7 +228,7 @@ async function connectAddonServer(id, config) {
     } else {
       // stdio (default, backward-compatible)
       const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
-      const env = addonStdioEnv(config);
+      const env = addonStdioEnv(config, process.env, id);
       remoteBotActor = remoteBotActorForCwd(cwd);
       // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
       // then the per-user install dirs systemd's PATH lacks.
@@ -348,6 +357,11 @@ function cleanupStaleAddonProcesses() {
   if (cleaned > 0) console.log(`  [proxy] Cleaned up ${cleaned} stale addon process(es)`);
 }
 
+// Test seam: a test swaps the spawn-side functions for fakes (never set in production).
+let _testDeps = null;
+export function _setProxyDepsForTest(deps) { _testDeps = deps || null; }
+function dep(name, real) { return (_testDeps && _testDeps[name]) || real; }
+
 /**
  * Create a combined McpServer that proxies tools from all connected external servers.
  * Call this once at gateway startup; it spawns all configured servers.
@@ -364,8 +378,9 @@ export async function initProxyServers() {
   try {
   cleanupStaleAddonProcesses();
 
-  const configured = INTEGRATIONS.filter((i) => {
-    if (!isIntegrationConfigured(i)) return false;
+  // Crow-wide sources configured through .env (deleted by PR 4, Home migration).
+  const configured = dep("legacyEnvSources", legacyEnvSources)().filter((i) => {
+    if (connectedServers.has(i.id)) return false;
     if (i.requires && i.requires.length > 0) {
       const hasBins = i.requires.every((bin) => {
         try {
@@ -384,7 +399,7 @@ export async function initProxyServers() {
     console.log("[proxy] No external integrations configured — /tools/mcp will have no tools.");
     // Still load dynamic backends and bundle-installed MCP addons — they don't
     // require external integrations to be configured.
-    await loadDynamicBackends();
+    await dep("loadDynamicBackends", loadDynamicBackends)();
     await loadAddonServers();
     return;
   }
@@ -393,7 +408,7 @@ export async function initProxyServers() {
 
   // Connect to all servers in parallel
   const results = await Promise.allSettled(
-    configured.map((integration) => connectToServer(integration))
+    configured.map((integration) => dep("connectToServer", connectToServer)(integration))
   );
 
   const successCount = results.filter(
@@ -403,7 +418,7 @@ export async function initProxyServers() {
   console.log(`[proxy] ${successCount}/${configured.length} server(s) connected.`);
 
   // Load dynamic backends from data_backends table
-  await loadDynamicBackends();
+  await dep("loadDynamicBackends", loadDynamicBackends)();
 
   // Load bundle-installed MCP servers from <crow-home>/mcp-addons.json
   await loadAddonServers();
@@ -435,8 +450,13 @@ async function loadAddonServers() {
 
   for (const [id, config] of entries) {
     if (connectedServers.has(id)) continue;
+    // A service add-on without its fields is connected per project, not Crow-wide.
+    if (!isLegacyConfiguredAddon(id, config)) {
+      console.log(`  [proxy] addon ${id}: skipped (service: its account fields are not set)`);
+      continue;
+    }
     try {
-      await connectAddonServer(id, config);
+      await dep("connectAddonServer", connectAddonServer)(id, config);
     } catch (err) {
       console.warn(`  [proxy] addon ${id}: ${err.message}`);
     }
@@ -875,8 +895,8 @@ export function _markAddonsSettled() {
  * Get status of all integrations for the /health and /setup endpoints.
  */
 export function getProxyStatus() {
-  const integrationStatus = INTEGRATIONS.map((integration) => {
-    const configured = isIntegrationConfigured(integration);
+  const integrationStatus = legacyIntegrationsView().map((integration) => {
+    const configured = integration.configured;
 
     let requiresMissing = false;
     if (integration.requires && integration.requires.length > 0) {
@@ -906,6 +926,9 @@ export function getProxyStatus() {
       requiresMissing,
       requires: integration.requires || [],
       docsUrl: integration.docsUrl || null,
+      category: integration.category,
+      steps: integration.steps,
+      toggleEnv: integration.toggleEnv,
     };
   });
 

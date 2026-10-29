@@ -13,6 +13,7 @@ import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../..
 import { DISPLAY_GROUPS, groupAddons, groupForCategory } from "./groups.js";
 import { formEnvVars } from "../../../bundle-env-form.js";
 import { renderLocalModelsCard } from "./local-models-card.js";
+import { trustedBinsMissing } from "../../../../shared/trusted-bins.js";
 
 /** Add-ons shown per group before "Show all" — a fixed count, deliberately not
  *  "two grid rows" (which would need viewport-dependent column measurement). */
@@ -215,10 +216,16 @@ export function buildExtensionsHTML({
 
     let installButton;
     const gpuCompat = checkGpuArchCompatible(addon, hostArches, hostVramGb);
+    const untrustedBins = isInstalled ? [] : trustedBinsMissing(addon);
     if (isInstalled) {
       installButton = badge(t("extensions.installedBadge", lang), "published");
     } else if (isDeprecatedBundle(addon)) {
       installButton = `<span class="ext-card__badge ext-card__badge--deprecated ext-card__replaced">${escapeHtml(successorName ? fill(t("extensions.deprecatedUse", lang), { name: successorName }) : t("extensions.deprecated", lang))}</span>`;
+    } else if (untrustedBins.length > 0) {
+      // requires-bins gate (validateInstall refuses it too): the add-on would be
+      // refused at spawn until its bin is installed system-wide.
+      const line = escapeHtml(fill(t("extensions.binsNotTrusted", lang), { bins: untrustedBins.join(", ") }));
+      installButton = `<button class="btn btn-sm btn-primary" disabled aria-disabled="true" data-testid="bins-not-trusted" title="${line}">${t("extensions.install", lang)}</button><p class="ext-card__binsnote">${line}</p>`;
     } else if (!gpuCompat.ok) {
       const tip = `${gpuCompat.reason || t("extensions.incompatibleGpuArch", lang)}`;
       const label = gpuCompat.kind === "vram" ? t("extensions.insufficientVram", lang) : t("extensions.incompatibleHost", lang);
@@ -506,8 +513,9 @@ export function buildExtensionsHTML({
       _iconBg: catColor.bg,
       _iconColor: catColor.color,
       _installed: !!installed[addon.id],
-      // The detail modal offers Install only when this is false (see addonCard).
-      _noInstall: isDeprecatedBundle(addon),
+      // The detail modal offers Install only when this is false (see addonCard:
+      // deprecated, or a requires-bins entry that is not trusted-resolvable).
+      _noInstall: isDeprecatedBundle(addon) || trustedBinsMissing(addon).length > 0,
     };
   }
   const addonRegistryJson = JSON.stringify(addonMap).replace(/<\//g, "<\\/");
