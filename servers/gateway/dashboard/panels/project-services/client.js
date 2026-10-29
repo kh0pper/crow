@@ -59,6 +59,7 @@ const STATIC_KEYS = [
   "services.error.generic", "common.close", "common.back",
   "services.install.step1", "services.install.step1Help", "services.install.step2", "services.install.step2Help",
   "services.install.submit", "services.install.footnote", "extensions.binsNotTrusted",
+  "services.install.hasConnection", "services.install.showRow",
   "services.group.signin", "services.group.paste", "services.group.builtin",
   ...ERROR_CODES.map((c) => `services.error.${c}`),
   ...STATUSES.map((s) => `services.status.${s}`),
@@ -595,6 +596,29 @@ export function projectServicesClientJs() {
     lbox.appendChild(el('p', 'svc-help', T('services.connect.labelHelp')));
     box2.appendChild(lbox);
 
+    // A paused connection of this service already in the project (its extension was removed):
+    // the install brings it back, so say so and point at its row (a same-name connect would
+    // answer label_taken).
+    var existingRow = null;
+    if (installMode) {
+      var rows = root.querySelectorAll('[data-svc-row]');
+      for (var r = 0; r < rows.length; r++) if (rows[r].getAttribute('data-service') === svc.serviceId) { existingRow = rows[r]; break; }
+    }
+    if (existingRow) {
+      var has = el('p', 'svc-footnote', fillOnce(T('services.install.hasConnection'), { service: svc.name }));
+      has.setAttribute('data-svc-has-connection', '');
+      var show = el('button', 'svc-link-btn', T('services.install.showRow'));
+      show.type = 'button';
+      show.addEventListener('click', function () {
+        var row = existingRow;
+        closeSheet();
+        row.setAttribute('tabindex', '-1');
+        try { if (row.scrollIntoView) row.scrollIntoView({ block: 'center' }); row.focus(); } catch (e) { /* no focus in this environment */ }
+      });
+      has.appendChild(document.createTextNode(' '));
+      has.appendChild(show);
+      form.appendChild(has);
+    }
     if (installMode) form.appendChild(el('p', 'svc-footnote', T('services.install.footnote')));
     else form.appendChild(el('p', 'svc-for', fillOnce(T('services.connect.for'), { project: DATA.project.name })));
     var err = el('p', 'svc-error');
@@ -696,7 +720,7 @@ export function projectServicesClientJs() {
           var code = r.j && typeof r.j.code === 'string' ? r.j.code : '';
           if (r.status === 200 && r.j && r.j.job_id) { connected = true; pollJob(r.j.job_id, next); return; }
           if (r.status === 409 && code === 'already_installing' && r.j.job_id) { pollJob(r.j.job_id, next); return; }
-          if (r.status === 409 && /already installed/.test(String(r.j && r.j.error || ''))) { installedNow(); next(); return; }
+          if (r.status === 409 && code === 'already_installed') { installedNow(); next(); return; }
           if (r.status === 409 && code === 'bins_not_trusted') {
             var bins = Array.isArray(r.j.bins) ? r.j.bins.filter(function (b) { return typeof b === 'string'; }) : [];
             stopped(fillOnce(T('extensions.binsNotTrusted'), { bins: bins.join(', ') }));

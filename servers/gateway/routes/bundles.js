@@ -2518,7 +2518,8 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
   // Check not already installed
   const installed = getInstalled();
   if (installed.find((i) => i.id === bundleId)) {
-    return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed` };
+    // `extra.code` is the stable answer clients match (the Services Install sheet); the text stays.
+    return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed`, extra: { code: "already_installed" } };
   }
 
   // PR 0: dependency check — refuse install if any required bundle is missing
@@ -3910,6 +3911,10 @@ export default function bundlesRouter() {
     }
 
     // The projects whose connections this uninstall pauses (read-only here; the job marks them).
+    // Two lists on purpose: this response (and the Extensions confirm's preflight) names only
+    // NON-ARCHIVED projects, the ones the owner can act on; once the job has paused them,
+    // job.affectedProjects is replaced with every project whose rows it actually marked
+    // (markConnectionsNeedInstall's RETURNING, archived projects included).
     const affectedProjects = await uninstallAffectedProjects(bundle_id);
     const job = createJob(bundle_id, "uninstall");
     job.affectedProjects = affectedProjects;

@@ -36,6 +36,8 @@ const { createDbClient } = await import("../servers/db.js");
 const { ensureWriteKey } = await import("../servers/gateway/keychain/store.js");
 const SC = await import("../servers/shared/service-connections.js");
 const { visibleEnvVars, formEnvVars } = await import("../servers/gateway/bundle-env-form.js");
+const BC = await import("../servers/gateway/bundles-config.js");
+const { buildExtensionsHTML } = await import("../servers/gateway/dashboard/panels/extensions/html.js");
 const { servicesApiRouter } = await import("../servers/gateway/routes/services-api.js");
 const { projectServicesHtml } = await import("../servers/gateway/dashboard/panels/project-services/html.js");
 const { projectServicesClientJs, projectServicesDataScript } = await import("../servers/gateway/dashboard/panels/project-services/client.js");
@@ -79,6 +81,76 @@ test("form unchanged with the flag off: HA keeps HA_URL/HA_TOKEN off and drops t
   const regHa = (reg["add-ons"] || reg).find((a) => a.id === "home-assistant");
   assert.deepEqual(names(formEnvVars(regHa, { servicesUi: false })), names(formEnvVars(ha, { servicesUi: false })));
   assert.ok(!names(formEnvVars(regHa, { servicesUi: true })).includes("HA_URL"));
+});
+
+// ---- Fix round 0 (1): only the INSTALL form drops them; Configure keeps a legacy Crow-wide set --
+
+const REG_HA = () => {
+  const reg = JSON.parse(readFileSync(join(REPO, "registry", "add-ons.json"), "utf8"));
+  return (reg["add-ons"] || reg).find((a) => a.id === "home-assistant");
+};
+/** The detail/Configure registry blob for one add-on, parsed out of the rendered script. */
+function blobFor(addonRegistryScript, id) {
+  const json = addonRegistryScript.slice(addonRegistryScript.indexOf(">") + 1, addonRegistryScript.lastIndexOf("</script>"));
+  const start = json.indexOf("{");
+  return JSON.parse(json.slice(start, json.lastIndexOf("}") + 1))[id];
+}
+function render({ installed = {}, legacyAccounts = {} } = {}) {
+  return buildExtensionsHTML({ installed, available: [REG_HA()], collections: [], registrySource: "local", communityStores: [], bundleStatus: {}, legacyAccounts, lang: "en" });
+}
+const envNames = (list) => (list || []).map((e) => e.name);
+
+test("both forms, flag off and on: Install drops the account fields only with the flag on; Configure keeps them for a legacy Crow-wide set", () => {
+  const ha = readManifest("home-assistant");
+  assert.ok(envNames(visibleEnvVars(ha, { servicesUi: true, keepAccountFields: true })).includes("HA_TOKEN"));
+  for (const flag of [false, true]) {
+    const prev = process.env.CROW_SERVICES_UI;
+    if (flag) process.env.CROW_SERVICES_UI = "1"; else delete process.env.CROW_SERVICES_UI;
+    try {
+      // Install form (not installed): the Install button's data-envvars and the detail blob.
+      const fresh = render();
+      const attr = fresh.viewsHtml.match(/data-id="home-assistant"[^>]*data-envvars="([^"]*)"/);
+      assert.ok(attr, "the Install button renders");
+      const installNames = envNames(JSON.parse(attr[1].replace(/&quot;/g, "\"").replace(/&amp;/g, "&")));
+      assert.equal(installNames.includes("HA_TOKEN"), !flag, `install form, flag ${flag}`);
+      assert.equal(envNames(blobFor(fresh.addonRegistryScript, "home-assistant").env_vars).includes("HA_URL"), !flag);
+      // Configure (installed, configured Crow-wide): always keeps them.
+      const legacy = render({ installed: { "home-assistant": { version: "1" } }, legacyAccounts: { "home-assistant": true } });
+      assert.ok(envNames(blobFor(legacy.addonRegistryScript, "home-assistant").env_vars).includes("HA_TOKEN"), `configure keeps, flag ${flag}`);
+      // Installed from the Install sheet (nothing set Crow-wide): they belong to connections.
+      const sheet = render({ installed: { "home-assistant": { version: "1" } } });
+      assert.equal(envNames(blobFor(sheet.addonRegistryScript, "home-assistant").env_vars).includes("HA_TOKEN"), !flag);
+    } finally {
+      if (prev === undefined) delete process.env.CROW_SERVICES_UI; else process.env.CROW_SERVICES_UI = prev;
+    }
+  }
+});
+
+test("configuredAccountFields and needs_config: a legacy Crow-wide HA keeps its nag; one installed for connections doesn't", () => {
+  delete process.env.HA_URL; delete process.env.HA_TOKEN;
+  const ha = readManifest("home-assistant");
+  mkdirSync(join(HOME, "bundles", "home-assistant"), { recursive: true });
+  writeFileSync(join(HOME, "bundles", "home-assistant", "manifest.json"), JSON.stringify(ha));
+  const addonsPath = join(HOME, "mcp-addons.json");
+  const prevAddons = existsSync(addonsPath) ? readFileSync(addonsPath, "utf8") : null;
+  const prevFlag = process.env.CROW_SERVICES_UI;
+  try {
+    writeFileSync(addonsPath, JSON.stringify({ "home-assistant": { command: "node", args: [], env: { HA_URL: "http://ha.example.lan:8123", HA_TOKEN: "" } } }));
+    assert.deepEqual(BC.configuredAccountFields("home-assistant"), ["HA_URL"], "names only, set ones only");
+    process.env.CROW_SERVICES_UI = "1";
+    assert.ok(BC.needsConfigKeys("home-assistant").includes("HA_TOKEN"), "legacy: still asks for the rest");
+    writeFileSync(addonsPath, JSON.stringify({ "home-assistant": { command: "node", args: [], env: {} } }));
+    assert.deepEqual(BC.configuredAccountFields("home-assistant"), []);
+    const on = BC.needsConfigKeys("home-assistant");
+    assert.ok(!on.includes("HA_URL") && !on.includes("HA_TOKEN"), "flag on: connections hold them");
+    delete process.env.CROW_SERVICES_UI;
+    const off = BC.needsConfigKeys("home-assistant");
+    assert.ok(off.includes("HA_URL") && off.includes("HA_TOKEN"), "flag off: unchanged");
+  } finally {
+    if (prevFlag === undefined) delete process.env.CROW_SERVICES_UI; else process.env.CROW_SERVICES_UI = prevFlag;
+    if (prevAddons === null) rmScratch(addonsPath); else writeFileSync(addonsPath, prevAddons);
+    rmScratch(join(HOME, "bundles", "home-assistant"));
+  }
 });
 
 // ---- Uninstall pauses, reinstall resumes ------------------------------------------------------
@@ -137,6 +209,13 @@ test("uninstall of github pauses spring's connection (needs_install, secrets ext
   if (!existsSync(join(HOME, "installed.json"))) writeFileSync(join(HOME, "installed.json"), "[]");
   const manifest = fixture("github");
   await install("github", manifest);
+  await withBundles(async (base) => {
+    const r = await fetch(`${base}/bundles/api/install`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: "github", env_vars: {} }) });
+    const body = await r.json();
+    assert.equal(r.status, 409);
+    assert.equal(body.code, "already_installed", "a stable code beside the text");
+    assert.equal(body.error, "Bundle 'github' is already installed", "the old text stays");
+  });
   const spring = await project("spring", "Spring");
   const autumn = await project("autumn", "Autumn");
   const old = await project("old", "Old", { archived: false });
@@ -284,8 +363,8 @@ const PAGE = () => ({
   groups: { network: [], signin: [], paste: [card("github", false), card("zotero", false)], builtin: [] }, botsLive: false,
 });
 
-function boot({ lang = "en", route } = {}) {
-  const pg = PAGE();
+function boot({ lang = "en", route, pageData } = {}) {
+  const pg = pageData || PAGE();
   const html = projectServicesHtml(pg, lang) + projectServicesDataScript(pg, lang);
   const { window, document } = parseHTML(`<html><body class="shell"><main>${html}</main></body></html>`);
   const calls = [];
@@ -301,7 +380,8 @@ function boot({ lang = "en", route } = {}) {
   const location = { href: "https://crow.example.ts.net/dashboard/project/spring/services", reload() { reloads++; } };
   document.cookie = "crow_csrf=csrf-abc";
   window.location = location;
-  window.HTMLElement.prototype.focus = function () {};
+  const focusedEls = [];
+  window.HTMLElement.prototype.focus = function () { focusedEls.push(this); };
   const ctx = vm.createContext({ window, document, location, fetch: fetchStub, URL, setTimeout: (fn) => { timers.push(fn); return timers.length; } });
   vm.runInContext(CLIENT_JS, ctx);
   const click = (el) => el.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -316,7 +396,7 @@ function boot({ lang = "en", route } = {}) {
     click(sheet().querySelector(`[data-svc-install="${id}"]`));
     return sheet().querySelector("form.svc-connect");
   };
-  return { window, document, calls, click, type, submit, settle, flush, sheet, isOpen, openInstall, reloads: () => reloads };
+  return { window, document, calls, click, type, submit, settle, flush, sheet, isOpen, openInstall, reloads: () => reloads, focused: () => focusedEls };
 }
 
 const path = (u) => u.split("?")[0];
@@ -469,6 +549,34 @@ test("closing the sheet mid-install clears the secret, stops the flow before the
   await s.flush();
   assert.ok(!s.calls.some((c) => c.url.includes("/connect")), "the late job answer never connects");
   assert.equal(s.reloads(), 1, "the started install shows on the page");
+});
+
+test("an already-installed answer (stable code) goes straight to the connect", async () => {
+  const s = boot({ route: storeRoute({ install: { status: 409, body: { code: "already_installed", error: "Bundle 'github' is already installed" } } }) });
+  const form = s.openInstall("github");
+  s.type(form.querySelector(`input[data-field="${GH}"]`), SECRET);
+  s.submit(form);
+  await s.settle();
+  await s.flush();
+  assert.deepEqual(s.calls.map((c) => path(c.url)).slice(-1), ["/dashboard/services/api/project/spring/connect"]);
+  assert.ok(!s.calls.some((c) => c.url.includes("/jobs/")));
+  assert.equal(form.querySelector("[data-svc-ok]").textContent, "Connected and tested.");
+});
+
+test("a paused connection of the same service: the Install sheet says so and Show it points at the row", () => {
+  const pg = PAGE();
+  pg.connections = [{ uuid: "00000000-0000-4000-8000-000000000001", serviceId: "github", name: "GitHub", accountLabel: "main", status: "needs_install", labelKey: "services.status.needs_install", lastTestedAt: null, fields: {} }];
+  const s = boot({ pageData: pg, route: storeRoute() });
+  const form = s.openInstall("github");
+  const has = form.querySelector("[data-svc-has-connection]");
+  assert.ok(has.textContent.startsWith("This project already has a GitHub connection."));
+  const row = s.document.querySelector('[data-svc-row][data-service="github"]');
+  s.click(has.querySelector("button"));
+  assert.equal(s.isOpen(), false);
+  assert.equal(s.focused().slice(-1)[0], row, "focus lands on the row");
+  const other = boot({ route: storeRoute() }).openInstall("github");
+  assert.equal(other.querySelector("[data-svc-has-connection]"), null, "no line without a connection");
+  assert.ok(t("services.install.hasConnection", "es") !== t("services.install.hasConnection", "en"));
 });
 
 test("source: no backtick, no dollar-brace, no storage in the client; the secret never in a data- attribute", () => {

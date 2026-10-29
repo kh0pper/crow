@@ -19,6 +19,7 @@ import { join, resolve, dirname } from "node:path";
 import { resolveCrowHome } from "../shared/crow-home.js";
 import { fileURLToPath } from "node:url";
 import { ungrantedFolderKeys } from "./folder-grants.js";
+import { servicesUiEnabled } from "./services/ui-flag.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -160,6 +161,25 @@ export function resolveEffectiveEnv(bundleId, manifest, { envOverride = null } =
   return { managed: true, env };
 }
 
+/** A service's account field names (manifest `connect.fields`), [] for any other add-on. */
+export function accountFieldNames(manifest) {
+  const fields = manifest?.connect?.fields;
+  return Array.isArray(fields) ? fields.map((f) => f?.name).filter((n) => typeof n === "string") : [];
+}
+
+/**
+ * The account fields an INSTALLED add-on already runs with Crow-wide (its mcp-addons entry, its
+ * .env or the gateway's own env: resolveEffectiveEnv), i.e. a legacy Crow-wide configuration
+ * from before project connections. [] when it has none, or isn't gateway-managed. Names only.
+ */
+export function configuredAccountFields(bundleId, manifest = getInstalledFirstManifest(bundleId)) {
+  const names = accountFieldNames(manifest);
+  if (names.length === 0) return [];
+  const { managed, env } = resolveEffectiveEnv(bundleId, manifest);
+  if (!managed) return [];
+  return names.filter((k) => isSet(env[k]) && !isPlaceholderValue(env[k]));
+}
+
 /**
  * Manifest-required env keys that are still EMPTY in the bundle's EFFECTIVE env.
  *
@@ -193,6 +213,15 @@ export function needsConfigKeys(bundleId, envOverride = null) {
   if (!managed) return folders;
   // An example value copied from .env.example ("/path/to/media", "x.example.com", a key
   // once published in the repo) is not configuration: list it, never rewrite the .env.
-  const missing = required.filter((k) => !isSet(env[k]) || isPlaceholderValue(env[k]));
+  let missing = required.filter((k) => !isSet(env[k]) || isPlaceholderValue(env[k]));
+  // Services UI on (Task 12): a service's account fields belong to project connections, so an
+  // add-on with none of them set Crow-wide (installed from the Install sheet) is not "missing"
+  // them. One with a legacy Crow-wide configuration keeps the nag for the rest of its fields.
+  if (!envOverride && servicesUiEnabled()) {
+    const account = accountFieldNames(man);
+    if (account.length && !account.some((k) => isSet(env[k]) && !isPlaceholderValue(env[k]))) {
+      missing = missing.filter((k) => !account.includes(k));
+    }
+  }
   return [...new Set([...missing, ...folders])];
 }

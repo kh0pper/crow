@@ -28,11 +28,13 @@ export function isAdvancedEnvVar(ev) {
 /**
  * env_vars the browser may see: installer-generated secrets are never shown or sent. With the
  * project Services UI on (CROW_SERVICES_UI), a service's account fields (`connect.fields`) leave
- * the extension's form too: they are typed per project, in the Services connect sheet. With the
- * flag off the form is exactly what it was.
+ * the INSTALL form: they are typed per project, in the Services connect sheet. `keepAccountFields`
+ * keeps them, for Configure on an installed add-on that already runs with them Crow-wide (a
+ * legacy configuration, see bundles-config.js configuredAccountFields), so the owner can still
+ * edit it. With the flag off the form is exactly what it was.
  */
-export function visibleEnvVars(addon, { servicesUi = servicesUiEnabled() } = {}) {
-  const accountFields = servicesUi && Array.isArray(addon?.connect?.fields)
+export function visibleEnvVars(addon, { servicesUi = servicesUiEnabled(), keepAccountFields = false } = {}) {
+  const accountFields = servicesUi && !keepAccountFields && Array.isArray(addon?.connect?.fields)
     ? new Set(addon.connect.fields.map((f) => f?.name).filter((n) => typeof n === "string"))
     : null;
   return (addon?.env_vars || []).filter((ev) => ev && typeof ev.name === "string" && !ev.generate

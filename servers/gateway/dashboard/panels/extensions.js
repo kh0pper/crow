@@ -34,6 +34,13 @@ export default {
     // Config completeness is computed HERE, never in html.js (which stays pure and
     // is unit-tested without ~/.crow).
     const needsConfig = fetchNeedsConfig(installed);
+    // Installed service add-ons already configured Crow-wide (legacy, before project
+    // connections): Configure keeps their account fields (project services Task 12).
+    let legacyAccounts = {};
+    try {
+      const { configuredAccountFields } = await import("../../bundles-config.js");
+      for (const id of Object.keys(installed)) if (configuredAccountFields(id).length) legacyAccounts[id] = true;
+    } catch { legacyAccounts = {}; }
     // Docker banner state (Item 4-PR5): cached ~60s with a short probe timeout,
     // so a hung docker daemon can never block the page render.
     const dockerOk = await dockerAvailable();
@@ -70,7 +77,7 @@ export default {
     } catch { /* zero counts rather than no page */ }
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, dockerOk, keychainPending, vaultSecure, localModels, lang,
+      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, legacyAccounts, dockerOk, keychainPending, vaultSecure, localModels, lang,
       // A skill's "Go to <extension>" arrives as ?q=<id>: the search box starts filled in.
       searchQuery: typeof req.query?.q === "string" ? req.query.q.slice(0, 100) : "",
     });

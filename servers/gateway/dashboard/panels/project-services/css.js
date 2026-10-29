@@ -152,6 +152,10 @@ export function projectServicesCss() {
   body.shell .svc-install-step--done .svc-install-num { background: var(--crow-accent); color: var(--crow-accent-contrast); }
   body.shell .svc-install-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
   body.shell .svc-install-title { font-weight: 600; overflow-wrap: anywhere; }
+  body.shell .svc-link-btn {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; border: 0; background: none;
+    font: inherit; font-weight: 600; color: var(--crow-accent); cursor: pointer;
+  }
   body.shell .svc-footnote { margin: 0; font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   body.shell .svc-error { margin: 0; color: var(--crow-error); overflow-wrap: anywhere; }
   body.shell .svc-ok { margin: 0; color: var(--crow-success); font-weight: 600; }
