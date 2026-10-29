@@ -8,7 +8,6 @@ import { appendAudit } from "./project-acl.js";
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { createDbClient, auditLog, resolveDataDir } from "../db.js";
-import { emitOrQueue } from "./sync-emit.js";
 import { disconnectProjectConnections } from "./service-connections.js";
 import { CROW_VOICE_BOT_ID } from "./voice-bot.js";
 import { resolveSqlitePath, tasksDbPath as defaultTasksDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
@@ -232,49 +231,57 @@ function defaultStorageDeleteFor(db) {
   };
 }
 
-async function defaultSyncManager() {
-  try { return (await import("../sharing/managers.js")).getInstanceSyncManager(); } catch { return null; }
-}
-
 /** Run one write inside the transaction; an absent table/column is skipped, anything else throws. */
 async function txWrite(db, sql, args) {
   try { return await db.execute({ sql, args }); } catch (err) { if (isAbsent(err)) return { rowsAffected: 0, skipped: true }; throw err; }
 }
 
-/** The crow.db purge + tombstone, in ONE BEGIN IMMEDIATE ... COMMIT. Synchronous DB work only. */
+/** A refusal found inside the transaction: rolls it back, and deleteProject returns its code. */
+class DeleteRefused extends Error {
+  constructor(code, detail = null) { super(`delete refused: ${code}`); this.code = code; this.detail = detail; }
+}
+
+/** The first free tombstone slug: <slug>-deleted-<id>, then -2, -3, ... */
+async function tombstoneSlug(db, slug, id) {
+  const base = `${slug}-deleted-${id}`;
+  for (let n = 1; ; n++) {
+    const cand = n === 1 ? base : `${base}-${n}`;
+    const { rows } = await db.execute({ sql: "SELECT 1 AS x FROM project_spaces WHERE slug = ? AND id != ?", args: [cand, id] });
+    if (!rows.length) return cand;
+  }
+}
+
+/**
+ * The crow.db purge + tombstone, in ONE BEGIN IMMEDIATE ... COMMIT. Synchronous DB work only.
+ * Notes, context and memories are deleted or unfiled LOCALLY ONLY and nothing is emitted (spec §15
+ * amendment): a note delete keys on a per-instance id and a context delete on the raw local
+ * project id, so on a peer either would hit UNRELATED rows; a memory update with a NULL project
+ * carries nothing once the transform strips it. The refusals are re-checked first, inside the
+ * transaction, so a member or bot added since the summary refuses with nothing changed.
+ * @returns {Promise<{ contextChanged: boolean }>}
+ */
 async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
   const id = Number(project.id);
-  const emits = { notes: [], context: [], memories: [] };
   await db.execute("BEGIN IMMEDIATE");
+  let contextChanged = false;
   try {
+    if (!(await canOwnProject(db, id))) throw new DeleteRefused("not_owner");
+    const block = (await sharedBlock(db, id)) || (await botsBlock(db, id));
+    if (block) throw new DeleteRefused(block.code, block.detail);
+
     await txWrite(db, "DELETE FROM service_connections WHERE project_id = ?", [id]);
     await txWrite(db, "DELETE FROM data_backends WHERE project_id = ?", [id]);
-
-    emits.notes = await tolerant(async () => (await db.execute({
-      sql: "SELECT id FROM research_notes WHERE project_id = ? ORDER BY id", args: [id],
-    })).rows.map((r) => Number(r.id)), []);
     await txWrite(db, "DELETE FROM research_notes WHERE project_id = ?", [id]);
     await txWrite(db, "DELETE FROM research_sources WHERE project_id = ?", [id]);
-
-    emits.context = await tolerant(async () => (await db.execute({
-      sql: "SELECT section_key, device_id, project_id FROM crow_context WHERE project_id = ? ORDER BY id", args: [id],
-    })).rows.map((r) => ({ section_key: r.section_key, device_id: r.device_id ?? null, project_id: r.project_id ?? null })), []);
-    await txWrite(db, "DELETE FROM crow_context WHERE project_id = ?", [id]);
+    const ctx = await txWrite(db, "DELETE FROM crow_context WHERE project_id = ?", [id]);
+    contextChanged = Number(ctx.rowsAffected || 0) > 0;
 
     // Memories are the user's: unfiled, never deleted.
-    emits.memories = await tolerant(async () => (await db.execute({
-      sql: "SELECT id, source FROM memories WHERE project_id = ? OR (project_uuid IS NOT NULL AND project_uuid = ?) ORDER BY id",
-      args: [id, project.uuid],
-    })).rows, null);
-    if (emits.memories === null) { // pre-0020 memories table: no project_uuid
-      emits.memories = await tolerant(async () => (await db.execute({
-        sql: "SELECT id, source FROM memories WHERE project_id = ? ORDER BY id", args: [id],
-      })).rows, []);
+    const mem = await txWrite(db,
+      "UPDATE memories SET project_id = NULL, project_uuid = NULL, updated_at = datetime('now') WHERE project_id = ? OR (project_uuid IS NOT NULL AND project_uuid = ?)",
+      [id, project.uuid]);
+    if (mem.skipped) { // pre-0020 memories table: no project_uuid
       await txWrite(db, "UPDATE memories SET project_id = NULL, updated_at = datetime('now') WHERE project_id = ?", [id]);
-    } else {
-      await txWrite(db,
-        "UPDATE memories SET project_id = NULL, project_uuid = NULL, updated_at = datetime('now') WHERE project_id = ? OR (project_uuid IS NOT NULL AND project_uuid = ?)",
-        [id, project.uuid]);
     }
 
     // Filings go to Unassigned; the card a filing named is being deleted, so its card_id goes too.
@@ -287,33 +294,21 @@ async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
 
     if (beforeTombstone) await beforeTombstone();
 
+    const slug = await tombstoneSlug(db, project.slug, id);
     const tombSql = (withRepo) => `UPDATE project_spaces
-         SET archived_at = datetime('now'), status = 'archived', slug = slug || '-deleted-' || id,
+         SET archived_at = datetime('now'), status = 'archived', slug = ?,
              description = NULL${withRepo ? ", repo_path = NULL" : ""}, updated_at = datetime('now')
        WHERE id = ? AND archived_at IS NULL`;
     let r;
-    try { r = await db.execute({ sql: tombSql(true), args: [id] }); }
-    catch (err) { if (!/no such column: repo_path/i.test(String(err && err.message))) throw err; r = await db.execute({ sql: tombSql(false), args: [id] }); }
+    try { r = await db.execute({ sql: tombSql(true), args: [slug, id] }); }
+    catch (err) { if (!/no such column: repo_path/i.test(String(err && err.message))) throw err; r = await db.execute({ sql: tombSql(false), args: [slug, id] }); }
     if (!r.rowsAffected) throw new Error("tombstone write matched no live row");
     await db.execute("COMMIT");
   } catch (err) {
     try { await db.execute("ROLLBACK"); } catch { /* already rolled back */ }
     throw err;
   }
-  return emits;
-}
-
-/** Sync deletes and the memory update, the way the existing emit sites shape them. Best effort. */
-async function emitPurge(db, syncManager, emits) {
-  for (const nid of emits.notes) await emitOrQueue(syncManager, db, "research_notes", "delete", { id: nid });
-  for (const c of emits.context) await emitOrQueue(syncManager, db, "crow_context", "delete", c);
-  // memory-write.js updateMemory's wire row for { project_id: null, project_uuid: null }.
-  for (const m of emits.memories) {
-    await emitOrQueue(syncManager, db, "memories", "update", { id: Number(m.id), project_id: null, source: m.source ?? null });
-  }
-  if (emits.context.length) {
-    try { (await import("../memory/crow-context.js")).invalidateContextCache(); } catch { /* cache is per-process */ }
-  }
+  return { contextChanged };
 }
 
 /** Cards and their records in the resolved store; board_defs in the global store. Never unlinks a file. */
@@ -380,15 +375,15 @@ const yyyymmdd = (d) => `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padS
 /**
  * Rename the workspace to <dataDir>/deleted-projects/<uuid>-<YYYYMMDD>/. renameSync moves the
  * directory entry itself: links inside (and the dir, if it is itself a link) move as links and
- * nothing is followed. Only a workspace under <dataDir>/projects/ is moved. @returns {boolean} moved
+ * nothing is followed. Only <dataDir>/projects/<slug>/workspace is moved. @returns {boolean} moved
  */
 function moveWorkspace(project, dataDir, now, partial) {
   const ws = project.workspace_dir;
   if (!workspaceExists(ws)) return false;
   const root = join(dataDir, "projects");
-  const rel = relative(root, resolve(ws));
-  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
-    console.warn(`[project-lifecycle] delete ${project.id}: workspace ${ws} is outside ${root}; left in place`);
+  // Only the project's own folder, <dataDir>/projects/<slug>/workspace (the slug from before the tombstone).
+  if (relative(root, resolve(ws)) !== join(String(project.slug), "workspace")) {
+    console.warn(`[project-lifecycle] delete ${project.id}: workspace ${ws} is not ${root}/${project.slug}/workspace; left in place`);
     partial.push("workspace");
     return false;
   }
@@ -414,17 +409,17 @@ function moveWorkspace(project, dataDir, now, partial) {
  * @param {string} [opts.actor='local']  local|contact|bot|system
  * @param {(fileRow:object)=>Promise<void>} [opts.storageDelete]  per-file delete (object + row)
  * @param {(backendId:number)=>any} [opts.disconnectBackend]  closes a running data backend
- * @param {object|null} [opts.syncManager]  defaults to the gateway's InstanceSyncManager
  * @param {string} [opts.dataDir]  defaults to project-spaces.js's anchor
  * @param {string} [opts.tasksDbPath]  the instance-global tasks.db (instance-paths.mjs by default)
  * @param {string} [opts.crowHome]  accepted, unused (see deleteSummary)
+ * @param {Function} [opts._beforeTransaction]  test seam: runs after the pre-transaction steps, before BEGIN
  * @param {Function} [opts._beforeTombstone]  test seam: runs inside the transaction, before the tombstone
  * @returns {Promise<{ ok: true, counts: object, partial?: string[] } |
  *   { ok: false, code: 'bad_actor'|'not_owner'|'shared'|'bots'|'name_mismatch'|'failed', detail?: object }>}
  */
 export async function deleteProject(db, projectId, {
   confirmName, crowHome, actor = "local", storageDelete, disconnectBackend = defaultDisconnectBackend,
-  syncManager, dataDir, tasksDbPath, now = () => new Date(), _beforeTombstone,
+  dataDir, tasksDbPath, now = () => new Date(), _beforeTransaction, _beforeTombstone,
 } = {}) {
   if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
   const summary = await deleteSummary(db, projectId, { tasksDbPath });
@@ -448,10 +443,13 @@ export async function deleteProject(db, projectId, {
     try { await disconnectBackend(b); } catch (err) { console.warn(`[project-lifecycle] delete ${id}: backend ${b} disconnect failed:`, err?.message || err); }
   }
 
-  let emits;
+  if (_beforeTransaction) await _beforeTransaction();
+
+  let purged;
   try {
-    emits = await purgeCrowDb(db, project, { actor, counts, beforeTombstone: _beforeTombstone });
+    purged = await purgeCrowDb(db, project, { actor, counts, beforeTombstone: _beforeTombstone });
   } catch (err) {
+    if (err instanceof DeleteRefused) return { ok: false, code: err.code, ...(err.detail ? { detail: err.detail } : {}) };
     console.warn(`[project-lifecycle] delete ${id}: crow.db purge rolled back:`, err?.message || err);
     return { ok: false, code: "failed" };
   }
@@ -459,10 +457,9 @@ export async function deleteProject(db, projectId, {
   // After the commit: best effort. The tombstone already hides the project and its id is never
   // reused, so anything left behind is inert.
   const partial = [];
-  try {
-    const mgr = syncManager === undefined ? await defaultSyncManager() : syncManager;
-    await emitPurge(db, mgr, emits);
-  } catch (err) { console.warn(`[project-lifecycle] delete ${id}: sync emit failed:`, err?.message || err); partial.push("sync"); }
+  if (purged.contextChanged) {
+    try { (await import("../memory/crow-context.js")).invalidateContextCache(); } catch { /* cache is per-process */ }
+  }
   await purgeCards(project, { tasksDbPath }, partial);
   await purgeFiles(db, id, storageDelete || defaultStorageDeleteFor(db), partial);
   const workspaceMoved = moveWorkspace(project, projectsDataDir(dataDir), now(), partial);

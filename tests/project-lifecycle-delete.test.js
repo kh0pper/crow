@@ -99,12 +99,8 @@ const recorder = () => {
   const calls = [];
   return { calls, storageDelete: async (row) => { calls.push(row.s3_key); await db.execute({ sql: "DELETE FROM storage_files WHERE id = ?", args: [row.id] }); } };
 };
-const fakeSync = () => {
-  const sent = [];
-  return { sent, mgr: { feedsDisabled: false, emitChange: async (table, op, row) => { sent.push({ table, op, row }); return 1; } } };
-};
 const del = (id, name, extra = {}) => L.deleteProject(db, id, {
-  confirmName: name, storageDelete: recorder().storageDelete, disconnectBackend: () => true, syncManager: null, ...extra,
+  confirmName: name, storageDelete: recorder().storageDelete, disconnectBackend: () => true, ...extra,
 });
 
 test("summary counts", async () => {
@@ -190,7 +186,7 @@ test("delete purges every table listed", async () => {
   const rec = recorder();
   const backends = [];
   const r = await L.deleteProject(db, id, {
-    confirmName: "Purge", storageDelete: rec.storageDelete, disconnectBackend: (b) => backends.push(b), syncManager: null,
+    confirmName: "Purge", storageDelete: rec.storageDelete, disconnectBackend: (b) => backends.push(b),
   });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.partial, undefined);
@@ -329,7 +325,7 @@ test("failure rolls back everything", async () => {
   seedCards(id, 2);
   const rec = recorder();
   const r = await L.deleteProject(db, id, {
-    confirmName: "Rollback", storageDelete: rec.storageDelete, disconnectBackend: () => true, syncManager: null,
+    confirmName: "Rollback", storageDelete: rec.storageDelete, disconnectBackend: () => true,
     _beforeTombstone: () => { throw new Error("injected"); },
   });
   assert.deepEqual(r, { ok: false, code: "failed" });
@@ -388,19 +384,6 @@ test("audit survives in project_audit_log and audit_log", async () => {
   assert.equal(d.counts.workspaceMoved, true);
 });
 
-test("sync deletes emitted for notes and context", async () => {
-  const id = await mk("Synced");
-  await seed(id);
-  const noteIds = (await db.execute({ sql: "SELECT id FROM research_notes WHERE project_id = ? ORDER BY id", args: [id] })).rows.map((r) => Number(r.id));
-  const mem = await one("SELECT id FROM memories WHERE project_id = ?", [id]);
-  const s = fakeSync();
-  assert.equal((await del(id, "Synced", { syncManager: s.mgr })).ok, true);
-  const by = (t) => s.sent.filter((x) => x.table === t);
-  assert.deepEqual(by("research_notes").map((x) => [x.op, x.row.id]), noteIds.map((i) => ["delete", i]));
-  assert.deepEqual(by("crow_context"), [{ table: "crow_context", op: "delete", row: { section_key: `ctx-${id}`, device_id: null, project_id: id } }]);
-  assert.deepEqual(by("memories"), [{ table: "memories", op: "update", row: { id: Number(mem.id), project_id: null, source: "test" } }]);
-});
-
 test("a step after the commit that fails is partial, never undone", async () => {
   const id = await mk("Partial");
   const p = await seed(id);
@@ -412,4 +395,68 @@ test("a step after the commit that fails is partial, never undone", async () => 
   assert.equal(existsSync(p.workspace_dir), false, "later steps still ran");
   const g = await one("SELECT details FROM audit_log WHERE event_type = 'project.delete' AND details LIKE ?", [`%"project_id":${id},%`]);
   assert.deepEqual(JSON.parse(g.details).partial, ["files"]);
+});
+
+test("a member or bot added after the summary is refused inside the transaction, nothing changed", async () => {
+  for (const kind of ["member", "bot"]) {
+    const id = await mk(`Race ${kind}`);
+    const p = await seed(id);
+    await db.execute({ sql: "DELETE FROM service_connections WHERE project_id = ?", args: [id] }); // the pre-step would mask it
+    seedCards(id, 1);
+    const snap = async () => ({
+      ps: { ...(await proj(id)) },
+      notes: await n("SELECT COUNT(*) AS n FROM research_notes WHERE project_id = ?", [id]),
+      ctx: await n("SELECT COUNT(*) AS n FROM crow_context WHERE project_id = ?", [id]),
+      mem: await n("SELECT COUNT(*) AS n FROM memories WHERE project_id = ?", [id]),
+      shell: await n("SELECT COUNT(*) AS n FROM shell_items WHERE project_id = ?", [id]),
+      offers: await n("SELECT COUNT(*) AS n FROM card_offers WHERE project_id = ? AND status = 'pending'", [id]),
+      sessions: await n("SELECT COUNT(*) AS n FROM bot_sessions WHERE project_id = ?", [id]),
+      backends: await n("SELECT COUNT(*) AS n FROM data_backends WHERE project_id = ?", [id]),
+      audit: await n("SELECT COUNT(*) AS n FROM project_audit_log WHERE project_id = ? AND action = 'project.delete'", [id]),
+      cards: tn("SELECT COUNT(*) AS n FROM tasks_items WHERE project_id = ?", [id]),
+    });
+    const before = await snap();
+    const rec = recorder();
+    const r = await L.deleteProject(db, id, {
+      confirmName: `Race ${kind}`, storageDelete: rec.storageDelete, disconnectBackend: () => true,
+      _beforeTransaction: async () => {
+        if (kind === "member") {
+          const c = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?, 'Late', 'e', 's') RETURNING id", args: [`crow:late-${id}`] });
+          await db.execute({ sql: "INSERT INTO project_members (project_id, contact_id, role) VALUES (?, ?, 'viewer')", args: [id, Number(c.rows[0].id)] });
+        } else {
+          await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, project_id) VALUES (?, 'Late bot', ?)", args: [`late-${id}`, id] });
+        }
+      },
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, kind === "member" ? "shared" : "bots");
+    assert.deepEqual(await snap(), before, `${kind}: nothing changed`);
+    assert.deepEqual(rec.calls, []);
+    assert.ok(existsSync(join(p.workspace_dir, "readme.txt")));
+  }
+});
+
+test("tombstone slug skips one already taken", async () => {
+  const id = await mk("Slug Clash");
+  const p = await proj(id);
+  await db.execute({ sql: "INSERT INTO project_spaces (slug, name) VALUES (?, 'squatter')", args: [`${p.slug}-deleted-${id}`] });
+  await db.execute({ sql: "INSERT INTO project_spaces (slug, name) VALUES (?, 'squatter 2')", args: [`${p.slug}-deleted-${id}-2`] });
+  assert.equal((await del(id, "Slug Clash")).ok, true);
+  assert.equal((await proj(id)).slug, `${p.slug}-deleted-${id}-3`);
+});
+
+test("a workspace that is not <dataDir>/projects/<slug>/workspace is left in place", async () => {
+  const id = await mk("Elsewhere");
+  const p = await proj(id);
+  // Inside the projects root but not this project's own folder (another project's workspace path).
+  const other = join(DATA, "projects", "someone-else", "workspace");
+  mkdirSync(other, { recursive: true });
+  writeFileSync(join(other, "keep.txt"), "mine");
+  await db.execute({ sql: "UPDATE project_spaces SET workspace_dir = ? WHERE id = ?", args: [other, id] });
+  const r = await del(id, "Elsewhere");
+  assert.equal(r.ok, true);
+  assert.equal(r.counts.workspaceMoved, false);
+  assert.deepEqual(r.partial, ["workspace"]);
+  assert.equal(readFileSync(join(other, "keep.txt"), "utf8"), "mine");
+  assert.ok(p.slug);
 });
