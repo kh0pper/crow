@@ -166,3 +166,10 @@ test("the kiosk passes the shared hint through unchanged (no kiosk change needed
   const o = displayTurnOptions(ctx, { settings: { lang: "es" }, crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS } });
   assert.equal(o.hintText, VOICE_LINES.es.hint_say);
 });
+
+test("crowVoiceTurnOptions: relayThreadId passes through, blank is dropped", () => {
+  assert.equal(crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: "thread-1" }).relayThreadId, "thread-1");
+  for (const blank of [undefined, null, "", "   ", 7]) {
+    assert.equal("relayThreadId" in crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: blank }), false, String(blank));
+  }
+});

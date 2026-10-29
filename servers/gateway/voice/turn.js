@@ -239,7 +239,7 @@ export function wasOffered(tc, offered, { categoryOf = () => null, selectedAddon
 
 /**
  * Is this turn a relay (the R1.2 session's relayed operator turn, or its speak-the-answer call)? Its transcript is
- * not the operator's own speech, so it is never offered crow_handoff (and Task 3.9 adds the rest of the contract).
+ * not the operator's own speech, so it never acts on Crow's behalf: runVoiceTurn's doc block states the contract.
  * True only for a non-empty (trimmed) opts.relayThreadId string.
  */
 export function isRelayTurn(opts) {
@@ -539,12 +539,24 @@ export function createVoiceTurnRunner(deps) {
    *   ignored). The text joins the turn's context line on the user message only, never saved; write it as
    *   "[Tag] …" lines so the echo gate recognises and strips a read-back. pending: true makes the turn an
    *   action turn (the action guard holds the reply and replaces an unbacked claim). A throw is logged and ignored.
-   * - afterTurn({ db, device, calledTools }): called in finally on every outcome; calledTools lists every tool name
-   *   the model called, refused and gated calls included. A throw is logged.
+   * - afterTurn({ db, device, calledTools, relay }): called in finally on every outcome; calledTools lists every tool
+   *   name the model called, refused and gated calls included; relay is isRelayTurn(opts). A throw is logged.
    * deps.handoffs (optional; Crow voice's hand-off): forTurn({ db, device, surface, lang, bot, transcript }) →
    *   [] or [{ definition, when, execute }], joined to opts.extraTools on a voice-bot turn that is not a relay and
    *   carries no must-run extra tool (see the hand-off block below).
    *
+   * opts.relayThreadId (the relay contract, PR 3 Task 3.9): a non-empty string (the R1.2 session's thread id) marks a
+   *   turn whose transcript is NOT the operator's own speech: the session's relayed operator turn, or its
+   *   speak-the-answer call (the bot's answer text). Every such call MUST set it (crowVoiceTurnOptions passes it on).
+   *   A relay turn can never act for the operator or answer a pending question:
+   *   - crow_handoff is never offered (deps.handoffs.forTurn is not asked; a forced call is refused as not_offered),
+   *     and none of Crow's own tools is loaded (neither opts.ownTools nor deps.ownTools);
+   *   - deps.voiceActions.fastPath and turnContext are never called, and the STT rewrite is skipped (the words were
+   *     not misheard), so no hand-off matcher reads the transcript and a pending entry never makes an action turn;
+   *   - deps.voiceActions.afterTurn still runs in finally with relay: true, on every outcome (opts.fastPaths answering
+   *     with no model call included): it clears every pending entry on the device and expires its hand-off row;
+   *   - timings.relay = true.
+   *   opts.fastPaths still run (the endpoint's own no-model paths).
    * opts.noTranscript: true keeps this turn out of the opt-in transcript buffer (the kiosk turn check).
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
@@ -583,6 +595,7 @@ export function createVoiceTurnRunner(deps) {
     // opts.startedAt: when the turn really began (the kiosk's turn_end), so an early-STT wait counts.
     const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
     const timings = { surface: VOICE_SURFACES.includes(opts.surface) ? opts.surface : "kiosk" };
+    if (relay) timings.relay = true;
     const result = { transcript: "", route: null, fastPath: false, escalated: false, degraded: null, aborted: false, failed: null, timings };
     const mark = (k) => { if (timings[k] == null) timings[k] = now() - t0; };
     const aborted = () => signal?.aborted === true;
@@ -666,7 +679,8 @@ export function createVoiceTurnRunner(deps) {
       // A misheard leading "add" ("Had coffee Tuesday at 9", PR 2.1 [r2 I6]) is put back once, here, before any reader
       // of the words (the fast paths, actionWhen, the intent lists, the model): the caption and the saved conversation
       // keep the rewritten text. The voice bot only, never while a question waits for a yes (stt-rewrite.js: English only).
-      const rw = transcript ? sttRewrite(transcript, { lang: opts.lang }) : null;
+      // A relay transcript (the relay contract) is not STT output: never rewritten.
+      const rw = transcript && !relay ? sttRewrite(transcript, { lang: opts.lang }) : null;
       if (rw) {
         let waiting = false;
         try { waiting = voiceActions?.turnContext?.({ device })?.pending === true; } catch { waiting = false; }
@@ -687,9 +701,10 @@ export function createVoiceTurnRunner(deps) {
 
       // 2. Fast paths (no LLM). deps.voiceActions.fastPath first (a pending confirmation answered by a yes or
       // a no), then opts.fastPaths. The voice-actions path gets the bot and an executor; a bot that cannot be
-      // loaded is passed as null (it never stops the path), and nothing is ensured here.
+      // loaded is passed as null (it never stops the path), and nothing is ensured here. Never on a relay turn: its
+      // words are not the operator's answer to a pending question (the relay contract).
       let fp = null;
-      if (typeof voiceActions?.fastPath === "function") {
+      if (!relay && typeof voiceActions?.fastPath === "function") {
         // Nothing here may stop "pause": a failure is logged and the path is skipped (null).
         let vaBot = null;
         try { vaBot = await loadBot(db, botId); } catch (err) { log(`[voice-turn] ${device.id} voice actions: bot not loaded (${err?.message || err})`); }
@@ -781,10 +796,11 @@ export function createVoiceTurnRunner(deps) {
       // → { tools, unavailable }. A turn with a must-run extra tool (the glasses camera, a must-run display tool)
       // carries only what it carries today ([rev2 C2]); opts.noOwnTools forces the same. An own tool runs as
       // execute(args, { transcript, executor, db, device, fallback? }): the device holds a strict-confirm question.
+      // A relay turn loads none (the relay contract).
       const mustOffered = extra.some((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true);
       const ownByName = new Map();
       const ownUnavailable = new Set();
-      if (!mustOffered && opts.noOwnTools !== true) {
+      if (!relay && !mustOffered && opts.noOwnTools !== true) {
         let src = null;
         if (Array.isArray(opts.ownTools)) src = opts.ownTools;
         else if (typeof deps.ownTools === "function" && isVoiceBotDef(bot)) {
@@ -894,9 +910,10 @@ export function createVoiceTurnRunner(deps) {
       // transcript: the context STRING is computed first, then wrapped and guarded.
       const optsCtx = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
       // deps.voiceActions.turnContext({ device }) → { text, pending } (a bare string is { text }): its text joins the
-      // context line (on the user message, echo-guarded, never saved); pending makes this an action turn.
+      // context line (on the user message, echo-guarded, never saved); pending makes this an action turn. Never on a
+      // relay turn (the relay contract): a pending entry is not this transcript's question.
       let vaCtx = null;
-      if (typeof voiceActions?.turnContext === "function") {
+      if (!relay && typeof voiceActions?.turnContext === "function") {
         let v = null;
         try { v = voiceActions.turnContext({ device }); } catch (err) { log(`[voice-turn] ${device.id} voice actions turnContext failed (${err?.message || err})`); }
         if (v && typeof v.then === "function") {
@@ -1978,7 +1995,7 @@ export function createVoiceTurnRunner(deps) {
         } catch { /* never stops a turn, never logged */ }
       }
       if (typeof voiceActions?.afterTurn === "function" && device?.id) {
-        try { await voiceActions.afterTurn({ db, device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
+        try { await voiceActions.afterTurn({ db, device, calledTools: calledTools.slice(), relay }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
       }
     }
   }

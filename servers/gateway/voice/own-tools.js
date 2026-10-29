@@ -582,7 +582,7 @@ export function resolveRoutineBackends(settings, conn) {
  *   pending      createPendingStore() (pending.js): the per-device pending confirmations
  *   connected()  → Set of connected add-on tool names (tool-executor connectedAddonToolNames)
  *   openTasksDb  → the instance-global tasks.db client (default: instance-paths tasksDbPath)
- * → { forTurn, fastPath, turnContext, resolveBackends }
+ * → { forTurn, fastPath, turnContext, afterTurn, resolveBackends }
  */
 export function createOwnTools({ pending, now = Date.now, log = () => {}, connected = () => new Set(), openTasksDb = defaultOpenTasksDb } = {}) {
   if (!pending || typeof pending.set !== "function") throw new Error("own tools: a pending store is required");
@@ -798,5 +798,16 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     return entry && (entry.kind === "routine" || entry.kind === "which_calendar") ? { text: `[Pending] ${entry.say}`, pending: true } : null;
   }
 
-  return { forTurn, fastPath, turnContext, resolveBackends };
+  /**
+   * deps.voiceActions.afterTurn: only a relay turn (turn.js's relay contract) acts here. It takes this device's pending
+   * routine or which_calendar entry: a relayed "yes" never answers it, and the question is over (R15: handoff.js clears
+   * the hand-off kinds). Any other turn leaves the entry to its yes, its no or its TTL.
+   */
+  function afterTurn({ device, relay = false } = {}) {
+    if (relay !== true || !device?.id) return;
+    const e = pending.get(device.id);
+    if (e && (e.kind === "routine" || e.kind === "which_calendar")) pending.take(device.id);
+  }
+
+  return { forTurn, fastPath, turnContext, afterTurn, resolveBackends };
 }
