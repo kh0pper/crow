@@ -3491,6 +3491,7 @@ export const translations = {
   // names, filed (the project's home) and unfiled (the Chat list).
   "perch.backProject": { en: "Back to the project home", es: "Volver al inicio del proyecto" },
   "perch.backList": { en: "Back to the sessions", es: "Volver a las sesiones" },
+  "perch.appsLabel": { en: "Apps for this project", es: "Apps de este proyecto" },
   "perch.plusLabel": { en: "Attach or dictate", es: "Adjuntar o dictar" },
   "perch.composerPlaceholderProject": { en: "Message # {project}", es: "Mensaje # {project}" },
   "perch.identToday": { en: "today", es: "hoy" },
@@ -3914,6 +3915,15 @@ export const translations = {
   "shell.unassigned": { en: "Unassigned", es: "Sin asignar" },
   "shell.projects": { en: "Projects", es: "Proyectos" },
   "shell.more": { en: "More of Crow", es: "Más de Crow" },
+  // R1.2 PR 5: the apps launcher (drawer + a session's apps sheet).
+  "shell.apps": { en: "Apps", es: "Apps" },
+  "shell.appsShow": { en: "Show apps", es: "Mostrar apps" },
+  "shell.appsThisProject": { en: "This project", es: "Este proyecto" },
+  "shell.appsAll": { en: "All apps", es: "Todas las apps" },
+  "shell.appsEmptyProject": { en: "No apps for this project's bots yet", es: "Los bots de este proyecto aún no tienen apps" },
+  "shell.appsEmptyAll": { en: "No apps installed yet", es: "Aún no hay apps instaladas" },
+  "shell.appsLoading": { en: "Loading apps…", es: "Cargando apps…" },
+  "shell.appsLoadFailed": { en: "Couldn't load the apps. Try again.", es: "No se pudieron cargar las apps. Inténtalo de nuevo." },
   "shell.reach": { en: "What Crow can reach", es: "Lo que Crow puede alcanzar" },
   "shell.useClassic": { en: "Use classic Crow", es: "Usar Crow clásico" },
   "shell.useNew": { en: "Use the new Crow", es: "Usar el nuevo Crow" },

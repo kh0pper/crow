@@ -238,6 +238,71 @@ export function shellCss() {
   }
   body.shell .shell-more-item:hover { border-color: var(--crow-accent); color: var(--crow-accent); }
 
+  /* ─── The drawer's Apps launcher (R1.2 PR 5), also the grid in a session's apps sheet ─── */
+  body.shell .shell-apps { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }
+  body.shell .shell-apps-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  body.shell .shell-apps-chip {
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--crow-border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--crow-text-primary);
+    font: inherit;
+    cursor: pointer;
+  }
+  body.shell .shell-apps-chip[aria-pressed="true"] { background: var(--crow-accent-muted); border-color: var(--crow-accent); color: var(--crow-accent); font-weight: 600; }
+  body.shell .shell-apps-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  body.shell .shell-apps-grid[hidden] { display: none; }
+  body.shell .shell-app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 2px;
+    border-radius: var(--crow-radius-control);
+    color: var(--crow-text-primary);
+    font-size: 0.75rem;
+    line-height: 1.2;
+    text-align: center;
+    text-decoration: none;
+  }
+  body.shell .shell-app:hover { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
+  body.shell .shell-app-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    border: 1px solid var(--crow-border);
+    border-radius: 12px;
+    background: var(--crow-bg-elevated);
+    color: var(--crow-accent);
+  }
+  body.shell .shell-app-icon svg { width: 24px; height: 24px; }
+  body.shell .shell-app-label { max-width: 100%; overflow-wrap: anywhere; }
+  body.shell .shell-apps-empty { grid-column: 1 / -1; margin: 0; color: var(--crow-text-secondary); font-size: 0.9rem; line-height: 44px; }
+  body.shell .shell-apps-empty a,
+  body.shell .shell-apps-goto {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 4px;
+    border: none;
+    background: none;
+    color: var(--crow-accent);
+    font: inherit;
+    line-height: normal;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  body.shell .shell-apps-chip:focus-visible,
+  body.shell .shell-app:focus-visible,
+  body.shell .shell-apps-goto:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+
   /* ─── Desktop: the tabs become a left rail with the project list ─── */
   @media (min-width: 1024px) {
     body.shell {

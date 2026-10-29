@@ -34,7 +34,9 @@ function build(crowHome) {
     if (!ext && !panel) continue;
     const mcpServers = Array.isArray(manifest.mcpServers) ? manifest.mcpServers.map(String) : [];
     const label = ext?.label || manifest.name || id;
-    const base = { id, label, mcpServers, directPort: null, path: null, fallbackHref: null };
+    // icon: the manifest's icon KEY (shared/app-icons.js resolves it; never markup).
+    const icon = typeof manifest.icon === "string" && manifest.icon ? manifest.icon : null;
+    const base = { id, label, icon, mcpServers, directPort: null, path: null, fallbackHref: null };
     if (ext) {
       if (ext.proxyMode === "direct") {
         // Cannot sit behind a subpath proxy: the client builds

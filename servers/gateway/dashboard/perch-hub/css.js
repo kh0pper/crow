@@ -975,5 +975,22 @@ min-height:44px;padding:6px 8px;font-size:13px;border-color:transparent;backgrou
 @media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-session-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
 }
+/* --- R1.2 PR 5: the session head's apps button and its sheet ---------------
+   The button is a 44 px grid icon at the head row's end; the sheet is shaped
+   like the session sheet and holds the shell's launcher grid. */
+#perch-hub-root .perch-head #perch-apps-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;border-color:transparent;background:transparent;color:var(--dim)}
+#perch-hub-root .perch-head #perch-apps-btn[hidden]{display:none}
+#perch-hub-root .perch-head #perch-apps-btn:hover{background:var(--teal-soft);color:var(--ink)}
+#perch-hub-root .perch-head #perch-apps-btn svg{width:22px;height:22px}
+#perch-apps-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;max-height:85dvh;
+border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;background:var(--card);color:var(--ink);box-shadow:0 -8px 32px rgba(0,0,0,.18)}
+#perch-apps-sheet[open]{display:flex;flex-direction:column}
+#perch-apps-sheet::backdrop{background:rgba(0,0,0,.4)}
+#perch-apps-sheet[open]:not(:modal){position:fixed;inset:auto 0 0;z-index:1200}
+#perch-hub-root #perch-apps-grid{overflow-y:auto;min-height:0}
+#perch-hub-root #perch-apps-grid .shell-app{color:var(--ink)}
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
+  #perch-apps-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
+}
 `);
 }

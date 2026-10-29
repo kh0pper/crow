@@ -91,5 +91,151 @@ export function shellClientJs() {
         }, true);
       }
     })();
+
+    // ─── The apps launcher (R1.2 PR 5): the drawer's Apps grid ───
+    // window.CrowApps is shared with the Perch session's apps sheet
+    // (perch-hub/client.js): one tile renderer, one open rule.
+    (function () {
+      var API = '/dashboard/shell-api/apps?project=';
+      // A direct-mode app cannot sit behind the subpath proxy: its link is
+      // https://<this hostname>:<port><path> (the nest panel's rule).
+      function fixDirect(a) {
+        var port = a.getAttribute('data-direct-port');
+        if (!port || !/^[0-9]{1,5}$/.test(port)) return;
+        var path = a.getAttribute('data-direct-path') || '/';
+        if (path.charAt(0) !== '/') path = '/' + path;
+        a.setAttribute('href', 'https://' + location.hostname + ':' + port + path);
+      }
+      function tile(x, extra) {
+        var a = document.createElement('a');
+        var href = String(x.href || '/dashboard/extensions');
+        a.className = 'shell-app' + (extra ? ' shell-app--extra' : '');
+        a.setAttribute('href', href);
+        if (extra) a.setAttribute('data-launcher-tile', String(x.id));
+        else {
+          a.setAttribute('data-app-id', String(x.id));
+          a.setAttribute('data-app-kind', x.kind === 'desktop' ? 'desktop' : 'page');
+          if (x.directPort != null) {
+            a.setAttribute('data-direct-port', String(x.directPort));
+            a.setAttribute('data-direct-path', String(x.path || '/'));
+          }
+        }
+        if (href.indexOf('/dashboard/') !== 0) a.setAttribute('data-turbo', 'false');
+        var ic = document.createElement('span');
+        ic.className = 'shell-app-icon';
+        ic.setAttribute('aria-hidden', 'true');
+        // Trusted: the server's app-icons table (a manifest only names a key).
+        if (typeof x.icon === 'string') ic.innerHTML = x.icon;
+        var lb = document.createElement('span');
+        lb.className = 'shell-app-label';
+        lb.textContent = String(x.label == null ? x.id : x.label);
+        a.appendChild(ic); a.appendChild(lb);
+        fixDirect(a);
+        return a;
+      }
+      function note(grid, text) {
+        var p = document.createElement('p');
+        p.className = 'shell-apps-empty';
+        p.textContent = text;
+        grid.appendChild(p);
+        return p;
+      }
+      // opts: { empty: text when there are no apps, emptyAction: optional
+      // { label, href } link after it }.
+      function render(grid, data, opts) {
+        opts = opts || {};
+        while (grid.firstChild) grid.removeChild(grid.firstChild);
+        var apps = data && Array.isArray(data.apps) ? data.apps : [];
+        var tiles = data && Array.isArray(data.tiles) ? data.tiles : [];
+        for (var i = 0; i < apps.length; i++) grid.appendChild(tile(apps[i], false));
+        if (!apps.length && opts.empty) {
+          var p = note(grid, opts.empty);
+          if (opts.emptyAction) {
+            p.appendChild(document.createTextNode(' \u00b7 '));
+            var l = document.createElement('a');
+            l.setAttribute('href', String(opts.emptyAction.href));
+            l.textContent = String(opts.emptyAction.label);
+            p.appendChild(l);
+          }
+        }
+        for (var j = 0; j < tiles.length; j++) grid.appendChild(tile(tiles[j], true));
+      }
+      function load(project) {
+        return fetch(API + encodeURIComponent(project || 'all'), { credentials: 'same-origin', headers: { accept: 'application/json' } })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+      }
+      // A desktop app first asks the open session to show it as a tile
+      // (crow:open-app-tile; the Perch client calls preventDefault when it
+      // does). Unhandled, the link navigates as usual. Returns true when handled.
+      function openDesktop(appId) {
+        var ev;
+        try { ev = new CustomEvent('crow:open-app-tile', { detail: { appId: appId }, cancelable: true }); }
+        catch (e) { return false; }
+        document.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      }
+      window.CrowApps = { render: render, load: load, openDesktop: openDesktop, fixDirect: fixDirect };
+
+      var direct = document.querySelectorAll('a.shell-app[data-direct-port]');
+      for (var d = 0; d < direct.length; d++) fixDirect(direct[d]);
+
+      // The drawer's switch: This project is server-rendered; All loads on the
+      // first switch to it, and a failure can be retried by switching again.
+      var section = typeof document.querySelector === 'function' ? document.querySelector('#shell-drawer .shell-apps') : null;
+      function show(view) {
+        if (!section) return;
+        var chips = section.querySelectorAll('[data-apps-view]');
+        for (var c = 0; c < chips.length; c++) chips[c].setAttribute('aria-pressed', chips[c].getAttribute('data-apps-view') === view ? 'true' : 'false');
+        var grids = section.querySelectorAll('[data-apps-grid]');
+        var target = null;
+        for (var g = 0; g < grids.length; g++) {
+          var on = grids[g].getAttribute('data-apps-grid') === view;
+          grids[g].hidden = !on;
+          if (on) target = grids[g];
+        }
+        if (!target || target.getAttribute('data-loaded') || target.getAttribute('data-loading')) return;
+        target.setAttribute('data-loading', '1');
+        while (target.firstChild) target.removeChild(target.firstChild);
+        note(target, section.getAttribute('data-apps-loading') || '');
+        load('all').then(function (data) {
+          target.removeAttribute('data-loading');
+          target.setAttribute('data-loaded', '1');
+          render(target, data, { empty: section.getAttribute('data-apps-empty-all') || '' });
+        }, function () {
+          target.removeAttribute('data-loading');
+          while (target.firstChild) target.removeChild(target.firstChild);
+          note(target, section.getAttribute('data-apps-failed') || '');
+        });
+      }
+      if (section) {
+        section.addEventListener('click', function (e) {
+          var b = e.target && e.target.closest ? e.target.closest('[data-apps-view],[data-apps-goto]') : null;
+          if (!b || !section.contains(b)) return;
+          var view = b.getAttribute('data-apps-view') || b.getAttribute('data-apps-goto');
+          show(view);
+          // The empty line's All apps hides with its grid: focus the chip.
+          if (b.hasAttribute('data-apps-goto')) {
+            var chip = section.querySelector('[data-apps-view="' + view + '"]');
+            if (chip && chip.focus) chip.focus();
+          }
+        });
+      }
+
+      // Opening a desktop app (drawer or a session's apps sheet), once per document.
+      if (!window.__crowAppsOpenBound) {
+        window.__crowAppsOpenBound = true;
+        document.addEventListener('click', function (e) {
+          if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          var a = e.target && e.target.closest ? e.target.closest('a.shell-app[data-app-kind="desktop"]') : null;
+          if (!a) return;
+          if (!openDesktop(a.getAttribute('data-app-id'))) return;
+          e.preventDefault();
+          var dlg = a.closest('dialog');
+          if (dlg && dlg.open) {
+            if (typeof dlg.close === 'function') dlg.close(); else dlg.removeAttribute('open');
+          }
+        });
+      }
+    })();
 `;
 }
