@@ -151,7 +151,8 @@ export class PeerManager {
     this.onPeerConnected = null; // callback(crowId, conn)
     // callback(crowId, payload, meta) — a `data` frame of an admitted CONTACT.
     // meta = { proof: "cb"|"sig", instanceId: string|null }. instanceId is the
-    // id the peer CLAIMED in its challenge (state.peerInstanceId): all of a
+    // id the peer CLAIMED in its challenge (state.peerInstanceId, null unless
+    // it matches ENROLL_ID_RE): all of a
     // contact's instances share one key, so nothing proves it. Use it for
     // routing only, never for authorization. (Only a sibling's
     // state.remoteInstanceId can be proven, by PT-2a pair binding; sibling
@@ -380,19 +381,31 @@ export class PeerManager {
     // replicate(id, conn)), whose JSON blocks have no raw newline, so a line
     // cap there would cut a sibling replicating one large entry.
     const lineCapped = () => !capped() && state.kind === "contact";
+    // `buffer` is the leftover partial line; `bufferBytes` its UTF-8 length,
+    // kept as a running count so a line trickled in many chunks is never
+    // re-measured (or re-split) from the start.
     let buffer = "";
+    let bufferBytes = 0;
+    const kill = () => { buffer = ""; bufferBytes = 0; this._kill(conn, state); };
     conn.on("data", (data) => {
       if (state.refused || state.closed) return;
-      buffer += data.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop(); // Keep incomplete line
+      const chunk = data.toString();
+      let lines = [];
+      if (chunk.includes("\n")) {
+        lines = (buffer + chunk).split("\n");
+        buffer = lines.pop(); // Keep incomplete line
+        bufferBytes = Buffer.byteLength(buffer);
+      } else {
+        buffer += chunk;
+        bufferBytes += Buffer.byteLength(chunk);
+      }
 
       for (const line of lines) {
-        if (lineCapped() && Buffer.byteLength(line) > this.postAdmitLineMax) { this._kill(conn, state); return; }
+        if (lineCapped() && Buffer.byteLength(line) > this.postAdmitLineMax) { kill(); return; }
         if (capped()) {
           state.preBytes += Buffer.byteLength(line) + 1;
           if (state.preBytes > this.preAuthMaxBytes
-              || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { this._kill(conn, state); return; }
+              || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { kill(); return; }
         }
         if (!line.trim()) continue;
         let msg;
@@ -404,9 +417,9 @@ export class PeerManager {
         chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
       }
       if (capped()) {
-        if (state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
-      } else if (lineCapped() && Buffer.byteLength(buffer) > this.postAdmitLineMax) {
-        this._kill(conn, state);
+        if (state.preBytes + bufferBytes > this.preAuthMaxBytes) kill();
+      } else if (lineCapped() && bufferBytes > this.postAdmitLineMax) {
+        kill();
       }
     });
 
@@ -846,7 +859,9 @@ export class PeerManager {
     if (!state.mutual || state.refused) return;
     if (state.kind === "contact" && msg.type === "data") {
       if (state.remoteCrowId && this.onPeerData) {
-        const meta = { proof: state.proof, instanceId: state.peerInstanceId ?? null };
+        // The claimed id is passed only in the enroll-id shape; anything else is null.
+        const claimed = state.peerInstanceId;
+        const meta = { proof: state.proof, instanceId: typeof claimed === "string" && ENROLL_ID_RE.test(claimed) ? claimed : null };
         try { await this.onPeerData(state.remoteCrowId, msg.payload, meta); } catch {}
       }
       return;
