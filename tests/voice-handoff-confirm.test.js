@@ -749,7 +749,8 @@ test("a no that changes the task is a correction, not a decline; a plain refusal
   assert.equal(s.pending.get(DEVICE.id).id, id, "still waiting: the model re-proposes");
   const declines = ["no thanks", "not now", "never mind", "forget it", "I changed my mind", "cancel that", "déjalo", "olvídalo", "ahora no",
     "no, mejor no", "no, mejor lo dejamos", "no pero gracias", "no but thanks", "no, not at all", "no, not at the moment", "no, at least not today",
-    "no, let's not have writer do that", "no, writer doesn't need to", "no, make it not happen", "no, que sea no"];
+    "no, let's not have writer do that", "no, writer doesn't need to", "no, make it not happen", "no, que sea no",
+    "no, change it to nothing", "no, change it to not happen", "olvídalo", "I changed my mind"];
   for (const t of declines) {
     const s2 = await setup();
     const { id: id2 } = await s2.propose();

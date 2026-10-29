@@ -141,7 +141,9 @@ test("a negation in the first words is never a yes, and always a no (claro que n
     assert.equal(H.isAffirmative(t), true, `${t}: a yes`);
     assert.equal(H.isNegative(t), false, `${t}: not a no`);
   }
-  for (const t of ["no", "nope", "no, espera", "cancel", "para", "never mind", "forget it", "I changed my mind", "déjalo", "olvídalo", "he cambiado de idea"]) assert.equal(H.isNegative(t), true, t);
+  for (const t of ["no", "nope", "no, espera", "cancel", "para", "never mind", "forget it", "Forget it, please.", "I changed my mind", "I've changed my mind, thanks", "déjalo", "olvídalo", "¡Déjalo, gracias!", "he cambiado de idea"]) assert.equal(H.isNegative(t), true, t);
+  // Those four are a no only as the whole utterance: with more after them they are a correction, not a decline.
+  for (const t of ["I changed my mind, make it 5pm", "déjalo a las cinco", "déjalo para mañana", "olvídalo, mejor a las seis", "déjalo así", "forget it and add lunch instead"]) assert.equal(H.isNegative(t), false, t);
   // A negation late in a long yes does not undo it (only the first few words count).
   assert.equal(H.isAffirmative("yes go ahead and delete the one that is no longer needed"), true);
 });

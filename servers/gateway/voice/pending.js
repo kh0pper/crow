@@ -74,15 +74,18 @@ const CONTENT_CHANGE_LEADS = [["make", "it"], ["change", "it", "to"], ["change",
   ["que", "sea"], ["hazlo", "sobre"], ["hazlo", "de"], ["cambialo", "a"]];
 const NEGATIVE_PARTICLES = new Set(["no", "not", "nunca", "never", "ni", "nada", "nothing"]);
 /** The transcript changes what was asked: a content-change cue with more words after it, and no negative particle
- * right after the cue ("make it not…", "que sea no…" still decline). */
+ * right after the cue ("make it not…", "que sea no…" still decline). The LONGEST cue at a position decides, so
+ * "change it to nothing" is judged after "change it to", not after "change it". */
 export function changesContent(transcript) {
   const words = phraseWords(transcript);
-  return CONTENT_CHANGE_LEADS.some((lead) => {
-    for (let i = 0; i + lead.length < words.length; i++) {
-      if (lead.every((w, j) => words[i + j] === w)) return !NEGATIVE_PARTICLES.has(words[i + lead.length]);
+  for (let i = 0; i < words.length; i++) {
+    let longest = 0;
+    for (const lead of CONTENT_CHANGE_LEADS) {
+      if (lead.length > longest && i + lead.length < words.length && lead.every((w, j) => words[i + j] === w)) longest = lead.length;
     }
-    return false;
-  });
+    if (longest) return !NEGATIVE_PARTICLES.has(words[i + longest]);
+  }
+  return false;
 }
 
 /**
