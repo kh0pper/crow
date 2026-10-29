@@ -5,6 +5,7 @@
  * refuses them with voice_bot_readonly). Its two writes are its own:
  *
  *   voice_bot_save    the switch, model, escalation, persona and name, the Routine section (calendar, reminders, tasks, confirm),
+ *                     the Hand-offs switch and the bots Crow may hand work to (handoff.enabled, handoff.allowed_bots),
  *                     speaking voice and speech recognition, memory tools, the recent-transcripts switch
  *                     (voice.transcript_buffer: in memory only, off unless ticked; voice/transcript-buffer.js;
  *                     voice.transcript_log: a one-week log on this instance's disk, off unless ticked; voice/transcript-log.js)
@@ -26,13 +27,17 @@
  */
 import { escapeHtml, section } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
-import { t, fill } from "../../shared/i18n.js";
+import { t, fill, translations } from "../../shared/i18n.js";
 import { readSetting } from "../../settings/registry.js";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
 import {
   CROW_VOICE_BOT_ID, VOICE_PRESETS, DEFAULT_PERSONA, voiceBotDefinition, normalizeVoiceSettings,
-  ROUTINE_BACKENDS, CONFIRM_LEVELS,
+  ROUTINE_BACKENDS, CONFIRM_LEVELS, isVoiceBotId, isVoiceBotDef,
 } from "../../../../shared/voice-bot.js";
+import { botCapabilitySummary, cleanName } from "../../../voice/bot-summaries.js";
+import { createHandoffStore } from "../../../voice/handoff-store.js";
+import { drawerHrefs } from "../../../board/card-link.js";
+import { boardState, oneLine } from "../../shared/bot-display.js";
 import { resolveRoutineBackends } from "../../../voice/own-tools.js";
 import { connectedAddonToolNames, createToolExecutor } from "../../../ai/tool-executor.js";
 import { loadModelOptions } from "./data-queries.js";
@@ -42,6 +47,9 @@ import { abilityLineHtml, voiceAbilityScript } from "./voice-use.js";
 import { VOICE_EDITOR_HREF } from "./voice-bot-card.js";
 
 const NAME_MAX = 40;
+/** How many recent hand-offs the log shows. */
+const HANDOFF_LOG_ROWS = 20;
+const handoffStore = createHandoffStore();
 const PROMPT_MAX = 4000;
 const ID_MAX = 200;
 // The three memory selections the "Memory tools" switch adds back (the preset's own). Off removes
@@ -142,6 +150,24 @@ async function applyRoutine(db, b, def, next) {
   };
 }
 
+/**
+ * The hand-off settings of the save, applied onto `next.handoff` (only enabled and allowed_bots move).
+ * allowed_bots keeps its voice meaning (bots Crow may hand work TO; empty = all): the ticked ids are
+ * narrowed to the non-voice bots that exist, deduplicated, and then normalized the way the voice turn
+ * reads them (a malformed entry is dropped, the rest kept).
+ */
+async function applyHandoff(db, b, def, next) {
+  const asked = [].concat(b.allowed_bots ?? []).filter((x) => typeof x === "string" && x);
+  let known = new Set();
+  try {
+    known = new Set((await db.execute({ sql: "SELECT bot_id, definition FROM pi_bot_defs", args: [] })).rows
+      .filter((r) => !isVoiceBotId(String(r.bot_id)) && !isVoiceBotDef(parseDef(r)))
+      .map((r) => String(r.bot_id)));
+  } catch { /* nothing is known: nothing is allowed through */ }
+  const ids = normalizeVoiceSettings({ handoff: { allowed_bots: [...new Set(asked)].filter((x) => known.has(x)) } }).handoff.allowed_bots;
+  next.handoff = { ...obj(def.handoff), enabled: b.handoff_enabled === "on", allowed_bots: ids };
+}
+
 export async function handleVoiceBotSave(req, res, { db }) {
   const b = req.body || {};
   const got = await freshRow(req, res, db);
@@ -176,6 +202,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
     tools: { ...obj(def.tools), crow_mcp: tools },
   };
   await applyRoutine(db, b, def, next);
+  await applyHandoff(db, b, def, next);
   if (!(await casWrite(db, row, { definition: JSON.stringify(next), displayName: name, enabled: b.enabled === "on" ? 1 : 0 }))) return back(res, "error=stale");
   emitBotDefsChanged(CROW_VOICE_BOT_ID);
   return back(res, "saved=1");
@@ -324,6 +351,57 @@ async function routineSection(db, v, lang, sec, hint) {
     `<select name="confirm" id="btb-v-confirm" form="btb-vsave">` + opt("standard", t("botbuilder.voiceConfirmStandard", lang), v.confirm === "standard") + opt("strict", t("botbuilder.voiceConfirmStrict", lang), v.confirm === "strict") + `</select>`);
 }
 
+const translations_has = (k) => Object.prototype.hasOwnProperty.call(translations, k);
+const HANDOFF_STATUS_KEY = (st) => "botbuilder.voiceHandoffStatus_" + st;
+/** The log time: UTC, to the minute. */
+function logTime(ms) {
+  const d = new Date(Number(ms));
+  return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 16).replace("T", " ") + " UTC" : "";
+}
+
+/** The Hand-offs section: the switch, the bots Crow may hand work to, and the last hand-offs (read-only). */
+async function handoffSection(db, v, lang, sec, hint) {
+  let bots = [];
+  try {
+    bots = (await db.execute({ sql: "SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows
+      .filter((r) => !isVoiceBotId(String(r.bot_id)) && !isVoiceBotDef(parseDef(r)));
+  } catch { bots = []; }
+  const allowed = v.handoff.allowed_bots;
+  const items = bots.map((r) => {
+    const id = String(r.bot_id);
+    const off = boardState(r).state !== "on";
+    return `<li><label class="btb-vcheck"><input type="checkbox" name="allowed_bots" value="${escapeHtml(id)}" form="btb-vsave"${allowed.includes(id) ? " checked" : ""}> ` +
+      `<b>${escapeHtml(cleanName(r.display_name, id))}</b></label> ` +
+      `<span class="btb-hint">${escapeHtml(botCapabilitySummary(r))}</span>` +
+      (off ? ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBoardOff", lang))}</span>` : "") + `</li>`;
+  }).join("");
+  let rows = [];
+  try { rows = await handoffStore.recent(db, HANDOFF_LOG_ROWS); } catch { rows = []; }
+  // One lookup for every card (a card that is gone gets no link).
+  let hrefs = new Map();
+  try { hrefs = await drawerHrefs(db, rows.filter((r) => r.card_id != null).map((r) => Number(r.card_id))); } catch { hrefs = new Map(); }
+  const logRows = [];
+  for (const r of rows) {
+    const href = r.card_id != null ? hrefs.get(Number(r.card_id)) ?? null : null;
+    const st = String(r.status ?? "");
+    const stLabel = translations_has(HANDOFF_STATUS_KEY(st)) ? t(HANDOFF_STATUS_KEY(st), lang) : st;
+    const asked = r.asked == null ? "" : `<div class="btb-hint">${escapeHtml(oneLine(String(r.asked), 300))}</div>`;
+    logRows.push(`<tr><td>${escapeHtml(logTime(r.created_at))}</td><td>${escapeHtml(String(r.surface ?? ""))}</td>` +
+      `<td>${escapeHtml(String(r.bot_id ?? ""))}</td><td>${escapeHtml(oneLine(String(r.task ?? ""), 300))}${asked}</td>` +
+      `<td>${escapeHtml(stLabel)}${href ? ` <a href="${escapeHtml(href)}">${escapeHtml(t("botbuilder.voiceHandoffOpenCard", lang))}</a>` : ""}</td></tr>`);
+  }
+  const log = logRows.length
+    ? `<table class="btb-handoff-log"><thead><tr>` + ["Time", "Surface", "Bot", "Task", "Status"].map((k) => `<th>${escapeHtml(t("botbuilder.voiceHandoffCol" + k, lang))}</th>`).join("") +
+      `</tr></thead><tbody>${logRows.join("")}</tbody></table>`
+    : hint("botbuilder.voiceHandoffLogEmpty");
+  return sec("botbuilder.voiceHandoffTitle",
+    `<label class="btb-vcheck"><input type="checkbox" name="handoff_enabled" value="on" form="btb-vsave"${v.handoff.enabled ? " checked" : ""}> ` +
+    `${escapeHtml(t("botbuilder.voiceHandoffLabel", lang))}</label>` + hint("botbuilder.voiceHandoffHint") +
+    `<p>${escapeHtml(t("botbuilder.voiceHandoffBots", lang))}</p>` + hint("botbuilder.voiceHandoffBotsHint") +
+    (items ? `<ul class="btb-hint">${items}</ul>` : hint("botbuilder.voiceHandoffNoBots")) +
+    `<h4>${escapeHtml(t("botbuilder.voiceHandoffLogTitle", lang))}</h4>` + log);
+}
+
 export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", PAGE_CSS = "", notice = "", kioskAvailable = false }) {
   const backLink = `<p><a href="/dashboard/bot-builder">&larr; ${t("botbuilder.noticeAllBots", lang)}</a></p>`;
   const row = await loadVoiceRow(db);
@@ -405,6 +483,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     `<label class="btb-vcheck"><input type="checkbox" name="transcript_log" value="on" form="btb-vsave"${v.transcript_log ? " checked" : ""}> ` +
     `${escapeHtml(t("botbuilder.voiceTranscriptLogLabel", lang))}</label>` + hint("botbuilder.voiceTranscriptLogWarn"));
   const routineSec = await routineSection(db, v, lang, sec, hint);
+  const handoffSec = await handoffSection(db, v, lang, sec, hint);
   const saveBar = `<p><button type="submit" class="btn btn-primary" form="btb-vsave">${escapeHtml(t("common.save", lang))}</button></p>`;
   const abilSec = kioskAvailable ? sec("botbuilder.voiceAbilTitle", abilityLineHtml(CROW_VOICE_BOT_ID)) + voiceAbilityScript(lang) : "";
 
@@ -412,6 +491,6 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     title: "Bot Builder — " + name,
     content: PAGE_CSS + section(t("botbuilder.voiceEditorTitle", lang),
       backLink + notice + `<p>${escapeHtml(t("botbuilder.voiceEditorIntro", lang))}</p>` + forms +
-      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + transcriptsSec + saveBar + abilSec),
+      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + handoffSec + transcriptsSec + saveBar + abilSec),
   }));
 }
