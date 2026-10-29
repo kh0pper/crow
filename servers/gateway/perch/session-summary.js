@@ -14,8 +14,9 @@
  *    where(session model). Order: this box, another of your boxes, the cloud.
  *    Unproven or missing counts as cloud. Otherwise "no summary yet".
  *  - A tainted session (trust.js: it took in outside content) is summarised
- *    with summary_flags {"outside_content":true}; the memory is tagged too, so
- *    the briefing never auto-injects it.
+ *    with summary_flags {"outside_content":true} on its row only: no memory is
+ *    written, and an earlier one is deleted (spec §9.11). The briefing never
+ *    auto-injects it.
  *  - A session in a visited (Crow-to-Crow) project is never summarised.
  *  - The prompt has a fixed shape; the output is sanitised (at most 4
  *    sentences, at most 600 characters, instruction-like sentences dropped).
@@ -424,7 +425,7 @@ export async function summarizeSession(db, session, deps = {}) {
  * If the memory write fails the row is put back, so a failure writes nothing.
  */
 async function writeSummary(db, w, { syncManager }) {
-  const { insertMemory, updateMemory } = await import("../../memory/memory-write.js");
+  const { insertMemory, updateMemory, deleteMemory } = await import("../../memory/memory-write.js");
   const rowSel = w.rowId != null
     ? { sql: "SELECT id, summary, summary_at, summary_flags, label FROM bot_sessions WHERE id=?", args: [w.rowId] }
     : { sql: "SELECT id, summary, summary_at, summary_flags, label FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1", args: [String(w.threadId)] };
@@ -457,15 +458,35 @@ async function writeSummary(db, w, { syncManager }) {
 
   // Single-writer: this instance is the origin of the memory (summary-source.js).
   const source = summarySource(w.origin, w.threadId);
-  // The memory carries the same two facts in its tags (no extra column), for
-  // a later recall gate: "source-rank-<0|1|2>", and "outside-content" when
-  // tainted. Recall does not read them yet (that awaits a product decision).
-  const tags = "session-summary,source-rank-" + w.sourceRank + (w.tainted ? ",outside-content" : "");
-  const context = w.tainted ? "Session summary (included outside content)" : "Session summary";
+  // The memory carries the source rank in its tags (no extra column):
+  // "source-rank-<0|1|2>". Recall reads it (servers/memory/summary-recall.js)
+  // and returns the summary only to an asker at least that private.
+  const tags = "session-summary,source-rank-" + w.sourceRank;
+  const context = "Session summary";
   const existingId = async () => {
     const { rows } = await db.execute({ sql: "SELECT id FROM memories WHERE source=? ORDER BY id LIMIT 1", args: [source] });
     return rows[0] ? Number(rows[0].id) : null;
   };
+  // Spec §9.11 (I3, option 1): a tainted session (it took in outside content)
+  // keeps its summary on the session row ONLY. No memory is written, and one
+  // left from before the taint is deleted through the memory-write path, so
+  // the delete syncs to paired instances.
+  if (w.tainted) {
+    try {
+      const id = await existingId();
+      if (id != null) await deleteMemory(db, id, { syncManager });
+    } catch {
+      try {
+        await db.execute({
+          sql: "UPDATE bot_sessions SET summary=?, summary_at=?, summary_flags=? WHERE id=?",
+          args: [prev.summary ?? null, prev.summary_at ?? null, prev.summary_flags ?? null, prev.id],
+        });
+        if (labelWritten) await db.execute({ sql: "UPDATE bot_sessions SET label=? WHERE id=? AND label=?", args: [prev.label ?? null, prev.id, w.title] });
+      } catch { /* best effort */ }
+      throw new SummaryError("memory_failed");
+    }
+    return;
+  }
   const update = (id) => updateMemory(db, id, {
     content: w.summary, category: "project", tags, context,
     project_id: w.projectId ?? null, project_uuid: w.projectUuid ?? null,

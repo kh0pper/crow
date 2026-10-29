@@ -24,6 +24,8 @@ import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { insertMemory, updateMemory, deleteMemory } from "./memory-write.js";
 import { isSummaryMemorySource, SUMMARY_SOURCE_RESERVED } from "../shared/summary-source.js";
+import { summaryRecallClause, askerRank } from "./summary-recall.js";
+import { actorFromEnv, resolveCallActor } from "../research/actor.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
@@ -37,6 +39,25 @@ export function createMemoryServer(dbPath, options = {}) {
   // Optional sync manager for instance-to-instance replication.
   // When set, mutations emit change entries to connected instances.
   const syncManager = options.syncManager || null;
+
+  // Session-summary recall gate (spec §9.11, summary-recall.js): who is asking,
+  // and how private its model is. Only the BUILD-TIME actor can raise an
+  // asker above the cloud: a bot named in the process env, which the gateway
+  // writes into each bot's stdio block (scripts/pi-bots/actor-env.mjs). A
+  // per-call claim (an x-crow-actor header, a crow/actor _meta) is unsigned
+  // here, so it may only narrow: a call whose actor differs from a bot base,
+  // and every caller of a gateway mount (no bot in env), ranks as the cloud.
+  const baseActor = options.actor || actorFromEnv(process.env);
+  const actorThread = options.actorThread !== undefined ? options.actorThread : (process.env.CROW_ACTOR_THREAD || null);
+  const rankAsker = options.summaryAskerRank || ((actor) => askerRank(db, actor, { threadId: actorThread }));
+  async function summaryGate(extra, alias = "m.") {
+    let rank = 2;
+    try {
+      const call = resolveCallActor(baseActor, extra);
+      if (baseActor && baseActor.kind === "bot" && call && call.kind === "bot" && call.id === baseActor.id) rank = await rankAsker(baseActor, extra);
+    } catch { rank = 2; }
+    return summaryRecallClause(rank, alias);
+  }
 
   // --- Phase 4: BLOB-based semantic memory ---
   // Cache provider-health check so we don't probe on every write. Keyed on the
@@ -133,7 +154,8 @@ export function createMemoryServer(dbPath, options = {}) {
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ query, category, min_importance, limit, semantic, instance_id, project_id }) => {
+    async ({ query, category, min_importance, limit, semantic, instance_id, project_id }, extra) => {
+      const gate = await summaryGate(extra, "m.");
       // Try semantic search first if requested and available
       let semanticRows = [];
 
@@ -153,7 +175,7 @@ export function createMemoryServer(dbPath, options = {}) {
               const ids = topCandidates.map((c) => c.memory_id);
               if (ids.length > 0) {
                 const placeholders = ids.map(() => "?").join(",");
-                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})`;
+                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})${await summaryGate(extra, "")}`;
                 const fetchArgs = [...ids];
                 if (category) { fetchSql += " AND category = ?"; fetchArgs.push(category); }
                 if (min_importance) { fetchSql += " AND importance >= ?"; fetchArgs.push(min_importance); }
@@ -210,6 +232,7 @@ export function createMemoryServer(dbPath, options = {}) {
           sql += " AND m.project_id = ?";
           params.push(project_id);
         }
+        sql += gate;
 
         sql += " ORDER BY rank LIMIT ?";
         params.push(limit);
@@ -258,7 +281,7 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter by project ID"),
       include_maker_lab: z.boolean().optional().describe("When true, include memories tagged source='maker-lab'. Default false."),
     },
-    async ({ context, limit, instance_id, project_id, include_maker_lab }) => {
+    async ({ context, limit, instance_id, project_id, include_maker_lab }, extra) => {
       const contextWords = context.split(/\s+/).filter((w) => w.length > 2).slice(0, 10).join(" ");
       const safeQuery = sanitizeFtsQuery(contextWords);
 
@@ -278,6 +301,7 @@ export function createMemoryServer(dbPath, options = {}) {
       if (!include_maker_lab) {
         sql += " AND (m.source IS NULL OR m.source != 'maker-lab')";
       }
+      sql += await summaryGate(extra, "m.");
 
       sql += " ORDER BY rank LIMIT ?";
       params.push(limit);
@@ -311,7 +335,7 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter research sources/notes by project ID"),
       min_importance: z.number().min(1).max(10).optional().describe("Min importance for memories"),
     },
-    async ({ topic, per_source_limit, include_sources, project_id, min_importance }) => {
+    async ({ topic, per_source_limit, include_sources, project_id, min_importance }, extra) => {
       const safeQuery = sanitizeFtsQuery(topic);
       const safeLike = escapeLikePattern(topic);
       const sources = include_sources || ["memories", "research_sources", "research_notes", "blog_posts"];
@@ -331,6 +355,7 @@ export function createMemoryServer(dbPath, options = {}) {
             const params = [safeQuery];
             if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
             if (min_importance) { sql += " AND m.importance >= ?"; params.push(min_importance); }
+            sql += await summaryGate(extra, "m.");
             sql += " ORDER BY rank LIMIT ?";
             params.push(per_source_limit);
 

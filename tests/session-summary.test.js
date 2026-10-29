@@ -191,15 +191,16 @@ test("no quick model → no summary yet", async () => {
   assert.equal(memoriesFor(s.threadId).length, 0);
 });
 
-test("tainted session is flagged", async () => {
+test("tainted session is flagged, and writes NO memory (spec §9.11)", async () => {
   const s = seedSession();
   run("CREATE TABLE IF NOT EXISTS artifact_session_taint (bot_id TEXT NOT NULL, thread_id TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (bot_id, thread_id))");
   run("INSERT INTO artifact_session_taint (bot_id, thread_id, reason) VALUES (?,?,?)", s.botId, s.threadId, "tool:web_fetch");
-  const { deps } = makeDeps();
+  const { deps, calls } = makeDeps();
   assert.equal((await byThread(s.threadId, deps)).written, true);
   assert.deepEqual(JSON.parse(sessionRow(s.threadId).summary_flags), { outside_content: true, source_rank: 0 });
-  const m = memoriesFor(s.threadId)[0];
-  assert.equal(m.tags, "session-summary,source-rank-0,outside-content", "the memory is marked so a briefing never auto-injects it");
+  assert.notEqual(sessionRow(s.threadId).summary, null, "the summary stays on the session row");
+  assert.deepEqual(memoriesFor(s.threadId), [], "no memory for a tainted session");
+  assert.deepEqual(calls.emits, [], "nothing synced");
 
   // The in-process "taint not recorded" set counts too (trust.js fail-closed).
   const { markTaintUnrecorded } = await import("../servers/gateway/session-taint-memory.js");
@@ -799,4 +800,85 @@ test("the session-summary source is reserved: crow_store_memory refuses it, crow
   assert.doesNotMatch(boot, /payload\.payload\.source \|\| "",/, "the raw source is never written");
   assert.deepEqual(parseSummarySource(summarySource("abc", "perchlive-1")), { origin: "abc", threadId: "perchlive-1" });
   assert.equal(parseSummarySource("session-summary:perchlive-1"), null, "the old one-part form has no origin");
+});
+
+// ---------------------------------------------------------------------------
+// I3 (spec §9.11, option 1): tainted sessions keep no memory; recall is gated
+// by the asking bot's model rank
+// ---------------------------------------------------------------------------
+
+test("a session tainted after its first summary has that memory deleted, and the delete syncs", async () => {
+  const s = seedSession();
+  assert.equal((await byThread(s.threadId, makeDeps().deps)).written, true);
+  const memId = memoriesFor(s.threadId)[0].id;
+  run("CREATE TABLE IF NOT EXISTS artifact_session_taint (bot_id TEXT NOT NULL, thread_id TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (bot_id, thread_id))");
+  run("INSERT INTO artifact_session_taint (bot_id, thread_id, reason) VALUES (?,?,?)", s.botId, s.threadId, "tool:web_fetch");
+  appendFileSync(s.file, JSON.stringify({ type: "message", message: { role: "user", content: "read this web page" } }) + "\n");
+  utimesSync(s.file, new Date("2026-10-29T12:30:00Z"), new Date("2026-10-29T12:30:00Z"));
+  const again = makeDeps({ nowOffset: 3_600_000 });
+  assert.equal((await byThread(s.threadId, again.deps)).written, true);
+  assert.deepEqual(memoriesFor(s.threadId), [], "the earlier memory is gone");
+  assert.equal(JSON.parse(sessionRow(s.threadId).summary_flags).outside_content, true);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(again.calls.emits.map((e) => [e.table, e.op, e.row.id, e.row.source]), [["memories", "delete", memId, SRC(s.threadId)]], "deleted through the memory-write path: it syncs");
+});
+
+async function memoryClient(options) {
+  const { createMemoryServer } = await import("../servers/memory/server.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const server = createMemoryServer(DB_FILE, options);
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "t", version: "1" });
+  await Promise.all([server.connect(st), client.connect(ct)]);
+  const call = async (name, args) => { const r = await client.callTool({ name, arguments: args }); return r.content.map((c) => c.text).join("\n"); };
+  return { call, close: () => client.close().catch(() => {}) };
+}
+
+test("recall filters summary memories by the asking bot's model rank; an unknown asker gets only cloud-rank ones", async () => {
+  // Three summaries written by the job: sessions on this box, another box, the cloud.
+  const mk = async (model, word) => {
+    const s = seedSession({ model, label: "named", messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }] });
+    const { deps } = makeDeps({ where: { "lan/big": "other_box" }, output: `SUMMARY: The bot handled the ZEBRAGATE ${word} task.` });
+    assert.equal((await byThread(s.threadId, deps)).written, true);
+    return s;
+  };
+  await mk(LOCAL_SESSION, "herebox");
+  await mk("lan/big", "otherbox");
+  await mk(CLOUD, "cloudbox");
+  run("INSERT INTO memories (content, category, importance, source) VALUES ('ZEBRAGATE ordinary note', 'general', 5, 'manual')");
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('localbot', 'L', ?, 1)", JSON.stringify({ models: { default: LOCAL_SESSION } }));
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('lanbot', 'N', ?, 1)", JSON.stringify({ models: { default: "lan/big" } }));
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('cloudbot', 'C', ?, 1)", JSON.stringify({ models: { default: CLOUD } }));
+  const where = (k) => ({ [LOCAL_SESSION]: "here", "lan/big": "other_box", [CLOUD]: "cloud" }[k] || "unproven");
+  const { askerRank } = await import("../servers/memory/summary-recall.js");
+  const asBot = (id) => ({ actor: { kind: "bot", id }, actorThread: null, summaryAskerRank: (actor) => withDb((db) => askerRank(db, actor, { where, resolveRole: async () => ({ key: null }) })) });
+  const seen = (text) => ["herebox", "otherbox", "cloudbox", "ordinary"].filter((w) => text.includes(w));
+
+  for (const [label, opts, expected] of [
+    ["local bot", asBot("localbot"), ["herebox", "otherbox", "cloudbox", "ordinary"]],
+    ["other-box bot", asBot("lanbot"), ["otherbox", "cloudbox", "ordinary"]],
+    ["cloud bot", asBot("cloudbot"), ["cloudbox", "ordinary"]],
+    ["unknown bot", asBot("ghostbot"), ["cloudbox", "ordinary"]],
+    ["unknown asker (a gateway mount)", { actor: { kind: "unknown" } }, ["cloudbox", "ordinary"]],
+    ["the owner over MCP (client model unknown)", { actor: { kind: "owner" } }, ["cloudbox", "ordinary"]],
+  ]) {
+    const c = await memoryClient(opts);
+    try {
+      assert.deepEqual(seen(await c.call("crow_search_memories", { query: "ZEBRAGATE", semantic: false, limit: 20 })), expected, label + ": search");
+      assert.deepEqual(seen(await c.call("crow_recall_by_context", { context: "ZEBRAGATE", limit: 20 })), expected, label + ": recall_by_context");
+      assert.deepEqual(seen(await c.call("crow_deep_recall", { topic: "ZEBRAGATE", include_sources: ["memories"], per_source_limit: 20 })), expected, label + ": deep_recall");
+    } finally { await c.close(); }
+  }
+  // A per-call claim can never raise an unknown asker (an unsigned header or _meta).
+  const c = await memoryClient({ actor: { kind: "unknown" }, summaryAskerRank: async () => 0 });
+  try {
+    assert.deepEqual(seen(await c.call("crow_search_memories", { query: "ZEBRAGATE", semantic: false, limit: 20, _meta: { "crow/actor": { kind: "bot", id: "localbot" } } })), ["cloudbox", "ordinary"]);
+  } finally { await c.close(); }
+  // The clause itself.
+  const { summaryRecallClause } = await import("../servers/memory/summary-recall.js");
+  assert.equal(summaryRecallClause(0), "");
+  assert.match(summaryRecallClause(2), /source-rank-2/);
+  assert.doesNotMatch(summaryRecallClause(2), /source-rank-[01]/);
+  assert.match(summaryRecallClause("junk"), /source-rank-2/, "an invalid rank is the cloud");
 });
