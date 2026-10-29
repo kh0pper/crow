@@ -75,6 +75,9 @@ export async function renderBasics(ctx) {
   const who = card(t("botbuilder.bxWhoTitle", lang),
     field(t("botbuilder.bxName", lang),
       `<input type="text" id="bx-name" name="display_name" class="btb-input" maxlength="80" required value="${escapeHtml(bot.display_name || "")}">`, "", "bx-name") +
+    field(t("botbuilder.bxDescription", lang),
+      `<input type="text" id="bx-description" name="bot_description" class="btb-input" maxlength="140" value="${escapeHtml(typeof def.description === "string" ? def.description : "")}">`,
+      t("botbuilder.bxDescriptionHint", lang), "bx-description") +
     field(t("botbuilder.bxPersona", lang),
       `<textarea id="bx-persona" name="system_prompt" rows="8" class="btb-textarea btb-textarea-wide btb-textarea-prose">${escapeHtml(def.system_prompt || "")}</textarea>`,
       t("botbuilder.bxPersonaHint", lang), "bx-persona"),

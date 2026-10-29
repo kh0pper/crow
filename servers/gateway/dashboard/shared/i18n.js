@@ -1621,6 +1621,8 @@ export const translations = {
   "botbuilder.bxNameRequired": { en: "The bot needs a name.", es: "El bot necesita un nombre." },
   "botbuilder.bxPersona": { en: "Persona and instructions", es: "Personalidad e instrucciones" },
   "botbuilder.bxPersonaHint": { en: "Plain language works best. Skills chosen on the Abilities tab are added after this.", es: "El lenguaje sencillo funciona mejor. Las habilidades elegidas en la pestaña Capacidades se añaden después de esto." },
+  "botbuilder.bxDescription": { en: "What it's for", es: "Para qué sirve" },
+  "botbuilder.bxDescriptionHint": { en: "Crow reads this when it decides which bot to hand work to.", es: "Crow lo lee al decidir a qué bot pasarle un trabajo." },
   "botbuilder.bxModelTitle": { en: "Model", es: "Modelo" },
   "botbuilder.bxModel": { en: "Model", es: "Modelo de IA" },
   "botbuilder.bxStronger": { en: "Stronger model for hard questions (optional)", es: "Modelo más potente para preguntas difíciles (opcional)" },
