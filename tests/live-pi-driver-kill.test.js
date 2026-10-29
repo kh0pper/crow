@@ -6,7 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { descendants, killTree, survivorsByMarker, KILL_GRACE_MS } from "../scripts/lib/live-pi-driver.mjs";
+import { randomUUID } from "node:crypto";
+import { descendants, killTree, survivorsByMarker, bootSecNow, KILL_GRACE_MS } from "../scripts/lib/live-pi-driver.mjs";
 
 const spawned = new Set();
 const track = (pid) => { if (pid > 1) spawned.add(pid); return pid; };
@@ -121,31 +122,59 @@ setTimeout(()=>{},60000);`;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("survivorsByMarker finds exact marker only and fails closed on EACCES", async () => {
+const statLine = (ticks) => `9 (x y) S 1 9 9 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 ${ticks} 0 0`;
+const eacces = () => Object.assign(new Error("EACCES"), { code: "EACCES" });
+const fixture = (ticks) => (p) => {
+  if (p.endsWith("/environ")) throw eacces();
+  if (p.endsWith("/status")) return `Uid:\t${process.getuid()}\t0\t0\t0\n`;
+  if (p.endsWith("/stat")) return statLine(ticks);
+  throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+};
+
+test("survivorsByMarker finds exact marker only (any age) and skips other users / vanished", () => {
   const me = process.getuid();
-  const env = { "/proc/11/environ": "A=1\0CROW_EVAL_RUN_ID=run-1\0", "/proc/12/environ": "CROW_EVAL_RUN_ID=run-10\0",
-    "/proc/13/environ": "XCROW_EVAL_RUN_ID=run-1\0" };
-  const status = (u) => `Name:\tx\nUid:\t${u}\t${u}\t${u}\t${u}\n`;
+  const err = (code) => Object.assign(new Error(code), { code });
   const readProc = (p) => {
-    const err = (code) => Object.assign(new Error(code), { code });
-    if (p === "/proc/11/environ" || p === "/proc/12/environ" || p === "/proc/13/environ") return env[p];
-    if (p === "/proc/14/environ") throw err("EACCES");          // ours, unreadable -> survivor
-    if (p === "/proc/15/environ") throw err("EACCES");          // someone else's -> skipped
-    if (p === "/proc/16/environ") throw err("ENOENT");          // vanished -> skipped
-    if (/\/status$/.test(p)) return status(p === "/proc/15/status" ? me + 1 : me);
+    if (p === "/proc/11/environ") return "A=1\0CROW_EVAL_RUN_ID=run-1\0";
+    if (p === "/proc/12/environ") return "CROW_EVAL_RUN_ID=run-10\0";
+    if (p === "/proc/13/environ") return "XCROW_EVAL_RUN_ID=run-1\0";
+    if (p === "/proc/15/environ") throw err("EACCES");
+    if (p === "/proc/16/environ") throw err("ENOENT");
+    if (p === "/proc/15/status") return `Uid:\t${me + 1}\t0\t0\t0\n`;
     throw err("ENOENT");
   };
-  const listPids = () => [11, 12, 13, 14, 15, 16];
-  assert.deepEqual(survivorsByMarker("run-1", { readProc, listPids }), [11, 14]);
+  assert.deepEqual(survivorsByMarker("run-1", { sinceBootSec: 1e9, readProc, listPids: () => [11, 12, 13, 15, 16] }), [11]);
+});
+
+test("unreadable old process is not a survivor", () => {
+  // started at tick 100 (<= 1 s at any plausible CLK_TCK), run began at 50 s since boot
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: fixture(100), listPids: () => [9] }), []);
+});
+
+test("unreadable new process is a survivor", () => {
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: fixture(1e9), listPids: () => [9] }), [9]);
+});
+
+test("survivorsByMarker requires sinceBootSec", () => {
+  assert.throws(() => survivorsByMarker("r", {}), /sinceBootSec/);
+});
+
+test("bootSecNow reads /proc/uptime field 1", () => {
+  assert.equal(bootSecNow(() => "1234.56 9999.00\n"), 1234.56);
+  assert.ok(bootSecNow() > 0);
 });
 
 test("survivorsByMarker sees a real process carrying the marker", async () => {
   const id = `lpd-${process.pid}-${Date.now()}`;
+  const since = bootSecNow();
   const p = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { stdio: "ignore", env: { ...process.env, CROW_EVAL_RUN_ID: id } });
   track(p.pid);
   await until(() => existsSync(`/proc/${p.pid}/environ`));
-  // Fail-closed also lists our-uid processes with unreadable environ, so assert membership only.
-  assert.ok(survivorsByMarker(id).includes(p.pid));
+  assert.ok(survivorsByMarker(id, { sinceBootSec: since }).includes(p.pid));
   p.kill("SIGKILL");
-  await until(() => !survivorsByMarker(id).includes(p.pid));
+  await until(() => !survivorsByMarker(id, { sinceBootSec: since }).includes(p.pid));
+});
+
+test("long-lived unreadable processes are excluded on this box", () => {
+  assert.deepEqual(survivorsByMarker(randomUUID(), { sinceBootSec: bootSecNow() }), []);
 });

@@ -10,6 +10,7 @@
  *
  * This module must never import the bridge, better-sqlite3 or servers/db*; a test asserts it.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
@@ -287,12 +288,28 @@ export async function killTree(pid, { graceMs = KILL_GRACE_MS, includeRoot = tru
   return { survivors: [...known].filter((p) => isAlive(p)) };
 }
 
+let clkTck;
+const clkTckHz = () => {
+  if (clkTck) return clkTck;
+  try { clkTck = Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()); } catch { /* fall back */ }
+  if (!Number.isFinite(clkTck) || clkTck <= 0) clkTck = 100;
+  return clkTck;
+};
+
+/** Seconds since boot (/proc/uptime field 1). Capture at run start and pass as sinceBootSec. */
+export function bootSecNow(readProc = defaultReadProc) {
+  return Number(readProc("/proc/uptime").trim().split(/\s+/)[0]);
+}
+
 /**
- * Every pid whose environ carries CROW_EVAL_RUN_ID=<runId> exactly. Fails closed: an unreadable
- * environ (EACCES) on a process owned by our uid counts as a survivor; other users' processes
+ * Every pid whose environ carries CROW_EVAL_RUN_ID=<runId> exactly, whatever its age. Fails
+ * closed for a process of our uid whose environ is unreadable (EACCES), but only if it started
+ * at or after sinceBootSec (the run's start, seconds since boot): long-lived unreadable
+ * processes (sshd, systemd --user, gpg-agent) cannot belong to the run. Other users' processes
  * and vanished pids are skipped.
  */
-export function survivorsByMarker(runId, { readProc = defaultReadProc, listPids = defaultListPids, uid = process.getuid() } = {}) {
+export function survivorsByMarker(runId, { sinceBootSec, readProc = defaultReadProc, listPids = defaultListPids, uid = process.getuid() } = {}) {
+  if (!Number.isFinite(sinceBootSec)) throw new DriverRefusal("survivorsByMarker requires a finite sinceBootSec");
   const want = `CROW_EVAL_RUN_ID=${runId}`;
   const out = [];
   for (const n of listPids()) {
@@ -303,7 +320,10 @@ export function survivorsByMarker(runId, { readProc = defaultReadProc, listPids 
       if (e.code === "ENOENT" || e.code === "ESRCH") continue;
       try {
         const m = /^Uid:\s+(\d+)/m.exec(readProc(`/proc/${n}/status`));
-        if (m && Number(m[1]) === uid) out.push(n);
+        if (!m || Number(m[1]) !== uid) continue;
+        const t = readProc(`/proc/${n}/stat`);
+        const startTicks = Number(t.slice(t.lastIndexOf(")") + 1).trim().split(/\s+/)[19]); // stat field 22
+        if (!Number.isFinite(startTicks) || startTicks / clkTckHz() >= sinceBootSec) out.push(n);
       } catch { /* vanished while checking */ }
     }
   }
