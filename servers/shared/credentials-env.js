@@ -4,7 +4,9 @@
  * A unit can hand the gateway (or the bot runner) a secret with
  *     LoadCredential=SOME_TOKEN:/etc/crow/credentials/SOME_TOKEN
  * instead of Environment= or EnvironmentFile=. systemd places the file in
- * $CREDENTIALS_DIRECTORY, readable only by the unit. Applied here, the value
+ * $CREDENTIALS_DIRECTORY, readable by the unit's own uid (so by any unsandboxed
+ * same-uid process that knows the path, children included, until the contain
+ * sandbox hides /run/credentials). Applied here, the value
  * lives in this process's memory: it is not printed by `systemctl show` (which
  * any local user can run) and is not part of the process's initial
  * /proc/<pid>/environ. Children spawned with process.env still inherit it
@@ -33,13 +35,16 @@ const applied = new Set();
 export function credentialKeyNames() { return [...applied]; }
 /**
  * A copy of `env` without the keys applied from credentials, for a child's
- * environment. Returns `env` itself when nothing was applied, so callers that
- * pass undefined/inherit keep their exact behaviour.
+ * environment. CREDENTIALS_DIRECTORY goes too, so a child is not handed the
+ * path to the files (it stays in this process's own env). Returns `env` itself
+ * when nothing was applied, so callers that pass undefined/inherit keep their
+ * exact behaviour.
  */
 export function withoutCredentialKeys(env) {
   if (!applied.size || !env) return env;
   const out = { ...env };
   for (const k of applied) delete out[k];
+  delete out.CREDENTIALS_DIRECTORY;
   return out;
 }
 /** Test seam. */

@@ -25,6 +25,7 @@ import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
+import { withoutCredentialKeys } from "../../shared/credentials-env.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
@@ -2930,7 +2931,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       try {
         // run()'s default execFile timeout is already 300_000 (pi payload can
         // exceed 120s on slow links) — no override needed here.
-        await run("npm", npmArgs, { cwd: destDir });
+        await run("npm", npmArgs, { cwd: destDir, env: withoutCredentialKeys(process.env) });
         appendLog(job, "Dependencies installed");
       } catch (err) {
         const stderrTail = String(err.stderr || err.message || "").slice(-2000).trim();
@@ -2946,8 +2947,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     } else if (existsSync(pkgJsonPath) && !existsSync(join(destDir, "node_modules"))) {
       appendLog(job, "Installing bundle dependencies (npm install)…");
       try {
+        // A bundle's own install scripts run here: never hand them a credential-applied key.
         await run("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
           cwd: destDir,
+          env: withoutCredentialKeys(process.env),
           timeout: 120_000,
         });
         appendLog(job, "Dependencies installed");
@@ -3217,6 +3220,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         try {
           const { execFileSync } = await import("node:child_process");
           execFileSync("npm", ["install", "--prefix", destDir, "--omit=dev"], {
+            env: withoutCredentialKeys(process.env),
             stdio: "pipe",
             timeout: 120_000,
           });

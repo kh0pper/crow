@@ -5,7 +5,7 @@
 // /proc/<pid>/environ.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -141,7 +141,8 @@ test("keys applied to process.env are dropped from the central child envs (add-o
     assert.equal(withoutCredentialKeys(process.env).CRED_STRIP_PROBE_TOKEN, undefined);
     assert.equal(addonStdioEnv({ env: { A: "1" } }).CRED_STRIP_PROBE_TOKEN, undefined, "add-on stdio children never get it");
     assert.equal(addonStdioEnv({ env: { A: "1" } }).A, "1");
-    assert.equal(process.env.CREDENTIALS_DIRECTORY, dir, "the directory pointer stays (the board-secret reader needs it)");
+    assert.equal(withoutCredentialKeys(process.env).CREDENTIALS_DIRECTORY, undefined, "a child is not handed the path to the files");
+    assert.equal(process.env.CREDENTIALS_DIRECTORY, dir, "the directory pointer stays in this process");
   } finally {
     delete process.env.CRED_STRIP_PROBE_TOKEN;
     if (prevDir === undefined) delete process.env.CREDENTIALS_DIRECTORY; else process.env.CREDENTIALS_DIRECTORY = prevDir;
@@ -163,4 +164,28 @@ test("the bot runner applies credentials in its FIRST import, before any module 
   const src = readFileSync(new URL("../scripts/pi-bots/gateways/gateway_runner.mjs", import.meta.url), "utf8");
   const firstImport = src.split("\n").find((l) => /^import /.test(l));
   assert.equal(firstImport, 'import "./apply-credentials.mjs";');
+});
+
+test("credential-applied keys never reach pi in passthrough mode, and bundle npm installs strip them", async () => {
+  const { _resetCredentialKeysForTest } = await import("../servers/shared/credentials-env.js");
+  const { buildBotBaseEnv } = await import("../servers/shared/bot-env.js");
+  const dir = credDir({ CRED_PASS_PROBE: "strip-me" });
+  const prevDir = process.env.CREDENTIALS_DIRECTORY;
+  try {
+    process.env.CREDENTIALS_DIRECTORY = dir;
+    applyCredentialFiles(process.env, { roots, log: quietLog().log });
+    const env = buildBotBaseEnv({ ...process.env, CROW_BOT_ENV_PASSTHROUGH: "1", OTHER_PLAIN: "1" });
+    assert.equal(env.CRED_PASS_PROBE, undefined);
+    assert.equal(env.CREDENTIALS_DIRECTORY, undefined);
+    assert.equal(env.OTHER_PLAIN, "1", "passthrough still passes the rest");
+  } finally {
+    delete process.env.CRED_PASS_PROBE;
+    if (prevDir === undefined) delete process.env.CREDENTIALS_DIRECTORY; else process.env.CREDENTIALS_DIRECTORY = prevDir;
+    _resetCredentialKeysForTest();
+  }
+  // Every npm spawn in the bundle installer passes the stripped env (a bundle's install scripts are third-party code).
+  const src = readFileSync(new URL("../servers/gateway/routes/bundles.js", import.meta.url), "utf8");
+  const npmCalls = [...src.matchAll(/(?:run|execFileSync)\("npm",[\s\S]*?\}\)/g)].map((m) => m[0]);
+  assert.ok(npmCalls.length >= 3, "found the npm install sites");
+  for (const c of npmCalls) assert.match(c, /env: withoutCredentialKeys\(process\.env\)/, c.slice(0, 80));
 });
