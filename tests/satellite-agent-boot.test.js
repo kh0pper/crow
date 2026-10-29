@@ -7,7 +7,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readFileSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import http from "node:http";
@@ -131,6 +131,21 @@ const guardCases = [
   ["CROW_DASHBOARD_PUBLIC set", (s) => { s.env.CROW_DASHBOARD_PUBLIC = "true"; }, /CROW_DASHBOARD_PUBLIC/],
   ["bind 0.0.0.0", (s) => { s.env.CROW_SATELLITE_HOST = "0.0.0.0"; }, /0\.0\.0\.0/],
   ["bind ::", (s) => { s.env.CROW_SATELLITE_HOST = "::"; }, /::/],
+  ...["0", "0.0", "00.0.0.0", "0x0.0.0.0", "::ffff:0.0.0.0", "[::]", "100.64.20.9", "10.0.0.5"].map((h) =>
+    [`bind ${h} (not loopback)`, (s) => { s.env.CROW_SATELLITE_HOST = h; }, /not loopback/]),
+  ["CROW_SERVE_PEER_UIDS=off", (s) => { s.env.CROW_SERVE_PEER_UIDS = "off"; }, /CROW_SERVE_PEER_UIDS=off/],
+  ["symlinked CROW_DATA_DIR holding a seed", (s) => {
+    const real = join(s.home, "real-data"); mkdirSync(real); writeFileSync(join(real, "identity.json"), SEED);
+    symlinkSync(real, join(s.home, "data-link")); s.env.CROW_DATA_DIR = join(s.home, "data-link");
+  }, /identity/],
+  ["symlinked ~/.crow root holding a seed", (s) => {
+    const real = join(s.home, "elsewhere"); mkdirSync(join(real, "data"), { recursive: true });
+    writeFileSync(join(real, "data", "identity.json"), SEED); symlinkSync(real, join(s.home, ".crow"));
+  }, /identity/],
+  ["symlinked identity.json pointing at a seed", (s) => {
+    writeFileSync(join(s.home, "seed-file"), SEED); mkdirSync(join(s.home, ".crow-z"));
+    symlinkSync(join(s.home, "seed-file"), join(s.home, ".crow-z", "identity.json"));
+  }, /identity/],
 ];
 
 for (const [name, arrange, msg] of guardCases) {
@@ -277,4 +292,19 @@ test("e2e: crow's pairing client pairs the spawned agent with the code from its 
   assert.match(again.err, /already paired/i);
   assert.doesNotMatch(again.out, /Pairing code/);
   await stop(child);
+
+  // Paired boot: no code. Then a lost pin (a crash between the two writes, or a deleted file):
+  // the cert alone is not a pairing, the agent comes up unpaired and prints a code.
+  const paired = await startAgent(s.env);
+  assert.match(paired.state.out, /^Paired; pairing routes are off$/m);
+  assert.doesNotMatch(paired.state.out, /Pairing code/);
+  await stop(paired.child);
+  unlinkSync(join(s.sat, "pinned.json"));
+  const lost = await startAgent(s.env);
+  assert.match(lost.state.out, /^Pairing code: {3}\S+/m);
+  const h = await request(lost.port, { method: "POST", path: "/satellite/v1/pair/hello", headers: SERVE, body: { nonce_c: "3".repeat(32) } });
+  assert.equal(h.status, 200);
+  const st2 = execFileSync(process.execPath, [CLI, "status"], { env: s.env, cwd: REPO }).toString();
+  assert.match(st2, /^not paired/m);
+  await stop(lost.child);
 });

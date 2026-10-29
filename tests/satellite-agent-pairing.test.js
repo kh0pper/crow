@@ -103,12 +103,12 @@ test("satellite.db: every table, schema version in meta, reopen is idempotent", 
   dirs.push(home);
   const db = openSatelliteDb(home);
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name).sort();
-  assert.deepEqual(tables, ["audit", "cert_serials", "crow_keychain", "jobs", "meta", "nonces", "pair_codes", "pair_nonces", "tool_cache"]);
+  assert.deepEqual(tables, ["audit", "cert_serials", "crow_keychain", "jobs", "meta", "nonces", "pair_codes", "pair_nonces", "pair_tries", "tool_cache"]);
   assert.equal(SAT_SCHEMA_VERSION, 1);
   assert.equal(db.prepare("SELECT value FROM meta WHERE key='sat_schema_version'").get().value, "1");
   const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
   assert.deepEqual(cols("pair_codes"), ["code_hash", "created_at", "expires_at", "used_at", "wrong_tries", "voided_at"]);
-  assert.deepEqual(cols("pair_nonces"), ["nonce_s", "nonce_c", "issued_at", "used_at"]);
+  assert.deepEqual(cols("pair_nonces"), ["nonce_s", "nonce_c", "issued_at", "used_at", "source"]);
   assert.deepEqual(cols("nonces"), ["nonce", "seen_at"]);
   db.close();
   const again = openSatelliteDb(home);
@@ -155,30 +155,141 @@ test("happy path: crow's client pairs; cert + pinned written; code and nonce use
 
 // ── wrong MACs ──────────────────────────────────────────────────────────────
 
-test("5 wrong MACs void the code; the right code then fails; a fresh code pairs", async () => {
+/** A raw attacker's attempt from `client`: its own hello, then a complete with a random MAC. */
+async function wrongTry(port, client) {
+  const h = await post(port, "/satellite/v1/pair/hello", { nonce_c: nc() }, client);
+  assert.equal(h.status, 200, h.text);
+  const payload = { crow_id: "crow:attacker00", root_pubkey: "e".repeat(64), primary_instance_id: "i", primary_url: "https://x.example.ts.net" };
+  return post(port, "/satellite/v1/pair/complete", {
+    cert: { payload, sig: "" }, ...payload, target_sha: null, protocol: P.AGENT_PROTOCOL, nonce_s: h.json.nonce_s,
+    mac: randomBytes(32).toString("hex"),
+  }, client);
+}
+
+test("one source: capped after 5 wrong MACs (too_many_tries), the code survives for the owner", async () => {
   const { a } = await agent();
   const { code } = a.issuePairCode();
   const db = await crowDb();
+  // crow itself (100.64.20.5) types the wrong code 5 times.
   for (let i = 0; i < 5; i++) {
     const svc = crow(a.port);
     const s = await svc.startPairing({ host: HOST });
     await assert.rejects(svc.completePairing({ db, pairing_id: s.pairing_id, code: P.generatePairCode().code, name: "vps" }), refusedWith("bad_mac"));
   }
-  const row = a.db.prepare("SELECT wrong_tries, voided_at FROM pair_codes").get();
-  assert.equal(row.wrong_tries, 5);
-  assert.ok(row.voided_at);
   let svc = crow(a.port);
   let s = await svc.startPairing({ host: HOST });
-  await assert.rejects(svc.completePairing({ db, pairing_id: s.pairing_id, code, name: "vps" }), refusedWith("no_live_code"));
+  await assert.rejects(svc.completePairing({ db, pairing_id: s.pairing_id, code, name: "vps" }), refusedWith("too_many_tries"));
+  const row = a.db.prepare("SELECT wrong_tries, voided_at FROM pair_codes").get();
+  assert.equal(row.wrong_tries, 5);
+  assert.equal(row.voided_at, null, "one source cannot void the code");
   assert.equal(a.isPaired(), false);
-  assert.equal(existsSync(join(a.home, "cert.json")), false);
-
+  // A fresh code resets the per-source count.
   const fresh = a.issuePairCode().code;
   svc = crow(a.port);
   s = await svc.startPairing({ host: HOST });
   await svc.completePairing({ db, pairing_id: s.pairing_id, code: fresh, name: "vps" });
   assert.equal(a.isPaired(), true);
 });
+
+test("a second source spamming wrong MACs does not stop the owner's source pairing", async () => {
+  const { a } = await agent();
+  const { code } = a.issuePairCode();
+  for (let i = 0; i < 5; i++) assert.equal((await wrongTry(a.port, "100.64.20.66")).json.error, "bad_mac");
+  assert.equal((await wrongTry(a.port, "100.64.20.66")).json.error, "too_many_tries");
+  const svc = crow(a.port);
+  const s = await svc.startPairing({ host: HOST });
+  await svc.completePairing({ db: await crowDb(), pairing_id: s.pairing_id, code, name: "vps" });
+  assert.equal(a.isPaired(), true);
+});
+
+test("a nonce_s is redeemable only by the source it was issued to (and is left untouched)", async () => {
+  const { a } = await agent();
+  a.issuePairCode();
+  const h = await post(a.port, "/satellite/v1/pair/hello", { nonce_c: nc() }, "100.64.20.5");
+  const payload = { crow_id: "crow:x", root_pubkey: "e".repeat(64), primary_instance_id: "i", primary_url: "https://x.example.ts.net" };
+  const body = { cert: { payload, sig: "" }, ...payload, protocol: P.AGENT_PROTOCOL, nonce_s: h.json.nonce_s, mac: "a".repeat(64) };
+  const stolen = await post(a.port, "/satellite/v1/pair/complete", body, "100.64.20.66");
+  assert.equal(stolen.status, 403);
+  assert.equal(stolen.json.error, "wrong_source");
+  const row = a.db.prepare("SELECT used_at FROM pair_nonces WHERE nonce_s = ?").get(h.json.nonce_s);
+  assert.equal(row.used_at, null);
+  assert.equal(a.db.prepare("SELECT wrong_tries FROM pair_codes").get().wrong_tries, 0);
+});
+
+test("the code is voided by wrong MACs from 3 distinct sources", async () => {
+  const { a } = await agent();
+  const { code } = a.issuePairCode();
+  assert.equal((await wrongTry(a.port, "100.64.20.61")).json.error, "bad_mac");
+  assert.equal((await wrongTry(a.port, "100.64.20.62")).json.error, "bad_mac");
+  assert.equal(a.db.prepare("SELECT voided_at FROM pair_codes").get().voided_at, null);
+  assert.equal((await wrongTry(a.port, "100.64.20.63")).json.error, "bad_mac");
+  assert.ok(a.db.prepare("SELECT voided_at FROM pair_codes").get().voided_at);
+  const svc = crow(a.port);
+  const s = await svc.startPairing({ host: HOST });
+  await assert.rejects(svc.completePairing({ db: await crowDb(), pairing_id: s.pairing_id, code, name: "vps" }), refusedWith("no_live_code"));
+});
+
+test("the code is voided at 25 wrong MACs in all (global threshold)", async () => {
+  const { a } = await agent();
+  a.issuePairCode();
+  // Two sources can reach at most 10; the 25 cap is checked directly against the stored total.
+  a.db.prepare("UPDATE pair_codes SET wrong_tries = 24").run();
+  assert.equal((await wrongTry(a.port, "100.64.20.61")).json.error, "bad_mac");
+  const row = a.db.prepare("SELECT wrong_tries, voided_at FROM pair_codes").get();
+  assert.equal(row.wrong_tries, 25);
+  assert.ok(row.voided_at);
+});
+
+test("/pair/complete: 10/min per source; another source unaffected; the window slides", async () => {
+  const { a, clock } = await agent();
+  for (let i = 0; i < 10; i++) assert.equal((await post(a.port, "/satellite/v1/pair/complete", {}, "100.64.20.70")).status, 400, `complete ${i}`);
+  const r = await post(a.port, "/satellite/v1/pair/complete", {}, "100.64.20.70");
+  assert.equal(r.status, 429);
+  assert.equal(r.json.error, "rate_limited");
+  assert.equal((await post(a.port, "/satellite/v1/pair/complete", {}, "100.64.20.71")).status, 400);
+  clock.t += 60001;
+  assert.equal((await post(a.port, "/satellite/v1/pair/complete", {}, "100.64.20.70")).status, 400);
+});
+
+test("pairing is Serve-only: a Serve shape from a non-Serve uid, or a public-proxy shape, gets 404", async () => {
+  const { a } = await agent();
+  a.issuePairCode();
+  // Public Caddy in front: XFF names a public client (the socket uid is caddy's, not tailscaled's).
+  const caddy = await post(a.port, "/satellite/v1/pair/hello", { nonce_c: nc() }, null,
+    { "x-forwarded-for": "198.51.100.7", "x-forwarded-host": "satellite.example.com", "x-forwarded-proto": "https", "x-real-ip": "198.51.100.7" });
+  assert.equal(caddy.status, 404);
+  assert.equal(caddy.text, "");
+  // A perfect Serve shape from a socket whose uid is not a Serve uid.
+  const prev = process.env.CROW_SERVE_PEER_UIDS;
+  process.env.CROW_SERVE_PEER_UIDS = "65534";
+  try {
+    for (const p of ["/satellite/v1/pair/hello", "/satellite/v1/pair/complete"]) {
+      const r = await post(a.port, p, { nonce_c: nc() });
+      assert.equal(r.status, 404, p);
+      assert.equal(r.text, "", p);
+    }
+  } finally {
+    process.env.CROW_SERVE_PEER_UIDS = prev;
+  }
+  assert.equal((await post(a.port, "/satellite/v1/pair/hello", { nonce_c: nc() })).status, 200);
+});
+
+test("cert.json without a matching pinned.json is not paired", async () => {
+  const { a } = await agent();
+  const { code } = a.issuePairCode();
+  const svc = crow(a.port);
+  const s = await svc.startPairing({ host: HOST });
+  await svc.completePairing({ db: await crowDb(), pairing_id: s.pairing_id, code, name: "vps" });
+  const { certIsLive } = await import("../servers/satellite/pairing.js");
+  const cert = JSON.parse(readFileSync(join(a.home, "cert.json"), "utf8"));
+  const pinned = JSON.parse(readFileSync(join(a.home, "pinned.json"), "utf8"));
+  assert.equal(certIsLive(cert, pinned, a.key.ed25519_pub, clockNow()), true);
+  assert.equal(certIsLive(cert, null, a.key.ed25519_pub, clockNow()), false);
+  for (const k of ["crow_id", "root_pubkey", "mgmt_pubkey"]) {
+    assert.equal(certIsLive(cert, { ...pinned, [k]: "other" }, a.key.ed25519_pub, clockNow()), false, k);
+  }
+});
+const clockNow = () => Date.now();
 
 test("an expired code (15 min) is refused", async () => {
   const { a, clock } = await agent();

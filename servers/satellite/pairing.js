@@ -4,7 +4,13 @@
  * Pairing code: 24 Crockford base32 characters, 15 min, single use. The db keeps only
  * pairMacKey(code) (HKDF-SHA256, one way): enough to check a MAC, never enough to print or
  * recover the code, and it lets `cli.js pair-code` mint a code the running agent accepts.
- * Minting voids every earlier live code. 5 wrong MACs void the live code.
+ * Minting voids every earlier live code.
+ *
+ * Wrong MACs (coordinator ruling, overrides spec §4.2's "5 wrong MACs void the code", so one
+ * reachable caller cannot burn the owner's code): each nonce_s is bound to the source it was
+ * issued to (`<via>:<client>`) and only that source can redeem it; a source is refused after
+ * 5 wrong MACs for the current code; the code itself is voided only at 25 wrong MACs in all or
+ * wrong MACs from 3 distinct sources. /pair/complete is limited to 10/min per source.
  *
  * hello {nonce_c} → {satellite_id, satellite_pubkey, nonce_s, agent_protocol, sig}; nonce_s is
  * kept in pair_nonces. complete {cert, crow_id, root_pubkey, primary_instance_id, primary_url,
@@ -23,6 +29,10 @@ import {
 } from "../shared/satellite-protocol.js";
 
 export const HELLO_PER_SOURCE_PER_MIN = 10;
+export const COMPLETE_PER_SOURCE_PER_MIN = 10;
+export const PAIR_SOURCE_MAX_WRONG = PAIR_MAX_WRONG; // 5, per source and code
+export const PAIR_GLOBAL_MAX_WRONG = 25;
+export const PAIR_VOID_DISTINCT_SOURCES = 3;
 export const HELLO_GLOBAL_PER_MIN = 30;
 export const PAIR_NONCE_KEEP_MS = 24 * 3600000;
 const MIN = 60000;
@@ -57,10 +67,16 @@ export function pairCodeLines({ code, expiresAt }, satelliteId) {
   ];
 }
 
-/** True when `cert` is a well-signed cert for this satellite that has not lapsed (grace counts). */
-export function certIsLive(cert, ownPubHex, now = Date.now()) {
-  return !!cert && verifyCertSignature(cert) && cert.payload.satellite_pubkey === ownPubHex
-    && certTimeState(cert, now) !== "lapsed";
+/**
+ * True when `cert` is a well-signed cert for this satellite that has not lapsed (grace counts)
+ * AND `pinned` matches it (crow_id, root_pubkey, mgmt_pubkey). pinned.json is written before
+ * cert.json, so a cert without its pin (a crash between the two, a deleted pin) is not paired.
+ */
+export function certIsLive(cert, pinned, ownPubHex, now = Date.now()) {
+  if (!cert || !pinned || !verifyCertSignature(cert)) return false;
+  const p = cert.payload;
+  return p.satellite_pubkey === ownPubHex && certTimeState(cert, now) !== "lapsed"
+    && pinned.crow_id === p.crow_id && pinned.root_pubkey === p.root_pubkey && pinned.mgmt_pubkey === p.mgmt_pubkey;
 }
 
 /** Sliding one-minute windows: per source and in all. */
@@ -85,7 +101,7 @@ export function createHelloLimiter({ perSource = HELLO_PER_SOURCE_PER_MIN, globa
   };
 }
 
-export function handleHello(ctx, body) {
+export function handleHello(ctx, body, source) {
   const { db, key, now } = ctx;
   const nonce_c = body?.nonce_c;
   if (typeof nonce_c !== "string" || !HEX32.test(nonce_c)) throw refuse(400, "bad_request");
@@ -93,7 +109,7 @@ export function handleHello(ctx, body) {
   const nonce_s = randomBytes(16).toString("hex");
   db.transaction(() => {
     db.prepare("DELETE FROM pair_nonces WHERE issued_at < ?").run(t - PAIR_NONCE_KEEP_MS);
-    db.prepare("INSERT INTO pair_nonces (nonce_s, nonce_c, issued_at) VALUES (?, ?, ?)").run(nonce_s, nonce_c, t);
+    db.prepare("INSERT INTO pair_nonces (nonce_s, nonce_c, issued_at, source) VALUES (?, ?, ?, ?)").run(nonce_s, nonce_c, t, source);
   })();
   const sig = signBytes(key.ed25519_priv, Buffer.from(helloSigningString({ nonceC: nonce_c, nonceS: nonce_s, satelliteId: key.satellite_id }), "utf8"));
   return { satellite_id: key.satellite_id, satellite_pubkey: key.ed25519_pub, nonce_s, agent_protocol: AGENT_PROTOCOL, sig };
@@ -106,7 +122,7 @@ const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
  * inside the db transaction, so a failed write leaves the code and nonce unspent.
  * → {sig, cert, pinned}. Throws PairRefusal.
  */
-export function handleComplete(ctx, body) {
+export function handleComplete(ctx, body, source) {
   const { db, key, now, persist } = ctx;
   if (!isObj(body)) throw refuse(400, "bad_request");
   const { cert, crow_id, root_pubkey, primary_instance_id, primary_url, target_sha, protocol, nonce_s, mac } = body;
@@ -124,12 +140,16 @@ export function handleComplete(ctx, body) {
 
   const t = now();
   const outcome = db.transaction(() => {
-    const n = db.prepare("SELECT nonce_c, issued_at, used_at FROM pair_nonces WHERE nonce_s = ?").get(nonce_s);
+    const n = db.prepare("SELECT nonce_c, issued_at, used_at, source FROM pair_nonces WHERE nonce_s = ?").get(nonce_s);
     if (!n) return { err: refuse(400, "bad_nonce") };
+    // Another source's nonce: refused and left untouched for the source it was issued to.
+    if (n.source !== source) return { err: refuse(403, "wrong_source") };
     if (n.used_at != null) return { err: refuse(400, "nonce_used") };
     if (!(t - n.issued_at < PAIR_NONCE_TTL_MS)) return { err: refuse(400, "nonce_expired") };
     const live = db.prepare("SELECT code_hash, wrong_tries FROM pair_codes WHERE used_at IS NULL AND voided_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1").get(t);
     if (!live) return { err: refuse(403, "no_live_code") };
+    const mine = db.prepare("SELECT wrong FROM pair_tries WHERE code_hash = ? AND source = ?").get(live.code_hash, source);
+    if ((mine?.wrong ?? 0) >= PAIR_SOURCE_MAX_WRONG) return { err: refuse(403, "too_many_tries") };
     // From here on the nonce is spent, whatever the outcome.
     db.prepare("UPDATE pair_nonces SET used_at = ? WHERE nonce_s = ?").run(t, nonce_s);
     let expected;
@@ -139,9 +159,13 @@ export function handleComplete(ctx, body) {
       return { err: refuse(400, "bad_request") };
     }
     if (!macEqualHex(expected, mac)) {
-      const tries = live.wrong_tries + 1;
-      db.prepare("UPDATE pair_codes SET wrong_tries = ?, voided_at = CASE WHEN ? >= ? THEN ? ELSE voided_at END WHERE code_hash = ?")
-        .run(tries, tries, PAIR_MAX_WRONG, t, live.code_hash);
+      const total = live.wrong_tries + 1;
+      db.prepare("INSERT INTO pair_tries (code_hash, source, wrong) VALUES (?, ?, 1) ON CONFLICT(code_hash, source) DO UPDATE SET wrong = wrong + 1")
+        .run(live.code_hash, source);
+      const sources = db.prepare("SELECT COUNT(*) AS n FROM pair_tries WHERE code_hash = ? AND wrong > 0").get(live.code_hash).n;
+      const voidIt = total >= PAIR_GLOBAL_MAX_WRONG || sources >= PAIR_VOID_DISTINCT_SOURCES;
+      db.prepare("UPDATE pair_codes SET wrong_tries = ?, voided_at = CASE WHEN ? THEN ? ELSE voided_at END WHERE code_hash = ?")
+        .run(total, voidIt ? 1 : 0, t, live.code_hash);
       return { err: refuse(403, "bad_mac") };
     }
     const seen = db.prepare("SELECT 1 FROM cert_serials WHERE serial = ?");

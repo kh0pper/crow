@@ -13,10 +13,11 @@ import express from "express";
 import { classifyPeer } from "../shared/peer-class.js";
 import { AGENT_PROTOCOL } from "../shared/satellite-protocol.js";
 import { openSatelliteDb } from "./db.js";
-import { ensureSatelliteKey, readCert, writeCert, writePinned } from "./keys.js";
+import { ensureSatelliteKey, readCert, readPinned, writeCert, writePinned } from "./keys.js";
 import {
-  PairRefusal, certIsLive, createHelloLimiter, handleComplete, handleHello, issuePairCode,
+  COMPLETE_PER_SOURCE_PER_MIN, PairRefusal, certIsLive, createHelloLimiter, handleComplete, handleHello, issuePairCode,
 } from "./pairing.js";
+import { noteRefusedOnce } from "../gateway/loopback-gate.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -38,10 +39,20 @@ export function resolveBind(env = process.env) {
   return { host, port };
 }
 
+/** The pairing source: Serve's class and the tailnet client it names. */
+const sourceOf = (req) => { const p = classifyPeer(req); return `${p.via}:${p.client || "unknown"}`; };
+
 export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log }) {
-  const state = { cert: readCert(satHome) };
-  const isPaired = () => certIsLive(state.cert, key.ed25519_pub, now());
+  const state = { cert: readCert(satHome), pinned: readPinned(satHome) };
+  const isPaired = () => certIsLive(state.cert, state.pinned, key.ed25519_pub, now());
+  // A paired cert's serial is always recorded (a crash may have lost the row): never re-accepted.
+  if (isPaired()) {
+    db.prepare("INSERT OR IGNORE INTO cert_serials (serial, accepted_at) VALUES (?, ?)")
+      .run(String(state.cert.payload.serial), new Date(now()).toISOString());
+  }
   const limiter = createHelloLimiter();
+  const completeLimiter = createHelloLimiter({ perSource: COMPLETE_PER_SOURCE_PER_MIN, global: Infinity });
+  const noteRefused = (route, code, source) => noteRefusedOnce(`satellite ${route}`, `${code} from ${source}`, { now: now() });
   const audit = db.prepare("INSERT INTO audit (ts, route, caller, result) VALUES (?, ?, ?, ?)");
   const record = (route, result) => { try { audit.run(new Date(now()).toISOString(), route, "pairing", result); } catch { /* never blocks */ } };
 
@@ -65,10 +76,13 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
 
   app.post("/satellite/v1/pair/hello", (req, res) => {
     if (isPaired()) return refuse(res, 409, "already_paired");
-    const source = classifyPeer(req).client || "unknown";
-    if (!limiter.hit(source, now())) return refuse(res, 429, "rate_limited");
+    const source = sourceOf(req);
+    if (!limiter.hit(source, now())) {
+      noteRefused("pair/hello", "rate_limited", source);
+      return refuse(res, 429, "rate_limited");
+    }
     try {
-      res.json(handleHello({ db, key, now }, req.body));
+      res.json(handleHello({ db, key, now }, req.body, source));
     } catch (err) {
       if (err instanceof PairRefusal) return refuse(res, err.status, err.code);
       throw err;
@@ -77,11 +91,19 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
 
   app.post("/satellite/v1/pair/complete", (req, res) => {
     if (isPaired()) return refuse(res, 409, "already_paired");
+    const source = sourceOf(req);
+    if (!completeLimiter.hit(source, now())) {
+      noteRefused("pair/complete", "rate_limited", source);
+      return refuse(res, 429, "rate_limited");
+    }
     try {
       const r = handleComplete({
         db, key, now,
-        persist: ({ cert, pinned }) => { writeCert(satHome, cert); writePinned(satHome, pinned); },
-      }, req.body);
+        // pinned.json first, cert.json last: the cert is the commit marker (a crash in between
+        // leaves a pin without a cert, which is simply unpaired).
+        persist: ({ cert, pinned }) => { writePinned(satHome, pinned); writeCert(satHome, cert); },
+      }, req.body, source);
+      state.pinned = r.pinned;
       state.cert = r.cert;
       record("pair/complete", "ok");
       out(`Paired with ${r.pinned.crow_id}`);
@@ -89,6 +111,7 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     } catch (err) {
       if (err instanceof PairRefusal) {
         record("pair/complete", err.code);
+        if (err.status === 403) noteRefused("pair/complete", err.code, source);
         return refuse(res, err.status, err.code);
       }
       throw err;
