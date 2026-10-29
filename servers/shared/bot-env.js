@@ -37,12 +37,26 @@ const PREFIXES = ["LC_", "PIBOT_TEST_"];
 /** Names that look like they hold a credential. Never passed. */
 export const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASS(WORD|WD)?|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE|SIGNING|DSN)/i;
 
+/**
+ * Env names that point a process at the peer credential store (every pair's
+ * bearer and signing key). Item 46 PR-B (Kevin's ruling): no bot or pi process
+ * may hold a peer credential, so these never reach one, not even with the
+ * scrub switched off, and a bot def's spawn_env cannot set them.
+ */
+export const PEER_CREDENTIAL_ENV = Object.freeze(["CROW_PEER_TOKENS_PATH"]);
+
+/** Removes every PEER_CREDENTIAL_ENV name from `env` in place; returns it. */
+export function stripPeerCredentialEnv(env) {
+  if (env && typeof env === "object") for (const k of PEER_CREDENTIAL_ENV) delete env[k];
+  return env;
+}
+
 export function botEnvScrubbed(env = process.env) {
   return String((env && env.CROW_BOT_ENV_PASSTHROUGH) || "") !== "1";
 }
 
 export function buildBotBaseEnv(source = process.env, { extraAllow = source.CROW_BOT_ENV_ALLOW || "" } = {}) {
-  if (!botEnvScrubbed(source)) return { ...source };
+  if (!botEnvScrubbed(source)) return stripPeerCredentialEnv({ ...source });
   const extra = new Set(String(extraAllow || "").split(",").map((s) => s.trim()).filter(Boolean));
   const out = {};
   for (const [k, v] of Object.entries(source)) {

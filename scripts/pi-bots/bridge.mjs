@@ -32,7 +32,7 @@ import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, mentionsLock, allowEntryMatches } fr
 import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-permission-policy.js";
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
-import { buildBotBaseEnv, botEnvScrubbed } from "../../servers/shared/bot-env.js";
+import { buildBotBaseEnv, botEnvScrubbed, PEER_CREDENTIAL_ENV, stripPeerCredentialEnv } from "../../servers/shared/bot-env.js";
 import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
@@ -100,7 +100,9 @@ export function filterSpawnEnvWithReport(def) {
     // not be able to turn the sandbox off for itself.
     // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
     // must not point pi at a file of its choosing.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_MODEL_ROLES_FILE") { stripped.push(k); continue; }
+    // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
+    // peer credential store.
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
     spawnEnv[k] = def.spawn_env[k];
   }
   return { spawnEnv, stripped };
@@ -457,6 +459,9 @@ export class PiRpc {
       // Model roles: the instance's role snapshot. After extraEnv (M2), so
       // nothing a caller or def passes can repoint it.
       { CROW_MODEL_ROLES_FILE: roleSnapshotPath() });
+    // Item 46 PR-B: whatever was merged above (an operator allow, passthrough,
+    // extraEnv), pi never learns where the peer credential store is.
+    stripPeerCredentialEnv(env);
     // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
     // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
     // just for sitting under the instance's data dir. INTERACTIVE (Perch)

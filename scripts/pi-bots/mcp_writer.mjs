@@ -377,15 +377,21 @@ export function writeBotMcp(def, opts = {}) {
   if (opts.remoteEnabled) {
     const node = opts.node || process.execPath;
     const proxyPath = opts.proxyPath || join(import.meta.dirname, "crow-remote-proxy.mjs");
-    // Pin the spawned proxy to THIS instance's peer-tokens.json (peer-credentials.js
-    // hardcodes ~/.crow otherwise — wrong for ~/.crow-mpa where the bot runtime lives).
-    const peerTokensPath = opts.peerTokensPath || join(crowHome, "peer-tokens.json");
+    // Item 46 PR-B: the proxy calls THIS gateway's loopback relay (same port
+    // convention as the board block), never the peer, and holds no peer
+    // credential. The relay token is this instance's; the actor is this turn's.
+    const gatewayPort = opts.gatewayPort || process.env.CROW_GATEWAY_PORT || 3001;
+    const actor = opts.botId ? { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType } : undefined;
     const { blocks, warnings } = mintRemoteBlocks(def, {
       peerGatewayUrls: opts.peerGatewayUrls || {},
       proxyPath,
       node,
-      peerTokensPath,
+      relayBaseUrl: `http://127.0.0.1:${gatewayPort}`,
+      relayTokenPath: join(crowHome, "peer-relay-token"),
+      actor,
     });
+    // Like every other stdio block, the proxy carries the bot's actor env.
+    if (opts.botId) applyActorEnv(blocks, actorEnvFor({ botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId }));
     remoteWarnings = warnings;
     for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
   }

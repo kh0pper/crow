@@ -100,9 +100,8 @@ const INSTANCE_BUNDLE_CWD = /\/\.crow[^/]*\/bundles\/([^/]+)\/?$/;
  *
  * Bearer = the RAW board token at `<crowHome>/board-token` (minted by
  * ensureBoardToken at gateway boot, servers/gateway/local-token.js) — read
- * directly off disk, the exact peer-tokens.json precedent mcp_writer.mjs
- * already follows for the remote-forward-proxy blocks (this module stays
- * DB-agnostic on purpose). Actor headers (D-T1.3) let board-mcp.js's
+ * directly off disk, like the peer-relay token the remote-forward-proxy
+ * blocks name (this module stays DB-agnostic on purpose). Actor headers (D-T1.3) let board-mcp.js's
  * resolveActor attribute a mutation to this bot and, when a job dispatched
  * the turn, to that job — the SAME botId/jobId that land in bot_sessions and
  * bot_jobs, which is what makes the result-service lock exemption

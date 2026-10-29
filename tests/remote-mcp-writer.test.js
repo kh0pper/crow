@@ -37,9 +37,11 @@ test("flag ON: mints the forward-proxy block alongside local servers", () => {
   assert.ok(written.mcpServers["crow-memory"], "local server still present");
   const remote = written.mcpServers["crow-remote-g1abcdef-crow-memory"];
   assert.ok(remote, "remote forward-proxy block minted");
-  assert.equal(remote.env.CROW_REMOTE_GATEWAY_URL, "https://g1:8444");
+  assert.equal(remote.env.CROW_REMOTE_RELAY_URL, "http://127.0.0.1:3001/peer-relay/g1abcdef/memory/mcp", "the proxy talks to this gateway's relay");
+  assert.equal(remote.env.CROW_REMOTE_RELAY_TOKEN_PATH, "/tmp/none/peer-relay-token", "this instance's relay token");
   assert.equal(remote.env.CROW_REMOTE_MOUNT, "/memory");
-  assert.equal(remote.env.CROW_PEER_TOKENS_PATH, "/tmp/none/peer-tokens.json", "proxy pinned to this instance's token store");
+  assert.ok(!("CROW_REMOTE_GATEWAY_URL" in remote.env), "the peer's URL never reaches the bot");
+  assert.ok(!JSON.stringify(remote).includes("peer-tokens"), "no credential-store path in the block");
   assert.equal(remote.router, true, "router mode survives the writer (pi-lab registers mcp__<block>, the csv's name)");
   assert.ok(Array.isArray(res.remoteWarnings));
 });
@@ -51,6 +53,24 @@ test("flag ON but addon cap → warning, no block", () => {
   const written = JSON.parse(readFileSync(join(sessionDir, ".mcp.json"), "utf8"));
   assert.ok(!Object.keys(written.mcpServers).some((k) => k.startsWith("crow-remote-")));
   assert.ok(res.remoteWarnings.some((w) => w.includes("texas-gov-data")));
+});
+
+test("flag ON with a bot: the relay port follows opts.gatewayPort, and the block carries the actor env", () => {
+  const { sessionDir, canonicalPath } = fixture();
+  const def = { tools: { remote_mcp: ["g1abcdef::crow-memory"] } };
+  const res = writeBotMcp(def, {
+    sessionDir, canonicalPath, crowHome: "/tmp/none", write: false,
+    remoteEnabled: true, peerGatewayUrls: { g1abcdef: "https://g1:8444" },
+    botId: "hank", displayName: "Hank Bot", threadId: "discord:42", gatewayType: "discord", gatewayPort: 4123,
+  });
+  const remote = res.json.mcpServers["crow-remote-g1abcdef-crow-memory"];
+  assert.equal(remote.env.CROW_REMOTE_RELAY_URL, "http://127.0.0.1:4123/peer-relay/g1abcdef/memory/mcp");
+  assert.equal(remote.env.CROW_REMOTE_ACTOR_ID, "hank");
+  assert.equal(remote.env.CROW_REMOTE_ACTOR_THREAD, "discord:42");
+  assert.equal(remote.env.CROW_REMOTE_ACTOR_GATEWAY, "discord");
+  assert.equal(remote.env.CROW_ACTOR_KIND, "bot", "like every other stdio block");
+  assert.equal(remote.env.CROW_ACTOR_BOT_ID, "hank");
+  assert.equal(remote.env.CROW_ACTOR_BOT_NAME, "Hank Bot");
 });
 
 // ---- board entry (Track 1 Task 7, D-T1.3/D-T1.5) ----------------------------

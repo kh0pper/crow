@@ -8,6 +8,7 @@
  * non-empty peerGatewayUrls — so any caller that doesn't opt in keeps today's
  * behavior (the flag-off invariant is structural).
  */
+import { signPeerRelayActor } from "./actor-sig.mjs";
 
 /** Core capabilities with a dedicated MCP mount (addons deferred to a later slice). */
 export const REMOTE_CANON_MOUNT = {
@@ -53,20 +54,31 @@ export function remoteServersForBot(def) {
 
 /**
  * Mint per-(instance,capability) stdio forward-proxy blocks for a bot.
+ *
+ * Item 46 PR-B (Kevin's ruling): no pair key, signing key or peer bearer ever
+ * reaches a bot or pi process. The proxy therefore never talks to the peer: it
+ * calls the gateway's loopback relay (servers/gateway/routes/peer-relay.js)
+ * with the path-scoped relay token and its signed actor headers, and the
+ * gateway forwards. A block's env is exactly the relay env below; it names no
+ * peer URL, no bearer, no key and no credential-store path.
+ *
  * @param {object} def
  * @param {object} o
- * @param {Record<string,string>} o.peerGatewayUrls  instanceId -> gateway_url (caller-supplied)
+ * @param {Record<string,string>} o.peerGatewayUrls  instanceId -> gateway_url (caller-supplied);
+ *   used only to skip unknown/revoked peers, never written into a block
  * @param {string} o.proxyPath  absolute path to crow-remote-proxy.mjs
  * @param {string} o.node       absolute node binary
- * @param {string} [o.peerTokensPath]  absolute path to THIS instance's
- *   peer-tokens.json. Set so the spawned proxy reads the right per-instance
- *   token store (peer-credentials.js otherwise hardcodes ~/.crow, ignoring
- *   CROW_HOME — wrong for the MPA instance whose tokens live in ~/.crow-mpa).
+ * @param {string} o.relayBaseUrl   this gateway's loopback base, e.g. http://127.0.0.1:3001
+ * @param {string} o.relayTokenPath absolute path to this instance's peer-relay-token
+ * @param {{botId:string, threadId?:string, gatewayType?:string}} [o.actor]
+ *   the bot this turn runs as; its relay signature is added when this process
+ *   holds the per-boot actor key
  * @returns {{ blocks: Record<string,object>, warnings: string[] }}
  */
-export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, peerTokensPath }) {
+export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, relayBaseUrl, relayTokenPath, actor } = {}) {
   const blocks = {};
   const warnings = [];
+  const base = typeof relayBaseUrl === "string" ? relayBaseUrl.replace(/\/+$/, "") : "";
   for (const { instanceId, canonicalId } of remoteServersForBot(def)) {
     const mount = REMOTE_CANON_MOUNT[canonicalId];
     if (!mount) {
@@ -78,10 +90,27 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, p
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — unknown/revoked peer or no gateway_url for instance '${instanceId}'`);
       continue;
     }
+    if (!base || !relayTokenPath) {
+      warnings.push(`remote '${instanceId}::${canonicalId}' skipped — no gateway relay configured`);
+      continue;
+    }
     const name = remoteBlockName(instanceId, canonicalId);
     if (blocks[name]) {
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — block name '${name}' collides with another selected peer (8-char instanceId prefix clash); keeping the first`);
       continue;
+    }
+    const env = {
+      CROW_REMOTE_INSTANCE_ID: instanceId,
+      CROW_REMOTE_MOUNT: mount,
+      CROW_REMOTE_RELAY_URL: `${base}/peer-relay/${encodeURIComponent(instanceId)}${mount}/mcp`,
+      CROW_REMOTE_RELAY_TOKEN_PATH: relayTokenPath,
+    };
+    if (actor && actor.botId != null && String(actor.botId) !== "") {
+      env.CROW_REMOTE_ACTOR_ID = String(actor.botId);
+      env.CROW_REMOTE_ACTOR_THREAD = actor.threadId == null ? "" : String(actor.threadId);
+      env.CROW_REMOTE_ACTOR_GATEWAY = actor.gatewayType == null ? "" : String(actor.gatewayType);
+      const sig = signPeerRelayActor(actor);
+      if (sig) env.CROW_REMOTE_ACTOR_SIG = sig;
     }
     blocks[name] = {
       command: node,
@@ -94,12 +123,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, p
       // tool (queue item 38a). One tool per capability also keeps the
       // tool-budget count (one per csv entry) honest.
       router: true,
-      env: {
-        CROW_REMOTE_INSTANCE_ID: instanceId,
-        CROW_REMOTE_GATEWAY_URL: gatewayUrl,
-        CROW_REMOTE_MOUNT: mount,
-        ...(peerTokensPath ? { CROW_PEER_TOKENS_PATH: peerTokensPath } : {}),
-      },
+      env,
     };
   }
   return { blocks, warnings };
