@@ -50,7 +50,9 @@ import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/m
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { loadProviders } from "../../shared/providers.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
-import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, isDoorUrl, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { isForeignInstanceHost } from "../../shared/provider-host.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { providerDoorUrl } from "../models/door.js";
 import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../shared/relative-dates.js";
 import { withTurnContext } from "../voice/context-echo.js";
@@ -453,6 +455,19 @@ async function voiceKeysFor(deps) {
 }
 
 export const resolveVoiceKey = (key) => resolveKey(key);
+
+/** completeText's resolver: resolveKey's answer plus the row's `host` (the
+ *  owner check needs it), uncached. */
+async function resolveDirectKey(key) {
+  const [providerId, modelId] = splitKey(key);
+  const r = await resolveProviderConfig(db(), providerId, modelId);
+  return {
+    baseUrl: (r.baseUrl || r.base_url || "").replace(/\/$/, ""),
+    model: r.model || r.modelId || r.model_id || modelId,
+    apiKey: r.apiKey || r.api_key || "none",
+    host: r.host || "local",
+  };
+}
 export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
 
 /**
@@ -470,11 +485,18 @@ export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
  * @returns {Promise<string>}
  */
 export async function completeText({ model, prompt, maxTokens = 400, timeoutMs = 60_000 } = {}, {
-  resolveKeyFn = resolveKey, fetchFn = fetch, recordUsageFn = (event) => recordUsageEvent(db(), event),
+  resolveKeyFn = resolveDirectKey, fetchFn = fetch, recordUsageFn = (event) => recordUsageEvent(db(), event),
+  ownInstanceIdFn = getOrCreateLocalInstanceId,
 } = {}) {
   if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
   const up = await resolveKeyFn(model);
   if (!up || !up.baseUrl) throw new Error("completeText: no base url for the model");
+  // Never through a door: a /llm/v1 (or /llm/p/<id>/v1) base URL is another
+  // gateway's router, which can start a model on demand there and applies the
+  // companion heuristics; a row owned by another instance (a native-foreign
+  // row, or a co-hosted peer's) is that instance's to start, not ours.
+  if (isDoorUrl(up.baseUrl)) throw new Error("completeText: refused, the model is behind a door");
+  if (isForeignInstanceHost(up.host, ownInstanceIdFn)) throw new Error("completeText: refused, another instance's model");
   const res = await fetchFn(`${up.baseUrl}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(up.apiKey) },
@@ -482,7 +504,8 @@ export async function completeText({ model, prompt, maxTokens = 400, timeoutMs =
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`completeText: upstream status ${res.status}`);
-  const json = await res.json();
+  let json;
+  try { json = await res.json(); } catch { throw new Error("completeText: invalid upstream body"); }
   try {
     const usage = extractUsageFromOpenAIResponse(JSON.stringify(json));
     if (usage) {

@@ -1389,6 +1389,13 @@ await addColumnIfMissing("memories", "project_id", "INTEGER DEFAULT NULL");
 // receiver maps project_uuid back to its own project (or leaves it unfiled).
 // NULL on every existing row. Also added by scripts/migrations/0020.
 await addColumnIfMissing("memories", "project_uuid", "TEXT");
+// One memory per session summary: the summary job's upsert relies on it. Same
+// DDL as scripts/migrations/0020 (SUMMARY_SOURCE_INDEX_SQL).
+try {
+  await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_session_summary_source ON memories(source) WHERE source LIKE 'session-summary:%'");
+} catch (err) {
+  console.warn(`Warning: could not create idx_memories_session_summary_source: ${err.message}`);
+}
 
 try {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_instance_id ON memories(instance_id)");

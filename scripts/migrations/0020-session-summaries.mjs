@@ -36,6 +36,13 @@ export const COLUMNS = Object.freeze([
 export const SUMMARY_AT_INDEX_SQL =
   "CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)";
 
+// One memory per session summary (source = "session-summary:<threadId>"): the
+// job's upsert relies on it. Thread ids are per-instance and unique, so the
+// same source on two instances is the same memory (it syncs as an update).
+// Same DDL as init-db.js.
+export const SUMMARY_SOURCE_INDEX_SQL =
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_session_summary_source ON memories(source) WHERE source LIKE 'session-summary:%'";
+
 export function run({ dbPath, log = () => {} }) {
   const results = [];
   const db = new Database(dbPath);
@@ -48,6 +55,13 @@ export function run({ dbPath, log = () => {} }) {
     }
     const hasSessions = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_sessions'").get();
     if (hasSessions) db.prepare(SUMMARY_AT_INDEX_SQL).run();
+    const memCols = db.prepare("PRAGMA table_info(memories)").all().map((c) => c.name);
+    if (memCols.includes("source")) {
+      // A store that somehow holds duplicate summary sources keeps booting;
+      // the upsert still finds the oldest row by source.
+      try { db.prepare(SUMMARY_SOURCE_INDEX_SQL).run(); }
+      catch (e) { log(`  idx_memories_session_summary_source: not created (${e.message})`); }
+    }
   } finally {
     db.close();
   }

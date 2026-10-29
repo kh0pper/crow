@@ -31,7 +31,7 @@ function legacyDb({ sessions = true, memories = true } = {}) {
   }
   if (memories) {
     db.exec(`CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
-      category TEXT NOT NULL DEFAULT 'general', project_id INTEGER DEFAULT NULL)`);
+      category TEXT NOT NULL DEFAULT 'general', source TEXT, project_id INTEGER DEFAULT NULL)`);
     db.prepare("INSERT INTO memories (content, project_id) VALUES ('old', 3)").run();
   }
   db.close();
@@ -148,6 +148,10 @@ test("init-db, init-pi-bots and 0020 agree", () => {
       assert.deepEqual(shape(p, "bot_sessions", SUMMARY_COLS), EXPECTED_SESSION_SHAPE, `${label}: bot_sessions summary columns`);
       assert.deepEqual(indexCols(p, "idx_bot_sessions_summary_at"), { table: "bot_sessions", cols: ["summary_at"] }, `${label}: summary_at index`);
     }
+    // The one-summary-per-session unique partial index: one shape on both rails.
+    const idxSql = (p) => { const d = new Database(p, { readonly: true }); try { return d.prepare("SELECT sql FROM sqlite_master WHERE name='idx_memories_session_summary_source'").get()?.sql || null; } finally { d.close(); } };
+    assert.equal(idxSql(freshDb), "CREATE UNIQUE INDEX idx_memories_session_summary_source ON memories(source) WHERE source LIKE 'session-summary:%'");
+    assert.equal(idxSql(legacy.dbPath), idxSql(freshDb), "0020 and init-db create the same index");
     // memories is init-db's (init-pi-bots never owned it): init-db and 0020 agree.
     assert.deepEqual(shape(freshDb, "memories", ["project_uuid"]), shape(legacy.dbPath, "memories", ["project_uuid"]));
     assert.deepEqual(shape(freshDb, "memories", ["project_uuid"]), { project_uuid: { type: "TEXT", notnull: 0, dflt_value: null } });
@@ -163,12 +167,14 @@ test("init-db, init-pi-bots and 0020 agree", () => {
     wound.exec("DROP INDEX idx_bot_sessions_summary_at");
     for (const c of SUMMARY_COLS) wound.exec(`ALTER TABLE bot_sessions DROP COLUMN ${c}`);
     wound.exec("ALTER TABLE memories DROP COLUMN project_uuid");
+    wound.exec("DROP INDEX idx_memories_session_summary_source");
     wound.close();
     assert.deepEqual(shape(freshDb, "bot_sessions", SUMMARY_COLS), {}, "test setup: wound back");
     execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: fresh, CROW_DB_PATH: "" }, stdio: "pipe", cwd: REPO });
     assert.deepEqual(shape(freshDb, "bot_sessions", SUMMARY_COLS), EXPECTED_SESSION_SHAPE);
     assert.deepEqual(indexCols(freshDb, "idx_bot_sessions_summary_at"), { table: "bot_sessions", cols: ["summary_at"] });
     assert.deepEqual(shape(freshDb, "memories", ["project_uuid"]), { project_uuid: { type: "TEXT", notnull: 0, dflt_value: null } });
+    assert.ok(idxSql(freshDb), "init-db re-creates the summary source index");
   } finally {
     rmSync(fresh, { recursive: true, force: true });
     rmSync(legacy.dir, { recursive: true, force: true });

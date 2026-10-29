@@ -249,3 +249,29 @@ test("a mixed-version peer that sends no project_uuid leaves it null and breaks 
   }
 });
 
+
+test("a peer's insert with a session-summary source this instance already holds is skipped, not a crash", async () => {
+  // idx_memories_session_summary_source (0020): one memory per summary source.
+  // Thread ids are per-instance, so in practice the same source is the same
+  // memory and arrives as an update; a stray insert must still never wedge the feed.
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    link = await linkPeers(a, b);
+    const SRC = "session-summary:perchlive-shared";
+    await b.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (300, 'B local summary', ?)", args: [SRC] });
+    await a.db.execute({ sql: "INSERT INTO memories (id, content, source) VALUES (301, 'A summary', ?)", args: [SRC] });
+    const { rows } = await a.db.execute("SELECT * FROM memories WHERE id = 301");
+    await a.mgr.emitChange("memories", "insert", { ...rows[0] });
+    // A later entry on the same feed still applies: the apply loop moved on.
+    await writeMemory(a, { id: 302, content: "after the collision" });
+    assert.ok(await until(async () => !!(await mem(b.db, 302))), "the feed drained past the skipped insert");
+    const { rows: same } = await b.db.execute({ sql: "SELECT id, content FROM memories WHERE source = ?", args: [SRC] });
+    assert.deepEqual(same.map((r) => [Number(r.id), r.content]), [[300, "B local summary"]], "B keeps its one row for the source");
+    assert.equal(await conflicts(b.db), 0, "a secondary-constraint skip is not a conflict row");
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});

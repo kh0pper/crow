@@ -151,7 +151,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
-import { summarizeSessionByThread } from "./perch/session-summary.js";
+import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
@@ -4337,6 +4337,7 @@ export function createInteractiveEngine({
    */
   function summarizeLater(s, trigger) {
     if (typeof summarize !== "function") return;
+    if (!summariesEnabled(env)) return;              // flag off: not even a DB client
     const threadId = s.threadId;
     const sessionModelKey = servingModel(s);
     const onTitle = (title) => {

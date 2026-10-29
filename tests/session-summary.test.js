@@ -381,6 +381,104 @@ test("the memory server's crow_store_memory still writes its own row and wire sh
   assert.equal(emits[0].id, id);
 });
 
+test("an unproven or missing session model ranks as this box: a cloud quick is refused", async () => {
+  for (const sessionWhere of ["unproven", "missing"]) {
+    const s = seedSession({ model: "odd/session" });
+    const { deps, calls } = makeDeps({ quickKey: CLOUD, where: { "odd/session": sessionWhere } });
+    assert.equal((await byThread(s.threadId, deps)).reason, "less_private", sessionWhere);
+    assert.equal(calls.complete.length, 0);
+    // Another of your boxes is refused too; only this box passes.
+    const t = seedSession({ model: "odd/session" });
+    assert.equal((await byThread(t.threadId, makeDeps({ quickKey: "lan/quick", where: { "lan/quick": "other_box", "odd/session": sessionWhere } }).deps)).reason, "less_private");
+    const u = seedSession({ model: "odd/session" });
+    assert.equal((await byThread(u.threadId, makeDeps({ where: { "odd/session": sessionWhere } }).deps)).written, true);
+  }
+  assert.equal(mod.atLeastAsPrivate("cloud", "unproven"), false);
+  assert.equal(mod.atLeastAsPrivate("here", "missing"), true);
+  assert.equal(mod.atLeastAsPrivate("unproven", "cloud"), true, "quick-side unproven ranks as cloud");
+});
+
+test("completeText refuses a door or another instance's model, and a bad body, without dialing", async () => {
+  const { completeText } = await import("../servers/gateway/routes/llm-router.js");
+  const fetched = [];
+  const fetchFn = async (url) => { fetched.push(url); return { ok: true, json: async () => ({ choices: [{ message: { content: "SUMMARY: x." } }] }) }; };
+  const req = { model: "p/m", prompt: "hi" };
+  for (const baseUrl of ["http://127.0.0.1:3001/llm/v1", "http://100.64.20.5:3001/llm/p/crow-local/v1", "http://127.0.0.1:3001/LLM/v1/"]) {
+    await assert.rejects(() => completeText(req, { fetchFn, resolveKeyFn: async () => ({ baseUrl: baseUrl.replace(/\/$/, ""), model: "m", apiKey: "none", host: "local" }) }),
+      /refused, the model is behind a door/, baseUrl);
+  }
+  const OTHER = "0123456789abcdef0123456789abcdef";
+  await assert.rejects(() => completeText(req, {
+    fetchFn, ownInstanceIdFn: () => "fedcba9876543210fedcba9876543210",
+    resolveKeyFn: async () => ({ baseUrl: "http://127.0.0.1:8003/v1", model: "m", apiKey: "none", host: OTHER }),
+  }).catch((e) => { if (/refused, another instance/.test(e.message)) throw e; throw new Error("not refused: " + e.message); }), /refused, another instance/);
+  assert.deepEqual(fetched, [], "a refused target is never dialed");
+
+  // A direct local target is dialed once; a non-JSON body is a fixed error.
+  const direct = async () => ({ baseUrl: "http://127.0.0.1:8011/v1", model: "m", apiKey: "none", host: "local" });
+  assert.equal(await completeText(req, { fetchFn, resolveKeyFn: direct, recordUsageFn: async () => {} }), "SUMMARY: x.");
+  await assert.rejects(() => completeText(req, { resolveKeyFn: direct, fetchFn: async () => ({ ok: true, json: async () => { throw new SyntaxError("Unexpected token < SECRET"); } }) }),
+    (e) => e.message === "completeText: invalid upstream body");
+
+  // Through the job: a door target is model_failed and writes nothing.
+  const s = seedSession();
+  const { deps } = makeDeps({ complete: (r) => completeText(r, { fetchFn, resolveKeyFn: async () => ({ baseUrl: "http://127.0.0.1:3001/llm/v1", model: "m", host: "local" }) }) });
+  assert.deepEqual(await byThread(s.threadId, deps), { written: false, reason: "model_failed" });
+  assert.equal(sessionRow(s.threadId).summary, null);
+  assert.equal(memoriesFor(s.threadId).length, 0);
+});
+
+test("a busy thread runs once more when the in-flight job finishes, however many requests arrived", async () => {
+  const s = seedSession({ label: "named" });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let n = 0;
+  const outputs = ["SUMMARY: The first run happened.", "SUMMARY: The rerun happened."];
+  const complete = async () => { n += 1; if (n === 1) await gate; return outputs[n - 1] || "SUMMARY: Too many runs."; };
+  const first = makeDeps({ complete });
+  const p1 = byThread(s.threadId, first.deps);
+  await new Promise((r) => setTimeout(r, 20));
+  for (let i = 0; i < 3; i++) assert.equal((await byThread(s.threadId, makeDeps({ complete }).deps)).reason, "busy");
+  release();
+  await p1;
+  assert.equal(n, 2, "exactly one rerun for three busy requests");
+  assert.equal(sessionRow(s.threadId).summary, "The rerun happened.");
+  assert.equal(memoriesFor(s.threadId).length, 1);
+  // With nobody waiting there is no rerun.
+  n = 0;
+  await byThread(s.threadId, makeDeps({ complete: async () => { n += 1; return "SUMMARY: Alone."; } }).deps);
+  assert.equal(n, 1);
+});
+
+test("one memory per summary source: the unique index, and a row that already exists is updated", async () => {
+  const s = seedSession();
+  run("INSERT INTO memories (content, category, source) VALUES ('older copy', 'project', ?)", "session-summary:" + s.threadId);
+  assert.throws(() => run("INSERT INTO memories (content, category, source) VALUES ('dup', 'project', ?)", "session-summary:" + s.threadId), /UNIQUE/);
+  run("INSERT INTO memories (content, source) VALUES ('a', 'other-source')");
+  run("INSERT INTO memories (content, source) VALUES ('b', 'other-source')"); // only summary sources are unique
+  const { deps, calls } = makeDeps();
+  assert.equal((await byThread(s.threadId, deps)).written, true);
+  const mems = memoriesFor(s.threadId);
+  assert.equal(mems.length, 1);
+  assert.notEqual(mems[0].content, "older copy");
+  assert.equal(calls.emits.filter((e) => e.op === "update").length, 1);
+});
+
+test("markdown links keep only their text, and a briefing behind a Dates line is still dropped", async () => {
+  assert.equal(mod.sanitizeOutput("SUMMARY: The bot read [the spec](https://example.com/x) and ![a chart](c.png).").summary, "The bot read the spec and a chart.");
+  const s = seedSession({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "[Dates] today is Thursday\n" + mod.BRIEFING_MARKER + "\nHIDDEN-BRIEF" }] },
+      { role: "user", content: "[Dates] today is Thursday\n" + mod.BRIEFING_MARKER + "\nHIDDEN-BRIEF-2" },
+      { role: "user", content: [{ type: "text", text: "Fix the footer." }] },
+    ],
+  });
+  const { deps, calls } = makeDeps();
+  await byThread(s.threadId, deps);
+  assert.doesNotMatch(calls.complete[0].prompt, /HIDDEN-BRIEF/);
+  assert.match(calls.complete[0].prompt, /Fix the footer/);
+});
+
 // ---------------------------------------------------------------------------
 // the engine hooks
 // ---------------------------------------------------------------------------
@@ -505,6 +603,23 @@ test("hibernate is not delayed by the job", async () => {
   assert.equal((await e2.get(u.sessionId)).state, "hibernating");
 });
 
+test("summarizeLater opens no DB client when the flag is off", async () => {
+  const calls = [];
+  const clock = makeClock();
+  const engine = createInteractiveEngine({
+    crowHome: CROW_HOME, env: { CROW_HOME, CROW_SESSION_SUMMARIES: "0" }, bridge: makeBridge(), now: clock.now,
+    setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: () => {}, summarize: (db, id) => { calls.push(id); return Promise.resolve(); },
+  });
+  const s = await engine.spawn({ botId: "botty" });
+  await tick();
+  await engine._hibernateForTest(s.sessionId);
+  await tick();
+  assert.equal(calls.length, 0);
+  const src = readFileSync(join(REPO, "servers/gateway/perch-interactive.js"), "utf8");
+  const body = src.slice(src.indexOf("function summarizeLater("), src.indexOf("setImmediate(", src.indexOf("function summarizeLater(")));
+  assert.match(body, /if \(!summariesEnabled\(env\)\) return;/, "the flag is checked before createDbClient");
+});
+
 test("cycle does not summarise: the session is not going idle", async () => {
   const calls = [];
   const { engine } = makeEngine((db, threadId) => { calls.push(threadId); return Promise.resolve({ written: false }); });
@@ -518,6 +633,6 @@ test("cycle does not summarise: the session is not going idle", async () => {
 test("the singleton's hooks call exactly summarizeSessionByThread", async () => {
   assert.equal(engineMod.SESSION_SUMMARIZER, mod.summarizeSessionByThread);
   const src = readFileSync(join(REPO, "servers/gateway/perch-interactive.js"), "utf8");
-  assert.match(src, /import \{ summarizeSessionByThread \} from "\.\/perch\/session-summary\.js";/);
+  assert.match(src, /import \{ summarizeSessionByThread, summariesEnabled \} from "\.\/perch\/session-summary\.js";/);
   assert.match(src, /createInteractiveEngine\(\{ browserWatch: true, summarize: SESSION_SUMMARIZER \}\)/);
 });

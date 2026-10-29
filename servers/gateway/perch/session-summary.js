@@ -47,11 +47,14 @@ const PRIVACY_RANK = Object.freeze({ here: 0, other_box: 1, cloud: 2 });
 export const privacyRank = (where) => (Object.hasOwn(PRIVACY_RANK, where) ? PRIVACY_RANK[where] : 2);
 
 /**
- * Is the quick model at least as private as the session's? An unknown session
- * model ranks as "this box", so only a quick model on this box passes.
+ * Is the quick model at least as private as the session's? On the QUICK side,
+ * unproven or missing ranks as cloud. On the SESSION side the opposite: an
+ * unknown, unproven or missing session model ranks as "this box" (the most
+ * private), so only a quick model on this box passes. Both err toward
+ * refusing a summary.
  */
 export function atLeastAsPrivate(quickWhere, sessionWhere) {
-  const s = sessionWhere == null ? 0 : privacyRank(sessionWhere);
+  const s = sessionWhere === "other_box" || sessionWhere === "cloud" ? PRIVACY_RANK[sessionWhere] : 0;
   return privacyRank(quickWhere) <= s;
 }
 
@@ -110,13 +113,15 @@ export function readTranscriptTail(file, { maxBytes = TAIL_BYTES, maxTurns = TAI
     try { ev = JSON.parse(line); } catch { continue; }
     const m = ev && ev.type === "message" ? ev.message : null;
     if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
-    const text = messageText(m);
+    // The [Dates] line comes off FIRST, so a briefing behind it is still seen.
+    const undated = (t) => (m.role === "user" ? stripDates(t) : String(t));
+    const text = undated(messageText(m));
     if (!text.trim() || isBriefing(text)) continue;
     // A briefing block inside a multi-block message is dropped on its own.
     const kept = Array.isArray(m.content)
-      ? m.content.filter((b) => b && typeof b.text === "string" && b.type !== "thinking" && !isBriefing(b.text)).map((b) => b.text).join("\n")
+      ? m.content.filter((b) => b && typeof b.text === "string" && b.type !== "thinking").map((b) => undated(b.text)).filter((t) => !isBriefing(t)).join("\n")
       : text;
-    const clean = maskSecrets(m.role === "user" ? stripDates(kept) : kept).trim();
+    const clean = maskSecrets(kept).trim();
     if (clean) out.push({ role: m.role, text: clean });
   }
   return out.slice(-maxTurns);
@@ -153,6 +158,8 @@ export const isInstructionLike = (s) => INSTRUCTION_RES.some((re) => re.test(s))
 // A sentence ends at . ! or ? (plus closing quotes) followed by whitespace, so "R1.2" stays whole.
 const splitSentences = (text) => String(text).split(/(?<=[.!?]["')\]\u201d\u2019]*)\s+(?=\S)/).map((s) => s.trim()).filter(Boolean);
 const plain = (s) => String(s)
+  // markdown images and links keep only their text: ![alt](url) / [text](url) -> text
+  .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
   // control characters, including CR/LF/TAB (the output is one plain paragraph)
   .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, " ")
   .replace(/[*_`#>|]+/g, "")
@@ -395,18 +402,31 @@ async function writeSummary(db, w, { syncManager }) {
   const source = SUMMARY_SOURCE_PREFIX + String(w.threadId);
   const tags = w.tainted ? "session-summary,outside-content" : "session-summary";
   const context = w.tainted ? "Session summary (included outside content)" : "Session summary";
-  try {
+  const existingId = async () => {
     const { rows } = await db.execute({ sql: "SELECT id FROM memories WHERE source=? ORDER BY id LIMIT 1", args: [source] });
-    if (rows[0]) {
-      await updateMemory(db, Number(rows[0].id), {
-        content: w.summary, category: "project", tags, context,
-        project_id: w.projectId ?? null, project_uuid: w.projectUuid ?? null,
-      }, { syncManager, source });
-    } else {
-      await insertMemory(db, {
-        content: w.summary, category: "project", context, tags, source, importance: 5,
-        project_id: w.projectId ?? null, ...(w.projectUuid ? { project_uuid: w.projectUuid } : {}),
-      }, { syncManager });
+    return rows[0] ? Number(rows[0].id) : null;
+  };
+  const update = (id) => updateMemory(db, id, {
+    content: w.summary, category: "project", tags, context,
+    project_id: w.projectId ?? null, project_uuid: w.projectUuid ?? null,
+  }, { syncManager, source });
+  try {
+    const id = await existingId();
+    if (id != null) await update(id);
+    else {
+      try {
+        await insertMemory(db, {
+          content: w.summary, category: "project", context, tags, source, importance: 5,
+          project_id: w.projectId ?? null, ...(w.projectUuid ? { project_uuid: w.projectUuid } : {}),
+        }, { syncManager });
+      } catch (e) {
+        // idx_memories_session_summary_source (0020): a row with this source
+        // appeared since the SELECT (another writer, or a sync apply). Update it.
+        if (!/UNIQUE constraint failed/i.test(String(e && e.message))) throw e;
+        const raced = await existingId();
+        if (raced == null) throw e;
+        await update(raced);
+      }
     }
   } catch {
     try {
@@ -420,7 +440,7 @@ async function writeSummary(db, w, { syncManager }) {
   }
 }
 
-/** threadId → in-flight job (at most one per thread). */
+/** threadId → {rerun, deps} for the in-flight job (at most one per thread). */
 const inFlight = new Map();
 
 /**
@@ -437,11 +457,31 @@ const inFlight = new Map();
  */
 export async function summarizeSessionByThread(db, threadId, deps = {}) {
   const id = String(threadId || "");
-  const log = deps.log || defaultLog;
   if (!id) return { written: false, reason: "no_session" };
   if (!summariesEnabled(deps.env || process.env)) return { written: false, reason: "disabled" };
-  if (inFlight.has(id)) return { written: false, reason: "busy" };
-  const job = (async () => {
+  const busy = inFlight.get(id);
+  if (busy) {
+    // Coalesce: the in-flight job runs once more when it finishes, however
+    // many requests arrive meanwhile, with the newest request's deps.
+    busy.rerun = true;
+    busy.deps = deps;
+    return { written: false, reason: "busy" };
+  }
+  const entry = { rerun: false, deps };
+  inFlight.set(id, entry);
+  try {
+    let result;
+    do {
+      entry.rerun = false;
+      result = await runByThread(db, id, entry.deps);
+    } while (entry.rerun);
+    return result;
+  } finally { inFlight.delete(id); }
+}
+
+async function runByThread(db, id, deps) {
+  const log = deps.log || defaultLog;
+  return (async () => {
     let row;
     try {
       row = (await db.execute({
@@ -477,6 +517,4 @@ export async function summarizeSessionByThread(db, threadId, deps = {}) {
     log(`[summary] ${id} error`);
     return { written: false, reason: "error" };
   });
-  inFlight.set(id, job);
-  try { return await job; } finally { inFlight.delete(id); }
 }
