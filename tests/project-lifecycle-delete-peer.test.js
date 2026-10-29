@@ -32,7 +32,7 @@ async function markerReaches(a, b, id) {
   return until(() => hasMemory(b.db, id), 15_000);
 }
 
-test("a delete on A drains nothing that changes B's notes, context or memories", { timeout: 90_000 }, async () => {
+test("a delete on A drains nothing that changes B's notes, context or memories, and B's edits never refile into the tombstone", { timeout: 90_000 }, async () => {
   _setEligibilityForTest(() => true); // the suite env disables sync; a queued emit must really queue
   const fleet = await makeFleet();
   const { a, b } = fleet;
@@ -42,6 +42,7 @@ test("a delete on A drains nothing that changes B's notes, context or memories",
 
     // A's project and its contents.
     const pid = Number((await createProjectSpace(a.db, { name: "Peer Safe" })).id);
+    const uuid = (await rows(a.db, "SELECT uuid FROM project_spaces WHERE id = ?", [pid]))[0].uuid;
     const noteIds = [];
     for (const c of ["a note 1", "a note 2"]) {
       noteIds.push(Number((await a.db.execute({ sql: "INSERT INTO research_notes (project_id, content) VALUES (?, ?)", args: [pid, c] })).lastInsertRowid));
@@ -87,6 +88,13 @@ test("a delete on A drains nothing that changes B's notes, context or memories",
     const after = await snapshot();
     after.memories = after.memories.filter((m) => m.id !== 900002);
     assert.deepEqual(after, before, "B's notes, context and memories are unchanged");
+
+    // The other direction: B edits the memory and still names the deleted project's uuid. A applies
+    // it through the real feed, and the memory lands unfiled, never back under the tombstone.
+    await b.mgr.emitChange("memories", "update", { id: memId, content: "edited on B", project_uuid: uuid, source: null });
+    assert.ok(await until(async () => (await rows(a.db, "SELECT content FROM memories WHERE id = ?", [memId]))[0]?.content === "edited on B", 15_000),
+      "B's edit reached A");
+    assert.equal((await rows(a.db, "SELECT project_id FROM memories WHERE id = ?", [memId]))[0].project_id, null, "unfiled, not refiled into the tombstone");
   } finally {
     _setEligibilityForTest(null);
     try { link && link.close(); } catch {}
