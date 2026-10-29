@@ -32,6 +32,10 @@ const STATE_WORD = "(?!(?:nothing|anything|what|whats|who|where|when|which|how|t
 const STATE_NOUN = "(?!(?:it|that|this|these|those|the|a|an|my|his|her|its|our|their|everything|something)\\b)" + STATE_WORD;
 // Things that start on their own: "the movie has started" is a fact, not a hand-off claim.
 const STARTS_ON_ITS_OWN = "movie|film|show|timer|meeting|game|class|event|call|countdown|alarm|song|episode|match|race|session|concert|lesson|rain|storm|season|sale|party|service";
+// The same in Spanish (accents dropped): "la película ya ha empezado" is a fact.
+const STARTS_ON_ITS_OWN_ES = "pelicula|partido|reunion|temporizador|juego|clase|evento|llamada|cancion|episodio|serie|concierto|lluvia|fiesta|sesion|alarma";
+// A span of time after "in" ("starting in five minutes", "in an hour"): a schedule, not a claim ("starting in on it" is one).
+const SPAN = "(?:\\d|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|half|few|couple|minutes?|hours?|seconds?)";
 const DAY = "(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|noon)";
 const CLAIMS = [
   // Done: "I've added", "I have scheduled", "I just set", "I added".
@@ -74,8 +78,8 @@ const CLAIMS = [
   // after it ("is starting at eight", "starting to rain") or a thing that starts on its own ("the movie has started")
   // is a fact, not a claim.
   /\b(?:i m|i am|they re|it s) on it\b/,
-  new RegExp(`(?<!\\b(?:${STARTS_ON_ITS_OWN}) )\\b(?:has|have) (?:started|begun)\\b(?! (?:at|on|already|yet)\\b)`),
-  new RegExp(`\\b(?:is|s) (?:now )?(?:working on|starting)\\b(?! (?:to|at|in)\\b| on (?:${DAY})\\b)`),
+  new RegExp(`(?<!\\b(?:${STARTS_ON_ITS_OWN}) )\\b(?:has|have) (?:started|begun)\\b(?! (?:at|yet|to|raining|snowing|pouring)\\b| on (?:${DAY})\\b| \\d)`),
+  new RegExp(`\\b(?:is|s) (?:now )?(?:working on|starting)\\b(?! (?:to|at)\\b| on (?:${DAY})\\b| in ${SPAN}\\b| \\d)`),
   /\bi(?: ve| have)? (?:handed|passed|given|sent|forwarded) (?:it|this|that)(?: over| off)? to\b/,
   // Spanish (accents already dropped): done, promised, offered, state, bare.
   new RegExp(`${NEG}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:anadido|agregado|creado|programado|agendado|reservado|enviado|mandado|guardado|anotado|apuntado|puesto|borrado|eliminado|cancelado|movido|cambiado|actualizado|configurado)\\b`),
@@ -91,7 +95,7 @@ const CLAIMS = [
   // The hand-off, in Spanish ("se pone con ello", "ya han empezado", "se lo pasé"); never after "no".
   new RegExp(`${NEG}\\bse pone con ello\\b`),
   new RegExp(`${NEG}\\bya esta con ello\\b`),
-  new RegExp(`${NEG}\\b(?:ha|han) empezado\\b`),
+  new RegExp(`${NEG}(?<!\\b(?:${STARTS_ON_ITS_OWN_ES})(?: ya)? )\\b(?:ha|han) empezado\\b`),
   new RegExp(`${NEG}\\bse lo (?:he )?pas(?:e|ado)\\b`),
 ];
 

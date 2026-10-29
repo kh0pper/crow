@@ -193,7 +193,7 @@ test("claimsAction: a hand-off claimed as started is a claim (en + es) [rev2 C1]
   for (const t of [
     "I'm on it!", "I am on it.", "They're on it.", "It's on it now.", "He's on it.", "The bots are on it.", "Your assistant is on it.",
     "Writer has started.", "They have begun.",
-    "Writer is working on it.", "Writer's now working on that.", "Writer is starting.", "Writer's now starting on it.", "It has started.",
+    "Writer is working on it.", "Writer's now working on that.", "Writer is starting.", "Writer's now starting on it.", "It has started.", "Writer has started on it.", "Hank has started on that.", "Writer has started already.", "Writer is starting in on it.",
     "I've handed it to Writer.", "I have passed this over to Helper.", "I handed that off to Writer.",
     "I've given it to Writer.", "I sent it over to Helper.", "I forwarded this to Writer.",
     "Writer se pone con ello.", "Ya está con ello.", "Ya ha empezado.", "Han empezado.",
@@ -226,4 +226,13 @@ test("claimsAction: read answers and things that start on their own are not hand
     assert.equal(claimsAction(t, { agents }), false, t);
     assert.equal(claimsAction(t), false, t);
   }
+});
+
+test("claimsAction: a start with a time, a span or the weather after it, or a Spanish thing that starts on its own, is no claim (fix round 2)", () => {
+  for (const t of [
+    "It has started to rain.", "It has started raining.", "Writer's show has started on Monday.", "It has started at noon.",
+    "The movie is starting in five minutes.", "Writer is starting in an hour.", "The class is starting 9 sharp.",
+    "La película ya ha empezado.", "El partido ha empezado.", "La reunión ha empezado.", "El temporizador ya ha empezado.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+  for (const t of ["Writer ya ha empezado.", "Han empezado."]) assert.equal(claimsAction(t), true, t);
 });
