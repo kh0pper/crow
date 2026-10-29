@@ -22,7 +22,7 @@
  *     on failure the conflict row stays unresolved (spec round-2 C2 / round-3 C2).
  */
 
-import { SYNCED_TABLES, rowsEquivalent } from "./instance-sync.js";
+import { SYNCED_TABLES, rowsEquivalent, DELETE_KEY_POLICY } from "./instance-sync.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 
 // ── Natural-key restore refusals (2c C7 / 2c-F3) ─────────────────────────────
@@ -258,7 +258,11 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
 
     // emitChange with "delete"
     let syncNote = null;
-    const emitResult = await emitOrQueue(instanceSync, db, table, "delete", { id: rowId });
+    // A table whose ids are not portable is deleted on peers by its uuid
+    // (DELETE_KEY_POLICY); a bare { id } there would be refused.
+    const deleteRow = DELETE_KEY_POLICY[table] === "uuid" && typeof liveRow.uuid === "string" && liveRow.uuid !== ""
+      ? { id: rowId, uuid: liveRow.uuid } : { id: rowId };
+    const emitResult = await emitOrQueue(instanceSync, db, table, "delete", deleteRow);
     if (emitResult && emitResult.queued === true) {
       syncNote =
         "Restored locally — change queued for sync; peers will be notified when the " +

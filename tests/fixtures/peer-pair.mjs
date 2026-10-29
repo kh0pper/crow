@@ -499,29 +499,44 @@ export async function writeMarker(inst, text) {
   const seq = top + 1 + randomBytes(4).readUInt32BE(0);
   const bumped = inst.sql("UPDATE sqlite_sequence SET seq = ? WHERE name = 'memories'", [seq]);
   if (bumped.changes === 0) inst.sql("INSERT INTO sqlite_sequence (name, seq) VALUES ('memories', ?)", [seq]);
-  const env = { ...inst.env };
+  const { queued } = await callMemoryTool(inst, "crow_store_memory", { content: text, category: "general", importance: 5, source: "pt2a-gate" },
+    { queuedWhen: () => outboxAudit(inst, text).length > 0 });
+  if (!await until(() => hasMarker(inst, text), 15_000)) throw new Error(`${inst.name}: marker not stored`);
+  return { queued };
+}
+
+/**
+ * Call one tool of `inst`'s memory MCP server through the real stdio door
+ * (the instance tree's servers/memory/index.js in a child with the instance's
+ * env plus `extraEnv`, and no InstanceSyncManager): its sync writes are
+ * queued in sync_outbox and reach peers only through the gateway's drain.
+ * `queuedWhen` (optional) is polled, with the child still alive, until it
+ * holds: tools queue their outbox row fire-and-forget after answering, and
+ * the drain can empty sync_outbox before a poll sees it, so the predicate
+ * should read the test-only audit copy (watchOutbox / outboxAuditRows).
+ * Returns { result, queued }; a tool error throws.
+ */
+export async function callMemoryTool(inst, name, args, { extraEnv = {}, queuedWhen = null } = {}) {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const env = { ...inst.env, ...extraEnv };
   // The stdio door's eligibility reads this switch; the suite sets it to 1.
   delete env.CROW_DISABLE_INSTANCE_SYNC;
   const transport = new StdioClientTransport({ command: process.execPath, args: [join(inst.repo, "servers/memory/index.js")], env, cwd: inst.repo, stderr: "pipe" });
   const client = new Client({ name: "pt2a-marker", version: "1.0.0" });
   const cap = (p, what) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error(`${inst.name}: ${what} timed out`)), 60_000))]);
   let queued = false;
+  let result;
   watchOutbox(inst);
   try {
-    await cap(client.connect(transport), "marker MCP connect");
-    const r = await cap(client.callTool({ name: "crow_store_memory", arguments: { content: text, category: "general", importance: 5, source: "pt2a-gate" } }), "crow_store_memory");
-    if (r.isError) throw new Error(`${inst.name}: crow_store_memory failed: ${JSON.stringify(r.content).slice(0, 300)}`);
-    // crow_store_memory queues its outbox row fire-and-forget, after the tool
-    // has answered, and the gateway's drain can empty sync_outbox before any
-    // poll sees it. So wait, bounded and with the child still alive, on the
-    // test-only audit copy (watchOutbox), which no drain touches: `queued` is
-    // true only if this marker's row really entered the outbox.
-    queued = await until(() => outboxAudit(inst, text).length > 0, 15_000, 100);
+    await cap(client.connect(transport), `${name} MCP connect`);
+    result = await cap(client.callTool({ name, arguments: args }), name);
+    if (result.isError) throw new Error(`${inst.name}: ${name} failed: ${JSON.stringify(result.content).slice(0, 300)}`);
+    if (queuedWhen) queued = await until(queuedWhen, 15_000, 100);
   } finally {
     try { await client.close(); } catch { /* gone */ }
   }
-  if (!await until(() => hasMarker(inst, text), 15_000)) throw new Error(`${inst.name}: marker not stored`);
-  return { queued };
+  return { result, queued };
 }
 
 /** Does `inst`'s DB hold a memory with exactly this content? */
@@ -548,6 +563,12 @@ export function watchOutbox(inst) {
         INSERT INTO crow_test_outbox_audit (outbox_id, table_name, op, row_json) VALUES (NEW.id, NEW.table_name, NEW.op, NEW.row_json);
       END;`);
   } finally { db.close(); }
+}
+
+/** Every sync_outbox row ever queued on `inst` for `table` (watchOutbox's audit copy), row_json parsed. */
+export function outboxAuditRows(inst, table) {
+  return inst.sql("SELECT op, row_json FROM crow_test_outbox_audit WHERE table_name = ? ORDER BY outbox_id", [table])
+    .map((r) => ({ op: r.op, row: JSON.parse(r.row_json) }));
 }
 
 /** Every sync_outbox row ever queued on `inst` carrying this marker (watchOutbox's audit copy). */
