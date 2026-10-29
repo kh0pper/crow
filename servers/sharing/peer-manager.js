@@ -86,6 +86,15 @@ function computeTopic(myEd25519Pub, theirEd25519Pub) {
     .digest();
 }
 
+const POST_ADMIT_LINE_MAX_DEFAULT = 262_144;
+
+/** CROW_PEER_LINE_MAX_BYTES when it is a positive integer, else 262144. */
+function postAdmitLineMaxFromEnv(env) {
+  const raw = env?.CROW_PEER_LINE_MAX_BYTES;
+  const n = typeof raw === "string" && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : POST_ADMIT_LINE_MAX_DEFAULT;
+}
+
 export class PeerManager {
   /**
    * @param {object} identity
@@ -95,6 +104,8 @@ export class PeerManager {
    * @param {number} [opts.preAuthMaxLines] lines an unadmitted peer may send
    * @param {number} [opts.preAuthMaxBytes] bytes an unadmitted peer may send
    * @param {number} [opts.preAuthMs]       time an unadmitted peer may take
+   * @param {number} [opts.postAdmitLineMax] bytes one line of an admitted peer
+   *   may reach (default 262144, or CROW_PEER_LINE_MAX_BYTES in opts.env)
    */
   constructor(identity, {
     env = process.env,
@@ -103,6 +114,7 @@ export class PeerManager {
     preAuthMaxBytes = 65_536,
     preAuthMs = 15_000,
     pairBindingWaitMs = 10_000,
+    postAdmitLineMax = postAdmitLineMaxFromEnv(env),
   } = {}) {
     this.identity = identity;
     this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
@@ -110,6 +122,11 @@ export class PeerManager {
     this.preAuthMaxLines = preAuthMaxLines;
     this.preAuthMaxBytes = preAuthMaxBytes;
     this.preAuthMs = preAuthMs;
+    // After admission the pre-auth caps no longer apply; each line of a
+    // contact connection (complete, or a partial one still waiting for its
+    // newline) is held to this cap. Sibling connections are exempt (see
+    // lineCapped in _handleConnection).
+    this.postAdmitLineMax = postAdmitLineMax;
     // PT-2a: how long a sibling that offered pair binding may take to send
     // its `pair-binding` frame once we have proven ourselves to it.
     this.pairBindingWaitMs = pairBindingWaitMs;
@@ -132,7 +149,14 @@ export class PeerManager {
     this.topics = new Map(); // crowId -> topic buffer
     this.instanceSyncTopic = null; // Buffer — the instance sync DHT topic
     this.onPeerConnected = null; // callback(crowId, conn)
-    this.onPeerData = null; // callback(crowId, data)
+    // callback(crowId, payload, meta) — a `data` frame of an admitted CONTACT.
+    // meta = { proof: "cb"|"sig", instanceId: string|null }. instanceId is the
+    // id the peer CLAIMED in its challenge (state.peerInstanceId): all of a
+    // contact's instances share one key, so nothing proves it. Use it for
+    // routing only, never for authorization. (Only a sibling's
+    // state.remoteInstanceId can be proven, by PT-2a pair binding; sibling
+    // connections never reach onPeerData.)
+    this.onPeerData = null;
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null) — instance-to-instance connections
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — a proven sibling advertised its outgoing Hypercore feed key
@@ -351,6 +375,11 @@ export class PeerManager {
     // line on arrival: once we have decided and the peer's own
     // `authenticated` has come in on the stream, what follows is post-admission.
     const capped = () => !(state.mutual || (state.authenticated && state.peerAuthSeen));
+    // Post-admission per-line cap, CONTACT connections only: an admitted
+    // sibling's stream also carries Hypercore replication (instance-connect.js
+    // replicate(id, conn)), whose JSON blocks have no raw newline, so a line
+    // cap there would cut a sibling replicating one large entry.
+    const lineCapped = () => !capped() && state.kind === "contact";
     let buffer = "";
     conn.on("data", (data) => {
       if (state.refused || state.closed) return;
@@ -359,6 +388,7 @@ export class PeerManager {
       buffer = lines.pop(); // Keep incomplete line
 
       for (const line of lines) {
+        if (lineCapped() && Buffer.byteLength(line) > this.postAdmitLineMax) { this._kill(conn, state); return; }
         if (capped()) {
           state.preBytes += Buffer.byteLength(line) + 1;
           if (state.preBytes > this.preAuthMaxBytes
@@ -373,7 +403,11 @@ export class PeerManager {
         if (msg?.type === "pair-binding") { this._onPairBindingFrame(msg, state); continue; }
         chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
       }
-      if (capped() && state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
+      if (capped()) {
+        if (state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
+      } else if (lineCapped() && Buffer.byteLength(buffer) > this.postAdmitLineMax) {
+        this._kill(conn, state);
+      }
     });
 
     // Remove only OUR entry: a refused or superseded connection closing must
@@ -812,7 +846,8 @@ export class PeerManager {
     if (!state.mutual || state.refused) return;
     if (state.kind === "contact" && msg.type === "data") {
       if (state.remoteCrowId && this.onPeerData) {
-        try { await this.onPeerData(state.remoteCrowId, msg.payload); } catch {}
+        const meta = { proof: state.proof, instanceId: state.peerInstanceId ?? null };
+        try { await this.onPeerData(state.remoteCrowId, msg.payload, meta); } catch {}
       }
       return;
     }

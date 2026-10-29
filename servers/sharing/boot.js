@@ -919,7 +919,8 @@ export async function initSharingRuntime(managers, helpers) {
   };
 
   // Handle data from connected peers (shares, revokes, etc.)
-  peerManager.onPeerData = async (crowId, payload) => {
+  // meta = { proof, instanceId } (instanceId is claimed, routing only); unused here.
+  peerManager.onPeerData = async (crowId, payload, _meta) => {
     if (!payload?.type) return;
 
     const contact = await db.execute({
