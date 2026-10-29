@@ -370,3 +370,381 @@ test("F8: own addresses are probed once per request when not injected", async ()
     assert.equal(n, 1);
   }, { ownAddrs: undefined, probeOwnAddrs });
 });
+
+// --- Add a provider (roles phase 2b, Task 12) ---------------------------------
+
+import { Readable } from "node:stream";
+import { candidatePick } from "../servers/shared/provider-recommendations.js";
+import { checkStamp } from "../servers/shared/pick-checks.js";
+
+const OR_URL = "https://openrouter.ai/api/v1";
+const NOW = () => new Date("2026-11-01T12:00:00Z"); // before the file's review_by
+const noClassifier = async () => ({ state: "missing" });
+const AT = "2026-10-30T10:00:00.000Z";
+const insOr = (id, models, description = "OpenRouter") => db.execute({
+  sql: "INSERT INTO providers (id, base_url, api_key, host, description, models, disabled) VALUES (?,?,?,?,?,?,0)",
+  args: [id, OR_URL, SECRET, "cloud", description, JSON.stringify(models)],
+});
+const providerCount = async () => Number((await db.execute("SELECT COUNT(*) AS n FROM providers")).rows[0].n);
+const csrfHeaders = { cookie: "crow_session=s1; crow_csrf=tok9", "x-crow-csrf": "tok9" };
+const addOpts = (extra = {}) => ({ now: NOW, classifierStatusFn: noClassifier, ...extra });
+// A stored check carries the stamp of the row it ran against (F3): cloud-or is OR_URL with SECRET.
+const OR_STAMP = checkStamp({ apiKey: SECRET, baseUrl: OR_URL });
+const orChecks = (byModel) => JSON.stringify({ "cloud-or": Object.fromEntries(Object.entries(byModel).map(([k, c]) => [k, { ...OR_STAMP, ...c }])) });
+
+test("picks: a preset pick whose stored check passed is starred (the route reads the checks)", async () => {
+  await insOr("cloud-or", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-haiku-5.5|chat": { ok: true, code: "ok", at: AT } }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const r = await call(s, "GET", "/api/roles/quick/picks");
+    assert.equal(r.status, 200);
+    const pick = r.json.picks.find((p) => p.key === "cloud-or/anthropic/claude-haiku-5.5");
+    assert.ok(pick, "the cloud pick is listed");
+    assert.equal(pick.recommended, true);
+    assert.equal(pick.providerLabel, "OpenRouter");
+    assert.equal(r.json.picks.find((p) => p.key === "local-chat/m1")?.recommended, false);
+    assert.ok(!r.text.includes(SECRET));
+  }, addOpts());
+});
+
+test("picks: a failed check gives no star", async () => {
+  await insOr("cloud-or", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-haiku-5.5|chat": { ok: false, code: "no_tool_call", at: AT } }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const r = await call(s, "GET", "/api/roles/quick/picks");
+    assert.equal(r.json.picks.find((p) => p.key === "cloud-or/anthropic/claude-haiku-5.5")?.recommended, false);
+  }, addOpts());
+});
+
+test("POST /api/providers/test: a rejected key answers 200 with the code, never the key", async () => {
+  const seen = [];
+  const testFn = async (args) => {
+    seen.push(args);
+    return { ok: false, code: "key_rejected", status: 401, models: null, host: "openrouter.ai", baseUrl: OR_URL, apiKey: args.apiKey };
+  };
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", {
+      body: { presetId: "openrouter", apiKey: "fixture-pasted-key-777" }, headers: csrfHeaders,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.code, "key_rejected");
+    assert.equal(r.json.status, 401);
+    assert.equal(r.json.host, "openrouter.ai");
+    assert.ok(!r.text.includes("fixture-pasted-key-777"), "the key is never echoed");
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].apiKey, "fixture-pasted-key-777");
+  }, addOpts({ testFn }));
+});
+
+test("POST /api/providers/test: a passing key lists models and the recommended ones", async () => {
+  const testFn = async () => ({ ok: true, code: "ok", status: 200, models: ["anthropic/claude-haiku-5.5", "x/y"], host: "openrouter.ai", baseUrl: OR_URL });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", { body: { presetId: "openrouter", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.models, ["anthropic/claude-haiku-5.5", "x/y"]);
+    assert.ok(r.json.recommended.includes("anthropic/claude-haiku-5.5"));
+    assert.ok(!r.json.recommended.includes("x/y"));
+  }, addOpts({ testFn }));
+});
+
+test("POST /api/providers refuses on a failed test and writes nothing", async () => {
+  const before = await providerCount();
+  const testFn = async () => ({ ok: false, code: "key_rejected", status: 401, models: null, host: "openrouter.ai" });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers", {
+      body: { presetId: "openrouter", apiKey: "fixture-pasted-key-777", modelIds: ["x/y"] }, headers: csrfHeaders,
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.code, "key_rejected");
+    assert.ok(!r.text.includes("fixture-pasted-key-777"));
+  }, addOpts({ testFn }));
+  assert.equal(await providerCount(), before);
+});
+
+test("POST /api/providers saves on a passing test and answers only the id", async () => {
+  const testFn = async () => ({ ok: true, code: "ok", status: 200, models: ["x/y"], host: "openrouter.ai", baseUrl: OR_URL });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers", {
+      body: { presetId: "openrouter", apiKey: "fixture-pasted-key-777", modelIds: ["x/y"] }, headers: csrfHeaders,
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { ok: true, providerId: "openrouter" });
+  }, addOpts({ testFn }));
+  const row = (await db.execute("SELECT api_key, models FROM providers WHERE id = 'openrouter'")).rows[0];
+  assert.equal(row.api_key, "fixture-pasted-key-777");
+  assert.deepEqual(JSON.parse(row.models).map((m) => m.id), ["x/y"]);
+});
+
+test("the provider routes need a session and CSRF", async () => {
+  const prev = process.env.CROW_DASHBOARD_PUBLIC;
+  process.env.CROW_DASHBOARD_PUBLIC = "true";
+  try {
+    await withServer(async (s) => {
+      for (const [m, p] of [["POST", "/api/providers/test"], ["POST", "/api/providers"], ["GET", "/api/providers/cloud-a/plan"],
+        ["POST", "/api/providers/cloud-a/probe"], ["POST", "/api/providers/cloud-a/recommended/preview"], ["POST", "/api/providers/cloud-a/recommended"]]) {
+        const r = await call(s, m, p, m === "POST" ? { body: {} } : {});
+        assert.equal(r.status, 401, p);
+      }
+    }, { sessionGate: undefined, ...addOpts() });
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DASHBOARD_PUBLIC; else process.env.CROW_DASHBOARD_PUBLIC = prev;
+  }
+  let tested = 0;
+  await withServer(async (s) => {
+    for (const p of ["/api/providers/test", "/api/providers", "/api/providers/cloud-a/probe", "/api/providers/cloud-a/recommended/preview", "/api/providers/cloud-a/recommended"]) {
+      const r = await call(s, "POST", p, { body: { apiKey: "fixture-pasted-key-777" }, headers: { cookie: "crow_session=s1; crow_csrf=tok9" } });
+      assert.equal(r.status, 403, p);
+      assert.ok(!r.text.includes("fixture-pasted-key-777"), p);
+    }
+  }, addOpts({ testFn: async () => { tested++; return { ok: true, code: "ok", models: [], host: "h" }; } }));
+  assert.equal(tested, 0);
+});
+
+test("a malformed body is refused without echoing or logging it", async () => {
+  const { rolesApiBodyErrorHandler } = await import("../servers/gateway/routes/roles-api.js");
+  const app = express();
+  app.use(express.json());
+  app.use(rolesApiRouter({ dbFactory, sessionGate: passGate, env: {}, ownAddrs: OWN, localInstanceId: () => "i-self", ...addOpts() }));
+  app.use(["/api/roles", "/api/providers"], rolesApiBodyErrorHandler);
+  const logged = [];
+  const origErr = console.error;
+  console.error = (...a) => logged.push(a.join(" "));
+  const s = await new Promise((resolve) => { const x = app.listen(0, "127.0.0.1", () => resolve(x)); });
+  try {
+    // An unquoted value: V8's message quotes this part of the body, so the
+    // default handler would echo and log it.
+    const payload = '{"apiKey":fixture-pasted-key-777}';
+    const r = await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port: s.address().port, path: "/api/providers/test", method: "POST",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {
+        let text = "";
+        res.on("data", (c) => (text += c));
+        res.on("end", () => resolve({ status: res.statusCode, text }));
+      });
+      req.on("error", reject);
+      req.end(payload);
+    });
+    assert.equal(r.status, 400);
+    assert.equal(JSON.parse(r.text).code, "bad_request");
+    assert.ok(!r.text.includes("fixture-pas"));
+    assert.ok(!logged.join("\n").includes("fixture-pas"));
+    // Over the parser's limit: refused the same way, nothing quoted or logged.
+    const big = JSON.stringify({ apiKey: "fixture-pasted-key-777", pad: "x".repeat(200_000) });
+    const r2 = await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port: s.address().port, path: "/api/providers", method: "POST",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(big) } }, (res) => {
+        let text = "";
+        res.on("data", (c) => (text += c));
+        res.on("end", () => resolve({ status: res.statusCode, text }));
+      });
+      req.on("error", reject);
+      req.end(big);
+    });
+    assert.equal(r2.status, 413);
+    assert.equal(JSON.parse(r2.text).code, "too_large");
+    assert.ok(!r2.text.includes("fixture-pas"));
+    assert.ok(!logged.join("\n").includes("fixture-pas"));
+  } finally {
+    console.error = origErr;
+    s.close();
+  }
+});
+
+test("POST /api/providers/:id/probe calls the probe seam once per distinct pick", async () => {
+  const models = ["anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5", "qwen/qwen3-embedding-8b", "cohere/rerank-4-fast"];
+  await insOr("cloud-or", models.map((id) => ({ id })));
+  invalidateRoleContext();
+  const distinct = new Set();
+  for (const roleId of ["coordinator", "quick", "deep", "everyday", "expert", "critic", "vision", "voice", "embed", "rerank"]) {
+    const p = candidatePick("openrouter", roleId, { liveModelIds: models });
+    if (p && (p.kind === "chat" || p.kind === "embed")) distinct.add(`${p.kind}:${p.model_id}`);
+  }
+  assert.ok(distinct.size >= 2, "the fixture shares a model between roles");
+  const calls = [];
+  const probeRequestFn = async (url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) });
+    const embed = url.endsWith("/embeddings");
+    const body = embed ? { data: [{ embedding: [0.1] }] } : { choices: [{ message: { tool_calls: [{ function: { name: "crow_probe" } }] } }] };
+    return { status: 200, headers: {}, stream: Readable.from([Buffer.from(JSON.stringify(body))]) };
+  };
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/cloud-or/probe", { body: {}, headers: csrfHeaders });
+    assert.equal(r.status, 200);
+    assert.ok(!r.text.includes(SECRET));
+    assert.equal(r.json.quick?.ok, true);
+    assert.equal(r.json.rerank, undefined, "rerank is never probed");
+    const unknown = await call(s, "POST", "/api/providers/nope/probe", { body: {}, headers: csrfHeaders });
+    assert.equal(unknown.status, 404);
+  }, addOpts({ probeRequestFn }));
+  assert.equal(calls.length, distinct.size);
+  assert.equal(new Set(calls.map((c) => `${c.url.endsWith("/embeddings") ? "embed" : "chat"}:${c.body.model}`)).size, distinct.size);
+});
+
+test("GET /api/providers/:id/plan: each pick with its check, embed read as embed, rerank never tested", async () => {
+  const models = ["anthropic/claude-haiku-5.5", "qwen/qwen3-embedding-8b", "cohere/rerank-4-fast"];
+  await insOr("cloud-or", models.map((id) => ({ id })));
+  await raw("provider_pick_checks", orChecks({
+    "anthropic/claude-haiku-5.5|chat": { ok: true, code: "ok", at: AT },
+    // A chat check of the embedding model does not count for embed.
+    "qwen/qwen3-embedding-8b|chat": { ok: true, code: "ok", at: AT },
+    "cohere/rerank-4-fast|chat": { ok: true, code: "ok", at: AT },
+  }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const r = await call(s, "GET", "/api/providers/cloud-or/plan");
+    assert.equal(r.status, 200);
+    assert.ok(!r.text.includes(SECRET));
+    const pickOf = (roleId) => r.json.picks.find((p) => p.roleId === roleId);
+    assert.equal(pickOf("quick").check.ok, true);
+    assert.equal(pickOf("quick").check.at, AT);
+    assert.equal(pickOf("quick").providerLabel, "OpenRouter");
+    assert.equal(pickOf("embed").check, null);
+    assert.equal(pickOf("rerank").check, null);
+    assert.ok(Array.isArray(r.json.apply) && Array.isArray(r.json.optIn) && Array.isArray(r.json.skipped));
+    assert.equal(r.json.stale, false);
+    const none = await call(s, "GET", "/api/providers/nope/plan");
+    assert.equal(none.status, 404);
+  }, addOpts());
+  await raw("provider_pick_checks", orChecks({ "qwen/qwen3-embedding-8b|embed": { ok: true, code: "ok", at: AT } }));
+  await withServer(async (s) => {
+    const r = await call(s, "GET", "/api/providers/cloud-or/plan");
+    assert.equal(r.json.picks.find((p) => p.roleId === "embed").check.ok, true);
+  }, addOpts());
+});
+
+test("realtime voice models are never recommended, and /plan marks only probeable kinds probed (F1)", async () => {
+  const listing = ["gpt-realtime-2.1-mini", "gpt-live-1", "gpt-6-luna", "gpt-6.1-sol", "text-embedding-3-large"];
+  const testFn = async () => ({ ok: true, code: "ok", status: 200, models: listing, host: "api.openai.com", baseUrl: "https://api.openai.com/v1" });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers/test", { body: { presetId: "openai", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(r.status, 200);
+    assert.ok(r.json.recommended.includes("gpt-6-luna"));
+    assert.ok(!r.json.recommended.includes("gpt-realtime-2.1-mini"));
+    assert.ok(!r.json.recommended.includes("gpt-live-1"));
+  }, addOpts({ testFn }));
+  await db.execute({
+    sql: "INSERT INTO providers (id, base_url, api_key, host, description, models, disabled) VALUES (?,?,?,?,?,?,0)",
+    args: ["cloud-o", "https://api.openai.com/v1", SECRET, "cloud", "OpenAI", JSON.stringify(listing.map((id) => ({ id })))],
+  });
+  await insOr("cloud-or", [{ id: "anthropic/claude-haiku-5.5" }, { id: "cohere/rerank-4-fast" }]);
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const o = (await call(s, "GET", "/api/providers/cloud-o/plan")).json;
+    assert.ok(!o.picks.some((p) => /realtime|live/.test(p.modelId)), "no realtime pick");
+    const voice = o.picks.find((p) => p.roleId === "voice");
+    assert.equal(voice, undefined, "OpenAI recommends no text model for voice");
+    const or = (await call(s, "GET", "/api/providers/cloud-or/plan")).json;
+    for (const p of [...o.picks, ...or.picks]) {
+      assert.equal(p.probed, p.kind === "chat" || p.kind === "embed", `${p.roleId} ${p.kind}`);
+    }
+    assert.equal(or.picks.find((p) => p.roleId === "rerank").probed, false);
+  }, addOpts());
+});
+
+test("recommended: preview then apply fills a role nothing runs today", async () => {
+  await insOr("cloud-or", [{ id: "anthropic/claude-opus-5.5" }]);
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-opus-5.5|chat": { ok: true, code: "ok", at: AT } }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const plan = (await call(s, "GET", "/api/providers/cloud-or/plan")).json;
+    const roles = plan.apply.map((x) => x.roleId);
+    assert.ok(roles.length > 0, "something is pre-ticked");
+    const stale = await call(s, "POST", "/api/providers/cloud-or/recommended", {
+      body: { roles, previewHash: "nope", ackUnattended: true, ackCloud: true }, headers: csrfHeaders,
+    });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.json.applied.length, 0);
+    const pv = await call(s, "POST", "/api/providers/cloud-or/recommended/preview", { body: { roles }, headers: csrfHeaders });
+    assert.equal(pv.status, 200);
+    assert.equal(typeof pv.json.previewHash, "string");
+    const ap = await call(s, "POST", "/api/providers/cloud-or/recommended", {
+      body: { roles, previewHash: pv.json.previewHash, ackUnattended: true, ackCloud: true }, headers: csrfHeaders,
+    });
+    assert.equal(ap.status, 200);
+    assert.deepEqual(ap.json.applied.map((x) => x.roleId).sort(), [...roles].sort());
+    assert.ok(Array.isArray(ap.json.stillEmpty));
+    assert.ok(!ap.text.includes(SECRET));
+  }, addOpts());
+  const b = JSON.parse(await settingOf("model_role.expert"));
+  assert.equal(b.model, "cloud-or/anthropic/claude-opus-5.5");
+});
+
+test("a ticked role the fresh plan no longer offers: preview and apply answer 409 preview_changed with the fresh plan (F9)", async () => {
+  await insOr("cloud-or", [{ id: "anthropic/claude-opus-5.5" }]);
+  await raw("provider_pick_checks", orChecks({ "anthropic/claude-opus-5.5|chat": { ok: true, code: "ok", at: AT } }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const plan = (await call(s, "GET", "/api/providers/cloud-or/plan")).json;
+    const roles = plan.apply.map((x) => x.roleId);
+    assert.ok(roles.length > 0);
+    const pv = await call(s, "POST", "/api/providers/cloud-or/recommended/preview", { body: { roles }, headers: csrfHeaders });
+    assert.equal(pv.status, 200);
+    // The check now fails: the plan stops offering those roles.
+    await raw("provider_pick_checks", orChecks({ "anthropic/claude-opus-5.5|chat": { ok: false, code: "no_tool_call", at: AT } }));
+    invalidateRoleContext();
+    const pv2 = await call(s, "POST", "/api/providers/cloud-or/recommended/preview", { body: { roles }, headers: csrfHeaders });
+    assert.equal(pv2.status, 409);
+    assert.equal(pv2.json.reason, "preview_changed");
+    assert.ok(Array.isArray(pv2.json.plan?.apply) && Array.isArray(pv2.json.plan?.skipped));
+    assert.ok(!pv2.json.plan.apply.some((x) => roles.includes(x.roleId)));
+    const ap = await call(s, "POST", "/api/providers/cloud-or/recommended", {
+      body: { roles, previewHash: pv.json.previewHash, ackUnattended: true, ackCloud: true }, headers: csrfHeaders,
+    });
+    assert.equal(ap.status, 409);
+    assert.deepEqual(ap.json.applied, []);
+    assert.ok(ap.json.refused.every((x) => x.reason === "preview_changed"));
+    assert.ok(Array.isArray(ap.json.plan?.apply));
+    for (const r of [pv2, ap]) assert.ok(!r.text.includes(SECRET));
+  }, addOpts());
+  assert.equal(await settingOf("model_role.expert"), null, "nothing written");
+});
+
+test("the gateway mounts the body error handler on both API prefixes", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/boot/feature-mounts.js", import.meta.url), "utf8");
+  assert.ok(src.includes('app.use(["/api/roles", "/api/providers"], rolesApiBodyErrorHandler);'));
+  // After the roles router, so a parse error reaching these prefixes meets it.
+  assert.ok(src.indexOf("app.use(rolesApiRouter());") < src.indexOf("rolesApiBodyErrorHandler);"));
+});
+
+test("a typed address is used only for Other; presets ignore it", async () => {
+  const seen = [];
+  const testFn = async (args) => { seen.push(args); return { ok: true, code: "ok", status: 200, models: ["x/y"], host: "h", baseUrl: args.baseUrl || OR_URL }; };
+  await withServer(async (s) => {
+    await call(s, "POST", "/api/providers/test", { body: { presetId: "openrouter", baseUrl: "https://api.example.com/v1", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(seen.at(-1).baseUrl, undefined);
+    await call(s, "POST", "/api/providers/test", { body: { presetId: "other", baseUrl: "https://api.example.com/v1", apiKey: "fixture-k" }, headers: csrfHeaders });
+    assert.equal(seen.at(-1).baseUrl, "https://api.example.com/v1");
+    const r = await call(s, "POST", "/api/providers", {
+      body: { presetId: "openrouter", baseUrl: "https://api.example.com/v1", apiKey: "fixture-k", modelIds: ["x/y"] }, headers: csrfHeaders,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(seen.at(-1).baseUrl, undefined);
+  }, addOpts({ testFn }));
+  const row = (await db.execute("SELECT base_url FROM providers WHERE id = 'openrouter'")).rows[0];
+  assert.equal(row.base_url, OR_URL);
+});
+
+test("door and bundle rows are not addable providers here", async () => {
+  await insOr("crow-c-peer", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await insOr("bundled", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await db.execute("UPDATE providers SET bundle_id = 'some-bundle' WHERE id = 'bundled'");
+  invalidateRoleContext();
+  let probes = 0;
+  await withServer(async (s) => {
+    for (const id of ["crow-c-peer", "bundled"]) {
+      const plan = await call(s, "GET", `/api/providers/${id}/plan`);
+      assert.equal(plan.status, 404, id);
+      assert.equal(plan.json.error, "not_addable", id);
+      for (const p of ["probe", "recommended/preview", "recommended"]) {
+        const r = await call(s, "POST", `/api/providers/${id}/${p}`, { body: { roles: ["quick"] }, headers: csrfHeaders });
+        assert.equal(r.status, 404, `${id} ${p}`);
+      }
+    }
+  }, addOpts({ probeRequestFn: async () => { probes++; throw new Error("never"); } }));
+  assert.equal(probes, 0);
+});

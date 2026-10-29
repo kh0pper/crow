@@ -133,7 +133,7 @@ async function modelSelect(db, state, lang) {
   // providers link + Next disabled; never a submittable empty select.
   const warn = empty
     ? `<p class="btb-warn">${escapeHtml(error || t("botbuilder.wizNoModels", lang))} ` +
-      `<a href="/dashboard/settings?section=llm&amp;tab=providers">${t("botbuilder.createProvidersLink", lang)}</a></p>`
+      `<a href="/dashboard/settings?section=models&amp;add=1">${t("botbuilder.createProvidersLink", lang)}</a></p>`
     : "";
   return {
     empty,

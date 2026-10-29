@@ -18,6 +18,13 @@
  *
  * Path segment `custom` is reserved for the custom-role routes (registered
  * before these); `/api/roles/custom...` answers 404 here.
+ *
+ * Add a provider (roles phase 2b): `/api/providers/test`, `/api/providers`,
+ * and per provider `/plan`, `/probe`, `/recommended/preview`, `/recommended`.
+ * Same session gate (per route, so the older `/api/providers/health` keeps its
+ * own auth) and CSRF. A pasted key is read from the body and handed to the
+ * test or the write; every answer is built field by field, so no key can ride
+ * along. NEVER add `/api/providers` to PUBLIC_FUNNEL_PREFIXES either.
  */
 import { Router } from "express";
 import { createHash } from "node:crypto";
@@ -32,7 +39,12 @@ import { CORE_ROLES, MEDIA_CAPABILITIES, isRoleRef, roleIdOf, isRawKey, isValidC
 import { getOwnAddresses } from "../../shared/locality.js";
 import { loadRoleContext } from "../../shared/model-roles-store.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
-import { listRolePicks } from "../../shared/role-picks.js";
+import { listRolePicks, providerLabel } from "../../shared/role-picks.js";
+import { readPickChecks, pickCheckOf, checkKindFor, isProbeKind } from "../../shared/pick-checks.js";
+import { candidatePick, presetForRow, isRecommendationsStale, loadRecommendations, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { friendlyModel } from "../dashboard/shared/bot-display.js";
+import { testProviderKey, addProvider, planRecommended, combinedPreview, applyRecommended } from "../ai/add-provider.js";
+import { probeRecommended } from "../ai/pick-probe.js";
 import { speechProfileWhere, speechProfileHost, isSpeechWhereLocal } from "../../shared/speech-where.js";
 import { TRUSTED_PEER_SQL } from "../../shared/peer-trust.js";
 import { getTtsProfiles } from "../ai/tts/index.js";
@@ -57,6 +69,47 @@ function roleDef(id, customDefs) {
 }
 
 const knownRoleId = (id, customDefs) => roleDef(id, customDefs) !== null;
+
+const str = (v) => (typeof v === "string" ? v : undefined);
+const PROVIDER_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const listedIds = (row) => (Array.isArray(row?.models) ? row.models : [])
+  .map((m) => (typeof m === "string" ? m : m?.id)).filter((id) => typeof id === "string" && id);
+
+/** The roles a body names, kept to the ones recommendations cover; null when none are named. */
+function rolesOf(body) {
+  const r = body?.roles;
+  if (!Array.isArray(r)) return null;
+  return [...new Set(r.filter((x) => typeof x === "string" && RECOMMENDATION_ROLES.includes(x)))];
+}
+
+/** The model ids a preset recommends from a listing (what the sheet pre-ticks and stars). */
+function recommendedIds(presetId, models, recOpts) {
+  if (!Array.isArray(models) || !models.length) return [];
+  const out = new Set();
+  for (const roleId of RECOMMENDATION_ROLES) {
+    const p = candidatePick(presetId, roleId, { liveModelIds: models }, recOpts);
+    if (p?.model_id) out.add(p.model_id);
+  }
+  return [...out];
+}
+
+/**
+ * The JSON parser's own refusals on these routes: a body that does not parse
+ * (400 `bad_request`) or is over the limit (413 `too_large`). Both answer
+ * without detail and log nothing. A parse error's message can quote part of
+ * the body (an unquoted value, for one), and a body here may hold a pasted
+ * key; Express's default handler would echo that message and log its stack.
+ * Any other error passes on untouched. Mount after the JSON parser:
+ * app.use(["/api/roles", "/api/providers"], it).
+ */
+export function rolesApiBodyErrorHandler(err, req, res, next) {
+  if (!err || res.headersSent) return next(err);
+  if (err.type === "entity.too.large" || err.status === 413 || err.statusCode === 413) {
+    return res.status(413).json({ ok: false, code: "too_large" });
+  }
+  if (err.type !== "entity.parse.failed" && err.status !== 400 && err.statusCode !== 400) return next(err);
+  res.status(400).json({ ok: false, code: "bad_request" });
+}
 
 /** null (clear), a raw `provider/model`, or `role:<known id>`. */
 function validModel(model, customDefs) {
@@ -112,6 +165,11 @@ const langOf = (req) => {
  * @param {() => Set<string>} [opts.probeOwnAddrs]  the probe (default getOwnAddresses)
  * @param {() => string} [opts.localInstanceId]
  * @param {(roleId:string) => string[]} [opts.recommendedFn]
+ * @param {Function} [opts.testFn]          the key test (default testProviderKey)
+ * @param {Function} [opts.probeRequestFn]  the probe's request seam (default safeRequest)
+ * @param {() => Date} [opts.now]           the clock for pick checks
+ * @param {Function} [opts.classifierStatusFn]  the safety row's status (plans)
+ * @param {object} [opts.recOpts]           recommendations file options (tests)
  */
 export default function rolesApiRouter({
   dbFactory = createDbClient,
@@ -121,6 +179,11 @@ export default function rolesApiRouter({
   probeOwnAddrs = getOwnAddresses,
   localInstanceId = getOrCreateLocalInstanceId,
   recommendedFn,
+  testFn = testProviderKey,
+  probeRequestFn,
+  now = () => new Date(),
+  classifierStatusFn,
+  recOpts,
 } = {}) {
   const router = Router();
   /** This box's addresses, probed at most once per request and passed down. */
@@ -180,7 +243,10 @@ export default function rolesApiRouter({
     const def = roleDef(req.params.id, ctx.customDefs);
     if (!def) return res.status(404).json({ error: "unknown_role" });
     const own = ownOf(req);
-    const picks = listRolePicks(def.id, { ctx, lang: langOf(req), ...(recommendedFn ? { recommendedFn } : {}), ...own });
+    const pickChecks = recommendedFn ? undefined : await readPickChecks(db);
+    const picks = listRolePicks(def.id, {
+      ctx, lang: langOf(req), ...(recommendedFn ? { recommendedFn } : { pickChecks, now: now(), recOpts }), ...own,
+    });
     // The stored chain rides along so a Change from the page keeps it (it is sent back unchanged).
     const fb = ctx.bindings?.[def.id]?.fallback;
     const base = Array.isArray(fb) ? { picks, fallback: [...fb] } : { picks };
@@ -261,6 +327,158 @@ export default function rolesApiRouter({
     });
     if (r.ok) return res.json({ ok: true, preview: r.preview });
     res.status(CONFLICT_REASONS.has(r.reason) ? 409 : 400).json({ ok: false, reason: r.reason, preview: r.preview });
+  }));
+
+  // --- Add a provider (roles phase 2b) -----------------------------------------
+
+  // A typed address is only for "Other": a preset always uses its own URL.
+  const providerBody = (b) => ({
+    presetId: str(b?.presetId), variantId: str(b?.variantId),
+    baseUrl: b?.presetId === "other" ? str(b?.baseUrl) : undefined, apiKey: str(b?.apiKey),
+  });
+  const planOpts = (req) => ({
+    env, ...ownOf(req), now: now(), localInstanceId,
+    ...(classifierStatusFn ? { classifierStatusFn } : {}), ...(recOpts ? { recOpts } : {}),
+  });
+  /**
+   * The provider row named by `:id`, or null (answered 404). Door rows
+   * (`crow-c-*`, another Crow's model door) and bundle rows (a local engine
+   * an extension manages) are never providers this flow added or checks:
+   * refused as `not_addable`, whatever their URL.
+   */
+  async function providerRow(db, req, res) {
+    const id = req.params.id;
+    const row = PROVIDER_ID.test(id || "") ? ((await loadCtx(db)).providers || []).find((p) => p && p.id === id) : null;
+    if (!row) { res.status(404).json({ error: "unknown_provider" }); return null; }
+    if (row.id.startsWith("crow-c-") || row.bundleId || row.bundle_id) { res.status(404).json({ error: "not_addable" }); return null; }
+    return row;
+  }
+
+  router.post("/api/providers/test", sessionGate, csrfMiddleware, async (req, res) => {
+    try {
+      const body = providerBody(req.body);
+      const r = await testFn(body);
+      const out = { ok: r?.ok === true, code: typeof r?.code === "string" ? r.code : "unreachable", models: null, host: typeof r?.host === "string" ? r.host : null };
+      if (Number.isFinite(r?.status)) out.status = r.status;
+      if (Array.isArray(r?.models)) out.models = r.models.filter((m) => typeof m === "string");
+      if (r?.truncated === true) out.truncated = true;
+      out.recommended = out.ok ? recommendedIds(body.presetId, out.models, recOpts) : [];
+      res.json(out);
+    } catch (err) {
+      console.warn(`[roles-api] provider test failed: ${err?.message}`);
+      if (!res.headersSent) res.status(500).json({ error: "internal" });
+    }
+  });
+
+  router.post("/api/providers", sessionGate, csrfMiddleware, withDb("provider add", async (db, req, res) => {
+    const modelIds = req.body?.modelIds;
+    const r = await addProvider(db, { ...providerBody(req.body), modelIds }, { testFn });
+    if (r?.ok) {
+      console.log(`[roles-api] provider ${r.providerId} added by ${actorOf(req)}`);
+      return res.json({ ok: true, providerId: r.providerId });
+    }
+    const out = { ok: false, code: typeof r?.code === "string" ? r.code : "save_failed" };
+    if (Number.isFinite(r?.status)) out.status = r.status;
+    res.status(400).json(out);
+  }));
+
+  router.get("/api/providers/:id/plan", sessionGate, withDb("provider plan", async (db, req, res) => {
+    const row = await providerRow(db, req, res);
+    if (!row) return;
+    const opts = planOpts(req);
+    const plan = await planRecommended(db, row.id, opts);
+    // Each role's candidate pick and its stored check, for the sheet. Only the
+    // row's saved (ticked) models are candidates; only chat and embed picks are probed.
+    const presetId = presetForRow(row);
+    const listed = listedIds(row);
+    const ctx = await loadCtx(db);
+    const picks = [];
+    if (presetId) {
+      for (const roleId of RECOMMENDATION_ROLES) {
+        const p = candidatePick(presetId, roleId, { liveModelIds: listed.length ? listed : null }, recOpts);
+        if (!p?.model_id) continue;
+        const key = `${row.id}/${p.model_id}`;
+        const probed = isProbeKind(p.kind);
+        const check = !probed
+          ? null
+          : await pickCheckOf(db, row.id, p.model_id, { kind: checkKindFor(roleId), now: opts.now, recOpts, row });
+        picks.push({
+          roleId, modelId: p.model_id, key, kind: p.kind,
+          label: friendlyModel(key, ctx.providers) || p.model_id,
+          providerLabel: providerLabel(row.id, ctx.providers),
+          probed,
+          check: check ? {
+            ok: check.ok, code: check.code, at: typeof check.at === "string" ? check.at : null,
+            ...(check.retryable ? { retryable: true } : {}),
+          } : null,
+        });
+      }
+    }
+    const reviewed = typeof loadRecommendations(recOpts).accessed === "string" ? loadRecommendations(recOpts).accessed : null;
+    res.json({
+      providerId: row.id, providerLabel: providerLabel(row.id, ctx.providers),
+      apply: plan.apply, optIn: plan.optIn, skipped: plan.skipped,
+      picks, stale: isRecommendationsStale(opts.now, recOpts), reviewed,
+    });
+  }));
+
+  router.post("/api/providers/:id/probe", sessionGate, csrfMiddleware, withDb("provider probe", async (db, req, res) => {
+    const row = await providerRow(db, req, res);
+    if (!row) return;
+    const roles = rolesOf(req.body);
+    const r = await probeRecommended(db, row.id, {
+      ...(roles && roles.length ? { roles } : {}),
+      ...(probeRequestFn ? { requestFn: probeRequestFn } : {}),
+      ...(recOpts ? { recOpts } : {}),
+    });
+    const out = {};
+    for (const [roleId, v] of Object.entries(r || {})) {
+      out[roleId] = { modelId: String(v?.modelId ?? ""), ok: v?.ok === true, code: String(v?.code ?? "") };
+    }
+    res.json(out);
+  }));
+
+  /** The fresh plan's apply/optIn/skipped lists, as /plan answers them (no key rides along). */
+  const planOut = (plan) => ({ apply: plan.apply, optIn: plan.optIn, skipped: plan.skipped });
+
+  /**
+   * The {roleId, key} items a fresh plan offers for the named roles, or
+   * `{plan}` when any named role is no longer offered.
+   */
+  async function offeredItems(db, providerId, roles, req) {
+    const plan = await planRecommended(db, providerId, planOpts(req));
+    const offered = new Map([...plan.apply, ...plan.optIn].map((x) => [x.roleId, x.key]));
+    if (roles.some((r) => !offered.has(r))) return { plan };
+    return { items: roles.map((roleId) => ({ roleId, key: offered.get(roleId) })) };
+  }
+
+  router.post("/api/providers/:id/recommended/preview", sessionGate, csrfMiddleware, withDb("recommended preview", async (db, req, res) => {
+    const row = await providerRow(db, req, res);
+    if (!row) return;
+    const { items, plan } = await offeredItems(db, row.id, rolesOf(req.body) || [], req);
+    // A ticked role the plan no longer offers: the sheet re-reads what is offered now.
+    if (plan) return res.status(409).json({ ok: false, reason: "preview_changed", plan: planOut(plan) });
+    res.json(await combinedPreview(db, items, planOpts(req)));
+  }));
+
+  router.post("/api/providers/:id/recommended", sessionGate, csrfMiddleware, withDb("recommended apply", async (db, req, res) => {
+    const row = await providerRow(db, req, res);
+    if (!row) return;
+    const { previewHash, ackUnattended, ackCloud } = req.body || {};
+    const r = await applyRecommended(db, row.id, {
+      ...planOpts(req),
+      roles: rolesOf(req.body) || [],
+      previewHash: typeof previewHash === "string" ? previewHash : undefined,
+      actor: actorOf(req),
+      ackUnattended: ackUnattended === true,
+      ackCloud: ackCloud === true,
+    });
+    const out = { ok: r.refused.length === 0, applied: r.applied, refused: r.refused, stillEmpty: r.stillEmpty };
+    // Nothing written and the user can fix it by looking again or ticking a box: 409.
+    const conflict = !r.applied.length && r.refused.length && r.refused.every((x) => CONFLICT_REASONS.has(x.reason));
+    if (conflict && r.plan) out.plan = planOut(r.plan);
+    if (r.applied.length) console.log(`[roles-api] recommended picks for ${row.id} applied by ${actorOf(req)}`);
+    res.status(conflict ? 409 : 200).json(out);
   }));
 
   return router;

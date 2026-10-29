@@ -180,9 +180,9 @@ test("render with ZERO providers: submit disabled + providers settings link", as
     "create submit must carry the disabled attribute when no models exist"
   );
   assert.ok(
-    res.html.includes("/dashboard/settings?section=llm&amp;tab=providers") ||
-    res.html.includes("/dashboard/settings?section=llm&tab=providers"),
-    "warning must link to the providers settings tab"
+    res.html.includes("/dashboard/settings?section=models&amp;add=1") ||
+    res.html.includes("/dashboard/settings?section=models&add=1"),
+    "warning must link to Add a provider on the Models page"
   );
 });
 

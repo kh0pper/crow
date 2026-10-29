@@ -202,7 +202,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req, ki
   const modelsUnavailable = !!createModelErr || createModelOpts.length === 0;
   const modelWarn = modelsUnavailable
     ? `<p class="btb-warn">${escapeHtml(createModelErr || "No providers configured.")} ` +
-      `<a href="/dashboard/settings?section=llm&amp;tab=providers">${t("botbuilder.createProvidersLink", lang)}</a></p>`
+      `<a href="/dashboard/settings?section=models&amp;add=1">${t("botbuilder.createProvidersLink", lang)}</a></p>`
     : "";
   // Item 5 PR1: quick create collapses into an advanced disclosure — the
   // wizard (CTA above) is the primary path. Form contents unchanged.

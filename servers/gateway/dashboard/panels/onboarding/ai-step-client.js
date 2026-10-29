@@ -51,19 +51,6 @@ export function aiStepClientJS(lang) {
           });
         }
 
-        // --- Cloud preset -> default model + key placeholder ---
-        var presetSelect = byId("onb-ai-cloud-preset");
-        var modelInput = byId("onb-ai-cloud-model");
-        var keyInput = byId("onb-ai-cloud-key");
-        if (presetSelect) {
-          presetSelect.addEventListener("change", function () {
-            var opt = presetSelect.options[presetSelect.selectedIndex];
-            if (!opt) return;
-            if (modelInput) modelInput.value = opt.getAttribute("data-default-model") || "";
-            if (keyInput) keyInput.setAttribute("placeholder", opt.getAttribute("data-key-hint") || "");
-          });
-        }
-
         // --- helpers shared with model-catalog.js's client script ---
         function fmtBytes(n) {
           if (n === null || n === undefined || isNaN(n)) return "?";
