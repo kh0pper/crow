@@ -83,6 +83,9 @@ function statusLine(row, now, lang, vars) {
   const status = row.status === "awaiting_phone" && !live(row, now) ? "expired" : row.status;
   if (row.kind === "stop" && ["done", "declined", "failed"].includes(status)) return fill(t(`voiceHandoff.stopStatus.${status}`, lang), vars);
   if (status === "failed" && FAILED_REASONS.has(row.detail)) return fill(t(`voiceHandoff.failed.${row.detail}`, lang), vars);
+  // A failed row that has a card ran and could not finish (the bot's own failure report, PR 5): its detail is
+  // the bot's summary, not a reason code, and "nothing was started" would be false (P26).
+  if (status === "failed" && row.card_id != null) return fill(t("voiceHandoff.failed.finish", lang), vars);
   if (status === "awaiting_phone") return t("voiceHandoff.notHere", lang);
   const key = `voiceHandoff.status.${status}`;
   const line = t(key, lang);

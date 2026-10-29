@@ -75,6 +75,14 @@ export const VOICE_LINES = Object.freeze({
     handoff_display_fallback: "the kiosk",
     // A stop that landed while the yes was still starting the bot (the status lines proper are PR 5).
     status_stopped: "{bot}'s task was stopped. What it made so far is kept.",
+    // The completion notice (handoff-completion.js, PR 5): the bot's own final report ends the hand-off. The
+    // title opens what it made; the spoken line goes to a live voice surface, and a kiosk never hears the task.
+    completion_title_done: "{bot} finished: {task}",
+    completion_title_failed: "{bot} couldn't finish: {task}",
+    completion_spoken: "{bot} finished {task}. It's on your phone.",
+    completion_spoken_kiosk: "{bot} has finished a task. The details are on your phone.",
+    completion_failed_spoken: "{bot} couldn't finish {task}. The details are on your phone.",
+    completion_failed_spoken_kiosk: "{bot} couldn't finish a task. The details are on your phone.",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -130,6 +138,12 @@ export const VOICE_LINES = Object.freeze({
     handoff_phone_title: "Crow en {display}: ¿pasarle una tarea a {bot}?",
     handoff_display_fallback: "el quiosco",
     status_stopped: "La tarea de {bot} se paró. Lo que hizo hasta ahora se queda.",
+    completion_title_done: "{bot} terminó: {task}",
+    completion_title_failed: "{bot} no pudo terminar: {task}",
+    completion_spoken: "{bot} terminó: {task}. Lo tienes en el teléfono.",
+    completion_spoken_kiosk: "{bot} ha terminado una tarea. Los detalles están en tu teléfono.",
+    completion_failed_spoken: "{bot} no pudo terminar: {task}. Los detalles están en tu teléfono.",
+    completion_failed_spoken_kiosk: "{bot} no pudo terminar una tarea. Los detalles están en tu teléfono.",
   }),
 });
 

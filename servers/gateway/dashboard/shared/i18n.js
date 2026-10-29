@@ -4146,6 +4146,7 @@ export const translations = {
   "voiceHandoff.failed.not_sent": { en: "This couldn't be sent to your phone, so it can't be confirmed. Ask Crow again.", es: "No se pudo enviar a tu teléfono, así que no se puede confirmar. Pídeselo a Crow otra vez." },
   "voiceHandoff.failed.not_allowed": { en: "Hand-offs to {bot} are turned off now, so nothing was started.", es: "Los encargos a {bot} están desactivados ahora, así que no se empezó nada." },
   "voiceHandoff.failed.interrupted": { en: "Crow was interrupted while starting it, so nothing was started.", es: "Crow se interrumpió al empezarlo, así que no se empezó nada." },
+  "voiceHandoff.failed.finish": { en: "{bot} couldn't finish it. The details are on {bot}'s board.", es: "{bot} no pudo terminarlo. Los detalles están en el tablero de {bot}." },
   "voiceHandoff.stopStatus.done": { en: "Stopped. What {bot} made so far is kept.", es: "Parado. Lo que {bot} hizo hasta ahora se queda." },
   "voiceHandoff.stopStatus.declined": { en: "You kept it running.", es: "La dejaste seguir." },
   "voiceHandoff.stopStatus.failed": { en: "The stop didn't go through.", es: "No se pudo parar." },

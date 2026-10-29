@@ -7,7 +7,8 @@
  * budget, on a model that was up; otherwise "starting up", and a first turn that fails is reported once.
  *
  *   getHandoffCore()                  the process singleton: { store, summaries, availability, loadVoiceDef, give,
- *                                     engine, openTasksDb, notify, inFlight, forTurn, confirm }
+ *                                     engine, openTasksDb, notify, announce, inFlight, forTurn, confirm, completion }
+ *   registerVoiceResultKind()         the "voice" result kind (handoff-completion.js), registered once at boot
  *   createHandoffCore(seams)          the same, built from seams (tests)
  *   createHandoffVoiceActions(...)    the runner's deps.voiceActions member (pending.js chainVoiceActions)
  *   proposeHandoff(ctx, task, botId)  the propose branch (the "which" answer re-proposes through it); on a
@@ -30,6 +31,8 @@ import { matchChoice } from "./own-tools.js";
 import { phraseWords, listMatches } from "./tool-families.js";
 import { HANDOFF_TASK_MAX_CHARS } from "./handoff-constants.js";
 import { confirm, langOf, botName, surfaceLabel } from "./handoff-confirm.js";
+import { createHandoffCompletion } from "./handoff-completion.js";
+import { registerResultKind } from "../board/result-requesters.js";
 
 // Re-exported so every existing import of these from handoff.js keeps working.
 export { botName, surfaceLabel };
@@ -287,7 +290,8 @@ async function defaultAnnounce(args) {
  * A hand-off core from its seams. `give` is the give-service (createTaskForBot, startAfterGive,
  * fileStartedThread), `engine` an async getter for the interactive engine (`{ createIfMissing }`), `openTasksDb` the tasks.db client
  * a confirm opens and closes, `notify` createNotification, `withDb` a short-lived crow.db for detached work,
- * `wait` the start-budget timer, `announce` presence's (PR 5). 5.3 and 5.4 add status and stop.
+ * `wait` the start-budget timer, `announce` presence's (PR 5). `completion` is the "voice" result kind
+ * (handoff-completion.js), built on the same store and announce seam. 5.3 and 5.4 add status and stop.
  */
 export function createHandoffCore({
   store = createHandoffStore(),
@@ -307,7 +311,18 @@ export function createHandoffCore({
   const core = { store, summaries, availability, loadVoiceDef, give, engine, openTasksDb, notify, withDb, wait, announce, now, inFlight: new Set(), log };
   core.forTurn = (ctx) => forTurn(core, ctx);
   core.confirm = (db, id, decision, via) => confirm(core, db, id, decision, via);
+  // The announce is read through the core at call time, so a seam set later (tests, 5.2) is the one spoken.
+  core.completion = createHandoffCompletion({ store, announce: (args) => core.announce(args), log });
   return core;
+}
+
+/**
+ * Register the hand-off as the "voice" result kind (result-requesters.js): a claimed card's final report
+ * sends the completion notice instead of the board's generic one. Boot does this once (post-listen), before
+ * the warm-up restore.
+ */
+export function registerVoiceResultKind({ core = getHandoffCore() } = {}) {
+  registerResultKind("voice", core.completion);
 }
 
 /**
@@ -334,11 +349,13 @@ export function startHandoffSweep({ core = getHandoffCore(), intervalMs = 60_000
   return core.sweep;
 }
 
-let shared = null;
+// On a globalThis symbol (P30): a second module instance (a bundle-loaded copy under another APP_ROOT)
+// shares the one store clock, in-flight set, sweep and result kind.
+const SHARED = Symbol.for("crow.voice.handoff-core");
 /** The process-wide hand-off core (lazy). */
 export function getHandoffCore() {
-  shared ??= createHandoffCore();
-  return shared;
+  globalThis[SHARED] ??= createHandoffCore();
+  return globalThis[SHARED];
 }
 
 /** The transcript names one of the OTHER candidates (a whole-name hit): a correction, whatever else it says. */

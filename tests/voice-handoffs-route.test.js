@@ -492,6 +492,19 @@ test("isLocalPasswordSessionOn: only this instance's own password session, on th
   assert.equal(await isLocalPasswordSessionOn({ execute: async () => { throw new Error("locked"); } }, { dashboardSession: OWN }), false, "an error is a no");
 });
 
+test("a failed row that has a card ran and could not finish: the page says so, never \"nothing was started\" (P26)", async () => {
+  const s = await setup();
+  const id = await s.insert();
+  await s.core.store.transition(s.db, id, ["awaiting_phone"], "failed", { card_id: 7, outcome: "failure", detail: "The source archive is offline." });
+  const html = await (await s.get(id)).text();
+  assert.ok(!hasForm(html));
+  assert.match(html, /Writer couldn't finish it\. The details are on Writer's board\./);
+  assert.ok(!/nothing was started/.test(html));
+  const es = await s.insert({ device_id: "kiosk-2", lang: "es" });
+  await s.core.store.transition(s.db, es, ["awaiting_phone"], "failed", { card_id: 8, outcome: "failure", detail: "x" });
+  assert.match(await (await s.get(es)).text(), /Writer no pudo terminarlo\. Los detalles están en el tablero de Writer\./);
+});
+
 test("every voiceHandoff page string is in English and Spanish", () => {
   const keys = Object.keys(translations).filter((k) => k.startsWith("voiceHandoff."));
   assert.ok(keys.length >= 30, `found ${keys.length}`);
