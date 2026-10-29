@@ -297,17 +297,30 @@ export function ownableProject(id, project) {
 }
 
 /**
- * The compose project label of an existing docker volume, "" when it has none, or
- * null when there is no such volume (or no docker). For ctx.volumeProject.
+ * The labels that say who owns an existing docker volume, for ctx.volumeInfo:
+ * { project, bundle } (com.docker.compose.project, crow.bundle; "" when absent), or
+ * null when there is no such volume or no docker at all. Any other docker failure
+ * (a timeout, a daemon error) THROWS: the guard then refuses rather than skip the
+ * check (fail closed).
  */
-export function dockerVolumeProject(name) {
+export function dockerVolumeInfo(name) {
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(String(name))) return null;
   try {
-    return execFileSync("docker", ["volume", "inspect", "--format", '{{index .Labels "com.docker.compose.project"}}', name],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim();
-  } catch {
-    return null;
+    const out = execFileSync("docker", ["volume", "inspect", "--format", '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "crow.bundle"}}', name],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 }).trim();
+    const [project = "", bundle = ""] = out.split("|");
+    return { project, bundle };
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;                                  // no docker on this machine
+    if (/no such volume/i.test(String(err?.stderr || "") + String(err?.message || ""))) return null;
+    throw new Error(`cannot inspect volume '${String(name).slice(0, 60)}': ${String(err?.stderr || err?.message || err).trim().slice(0, 120)}`);
   }
+}
+
+// Community bundles may not take the id "crow" or a "crow-" prefix: "crow-<id>" is how
+// every bundle may name its own compose project, so such an id could claim another's.
+export function reservedCommunityId(id) {
+  return id === "crow" || String(id).startsWith("crow-");
 }
 
 export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
@@ -604,9 +617,19 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   // crow-<id>, or one of those plus "-<suffix>" (a second instance). Volume and network
   // names must stay inside the project.
   const project = String(model.name || "");
+  const community = manifest?.origin === "community";
+  if (ownId && community && reservedCommunityId(ownId)) return refuse(`the bundle id '${ownId}' is reserved (no community bundle may be "crow" or start with "crow-")`);
   if (ownId && project) {
     const okProject = [ownId, `crow-${ownId}`].some((b) => project === b || project.startsWith(`${b}-`));
     if (!okProject) return refuse(`the compose project name '${project.slice(0, 60)}' is not this bundle's (${ownId})`);
+    // The project rule is prefix-based, so one name can fit several ids (crow-browser-r4
+    // fits browser, browser-r4, crow-browser). A community bundle may not take a project
+    // that another bundle known here (installed, or shipped in the repo) could own: it
+    // would replace that bundle's containers and reach its default-named volumes.
+    if (community && typeof ctx?.knownBundleIds === "function") {
+      const rival = [...new Set(ctx.knownBundleIds() || [])].find((k) => k !== ownId && /^[a-z0-9][a-z0-9-]*$/.test(String(k)) && ownableProject(k, project));
+      if (rival) return refuse(`the compose project name '${project.slice(0, 60)}' also belongs to the '${rival}' bundle: a community bundle may not share it`);
+    }
   }
   const inProject = (n) => !project || n.startsWith(`${project}_`) || n.startsWith(`${project}-`) || n === project;
   for (const [name, n] of Object.entries(model.networks || {})) {
@@ -628,11 +651,18 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     // a bundle whose id extends another's (browser-chromium vs browser) could still
     // name a volume the other created; refuse unless that project is one this
     // bundle may own itself. Unlabelled volumes keep Compose's own adoption rule.
-    if (!vol.external && ownId && typeof ctx?.volumeProject === "function") {
+    // A bundle labels its volumes with its own id (crow.bundle) and may not wear another's.
+    const declared = vol.labels && typeof vol.labels === "object" && !Array.isArray(vol.labels) ? vol.labels["crow.bundle"] : undefined;
+    if (declared !== undefined && ownId && String(declared) !== ownId) return refuse(`volume '${name}' carries the label crow.bundle=${String(declared).slice(0, 60)}: another bundle's identity`);
+    if (!vol.external && ownId && typeof ctx?.volumeInfo === "function") {
       const real = String(vol.name || `${project}_${name}`);
-      const owner = ctx.volumeProject(real);
-      if (owner && !ownableProject(ownId, owner)) {
-        return refuse(`volume '${real.slice(0, 60)}' already exists and belongs to compose project '${String(owner).slice(0, 60)}': another bundle's data`);
+      let info;
+      try { info = ctx.volumeInfo(real); } catch (err) { return refuse(`could not check who owns volume '${real.slice(0, 60)}' (${String(err?.message || err).slice(0, 120)}): refusing`); }
+      if (info && info.bundle && info.bundle !== ownId) {
+        return refuse(`volume '${real.slice(0, 60)}' already exists and belongs to the '${String(info.bundle).slice(0, 60)}' bundle (crow.bundle): another bundle's data`);
+      }
+      if (info && info.project && !ownableProject(ownId, info.project)) {
+        return refuse(`volume '${real.slice(0, 60)}' already exists and belongs to compose project '${String(info.project).slice(0, 60)}': another bundle's data`);
       }
     }
     // An external volume is another project's data (another extension's database…).

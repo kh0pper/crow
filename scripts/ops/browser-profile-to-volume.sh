@@ -379,7 +379,7 @@ say "profile backed up: $BACKUP/profile.tar ($(du -h "$BACKUP/profile.tar" | cut
 # ---- 6. the volume --------------------------------------------------------------
 STAGE=volume
 CREATED_VOLUME=1   # before the create (step 1 proved it absent; the rollback checks it exists)
-"$DOCKER" volume create --label "com.docker.compose.project=$PROJECT" --label "com.docker.compose.volume=$VOLUME_KEY" "$VOLUME" >/dev/null
+"$DOCKER" volume create --label "com.docker.compose.project=$PROJECT" --label "com.docker.compose.volume=$VOLUME_KEY" --label crow.bundle=browser "$VOLUME" >/dev/null
 "$DOCKER" run --rm -i --network none --user 0:0 --entrypoint tar -v "$VOLUME:$PROFILE_DIR" "$IMAGE" \
   -xpf - --numeric-owner -C /root/.config < "$BACKUP/profile.tar"
 COUNT_TAR="$(tar -tf "$BACKUP/profile.tar" | wc -l)"

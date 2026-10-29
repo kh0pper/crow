@@ -73,6 +73,11 @@ services:
 volumes:
   chromium-profile:
     name: ${CROW_BROWSER_CONTAINER_NAME:-browser}_chromium-profile
+    # Who owns it: the compose guard refuses any other bundle id a volume with this
+    # label (a name or project prefix alone cannot prove ownership). Compose never
+    # relabels an existing volume, so the label cannot be forged afterwards.
+    labels:
+      crow.bundle: browser
 
 configs:
   vnc_token:

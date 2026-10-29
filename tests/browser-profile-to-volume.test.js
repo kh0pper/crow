@@ -335,7 +335,7 @@ test("the full run: tag, build to a temporary tag, deadman, graceful close, stop
     'exec crow-browser sh -c pkill -TERM -o -f -- "--user-data-dir=/root/.config/chromium-crow"',
     "stop -t 30 crow-browser",
     "cp crow-browser:/root/.config/chromium-crow -",
-    "volume create --label com.docker.compose.project=browser --label com.docker.compose.volume=chromium-profile browser_chromium-profile",
+    "volume create --label com.docker.compose.project=browser --label com.docker.compose.volume=chromium-profile --label crow.bundle=browser browser_chromium-profile",
     `tag ${NEXT} browser-crow-browser`,
     "compose -p browser up -d --no-build --force-recreate",
     "systemctl --user stop crow-browser-deadman-browser-20261029-120000.timer",
