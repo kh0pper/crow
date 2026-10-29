@@ -16,13 +16,14 @@
  *     version is flagged suspicious. A bundle with no sha256 reported (tools_too_large) is
  *     "tools unavailable", never a mismatch.
  *
- * Clocks and timers are injectable; nothing here registers a system timer. tick() does one
+ * Every write is conditional on the row not being revoked (an unpair during a poll wins), and
+ * notifications are sent only after the write. Clocks and timers are injectable; nothing here registers a system timer. tick() does one
  * SELECT and no network when there are no satellites.
  */
 import { createDbClient } from "../../db.js";
 import { createNotification } from "../../shared/notifications.js";
 import { satelliteFetch } from "./client.js";
-import { listSatellites, getSatellite, updateSatelliteStatus, getToolPin } from "./store.js";
+import { listSatellites, getSatellite, updateSatelliteIfNotRevoked, getToolPin } from "./store.js";
 import { readHealth, fetchToolList } from "./remote.js";
 import { diffTools, formatDiff, lastRecord } from "./tools-pin.js";
 
@@ -58,12 +59,13 @@ export function createSatellitePoller({
     patch.last_status_json = JSON.stringify(rec);
     let became = false;
     if (sat.status === "active" && t - Date.parse(since) >= UNREACHABLE_AFTER_MS) { patch.status = "unreachable"; became = true; }
-    await updateSatelliteStatus(db, sat.id, patch);
+    // Conditional: an unpair that landed during the poll wins (never revived, never notified).
+    if (!(await updateSatelliteIfNotRevoked(db, sat.id, patch))) return { ok: false, code: "revoked" };
     if (became) await say(db, sat, "unreachable", `${sat.name} is unreachable`, `No answer since ${hhmm(since)}. Its tools return an error until it is back.`);
     return { ok: false, code };
   }
 
-  async function checkTools(db, sat, status, prevAlerts) {
+  async function checkTools(db, sat, status, prevAlerts, later) {
     const notified = { ...(prevAlerts?.tools || {}) };
     for (const [bundle, t] of Object.entries(status?.tools || {})) {
       const pin = await getToolPin(db, sat.id, bundle);
@@ -80,7 +82,7 @@ export function createSatellitePoller({
       } catch { /* keep the fallback text */ }
       const same = pin.version != null && t.version != null && String(pin.version) === String(t.version);
       const body = `${diffText}.${same ? ` Same version (${t.version}) as approved: this is suspicious.` : ""} The tools are off until you approve them on the Servers page.`;
-      await say(db, sat, `tools:${bundle}`, `${sat.name}'s ${bundle} tools changed; approve them on the Servers page`, body);
+      later.push([`tools:${bundle}`, `${sat.name}'s ${bundle} tools changed; approve them on the Servers page`, body]);
     }
     for (const b of Object.keys(notified)) if (!status?.tools?.[b]) delete notified[b];
     return notified;
@@ -97,12 +99,14 @@ export function createSatellitePoller({
     const t = now();
     const prev = lastRecord(sat);
     const rec = { v: 1, polled_at: new Date(t).toISOString(), status: prev?.status ?? null, health, skew_ms: health?.skew_ms ?? null, error: null, alerts: { psi: !!prev?.alerts?.psi, tools: prev?.alerts?.tools || {} } };
-    const patch = { status: sat.status === "unreachable" ? "active" : sat.status, unreachable_since: null };
+    // status only when it changes (unreachable → active); the write below never touches a revoked row.
+    const patch = { unreachable_since: null };
+    if (sat.status === "unreachable") patch.status = "active";
     if (r.status !== 200) {
       // A signed refusal: the satellite is there, but refused (clock_skew, cert_expired, ...).
       rec.error = typeof r.json?.error === "string" ? r.json.error.slice(0, 48) : `status_${r.status}`;
       patch.last_status_json = JSON.stringify(rec);
-      await updateSatelliteStatus(db, sat.id, patch);
+      if (!(await updateSatelliteIfNotRevoked(db, sat.id, patch))) return { ok: false, code: "revoked" };
       return { ok: false, code: rec.error, answered: true };
     }
     const status = r.json || {};
@@ -111,11 +115,13 @@ export function createSatellitePoller({
     if (Number.isInteger(status.agent_protocol)) patch.agent_protocol = status.agent_protocol;
     const psi = Number(status.psi_memory_some_avg10);
     const hot = Number.isFinite(psi) && psi > PSI_ALERT_PCT;
-    if (hot && !rec.alerts.psi) await say(db, sat, "psi", `${sat.name} is low on memory`, `Memory pressure is ${psi.toFixed(1)} % (over ${PSI_ALERT_PCT} %). The kernel may stop its extensions.`);
+    const later = []; // notifications go out only once the record is written
+    if (hot && !rec.alerts.psi) later.push(["psi", `${sat.name} is low on memory`, `Memory pressure is ${psi.toFixed(1)} % (over ${PSI_ALERT_PCT} %). The kernel may stop its extensions.`]);
     rec.alerts.psi = hot;
-    rec.alerts.tools = await checkTools(db, sat, status, prev?.alerts);
+    rec.alerts.tools = await checkTools(db, sat, status, prev?.alerts, later);
     patch.last_status_json = JSON.stringify(rec);
-    await updateSatelliteStatus(db, sat.id, patch);
+    if (!(await updateSatelliteIfNotRevoked(db, sat.id, patch))) return { ok: false, code: "revoked" };
+    for (const [kind, title, body] of later) await say(db, sat, kind, title, body);
     return { ok: true };
   }
 

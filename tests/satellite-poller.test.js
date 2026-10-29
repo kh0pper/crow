@@ -196,3 +196,24 @@ test("runtime: CROW_SATELLITE_TIMERS=0 starts nothing; otherwise one start, idem
   assert.equal(R.getSatelliteRuntime().started, true);
   R._resetSatelliteRuntimeForTest();
 });
+
+test("coordinator fix: a revoke that lands during a poll is never overwritten (status stays revoked)", async () => {
+  for (const mode of ["ok", "unreachable"]) {
+    const db = await freshDb();
+    const clock = { t: Date.parse("2026-11-01T10:00:00Z") };
+    const fake = createMgmtFake({ clock: () => clock.t });
+    await makeSatelliteRow(db, fake, { now: clock.t, status: mode === "ok" ? "active" : "unreachable" });
+    const revoke = async () => store.markRevoked(db, fake.satId, new Date(clock.t).toISOString());
+    fake.table["GET /satellite/v1/status"] = async () => {
+      await revoke();
+      if (mode === "unreachable") return { drop: true };
+      return { status: 200, json: fake.statusBody() };
+    };
+    const { poller } = setup(db, fake, clock);
+    clock.t += 20 * 60000;
+    await poller.tick();
+    const sat = await store.getSatellite(db, fake.satId);
+    assert.equal(sat.status, "revoked", mode);
+    assert.equal(sat.last_status_json, null, `${mode}: nothing written to a revoked row`);
+  }
+});

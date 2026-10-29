@@ -11,8 +11,10 @@
  *   - consent is relayed: the satellite's challenge goes to the owner, the owner's answer goes
  *     back signed, and the satellite's consent token goes on the retried install;
  *   - an install's finished job records installed.json + mcp-addons + skills; an uninstall's
- *     removes them and the tool pin. Finishing is idempotent: the GET job route does it, and so
- *     does a background watcher (injectable timers) for a dialog that was closed;
+ *     removes them and the tool pin. Only jobs crow itself started count (id, bundle and action
+ *     must match crow's record, consumed once), and eligibility is re-checked at that moment.
+ *     The GET job route finishes a job, and so does a background watcher (injectable timers)
+ *     for a dialog that was closed;
  *   - the tool list the owner approves is re-read at approval and must hash to what they saw.
  *
  * Errors are ManageError {status, code, extra}; routes answer {error: code, ...extra}.
@@ -26,7 +28,7 @@ import { getBootSha } from "../convergence.js";
 import { satelliteEligible } from "../../satellite/gate.js";
 import { skillSyncMode } from "../bundle-skill-sync.js";
 import { satelliteFetch } from "./client.js";
-import { getSatellite, getToolPin, putToolPin, deleteToolPins, updateSatelliteStatus } from "./store.js";
+import { getSatellite, getToolPin, putToolPin, deleteToolPins, updateSatelliteIfNotRevoked } from "./store.js";
 import { bundleHost, installPaths, recordSatelliteInstall, removeSatelliteInstall, removeAllForSatellite, satelliteInstalls } from "./installs.js";
 import { fetchToolList } from "./remote.js";
 import { checkToolList, diffTools, toolsSha, toolsState, lastRecord, MAX_TOOLS } from "./tools-pin.js";
@@ -134,19 +136,44 @@ export function createSatelliteManager({
   }
 
   // ── finishing jobs ──────────────────────────────────────────────────────────────────────
-  async function finishJob(db, sat, job) {
-    if (!job || job.status !== "complete" || !BUNDLE_RE.test(String(job.bundle_id))) return null;
-    const id = job.bundle_id;
-    if (job.action === "install") {
+  // Every job crow starts, keyed "<sat>:<job>" → {bundle, action}. A job report is acted on only
+  // when its id, bundle and action all match a record crow made, and the record is consumed: a
+  // satellite cannot get crow to record an install (or drop an entry) it was never asked for.
+  // In memory: a gateway restart mid-job leaves that one install unrecorded (the card shows it
+  // as not recorded; reinstall or uninstall from the card).
+  const startedJobs = new Map();
+  const JOB_RECORD_MAX = 256;
+  function noteJob(satId, jobId, bundle, action) {
+    if (startedJobs.size >= JOB_RECORD_MAX) startedJobs.delete(startedJobs.keys().next().value);
+    startedJobs.set(`${satId}:${jobId}`, { bundle, action });
+  }
+
+  async function removeRecords(db, sat, id) {
+    const r = removeSatelliteInstall({ id, satelliteId: sat.id, appBundles: appBundlesDir(), paths: P(), log });
+    try { await deleteToolPins(db, sat.id, id); } catch (err) { log(`[satellites] pins ${id}: ${err.message}`); }
+    return r;
+  }
+
+  async function finishJob(db, sat, job, jobId) {
+    if (!job || typeof jobId !== "string" || job.id !== jobId) return null;
+    const key = `${sat.id}:${jobId}`;
+    const rec = startedJobs.get(key);
+    if (!rec || job.bundle_id !== rec.bundle || job.action !== rec.action) return null;
+    if (job.status === "running") return null;
+    startedJobs.delete(key); // finished either way: consumed
+    if (job.status !== "complete") return null;
+    const id = rec.bundle;
+    if (rec.action === "install") {
+      const m = manifestOf(id);
+      if (!m || m.id !== id || !satelliteEligible(m)) {
+        log(`[satellites] ${sat.id}: install of ${id} finished but ${id} is no longer satellite-eligible here; not recorded`);
+        return { ok: false, code: "not_satellite" };
+      }
       const r = recordSatelliteInstall({ id, satelliteId: sat.id, version: manifestOf(id)?.version ?? null, appBundles: appBundlesDir(), paths: P(), now, skillMode, log });
       if (!r.ok) log(`[satellites] ${sat.id}: install of ${id} finished but not recorded: ${r.code}`);
       return r;
     }
-    if (job.action === "uninstall") {
-      const r = removeSatelliteInstall({ id, satelliteId: sat.id, appBundles: appBundlesDir(), paths: P(), log });
-      try { await deleteToolPins(db, sat.id, id); } catch (err) { log(`[satellites] pins ${id}: ${err.message}`); }
-      return r;
-    }
+    if (rec.action === "uninstall") return removeRecords(db, sat, id);
     return null;
   }
 
@@ -160,7 +187,7 @@ export function createSatelliteManager({
         const sat = await getSatellite(db, satId);
         if (!sat || sat.status === "revoked") return;
         const r = await relay(sat, "GET", `/satellite/v1/jobs/${jobId}`);
-        if (r.status === 200 && r.json.status !== "running") { await finishJob(db, sat, r.json); return; }
+        if (r.status === 200 && r.json.status !== "running") { await finishJob(db, sat, r.json, jobId); return; }
         if (r.status === 404) return;
       } catch { /* retry */ } finally { try { db?.close?.(); } catch { /* best effort */ } }
       if (now() - started < watchMaxMs) setTimeoutImpl(step, watchIntervalMs)?.unref?.();
@@ -231,7 +258,7 @@ export function createSatelliteManager({
     if (body.env && Object.keys(body.env).length) out.env = body.env;
     if (typeof body.consent_token === "string") out.consent_token = body.consent_token;
     const r = await relay(sat, "POST", "/satellite/v1/bundles/install", out);
-    if (r.status === 202 && JOB_RE.test(String(r.json.job_id))) watch(sat.id, r.json.job_id);
+    if (r.status === 202 && JOB_RE.test(String(r.json.job_id))) { noteJob(sat.id, r.json.job_id, id, "install"); watch(sat.id, r.json.job_id); }
     return r;
   }
 
@@ -247,9 +274,10 @@ export function createSatelliteManager({
     gate(sat, "uninstall");
     const id = bundleId(bundle);
     const r = await relay(sat, "POST", "/satellite/v1/bundles/uninstall", { id });
-    if (r.status === 202 && JOB_RE.test(String(r.json.job_id))) watch(sat.id, r.json.job_id);
-    // Not installed there any more: crow's records go too (a half-finished earlier uninstall).
-    if (r.status === 404 && r.json.error === "not_installed") await finishJob(db, sat, { status: "complete", action: "uninstall", bundle_id: id });
+    if (r.status === 202 && JOB_RE.test(String(r.json.job_id))) { noteJob(sat.id, r.json.job_id, id, "uninstall"); watch(sat.id, r.json.job_id); }
+    // Not installed there any more: crow's records go too (a half-finished earlier uninstall;
+    // the bundle id is the owner's, from this route, not the satellite's report).
+    if (r.status === 404 && r.json.error === "not_installed") await removeRecords(db, sat, id);
     return r;
   }
 
@@ -258,7 +286,7 @@ export function createSatelliteManager({
     if (!JOB_RE.test(String(jobId))) throw no(400, "bad_job_id");
     const r = await relay(sat, "GET", `/satellite/v1/jobs/${jobId}`);
     if (r.status === 200) {
-      const done = await finishJob(db, sat, r.json);
+      const done = await finishJob(db, sat, r.json, jobId);
       if (done && done.ok === false) r.json = { ...r.json, crow_record: done.code };
     }
     return r;
@@ -329,7 +357,7 @@ export function createSatelliteManager({
     const sat = await satOf(db, satId);
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name || name.length > NAME_MAX || /[\u0000-\u001f\u007f]/.test(name)) throw no(400, "bad_name");
-    await updateSatelliteStatus(db, sat.id, { name });
+    if (!(await updateSatelliteIfNotRevoked(db, sat.id, { name }))) throw no(409, "revoked");
     return { status: 200, json: { ok: true, name } };
   }
 

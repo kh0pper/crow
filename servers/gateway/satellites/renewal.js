@@ -12,6 +12,10 @@
  * the satellite never took the new pin, discard the staged key; refused bad_signature → probe
  * with the new key: it works → promote. Neither answers → keep both and resolve later
  * (resolveStaged), never guess.
+ *
+ * Every row write is conditional on the satellite not being revoked, and the row is written
+ * BEFORE a staged key is promoted: an unpair during a renewal or rotation wins, no cert is
+ * committed and no live key file comes back.
  */
 import { createDbClient } from "../../db.js";
 import { createNotification } from "../../shared/notifications.js";
@@ -19,7 +23,7 @@ import { needsRenewal } from "../../shared/satellite-protocol.js";
 import { loadIdentityIfPresent } from "../../sharing/identity.js";
 import { satelliteFetch } from "./client.js";
 import { issueCert } from "./certs.js";
-import { listSatellites, getSatellite, updateSatelliteStatus } from "./store.js";
+import { listSatellites, getSatellite, updateSatelliteIfNotRevoked } from "./store.js";
 import { loadMgmtKey, loadStagedMgmtKey, createStagedMgmtKey, promoteStagedMgmtKey, discardStagedMgmtKey } from "./mgmt-keys.js";
 import { SERVERS_URL } from "./poller.js";
 
@@ -52,7 +56,8 @@ export function createCertRenewer({
     });
   }
 
-  const commitCert = (db, id, cert, extra = {}) => updateSatelliteStatus(db, id, {
+  // Conditional on the row not being revoked: false means an unpair won the race.
+  const commitCert = (db, id, cert, extra = {}) => updateSatelliteIfNotRevoked(db, id, {
     cert_json: JSON.stringify(cert), cert_serial: cert.payload.serial, cert_expires_at: cert.payload.expires_at, ...extra,
   });
 
@@ -78,7 +83,7 @@ export function createCertRenewer({
       return { renewed: false, code: err?.code || "unreachable" };
     }
     if (r.status !== 200) return { renewed: false, code: typeof r.json?.error === "string" ? r.json.error : `status_${r.status}` };
-    await commitCert(db, sat.id, cert);
+    if (!(await commitCert(db, sat.id, cert))) return { renewed: false, code: "revoked" };
     return { renewed: true, expires_at: cert.payload.expires_at };
   }
 
@@ -90,10 +95,13 @@ export function createCertRenewer({
     if (old !== "bad_key") return "pending";
     const fresh = await probe({ ...sat }, staged);
     if (fresh !== "ok") return "pending";
-    promoteStagedMgmtKey(sat.id, { env });
+    // The row first (conditional), then the key file: a revoked satellite never gets a live key back.
     const extra = { mgmt_pubkey: staged.ed25519_pub };
-    if (cert && cert.payload?.mgmt_pubkey === staged.ed25519_pub) await commitCert(db, sat.id, cert, extra);
-    else await updateSatelliteStatus(db, sat.id, extra); // the cert itself is renewed on the next pass
+    const wrote = cert && cert.payload?.mgmt_pubkey === staged.ed25519_pub
+      ? await commitCert(db, sat.id, cert, extra)
+      : await updateSatelliteIfNotRevoked(db, sat.id, extra); // the cert itself is renewed on the next pass
+    if (!wrote) { discardStagedMgmtKey(sat.id, { env }); return "revoked"; }
+    promoteStagedMgmtKey(sat.id, { env });
     return "promoted";
   }
 
@@ -111,6 +119,7 @@ export function createCertRenewer({
     } catch {
       const out = await resolveStaged(db, sat, staged, cert);
       if (out === "promoted") return { rotated: true, recovered: true };
+      if (out === "revoked") return { rotated: false, code: "revoked" };
       if (out === "discarded") return { rotated: false, code: "not_applied" };
       return { rotated: false, code: "ambiguous" };
     }
@@ -118,8 +127,11 @@ export function createCertRenewer({
       discardStagedMgmtKey(sat.id, { env });
       return { rotated: false, code: typeof r.json?.error === "string" ? r.json.error : `status_${r.status}` };
     }
+    if (!(await commitCert(db, sat.id, cert, { mgmt_pubkey: staged.ed25519_pub }))) {
+      discardStagedMgmtKey(sat.id, { env });
+      return { rotated: false, code: "revoked" };
+    }
     promoteStagedMgmtKey(sat.id, { env });
-    await commitCert(db, sat.id, cert, { mgmt_pubkey: staged.ed25519_pub });
     return { rotated: true };
   }
 
