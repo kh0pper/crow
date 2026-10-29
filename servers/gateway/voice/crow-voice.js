@@ -44,42 +44,49 @@ export function ownToolsLoaded(voiceDef, connected = null) {
 }
 
 /**
- * Is the fast voice model a cloud one? A raw key: its provider row (the id before the first "/") has host
- * "cloud". A `role:` ref: the role resolves (full walk) and the resolved key is not proven local (isCloudKey,
- * which follows a door to its upstream). false on any doubt, an unresolvable role included.
+ * Is the fast voice model a cloud one, under the strict check (roles phase 2 Task 20, Kevin Q2)? Anything not
+ * proven local counts as cloud. The key is the one the turn would use (turn.js voiceKeys): the def's own key (a
+ * `role:` ref resolved by the full walk, a raw "provider/model" as it is) is checked by strictVoiceCloud (every
+ * hop, this box's "This is local" marks, a row flagged host "cloud" always cloud); a def with no fast key, an
+ * unresolvable role or a malformed key uses the router's fast side, so its answer is resolveVoiceKeys'
+ * `fastCloud`. Never throws: a failure is not proof of local.
  */
-async function fastModelIsCloud(db, def) {
-  const key = normalizeVoiceSettings(def).fast_voice_model;
-  if (typeof key === "string" && key.startsWith("role:")) {
-    try {
-      // Lazy: surfaces load this module through appImport; the store loads only for a role.
-      const [{ resolveRole, loadRoleContext }, { isCloudKey }] = await Promise.all([
+export async function fastModelIsCloud(db, def, { resolveVoiceKeysFn } = {}) {
+  try {
+    // Lazy: surfaces load this module through appImport; the store and the strict check load on use.
+    const vk = await import("../../shared/voice-keys.js");
+    const routerFast = async () => {
+      const k = await (resolveVoiceKeysFn || vk.resolveVoiceKeys)(db);
+      return k?.fastCloud !== false;
+    };
+    const key = normalizeVoiceSettings(def).fast_voice_model;
+    if (typeof key !== "string" || !key) return await routerFast();
+    let resolved = key;
+    if (key.startsWith("role:")) {
+      const [{ resolveRole }, { isRoleRef }] = await Promise.all([
         import("../../shared/model-roles-store.js"), import("../../shared/model-roles.js"),
       ]);
+      if (!isRoleRef(key)) return await routerFast(); // a bare "role:" is no role
       const r = await resolveRole(db, key, { need: "chat" });
-      if (!r?.key || r.reason === "raw") return false; // a bare "role:" is no role (isRoleRef)
-      const { providers } = await loadRoleContext(db);
-      return isCloudKey(r.key, { providers });
-    } catch { return false; }
-  }
-  const i = key ? key.indexOf("/") : -1;
-  if (i <= 0) return false;
-  try {
-    const row = (await db.execute({ sql: "SELECT host FROM providers WHERE id = ?", args: [key.slice(0, i)] })).rows[0];
-    return row?.host === "cloud";
-  } catch { return false; }
+      if (!r?.key) return await routerFast(); // the turn falls back to the router's fast key
+      resolved = r.key;
+    }
+    const i = resolved.indexOf("/");
+    if (i <= 0 || i === resolved.length - 1) return await routerFast();
+    return await vk.strictVoiceCloud(db, resolved);
+  } catch { return true; }
 }
 
 /**
  * A surface's loader for the Crow voice bot: loadVoiceBot(db) → { def, cloud } | null.
  *   def    the voice bot's parsed definition
- *   cloud  its fast voice model is a cloud one (fastModelIsCloud; crowVoiceTurnOptions' `cloud`)
+ *   cloud  its fast voice model is not proven local (fastModelIsCloud; crowVoiceTurnOptions' `cloud`)
  * null when the row is missing, disabled or corrupt, or the read fails: the surface then applies no
  * profiles and the turn speaks the no-assistant line (turn.js). Never throws. Cached VOICE_BOT_CACHE_MS;
  * `generation()` (turn.js defaultVoiceDeps' botDefsGeneration, bumped on pibots:defs-changed) drops
- * the cache at once.
+ * the cache at once. `resolveVoiceKeysFn` (a seam) is fastModelIsCloud's router-keys reader.
  */
-export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttlMs = VOICE_BOT_CACHE_MS } = {}) {
+export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttlMs = VOICE_BOT_CACHE_MS, resolveVoiceKeysFn } = {}) {
   let hit = null;
   return async function loadVoiceBot(db) {
     let gen = 0;
@@ -90,7 +97,7 @@ export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttl
       const row = (await db.execute({ sql: "SELECT definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
       if (row && Number(row.enabled) === 1) {
         const def = JSON.parse(row.definition);
-        if (def && typeof def === "object" && !Array.isArray(def)) value = { def, cloud: await fastModelIsCloud(db, def) };
+        if (def && typeof def === "object" && !Array.isArray(def)) value = { def, cloud: await fastModelIsCloud(db, def, { resolveVoiceKeysFn }) };
       }
     } catch { value = null; }
     hit = { value, gen, at: now() };
@@ -103,7 +110,7 @@ export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttl
  *   surface           "phone" | "kiosk" | "glasses" (turn.js records it as timings.surface)
  *   lang              the surface's language for the spoken lines
  *   voiceDef          the voice bot's definition, when the caller has it: escalation off → noEscalate
- *   cloud             the caller's answer to "is the fast voice model a cloud provider (host "cloud")?".
+ *   cloud             the caller's answer to "is the fast voice model not proven local?" (loadVoiceBot's `cloud`).
  *                     A cloud model is capable, so the tool-family gate (there for the small local
  *                     model's latency) is off. The lookup is the caller's.
  *   actionWhen, actionFollowWhen   the surface's action-intent tests (queue item 29)

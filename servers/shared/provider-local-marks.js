@@ -222,7 +222,7 @@ export async function strictVoiceKeysInUse(db, { env = process.env } = {}) {
     } catch { /* unresolvable: left out */ }
   };
   try {
-    const { resolveVoiceKeys } = await import("../gateway/routes/llm-router.js");
+    const { resolveVoiceKeys } = await import("./voice-keys.js");
     const v = await resolveVoiceKeys(db, { env });
     await add(v?.fast);
     await add(v?.escalate);

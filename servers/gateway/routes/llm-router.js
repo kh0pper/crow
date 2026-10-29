@@ -76,6 +76,7 @@ import { withTurnContext } from "../voice/context-echo.js";
 import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
 import { VOICE_ROUTE_DEFAULTS } from "../../shared/voice-route-defaults.js";
 import { resolveRole } from "../../shared/model-roles-store.js";
+import { resolveVoiceKeys, logRoleMiss } from "../../shared/voice-keys.js";
 import { isRoleRef } from "../../shared/model-roles.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || VOICE_ROUTE_DEFAULTS.fast;
@@ -426,40 +427,8 @@ export function chooseVoiceRoute(messages, { hasTools = false, actionIntent = fa
   return { route: "fast", reason: null, key: keys.fast };
 }
 
-const loggedRoleMisses = new Set();
-function logRoleMiss(what, r) {
-  const msg = `${what}: ${r?.reason || "unknown"}`;
-  if (loggedRoleMisses.has(msg)) return;
-  loggedRoleMisses.add(msg);
-  console.warn(`[llm-router] role ${msg}; using the consumer default`);
-}
-
-/**
- * The voice route's keys for THIS request. Per side: the env var (read now), else the CHOSEN role binding
- * (role:voice for fast, role:everyday for escalate; a seeded or missing binding is not chosen), else the raw
- * constant. A chosen role that resolves to nothing (its model not configured; voice has no fallback chain) falls
- * to the raw constant, never to another role's model. Never throws.
- * → { fast, escalate, fastRole, escalateRole } (a *Role is the role id when the role gave the key, else null)
- */
-export async function resolveVoiceKeys(dbc, { env = process.env, resolveRoleFn = resolveRole } = {}) {
-  const side = async (envName, roleId, raw) => {
-    const e = env?.[envName];
-    if (typeof e === "string" && e) return { key: e, role: null };
-    try {
-      const r = await resolveRoleFn(dbc, `role:${roleId}`, { need: "chat", chosenOnly: true });
-      if (r && typeof r.key === "string" && r.key) return { key: r.key, role: roleId };
-      if (r?.reason !== "not_chosen") logRoleMiss(roleId, r);
-    } catch (err) {
-      logRoleMiss(roleId, { reason: err?.message || String(err) });
-    }
-    return { key: raw, role: null };
-  };
-  const [f, e] = await Promise.all([
-    side("COMPANION_FAST_MODEL", "voice", FAST_KEY),
-    side("COMPANION_ESCALATION_MODEL", "everyday", ESC_KEY),
-  ]);
-  return { fast: f.key, escalate: e.key, fastRole: f.role, escalateRole: e.role };
-}
+// resolveVoiceKeys lives in the light servers/shared/voice-keys.js (Task 20, m9); re-exported here for its callers.
+export { resolveVoiceKeys };
 
 /**
  * A bot's fast voice model key: a raw key comes back unchanged; a `role:` ref resolves by the full walk (an
@@ -486,7 +455,8 @@ async function voiceKeysFor(deps) {
   } catch (err) {
     logRoleMiss("voice keys", { reason: err?.message || String(err) });
   }
-  return { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null };
+  // No keys read: nothing is proven local (the strict check, Task 20).
+  return { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true };
 }
 
 export const resolveVoiceKey = (key) => resolveKey(key);
@@ -521,6 +491,8 @@ async function handleChat(req, res, deps) {
   let routeLabel = escalate ? `escalate(${escReason})` : "fast";
   // Only a role-resolved key is labelled, so an unedited instance logs exactly what it did before.
   const roleOf = () => (key === keys.fast ? keys.fastRole : key === keys.escalate ? keys.escalateRole : null);
+  // Not proven local (strict, Task 20): a key the resolver did not judge counts as cloud.
+  const cloudOf = () => (key === keys.fast ? keys.fastCloud !== false : key === keys.escalate ? keys.escalateCloud !== false : true);
 
   // Voice quality: the fast model (Qwen3.5-4B) emits its chain-of-thought as
   // PLAIN text ("Thinking Process: ...") that the avatar would speak aloud, so
@@ -606,7 +578,7 @@ async function handleChat(req, res, deps) {
   const url = `${up.baseUrl}/chat/completions`;
   const t0 = Date.now();
   const role = roleOf();
-  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model})${role ? ` role=${role}` : ""} stream=${!!body.stream} requester=${requester}`);
+  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model})${role ? ` role=${role}` : ""} cloud=${cloudOf()} stream=${!!body.stream} requester=${requester}`);
 
   let upstream;
   try {
