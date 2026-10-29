@@ -336,7 +336,7 @@ function scheduleIdle(r) {
     r.idleTimer = null;
     if (r.state !== "running") return;
     if (r.h.inFlight > 0) return scheduleIdle(r);
-    stopChild(r.uuid).catch(() => {});
+    stopCurrent(r.uuid).catch(() => {});
   }, idleMs());
   r.idleTimer.unref?.();
 }
@@ -348,7 +348,7 @@ function makeRoom() {
   if (live.length + retiring.size < maxChildren()) return;
   const idle = live.filter((r) => r.state === "running" && r.h.inFlight === 0).sort((a, b) => a.lastUsedAt - b.lastUsedAt);
   if (!idle.length) throw new ChildError("busy");
-  stopChild(idle[0].uuid).catch(() => {});
+  stopCurrent(idle[0].uuid).catch(() => {});
 }
 
 /** Each call is counted (idle, cap) and gets its own abort, fired when the child goes away: the
@@ -376,7 +376,7 @@ function wrapClient(r, client, h) {
         touch(r);
         if (r.state === "running") r.tree = processTree(r.pid);
         // Past its lifetime: stopped at its first idle moment; the next call respawns it.
-        if (expired(r) && h.inFlight === 0) stopChild(r.uuid).catch(() => {});
+        if (expired(r) && h.inFlight === 0) stopCurrent(r.uuid).catch(() => {});
       }
     }
   };
@@ -420,7 +420,7 @@ function closeRetired(d) {
 function enforceDeadlines() {
   for (const d of [...retiring]) if (pastGrace(d.startedAt)) closeRetired(d);
   for (const r of records.values()) {
-    if (r.state === "running" && pastGrace(r.startedAt)) stopChild(r.uuid).catch(() => {});
+    if (r.state === "running" && pastGrace(r.startedAt)) stopCurrent(r.uuid).catch(() => {});
   }
 }
 
@@ -609,7 +609,7 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
   const atLife = () => {
     r.lifeTimer = null;
     if (r.generation !== generation || r.state !== "running") return;
-    if (r.h.inFlight === 0 || pastGrace(r.startedAt)) return void stopChild(r.uuid).catch(() => {});
+    if (r.h.inFlight === 0 || pastGrace(r.startedAt)) return void stopCurrent(r.uuid).catch(() => {});
     r.lifeTimer = setTimeout(atLife, Math.max(1, r.startedAt + maxLifetimeMs() + graceMs() - now()));
     r.lifeTimer.unref?.();
   };
@@ -665,7 +665,7 @@ export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(),
   if (r.state === "running" && r.client && expired(r)) {
     // Never hand out an expired child: idle, it stops now; busy, it is retired (its calls finish
     // on it, up to its grace deadline) and a fresh one starts below, or busy at the cap.
-    if (r.h.inFlight === 0) stopChild(uuid).catch(() => {});
+    if (r.h.inFlight === 0) stopCurrent(uuid).catch(() => {});
     else retire(r);
   }
   if (r.state === "running" && r.client) {
@@ -681,9 +681,18 @@ export async function ensureChild(db, uuid, { key, crowHome = resolveCrowHome(),
   return p;
 }
 
-/** Stops the child (disconnect, uninstall, idle, Restart). Safe to repeat. `forget` also drops
+/** Stops the child and any retired child of the same uuid (disconnect, uninstall, idle, Restart). Safe to repeat. `forget` also drops
  * the record (its stderr and injected values) once the child is gone. */
 export async function stopChild(uuid, { forget = false } = {}) {
+  // Every retired (moved-aside) child of this uuid goes too, at once: its calls are cut with
+  // child_unavailable and its tree killed, never left running until its grace deadline.
+  for (const d of [...retiring]) if (d.uuid === uuid) closeRetired(d);
+  return stopCurrent(uuid, { forget });
+}
+
+/** Stops only the record's current child. The internal stops (idle, cap, lifetime) use this, so
+ * a retired child still finishing its calls is left to its own close (last call, grace). */
+async function stopCurrent(uuid, { forget = false } = {}) {
   const r = records.get(uuid);
   if (!r) return;
   r.generation++;

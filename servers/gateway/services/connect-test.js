@@ -21,7 +21,13 @@
 import http from "node:http";
 import https from "node:https";
 import { lookup as dnsLookup } from "node:dns";
-import { readdirSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, realpathSync as jsRealpathSync, statSync } from "node:fs";
+
+// The kernel's realpath(3), never the JS one: JS realpathSync collapses ".." lexically after a
+// link (`<dir>/L/../secrets` with L → <home>/bundles reads as <dir>/secrets, while the kernel —
+// and so the child — follows L first and lands in <home>/secrets). Every path this module
+// judges goes through this.
+const realpathSync = jsRealpathSync.native;
 import { isAbsolute, relative, resolve as resolvePath, join } from "node:path";
 import { isIP } from "node:net";
 import { homedir, networkInterfaces } from "node:os";
