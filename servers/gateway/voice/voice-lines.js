@@ -47,6 +47,14 @@ export const VOICE_LINES = Object.freeze({
     last_write_recap_named: "{title} is on the {calendar} calendar for {when}.",
     last_write_recap_task_crow: "{title} is on Crow's task list.",
     last_write_recap_task_named: "{title} is on the {list} list.",
+    // The hand-off (handoff.js, PR 3): Crow proposes, asks which bot, or says none can; nothing is created yet.
+    // {bot} is always the bot's display name.
+    handoff_propose: "I'll have {bot} {task} — okay?",
+    handoff_propose_queued: "{bot} can't start right now, so this would wait on {bot}'s board: {task}. Put it there?",
+    handoff_model_starts: " {bot}'s model will need to start first.",
+    handoff_which: "That could go to {a} or to {b} — which one?",
+    handoff_which_one: "Should {a} take that?",
+    handoff_none: "None of your bots can take that from here.",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -83,6 +91,12 @@ export const VOICE_LINES = Object.freeze({
     last_write_recap_named: "{title} está en el calendario {calendar} para el {when}.",
     last_write_recap_task_crow: "{title} está en la lista de tareas de Crow.",
     last_write_recap_task_named: "{title} está en la lista {list}.",
+    handoff_propose: "Puedo pedirle a {bot}: {task}. ¿Vale?",
+    handoff_propose_queued: "{bot} no puede empezar ahora, así que esto esperaría en el tablero de {bot}: {task}. ¿Lo dejo ahí?",
+    handoff_model_starts: " Antes tendrá que arrancar el modelo de {bot}.",
+    handoff_which: "Eso podría ir a {a} o a {b}. ¿A cuál?",
+    handoff_which_one: "¿Se lo paso a {a}?",
+    handoff_none: "Ninguno de tus bots puede encargarse de eso desde aquí.",
   }),
 });
 

@@ -26,6 +26,7 @@ import { lastWriteRecap } from "./own-tools.js";
 import { transcriptBufferOn, reloadTranscriptSetting, voiceTranscripts } from "./transcript-buffer.js";
 import { transcriptLogOn, voiceTranscriptLog } from "./transcript-log.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
+import { botDefsGeneration, watchBotDefs } from "./defs-generation.js";
 
 /**
  * A voice bot (kind "voice") also asks a spoken yes before these: a schedule or a change to the
@@ -234,6 +235,15 @@ export function wasOffered(tc, offered, { categoryOf = () => null, selectedAddon
   const cat = categoryOf(name);
   if (cat && offered.has(`crow_${cat}`)) return true;
   return offered.has("crow_tools") && selectedAddon(name) === true;
+}
+
+/**
+ * Is this turn a relay (the R1.2 session's relayed operator turn, or its speak-the-answer call)? Its transcript is
+ * not the operator's own speech, so it is never offered crow_handoff (and Task 3.9 adds the rest of the contract).
+ * True only for a non-empty (trimmed) opts.relayThreadId string.
+ */
+export function isRelayTurn(opts) {
+  return typeof opts?.relayThreadId === "string" && opts.relayThreadId.trim() !== "";
 }
 
 export function createVoiceTurnRunner(deps) {
@@ -517,8 +527,11 @@ export function createVoiceTurnRunner(deps) {
    *   ignored). The text joins the turn's context line on the user message only, never saved; write it as
    *   "[Tag] …" lines so the echo gate recognises and strips a read-back. pending: true makes the turn an
    *   action turn (the action guard holds the reply and replaces an unbacked claim). A throw is logged and ignored.
-   * - afterTurn({ device, calledTools }): called in finally on every outcome; calledTools lists every tool name
+   * - afterTurn({ db, device, calledTools }): called in finally on every outcome; calledTools lists every tool name
    *   the model called, refused and gated calls included. A throw is logged.
+   * deps.handoffs (optional; Crow voice's hand-off): forTurn({ db, device, surface, lang, bot, transcript }) →
+   *   [] or [{ definition, when, execute }], joined to opts.extraTools on a voice-bot turn that is not a relay and
+   *   carries no must-run extra tool (see the hand-off block below).
    *
    * opts.noTranscript: true keeps this turn out of the opt-in transcript buffer (the kiosk turn check).
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
@@ -554,6 +567,7 @@ export function createVoiceTurnRunner(deps) {
    */
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
+    const relay = isRelayTurn(opts);
     // opts.startedAt: when the turn really began (the kiosk's turn_end), so an early-STT wait counts.
     const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
     const timings = { surface: VOICE_SURFACES.includes(opts.surface) ? opts.surface : "kiosk" };
@@ -721,7 +735,24 @@ export function createVoiceTurnRunner(deps) {
       }
       // opts.memoryOn (boolean): the endpoint's own answer; without it, the display setting decides as before.
       const memoryOn = typeof opts.memoryOn === "boolean" ? opts.memoryOn : device.kiosk_settings?.memory_integration === true;
-      const extra = Array.isArray(opts.extraTools) ? opts.extraTools : [];
+      // The hand-off tool (PR 3, Task 3.7) joins the display's extra tools here, before anything reads them, so it is
+      // offered on the turn it is built [rv1 C6]: the voice bot only, never on a relay turn, and never beside a
+      // must-run extra tool ([rev2 C2]: that turn carries only what it carries today). deps.handoffs.forTurn → [] or
+      // [{ definition, when, execute }]; a missing deps.handoffs (the eval harness, tests) gives no tool, a throw none.
+      const baseExtra = Array.isArray(opts.extraTools) ? opts.extraTools : [];
+      const mustBase = baseExtra.some((x) => (typeof x.when !== "function" || x.when(transcript) === true) && typeof x.must === "function" && x.must(transcript) === true);
+      let handoffExtra = [];
+      if (!mustBase && !relay && voiceKind && typeof deps.handoffs?.forTurn === "function") {
+        try {
+          const got = await deps.handoffs.forTurn({ db, device, surface: timings.surface, lang: opts.lang, bot, transcript });
+          const taken = new Set(baseExtra.map((x) => x?.definition?.name));
+          handoffExtra = (Array.isArray(got) ? got : []).filter((x) => typeof x?.definition?.name === "string" && typeof x.execute === "function" && !taken.has(x.definition.name));
+        } catch (err) { log(`[voice-turn] ${device.id} hand-off tool not loaded (${err?.message || err})`); handoffExtra = []; }
+      }
+      const handoffNames = new Set(handoffExtra.map((x) => x.definition.name));
+      // A display tool: an extra tool that is not the hand-off (the hand-off acts on a request; a display tool does not).
+      const displayTool = (n) => extraByName.has(n) && !handoffNames.has(n);
+      const extra = baseExtra.concat(handoffExtra);
       const extraByName = new Map(extra.map((x) => [x.definition.name, x]));
       // denyTools (kiosk: crow_delegate, crow_job_status — review C3): never advertised AND
       // refused by the gate below even if force-called, so a room cannot hand work to
@@ -899,7 +930,7 @@ export function createVoiceTurnRunner(deps) {
         && ((typeof x.holdText === "function" && x.holdText(transcript) === true) || (typeof x.must === "function" && x.must(transcript) === true)));
       // …or, with a display tool on offer (a card or a timer is up), the request names a thing the display holds
       // ("put eggs on the list", "add two minutes"): opts.displayObjectWhen (kiosk: list, timer, card, minutes).
-      const displayBacks = displayAsked || (offered.size > 0 && typeof opts.displayObjectWhen === "function" && opts.displayObjectWhen(transcript) === true);
+      const displayBacks = displayAsked || ([...offered].some(displayTool) && typeof opts.displayObjectWhen === "function" && opts.displayObjectWhen(transcript) === true);
       const wrapperWithheld = cls0.wrapperWithheld;
       // Escalate an action request when the quick model got no family tool but the assistant has some — and no
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
@@ -932,7 +963,7 @@ export function createVoiceTurnRunner(deps) {
         ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: fastKey }
         : deps.chooseVoiceRoute(routeView, { hasTools: cls0.quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld, keys });
       // A quick-model turn that will end on the no-tool can't-do below makes no adapter at all (no model is touched).
-      const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !extraByName.has(t.name));
+      const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !displayTool(t.name));
       let chat = noToolAhead ? null : await deps.createChatAdapter(fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -974,7 +1005,7 @@ export function createVoiceTurnRunner(deps) {
       // An action request on a turn with no tool at all: no model call. The quick model, given nothing to act
       // with, role-plays success ("I've added your appointment … I'll remind you", queue item 29).
       // "No tool" = nothing but display tools the request does not ask for (and no memory tool on offer).
-      const actionable = tools.filter((t) => !extraByName.has(t.name));
+      const actionable = tools.filter((t) => !displayTool(t.name));
       if (actionAsked && actionable.length === 0 && !displayBacks) {
         timings.action_no_tool = true;
         await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
@@ -1933,7 +1964,7 @@ export function createVoiceTurnRunner(deps) {
         } catch { /* never stops a turn, never logged */ }
       }
       if (typeof voiceActions?.afterTurn === "function" && device?.id) {
-        try { await voiceActions.afterTurn({ device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
+        try { await voiceActions.afterTurn({ db, device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
       }
     }
   }
@@ -1952,16 +1983,16 @@ export function createVoiceTurnRunner(deps) {
   return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo, get transcripts() { return deps.transcripts || null; } };
 }
 
-// One pibots:defs-changed subscription per process, however many runners defaultVoiceDeps() feeds.
-let botDefsGeneration = 0;
+// One pibots:defs-changed subscription per process, however many runners defaultVoiceDeps() feeds. The generation
+// itself lives in defs-generation.js (handoff.js's voice-bot loader reads the same one).
 let botDefsSubscribed = false;
 async function subscribeBotDefsChanged() {
   if (botDefsSubscribed) return;
   botDefsSubscribed = true;
   try {
     const bus = (await import("../../shared/event-bus.js")).default;
+    watchBotDefs(bus);
     bus.on("pibots:defs-changed", () => {
-      botDefsGeneration++;
       // The transcript buffer: a save that turns it off (or disables Crow's voice) clears it now, not on the next turn.
       reloadTranscriptSetting(voiceTranscripts, readVoiceDefFresh).catch(() => {});
     });
@@ -1995,6 +2026,7 @@ export async function defaultVoiceDeps() {
   const { createToolFamilies } = await import("./tool-families.js");
   const { createPendingStore, chainVoiceActions } = await import("./pending.js");
   const { createOwnTools } = await import("./own-tools.js");
+  const { getHandoffCore, createHandoffVoiceActions } = await import("./handoff.js");
   const ext = await import("../../../scripts/pi-bots/ext_registry.mjs");
   const proxy = await import("../proxy.js");
   const memoryTools = new Set(Object.keys(TOOL_MANIFESTS.memory?.tools || {}));
@@ -2013,7 +2045,7 @@ export async function defaultVoiceDeps() {
     // The opt-in one-week transcript log (on disk, this instance only); its sweep is armed at boot (post-listen.js).
     transcriptLog: voiceTranscriptLog,
     ensureVoiceBot: async (db) => { await ensureCrowVoiceBot(db); },
-    botDefsGeneration: () => botDefsGeneration,
+    botDefsGeneration,
     loadBotRow: async (db, botId) => (await db.execute({ sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null,
     getSttProfile: async (db, device) => (device.stt_profile_id
       ? byId(await stt.getSttProfiles(db, { includeKeys: true }), device.stt_profile_id)
@@ -2061,8 +2093,10 @@ export async function defaultVoiceDeps() {
     isConnectedAddonTool: tx.isConnectedAddonTool,
     connectedAddonTools: () => tx.connectedAddonToolNames(),
     ownTools: ownTools.forTurn,
-    // A chain: Crow's own tools now; the hand-off joins after them (PR 3).
-    voiceActions: chainVoiceActions([ownTools]),
+    // The hand-off tool (PR 3): one process core, this runner's pending store.
+    handoffs: { forTurn: (ctx) => getHandoffCore().forTurn({ ...ctx, pending }) },
+    // A chain: Crow's own tools first, then the hand-off.
+    voiceActions: chainVoiceActions([ownTools, createHandoffVoiceActions({ core: getHandoffCore(), pending })]),
     botVoiceScope: tx.botVoiceScope,
     generateSystemPrompt: sp.generateSystemPrompt,
     isMemoryTool: (n) => n === "crow_memory" || memoryTools.has(n),

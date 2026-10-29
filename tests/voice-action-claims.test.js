@@ -188,3 +188,20 @@ test("needsSpokenYes: a tool whose first verb deletes, changes or sends asks for
   assert.equal(toolEffect("crow_revoke_instance"), "write");
   for (const n of ["ws_cal_create_event", "crow_store_memory", "fw_play", "ws_cal_list_events", "crow_create_schedule", "gmail_create_draft", "acme_frobnicate", "", null]) assert.equal(needsSpokenYes(n), false, String(n));
 });
+
+test("claimsAction: a hand-off claimed as started is a claim (en + es) [rev2 C1]; a refusal or a negation is not", () => {
+  for (const t of [
+    "I'm on it!", "I am on it.", "They're on it.", "It's on it now.",
+    "Writer's on it!", "Writer is on it.", "The bots are on it.", "Helper and Writer're on it.",
+    "Writer has started.", "They have begun.",
+    "Writer is working on it.", "Writer's now working on that.", "Writer is starting.", "Writer's now starting on it.",
+    "I've handed it to Writer.", "I have passed this over to Helper.", "I handed that off to Writer.",
+    "I've given it to Writer.", "I sent it over to Helper.", "I forwarded this to Writer.",
+    "Writer se pone con ello.", "Ya está con ello.", "Ya ha empezado.", "Han empezado.",
+    "Se lo pasé a Writer.", "Se lo he pasado a Writer.",
+  ]) assert.equal(claimsAction(t), true, t);
+  for (const t of [
+    "I can't hand that to Writer.", "I can't pass it to Writer from here.",
+    "No se lo he pasado a Writer.", "No ha empezado.", "Writer no se pone con ello.",
+  ]) assert.equal(claimsAction(t), false, t);
+});

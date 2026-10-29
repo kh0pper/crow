@@ -66,6 +66,13 @@ const CLAIMS = [
   new RegExp(`${OPEN}(?:${STATE_WORD}){1,8}(?:is|are|s) (?:now )?(?:on|in) (?:your|the) (?:\\w+ )?(?:calendar|agenda|schedule|list)\\b`),
   new RegExp(`${OPEN}(?=.*\\b(?:booked|added|set|scheduled|saved|put)\\b)(?:${STATE_WORD}){1,4}s (?:now )?(?:\\w+ )?(?:on|for|at) (?:${DAY}|\\d)`),
   /\b(?:your|the) (?:\w+ )?(?:calendar|agenda|schedule|list|reminders) now (?:has|includes|contains|shows|lists)\b/,
+  // A hand-off claimed as started ([rev2 C1]): "Writer's on it", "it has started", "I've handed it to Writer". Only
+  // the server says a bot started, after the card exists (handoff.js); a model saying it is a claim.
+  /\b(?:i m|i am|they re|it s) on it\b/,
+  /\b(?:is|s|are|re) on it\b/,
+  /\b(?:has|have) (?:started|begun)\b/,
+  /\b(?:is|s) (?:now )?(?:working on|starting)\b/,
+  /\bi(?: ve| have)? (?:handed|passed|given|sent|forwarded) (?:it|this|that)(?: over| off)? to\b/,
   // Spanish (accents already dropped): done, promised, offered, state, bare.
   new RegExp(`${NEG}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:anadido|agregado|creado|programado|agendado|reservado|enviado|mandado|guardado|anotado|apuntado|puesto|borrado|eliminado|cancelado|movido|cambiado|actualizado|configurado)\\b`),
   new RegExp(`${NEG}\\b(?:anadi|agregue|programe|agende|envie|mande|guarde|anote|apunte|borre|elimine|cancele)\\b`),
@@ -77,6 +84,11 @@ const CLAIMS = [
   new RegExp(`${NEG}\\b(?:ha|han) sido (?:anadid|agregad|cread|programad|agendad|enviad|guardad|reservad|borrad|eliminad|cancelad)[oa]s?\\b`),
   new RegExp(`${NEG}\\b(?:te lo|se lo|te la|se la|lo|la) (?:recuerdo|apunto|agendo|anoto|programo|guardo|agrego|anado|pongo|mando|envio)\\b`),
   new RegExp(`${OPEN}(?:listo|lista|hecho|agendad[oa]|programad[oa]|anotad[oa]|apuntad[oa]|guardad[oa]|anadid[oa]|agregad[oa]|reservad[oa]|enviad[oa])\\b`),
+  // The hand-off, in Spanish ("se pone con ello", "ya han empezado", "se lo pasé"); never after "no".
+  new RegExp(`${NEG}\\bse pone con ello\\b`),
+  new RegExp(`${NEG}\\bya esta con ello\\b`),
+  new RegExp(`${NEG}\\b(?:ha|han) empezado\\b`),
+  new RegExp(`${NEG}\\bse lo (?:he )?pas(?:e|ado)\\b`),
 ];
 
 const REMINDER = [
