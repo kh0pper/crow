@@ -6,6 +6,8 @@
  *   POST /dashboard/services/api/project/:slug/connect          {serviceId, accountLabel, values}
  *   POST /dashboard/services/api/connection/:uuid/test          test again
  *   POST /dashboard/services/api/connection/:uuid/disconnect    idempotent
+ *   GET  /dashboard/services/api/uninstall-preflight/:id        read-only: {affectedProjects:[{slug, name}]}
+ *                                                               for the Extensions uninstall confirm (Task 12)
  *
  * Auth: the dashboard session gate (requireDashboardSessionJson: JSON 401/403, and it refuses
  * the Funnel), then the flag (404 while CROW_SERVICES_UI is off), then CSRF on every POST. A
@@ -31,7 +33,7 @@ import { resolveCrowHome } from "../../shared/crow-home.js";
 import { serviceById, serviceCatalog } from "../../shared/service-catalog.js";
 import {
   CONNECTION_ERROR_CLASSES, ConnectionError, RESERVED_BLOCK_NAMES, checkLabelFree, connectionDisplayStatus,
-  createConnection, disconnectConnection, getConnection, listConnections, otherProjectServiceIds, recordTest,
+  createConnection, disconnectConnection, getConnection, listConnections, otherProjectServiceIds, projectsUsingBundle, recordTest,
 } from "../../shared/service-connections.js";
 import { recordServiceSecretValues } from "../../shared/secret-values.js";
 import { refreshGatewaySecretValues } from "../../shared/secret-values-collect.js";
@@ -51,6 +53,7 @@ export const SERVICES_API_BASE = "/dashboard/services/api";
 const GROUPS = ["network", "signin", "paste", "builtin"];
 const VALUE_MAX = 4096;
 const CONTROL_RE = /\p{Cc}/u;
+const BUNDLE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;   // routes/bundles.js isValidBundleId
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEY_FAULTS = new Set(["KEYCHAIN_KEY_MISSING", "KEYCHAIN_KEY_INVALID"]);
 
@@ -111,6 +114,7 @@ export async function connectionView(db, conn, service, { installed }) {
 function serviceCard(s, installed) {
   return {
     serviceId: s.id,
+    bundleId: s.bundleId,                  // the Install sheet installs this extension (Task 12)
     name: s.name,
     installed: installed.has(s.bundleId),
     labelFrom: s.labelFrom || null,        // the connect sheet suggests the account name the same way
@@ -391,6 +395,14 @@ export function servicesApiRouter({
     await disconnectConnection(db, conn.uuid, { actor: "local" });
     refresh();
     res.json({ ok: true });
+  }));
+
+  // The Extensions uninstall confirm: which projects' connections the uninstall would pause. Read
+  // only, names only, [] when nothing is affected.
+  router.get(`${SERVICES_API_BASE}/uninstall-preflight/:id`, withDb(async (req, res, db) => {
+    const id = req.params.id;
+    if (typeof id !== "string" || !BUNDLE_ID_RE.test(id)) return res.status(400).json({ error: "bad_value" });
+    res.json({ affectedProjects: await projectsUsingBundle(db, id) });
   }));
 
   // The connect body's own parser: a malformed or oversized body may hold a pasted secret, so it

@@ -25,7 +25,7 @@ const UUID = "00000000-0000-4000-8000-000000000001";
 function card(id, installed) {
   const s = serviceById(id);
   return {
-    serviceId: s.id, name: s.name, installed, labelFrom: s.labelFrom || null,
+    serviceId: s.id, bundleId: s.bundleId, name: s.name, installed, labelFrom: s.labelFrom || null,
     fields: s.fields.map((f) => ({ name: f.name, kind: f.kind, labelKey: f.label_key || null, helpKey: f.help_key || null })),
     steps: [...s.steps], stepLinks: { ...s.stepLinks },
   };
@@ -403,12 +403,19 @@ test("closing during an in-flight connect: the late answer leaves a newly opened
   assert.equal(s2.reloads(), 0);
 });
 
-test("Install leaves for the extensions page (the install-then-connect sheet is a later task)", () => {
+test("Install opens the Install sheet; an entry without its extension id goes to the store", () => {
   const s = boot();
   s.click(s.document.querySelector(".svc-add"));
   s.click(s.sheet().querySelector('[data-svc-install="brave-search"]'));
-  assert.equal(s.window.location.href, "/dashboard/extensions");
-  assert.equal(s.isOpen(), false);
+  assert.ok(s.isOpen(), "the Install sheet (Task 12), not a page change");
+  assert.equal(s.sheet().querySelector(".svc-submit").textContent, "Install and connect");
+  const p = page();
+  delete p.groups.paste[0].bundleId;
+  const s2 = boot({ pageData: p });
+  s2.click(s2.document.querySelector(".svc-add"));
+  s2.click(s2.sheet().querySelector('[data-svc-install="brave-search"]'));
+  assert.equal(s2.window.location.href, "/dashboard/extensions");
+  assert.equal(s2.isOpen(), false);
 });
 
 test("a failed Test again shows the error class's copy on the row and the answered status; a passed one re-renders", async () => {

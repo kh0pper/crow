@@ -4308,6 +4308,13 @@ export const translations = {
   "services.error.child_unavailable": { en: "{service} didn't start. Try again in a moment.", es: "{service} no arrancó. Inténtalo de nuevo en un momento." },
   "services.error.busy": { en: "Too many services are running. Try again in a moment.", es: "Hay demasiados servicios en marcha. Inténtalo de nuevo en un momento." },
   "services.error.generic": { en: "Something went wrong on this Crow. Try again in a moment.", es: "Algo salió mal en este Crow. Inténtalo de nuevo en un momento." },
+  "services.install.step1": { en: "Add the {service} extension to Crow", es: "Añadir la extensión {service} a Crow" },
+  "services.install.step1Help": { en: "Once, for your whole Crow. Your other projects can connect it later without installing again.", es: "Una vez, para todo tu Crow. Tus otros proyectos podrán conectarla después sin instalarla de nuevo." },
+  "services.install.step2": { en: "Connect it to {project}", es: "Conectarla a {project}" },
+  "services.install.step2Help": { en: "Just for this project, just for you.", es: "Solo para este proyecto, solo para ti." },
+  "services.install.submit": { en: "Install and connect", es: "Instalar y conectar" },
+  "services.install.footnote": { en: "Disconnecting later removes it from this project only. Removing the extension from Crow is in Extensions.", es: "Desconectar después lo quita solo de este proyecto. Quitar la extensión de Crow está en Extensiones." },
+  "services.uninstall.affects": { en: "Connections in these projects stop until you install it again: {projects}", es: "Las conexiones de estos proyectos se detienen hasta que la instales de nuevo: {projects}" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

@@ -10,8 +10,14 @@ import { generatePassword, PASSWORD_LENGTH } from "../../shared/password-generat
  */
 
 import { tJs } from "../../shared/i18n.js";
+import { servicesUiEnabled } from "../../../services/ui-flag.js";
 
-export function extensionsClientJS(lang) {
+/**
+ * `servicesUi` (project services Task 12): with the Services UI on, the uninstall confirm asks
+ * GET /dashboard/services/api/uninstall-preflight/<id> which projects' connections the uninstall
+ * pauses and lists them; with it off the confirm is exactly what it was (no request at all).
+ */
+export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = {}) {
   return `
     <div id="modal-overlay">
       <div id="modal-content"></div>
@@ -892,8 +898,9 @@ export function extensionsClientJS(lang) {
         // any failure, with an empty list — never blocking the uninstall
         // flow on this being reachable).
         var ENGINE_BUNDLE_ID = "bot-engine";
+        var SERVICES_UI = ${servicesUi ? "true" : "false"};
 
-        function buildUninstallModal(id, name, isDocker, blastChannels) {
+        function buildUninstallModal(id, name, isDocker, blastChannels, affectedProjects) {
           var frag = document.createElement("div");
 
           var h3 = document.createElement("h3");
@@ -940,6 +947,16 @@ export function extensionsClientJS(lang) {
             });
             blastBox.appendChild(blastList);
             frag.appendChild(blastBox);
+          }
+
+          if (affectedProjects && affectedProjects.length > 0) {
+            var affBox = document.createElement("div");
+            affBox.style.cssText = "background:rgba(240,173,78,0.08);border:1px solid rgba(240,173,78,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;box-sizing:border-box;color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5";
+            affBox.setAttribute("data-uninstall-affects", "");
+            var affNames = affectedProjects.map(function(p) { return (p && typeof p.name === "string" && p.name) || (p && p.slug) || ""; }).filter(Boolean);
+            // Project names are user data: textContent only, one {projects} pass.
+            affBox.textContent = '${tJs("services.uninstall.affects", lang)}'.split("{projects}").join(affNames.join(", "));
+            frag.appendChild(affBox);
           }
 
           var checkId = null;
@@ -1017,6 +1034,23 @@ export function extensionsClientJS(lang) {
             var id = this.dataset.id;
             var name = this.dataset.name;
             var isDocker = this.dataset.docker === "true";
+
+            if (SERVICES_UI) {
+              // Both lookups settle first; either failing (a 404 when the flag is off on the
+              // server, a dropped connection) leaves its list empty, never blocking the uninstall.
+              var blast = id === ENGINE_BUNDLE_ID
+                ? fetch(API + "/engine-blast").then(function(r) { return r.ok ? r.json() : { channels: [] }; })
+                    .then(function(d) { return (d && d.channels) || []; }, function() { return []; })
+                : Promise.resolve([]);
+              var affects = fetch("/dashboard/services/api/uninstall-preflight/" + encodeURIComponent(id), { credentials: "same-origin" })
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(d) { return d && Array.isArray(d.affectedProjects) ? d.affectedProjects : []; }, function() { return []; });
+              Promise.all([blast, affects]).then(function(both) {
+                setModalContent(buildUninstallModal(id, name, isDocker, both[0], both[1]));
+                showModal();
+              });
+              return;
+            }
 
             if (id === ENGINE_BUNDLE_ID) {
               fetch(API + "/engine-blast").then(function(r) {

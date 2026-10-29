@@ -18,6 +18,16 @@
  * line and Connect and test, which POSTs .../project/<slug>/connect and keeps the sheet open with
  * the error class's copy on a failure.
  *
+ * The Install sheet (Task 12): Install on an extension that isn't installed opens the same view
+ * with two numbered cards (add the extension to Crow; connect it to this project, holding the
+ * fields) and Install and connect. That runs the store's own path, no other: GET
+ * /dashboard/bundles/api/consent-challenge/<id>, POST /dashboard/bundles/api/install (no account
+ * fields: those go only to the connect), the job poll, then the connect above. An extension that
+ * needs consent or other install settings goes to its own form in Extensions instead. A refusal
+ * because a required program isn't installed system-wide shows the store's own line. Once the
+ * install lands, the button only connects: a failed connect leaves the extension installed and
+ * pressing again never reinstalls.
+ *
  * Typed secrets: a secret input is type=password with autocomplete=new-password (so a browser
  * never fills a saved password into it), has no name attribute (a stray native submit can't
  * serialise it) and no value attribute. Its value goes only into the connect POST body; it never
@@ -47,6 +57,8 @@ const STATIC_KEYS = [
   "services.connect.for", "services.connect.label", "services.connect.labelHelp", "services.connect.labelDefault",
   "services.connect.labelHere", "services.connect.submit",
   "services.error.generic", "common.close", "common.back",
+  "services.install.step1", "services.install.step1Help", "services.install.step2", "services.install.step2Help",
+  "services.install.submit", "services.install.footnote", "extensions.binsNotTrusted",
   "services.group.signin", "services.group.paste", "services.group.builtin",
   ...ERROR_CODES.map((c) => `services.error.${c}`),
   ...STATUSES.map((s) => `services.status.${s}`),
@@ -70,6 +82,8 @@ export function projectServicesData(page, lang = "en") {
       for (const k of c.steps || []) keys.add(k);
       return {
         serviceId: c.serviceId,
+        // The extension the Install sheet installs; no id means Install opens the store.
+        ...(typeof c.bundleId === "string" && c.bundleId ? { bundleId: c.bundleId } : {}),
         name: c.name,
         installed: c.installed === true,
         labelFrom: c.labelFrom || null,
@@ -110,6 +124,7 @@ export function projectServicesClientJs() {
   if (!root || root.getAttribute('data-svc-bound')) return;
   root.setAttribute('data-svc-bound', '1');
   var API = '/dashboard/services/api/connection/';
+  var BUNDLES = '/dashboard/bundles/api/';
   var busy = false;
   var HAS = Object.prototype.hasOwnProperty;
 
@@ -458,6 +473,10 @@ export function projectServicesClientJs() {
     return '';
   }
 
+  // The connect sheet, and (svc not installed) the Install sheet: step 1 adds the extension to
+  // Crow through the store's own path (consent-challenge, install, job poll), step 2 is the same
+  // connect form, and Install and connect runs both. A connect that fails after the install
+  // leaves the extension installed; pressing the button again only connects.
   function openConnect(svc) {
     ensureSheet();
     wipeSecrets();
@@ -471,6 +490,29 @@ export function projectServicesClientJs() {
     var labelTouched = false;
     var inflight = false;
     var done = false;
+    var installMode = svc.installed !== true;
+    var installed = !installMode;
+
+    // Where the steps and fields go: the form itself, or step 2's card.
+    var box2 = form;
+    var card1 = null;
+    function installCard(n, title, help) {
+      var c = el('div', 'svc-install-step');
+      c.setAttribute('data-svc-install-step', String(n));
+      var num = el('span', 'svc-install-num', String(n));
+      num.setAttribute('aria-hidden', 'true');
+      c.appendChild(num);
+      var body = el('div', 'svc-install-body');
+      body.appendChild(el('div', 'svc-install-title', title));
+      body.appendChild(el('p', 'svc-help', help));
+      c.appendChild(body);
+      form.appendChild(c);
+      return { card: c, num: num, body: body };
+    }
+    if (installMode) {
+      card1 = installCard(1, fillOnce(T('services.install.step1'), { service: svc.name }), T('services.install.step1Help'));
+      box2 = installCard(2, fillOnce(T('services.install.step2'), { project: DATA.project.name }), T('services.install.step2Help')).body;
+    }
 
     var ol = null;
     if (svc.steps && svc.steps.length) {
@@ -481,7 +523,7 @@ export function projectServicesClientJs() {
         li.textContent = T(svc.steps[i]);
         ol.appendChild(li);
       }
-      form.appendChild(ol);
+      box2.appendChild(ol);
     }
     function updateLinks() {
       if (!ol) return;
@@ -534,7 +576,7 @@ export function projectServicesClientJs() {
       box.appendChild(lb);
       box.appendChild(input);
       if (f.helpKey) box.appendChild(el('p', 'svc-help', T(f.helpKey)));
-      form.appendChild(box);
+      box2.appendChild(box);
     }
 
     var lbox = el('div', 'svc-field');
@@ -551,9 +593,10 @@ export function projectServicesClientJs() {
     lbox.appendChild(llb);
     lbox.appendChild(label);
     lbox.appendChild(el('p', 'svc-help', T('services.connect.labelHelp')));
-    form.appendChild(lbox);
+    box2.appendChild(lbox);
 
-    form.appendChild(el('p', 'svc-for', fillOnce(T('services.connect.for'), { project: DATA.project.name })));
+    if (installMode) form.appendChild(el('p', 'svc-footnote', T('services.install.footnote')));
+    else form.appendChild(el('p', 'svc-for', fillOnce(T('services.connect.for'), { project: DATA.project.name })));
     var err = el('p', 'svc-error');
     err.setAttribute('role', 'alert');
     err.setAttribute('data-svc-error', '');
@@ -562,7 +605,7 @@ export function projectServicesClientJs() {
     ok.setAttribute('role', 'status');
     ok.setAttribute('data-svc-ok', '');
     form.appendChild(ok);
-    var submit = el('button', 'svc-submit', T('services.connect.submit'));
+    var submit = el('button', 'svc-submit', T(installMode ? 'services.install.submit' : 'services.connect.submit'));
     submit.type = 'submit';
     form.appendChild(submit);
     sheet.appendChild(form);
@@ -581,14 +624,91 @@ export function projectServicesClientJs() {
       var target = name === 'accountLabel' ? label : form.querySelector('input[data-field="' + name + '"]');
       if (target) target.setAttribute('aria-invalid', 'true');
     }
+    function stopped(text) {
+      inflight = false;
+      submit.disabled = false;
+      err.textContent = text;
+    }
 
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-      if (inflight || done) return;
-      inflight = true;
-      submit.disabled = true;
-      err.textContent = '';
-      markInvalid(null);
+    // ---- Step 1: the store's own install path, no other --------------------------------------
+    function readJson(r) {
+      return r.json().then(function (j) { return { status: r.status, j: j }; }, function () { return { status: r.status, j: null }; });
+    }
+    var netFail = function () { return { status: 0, j: null }; };
+    function installedNow() {
+      installed = true;
+      svc.installed = true;
+      connected = true;           // the page shows the new extension even if the sheet closes now
+      if (card1) {
+        card1.card.classList.add('svc-install-step--done');
+        card1.num.textContent = '\\u2713';
+      }
+      // From here the button only connects: a retry never installs again.
+      submit.textContent = T('services.connect.submit');
+    }
+    // A restart was scheduled (the install loaded new code): wait until the gateway answers again.
+    function whenBack(next) {
+      var tries = 0;
+      setTimeout(function ping() {
+        if (mine !== view) return;
+        fetch('/health', { credentials: 'same-origin' }).then(function (r) {
+          if (mine !== view) return;
+          if (r.ok || ++tries > 60) next(); else setTimeout(ping, 2000);
+        }, function () {
+          if (mine !== view) return;
+          if (++tries > 60) next(); else setTimeout(ping, 2000);
+        });
+      }, 4000);
+    }
+    function pollJob(jobId, next) {
+      fetch(BUNDLES + 'jobs/' + encodeURIComponent(jobId), { credentials: 'same-origin' }).then(readJson, netFail).then(function (res) {
+        if (mine !== view) return;
+        var st = res.j && typeof res.j.status === 'string' ? res.j.status : '';
+        if (st === 'complete') { installedNow(); next(); return; }
+        if (st === 'complete_restart') { installedNow(); whenBack(next); return; }
+        if (st === 'failed') { stopped(T('services.error.generic')); return; }
+        // The job is gone (a restart dropped it) or the gateway is restarting: the connect
+        // answers not_installed if the install did not land.
+        if (res.status === 404 || res.status === 0) { whenBack(function () { installedNow(); next(); }); return; }
+        setTimeout(function () { if (mine === view) pollJob(jobId, next); }, 1000);
+      });
+    }
+    function install(next) {
+      var bid = svc.bundleId;
+      fetch(BUNDLES + 'consent-challenge/' + encodeURIComponent(bid) + '?lang=' + encodeURIComponent(DATA.lang || 'en'),
+        { credentials: 'same-origin' }).then(readJson, netFail).then(function (c) {
+        if (mine !== view) return;
+        if (c.status !== 200 || !c.j) { stopped(T('services.error.generic')); return; }
+        // This sheet asks for no consent and no other settings: such an extension installs from
+        // its own form in Extensions.
+        var more = Array.isArray(c.j.install_required) && c.j.install_required.length > 0;
+        if (c.j.required === true || more) {
+          closeSheet();
+          go('/dashboard/extensions?q=' + encodeURIComponent(bid));
+          return;
+        }
+        return fetch(BUNDLES + 'install', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() },
+          body: JSON.stringify({ bundle_id: bid, env_vars: {} })
+        }).then(readJson, netFail).then(function (r) {
+          if (mine !== view) return;
+          var code = r.j && typeof r.j.code === 'string' ? r.j.code : '';
+          if (r.status === 200 && r.j && r.j.job_id) { connected = true; pollJob(r.j.job_id, next); return; }
+          if (r.status === 409 && code === 'already_installing' && r.j.job_id) { pollJob(r.j.job_id, next); return; }
+          if (r.status === 409 && /already installed/.test(String(r.j && r.j.error || ''))) { installedNow(); next(); return; }
+          if (r.status === 409 && code === 'bins_not_trusted') {
+            var bins = Array.isArray(r.j.bins) ? r.j.bins.filter(function (b) { return typeof b === 'string'; }) : [];
+            stopped(fillOnce(T('extensions.binsNotTrusted'), { bins: bins.join(', ') }));
+            return;
+          }
+          stopped(T('services.error.generic'));
+        });
+      });
+    }
+
+    // ---- Step 2 (or the whole connect sheet): Task 11's connect ------------------------------
+    function connect() {
       var values = {};
       var inputs = form.querySelectorAll('input[data-field]');
       for (var i = 0; i < inputs.length; i++) values[inputs[i].getAttribute('data-field')] = inputs[i].value;
@@ -631,9 +751,20 @@ export function projectServicesClientJs() {
         err.textContent = errorText(code, field ? fieldLabel(field) : '', svc.name);
         markInvalid(field || null);
       });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (inflight || done) return;
+      inflight = true;
+      submit.disabled = true;
+      err.textContent = '';
+      markInvalid(null);
+      if (installed) connect();
+      else install(function () { if (mine === view) connect(); });
     });
     showSheet();
-    // The Connect button that had focus is gone: start on the first field.
+    // The button that had focus is gone: start on the first field.
     var first = form.querySelector('input');
     try { if (first) first.focus(); } catch (e) { /* no focus in this environment */ }
   }
@@ -649,7 +780,9 @@ export function projectServicesClientJs() {
       if (svc && svc.installed) openConnect(svc);
       return;
     }
-    // Install: the extension's own form until the install-then-connect sheet lands.
+    // Install: the Install sheet; an entry without its extension id goes to the store instead.
+    var inst = byId(t.getAttribute('data-svc-install'));
+    if (inst && !inst.installed && typeof inst.bundleId === 'string' && inst.bundleId) { openConnect(inst); return; }
     closeSheet();
     go('/dashboard/extensions');
   });

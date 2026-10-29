@@ -58,7 +58,8 @@ import {
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
-import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries } from "../keychain/install-hooks.js";
+import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
+import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
@@ -303,6 +304,23 @@ function createJob(bundleId, action) {
   // delete the job mid-flight, the client's poll would 404, and its catch-path
   // would mistake that for a gateway restart (spurious reload + lost summary).
   return job;
+}
+
+/**
+ * Read-only (project services Task 12): the non-archived projects with a live connection of this
+ * bundle, as [{slug, name}]. [] on any failure (no service_connections table yet, a busy DB): the
+ * uninstall itself never depends on it.
+ */
+export async function uninstallAffectedProjects(bundleId, { dbFactory = createDbClient } = {}) {
+  let db;
+  try {
+    db = dbFactory();
+    return await projectsUsingBundle(db, bundleId);
+  } catch {
+    return [];
+  } finally {
+    try { db?.close(); } catch {}
+  }
 }
 
 function appendLog(job, line) {
@@ -3302,6 +3320,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     });
     saveInstalled(installedSnapshot);
     appendLog(job, "Installation tracked");
+    // Recorded: the project connections an earlier uninstall paused come back (and their
+    // keychain secrets), for every bundle, unconditionally (Task 12).
+    await restoreServicesAfterInstall(bundleId, { log: (m) => appendLog(job, m) });
 
     // Post-install hook — AFTER the install is recorded, so a gateway restart mid-hook
     // leaves a recorded bundle + a re-runnable script, never orphan containers.
@@ -3888,8 +3909,11 @@ export default function bundlesRouter() {
       return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
     }
 
+    // The projects whose connections this uninstall pauses (read-only here; the job marks them).
+    const affectedProjects = await uninstallAffectedProjects(bundle_id);
     const job = createJob(bundle_id, "uninstall");
-    res.json({ ok: true, job_id: job.id, message: `Removing ${bundle_id}...` });
+    job.affectedProjects = affectedProjects;
+    res.json({ ok: true, job_id: job.id, message: `Removing ${bundle_id}...`, affectedProjects });
 
     (async () => {
       try {
@@ -4051,7 +4075,13 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
-        const keptPasswords = await markBundleKeychainRemoved(bundle_id);
+        const keptPasswords = await markBundleKeychainRemoved(bundle_id, {
+          onPaused: (projects) => {
+            // The projects whose connections this uninstall paused (needs_install, secrets kept).
+            job.affectedProjects = projects;
+            if (projects.length) appendLog(job, `Paused this extension's connections in ${projects.length} project(s) until it is installed again`);
+          },
+        });
         if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Security & passwords → Saved passwords & keys)`);
 
         let notifDb;

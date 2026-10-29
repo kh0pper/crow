@@ -432,6 +432,23 @@ export async function markConnectionsNeedInstall(db, bundleId) {
   return rows.map((r) => ({ projectId: Number(r.id), slug: r.slug, name: r.name }));
 }
 
+/**
+ * Read-only, for the uninstall confirm (Task 7 M4): the non-archived projects with a live (not
+ * disconnected) connection of `bundleId`, one entry per project, by slug. Changes nothing.
+ * @returns {Promise<Array<{slug:string, name:string}>>}
+ */
+export async function projectsUsingBundle(db, bundleId) {
+  if (typeof bundleId !== "string" || !bundleId) return [];
+  const { rows } = await db.execute({
+    sql: `SELECT slug, name FROM project_spaces
+          WHERE status != 'archived' AND archived_at IS NULL
+            AND id IN (SELECT project_id FROM service_connections WHERE bundle_id = ? AND ${LIVE})
+          ORDER BY slug`,
+    args: [bundleId],
+  });
+  return rows.map((r) => ({ slug: r.slug, name: r.name }));
+}
+
 /** Reinstall of `bundleId`: needs_install rows go back to active (or error when last_error is set). */
 export async function restoreConnectionsAfterInstall(db, bundleId) {
   if (typeof bundleId !== "string" || !bundleId) return 0;

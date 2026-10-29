@@ -389,7 +389,8 @@ test("dashboardAuth refuses an unauthenticated /dashboard/perch-api/interactive 
 test("rejectFunneled middleware: the Services API is never funnel-exposed", async () => {
   const paths = ["/dashboard/services/api/project/home", "/dashboard/services/api/project/home/connect",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/test",
-    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect"];
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect",
+    "/dashboard/services/api/uninstall-preflight/github"];
   const server = await startTestApp();
   try {
     const port = server.address().port;
@@ -420,6 +421,13 @@ test("the Services API's own gate: Funnel and off-network refused, no session 40
     let noSession;
     try { noSession = await request(port, "/dashboard/services/api/project/home"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
     assert.equal(noSession.status, 401);
+    // Task 12 (M13): the uninstall preflight sits behind the same gate.
+    const preFunnel = await request(port, "/dashboard/services/api/uninstall-preflight/github", { "tailscale-funnel-request": "?1" });
+    assert.equal(preFunnel.status, 403, "the preflight is never served over the Funnel");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let preNoSession;
+    try { preNoSession = await request(port, "/dashboard/services/api/uninstall-preflight/github"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(preNoSession.status, 401, "the preflight needs a dashboard session");
     assert.equal(opened, 0, "no request reached a handler");
   } finally {
     server.close();

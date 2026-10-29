@@ -141,6 +141,18 @@ export function projectServicesCss() {
     margin: 0; padding: 12px 14px; border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px);
     font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere;
   }
+  body.shell .svc-install-step {
+    display: flex; gap: 12px; align-items: flex-start; min-width: 0; padding: 14px; box-sizing: border-box;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px); background: var(--crow-bg-surface);
+  }
+  body.shell .svc-install-num {
+    flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+    border-radius: 50%; background: var(--crow-bg-elevated); font-weight: 700;
+  }
+  body.shell .svc-install-step--done .svc-install-num { background: var(--crow-accent); color: var(--crow-accent-contrast); }
+  body.shell .svc-install-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  body.shell .svc-install-title { font-weight: 600; overflow-wrap: anywhere; }
+  body.shell .svc-footnote { margin: 0; font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   body.shell .svc-error { margin: 0; color: var(--crow-error); overflow-wrap: anywhere; }
   body.shell .svc-ok { margin: 0; color: var(--crow-success); font-weight: 600; }
   body.shell .svc-error:empty, body.shell .svc-ok:empty { display: none; }
