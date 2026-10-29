@@ -59,7 +59,8 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // bot-world.mjs so P2's interactive engine can build the SAME world without
 // this module's per-turn channel semantics. bot-world imports back LAZILY —
 // see its CYCLE NOTE.
-import { buildBotWorld, prepareSpawn, bindWorldSession } from "./bot-world.mjs";
+import { buildBotWorld, prepareSpawn, bindWorldSession, withServiceBlocks } from "./bot-world.mjs";
+import { expandServiceEntry, turnScopeFor } from "./service-blocks.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
@@ -113,9 +114,14 @@ export function filterSpawnEnv(def) { return filterSpawnEnvWithReport(def).spawn
 
 export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
-export function toolAllowlist(def, { remoteEnabled = false } = {}) {
+export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null, serviceSkippedTools = [] } = {}) {
   const builtin = (def.tools && def.tools.pi_builtin) || [];
-  const mcp = ((def.tools && def.tools.crow_mcp) || []).map((s) => "mcp__" + s.replace("/", "__"));
+  // Project services (Task 18): an entry naming a connected service that got labelled blocks for
+  // this turn (service-blocks.mjs) becomes one name per block (`github/get_me` ->
+  // `mcp__github-work__get_me`, `mcp__github-personal__get_me`), minus the over-long ones. With no
+  // blocks (every channel turn, every non-owner turn) the spelling is today's, byte for byte.
+  const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) =>
+    expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools }) || ["mcp__" + s.replace("/", "__")]);
   const out = [...builtin, ...mcp];
   if (remoteEnabled) {
     // Server-level allow per remote capability (= all that capability's tools;
@@ -159,7 +165,7 @@ export function canonicalToolOrder(csv) {
  * which feed PI_BOT_PERMISSION_POLICY.
  * @returns {{csv: string, maOptIn: boolean, maCapable: boolean}}
  */
-export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null } = {}) {
+export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [] } = {}) {
   const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
   const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
   // Belt (R7 — pi `--tools` provably filters extension-registered tools
@@ -167,7 +173,7 @@ export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactiv
   // custom tools"). Only expose `subagent` to the model when capable+
   // opted-in; otherwise pi never offers it. The gate is the backstop if a
   // hand DB-edit bypasses this.
-  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled }));
+  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled, serviceBlocks, serviceSkippedTools }));
   if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
   // PL-3 completion, same belt as subagent above. pi-lab's ask-user
   // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1
@@ -328,6 +334,8 @@ export class PiRpc {
       remoteEnabled: opts.remoteEnabled,
       interactive: !!(opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1"),
       narrowedTools: opts.narrowedTools,
+      serviceBlocks: opts.serviceBlocks || null,
+      serviceSkippedTools: opts.serviceSkippedTools || [],
     });
     // Wave 2: the FINAL csv, exposed so the interactive engine's Session-tab
     // facts can report the tool count the child was actually pinned with
@@ -1113,6 +1121,28 @@ export async function handleInbound(opts) {
   }
   const resolved = spawnPrep.resolved;
 
+  // Project services (Task 18): the owner's connected accounts, as labelled blocks, BEFORE the
+  // tool-budget preflight so it counts them (R6); carried in world._mcpArgs so PR-B's
+  // bindWorldSession rebuild below keeps them. Only a job turn can be the owner's here: its
+  // bot_jobs row says principal 'owner' and names this process as the claimer (rev 4 H2; NULL or
+  // anything else is not the owner). Every channel turn (gmail, discord, telegram, slack,
+  // crow-messages, ...) calls the seam as not the owner's, so its config is unchanged.
+  {
+    let jobRow = null;
+    if (opts.job_id) {
+      try {
+        const jc = db(CROW_DB);
+        try { jobRow = jc.prepare("SELECT principal, worker_pid FROM bot_jobs WHERE job_id=? AND bot_id=? AND status='running'").get(String(opts.job_id), bot_id) || null; }
+        finally { jc.close(); }
+      } catch (e) { jobRow = null; log("services: job row unreadable, connections not offered"); }
+    }
+    const turn = turnScopeFor({
+      gatewayType: gateway_type, jobId: jobRow ? opts.job_id : null,
+      principal: jobRow ? jobRow.principal : null, workerPid: jobRow ? jobRow.worker_pid : null,
+    });
+    await withServiceBlocks(world, spawnPrep, { scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn, notClaimer: !!turn.notClaimer, log });
+  }
+
   // Strand 2: a model that cannot take this bot's tool surface fails every
   // turn as a provider 400. Refuse before the session goes active, the model
   // warms or pi spawns — same shape as PI_MODEL_UNAVAILABLE above. The
@@ -1124,6 +1154,8 @@ export async function handleInbound(opts) {
       remoteEnabled: po.remoteEnabled,
       interactive: !!(po.extraEnv && po.extraEnv.PI_BOT_INTERACTIVE === "1"),
       narrowedTools: po.narrowedTools,
+      serviceBlocks: po.serviceBlocks || null,
+      serviceSkippedTools: po.serviceSkippedTools || [],
     });
     const budget = checkToolBudget(csv, capFor(resolved));
     if (!budget.ok) {

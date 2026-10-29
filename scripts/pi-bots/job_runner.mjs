@@ -42,7 +42,8 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors } from "./actor-sig.mjs";
-import { withSkillTools } from "./bot-world.mjs";
+import { withSkillTools, withServiceBlocks } from "./bot-world.mjs";
+import { turnScopeFor } from "./service-blocks.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
@@ -354,6 +355,21 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
         write: mcpDelivery === "file" });
       mcpConfig = (w && w.json) || null;
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
+    // Project services (Task 18): the owner's connected accounts as labelled blocks, only for a
+    // job whose principal is 'owner' and which THIS process claimed (`job` is claimNextJob's
+    // RETURNING row): the scope is j:<job_id>@<this pid>, the tuple jobActor's. A cron, schedule
+    // or bot-made job (principal NULL) gets none. The seam asks a key-less host's relay for the
+    // service signature in its own request (never in the "bot" presign above).
+    const svcPrep = { piRpcOpts: { def, mcpConfig, mcpDelivery } };
+    {
+      const turn = turnScopeFor({ gatewayType: "job", jobId: job.job_id, principal: job.principal ?? null, workerPid: job.worker_pid ?? null });
+      await withServiceBlocks(
+        { def, crowHome, projectId: bot.project_id == null ? null : Number(bot.project_id), bot, gatewayType: "job", mcpDelivery, mcpConfig },
+        svcPrep,
+        { scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn, notClaimer: !!turn.notClaimer, log, actor: { ...jobActor(job), jobId: job.job_id } },
+      );
+      mcpConfig = svcPrep.piRpcOpts.mcpConfig;
+    }
     // S6-CROW: a project bot's background job reads its project workspace,
     // exactly like its channel turns (bot-read-paths.mjs). No project => none.
     let projectWorkspaceDir = null;
@@ -382,6 +398,8 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
+      serviceBlocks: svcPrep.piRpcOpts.serviceBlocks || null,
+      serviceSkippedTools: svcPrep.piRpcOpts.serviceSkippedTools || [],
     });
     try {
       const st0 = await pi.getState().catch(() => null);

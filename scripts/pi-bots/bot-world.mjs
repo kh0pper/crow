@@ -51,8 +51,12 @@ import { addSkillToolsGuarded } from "./skill-tools.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
+import { applyServiceBlocks, withServiceBlocks, offerableConnections } from "./service-blocks.mjs";
 import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
+
+/** Project services (Task 18): THE seam every rail calls (service-blocks.mjs). */
+export { withServiceBlocks, offerableConnections };
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
 function loadBridge() { return import("./bridge.mjs"); }
@@ -182,6 +186,14 @@ async function writeWorldMcp(a, sessionId) {
       write: a.mcpDelivery === "file",
     });
     mcpConfig = w.json || null;
+    // Project services (Task 18, R6 vs PR-B): withServiceBlocks stored this turn's blocks here
+    // before the tool-budget preflight; every rebuild (bindWorldSession) re-applies them, or the
+    // child would be pinned with tools its config no longer carries. Only a blocks result whose
+    // scope still names this turn: a job scope (it binds no session), or this very session.
+    const sb = a.serviceBlocks;
+    if (mcpConfig && sb && sb.blocks && (String(sb.scopeRef).startsWith("j:") || (sid != null && sb.scopeRef === "s:" + sid))) {
+      mcpConfig = applyServiceBlocks(mcpConfig, sb);
+    }
     if (w.warnings.length) a.log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.remoteWarnings && w.remoteWarnings.length) {
       for (const warn of w.remoteWarnings) a.log("remote-tool: " + warn);

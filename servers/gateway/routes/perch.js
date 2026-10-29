@@ -71,6 +71,8 @@ import { stripOfferNotes } from "../board/offer-service.js";
 import { stripContextEcho } from "../voice/context-echo.js";
 import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 import { maskDeep } from "../../shared/secret-mask.js";
+import { connectionsFor } from "../../shared/service-connections.js";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 import { activeProjects, parseScope, projectOfItems } from "../../shared/shell-items.js";
 
 /* Note: stripOfferNotes would also hide an identical note-shaped prefix the operator typed by hand (accepted). */
@@ -192,7 +194,7 @@ function parseDef(row) {
 
 async function loadBotRow(db, botId) {
   const { rows } = await db.execute({
-    sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id=?",
+    sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE bot_id=?",
     args: [botId],
   });
   return rows[0] || null;
@@ -218,6 +220,28 @@ function labelFor(id) {
 }
 
 /**
+ * Project services (Task 18): the labelled block names an owner turn of this bot would get
+ * (service-blocks.mjs serviceBlockNames over the project's offerable connections: selected,
+ * bound, not sensitive), so the envelope lists `mcp__github-work__get_me` where the child is
+ * pinned with it. No signing here; the names are the same on every turn, and a narrowing of a
+ * name a non-owner child lacks only removes nothing. Any failure: no service names.
+ */
+async function envelopeServiceBlocks(db, def, projectId) {
+  if (projectId == null) return { byService: null, skippedTools: [] };
+  try {
+    const sb = await import("../../../scripts/pi-bots/service-blocks.mjs");
+    const crowHome = resolveCrowHome();
+    const offer = sb.offerableConnections(def, await connectionsFor(db, { projectId: Number(projectId) }), { crowHome });
+    if (!offer.length) return { byService: null, skippedTools: [] };
+    const r = sb.serviceBlockNames({ def, connections: offer, existingNames: sb.reservedBlockNames(crowHome),
+      toolsFor: (sid) => sb.cachedServiceTools(sid, { crowHome }) });
+    return { byService: r.byService, skippedTools: r.skippedTools };
+  } catch {
+    return { byService: null, skippedTools: [] };
+  }
+}
+
+/**
  * The bot's envelope: what Bot Builder (the single writer) grants, split into
  * what is on and what is knowably off.
  *
@@ -236,10 +260,11 @@ function labelFor(id) {
  * (The bridge additionally requires a capability-listed model at spawn; the
  * envelope reports the def's grant, not the per-turn resolution.)
  */
-async function buildEnvelope(db, def) {
+async function buildEnvelope(db, def, { projectId = null } = {}) {
   const { toolAllowlist } = await loadBridge();
   const remoteEnabled = await remoteInvocationOn(db);
-  const csv = toolAllowlist(def, { remoteEnabled });
+  const services = await envelopeServiceBlocks(db, def, projectId);
+  const csv = toolAllowlist(def, { remoteEnabled, serviceBlocks: services.byService, serviceSkippedTools: services.skippedTools });
   const allowed = csv ? csv.split(",").filter(Boolean) : [];
   if (def.permission_policy && def.permission_policy.multi_agent === true) allowed.push("subagent");
   const allowedSet = new Set(allowed);
@@ -905,7 +930,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
     try {
       const row = await loadBotRow(db, botId);
       if (!row) return jsonError(res, 404, "unknown_bot");
-      const envelope = await buildEnvelope(db, parseDef(row));
+      const envelope = await buildEnvelope(db, parseDef(row), { projectId: row.project_id ?? null });
       if (threadId) {
         const sess = await latestSession(db, botId, threadId);
         if (sess && Object.prototype.hasOwnProperty.call(sess, "narrowed_tools")) {
@@ -1002,7 +1027,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         const missing = prevList.filter((t) => !isSentinel(t) && !wanted.includes(t));
         if (missing.length) return jsonError(res, 409, "narrowing_locked", { missing });
       }
-      const envelope = await buildEnvelope(db, parseDef(row));
+      const envelope = await buildEnvelope(db, parseDef(row), { projectId: row.project_id ?? null });
       const allowed = new Set(envelope.tools.map((t) => t.id));
       // Perch narrows; Bot Builder widens. Anything outside the def's own grant
       // — unknown id, or one the def denies — is a widening attempt.

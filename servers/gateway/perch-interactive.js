@@ -776,6 +776,11 @@ export function createInteractiveEngine({
     seams = {
       buildBotWorld: world.buildBotWorld,
       prepareSpawn: world.prepareSpawn,
+      // Project services (Task 18): the one blocks seam (service-blocks.mjs, re-exported by
+      // bot-world.mjs), and the filter the cycle-back fingerprint uses so a bot that selects
+      // none of the project's offerable connections never restarts for them.
+      withServiceBlocks: world.withServiceBlocks,
+      offerableConnections: world.offerableConnections,
       // Strand 2: a model's tool cap, from provider data (null = none).
       capFor: budget.capFor,
       PiRpc: br.PiRpc,
@@ -2488,12 +2493,18 @@ export function createInteractiveEngine({
   // The loopback mount asks sessionServicesLive(rowId) (through
   // isOwnerTurnScope in servers/shared/turn-principal.js) on every call.
 
-  /** The project's active connection uuids, sorted and joined (M12). "" for no project. */
-  async function connectionsFingerprintOf(projectId) {
+  /**
+   * The project's active connection uuids, sorted and joined (M12). "" for no project. With the
+   * seams' offerableConnections and the child's def (Task 18), only the connections this bot could
+   * be offered count (selected by it, bound as connected, not sensitive): an owner message to a
+   * bot that selects none of them is "" both ways and never cycles the child.
+   */
+  async function connectionsFingerprintOf(projectId, S = null, def = null) {
     if (projectId == null) return "";
     const db = createDbClient();
     try {
-      const list = await connectionsFor(db, { projectId: Number(projectId) });
+      let list = await connectionsFor(db, { projectId: Number(projectId) });
+      if (S && typeof S.offerableConnections === "function" && def) list = S.offerableConnections(def, list, { crowHome });
       return list.map((c) => String(c.uuid)).sort().join(",");
     } finally { try { db.close(); } catch { /* closed */ } }
   }
@@ -2502,7 +2513,7 @@ export function createInteractiveEngine({
   async function serviceBlocksForChild(S, s, world, prep, slog) {
     // No seam, no blocks, and no read at all (fix round 1, M1).
     if (typeof S.withServiceBlocks !== "function") return false;
-    try { s.connectionsFingerprint = await connectionsFingerprintOf(world.projectId); }
+    try { s.connectionsFingerprint = await connectionsFingerprintOf(world.projectId, S, world.def); }
     catch { s.connectionsFingerprint = null; slog("services: project connections unreadable"); }
     const saved = prep.piRpcOpts;
     prep.piRpcOpts = Object.assign({}, saved);
@@ -2541,7 +2552,7 @@ export function createInteractiveEngine({
     } else {
       if (typeof S.withServiceBlocks !== "function") return;
       let fp;
-      try { fp = await connectionsFingerprintOf(s.projectId); } catch { sessionLog(s)("services: project connections unreadable"); return; }
+      try { fp = await connectionsFingerprintOf(s.projectId, S, s.servicesDef || null); } catch { sessionLog(s)("services: project connections unreadable"); return; }
       if (!s.pi || s.turn || s.cycling || s.state === "stopped") return;
       const stale = s.childPrincipal === "owner" ? fp !== s.connectionsFingerprint : fp !== "";
       if (!stale) return;
@@ -2626,6 +2637,9 @@ export function createInteractiveEngine({
     s.thirdPartyExtensions = ((world.def && world.def.tools && world.def.tools.pi_extensions) || []).length > 0;
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
+    // Project services (Task 18): the def this child is pinned from, for the cycle-back's
+    // selection-aware fingerprint (connectionsFingerprintOf).
+    s.servicesDef = world.def || null;
     // Track 3 Task 6: refreshed on EVERY startChild (spawn and wake alike),
     // so a dispatch brief composed after a wake reflects the current world.
     s.tasksDbPath = world.tasksDbPath;
