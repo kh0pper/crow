@@ -36,7 +36,8 @@ const STOP_VERBS = new Set(LISTS.stopVerbs.map((p) => p.join(" ")));
 // A bot name made only of these is dropped: a bot called "the" or "it" would otherwise match everything.
 const STOPWORDS = new Set(["the", "a", "an", "it", "that", "this", "to", "of", "and", "or", "is", "el", "la", "lo", "los", "las", "un", "una", "eso", "esto", "que", "de", "y", "en", "por", "para"]);
 // "don't stop writer", "do not cancel it", "never halt that task": a negated verb is not a stop.
-const NEGATIONS = new Set(["dont", "not", "never", "no"]);
+const NEGATIONS = new Set(["dont", "not", "never"]);
+// Never "no": "no, stop writer" is a stop (phraseWords drops the comma).
 
 /**
  * Bot names and ids as word lists: strings only, at most MAX_PHRASES of them, each cut to MAX_PHRASE_WORDS

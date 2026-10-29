@@ -77,6 +77,8 @@ test("wantsHandoffStop: named, pronoun, or null", () => {
   assert.equal(wantsHandoffStop("stop writer", []), null, "a name is a bot only when it is one");
   for (const t of ["stop the handoff", "cancel that research", "cancela esa tarea", "deten esa investigacion", "para el encargo"]) assert.equal(wantsHandoffStop(t, BOTS), "named", t);
   for (const t of ["don't stop writer", "do not cancel the research", "never halt that task", "don't stop it", "i said dont cancel that"]) assert.equal(wantsHandoffStop(t, BOTS), null, t);
+  assert.equal(wantsHandoffStop("no, stop writer", BOTS), "named", "a leading no is not a negation");
+  assert.equal(wantsHandoffStop("don't stop writer", BOTS), null);
   for (const t of ["eso es para eso", "para eso sirve el martillo"]) assert.equal(wantsHandoffStop(t, BOTS), null, `para eso keeps the para rules: ${t}`);
 });
 
