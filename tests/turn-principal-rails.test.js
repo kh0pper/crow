@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
+import { markFromLaptop } from "./helpers/off-box.js";
 
 const dir = mkdtempSync(join(tmpdir(), "turn-principal-rails-"));
 process.env.CROW_DATA_DIR = dir;
@@ -54,6 +55,8 @@ function stubAuth(req, res, next) {
   if (who === "local" || who === "peer") req.dashboardSession = SESSIONS.local;
   if (who === "sso") req.dashboardSession = SESSIONS.sso;
   if (who === "peer") req.crossHostAuth = true;
+  // The owner's laptop, not this machine: a request from the box is never the owner's (Task 16b).
+  if (req.dashboardSession) markFromLaptop(req);
   next();
 }
 

@@ -35,7 +35,7 @@ before(async () => {
     db: s.db, startDispatcher: false, onInit: () => { s.inits++; }, csrf: (req, res, next) => next(),
     runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async (id) => { s.stops.push(id); return { ok: true }; },
       events: async () => ({ events: [], done: false, active: s.runnerActive }) },
-    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => s.totpOn === true },
+    authority: { isLocalDashboardSession: async (_db, req) => req?.dashboardSession === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => s.totpOn === true },
     notifyCard: async (sid, frame, opts) => { s.cards.push([sid, frame, opts]); return { delivered: true, botId: opts && opts.botId }; },
   });
   const app = express(); app.use(router);
@@ -366,7 +366,7 @@ test("I-1: GET /perch/:sid/calls — a transient bot_sessions error is a 500, no
   const auth = (req, res, next) => { req.dashboardSession = req.headers["x-test-session"]; next(); };
   const router = phoneRouter(auth, { db: busyDb, startDispatcher: false, csrf: (req, res, next) => next(),
     runner: { farend: async () => ({ ok: true }), stop: async () => ({ ok: true }), events: async () => ({ events: [], done: false }) },
-    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async () => false, totpRequired: async () => false },
+    authority: { isLocalDashboardSession: async (_db, req) => req?.dashboardSession === "local", stepUpOk: async () => false, totpRequired: async () => false },
     notifyCard: async () => ({ delivered: false }) });
   const app = express(); app.use(router);
   const srv = app.listen(0); await new Promise((r) => srv.once("listening", r));

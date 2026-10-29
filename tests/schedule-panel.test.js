@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fromLaptop } from "./helpers/off-box.js";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "crow-sched-panel-"));
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: tmpDir }, stdio: "pipe" });
@@ -52,7 +53,7 @@ async function seed(task, cron, nextRun, { tz = null, enabled = 1, description =
 /** Call the handler like the dashboard router does. → { status, html, location, json } */
 async function call({ method = "GET", query = {}, body = {}, lang = "en", session = "sess-local" } = {}) {
   const out = { status: 200, html: null, location: null, json: null };
-  const req = { method, query, body, csrfToken: "tok123", dashboardSession: session || undefined };
+  const req = fromLaptop({ method, query, body, csrfToken: "tok123", dashboardSession: session || undefined });
   const res = {
     headersSent: false,
     status(n) { out.status = n; return this; },
@@ -108,8 +109,8 @@ test("writes are owner-only: no session, a peer sign-in (SSO) session and a sign
     assert.equal(r.status, 403, String(session));
   }
   assert.equal((await all("SELECT enabled FROM schedules WHERE id = ?", [id]))[0].enabled, 1);
-  assert.equal(await isOwnerRequest({ dashboardSession: "sess-local", crossHostAuth: true }), false);
-  assert.equal(await isOwnerRequest({ dashboardSession: "sess-local" }), true);
+  assert.equal(await isOwnerRequest(fromLaptop({ dashboardSession: "sess-local", crossHostAuth: true })), false);
+  assert.equal(await isOwnerRequest(fromLaptop({ dashboardSession: "sess-local" })), true);
   assert.equal((await post({ action: "pause", id: String(id) })).status, 303, "the local password session may write");
 });
 

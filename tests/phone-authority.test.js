@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { createDbClient } from "../servers/db.js";
 import { isLocalDashboardSession, stepUpOk, totpRequired } from "../bundles/phone/server/authority.js";
 import { readRunnerSecret } from "../bundles/phone/server/secrets.js";
+import { fromLaptop } from "./helpers/off-box.js";
 
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 
@@ -17,10 +18,10 @@ test("local session yes, SSO session no, expired no", async () => {
   await ins("local", "dashboard", "+1 day");
   await ins("sso", "dashboard sso", "+1 day");
   await ins("old", "dashboard", "-1 day");
-  assert.equal(await isLocalDashboardSession(db, "local"), true);
-  assert.equal(await isLocalDashboardSession(db, "sso"), false);
-  assert.equal(await isLocalDashboardSession(db, "old"), false);
-  assert.equal(await isLocalDashboardSession(db, ""), false);
+  assert.equal(await isLocalDashboardSession(db, fromLaptop({ dashboardSession: "local" })), true);
+  assert.equal(await isLocalDashboardSession(db, fromLaptop({ dashboardSession: "sso" })), false);
+  assert.equal(await isLocalDashboardSession(db, fromLaptop({ dashboardSession: "old" })), false);
+  assert.equal(await isLocalDashboardSession(db, fromLaptop({ dashboardSession: "" })), false);
 });
 
 test("local session with ISO string expires_at: expired rejected, future accepted", async () => {
@@ -30,8 +31,8 @@ test("local session with ISO string expires_at: expired rejected, future accepte
   const futureIso = new Date(Date.now() + 86_400_000).toISOString();
   await db.execute({ sql: "INSERT INTO oauth_tokens VALUES (?,?,?,?)", args: [sha("expired"), "dashboard", "dashboard", expiredIso] });
   await db.execute({ sql: "INSERT INTO oauth_tokens VALUES (?,?,?,?)", args: [sha("future"), "dashboard", "dashboard", futureIso] });
-  assert.equal(await isLocalDashboardSession(db, "expired"), false);
-  assert.equal(await isLocalDashboardSession(db, "future"), true);
+  assert.equal(await isLocalDashboardSession(db, fromLaptop({ dashboardSession: "expired" })), false);
+  assert.equal(await isLocalDashboardSession(db, fromLaptop({ dashboardSession: "future" })), true);
 });
 
 test("stepUpOk: passes when 2FA off, requires a valid code when on", async () => {
