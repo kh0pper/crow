@@ -97,7 +97,10 @@ let TOKEN, BOARD, srv, base, sessions, handle;
 async function connect(serviceId, projectId, { label = "work", secrets } = {}) {
   return withDb(async (d) => {
     const key = await ensureWriteKey(d, { crowHome: HOME });
-    return SC.createConnection(d, { projectId, serviceId, accountLabel: label, secrets: secrets ?? (serviceId === "github" ? { [GH]: GH_TOKEN } : { NOTION_TOKEN: "test-token-2" }), config: {}, testedAt: new Date() }, { key });
+    const c = await SC.createConnection(d, { projectId, serviceId, accountLabel: label, secrets: secrets ?? (serviceId === "github" ? { [GH]: GH_TOKEN } : { NOTION_TOKEN: "test-token-2" }), config: {}, testedAt: new Date() }, { key });
+    // As the owner's connect route does (Task 16c fix round 1): the binding in the hidden dir.
+    SENS.recordConnectionBinding(c, { crowHome: HOME });
+    return c;
   });
 }
 
@@ -547,9 +550,14 @@ test("Task 16c: a corrupt override file never opens a private-by-default connect
   raw((d) => d.prepare("UPDATE service_connections SET service_id = 'mystery' WHERE uuid = ?").run(U.home));
   setDef("b5", ["mystery"]);
   try {
+    const flipped = await withDb((d) => M.authorizeServiceCall(d, { scope: "job", botId: "b5", defProjectId: P.home }, U.home, { crowHome: HOME }));
+    assert.deepEqual(flipped, { ok: false, code: "not_active", reason: "binding_mismatch" }, "not the service the owner connected");
+    // Even bound to it (an unknown service the owner somehow connected): private and locked.
+    SENS.recordConnectionBinding({ uuid: U.home, serviceId: "mystery" }, { crowHome: HOME });
     const r = await withDb((d) => M.authorizeServiceCall(d, { scope: "job", botId: "b5", defProjectId: P.home }, U.home, { crowHome: HOME }));
     assert.deepEqual(r, { ok: false, code: "not_active", reason: "private_unavailable" });
   } finally {
+    SENS.recordConnectionBinding({ uuid: U.home, serviceId: "github" }, { crowHome: HOME });
     setDef("b5", ["github"]);
     raw((d) => d.prepare("UPDATE service_connections SET service_id = 'github' WHERE uuid = ?").run(U.home));
   }
@@ -579,4 +587,41 @@ test("perchEngineAccessor is synchronous, never creates an engine, and fails clo
   assert.equal(none(), null);
   const empty = await M.perchEngineAccessor(async () => ({ getInteractiveEngine: ({ createIfMissing }) => (createIfMissing ? { made: true } : null) }));
   assert.equal(empty(), null, "createIfMissing:false");
+});
+
+test("Task 16c fix round 1: a bot flips a connection's service_id in crow.db → initialize, list and call refused (binding_mismatch); a missing binding is refused; the correct row works", async () => {
+  // An obsidian connection (locked private), selected by its bot as "github" after the flip.
+  const ob = await withDb(async (d) => {
+    const key = await ensureWriteKey(d, { crowHome: HOME });
+    return SC.createConnection(d, { projectId: P.spring, serviceId: "github", accountLabel: "vault", secrets: { [GH]: GH_TOKEN }, config: {}, testedAt: new Date() }, { key });
+  });
+  // Bound as obsidian (what the owner connected); the row then says github.
+  SENS.recordConnectionBinding({ uuid: ob.uuid, serviceId: "obsidian" }, { crowHome: HOME });
+  const sid = await open(U.gh);
+  const spawns = spawnCount();
+  const az = await withDb((d) => M.authorizeServiceCall(d, { scope: "session", botId: "b1", defProjectId: P.spring, sessionProjectId: P.spring }, ob.uuid, { crowHome: HOME, repoSkillsDir: SKILLS }));
+  assert.deepEqual(az, { ok: false, code: "not_active", reason: "binding_mismatch" });
+  for (const [label, run] of [
+    ["initialize", () => init(ob.uuid)],
+    ["tools/list", () => listTools(ob.uuid, sid)],
+    ["tools/call", () => callTool(ob.uuid, sid, "whoami")],
+  ]) {
+    audit.length = 0;
+    const r = await run();
+    assert.equal(r.status, 409, `${label}: ${r.status} ${r.text}`);
+    assert.equal(lastOutcome(), "refused:not_active", label);
+  }
+  assert.equal(await withDb((d) => C.listedTools(d, ob.uuid, { crowHome: HOME })), null, "the listing refuses it too");
+  assert.equal(spawnCount(), spawns, "nothing spawned");
+
+  // No binding at all: refused the same way.
+  const nb = await withDb(async (d) => {
+    const key = await ensureWriteKey(d, { crowHome: HOME });
+    return SC.createConnection(d, { projectId: P.spring, serviceId: "github", accountLabel: "nobind", secrets: { [GH]: GH_TOKEN }, config: {}, testedAt: new Date() }, { key });
+  });
+  assert.equal((await withDb((d) => M.authorizeServiceCall(d, { scope: "session", botId: "b1", defProjectId: P.spring, sessionProjectId: P.spring }, nb.uuid, { crowHome: HOME, repoSkillsDir: SKILLS }))).reason, "binding_mismatch");
+  assert.equal((await init(nb.uuid)).status, 409);
+
+  // The correct row still works.
+  assert.ok(JSON.parse(textOf(await callTool(U.gh, sid, "whoami"))).keys.includes(GH));
 });

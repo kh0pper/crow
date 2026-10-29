@@ -12,7 +12,7 @@ import { listConnections } from "../../../../shared/service-connections.js";
 import { serviceSecretKeys } from "../../../keychain/store.js";
 import { childState, childStderr } from "../../../services/children.js";
 import { serviceById } from "../../../../shared/service-catalog.js";
-import { connectionSensitivity, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
+import { connectionBindingOk, connectionSensitivity, readConnectionBindings, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
 
 const CHILD_STATES = ["running", "stopped", "starting", "error", "cooling"];
 
@@ -87,10 +87,12 @@ function restartScript() {
 }
 
 /** The Private switch (Task 16c): checked = private; disabled for a locked service. Fail closed: on. */
-function privateSwitch(c, lang, overrides) {
+function privateSwitch(c, lang, overrides, bindings) {
   let on = true;
-  let locked = false;
-  try { const s = connectionSensitivity(c, { overrides }); on = s.sensitive !== false; locked = s.locked === true; } catch { /* private */ }
+  let locked = true;   // a row that isn't the service the owner connected stays private and locked
+  try {
+    if (connectionBindingOk(c, { bindings })) { const s = connectionSensitivity(c, { overrides }); on = s.sensitive !== false; locked = s.locked === true; }
+  } catch { on = true; locked = true; }
   const labels = {
     on: t("services.private.on", lang), locked: t("services.private.locked", lang),
     notOwner: t("services.private.notOwner", lang), generic: t("services.error.generic", lang),
@@ -101,7 +103,7 @@ function privateSwitch(c, lang, overrides) {
 }
 
 /** One connection's Advanced row: names and status only, the child's state, Restart, the Private switch, its redacted stderr. */
-function connectionRow(c, keys, lang, overrides) {
+function connectionRow(c, keys, lang, overrides, bindings) {
   const status = t(`services.status.${c.status}`, lang);
   const state = childState(c.uuid);
   const name = serviceById(c.serviceId)?.name || c.serviceId;
@@ -115,7 +117,7 @@ function connectionRow(c, keys, lang, overrides) {
   return `<li data-int-conn="${escapeHtml(c.uuid)}"><strong>${escapeHtml(c.serviceId)}</strong> ${escapeHtml(c.accountLabel)} <span class="int-note">${escapeHtml(status)}${c.lastError ? ` <code>${escapeHtml(c.lastError)}</code>` : ""}${keys.length ? ` · ${keys.map((k) => escapeHtml(k)).join(", ")}` : ""}</span>
       · <span class="int-note" data-int-child-state>${escapeHtml(t(`services.child.${state}`, lang))}</span>
       <button type="button" class="btn btn-sm" data-int-restart="${escapeHtml(c.uuid)}" data-labels="${escapeHtml(JSON.stringify(labels))}">${escapeHtml(t("settings.integrations.restartChild", lang))}</button>
-      <span class="int-note" data-int-restart-msg role="status"></span>${privateSwitch(c, lang, overrides)}${stderr}</li>`;
+      <span class="int-note" data-int-restart-msg role="status"></span>${privateSwitch(c, lang, overrides, bindings)}${stderr}</li>`;
 }
 
 /** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). */
@@ -138,9 +140,10 @@ async function movedHtml({ scope, db, lang }) {
   if (db) {
     try {
       const overrides = readSensitivityOverrides();
+      const bindings = readConnectionBindings();
       for (const c of await listConnections(db, {})) {
         const keys = [...(await serviceSecretKeys(db, c.uuid))].sort();
-        conns += connectionRow(c, keys, lang, overrides);
+        conns += connectionRow(c, keys, lang, overrides, bindings);
       }
     } catch (err) { console.warn("[settings] connections listing failed:", err.message); }
   }

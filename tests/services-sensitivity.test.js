@@ -22,7 +22,12 @@ const M = await import("../servers/gateway/services/mount.js");
 const FILE = join(HOME, "secrets", SENS.SENSITIVITY_OVERRIDES_FILENAME);
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const conn = (serviceId, n) => ({ uuid: uuid(n), serviceId });
-const sens = (serviceId, n) => SENS.isSensitiveConnection(conn(serviceId, n), { crowHome: HOME });
+/** The connection as the owner's connect route makes it (its binding recorded), then the check. */
+function sens(serviceId, n) {
+  try { SENS.recordConnectionBinding(conn(serviceId, n), { crowHome: HOME }); } catch { /* an invalid id: no binding */ }
+  return SENS.isSensitiveConnection(conn(serviceId, n), { crowHome: HOME });
+}
+const BINDINGS = join(HOME, "secrets", SENS.CONNECTION_BINDINGS_FILENAME);
 /** Write the override file by hand (a 600 file in the real secrets dir). */
 function plant(path, text, mode = 0o600) {
   writeFileSync(path, text, { mode });
@@ -143,4 +148,33 @@ test("For You's read-only owner authority (For You spec §11) is a named slot on
     const r = await M.authorizeServiceCall(db, { scope, botId: "b1", defProjectId: 1 }, uuid(1), { crowHome: HOME });
     assert.deepEqual(r, { ok: false, code: "not_granted" }, String(scope));
   }
+});
+
+test("fix round 1: the binding. A row whose service_id isn't the one the owner connected, or with no binding, is sensitive", () => {
+  const u = uuid(40);
+  assert.equal(SENS.isSensitiveConnection({ uuid: u, serviceId: "github" }, { crowHome: HOME }), true, "no binding: sensitive");
+  assert.equal(SENS.connectionBindingOk({ uuid: u, serviceId: "github" }, { crowHome: HOME }), false);
+  SENS.recordConnectionBinding({ uuid: u, serviceId: "obsidian" }, { crowHome: HOME });
+  assert.equal(SENS.connectionBindingOk({ uuid: u, serviceId: "obsidian" }, { crowHome: HOME }), true);
+  // A bot rewrites the row: obsidian -> github. An open service now, but not the one connected.
+  assert.equal(SENS.connectionBindingOk({ uuid: u, serviceId: "github" }, { crowHome: HOME }), false);
+  assert.equal(SENS.isSensitiveConnection({ uuid: u, serviceId: "github" }, { crowHome: HOME }), true);
+  // Even with an owner override saying "not private" for that uuid as github.
+  SENS.recordConnectionBinding({ uuid: uuid(41), serviceId: "github" }, { crowHome: HOME });
+  SENS.setSensitivityOverride({ uuid: u, serviceId: "github" }, false, { crowHome: HOME });
+  assert.equal(SENS.isSensitiveConnection({ uuid: u, serviceId: "github" }, { crowHome: HOME }), true);
+  assert.equal(SENS.isSensitiveConnection({ uuid: uuid(41), serviceId: "github" }, { crowHome: HOME }), false, "a correct row");
+  assert.equal(statSync(BINDINGS).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(readFileSync(BINDINGS, "utf8"))[u], "obsidian");
+  // Bad values are never recorded.
+  for (const bad of [{ uuid: "x", serviceId: "github" }, { uuid: uuid(42), serviceId: "../x" }, { uuid: uuid(42), serviceId: 3 }]) {
+    assert.throws(() => SENS.recordConnectionBinding(bad, { crowHome: HOME }), (e) => e.code === "bad_value");
+  }
+  // A corrupt file binds nothing; a planted bindings file outside the anchored dir binds nothing.
+  const good = readFileSync(BINDINGS, "utf8");
+  plant(BINDINGS, "{oops\n");
+  assert.equal(SENS.connectionBindingOk({ uuid: uuid(41), serviceId: "github" }, { crowHome: HOME }), false);
+  plant(BINDINGS, good);
+  plant(join(HOME, SENS.CONNECTION_BINDINGS_FILENAME), JSON.stringify({ [uuid(43)]: "github" }) + "\n");
+  assert.equal(SENS.connectionBindingOk({ uuid: uuid(43), serviceId: "github" }, { crowHome: HOME }), false);
 });

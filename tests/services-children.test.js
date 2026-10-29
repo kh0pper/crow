@@ -31,6 +31,7 @@ delete process.env.CROW_SERVICES_UI;
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: process.env, stdio: "pipe", cwd: REPO });
 
 const C = await import("../servers/gateway/services/children.js");
+const SENS = await import("../servers/shared/service-sensitivity.js");
 const TC = await import("../servers/gateway/services/tool-cache.js");
 const SC = await import("../servers/shared/service-connections.js");
 const { createDbClient } = await import("../servers/db.js");
@@ -102,7 +103,10 @@ async function connect(serviceId, { projectId, label = "work", secrets = {}, con
   const pid = projectId ?? (await project());
   return withDb(async (d) => {
     const key = await ensureWriteKey(d, { crowHome: HOME });
-    return SC.createConnection(d, { projectId: pid, serviceId, accountLabel: label, secrets, config, testedAt: new Date() }, { key });
+    const c = await SC.createConnection(d, { projectId: pid, serviceId, accountLabel: label, secrets, config, testedAt: new Date() }, { key });
+    // As the owner's connect route does (Task 16c fix round 1): the binding in the hidden dir.
+    SENS.recordConnectionBinding(c, { crowHome: HOME });
+    return c;
   });
 }
 const github = (token = "test-token-9", o = {}) => connect("github", { ...o, secrets: { [GH]: token } });
@@ -1040,4 +1044,38 @@ test("fix round 3: stopChild (disconnect) also kills a RETIRED child of that uui
     C._setChildrenForTest({ clock: null });
     await C.stopAllChildren();
   }
+});
+
+// ---- Task 16c fix round 1: the binding ------------------------------------------------------------
+
+test("binding: a bot flips an obsidian row's service_id to github in crow.db → ensureChild and listedTools refuse before any spawn; a missing binding too; a correct row still works", async () => {
+  const v = vault("vbind");
+  const ob = await connect("obsidian", { config: { OBSIDIAN_VAULT_PATH: v } });
+  await withDb((d) => d.execute({ sql: "UPDATE service_connections SET service_id = 'github', bundle_id = 'github' WHERE uuid = ?", args: [ob.uuid] }));
+  const before = spawnCount();
+  let err = null;
+  try { await withDb((d) => C.ensureChild(d, ob.uuid, { crowHome: HOME })); } catch (e) { err = e; }
+  assert.ok(err instanceof C.ChildError, "refused");
+  assert.equal(err.code, "not_active");
+  assert.equal(err.reason, "binding_mismatch");
+  assert.equal(await withDb((d) => C.listedTools(d, ob.uuid, { crowHome: HOME })), null, "nothing listed");
+  assert.equal(spawnCount(), before, "nothing spawned");
+  assert.equal(C.childState(ob.uuid), "stopped");
+
+  // A connection with no binding at all (made before bindings existed, or by a bot) is refused too.
+  const gh = await withDb(async (d) => {
+    const key = await ensureWriteKey(d, { crowHome: HOME });
+    return SC.createConnection(d, { projectId: await project(), serviceId: "github", accountLabel: "nobind", secrets: { [GH]: "test-token-nb" }, testedAt: new Date() }, { key });
+  });
+  err = null;
+  try { await withDb((d) => C.ensureChild(d, gh.uuid, { crowHome: HOME })); } catch (e) { err = e; }
+  assert.equal(err?.reason, "binding_mismatch");
+  assert.equal(spawnCount(), before);
+
+  // Once bound (as the owner's connect route would have), it starts.
+  SENS.recordConnectionBinding(gh, { crowHome: HOME });
+  const ok = await withDb((d) => C.ensureChild(d, gh.uuid, { crowHome: HOME }));
+  assert.ok(ok.client);
+  assert.equal(spawnCount(), before + 1);
+  await C.stopChild(gh.uuid);
 });

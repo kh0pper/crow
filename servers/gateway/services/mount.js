@@ -12,7 +12,9 @@
  * This module adds the services checks (plan checks 2–6 and Task 16c's check 7, minus the owner
  * turn the helper ran):
  *  3. the connection exists (else not_found) and is the local owner's (owner_contact_id IS
- *     NULL, else owner_mismatch);
+ *     NULL, else owner_mismatch), and its row's service_id is the one the owner's connect route
+ *     recorded in the hidden secrets dir (service-sensitivity.js connectionBindingOk; a bot can
+ *     write crow.db), else not_active with reason binding_mismatch, a missing binding included;
  *  4. one project: the bot def's project (pi_bot_defs.project_id, the authority), and for an s:
  *     scope the session's project too, equal the connection's (else wrong_project; a def with
  *     no project is wrong_project);
@@ -43,7 +45,7 @@
 import { createDbClient as defaultCreateDbClient } from "../../db.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { getConnection, servableConnection } from "../../shared/service-connections.js";
-import { isSensitiveConnection } from "../../shared/service-sensitivity.js";
+import { connectionBindingOk, isSensitiveConnection } from "../../shared/service-sensitivity.js";
 import { mountLoopbackMcp } from "../loopback-tool-mount.js";
 import { SERVICES_TOKEN } from "../local-token.js";
 import { effectiveCrowMcp, splitEntry } from "../../../scripts/pi-bots/skill-tools.mjs";
@@ -64,6 +66,8 @@ export const SERVICES_MAX_IN_FLIGHT = 4;
 const refuse = (code) => ({ ok: false, code });
 /** Check 7's refusal: the helper's fixed not_active, with the real reason for direct callers. */
 const privateUnavailable = () => ({ ok: false, code: "not_active", reason: "private_unavailable" });
+/** Check 3's binding refusal: the row's service_id is not the one the owner connected. */
+const bindingMismatch = () => ({ ok: false, code: "not_active", reason: "binding_mismatch" });
 
 /**
  * For You's morning job (For You spec §11, Kevin 2026-10-29): ONE named exception to "only my
@@ -123,6 +127,9 @@ export async function authorizeServiceCall(db, actor, uuid, { crowHome = resolve
     const connection = await getConnection(db, uuid);
     if (!connection) return refuse("not_found");
     if (connection.ownerContactId != null) return refuse("owner_mismatch");
+    // The row's service_id picks the selection, the child and the sensitivity: only the one the
+    // owner connected counts.
+    if (!connectionBindingOk(connection, { crowHome })) return bindingMismatch();
     // 4. one project: the def's project is the authority; a session must agree with it.
     if (actor.defProjectId == null || Number(actor.defProjectId) !== connection.projectId) return refuse("wrong_project");
     if (actor.scope === "session" && (actor.sessionProjectId == null || Number(actor.sessionProjectId) !== connection.projectId)) return refuse("wrong_project");

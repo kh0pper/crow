@@ -583,6 +583,9 @@ test("Task 16c: the owner turns Private on and off; the page shows it; the overr
     assert.equal(c.status, 201);
     const uuid = c.json.connection.uuid;
     assert.deepEqual(c.json.connection.private, { on: false, locked: false });
+    // Fix round 1: the connect route recorded the binding in the hidden dir.
+    assert.equal(JSON.parse(readFileSync(join(HOME, "secrets", SENS.CONNECTION_BINDINGS_FILENAME), "utf8"))[uuid], "github");
+    assert.equal(SENS.connectionBindingOk({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
     const on = await call(s, "POST", sensPath(uuid), { body: { sensitive: true }, headers: as("own-1") });
     assert.equal(on.status, 200, on.text);
     assert.deepEqual(on.json, { ok: true, private: { on: true, locked: false } });
@@ -627,6 +630,11 @@ test("Task 16c: a locked service (obsidian, or one the registry doesn't name) ca
       const page = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") });
       assert.deepEqual(page.json.connections.find((x) => x.uuid === uuid).private, { on: true, locked: true }, serviceId);
     }
+    // A row rewritten to an open service (a bot writing crow.db) is not the bound one: still private and locked.
+    await ctx.db.execute({ sql: "UPDATE service_connections SET service_id = 'trello' WHERE uuid = ?", args: [uuid] });
+    const flipped = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: as("own-1") });
+    assert.deepEqual(flipped.json.connections.find((x) => x.uuid === uuid).private, { on: true, locked: true }, "binding mismatch");
+    assert.equal(SENS.isSensitiveConnection({ uuid, serviceId: "trello" }, { crowHome: HOME }), true);
     let file = {};
     try { file = JSON.parse(readFileSync(OVERRIDES, "utf8")); } catch { file = {}; }
     assert.equal(Object.hasOwn(file, uuid), false, "nothing was written for a locked service");
