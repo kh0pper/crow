@@ -668,6 +668,27 @@ background:var(--sky);overflow:hidden;cursor:pointer}
 #perch-hub-root .ph-btile .bt-note{font-size:13px;color:var(--dim)}
 #perch-hub-root .ph-btile .bt-actions{display:flex;flex-wrap:wrap;gap:8px}
 #perch-hub-root .ph-btile .bt-actions button{min-height:44px;min-width:44px;padding:8px 14px}
+/* R1.2 PR 5: the embedded app tile, the browser tile's box around another
+   desktop app's watch-only noVNC view. */
+#perch-hub-root .ph-atile{flex-direction:column;gap:6px;align-self:stretch;width:100%;max-width:560px;min-width:0;
+background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px;margin:2px 0}
+#perch-hub-root .ph-atile [hidden]{display:none}
+#perch-hub-root .ph-atile:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+#perch-hub-root .ph-atile .at-bar{display:flex;align-items:center;gap:8px;min-width:0;font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-atile .at-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--ink)}
+#perch-hub-root .ph-atile .at-state{flex-shrink:0}
+#perch-hub-root .ph-atile .at-vnc{display:block;width:100%;aspect-ratio:16/10;border:0;border-radius:8px;background:var(--sky)}
+#perch-hub-root .ph-atile .at-note{font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-atile .at-actions{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root .ph-atile .at-actions button,#perch-hub-root .ph-atile .at-open{min-height:44px;min-width:44px;padding:8px 14px}
+#perch-hub-root .ph-atile .at-open{display:inline-flex;align-items:center;box-sizing:border-box;text-decoration:none}
+#perch-hub-root .ph-atile .at-open[hidden]{display:none}
+#perch-hub-root .ph-atile .to-pw-row,#perch-hub-root .ph-atile .to-reauth{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+#perch-hub-root .ph-atile .to-pw-row button,#perch-hub-root .ph-atile .to-reauth button{min-height:44px;min-width:44px;padding:8px 14px}
+#perch-hub-root .ph-atile .to-hint{font-size:13px;color:var(--dim)}
+#perch-hub-root .ph-atile .to-pw{font-size:15px;overflow-wrap:anywhere;user-select:all}
+#perch-hub-root .ph-atile .to-reauth-input{min-height:44px;flex:1;min-width:0}
+#perch-hub-root .ph-atile .to-reauth-error{font-size:13px;color:var(--ink);width:100%}
 #perch-hub-root .browser-status{font-size:12.5px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The Take over sheet (spec 2026-10-27 §4.4): full screen over the hub, the
    noVNC viewer filling what the bar leaves. Targets are 44 px; Perch tokens only. */
@@ -974,6 +995,23 @@ min-height:44px;padding:6px 8px;font-size:13px;border-color:transparent;backgrou
 #perch-hub-root #perch-session-sheet .narrow-tool{min-height:44px}
 @media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-session-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
+}
+/* --- R1.2 PR 5: the session head's apps button and its sheet ---------------
+   The button is a 44 px grid icon at the head row's end; the sheet is shaped
+   like the session sheet and holds the shell's launcher grid. */
+#perch-hub-root .perch-head #perch-apps-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;border-color:transparent;background:transparent;color:var(--dim)}
+#perch-hub-root .perch-head #perch-apps-btn[hidden]{display:none}
+#perch-hub-root .perch-head #perch-apps-btn:hover{background:var(--teal-soft);color:var(--ink)}
+#perch-hub-root .perch-head #perch-apps-btn svg{width:22px;height:22px}
+#perch-apps-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;max-height:85dvh;
+border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;background:var(--card);color:var(--ink);box-shadow:0 -8px 32px rgba(0,0,0,.18)}
+#perch-apps-sheet[open]{display:flex;flex-direction:column}
+#perch-apps-sheet::backdrop{background:rgba(0,0,0,.4)}
+#perch-apps-sheet[open]:not(:modal){position:fixed;inset:auto 0 0;z-index:1200}
+#perch-hub-root #perch-apps-grid{overflow-y:auto;min-height:0}
+#perch-hub-root #perch-apps-grid .shell-app{color:var(--ink)}
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
+  #perch-apps-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
 }
 `);
 }

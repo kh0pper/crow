@@ -23,6 +23,7 @@ import { tryNewCardHtml } from "./chrome.js";
 import { needsYouCounts } from "../panels/board/needs-you.js";
 import { getInteractiveEngine } from "../../perch-interactive.js";
 import { ACTIVE_PROJECT_WHERE, activeProjects } from "../../../shared/shell-items.js";
+import { launcherFor } from "../../apps/launcher.js";
 
 /** The tab a panel lights up. bot-board / artifacts stand in until P3 / P4 register board / make. */
 export const TAB_OF = Object.freeze({
@@ -200,5 +201,9 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
   catch (err) { console.warn("[shell] needs-you counts failed:", err.message); }
   // The project home reads the same Map rather than counting again.
   req.crowShellCounts = counts;
-  return { variant: "shell", shell: { scope, projects, counts, homeSlug, tab: TAB_OF[panelId] ?? null } };
+  // The drawer's Apps grid for this scope: the 30 s catalog cache plus, for a
+  // project, one pi_bot_defs query (apps/launcher.js). All is fetched on switch.
+  let apps = null;
+  try { apps = await launcherFor(db, scope, { lang }); } catch (err) { console.warn("[shell] apps launcher failed:", err.message); }
+  return { variant: "shell", shell: { scope, projects, counts, homeSlug, apps, tab: TAB_OF[panelId] ?? null } };
 }

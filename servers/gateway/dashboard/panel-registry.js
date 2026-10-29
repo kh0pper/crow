@@ -64,7 +64,9 @@ export async function loadExternalPanels() {
       const mod = await import(panelPath);
       const manifest = mod.default || mod.manifest;
       if (manifest && manifest.id && manifest.handler) {
-        panels.set(manifest.id, manifest);
+        // Bundle panels install as <bundleId>.js, so the file id IS the bundle id.
+        // Record it so the app catalog can find a bundle's real panel route.
+        panels.set(manifest.id, { ...manifest, bundleId: id });
       }
     } catch (err) {
       console.warn(`[dashboard] Failed to load panel ${id}:`, err.message);
@@ -125,6 +127,12 @@ export function getVisiblePanels() {
  */
 export function getPanel(id) {
   return panels.get(id);
+}
+
+/** The registered panel a bundle contributed (recorded by loadExternalPanels), or undefined. */
+export function getPanelForBundle(bundleId) {
+  for (const p of panels.values()) if (p.bundleId === bundleId) return p;
+  return undefined;
 }
 
 /**

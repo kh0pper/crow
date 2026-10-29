@@ -31,6 +31,7 @@ const IDENTICAL_OK = new Set([
   "nav.blog",
   "nav.perch", // "Perch Hub" — product name
   "login.2faPlaceholder", // "000000"
+  "shell.apps", // "Apps": the Spanish UI says "apps" too (shell.appsAll "Todas las apps")
   "common.error", // "Error" is Spanish too
   "notif.ram",
   "notif.cpus",

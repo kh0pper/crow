@@ -19,6 +19,14 @@ import { tJs } from "../shared/i18n.js";
  *  - opened by the tile's "perch:browser-takeover" event (Take over, or a tap
  *    on the live picture), by a "?take-over=1" link (the wait_for_user
  *    attention item), or from the Browser panel;
+ *  - R1.2 PR 5: the app tile sends the same event with detail.app
+ *    { id, label, base } (base = the app's /proxy/<id>/<desktop path>). Another
+ *    app's sheet runs the same states on POST …/apps/<id>/take-over |
+ *    heartbeat | hand-back, has no password row, and never touches the
+ *    browser's "You have the browser" control. The browser itself stays on
+ *    …/browser/*. The browser's app tile reuses this sheet's Copy password
+ *    row (toPwParts / toFindPassword, the same keychain reveal and re-auth)
+ *    under its watch view, where noVNC asks for the VNC password;
  *  - POST …/browser/take-over → "held": the noVNC viewer loads; "pending": "The
  *    bot is finishing its step…" and a 1 s check until it switches;
  *  - held: a heartbeat every 15 s (the server keeps the holding 5 minutes
@@ -50,6 +58,23 @@ export function perchTakeOverJs(lang = "en") {
   var toSheet=null;
 
   function toApi(path){ return perchApi('POST','/browser/'+path); }
+  /* R1.2 PR 5: the sheet also takes over another desktop app (detail.app from
+     the app tile): the same state machine on that app's own routes. The
+     browser, from its tile or the launcher's, stays on /browser/. */
+  var TO_APP_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
+  var TO_APP_PATH=/^([A-Za-z0-9._~-]+\\/)*vnc(_lite)?[.]html$/;
+  function toAppOf(detail){
+    var a=detail&&detail.app;
+    if(!a||typeof a.id!=='string'||!TO_APP_ID.test(a.id)) return null;
+    var pre='/proxy/'+a.id+'/', base=typeof a.base==='string'?a.base:'';
+    if(base.indexOf(pre)!==0||!TO_APP_PATH.test(base.slice(pre.length))||base.indexOf('..')>=0) return null;
+    return { id:a.id, label:typeof a.label==='string'?a.label:'', base:base };
+  }
+  function toIsBrowser(s){ return !s.app||s.app.id==='browser'; }
+  function toOp(s,op){
+    if(toIsBrowser(s)) return toApi(op);
+    return perchApi('POST','/apps/'+encodeURIComponent(s.app.id)+'/'+op);
+  }
   function toKeychain(method,path,body){
     var opts={ method:method, headers:{ 'X-Crow-Csrf':csrf() }, cache:'no-store' };
     if(body!==undefined){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
@@ -66,16 +91,52 @@ export function perchTakeOverJs(lang = "en") {
     if(!live()) return;
     if(toSheet){ if(toSheet.back.focus) toSheet.back.focus(); return; }
     var anchor=detail&&typeof detail.anchor==='string'?detail.anchor:null;
-    var tile=(typeof btFind==='function')?btFind(anchor):null;
-    var s={ state:'opening', timer:null, pwTimer:null, secret:null, entryId:null, method:'password', closed:false, retry:null };
+    var app=toAppOf(detail);
+    if(detail&&detail.app&&!app) return;    /* an app the sheet cannot check never falls back to the browser */
+    var tile=(!app&&typeof btFind==='function')?btFind(anchor):null;
+    var s={ state:'opening', timer:null, pwTimer:null, secret:null, entryId:null, method:'password', closed:false, retry:null, app:app };
     var node=document.createElement('div'); node.className='ph-tosheet';
     node.setAttribute('role','dialog'); node.setAttribute('aria-modal','true');
     var head=document.createElement('div'); head.className='to-head';
     var host=document.createElement('span'); host.className='to-host';
-    host.textContent=(typeof btHost==='function')?btHost(tile?tile.domain:null):'';
+    host.textContent=(app&&app.label)?app.label:(typeof btHost==='function')?btHost(tile?tile.domain:null):'';
     var back=toButton('to-back btn btn-primary',TO_HAND_BACK);
     head.appendChild(host); head.appendChild(back);
     var status=line('to-status',''); status.setAttribute('role','status'); status.hidden=true;
+    var parts=toPwParts(s);
+    var view=document.createElement('div'); view.className='to-view';
+    node.appendChild(head); node.appendChild(status); node.appendChild(parts.pwRow); node.appendChild(parts.reauth); node.appendChild(view);
+    s.node=node; s.status=status; s.back=back; s.view=view; s.host=host;
+    toSheet=s;
+    if(toIsBrowser(s)) toMine(false);
+    (el('perch-hub-root')||document.body).appendChild(node);
+    back.onclick=function(){ toHandBack(s); };
+    if(back.focus) back.focus();
+    if(!toIsBrowser(s)){
+      /* another app: no keychain lookup (the browser's VNC password only) */
+      perchApi('POST','/apps/'+encodeURIComponent(app.id)+'/take-over').then(function(r){
+        /* its lease is not confirmed any more: nothing was taken; Hand back closes the sheet */
+        if(r&&r.status===409){ if(toSheet===s&&!s.closed){ s.state='ended'; toSetStatus(s,TO_FAILED); } return; }
+        toAnswer(s,r);
+      });
+      return;
+    }
+    toFindPassword(s);
+    /* From a link: the server takes it only while that chat's turn uses the browser. */
+    var body=(detail&&detail.link)?{ from:'link', sid:String(detail.sid||'') }:undefined;
+    perchApi('POST','/browser/take-over',body).then(function(r){
+      /* a stale link: say so (nothing was taken); Hand back closes the sheet */
+      if(r&&r.status===409){ if(toSheet===s&&!s.closed){ s.state='ended'; toSetStatus(s,TO_NOT_WAITING); } return; }
+      toAnswer(s,r);
+    });
+  }
+
+  /* The password row and its re-auth panel, on s (s.copy, s.hint, s.pw,
+     s.reauth, s.rInput, s.rErr). Built for the sheet, and for the browser's
+     app tile (R1.2 PR 5: its watch view meets the same noVNC password prompt),
+     where s.inTile is set: the same lookup, reveal and re-auth, alive until
+     the tile closes (toPwClose) instead of until the sheet does. */
+  function toPwParts(s){
     var pwRow=document.createElement('div'); pwRow.className='to-pw-row';
     var copy=toButton('to-copy btn btn-secondary',TO_COPY); copy.hidden=true;
     var hint=line('to-hint',''); hint.hidden=true;
@@ -89,27 +150,16 @@ export function perchTakeOverJs(lang = "en") {
     var rGo=toButton('to-reauth-go btn btn-primary',TO_CONFIRM);
     var rCancel=toButton('to-reauth-cancel btn btn-secondary',TO_CANCEL);
     reauth.appendChild(rTitle); reauth.appendChild(rInput); reauth.appendChild(rErr); reauth.appendChild(rGo); reauth.appendChild(rCancel);
-    var view=document.createElement('div'); view.className='to-view';
-    node.appendChild(head); node.appendChild(status); node.appendChild(pwRow); node.appendChild(reauth); node.appendChild(view);
-    s.node=node; s.status=status; s.back=back; s.copy=copy; s.hint=hint; s.pw=pw; s.view=view;
-    s.reauth=reauth; s.rInput=rInput; s.rErr=rErr; s.host=host;
-    toSheet=s;
-    toMine(false);
-    (el('perch-hub-root')||document.body).appendChild(node);
-    back.onclick=function(){ toHandBack(s); };
+    s.copy=copy; s.hint=hint; s.pw=pw; s.reauth=reauth; s.rInput=rInput; s.rErr=rErr;
     copy.onclick=function(){ toCopy(s); };
     rGo.onclick=function(){ toReauth(s); };
     rCancel.onclick=function(){ s.retry=null; rInput.value=''; reauth.hidden=true; };
-    if(back.focus) back.focus();
-    toFindPassword(s);
-    /* From a link: the server takes it only while that chat's turn uses the browser. */
-    var body=(detail&&detail.link)?{ from:'link', sid:String(detail.sid||'') }:undefined;
-    perchApi('POST','/browser/take-over',body).then(function(r){
-      /* a stale link: say so (nothing was taken); Hand back closes the sheet */
-      if(r&&r.status===409){ if(toSheet===s&&!s.closed){ s.state='ended'; toSetStatus(s,TO_NOT_WAITING); } return; }
-      toAnswer(s,r);
-    });
+    return { pwRow:pwRow, reauth:reauth };
   }
+  /* A reply that arrives after its sheet (or its tile's row) closed is dropped. */
+  function toGone(s){ return s.closed||(!s.inTile&&toSheet!==s); }
+  /* The tile's row closes: nothing of the password is left. */
+  function toPwClose(s){ s.closed=true; toWipePassword(s); s.rInput.value=''; s.retry=null; }
 
   function toSetStatus(s,text){ s.status.textContent=text; s.status.hidden=!text; }
 
@@ -131,7 +181,7 @@ export function perchTakeOverJs(lang = "en") {
     }
     if(st==='idle'){
       /* held: the browser went back (5-minute loss). Not yet held: the take-over gave up. */
-      if(s.state==='held'){ closeTakeOver(); toMine(false); return; }
+      if(s.state==='held'){ closeTakeOver(); if(toIsBrowser(s)) toMine(false); return; }
       s.state='ended'; toSetStatus(s,TO_FAILED);
       return;
     }
@@ -146,17 +196,17 @@ export function perchTakeOverJs(lang = "en") {
     s.timer=setTimeout(function(){
       s.timer=null;
       if(s.closed||toSheet!==s||!live()) return;
-      toApi('heartbeat').then(function(r){ toAnswer(s,r); });
+      toOp(s,'heartbeat').then(function(r){ toAnswer(s,r); });
     },ms);
   }
 
   function toViewer(s){
     if(s.frame) return;
     var f=document.createElement('iframe'); f.className='to-vnc';
-    f.setAttribute('title','VNC');
+    f.setAttribute('title',(s.app&&s.app.label)?s.app.label:'VNC');
     /* view_only pinned off: noVNC keeps that setting in its own browser storage, and the
-       Browser panel's watch-only viewer sets it on the same origin */
-    f.setAttribute('src','/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false');
+       Browser panel's (and the app tile's) watch-only viewer sets it on the same origin */
+    f.setAttribute('src',(s.app?s.app.base:'/proxy/browser/vnc.html')+'?autoconnect=true&resize=scale&view_only=false');
     s.view.appendChild(f); s.frame=f;
   }
 
@@ -167,10 +217,10 @@ export function perchTakeOverJs(lang = "en") {
     if(s.state==='ended'){ closeTakeOver(); toMineRefresh(); return; }
     if(s.backing) return;
     s.backing=true; s.back.disabled=true;
-    toApi('hand-back').then(function(r){
+    toOp(s,'hand-back').then(function(r){
       s.backing=false; s.back.disabled=false;
       if(s.closed||toSheet!==s) return;
-      if(r&&r.ok){ closeTakeOver(); toMine(false); return; }
+      if(r&&r.ok){ closeTakeOver(); if(toIsBrowser(s)) toMine(false); return; }
       toSetStatus(s,TO_FAILED);
     });
   }
@@ -178,7 +228,7 @@ export function perchTakeOverJs(lang = "en") {
   /* ---- Copy password (the keychain's own reveal + re-auth, §7 item 13) ---- */
   function toFindPassword(s){
     toKeychain('GET','/entries').then(function(r){
-      if(s.closed||toSheet!==s) return;
+      if(toGone(s)) return;
       var list=(r.status===200&&r.j&&Array.isArray(r.j.entries))?r.j.entries:[];
       var hit=null;
       for(var i=0;i<list.length;i++){
@@ -195,7 +245,7 @@ export function perchTakeOverJs(lang = "en") {
     s.copying=true;
     toKeychain('POST','/reveal',{ id:s.entryId, purpose:'copy' }).then(function(r){
       s.copying=false;
-      if(s.closed||toSheet!==s) return;
+      if(toGone(s)) return;
       if(r.status===403&&r.j&&r.j.code==='reauth_required'){ toNeedAuth(s,function(){ toCopy(s); }); return; }
       if(r.status!==200||typeof r.j.secret!=='string'){ s.hint.textContent=TO_PW_ERROR; s.hint.hidden=false; return; }
       var secret=r.j.secret; r.j.secret=null;
@@ -236,7 +286,7 @@ export function perchTakeOverJs(lang = "en") {
     var body=s.method==='totp'?{ totp_code:v }:{ password:v };
     toKeychain('POST','/reauth',body).then(function(r){
       s.rInput.value='';
-      if(s.closed||toSheet!==s) return;
+      if(toGone(s)) return;
       if(r.status===200){
         s.reauth.hidden=true;
         var next=s.retry; s.retry=null;
@@ -279,6 +329,15 @@ export function perchTakeOverJs(lang = "en") {
       toApi('hand-back').then(function(r){ b.disabled=false; if(r&&r.ok) toMine(false); });
     };
   })();
+
+  /* Turbo snapshots the body before a visit: a password shown in the
+     clipboard-refused window (the sheet's or the browser app tile's) and a
+     typed re-auth never land in that snapshot. Once per document. */
+  bindOnce(document,'turbo:before-cache','toCache',function(){
+    var s=toSheet;
+    if(s){ toWipePassword(s); s.rInput.value=''; }
+    if(typeof atWipePasswords==='function') atWipePasswords();
+  });
 
   bindOnce(document,'perch:browser-takeover','takeOver',function(ev){
     if(!live()) return;
