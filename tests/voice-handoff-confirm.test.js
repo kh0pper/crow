@@ -739,15 +739,24 @@ test("a tasks store that cannot be opened fails the row at once, never leaving i
   s.done(); s2.done();
 });
 
-test("a no that changes the task is a correction, not a decline", async () => {
+test("a no that changes the task is a correction, not a decline; a plain refusal declines", async () => {
   const s = await setup();
   const { id } = await s.propose();
-  assert.equal(await s.answer("no, have writer write a summary instead"), null);
-  assert.equal(await s.answer("no, make it about radio drama"), null);
+  for (const t of ["no, make it about radio drama", "no, have writer write a summary instead", "no, que sea sobre la radio", "no, change it to a short summary"]) {
+    assert.equal(await s.answer(t), null, t);
+  }
   assert.equal((await s.row(id)).status, "proposed");
   assert.equal(s.pending.get(DEVICE.id).id, id, "still waiting: the model re-proposes");
-  assert.deepEqual(await s.answer("no thanks"), { say: "Okay, I won't.", verb: "handoff_declined" });
-  assert.equal((await s.row(id)).status, "declined");
+  const declines = ["no thanks", "not now", "never mind", "forget it", "I changed my mind", "cancel that", "déjalo", "olvídalo", "ahora no",
+    "no, mejor no", "no, mejor lo dejamos", "no pero gracias", "no but thanks", "no, not at all", "no, not at the moment", "no, at least not today",
+    "no, let's not have writer do that", "no, writer doesn't need to", "no, make it not happen", "no, que sea no"];
+  for (const t of declines) {
+    const s2 = await setup();
+    const { id: id2 } = await s2.propose();
+    assert.deepEqual(await s2.answer(t), { say: "Okay, I won't.", verb: "handoff_declined" }, t);
+    assert.equal((await s2.row(id2)).status, "declined", t);
+    s2.done();
+  }
   s.done();
 });
 

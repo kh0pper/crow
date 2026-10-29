@@ -67,10 +67,22 @@ const leadsCorrection = (words) => CORRECTION_LEADS.some((lead) => {
   for (let i = 0; i + lead.length < words.length; i++) if (lead.every((w, j) => words[i + j] === w)) return true;
   return false;
 });
-/** The transcript carries a correction lead with more words after it ("no, make it about radio drama"): what was
- * asked is being changed, so a no is not a plain decline either (the hand-off fastPath lets the model re-propose). */
-export function hasCorrectionLead(transcript) {
-  return leadsCorrection(phraseWords(transcript));
+// A content-change cue after a NO ("no, make it about radio drama", "no, que sea sobre la radio"): the task is
+// being changed, so the hand-off fastPath lets the model re-propose. Deliberately narrower than CORRECTION_LEADS
+// (which serve the yes path): "no, mejor no", "no but thanks" and "no, not at the moment" are plain declines.
+const CONTENT_CHANGE_LEADS = [["make", "it"], ["change", "it", "to"], ["change", "it"], ["make", "that"],
+  ["que", "sea"], ["hazlo", "sobre"], ["hazlo", "de"], ["cambialo", "a"]];
+const NEGATIVE_PARTICLES = new Set(["no", "not", "nunca", "never", "ni", "nada", "nothing"]);
+/** The transcript changes what was asked: a content-change cue with more words after it, and no negative particle
+ * right after the cue ("make it not…", "que sea no…" still decline). */
+export function changesContent(transcript) {
+  const words = phraseWords(transcript);
+  return CONTENT_CHANGE_LEADS.some((lead) => {
+    for (let i = 0; i + lead.length < words.length; i++) {
+      if (lead.every((w, j) => words[i + j] === w)) return !NEGATIVE_PARTICLES.has(words[i + lead.length]);
+    }
+    return false;
+  });
 }
 
 /**

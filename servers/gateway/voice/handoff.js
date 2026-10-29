@@ -24,7 +24,7 @@ import { createSummaryCache, listHandoffCandidates, cleanName } from "./bot-summ
 import { createVoiceBotLoader } from "./crow-voice.js";
 import { botDefsGeneration } from "./defs-generation.js";
 import { modelAvailability } from "./model-availability-voice.js";
-import { matchYesNo, hasCorrectionLead } from "./pending.js";
+import { matchYesNo, changesContent } from "./pending.js";
 import { matchChoice } from "./own-tools.js";
 import { phraseWords, listMatches } from "./tool-families.js";
 import { HANDOFF_TASK_MAX_CHARS, HANDOFF_START_BUDGET_MS } from "./handoff-constants.js";
@@ -522,8 +522,9 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
         const answer = matchYesNo(transcript, { otherBots: peek.names });
         if (!answer) return null;
         // A no that changes the task ("no, have writer write a summary instead", "no, make it about radio drama")
-        // is a correction too: the model re-proposes. A bare no declines.
-        if (answer === "no" && (wantsHandoff(transcript, [...(peek.names || []), peek.name, peek.bot_id]) || hasCorrectionLead(transcript))) return null;
+        // is a correction too: the model re-proposes. Only the OTHER bots' names count for the work check, so
+        // naming this bot in a refusal ("no, writer doesn't need to") still declines, as does a bare no.
+        if (answer === "no" && (wantsHandoff(transcript, peek.names || []) || changesContent(transcript))) return null;
         const entry = pending.take(id);   // act on what take() returned, never the earlier copy
         if (!entry || entry.kind !== "handoff" || entry.id !== peek.id) return null;
         const r = await core.confirm(db, entry.id, answer, "voice");
