@@ -16,8 +16,12 @@
  * `tts_profiles` sync that already exists, which is why every speech preview
  * says `paired: true` whenever a trusted peer exists (minor g).
  *
- * Path segment `custom` is reserved for the custom-role routes (registered
- * before these); `/api/roles/custom...` answers 404 here.
+ * Path segment `custom` is reserved for the custom-role routes (Task 18:
+ * `POST /api/roles/custom` create/edit, `POST /api/roles/custom/:id/preview`,
+ * `DELETE /api/roles/custom/:id`). They are registered on this router AHEAD
+ * of every `/api/roles/:id...` route; anything else under `custom` still
+ * answers 404 there (roleDef refuses the reserved id). A custom role only
+ * ever needs chat or vision: never safety, voice or classifier semantics.
  *
  * Add a provider (roles phase 2b): `/api/providers/test`, `/api/providers`,
  * and per provider `/plan`, `/probe`, `/recommended/preview`, `/recommended`.
@@ -37,8 +41,9 @@ import { requireDashboardSessionJson } from "./models.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { CORE_ROLES, MEDIA_CAPABILITIES, isRoleRef, roleIdOf, isRawKey, isValidCustomRoleId, walkRole } from "../../shared/model-roles.js";
 import { getOwnAddresses } from "../../shared/locality.js";
-import { loadRoleContext } from "../../shared/model-roles-store.js";
-import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
+import { loadRoleContext, deleteCustomRole, normalizeCustomDef } from "../../shared/model-roles-store.js";
+import { previewRoleChange, applyRoleChange, previewCustomRoleEdit, applyCustomRoleEdit } from "../../shared/role-change.js";
+import { customRoleConsumers } from "../../shared/role-consumers.js";
 import { listRolePicks, providerLabel } from "../../shared/role-picks.js";
 import { readPickChecks, pickCheckOf, checkKindFor, isProbeKind } from "../../shared/pick-checks.js";
 import { candidatePick, presetForRow, isRecommendationsStale, loadRecommendations, recommendedModelIds, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
@@ -236,6 +241,57 @@ export default function rolesApiRouter({
       .digest("hex").slice(0, 32);
     return { where, host, cloud, paired, previewHash };
   }
+
+  // --- Custom roles (Task 18) -------------------------------------------------
+  // Registered before every `/api/roles/:id...` route, so the literal `custom` wins.
+
+  /** The definition fields of a body (never an id or anything else). */
+  const customDefBody = (b) => ({ label: b?.label, job: b?.job, capability: b?.capability, allowHeavy: b?.allowHeavy === true });
+  const CUSTOM_STATUS = { invalid_label: 400, invalid_capability: 400, unknown_role: 404 };
+
+  router.post("/api/roles/custom", csrfMiddleware, withDb("custom save", async (db, req, res) => {
+    const b = req.body || {};
+    const id = b.id === undefined || b.id === null ? undefined : b.id;
+    const r = await applyCustomRoleEdit(db, { id, ...customDefBody(b) }, {
+      actor: actorOf(req),
+      previewHash: typeof b.previewHash === "string" ? b.previewHash : undefined,
+      ackUnattended: b.ackUnattended === true,
+      ackCloud: b.ackCloud === true,
+      env,
+      ...ownOf(req),
+    });
+    if (r.ok) return res.json({ ok: true, id: r.id });
+    const out = { ok: false, reason: r.reason };
+    if (r.preview) out.preview = r.preview;
+    res.status(r.preview ? 409 : CUSTOM_STATUS[r.reason] || 400).json(out);
+  }));
+
+  router.post("/api/roles/custom/:id/preview", csrfMiddleware, withDb("custom preview", async (db, req, res) => {
+    const ctx = await loadCtx(db);
+    const id = req.params.id;
+    if (!isValidCustomRoleId(id) || !ctx.customDefs?.[id]) return res.status(404).json({ ok: false, reason: "unknown_role" });
+    const n = normalizeCustomDef(customDefBody(req.body));
+    if (n.error) return res.status(400).json({ ok: false, reason: n.error });
+    res.json(await previewCustomRoleEdit(db, id, n.def, { ctx, env, ...ownOf(req) }));
+  }));
+
+  router.delete("/api/roles/custom/:id", csrfMiddleware, withDb("custom delete", async (db, req, res) => {
+    const r = await deleteCustomRole(db, req.params.id, {
+      consumersFn: (d, id) => customRoleConsumers(d, id, { env }),
+      actor: actorOf(req),
+    });
+    if (r.ok) return res.json({ ok: true });
+    if (r.reason === "in_use") {
+      // Names and ids only: what the "in use" line lists.
+      const consumers = (r.consumers || []).map((c) => ({
+        kind: String(c.kind), id: String(c.id),
+        ...(typeof c.label === "string" ? { label: c.label } : {}),
+        ...(typeof c.labelKey === "string" ? { labelKey: c.labelKey } : {}),
+      }));
+      return res.status(409).json({ ok: false, reason: "in_use", consumers });
+    }
+    res.status(r.reason === "unknown_role" ? 404 : 400).json({ ok: false, reason: r.reason });
+  }));
 
   // --- Picks ----------------------------------------------------------------
 

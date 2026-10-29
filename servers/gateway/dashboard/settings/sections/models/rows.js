@@ -27,7 +27,7 @@ import { friendlyModel } from "../../../shared/bot-display.js";
 import { readSetting } from "../../registry.js";
 import { getOwnAddresses } from "../../../../../shared/locality.js";
 
-/** Page groups, in order. `custom` is filled by the custom-roles work (Task 18). */
+/** Page groups, in order. `custom` lists the user's own roles (Task 18), sorted by name. */
 export const ROLE_GROUPS = Object.freeze([
   Object.freeze({ id: "thinking", roles: Object.freeze(["coordinator", "quick", "deep", "everyday", "expert", "critic"]) }),
   Object.freeze({ id: "speech", roles: Object.freeze(["voice", "stt", "tts"]) }),
@@ -171,7 +171,11 @@ async function chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStat
       row.status = { code: seeded ? "default" : "ready" };
       row.model = modelOf(id === "voice" ? voiceKeys?.fast || r.key : r.key, ctx, whereOpts);
     } else if (r.reason === "fallback") {
-      row.status = { code: "fallback", role: r.chain[r.chain.length - 1] };
+      const via = r.chain[r.chain.length - 1];
+      row.status = { code: "fallback", role: via };
+      // A custom role has no translated name: the row carries the user's own.
+      const vl = ctx.customDefs?.[via]?.label;
+      if (typeof vl === "string" && vl) row.status.roleLabel = vl;
       row.model = modelOf(r.key, ctx, whereOpts);
     } else if (r.reason === "unset") {
       if (CONSUMER_DEFAULT.has(id)) {
@@ -254,6 +258,17 @@ export async function buildRoleRows(db, { env = process.env, ownAddrs, localMark
       }
       rows.push({ ...row, group: g.id, labelKey: ROLE_LABEL_KEYS[id], jobKey: ROLE_JOB_KEYS[id] });
     }
+  }
+  // The user's own roles: chat-style rows that carry their own name and job (no translation keys).
+  const custom = Object.entries(ctx.customDefs || {})
+    .map(([id, d]) => ({ id, label: typeof d.label === "string" && d.label ? d.label : id, job: typeof d.job === "string" ? d.job : "", d }))
+    .sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+  for (const c of custom) {
+    const row = await chatRow(db, { id: c.id, capability: c.d.capability || "chat" }, ctx, { env, whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
+    rows.push({
+      ...row, group: "custom", custom: true, label: c.label, job: c.job,
+      capability: c.d.capability || "chat", allowHeavy: c.d.allowHeavy === true, labelKey: null, jobKey: null,
+    });
   }
   return rows;
 }

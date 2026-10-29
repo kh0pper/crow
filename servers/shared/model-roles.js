@@ -271,16 +271,19 @@ export function parseBindingValue(raw) {
   return out;
 }
 
-const CUSTOM_CAPABILITIES = ["chat", "vision"];
+/** What a custom role may need. Never safety, voice, speech or a classifier: those stay core-only. */
+export const CUSTOM_CAPABILITIES = Object.freeze(["chat", "vision"]);
 
 function parseCustomDef(raw) {
   let v;
   try { v = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
   if (!v || typeof v !== "object" || Array.isArray(v) || !CUSTOM_CAPABILITIES.includes(v.capability)) return null;
-  // Spec 10-21 §3.2: a definition is {label, job, capability}; anything else is dropped.
+  // Spec 10-21 §3.2: a definition is {label, job, capability}, plus Phase 2's
+  // "may use big models" switch, kept only when it is boolean true; anything else is dropped.
   const def = { capability: v.capability };
   if (typeof v.label === "string") def.label = v.label;
   if (typeof v.job === "string") def.job = v.job;
+  if (v.allowHeavy === true) def.allowHeavy = true;
   return def;
 }
 

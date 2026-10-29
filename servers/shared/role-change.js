@@ -17,9 +17,11 @@ import { createHash } from "node:crypto";
 import { splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
 import {
   resolveRoleKey, resolveChosenRoleKey, walkRole, isCloudKey, whereItRuns,
-  finalHopRow, isRoleRef, roleIdOf, isRawKey,
+  finalHopRow, isRoleRef, roleIdOf, isRawKey, isValidCustomRoleId,
 } from "./model-roles.js";
-import { loadRoleContext, setBinding, addBindingsChangeListener, invalidateRoleContext } from "./model-roles-store.js";
+import {
+  loadRoleContext, setBinding, addBindingsChangeListener, invalidateRoleContext, normalizeCustomDef, saveCustomRole,
+} from "./model-roles-store.js";
 import { scanSlots } from "./model-consumers.js";
 import { listRoleConsumers, rolesReaching } from "./role-consumers.js";
 import { getOwnAddresses } from "./locality.js";
@@ -160,11 +162,13 @@ const resolvedKey = (roleId, c) => {
  * never uses marks, minor e).
  * @returns {Promise<RolePreview>}
  */
-export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, env = process.env, localMarks, ownAddrs } = {}) {
+export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, env = process.env, localMarks, ownAddrs, nextCustomDefs } = {}) {
   ctx ??= await loadRoleContext(db, { maxAgeMs: 0 });
   slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false, env });
   ownAddrs ??= getOwnAddresses(); // once per preview, not per candidate
   const ctxX = hypothetical(ctx, roleId, change);
+  // A custom-role edit: the same binding under the edited definitions.
+  if (nextCustomDefs) ctxX.customDefs = nextCustomDefs;
   const whereOpts = { providers: ctx.providers, localMarks, ownAddrs };
 
   const cur = resolveRoleKey(`role:${roleId}`, ctx);
@@ -298,4 +302,59 @@ export async function applyRoleChange(db, roleId, change = {}, {
     clearProviderTaskCache();
   }
   return { ok: true, preview };
+}
+
+// ---- custom-role edits -------------------------------------------------------
+
+/** The fields whose change can move what a custom role resolves to. */
+const defMoves = (a, b) => a.capability !== b.capability || !!a.allowHeavy !== !!b.allowHeavy;
+
+/**
+ * m14: what an edit to custom role `id` does before it is saved: the role's
+ * own stored binding resolved under the edited definition (previewRoleChange
+ * with the hypothetical customDefs). The hash also covers the definition, so
+ * a preview of one edit never authorises another. `def` is normalised as
+ * saveCustomRole would store it; an invalid def or an unknown id throws.
+ * @returns {Promise<RolePreview>}
+ */
+export async function previewCustomRoleEdit(db, id, def, { ctx, env = process.env, localMarks, ownAddrs } = {}) {
+  ctx ??= await loadRoleContext(db, { maxAgeMs: 0 });
+  const n = normalizeCustomDef(def);
+  if (n.error) throw new TypeError(`previewCustomRoleEdit: ${n.error}`);
+  if (!isValidCustomRoleId(id) || !ctx.customDefs?.[id]) throw new TypeError("previewCustomRoleEdit: unknown_role");
+  const b = ctx.bindings?.[id] || null;
+  const change = { model: b?.model ?? null, ...(Array.isArray(b?.fallback) ? { fallback: [...b.fallback] } : {}) };
+  const nextCustomDefs = { ...ctx.customDefs, [id]: n.def };
+  const pv = await previewRoleChange(db, id, change, { ctx, env, localMarks, ownAddrs, nextCustomDefs });
+  const previewHash = createHash("sha256").update(JSON.stringify([pv.previewHash, id, n.def.capability, !!n.def.allowHeavy])).digest("hex");
+  return { ...pv, previewHash };
+}
+
+/**
+ * Save a custom role from the page. A create, or an edit that keeps the
+ * capability and the big-models switch, is written at once. An edit that
+ * changes either needs the hash of a fresh previewCustomRoleEdit (refusals:
+ * needs_preview without one, preview_changed on a mismatch) and the acks
+ * that preview asks for (needs_ack_unattended, needs_ack_cloud). A refusal
+ * after a preview carries it.
+ * @returns {Promise<{ok:true, id:string}|{ok:false, reason:string, preview?:RolePreview}>}
+ */
+export async function applyCustomRoleEdit(db, def = {}, {
+  actor, previewHash, ackUnattended = false, ackCloud = false, env = process.env, localMarks, ownAddrs,
+} = {}) {
+  const n = normalizeCustomDef(def);
+  if (n.error) return { ok: false, reason: n.error };
+  if (def.id === undefined || def.id === null) return saveCustomRole(db, { ...n.def }, { actor });
+  const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
+  const was = isValidCustomRoleId(def.id) ? ctx.customDefs?.[def.id] : null;
+  if (!was) return { ok: false, reason: "unknown_role" };
+  if (defMoves(was, n.def)) {
+    const preview = await previewCustomRoleEdit(db, def.id, n.def, { ctx, env, localMarks, ownAddrs });
+    const fail = (reason) => ({ ok: false, reason, preview });
+    if (typeof previewHash !== "string" || !previewHash) return fail("needs_preview");
+    if (previewHash !== preview.previewHash) return fail("preview_changed");
+    if (preview.needs.ackUnattended && ackUnattended !== true) return fail("needs_ack_unattended");
+    if (preview.needs.ackCloud && ackCloud !== true) return fail("needs_ack_cloud");
+  }
+  return saveCustomRole(db, { id: def.id, ...n.def }, { actor });
 }

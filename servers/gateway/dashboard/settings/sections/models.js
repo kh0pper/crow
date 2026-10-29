@@ -10,13 +10,18 @@
  * When the provider recommendations are past their review date, one line
  * says so (Crow fills no role from them until they are reviewed).
  *
+ * "Your roles" lists the user's own roles (Task 18) and always offers "Add a
+ * role"; a custom row's "Edit" opens `<dialog id="models-custom">`
+ * (customRolesClientJS, through /api/roles/custom), which also holds Delete.
+ * Core rows have no edit or delete control.
+ *
  * Search ranking stays out of the list until something fills it on purpose;
  * "Show search ranking" (`?section=models&show=rerank`) renders it anyway.
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { buildRoleRows, ROLE_GROUPS, FILLED_STATUSES } from "./models/rows.js";
-import { modelsClientJS } from "./models/client.js";
+import { modelsClientJS, customRolesClientJS } from "./models/client.js";
 import { addProviderSheetHtml, addProviderClientJS } from "../../shared/add-provider-ui.js";
 import { isRecommendationsStale, loadRecommendations } from "../../../../shared/provider-recommendations.js";
 
@@ -26,7 +31,8 @@ function statusText(row, lang) {
   const code = row.status?.code || "not_set";
   if (code === "fallback") {
     const via = row.status.role;
-    return fill(t("models.status.fallback", lang), { role: via ? t(`settings.roles.${via}`, lang) : "?" });
+    const name = row.status.roleLabel || (via ? t(`settings.roles.${via}`, lang) : "?");
+    return fill(t("models.status.fallback", lang), { role: name });
   }
   return t(`models.status.${code}`, lang);
 }
@@ -36,6 +42,10 @@ function whereChip(where, lang) {
   return `<span class="mr-where mr-where-${w}">${escapeHtml(t(`models.where.${w}`, lang))}</span>`;
 }
 
+/** A row's name and job: the user's own words for a custom role, the translation otherwise. */
+const rowLabel = (row, lang) => (row.custom ? row.label || row.id : t(row.labelKey, lang));
+const rowJob = (row, lang) => (row.custom ? row.job || "" : t(row.jobKey, lang));
+
 function rowHtml(row, lang) {
   const model = row.model
     ? `<div class="mr-model"><span class="mr-model-label">${escapeHtml(row.model.label || row.model.key || "")}</span>${whereChip(row.model.where, lang)}</div>`
@@ -43,23 +53,31 @@ function rowHtml(row, lang) {
   const note = (row.voiceBot
     ? `<p class="mr-note">${escapeHtml(fill(t("models.ui.voiceBotUses", lang), { name: row.voiceBot.name }))}</p>`
     : "") + (row.refused
-    ? `<p class="mr-note mr-refused">${escapeHtml(fill(t("models.warn.refused", lang), { consumer: t(row.labelKey, lang) }))}</p>`
+    ? `<p class="mr-note mr-refused">${escapeHtml(fill(t("models.warn.refused", lang), { consumer: rowLabel(row, lang) }))}</p>`
+    : "") + (row.custom && row.allowHeavy
+    ? `<p class="mr-note mr-big">${escapeHtml(t("models.custom.bigModels", lang))}</p>`
     : "");
   const details = row.detailsHref
     ? `<a class="mr-details" href="/dashboard/settings${escapeHtml(row.detailsHref)}" data-turbo-frame="_top">${escapeHtml(t("models.ui.details", lang))}</a>`
     : "";
+  // Only a custom row can be edited or deleted (the edit sheet holds Delete); core rows have neither.
+  const edit = row.custom
+    ? `<button type="button" class="mr-change mr-edit" data-custom-edit="${escapeHtml(row.id)}" data-custom-label="${escapeHtml(row.label || "")}" data-custom-job="${escapeHtml(row.job || "")}" data-custom-capability="${escapeHtml(row.capability === "vision" ? "vision" : "chat")}" data-custom-heavy="${row.allowHeavy ? "true" : "false"}" aria-haspopup="dialog" aria-controls="models-custom">${escapeHtml(t("common.edit", lang))}</button>`
+    : "";
   const code = row.status?.code || "not_set";
-  return `<article class="mr-row" data-row-id="${escapeHtml(row.id)}" data-status="${escapeHtml(code)}">
+  const job = rowJob(row, lang);
+  return `<article class="mr-row" data-row-id="${escapeHtml(row.id)}" data-status="${escapeHtml(code)}"${row.custom ? " data-custom" : ""}>
       <div class="mr-text">
-        <h3 class="mr-label">${escapeHtml(t(row.labelKey, lang))}</h3>
-        <p class="mr-job">${escapeHtml(t(row.jobKey, lang))}</p>
+        <h3 class="mr-label">${escapeHtml(rowLabel(row, lang))}</h3>
+        ${job ? `<p class="mr-job">${escapeHtml(job)}</p>` : ""}
         ${model}
         <p class="mr-status mr-status-${escapeHtml(code)}">${escapeHtml(statusText(row, lang))}</p>
         ${note}
       </div>
       <div class="mr-actions">
         ${details}
-        <button type="button" class="mr-change" data-role="${escapeHtml(row.id)}" data-role-kind="${escapeHtml(row.kind || "chat")}" data-role-label="${escapeHtml(t(row.labelKey, lang))}" aria-haspopup="dialog" aria-controls="models-change">${escapeHtml(t("models.ui.change", lang))}</button>
+        ${edit}
+        <button type="button" class="mr-change" data-role="${escapeHtml(row.id)}" data-role-kind="${escapeHtml(row.kind || "chat")}" data-role-label="${escapeHtml(rowLabel(row, lang))}" aria-haspopup="dialog" aria-controls="models-change">${escapeHtml(t("models.ui.change", lang))}</button>
       </div>
     </article>`;
 }
@@ -86,12 +104,17 @@ const STYLE = `<style>
   .mr-note { margin:0.25rem 0 0; font-size:0.8rem; color:var(--crow-text-muted); }
   .mr-actions { display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem; }
   .mr-details { display:inline-flex; align-items:center; min-height:44px; color:var(--crow-accent); text-decoration:none; font-size:0.9rem; }
-  #models-change { border:none; padding:0; width:min(560px, 100%); max-width:100%; max-height:85dvh; box-sizing:border-box; overflow:auto;
+  .mr-add-role { align-self:flex-start; }
+  .mc-field { display:flex; flex-direction:column; gap:0.25rem; margin:0 0 0.75rem; }
+  .mc-field input, .mc-field select { min-height:44px; padding:0 0.75rem; box-sizing:border-box; width:100%; font:inherit; color:var(--crow-text-primary);
+    background:var(--crow-bg-elevated); border:1px solid var(--crow-border); border-radius:var(--crow-radius-control); }
+  .mc-delete { margin-right:auto; }
+  #models-change, #models-custom { border:none; padding:0; width:min(560px, 100%); max-width:100%; max-height:85dvh; box-sizing:border-box; overflow:auto;
     border-radius:var(--crow-radius-card); background:var(--crow-bg-surface); color:var(--crow-text-primary); box-shadow:0 -8px 32px rgba(0,0,0,0.18); }
-  #models-change::backdrop { background:rgba(0,0,0,0.4); }
-  #models-change[open]:not(:modal) { position:fixed; inset:auto 0 0; z-index:1200; margin:0 auto; }
+  #models-change::backdrop, #models-custom::backdrop { background:rgba(0,0,0,0.4); }
+  #models-change[open]:not(:modal), #models-custom[open]:not(:modal) { position:fixed; inset:auto 0 0; z-index:1200; margin:0 auto; }
   @media (max-width: 480px) {
-    #models-change { width:100%; margin:auto 0 0; border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0; }
+    #models-change, #models-custom { width:100%; margin:auto 0 0; border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0; }
   }
   .mc-list { display:flex; flex-direction:column; gap:0.4rem; }
   .mc-pick { display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem; width:100%; min-height:44px; padding:0.5rem 0.75rem; box-sizing:border-box; text-align:left;
@@ -120,10 +143,15 @@ export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false
   const visible = rows.filter((r) => !r.hidden || wanted.has(r.id));
   const groups = ROLE_GROUPS.map((g) => {
     const rs = visible.filter((r) => r.group === g.id);
-    if (!rs.length) return "";
+    const isCustom = g.id === "custom";
+    // "Your roles" is always shown, so a first role can be added.
+    if (!rs.length && !isCustom) return "";
+    const add = isCustom
+      ? `<button type="button" class="mr-change mr-add-role" data-custom-add aria-haspopup="dialog" aria-controls="models-custom">${escapeHtml(t("models.ui.addRole", lang))}</button>`
+      : "";
     return `<section class="mr-group" data-group="${escapeHtml(g.id)}">
-      <h2 class="mr-group-title">${escapeHtml(t(g.id === "custom" ? "models.ui.yourRoles" : `models.group.${g.id}`, lang))}</h2>
-      <div class="mr-rows">${rs.map((r) => rowHtml(r, lang)).join("")}</div>
+      <h2 class="mr-group-title">${escapeHtml(t(isCustom ? "models.ui.yourRoles" : `models.group.${g.id}`, lang))}</h2>
+      <div class="mr-rows">${rs.map((r) => rowHtml(r, lang)).join("")}${add}</div>
     </section>`;
   }).join("");
   const showRerank = rows.some((r) => r.id === "rerank" && r.hidden && !wanted.has("rerank"))
@@ -140,8 +168,10 @@ export function renderModelsPage(rows, { lang = "en", show = [], openAdd = false
     ${groups}
     ${showRerank}
     <dialog id="models-change" class="mc-sheet" aria-labelledby="models-change-title"></dialog>
+    <dialog id="models-custom" class="mc-sheet" aria-labelledby="models-custom-title"></dialog>
     ${addProviderSheetHtml({ lang, open: openAdd })}
     <script>${modelsClientJS({ lang })}</script>
+    <script>${customRolesClientJS({ lang })}</script>
     <script>${addProviderClientJS({ lang })}</script>`;
 }
 

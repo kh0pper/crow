@@ -89,7 +89,8 @@ test("parse rows", () => {
   assert.deepEqual(Object.keys(customDefs), ["c-coder"]);
   assert.equal(customDefs["c-coder"].capability, "chat");
   const extra = parseBindingRows([{ key: "model_role_def.c-x", value: '{"label":"Coder","job":"writes code","capability":"vision","allowHeavy":true,"fallback":["deep"],"evil":1}' }]);
-  assert.deepEqual(extra.customDefs["c-x"], { capability: "vision", label: "Coder", job: "writes code" });
+  // Phase 2 (Task 18): "may use big models" is kept, only as boolean true.
+  assert.deepEqual(extra.customDefs["c-x"], { capability: "vision", label: "Coder", job: "writes code", allowHeavy: true });
   assert.deepEqual(parseBindingRows(null), { bindings: {}, customDefs: {} });
 });
 
