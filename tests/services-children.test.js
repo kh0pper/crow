@@ -963,3 +963,81 @@ test("fix round 2 (b): a long in-flight call is cut at lifetime + grace and reje
     await C.stopAllChildren();
   }
 });
+
+// ---- fix round 3 (re-review N1): the kernel's realpath, not JS's lexical ".." -----------------
+
+test("fix round 3 (N1): <dir>/L/../secrets/keychain.key, L a link into the Crow home, is refused by folderRefusal and the spawn walk", async () => {
+  const { folderRefusal } = await import("../servers/gateway/services/connect-test.js");
+  mkdirSync(join(HOME, "bundles"), { recursive: true });
+  await withDb((d) => ensureWriteKey(d, { crowHome: HOME }));   // the real scratch key file
+  const realKey = readFileSync(join(SECRETS, "keychain.key"), "utf8");
+  mkdirSync(join(SECRETS, ".obsidian"), { recursive: true });
+  // `side` holds L (→ <home>/bundles, so the kernel's L/.. is <home>) and decoys at the path a
+  // lexical ".." would give: <side>/secrets/keychain.key and an innocent <side>/secrets vault.
+  const side = mkdtempSync(join(VAULTS, "n1-"));
+  symlinkSync(join(HOME, "bundles"), join(side, "L"));
+  mkdirSync(join(side, "secrets", ".obsidian"), { recursive: true });
+  writeFileSync(join(side, "secrets", "keychain.key"), "decoy");
+  const sneaky = `${side}/L/../secrets/keychain.key`;
+  assert.equal(readFileSync(sneaky, "utf8"), realKey, "the kernel follows L first: this IS the keychain key");
+  const opts = { crowHome: HOME, expectEntry: ".obsidian", otherSecretsDirs: [], scanLinks: true };
+
+  // The walk: a vault link whose target is the sneaky path.
+  const v = vault("n1-walk");
+  symlinkSync(sneaky, join(v, "note.md"));
+  assert.equal(folderRefusal(v, opts), "forbidden_target", "walk");
+  // The root: the vault path itself in the sneaky shape.
+  assert.equal(folderRefusal(`${side}/L/../secrets`, { ...opts, scanLinks: false }), "forbidden_target", "root");
+
+  try {
+    // Through the spawn re-check: neither starts a child.
+    const before = spawnCount();
+    const c1 = await connect("obsidian", { config: { OBSIDIAN_VAULT_PATH: v } });
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, c1.uuid, { crowHome: HOME }))), "child_unavailable");
+    assert.equal((await withDb((d) => SC.getConnection(d, c1.uuid))).lastError, "forbidden_target");
+    const c2 = await connect("obsidian", { config: { OBSIDIAN_VAULT_PATH: `${side}/L/../secrets` } });
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, c2.uuid, { crowHome: HOME }))), "child_unavailable");
+    assert.equal((await withDb((d) => SC.getConnection(d, c2.uuid))).lastError, "forbidden_target");
+    assert.equal(spawnCount(), before);
+  } finally { await C.stopAllChildren(); }
+});
+
+test("fix round 3: stopChild (disconnect) also kills a RETIRED child of that uuid at once, no grace wait", async () => {
+  let offset = 0;
+  C._setChildrenForTest({ clock: () => Date.now() + offset });
+  try {
+    const g = await github();
+    const first = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    const { pid } = await first.client.callTool({ name: "whoami", arguments: {} }).then((r) => JSON.parse(r.content[0].text));
+    const long = codeOf(first.client.callTool({ name: "sleep", arguments: { ms: 30_000 } }));
+    offset = 60 * 60_000 + 10_000;   // past the lifetime, well inside the grace
+    const fresh = await withDb((d) => C.ensureChild(d, g.uuid, { crowHome: HOME }));
+    assert.notEqual(fresh.client, first.client, "the busy expired child was moved aside");
+    await withApi(async (s) => {
+      const r = await post(s, `/dashboard/services/api/connection/${g.uuid}/disconnect`, AUTH);
+      assert.equal(r.status, 200);
+    });
+    const t0 = Date.now();
+    assert.equal(await long, "child_unavailable", "the retired child's call is cut at once");
+    assert.ok(Date.now() - t0 < 3000);
+    let alive = true;
+    while (alive && Date.now() - t0 < 4000) {
+      try { process.kill(pid, 0); await sleep(50); } catch { alive = false; }
+    }
+    assert.equal(alive, false, "the retired child's process is gone");
+    assert.equal(C.listChildren().length, 0);
+
+    // stopAllChildren closes retiring entries too.
+    offset = 0;
+    const h = await github();
+    const c = await withDb((d) => C.ensureChild(d, h.uuid, { crowHome: HOME }));
+    const busy = codeOf(c.client.callTool({ name: "sleep", arguments: { ms: 30_000 } }));
+    offset = 60 * 60_000 + 10_000;
+    await withDb((d) => C.ensureChild(d, h.uuid, { crowHome: HOME }));
+    await C.stopAllChildren();
+    assert.equal(await busy, "child_unavailable");
+  } finally {
+    C._setChildrenForTest({ clock: null });
+    await C.stopAllChildren();
+  }
+});
