@@ -25,7 +25,7 @@ const mem = (memMiB, swapMiB) => `MemTotal:       ${memMiB * 1024} kB\nMemFree: 
 // Commands the dry-run must never run: each stub logs its argv and fails loudly.
 const MUTATING = ["sudo", "apt-get", "apt", "curl", "git", "npm", "loginctl", "usermod", "systemd-run", "journalctl", "fallocate", "mkswap", "swapon", "docker", "ufw", "node"];
 
-const REAL_TOOLS = ["realpath", "awk", "grep", "find", "cat"];
+const REAL_TOOLS = ["realpath", "awk", "grep", "find", "cat", "mktemp", "rm"];
 
 /**
  * A fake box. opts: os, meminfo, arch, diskKb, tsState ("Running" | "Stopped" | null = not
@@ -304,8 +304,11 @@ test("static: never Funnel, never a path-prefixed Serve mapping, never rewrites 
   assert.doesNotMatch(code, /tailscale funnel (?!status)/);
   assert.doesNotMatch(code, /--set-path/);
   assert.doesNotMatch(code, /ufw (--force )?(delete|reset|disable|enable|default|insert|route)/);
-  assert.match(code, /ufw allow in on tailscale0/);
-  assert.match(code, /tailscale serve --bg --https=443 http:\/\/127\.0\.0\.1:3014/);
+  // ufw: only Serve's 443/tcp on tailscale0, never the whole tailnet interface.
+  assert.match(code, /sudo ufw allow in on tailscale0 to any port 443 proto tcp comment 'crow-satellite'/);
+  assert.doesNotMatch(code, /allow in on tailscale0(?! to any port 443 proto tcp)/);
+  assert.match(code, /\^443\/tcp on tailscale0/, "idempotency matches the exact scoped rule");
+  assert.match(code, /sudo tailscale serve --bg --https=443 "http:\/\/127\.0\.0\.1:\$\{AGENT_PORT\}"/);
   // --repair never deletes kept state.
   assert.doesNotMatch(code, /rm -rf?[^\n]*(vault|secrets|installed\.json|bundles|cert\.json|pinned\.json)/);
 });
@@ -322,4 +325,78 @@ test("crow-satellite wrapper: only status and pair-code, CROW_HOME defaults to ~
   const st = spawnSync("bash", [CLI, "status"], { encoding: "utf8", env });
   assert.equal(st.status, 1, st.stdout + st.stderr);
   assert.ok(st.stderr.includes(join(box.home, ".crow-satellite")), st.stderr);
+});
+
+test("static: reset-failed precedes the restart (a --repair after a start-limit hit)", () => {
+  const code = src();
+  const rf = code.indexOf('sudo systemctl reset-failed "$UNIT_NAME"');
+  const rs = code.indexOf('sudo systemctl restart "$UNIT_NAME"');
+  assert.ok(rf > 0 && rs > rf, "reset-failed before restart");
+});
+
+test("static: the read-only ufw and Funnel checks run right after sudo -v, before any change", () => {
+  const code = src();
+  const sudoV = code.indexOf("sudo -v");
+  const ufw = code.indexOf("sudo ufw status verbose");
+  const funnel = code.indexOf("check_no_funnel\n");
+  const firstChange = code.indexOf("sudo fallocate");
+  assert.ok(sudoV > 0 && ufw > sudoV && funnel > sudoV, "checks after sudo -v");
+  assert.ok(ufw < firstChange && funnel < firstChange, "checks before the first change");
+});
+
+test("seed scan: an unreadable subdirectory under HOME is refused and named", () => {
+  const box = fakeBox();
+  const locked = join(box.home, "locked");
+  mkdirSync(locked);
+  chmodSync(locked, 0o000);
+  try {
+    const r = dryRun(box);
+    assert.equal(r.status, 78, r.out);
+    assert.ok(r.out.includes(locked), r.out);
+    assertNoMutation(r);
+  } finally {
+    chmodSync(locked, 0o700);
+  }
+});
+
+test("seed scan: an unreadable bundle data dir under SAT_HOME/bundles/*/data is exempt", () => {
+  const box = fakeBox();
+  const data = join(box.home, ".crow-satellite", "bundles", "gitea", "data");
+  mkdirSync(join(data, "pg"), { recursive: true });
+  chmodSync(join(data, "pg"), 0o000);
+  chmodSync(data, 0o000);
+  try {
+    const r = dryRun(box);
+    assert.equal(r.status, 0, r.out);
+  } finally {
+    chmodSync(data, 0o700);
+    chmodSync(join(data, "pg"), 0o700);
+  }
+});
+
+test("seed scan: a symlinked directory under HOME is refused (the scan does not follow it)", () => {
+  const box = fakeBox();
+  const outside = join(box.dir, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "identity.json"), '{"seed":"aa"}');
+  symlinkSync(outside, join(box.home, "linked"));
+  const r = dryRun(box);
+  assert.equal(r.status, 78, r.out);
+  assert.ok(r.out.includes(join(box.home, "linked")), r.out);
+});
+
+test("a symlink standing in for ~/.crow-satellite is refused", () => {
+  const box = fakeBox();
+  mkdirSync(join(box.home, "elsewhere"));
+  symlinkSync(join(box.home, "elsewhere"), join(box.home, ".crow-satellite"));
+  const r = dryRun(box);
+  assert.equal(r.status, 78, r.out);
+  assert.match(r.out, /\.crow-satellite/);
+});
+
+test("a SAT_HOME with whitespace is refused (the unit's Environment= would split it)", () => {
+  const box = fakeBox();
+  const r = dryRun(box, { env: { SAT_HOME: join(box.home, "crow sat") } });
+  assert.equal(r.status, 78, r.out);
+  assert.match(r.out, /whitespace/);
 });
