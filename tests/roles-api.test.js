@@ -494,14 +494,27 @@ test("POST /api/providers refuses on a failed test and writes nothing", async ()
   assert.equal(await providerCount(), before);
 });
 
-test("POST /api/providers saves on a passing test and answers only the id", async () => {
+test("re-review (a): POST /api/providers answers ineligible with the reason for a cloud row the door would refuse", async () => {
+  const url = "http://api.example.com/v1";
+  const testFn = async () => ({ ok: true, code: "ok", status: 200, models: ["m1"], host: "api.example.com", baseUrl: url });
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/providers", {
+      body: { presetId: "other", baseUrl: url, apiKey: "fixture-pasted-key-778", modelIds: ["m1"] }, headers: csrfHeaders,
+    });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.consent, "ineligible");
+    assert.equal(r.json.consentReason, "insecure");
+  }, addOpts({ testFn }));
+});
+
+test("POST /api/providers saves on a passing test and answers only the id and the consent result", async () => {
   const testFn = async () => ({ ok: true, code: "ok", status: 200, models: ["x/y"], host: "openrouter.ai", baseUrl: OR_URL });
   await withServer(async (s) => {
     const r = await call(s, "POST", "/api/providers", {
       body: { presetId: "openrouter", apiKey: "fixture-pasted-key-777", modelIds: ["x/y"] }, headers: csrfHeaders,
     });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json, { ok: true, providerId: "openrouter" });
+    assert.deepEqual(r.json, { ok: true, providerId: "openrouter", consent: "granted" });
   }, addOpts({ testFn }));
   const row = (await db.execute("SELECT api_key, models FROM providers WHERE id = 'openrouter'")).rows[0];
   assert.equal(row.api_key, "fixture-pasted-key-777");
@@ -760,12 +773,13 @@ test("a typed address is used only for Other; presets ignore it", async () => {
 
 test("door and bundle rows are not addable providers here", async () => {
   await insOr("crow-c-peer", [{ id: "anthropic/claude-haiku-5.5" }]);
+  await insOr("CROW-C-upper", [{ id: "anthropic/claude-haiku-5.5" }]);
   await insOr("bundled", [{ id: "anthropic/claude-haiku-5.5" }]);
   await db.execute("UPDATE providers SET bundle_id = 'some-bundle' WHERE id = 'bundled'");
   invalidateRoleContext();
   let probes = 0;
   await withServer(async (s) => {
-    for (const id of ["crow-c-peer", "bundled"]) {
+    for (const id of ["crow-c-peer", "CROW-C-upper", "bundled"]) {
       const plan = await call(s, "GET", `/api/providers/${id}/plan`);
       assert.equal(plan.status, 404, id);
       assert.equal(plan.json.error, "not_addable", id);

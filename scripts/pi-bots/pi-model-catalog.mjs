@@ -11,7 +11,9 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { resolveNodeBin, resolvePiCli } from "./pi_resolver.mjs";
+import { piProviderIdFor, piModelsJsonPath, readPiModelsJson } from "./pi_provider_id.mjs";
 
 let _cache = null; // { at, keys }
 let _inflight = null;
@@ -52,10 +54,7 @@ export function listPiModels({
   return _inflight;
 }
 
-/** What pi's models.json declares, without spawning pi (the gateway's M3 marks). */
-export function piModelsFileKeys({ path = process.env.PI_MODELS_JSON || `${process.env.HOME || homedir()}/.pi/agent/models.json`, readFileFn = (p) => readFileSync(p, "utf8") } = {}) {
-  let j;
-  try { j = JSON.parse(readFileFn(path)); } catch { return null; }
+function fileKeysOf(j) {
   const keys = new Set();
   for (const [pid, p] of Object.entries((j && j.providers) || {})) {
     for (const m of Array.isArray(p?.models) ? p.models : []) if (m && m.id) keys.add(`${pid}/${m.id}`);
@@ -63,12 +62,29 @@ export function piModelsFileKeys({ path = process.env.PI_MODELS_JSON || `${proce
   return keys;
 }
 
+/** What pi's models.json declares, without spawning pi (the gateway's M3 marks). */
+export function piModelsFileKeys({ path = piModelsJsonPath(), readFileFn = (p) => readFileSync(p, "utf8") } = {}) {
+  let j;
+  try { j = JSON.parse(readFileFn(path)); } catch { return null; }
+  return fileKeysOf(j);
+}
+
 export async function checkPiModel({ provider, model }, deps = {}) {
-  const key = `${provider}/${model}`;
+  const asked = `${provider}/${model}`;
+  const unavailable = { ok: false, message: `model "${asked}" is not available to the bot engine` };
+  // Task 17: check the provider pi will actually be spawned with (the bridge
+  // maps a consented cloud row to its crow-c-* door entry the same way). A
+  // bare pi built-in id with no entry fails closed here.
+  const homeDir = deps.homeDir || process.env.HOME || homedir();
+  const crowHome = deps.crowHome || process.env.CROW_HOME || join(homeDir, ".crow");
+  const json = (deps.piModelsJsonFn || readPiModelsJson)();
+  const piProvider = piProviderIdFor(provider, json, { crowHome, homeDir });
+  if (piProvider == null) return unavailable;
+  const key = `${piProvider}/${model}`;
   // Fast path, no spawn: a key pi's models.json declares (every M1 entry and
   // every hand-written one) is usable. Only a key absent from the file (a pi
   // built-in, or a genuinely unknown model) pays for `pi --list-models`.
-  const fileKeys = (deps.piKeysFn || piModelsFileKeys)();
+  const fileKeys = deps.piKeysFn ? deps.piKeysFn() : (json ? fileKeysOf(json) : null);
   if (fileKeys && fileKeys.has(key)) return { ok: true };
   const l = await listPiModels(deps);
   if (!l.ok) {
@@ -80,5 +96,5 @@ export async function checkPiModel({ provider, model }, deps = {}) {
     const again = await listPiModels({ ...deps, force: true });
     if (again.ok && again.keys.has(key)) return { ok: true };
   }
-  return { ok: false, message: `model "${key}" is not available to the bot engine` };
+  return unavailable;
 }

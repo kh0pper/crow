@@ -26,3 +26,14 @@ export function nativeLoopbackUrl(port) { return `http://127.0.0.1:${port}/v1`; 
 export function providerDoorUrl(doorBase, providerId) {
   return String(doorBase).replace(/\/llm\/v1\/?$/, `/llm/p/${encodeURIComponent(providerId)}/v1`);
 }
+
+/**
+ * The cloud door base URL pi is given for a consented cloud row (roles
+ * phase 2, Task 16): always loopback on this gateway's port. openai types end
+ * in /v1 (pi appends /chat/completions); anthropic does not, because pi's
+ * anthropic client appends /v1/messages itself.
+ */
+export function cloudDoorUrl(port, providerId, providerType) {
+  const base = `http://127.0.0.1:${port}/llm/c/${encodeURIComponent(providerId)}`;
+  return String(providerType || "").toLowerCase() === "anthropic" ? base : `${base}/v1`;
+}

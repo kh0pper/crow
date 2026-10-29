@@ -22,6 +22,7 @@ import { scanSlots } from "../../shared/model-consumers.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
 import { getOwnAddresses } from "../../shared/locality.js";
 import { buildRoleRows } from "../dashboard/settings/sections/models/rows.js";
+import { grantCloudConsent } from "../../shared/cloud-consent.js";
 
 const MAX_MODEL_IDS = 2000;
 const MAX_MODEL_ID_LEN = 256;
@@ -242,7 +243,7 @@ export function providerIdFor(presetId, { rows = [], baseUrl, apiKey } = {}) {
   const wantKey = (typeof apiKey === "string" ? (cleanKey(apiKey) ?? apiKey.trim()) : apiKey) || "";
   for (let n = 1; n < 1000; n++) {
     const id = nthId(base, n, custom);
-    if (id.startsWith(DOOR_ID_PREFIX)) continue;
+    if (id.toLowerCase().startsWith(DOOR_ID_PREFIX)) continue;
     const row = byId.get(id);
     if (!row) return { id, reuse: false };
     const rowKey = row.apiKey ?? row.api_key ?? null;
@@ -292,12 +293,18 @@ function cleanModelIds(modelIds) {
  * Test, then write one providers row. Refuses unless the test passed (or, for
  * `other` with a typed model id, the server simply had no listing). On
  * `reuse`, the stored models are kept and the ticked ones added (I9), so a
- * model a role is bound to is never dropped. `onAdded(providerId)` runs after
- * the write (Task 15's consent seam).
+ * model a role is bound to is never dropped. `onAdded(providerId, {baseUrl,
+ * apiKey})` runs after the write with exactly what was written; by default it
+ * records this box's consent for bots to use the row (Task 15), on a new row
+ * and again on reuse, refused if the row changed since. The result's
+ * `consent` is "granted", "failed", "not_needed" (not a cloud row), or
+ * "ineligible" (a cloud row the cloud door would never serve), then with
+ * `consentReason`, the cloudDoorIneligibleReason code.
  */
 export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, modelIds } = {}, {
   upsertProviderFn = upsertProvider, invalidateFn = invalidateProvidersCache,
-  testFn = testProviderKey, listRowsFn = listProvidersAll, onAdded,
+  testFn = testProviderKey, listRowsFn = listProvidersAll,
+  onAdded = (id, written) => grantCloudConsent(db, id, { actor: "add-provider", expect: written }),
 } = {}) {
   const preset = presetById(presetId);
   if (!preset) return { ok: false, code: "unknown_preset" };
@@ -342,7 +349,7 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
       providerType: preset.providerType,
     });
     invalidateFn();
-    saved = { id, reuse };
+    saved = { id, reuse, written: { baseUrl: rowUrl, apiKey: key || null } };
   } catch (err) {
     console.warn(`[add-provider] save failed: ${err?.message}`);
     return { ok: false, code: "save_failed" };
@@ -350,8 +357,15 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
     release();
   }
   // Outside the try: the row is written, so a failing onAdded must not read as "not saved".
-  if (onAdded) await onAdded(saved.id);
-  return { ok: true, providerId: saved.id, reuse: saved.reuse, test };
+  let consent = "failed";
+  let consentReason = null;
+  try {
+    const r = onAdded ? await onAdded(saved.id, saved.written) : null;
+    if (r?.ok === true) consent = "granted";
+    else if (r?.reason === "not_cloud") consent = "not_needed";
+    else if (r?.reason === "not_eligible") { consent = "ineligible"; consentReason = typeof r.why === "string" ? r.why : null; }
+  } catch (err) { console.warn(`[add-provider] after-save step failed: ${err?.message}`); }
+  return { ok: true, providerId: saved.id, reuse: saved.reuse, consent, ...(consent === "ineligible" ? { consentReason } : {}), test };
 }
 
 // --- "Use the recommended models for roles you haven't set" (Task 11) -------

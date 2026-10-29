@@ -22,7 +22,7 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken } from "../local-token.js";
 import { peerRelayRouter } from "../routes/peer-relay.js";
 import { actorSignRouter } from "../routes/actor-sign.js";
 import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
@@ -58,6 +58,33 @@ export async function persistSyncDeploymentVerdict(db, { feedsDisabled, noAuth }
   if (noAuth) return;
   const { writeSetting } = await import("../dashboard/settings/registry.js");
   await writeSetting(db, "sync_deployment_enabled", feedsDisabled ? "0" : "1", { scope: "local" });
+}
+
+/**
+ * Roles phase 2 Task 14: the cloud-door token (/llm/c) is ROTATED on every
+ * boot, not ensured: a fresh value per start. Running pi processes pick it up
+ * on their next request (their models.json apiKey command reads the file each
+ * time). Best-effort, like the other boot token blocks: a failure is logged
+ * (err.message only) and boot continues. Exported with injectable deps so the
+ * failure path is unit-testable without standing up mountMcpServers.
+ * @returns {Promise<boolean>} true when the token was rotated
+ */
+export async function rotateCloudDoorTokenAtBoot({
+  createDb = createDbClient, rotate = rotateLlmCloudToken, log = console,
+} = {}) {
+  try {
+    const tokenDb = createDb();
+    try {
+      await rotate(tokenDb);
+      log.log("[gateway] cloud-door token rotated");
+      return true;
+    } finally {
+      try { tokenDb.close(); } catch {}
+    }
+  } catch (err) {
+    log.warn(`[gateway] rotateLlmCloudToken failed: ${err.message}`);
+    return false;
+  }
 }
 
 export async function mountMcpServers(app, deps) {
@@ -330,6 +357,9 @@ export async function mountMcpServers(app, deps) {
   // main process of a live pibot-* unit) and signs with the key minted below;
   // the key never leaves this process.
   app.use(actorSignRouter({ createDbClient }));
+
+  // Roles phase 2 Task 14: rotate the cloud-door token (best-effort).
+  await rotateCloudDoorTokenAtBoot();
 
   // S5: board actor headers count only with a signature from the per-boot
   // in-memory key, so the key must exist before any bot world is built in

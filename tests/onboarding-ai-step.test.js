@@ -498,3 +498,44 @@ test("the variant optgroups come from one shared helper", () => {
   assert.ok(/import \{[^}]*variantOptionsHtml[^}]*\} from "\.\.\/shared\/add-provider-ui\.js"/.test(src), "onboarding imports the helper");
   assert.ok(!src.includes("<optgroup"), "no second optgroup builder");
 });
+
+// ── Task 15: a saved row whose consent grant failed says so ─────────────────
+
+test("cloud-provider POST: when bots can't use the row yet, redirects cloud=ok&bots=failed", async () => {
+  const res = makeRes();
+  // db {} cannot hold a consent grant, so the grant fails after the save.
+  await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "typed-model" }), res, {
+    db: {}, testFn: okTest, listRowsFn: noRows,
+    upsertProviderFn: async (db, provider) => ({ id: provider.id }),
+    invalidateCacheFn: async () => {},
+  });
+  assert.ok(res.redirected.includes("cloud=ok&bots=failed"), res.redirected);
+});
+
+test("cloud-provider POST: a granted row redirects cloud=ok without bots=failed", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { rmScratch } = await import("./helpers/safe-rm.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const dir = mkdtempSync(join(tmpdir(), "onb-consent-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: repoRoot });
+  const db = createDbClient(join(dir, "crow.db"));
+  try {
+    const res = makeRes();
+    await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "fixture-key-123", model: "typed-model" }), res, {
+      db, testFn: okTest, invalidateCacheFn: async () => {},
+    });
+    assert.ok(res.redirected.includes("cloud=ok"), res.redirected);
+    assert.ok(!res.redirected.includes("bots=failed"), res.redirected);
+  } finally { try { db.close(); } catch {} rmScratch(dir); }
+});
+
+test("ai step with ?cloud=ok&bots=failed shows the botsFailed line; without bots=failed it does not", async () => {
+  const line = i18n.t("models.add.botsFailed", "en");
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  const has = (h) => h.includes(line) || h.includes(esc(line)) || h.includes(line.replace(/"/g, "&quot;"));
+  assert.ok(has(await render({ step: String(AI_IDX), cloud: "ok", bots: "failed" }, { db: providersDb(0) })));
+  assert.ok(!has(await render({ step: String(AI_IDX), cloud: "ok" }, { db: providersDb(0) })));
+  assert.ok(!has(await render({ step: String(AI_IDX), bots: "failed" }, { db: providersDb(0) })));
+});

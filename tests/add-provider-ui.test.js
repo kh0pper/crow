@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PROVIDER_PRESETS } from "../servers/shared/provider-presets.js";
 import { addProviderSheetHtml, addProviderClientJS } from "../servers/gateway/dashboard/shared/add-provider-ui.js";
+import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 import { createDbClient } from "../servers/db.js";
 import { invalidateRoleContext } from "../servers/shared/model-roles-store.js";
 import { clearProviderTaskCache } from "../servers/shared/provider-task.js";
@@ -302,6 +303,15 @@ test("Save sends the ticked models, forgets the key, then shows each pick with i
   assert.ok(text("rerank").includes("Not tested yet") && text("rerank").includes("Search ranking can't be tested here."), text("rerank"));
   assert.ok(!JSON.stringify(h.calls.filter((c) => c.url !== "/api/providers" && c.url !== "/api/providers/test").map((c) => c.body)).includes("fixture-pasted-key-777"),
     "only the test and the save carry the key");
+});
+
+test("a save the cloud door could never serve says why bots can't use it, instead of plain Saved", async () => {
+  const h = harness(fullRoutes([{ match: (u, i) => u === "/api/providers" && i.method === "POST", reply: () => json(200, { ok: true, providerId: "openrouter", consent: "ineligible", consentReason: "insecure" }) }]));
+  await saved(h);
+  assert.equal(h.parts.saveLine.textContent, t("models.add.saved", "en") + " " + t("providers.botsIneligible.insecure", "en"));
+  const h2 = harness(fullRoutes([{ match: (u, i) => u === "/api/providers" && i.method === "POST", reply: () => json(200, { ok: true, providerId: "openrouter", consent: "ineligible", consentReason: "bogus" }) }]));
+  await saved(h2);
+  assert.equal(h2.parts.saveLine.textContent, t("models.add.saved", "en"), "an unknown reason falls back to plain Saved");
 });
 
 test("a refused save shows its plain line", async () => {

@@ -341,3 +341,24 @@ test("referencedModelKeys collects every bot's default and escalation keys", () 
   assert.deepEqual([...keysOut].sort(), ["crow-local/q", "zai-coding/glm-5.1"]);
   assert.equal(referencedModelKeys(null).size, 0);
 });
+
+// Task 17 fix round 1: the Perch picker ranks by the bridge's own mapping.
+test("Perch picker: a consented cloud row is runnable via its door entry; a keyed bare built-in PiRpc refuses is not", async () => {
+  const files = { "/h/.pi/agent/models.json": JSON.stringify({ providers: { "crow-c-cloud-a": { models: [{ id: "c1" }] }, "crow-local": {} } }) };
+  const read = (p) => { if (p in files) return files[p]; const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; };
+  const pi = await loadPiProviderNames({ env: { HOME: "/h", CROW_HOME: "/h/.crow", OPENAI_API_KEY: "k" }, read, list: () => { throw new Error("ENOENT"); }, cli: () => null });
+  assert.equal(pi.keyed.has("openai"), true, "the operator holds a key for the built-in");
+  assert.equal(pi.map("cloud-a"), "crow-c-cloud-a");
+  assert.equal(pi.map("openai"), null);
+  assert.equal(pi.map("OpenAI"), null);
+  const out = pickerModels([
+    { provider: "cloud-a", id: "c1", baseUrl: "https://api.example.com/v1" },
+    { provider: "openai", id: "gpt-x", baseUrl: "https://api.openai.com/v1" },
+    { provider: "crow-local", id: "q", baseUrl: "http://127.0.0.1:18100/v1" },
+  ], { pi });
+  const by = Object.fromEntries(out.map((m) => [m.provider, m.runnable]));
+  assert.deepEqual(by, { "cloud-a": true, openai: false, "crow-local": true });
+  // a co-hosted instance's picker never maps onto the primary's door entries
+  const r4 = await loadPiProviderNames({ env: { HOME: "/h", CROW_HOME: "/h/.crow-r4" }, read, list: () => { throw new Error("ENOENT"); }, cli: () => null });
+  assert.equal(pickerModels([{ provider: "cloud-a", id: "c1", baseUrl: "https://api.example.com/v1" }], { pi: r4 })[0].runnable, false);
+});
