@@ -313,6 +313,19 @@ test("new mode: an explicit request still opens the nest", async () => {
   }
 });
 
+test("new mode: More of Crow carries the Crow's Nest as an explicit ?open=1 link, and it renders the nest", async () => {
+  const jar = { ...NEW, [MODE]: "new" };
+  const page = await get("/dashboard/perch", jar);
+  assert.equal(page.status, 200);
+  const more = (page.body.match(/<div class="shell-more">[\s\S]*?<\/div>/) || [])[0] || "";
+  assert.match(more, /<a href="\/dashboard\/nest\?open=1" class="shell-more-item">Crow&#39;s Nest<\/a>|<a href="\/dashboard\/nest\?open=1" class="shell-more-item">Crow(&#x27;|')s Nest<\/a>/);
+  assert.doesNotMatch(more, /href="\/dashboard\/nest"/, "never the bare (redirecting) nest");
+  const r = await get("/dashboard/nest?open=1", jar);
+  assert.equal(r.status, 200);
+  assert.match(r.body, /<body class="shell/);
+  assert.match(r.body, /class="nest-app/);
+});
+
 test("classic mode: /dashboard and /dashboard/nest render the nest as before", async () => {
   const jar = { ...NEW, [MODE]: "classic" };
   const nest = await get("/dashboard/nest", jar);
