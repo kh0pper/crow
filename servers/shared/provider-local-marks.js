@@ -13,8 +13,9 @@
  * `host` is the row's hostname when it was marked (the one the page showed).
  * The mark counts only while the row still has that hostname, so a peer
  * rewriting the row's base URL through sync makes it lapse. A row whose
- * stored `host` is "cloud" (N4), or whose base URL is a known cloud preset
- * (presetForRow: api.z.ai, api.openai.com, ...) whatever its `host` says, is
+ * stored `host` is "cloud" (N4), or whose base URL is on a known cloud preset's
+ * hostname (presetHostFor: api.z.ai, api.openai.com, ... and their
+ * subdomains, any path, port or scheme) whatever its `host` says, is
  * never marked and never counts as local.
  * Marks, the one-time upgrade flag and the notice flag are instance scope:
  * never synced.
@@ -33,7 +34,7 @@ import { classifyIp, isLocalNetworkIp } from "./ip-classify.js";
 import { getOwnAddresses } from "./locality.js";
 import { providerRowToObject } from "./provider-row.js";
 import { invalidateRoleContext } from "./model-roles-store.js";
-import { presetForRow } from "./provider-recommendations.js";
+import { presetHostFor } from "./provider-recommendations.js";
 
 export const LOCAL_MARKS_KEY = "provider_local_marks";
 export const LOCAL_MARKS_SEEDED_KEY = "provider_local_marks_seeded";
@@ -132,7 +133,7 @@ function sameHex(a, b) {
  * reserved or documentation), `ip_literal` (any other IP literal: its
  * address already says where it runs, so a mark never applies),
  * `flagged_cloud` (stored `host === "cloud"`, N4), `known_cloud` (the base
- * URL is a known cloud preset, whatever `host` says), `changed` (the caller's
+ * URL is on a known cloud preset's hostname, whatever `host` says), `changed` (the caller's
  * expectation no longer holds).
  *
  * `expect` is `{token}` (what the page rendered, localMarkTokenFor; the
@@ -148,7 +149,7 @@ export async function markLocal(db, rowId, { actor, expect } = {}) {
     if (!row || !host) return { ok: false, reason: "not_found" };
     if (isIP(host)) return { ok: false, reason: isLocalNetworkIp(host) ? "ip_literal" : "public_address" };
     if (row.host === "cloud") return { ok: false, reason: "flagged_cloud" };
-    if (presetForRow(row) !== null) return { ok: false, reason: "known_cloud" };
+    if (presetHostFor(row) !== null) return { ok: false, reason: "known_cloud" };
     if (expect !== undefined) {
       let ok = false;
       if (expect && typeof expect.token === "string") {
@@ -200,12 +201,12 @@ const rowsOfKey = (key, providers) => [...new Set(chainRows(key, { providers }))
 /**
  * The one predicate voice and the phone local slot use (N4): true when ANY
  * row the key's door walk visits is flagged `host === "cloud"` or sits on a
- * known cloud preset base URL (presetForRow), or the
+ * known cloud preset hostname (presetHostFor), or the
  * strict check with marks says some hop is not proven local (isCloudKey
  * judges the worst hop). Pure.
  */
 export function isStrictCloud(key, { providers, localMarks, ownAddrs } = {}) {
-  if (rowsOfKey(key, providers).some((r) => r.host === "cloud" || presetForRow(r) !== null)) return true;
+  if (rowsOfKey(key, providers).some((r) => r.host === "cloud" || presetHostFor(r) !== null)) return true;
   return isCloudKey(key, { providers, localMarks, ...(ownAddrs ? { ownAddrs } : {}) });
 }
 
@@ -278,11 +279,11 @@ function rowVerdict(row, ownAddrs) {
 
 /**
  * Could this row take a "This is local" mark? An enabled row on a DNS name,
- * not flagged `host === "cloud"`, not on a known cloud preset URL, whose own verdict (no marks) is "unknown".
+ * not flagged `host === "cloud"`, not on a known cloud preset hostname, whose own verdict (no marks) is "unknown".
  * An IP-literal row never qualifies: its address already says what it is.
  */
 export function isMarkableRow(row, { ownAddrs } = {}) {
-  if (!row || row.disabled || row.host === "cloud" || presetForRow(row) !== null) return false;
+  if (!row || row.disabled || row.host === "cloud" || presetHostFor(row) !== null) return false;
   const h = hostnameOf(row.baseUrl);
   if (!h || isIP(h)) return false;
   return rowVerdict(row, ownAddrs || getOwnAddresses()) === "unknown";

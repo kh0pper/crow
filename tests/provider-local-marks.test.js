@@ -541,3 +541,33 @@ test("marks-change listeners fire on mark and unmark", async () => {
   await markLocal(db, "lan-dns", { actor: "t" });
   assert.deepEqual(seen, ["lan-dns", "lan-dns"], "unsubscribed");
 });
+
+test("a row on a known cloud preset HOSTNAME is strict cloud and can't be marked, whatever its path, port or scheme", async () => {
+  const db = await seeded();
+  const variants = {
+    "oa-nov1": "https://api.openai.com",
+    "oa-443": "https://api.openai.com:443/v1",
+    "oa-http": "http://api.openai.com/v1",
+    "zai-path": "https://api.z.ai/v4",
+    "zai-chat": "https://api.z.ai/api/paas/v4/chat",
+    "tog-xyz": "https://api.together.xyz/v2",
+    "sub-oa": "https://eu.api.openai.com/v1",
+  };
+  for (const [id, url] of Object.entries(variants)) await ins(db, id, url, "local", ["m"]);
+  invalidateRoleContext();
+  const providers = await providersOf(db);
+  for (const [id, url] of Object.entries(variants)) {
+    assert.deepEqual(await markLocal(db, id, { actor: "t" }), { ok: false, reason: "known_cloud" }, url);
+    const row = providers.find((p) => p.id === id);
+    assert.equal(isMarkableRow(row, { ownAddrs: OWN }), false, `${url}: no checkbox`);
+    const host = new URL(url).hostname;
+    const forged = { [id]: { host, at: "x", by: "x" } };
+    assert.equal(isStrictCloud(`${id}/m`, { providers, localMarks: forged, ownAddrs: OWN }), true, `${url}: strict cloud`);
+    assert.equal(isCloudKey(`${id}/m`, { providers, localMarks: forged, ownAddrs: OWN }), true, `${url}: Models page cloud`);
+  }
+  // Control: a lookalike host that only ends with a preset's name (no dot boundary) is not a preset.
+  await ins(db, "lookalike", "http://notapi.openai.com.example.internal/v1", "local", ["m"]);
+  await ins(db, "suffix", "http://myapi.openai.com-box.example.internal/v1", "local", ["m"]);
+  assert.deepEqual(await markLocal(db, "lookalike", { actor: "t" }), { ok: true });
+  assert.deepEqual(await markLocal(db, "suffix", { actor: "t" }), { ok: true });
+});
