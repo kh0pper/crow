@@ -267,6 +267,36 @@ test("sheet opens from the bot name, switches tabs, closes on Escape and returns
   } finally { await s.close(); }
 });
 
+// The tab strip must not move under the pointer. The Files tab fetches on
+// activation, and a sheet sized by its content grew when that response
+// landed: the strip jumped ~90 px at 1280, so a tap on Activity aimed a
+// moment earlier hit the Files crumbs instead (the CI flake of the first
+// test). The sheet now has one height whatever the tab holds.
+for (const [w, h] of [[1280, 900], [390, 844]]) {
+  test(`${w} px: the tab strip stays put across tabs and while Files loads`, async (t) => {
+    if (!available) return t.skip("no headless Chrome");
+    const s = await tab(w, h);
+    try {
+      const STRIP = `(function(){ return JSON.stringify(['session','files','activity'].map(function(n){
+        var b=document.getElementById('perch-tab-btn-'+n).getBoundingClientRect();
+        return [Math.round(b.left),Math.round(b.top),Math.round(b.width),Math.round(b.height)]; })); })()`;
+      await s.click("perch-ident-btn");
+      await s.waitFor(OPEN, "the sheet");
+      const onSession = await s.json(STRIP);
+      await s.click("perch-tab-btn-files");
+      const filesBeforeData = await s.json(STRIP);
+      await s.waitFor("document.querySelectorAll('#perch-cwd-list .cwd-row').length===2", "the Files rows");
+      const filesAfterData = await s.json(STRIP);
+      await s.click("perch-tab-btn-activity");
+      await s.waitFor("!document.getElementById('perch-tab-activity').hidden", "Activity");
+      const onActivity = await s.json(STRIP);
+      assert.deepEqual(filesBeforeData, onSession, "switching to Files moved the tab strip");
+      assert.deepEqual(filesAfterData, onSession, "the Files response moved the tab strip");
+      assert.deepEqual(onActivity, onSession, "switching to Activity moved the tab strip");
+    } finally { await s.close(); }
+  });
+}
+
 test("sheet shows live activity and returns focus", async (t) => {
   if (!available) return t.skip("no headless Chrome");
   const s = await tab(390, 844);
