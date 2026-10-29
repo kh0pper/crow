@@ -195,6 +195,10 @@ const GEOMETRY = `(function(){
     name:name.textContent, nameClipped:name.scrollWidth>name.clientWidth,
     sub:sub.textContent, subClipped:sub.scrollWidth>sub.clientWidth,
     chip:chip?chip.textContent:null, chipClipped:chip?chip.scrollWidth>chip.clientWidth+0.5:null,
+    chipEllipsis:chip?getComputedStyle(chip).textOverflow==='ellipsis':null,
+    chevronInside:(function(){ var b=document.querySelector('.shell-scope'); var v=b&&b.querySelector('svg'); if(!b||!v) return null;
+      var bb=b.getBoundingClientRect(), vb=v.getBoundingClientRect();
+      return vb.width>0 && vb.left>=bb.left-0.5 && vb.right<=bb.right+0.5 && bb.left>=0 && bb.right<=innerWidth+0.5; })(),
     avatars:document.querySelectorAll('.shell-avatar').length, bird:box(document.getElementById('crow-bird-btn')),
     fieldFont:parseFloat(getComputedStyle(input).fontSize), kb:document.body.hasAttribute('data-perch-kb'), scrollers:scrollers, transcriptScrolls:tr.scrollHeight>tr.clientHeight });
 })()`;
@@ -225,7 +229,11 @@ function assertLayout(m, lang, label) {
   // The real header: the server-rendered chip names the session's project
   // (the link carried ?project=), unclipped; the mascot is the only button.
   assert.equal(m.chip, PROJECT.name, at("the header chip names the session's project"));
-  assert.equal(m.chipClipped, false, at("the chip's name is not clipped"));
+  // The chip itself and its chevron are never cut off. A long project name
+  // may shorten with an ellipsis (fonts differ by machine: CI's fallback
+  // font is wider), never by being cropped mid-letter.
+  assert.equal(m.chevronInside, true, at("the chip and its chevron are fully on screen"));
+  if (m.chipClipped) assert.equal(m.chipEllipsis, true, at("a long chip name shortens with an ellipsis"));
   assert.equal(m.avatars, 0, at("no separate avatar button"));
   assert.ok(m.bird && m.bird.w >= 44 && m.bird.h >= 44, at("the mascot is a 44 px target"));
   assert.ok(m.fieldFont >= 16, at("the field's text is at least 16px (no iOS focus zoom)"));
@@ -246,6 +254,8 @@ for (const lang of ["en", "es"]) {
           mkdirSync(SHOTS, { recursive: true });
           await s.shot(join(SHOTS, `session-phone-${SHOT_TAG}-${lang}.png`));
         }
+        // Measure after web fonts and two frames, as settings-llm-phone-layout does.
+        await s.evalIn("document.fonts.ready.then(function(){ return new Promise(function(r){ requestAnimationFrame(function(){ requestAnimationFrame(function(){ r(1); }); }); }); })");
         assertLayout(await s.json(GEOMETRY), lang, `${lang} ${dark ? "dark" : "light"}`);
       } finally { await s.close(); }
     });
