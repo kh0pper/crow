@@ -14,6 +14,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
+import { t } from "../../shared/i18n.js";
 import providersTab from "./llm/providers-tab.js";
 import profilesTab from "./llm/profiles-tab.js";
 import healthTab from "./llm/health-tab.js";
@@ -34,7 +35,9 @@ function resolveTab(req) {
 export default {
   id: "llm",
   group: "ai",
-  navOrder: 5, // above ai-provider (10) during the dual-ship window
+  navOrder: 5,
+  // The Models page (?section=models) is the menu entry; this is its Advanced view, still deep-linkable.
+  hidden: true,
   // F2.2 metadata: providers are local/per-instance config; the profile
   // blobs (ai/tts/stt/vision) replicate to paired instances.
   scope: "mixed",
@@ -80,7 +83,9 @@ export default {
         margin-bottom:0.85rem;
         line-height:1.45;
       }
+      .llm-simple-link { display:inline-flex; align-items:center; min-height:44px; color:var(--crow-accent); text-decoration:none; font-size:0.9rem; }
     </style>
+    <a class="llm-simple-link" href="/dashboard/settings?section=models" data-turbo-frame="_top">&larr; ${escapeHtml(t("models.ui.simple", lang))}</a>
     <nav class="llm-tabs">${tabsHtml}</nav>
     <p class="llm-section-hint">Providers, models, and profiles here are shared plumbing. To build an <strong>assistant</strong> (persona + skills + scoped tools + gateways like Gmail, Discord, or Meta glasses) that references them, use the <a href="/dashboard/bot-builder" data-turbo-frame="_top">Bot Builder</a>.</p>
     <div class="llm-tab-body">${body}</div>`;

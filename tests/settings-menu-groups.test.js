@@ -173,3 +173,23 @@ test("POST from the combined Sharing page stays on it; POST without a section is
   assert.equal(await run({ section: "other-crows-sharing" }), "/dashboard/settings?section=other-crows-sharing");
   assert.equal(await run({}), "/dashboard/settings?section=remote-invocation");
 });
+
+test("AI group: Models is the menu entry; the LLM page is hidden but still deep-linkable with a way back", async () => {
+  const { db, panel, reg, renderSettingsMenu } = await setup();
+  const html = await renderSettingsMenu(reg.getSettingsSections(), db, "en");
+  assert.ok(hasRow(html, "models"), "Models row in the menu");
+  assert.ok(!hasRow(html, "llm"), "LLM row no longer in the menu");
+  const models = reg.getSettingsSection("models");
+  assert.equal(models.group, "ai");
+  assert.equal(models.navOrder, 1);
+  assert.equal(models.labelKey, "settings.section.models");
+  assert.equal(reg.getSettingsSection("llm").hidden, true);
+
+  let laidOut = null, redirected = null;
+  const res = { redirect: (u) => { redirected = u; }, status() { return this; }, setHeader() {}, set() {}, locals: {} };
+  const req = { method: "GET", query: { section: "llm", tab: "providers" }, body: {}, headers: {}, get: () => "" };
+  await panel.handler(req, res, { db, lang: "en", layout: ({ content }) => { laidOut = content; return content; } });
+  assert.equal(redirected, null);
+  assert.ok(laidOut && laidOut.includes('href="/dashboard/settings?section=models"'), "the LLM page links back to Models");
+  assert.ok(laidOut.includes("Simple view"));
+});

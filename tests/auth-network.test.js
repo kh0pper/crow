@@ -135,6 +135,24 @@ test("/llm routers refuse Funnel themselves, even with CROW_DASHBOARD_PUBLIC=tru
   }
 });
 
+// Roles Phase 2: the roles API and the provider key test are dashboard-only.
+test("rejectFunneled middleware: /api/roles and /api/providers are never funnel-exposed", async () => {
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of ["/api/roles/voice/picks", "/api/roles/quick/preview", "/api/roles/stt/profile", "/api/providers/test"]) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of ["/api/roles/voice/picks", "/api/providers/test"]) {
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+  }
+});
+
 test("rejectFunneled middleware: SSO routes are never reachable via Funnel", async () => {
   const server = await startTestApp();
   try {

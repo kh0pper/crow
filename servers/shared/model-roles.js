@@ -16,6 +16,8 @@
 import { validateModelKey, splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
 import { isForeignInstanceHost, isInstanceIdShape, hostnameOf } from "./provider-host.js";
 import { getOwnAddresses, addressClass } from "./locality.js";
+import { classifyIp } from "./ip-classify.js";
+import { isIP } from "node:net";
 import { EMBED_TASKS, RERANK_TASKS } from "./provider-task.js";
 import { servingClassOf } from "../gateway/models/serving-class.js";
 import { doorKindOf, isDoorUrl } from "../gateway/models/door-resolve.js";
@@ -167,11 +169,64 @@ export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, 
   return "unknown";
 }
 
+/** The row a key's traffic finally reaches after the door walk (null when it cannot be named). */
+export function finalHopRow(key, { providers, resolveDoor = defaultResolveDoor } = {}) {
+  let row = providerById(providers, splitKey(key).provider);
+  for (let hops = 0; row && hops <= MAX_DOOR_HOPS; hops++) {
+    const up = resolveDoor(row, providers);
+    if (up === row) return row;
+    row = up;
+  }
+  return null;
+}
+
 /** The one cloud predicate (voice, phone, warnings): errs toward warning, so
  *  anything not proven local counts as cloud. */
 export function isCloudKey(key, opts) {
   return cloudStatus(key, opts) !== "local";
 }
+
+/** id -> i18n key of the role's one-line job. */
+export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r) => [r.id, `settings.roleJobs.${r.id}`])));
+
+/**
+ * Where does a model run? "here" (loopback or one of this box's addresses,
+ * judged on the final hop after the door walk),
+ * "other_box" (local-network but not ours), "cloud" (proven public), "unproven"
+ * (a name or literal that cannot be proven local OR public: 0.0.0.0, ::, NAT64
+ * and other reserved or embedded literals), "missing" (no provider row, no model
+ * half, or a role: ref - callers resolve a role first). localMarks is passed to
+ * cloudStatus, which ignores it until marks exist.
+ */
+export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultResolveDoor, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
+  if (isRoleRef(key)) return "missing";
+  const { provider, model } = splitKey(key);
+  const first = providerById(providers, provider);
+  if (!first || !model) return "missing";
+  const own = ownAddrs || getOwnAddresses();
+  const status = cloudStatus(key, { providers, resolveDoor, ownAddrs: own, localSuffixes, localMarks });
+  if (status === "unknown") return "unproven";
+  if (status === "cloud") {
+    // Every IP-literal hop that made it cloud must be a proven public address.
+    let row = first;
+    for (let hops = 0; row && hops <= MAX_DOOR_HOPS; hops++) {
+      const h = hostnameOf(row.baseUrl);
+      if (h && isIP(h) && !own.has(h) && addressClass(h) && !isDirectPublic(h) && !isLocalHop(h)) return "unproven";
+      const up = resolveDoor(row, providers);
+      if (up === row) break;
+      row = up;
+    }
+    return "cloud";
+  }
+  // Judged on the final hop: a loopback door forwarding to a network box runs on that box.
+  const last = finalHopRow(key, { providers, resolveDoor }) || first;
+  const h = hostnameOf(last.baseUrl);
+  return h && (own.has(h) || addressClass(h) === "loopback") ? "here" : "other_box";
+}
+
+// Public AND not an IPv4 smuggled through a translator or tunnel (NAT64, 6to4, Teredo, ...).
+const isDirectPublic = (h) => { const c = classifyIp(h); return c.cls === "public" && (c.via === null || c.via === "mapped"); };
+const isLocalHop = (h) => ["loopback", "rfc1918", "cgnat", "linklocal", "ula"].includes(addressClass(h));
 
 function capabilityOk(need, p, modelId) {
   const m = modelEntry(p, modelId);
