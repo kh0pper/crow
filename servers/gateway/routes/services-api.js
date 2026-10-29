@@ -41,6 +41,7 @@ import { serviceById, serviceCatalog } from "../../shared/service-catalog.js";
 import {
   CONNECTION_ERROR_CLASSES, ConnectionError, RESERVED_BLOCK_NAMES, checkLabelFree, connectionDisplayStatus,
   createConnection, disconnectConnection, getConnection, listConnections, otherProjectServiceIds, projectsUsingBundle, recordTest,
+  rollbackNewConnection,
 } from "../../shared/service-connections.js";
 import { recordServiceSecretValues } from "../../shared/secret-values.js";
 import { refreshGatewaySecretValues } from "../../shared/secret-values-collect.js";
@@ -250,6 +251,8 @@ function langOf(req) {
  * @param {(values: string[]) => void} [o.recordSecrets] masking record (default recordServiceSecretValues)
  * @param {() => void} [o.refreshMasking] re-collect this gateway's in-memory masking sets (default refreshGatewaySecretValues)
  * @param {Function} [o.audit] / [o.notify] the keychain's new-key audit and notice (keyCreatedHook)
+ * @param {(conn: object, opts: object) => void} [o.recordBinding] the binding writer (default
+ *   recordConnectionBinding; tests make it throw)
  * @param {(db: object, req: object) => Promise<boolean>} [o.ownerCheck] the owner rule for the
  *   Private switch (default isLocalPasswordSessionOn; tests use the real one)
  */
@@ -266,6 +269,7 @@ export function servicesApiRouter({
   audit,
   notify,
   ownerCheck = isLocalPasswordSessionOn,
+  recordBinding = recordConnectionBinding,
 } = {}) {
   const home = () => crowHome || resolveCrowHome();
   const installed = () => toSet(installedIds ? installedIds() : installedBundleIds(home()));
@@ -383,9 +387,16 @@ export function servicesApiRouter({
       throw err;
     }
     // The owner's binding uuid -> service, in the hidden secrets dir: a bot that rewrites the row's
-    // service_id in crow.db gets a connection nothing serves. Unwritten, the connection is never
-    // served (fail closed) and the owner reconnects.
-    try { recordConnectionBinding(conn, { crowHome: home() }); } catch { console.warn("[services] connection binding not written"); }
+    // service_id in crow.db gets a connection nothing serves. If it can't be written the connect
+    // did not happen: its secrets and row are removed (secrets first, as Task 7's undo does) and
+    // the answer is the generic 500, so the owner can simply try again with the same label.
+    try {
+      recordBinding(conn, { crowHome: home() });
+    } catch {
+      console.error("[services] connection binding not written");
+      try { await rollbackNewConnection(db, conn.uuid); } catch { console.error("[services] connect rollback failed"); }
+      return res.status(500).json({ ok: false });
+    }
     refresh();
     res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true, crowHome: home() }) });
   }));
