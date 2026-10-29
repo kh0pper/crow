@@ -129,10 +129,13 @@ test("refused unless CI is green: red, pending and unknown all refuse", async ()
   }
 });
 
-test("7-day rule: no update when the last signed call from crow is older than 7 days (or there is none)", async () => {
-  assert.equal((await world({ lastCallAgoMs: 7 * DAY + 60000 }).updater.check(TARGET)).code, "crow_unreachable");
-  assert.equal((await world({ lastCallAgoMs: null }).updater.check(TARGET)).code, "crow_unreachable");
-  assert.equal((await world({ lastCallAgoMs: 7 * DAY - 60000 }).updater.check(TARGET)).ok, true);
+test("7-day rule: crow's own signed POST /update proves crow is reachable, so silence never refuses it; the rule stays as a guard for a satellite-initiated path", async () => {
+  assert.equal((await world({ lastCallAgoMs: 7 * DAY + 60000 }).updater.check(TARGET)).ok, true, "after more than 7 days of silence");
+  assert.equal((await world({ lastCallAgoMs: null }).updater.check(TARGET)).ok, true, "with no audit rows at all");
+  const t = Date.now();
+  assert.equal(U.crowUnreachable(world({ lastCallAgoMs: 7 * DAY + 60000, now: t }).db, t), true);
+  assert.equal(U.crowUnreachable(world({ lastCallAgoMs: null, now: t }).db, t), true);
+  assert.equal(U.crowUnreachable(world({ lastCallAgoMs: 7 * DAY - 60000, now: t }).db, t), false);
 });
 
 test("happy path, lockfile unchanged: backup, ff-only merge, no npm, self-check + migrate in the new tree, exit 75", async () => {
@@ -164,9 +167,9 @@ test("lockfile changed: the MCP children stop, then npm ci --omit=dev runs under
   const order = [];
   const up = U.createUpdater({ db: w.db, satHome: w.satHome, appRoot: w.appRoot, fetchCheckRuns: async () => green, exit: (c) => w.exits.push(c), log: () => {},
     runner: async (cmd, args, opts) => { if (cmd === "systemd-run") order.push("npm"); return w.runner(cmd, args, opts); },
-    beforeInstall: async () => { order.push("stop-children"); } });
+    beforeInstall: async () => { order.push("pause"); }, afterRollback: async () => { order.push("resume"); } });
   assert.equal((await up.update(TARGET)).ok, true);
-  assert.deepEqual(order, ["stop-children", "npm"]);
+  assert.deepEqual(order, ["pause", "npm"], "paused before npm; no resume on the way to a restart");
   const npm = w.runner.calls.find((c) => c.line.startsWith("systemd-run"));
   assert.equal(npm.line, "systemd-run --user --scope -p MemoryMax=600M nice -n 10 ionice -c2 -n7 npm ci --omit=dev");
   assert.equal(npm.cwd, w.appRoot);
@@ -179,9 +182,13 @@ test("rollback: a failed npm ci resets to the previous sha and re-installs; no r
     failOnce: { "systemd-run": "oom" },
   });
   const w = world({ runner });
-  const r = await w.updater.update(TARGET);
+  const order = [];
+  const up = U.createUpdater({ db: w.db, satHome: w.satHome, appRoot: w.appRoot, runner, fetchCheckRuns: async () => green, exit: (c) => w.exits.push(c), log: () => {},
+    beforeInstall: async () => { order.push("pause"); }, afterRollback: async () => { order.push("resume"); } });
+  const r = await up.update(TARGET);
   assert.equal(r.ok, false);
   assert.equal(r.code, "rolled_back");
+  assert.deepEqual(order, ["pause", "resume"], "the MCP children are un-paused after a rollback without restart");
   const lines = runner.lines();
   assert.ok(lines.includes(`git reset --hard ${CUR}`));
   assert.ok(lines.indexOf(`git reset --hard ${CUR}`) > lines.indexOf(`git merge --ff-only ${TARGET}`));
@@ -280,7 +287,6 @@ test("POST /satellite/v1/update: owners only, refusals signed, an accepted updat
     { method: "POST", path: "/satellite/v1/update", body, caller, mgmtKey: { ed25519_priv: mgmt.privHex },
       fetchImpl: async (url, init = {}) => { const u = new URL(url); return fetch(`http://127.0.0.1:${a.port}${u.pathname}`, { ...init, headers: { ...init.headers, ...serveHeaders(null, "100.64.20.5") } }); } },
   );
-  // A first signed call so crow counts as heard from (the 7-day rule reads the audit log).
   const bot = await call({ target_sha: TARGET }, "bot:b1");
   assert.equal(bot.status, 403);
   assert.equal(bot.json.error, "owner_only");

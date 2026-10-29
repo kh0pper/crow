@@ -173,7 +173,7 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
     toolCache: { refresh: (id, version) => mcpHost.refreshToolCache(id, version), remove: (id) => mcpHost.removeBundle(id) },
   });
   registerMcpRoutes(signed, { host: mcpHost, satHome, sendSigned: auth.sendSigned });
-  registerUpdateRoute(signed, { updater: createUpdater({ db, satHome, now, log: out, beforeInstall: () => mcpHost.stopChildren(), ...updateDeps }), sendSigned: auth.sendSigned });
+  registerUpdateRoute(signed, { updater: createUpdater({ db, satHome, now, log: out, beforeInstall: () => mcpHost.pause(), afterRollback: () => mcpHost.resume(), ...updateDeps }), sendSigned: auth.sendSigned });
   for (const add of signedRoutes) add(signed, ctx);
   signed.use((_req, res) => auth.sendSigned(res, 404, { error: "not_found" }));
   app.use("/satellite/v1", signed);

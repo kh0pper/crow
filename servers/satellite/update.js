@@ -4,8 +4,9 @@
  *
  * Accepted only when, in order:
  *   - target_sha is a full 40-hex sha;
- *   - crow was heard from within UNREACHABLE_MAX_MS (7 days): the newest signed call in the
- *     audit log before this one (a satellite cut off from crow for a week never updates itself);
+ *   (no "heard from crow lately" check here: this path is crow's own signed request, which proves
+ *     crow is reachable. The 7-day rule, UNREACHABLE_MAX_MS / crowUnreachable(), is for a future
+ *     satellite-initiated update: a satellite cut off from crow for a week never updates itself);
  *   - it differs from the current HEAD;
  *   - after `git fetch origin main` it is a known commit, an ancestor of (or equal to)
  *     origin/main, and a fast-forward of HEAD;
@@ -13,7 +14,8 @@
  *     gateway, "unknown" and "pending" refuse: a satellite updates only to a knowably green sha.
  * Then (apply): satellite.db backup → `git merge --ff-only <target>` → `npm ci --omit=dev` only if
  * package-lock.json changed (systemd-run --user --scope -p MemoryMax=600M, nice, ionice; the MCP
- * children are stopped first via `beforeInstall`) → the
+ * children are paused first via `beforeInstall`, and resumed by `afterRollback` if the update
+ * rolls back without a restart) → the
  * NEW tree's `cli.js self-check` (its module graph loads) → its `cli.js migrate`
  * (SAT_SCHEMA_VERSION, each step transactional) → supervised restart: exit
  * UPDATE_RESTART_EXIT_CODE, which the unit's Restart=on-failure restarts.
@@ -31,6 +33,15 @@ import { SATELLITE_DB_FILE } from "./db.js";
 
 export const UPDATE_RESTART_EXIT_CODE = 75;
 export const UNREACHABLE_MAX_MS = 7 * 86400000;
+
+/**
+ * The 7-day rule for a satellite-INITIATED update (not used by crow's POST /update): true when
+ * the newest signed call in the audit log is older than UNREACHABLE_MAX_MS, or there is none.
+ */
+export function crowUnreachable(db, now = Date.now()) {
+  const last = Date.parse(db.prepare("SELECT MAX(ts) AS ts FROM audit WHERE caller IS NOT NULL").get()?.ts || "");
+  return !Number.isFinite(last) || now - last > UNREACHABLE_MAX_MS;
+}
 export const DB_RESTORE_MARKER = "update-restore-db.json";
 export const LAST_RESULT_FILE = "update-last.json";
 const BACKUPS_KEPT = 3;
@@ -86,13 +97,12 @@ export function applyPendingDbRestore(satHome, log = console.warn) {
 
 export function createUpdater({
   db, satHome, appRoot = APP_ROOT, runner = execRun, now = Date.now, log = console.log,
-  fetchCheckRuns, exit = (code) => process.exit(code), nodePath = process.execPath, beforeInstall = async () => {},
+  fetchCheckRuns, exit = (code) => process.exit(code), nodePath = process.execPath, beforeInstall = async () => {}, afterRollback = async () => {},
 }) {
   const git = (args, timeout = 120000) => runner("git", args, { cwd: appRoot, timeout });
   const checkRuns = fetchCheckRuns || ((sha) => githubCheckRuns({ runner, appRoot, sha }));
   const cli = join(appRoot, "servers", "satellite", "cli.js");
   const nodeCli = (cmd) => runner(nodePath, [cli, cmd], { cwd: appRoot, timeout: 120000, env: { ...process.env, CROW_HOME: satHome } });
-  const lastCall = db.prepare("SELECT MAX(ts) AS ts FROM audit WHERE caller IS NOT NULL");
   let busy = false;
 
   const refuse = (status, code, extra = {}) => ({ ok: false, status, code, ...extra });
@@ -105,8 +115,6 @@ export function createUpdater({
   /** Every acceptance rule; no change to the tree except the fetch. */
   async function check(target) {
     if (typeof target !== "string" || !SHA.test(target)) return refuse(400, "bad_target_sha");
-    const last = Date.parse(lastCall.get()?.ts || "");
-    if (!Number.isFinite(last) || now() - last > UNREACHABLE_MAX_MS) return refuse(409, "crow_unreachable");
     let from;
     try { from = String((await git(["rev-parse", "HEAD"], 15000)).stdout || "").trim(); } catch { return refuse(500, "no_checkout"); }
     if (!SHA.test(from)) return refuse(500, "no_checkout");
@@ -153,7 +161,8 @@ export function createUpdater({
       note(`fast-forwarded ${from.slice(0, 12)} → ${to.slice(0, 12)}`);
       if (lockChanged) {
         npmRan = true;
-        // npm ci under 600 MB on a small box: the MCP children make room first (§10).
+        // npm ci under 600 MB on a small box: the MCP children are paused (stopped, and no new
+        // one starts) until the update restarts or rolls back (§10).
         try { await beforeInstall(); } catch { /* best effort */ }
         const [cmd, args] = npmCiCommand();
         await runner(cmd, args, { cwd: appRoot, timeout: 1800000 });
@@ -186,6 +195,7 @@ export function createUpdater({
       }
       writeLast({ from, to, result: rolled ? "rolled_back" : "rollback_failed", steps });
       if (migrating) await exit(UPDATE_RESTART_EXIT_CODE);
+      else { try { await afterRollback(); } catch { /* best effort */ } } // no restart: un-pause the MCP children
       return refuse(500, rolled ? "rolled_back" : "rollback_failed", { steps });
     }
     writeLast({ from, to, result: "restarting", steps });
