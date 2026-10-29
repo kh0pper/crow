@@ -33,12 +33,12 @@ snippet inside the server's 120-character cut, the true value is on the citable 
 1,200-character preview, spellings are long enough to match).
 
 A private real-world set loads with `--cases=<dir>` on `run.mjs` and `report.mjs`. It is a dev
-aid only and never feeds a verdict.
+aid only and must not be used for a verdict; nothing in the code stops it.
 
 ## Trajectories
 
-`trajectories/<case>.json` holds recorded bot behavior for each case, as lists of steps:
-`{call, args}`, `{batch: [...]}` or `{say}`. `$project` and `$source:<url>` placeholders resolve
+`trajectories/<case>.json` holds recorded bot behavior for each case, as a variant `{steps, fails}`, where `steps` is a list of
+`{call, args}`, `{batch: [...]}` or `{say}` and `fails` names the criteria it must fail. `$project` and `$source:<url>` placeholders resolve
 to numbers. Base trajectories per case: `careful` (should pass), `hank` (the snippet-trusting
 failure; each lists the criteria it must fail) and `correcting` (corrects the snippet's wording
 in prose). Adversarial ones are named `<case>.<name>` (`rr07.trimmed`, `rr01.batch`,
@@ -58,13 +58,13 @@ the `pi` driver, the judge model and the thresholds.
 
 ## Commands
 
-Use a scratch directory outside the repo (the examples use `$TMPDIR/rr`).
+Use a scratch directory outside the repo (the examples use `${TMPDIR:-/tmp}/rr`).
 
 ```
 npm test -- tests/research-eval.test.js tests/research-eval-harness.test.js
-node scripts/research-eval/run.mjs --mode=harness --trajectory=careful --reps=3 --out=$TMPDIR/rr/careful.jsonl
-node scripts/research-eval/run.mjs --mode=harness --trajectory=correcting --judge=stub-pass --reps=3 --out=$TMPDIR/rr/correcting.jsonl
-node scripts/research-eval/report.mjs $TMPDIR/rr/careful.jsonl $TMPDIR/rr/correcting.jsonl
+node scripts/research-eval/run.mjs --mode=harness --trajectory=careful --reps=3 --out=${TMPDIR:-/tmp}/rr/careful.jsonl
+node scripts/research-eval/run.mjs --mode=harness --trajectory=correcting --judge=stub-pass --reps=3 --out=${TMPDIR:-/tmp}/rr/correcting.jsonl
+node scripts/research-eval/report.mjs ${TMPDIR:-/tmp}/rr/careful.jsonl ${TMPDIR:-/tmp}/rr/correcting.jsonl
 ```
 
 ### run.mjs flags
@@ -78,7 +78,7 @@ node scripts/research-eval/report.mjs $TMPDIR/rr/careful.jsonl $TMPDIR/rr/correc
 - `--judge=stub-pass`: the only judge in harness mode. Omitted means no judge.
 
 Exit codes: 0 done; 1 unexpected error; 2 bad usage or live mode; 3 `--out` not empty and no `--resume`.
-A transport failure is retried with a fresh scratch up to 3 times, then the row is written as contaminated.
+A transport failure is attempted up to 3 times in all, each on a fresh scratch, then the row is written as contaminated.
 
 ### report.mjs flags
 
@@ -87,7 +87,7 @@ it the expected set is the union of case ids any arm has. It prints rates (per c
 criterion, case type, paired arm comparisons) and never a pass/fail gate.
 
 Verdict refusals: the report prints `NO VERDICT` and the reasons, and exits 6, for: a
-contaminated or malformed row, a duplicate (arm, case, rep), a sampling setting other than the
+contaminated or malformed row, an unreadable input file, a duplicate (arm, case, rep), a sampling setting other than the
 pre-registered one, an expected (arm, case) with fewer than 3 scored reps (zero included), or
 scored rep counts that differ within an arm or across arms for a case. Exit 2 is bad usage; 0
 means the figures are complete. A case's pass is recomputed from `criteria`, never read from the
@@ -113,7 +113,7 @@ scratch never writes `process.env`. The real user's crow directory is never read
 
 ## Runtime
 
-The harness test file (52+ runs from one template, concurrency 4) takes about 5.4 to 5.6 s.
+The harness test file (52+ runs from one template, concurrency 4) takes a few seconds.
 
 ## Caveats
 
