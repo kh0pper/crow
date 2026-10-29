@@ -20,9 +20,10 @@
  *     `api.together.xyz` (the older domain, still the default in several
  *     clients) is kept in `aliases` so existing rows are recognised.
  *   - zai: no models-list or key-check endpoint is documented. Both paths are
- *     `/models` (unconfirmed); a 404 there reads as "doesn't list models,
- *     type a model name".
- *   - other: any OpenAI-compatible server; the URL is typed by the user.
+ *     `/models`, confirmed live 2026-10-28 on both bases (200 with a key,
+ *     401 with a bad one).
+ *   - other: any OpenAI-compatible server; the URL is typed by the user. The
+ *     key may be empty (a local Ollama or llama-server needs none).
  *
  * Labels: `labelKey` is the i18n key; `label` is the English provider name
  * (a proper noun), used where a stored description needs plain text.

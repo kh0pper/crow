@@ -314,3 +314,35 @@ test("key never echoed or logged", async () => {
   for (const r of results) assert.ok(!JSON.stringify(r).includes(KEY), JSON.stringify(r));
   for (const line of captured) assert.ok(!line.includes(KEY), line);
 });
+
+test("other accepts an empty key and sends no Authorization; presets still need one", async () => {
+  const base = "http://192.168.1.20:11434/v1";
+  for (const apiKey of ["", "  ", undefined]) {
+    const requestFn = stubRequest({ "*": () => reply(200, modelsBody(["llama-x"])) });
+    const out = await testProviderKey({ presetId: "other", baseUrl: base, apiKey }, { requestFn });
+    assert.equal(out.ok, true, JSON.stringify(apiKey));
+    assert.deepEqual(requestFn.calls[0].headers, {});
+  }
+  // A non-empty key on other is still validated, and sent.
+  const bad = stubRequest({ "*": () => reply(200, modelsBody(["llama-x"])) });
+  assert.equal((await testProviderKey({ presetId: "other", baseUrl: base, apiKey: "fixture key" }, { requestFn: bad })).code, "bad_key");
+  assert.equal(bad.calls.length, 0);
+  const keyed = stubRequest({ "*": () => reply(200, modelsBody(["llama-x"])) });
+  await testProviderKey({ presetId: "other", baseUrl: base, apiKey: " fixture-key-a " }, { requestFn: keyed });
+  assert.equal(keyed.calls[0].headers.Authorization, "Bearer fixture-key-a");
+  // Presets still refuse an empty key.
+  const never = stubRequest({ "*": () => reply(200, modelsBody(["m"])) });
+  assert.equal((await testProviderKey({ presetId: "openai", apiKey: "" }, { requestFn: never })).code, "bad_key");
+  assert.equal(never.calls.length, 0);
+
+  // The row stores no key, and re-adding the same keyless server reuses it.
+  const h = harness();
+  const requestFn = stubRequest({ "*": () => reply(200, modelsBody(["llama-x"])) });
+  const seams = { ...h.seams, testFn: (input) => testProviderKey(input, { requestFn }) };
+  const first = await addProvider({}, { presetId: "other", baseUrl: base, apiKey: "", modelIds: ["llama-x"] }, seams);
+  assert.equal(first.ok, true);
+  assert.equal(h.writes[0].apiKey, null);
+  const rows = [{ id: first.providerId, baseUrl: base, apiKey: null, models: [{ id: "llama-x" }] }];
+  const again = await addProvider({}, { presetId: "other", baseUrl: base, apiKey: "", modelIds: ["llama-x"] }, { ...seams, listRowsFn: async () => rows });
+  assert.deepEqual([again.providerId, again.reuse], [first.providerId, true]);
+});

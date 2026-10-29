@@ -1928,7 +1928,7 @@
         "https://docs.z.ai/api-reference/introduction",
         "https://docs.z.ai/devpack/tool/others.md"
       ],
-      "endpoint_check": "2026-10-28: general base https://api.z.ai/api/paas/v4 (API introduction); GLM Coding Plan base https://api.z.ai/api/coding/paas/v4 (devpack tool integration page); Authorization: Bearer <key>. No models-list or key-check endpoint is documented, so /models is unconfirmed.",
+      "endpoint_check": "2026-10-28: general base https://api.z.ai/api/paas/v4 (API introduction); GLM Coding Plan base https://api.z.ai/api/coding/paas/v4 (devpack tool integration page); Authorization: Bearer <key>. No models-list or key-check endpoint is documented; confirmed live 2026-10-28: /models returns 200 with key and 401 with a bad key, on both bases.",
       "none_found": [
         "voice",
         "embed",
@@ -1973,7 +1973,7 @@
           },
           {
             "model_id": "glm-5.2",
-            "id_verified": false,
+            "id_verified": true,
             "kind": "chat",
             "status": "stable",
             "retires": null,
@@ -2060,7 +2060,7 @@
           },
           {
             "model_id": "glm-5.1",
-            "id_verified": false,
+            "id_verified": true,
             "kind": "chat",
             "status": "stable",
             "retires": null,
@@ -2077,7 +2077,7 @@
           },
           {
             "model_id": "glm-5",
-            "id_verified": false,
+            "id_verified": true,
             "kind": "chat",
             "status": "stable",
             "retires": null,

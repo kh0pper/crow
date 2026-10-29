@@ -43,7 +43,18 @@ function labelFor(preset, variantId) {
   return v?.label || preset.label;
 }
 
+/**
+ * The key to use: the cleaned key, "" for an empty key on `other` (a local
+ * server that needs none), or null when the key is unusable.
+ */
+function keyFor(preset, apiKey) {
+  const trimmed = typeof apiKey === "string" ? apiKey.trim() : "";
+  if (!trimmed && preset.id === "other") return "";
+  return cleanKey(apiKey);
+}
+
 function authHeaders(preset, key) {
+  if (!key) return {};
   if (preset.authStyle === "anthropic") return { "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION };
   return { Authorization: `Bearer ${key}` };
 }
@@ -109,8 +120,8 @@ export async function testProviderKey({ presetId, variantId, baseUrl, apiKey } =
   if (!u || !isHttpUrl(u) || u.username || u.password) return out("bad_url");
   const mode = preset.id === "other" ? "other" : "cloud";
   if (refusedTarget(u, mode)) return out("forbidden_target");
-  const key = cleanKey(apiKey);
-  if (!key) return out("bad_key");
+  const key = keyFor(preset, apiKey);
+  if (key == null) return out("bad_key");
 
   const base = u.href.replace(/\/+$/, "");
   const headers = authHeaders(preset, key);
@@ -174,14 +185,14 @@ export function providerIdFor(presetId, { rows = [], baseUrl, apiKey } = {}) {
   const base = custom ? `custom-${hostSlug(baseUrl)}` : String(presetId);
   const byId = new Map(rows.map((r) => [r.id, r]));
   const wantUrl = normalizeBaseUrl(baseUrl);
-  const wantKey = cleanKey(apiKey) ?? apiKey;
+  const wantKey = (typeof apiKey === "string" ? (cleanKey(apiKey) ?? apiKey.trim()) : apiKey) || "";
   for (let n = 1; n < 1000; n++) {
     const id = nthId(base, n, custom);
     if (id.startsWith(DOOR_ID_PREFIX)) continue;
     const row = byId.get(id);
     if (!row) return { id, reuse: false };
     const rowKey = row.apiKey ?? row.api_key ?? null;
-    if (normalizeBaseUrl(row.baseUrl ?? row.base_url) === wantUrl && rowKey === wantKey) return { id, reuse: true };
+    if (normalizeBaseUrl(row.baseUrl ?? row.base_url) === wantUrl && (rowKey || "") === wantKey) return { id, reuse: true };
   }
   throw new Error("no free provider id");
 }
@@ -240,9 +251,10 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
   if (!test.ok && !typedOnly) {
     return { ok: false, code: test.code, ...(test.status != null ? { status: test.status } : {}) };
   }
-  const key = cleanKey(apiKey);
+  const key = keyFor(preset, apiKey);
   const rowUrl = test.baseUrl || baseUrlFor(preset, { variantId, baseUrl });
-  if (!key || !rowUrl) return { ok: false, code: key ? "bad_url" : "bad_key" };
+  if (key == null) return { ok: false, code: "bad_key" };
+  if (!rowUrl) return { ok: false, code: "bad_url" };
 
   let saved;
   try {
@@ -258,7 +270,7 @@ export async function addProvider(db, { presetId, variantId, baseUrl, apiKey, mo
     await upsertProviderFn(db, {
       id,
       baseUrl: rowUrl,
-      apiKey: key,
+      apiKey: key || null,
       host: preset.id === "other" ? undefined : "cloud",
       bundleId: null,
       description: labelFor(preset, variantId),
