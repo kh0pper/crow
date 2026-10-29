@@ -1846,6 +1846,12 @@ export function createInteractiveEngine({
       // this host) also sees the inner pi as leased.
       const inner = s.pi && s.pi.piPid;
       if (inner && inner !== pid) leases[String(inner)] = { sessionId: s.sessionId, expiresAt: now() + LEASE_TTL_MS };
+      // PID-namespace sandbox: the namespace's init (an inner bwrap between
+      // the wrapper and pi) is leased too, so a reaper that folds only one
+      // wrapper level (an older pi_lifecycle during a rollout) sees it, the
+      // entry it would otherwise reap as an unleased pi, as leased.
+      const init = s.pi && s.pi.sandboxInitPid;
+      if (init && init !== pid && init !== inner) leases[String(init)] = { sessionId: s.sessionId, expiresAt: now() + LEASE_TTL_MS };
     }
     const file = join(crowHome, LEASE_FILENAME);
     const tmp = file + ".tmp-" + process.pid;

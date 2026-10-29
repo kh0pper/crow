@@ -16,7 +16,7 @@
  *  That is an operator decision, not made here.
  *
  * What this does, with no privilege, when bubblewrap is usable:
- *     bwrap --dev-bind / / --unshare-user
+ *     bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc
  *           --ro-bind /dev/null <docker.sock>...          docker API
  *           --tmpfs /run/user                             user bus, systemd
  *                                                         user manager, gnupg,
@@ -32,8 +32,21 @@
  *  *_SOCKET and *_SOCKET_PATH.
  *  - The masks are locked mounts: the child cannot unmount them, even from a
  *    nested user namespace (verified).
- *  - In its own user namespace the child is refused other processes'
- *    /proc/<pid>/{root,environ,mem} (the gateway's and other bots').
+ *  - Its own PID namespace with a fresh /proc (--unshare-pid --proc /proc;
+ *    not --die-with-parent, see BWRAP_BASE): no host process is even
+ *    visible, so the gateway's and other bots' /proc/<pid>/{root,environ,mem}
+ *    do not exist inside, and a same-uid host process cannot be signalled
+ *    (kill -0 fails, ESRCH). This is structural, not a ptrace-policy outcome
+ *    (in its own user namespace those reads were already refused). The
+ *    parent side keeps using outer PIDs: proc.pid is the outer bwrap, bwrap's
+ *    --info-fd child-pid is the namespace's init (an inner bwrap, kept as
+ *    PiRpc.sandboxInitPid) and PiRpc resolves pi's outer pid as that init's
+ *    child; the process-group kill and the reaper (which folds nested
+ *    wrappers) work on outer PIDs.
+ *  - Where bwrap can make a user namespace but not a PID namespace or a fresh
+ *    /proc, the user-namespace-only tier (BWRAP_BASE_NO_PIDNS) runs instead,
+ *    with a one-time warning; it is re-probed, so a transient failure does
+ *    not pin it.
  *  - bubblewrap sets no_new_privs, so sudo and setuid/setgid binaries
  *    (crontab, at, pkexec) cannot raise privilege.
  *  - uid, network, cwd and the rest of the filesystem (read-write) are
@@ -71,12 +84,24 @@ import { basename, dirname, join } from "node:path";
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
 export const PROBE_RETRY_MS = 5 * 60 * 1000;
+/** Every sandboxed pi: own user + PID namespace, fresh /proc. The probe uses
+ *  the same flags, so tier "pidns" means all of them work. NOT
+ *  --die-with-parent: close()'s group SIGTERM ends the outer bwrap at once,
+ *  and PDEATHSIG would then SIGKILL the namespace init, so pi's SIGTERM drain
+ *  and MCP shutdown would never run. A wrapper orphaned by a dead gateway is
+ *  caught by the reaper's orphan rule (ppid 1). */
+export const BWRAP_BASE = Object.freeze(["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc"]);
+/** Second tier, for hosts where bwrap can make a user namespace but not a PID
+ *  namespace or a fresh /proc: the pre-PID-namespace sandbox (tier "userns",
+ *  status "active-no-pidns"). */
+export const BWRAP_BASE_NO_PIDNS = Object.freeze(["--dev-bind", "/", "/", "--unshare-user"]);
 
-let probeCache = null; // { ok, bwrap, setpriv, reason, at }
+let probeCache = null; // { ok, pidns, bwrap, setpriv, reason, pidnsReason, at }
 let warnedFor = null;
+let warnedNoPidns = false;
 
 /** Test seam only. */
-export function _resetPiSandboxForTest() { probeCache = null; warnedFor = null; }
+export function _resetPiSandboxForTest() { probeCache = null; warnedFor = null; warnedNoPidns = false; }
 
 export function piSandboxMode(env = process.env) {
   const v = String(env.CROW_PI_SANDBOX || "auto").trim().toLowerCase();
@@ -168,40 +193,54 @@ function runProbe(bin, args) {
 }
 
 /**
- * Can this process start a bubblewrap user-namespace sandbox? A success is
- * cached for the life of the process; a failure is re-probed after
- * PROBE_RETRY_MS (a transient spawn timeout must not leave every later pi
- * unsandboxed until restart).
+ * Can this process start a bubblewrap sandbox, and which tier? Tier 1 (user
+ * + PID namespace, fresh /proc) first, then tier 2 (user namespace only).
+ * Only a FULL-tier success is cached for the life of the process. A failure
+ * and a tier-2 success are re-probed after PROBE_RETRY_MS, so a transient
+ * spawn timeout neither leaves every later pi unsandboxed nor pins it to the
+ * weaker tier until restart. `runProbe` is a test seam.
  */
 export function probePiSandbox(opts = {}) {
   const now = opts.now ?? Date.now();
-  if (probeCache && !opts.force && (probeCache.ok || now - probeCache.at < PROBE_RETRY_MS)) return probeCache;
+  if (probeCache && !opts.force && ((probeCache.ok && probeCache.pidns) || now - probeCache.at < PROBE_RETRY_MS)) return probeCache;
   const bwrap = opts.bwrap !== undefined ? opts.bwrap : (BWRAP_CANDIDATES.find((p) => existsSync(p)) || null);
   const setpriv = opts.setpriv !== undefined ? opts.setpriv : (SETPRIV_CANDIDATES.find((p) => existsSync(p)) || null);
-  let ok = false, reason;
+  const run = opts.runProbe || runProbe;
+  let ok = false, pidns = false, reason, pidnsReason = null;
   if (!bwrap) reason = "bubblewrap (bwrap) is not installed";
   else {
-    const err = runProbe(bwrap, ["--dev-bind", "/", "/", "--unshare-user", "--", "/bin/true"]);
-    if (err == null) ok = true; else reason = "bwrap cannot create a user namespace here: " + err;
+    const err = run(bwrap, [...BWRAP_BASE, "--", "/bin/true"]);
+    if (err == null) { ok = true; pidns = true; }
+    else {
+      pidnsReason = "bwrap cannot create a PID namespace with a fresh /proc here (--unshare-pid / --proc): " + err;
+      const err2 = run(bwrap, [...BWRAP_BASE_NO_PIDNS, "--", "/bin/true"]);
+      if (err2 == null) ok = true;
+      else reason = "bwrap cannot create a user namespace here (--unshare-user): " + err2;
+    }
   }
   let setprivOk = false;
-  if (!ok && setpriv) setprivOk = runProbe(setpriv, ["--no-new-privs", "/bin/true"]) == null;
-  probeCache = { ok, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason, at: now };
+  if (!ok && setpriv) setprivOk = run(setpriv, ["--no-new-privs", "/bin/true"]) == null;
+  probeCache = { ok, pidns, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason,
+    pidnsReason: pidns ? null : pidnsReason, at: now };
   return probeCache;
 }
 
-/** Current state for status surfaces: "active" | "nnp-only: ..." | "off" | "fallback: ...". */
+/** Current state for status surfaces: "active" (tier pidns) | "active-no-pidns"
+ *  (tier userns) | "nnp-only: ..." | "off" | "fallback: ...". */
 export function piSandboxStatus() {
   const mode = piSandboxMode(process.env);
   if (mode === "off") return "off";
   const p = probePiSandbox();
-  if (p.ok) return "active";
+  if (p.ok) return p.pidns === false ? "active-no-pidns" : "active";
   return (p.setpriv ? "nnp-only: " : "fallback: ") + p.reason;
 }
 
 /**
- * The command line (and env) to spawn pi with.
- * @returns {{cmd, args, env, sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, reason, masked:string[]}}
+ * The command line (and env) to spawn pi with. `tier` names what the child
+ * really gets: "pidns" (bwrap, user + PID namespace, fresh /proc), "userns"
+ * (bwrap, user namespace only), "nnp" (setpriv --no-new-privs only) or
+ * "none" (plain spawn). `pidNamespace` is true exactly for "pidns".
+ * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[]}}
  * @throws when mode is "required" and bwrap is unavailable.
  */
 export function wrapPiSpawn(cmd, args, opts = {}) {
@@ -209,7 +248,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // the child env (which carries the bot def's spawn_env).
   const mode = opts.mode || piSandboxMode(process.env);
   const env = opts.env || process.env;
-  const plain = (reason) => ({ cmd, args, env, sandboxed: false, wrapper: null, reason, masked: [] });
+  const plain = (reason) => ({ cmd, args, env, tier: "none", sandboxed: false, wrapper: null, pidNamespace: false, reason, masked: [] });
   if (mode === "off") return plain("CROW_PI_SANDBOX=off");
   const probe = opts.probe || probePiSandbox();
   if (!probe.ok) {
@@ -225,7 +264,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     }
     if (probe.setpriv) {
       return { cmd: probe.setpriv, args: ["--no-new-privs", cmd, ...args], env: scrubSandboxEnv(env),
-        sandboxed: false, wrapper: "setpriv", reason: probe.reason, masked: [] };
+        tier: "nnp", sandboxed: false, wrapper: "setpriv", pidNamespace: false, reason: probe.reason, masked: [] };
     }
     return plain(probe.reason);
   }
@@ -250,7 +289,14 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
       if (!pins.includes(a)) pins.push(a);
     }
   }
-  const pre = ["--dev-bind", "/", "/", "--unshare-user"];
+  // A probe without a pidns field (older callers, test stubs) means the full tier.
+  const pidNamespace = probe.pidns !== false;
+  if (!pidNamespace && !warnedNoPidns) {
+    warnedNoPidns = true;
+    console.error("[pi-sandbox] WARNING: pi children run in the bubblewrap sandbox WITHOUT a private PID namespace (" +
+      (probe.pidnsReason || "unavailable") + "). Bots can see host processes and their /proc entries.");
+  }
+  const pre = [...(pidNamespace ? BWRAP_BASE : BWRAP_BASE_NO_PIDNS)];
   for (const a of pins.sort((x, y) => x.length - y.length)) pre.push("--bind", a, a);
   for (const d of tmpfs) pre.push("--tmpfs", d);
   // Read-only too: no decoy can be planted there for a host-side reader
@@ -260,7 +306,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs], pinned: pins };
+    tier: pidNamespace ? "pidns" : "userns", sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs], pinned: pins };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */
