@@ -40,6 +40,7 @@ import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
+import { hasActorKey, presignActors } from "./actor-sig.mjs";
 import { withSkillTools } from "./bot-world.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
@@ -336,6 +337,13 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // /tmp/pibot-job-* dir — PiRpc pipes the built JSON to pi instead.
     const mcpDelivery = mcpConfigDelivery();
     let mcpConfig = null;
+    // Item 46 PR-B: a key-less host (the pibot-bridge@ tick drains jobs) asks
+    // its gateway's loopback signing relay for this job's phone signature; the
+    // key never reaches it. The gateway signs only for a running job of this
+    // bot, and only its own (bot, "job-<id>", "job") tuple. Never throws.
+    if (!hasActorKey()) {
+      await presignActors({ gatewayUrl: "http://127.0.0.1:" + (process.env.CROW_GATEWAY_PORT || 3001), ...jobActor(job), jobId: job.job_id, kinds: ["bot"] });
+    }
     try {
       const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
         write: mcpDelivery === "file" });

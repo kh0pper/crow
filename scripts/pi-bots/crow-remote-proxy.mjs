@@ -2,36 +2,54 @@
 /**
  * F4a Layer 2b — cross-instance forward-proxy (stdio MCP server).
  *
- * pi spawns this as a stdio MCP server (its only proven transport). It connects
- * an MCP client to ONE peer capability mount (CROW_REMOTE_GATEWAY_URL +
- * CROW_REMOTE_MOUNT + /mcp) using the Bearer peer token from peer-tokens.json,
- * and passes tools/list + tools/call through verbatim. It carries NO policy:
- * the peer's L2a exposure gate is the authoritative allow/deny. On any connect
- * failure it serves an empty tool list so a turn never crashes.
+ * pi spawns this as a stdio MCP server (its only proven transport). It passes
+ * tools/list + tools/call through verbatim to ONE paired peer's capability
+ * mount, and carries NO policy of its own. On any connect failure it serves an
+ * empty tool list so a turn never crashes.
  *
- * Reuses the auth pattern from servers/gateway/proxy.js connectToRemoteInstance.
+ * Item 46 PR-B (the operator's ruling): no pair key, signing key or peer bearer
+ * is handed to a bot or pi process (a bot with an open shell can still read
+ * the credential files under CROW_HOME by path: the known residual in
+ * docs/architecture/instances.md), so this process never talks to the peer. It
+ * connects to its own gateway's loopback relay (CROW_REMOTE_RELAY_URL,
+ * servers/gateway/routes/peer-relay.js) with the path-scoped relay token read
+ * from CROW_REMOTE_RELAY_TOKEN_PATH and the X-Crow-Actor-* headers the gateway
+ * signed for this bot and its session (CROW_REMOTE_ACTOR_*). The gateway verifies the
+ * bot, re-checks its selection, and forwards with the peer bearer, signing
+ * the tools/call itself. This module must not import the peer credential
+ * store, directly or transitively (tests/no-peer-key-in-bot-process.test.js).
  */
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { getPeerCreds } from "../../servers/shared/peer-credentials.js";
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../../servers/shared/json-schema-to-zod.js";
 
 const CONNECT_TIMEOUT_MS = 15000;
+const ACTOR_HEADERS = {
+  CROW_REMOTE_ACTOR_ID: "X-Crow-Actor-Id",
+  CROW_REMOTE_ACTOR_THREAD: "X-Crow-Actor-Thread",
+  CROW_REMOTE_ACTOR_GATEWAY: "X-Crow-Actor-Gateway",
+  CROW_REMOTE_ACTOR_SESSION: "X-Crow-Actor-Session",
+  CROW_REMOTE_ACTOR_SIG: "X-Crow-Actor-Sig",
+};
 
-/** Real client factory: authenticated StreamableHTTP client to the peer mount. */
+/** Real client factory: a StreamableHTTP client to this gateway's peer relay. */
 async function defaultClientFactory() {
-  const instanceId = process.env.CROW_REMOTE_INSTANCE_ID;
-  const gatewayUrl = (process.env.CROW_REMOTE_GATEWAY_URL || "").replace(/\/$/, "");
-  const mount = process.env.CROW_REMOTE_MOUNT || "";
-  if (!instanceId || !gatewayUrl || !mount) throw new Error("crow-remote-proxy: missing CROW_REMOTE_* env");
-  const creds = getPeerCreds(instanceId);
-  if (!creds || !creds.auth_token) throw new Error(`crow-remote-proxy: no peer token for ${instanceId}`);
-  const url = new URL(`${gatewayUrl}${mount}/mcp`);
-  const requestInit = { headers: { Authorization: `Bearer ${creds.auth_token}` } };
-  const transport = new StreamableHTTPClientTransport(url, { requestInit });
-  const client = new Client({ name: "crow-remote-proxy", version: "0.1.0" });
+  const relayUrl = process.env.CROW_REMOTE_RELAY_URL || "";
+  const tokenPath = process.env.CROW_REMOTE_RELAY_TOKEN_PATH || "";
+  if (!relayUrl || !tokenPath) throw new Error("crow-remote-proxy: missing CROW_REMOTE_RELAY_* env");
+  let token = "";
+  try { token = readFileSync(tokenPath, "utf8").trim(); } catch { token = ""; }
+  if (!token) throw new Error("crow-remote-proxy: relay token unreadable");
+  const headers = { Authorization: `Bearer ${token}` };
+  for (const [envName, headerName] of Object.entries(ACTOR_HEADERS)) {
+    const v = process.env[envName];
+    if (typeof v === "string" && v !== "") headers[headerName] = v;
+  }
+  const transport = new StreamableHTTPClientTransport(new URL(relayUrl), { requestInit: { headers } });
+  const client = new Client({ name: "crow-remote-proxy", version: "0.2.0" });
   let timer;
   try {
     await Promise.race([

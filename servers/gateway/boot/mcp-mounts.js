@@ -22,7 +22,9 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken } from "../local-token.js";
+import { peerRelayRouter } from "../routes/peer-relay.js";
+import { actorSignRouter } from "../routes/actor-sign.js";
 import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -304,6 +306,30 @@ export async function mountMcpServers(app, deps) {
   } catch (err) {
     console.warn(`[gateway] ensureModelsToken failed: ${err.message}`);
   }
+
+  // Item 46 PR-B: the peer relay a pi bot's remote proxy calls instead of a
+  // peer (routes/peer-relay.js). Its token is minted here, best-effort like the
+  // board token; without it the relay refuses every call (bots lose remote
+  // tools, nothing else). The router validates its own token and signed actor;
+  // no global middleware authenticates /peer-relay/... (the local-token MCP
+  // path match is a single segment, and the relay token is in no MCP check).
+  try {
+    const tokenDb = createDbClient();
+    try {
+      const { minted } = await ensurePeerRelayToken(tokenDb);
+      if (minted) console.log("[gateway] peer relay token minted");
+    } finally {
+      try { tokenDb.close(); } catch {}
+    }
+  } catch (err) {
+    console.warn(`[gateway] ensurePeerRelayToken failed: ${err.message}`);
+  }
+  app.use(peerRelayRouter({ createDbClient }));
+  // Item 46 PR-B: the loopback signing relay for the key-less bot hosts
+  // (routes/actor-sign.js). It authenticates the calling process itself (the
+  // main process of a live pibot-* unit) and signs with the key minted below;
+  // the key never leaves this process.
+  app.use(actorSignRouter({ createDbClient }));
 
   // S5: board actor headers count only with a signature from the per-boot
   // in-memory key, so the key must exist before any bot world is built in

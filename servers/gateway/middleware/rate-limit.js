@@ -146,6 +146,13 @@ export const GENERAL_LIMITER_SKIP_PREFIXES = Object.freeze([
   "/dashboard", "/api/meta-glasses/", "/llm", "/ramble/", "/api/ramble/", "/api/workspace/live/",
   // Kiosk display page + its API (2 s pair polling); each has its own gate.
   "/display", "/api/kiosk/",
+  // The peer relay (item 46 PR-B): loopback only, its own token and a per-boot
+  // signed bot actor (routes/peer-relay.js); one bucket for every bot's calls.
+  "/peer-relay/",
+  // The loopback signing relay (item 46 PR-B): local only, the caller must be
+  // a bot host unit's main process (routes/actor-sign.js), one call per turn.
+  // A refusal here would silently run the turn unsigned.
+  "/internal/actor-sign",
 ]);
 
 /** express-rate-limit `skip` predicate for the general limiter; `extraPrefixes` = GATEWAY_RATE_LIMIT_SKIP_PREFIXES. */

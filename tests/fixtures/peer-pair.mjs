@@ -129,6 +129,10 @@ export class Instance {
       // Every child, new and old tree: Hyperswarm never carries instance
       // sync here, so tailnet is the only sync transport.
       CROW_INSTANCE_SYNC_HYPERSWARM: "0",
+      // remote-actor.js treats headers dated in the first minute after boot as
+      // pre_boot (servers/shared/test-timing.js: honoured only in the suite's
+      // scratch env); these gateways sign and verify seconds after they start.
+      CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS: "1",
     });
     if (this.sync) {
       Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP }, SYNC_TIMING);
@@ -249,6 +253,27 @@ export class Instance {
       [sha(token), new Date(Date.now() + 3_600_000).toISOString()]);
     return token;
   }
+}
+
+/** An Instance whose pair CLI enrolls under its own name: the CLI reads $HOSTNAME, never the real host's. */
+export class Named extends Instance { get env() { return { ...super.env, HOSTNAME: this.name }; } }
+
+/**
+ * Install the real Workspace add-on on `inst` (mcp-addons.json → its own tree's
+ * bundles/workspace/server/index.js) against the hermetic fake Nextcloud `fake`
+ * (tests/helpers/workspace-fake-nextcloud.js), and expose `exposed` to peers.
+ * Takes effect at the next boot.
+ */
+export function installWorkspace(inst, fake, { exposed = ["workspace"] } = {}) {
+  const dir = join(inst.dir, "bundles", "workspace");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".env"),
+    "WORKSPACE_BOOTSTRAP_DONE=1\nWORKSPACE_PUBLIC_HOST=crow.test\nWORKSPACE_BOT_APP_PASSWORD=pw-secret-123\nWORKSPACE_ONLYOFFICE_JWT_SECRET=jwt\n", { mode: 0o600 });
+  writeFileSync(join(inst.dir, "mcp-addons.json"), JSON.stringify({
+    workspace: { command: "node", args: ["server/index.js"], cwd: join(inst.repo, "bundles", "workspace"),
+      env: { WORKSPACE_NC_INTERNAL_URL: fake.ncUrl, WORKSPACE_OO_INTERNAL_URL: fake.ooUrl } },
+  }), { mode: 0o600 });
+  inst.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('remote_exposed_tools', ?)", [JSON.stringify(exposed)]);
 }
 
 const mod = (p) => JSON.stringify(new URL(`../../${p}`, import.meta.url).href);

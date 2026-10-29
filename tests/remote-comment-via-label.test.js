@@ -4,7 +4,9 @@
  * A paired instance that writes a Workspace comment here, by any peer path (another instance's voice
  * bot through /router/mcp crow_tools, or a direct MCP client on /tools/mcp), is labelled
  * "Crow (via <this instance's own row name for that peer>)", with a short id suffix when that name is
- * not unique. Nothing the caller claims becomes the label. Positive control: the owner's own comment
+ * not unique. Nothing the caller claims becomes the label. (PR-B: a voice bot's call is signed by its
+ * gateway and reads "<bot> (bot from <name>)" instead; tests/remote-actor-two-gateways.test.js covers
+ * that path in both directions.) Positive control: the owner's own comment
  * (local MCP token) still reads "Crow", as before. (Artifacts are closed to peers: tests/peer-label.test.js.)
  *
  * B runs the real Workspace add-on (mcp-addons.json → bundles/workspace/server/index.js) against the
@@ -12,33 +14,19 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Instance, pairInto, until, sha, REPO } from "./fixtures/peer-pair.mjs";
+import { Named, installWorkspace, pairInto, until, sha } from "./fixtures/peer-pair.mjs";
 import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
 import { idSuffix } from "../servers/shared/peer-label.js";
 
 const FIX = join(import.meta.dirname, "fixtures", "workspace");
-// The pair CLI enrolls under $HOSTNAME; pin it per instance so the test never sees the real host's name.
-class Named extends Instance { get env() { return { ...super.env, HOSTNAME: this.name }; } }
 const OWNER_IP = { ip: "100.64.20.250" };
 let A, B, C, fake, ownerToken;
 const clients = [];
-
-function installWorkspace(inst) {
-  const dir = join(inst.dir, "bundles", "workspace");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, ".env"),
-    "WORKSPACE_BOOTSTRAP_DONE=1\nWORKSPACE_PUBLIC_HOST=crow.test\nWORKSPACE_BOT_APP_PASSWORD=pw-secret-123\nWORKSPACE_ONLYOFFICE_JWT_SECRET=jwt\n", { mode: 0o600 });
-  writeFileSync(join(inst.dir, "mcp-addons.json"), JSON.stringify({
-    workspace: { command: "node", args: ["server/index.js"], cwd: join(REPO, "bundles", "workspace"),
-      env: { WORKSPACE_NC_INTERNAL_URL: fake.ncUrl, WORKSPACE_OO_INTERNAL_URL: fake.ooUrl } },
-  }), { mode: 0o600 });
-  inst.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('remote_exposed_tools', ?)", [JSON.stringify(["workspace"])]);
-}
 
 async function mcp(url, bearer) {
   const c = new Client({ name: "via-label-test", version: "1" });
@@ -85,7 +73,7 @@ before(async () => {
   B = await new Named("bravo", "100.64.20.12").init();
   // C enrolls under the SAME name as A: the name is the peer's choice, so it cannot be trusted to be unique.
   C = await new Named("alpha", "100.64.20.13").init();
-  installWorkspace(B);
+  installWorkspace(B, fake);
   ownerToken = randomBytes(32).toString("hex");
   B.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('mcp_local_token_hash', ?)", [sha(ownerToken)]);
   await A.boot();
@@ -110,11 +98,12 @@ test("positive control: the owner's own comment on B still reads 'Crow'", async 
   assert.equal(await authorOf("S/own.docx", a.data.comment_id), "Crow");
 });
 
-test("another instance's voice bot (callRemote → /router/mcp crow_tools) reads 'Crow (via alpha)'", async () => {
+// PR-B: the voice bot's gateway signs its actor, so the label names the bot (tests/remote-actor-two-gateways.test.js).
+test("another instance's voice bot (callRemote → /router/mcp crow_tools) reads 'Hank (bot from alpha)'", async () => {
   put("voice.docx");
   const a = await voiceComment(A, "S/voice.docx", "from the voice bot");
   assert.equal(a.success, true, JSON.stringify(a));
-  assert.equal(await authorOf("S/voice.docx", a.data.comment_id), "Crow (via alpha)");
+  assert.equal(await authorOf("S/voice.docx", a.data.comment_id), "Hank (bot from alpha)");
 });
 
 test("a peer's direct /tools/mcp call reads 'Crow (via alpha)', whatever actor it claims in _meta", async () => {
@@ -141,7 +130,7 @@ test("a second peer enrolled under the same name: both are told apart by an id s
   assert.equal(a.success && c.success, true);
   const la = await authorOf("S/dupA.docx", a.data.comment_id);
   const lc = await authorOf("S/dupC.docx", c.data.comment_id);
-  assert.equal(la, `Crow (via alpha [${idSuffix(A.id)}])`);
+  assert.equal(la, `Hank (bot from alpha [${idSuffix(A.id)}])`);
   assert.equal(lc, `Crow (via alpha [${idSuffix(C.id)}])`);
   assert.notEqual(la, lc);
 });

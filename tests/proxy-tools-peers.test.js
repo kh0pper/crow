@@ -174,3 +174,53 @@ test("peer gate: even with instance-p1 in the exposure list, a /tools call to a 
   assert.equal(res.body.error.code, -32001);
   assert.deepEqual(emits, []);
 });
+
+// Item 46 PR-B version gate: only an add-on entry flagged remoteBotActor (Workspace >= 0.4.3, read from its own
+// cwd's manifest.json at connect) receives a peer's verified bot as {kind:"bot"}; every other entry keeps the
+// peer form, on both the raw /tools surface and the router's crow_tools.
+test("remote bot actor reaches only an entry flagged remoteBotActor (/tools and router crow_tools)", async () => {
+  const seen = [];
+  const metaClient = (label) => ({ async callTool({ name, _meta }) { seen.push({ label, name, kind: _meta?.["crow/actor"]?.kind, id: _meta?.["crow/actor"]?.id }); return { content: [{ type: "text", text: "ok" }] }; } });
+  connectedServers.set("workspace", { client: metaClient("workspace"), tools: [{ name: "ws_tool", inputSchema: { type: "object" } }], status: "connected", isAddon: true, remoteBotActor: true });
+  connectedServers.set("other", { client: metaClient("other"), tools: [{ name: "other_tool", inputSchema: { type: "object" } }], status: "connected", isAddon: true });
+  const extra = { authInfo: { token: "peer-instance", clientId: "instance:inst-a-1", extra: { peerName: "alpha", remoteActor: { kind: "bot", id: "hank", name: "Hank", instanceId: "inst-a-1" } } } };
+  try {
+    const tools = createProxyServer()._registeredTools;
+    const cb = (t) => tools[t].callback || tools[t].handler;
+    await cb("ws_tool")({}, extra);
+    await cb("other_tool")({}, extra);
+    const { createRouterServer } = await import("../servers/gateway/router.js");
+    const ct = createRouterServer()._registeredTools.crow_tools;
+    await (ct.callback || ct.handler)({ action: "ws_tool", params: {} }, extra);
+    await (ct.callback || ct.handler)({ action: "other_tool", params: {} }, extra);
+  } finally {
+    connectedServers.delete("workspace");
+    connectedServers.delete("other");
+  }
+  assert.deepEqual(seen, [
+    { label: "workspace", name: "ws_tool", kind: "bot", id: "hank@inst-a-1" },
+    { label: "other", name: "other_tool", kind: "peer", id: undefined },
+    { label: "workspace", name: "ws_tool", kind: "bot", id: "hank@inst-a-1" },
+    { label: "other", name: "other_tool", kind: "peer", id: undefined },
+  ]);
+});
+
+test("remoteBotActorForCwd reads <cwd>/manifest.json: workspace 0.4.3 yes; 0.4.2, other ids, missing or garbage no", async () => {
+  const { remoteBotActorForCwd } = await import("../servers/gateway/proxy.js");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = (manifest) => {
+    const d = mkdtempSync(join(tmpdir(), "rba-"));
+    if (manifest !== undefined) writeFileSync(join(d, "manifest.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest));
+    return d;
+  };
+  assert.equal(remoteBotActorForCwd(dir({ id: "workspace", version: "0.4.3" })), true);
+  assert.equal(remoteBotActorForCwd(dir({ id: "workspace", version: "0.4.2" })), false);
+  assert.equal(remoteBotActorForCwd(dir({ id: "research", version: "9.0.0" })), false);
+  assert.equal(remoteBotActorForCwd(dir()), false);
+  assert.equal(remoteBotActorForCwd(dir("{not json")), false);
+  assert.equal(remoteBotActorForCwd(undefined), false);
+  const repo = join(import.meta.dirname, "..", "bundles", "workspace");
+  assert.equal(remoteBotActorForCwd(repo), true, "the repo's Workspace bundle is at 0.4.3 or later");
+});

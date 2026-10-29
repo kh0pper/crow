@@ -235,6 +235,46 @@ export async function ensureArtifactsToken(db) {
   return { minted: true };
 }
 
+// Peer-relay token (item 46 PR-B): same shape as the artifacts token (hash in
+// a local-scope setting, raw value in <crowHome>/peer-relay-token 0600). A pi
+// bot's remote proxy presents it, with its signed actor headers, to the
+// loopback relay at /peer-relay/... (routes/peer-relay.js), which validates it
+// itself. It is accepted NOWHERE else: localTokenAuthMiddleware never consults
+// it, so it authenticates no MCP mount.
+const PEER_RELAY_HASH_KEY = "mcp_peer_relay_token_hash";
+const PEER_RELAY_CREATED_KEY = "mcp_peer_relay_token_created";
+export function peerRelayTokenPath() {
+  return join(crowHome(), "peer-relay-token");
+}
+
+export async function generatePeerRelayToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, PEER_RELAY_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, PEER_RELAY_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = peerRelayTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validatePeerRelayToken(db, token) {
+  if (!token || typeof token !== "string") return false;
+  const stored = await readSetting(db, PEER_RELAY_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function ensurePeerRelayToken(db) {
+  const hash = await readSetting(db, PEER_RELAY_HASH_KEY);
+  if (hash && existsSync(peerRelayTokenPath())) return { minted: false };
+  await generatePeerRelayToken(db);
+  return { minted: true };
+}
+
 // Kiosk announce token (kiosk spec §4.1): lets the kiosk bundle's stdio MCP
 // server reach the gateway's live display sessions through loopback-only
 // /api/kiosk/internal/*. Same shape as the board/phone tokens (hash in a

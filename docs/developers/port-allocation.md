@@ -13,6 +13,7 @@ This document is the **single source of truth** for every host port consumed by 
 - "Reserved" rows are claimed by upcoming Phase 2 bundles; do not consume them for unrelated work.
 - "MVP" rows are claimed by the bundles in the current MVP plan.
 - This doc alone is not authoritative. A port is only actually free when it's free across all three registries: this table, every `docker-compose.yml` under `crow-addons/` AND `crow/bundles/` (not just the one you're editing), and live listeners on the host. A same-port/different-bind-address pair (e.g. `127.0.0.1:4210` vs. the tailnet IP on `4210`) can pass both `check-port-allocation.js` and a naive "is anything listening?" check, then show up later as a silent double-allocation — check all three before claiming a number.
+- The peer relay (`/peer-relay/<instance>/<mount>/mcp`, how a pi bot's remote-tools proxy reaches a paired peer) is a route on the gateway's own loopback port. No new port.
 - Docker subnets: `crow-workspace` pins 10.89.70.0/24 (scratch: 10.89.71.0/24 smoke, 10.89.72.0/24 restore). Do not reuse.
 
 ## External ports (not Crow's to allocate)

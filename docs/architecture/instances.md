@@ -147,6 +147,24 @@ User asks: "Search all instances for tax notes"
   → Local AI merges all results and presents to user
 ```
 
+### Who wrote a peer's comment
+
+When a paired instance writes here (for example a Workspace comment), the author label says only what the sending gateway knows:
+
+- **`Crow (via alpha)`**: the paired instance this instance calls `alpha` made the call. The name is this instance's own `crow_instances` row for it, with a short id suffix (`alpha [1a2b3c4d]`) when two peers share a name. Nothing the call carries (tool arguments, `_meta`) is used.
+- **`Crow (via peer [1a2b3c4d])`**: the same, for a peer whose name cleans to nothing readable (labels keep ASCII letters, digits and a few separators only). It always carries the id suffix.
+- **`Hank (bot from alpha)`**: `alpha`'s gateway asserts that its own bot Hank made the call. Only that gateway signs, and only for a bot it has already verified; no key is handed to a bot or its process (but see the known residual below). The proof is an HMAC under the pair subkey `crow/remote-actor/v1`, derived from the pair's `signing_key`.
+
+On the wire the sender adds two headers to a `tools/call` POST: `x-crow-remote-actor` (base64url JSON naming the bot, the sender, this instance as audience, the mount, a timestamp, a nonce and a digest of the tool call) and `x-crow-remote-actor-sig`. This instance checks them against the key of the bearer-authenticated peer, so one peer can never speak as another, and rejects stale, replayed, mis-addressed or altered calls. Because replay memory does not survive a restart, a call dated within the first minute after this instance started is also downgraded. Every failure downgrades the label to `Crow (via <name>)`; none refuses the call, and a peer's call is never treated as the owner. Outcomes are logged at most once an hour per peer and reason (`[remote-actor] accepted …` / `downgraded …`), never with a key or header.
+
+Servers receive the verified bot as `_meta["crow/actor"] = { kind: "bot", id: "<bot>@<instance>", name, instance, from }`. A `kind: "bot"` with `instance` is a remote bot, never a local one: split the id on the last `@`. Only add-ons that understand this form get it: the gateway reads each stdio add-on's own `manifest.json` at connect, and today only Workspace 0.4.3 or later qualifies. Every other add-on, and every HTTP-transport add-on, keeps receiving `{ kind: "peer", instance, from }`.
+
+Which bots produce `bot from` today: only the gateway's voice bots (glasses, companion), which call a peer's `/router/mcp` from the gateway itself. A pi bot reaches a peer only through its gateway's loopback peer relay, and the relay serves only the core mounts (memory, projects, sharing, storage, blog) (see [Bot Engine](../developers/bot-engine.md#the-peer-relay-how-a-pi-bot-calls-a-paired-instance)). A pi bot's calls there are signed as that bot, but Workspace is not among those mounts, so today only the voice path produces a `bot from` Workspace comment.
+
+**Standing rule: attribution only.** A remote bot actor (`_meta["crow/actor"]` with `kind: "bot"` and an `instance`) is a label. Nothing may authorize on it: no permission, scope, owner check or exposure decision may depend on it. That holds at least until the credential files below are hidden from bot processes and bots run as a dedicated user.
+
+**Known residual.** The peer credential store (`<CROW_HOME>/peer-tokens.json`, holding each peer's bearer and pair signing key) and the relay token (`<CROW_HOME>/peer-relay-token`) still sit under `CROW_HOME`, outside the directory hidden from bot sandboxes. A bot with an open shell running as the gateway's user can read them by path. A bot without a shell cannot, because read tools are confined to its own roots. Hiding both files from bot processes is a follow-up.
+
 ### Cached Summaries
 
 To avoid redundant federation calls, the gateway caches lightweight summaries from remote instances:
