@@ -509,7 +509,7 @@ test("a completion heads-up that was spoken makes the hand-off that device's las
   s.core.announce = async () => ({ spokenOn: "glasses-1", surface: "glasses" });
   await s.report(cardId);
   await flush();
-  assert.deepEqual(s.core.lastHandoffTopic.get("glasses-1"), { id, turn: null, at: T0 });
+  assert.deepEqual(s.core.lastHandoffTopic.get("glasses-1"), { id, exchange: 0, at: T0 });
   const t = await setup();
   const b = await t.handoff();
   await t.report(b.cardId);

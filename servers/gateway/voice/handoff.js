@@ -7,8 +7,8 @@
  * budget, on a model that was up; otherwise "starting up", and a first turn that fails is reported once.
  *
  *   getHandoffCore()                  the process singleton: { store, summaries, availability, loadVoiceDef, give,
- *                                     engine, openTasksDb, notify, announce, inFlight, lastHandoffTopic, forTurn,
- *                                     confirm, completion }
+ *                                     engine, openTasksDb, notify, announce, inFlight, lastHandoffTopic, exchanges,
+ *                                     forTurn, confirm, completion, status }
  *   registerVoiceResultKind()         the "voice" result kind (handoff-completion.js), registered once at boot
  *   createHandoffCore(seams)          the same, built from seams (tests)
  *   createHandoffVoiceActions(...)    the runner's deps.voiceActions member (pending.js chainVoiceActions)
@@ -33,6 +33,8 @@ import { phraseWords, listMatches } from "./tool-families.js";
 import { HANDOFF_TASK_MAX_CHARS } from "./handoff-constants.js";
 import { confirm, langOf, botName, surfaceLabel, announceHandoff } from "./handoff-confirm.js";
 import { createHandoffCompletion } from "./handoff-completion.js";
+import { status as handoffStatus, answerRow, reconcileOpen } from "./handoff-status.js";
+import { rememberTopic, bumpExchange } from "./handoff-topic.js";
 import { registerResultKind } from "../board/result-requesters.js";
 
 // Re-exported so every existing import of these from handoff.js keeps working.
@@ -292,7 +294,8 @@ async function defaultAnnounce(args) {
  * fileStartedThread), `engine` an async getter for the interactive engine (`{ createIfMissing }`), `openTasksDb` the tasks.db client
  * a confirm opens and closes, `notify` createNotification, `withDb` a short-lived crow.db for detached work,
  * `wait` the start-budget timer, `announce` presence's (PR 5). `completion` is the "voice" result kind
- * (handoff-completion.js), built on the same store and announce seam. 5.3 and 5.4 add status and stop.
+ * (handoff-completion.js), built on the same store and announce seam; `status` answers "how's it going?"
+ * (handoff-status.js). 5.4 adds stop.
  */
 export function createHandoffCore({
   store = createHandoffStore(),
@@ -309,11 +312,13 @@ export function createHandoffCore({
   now = Date.now,
   log = (m) => console.warn(m),
 } = {}) {
-  // lastHandoffTopic (P31): device id → { id, turn, at }, the hand-off last spoken about there (a confirm, a status
-  // answer, a heads-up); on the core, so it is shared like the core itself (P30).
-  const core = { store, summaries, availability, loadVoiceDef, give, engine, openTasksDb, notify, withDb, wait, announce, now, inFlight: new Set(), lastHandoffTopic: new Map(), log };
+  // lastHandoffTopic (P31) and exchanges (P17, handoff-topic.js): device id → { id, exchange, at }, the hand-off
+  // last spoken about there (a confirm, a status answer, a heads-up), and the turn count that dates it; on the
+  // core, so they are shared like the core itself (P30).
+  const core = { store, summaries, availability, loadVoiceDef, give, engine, openTasksDb, notify, withDb, wait, announce, now, inFlight: new Set(), lastHandoffTopic: new Map(), exchanges: new Map(), log };
   core.forTurn = (ctx) => forTurn(core, ctx);
   core.confirm = (db, id, decision, via) => confirm(core, db, id, decision, via);
+  core.status = (db, ctx) => handoffStatus(core, db, ctx);
   // The announce is read through the core at call time, so a seam set later (tests, 5.2) is the one spoken.
   core.completion = createHandoffCompletion({ store, announce: (args) => announceHandoff(core, args?.handoffId ?? null, args), log });
   return core;
@@ -331,7 +336,10 @@ export function registerVoiceResultKind({ core = getHandoffCore() } = {}) {
 /**
  * The minute sweep over the log (handoff-store.js sweep): stale proposals expire, a stuck start is recovered
  * (an in-flight confirm is left alone), a pending stop is retried through the engine's stop, old verbatim
- * speech is scrubbed. Armed once per core; unref'd. → { runOnce, stop }.
+ * speech is scrubbed; then the started and quiet rows are reconciled with their card's result and their
+ * session (handoff-status.js reconcileOpen, P13: it needs tasks.db, the engine, notify and announce, so it
+ * runs here, not in the store). Armed once per core; unref'd. → { runOnce, stop }; runOnce resolves to the
+ * store's counts plus `reconciled`.
  */
 export function startHandoffSweep({ core = getHandoffCore(), intervalMs = 60_000, openDb = () => createDbClient() } = {}) {
   if (core.sweep) return core.sweep;
@@ -343,8 +351,13 @@ export function startHandoffSweep({ core = getHandoffCore(), intervalMs = 60_000
   };
   const runOnce = async () => {
     const db = openDb();
-    try { return await core.store.sweep(db, { inFlight: core.inFlight, findCard: findHandoffCard, retryStop }); }
-    finally { try { db.close(); } catch { /* already closed */ } }
+    try {
+      const out = await core.store.sweep(db, { inFlight: core.inFlight, findCard: findHandoffCard, retryStop });
+      // The reconcile rides the same pass; its failure is logged and never loses the store sweep's counts.
+      try { out.reconciled = await reconcileOpen(core, db); }
+      catch (err) { out.reconciled = null; core.log(`[voice-handoff] reconcile failed (${err?.message || err})`); }
+      return out;
+    } finally { try { db.close(); } catch { /* already closed */ } }
   };
   const timer = setInterval(() => { runOnce().catch((err) => core.log(`[voice-handoff] sweep failed (${err?.message || err})`)); }, intervalMs);
   if (timer && typeof timer.unref === "function") timer.unref();
@@ -372,22 +385,26 @@ function namesAnother(transcript, names) {
  * The runner's deps.voiceActions member, sharing the runner's pending store (pending.js chainVoiceActions).
  *   fastPath     a pending hand-off: yes → core.confirm (the server speaks what really happened), no → declined;
  *                a transcript naming another candidate is a correction (null, even after "no": the model
- *                re-proposes). A pending which: an answer naming one option re-proposes through proposeHandoff,
- *                a no declines. Anything else → null. The entry is taken only when it is answered.
+ *                re-proposes). A pending which: an answer naming one option re-proposes through proposeHandoff
+ *                (purpose "handoff", or none), or answers that bot's status (purpose "status", P18); a no
+ *                declines. With nothing of its own pending: a status question (core.status, handoff-status.js)
+ *                answered from the log, never the model. Anything else → null. The entry is taken only when it
+ *                is answered. Never on a relay turn (turn.js skips fastPath there).
  *   turnContext  a pending hand-off or which: "[Hand-off] Waiting for a yes or no: …", pending (an action turn,
  *                so a reply claiming the bot started is held and replaced); it reads only the entry [rv1 C6]
- *   afterTurn    a turn that left a pending hand-off or which unanswered (no crow_handoff call) takes it and
- *                expires its row; a routine or which_calendar entry is never touched. A relay turn (relay: true,
- *                turn.js's relay contract) takes a pending hand-off, which or stop whatever was called, and
- *                expires a hand-off's row
+ *   afterTurn    every turn counts one exchange on the device (handoff-topic.js). A turn that left a pending
+ *                hand-off or which unanswered (no crow_handoff call) takes it and expires its row; a routine or
+ *                which_calendar entry is never touched. A relay turn (relay: true, turn.js's relay contract)
+ *                takes a pending hand-off, which or stop whatever was called, and expires a hand-off's row
  */
 export function createHandoffVoiceActions({ core, pending } = {}) {
+  const statusOf = (ctx) => core.status(ctx.db, { ...ctx, pending });
   return {
     async fastPath({ db, device, surface, transcript, lang, bot } = {}) {
       const id = device?.id;
       if (!id || !db) return null;
       const peek = pending.get(id);
-      if (!peek || !OWN_KINDS.has(peek.kind)) return null;
+      if (!peek || !OWN_KINDS.has(peek.kind)) return statusOf({ db, device, surface, transcript, lang, bot });
       const speak = langOf(lang);
       if (peek.kind === "handoff") {
         if (namesAnother(transcript, peek.names)) return null;
@@ -400,9 +417,26 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
         const entry = pending.take(id);   // act on what take() returned, never the earlier copy
         if (!entry || entry.kind !== "handoff" || entry.id !== peek.id) return null;
         const r = await core.confirm(db, entry.id, answer, "voice");
+        // The yes makes this hand-off the device's topic: a bare "how's it going?" soon after is about it (P17).
+        if (answer === "yes") rememberTopic(core, id, entry.id, { inTurn: true });
         return { say: r.say || voiceLine("handoff_failed", speak, { bot: entry.name }), verb: "handoff_" + r.status };
       }
       const pick = matchChoice(transcript, peek.options.map((o) => ({ ...o, match: o.bot_id })));
+      if (peek.purpose === "status") {
+        // "Which one?" after a status question (P18): the named bot's row is answered; a fresh status question
+        // ("how's writer doing?") answers too; a no lets it go. Nothing of this proposes a hand-off.
+        if (pick) {
+          const entry = pending.take(id);
+          if (!entry || entry.kind !== "which" || entry.purpose !== "status") return null;
+          const row = await core.store.get(db, pick.id);
+          return row ? answerRow(core, db, row, { device, surface, lang: speak }) : { say: voiceLine("status_none", speak), verb: "status_none" };
+        }
+        const asked = await statusOf({ db, device, surface, transcript, lang, bot });
+        if (asked) { if (asked.verb !== "status_which") pending.take(id); return asked; }
+        if (matchYesNo(transcript) !== "no") return null;
+        pending.take(id);
+        return { say: voiceLine("declined", speak), verb: "handoff_declined" };
+      }
       if (!pick) {
         if (matchYesNo(transcript) !== "no") return null;
         pending.take(id);
@@ -421,11 +455,15 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
     turnContext({ device } = {}) {
       const e = device?.id ? pending.get(device.id) : null;
       if (!e || !OWN_KINDS.has(e.kind)) return null;
+      if (e.kind === "which" && e.purpose === "status") {
+        return { text: `[Hand-off] Waiting for which bot's task the user is asking about: ${e.options.map((o) => o.name).join(" or ")}. Do not guess at its progress.`, pending: true };
+      }
       const what = e.kind === "handoff" ? `${e.name}: ${e.task}` : `${e.options.map((o) => o.name).join(" or ")}: ${e.task}`;
       return { text: `[Hand-off] Waiting for a yes or no: ${what}. If the user changes the bot or the task, call crow_handoff again with the change.`, pending: true };
     },
     async afterTurn({ db, device, calledTools = [], relay = false } = {}) {
       if (!device?.id) return;
+      bumpExchange(core, device.id);
       const e = pending.get(device.id);
       if (!e) return;
       if (relay === true ? !RELAY_KINDS.has(e.kind) : !OWN_KINDS.has(e.kind) || calledTools.includes(HANDOFF_TOOL_NAME)) return;

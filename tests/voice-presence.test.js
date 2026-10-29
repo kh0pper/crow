@@ -265,7 +265,8 @@ test("a start-failed heads-up is spoken only after its notification was sent", a
 test("a heads-up that was spoken records the hand-off as that device's last topic (P31)", async () => {
   const c = fakeCore("ok");
   await announceHandoff(c, 7, { originDeviceId: "kiosk-1", lineFor: () => "x" });
-  assert.deepEqual(c.lastHandoffTopic.get("phone-1"), { id: 7, turn: null, at: T0 }, "keyed by the device it was spoken on");
+  // Said between turns: exchange 0 is the last completed one there (handoff-topic.js), so the next turn is the first after it.
+  assert.deepEqual(c.lastHandoffTopic.get("phone-1"), { id: 7, exchange: 0, at: T0 }, "keyed by the device it was spoken on");
   const silent = { ...fakeCore("ok"), announce: async () => ({ spokenOn: null }) };
   await announceHandoff(silent, 8, { originDeviceId: "phone-1", lineFor: () => "x" });
   assert.equal(silent.lastHandoffTopic.size, 0, "nothing recorded when nothing was spoken");

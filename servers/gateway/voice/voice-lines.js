@@ -73,8 +73,25 @@ export const VOICE_LINES = Object.freeze({
     // The push's title; {display} is the kiosk's name, or handoff_display_fallback when it has none.
     handoff_phone_title: "Crow on {display}: hand a task to {bot}?",
     handoff_display_fallback: "the kiosk",
-    // A stop that landed while the yes was still starting the bot (the status lines proper are PR 5).
+    // "How's it going?" (handoff-status.js, PR 5 Task 5.3): the state of a handed-off task, reconciled with the
+    // card's result and the bot's Perch session. {task} is the task line; on a kiosk it is status_task_kiosk.
+    status_queued: "{bot} hasn't started {task} yet. It's waiting on {bot}'s board.",
+    status_starting: "{bot} is still starting up for {task}.",
+    status_running: "{bot} is working on {task}.",
+    status_needs_you: "{bot} needs an answer from you. Check your phone.",
+    status_done: "{bot} finished {task}. It's on your phone.",
+    status_failed: "{bot} couldn't finish {task}.",
+    status_ended_quiet: "{bot} stopped without saying it was done. The card is still on {bot}'s board.",
+    status_waiting_quiet: "{bot} paused without reporting a result. Its session is waiting on {bot}'s board.",
+    status_stopping: "{bot}'s task will stop as soon as {bot} finishes starting up.",
     status_stopped: "{bot}'s task was stopped. What it made so far is kept.",
+    status_none: "There's nothing handed off right now.",
+    status_which: "{list} are working on things. Which one?",
+    status_task_kiosk: "the task",
+    list_and: "{rest} and {last}",
+    // The session ended with no result (the sweep or a status read found it): the notification title and the
+    // spoken line; a kiosk hears ended_no_result_spoken_kiosk instead [rv5 m3].
+    handoff_ended_no_result: "{bot} stopped without finishing {task}. The card is still on {bot}'s board.",
     // The completion notice (handoff-completion.js, PR 5): the bot's own final report ends the hand-off. The
     // title opens what it made; the spoken line goes to a live voice surface, and a kiosk never hears the task.
     completion_title_done: "{bot} finished: {task}",
@@ -140,7 +157,21 @@ export const VOICE_LINES = Object.freeze({
     handoff_already_sent: "Ya te envié una al teléfono. Confírmala o recházala primero.",
     handoff_phone_title: "Crow en {display}: ¿pasarle una tarea a {bot}?",
     handoff_display_fallback: "el quiosco",
+    status_queued: "{bot} aún no ha empezado: {task}. Está esperando en el tablero de {bot}.",
+    status_starting: "{bot} todavía se está poniendo en marcha para: {task}.",
+    status_running: "{bot} está trabajando en: {task}.",
+    status_needs_you: "{bot} necesita una respuesta tuya. Mira el teléfono.",
+    status_done: "{bot} terminó: {task}. Lo tienes en el teléfono.",
+    status_failed: "{bot} no pudo terminar: {task}.",
+    status_ended_quiet: "{bot} se detuvo sin decir que había terminado. La tarjeta sigue en el tablero de {bot}.",
+    status_waiting_quiet: "{bot} se pausó sin informar de un resultado. Su sesión espera en el tablero de {bot}.",
+    status_stopping: "La tarea de {bot} se parará en cuanto {bot} termine de arrancar.",
     status_stopped: "La tarea de {bot} se paró. Lo que hizo hasta ahora se queda.",
+    status_none: "Ahora mismo no hay nada encargado.",
+    status_which: "{list} están trabajando en cosas. ¿Cuál?",
+    status_task_kiosk: "la tarea",
+    list_and: "{rest} y {last}",
+    handoff_ended_no_result: "{bot} se detuvo sin terminar: {task}. La tarjeta sigue en el tablero de {bot}.",
     completion_title_done: "{bot} terminó: {task}",
     completion_title_failed: "{bot} no pudo terminar: {task}",
     completion_spoken: "{bot} terminó: {task}. Lo tienes en el teléfono.",

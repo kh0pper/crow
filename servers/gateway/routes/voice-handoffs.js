@@ -42,7 +42,7 @@ const DECISIONS = { confirm: "yes", decline: "no" };
 /** Confirm's statuses that are the caller's mistake, not a state to show (P9). */
 const NOT_FOUND = new Set(["none", "wrong_kind"]);
 /** Failed details with their own reason line; any other detail gets the generic one. */
-const FAILED_REASONS = new Set(["not_sent", "not_allowed", "interrupted"]);
+const FAILED_REASONS = new Set(["not_sent", "not_allowed", "interrupted", "session_ended_no_result"]);
 
 /** The headers every response here carries: never framed, never cached. */
 function guardHeaders(req, res, next) {

@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wantsHandoff, wantsHandoffStatus, wantsHandoffStop, HANDOFF_INTENT_WORDS, HANDOFF_TARGET_PHRASES } from "../servers/gateway/voice/handoff-intent.js";
+import { wantsHandoff, wantsHandoffStatus, wantsHandoffStop, namesWork, isBareStatus, mayAskStatus, namedBots, STATUS_LEAD_WORDS, HANDOFF_INTENT_WORDS, HANDOFF_TARGET_PHRASES } from "../servers/gateway/voice/handoff-intent.js";
 import { HANDOFF_TARGET_WORDS } from "../servers/gateway/voice/handoff-constants.js";
 import { normalizeIntentLists, listMatches, phraseWords, INTENT_MAX_CHARS } from "../servers/gateway/voice/tool-families.js";
 
@@ -56,6 +56,9 @@ test("wantsHandoffStatus: asking about a hand-off", () => {
   assert.equal(wantsHandoffStatus("how is the writer doing", BOTS), true, "an optional the before the name");
   assert.equal(wantsHandoffStatus("is the writer done", BOTS), true);
   assert.equal(wantsHandoffStatus("how's the weather doing", BOTS), false);
+  // 5.3: the same forms about the work itself, with no bot named.
+  for (const t of ["how's the research going", "how is the report coming", "is the report done", "is that task done", "how's the write up going"]) assert.equal(wantsHandoffStatus(t, []), true, t);
+  for (const t of ["how's the game going", "is the timer done", "how's the research", "the report is done"]) assert.equal(wantsHandoffStatus(t, []), false, t);
 });
 
 test("wantsHandoffStatus: ordinary questions are not status", () => {
@@ -113,6 +116,52 @@ test("HANDOFF_TARGET_PHRASES: frozen, normalized, a superset of the correction w
   assert.equal(HANDOFF_TARGET_PHRASES.length, HANDOFF_TARGET_WORDS.en.length + HANDOFF_TARGET_WORDS.es.length, "no phrase dropped");
 });
 
+test("namesWork (5.3, P15): the work a hand-off produces, in both languages; things of the room are not work", () => {
+  for (const t of [
+    "how's the research going", "is the report done", "any news on the document", "how far along is the write up",
+    "status of the task", "is that report done yet", "how is the presentation going",
+    "como va la investigacion", "ya esta listo el informe", "como va el documento", "ya termino la tarea", "como lo lleva el resumen",
+  ]) assert.equal(namesWork(t), true, t);
+  for (const t of [
+    "is the timer done", "how's the game going", "any news on the election", "ya termino la cancion", "como va el partido",
+    "how's it going", "is it done", "what time is it", "", null,
+  ]) assert.equal(namesWork(t), false, String(t));
+});
+
+test("isBareStatus (P16): a status phrase and filler only; a subject of its own is not bare", () => {
+  for (const t of ["how's it going?", "hey crow, how's it going", "is it done yet?", "is it done already, please", "¿ya terminó?", "como va", "bueno, ¿ya está listo?", "how far along is it"]) {
+    assert.equal(isBareStatus(t), true, t);
+  }
+  for (const t of ["how's it going with writer", "how's the research going", "any news on the election", "is the timer done", "how is it going to rain", "como va a estar el clima", "how's it going today", "como va todo", ""]) {
+    assert.equal(isBareStatus(t), false, t);
+  }
+  assert.equal(isBareStatus("how far along is it"), true, "\"is it\" after \"how far along\" is filler-free but still bare");
+});
+
+test("STATUS_LEAD_WORDS: every status form carries one, so mayAskStatus gates the log reads (5.3)", () => {
+  assert.deepEqual([...STATUS_LEAD_WORDS], ["how", "hows", "done", "status", "news", "como", "ya"]);
+  for (const lang of ["en", "es"]) for (const p of HANDOFF_INTENT_WORDS.status[lang]) assert.equal(mayAskStatus(p), true, `status phrase: ${p}`);
+  for (const t of ["how is writer doing", "how's the writer doing", "is bot hank done", "is the writer done"]) assert.equal(mayAskStatus(t), true, t);
+  for (const t of ["play some jazz", "add lunch to my calendar", "research solar panels", "pon musica", "", null]) assert.equal(mayAskStatus(t), false, String(t));
+});
+
+test("namedBots: whole names or ids anywhere, each once, stopword-only names never", () => {
+  const bots = [{ bot_id: "writer", name: "Writer" }, { bot_id: "bot-hank", name: "Hank" }, { bot_id: "the", name: "It" }];
+  assert.deepEqual(namedBots("how's writer doing", bots), ["writer"]);
+  assert.deepEqual(namedBots("any news on bot hank and writer", bots), ["writer", "bot-hank"], "in the order the bots were given");
+  assert.deepEqual(namedBots("how's hank doing", bots), ["bot-hank"], "the display name");
+  assert.deepEqual(namedBots("how are the writers doing", bots), [], "only a WHOLE name; a stopword-only name never matches");
+  assert.deepEqual(namedBots("is it done", bots), [], "\"it\" is a stopword name");
+  assert.deepEqual(namedBots("how's writer doing", null), []);
+  assert.deepEqual(namedBots("", bots), []);
+});
+
+test("isBareStatus and namesWork: the input cap holds", () => {
+  const pad = "blah ".repeat(200);
+  assert.equal(isBareStatus(`${pad} how's it going`), false, "past the cap is not read");
+  assert.equal(namesWork(`${pad} the report`), false);
+});
+
 test("en/es parity: every list has both languages, keeps every phrase, and each phrase works in a sentence", () => {
   const lists = { target: HANDOFF_TARGET_WORDS, ...HANDOFF_INTENT_WORDS };
   for (const [name, l] of Object.entries(lists)) {
@@ -127,6 +176,7 @@ test("en/es parity: every list has both languages, keeps every phrase, and each 
     stopVerbs: (p) => assert.equal(wantsHandoffStop(`${p} la tarea`, []), "named", `stop verb: ${p}`),
     stopTargets: (p) => assert.equal(wantsHandoffStop(`stop ${p}`, []), "named", `stop target: ${p}`),
     stopPronouns: (p) => assert.equal(wantsHandoffStop(p, []), "pronoun", `stop pronoun: ${p}`),
+    workNouns: (p) => assert.equal(namesWork(`how is ${p} going`), true, `work noun: ${p}`),
   };
   assert.deepEqual(Object.keys(say).sort(), Object.keys(HANDOFF_INTENT_WORDS).sort(), "every list is exercised");
   for (const [name, check] of Object.entries(say)) for (const lang of ["en", "es"]) for (const p of HANDOFF_INTENT_WORDS[name][lang]) check(p);

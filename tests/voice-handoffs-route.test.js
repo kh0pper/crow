@@ -505,6 +505,19 @@ test("a failed row that has a card ran and could not finish: the page says so, n
   assert.match(await (await s.get(es)).text(), /Writer no pudo terminarlo\. Los detalles están en el tablero de Writer\./);
 });
 
+test("a row whose session ended without a result says so on the page (P26, 5.3)", async () => {
+  const s = await setup();
+  const id = await s.insert();
+  await s.core.store.transition(s.db, id, ["awaiting_phone"], "failed", { card_id: 7, detail: "session_ended_no_result" });
+  const html = await (await s.get(id)).text();
+  assert.ok(!hasForm(html));
+  assert.match(html, /Writer stopped without finishing it\. The card is still on Writer's board\./);
+  assert.ok(!/nothing was started/.test(html));
+  const es = await s.insert({ device_id: "kiosk-2", lang: "es" });
+  await s.core.store.transition(s.db, es, ["awaiting_phone"], "failed", { card_id: 8, detail: "session_ended_no_result" });
+  assert.match(await (await s.get(es)).text(), /Writer se detuvo sin terminarlo\. La tarjeta sigue en el tablero de Writer\./);
+});
+
 test("every voiceHandoff page string is in English and Spanish", () => {
   const keys = Object.keys(translations).filter((k) => k.startsWith("voiceHandoff."));
   assert.ok(keys.length >= 30, `found ${keys.length}`);

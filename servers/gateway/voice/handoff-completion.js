@@ -136,13 +136,8 @@ export function createHandoffCompletion({ store, announce, cardHref = cardDrawer
 
   async function restore(cdb) {
     let rows;
-    try {
-      rows = (await cdb.execute({
-        sql: `SELECT card_id FROM voice_handoffs WHERE kind = 'handoff' AND card_id IS NOT NULL
-               AND status IN (${COMPLETION_OPEN.map(() => "?").join(",")})`,
-        args: [...COMPLETION_OPEN],
-      })).rows;
-    } catch (err) { if (noTable(err)) return []; throw err; }
+    try { rows = await store.openRows(cdb, { statuses: COMPLETION_OPEN, withCard: true }); }
+    catch (err) { if (noTable(err)) return []; throw err; }
     return rows.map((r) => cardIdOf(r.card_id)).filter((id) => id != null);
   }
 

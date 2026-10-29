@@ -912,14 +912,15 @@ test("startHandoffSweep runs the store's sweep with the in-flight set, the card 
   let present = eng;
   const asked = [];
   const core = createHandoffCore({
-    store: { sweep: async (db, opts) => { seen.push({ db, opts }); return { expired: 0 }; } },
+    store: { sweep: async (db, opts) => { seen.push({ db, opts }); return { expired: 0 }; }, openRows: async () => [] },
     summaries: { get: async () => [] }, engine: async (o) => { asked.push(o); return present; }, log: () => {},
   });
   const fake = { execute: async () => ({ rows: [] }), closed: 0, close() { fake.closed++; } };
   const sweep = startHandoffSweep({ core, intervalMs: 3_600_000, openDb: () => fake });
   try {
     assert.equal(startHandoffSweep({ core, intervalMs: 1 }), sweep, "armed once per core");
-    await sweep.runOnce();
+    const out = await sweep.runOnce();
+    assert.deepEqual(out, { expired: 0, reconciled: { rows: 0, ended: 0, quiet: 0, resumed: 0, done: 0 } }, "the reconcile (5.3) rides the same pass");
     assert.equal(seen.length, 1);
     assert.equal(seen[0].db, fake);
     assert.equal(fake.closed, 1, "the pass closes its db");

@@ -9,6 +9,7 @@ import { HANDOFF_START_BUDGET_MS } from "./handoff-constants.js";
 import { normalizeVoiceSettings } from "../../shared/voice-bot.js";
 import { claimResult } from "../board/result-requesters.js";
 import { cardDrawerHref } from "../board/card-link.js";
+import { rememberTopic } from "./handoff-topic.js";
 
 export const langOf = (lang) => (lang === "es" ? "es" : "en");
 
@@ -77,13 +78,13 @@ async function lostConfirm(core, db, h, from, decision) {
 /**
  * The spoken heads-up for hand-off `handoffId` (presence.announce through the core's seam). When it was really
  * spoken, the device it was spoken on records the hand-off as its last topic (P31: on the shared core), so a
- * follow-up "how's it going?" there is about this one. `turn: null` means "said between turns": the next
- * exchange is the first after it (5.3 counts the exchanges). → the announce result.
+ * follow-up "how's it going?" there is about this one. Said between turns (`inTurn: false`): the next exchange
+ * is the first after it (handoff-topic.js counts the exchanges). → the announce result.
  */
 export async function announceHandoff(core, handoffId, args) {
   const r = await core.announce({ ...args, handoffId });
   const on = r && typeof r.spokenOn === "string" && r.spokenOn ? r.spokenOn : null;
-  if (on && handoffId != null && core.lastHandoffTopic instanceof Map) core.lastHandoffTopic.set(on, { id: handoffId, turn: null, at: core.now() });
+  if (on && handoffId != null) rememberTopic(core, on, handoffId, { inTurn: false });
   return r;
 }
 

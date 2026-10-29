@@ -1,7 +1,8 @@
 /**
  * Hand-off intent (PR 3, Task 3.5): is a spoken request bigger work for a bot ("research…", "write it up",
  * "have writer…"), a question about a hand-off ("how's it going?"), or a stop ("stop writer", "cancel it")?
- * The voice turn offers the hand-off tool only when wantsHandoff says so.
+ * The voice turn offers the hand-off tool only when wantsHandoff says so. The status helpers (5.3):
+ * mayAskStatus (the cheap gate), namesWork, isBareStatus and namedBots decide what a status question is about.
  *
  * Plain en/es phrase lists compared word by word (tool-families.js phraseWords/listMatches: capped at
  * INTENT_MAX_CHARS, accents and apostrophes dropped), never a pattern: a bot's name comes from its owner,
@@ -29,6 +30,13 @@ export const HANDOFF_INTENT_WORDS = freezeLists({
   stopVerbs: { en: ["stop", "cancel", "halt"], es: ["para", "deten", "cancela"] },
   stopTargets: { en: ["the research", "that research", "the task", "that task", "the hand off", "the handoff"], es: ["la tarea", "esa tarea", "la investigacion", "esa investigacion", "el encargo", "ese encargo"] },
   stopPronouns: { en: ["stop it", "cancel it", "stop that", "cancel that"], es: ["paralo", "cancelalo", "detenlo", "cancela eso", "para eso"] },
+  // The work a hand-off produces, as a status question names it ("how's the report going?"), beyond the stop
+  // targets (namesWork reads both). Never a thing of the room: "the timer", "the game", "the song", "the
+  // election" are not here, so "is the timer done?" goes to the model (P16).
+  workNouns: {
+    en: ["the report", "that report", "the document", "that document", "the write up", "the writeup", "the summary", "the presentation", "the draft", "the automation", "the job", "that job", "the research job"],
+    es: ["el informe", "ese informe", "el documento", "ese documento", "el resumen", "la presentacion", "el borrador", "la automatizacion", "el trabajo", "ese trabajo"],
+  },
 });
 
 const LISTS = Object.freeze(Object.fromEntries(Object.entries(HANDOFF_INTENT_WORDS).map(([k, l]) => [k, Object.freeze(normalizeIntentLists(l))])));
@@ -75,9 +83,14 @@ export function wantsHandoff(transcript, botNames) {
   return listMatches(words, LISTS.work) || listMatches(words, botPhrases(botNames));
 }
 
+// The work a hand-off produces, as a status question may name it (namesWork): the stop targets and the work nouns.
+const WORK = Object.freeze([...LISTS.stopTargets, ...LISTS.workNouns]);
+const GOING = new Set(["going", "coming"]);
+
 /**
  * A status phrase, or "how is <bot> doing" / "how's <bot> doing" / "is <bot> done" (an optional "the" before
- * the name). "how is it going to…" and "como va a…" are not.
+ * the name), or the same about the work ("how's the research going", "is the report done"; 5.3).
+ * "how is it going to…" and "como va a…" are not.
  */
 export function wantsHandoffStatus(transcript, botNames = []) {
   const words = phraseWords(transcript);
@@ -97,6 +110,8 @@ export function wantsHandoffStatus(transcript, botNames = []) {
       const at = i + lead + (words[i + lead] === "the" ? 1 : 0);
       const b = matchAt(words, at, bots);
       if (b && words[at + b] === (howLead ? "doing" : "done")) return true;
+      const w = matchAt(words, i + lead, WORK);
+      if (w && (howLead ? GOING.has(words[i + lead + w]) : words[i + lead + w] === "done")) return true;
     }
   }
   return false;
@@ -106,6 +121,61 @@ export function wantsHandoffStatus(transcript, botNames = []) {
 const PARA_LEADS = new Set(["hey", "ok", "okay", "crow", "oye", "bueno", "por", "favor", "ya"]);
 const END_WORDS = new Set(["please", "now", "right", "thanks", "crow", "por", "favor", "ya", "ahora", "mismo", "gracias"]);
 const endsAt = (words, j) => words.slice(j).every((w) => END_WORDS.has(w));
+
+/**
+ * Every status form (the status phrases and the "how is <bot> doing" / "is <bot> done" forms) carries one of
+ * these words, so a transcript without any of them is never a status question: the one check that runs on
+ * every voice turn before anything is read from the log (handoff-status.js). The parity test pins the list
+ * against the phrases.
+ */
+export const STATUS_LEAD_WORDS = Object.freeze(["how", "hows", "done", "status", "news", "como", "ya"]);
+const STATUS_LEADS = new Set(STATUS_LEAD_WORDS);
+
+/** Cheap: could this be a status question at all? */
+export function mayAskStatus(transcript) {
+  return phraseWords(transcript).some((w) => STATUS_LEADS.has(w));
+}
+
+/** The work a hand-off produces, named: a stop target ("the research", "la tarea") or a work noun ("the report"). */
+export function namesWork(transcript) {
+  const words = phraseWords(transcript);
+  return words.length > 0 && listMatches(words, WORK);
+}
+
+// A bare status question is a status phrase and nothing else but lead-ins, end words, "yet"-words and the
+// pronouns that point at the last topic (P16): "hey crow, how's it going?", "is it done yet?", "how far along
+// is it", "¿ya terminó eso?". Anything more has a subject of its own.
+const BARE_FILLER = new Set([...PARA_LEADS, ...END_WORDS, "so", "yet", "already", "then", "is", "it", "that", "this", "todavia", "aun", "entonces", "eso", "esto", "lo"]);
+const FUTURE = (said, next) => ((said === "how is it going" || said === "hows it going") && next === "to") || (said === "como va" && next === "a");
+
+/** A status phrase with nothing around it but filler: about whatever was last spoken of, or nothing. */
+export function isBareStatus(transcript) {
+  const words = phraseWords(transcript);
+  if (!words.length) return false;
+  for (let i = 0; i < words.length; i++) {
+    const n = matchAt(words, i, LISTS.status);
+    if (!n || FUTURE(words.slice(i, i + n).join(" "), words[i + n])) continue;
+    if ([...words.slice(0, i), ...words.slice(i + n)].every((w) => BARE_FILLER.has(w))) return true;
+  }
+  return false;
+}
+
+/**
+ * The bots the transcript names, as ids: a whole name or id anywhere in it ("how's writer doing", "any news
+ * on bot hank"). `bots` is [{ bot_id, name }]; a name made only of stopwords never matches. Each id once, in
+ * the order they were given.
+ */
+export function namedBots(transcript, bots) {
+  const words = phraseWords(transcript);
+  if (!words.length || !Array.isArray(bots)) return [];
+  const out = [];
+  for (const b of bots.slice(0, MAX_PHRASES)) {
+    const id = b && typeof b.bot_id === "string" ? b.bot_id : null;
+    if (!id || out.includes(id)) continue;
+    if (listMatches(words, botPhrases([b.name, id]))) out.push(id);
+  }
+  return out;
+}
 const negated = (words, i) => i > 0 && NEGATIONS.has(words[i - 1]);
 const paraOpens = (words, i) => words.slice(0, i).every((w) => PARA_LEADS.has(w));
 
