@@ -670,31 +670,44 @@ export function projectServicesClientJs() {
       // From here the button only connects: a retry never installs again.
       submit.textContent = T('services.connect.submit');
     }
-    // A restart was scheduled (the install loaded new code): wait until the gateway answers again.
+    // A restart was scheduled (the install loaded new code): poll the gateway until it has gone
+    // away and answers again. No fixed wait tied to the server's restart delay: it goes on once
+    // /health fails and then answers, or once it has answered for 15 s straight (a restart
+    // that never came), and gives up waiting after about 2 minutes.
     function whenBack(next) {
       var tries = 0;
-      setTimeout(function ping() {
+      var sawDown = false;
+      var upRun = 0;
+      (function ping() {
         if (mine !== view) return;
-        fetch('/health', { credentials: 'same-origin' }).then(function (r) {
+        fetch('/health', { credentials: 'same-origin' }).then(function (r) { return r.ok; }, function () { return false; }).then(function (up) {
           if (mine !== view) return;
-          if (r.ok || ++tries > 60) next(); else setTimeout(ping, 2000);
-        }, function () {
-          if (mine !== view) return;
-          if (++tries > 60) next(); else setTimeout(ping, 2000);
+          tries++;
+          if (!up) { sawDown = true; upRun = 0; } else upRun++;
+          if ((up && sawDown) || upRun > 15 || tries > 120) { next(); return; }
+          setTimeout(ping, 1000);
         });
-      }, 4000);
+      })();
     }
-    function pollJob(jobId, next) {
+    // A job that is lost (the gateway forgot it, or it never finishes) never leaves the sheet
+    // stuck: the generic line, and Install and connect stays available (a retry that finds the
+    // extension installed answers already_installed and goes on to the connect).
+    var POLL_MAX = 900;   // 1 s apart: 15 minutes, well past the store's pull timeouts
+    function lostJob() { stopped(T('services.error.generic')); }
+    function pollJob(jobId, next, polls) {
+      polls = polls || 0;
       fetch(BUNDLES + 'jobs/' + encodeURIComponent(jobId), { credentials: 'same-origin' }).then(readJson, netFail).then(function (res) {
         if (mine !== view) return;
         var st = res.j && typeof res.j.status === 'string' ? res.j.status : '';
         if (st === 'complete') { installedNow(); next(); return; }
         if (st === 'complete_restart') { installedNow(); whenBack(next); return; }
         if (st === 'failed') { stopped(T('services.error.generic')); return; }
-        // The job is gone (a restart dropped it) or the gateway is restarting: the connect
-        // answers not_installed if the install did not land.
-        if (res.status === 404 || res.status === 0) { whenBack(function () { installedNow(); next(); }); return; }
-        setTimeout(function () { if (mine === view) pollJob(jobId, next); }, 1000);
+        if (res.status === 404) { lostJob(); return; }
+        if (polls + 1 >= POLL_MAX) { lostJob(); return; }
+        // The gateway is away (a restart): ask again once it answers; a job it no longer
+        // knows is then a 404 above.
+        if (res.status === 0) { whenBack(function () { pollJob(jobId, next, polls + 1); }); return; }
+        setTimeout(function () { if (mine === view) pollJob(jobId, next, polls + 1); }, 1000);
       });
     }
     function install(next) {

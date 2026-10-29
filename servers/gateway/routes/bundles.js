@@ -311,6 +311,10 @@ function createJob(bundleId, action) {
  * bundle, as [{slug, name}]. [] on any failure (no service_connections table yet, a busy DB): the
  * uninstall itself never depends on it.
  */
+let _uninstallAffectedForTest = null;
+/** Test seam: replaces the uninstall route's affected-projects query (tests only). */
+export function _setUninstallAffectedForTest(fn) { _uninstallAffectedForTest = fn || null; }
+
 export async function uninstallAffectedProjects(bundleId, { dbFactory = createDbClient } = {}) {
   let db;
   try {
@@ -1018,6 +1022,24 @@ function installBundleSkills(bundleId, destDir, manifest, job) {
  * saved them to the keychain (install-hooks backfillKeychainEntries). Values come from the
  * installed .env, else the retained copy, else the MCP entry; never logged.
  */
+/**
+ * Boot pass (project services Task 12, review M1): every INSTALLED bundle gets the restore an
+ * install runs (restoreServicesAfterInstall: service secrets 'extension_removed' → active, then
+ * needs_install connections → active / error). A crash between the install record and the
+ * install's own restore would otherwise leave the connections paused on an installed bundle.
+ * Safe to repeat (both steps touch only paused rows) and never revives 'disconnected'.
+ * @returns {Promise<number>} connections restored
+ */
+export async function restoreInstalledBundleServices({ log = (m) => console.log(`[services] ${m}`) } = {}) {
+  let n = 0;
+  for (const rec of getInstalled()) {
+    const id = rec?.id;
+    if (typeof id !== "string" || !isValidBundleId(id)) continue;
+    n += (await restoreServicesAfterInstall(id, { log: (m) => log(`${id}: ${m}`) })).connections;
+  }
+  return n;
+}
+
 export async function backfillBundleKeychain({ log = (m) => console.log(`[keychain] ${m}`) } = {}) {
   let n = 0;
   const addons = readJsonSafe(MCP_ADDONS_PATH, {}) || {};
@@ -3903,6 +3925,14 @@ export default function bundlesRouter() {
       });
     }
 
+    // The projects whose connections this uninstall pauses (read-only, project services Task 12).
+    // Awaited HERE, before the install-set check below: nothing may await between that check
+    // and createJob (D6.9). This list names only NON-ARCHIVED projects, the ones the owner can
+    // act on. job.affectedProjects is a second list: it starts empty and is filled only by the
+    // job, with every project whose rows it actually paused (markConnectionsNeedInstall's
+    // RETURNING, archived projects included); a job that fails first reports none.
+    const affectedProjects = await (_uninstallAffectedForTest || uninstallAffectedProjects)(bundle_id);
+
     // D6.9: same reverse guard as /install — an uninstall finishing mid-set
     // would fire its own restart and kill the set runner. Checked immediately
     // before createJob so nothing can race past this point into job creation.
@@ -3910,14 +3940,8 @@ export default function bundlesRouter() {
       return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
     }
 
-    // The projects whose connections this uninstall pauses (read-only here; the job marks them).
-    // Two lists on purpose: this response (and the Extensions confirm's preflight) names only
-    // NON-ARCHIVED projects, the ones the owner can act on; once the job has paused them,
-    // job.affectedProjects is replaced with every project whose rows it actually marked
-    // (markConnectionsNeedInstall's RETURNING, archived projects included).
-    const affectedProjects = await uninstallAffectedProjects(bundle_id);
     const job = createJob(bundle_id, "uninstall");
-    job.affectedProjects = affectedProjects;
+    job.affectedProjects = [];
     res.json({ ok: true, job_id: job.id, message: `Removing ${bundle_id}...`, affectedProjects });
 
     (async () => {

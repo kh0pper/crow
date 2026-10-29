@@ -77,4 +77,10 @@ test("uninstall unregisters the providers the install registered", async () => {
   assert.ok(!done.log.some((l) => /Provider unregister skipped/.test(l)), done.log.join("\n"));
   assert.ok(done.log.includes("Disabled 1 provider(s) registered by bundle"), done.log.join("\n"));
   assert.deepEqual(await providerRows(id), [{ id: "demo-llm-local", disabled: 1 }]);
+
+  // A reinstall registers the manifest's providers again, enabled.
+  const again = B._createJobForTest(id, "install");
+  const out2 = await B.runInstallJob(id, {}, { job: again, installedSnapshot: [], consentVerified: false, manifest });
+  assert.equal(out2.ok, true, out2.reason);
+  assert.deepEqual(await providerRows(id), [{ id: "demo-llm-local", disabled: 0 }], again.log.join("\n"));
 });

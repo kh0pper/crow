@@ -300,6 +300,78 @@ test("uninstallAffectedProjects is read-only and answers [] on a DB failure", as
   assert.deepEqual(await B.uninstallAffectedProjects("no-such-bundle"), []);
 });
 
+test("D6.9 kept (review I1): a collection install that starts while the affected-projects query runs refuses the uninstall with 409", async () => {
+  const { beginInstallSet, endInstallSet, isInstallSetRunning } = await import("../servers/gateway/install-lock.js");
+  const manifest = fixture("demo-race");
+  await install("demo-race", manifest);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let queried = false;
+  B._setUninstallAffectedForTest(async () => { queried = true; await gate; return []; });
+  try {
+    await withBundles(async (base) => {
+      const pending = fetch(`${base}/bundles/api/uninstall`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: "demo-race" }) });
+      while (!queried) await new Promise((r) => setTimeout(r, 5));
+      assert.equal(isInstallSetRunning(), false);
+      beginInstallSet();          // the set starts mid-query
+      release();
+      const r = await pending;
+      assert.equal(r.status, 409, "the check runs after the query, immediately before createJob");
+      assert.ok(existsSync(join(HOME, "bundles", "demo-race")), "nothing was removed");
+    });
+  } finally {
+    endInstallSet();
+    B._setUninstallAffectedForTest(null);
+  }
+  // Source order: no await between the install-set check and createJob in the uninstall route.
+  const src = readFileSync(join(REPO, "servers/gateway/routes/bundles.js"), "utf8");
+  const route = src.slice(src.indexOf('router.post("/bundles/api/uninstall"'));
+  const between = route.slice(route.indexOf("if (isInstallSetRunning())"), route.indexOf('createJob(bundle_id, "uninstall")'));
+  assert.ok(between.length > 0 && !/\bawait\b/.test(between), "no await between the check and createJob");
+  assert.ok(route.indexOf("uninstallAffectedProjects)(bundle_id)") < route.indexOf("if (isInstallSetRunning())"));
+});
+
+test("review M5: the job's affectedProjects starts empty and holds only what it actually paused", async () => {
+  B._setUninstallAffectedForTest(async () => [{ slug: "claimed", name: "Claimed" }]);
+  try {
+    await withBundles(async (base) => {
+      const r = await fetch(`${base}/bundles/api/uninstall`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: "demo-race" }) });
+      const body = await r.json();
+      assert.equal(r.status, 200, JSON.stringify(body));
+      assert.deepEqual(body.affectedProjects, [{ slug: "claimed", name: "Claimed" }], "the response carries the preflight list");
+      assert.deepEqual(B._getJobForTest(body.job_id).affectedProjects, [], "the job claims nothing up front");
+      let j;
+      const deadline = Date.now() + 10_000;
+      do { await new Promise((res) => setTimeout(res, 30)); j = await (await fetch(`${base}/bundles/api/jobs/${body.job_id}`)).json(); } while (j.status === "running" && Date.now() < deadline);
+      assert.deepEqual(j.affectedProjects, [], "no connection of demo-race was paused");
+    });
+  } finally { B._setUninstallAffectedForTest(null); }
+});
+
+test("review M1: the boot pass restores paused connections of installed bundles, is safe to repeat, and never revives a disconnected one", async () => {
+  const p = await project("spring2", "Spring 2");
+  const a = await connectGithub(p, "boot-a", "test-token-7");
+  const b = await connectGithub(p, "boot-b", "test-token-8");
+  const d = db();
+  try {
+    // The crash window: installed.json says github is installed, its connections are still paused.
+    await SC.markConnectionsNeedInstall(d, "github");
+    await H.markBundleKeychainRemoved("github");
+    await SC.disconnectConnection(d, b.uuid);
+  } finally { d.close(); }
+  assert.ok(JSON.parse(readFileSync(join(HOME, "installed.json"), "utf8")).some((r) => r.id === "github"));
+  assert.deepEqual(await state(a.uuid), { status: "needs_install", secrets: ["extension_removed"] });
+  const logs = [];
+  const first = await B.restoreInstalledBundleServices({ log: (m) => logs.push(m) });
+  assert.ok(first >= 1);
+  assert.deepEqual(await state(a.uuid), { status: "active", secrets: ["active"] });
+  assert.deepEqual(await state(b.uuid), { status: "disconnected", secrets: ["disconnected"] });
+  assert.equal(await B.restoreInstalledBundleServices({ log: () => {} }), 0, "a second pass changes nothing");
+  assert.deepEqual(await state(a.uuid), { status: "active", secrets: ["active"] });
+  assert.deepEqual(await state(b.uuid), { status: "disconnected", secrets: ["disconnected"] });
+  assert.ok(!logs.join("\n").includes("test-token"));
+});
+
 // ---- The preflight route ----------------------------------------------------------------------
 
 const COOKIE = "crow_session=s1; crow_csrf=tok9";
@@ -388,7 +460,7 @@ function boot({ lang = "en", route, pageData } = {}) {
   const type = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
   const submit = (form) => form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
-  const flush = async () => { for (let n = 0; n < 20 && timers.length; n++) { timers.splice(0).forEach((fn) => fn()); await settle(); } };
+  const flush = async (rounds = 60) => { for (let n = 0; n < rounds && timers.length; n++) { timers.splice(0).forEach((fn) => fn()); await settle(); } };
   const sheet = () => document.querySelector("[data-svc-sheet]");
   const isOpen = () => !!sheet() && (sheet().open === true || sheet().hasAttribute("open"));
   const openInstall = (id) => {
@@ -401,14 +473,18 @@ function boot({ lang = "en", route, pageData } = {}) {
 
 const path = (u) => u.split("?")[0];
 /** The store's answers: a challenge with no consent, a job that runs once then completes, a connect. */
-function storeRoute({ install = { status: 200, body: { ok: true, job_id: "7" } }, connect = { status: 201, body: { ok: true, connection: {} } }, challenge = { status: 200, body: { required: false, install_required: [] } }, job = ["running", "complete"] } = {}) {
+function storeRoute({ install = { status: 200, body: { ok: true, job_id: "7" } }, connect = { status: 201, body: { ok: true, connection: {} } }, challenge = { status: 200, body: { required: false, install_required: [] } }, job = ["running", "complete"], health = null } = {}) {
   let polls = 0;
+  let pings = 0;
   return (c) => {
     const p = path(c.url);
     if (p.startsWith("/dashboard/bundles/api/consent-challenge/")) return challenge;
     if (p === "/dashboard/bundles/api/install") return typeof install === "function" ? install(c) : install;
-    if (p.startsWith("/dashboard/bundles/api/jobs/")) return { status: 200, body: { status: job[Math.min(polls++, job.length - 1)], log: ["x"] } };
-    if (p === "/health") return { status: 200, body: {} };
+    if (p.startsWith("/dashboard/bundles/api/jobs/")) {
+      const st = typeof job === "function" ? job(polls++) : job[Math.min(polls++, job.length - 1)];
+      return st && typeof st === "object" ? st : { status: 200, body: { status: st, log: ["x"] } };
+    }
+    if (p === "/health") return health ? health(pings++) : { status: 200, body: {} };
     if (p.endsWith("/connect")) return typeof connect === "function" ? connect(c) : connect;
     return { status: 404, body: {} };
   };
@@ -577,6 +653,58 @@ test("a paused connection of the same service: the Install sheet says so and Sho
   const other = boot({ route: storeRoute() }).openInstall("github");
   assert.equal(other.querySelector("[data-svc-has-connection]"), null, "no line without a connection");
   assert.ok(t("services.install.hasConnection", "es") !== t("services.install.hasConnection", "en"));
+});
+
+test("a lost install job (404) shows the generic line and keeps Install and connect; a retry starts from the challenge again", async () => {
+  const s = boot({ route: storeRoute({ job: [{ status: 404, body: { error: "Job not found" } }] }) });
+  const form = s.openInstall("github");
+  s.type(form.querySelector(`input[data-field="${GH}"]`), SECRET);
+  s.submit(form);
+  await s.settle();
+  await s.flush();
+  assert.equal(form.querySelector("[data-svc-error]").textContent, t("services.error.generic", "en"));
+  assert.equal(form.querySelector(".svc-submit").textContent, "Install and connect", "the install path stays");
+  assert.equal(form.querySelector(".svc-submit").disabled, false);
+  assert.ok(!form.querySelector('[data-svc-install-step="1"]').classList.contains("svc-install-step--done"));
+  assert.ok(!s.calls.some((c) => c.url.includes("/connect")));
+  const before = s.calls.length;
+  s.submit(form);
+  await s.settle();
+  assert.equal(path(s.calls[before].url), "/dashboard/bundles/api/consent-challenge/github");
+});
+
+test("a job that never finishes stops polling at the cap with the generic line", async () => {
+  const s = boot({ route: storeRoute({ job: () => "running" }) });
+  const form = s.openInstall("github");
+  s.submit(form);
+  await s.settle();
+  await s.flush(1000);
+  const polls = s.calls.filter((c) => c.url.includes("/jobs/")).length;
+  assert.equal(polls, 900, "capped");
+  assert.equal(form.querySelector("[data-svc-error]").textContent, t("services.error.generic", "en"));
+  assert.equal(form.querySelector(".svc-submit").textContent, "Install and connect");
+});
+
+test("after a restart-scheduling install the sheet polls /health until the gateway has gone and answers again, then connects", async () => {
+  // Up, up, down (the restart), down, up: the connect follows the first answer after the outage.
+  const seq = [200, 200, 0, 0, 200];
+  const s = boot({ route: storeRoute({ job: ["complete_restart"], health: (i) => (seq[i] === 0 ? new Error("down") : { status: seq[Math.min(i, seq.length - 1)] ?? 200, body: {} }) }) });
+  const form = s.openInstall("github");
+  s.type(form.querySelector(`input[data-field="${GH}"]`), SECRET);
+  s.submit(form);
+  await s.settle();
+  await s.flush();
+  const seqCalls = s.calls.map((c) => path(c.url));
+  assert.equal(seqCalls.filter((u) => u === "/health").length, 5, "no fixed wait: it stops at the first answer after the outage");
+  assert.equal(seqCalls[seqCalls.length - 1], "/dashboard/services/api/project/spring/connect");
+  // A gateway that never goes away (no restart came): it goes on after 15 s of answers.
+  const r = boot({ route: storeRoute({ job: ["complete_restart"] }) });
+  const f2 = r.openInstall("github");
+  r.submit(f2);
+  await r.settle();
+  await r.flush();
+  assert.equal(r.calls.filter((c) => path(c.url) === "/health").length, 16);
+  assert.equal(path(r.calls[r.calls.length - 1].url), "/dashboard/services/api/project/spring/connect");
 });
 
 test("source: no backtick, no dollar-brace, no storage in the client; the secret never in a data- attribute", () => {

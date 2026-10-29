@@ -4314,7 +4314,7 @@ export const translations = {
   "services.install.step2Help": { en: "Just for this project, just for you.", es: "Solo para este proyecto, solo para ti." },
   "services.install.submit": { en: "Install and connect", es: "Instalar y conectar" },
   "services.install.footnote": { en: "Disconnecting later removes it from this project only. Removing the extension from Crow is in Extensions.", es: "Desconectar después lo quita solo de este proyecto. Quitar la extensión de Crow está en Extensiones." },
-  "services.install.hasConnection": { en: "This project already has a {service} connection. Installing turns it back on; a second account needs another name.", es: "Este proyecto ya tiene una conexión de {service}. Al instalar se vuelve a activar; una segunda cuenta necesita otro nombre." },
+  "services.install.hasConnection": { en: "This project already has a {service} connection. Installing turns it back on. A second account needs another name.", es: "Este proyecto ya tiene una conexión de {service}. Al instalar se vuelve a activar. Una segunda cuenta necesita otro nombre." },
   "services.install.showRow": { en: "Show it", es: "Mostrarla" },
   "services.uninstall.affects": { en: "Connections in these projects stop until you install it again: {projects}", es: "Las conexiones de estos proyectos se detienen hasta que la instales de nuevo: {projects}" },
 };
