@@ -17,7 +17,9 @@
 export const CLAIM_MAX_CHARS = 2000;
 
 const NEG = "(?<!\\bno(?: (?:te|lo|la|los|las|se|le|me|nunca|todavia|aun))* )";
-const EN_DONE = "added|created|scheduled|rescheduled|booked|set up|set|sent|saved|stored|noted|put|deleted|removed|canceled|cancelled|moved|changed|updated|emailed|texted|invited|written down";
+// stopped / halted (PR 6): "Okay, I stopped Writer" is a stop only the server may report (handoff-stop.js); "the rain
+// stopped" has no "I" before it.
+const EN_DONE = "added|created|scheduled|rescheduled|booked|set up|set|sent|saved|stored|noted|put|deleted|removed|canceled|cancelled|moved|changed|updated|emailed|texted|invited|written down|stopped|halted";
 const EN_DO = "add|create|schedule|reschedule|book|set up|set|send|save|store|note|put|delete|remove|cancel|move|change|update|email|text|invite|remind|write down|let you know|follow up|keep track|check back|ping|notify|alert";
 // "Let me …" without the verbs a plain answer uses ("let me put it this way", "let me note that…").
 const EN_LET = "add|create|schedule|reschedule|book|set up|set|send|save|delete|remove|cancel|move|update|email|text|invite|remind";
@@ -33,6 +35,8 @@ const STATE_NOUN = "(?!(?:it|that|this|these|those|the|a|an|my|his|her|its|our|t
 // Things that start on their own: "the movie has started" is a fact, not a hand-off claim.
 const STARTS_ON_ITS_OWN = "movie|film|show|timer|meeting|game|class|event|call|countdown|alarm|song|episode|match|race|session|concert|lesson|rain|storm|season|sale|party|service";
 // The same in Spanish (accents dropped): "la película ya ha empezado" is a fact.
+// Before a Spanish first-person stop: never "me" (reflexive) or "que" and its clitics (the subjunctive "que lo pare").
+const NOT_ME_QUE = "(?<!\\bme )(?<!\\bque(?: (?:lo|la|le|los|las|se|te|me))* )";
 const STARTS_ON_ITS_OWN_ES = "pelicula|partido|reunion|temporizador|juego|clase|evento|llamada|cancion|episodio|serie|concierto|lluvia|fiesta|sesion|alarma";
 // A span of time after "in" ("starting in five minutes", "in an hour"): a schedule, not a claim ("starting in on it" is one).
 const SPAN = "(?:\\d|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|half|few|couple|minutes?|hours?|seconds?)";
@@ -84,6 +88,10 @@ const CLAIMS = [
   // Spanish (accents already dropped): done, promised, offered, state, bare.
   new RegExp(`${NEG}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:anadido|agregado|creado|programado|agendado|reservado|enviado|mandado|guardado|anotado|apuntado|puesto|borrado|eliminado|cancelado|movido|cambiado|actualizado|configurado)\\b`),
   new RegExp(`${NEG}\\b(?:anadi|agregue|programe|agende|envie|mande|guarde|anote|apunte|borre|elimine|cancele)\\b`),
+  // A stop, first person (PR 6): "paré", "detuve", "he parado", "lo he detenido". Never reflexive ("me detuve a pensar",
+  // "me he parado") and never the subjunctive after que ("espero que pare la lluvia", "¿quieres que lo pare?").
+  new RegExp(`${NEG}${NOT_ME_QUE}\\b(?:pare|detuve)\\b`),
+  new RegExp(`${NEG}${NOT_ME_QUE}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:parado|detenido)\\b`),
   new RegExp(`${NEG}\\b(?:recordare|anadire|agregare|creare|programare|agendare|reservare|enviare|mandare|guardare|anotare|apuntare|avisare|borrare|eliminare|cancelare)\\b`),
   new RegExp(`${NEG}\\bvoy a (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar|borrar|eliminar|cancelar)`),
   new RegExp(`${NEG}\\bpuedo (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar)`),
@@ -97,6 +105,10 @@ const CLAIMS = [
   new RegExp(`${NEG}\\bya esta con ello\\b`),
   new RegExp(`${NEG}(?<!\\b(?:${STARTS_ON_ITS_OWN_ES})(?: ya)? )\\b(?:ha|han) empezado\\b`),
   new RegExp(`${NEG}\\bse lo (?:he )?pas(?:e|ado)\\b`),
+  // PR 6: "estoy en ello" (the "I'm on it"); "le pasé la tarea a Writer", "le encargué el informe a Writer". Never after
+  // que, cuando, si, ojalá or aunque: "lo que le pase", "cuando le pase algo" are the subjunctive of pasar.
+  new RegExp(`${NEG}\\b(?:estoy|estamos) (?:ya )?en ello\\b`),
+  new RegExp(`${NEG}(?<!\\b(?:que|cuando|si|ojala|aunque) )\\b(?:ya )?(?:le|les) (?:he )?(?:pase|pasado|encargue|encargado)\\b`),
 ];
 
 const REMINDER = [
@@ -127,7 +139,19 @@ const ON_IT = /\b(\w+) (?:is|s|are|re) (?:now |already |right )?on it\b/g;
 const agentSet = (opts) => new Set((Array.isArray(opts?.agents) ? opts.agents : [])
   .map((n) => claimText(String(n ?? "")).split(" ").at(-1)).filter(Boolean));
 const agentOnIt = (t, agents) => { for (const m of t.matchAll(ON_IT)) if (AGENT_WORDS.has(m[1]) || agents.has(m[1])) return true; return false; };
-const claimIn = (t, agents) => CLAIMS.some((re) => re.test(t)) || agentOnIt(t, agents);
+// The same rule in Spanish (PR 6): "Writer está en ello", "Writer ya empezó" are claims only about an agent ("la película
+// ya empezó" is a fact). "Ya está en ello" / "Está en ello" with nothing before it (an opener at most) drops its subject,
+// as Spanish does: a claim, like "ya está con ello". "No está en ello" has "no" before the verb, never an agent.
+const AGENT_WORDS_ES = new Set(["el", "ella", "ellos", "ellas", "bot", "bots", "asistente", "asistentes", "agente", "agentes", "equipo", "alguien"]);
+const OPENERS_ES = new Set(["vale", "bueno", "perfecto", "claro", "genial", "venga", "ok", "okay"]);
+const EN_ELLO = /(?:^|\b(\w+) )(?:ya )?(?:esta|estan) (?:ya )?en ello\b/g;
+const STARTED_ES = /\b(\w+) (?:ya )?(?:empezo|comenzo|empezaron|comenzaron)\b/g;
+const agentEnEllo = (t, agents) => {
+  for (const m of t.matchAll(EN_ELLO)) if (m[1] === undefined || OPENERS_ES.has(m[1]) || AGENT_WORDS_ES.has(m[1]) || agents.has(m[1])) return true;
+  for (const m of t.matchAll(STARTED_ES)) if (AGENT_WORDS_ES.has(m[1]) || agents.has(m[1])) return true;
+  return false;
+};
+const claimIn = (t, agents) => CLAIMS.some((re) => re.test(t)) || agentOnIt(t, agents) || agentEnEllo(t, agents);
 
 // Clauses joined by "and" are read on their own too ("I've made a note and added it to your calendar").
 const clauses = (text) => claimSentences(text).flatMap((t) => [t, ...t.split(/ (?:and|also|then|plus|y|tambien|luego) /)]);

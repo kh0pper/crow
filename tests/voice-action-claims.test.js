@@ -138,7 +138,10 @@ test("claimsReminder: a promised reminder or follow-up, which a saved memory is 
 
 test("claimsAction: adversarial model output stays fast (patterns run on capped text; the lookbehinds are bounded)", () => {
   const t0 = process.cpuUsage();
-  for (const unit of ["no te ", "no te lo ", "no ", "i m ", "let me ", "is are ", "te lo te lo "]) { claimsAction(unit.repeat(500) + "he anadido"); claimsReminder(unit.repeat(500) + "recordar"); }
+  for (const unit of ["no te ", "no te lo ", "no ", "i m ", "let me ", "is are ", "te lo te lo ", "que lo ", "me ", "writer y "]) {
+    claimsAction(unit.repeat(500) + "he anadido"); claimsReminder(unit.repeat(500) + "recordar");
+    claimsAction(unit.repeat(500) + "pare"); claimsAction(unit.repeat(500) + "esta en ello"); claimsAction(unit.repeat(500) + "ya empezo");
+  }
   const d = process.cpuUsage(t0);
   assert.ok((d.user + d.system) / 1000 < 300, `${(d.user + d.system) / 1000} ms`);
 });
@@ -235,4 +238,32 @@ test("claimsAction: a start with a time, a span or the weather after it, or a Sp
     "La película ya ha empezado.", "El partido ha empezado.", "La reunión ha empezado.", "El temporizador ya ha empezado.",
   ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
   for (const t of ["Writer ya ha empezado.", "Han empezado."]) assert.equal(claimsAction(t), true, t);
+});
+
+test("claimsAction: a first-person stop is a held claim; a thing that stopped on its own is not (PR 6 carry)", () => {
+  for (const t of [
+    "Okay, I stopped Writer.", "I've halted it.", "I have stopped the research.", "I just stopped it.", "I halted Writer's task.",
+    "Paré la tarea de Writer.", "Vale, detuve a Writer.", "He parado la tarea.", "Lo he detenido.", "Ya he parado a Writer.", "La detuve.", "Cancelé la tarea.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), true, t);
+  for (const t of [
+    "The rain stopped.", "The music has stopped.", "It stopped raining.", "Your timer has stopped.", "Writer stopped by earlier.",
+    "La lluvia paró.", "La música se detuvo.", "No he parado nada.", "No lo detuve.", "Espero que pare la lluvia.", "¿Quieres que lo pare?",
+    "Me detuve a pensar.", "Me he parado en la esquina.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+});
+
+test("claimsAction: the Spanish hand-off claims, with an agent subject where the sentence has one (PR 6 carry)", () => {
+  const agents = ["Writer", "Helper"];
+  for (const t of [
+    "Writer está en ello.", "Writer ya está en ello.", "Writer y Helper están en ello.", "El agente está en ello.", "Ya está en ello.", "Está en ello.", "Vale ya está en ello.", "Estoy en ello.",
+    "Le pasé la tarea a Writer.", "Le he pasado la tarea a Helper.", "Le encargué la investigación a Writer.", "Le he encargado el informe a Writer.", "Ya le pasé el encargo.",
+    "Writer ya empezó.", "El asistente ya empezó con la tarea.", "Helper comenzó.",
+  ]) assert.equal(claimsAction(t, { agents }), true, t);
+  for (const t of [
+    "Writer no está en ello.", "No estoy en ello.", "Todavía no está en ello.", "La tapa está en ello.",
+    "Todavía no le pasé la tarea a Writer.", "Espero que no le pase nada.", "Lo que le pase a tu coche.", "Cuando le pase algo, avísame.",
+    "La película ya empezó.", "Ya empezó.", "La lluvia ya empezó.", "El partido comenzó a las ocho.",
+  ]) assert.equal(claimsAction(t, { agents }), false, t);
+  // As in English, "<X> está en ello" / "<X> ya empezó" names an agent only when X is one.
+  for (const t of ["Writer está en ello.", "Writer ya empezó."]) assert.equal(claimsAction(t), false, `no agents: ${t}`);
 });
