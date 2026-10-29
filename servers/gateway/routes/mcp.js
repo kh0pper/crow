@@ -85,8 +85,10 @@ function verifiedRemoteActor(req, prefix) {
  * Create Streamable HTTP handlers for an MCP server.
  * @param {Map} sessions - Session store from SessionManager
  * @param {Function} createServer - Factory function returning McpServer
+ * @param {string} serverName
+ * @param {{resumable?: boolean}} [opts] - resumable (default true): keep an in-memory event store
  */
-export function createMcpHandler(sessions, createServer, serverName) {
+export function createMcpHandler(sessions, createServer, serverName, { resumable = true } = {}) {
   const postHandler = async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     try {
@@ -94,10 +96,11 @@ export function createMcpHandler(sessions, createServer, serverName) {
         const session = sessions.get(sessionId);
         await session.transport.handleRequest(req, res, req.body);
       } else if (!sessionId && isInitializeRequest(req.body)) {
-        const eventStore = new InMemoryEventStore();
+        // resumable: false keeps no event store (nothing replayable, no result
+        // held in memory after it was sent); the loopback tool mounts use it.
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
-          eventStore,
+          ...(resumable ? { eventStore: new InMemoryEventStore() } : {}),
           onsessioninitialized: (sid) => {
             sessions.set(sid, { transport, server, owner: sessionOwner(req) });
             // Log session start

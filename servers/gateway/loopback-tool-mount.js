@@ -13,11 +13,16 @@
  *   4. a v3 (scope-bound) actor signature of exactly `actorKind` -> otherwise 403;
  *   5. the signed scope still live (resolveSignedScope) -> otherwise 403;
  *   6. a JSON-RPC batch -> 400 (-32600);
- *   7. the MCP session is bound to `${family}:${botId}:${scopeRef}` (stored as
- *      its owner via req.auth.clientId): another bot's, or the same bot's under
- *      another scope -> 404, empty body;
+ *   7. the MCP session is bound to JSON [family, botId, scopeRef] (stored as
+ *      its owner via req.auth.clientId; botId must match BOT_ID_RE): another
+ *      bot's, or the same bot's under another scope -> 404, empty body;
+ *   7a. ownerTurnOnly (default ON): the resolved scope must be the owner's own
+ *      turn (servers/shared/turn-principal.js isOwnerTurnScope: a j: job with
+ *      principal 'owner', or an s: Perch session the injected Perch engine
+ *      calls live) -> otherwise 403 not_owner_turn, before authorize runs;
  *   8. `authorize` on EVERY request -> its code's status from the table;
- *   9. (tools/call) the in-flight cap per mount key -> isError `busy`;
+ *   9. (tools/call) the in-flight cap per mount key, and each bot's share of
+ *      it -> isError `busy`;
  *  10. on initialize only, `upstream.onInitialize(ctx)` -> 502 on failure;
  *  11. the request runs inside callerContext.run(...), so a tool handler reads
  *      the LIVE caller, never a closure from the request that opened the session.
@@ -31,7 +36,19 @@
  * The in-flight cap counts upstream calls that are still RUNNING: a slot is
  * released when the upstream's own promise settles, not when the caller gets
  * its answer, so calls abandoned at the timeout or on a disconnect (whose
- * upstream ignores the abort) keep their slot until they really end.
+ * upstream ignores the abort) keep their slot until they really end. Two
+ * bounds on that: one bot holds at most `maxInFlightPerBot` of a key's
+ * `maxInFlight` slots (default half, rounded up), so it cannot starve the
+ * others; and a call still unsettled at the hard ceiling (`inFlightCeilingMs`,
+ * default 5 x callTimeoutMs) has its slot reclaimed and logged. Below the
+ * ceiling the slot is held until the upstream settles. An upstream's callTool
+ * must settle when its child exits.
+ *
+ * MCP sessions here keep NO event store (nothing is replayable, so no result
+ * stays in memory after it is sent). A session is closed when a request on it
+ * is refused because its scope died (a verified signature whose job or
+ * session ended), by the owner-turn check, or by authorize; and a sweep
+ * closes sessions idle longer than `sessionIdleMs` (default 10 min).
  *
  * Text a caller sees comes ONLY from the fixed error table below: authorize and
  * the upstream return or throw a `code`, never text, and any userText / message
@@ -44,18 +61,27 @@
  * dropped, and no other upstream field (_meta, annotations, structuredContent,
  * userText, ...) is ever copied. The whole result is capped at
  * `resultCap.maxBytes` (base64 images count). Only `content` + `isError` survive.
+ * Text is redacted across item boundaries (the joined text, re-split), so a
+ * secret split over two items is caught. A throw anywhere in the shaping is
+ * "<tool> failed.". Tool descriptions, and the description / title / enum /
+ * const / default / examples strings of an input schema, are redacted with the
+ * same secrets and capped (2 KiB per string) before tools/list shows them. An
+ * unknown tool name gets "Not available on this turn." and an audit event.
  *
  * One audit event per tools/call and per refusal, never arguments, results,
  * headers or tokens.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpHandler } from "./routes/mcp.js";
 import { isLocalPeer } from "../shared/peer-class.js";
 import { loopbackActorGate, noteRefusedOnce, readActorHeaders } from "./loopback-gate.js";
 import { callerContext } from "./caller-context.js";
 import { recordToolCall } from "./session-logger.js";
-import { redactSecrets } from "../shared/redact-secrets.js";
+import { redactAcross, redactSecrets } from "../shared/redact-secrets.js";
+import { isOwnerTurnScope } from "../shared/turn-principal.js";
+import { testTunableMs } from "../shared/test-timing.js";
+import { BOT_ID_RE } from "../../scripts/pi-bots/bot-workspace-env.mjs";
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { resolveSignedScope } from "../shared/signed-session.js";
 import { SCOPE_ACTOR_KINDS, verifyScopeActorSig } from "../../scripts/pi-bots/actor-sig.mjs";
@@ -134,6 +160,9 @@ const CROW_DEV = "crow.dev/";
 const CONTENT_KINDS = new Set(["text", "image"]);
 const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+const DESC_MAX = 2048;
+const SCHEMA_MAX_DEPTH = 64;
+const IDLE_DEFAULT_MS = 600_000;
 // The SDK validated a tools/call's arguments and they failed (see buildServer).
 const INVALID_ARGS = Symbol("loopback-mount.invalid-args");
 
@@ -174,6 +203,15 @@ function normalize(opts) {
   need(Number.isInteger(o.callTimeoutMs) && o.callTimeoutMs > 0, "callTimeoutMs is required (a positive integer)");
   const maxInFlight = o.maxInFlight === undefined ? 4 : o.maxInFlight;
   need(Number.isInteger(maxInFlight) && maxInFlight > 0, "maxInFlight must be a positive integer");
+  const maxInFlightPerBot = o.maxInFlightPerBot === undefined ? Math.ceil(maxInFlight / 2) : o.maxInFlightPerBot;
+  need(Number.isInteger(maxInFlightPerBot) && maxInFlightPerBot > 0 && maxInFlightPerBot <= maxInFlight, "maxInFlightPerBot must be an integer from 1 to maxInFlight");
+  const inFlightCeilingMs = o.inFlightCeilingMs === undefined ? 5 * (o.callTimeoutMs || 0) : o.inFlightCeilingMs;
+  need(Number.isInteger(inFlightCeilingMs) && inFlightCeilingMs >= o.callTimeoutMs, "inFlightCeilingMs must be an integer >= callTimeoutMs");
+  const sessionIdleMs = o.sessionIdleMs === undefined ? testTunableMs("CROW_TEST_LOOPBACK_IDLE_MS", IDLE_DEFAULT_MS) : o.sessionIdleMs;
+  need(Number.isInteger(sessionIdleMs) && sessionIdleMs > 0, "sessionIdleMs must be a positive integer");
+  const ownerTurnOnly = o.ownerTurnOnly === undefined ? true : o.ownerTurnOnly;
+  need(typeof ownerTurnOnly === "boolean", "ownerTurnOnly must be a boolean");
+  need(o.perchEngine == null || typeof o.perchEngine === "function" || typeof o.perchEngine === "object", "perchEngine must be an engine or a function returning one");
   need(o.onAudit === undefined || typeof o.onAudit === "function", "onAudit must be a function");
   need(typeof o.sessionManager?.getStore === "function", "sessionManager is required");
   need(typeof o.createDbClient === "function", "createDbClient is required");
@@ -183,12 +221,14 @@ function normalize(opts) {
     validate: hasFn ? o.validateToken : (db, t) => o.token.validate(db, t),
     authorize: o.authorize, upstream: o.upstream, toolFilter: o.toolFilter,
     maxBytes: o.resultCap.maxBytes, contentTypes: new Set(o.resultCap.contentTypes),
-    callTimeoutMs: o.callTimeoutMs, maxInFlight, onAudit: o.onAudit,
+    callTimeoutMs: o.callTimeoutMs, maxInFlight, maxInFlightPerBot, inFlightCeilingMs, sessionIdleMs, onAudit: o.onAudit,
+    ownerTurnOnly, perchEngine: o.perchEngine ?? null,
     sessionManager: o.sessionManager, createDbClient: o.createDbClient,
     verifySig: deps.verifyScopeActorSig || verifyScopeActorSig,
     resolveScope: deps.resolveSignedScope || resolveSignedScope,
     now: deps.now || (() => Date.now()),
     inflight: new Map(),
+    inflightBot: new Map(),
   };
 }
 
@@ -205,9 +245,21 @@ function emit(m, event, sid) {
   } catch { /* an audit sink never affects the call */ }
 }
 
+
 const filterOk = (m, ctx, tool) => { try { return m.toolFilter(ctx, tool) === true; } catch { return false; } };
 
-/** One tools/call: the live caller, filter, _meta, in-flight cap, timeout, abort, shaping. */
+/** The Perch engine the owner-turn check asks (an object, or a function returning one). */
+function perchEngineOf(m) {
+  try { return typeof m.perchEngine === "function" ? m.perchEngine() : m.perchEngine; } catch { return null; }
+}
+
+/** The session-binding owner: JSON, so no field's separator can forge another tuple (M10). */
+const clientIdFor = (family, botId, scopeRef) => JSON.stringify([family, botId, scopeRef]);
+
+/**
+ * One tools/call: the live caller, filter, _meta, in-flight cap, timeout, abort, shaping.
+ * `tool.unknown` marks a name the session never registered (M5).
+ */
 async function runTool(m, tool, args, extra) {
   const t0 = m.now();
   const live = callerContext.getStore();
@@ -225,6 +277,8 @@ async function runTool(m, tool, args, extra) {
 
   // 1. the LIVE caller (a store this mount made for this request), never a closure.
   if (!live || !st || live.family !== m.family) return refuse("unattributed");
+  // A name this session never registered: the fixed text and an audit event.
+  if (tool.unknown) return refuse("not_granted");
   // 2. the filter, again, on every call.
   if (!filterOk(m, live.ctx, tool)) return refuse("not_granted");
   if (args === INVALID_ARGS) return done("refused:invalid_args", errResult(loopbackErrorText("invalid_args", { lang, tool: tool.name })));
@@ -232,17 +286,24 @@ async function runTool(m, tool, args, extra) {
   const meta = stripCrowDev(extra?._meta);
   let callArgs = isPlainObject(args) ? args : {};
   if (Object.hasOwn(callArgs, "_meta")) callArgs = { ...callArgs, _meta: stripCrowDev(callArgs._meta) };
-  // 4. the in-flight cap for this mount key.
+  // 4. the in-flight cap for this mount key, and this bot's share of it.
+  const botKey = JSON.stringify([st.key, live.botId]);
   const n = m.inflight.get(st.key) || 0;
-  if (n >= m.maxInFlight) return refuse("busy");
+  const nb = m.inflightBot.get(botKey) || 0;
+  if (n >= m.maxInFlight || nb >= m.maxInFlightPerBot) return refuse("busy");
   m.inflight.set(st.key, n + 1);
-  // The slot is released when the upstream's OWN promise settles (header).
+  m.inflightBot.set(botKey, nb + 1);
+  // The slot is released when the upstream's OWN promise settles (header), or
+  // at the hard ceiling for a call that never does.
   let released = false;
+  let ceiling = null;
+  const dec = (map, k) => { const left = (map.get(k) || 1) - 1; if (left > 0) map.set(k, left); else map.delete(k); };
   const release = () => {
     if (released) return;
     released = true;
-    const left = (m.inflight.get(st.key) || 1) - 1;
-    if (left > 0) m.inflight.set(st.key, left); else m.inflight.delete(st.key);
+    if (ceiling) clearTimeout(ceiling);
+    dec(m.inflight, st.key);
+    dec(m.inflightBot, botKey);
   };
   let raw;
   try {
@@ -257,35 +318,52 @@ async function runTool(m, tool, args, extra) {
       // 5. the upstream; an upstream that ignores the signal still loses the race.
       raw = Promise.resolve().then(() => m.upstream.callTool(live.ctx, tool.name, callArgs, { signal, meta }));
       raw.then(release, release);
+      ceiling = setTimeout(() => {
+        if (released) return;
+        release();
+        noteRefusedOnce(`${m.family}:inflight`, `a call that never settled had its slot reclaimed at the ${secsOf(m.inFlightCeilingMs)} s ceiling`);
+      }, m.inFlightCeilingMs);
+      ceiling.unref?.();
       result = await Promise.race([raw, aborted]);
     } catch (err) {
       if (timeout.aborted) return fail("timeout", { secs: secsOf(m.callTimeoutMs) });
       if (signal.aborted) return fail("aborted");
-      const code = err !== null && typeof err === "object" && typeof err.code === "string" && TOOL_CODES.has(err.code) ? err.code : "failed";
+      let code = "failed";
+      try { if (err !== null && typeof err === "object" && typeof err.code === "string" && TOOL_CODES.has(err.code)) code = err.code; } catch { code = "failed"; }
       return fail(code);
     }
-    if (!isPlainObject(result) || !Array.isArray(result.content)) {
-      const code = isPlainObject(result) && typeof result.code === "string" && TOOL_CODES.has(result.code) ? result.code : "failed";
-      return fail(code);
+    // 6. shaping, all of it inside one try: any throw is "<tool> failed." (M4).
+    let out, bytes;
+    try {
+      if (!isPlainObject(result) || !Array.isArray(result.content)) {
+        const code = isPlainObject(result) && typeof result.code === "string" && TOOL_CODES.has(result.code) ? result.code : "failed";
+        return fail(code);
+      }
+      const secrets = Array.isArray(live.ctx?.secrets) ? live.ctx.secrets : [];
+      const content = [];
+      const texts = [];
+      let dropped = 0;
+      for (const item of result.content) {
+        const kind = isPlainObject(item) && m.contentTypes.has(item.type) ? item.type : null;
+        const text = kind === "text" ? item.text : undefined;
+        if (kind === "text" && typeof text === "string") { texts.push(content.length); content.push({ type: "text", text }); }
+        else if (kind === "image" && typeof item.mimeType === "string" && IMAGE_MIME.has(item.mimeType) && typeof item.data === "string" && BASE64_RE.test(item.data)) {
+          content.push({ type: "image", mimeType: item.mimeType, data: item.data });
+        } else dropped++;
+      }
+      // Redacted as one text, so a secret split across two items is caught (M3).
+      const redacted = redactAcross(texts.map((i) => content[i].text), secrets);
+      texts.forEach((i, k) => { content[i] = { type: "text", text: redacted[k] }; });
+      if (dropped) {
+        content.push({ type: "text", text: loopbackErrorText("dropped", { lang, n: dropped }) });
+        noteRefusedOnce(`${m.family}:result`, "dropped content items outside the allowlist");
+      }
+      out = { content };
+      if (result.isError === true) out.isError = true;
+      bytes = Buffer.byteLength(JSON.stringify(out));
+    } catch {
+      return fail("failed");
     }
-    // 6. shaping: allowed content types only, redacted text, content + isError only.
-    const secrets = Array.isArray(live.ctx?.secrets) ? live.ctx.secrets : [];
-    const content = [];
-    let dropped = 0;
-    for (const item of result.content) {
-      const kind = isPlainObject(item) && m.contentTypes.has(item.type) ? item.type : null;
-      if (kind === "text" && typeof item.text === "string") content.push({ type: "text", text: redactSecrets(item.text, secrets) });
-      else if (kind === "image" && typeof item.mimeType === "string" && IMAGE_MIME.has(item.mimeType) && typeof item.data === "string" && BASE64_RE.test(item.data)) {
-        content.push({ type: "image", mimeType: item.mimeType, data: item.data });
-      } else dropped++;
-    }
-    if (dropped) {
-      content.push({ type: "text", text: loopbackErrorText("dropped", { lang, n: dropped }) });
-      noteRefusedOnce(`${m.family}:result`, "dropped content items outside the allowlist");
-    }
-    const out = { content };
-    if (result.isError === true) out.isError = true;
-    const bytes = Buffer.byteLength(JSON.stringify(out));
     if (bytes > m.maxBytes) return fail("too_large", { kib: Math.ceil(bytes / 1024) });
     return done(out.isError ? "error:upstream" : "ok", out, bytes);
   } finally {
@@ -294,34 +372,72 @@ async function runTool(m, tool, args, extra) {
   }
 }
 
+/** Redacted and capped: a string a tools/list reader sees (M2). */
+const clip = (v, secrets) => redactSecrets(v, secrets).slice(0, DESC_MAX);
+
+/**
+ * A copy of an upstream input schema whose human-readable strings
+ * (description, title, const, default, and the strings of enum / examples)
+ * are redacted and capped. Keys and structure are kept; past
+ * SCHEMA_MAX_DEPTH the subtree is dropped (it would not convert anyway).
+ */
+function sanitizeSchema(node, secrets, depth = 0) {
+  if (depth > SCHEMA_MAX_DEPTH) return {};
+  if (Array.isArray(node)) return node.map((v) => sanitizeSchema(v, secrets, depth + 1));
+  if (!isPlainObject(node)) return node;
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    if ((k === "description" || k === "title" || k === "const" || k === "default") && typeof v === "string") out[k] = clip(v, secrets);
+    else if ((k === "enum" || k === "examples") && Array.isArray(v)) out[k] = v.map((x) => (typeof x === "string" ? clip(x, secrets) : sanitizeSchema(x, secrets, depth + 1)));
+    else out[k] = sanitizeSchema(v, secrets, depth + 1);
+  }
+  return out;
+}
+
 /**
  * The per-session McpServer: EVERY upstream tool is registered, and the filter
  * decides live (tools/list through the `enabled` getter below, tools/call in
  * runTool), so a hidden tool gets the fixed text and an audit event.
  *
- * Two reliances on @modelcontextprotocol/sdk 1.27.1 internals, both covered by
+ * Three reliances on @modelcontextprotocol/sdk 1.27.1 internals, all covered by
  * tests/loopback-tool-mount.test.js (re-run it on any SDK bump):
  *  - RegisteredTool.enabled is a plain property McpServer reads when it lists
  *    and when it calls; here it is a getter;
  *  - McpServer#validateToolInput (TS-private) is wrapped on the instance so a
  *    schema failure reaches runTool as INVALID_ARGS (fixed text + audit) and
  *    not as the SDK's own message. If the method is ever gone, the SDK's
- *    validation still runs unwrapped (its text, no audit): fail closed.
+ *    validation still runs unwrapped (its text, no audit): fail closed;
+ *  - McpServer installs its tools/call handler through the (public)
+ *    server.setRequestHandler(CallToolRequestSchema, ...); that call is
+ *    wrapped on the instance so a name this session never registered reaches
+ *    runTool (fixed text + audit) instead of the SDK's "Tool <x> not found".
  */
-function buildServer(m, tools) {
+function buildServer(m, tools, secrets = []) {
   const server = new McpServer({ name: `crow-${m.family}`, version: "1.0.0" });
   if (typeof server.validateToolInput === "function") {
     const validate = server.validateToolInput.bind(server);
     server.validateToolInput = async (...a) => { try { return await validate(...a); } catch { return INVALID_ARGS; } };
   }
-  const pool = { units: SOURCE_BUDGET };
   const seen = new Set();
+  const inner = server.server;
+  const setHandler = inner.setRequestHandler.bind(inner);
+  inner.setRequestHandler = (schema, handler) => {
+    if (schema !== CallToolRequestSchema) return setHandler(schema, handler);
+    return setHandler(schema, (request, extra) => {
+      const name = request?.params?.name;
+      if (typeof name === "string" && seen.has(name)) return handler(request, extra);
+      return runTool(m, { name: String(name ?? "").slice(0, 64), unknown: true }, undefined, extra);
+    });
+  };
+  const sec = Array.isArray(secrets) ? secrets : [];
+  const pool = { units: SOURCE_BUDGET };
   for (const tool of Array.isArray(tools) ? tools : []) {
     if (!isPlainObject(tool) || typeof tool.name !== "string" || !tool.name || seen.has(tool.name)) continue;
     seen.add(tool.name);
+    const description = clip(typeof tool.description === "string" ? tool.description : tool.name, sec);
     const registered = server.registerTool(
       tool.name,
-      { description: typeof tool.description === "string" ? tool.description : tool.name, inputSchema: jsonSchemaToZodObject(tool.inputSchema, pool) },
+      { description, inputSchema: jsonSchemaToZodObject(sanitizeSchema(tool.inputSchema, sec), pool) },
       (args, extra) => runTool(m, tool, args, extra),
     );
     // tools/list follows the LIVE ctx too: a tool is listed only while the
@@ -343,28 +459,60 @@ function buildServer(m, tools) {
 /** Test seam: the per-session server for an ctx, outside any request (no caller store). */
 export async function _buildLoopbackServerForTest(opts, ctx) {
   const m = normalize(opts);
-  return buildServer(m, await m.upstream.listTools(ctx));
+  return buildServer(m, await m.upstream.listTools(ctx), ctx?.secrets);
 }
 
 /**
  * Mount one loopback tool family: `POST|GET|DELETE /<family>/<params>/mcp`.
  * See the header for the fixed order. Throws TypeError on a bad option.
+ * Returns `{ sweepIdle(), stop() }`: the idle sweep runs on its own unref'd
+ * timer; sweepIdle runs it now (tests), stop ends the timer.
  */
 export function mountLoopbackMcp(app, opts) {
   const m = normalize(opts);
   const handlersByStore = new Map();
+  const lastSeen = new Map(); // JSON [storeName, sid] -> ms of its last request
   const handlersFor = (storeName) => {
     let h = handlersByStore.get(storeName);
     if (!h) {
       const store = m.sessionManager.getStore(storeName, "streamable");
       h = { store, ...createMcpHandler(store, () => {
         const live = callerContext.getStore();
-        return buildServer(m, live ? requestState.get(live)?.tools : []);
-      }, storeName) };
+        const st = live ? requestState.get(live) : undefined;
+        return buildServer(m, st ? st.tools : [], live?.ctx?.secrets);
+      }, storeName, { resumable: false }) };
       handlersByStore.set(storeName, h);
     }
     return h;
   };
+  const seenKey = (storeName, sid) => JSON.stringify([storeName, sid]);
+  const closeEntry = (store, storeName, sid, entry) => {
+    store.delete(sid);
+    lastSeen.delete(seenKey(storeName, sid));
+    Promise.resolve().then(() => entry.transport.close()).catch(() => { /* already closed */ });
+  };
+  /** Close the stored session `sid` if (and only if) `clientId` owns it. */
+  const closeOwned = (storeName, sid, clientId) => {
+    const store = handlersByStore.get(storeName)?.store;
+    const entry = sid && store ? store.get(sid) : undefined;
+    if (entry && entry.owner === clientId) closeEntry(store, storeName, sid, entry);
+  };
+  const sweepIdle = () => {
+    const now = m.now();
+    const live = new Set();
+    for (const [storeName, { store }] of handlersByStore) {
+      for (const [sid, entry] of [...store.entries()]) {
+        const k = seenKey(storeName, sid);
+        const at = lastSeen.get(k);
+        if (at === undefined) { lastSeen.set(k, now); live.add(k); continue; }
+        if (now - at > m.sessionIdleMs) closeEntry(store, storeName, sid, entry);
+        else live.add(k);
+      }
+    }
+    for (const k of [...lastSeen.keys()]) if (!live.has(k)) lastSeen.delete(k);
+  };
+  const timer = setInterval(sweepIdle, Math.min(60_000, m.sessionIdleMs));
+  timer.unref?.();
 
   app.all(`/${m.family}/${m.params}/mcp`, async (req, res) => {
     const t0 = m.now();
@@ -377,6 +525,7 @@ export function mountLoopbackMcp(app, opts) {
     const key = Object.values(req.params || {}).map((v) => encodeURIComponent(String(v))).join("/");
     const sidRaw = req.headers["mcp-session-id"];
     const sid = typeof sidRaw === "string" && sidRaw ? sidRaw : undefined;
+    const storeName = `${m.family}-${key}`;
     let botId = null, scopeRef = null;
 
     let db = null;
@@ -395,27 +544,37 @@ export function mountLoopbackMcp(app, opts) {
       res.status(status).json({ jsonrpc: "2.0", error: { code: rpcCode, message: loopbackErrorText(code, { lang }) }, id });
     };
 
-    // 1. Source before method: a non-local caller gets the empty 404 for any method.
+    // 1. Source before method: a non-local caller gets the empty 404 for any
+    //    method, before any DB work (which is why the general rate limiter can
+    //    skip these paths: middleware/rate-limit.js).
     if (!isLocalPeer(req.socket?.remoteAddress, req.headers) || req.instanceAuth || req.crossHostAuth) return refuse(404, "not_found");
     // 2.
     if (!["POST", "GET", "DELETE"].includes(req.method)) return refuse(405, "method_not_allowed");
 
-    // 2-5. The gate (each step's throw is that step's refusal).
+    // 2-5. The gate (each step's throw is that step's refusal). `verified` is
+    // the actor whose signature checked out, kept for a step-5 refusal: its
+    // own session (only) is closed when its scope has died.
+    let verified = null;
     const gate = await loopbackActorGate(req, {
       validateToken: async (t) => (await m.validate(getDb(), t)) === true,
       verify: async (headers) => {
         const a = readActorHeaders(headers);
         if (a.kind !== m.actorKind) return null;
+        if (typeof a.botId !== "string" || !BOT_ID_RE.test(a.botId)) return null;
         const ok = m.verifySig({ kind: a.kind, botId: a.botId, scope: a.scopeRef, threadId: a.threadId, gatewayType: a.gatewayType, sig: a.sig });
         if (ok !== true) return null;
         return { kind: a.kind, botId: a.botId, scopeRef: a.scopeRef, threadId: a.threadId, gatewayType: a.gatewayType };
       },
       resolve: async (a) => {
+        verified = a;
         const r = await m.resolveScope(getDb(), { botId: a.botId, scopeRef: a.scopeRef, threadId: a.threadId, gatewayType: a.gatewayType });
         return isPlainObject(r) ? r : null;
       },
     });
-    if (!gate.ok) return refuse(gate.status, gate.code);
+    if (!gate.ok) {
+      if (verified && gate.status === 403) closeOwned(storeName, sid, clientIdFor(m.family, verified.botId, verified.scopeRef));
+      return refuse(gate.status, gate.code);
+    }
     const actor = gate.actor;
     botId = actor.botId;
     scopeRef = actor.scopeRef;
@@ -424,18 +583,24 @@ export function mountLoopbackMcp(app, opts) {
     if (Array.isArray(body)) return refuse(400, "batch", -32600);
 
     // 7. The session belongs to this bot under this scope.
-    const clientId = `${m.family}:${botId}:${scopeRef}`;
+    const clientId = clientIdFor(m.family, botId, scopeRef);
     req.auth = { clientId, token: "loopback-tool-mount", scopes: [] };
     // Peek only: a store is created after authorize passes, never before.
-    const storeName = `${m.family}-${key}`;
     const known = handlersByStore.get(storeName)?.store;
     if (sid && known?.has(sid) && known.get(sid)?.owner !== clientId) return refuse(404, "not_found");
+
+    // 7a. The owner's own turn only, unless the family opted out.
+    if (m.ownerTurnOnly && !isOwnerTurnScope(actor, { engine: perchEngineOf(m) })) {
+      closeOwned(storeName, sid, clientId);
+      return refuse(403, "not_owner_turn");
+    }
 
     // 8. authorize, on every request.
     let az = null;
     try { az = await m.authorize({ db: getDb(), req, params: req.params, actor }); } catch { az = null; }
     if (!isPlainObject(az) || az.ok !== true) {
       const code = isPlainObject(az) && az.ok === false && typeof az.code === "string" && Object.hasOwn(AUTHZ_STATUS, az.code) ? az.code : "not_granted";
+      closeOwned(storeName, sid, clientId);
       return refuse(AUTHZ_STATUS[code], code);
     }
     const ctx = isPlainObject(az.ctx) ? az.ctx : {};
@@ -453,6 +618,7 @@ export function mountLoopbackMcp(app, opts) {
 
     // 11. Run the request inside the caller context.
     const h = handlersFor(storeName);
+    if (sid && h.store.has(sid)) lastSeen.set(seenKey(storeName, sid), m.now());
     const store = { caller: `bot:${botId}`, botId, peer: false, crossHost: false, family: m.family, scopeRef, projectId: actor.defProjectId ?? null, ctx };
     requestState.set(store, { lang, method, sid, key, tools, closed: closed.signal });
     const handler = req.method === "POST" ? h.postHandler : req.method === "GET" ? h.getHandler : h.deleteHandler;
@@ -461,5 +627,13 @@ export function mountLoopbackMcp(app, opts) {
     } catch {
       if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id });
     }
+    // A session this request just opened starts its idle clock now.
+    if (!sid) {
+      let opened;
+      try { opened = res.getHeader("mcp-session-id"); } catch { opened = undefined; }
+      if (typeof opened === "string" && h.store.has(opened)) lastSeen.set(seenKey(storeName, opened), m.now());
+    }
   });
+
+  return { sweepIdle, stop: () => clearInterval(timer) };
 }

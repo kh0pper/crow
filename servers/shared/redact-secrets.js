@@ -47,3 +47,39 @@ export function redactThenTruncate(input, secrets, cap, opts = {}) {
   const whole = redactSecrets(buf.subarray(0, keep).toString("utf8"), secrets, opts);
   return Buffer.from(whole, "utf8").subarray(0, cap);
 }
+
+/**
+ * Redacts a run of text pieces as ONE text (what a reader of the joined pieces
+ * sees), so a secret split across two pieces is caught too, then hands back
+ * one string per piece: a match is replaced by REDACTED in the piece where it
+ * starts, and the rest of it is removed from the pieces it spills into.
+ * Same matching as redactSecrets (longest secret first, one pass).
+ * @param {string[]} pieces
+ * @returns {string[]}
+ */
+export function redactAcross(pieces, secrets, { minLen = MIN_SECRET_LENGTH } = {}) {
+  const parts = (Array.isArray(pieces) ? pieces : []).map((p) => String(p));
+  const list = [...new Set(usable(secrets, minLen))].sort((a, b) => b.length - a.length);
+  if (!list.length || !parts.length) return parts;
+  const joined = parts.join("");
+  const ranges = [];
+  for (const m of joined.matchAll(new RegExp(list.map(escapeRegExp).join("|"), "g"))) ranges.push([m.index, m.index + m[0].length]);
+  if (!ranges.length) return parts;
+  const out = [];
+  let o = 0;
+  for (const p of parts) {
+    const e = o + p.length;
+    let pos = o;
+    let s = "";
+    for (const [r0, r1] of ranges) {
+      if (r1 <= o || r0 >= e) continue;
+      if (r0 >= pos) s += joined.slice(pos, r0);
+      if (r0 >= o) s += REDACTED;
+      pos = Math.max(pos, Math.min(r1, e));
+    }
+    s += joined.slice(pos, e);
+    out.push(s);
+    o = e;
+  }
+  return out;
+}

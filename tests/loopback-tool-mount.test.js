@@ -46,7 +46,7 @@ const tokens = {};
 const audit = [];
 const calls = [];          // every upstream.callTool: { name, args, meta, caller, signal }
 const state = {};          // knobs the authorize / upstream read
-const resetState = () => Object.assign(state, { deny: null, initFail: null, hide: new Set(["hidden"]), release: null, started: 0, stuck: [] });
+const resetState = () => Object.assign(state, { deny: null, initFail: null, hide: new Set(["hidden"]), release: null, started: 0, stuck: [], authorized: 0, perchLive: new Set() });
 
 const EXAMPLE_TOKEN = () => pathScopedToken({
   name: "example-tools", hashKey: "mcp_example_tools_token_hash", createdKey: "mcp_example_tools_token_created", home: dir,
@@ -71,6 +71,11 @@ const TOOLS = [
   { name: "leaky", description: "fields outside the allowlist", inputSchema: { type: "object", properties: {} } },
   { name: "stuck", description: "ignores its signal", inputSchema: { type: "object", properties: {} } },
   { name: "typed", description: "a required number", inputSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] } },
+  { name: "split", description: "a secret split across two text items", inputSchema: { type: "object", properties: {} } },
+  { name: "getter", description: "a text item whose getter throws", inputSchema: { type: "object", properties: {} } },
+  { name: "leakdesc", description: `uses ${SECRET} to log in ${"d".repeat(5000)}`, inputSchema: {
+    type: "object", properties: { mode: { type: "string", description: `pass ${SECRET}`, enum: ["plain", SECRET] } },
+  } },
 ];
 
 const upstream = {
@@ -102,6 +107,9 @@ const upstream = {
       ], structuredContent: { s: SECRET }, _meta: { s: SECRET } };
       case "stuck": return await new Promise((res) => { state.stuck.push(() => res({ content: [{ type: "text", text: "late" }] })); });
       case "typed": return { content: [{ type: "text", text: `n=${args.n}` }] };
+      case "split": return { content: [{ type: "text", text: `head ${SECRET.slice(0, 6)}` }, { type: "text", text: `${SECRET.slice(6)} tail` }] };
+      case "getter": return { content: [{ get type() { return "text"; }, get text() { throw new Error(`LEAK ${SECRET}`); } }] };
+      case "leakdesc": return { content: [{ type: "text", text: "ok" }] };
       case "mixed": return { content: [{ type: "text", text: "kept" }, { type: "resource", resource: { uri: "file:///x", text: "dropped" } }] };
       case "slow": return await new Promise((_, rej) => signal.addEventListener("abort", () => rej(signal.reason), { once: true }));
       case "hang": state.started++; return await new Promise((res, rej) => {
@@ -115,6 +123,7 @@ const upstream = {
 
 async function authorize({ db, req, params, actor }) {
   assert.ok(db && typeof db.execute === "function", "authorize gets the db");
+  state.authorized++;
   if (state.deny === "throw") throw new Error(`authorize blew up ${SECRET}`);
   if (state.deny === "null") return null;
   if (state.deny) return { ok: false, code: state.deny };
@@ -128,14 +137,17 @@ const toolFilter = (ctx, tool) => !state.hide.has(tool.name) && !(ctx.nonce === 
 function mountOpts(over = {}) {
   return {
     family: "example-tools", params: ":uuid", actorKind: "service", token: EXAMPLE_TOKEN(), authorize, upstream, toolFilter,
-    resultCap: { maxBytes: 4096, contentTypes: ["text", "image"] }, callTimeoutMs: TIMEOUT_MS, maxInFlight: 2,
+    resultCap: { maxBytes: 4096, contentTypes: ["text", "image"] }, callTimeoutMs: TIMEOUT_MS, maxInFlight: 2, maxInFlightPerBot: 2,
+    perchEngine: { sessionServicesLive: (id) => state.perchLive.has(Number(id)) },
     onAudit: (e) => audit.push(e), sessionManager: sessions, createDbClient: () => createDbClient(dbPath), ...over,
   };
 }
 
 // ---- actors ----
+// M1: a job scope names its claiming worker (this process claimed every fixture job).
+const jref = (jobId) => `j:${jobId}@${process.pid}`;
 const jobActor = (botId = "hank", jobId = "job-own-1", tuple = { threadId: `job-${jobId}`, gatewayType: "job" }) => ({
-  kind: "service", botId, scope: `j:${jobId}`, ...tuple, sig: signScopeActor({ kind: "service", botId, jobId, ...tuple }),
+  kind: "service", botId, scope: jref(jobId), ...tuple, sig: signScopeActor({ kind: "service", botId, jobId, ...tuple }),
 });
 const sessActor = (name = "live", botId = "hank", threadId = "t-100", gatewayType = "gmail") => ({
   kind: "service", botId, scope: `s:${SESS[name]}`, threadId, gatewayType, sig: signScopeActor({ kind: "service", botId, sessionId: SESS[name], threadId, gatewayType }),
@@ -198,13 +210,16 @@ before(async () => {
   const ins = d.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, archived_at) VALUES (?, ?, ?, ?, ?)");
   for (const [name, b, gw, thread, status, archived] of [
     ["live", "hank", "gmail", "t-100", "active", null], ["archived", "hank", "gmail", "t-102", "active", "2026-10-01 00:00:00"],
-    ["other", "hank", "gmail", "t-104", "active", null],
+    ["other", "hank", "gmail", "t-104", "active", null], ["perch", "hank", "perch", "perch-1", "active", null],
+    ["perch2", "hank", "perch", "perch-2", "active", null],
   ]) SESS[name] = String(ins.run(b, gw, thread, status, archived).lastInsertRowid);
   const job = d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, card_id, principal) VALUES (?, ?, 'g', ?, ?, ?, 'owner')");
   job.run("job-own-1", "hank", "running", process.pid, null);
   job.run("job-fin-1", "hank", "completed", process.pid, null);
   job.run("job-card-1", "hank", "running", process.pid, 5);
   job.run("job-otto-1", "otto", "running", process.pid, null);
+  for (const id of ["job-end-1", "job-end-2", "job-end-3", "job-idle-1"]) job.run(id, "hank", "running", process.pid, null);
+  d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, principal) VALUES ('job-null-1', 'hank', 'g', 'running', ?, NULL)").run(process.pid);
   d.close();
 
   // The session logger (createMcpHandler) writes to CROW_DB_PATH: point it at this database.
@@ -372,8 +387,9 @@ test("signatures: missing, other kind, v1, v2 peer-relay, s:12 signed / s:13 sen
     assert.equal(r.status, 403, name);
     assert.equal(r.json?.error?.message, "A signed bot is required.", name);
   }
-  // The positive controls: the right card tuple, a live session, a running job.
-  for (const a of [jobActor("hank", "job-card-1", { threadId: "board-card-5", gatewayType: "board" }), live, jobActor()]) await open(a);
+  // The positive controls: the right card tuple, a live (owner's Perch) session, a running job.
+  state.perchLive.add(Number(SESS.perch));
+  for (const a of [jobActor("hank", "job-card-1", { threadId: "board-card-5", gatewayType: "board" }), sessActor("perch", "hank", "perch-1", "perch"), jobActor()]) await open(a);
   assert.equal(calls.length, 0);
 });
 
@@ -481,7 +497,10 @@ test("authorize runs on every request: refusal at initialize and later inside an
   assert.equal(r.status, 409, "flipped inside an open session");
   assert.equal(calls.length, 0, "refused before any upstream work");
   state.deny = null;
-  assert.equal(textOf(await callTool(sid, "echo", { text: "x" })), "ECHO x");
+  // I2: the refusal closed that session; a fresh one works.
+  await until(() => !sessions.getStore(`example-tools-${UUID}`, "streamable").has(sid));
+  assert.equal((await callTool(sid, "echo", { text: "x" })).status, 400, "the closed session id is gone");
+  assert.equal(textOf(await callTool(await open(jobActor()), "echo", { text: "x" })), "ECHO x");
 });
 
 test("onInitialize failing -> 502 with the fixed text (throw or {code}); nothing leaks", async () => {
@@ -541,7 +560,7 @@ test("the upstream sees the ALS caller store; without one the call is refused an
   assert.equal(caller.peer, false);
   assert.equal(caller.crossHost, false);
   assert.equal(caller.family, "example-tools");
-  assert.equal(caller.scopeRef, "j:job-own-1");
+  assert.equal(caller.scopeRef, jref("job-own-1"));
   assert.equal(caller.projectId, 42);
   assert.equal(caller.ctx.uuid, UUID);
   // Outside any request (no ALS store): refused, upstream untouched.
@@ -650,7 +669,7 @@ test("audit: one event per tools/call and per refusal, never args, results, head
   assert.equal(ok.family, "example-tools");
   assert.equal(ok.key, UUID);
   assert.equal(ok.botId, "hank");
-  assert.equal(ok.scopeRef, "j:job-own-1");
+  assert.equal(ok.scopeRef, jref("job-own-1"));
   assert.equal(typeof ok.ms, "number");
   assert.ok(ok.bytes > 0);
   assert.equal(typeof ok.ts, "string");
@@ -800,4 +819,236 @@ test("M1: no session store is created for a request authorize refuses", async ()
     sm.dispose();
     await new Promise((r) => s.close(r)); s.closeAllConnections?.();
   }
+});
+
+// ---------------------------------------------------------------- fix round 2 (PR review)
+
+// A second mount on its own app + session manager (so its stores and options are isolated).
+async function sideMount(over = {}) {
+  const app = express();
+  app.use(express.json());
+  const sm = new SessionManager();
+  const handle = mountLoopbackMcp(app, mountOpts({ sessionManager: sm, ...over }));
+  const s = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  const url = `http://127.0.0.1:${s.address().port}`;
+  return {
+    sm, handle, path: `/${over.family}/${UUID}/mcp`,
+    store: () => sm.getStore(`${over.family}-${UUID}`, "streamable"),
+    async use(fn) { const saved = base; base = url; try { return await fn(); } finally { base = saved; } },
+    async close() { await sm.closeAll(); sm.dispose(); await new Promise((r) => s.close(r)); s.closeAllConnections?.(); },
+  };
+}
+
+test("I4: by default a NULL-principal job and a Gmail session fail not_owner_turn BEFORE authorize runs", async () => {
+  for (const [name, a] of [["null principal", jobActor("hank", "job-null-1")], ["gmail session", sessActor("live")]]) {
+    state.authorized = 0;
+    const r = await send(initBody(), { actor: a });
+    assert.equal(r.status, 403, name);
+    assert.equal(r.json?.error?.message, "Not available on this turn.", name);
+    assert.equal(state.authorized, 0, `${name}: authorize never ran`);
+    assert.ok(audit.some((e) => e.outcome === "refused:not_owner_turn"), name);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("I4: an s: scope passes only while the Perch engine says its services are live (gateway_type 'perch')", async () => {
+  const perch = sessActor("perch", "hank", "perch-1", "perch");
+  assert.equal((await send(initBody(), { actor: perch })).status, 403, "engine says no");
+  state.perchLive.add(Number(SESS.perch));
+  const sid = await open(perch);
+  assert.equal(textOf(await callTool(sid, "echo", { text: "p" }, { actor: perch })), "ECHO p");
+  state.perchLive.clear();
+  assert.equal((await callTool(sid, "echo", { text: "p" }, { actor: perch })).status, 403, "flipped off inside the session");
+});
+
+test("I4: with no Perch engine every s: scope fails; ownerTurnOnly:false hands the call to authorize", async () => {
+  const none = await sideMount({ family: "example-noperch", perchEngine: undefined });
+  const open4 = await sideMount({ family: "example-anyturn", ownerTurnOnly: false });
+  try {
+    state.perchLive.add(Number(SESS.perch));
+    await none.use(async () => {
+      assert.equal((await send(initBody(), { path: none.path, actor: sessActor("perch", "hank", "perch-1", "perch") })).status, 403);
+      assert.equal((await send(initBody(), { path: none.path })).status, 200, "an owner job still opens");
+    });
+    await open4.use(async () => {
+      state.authorized = 0;
+      const sid = await open(sessActor("live"), { path: open4.path });
+      assert.ok(sid);
+      assert.equal(state.authorized, 1, "the family's authorize decides");
+      assert.equal((await send(initBody(), { path: open4.path, actor: jobActor("hank", "job-null-1") })).status, 200);
+    });
+    assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-badot", ownerTurnOnly: "no" })), TypeError);
+  } finally { await none.close(); await open4.close(); }
+});
+
+test("I2: the family keeps no event store (no SSE event ids, nothing replayable)", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "echo", { text: "e" });
+  assert.equal(textOf(r), "ECHO e");
+  assert.ok(!/^id:/m.test(r.text), `no SSE event id: ${r.text.slice(0, 200)}`);
+});
+
+test("I2: a session whose job has ended is closed by the next request on it (and refused)", async () => {
+  const side = await sideMount({ family: "example-reap" });
+  try {
+    await side.use(async () => {
+      const a = jobActor("hank", "job-end-1");
+      const sid = await open(a, { path: side.path });
+      assert.equal(side.store().has(sid), true);
+      const d = new Database(dbPath);
+      d.prepare("UPDATE bot_jobs SET status = 'completed' WHERE job_id = 'job-end-1'").run();
+      d.close();
+      const r = await callTool(sid, "echo", { text: "x" }, { path: side.path, actor: a });
+      assert.equal(r.status, 403);
+      await until(() => !side.store().has(sid));
+    });
+  } finally { await side.close(); }
+});
+
+test("I2: an authorize or owner-turn refusal inside an open session closes that session", async () => {
+  const side = await sideMount({ family: "example-reap2" });
+  try {
+    await side.use(async () => {
+      const sid = await open(jobActor("hank", "job-end-2"), { path: side.path });
+      state.deny = "not_active";
+      assert.equal((await callTool(sid, "echo", { text: "x" }, { path: side.path, actor: jobActor("hank", "job-end-2") })).status, 409);
+      await until(() => !side.store().has(sid));
+      state.deny = null;
+      state.perchLive.add(Number(SESS.perch2));
+      const p = sessActor("perch2", "hank", "perch-2", "perch");
+      const sid2 = await open(p, { path: side.path });
+      state.perchLive.clear();
+      assert.equal((await callTool(sid2, "echo", { text: "x" }, { path: side.path, actor: p })).status, 403);
+      await until(() => !side.store().has(sid2));
+    });
+  } finally { await side.close(); }
+});
+
+test("I2: a bad signature presented with someone's session id does NOT close that session", async () => {
+  const side = await sideMount({ family: "example-reap3" });
+  try {
+    await side.use(async () => {
+      const sid = await open(jobActor("hank", "job-end-3"), { path: side.path });
+      const r = await callTool(sid, "echo", { text: "x" }, { path: side.path, actor: { ...jobActor("hank", "job-end-3"), sig: "0".repeat(64) } });
+      assert.equal(r.status, 403);
+      assert.equal(side.store().has(sid), true, "an unverified caller cannot close a session");
+      assert.equal(textOf(await callTool(sid, "echo", { text: "y" }, { path: side.path, actor: jobActor("hank", "job-end-3") })), "ECHO y");
+    });
+  } finally { await side.close(); }
+});
+
+test("I2: the idle sweep closes sessions idle beyond the TTL (injected clock)", async () => {
+  let now = 1_000_000;
+  const side = await sideMount({ family: "example-idle", sessionIdleMs: 60_000, deps: { now: () => now } });
+  try {
+    await side.use(async () => {
+      const a = jobActor("hank", "job-idle-1");
+      const sid = await open(a, { path: side.path });
+      now += 59_000;
+      side.handle.sweepIdle();
+      assert.equal(side.store().has(sid), true, "not idle long enough");
+      assert.equal(textOf(await callTool(sid, "echo", { text: "x" }, { path: side.path, actor: a })), "ECHO x", "a request refreshes it");
+      now += 59_000;
+      side.handle.sweepIdle();
+      assert.equal(side.store().has(sid), true);
+      now += 61_000;
+      side.handle.sweepIdle();
+      await until(() => !side.store().has(sid));
+    });
+    assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-idlebad", sessionIdleMs: 0 })), TypeError);
+  } finally { await side.close(); }
+});
+
+test("M2: tool descriptions and schema descriptions/enums are redacted and length-capped", async () => {
+  const sid = await open(jobActor());
+  const r = await listTools(sid);
+  assert.ok(!r.text.includes(SECRET), "no secret anywhere in tools/list");
+  const t = r.json.result.tools.find((x) => x.name === "leakdesc");
+  assert.ok(t.description.startsWith("uses [redacted] to log in"), t.description.slice(0, 60));
+  assert.ok(t.description.length <= 2048, `capped: ${t.description.length}`);
+  const mode = t.inputSchema.properties.mode;
+  assert.equal(mode.description, "pass [redacted]");
+  assert.deepEqual(mode.enum, ["plain", "[redacted]"]);
+});
+
+test("M3: a secret split across two text items is still redacted", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "split");
+  const joined = r.json.result.content.map((c) => c.text).join("");
+  assert.ok(!joined.includes(SECRET), joined);
+  for (const piece of [SECRET.slice(0, 6), SECRET.slice(6)]) assert.ok(!r.text.includes(piece), `leaks ${piece}`);
+  assert.equal(joined, "head [redacted] tail");
+});
+
+test("M4: a throw while shaping the result gets the fixed '<tool> failed.' text, never the thrown message", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "getter");
+  assert.equal(r.json.result.isError, true);
+  assert.equal(textOf(r), "getter failed.");
+  assert.ok(!r.text.includes(SECRET) && !r.text.includes("LEAK"));
+  assert.ok(audit.some((e) => e.tool === "getter" && e.outcome === "error:failed"));
+});
+
+test("M5: an unknown tool name gets the fixed text and an audit event, never the SDK's own text", async () => {
+  const sid = await open(jobActor());
+  const r = await callTool(sid, "nope");
+  assert.equal(r.json.result.isError, true);
+  assert.equal(textOf(r), "Not available on this turn.");
+  assert.ok(!/not found|-32602/i.test(r.text), r.text);
+  assert.ok(audit.some((e) => e.method === "tools/call" && e.tool === "nope" && e.outcome === "refused:not_granted"), JSON.stringify(audit));
+  assert.equal(calls.length, 0);
+});
+
+test("M6: one bot holds at most its share of a mount key's slots; another bot still gets in", async () => {
+  const side = await sideMount({ family: "example-share", maxInFlight: 3, maxInFlightPerBot: undefined });
+  try {
+    await side.use(async () => {
+      const hank = await open(jobActor(), { path: side.path });
+      const otto = await open(jobActor("otto", "job-otto-1"), { path: side.path });
+      const a = callTool(hank, "stuck", {}, { path: side.path });
+      const b = callTool(hank, "stuck", {}, { path: side.path });
+      await until(() => state.stuck.length === 2);
+      assert.equal(textOf(await callTool(hank, "echo", { text: "3" }, { path: side.path })), "Busy, try again in a moment.", "hank's share (2 of 3) is used up");
+      assert.equal(textOf(await callTool(otto, "echo", { text: "o" }, { path: side.path, actor: jobActor("otto", "job-otto-1") })), "ECHO o", "otto still gets the third slot");
+      await Promise.all([a, b]);
+      state.stuck.splice(0).forEach((f) => f());
+    });
+  } finally { await side.close(); }
+});
+
+test("M6: a call that never settles has its slot reclaimed at the hard ceiling", async () => {
+  const side = await sideMount({ family: "example-ceiling", maxInFlight: 1, maxInFlightPerBot: 1, callTimeoutMs: 100, inFlightCeilingMs: 300 });
+  const warn = console.warn;
+  const warned = [];
+  try {
+    console.warn = (...x) => warned.push(x.join(" "));
+    await side.use(async () => {
+      const sid = await open(jobActor(), { path: side.path });
+      assert.match(textOf(await callTool(sid, "stuck", {}, { path: side.path })), /^Timed out/);
+      assert.equal(textOf(await callTool(sid, "echo", { text: "b" }, { path: side.path })), "Busy, try again in a moment.", "below the ceiling the slot is held (S1)");
+      await sleep(350);
+      assert.equal(textOf(await callTool(sid, "echo", { text: "c" }, { path: side.path })), "ECHO c", "reclaimed at the ceiling");
+      assert.equal(state.stuck.length, 1, "the upstream call itself never settled");
+    });
+    assert.ok(warned.some((l) => /ceiling/.test(l)), JSON.stringify(warned));
+    assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-ceilbad", inFlightCeilingMs: 10 })), TypeError, "a ceiling below the timeout");
+    assert.throws(() => mountLoopbackMcp(express(), mountOpts({ family: "example-sharebad", maxInFlightPerBot: 3 })), TypeError, "a share above the cap");
+  } finally {
+    console.warn = warn;
+    state.stuck.splice(0).forEach((f) => f());
+    await side.close();
+  }
+});
+
+test("M10: the session binding is separator-safe JSON, and a botId outside BOT_ID_RE is refused at the mount", async () => {
+  const sid = await open(jobActor());
+  const entry = sessions.getStore(`example-tools-${UUID}`, "streamable").get(sid);
+  assert.equal(entry.owner, JSON.stringify(["example-tools", "hank", jref("job-own-1")]));
+  // A signature that verifies, for a bot id that could never be a bot def's.
+  const bad = { kind: "service", botId: "ha:nk", scope: jref("job-own-1"), threadId: "job-job-own-1", gatewayType: "job" };
+  bad.sig = signScopeActor({ kind: "service", botId: bad.botId, jobId: "job-own-1", threadId: bad.threadId, gatewayType: bad.gatewayType });
+  assert.equal(verifyScopeActorSig(bad), true, "the signature itself verifies");
+  const r = await send(initBody(), { actor: bad });
+  assert.equal(r.status, 403);
+  assert.equal(r.json?.error?.message, "A signed bot is required.");
 });
