@@ -482,6 +482,39 @@ test("through the runner: \"stop it\" with a topic and no media is the stop ask,
 
 /* ---------- Scope and resolution (P20, P23) ---------- */
 
+test("a stop said again while its question waits asks again, never declines; another bot's stop asks about that one (PR 6 carry)", async () => {
+  const s = await setup();
+  const { id } = await started(s);
+  const ask = { say: "Stop Writer's task: research radio history?", verb: "stop_propose" };
+  assert.deepEqual(await s.ask("stop writer"), ask);
+  s.now.advance(MIN);
+  assert.deepEqual(await s.ask("stop writer"), ask, "the same stop: the proposal again, not \"Okay, I won't.\"");
+  assert.deepEqual(await s.ask("stop the writer please"), ask);
+  assert.deepEqual(await s.ask("stop it"), ask, "a pronoun stop means the one asked about");
+  const e = s.pending.get(DEVICE.id);
+  assert.equal(e.kind, "stop");
+  assert.equal(e.id, id);
+  assert.equal(e.at, s.now(), "the question's TTL is refreshed");
+  assert.equal((await s.row(id)).status, "started");
+  assert.deepEqual(s.eng.calls.stop, [], "asked, not acted");
+  // Another bot named: that one is asked about instead.
+  const h = await s.handoff({ bot: "helper", session: "s2" });
+  assert.deepEqual(await s.ask("stop helper"), { say: "Stop Helper's task: research radio history?", verb: "stop_propose" });
+  assert.equal(s.pending.get(DEVICE.id).id, h.id);
+  assert.equal((await s.ask("yes")).verb, "stop_stopped");
+  assert.deepEqual(s.eng.calls.stop, ["s2"]);
+  assert.equal((await s.row(id)).status, "started", "writer's keeps running");
+  // A bare word is still the answer: "no" and "stop" alone decline.
+  for (const word of ["no", "stop"]) {
+    assert.equal((await s.ask("stop writer")).verb, "stop_propose");
+    assert.deepEqual(await s.ask(word), { say: "Okay, I won't.", verb: "handoff_declined" }, word);
+    assert.equal(s.pending.get(DEVICE.id), null, word);
+  }
+  assert.equal((await s.row(id)).status, "started");
+  assert.deepEqual(s.eng.calls.stop, ["s2"]);
+  s.done();
+});
+
 test("a named bot with nothing open of its own: already when it just ended, none otherwise; nothing open at all is the model's", async () => {
   const s = await setup();
   assert.equal(await s.ask("stop writer"), null, "no open hand-off: the stop matchers never fire");

@@ -34,7 +34,7 @@ import { HANDOFF_TASK_MAX_CHARS, HANDOFF_OPEN, PERSONAL_SURFACES } from "./hando
 import { confirm, langOf, botName, surfaceLabel, announceHandoff } from "./handoff-confirm.js";
 import { createHandoffCompletion } from "./handoff-completion.js";
 import { status as handoffStatus, answerRow, reconcileOpen } from "./handoff-status.js";
-import { stop as handoffStop, decideStop as handoffDecideStop, stopIntent, stopConfirmed, proposeStop } from "./handoff-stop.js";
+import { stop as handoffStop, decideStop as handoffDecideStop, stopIntent, stopConfirmed, proposeStop, stopAgain } from "./handoff-stop.js";
 import { sendToPhone, phoneConfirmPath, displayNameOf } from "./handoff-phone.js";
 import { rememberTopic, bumpExchange } from "./handoff-topic.js";
 import { registerResultKind } from "../board/result-requesters.js";
@@ -353,7 +353,8 @@ function namesAnother(transcript, names) {
  *   fastPath     a pending hand-off: yes → core.confirm (the server speaks what really happened), no → declined;
  *                a transcript naming another candidate is a correction (null, even after "no": the model
  *                re-proposes). A pending stop (P19): yes → the stop (handoff-stop.js stopConfirmed: core.stop,
- *                or the phone page from a kiosk), no → declined; on a media ask (stop_propose_media) anything
+ *                or the phone page from a kiosk), no → declined; the stop said again (stopAgain: "stop writer",
+ *                "stop it") asks again, or about the other bot it names, never a no; on a media ask (stop_propose_media) anything
  *                but a yes is the media path's (null, P21). A pending which: an answer naming one option
  *                re-proposes through proposeHandoff (purpose "handoff", or none), answers that bot's status
  *                (purpose "status", P18) or asks to stop its task (purpose "stop"); a no declines. With nothing
@@ -383,6 +384,12 @@ export function createHandoffVoiceActions({ core, pending } = {}) {
       }
       const speak = langOf(lang);
       if (peek.kind === "stop") {
+        // The stop said again ("stop writer" while "Stop Writer's task?" waits) asks again, never declines (PR 6);
+        // a media ask keeps P21 (anything but a yes is the media path's).
+        if (peek.media !== true) {
+          const again = await stopAgain(core, db, { device, surface, transcript, lang, bot, pending, mediaActive }, peek);
+          if (again) return again;
+        }
         const answer = matchYesNo(transcript);
         // A media ask: only a yes answers it; "stop the music", a no, anything else is the media path's (P21).
         if (!answer || (peek.media === true && answer !== "yes")) return null;

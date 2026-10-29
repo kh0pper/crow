@@ -11,6 +11,7 @@
  *   stopIntent(core, db, ctx)               the fast path for a stop request (wantsHandoffStop) → { say, verb } | null
  *   stopConfirmed(core, db, ctx, entry)     the spoken yes on a pending stop entry
  *   proposeStop(core, db, ctx, row)         ask to stop `row`: the spoken question, or the phone page on a kiosk
+ *   stopAgain(core, db, ctx, entry)         a stop request said while a stop question waits → { say, verb } | null
  *
  * Which hand-off (P20, P23): the scope is the status scope (handoff-status.js rowsInScope: a kiosk sees its own
  * device's rows, a personal surface every device's), open rows only, and the matchers fire only with one open.
@@ -36,7 +37,7 @@
  *   3. One board mutation handoff_stopped (DASHBOARD_ACTOR; via and the hand-off id) on the card [rv1 S].
  *   4. The result claim is released (guarded on a card, P9).
  */
-import { PERSONAL_SURFACES } from "./handoff-constants.js";
+import { PERSONAL_SURFACES, HANDOFF_OPEN } from "./handoff-constants.js";
 import { wantsHandoffStop, stopShape } from "./handoff-intent.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf } from "./handoff-confirm.js";
@@ -307,4 +308,20 @@ export async function stopIntent(core, db, { device, surface, transcript, lang, 
   takeForeign(core, pending, device.id);
   pending.set(device.id, { kind: "which", purpose: "stop", options: which, asked: transcript });
   return { say: voiceLine("status_which", speak, { list: joinAnd(which.map((w) => w.name), speak) }), verb: "status_which" };
+}
+
+/**
+ * A stop request said while the stop question `entry` waits (PR 6): "stop writer" again is never a "no". A
+ * stop that resolves to a row (stopIntent) asks about it, which replaces the entry: the same row is the
+ * proposal again with a fresh TTL, another bot's is that one's question. A pronoun ("stop it") that stopIntent
+ * cannot place (no topic) means the row being asked about. Anything else → null: the yes/no reads it, so a
+ * bare "no" or "stop" still declines. ctx is stopIntent's.
+ */
+export async function stopAgain(core, db, ctx, entry) {
+  const r = await stopIntent(core, db, ctx);
+  if (r) return r;
+  if (wantsHandoffStop(ctx.transcript, [entry.name, entry.bot_id]) !== "pronoun") return null;
+  const row = await core.store.get(db, entry.id);
+  if (!row || row.kind !== "handoff" || !HANDOFF_OPEN.includes(row.status)) return null;
+  return proposeStop(core, db, ctx, row, { media: mediaMayBeActive(ctx.mediaActive) });
 }
