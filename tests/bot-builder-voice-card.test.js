@@ -810,3 +810,31 @@ test("the Basics model select renders a held role: ref as the first option", asy
   const i = html.indexOf('id="bx-model"');
   assert.ok(html.slice(i, i + 400).includes('<option value="role:everyday" selected>Builder</option>'), html.slice(i, i + 400));
 });
+
+test("a bot's model refuses the safety role and the non-chat roles, with a plain reason; chat roles still save", async () => {
+  const { saveBasics } = await import("../servers/gateway/dashboard/panels/bot-builder/save-handlers.js");
+  for (const key of ["role:safety", "role:stt", "role:tts", "role:image", "role:video", "role:embed", "role:rerank"]) {
+    for (const field of ["model_default", "model_escalation", "fast_voice_model"]) {
+      const def = { models: { default: "crow-chat/qwen3.6-35b-a3b" } };
+      const r = await saveBasics(def, { [field]: key }, { db, lang: "en", changed: () => true });
+      assert.ok(typeof r.error === "string" && r.error.length > 0, `${field}=${key} refused`);
+      assert.ok(!r.error.includes("role:"), "plain reason, no raw ref: " + r.error);
+    }
+  }
+  const es = await saveBasics({ models: {} }, { model_default: "role:safety" }, { db, lang: "es", changed: () => true });
+  assert.notEqual(es.error, (await saveBasics({ models: {} }, { model_default: "role:safety" }, { db, lang: "en", changed: () => true })).error);
+  for (const key of ["role:everyday", "role:vision", "role:voice"]) {
+    const r = await saveBasics({ models: {} }, { model_default: key }, { db, lang: "en", changed: () => true });
+    assert.equal(r.error, undefined, key);
+  }
+  // The legacy AI tab and the voice editor refuse too, and nothing is written.
+  const before = (await otherRows()).find((r) => r.bot_id === "alpha").definition;
+  const legacy = await post({ action: "save_ai", bot_id: "alpha", model_default: "role:safety" });
+  assert.ok(qOf(legacy).get("error"), legacy);
+  assert.equal((await otherRows()).find((r) => r.bot_id === "alpha").definition, before);
+  await reset();
+  const v = await post(await saveBody({ fast_voice_model: "role:tts" }));
+  assert.ok(qOf(v).get("error"), v);
+  assert.notEqual((await voiceDef()).fast_voice_model, "role:tts");
+  await reset();
+});

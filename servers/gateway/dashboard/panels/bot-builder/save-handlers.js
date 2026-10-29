@@ -161,11 +161,14 @@ export async function saveBasics(def, b, ctx) {
   setModel("fast_voice_model", () => def.fast_voice_model, (v) => { def.fast_voice_model = v; }, () => { delete def.fast_voice_model; });
   if (def.models && !Object.keys(def.models).length) delete def.models;
   if (modelsTouched) {
+    // The safety classifier and the non-chat roles are never a bot's model: refuse, nothing saved.
+    const roleRefs = await loadRoleRefs(ctx.db, lang);
+    const no = [def.models && def.models.default, def.models && def.models.escalation, def.fast_voice_model].find((k) => k && roleRefs.refused(k));
+    if (no) return { error: roleRefs.notForBots(no) };
     try {
       const { opts } = await loadModelOptions(ctx.db);
       const valid = new Set(opts.map((o) => o.key));
-      const roles = await loadRoleRefs(ctx.db);
-      const bad = [def.models && def.models.default, def.models && def.models.escalation, def.fast_voice_model].filter((k) => k && !valid.has(k) && !roles.known(k));
+      const bad = [def.models && def.models.default, def.models && def.models.escalation, def.fast_voice_model].filter((k) => k && !valid.has(k) && !roleRefs.known(k));
       if (bad.length) out.warn.push(fill(t("botbuilder.bxModelsUnavailable", lang), { models: bad.join(", ") }));
     } catch { /* validation never blocks a save */ }
   }

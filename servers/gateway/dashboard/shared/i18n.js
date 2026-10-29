@@ -1652,6 +1652,7 @@ export const translations = {
   "botbuilder.bxVoiceModel": { en: "Voice model (glasses, kiosk and companion)", es: "Modelo de voz (gafas, quiosco y compañero)" },
   "botbuilder.bxVoiceSame": { en: "Same as the model above", es: "El mismo modelo de arriba" },
   "botbuilder.bxVoiceModelHint": { en: "A small, fast model for spoken turns. This is the only place it is set.", es: "Un modelo pequeño y rápido para los turnos hablados. Este es el único lugar donde se configura." },
+  "botbuilder.roleNotForBots": { en: "{role} can't be a bot's model. Pick a chat role or a model.", es: "{role} no puede ser el modelo de un bot. Elige un rol de chat o un modelo." },
   "botbuilder.bxModelsUnavailable": { en: "Saved, but these models are not available on this Crow, so runs will fail until they are: {models}", es: "Guardado, pero estos modelos no están disponibles en este Crow, así que fallará hasta que lo estén: {models}" },
   "botbuilder.bxChannelTitle": { en: "Where people reach this bot", es: "Dónde la gente contacta a este bot" },
   "botbuilder.bxChannelLead": { en: "Pick one channel. Only that channel's settings are shown, and nothing is saved until you press Save.", es: "Elige un canal. Solo se muestran los ajustes de ese canal y no se guarda nada hasta que pulses Guardar." },

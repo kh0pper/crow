@@ -426,6 +426,14 @@ export async function handleBotBuilderPost(req, res, { db }) {
       // resolved later via resolve-profile.js. Empty -> bot uses its default.
       const fvm = (b.fast_voice_model || "").trim();
       if (fvm) def.fast_voice_model = fvm; else delete def.fast_voice_model;
+      {
+        // The safety classifier and the non-chat roles are never a bot's model: refuse, nothing saved.
+        const roleRefs = await loadRoleRefs(db, lang);
+        const no = [def.models.default, def.models.escalation, def.fast_voice_model].find((k) => k && roleRefs.refused(k));
+        if (no) {
+          return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` + encodeURIComponent(roleRefs.notForBots(no)));
+        }
+      }
       try {
         const { opts } = await loadModelOptions(db);
         const validKeys = new Set(opts.map((o) => o.key));
