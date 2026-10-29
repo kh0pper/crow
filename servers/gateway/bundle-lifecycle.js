@@ -148,7 +148,7 @@ export async function resolveComposeProject({ projectDir, composeText, envVars =
 }
 
 // Local helpers (not imported from routes/bundles.js — that would be circular).
-function realOrSelf(p) { try { return realpathSync(p); } catch { return p; } }
+function realOrSelf(p) { try { return realpathSync.native(p); } catch { return p; } }
 
 function installedListsId(installedPath, id) {
   try {
