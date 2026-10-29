@@ -302,8 +302,8 @@ describe("revocation", () => {
 describe("request signing", () => {
   const base = (m) => ({ method: "post", pathQuery: "/satellite/v1/mcp/x?a=1", body: '{"k":1}', satelliteId: "sat_aaaaaaaaaaaaaaaaaaaa", caller: "owner-local", ...m });
   test("signing string layout", () => {
-    const s = requestSigningString({ method: "post", pathQuery: "/p?q=1", bodySha256: "BH", ts: "123", nonce: "N", satelliteId: "sat_x", caller: "bot:b1" });
-    assert.equal(s, "crow-satellite-req/v1\nPOST\n/p?q=1\nBH\n123\nN\nsat_x\nbot:b1");
+    const s = requestSigningString({ method: "post", pathQuery: "/p?q=1", bodySha256: 'abababababababababababababababababababababababababababababababab', ts: "123", nonce: '11111111111111111111111111111111', satelliteId: "sat_aaaaaaaaaaaaaaaaaaaa", caller: "bot:b1" });
+    assert.equal(s, "crow-satellite-req/v1\nPOST\n/p?q=1\n" + 'abababababababababababababababababababababababababababababababab' + "\n123\n" + '11111111111111111111111111111111' + "\nsat_aaaaaaaaaaaaaaaaaaaa\nbot:b1");
   });
   test("round trip and headers", () => {
     const mg = generateKeypair();
@@ -371,8 +371,8 @@ describe("request signing", () => {
 
 describe("response signing", () => {
   test("string layout and round trip", () => {
-    const s = responseSigningString({ requestNonce: "N", status: 200, bodySha256: "BH" });
-    assert.equal(s, "crow-satellite-resp/v1\nN\n200\nBH");
+    const s = responseSigningString({ requestNonce: '11111111111111111111111111111111', status: 200, bodySha256: 'abababababababababababababababababababababababababababababababab' });
+    assert.equal(s, "crow-satellite-resp/v1\n" + '11111111111111111111111111111111' + "\n200\n" + 'abababababababababababababababababababababababababababababababab');
     const sat = generateKeypair();
     const args = { requestNonce: "ab".repeat(16), status: 200, bodySha256: sha256Hex("{}") };
     const sig = signResponse(sat.privHex, args);
@@ -425,8 +425,8 @@ describe("pairing", () => {
     assert.match(hashPairCode(normalized), /^[0-9a-f]{64}$/);
   });
   test("hello string and done string", () => {
-    assert.equal(helloSigningString({ nonceC: "C", nonceS: "S", satelliteId: "sat_x" }), "crow-satellite-pair-hello/v1\nC\nS\nsat_x");
-    assert.equal(doneSigningString({ nonceC: "C", certSha256: "H" }), "crow-satellite-pair-done/v1\nC\nH");
+    assert.equal(helloSigningString({ nonceC: '11111111111111111111111111111111', nonceS: '22222222222222222222222222222222', satelliteId: "sat_aaaaaaaaaaaaaaaaaaaa" }), "crow-satellite-pair-hello/v1\n" + '11111111111111111111111111111111' + "\n" + '22222222222222222222222222222222' + "\nsat_aaaaaaaaaaaaaaaaaaaa");
+    assert.equal(doneSigningString({ nonceC: '11111111111111111111111111111111', certSha256: 'abababababababababababababababababababababababababababababababab' }), "crow-satellite-pair-done/v1\n" + '11111111111111111111111111111111' + "\n" + 'abababababababababababababababababababababababababababababababab');
   });
   test("pairMac equality, determinism and mismatches", () => {
     const { normalized } = generatePairCode();
@@ -437,15 +437,15 @@ describe("pairing", () => {
     assert.equal(macEqualHex(m, pairMac(normalized, args)), true);
     assert.equal(macEqualHex(m, pairMac(generatePairCode().normalized, args)), false);
     for (const k of Object.keys(args)) {
-      assert.equal(macEqualHex(m, pairMac(normalized, { ...args, [k]: "x" + args[k] })), false, k);
+      assert.equal(macEqualHex(m, pairMac(normalized, { ...args, [k]: k === "satelliteId" ? satelliteIdFromPub(generateKeypair().pubHex) : k === "certSha256" ? sha256Hex(args[k]) : randomBytes(16).toString("hex") })), false, k);
     }
   });
   test("pairMac matches an independent HKDF+HMAC computation", async () => {
     const { hkdfSync, createHmac } = await import("node:crypto");
     const code = "0123456789ABCDEFGHJKMNPQ";
-    const a = { nonceC: "c1", nonceS: "s1", certSha256: "h1", satelliteId: "sat_zzzzzzzzzzzzzzzzzzzz" };
+    const a = { nonceC: '11111111111111111111111111111111', nonceS: '22222222222222222222222222222222', certSha256: 'abababababababababababababababababababababababababababababababab', satelliteId: "sat_zzzzzzzzzzzzzzzzzzzz" };
     const key = Buffer.from(hkdfSync("sha256", Buffer.from(code), Buffer.alloc(0), "crow-satellite-pair/v1", 32));
-    const want = createHmac("sha256", key).update(`crow-satellite-pair/v1\nc1\ns1\nh1\n${a.satelliteId}`).digest("hex");
+    const want = createHmac("sha256", key).update(`crow-satellite-pair/v1\n${a.nonceC}\n${a.nonceS}\n${a.certSha256}\n${a.satelliteId}`).digest("hex");
     assert.equal(pairMac(code, a), want);
   });
   test("macEqualHex constant-time wrapper handles bad input", () => {
@@ -499,8 +499,8 @@ describe("cross-domain refusal", () => {
     const respStr = responseSigningString({ requestNonce: nonce, status: 200, bodySha256: sha256Hex("") });
     assert.equal(verifyBytes(root.pubHex, Buffer.from(respStr), f.cert.sig), false);
     // hello sig does not verify as done and vice versa (satellite key)
-    const helloSig = signBytes(f.sat.privHex, Buffer.from(helloSigningString({ nonceC: "a", nonceS: "b", satelliteId: "c" })));
-    assert.equal(verifyBytes(f.sat.pubHex, Buffer.from(doneSigningString({ nonceC: "a", certSha256: "b" })), helloSig), false);
+    const helloSig = signBytes(f.sat.privHex, Buffer.from(helloSigningString({ nonceC: '11111111111111111111111111111111', nonceS: '22222222222222222222222222222222', satelliteId: f.payload.satellite_id })));
+    assert.equal(verifyBytes(f.sat.pubHex, Buffer.from(doneSigningString({ nonceC: '11111111111111111111111111111111', certSha256: 'abababababababababababababababababababababababababababababababab' })), helloSig), false);
     // a response signature does not verify as a request
     const rs = signResponse(f.sat.privHex, { requestNonce: nonce, status: 200, bodySha256: sha256Hex("") });
     const rqAsResp = verifyRequest(f.sat.pubHex, {
@@ -508,5 +508,81 @@ describe("cross-domain refusal", () => {
       headers: { "X-Crow-Sat-Sig": rs, "X-Crow-Sat-Ts": String(NOW), "X-Crow-Sat-Nonce": nonce, "X-Crow-Sat-Caller": "owner-local" },
     });
     assert.equal(rqAsResp.ok, false);
+  });
+});
+
+describe("fix round 1: hardening", () => {
+  const SID = "sat_aaaaaaaaaaaaaaaaaaaa";
+  const base = (m) => ({ method: "POST", pathQuery: "/x", body: "{}", satelliteId: SID, caller: "owner-local", ...m });
+
+  test("verifyRequest never throws on a non-string/Buffer body", () => {
+    const mg = generateKeypair();
+    const h = signRequest(mg.privHex, base({ ts: String(NOW) }));
+    for (const body of [{}, [], 5, true, { a: 1 }]) {
+      assert.deepEqual(verifyRequest(mg.pubHex, { ...base({ body }), headers: h, now: NOW }), { ok: false, code: "bad_signature", caller: undefined, nonce: undefined });
+    }
+    assert.equal(verifyRequest(mg.pubHex, { ...base({ body: new Uint8Array(Buffer.from("{}")) }), headers: h, now: NOW }).ok, true);
+    assert.equal(verifyRequest(mg.pubHex, undefined).ok, false);
+    assert.throws(() => signRequest(mg.privHex, base({ body: {} })));
+  });
+  test("nonce must be 32 lowercase hex", () => {
+    const mg = generateKeypair();
+    for (const nonce of ["ab", "AB".repeat(16), "zz".repeat(16), "ab".repeat(17), "ab".repeat(15) + "a\n"]) {
+      assert.throws(() => signRequest(mg.privHex, base({ nonce, ts: String(NOW) })), TypeError);
+    }
+    const h = signRequest(mg.privHex, base({ ts: String(NOW) }));
+    assert.match(h["X-Crow-Sat-Nonce"], /^[0-9a-f]{32}$/);
+    for (const nonce of ["ab", "AB".repeat(16), h["X-Crow-Sat-Nonce"] + "0"]) {
+      const r = verifyRequest(mg.pubHex, { ...base(), headers: { ...h, "X-Crow-Sat-Nonce": nonce }, now: NOW });
+      assert.equal(r.code, "bad_signature");
+    }
+  });
+  test("newline-injected fields are refused by the builders and verifiers", () => {
+    const good = { bodySha256: "ab".repeat(32), ts: "1", nonce: "ab".repeat(16), satelliteId: SID, caller: "owner-local" };
+    const inj = "ab".repeat(15) + "a\nX";
+    assert.throws(() => requestSigningString({ method: "GET", pathQuery: "/", ...good, nonce: inj }), TypeError);
+    assert.throws(() => requestSigningString({ method: "GET", pathQuery: "/\nPOST", ...good }), TypeError);
+    assert.throws(() => requestSigningString({ method: "GET\n", pathQuery: "/", ...good }), TypeError);
+    assert.throws(() => requestSigningString({ method: "GET", pathQuery: "/", ...good, satelliteId: SID + "\nx" }), TypeError);
+    assert.throws(() => requestSigningString({ method: "GET", pathQuery: "/", ...good, bodySha256: "ab" }), TypeError);
+    assert.throws(() => responseSigningString({ requestNonce: inj, status: 200, bodySha256: good.bodySha256 }), TypeError);
+    assert.throws(() => responseSigningString({ requestNonce: good.nonce, status: "200\nx", bodySha256: good.bodySha256 }), TypeError);
+    assert.throws(() => helloSigningString({ nonceC: inj, nonceS: good.nonce, satelliteId: SID }), TypeError);
+    assert.throws(() => helloSigningString({ nonceC: good.nonce, nonceS: good.nonce, satelliteId: "c" }), TypeError);
+    assert.throws(() => doneSigningString({ nonceC: inj, certSha256: good.bodySha256 }), TypeError);
+    assert.throws(() => pairMac("0".repeat(24), { nonceC: inj, nonceS: good.nonce, certSha256: good.bodySha256, satelliteId: SID }), TypeError);
+    assert.throws(() => pairMac("0".repeat(24), { nonceC: good.nonce, nonceS: good.nonce, certSha256: good.bodySha256, satelliteId: "sat_x" }), TypeError);
+    assert.throws(() => pairMac("short", { nonceC: good.nonce, nonceS: good.nonce, certSha256: good.bodySha256, satelliteId: SID }), TypeError);
+    const sat = generateKeypair();
+    assert.equal(verifyResponse(sat.pubHex, { requestNonce: inj, status: 200, bodySha256: good.bodySha256 }, "00".repeat(64)), false);
+    const mg = generateKeypair();
+    assert.equal(verifyRequest(mg.pubHex, { method: "GET", pathQuery: "/\nx", body: "", satelliteId: SID, now: NOW,
+      headers: { "X-Crow-Sat-Sig": "00".repeat(64), "X-Crow-Sat-Ts": String(NOW), "X-Crow-Sat-Nonce": good.nonce, "X-Crow-Sat-Caller": "owner-local" } }).ok, false);
+  });
+  test("canonicalJson refuses sparse arrays", () => {
+    assert.throws(() => canonicalJson([1, , 3]), TypeError);
+    assert.throws(() => canonicalJson({ a: new Array(2) }), TypeError);
+    assert.equal(canonicalJson([1, null, 3]), "[1,null,3]");
+  });
+  test("acceptCert: bad_cert for malformed or inverted timestamps", () => {
+    const f = fixture();
+    const sign = (patch) => signCert(f.root.privHex, { ...f.payload, ...patch });
+    const run = (cert) => acceptCert(cert, { ownPubHex: f.sat.pubHex, now: NOW });
+    const iso = (ms) => new Date(ms).toISOString();
+    for (const patch of [
+      { issued_at: "2026-11-01" }, { issued_at: "2026-11-01T00:00:00+00:00" }, { expires_at: "tomorrow" },
+      { expires_at: "2026-11-01T00:00:00.000000Z" }, { issued_at: 5 },
+      { issued_at: iso(NOW + DAY), expires_at: iso(NOW + DAY) }, { expires_at: iso(NOW - DAY) },
+    ]) {
+      assert.deepEqual(run(sign(patch)), { ok: false, code: "bad_cert" }, JSON.stringify(patch));
+    }
+    assert.deepEqual(run(sign({ issued_at: "2026-11-01T00:00:00Z", expires_at: "2027-01-01T00:00:00Z" })), { ok: true });
+  });
+  test("certTimeState / needsRenewal / formatFingerprint guard bad input", () => {
+    for (const bad of [null, undefined, {}, "x", { payload: {} }, { payload: { expires_at: "garbage" } }]) {
+      assert.equal(certTimeState(bad, NOW), "lapsed");
+      assert.equal(needsRenewal(bad, NOW), true);
+    }
+    for (const bad of [null, undefined, 5, "sat_x", {}, "sat_" + "A".repeat(20)]) assert.throws(() => formatFingerprint(bad), TypeError);
   });
 });

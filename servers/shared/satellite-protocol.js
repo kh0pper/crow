@@ -41,6 +41,10 @@ const hexBuf = (h, len) => {
   if (len && h.length !== len * 2) throw new Error("bad length");
   return Buffer.from(h, "hex");
 };
+const NONCE_RE = /^[0-9a-f]{32}$/;
+const SHA_RE = /^[0-9a-f]{64}$/;
+const need = (ok, what) => { if (!ok) throw new TypeError(`satellite-protocol: invalid ${what}`); };
+const ISO_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,3})?Z$/;
 const toBuf = (v) => (Buffer.isBuffer(v) ? v : typeof v === "string" ? Buffer.from(v, "utf8") : v instanceof Uint8Array ? Buffer.from(v) : null);
 
 // ── canonical JSON ──────────────────────────────────────────────────────────
@@ -54,7 +58,10 @@ export function canonicalJson(value) {
       if (!Number.isFinite(value)) throw new TypeError("canonicalJson: non-finite number");
       return JSON.stringify(value);
     case "object": {
-      if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+      if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i++) if (!(i in value)) throw new TypeError("canonicalJson: sparse array");
+        return `[${value.map(canonicalJson).join(",")}]`;
+      }
       const proto = Object.getPrototypeOf(value);
       if (proto !== Object.prototype && proto !== null) throw new TypeError("canonicalJson: non-plain object");
       return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
@@ -114,7 +121,9 @@ export function isSatelliteId(s) {
   return typeof s === "string" && /^sat_[a-z2-7]{20}$/.test(s);
 }
 
+/** Throws TypeError unless `id` is a valid satellite id. */
 export function formatFingerprint(id) {
+  if (!isSatelliteId(id)) throw new TypeError("formatFingerprint: not a satellite id");
   return `sat_${id.slice(4).match(/.{1,4}/g).join("-")}`;
 }
 
@@ -165,7 +174,7 @@ export function acceptCert(cert, { ownPubHex, pinned = null, current = null, ser
   if (pinned && (pinned.crow_id !== p.crow_id || pinned.root_pubkey !== p.root_pubkey)) return no("wrong_crow");
   const issued = Date.parse(p.issued_at);
   const expires = Date.parse(p.expires_at);
-  if (!Number.isFinite(issued) || !Number.isFinite(expires)) return no("bad_signature");
+  if (!ISO_RE.test(p.issued_at) || !ISO_RE.test(p.expires_at) || !Number.isFinite(issued) || !Number.isFinite(expires) || !(issued < expires)) return no("bad_cert");
   if (now >= expires) return no("expired");
   if (issued > now + TS_WINDOW_MS) return no("not_yet_valid");
   if (current?.payload) {
@@ -176,14 +185,17 @@ export function acceptCert(cert, { ownPubHex, pinned = null, current = null, ser
   return { ok: true };
 }
 
+/** Anything that is not a cert with a parseable expires_at is "lapsed". */
 export function certTimeState(cert, now = Date.now()) {
-  const exp = Date.parse(cert.payload.expires_at);
+  const exp = Date.parse(cert?.payload?.expires_at);
+  if (!Number.isFinite(exp)) return "lapsed";
   if (now < exp) return "valid";
   return now - exp <= GRACE_MS ? "grace" : "lapsed";
 }
 
 export function needsRenewal(cert, now = Date.now()) {
-  return Date.parse(cert.payload.expires_at) - now < RENEW_BELOW_MS;
+  const exp = Date.parse(cert?.payload?.expires_at);
+  return !Number.isFinite(exp) || exp - now < RENEW_BELOW_MS;
 }
 
 export function certSha256(cert) {
@@ -216,10 +228,22 @@ export function isValidCaller(c) {
 }
 
 export function requestSigningString({ method, pathQuery, bodySha256, ts, nonce, satelliteId, caller }) {
+  need(typeof method === "string" && /^[A-Za-z]+$/.test(method), "method");
+  need(typeof pathQuery === "string" && pathQuery.startsWith("/") && !/[\r\n]/.test(pathQuery), "pathQuery");
+  need(typeof bodySha256 === "string" && SHA_RE.test(bodySha256), "bodySha256");
+  need(typeof ts === "string" && /^\d{1,16}$/.test(ts), "ts");
+  need(typeof nonce === "string" && NONCE_RE.test(nonce), "nonce");
+  need(isSatelliteId(satelliteId), "satelliteId");
+  need(isValidCaller(caller), "caller");
   return `${PREFIXES.req}${String(method).toUpperCase()}\n${pathQuery}\n${bodySha256}\n${ts}\n${nonce}\n${satelliteId}\n${caller}`;
 }
 
-const bodyHash = (body) => sha256Hex(body == null || body === "" ? "" : body);
+// null/undefined count as an empty body; anything but string/Buffer/Uint8Array throws.
+function bodyHash(body) {
+  if (body == null) return sha256Hex("");
+  need(typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array, "body");
+  return sha256Hex(typeof body === "string" ? body : Buffer.from(body));
+}
 
 export function signRequest(mgmtPrivHex, { method, pathQuery, body = "", satelliteId, caller, ts, nonce }) {
   if (!isValidCaller(caller)) throw new Error("signRequest: invalid caller");
@@ -241,23 +265,30 @@ function header(headers, name) {
   return undefined;
 }
 
-export function verifyRequest(mgmtPubHex, { method, pathQuery, body = "", headers, satelliteId, now = Date.now() }) {
+export function verifyRequest(mgmtPubHex, { method, pathQuery, body = "", headers, satelliteId, now = Date.now() } = {}) {
   const no = (code) => ({ ok: false, code, caller: undefined, nonce: undefined });
-  const caller = header(headers, "X-Crow-Sat-Caller");
-  if (!isValidCaller(caller)) return no("bad_caller");
-  const ts = header(headers, "X-Crow-Sat-Ts");
-  if (typeof ts !== "string" || !/^\d{1,16}$/.test(ts) || Math.abs(Number(ts) - now) > TS_WINDOW_MS) return no("clock_skew");
-  const nonce = header(headers, "X-Crow-Sat-Nonce");
-  const sig = header(headers, "X-Crow-Sat-Sig");
-  if (typeof nonce !== "string" || !nonce || typeof sig !== "string") return no("bad_signature");
-  const str = requestSigningString({ method, pathQuery, bodySha256: bodyHash(body), ts, nonce, satelliteId, caller });
-  if (!verifyBytes(mgmtPubHex, Buffer.from(str, "utf8"), sig)) return no("bad_signature");
-  return { ok: true, code: undefined, caller, nonce };
+  try {
+    const caller = header(headers, "X-Crow-Sat-Caller");
+    if (!isValidCaller(caller)) return no("bad_caller");
+    const ts = header(headers, "X-Crow-Sat-Ts");
+    if (typeof ts !== "string" || !/^\d{1,16}$/.test(ts) || Math.abs(Number(ts) - now) > TS_WINDOW_MS) return no("clock_skew");
+    const nonce = header(headers, "X-Crow-Sat-Nonce");
+    const sig = header(headers, "X-Crow-Sat-Sig");
+    if (typeof nonce !== "string" || !NONCE_RE.test(nonce) || typeof sig !== "string") return no("bad_signature");
+    const str = requestSigningString({ method, pathQuery, bodySha256: bodyHash(body), ts, nonce, satelliteId, caller });
+    if (!verifyBytes(mgmtPubHex, Buffer.from(str, "utf8"), sig)) return no("bad_signature");
+    return { ok: true, code: undefined, caller, nonce };
+  } catch {
+    return no("bad_signature");
+  }
 }
 
 // ── response signing (§5.2) ─────────────────────────────────────────────────
 
 export function responseSigningString({ requestNonce, status, bodySha256 }) {
+  need(typeof requestNonce === "string" && NONCE_RE.test(requestNonce), "requestNonce");
+  need(Number.isInteger(status) && status >= 100 && status <= 599, "status");
+  need(typeof bodySha256 === "string" && SHA_RE.test(bodySha256), "bodySha256");
   return `${PREFIXES.resp}${requestNonce}\n${status}\n${bodySha256}`;
 }
 
@@ -266,7 +297,11 @@ export function signResponse(satPrivHex, args) {
 }
 
 export function verifyResponse(satPubHex, args, sigHex) {
-  return verifyBytes(satPubHex, Buffer.from(responseSigningString(args), "utf8"), sigHex);
+  try {
+    return verifyBytes(satPubHex, Buffer.from(responseSigningString(args), "utf8"), sigHex);
+  } catch {
+    return false;
+  }
 }
 
 // ── pairing (§4.1 step 6, §4.2) ─────────────────────────────────────────────
@@ -299,10 +334,19 @@ export function hashPairCode(normalized) {
 }
 
 export function helloSigningString({ nonceC, nonceS, satelliteId }) {
+  need(typeof nonceC === "string" && NONCE_RE.test(nonceC), "nonceC");
+  need(typeof nonceS === "string" && NONCE_RE.test(nonceS), "nonceS");
+  need(isSatelliteId(satelliteId), "satelliteId");
   return `${PREFIXES.hello}${nonceC}\n${nonceS}\n${satelliteId}`;
 }
 
+/** Throws TypeError on malformed inputs; callers treat a throw as a failed pairing. */
 export function pairMac(normalizedCode, { nonceC, nonceS, certSha256: certHash, satelliteId }) {
+  need(typeof normalizedCode === "string" && normalizePairCode(normalizedCode) === normalizedCode, "pair code");
+  need(typeof nonceC === "string" && NONCE_RE.test(nonceC), "nonceC");
+  need(typeof nonceS === "string" && NONCE_RE.test(nonceS), "nonceS");
+  need(typeof certHash === "string" && SHA_RE.test(certHash), "certSha256");
+  need(isSatelliteId(satelliteId), "satelliteId");
   const key = Buffer.from(hkdfSync("sha256", Buffer.from(normalizedCode, "utf8"), Buffer.alloc(0), PREFIXES.pair, 32));
   return createHmac("sha256", key)
     .update(`${PREFIXES.pair}\n${nonceC}\n${nonceS}\n${certHash}\n${satelliteId}`)
@@ -319,5 +363,7 @@ export function macEqualHex(a, b) {
 }
 
 export function doneSigningString({ nonceC, certSha256: certHash }) {
+  need(typeof nonceC === "string" && NONCE_RE.test(nonceC), "nonceC");
+  need(typeof certHash === "string" && SHA_RE.test(certHash), "certSha256");
   return `${PREFIXES.done}${nonceC}\n${certHash}`;
 }
