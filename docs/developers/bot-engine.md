@@ -217,10 +217,10 @@ Every pi child goes through `PiRpc` in `scripts/pi-bots/bridge.mjs`, whatever st
 
 **What it is:** defense in depth that removes the casual routes from a bot's shell to docker and sudo. **What it is not:** a containment boundary. The filesystem stays writable, so a bot with an open shell still has the escape routes listed below. A real boundary needs a dedicated unprivileged bot user, which is an operator decision.
 
-When bubblewrap can create a user namespace, pi starts as:
+When bubblewrap can create a user and PID namespace with a fresh `/proc` (tier `pidns`, see [PID namespace sandbox](#pid-namespace-sandbox) below), pi starts as:
 
 ```
-bwrap --dev-bind / / --unshare-user \
+bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc \
   --tmpfs /run/user --tmpfs /tmp/tmux-<uid> --tmpfs /tmp/cc-daemon-<uid> --tmpfs /tmp/.X11-unix \
   --ro-bind /dev/null <docker.sock> \
   --ro-bind ~/.config/systemd ~/.config/systemd --ro-bind ~/.local/share/systemd ~/.local/share/systemd \
@@ -246,7 +246,7 @@ The two systemd dirs are created empty when missing.
   The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`, `*_SOCKET` and `*_SOCKET_PATH`.
 - **User unit dirs are not directly writable.** This is not a guarantee: a bot can rename an ancestor directory (see the remaining routes below).
 - **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
-- **No reading other processes:** other processes' `/proc/<pid>/{root,environ,mem}` are refused, including the gateway's and other bots'.
+- **No other processes at all (`pidns` tier):** pi runs in its own PID namespace, so the gateway and other bots are not even visible inside. In the `userns` tier their `/proc/<pid>/{root,environ,mem}` are still refused by user-namespace rules.
 - **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
 - **Unchanged:** uid, network, cwd and the rest of the filesystem (read-write). Inside, files owned by other uids/gids show as `nobody`/`nogroup`, which affects owner-checking tools such as sudo and git's `safe.directory` on root-owned trees.
 
@@ -269,9 +269,10 @@ Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_S
 **Without bubblewrap** (for example black-swan, where Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` also applies), pi starts as `setpriv --no-new-privs -- node cli.js …` when `setpriv` exists. sudo and setuid are blocked; docker and the user session are not.
 
 **The probe:**
-- A failed probe is retried after 5 minutes, so a transient failure doesn't leave the process unsandboxed until restart.
-- A success is kept for the life of the process.
-- `piSandboxStatus()` reports `active`, `nnp-only: …`, `fallback: …` or `off`.
+- It tries the full `pidns` flags first, then a plain user namespace (`userns`), then setpriv.
+- A failed probe, and a `userns`-only success, are retried after 5 minutes, so a transient failure doesn't leave the process unsandboxed (or on the weaker tier) until restart.
+- A `pidns` success is kept for the life of the process.
+- `piSandboxStatus()` reports `active` (`pidns`), `active-no-pidns` (`userns`), `nnp-only: …`, `fallback: …` or `off`.
 
 `CROW_PI_SANDBOX` is read from the gateway's own environment only. A bot def's `spawn_env` cannot set it; it is stripped like `PI_BOT_*`. The values:
 
@@ -279,12 +280,41 @@ Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_S
 - `required` refuses to spawn pi without bwrap.
 - `off` never wraps.
 
-**Process accounting under bwrap:**
-- `proc.pid` is the wrapper. `PiRpc.piPid` is pi itself, read from bwrap's `--info-fd`.
+**Process accounting under bwrap** (outer PIDs on the parent side):
+- `proc.pid` is the outer bwrap, the process-group leader.
+- In the `pidns` tier, bwrap's `--info-fd` reports the PID namespace's init (an inner bwrap), kept as `PiRpc.sandboxInitPid`. `PiRpc.piPid` is pi's outer pid, resolved as that init's child. In the `userns` tier, `--info-fd` reports pi itself.
 - Under the setpriv fallback, `proc.pid` is pi.
-- `listBridgePi()` folds a wrapper and its pi into one entry: the wrapper's pid/ppid (lease and orphan rules unchanged) and pi's RSS.
-- The reaper signals the wrapper's process group and pi itself.
-- Perch leases list **both** the wrapper pid and pi's pid, so a reaper from an older build (which doesn't fold wrappers) still sees the inner pi as leased.
+- `listBridgePi()` folds the wrapper (both nested bwraps in the `pidns` tier) and pi into one entry: the outer wrapper's pid/ppid (lease and orphan rules unchanged) and pi's RSS. `countLivePi()` therefore counts one sandboxed pi once.
+- The reaper signals the outer wrapper's process group and pi itself.
+- Perch leases list the outer wrapper, the namespace init and pi, so a reaper from an older build (no folding, or one level of folding) still sees every entry of a live session as leased.
+
+### PID namespace sandbox
+
+`wrapPiSpawn()` returns the tier it chose as `tier`, and `PiRpc` keeps it as `sandboxTier`:
+
+| `tier` | What pi gets | `piSandboxStatus()` |
+|---|---|---|
+| `pidns` | bwrap: user + PID namespace, fresh `/proc`, every mask above | `active` |
+| `userns` | bwrap: user namespace only, every mask above, host processes visible | `active-no-pidns` |
+| `nnp` | `setpriv --no-new-privs` only | `nnp-only: …` |
+| `none` | a plain spawn (`CROW_PI_SANDBOX=off`, or neither tool works) | `fallback: …` or `off` |
+
+In the `pidns` tier:
+
+- **No host process is visible.** Inside, `/proc` lists only the sandbox's own processes. The gateway's and other bots' `/proc/<pid>/{root,environ,mem}` do not exist there, and a same-uid host process cannot be signalled (`kill -0 <host pid>` fails with ESRCH). This is structural, not a ptrace-policy outcome.
+- **The SIGTERM drain still runs.** `--die-with-parent` is deliberately not used: `close()`'s group SIGTERM ends the outer bwrap at once, and a parent-death SIGKILL would cut pi's own drain and MCP shutdown short. A wrapper orphaned by a dead gateway is caught by the reaper's orphan rule (ppid 1).
+- **The 5 s SIGKILL bound holds.** `close()` returns once the outer bwrap exits, but its SIGKILL timer stays armed in the background until the whole process group is gone, so a pi that ignores SIGTERM is still killed.
+- **What bots see differently:**
+  - `ps`, `pgrep`, `top` and `kill <host pid>` in a bot shell see only the sandbox's own processes.
+  - Processes a bot starts (`nohup`, `setsid`, a daemon, a backgrounded server) die when pi exits, because the namespace ends with it.
+  - PIDs written by in-sandbox processes (pid files, logs) are namespace-local; a host-side `kill(pid, 0)` check on them sees a different or dead process.
+  - Operators with bash-enabled bots should check those bots' skills for `ps`, `pgrep`, `kill`, `nohup`, `setsid` or `tmux` use.
+
+Where bwrap can make a user namespace but not a PID namespace or a fresh `/proc`, pi runs in the `userns` tier with a one-time warning. That tier is re-probed after 5 minutes, and later spawns move to `pidns` once it works.
+
+Actor signing does not change: in-gateway spawns sign with the per-boot key, and the key-less bot hosts presign each turn through `POST /internal/actor-sign` ([Separate bot hosts](#separate-bot-hosts)). A generic background job's actor now carries its job id, so its board calls record `board_mutations.job_id` like card jobs do.
+
+**Rollout double count.** A bot host not yet restarted on this build folds only one wrapper level, so it counts each `pidns` sandboxed pi twice and admits about half as many until it restarts.
 
 **Docker-backed tools inside a bot turn:**
 - `crow_browser_launch` fails on its container recreate/restart path; a plain launch over CDP works.
