@@ -586,6 +586,12 @@ export class PiRpc {
     delete launch.env.PI_BOT_SECRET_VALUES_FD;
     // Only a pi-lab that declares it reads (and closes) the fd gets one: an
     // older pi-lab would leave the pipe open in pi for the whole session.
+    // The card set ALONE (getCardValues), never a project-service value
+    // (getApprovalCardValues, the gateway's own card mask): this payload feeds
+    // EVERY bot's pi process, channel and cron bots included, so a service
+    // value here would hand the owner's connected-account secret, in plain
+    // text, to pi processes running turns the owner did not start: that breaks
+    // "only my own turns" (connections reach only the owner's own turns).
     const valuesPayload = hidden && piLabSupportsSecretValuesFd() ? secretValuesPayload(getCardValues()) : null;
     if (valuesPayload != null) launch.env.PI_BOT_SECRET_VALUES_FD = String(SECRET_VALUES_FD);
     this.sandboxed = launch.sandboxed;

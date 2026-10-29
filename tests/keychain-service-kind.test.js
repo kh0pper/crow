@@ -21,7 +21,7 @@ const { createReauthGate } = await import("../servers/gateway/keychain/reauth.js
 const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
 const { SERVICE_CONNECTIONS_DDL } = await import("../servers/shared/project-services-schema.js");
 const { collectSecretValueSets } = await import("../servers/shared/secret-values-collect.js");
-const { recordCardSecret } = await import("../servers/shared/secret-values.js");
+const { recordCardSecret, recordServiceSecretValues } = await import("../servers/shared/secret-values.js");
 
 const SECRET_A = "test-token-61";
 const SECRET_B = "test-token-62";
@@ -196,7 +196,7 @@ test("listEntries shows a service row's metadata (uuid, field name) and never it
   assert.ok(!("secret_sealed" in list[0]));
 });
 
-test("A12 (corrected) — what the bot secret-value sets really hold for a service row: display only when generated-shaped, never a card value", async () => {
+test("A12 (Task 9) — a service row counts only once the operator recorded its hash from the dashboard: then on display paths (dotted tokens too), never in the card set", async () => {
   // readableSecretsSync (the masking reader) returns every readable row, service rows included.
   const crowHome = home();
   const dataDir = join(crowHome, "data");
@@ -216,13 +216,19 @@ test("A12 (corrected) — what the bot secret-value sets really hold for a servi
   } finally { raw.close(); }
 
   const env = { CROW_HOME: crowHome, CROW_DATA_DIR: dataDir };
-  // Even a value the operator's own keychain UI recorded stays off cards: a non-manual row is
-  // steerable by a bot (kind is untrusted), so kind-based trust is not extended to services.
+  // Kind is untrusted (a bot can insert a service row or flip a row's kind): with no recorded
+  // hash a service row masks nothing, whatever its shape. A card hash is not a service hash.
   recordCardSecret([PAT, JWT], env);
-  const sets = collectSecretValueSets({ env, dbPath: path });
-  assert.ok(sets.display.includes(PAT), "a generated-shaped service secret is masked in logs and transcripts");
-  assert.ok(!sets.display.includes(JWT), "a dotted token (HA, Discord) is NOT in the display set: masking for it is Task 9's to add");
-  assert.ok(!sets.card.includes(PAT) && !sets.card.includes(JWT), "service secrets never hide text on approval cards");
+  let sets = collectSecretValueSets({ env, dbPath: path });
+  assert.ok(!sets.display.includes(PAT) && !sets.display.includes(JWT), "no service hash: not masked");
+  assert.deepEqual(sets.service, []);
+  // The Services connect route records the hash (recordServiceSecretValues).
+  recordServiceSecretValues([PAT, JWT], env);
+  sets = collectSecretValueSets({ env, dbPath: path });
+  assert.ok(sets.display.includes(PAT), "a service secret is masked in logs and transcripts");
+  assert.ok(sets.display.includes(JWT), "a dotted token (HA, Discord) too");
+  assert.ok(sets.service.includes(PAT) && sets.service.includes(JWT), "and on the gateway's own approval cards (getApprovalCardValues)");
+  assert.ok(!sets.card.includes(PAT) && !sets.card.includes(JWT), "never the card set pi is handed");
 });
 
 test("the delete route answers 409 {error:'service_row'} for a service row, audits nothing, and no response carries the secret", async () => {

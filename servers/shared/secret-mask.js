@@ -32,7 +32,7 @@
  * Every regex is linear or bounded, and the cut-prefix match is a linear
  * prefix-function scan.
  */
-import { getCardValues, getSecretValues, normalizeValues, safeShape } from "./secret-values.js";
+import { getApprovalCardValues, getSecretValues, normalizeValues, safeShape } from "./secret-values.js";
 
 export const REDACTED = "[REDACTED]";
 
@@ -378,6 +378,8 @@ function currentValues() {
   try { return getSecretValues(); } catch { return []; }
 }
 
+// Card mode in this process: the card set plus operator-recorded project-service
+// values (getApprovalCardValues). Never what pi is handed (bridge.mjs uses getCardValues).
 function currentCardValues() {
-  try { return getCardValues(); } catch { return []; }
+  try { return getApprovalCardValues(); } catch { return []; }
 }

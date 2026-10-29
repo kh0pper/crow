@@ -31,6 +31,12 @@ export const SECRET_VALUES_DISPLAY_FILENAME = "pi-bot-secret-values-display";
 /** sha256 (hex) of every manual keychain value the operator saved through the
  * UI: the only values that may hide text on an approval card. */
 export const CARD_HASHES_FILENAME = "card-secret-hashes";
+/** sha256 (hex) of every project-service secret the operator saved from the
+ * dashboard (the Services connect route, and every later service-secret write
+ * path). A list of its own, never the card list: a bot can copy a service row's
+ * ciphertext into a manual row, and a hash in the card list would then make it
+ * a card value and put it in the payload pi receives. */
+export const SERVICE_HASHES_FILENAME = "service-secret-hashes";
 export const MIN_SECRET_LENGTH = 6;
 export const MAX_SECRET_VALUES_BYTES = 1024 * 1024;
 
@@ -330,6 +336,35 @@ export function recordCardSecret(values, env = process.env) {
 
 export function cardHashOf(v) { return sha256(v); }
 
+/** The operator's service-secret hashes (empty when there is no list yet). */
+export function readServiceHashes(env = process.env) {
+  const p = anchoredPath(env, SERVICE_HASHES_FILENAME);
+  const f = p ? readSecretValuesFile(p, { raw: true }) : null;
+  return new Set(f ? f.lines.filter((l) => /^[0-9a-f]{64}$/.test(l)) : []);
+}
+
+/**
+ * Record project-service secret values the operator saved from the dashboard
+ * (connect now; edit / re-connect, Home migration and Import from Claude Code
+ * reuse it). Only the hash is written, in the hidden dir a sandboxed bot cannot
+ * write; secret-values-collect.js then masks a kind 'service' keychain value
+ * whose hash is here. Disconnect never removes a hash. The value also joins
+ * this process's display set at once, so this gateway's logs mask it before
+ * the next pi spawn re-collects. Never stores or prints a value.
+ */
+export function recordServiceSecretValues(values, env = process.env) {
+  const list = [].concat(values).filter((v) => typeof v === "string" && v);
+  if (!list.length) return;
+  const p = anchoredPath(env, SERVICE_HASHES_FILENAME);
+  if (p) {
+    const cur = readServiceHashes(env);
+    for (const v of list) cur.add(sha256(v));
+    writeSecretValuesFile(p, [...cur], { raw: true });
+  }
+  memValues = normalizeValues([...memValues, ...list.map((v) => v.trim())]);
+  cache = null;
+}
+
 const SECRET_PARTS = new Set(["PASS", "PASSWORD", "PASSWD", "PW", "PWD", "SECRET", "SECRETS", "TOKEN", "APIKEY", "KEY",
   "CREDENTIAL", "CREDENTIALS", "DSN"]);
 const NOT_SECRET_NAMES = new Set(["PWD", "OLDPWD"]);
@@ -495,6 +530,7 @@ export function readSecretValuesFile(path, { raw = false } = {}) {
 let cache = null;   // { values, key, env, mem }
 let memValues = [];      // the last DISPLAY set collected in THIS process (secret-values-collect.js)
 let memCardValues = [];  // the last CARD set collected in THIS process
+let memServiceCardValues = [];  // the last operator-recorded service values (gateway approval cards only)
 
 function primeSecretValuesCache() { cache = null; }
 
@@ -503,19 +539,32 @@ function primeSecretValuesCache() { cache = null; }
  * this at every spawn, file or no file: where the file is not written (no
  * bubblewrap) this is how the process's own mask still gets them.
  */
-export function primeSecretValues(values, cardValues = []) {
+export function primeSecretValues(values, cardValues = [], serviceCardValues = []) {
   memValues = normalizeValues(values);
   memCardValues = normalizeValues(cardValues).filter(safeShape);
+  memServiceCardValues = normalizeValues(serviceCardValues).filter(safeShape);
   cache = null;
 }
 
 /**
- * The values that may hide text on an APPROVAL CARD: the card set collected in
- * THIS process only (operator-saved manual keychain entries, shell-safe).
- * Never a file: a file is a path, and a path can be planted.
+ * The CARD set collected in THIS process only (operator-saved manual keychain
+ * entries, shell-safe): what pi receives (PI_BOT_SECRET_VALUES_FD, the values
+ * file) for its own cards. Never a project-service value (see
+ * getApprovalCardValues). Never a file: a file is a path, and a path can be
+ * planted.
  */
 export function getCardValues() {
   return memCardValues.filter(safeShape);
+}
+
+/**
+ * The values that may hide text on an approval card THIS process renders
+ * (secret-mask.js card mode, the gateway's Perch cards): the card set plus the
+ * operator-recorded, strong project-service values. The service values stay in
+ * this process: they never reach pi (getCardValues is that set).
+ */
+export function getApprovalCardValues() {
+  return normalizeValues([...memCardValues, ...memServiceCardValues]).filter(safeShape);
 }
 
 /** Drop the cached list (the next getSecretValues() re-reads). */
