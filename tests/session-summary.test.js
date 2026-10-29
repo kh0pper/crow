@@ -50,6 +50,9 @@ function seedSession({ project = "live", label = null, model = LOCAL_SESSION, bo
     { role: "assistant", content: [{ type: "text", text: "Renamed four report files and checked the index." }] },
   ];
   writeFileSync(file, [JSON.stringify({ type: "session", id: piId }), ...msgs.map((m) => JSON.stringify({ type: "message", message: m }))].join("\n") + "\n");
+  // Written before the first summary (deps.now is 12:00Z): a test that wants
+  // a changed transcript moves the mtime past summary_at itself.
+  utimesSync(file, new Date("2026-10-29T11:00:00Z"), new Date("2026-10-29T11:00:00Z"));
   run("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status, pi_session_id, pi_session_dir, model, label) VALUES (?,?,?,?,?,?,?,?,?)",
     botId, "perch", threadId, "perch-live", "waiting-user", piId, sdir, model, label);
   let projectId = null, uuid = null;
@@ -70,7 +73,8 @@ function makeDeps(o = {}) {
   const calls = { complete: [], emits: [], logs: [] };
   const whereMap = { [QUICK]: "here", [LOCAL_SESSION]: "here", [CLOUD]: "cloud", ...(o.where || {}) };
   const deps = {
-    env: o.env || {},
+    // Summaries are default OFF (only "1" turns them on): the job's tests opt in.
+    env: o.env || { CROW_SESSION_SUMMARIES: "1" },
     now: () => Date.parse("2026-10-29T12:00:00Z") + (o.nowOffset || 0),
     resolveRole: async (_db, key) => (key === "role:quick" ? { key: o.quickKey === undefined ? QUICK : o.quickKey } : { key: null }),
     where: (k) => whereMap[k] || "missing",
@@ -115,7 +119,7 @@ test("writes a summary and one memory", async () => {
   const row = sessionRow(s.threadId);
   assert.equal(row.summary, "The operator asked the bot to rename the report files. The bot renamed four files and checked the index.");
   assert.equal(row.summary_at, "2026-10-29 12:00:00");
-  assert.equal(row.summary_flags, null, "an untainted session carries no flags");
+  assert.deepEqual(JSON.parse(row.summary_flags), { source_rank: 0 }, "an untainted session: only its source rank");
 
   const mems = memoriesFor(s.threadId);
   assert.equal(mems.length, 1);
@@ -123,6 +127,7 @@ test("writes a summary and one memory", async () => {
   assert.equal(mems[0].content, row.summary);
   assert.equal(mems[0].project_id, s.projectId, "filed under the shell_items project (§9.3)");
   assert.equal(mems[0].project_uuid, s.uuid);
+  assert.equal(mems[0].tags, "session-summary,source-rank-0", "the source rank rides in the tags (I3 prep)");
 
   // The memory server's own insert path ran its sync emit, with the uuid on the wire.
   const ins = calls.emits.filter((e) => e.table === "memories" && e.op === "insert");
@@ -188,16 +193,16 @@ test("tainted session is flagged", async () => {
   run("INSERT INTO artifact_session_taint (bot_id, thread_id, reason) VALUES (?,?,?)", s.botId, s.threadId, "tool:web_fetch");
   const { deps } = makeDeps();
   assert.equal((await byThread(s.threadId, deps)).written, true);
-  assert.deepEqual(JSON.parse(sessionRow(s.threadId).summary_flags), { outside_content: true });
+  assert.deepEqual(JSON.parse(sessionRow(s.threadId).summary_flags), { outside_content: true, source_rank: 0 });
   const m = memoriesFor(s.threadId)[0];
-  assert.match(m.tags, /outside-content/, "the memory is marked so a briefing never auto-injects it");
+  assert.equal(m.tags, "session-summary,source-rank-0,outside-content", "the memory is marked so a briefing never auto-injects it");
 
   // The in-process "taint not recorded" set counts too (trust.js fail-closed).
   const { markTaintUnrecorded } = await import("../servers/gateway/session-taint-memory.js");
   const t = seedSession();
   markTaintUnrecorded(t.botId, t.threadId);
   await byThread(t.threadId, makeDeps().deps);
-  assert.deepEqual(JSON.parse(sessionRow(t.threadId).summary_flags), { outside_content: true });
+  assert.deepEqual(JSON.parse(sessionRow(t.threadId).summary_flags), { outside_content: true, source_rank: 0 });
 });
 
 test("visited project skipped", async () => {
@@ -217,6 +222,7 @@ test("re-summarising updates in place", async () => {
 
   // The session wakes, does more, and hibernates again.
   appendFileSync(s.file, JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Then archived the old drafts." }] } }) + "\n");
+  utimesSync(s.file, new Date("2026-10-29T12:30:00Z"), new Date("2026-10-29T12:30:00Z"));
   const second = makeDeps({ nowOffset: 3_600_000, output: "SUMMARY: The bot renamed the report files and archived the old drafts.\nTITLE: ignored" });
   assert.equal((await byThread(s.threadId, { ...second.deps, trigger: "close" })).written, true);
 
@@ -321,14 +327,22 @@ test("flag off is fully off", async () => {
   assert.equal(calls.emits.length, 0);
   assert.equal(sessionRow(s.threadId).summary, null);
   assert.equal(memoriesFor(s.threadId).length, 0);
+  // Default OFF until the fleet runs 0020: unset, "0", "true" or "on" is off; only "1" is on.
+  for (const v of [undefined, "", "0", "true", "on", "yes"]) {
+    const d = makeDeps({ env: v === undefined ? {} : { CROW_SESSION_SUMMARIES: v } });
+    assert.equal((await byThread(s.threadId, d.deps)).reason, "disabled", String(v));
+    assert.equal(d.calls.complete.length, 0);
+  }
+  assert.equal(mod.summariesEnabled({}), false, "default off");
+  assert.equal(mod.summariesEnabled({ CROW_SESSION_SUMMARIES: "1" }), true);
   // Read per use: process.env too, not cached at import.
-  process.env.CROW_SESSION_SUMMARIES = "0";
+  const d = makeDeps(); delete d.deps.env;
+  assert.equal((await byThread(s.threadId, d.deps)).reason, "disabled", "process.env unset: off");
+  process.env.CROW_SESSION_SUMMARIES = "1";
   try {
-    const d = makeDeps(); delete d.deps.env;
-    assert.equal((await byThread(s.threadId, d.deps)).reason, "disabled");
+    const d2 = makeDeps(); delete d2.deps.env;
+    assert.equal((await byThread(s.threadId, d2.deps)).written, true, "on once the flag is \"1\", without a restart");
   } finally { delete process.env.CROW_SESSION_SUMMARIES; }
-  const d2 = makeDeps(); delete d2.deps.env;
-  assert.equal((await byThread(s.threadId, d2.deps)).written, true, "back on once the flag is unset");
 });
 
 test("a failure writes nothing and logs no content", async () => {
@@ -439,6 +453,8 @@ test("a busy thread runs once more when the in-flight job finishes, however many
   const p1 = byThread(s.threadId, first.deps);
   await new Promise((r) => setTimeout(r, 20));
   for (let i = 0; i < 3; i++) assert.equal((await byThread(s.threadId, makeDeps({ complete }).deps)).reason, "busy");
+  // The transcript moved on meanwhile (an unchanged one is not re-summarised).
+  utimesSync(s.file, new Date("2026-10-29T12:30:00Z"), new Date("2026-10-29T12:30:00Z"));
   release();
   await p1;
   assert.equal(n, 2, "exactly one rerun for three busy requests");
@@ -446,7 +462,8 @@ test("a busy thread runs once more when the in-flight job finishes, however many
   assert.equal(memoriesFor(s.threadId).length, 1);
   // With nobody waiting there is no rerun.
   n = 0;
-  await byThread(s.threadId, makeDeps({ complete: async () => { n += 1; return "SUMMARY: Alone."; } }).deps);
+  utimesSync(s.file, new Date("2026-10-29T13:30:00Z"), new Date("2026-10-29T13:30:00Z"));
+  await byThread(s.threadId, makeDeps({ nowOffset: 7_200_000, complete: async () => { n += 1; return "SUMMARY: Alone."; } }).deps);
   assert.equal(n, 1);
 });
 
@@ -556,7 +573,7 @@ function makeEngine(summarize) {
   const clock = makeClock();
   const bridge = makeBridge();
   const engine = createInteractiveEngine({
-    crowHome: CROW_HOME, env: { CROW_HOME }, bridge, now: clock.now,
+    crowHome: CROW_HOME, env: { CROW_HOME, CROW_SESSION_SUMMARIES: "1" }, bridge, now: clock.now,
     setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: () => {}, summarize,
   });
   return { engine, clock, state: bridge._state };
@@ -635,4 +652,83 @@ test("the singleton's hooks call exactly summarizeSessionByThread", async () => 
   const src = readFileSync(join(REPO, "servers/gateway/perch-interactive.js"), "utf8");
   assert.match(src, /import \{ summarizeSessionByThread, summariesEnabled \} from "\.\/perch\/session-summary\.js";/);
   assert.match(src, /createInteractiveEngine\(\{ browserWatch: true, summarize: SESSION_SUMMARIZER \}\)/);
+});
+
+// ---------------------------------------------------------------------------
+// final-review fix wave
+// ---------------------------------------------------------------------------
+
+test("the summary stores its SOURCE rank (where the session's own model ran), in the row and the memory tags", async () => {
+  const cases = [[LOCAL_SESSION, 0], ["lan/big", 1], [CLOUD, 2], [null, 0]];
+  for (const [model, rank] of cases) {
+    const s = seedSession({ model });
+    const { deps } = makeDeps({ where: { "lan/big": "other_box" } });
+    assert.equal((await byThread(s.threadId, deps)).written, true, String(model));
+    assert.equal(JSON.parse(sessionRow(s.threadId).summary_flags).source_rank, rank, String(model));
+    assert.equal(memoriesFor(s.threadId)[0].tags, "session-summary,source-rank-" + rank);
+  }
+  assert.equal(mod.sessionSourceRank("unproven"), 0, "unknown counts as this box (most private)");
+});
+
+test("a stop right after an idle hibernate does not re-summarise an unchanged transcript", async () => {
+  const s = seedSession();
+  assert.equal((await byThread(s.threadId, { ...makeDeps().deps, trigger: "idle" })).written, true);
+  const stop = makeDeps({ nowOffset: 60_000 });
+  assert.deepEqual(await byThread(s.threadId, { ...stop.deps, trigger: "close" }), { written: false, reason: "unchanged" });
+  assert.equal(stop.calls.complete.length, 0);
+});
+
+test("completeText sends nothing while the box is reserved, nor to a lazy-loading provider", async () => {
+  const { completeText, isLazyLoader } = await import("../servers/gateway/routes/llm-router.js");
+  const fetched = [];
+  const fetchFn = async (url) => { fetched.push(url); return { ok: true, json: async () => ({ choices: [{ message: { content: "SUMMARY: x." } }] }) }; };
+  const direct = async () => ({ baseUrl: "http://127.0.0.1:8011/v1", model: "m", apiKey: "none", host: "local", providerType: null });
+  const req = { model: "p/m", prompt: "hi" };
+  await assert.rejects(() => completeText(req, { fetchFn, resolveKeyFn: direct, reservationFn: () => ({ owner: "bench", corrupt: false }) }),
+    (e) => e.reason === "box_reserved");
+  await assert.rejects(() => completeText(req, { fetchFn, resolveKeyFn: direct, reservationFn: () => { throw new Error("unreadable"); } }),
+    (e) => e.reason === "box_reserved", "an unreadable reservation fails closed");
+  for (const up of [
+    { baseUrl: "http://127.0.0.1:9000/v1", providerType: "ollama" },
+    { baseUrl: "http://127.0.0.1:9000/v1", providerType: "llama-swap" },
+    { baseUrl: "http://127.0.0.1:8000/api/v1", providerType: "lemonade" },
+    { baseUrl: "http://127.0.0.1:11434/v1", providerType: null },
+  ]) {
+    assert.equal(isLazyLoader(up), true, JSON.stringify(up));
+    await assert.rejects(() => completeText(req, { fetchFn, reservationFn: () => null, resolveKeyFn: async () => ({ model: "m", apiKey: "none", host: "local", ...up }) }),
+      (e) => e.reason === "lazy_loader", JSON.stringify(up));
+  }
+  assert.deepEqual(fetched, [], "nothing was dialed");
+  assert.equal(isLazyLoader({ baseUrl: "http://127.0.0.1:8011/v1", providerType: "openai-compat" }), false);
+  assert.equal(await completeText(req, { fetchFn, resolveKeyFn: direct, reservationFn: () => null, recordUsageFn: async () => {} }), "SUMMARY: x.");
+
+  // Through the job: model_failed with the fixed code, nothing written, no content logged.
+  const s = seedSession();
+  const { deps, calls } = makeDeps({ complete: (r) => completeText(r, { fetchFn, resolveKeyFn: direct, reservationFn: () => ({ owner: "bench" }) }) });
+  assert.deepEqual(await byThread(s.threadId, deps), { written: false, reason: "model_failed", detail: "box_reserved" });
+  assert.deepEqual(calls.logs, ["[summary] " + s.threadId + " model_failed box_reserved"]);
+  assert.equal(sessionRow(s.threadId).summary, null);
+  assert.equal(memoriesFor(s.threadId).length, 0);
+});
+
+test("after a Forget only the later turns are read", async () => {
+  const s = seedSession({
+    messages: [
+      { role: "user", content: "FORGOTTEN-TURN please" },
+      { role: "assistant", content: "FORGOTTEN-REPLY done" },
+    ],
+  });
+  // Stamp the seeded turns before the Forget, and add one after it.
+  const lines = readFileSync(s.file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const stamped = lines.map((e) => (e.type === "message" ? { ...e, timestamp: "2026-10-29T10:00:00.000Z" } : e));
+  stamped.push({ type: "message", timestamp: "2026-10-29T12:10:00.000Z", message: { role: "user", content: "LATER-TURN fix the footer" } });
+  writeFileSync(s.file, stamped.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  utimesSync(s.file, new Date("2026-10-29T12:10:00Z"), new Date("2026-10-29T12:10:00Z"));
+  run("UPDATE bot_sessions SET summary_flags=? WHERE gateway_thread_id=?", JSON.stringify({ forgotten_at: "2026-10-29 11:00:00" }), s.threadId);
+  const { deps, calls } = makeDeps({ nowOffset: 900_000 });
+  assert.equal((await byThread(s.threadId, deps)).written, true);
+  assert.match(calls.complete[0].prompt, /LATER-TURN/);
+  assert.doesNotMatch(calls.complete[0].prompt, /FORGOTTEN/, "the forgotten turns are never summarised again");
+  // An unstamped turn after a Forget is left out (fail closed).
+  assert.deepEqual(mod.readTranscriptTail(s.file, { afterMs: Date.parse("2026-10-29T12:30:00Z") }), []);
 });

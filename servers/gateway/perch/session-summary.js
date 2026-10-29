@@ -5,7 +5,11 @@
  * memory (synced like any memory), both updated in place on later runs.
  *
  * Rules (binding, from the plan's Global Constraints):
- *  - CROW_SESSION_SUMMARIES="0" turns it fully off: no summary, no memory. Read per use.
+ *  - CROW_SESSION_SUMMARIES is OFF unless it is exactly "1" (until every
+ *    paired instance runs migration 0020: a summary memory carrying
+ *    project_uuid is dropped by a receiver whose memories table lacks the
+ *    column, and the dropped entry is never retried). Off means no summary and
+ *    no memory. Read per use.
  *  - Privacy: summarised only when where(quick) is at least as private as
  *    where(session model). Order: this box, another of your boxes, the cloud.
  *    Unproven or missing counts as cloud. Otherwise "no summary yet".
@@ -38,7 +42,8 @@ export const TAIL_TURNS = 40;
 export const TAIL_BYTES = 24 * 1024;
 const LABEL_CAP = 80; // perch-interactive.js normalizeLabel
 
-export const summariesEnabled = (env = process.env) => String(env.CROW_SESSION_SUMMARIES ?? "") !== "0";
+/** Default OFF: only "1" turns summaries on (see the header). */
+export const summariesEnabled = (env = process.env) => String(env.CROW_SESSION_SUMMARIES ?? "") === "1";
 
 // ---- privacy ----------------------------------------------------------------
 
@@ -54,8 +59,18 @@ export const privacyRank = (where) => (Object.hasOwn(PRIVACY_RANK, where) ? PRIV
  * refusing a summary.
  */
 export function atLeastAsPrivate(quickWhere, sessionWhere) {
-  const s = sessionWhere === "other_box" || sessionWhere === "cloud" ? PRIVACY_RANK[sessionWhere] : 0;
-  return privacyRank(quickWhere) <= s;
+  return privacyRank(quickWhere) <= sessionSourceRank(sessionWhere);
+}
+
+/**
+ * The SOURCE rank of a session (where its own model ran): other_box 1, cloud
+ * 2, and anything else (this box, unknown, unproven, missing) 0, the most
+ * private. Stored with the summary (summary_flags.source_rank) when it is
+ * written, so the briefing never re-derives it from a model the bot may have
+ * switched since.
+ */
+export function sessionSourceRank(sessionWhere) {
+  return sessionWhere === "other_box" || sessionWhere === "cloud" ? PRIVACY_RANK[sessionWhere] : 0;
 }
 
 // ---- transcript -------------------------------------------------------------
@@ -103,9 +118,10 @@ const stripDates = (text) => String(text).replace(/^\[Dates\][^\n]*\n?/m, "");
  * The transcript tail as [{role, text}]: the last TAIL_BYTES of the file, then
  * the last TAIL_TURNS user/assistant messages with text. Briefing blocks are
  * dropped (any message or custom entry whose text starts with BRIEFING_MARKER),
- * and every string is secret-masked before it can reach a model.
+ * and every string is secret-masked before it can reach a model. With
+ * `afterMs`, only messages pi stamped later than it are read (a Forget).
  */
-export function readTranscriptTail(file, { maxBytes = TAIL_BYTES, maxTurns = TAIL_TURNS } = {}) {
+export function readTranscriptTail(file, { maxBytes = TAIL_BYTES, maxTurns = TAIL_TURNS, afterMs = null } = {}) {
   const out = [];
   for (const line of readTail(file, maxBytes).split("\n")) {
     if (!line.trim()) continue;
@@ -113,6 +129,12 @@ export function readTranscriptTail(file, { maxBytes = TAIL_BYTES, maxTurns = TAI
     try { ev = JSON.parse(line); } catch { continue; }
     const m = ev && ev.type === "message" ? ev.message : null;
     if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
+    // After a Forget only later turns count: an event pi stamped at or before
+    // `afterMs`, or one with no readable stamp, is left out (fail closed).
+    if (afterMs != null) {
+      const at = Date.parse(String(ev.timestamp ?? ""));
+      if (!Number.isFinite(at) || at <= afterMs) continue;
+    }
     // The [Dates] line comes off FIRST, so a briefing behind it is still seen.
     const undated = (t) => (m.role === "user" ? stripDates(t) : String(t));
     const text = undated(messageText(m));
@@ -292,7 +314,7 @@ const defaultLog = (m) => console.log(m);
 // ---- the job ----------------------------------------------------------------
 
 class SummaryError extends Error {
-  constructor(reason) { super(reason); this.reason = reason; }
+  constructor(reason, detail = null) { super(reason); this.reason = reason; this.detail = detail; }
 }
 
 /**
@@ -314,9 +336,9 @@ export async function summarizeSession(db, session, deps = {}) {
   const env = deps.env || process.env;
   const now = deps.now || Date.now;
   const log = deps.log || defaultLog;
-  const skip = (reason) => {
-    if (reason !== "disabled") log(`[summary] ${threadId} ${reason}`);
-    return { written: false, reason };
+  const skip = (reason, detail = null) => {
+    if (reason !== "disabled") log(`[summary] ${threadId} ${reason}` + (detail ? " " + detail : ""));
+    return detail ? { written: false, reason, detail } : { written: false, reason };
   };
   try {
     // 1. the flag
@@ -336,42 +358,55 @@ export async function summarizeSession(db, session, deps = {}) {
       sessionKey = r && r.key ? String(r.key) : null;
       if (!sessionKey) return skip("less_private"); // a session role nothing fills: cannot be proven
     }
-    if (!atLeastAsPrivate(where(quickKey), sessionKey ? where(sessionKey) : null)) return skip("less_private");
+    const sessionWhere = sessionKey ? where(sessionKey) : null;
+    if (!atLeastAsPrivate(where(quickKey), sessionWhere)) return skip("less_private");
+    const sourceRank = sessionSourceRank(sessionWhere);
     // 5. the transcript tail
     if (!transcriptPath) return skip("no_transcript");
     let mtimeMs;
     try { mtimeMs = statSync(transcriptPath).mtimeMs; } catch { return skip("no_transcript"); }
-    if (trigger === "idle" && summaryAt) {
+    // Either trigger: a stop right after an idle hibernate finds the same
+    // transcript it already summarised.
+    if (summaryAt) {
       const at = parseSqliteTime(summaryAt);
       // summary_at has whole-second precision: compare at that precision.
       if (Number.isFinite(at) && Math.floor(mtimeMs / 1000) * 1000 <= at) return skip("unchanged");
     }
     // Forget is sticky (briefing.js forgetSummary): no new summary until the
     // transcript has changed after the Forget.
+    let afterMs = null;
     if (forgottenAt) {
       const at = parseSqliteTime(forgottenAt);
       if (!Number.isFinite(at) || Math.floor(mtimeMs / 1000) * 1000 <= at) return skip("forgotten");
+      // A later summary covers only the turns after the Forget: the forgotten
+      // ones are never summarised again.
+      afterMs = at + 999; // forgotten_at has whole-second precision
     }
-    const turns = readTranscriptTail(transcriptPath);
+    const turns = readTranscriptTail(transcriptPath, { afterMs });
     if (!turns.length) return skip("empty_transcript");
     const wantTitle = !String(label || "").trim();
     // 6. the model call
     const complete = deps.complete || defaultComplete;
     let raw;
     try { raw = await complete({ model: quickKey, prompt: buildPrompt(turns, { wantTitle }) }); }
-    catch { throw new SummaryError("model_failed"); }
+    catch (e) {
+      // completeText's own skips carry a fixed code (box_reserved, lazy_loader);
+      // any other error's message is never read (it could quote the prompt).
+      const code = e && typeof e.reason === "string" && /^[a-z_]{1,32}$/.test(e.reason) ? e.reason : null;
+      throw new SummaryError("model_failed", code);
+    }
     // 7. sanitise
     const { summary, title } = sanitizeOutput(raw);
     if (!summary) return skip("empty_output");
     // 8-10. write
     await writeSummary(db, {
       threadId, rowId: session.rowId, summary, title: wantTitle ? title : null, tainted: !!tainted,
-      projectId, projectUuid, at: sqliteNow(now()),
+      sourceRank, projectId, projectUuid, at: sqliteNow(now()),
     }, { syncManager: deps.syncManager === undefined ? await defaultSyncManager() : deps.syncManager });
     if (wantTitle && title && deps.onTitle) { try { deps.onTitle(title); } catch { /* the row carries it */ } }
     return { written: true, reason: "ok" };
   } catch (e) {
-    return skip(e instanceof SummaryError ? e.reason : "error");
+    return e instanceof SummaryError ? skip(e.reason, e.detail) : skip("error");
   }
 }
 
@@ -388,7 +423,9 @@ async function writeSummary(db, w, { syncManager }) {
   let prev;
   try { prev = (await db.execute(rowSel)).rows[0]; } catch { throw new SummaryError("row_failed"); }
   if (!prev) throw new SummaryError("no_session");
-  const flags = w.tainted ? JSON.stringify({ outside_content: true }) : null;
+  // source_rank: where the session's own model ran when it was summarised
+  // (briefing.js reads only this; a missing value counts as this box).
+  const flags = JSON.stringify(w.tainted ? { outside_content: true, source_rank: w.sourceRank } : { source_rank: w.sourceRank });
   let labelWritten = false;
   try {
     await db.execute({
@@ -406,7 +443,10 @@ async function writeSummary(db, w, { syncManager }) {
   } catch { throw new SummaryError("row_failed"); }
 
   const source = SUMMARY_SOURCE_PREFIX + String(w.threadId);
-  const tags = w.tainted ? "session-summary,outside-content" : "session-summary";
+  // The memory carries the same two facts in its tags (no extra column), for
+  // a later recall gate: "source-rank-<0|1|2>", and "outside-content" when
+  // tainted. Recall does not read them yet (that awaits a product decision).
+  const tags = "session-summary,source-rank-" + w.sourceRank + (w.tainted ? ",outside-content" : "");
   const context = w.tainted ? "Session summary (included outside content)" : "Session summary";
   const existingId = async () => {
     const { rows } = await db.execute({ sql: "SELECT id FROM memories WHERE source=? ORDER BY id LIMIT 1", args: [source] });
@@ -482,12 +522,14 @@ export async function summarizeSessionByThread(db, threadId, deps = {}) {
   const entry = { rerun: false, deps };
   inFlight.set(id, entry);
   try {
-    let result;
+    let result, wrote = null;
     do {
       entry.rerun = false;
       result = await runByThread(db, id, entry.deps);
+      if (result && result.written) wrote = result;
     } while (entry.rerun);
-    return result;
+    // A rerun that found nothing new (unchanged) does not hide the write.
+    return wrote || result;
   } finally { inFlight.delete(id); }
 }
 

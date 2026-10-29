@@ -43,7 +43,7 @@ import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { requesterTag } from "../requester-tag.js";
-import { ReservedError } from "../box-reservation.js";
+import { ReservedError, readReservation } from "../box-reservation.js";
 import { ServingClassError } from "../models/serving-class.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
@@ -466,7 +466,22 @@ async function resolveDirectKey(key) {
     model: r.model || r.modelId || r.model_id || modelId,
     apiKey: r.apiKey || r.api_key || "none",
     host: r.host || "local",
+    providerType: r.provider_type || r.providerType || null,
   };
+}
+
+/** Provider kinds that load a model on the first request (a lazy loader is a
+ *  model starter): completeText never sends them anything. */
+const LAZY_LOADER_RE = /ollama|llama[-_ ]?swap|lemonade|lm[-_ ]?studio|localai/i;
+/** Ollama's well-known port, for a row whose kind was never recorded. */
+const LAZY_LOADER_PORT_RE = /:11434(\/|$)/;
+export function isLazyLoader(up) {
+  return !!up && (LAZY_LOADER_RE.test(String(up.providerType || "")) || LAZY_LOADER_PORT_RE.test(String(up.baseUrl || "")));
+}
+
+/** completeText's skip: `reason` is a fixed code (box_reserved, lazy_loader, ...). */
+export class CompleteTextSkipped extends Error {
+  constructor(reason) { super("completeText: skipped, " + reason); this.reason = reason; }
 }
 export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
 
@@ -478,6 +493,10 @@ export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
  * It NEVER starts or warms a model: background jobs must not be a new
  * on-demand model starter (box reservations and operator windows). A model
  * that is not up fails the call, and the caller writes nothing.
+ * While a box reservation is held it sends nothing (CompleteTextSkipped
+ * "box_reserved"), and it never sends to a provider whose kind loads models
+ * lazily (ollama, llama-swap, lemonade and the like: "lazy_loader"); only a
+ * direct, already-running llama-server-style endpoint is used.
  * Thinking tags in the reply are stripped. Throws on any failure; the error
  * message never quotes the prompt or the reply.
  *
@@ -486,11 +505,17 @@ export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
  */
 export async function completeText({ model, prompt, maxTokens = 400, timeoutMs = 60_000 } = {}, {
   resolveKeyFn = resolveDirectKey, fetchFn = fetch, recordUsageFn = (event) => recordUsageEvent(db(), event),
-  ownInstanceIdFn = getOrCreateLocalInstanceId,
+  ownInstanceIdFn = getOrCreateLocalInstanceId, reservationFn = () => readReservation(),
 } = {}) {
   if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
+  // The box is spoken for (an operator window, a benchmark): a background
+  // job adds no load at all, even to a model that is already up.
+  let held = null;
+  try { held = reservationFn(); } catch { held = { corrupt: true }; } // unreadable: fail closed
+  if (held) throw new CompleteTextSkipped("box_reserved");
   const up = await resolveKeyFn(model);
   if (!up || !up.baseUrl) throw new Error("completeText: no base url for the model");
+  if (isLazyLoader(up)) throw new CompleteTextSkipped("lazy_loader");
   // Never through a door: a /llm/v1 (or /llm/p/<id>/v1) base URL is another
   // gateway's router, which can start a model on demand there and applies the
   // companion heuristics; a row owned by another instance (a native-foreign
