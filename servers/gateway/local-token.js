@@ -409,9 +409,33 @@ export function llmCloudTokenPath() {
  *  A reader sees the old token or the new one, never a partial or
  *  world-readable file. Returns the raw token. */
 export async function rotateLlmCloudToken(db) {
+  return rotateTokenFile(db, {
+    path: llmCloudTokenPath(), hashKey: LLM_CLOUD_HASH_KEY, createdKey: LLM_CLOUD_CREATED_KEY, label: "llm-cloud-token",
+    ensureDir: (d) => mkdirSync(d, { recursive: true }), onFailure: "restore",
+  });
+}
+
+/**
+ * The one rotation both per-boot token shapes use (the cloud-door token and
+ * every pathScopedToken). Steps 1-3 as rotateLlmCloudToken describes. What a
+ * failure leaves behind is the caller's choice:
+ *  - "restore" (the cloud door): the old file and the old hash keep matching,
+ *    so the old token keeps validating;
+ *  - "fail-closed" (the loopback tool families, "rotated every boot"): ANY
+ *    failure deletes the stored hash, so no token validates (not even the
+ *    previous boot's) until a rotation succeeds.
+ * Throws the step's error either way.
+ */
+async function rotateTokenFile(db, { path, hashKey, createdKey, label, ensureDir, onFailure }) {
   const token = randomBytes(32).toString("hex");
-  const path = llmCloudTokenPath();
-  mkdirSync(dirname(path), { recursive: true });
+  const failClosed = async (err) => {
+    try { await deleteLocalSetting(db, hashKey); } catch (e) {
+      console.warn(`[${label}] could not delete the stored hash after a failed rotation: ${e.message}`);
+    }
+    throw err;
+  };
+  const bail = async (err) => { if (onFailure === "fail-closed") return failClosed(err); throw err; };
+  try { ensureDir(dirname(path)); } catch (err) { return bail(err); }
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const dropTmp = () => { try { unlinkSync(tmp); } catch { /* already gone */ } };
   try {
@@ -419,32 +443,33 @@ export async function rotateLlmCloudToken(db) {
     chmodSync(tmp, 0o600);
   } catch (err) {
     dropTmp();
-    throw err;
+    return bail(err);
   }
   let oldHash;
   try {
-    oldHash = await readSetting(db, LLM_CLOUD_HASH_KEY);
-    await writeSetting(db, LLM_CLOUD_HASH_KEY, sha256Hex(token), { scope: "local" });
+    oldHash = await readSetting(db, hashKey);
+    await writeSetting(db, hashKey, sha256Hex(token), { scope: "local" });
   } catch (err) {
     dropTmp();
-    throw err;
+    return bail(err);
   }
   try {
     renameSync(tmp, path);
   } catch (err) {
     dropTmp();
+    if (onFailure === "fail-closed") return failClosed(err);
     try {
-      if (oldHash) await writeSetting(db, LLM_CLOUD_HASH_KEY, oldHash, { scope: "local" });
-      else await deleteLocalSetting(db, LLM_CLOUD_HASH_KEY);
+      if (oldHash) await writeSetting(db, hashKey, oldHash, { scope: "local" });
+      else await deleteLocalSetting(db, hashKey);
     } catch (restoreErr) {
       // Best effort: the next boot rotates again. Until then the stored hash
-      // matches no file, so bots cannot reach the door.
-      console.warn(`[llm-cloud-token] could not put the old hash back after a failed rename: ${restoreErr.message}`);
+      // matches no file, so nothing validates.
+      console.warn(`[${label}] could not put the old hash back after a failed rename: ${restoreErr.message}`);
     }
     throw err;
   }
   try {
-    await writeSetting(db, LLM_CLOUD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+    await writeSetting(db, createdKey, new Date().toISOString(), { scope: "local" });
   } catch { /* informational only */ }
   return token;
 }
@@ -476,42 +501,14 @@ export function pathScopedToken({ name, hashKey, createdKey, home }) {
   return {
     name,
     path,
-    /** Same ordering as rotateLlmCloudToken: a reader sees the old token or
-     *  the new one, never a partial or world-readable file, and the file and
-     *  the stored hash match after every failure:
-     *    1. temp file (wx, 0600) + chmod: failure changes nothing;
-     *    2. store the new hash: failure drops the temp file;
-     *    3. rename over the old file: failure puts the old hash back. */
+    /** rotateTokenFile's ordering (a reader sees the old token or the new
+     *  one, never a partial or world-readable file), failing CLOSED: any
+     *  failure deletes this family's stored hash, so the previous boot's
+     *  token stops validating and the family refuses every request until a
+     *  rotation succeeds (the next boot). secrets/ is made (and tightened)
+     *  0700 by the shared ensureSecretsDir. */
     async rotate(db) {
-      const token = randomBytes(32).toString("hex");
-      const p = path();
-      mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
-      const tmp = `${p}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-      const dropTmp = () => { try { unlinkSync(tmp); } catch { /* already gone */ } };
-      try {
-        writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
-        chmodSync(tmp, 0o600);
-      } catch (err) { dropTmp(); throw err; }
-      let oldHash;
-      try {
-        oldHash = await readSetting(db, hashKey);
-        await writeSetting(db, hashKey, sha256Hex(token), { scope: "local" });
-      } catch (err) { dropTmp(); throw err; }
-      try {
-        renameSync(tmp, p);
-      } catch (err) {
-        dropTmp();
-        try {
-          if (oldHash) await writeSetting(db, hashKey, oldHash, { scope: "local" });
-          else await deleteLocalSetting(db, hashKey);
-        } catch (restoreErr) {
-          // The next boot rotates again; until then the stored hash matches no file.
-          console.warn(`[${name}-token] could not put the old hash back after a failed rename: ${restoreErr.message}`);
-        }
-        throw err;
-      }
-      try { await writeSetting(db, createdKey, new Date().toISOString(), { scope: "local" }); } catch { /* informational only */ }
-      return token;
+      return rotateTokenFile(db, { path: path(), hashKey, createdKey, label: `${name}-token`, ensureDir: ensureSecretsDir, onFailure: "fail-closed" });
     },
     /** Timing-safe check against this family's hash ONLY. */
     async validate(db, token) {

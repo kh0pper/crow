@@ -16,7 +16,8 @@ const boom = () => { throw new Error("boom"); };
 
 test("happy path merges the resolved scope into the actor", async () => {
   const r = await loopbackActorGate(req(), deps());
-  assert.deepEqual(r, { ok: true, actor: { kind: "bot", botId: "b1", scope: "s1" }, token: "tok" });
+  assert.deepEqual(r, { ok: true, actor: { kind: "bot", botId: "b1", scope: "s1" } });
+  assert.ok(!JSON.stringify(r).includes("tok"), "M9: the raw bearer never leaves the gate");
 });
 test("step 2: non-local peer, instanceAuth, crossHostAuth -> 404", async () => {
   for (const r of [req({ socket: { remoteAddress: "100.64.20.5" } }), req({ instanceAuth: {} }), req({ crossHostAuth: {} }),

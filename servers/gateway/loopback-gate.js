@@ -69,6 +69,7 @@ export async function loopbackActorGate(req, { validateToken, verify, resolve })
   try {
     const resolved = await resolve(actor);
     if (!resolved) return refuse(403, "unattributed");
-    return { ok: true, actor: { ...actor, ...resolved }, token };
+    // Never the bearer: a caller that logs the gate's result must not leak it.
+    return { ok: true, actor: { ...actor, ...resolved } };
   } catch { return refuse(403, "unattributed"); }
 }

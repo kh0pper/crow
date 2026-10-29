@@ -6,10 +6,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, readdirSync, chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
+import { readSetting } from "../servers/gateway/dashboard/settings/registry.js";
+import { rotateFamilyTokensAtBoot } from "../servers/gateway/boot/mcp-mounts.js";
 import {
   pathScopedToken, SERVICES_TOKEN, SATELLITE_TOOLS_TOKEN,
   generateLocalToken, generateBoardToken, validateLocalToken, validateBoardToken,
@@ -72,13 +74,14 @@ test("a family token is refused by validateLocalToken and validateBoardToken", a
   }
 });
 
-test("a failed rename throws, drops the temp file, and the old token still validates", async () => {
+test("M7: a failed rename throws, drops the temp file, and fails closed: the old token stops validating", async () => {
   const f = pathScopedToken({ name: "dirtarget", hashKey: "dirtarget_token_hash", createdKey: "dirtarget_token_created_at" });
   const old = await f.rotate(db);
   // Make the target path a directory so renameSync(tmp, path) fails.
   rmSync(f.path()); mkdirSync(f.path());
   await assert.rejects(() => f.rotate(db));
-  assert.equal(await f.validate(db, old), true, "old hash restored");
+  assert.equal(await f.validate(db, old), false, "the previous boot's token no longer opens the family (rotated every boot, fail closed)");
+  assert.equal(await readSetting(db, "dirtarget_token_hash"), null, "no hash stored");
   assert.deepEqual(readdirSync(join(process.env.CROW_HOME, "secrets")).filter((x) => x.startsWith("dirtarget-token.") && x.endsWith(".tmp")), []);
 });
 
@@ -87,4 +90,40 @@ test("a failed rename with no prior hash leaves no hash behind", async () => {
   mkdirSync(f.path(), { recursive: true });
   await assert.rejects(() => f.rotate(db));
   assert.equal(await f.validate(db, "a".repeat(64)), false);
+});
+
+test("M7: a failed temp-file write also fails closed (the old token stops validating)", async () => {
+  const f = pathScopedToken({ name: "rofail", hashKey: "rofail_token_hash", createdKey: "rofail_token_created_at", home: join(dir, "rohome") });
+  const old = await f.rotate(db);
+  // secrets/ replaced by a plain file: the temp file cannot be created under it.
+  const secrets = join(dir, "rohome", "secrets");
+  rmSync(secrets, { recursive: true, force: true });
+  writeFileSync(secrets, "x");
+  await assert.rejects(() => f.rotate(db));
+  assert.equal(await f.validate(db, old), false);
+  assert.equal(await readSetting(db, "rofail_token_hash"), null);
+});
+
+test("M8: rotate tightens an existing secrets/ directory to 0700 (the shared ensureSecretsDir)", async () => {
+  const home = join(dir, "loosehome");
+  mkdirSync(join(home, "secrets"), { recursive: true });
+  chmodSync(join(home, "secrets"), 0o755);
+  const f = pathScopedToken({ name: "loose", hashKey: "loose_token_hash", createdKey: "loose_token_created_at", home });
+  await f.rotate(db);
+  assert.equal(statSync(join(home, "secrets")).mode & 0o777, 0o700);
+});
+
+test("M7: the boot step logs a failed family rotation as that family disabled, and keeps booting", async () => {
+  const lines = { log: [], warn: [] };
+  const log = { log: (m) => lines.log.push(m), warn: (m) => lines.warn.push(m) };
+  let closed = 0;
+  const good = pathScopedToken({ name: "bootgood", hashKey: "bootgood_token_hash", createdKey: "bootgood_token_created_at", home: join(dir, "boothome") });
+  const bad = { rotate: async () => { throw new Error("disk full"); } };
+  await rotateFamilyTokensAtBoot({
+    createDb: () => new Proxy(db, { get: (tg, k) => (k === "close" ? () => { closed++; } : (typeof tg[k] === "function" ? tg[k].bind(tg) : tg[k])) }),
+    tokens: [[bad, "bad-tools"], [good, "good-tools"]], log,
+  });
+  assert.equal(closed, 2, "each rotation's DB client is closed");
+  assert.deepEqual(lines.warn, ["[gateway] bad-tools token rotation failed: disk full; the bad-tools mount refuses every request until the next boot"]);
+  assert.deepEqual(lines.log, ["[gateway] good-tools token rotated"]);
 });

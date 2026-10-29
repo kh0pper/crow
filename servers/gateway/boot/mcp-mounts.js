@@ -87,6 +87,31 @@ export async function rotateCloudDoorTokenAtBoot({
   }
 }
 
+/**
+ * Boot step: rotate every loopback-mount family token (pathScopedToken), each
+ * with its own DB client. A failed rotation has already deleted that family's
+ * stored hash (fail closed: not even the previous boot's token validates), so
+ * the log says the family is off until the next boot. Never throws.
+ */
+export async function rotateFamilyTokensAtBoot({
+  createDb = createDbClient, log = console,
+  tokens = [[SERVICES_TOKEN, "services-tools"], [SATELLITE_TOOLS_TOKEN, "satellite-tools"]],
+} = {}) {
+  for (const [tok, label] of tokens) {
+    try {
+      const tokenDb = createDb();
+      try {
+        await tok.rotate(tokenDb);
+        log.log(`[gateway] ${label} token rotated`);
+      } finally {
+        try { tokenDb.close(); } catch {}
+      }
+    } catch (err) {
+      log.warn(`[gateway] ${label} token rotation failed: ${err.message}; the ${label} mount refuses every request until the next boot`);
+    }
+  }
+}
+
 export async function mountMcpServers(app, deps) {
   const { authMiddleware, noAuth, instructions, routerInstructions, sessionManager } = deps;
 
@@ -352,19 +377,7 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[gateway] ensurePeerRelayToken failed: ${err.message}`);
   }
   // Loopback-mount family tokens (pathScopedToken): fresh on every boot.
-  for (const [tok, label] of [[SERVICES_TOKEN, "services-tools"], [SATELLITE_TOOLS_TOKEN, "satellite-tools"]]) {
-    try {
-      const tokenDb = createDbClient();
-      try {
-        await tok.rotate(tokenDb);
-        console.log(`[gateway] ${label} token rotated`);
-      } finally {
-        try { tokenDb.close(); } catch {}
-      }
-    } catch (err) {
-      console.warn(`[gateway] ${label} token rotation failed: ${err.message}`);
-    }
-  }
+  await rotateFamilyTokensAtBoot();
   app.use(peerRelayRouter({ createDbClient }));
   // Item 46 PR-B: the loopback signing relay for the key-less bot hosts
   // (routes/actor-sign.js). It authenticates the calling process itself (the
