@@ -99,7 +99,8 @@ export function reachableCloud(ctxX, roles, { localMarks, ownAddrs } = {}) {
       if (!e.key || e.filtered || !(e.verdict === "ok" || e.verdict === "not_configured")) continue;
       const id = `${viaRole}|${e.key}`;
       if (seen.has(id)) continue;
-      if (!isCloudKey(e.key, { providers: ctxX.providers, localMarks, ownAddrs })) continue;
+      // Marks never apply to the classifier (minor e), whichever change reaches it.
+      if (!isCloudKey(e.key, { providers: ctxX.providers, ...(viaRole === "safety" ? {} : { localMarks }), ownAddrs })) continue;
       seen.add(id);
       out.push({ viaRole, key: e.key });
     }
@@ -158,14 +159,18 @@ const resolvedKey = (roleId, c) => {
  *
  * `pin.value` is a display name (pinDisplay), never the stored value; null
  * with `custom: true` when there is nothing safe to show.
- * `localMarks`/`ownAddrs` pass through to the cloud check (the safety check
- * never uses marks, minor e).
+ * `localMarks` (default ctx.localMarks) and `ownAddrs` pass through to the
+ * cloud check; a safety change, the safety refusal and any chain walked via
+ * safety never use marks (minor e).
  * @returns {Promise<RolePreview>}
  */
 export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, env = process.env, localMarks, ownAddrs, nextCustomDefs } = {}) {
   ctx ??= await loadRoleContext(db, { maxAgeMs: 0 });
   slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false, env });
   ownAddrs ??= getOwnAddresses(); // once per preview, not per candidate
+  // The marks the Models page uses (the context's by default), so the sheet
+  // and the page agree; never for a safety change (minor e).
+  localMarks = roleId === "safety" ? undefined : localMarks ?? ctx.localMarks;
   const ctxX = hypothetical(ctx, roleId, change);
   // A custom-role edit: the same binding under the edited definitions.
   if (nextCustomDefs) ctxX.customDefs = nextCustomDefs;

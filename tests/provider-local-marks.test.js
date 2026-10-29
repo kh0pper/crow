@@ -36,9 +36,12 @@ function fresh() {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
     env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: join(import.meta.dirname, ".."),
   });
-  const db = createDbClient(join(dir, "crow.db"));
+  const path = join(dir, "crow.db");
+  const db = createDbClient(path);
+  dbPaths.set(db, path);
   return { db, cleanup() { try { db.close(); } catch {} rmScratch(dir); } };
 }
+const dbPaths = new WeakMap();
 const dbs = [];
 after(() => { for (const d of dbs) d.cleanup(); });
 
@@ -210,6 +213,13 @@ test("a mark write invalidates the role context", async () => {
 test("public refused: markLocal on a public or documentation IP literal gives public_address", async () => {
   const db = await seeded();
   assert.deepEqual(await markLocal(db, "pub-ip", { actor: "t" }), { ok: false, reason: "public_address" });
+  // Every other IP literal (private, tailnet, loopback) is refused too: its address already decides.
+  await ins(db, "lan-ip", "http://100.64.20.5:8030/v1", "local", ["q1"]);
+  await ins(db, "loop-ip", "http://127.0.0.1:8030/v1", "local", ["q2"]);
+  await ins(db, "v6-ip", "http://[fd00::5]:8030/v1", "local", ["q3"]);
+  for (const id of ["lan-ip", "loop-ip", "v6-ip"]) {
+    assert.deepEqual(await markLocal(db, id, { actor: "t" }), { ok: false, reason: "ip_literal" }, id);
+  }
   assert.deepEqual(await readLocalMarks(db), {});
   assert.deepEqual(await markLocal(db, "nope", { actor: "t" }), { ok: false, reason: "not_found" });
 });
@@ -236,6 +246,7 @@ test("disagreement logged once per consumer and key", () => {
     logStrictDisagreement("voice", "other-dns/m2", { strictCloud: true, oldCloud: false });
     logStrictDisagreement("voice", "other-dns/m2", { strictCloud: true, oldCloud: false });
     logStrictDisagreement("voice", "same/m", { strictCloud: true, oldCloud: true });
+    logStrictDisagreement("voice", "rev/m", { strictCloud: false, oldCloud: true }); // no reverse wording
   } finally { console.warn = orig; }
   assert.equal(lines.length, 1);
   assert.equal(lines[0], "[roles] voice other-dns/m2: not proven local under the strict check (the old check said local)");
@@ -315,4 +326,183 @@ test("boot: upgradeLocalMarksAtBoot uses its own client, closes it, never throws
   assert.deepEqual(r, { skipped: true });
   // A factory that throws is swallowed too.
   await upgradeLocalMarksAtBoot({ dbFactory: () => { throw new Error("no db"); } });
+});
+
+// ---- fix round 1 -----------------------------------------------------------------
+
+const door = (id, host, upstream, extra = {}) => ({
+  id, baseUrl: `http://${host}:3001/llm/p/${upstream}/v1`, bundleId: "fixture-bundle", host: "local", models: [{ id: "m" }], ...extra,
+});
+
+test("three hops: a marked DNS door, then a cloud-flagged door on 100.64.20.7, then loopback, reads cloud", () => {
+  const providers = [
+    door("a", "gw.example.internal", "b"),
+    door("b", "100.64.20.7", "c", { host: "cloud" }),
+    { id: "c", baseUrl: "http://127.0.0.1:8011/v1", host: "local", models: [{ id: "m" }] },
+  ];
+  const localMarks = { a: { host: "gw.example.internal", at: "x", by: "t" } };
+  assert.equal(isCloudKey("a/m", { providers, localMarks, ownAddrs: OWN }), false, "the walk alone says local");
+  assert.equal(isStrictCloud("a/m", { providers, localMarks, ownAddrs: OWN }), true);
+  assert.equal(isStrictCloud("b/m", { providers, localMarks, ownAddrs: OWN }), true);
+  // Without the flag the same chain is local.
+  const unflagged = providers.map((p) => (p.id === "b" ? { ...p, host: "local" } : p));
+  assert.equal(isStrictCloud("a/m", { providers: unflagged, localMarks, ownAddrs: OWN }), false);
+  // An unmarked DNS hop anywhere in the chain is strict cloud.
+  assert.equal(isStrictCloud("a/m", { providers: unflagged, localMarks: {}, ownAddrs: OWN }), true);
+});
+
+test("a lookup answering loopback plus a foreign address does not mark", async () => {
+  const db = await seeded();
+  const mixed = async (h) => (h === "box.example.internal"
+    ? [{ address: "127.0.0.1", family: 4 }, { address: "198.51.100.7", family: 4 }]
+    : lookupFn(h));
+  const r = await upgradeLocalMarks(db, { lookupFn: mixed, ownAddrs: OWN, env: ENV });
+  assert.deepEqual(r.marked, []);
+  assert.deepEqual(r.affected.sort(), ["lan-dns", "other-dns"]);
+  assert.deepEqual(await readLocalMarks(db), {});
+});
+
+test("a name resolving to one of this box's own addresses is marked", async () => {
+  const db = await seeded();
+  const r = await upgradeLocalMarks(db, { lookupFn, ownAddrs: new Set(["192.168.1.40"]), env: ENV });
+  assert.deepEqual(r.marked.sort(), ["lan-dns", "other-dns"]);
+  assert.deepEqual(r.affected, []);
+  assert.equal((await readLocalMarks(db))["other-dns"].host, "nas.example.internal");
+});
+
+test("a row flagged cloud after it was marked is strict cloud", async () => {
+  const db = await seeded();
+  assert.deepEqual(await markLocal(db, "lan-dns", { actor: "t" }), { ok: true });
+  const localMarks = await readLocalMarks(db);
+  assert.equal(isStrictCloud("lan-dns/m1", { providers: await providersOf(db), localMarks, ownAddrs: OWN }), false);
+  // A peer's sync rewrites the stored host to "cloud"; the mark stays stored but no longer counts.
+  await db.execute({ sql: "UPDATE providers SET host = 'cloud' WHERE id = ?", args: ["lan-dns"] });
+  const now = await providersOf(db);
+  assert.equal(isStrictCloud("lan-dns/m1", { providers: now, localMarks, ownAddrs: OWN }), true);
+  assert.equal(isCloudKey("lan-dns/m1", { providers: now, localMarks, ownAddrs: OWN }), true);
+});
+
+test("the snapshot cloud flag ignores the marks the role context carries", async () => {
+  const db = await seeded();
+  await setBinding(db, "everyday", { model: "lan-dns/m1" }, { actor: "t" });
+  await markLocal(db, "lan-dns", { actor: "t" });
+  const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
+  assert.ok(ctx.localMarks["lan-dns"], "the context carries the mark");
+  const { buildRoleSnapshot } = await import("../servers/shared/model-roles-snapshot.js");
+  const snap = buildRoleSnapshot(ctx);
+  assert.equal(snap.roles.everyday.resolved, "lan-dns/m1");
+  assert.equal(snap.roles.everyday.cloud, true, "a marked DNS row is still cloud for pi");
+});
+
+test("the bot classifier ignores marks: a safety role on a marked DNS row is not used", async () => {
+  const db = await seeded();
+  await setBinding(db, "safety", { model: "other-dns/m2" }, { actor: "t" });
+  await markLocal(db, "other-dns", { actor: "t" });
+  const { default: Database } = await import("better-sqlite3");
+  const conn = new Database(dbPaths.get(db), { readonly: true });
+  try {
+    const { readBotClassifierSync } = await import("../scripts/pi-bots/bot-classifier.mjs");
+    const sel = readBotClassifierSync(conn, { localInstanceId: "a".repeat(32) });
+    assert.notEqual(sel.source, "role", JSON.stringify(sel));
+    assert.equal(sel.ok && sel.model === "m2", false, JSON.stringify(sel));
+  } finally { conn.close(); }
+});
+
+test("picks and the change preview use the context's marks; safety's picks and preview stay unmarked", async () => {
+  const db = await seeded();
+  const ctx0 = await loadRoleContext(db, { maxAgeMs: 0 });
+  const pick = (roleId, ctx) => listRolePicks(roleId, { ctx, ownAddrs: OWN }).find((x) => x.key === "lan-dns/m1");
+  assert.equal(pick("everyday", ctx0).where, "unproven");
+  const pv0 = await previewRoleChange(db, "everyday", { model: "lan-dns/m1" }, { ctx: ctx0, env: ENV, ownAddrs: OWN });
+  assert.ok(pv0.cloud, "unmarked: the sheet warns");
+
+  await markLocal(db, "lan-dns", { actor: "t" });
+  const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
+  assert.equal(pick("everyday", ctx).where, "other_box", "the picks list honours the mark");
+  const pv = await previewRoleChange(db, "everyday", { model: "lan-dns/m1" }, { ctx, env: ENV, ownAddrs: OWN });
+  assert.equal(pv.cloud, null, "marked: no cloud warning");
+  assert.equal(pv.next.where, "other_box");
+
+  // Safety: unmarked whatever the context carries.
+  const sp = pick("safety", ctx);
+  assert.equal(sp.where, "unproven");
+  assert.equal(sp.allowed, false);
+  const spv = await previewRoleChange(db, "safety", { model: "lan-dns/m1" }, { ctx, env: ENV, ownAddrs: OWN });
+  assert.ok(spv.cloud, "safety's preview still warns");
+  assert.equal(spv.next.where, "unproven");
+  assert.ok(spv.refused.length, "and refuses");
+  // Even an explicit marks argument does not reach safety.
+  const spv2 = await previewRoleChange(db, "safety", { model: "lan-dns/m1" }, { ctx, env: ENV, ownAddrs: OWN, localMarks: ctx.localMarks });
+  assert.ok(spv2.cloud);
+
+  // A preview hash from the page's preview still applies (same marks on both sides).
+  const r = await applyRoleChange(db, "everyday", { model: "lan-dns/m1" }, { env: ENV, ownAddrs: OWN, actor: "t", previewHash: pv.previewHash, ackUnattended: true });
+  assert.equal(r.ok, true, r.reason);
+});
+
+test("/api/roles picks and preview agree with the Models page chip", async () => {
+  const db = await seeded();
+  await markLocal(db, "lan-dns", { actor: "t" });
+  const express = (await import("express")).default;
+  const { default: rolesApiRouter } = await import("../servers/gateway/routes/roles-api.js");
+  const app = express();
+  app.use(express.json());
+  const dbFactory = () => new Proxy(db, { get: (tgt, k) => (k === "close" ? () => {} : Reflect.get(tgt, k)) });
+  app.use(rolesApiRouter({ dbFactory, sessionGate: (_q, _r, n) => n(), env: {}, ownAddrs: OWN, localInstanceId: () => "i-self", recommendedFn: () => [] }));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const picks = await (await fetch(`${base}/api/roles/everyday/picks`)).json();
+    assert.equal(picks.picks.find((x) => x.key === "lan-dns/m1")?.where, "other_box");
+    const safety = await (await fetch(`${base}/api/roles/safety/picks`)).json();
+    const sp = safety.picks.find((x) => x.key === "lan-dns/m1");
+    assert.equal(sp?.where, "unproven");
+    assert.equal(sp?.allowed, false);
+    const pv = await (await fetch(`${base}/api/roles/everyday/preview`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "lan-dns/m1" }) })).json();
+    assert.equal(pv.cloud, null);
+    const spv = await (await fetch(`${base}/api/roles/safety/preview`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "lan-dns/m1" }) })).json();
+    assert.ok(spv.cloud);
+  } finally { server.close(); }
+});
+
+test("a failed notification leaves the done flag unset; the next boot sends it", async () => {
+  const db = await seeded();
+  const r = await upgradeLocalMarks(db, { lookupFn, ownAddrs: OWN, env: ENV, notifyFn: async () => { throw new Error("delivery down"); } });
+  assert.deepEqual(r.affected, ["other-dns"]);
+  assert.equal(await getRaw(db, LOCAL_MARKS_SEEDED_KEY), null);
+  assert.equal(await getRaw(db, LOCAL_NOTICE_SHOWN_KEY), null);
+  let sent = 0;
+  await upgradeLocalMarks(db, { lookupFn, ownAddrs: OWN, env: ENV, notifyFn: async () => { sent++; } });
+  assert.equal(sent, 1);
+  assert.ok(await getRaw(db, LOCAL_MARKS_SEEDED_KEY));
+  assert.ok(await getRaw(db, LOCAL_NOTICE_SHOWN_KEY));
+});
+
+test("two upgrades at once in one process share one run, even through separate clients", async () => {
+  const db = await seeded();
+  const db2 = createDbClient(dbPaths.get(db));
+  try {
+    let lookups = 0, release;
+    const gate = new Promise((r) => { release = r; });
+    const slow = async (h) => { lookups++; await gate; return lookupFn(h); };
+    const p1 = upgradeLocalMarks(db, { lookupFn: slow, ownAddrs: OWN, env: ENV, notifyFn: async () => {} });
+    const p2 = upgradeLocalMarks(db2, { lookupFn: slow, ownAddrs: OWN, env: ENV, notifyFn: async () => {} });
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    const [a, b] = await Promise.all([p1, p2]);
+    assert.equal(a, b, "the same result object");
+    assert.equal(lookups, 2, "one lookup per candidate row, not two runs");
+  } finally { db2.close(); }
+});
+
+test("providers tab: a refused mark redirects with its reason and shows its line", async () => {
+  const db = await seeded();
+  let redirected = null;
+  const res = { redirectAfterPost: (u) => { redirected = u; } };
+  await tab.handleAction({ req: { body: { action: "llm_provider_mark_local", id: "pub-ip", local_token: "0".repeat(32) } }, res, db, action: "llm_provider_mark_local" });
+  assert.match(redirected, /local=public_address$/);
+  const html = await tab.render({ req: { query: { local: "ip_literal" } }, db, lang: "es", piAgentDir: null, tasksDbPaths: [] });
+  assert.ok(html.includes(t("providers.localRefused.ip_literal", "es")));
+  const plain = await tab.render({ req: { query: { local: "<script>" } }, db, lang: "en", piAgentDir: null, tasksDbPaths: [] });
+  assert.equal(plain.includes("<script>"), false);
 });

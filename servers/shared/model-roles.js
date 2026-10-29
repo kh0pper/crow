@@ -198,6 +198,19 @@ export function finalHopRow(key, { providers, resolveDoor = defaultResolveDoor }
   return null;
 }
 
+/** Every row a key's door walk visits, in order (the key's own row first, at most MAX_DOOR_HOPS + 1). */
+export function chainRows(key, { providers, resolveDoor = defaultResolveDoor } = {}) {
+  const out = [];
+  let row = providerById(providers, splitKey(key).provider);
+  for (let hops = 0; row && hops <= MAX_DOOR_HOPS; hops++) {
+    out.push(row);
+    const up = resolveDoor(row, providers);
+    if (up === row) break;
+    row = up;
+  }
+  return out;
+}
+
 /** The one cloud predicate (voice, phone, warnings): errs toward warning, so
  *  anything not proven local counts as cloud. */
 export function isCloudKey(key, opts) {

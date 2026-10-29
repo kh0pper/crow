@@ -25,12 +25,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import { promises as dnsPromises } from "node:dns";
-import { cloudStatus, isCloudKey, finalHopRow } from "./model-roles.js";
+import { cloudStatus, isCloudKey, chainRows } from "./model-roles.js";
 import { hostnameOf } from "./provider-host.js";
 import { classifyIp, isLocalNetworkIp } from "./ip-classify.js";
 import { getOwnAddresses } from "./locality.js";
 import { providerRowToObject } from "./provider-row.js";
-import { splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
 import { invalidateRoleContext } from "./model-roles-store.js";
 
 export const LOCAL_MARKS_KEY = "provider_local_marks";
@@ -106,8 +105,10 @@ function sameHex(a, b) {
  * Mark row `rowId` "This is local" on this box, recording its current
  * hostname. Refusals, in order: `not_found` (no row, or no hostname),
  * `public_address` (an IP literal that is not on a local network: public,
- * reserved or documentation), `flagged_cloud` (stored `host === "cloud"`,
- * N4), `changed` (the caller's expectation no longer holds).
+ * reserved or documentation), `ip_literal` (any other IP literal: its
+ * address already says where it runs, so a mark never applies),
+ * `flagged_cloud` (stored `host === "cloud"`, N4), `changed` (the caller's
+ * expectation no longer holds).
  *
  * `expect` is `{token}` (what the page rendered, localMarkTokenFor; the
  * salt is read here) or `{host}` (the hostname the caller checked, the
@@ -120,7 +121,7 @@ export async function markLocal(db, rowId, { actor, expect } = {}) {
     const row = await providerRow(db, rowId);
     const host = row ? hostnameOf(row.baseUrl) : null;
     if (!row || !host) return { ok: false, reason: "not_found" };
-    if (isIP(host) && !isLocalNetworkIp(host)) return { ok: false, reason: "public_address" };
+    if (isIP(host)) return { ok: false, reason: isLocalNetworkIp(host) ? "ip_literal" : "public_address" };
     if (row.host === "cloud") return { ok: false, reason: "flagged_cloud" };
     if (expect !== undefined) {
       let ok = false;
@@ -165,26 +166,21 @@ export function isMarkCurrent(row, localMarks) {
 
 // ---- the strict predicate --------------------------------------------------------
 
-const providerList = (providers) => (Array.isArray(providers) ? providers : Object.values(providers || {}));
-
-/** The key's first row and the row its traffic finally reaches (deduplicated). */
-function rowsOfKey(key, providers) {
-  const first = providerList(providers).find((p) => p && p.id === splitKey(key).provider) || null;
-  const last = finalHopRow(key, { providers });
-  return [...new Set([first, last].filter(Boolean))];
-}
+/** Every row the key's door walk visits (chainRows), each once. */
+const rowsOfKey = (key, providers) => [...new Set(chainRows(key, { providers }))];
 
 /**
- * The one predicate voice and the phone local slot use (N4): true when the
- * key's row (or the row its door forwards to) is flagged `host === "cloud"`,
- * or the strict check with marks says it is not proven local. Pure.
+ * The one predicate voice and the phone local slot use (N4): true when ANY
+ * row the key's door walk visits is flagged `host === "cloud"`, or the
+ * strict check with marks says some hop is not proven local (isCloudKey
+ * judges the worst hop). Pure.
  */
 export function isStrictCloud(key, { providers, localMarks, ownAddrs } = {}) {
   if (rowsOfKey(key, providers).some((r) => r.host === "cloud")) return true;
   return isCloudKey(key, { providers, localMarks, ...(ownAddrs ? { ownAddrs } : {}) });
 }
 
-/** The old check (before the strict one): only a row flagged `host === "cloud"` was cloud. */
+/** The old check (before the strict one): only a row flagged `host === "cloud"` (on any hop) was cloud. */
 export function oldCheckCloud(key, { providers } = {}) {
   return rowsOfKey(key, providers).some((r) => r.host === "cloud");
 }
@@ -192,17 +188,16 @@ export function oldCheckCloud(key, { providers } = {}) {
 const loggedDisagreements = new Set();
 
 /**
- * One console.warn per `consumer|key` per process when the strict check and
- * the old one disagree (controller ruling b). Tasks 20 and 21 call it.
+ * One console.warn per `consumer|key` per process when the strict check
+ * calls a key cloud and the old one said local (controller ruling b). Tasks
+ * 20 and 21 call it.
  */
 export function logStrictDisagreement(consumer, key, { strictCloud, oldCloud } = {}) {
-  if (!!strictCloud === !!oldCloud) return;
+  if (!strictCloud || oldCloud) return;
   const id = `${consumer}|${key}`;
   if (loggedDisagreements.has(id)) return;
   loggedDisagreements.add(id);
-  console.warn(strictCloud
-    ? `[roles] ${consumer} ${key}: not proven local under the strict check (the old check said local)`
-    : `[roles] ${consumer} ${key}: local under the strict check (the old check said cloud)`);
+  console.warn(`[roles] ${consumer} ${key}: not proven local under the strict check (the old check said local)`);
 }
 
 // ---- keys in use ---------------------------------------------------------------
@@ -309,7 +304,7 @@ async function defaultNotify(db, { names }) {
   });
 }
 
-const upgradeRunning = new WeakMap(); // db -> the run in progress
+let upgradeRunning = null; // the run in progress in this process (one box, one DB)
 
 /**
  * Run once per box (guarded by `provider_local_marks_seeded`), off the boot
@@ -320,11 +315,13 @@ const upgradeRunning = new WeakMap(); // db -> the run in progress
  * ruling a); otherwise it is `affected`. A lookup that errors or times out
  * goes to `errors`, and the seeded flag stays unset so the next boot retries
  * (minor f). When `affected` is non-empty and `provider_local_notice_shown`
- * is unset, `notifyFn` sends one notification and the flag is set.
+ * is unset, `notifyFn` sends one notification and the flag is set; if it
+ * throws, the seeded flag also stays unset, so the next boot retries. Two
+ * calls at once in one process share one run.
  * @returns {Promise<{marked:string[], affected:string[], errors:string[], skipped?:true}>}
  */
 export async function upgradeLocalMarks(db, { lookupFn = dnsPromises.lookup, ownAddrs, notifyFn = defaultNotify, timeoutMs = 3000, env = process.env } = {}) {
-  if (upgradeRunning.has(db)) return upgradeRunning.get(db);
+  if (upgradeRunning) return upgradeRunning;
   const run = (async () => {
     if (await readValue(db, LOCAL_MARKS_SEEDED_KEY)) return { marked: [], affected: [], errors: [], skipped: true };
     const own = ownAddrs || getOwnAddresses();
@@ -348,16 +345,20 @@ export async function upgradeLocalMarks(db, { lookupFn = dnsPromises.lookup, own
       if (ours && (await markLocal(db, row.id, { actor: "upgrade", expect: { host } })).ok) marked.push(row.id);
       else affected.push(row.id);
     }
+    let noticePending = false;
     if (affected.length && !(await readValue(db, LOCAL_NOTICE_SHOWN_KEY))) {
       try {
         await notifyFn(db, { names: affected });
         await writeValue(db, LOCAL_NOTICE_SHOWN_KEY, new Date().toISOString());
-      } catch (err) { console.warn(`[roles] local notice not sent: ${err?.message}`); }
+      } catch (err) {
+        noticePending = true; // retried with the whole upgrade at the next boot
+        console.warn(`[roles] local notice not sent: ${err?.message}`);
+      }
     }
-    if (!errors.length) await writeValue(db, LOCAL_MARKS_SEEDED_KEY, new Date().toISOString());
+    if (!errors.length && !noticePending) await writeValue(db, LOCAL_MARKS_SEEDED_KEY, new Date().toISOString());
     if (marked.length || affected.length) console.log(`[roles] local marks upgrade: marked ${marked.join(", ") || "none"}; not proven local ${affected.join(", ") || "none"}`);
     return { marked, affected, errors };
   })();
-  upgradeRunning.set(db, run);
-  try { return await run; } finally { upgradeRunning.delete(db); }
+  upgradeRunning = run;
+  try { return await run; } finally { if (upgradeRunning === run) upgradeRunning = null; }
 }

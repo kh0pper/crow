@@ -102,7 +102,8 @@ function safetyReachesCloud(ctxX, ownAddrs) {
  * @param {string} roleId
  * @param {{ctx:object, lang?:string, recommendedFn?:(roleId:string)=>string[], ownAddrs?:Set<string>, localMarks?:object,
  *   pickChecks?:object, now?:Date, recOpts?:object}} opts
- *   localMarks only shapes `where`; the safety check never uses them. Without
+ *   localMarks only shapes `where` (default: ctx.localMarks, the marks the
+ *   Models page uses); safety's picks and the safety check never use them. Without
  *   `recommendedFn`, a pick is recommended by recommendedKeysFor (a listed
  *   preset pick whose stored check passed; `pickChecks` from readPickChecks).
  * @returns {Pick[]}
@@ -114,6 +115,8 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddr
   const providers = ctx.providers || [];
   ownAddrs ??= getOwnAddresses(); // once per list, not per candidate
   const own = { ownAddrs };
+  // The marks the Models page chip uses (the context's by default); safety never uses marks (minor e).
+  localMarks = roleId === "safety" ? undefined : localMarks ?? ctx.localMarks;
   const where = (key) => (key ? whereItRuns(key, { providers, localMarks, ...own }) : "missing");
 
   recommendedFn ??= (id) => recommendedKeysFor(id, { ctx, pickChecks, now, recOpts });

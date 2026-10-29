@@ -227,7 +227,7 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
  * @param {object} [opts.env]               env for pins and overrides (default process.env)
  * @param {string} [opts.lang]              accepted for the callers' symmetry; rows carry codes, not copy
  * @param {Set<string>} [opts.ownAddrs]     this box's addresses (default: probed)
- * @param {object} [opts.localMarks]
+ * @param {object} [opts.localMarks]        "This is local" marks (default: the role context's; never applied to safety)
  * @param {() => string} [opts.localInstanceId]  test seam for the role context
  * @param {Function} [opts.classifierStatusFn]   test seam (default getClassifierStatus)
  * @param {Function} [opts.classifierLookup]     DNS lookup handed to the classifier status (the menu preview passes one that never touches the network)
@@ -236,7 +236,10 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
 export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, localInstanceId, classifierStatusFn = getClassifierStatus, classifierLookup } = {}) {
   const ctx = await loadRoleContext(db, { maxAgeMs: 0, ...(localInstanceId ? { getOrCreateLocalInstanceId: localInstanceId } : {}) });
   // This box's addresses: probed once for all rows, not per model.
+  // Marks: the caller's, else the context's ("This is local"); never for safety (minor e).
+  localMarks ??= ctx.localMarks;
   const whereOpts = { ownAddrs: ownAddrs || getOwnAddresses(), ...(localMarks ? { localMarks } : {}) };
+  const unmarkedWhere = { ownAddrs: whereOpts.ownAddrs };
   // Voice keys from the same context the rows use.
   const resolveRoleFn = async (_db, key, { need, chosenOnly } = {}) => (chosenOnly ? resolveChosenRoleKey : resolveRoleKey)(key, { ...ctx, need });
   let voiceKeys = null;
@@ -254,7 +257,7 @@ export async function buildRoleRows(db, { env = process.env, ownAddrs, localMark
       } else if (SPEECH[id]) {
         row = await speechRow(db, def, { whereOpts, voiceDef });
       } else {
-        row = await chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
+        row = await chatRow(db, def, ctx, { env, whereOpts: id === "safety" ? unmarkedWhere : whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
       }
       rows.push({ ...row, group: g.id, labelKey: ROLE_LABEL_KEYS[id], jobKey: ROLE_JOB_KEYS[id] });
     }

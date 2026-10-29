@@ -192,6 +192,9 @@ export function localMarkSwitch(p, { localMarks, salt, ownAddrs, lang = "en" }) 
           </form>`;
 }
 
+/** markLocal refusals with their own line (?local=<reason>). */
+const LOCAL_REFUSALS = new Set(["ip_literal", "public_address", "flagged_cloud"]);
+
 const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
 const USED_BY_MAX = 4;
 
@@ -252,9 +255,12 @@ export default {
     try { salt = await ensureCloudConsentSalt(db); } catch (err) { console.warn(`[llm-providers-tab] consent salt: ${err.message}`); }
     const consentCtx = { consent: await readCloudConsent(db), salt, lang };
     const localCtx = { localMarks: await readLocalMarks(db), salt, ownAddrs: hostCtx.ownAddrs, lang };
-    const botsNote = req?.query?.bots === "changed" || req?.query?.local === "changed"
+    const localQ = typeof req?.query?.local === "string" ? req.query.local : "";
+    const botsNote = req?.query?.bots === "changed" || localQ === "changed"
       ? `<p class="llm-bots-changed" role="status">${escapeHtml(t("providers.botsChanged", lang))}</p>`
-      : "";
+      : LOCAL_REFUSALS.has(localQ)
+        ? `<p class="llm-bots-changed" role="status">${escapeHtml(t(`providers.localRefused.${localQ}`, lang))}</p>`
+        : "";
     const buildRow = (p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const idEsc = escapeHtml(p.id);
@@ -525,7 +531,7 @@ export default {
           const token = typeof req.body?.local_token === "string" ? req.body.local_token : "";
           const r = await markLocal(db, id, { actor: `dashboard:${user}`, expect: { token } });
           if (r.ok) console.log(`[llm-providers-tab] ${id} marked local (dashboard:${user})`);
-          else if (r.reason === "changed") { res.redirectAfterPost(`${BACK}&local=changed`); return true; }
+          else if (r.reason === "changed" || LOCAL_REFUSALS.has(r.reason)) { res.redirectAfterPost(`${BACK}&local=${r.reason}`); return true; }
         } else {
           await unmarkLocal(db, id);
           console.log(`[llm-providers-tab] ${id} no longer marked local (dashboard:${user})`);
