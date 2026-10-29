@@ -71,6 +71,10 @@ before(async () => {
   pjob.run("job-own-else", "hank", "running", 1, null, "owner"); // another host's owner job
   pjob.run("job-card-1", "hank", "running", process.pid, 5, "owner");
   pjob.run("job-other-1", "hank", "running", process.pid, null, "other");
+  pjob.run("job-own-done", "hank", "completed", process.pid, null, "owner"); // the owner's, but finished
+  pjob.run("job-null-1", "hank", "running", process.pid, null, null); // column present, value NULL (the insert default)
+  pjob.run("job-empty-1", "hank", "running", process.pid, null, "");
+  pjob.run("job-caps-1", "hank", "running", process.pid, null, "OWNER");
   d.close();
 
   _resetActorKeyForTest();
@@ -314,11 +318,15 @@ test("service: an owner card job with its own board-card tuple gets a sig; anoth
     "control: the session itself is live and this host's job is running");
 });
 
-test("service: refused for a NULL-principal (cron) job, a non-owner job, another host's owner job, and a job-less turn", async () => {
+test("service: refused for a NULL-principal (cron) job, a non-owner job, a finished or another host's owner job, and a job-less turn", async () => {
   for (const [name, body] of Object.entries({
     "cron job (NULL principal)": { botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1" },
     "principal 'other'": { botId: "hank", threadId: "job-job-other-1", gatewayType: "job", jobId: "job-other-1" },
     "another host's owner job": { botId: "hank", threadId: "job-job-own-else", gatewayType: "job", jobId: "job-own-else" },
+    "a running claimed job, principal column present but NULL": { botId: "hank", threadId: "job-job-null-1", gatewayType: "job", jobId: "job-null-1" },
+    "a running claimed job, principal ''": { botId: "hank", threadId: "job-job-empty-1", gatewayType: "job", jobId: "job-empty-1" },
+    "a running claimed job, principal 'OWNER'": { botId: "hank", threadId: "job-job-caps-1", gatewayType: "job", jobId: "job-caps-1" },
+    "a finished owner job": { botId: "hank", threadId: "job-job-own-done", gatewayType: "job", jobId: "job-own-done" },
     "a Gmail session": LIVE(),
     "a Gmail session with an owner job": { ...LIVE(), jobId: "job-own-1" },
     "an owner job, another job's tuple": { ...OWNJOB, threadId: "job-job-run-1" },
