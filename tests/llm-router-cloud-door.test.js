@@ -18,7 +18,7 @@ import zlib from "node:zlib";
 import express from "express";
 import llmRouterRouter from "../servers/gateway/routes/llm-router.js";
 import {
-  resolveCloudTarget, isCloudTarget as realIsCloudTarget, CLOUD_OPS, REQUEST_HEADER_ALLOW, RESPONSE_HEADER_ALLOW,
+  resolveCloudTarget, isCloudTarget as realIsCloudTarget, CLOUD_OPS, REQUEST_HEADER_ALLOW, RESPONSE_HEADER_ALLOW, ERROR_BODY_MAX,
 } from "../servers/gateway/models/cloud-door.js";
 import { cloudDoorUrl } from "../servers/gateway/models/door.js";
 import { extractUsageFromAnthropicStream, recordUsageEvent } from "../servers/shared/metering.js";
@@ -161,7 +161,8 @@ before(async () => {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   appUrl = `http://127.0.0.1:${srv.address().port}`;
 });
-after(() => { srv?.close(); up?.close(); up2?.close(); Object.assign(console, origLog); });
+// closeAllConnections: a leaked upstream request (an abort regression) must not keep the file alive.
+after(() => { for (const x of [srv, up, up2]) { x?.closeAllConnections?.(); x?.close(); } Object.assign(console, origLog); });
 
 beforeEach(async () => {
   hits = []; up2Hits = 0; upHandler = null; usage = []; remote = "127.0.0.1"; logs = [];
@@ -621,7 +622,7 @@ test("resolveCloudTarget: shapes and the allowlists", async () => {
 
 // ---------------------------------------------------------------- fix round 1
 
-test("a client abort before the upstream answers closes the upstream request at once", async () => {
+test("a client abort before the upstream answers closes the upstream request at once", { timeout: 10_000 }, async () => {
   let upClosedAt = null;
   upHandler = (req, res) => { res.on("close", () => { upClosedAt = Date.now(); }); /* never answers */ };
   const u = new URL(`${appUrl}/llm/c/cloud-a/v1/chat/completions`);
@@ -639,7 +640,7 @@ test("a client abort before the upstream answers closes the upstream request at 
   assert.equal((await call("/llm/c/cloud-a/v1/chat/completions")).status, 200);
 });
 
-test("a client abort mid-stream closes the upstream", async () => {
+test("a client abort mid-stream closes the upstream", { timeout: 10_000 }, async () => {
   let upClosedAt = null;
   upHandler = (req, res) => {
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -838,7 +839,7 @@ test("isLocalPeer is the one source rule: every forwarding and tailscale header 
   for (const a of ["100.64.20.9", "10.0.0.50", "203.0.113.5", ""]) assert.equal(isLocalPeer(a, {}), false, a);
 });
 
-test("at most 8 requests at once; the ninth gets 429 DOOR_BUSY", async () => {
+test("at most 8 requests at once; the ninth gets 429 DOOR_BUSY", { timeout: 10_000 }, async () => {
   const held = [];
   upHandler = (req, res) => { held.push(res); };
   const pending = [];
@@ -853,4 +854,69 @@ test("at most 8 requests at once; the ninth gets 429 DOOR_BUSY", async () => {
   for (const r of await Promise.all(pending)) assert.equal(r.status, 200);
   upHandler = null;
   assert.equal((await call("/llm/c/cloud-a/v1/chat/completions")).status, 200);
+});
+
+// ---------------------------------------------------------------- fix round 2
+
+test("a key straddling the error-body cap is redacted, never cut into a prefix", async () => {
+  for (const [key, path, body] of [
+    [UP_KEY, "/llm/c/cloud-a/v1/chat/completions", undefined],
+    [DOOR_TOKEN, "/llm/c/cloud-a/v1/chat/completions", undefined],
+  ]) {
+    for (const before of [ERROR_BODY_MAX - 5, ERROR_BODY_MAX - 1, ERROR_BODY_MAX - key.length + 1]) {
+      upHandler = (req, res) => { res.writeHead(400, { "content-type": "application/json" }); res.end("x".repeat(before) + key + "tail".repeat(100)); };
+      const r = await call(path, { body });
+      assert.equal(r.status, 400);
+      assert.ok(r.buf.length <= ERROR_BODY_MAX, `sent ${r.buf.length} bytes`);
+      for (let n = 4; n <= key.length; n++) assert.ok(!r.body.includes(key.slice(0, n)), `a ${n}-character prefix of the secret leaked (offset ${before})`);
+    }
+  }
+});
+
+test("an error body that fails to decode destroys the upstream stream", { timeout: 10_000 }, async () => {
+  let upClosed = false;
+  upHandler = (req, res) => {
+    res.writeHead(401, { "content-type": "application/json", "content-encoding": "gzip" });
+    res.write(Buffer.from("this is not gzip at all"));
+    res.on("close", () => { upClosed = true; });
+    // ...and never ends.
+  };
+  const r = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r.status, 502);
+  for (let i = 0; i < 100 && !upClosed; i++) await new Promise((x) => setTimeout(x, 10));
+  assert.equal(upClosed, true);
+});
+
+test("a 2xx answer with corrupt gzip still records the call, counts unknown", async () => {
+  upHandler = (req, res) => { res.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip" }); res.end(Buffer.from("not gzip")); };
+  const r = await call("/llm/c/cloud-a/v1/chat/completions");
+  assert.equal(r.status, 200);
+  assert.equal(r.buf.toString("utf8"), "not gzip", "the bytes pass as they came");
+  await settled();
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].inputTokens, null);
+  assert.equal(usage[0].outputTokens, null);
+});
+
+test("body fields are stripped by the body's shape, whatever the row's auth style", async () => {
+  const extra = { models: ["x/y"], route: "fallback", provider: { order: ["x"] }, mcp_servers: [{ type: "url", url: "https://mcp.example.com/sse", name: "m" }] };
+  await call("/llm/c/cloud-b/v1/messages", { body: { model: "m-b", messages: [], ...extra }, headers: { "anthropic-version": "2023-06-01" } });
+  await call("/llm/c/cloud-a/v1/chat/completions", { body: { model: "c1", messages: [], ...extra } });
+  for (const h of hits) {
+    const sent = JSON.parse(h.body);
+    for (const k of Object.keys(extra)) assert.equal(sent[k], undefined, `${h.url}: ${k}`);
+  }
+  assert.equal(hits.length, 2);
+});
+
+test("metering: a large non-streamed body with usage first is still metered", async () => {
+  upHandler = (req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ usage: { prompt_tokens: 21, completion_tokens: 22 }, choices: [{ message: { content: "z".repeat(200_000) } }] }));
+  };
+  await call("/llm/c/cloud-a/v1/chat/completions");
+  await settled();
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].inputTokens, 21);
+  assert.equal(usage[0].outputTokens, 22);
 });

@@ -38,7 +38,7 @@
  * What passes: request headers in REQUEST_HEADER_ALLOW (plus anthropic-version
  * and anthropic-beta for anthropic rows) and the real key; the body
  * re-serialised with a fresh content-length, minus the fields in
- * STRIPPED_BODY_FIELDS (OpenRouter's `models`/`route`/`provider` would let a
+ * STRIPPED_BODY_FIELDS (all of them, whatever the row's auth style) (OpenRouter's `models`/`route`/`provider` would let a
  * bot pick models outside the row's list; anthropic's `mcp_servers` would make
  * the provider call URLs the bot chose). Provider server tools (web_search and
  * the like) are kept: they run on the provider, billed to the user's own key.
@@ -46,7 +46,8 @@
  * parameter. Back to the caller: the status, the body and only the response
  * headers in RESPONSE_HEADER_ALLOW plus any `*-ratelimit-*` and the
  * content-encoding. The literal key and the caller's token are removed from
- * those header values and from non-2xx bodies (buffered, at most 1 MB).
+ * those header values and from non-2xx bodies (buffered, at most 1 MB sent;
+ * redacted before the cut, so a secret straddling it never leaks a prefix).
  *
  * Timeouts (never an unbounded wait): `headersMs` (default 10 min) is the
  * budget for the upstream to start answering, because a non-streamed
@@ -84,8 +85,11 @@ export const STRIPPED_BODY_FIELDS = Object.freeze({
   openai: Object.freeze(["models", "route", "provider"]),
   anthropic: Object.freeze(["mcp_servers"]),
 });
+// Stripped by the body's shape, whatever the row's auth style: a router behind
+// an anthropic-type row may honour models/route/provider too.
+const STRIP_ALWAYS = Object.freeze([...STRIPPED_BODY_FIELDS.openai, ...STRIPPED_BODY_FIELDS.anthropic]);
 const ANTHROPIC_DEFAULT_VERSION = "2023-06-01";
-const ERROR_BODY_MAX = 1_000_000;
+export const ERROR_BODY_MAX = 1_000_000;
 const REDACTED = "[redacted]";
 
 export const CLOUD_TIMEOUTS = Object.freeze({ headersMs: 10 * 60_000, idleMs: 2 * 60_000, totalMs: 30 * 60_000 });
@@ -158,11 +162,13 @@ const send = (res, status, code, message) => res.status(status).json({ error: { 
 /** Replaces every literal secret (8+ characters, so a short key cannot shred the text). */
 function redactor(secrets) {
   const list = secrets.filter((s) => typeof s === "string" && s.length >= 8);
-  return (text) => {
+  const redact = (text) => {
     let out = String(text);
     for (const s of list) out = out.split(s).join(REDACTED);
     return out;
   };
+  redact.maxLen = list.reduce((m, s) => Math.max(m, Buffer.byteLength(s)), 0);
+  return redact;
 }
 
 /** A decompressor for one content-encoding, or null (identity) / undefined (unsupported). */
@@ -193,6 +199,7 @@ function captureTap({ head = 32 * 1024, tail = 64 * 1024 } = {}) {
     whole() { return total <= head + tail; },
     text() { return total <= head + tail ? start + end : `${start}\n${end}`; },
     tail() { return end || start; },
+    head() { return start; },
   };
 }
 
@@ -232,7 +239,8 @@ function usageFrom(tap, authStyle) {
   const found = extract(tap.text());
   if (found) return found;
   if (tap.whole()) return null;
-  const obj = lastUsageObject(tap.tail());
+  // Usage normally sits last (the tail); some servers put it first (the head).
+  const obj = lastUsageObject(tap.tail()) || lastUsageObject(tap.head());
   return obj ? extract(JSON.stringify({ usage: obj })) : null;
 }
 
@@ -295,7 +303,7 @@ export function createCloudDoor(deps) {
       headers.authorization = `Bearer ${target.apiKey}`;
     }
     const sent = { ...body };
-    for (const f of STRIPPED_BODY_FIELDS[target.authStyle === "anthropic" ? "anthropic" : "openai"]) delete sent[f];
+    for (const f of STRIP_ALWAYS) delete sent[f];
     const payload = JSON.stringify(sent);
     const redact = redactor([target.apiKey, callerToken(req.headers)]);
     const label = `${target.providerId}/${target.model}`;
@@ -349,6 +357,7 @@ export function createCloudDoor(deps) {
     const tap = captureTap();
     const text = new StringDecoder("utf8");
     let meter = true;
+    let undecodable = false;
     let dec = null;
     let decDone = Promise.resolve();
     if (encoding) {
@@ -361,22 +370,23 @@ export function createCloudDoor(deps) {
         dec.on("data", (c) => tap.push(out.write(c)));
         decDone = new Promise((resolve) => {
           dec.on("end", resolve);
-          dec.on("error", () => { meter = false; resolve(); });
+          dec.on("error", () => { undecodable = true; resolve(); });
         });
       }
     }
     const completed = await pump(up.stream, res, (c) => {
       if (!meter) return;
-      if (dec) dec.write(c);
+      if (dec) { if (!undecodable) dec.write(c); }
       else tap.push(text.write(c));
     }, label, op);
-    if (dec) {
+    if (dec && !undecodable) {
       dec.end();
       await Promise.race([decDone, new Promise((r) => setTimeout(r, 2000).unref?.())]);
     }
     if (!completed || !meter) return;
     try {
-      const usage = usageFrom(tap, target.authStyle);
+      // A body the copy could not decode is still a completed (billed) call: counts unknown.
+      const usage = undecodable ? null : usageFrom(tap, target.authStyle);
       await deps.recordUsageFn({
         tenantId: deps.tenantIdFn(), surface: "llm", providerId: target.providerId, providerType: target.providerType,
         modelId: target.model,
@@ -428,25 +438,29 @@ export function createCloudDoor(deps) {
     }
     const src = dec ? up.stream.pipe(dec) : up.stream;
     if (dec) up.stream.on("error", (e) => dec.destroy(e));
+    // Keep enough past the cap that a secret straddling it is still whole when redacted.
+    const keep = ERROR_BODY_MAX + redact.maxLen;
     const ok = await new Promise((resolve) => {
       let fin = false;
       const end = (v) => { if (!fin) { fin = true; clearTimeout(timer); resolve(v); } };
       const timer = setTimeout(() => { up.stream.destroy(); end(chunks.length > 0); }, timeouts.idleMs);
       src.on("data", (c) => {
-        if (size >= ERROR_BODY_MAX) return;
+        if (size >= keep) return;
         chunks.push(c);
         size += c.length;
-        if (size >= ERROR_BODY_MAX) { up.stream.destroy(); end(true); }
+        if (size >= keep) { up.stream.destroy(); end(true); }
       });
       src.on("end", () => end(true));
-      src.on("error", () => end(false));
+      // A body that fails to decode: stop reading the upstream too.
+      src.on("error", () => { up.stream.destroy(); end(false); });
       res.on("close", () => { if (!res.writableFinished) { up.stream.destroy(); end(false); } });
     });
     if (res.destroyed) return;
     if (!ok) return send(res, 502, "UPSTREAM_UNREACHABLE", "the provider's error answer could not be read");
     console.log(`[llm-router] cloud ${op} -> ${label} error body ${size} bytes`);
     passHeaders();
-    res.end(redact(Buffer.concat(chunks).subarray(0, ERROR_BODY_MAX).toString("utf8")));
+    const whole = redact(Buffer.concat(chunks).subarray(0, keep).toString("utf8"));
+    res.end(Buffer.from(whole, "utf8").subarray(0, ERROR_BODY_MAX));
   }
 
   return { gate, handle };
