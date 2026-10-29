@@ -179,6 +179,21 @@ export async function assertBotMayWriteCard(tdb, cdb, actor, id) {
   throw fail("a bot can only change cards on its own project's board, or cards assigned to it", "forbidden_project", 403);
 }
 
+/**
+ * Throws 403 unless a bot actor may put a card under parent `parentId`. A
+ * child inherits its parent's project, so the parent must be on the bot's own
+ * project: a card merely assigned to the bot from another project is not
+ * enough (that would let the bot add or move cards into that project).
+ */
+export async function assertBotMayParentUnder(tdb, cdb, actor, parentId) {
+  if (!actor || actor.kind !== "bot" || !Number.isInteger(parentId)) return;
+  const row = (await tdb.execute({ sql: "SELECT project_id, board_id FROM tasks_items WHERE id=?", args: [parentId] })).rows[0];
+  if (!row || row.board_id != null) return; // missing → createCard/updateCard's own 400
+  const pid = await botProjectOf(cdb, actor.id);
+  if (pid != null && row.project_id != null && Number(row.project_id) === pid) return;
+  throw fail("a bot can only put cards under a card on its own project's board", "forbidden_project", 403);
+}
+
 /** The project a bot may create a card in: its own (filled in when omitted). */
 export async function botCreateProject(cdb, actor, requested) {
   if (!actor || actor.kind !== "bot") return requested;
@@ -422,7 +437,7 @@ export function createBoardMcpServer(options = {}) {
         return createItem(tdb, boardId, fields, actor);
       }
       if (fields.autonomy != null) assertNotBot(actor, "set a card's autonomy");
-      if (fields.parent_id != null) await assertBotMayWriteCard(tdb, cdb, actor, Number(fields.parent_id));
+      if (fields.parent_id != null) await assertBotMayParentUnder(tdb, cdb, actor, Number(fields.parent_id));
       else fields = { ...fields, project_id: await botCreateProject(cdb, actor, fields.project_id) };
       // A bot's card never falls back to "the instance's only project": a bot
       // with no linked project creates an unassigned card.
@@ -455,7 +470,7 @@ export function createBoardMcpServer(options = {}) {
       // own work unapproved), and re-parenting re-inherits the new parent's
       // project, so the new parent must be writable too.
       if (fields.autonomy != null) assertNotBot(actor, "change a card's autonomy");
-      if (fields.parent_id != null) await assertBotMayWriteCard(tdb, cdb, actor, Number(fields.parent_id));
+      if (fields.parent_id != null) await assertBotMayParentUnder(tdb, cdb, actor, Number(fields.parent_id));
       return dispatchUpdate(tdb, id, fields, actor);
     });
 

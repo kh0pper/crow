@@ -824,11 +824,18 @@ test("bot write scope: a bot changes only its own project's cards or cards assig
   assert.notEqual(otherRow.status, "done");
   assert.equal(otherRow.archived_at, null);
 
-  // A card assigned to the bot from another project stays writable.
-  if (given.id != null) {
-    const g = await call("board_update_item", { id: given.id, description: "working on it" });
-    assert.ok(!g.isError, g.content?.[0]?.text);
-  }
+  // A card assigned to the bot from another project stays writable...
+  assert.ok(given.id != null, "the operator could assign a card to the bot");
+  const g = await call("board_update_item", { id: given.id, description: "working on it" });
+  assert.ok(!g.isError, g.content?.[0]?.text);
+  // ...but it can't be used to pull cards into that project: no subtask under
+  // it, and no re-parenting of the bot's own card under it.
+  const sub = await call("board_create_item", { title: "subtask in the other project", parent_id: given.id });
+  assert.equal(sub.isError, true);
+  assert.match(sub.content[0].text, /forbidden_project/);
+  const pull = await call("board_update_item", { id: own.id, parent_id: given.id });
+  assert.equal(pull.isError, true);
+  assert.match(pull.content[0].text, /forbidden_project/);
 
   // Autonomy is the operator's: a bot can't create an auto card or raise one.
   const autoCreate = await call("board_create_item", { title: "self-approving", autonomy: "auto" });
