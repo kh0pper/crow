@@ -16,6 +16,7 @@ import { readSetting } from "../../settings/registry.js";
 import { TASKS_DB, gatherPeerTools, remoteInvocationOn } from "./data-queries.js";
 import { hasArchivedAtColumn } from "../../../board/util.js";
 import { learningMode } from "./def-adapter.js";
+import { trackerOn, trackerIsCustom } from "./tracker-choice.js";
 import { storedToBashUi } from "./bash-mode.js";
 import { segGroup, scriptJson } from "./ui.js";
 import { activeProjectWhere } from "../../../../shared/shell-items.js";
@@ -57,13 +58,8 @@ async function renderBoard(ctx) {
   }
   const tc = def.tracker_config || {};
   const ttype = tc.type || "kanban";
-  const ttSel = (v) => ttype === v ? " selected" : "";
-  const trackerOpts = trackerDefs.map((td) =>
-    `<option value="${escapeHtml(td.slug)}"${tc.tracker_slug === td.slug ? " selected" : ""}>${escapeHtml(td.display_name)} (${escapeHtml(td.slug)})</option>`
-  ).join("");
-  const cfFields = Array.isArray(tc.context_fields) ? tc.context_fields.join(", ") : "";
-  const qfKey = tc.queue_filter ? Object.keys(tc.queue_filter)[0] || "" : "";
-  const qfVal = tc.queue_filter && qfKey ? tc.queue_filter[qfKey] || "" : "";
+  const isCustom = trackerIsCustom(def);
+  const cardsOn = trackerOn(def);
   let snap = "";
   const pid = def.project_id;
   const boardHref = "/dashboard/bot-board?bot=" + encodeURIComponent(botId);
@@ -124,29 +120,11 @@ async function renderBoard(ctx) {
     `<select name="project_id" class="btb-select"><option value="">${escapeHtml(t("botbuilder.bxNone", lang))}</option>${projOpts}</select></div>` +
     `<p class="btb-hint">${t("botbuilder.hintProjectDetermines", lang)}</p>` +
     `<hr class="btb-divider">` +
-    `<div class="btb-group"><label>${t("botbuilder.labelTrackerType", lang)}</label>` +
-    `<select name="tracker_type" class="btb-select">` +
-    `<option value="kanban"${ttSel("kanban")}>${t("botbuilder.trackerOptKanban", lang)}</option>` +
-    `<option value="task-list"${ttSel("task-list")}>${t("botbuilder.trackerOptTaskList", lang)}</option>` +
-    `<option value="custom"${ttSel("custom")}>${t("botbuilder.trackerOptCustom", lang)}</option>` +
-    `<option value="none"${ttSel("none")}>${t("botbuilder.trackerOptNone", lang)}</option>` +
-    `</select></div>` +
-    `<div id="custom-tracker-fields" style="${ttype !== "custom" ? "display:none" : ""}">` +
-    `<div class="btb-group"><label>${t("botbuilder.labelTrackerSlug", lang)}</label>` +
-    `<select name="tracker_slug" class="btb-select"><option value="">${escapeHtml(t("botbuilder.avSelectBoard", lang))}</option>` +
-    // a custom board that was deleted stays selected (and saved) as itself
-    (tc.tracker_slug && !trackerDefs.some((td) => td.slug === tc.tracker_slug)
-      ? `<option value="${escapeHtml(tc.tracker_slug)}" selected>${escapeHtml(fill(t("botbuilder.avBoardMissing", lang), { slug: tc.tracker_slug }))}</option>` : "") +
-    `${trackerOpts}</select></div>` +
-    `<div class="btb-group"><label>${t("botbuilder.labelContextFields", lang)}</label>` +
-    `<input name="context_fields" value="${escapeHtml(cfFields)}" class="btb-input" placeholder="label, status, action_needed, pir_number"></div>` +
-    `<div class="btb-group"><label>${t("botbuilder.labelQueueFilter", lang)}</label>` +
-    `<input name="queue_filter_key" value="${escapeHtml(qfKey)}" class="btb-input" style="max-width:220px;display:inline-block" placeholder="processing_lease_status"> = ` +
-    `<input name="queue_filter_value" value="${escapeHtml(qfVal)}" class="btb-input" style="max-width:220px;display:inline-block" placeholder="queued"></div>` +
-    `</div>` +
+    (isCustom
+      ? `<p class="btb-hint">${escapeHtml(fill(t("botbuilder.trackerCustomReadonly", lang), { slug: tc.tracker_slug || "?" }))}</p>`
+      : `<label class="btb-checkbox btb-check-row"><input type="checkbox" name="show_cards"${cardsOn ? " checked" : ""}> ${escapeHtml(t("botbuilder.trackerShowCards", lang))}</label>` +
+        `<input type="hidden" name="show_cards__was" value="${cardsOn ? "on" : "off"}">`) +
     snap +
-    `<script>document.querySelector('[name=tracker_type]').onchange=function(){` +
-    `document.getElementById('custom-tracker-fields').style.display=this.value==='custom'?'':'none';}</script>` +
     actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveTrackerConfig", lang)}</button>`) + `</form>` +
     // Tracker definition editor (below the config form)
     (function() {

@@ -442,10 +442,10 @@ test("an unknown bot redirects with error=unknown_bot", async () => {
 test("applyTrackerChoice is what the Edit tab's tracker save writes", async () => {
   const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
   const pid = (await createProjectSpace(db, { name: "Tracker" })).id;
-  const def = { ...BASE_DEF(), tracker_config: { type: "custom", tracker_slug: "old", context_fields: ["a"] } };
+  const def = { ...BASE_DEF(), tracker_config: { type: "none" } };
   await addBot("tab-bot", "Tab Bot", def);
   const res = mkRes();
-  await handleBotBuilderPost({ body: { action: "save_tracker", bot_id: "tab-bot", tracker_type: "kanban", project_id: String(pid) }, headers: {} }, res, { db });
+  await handleBotBuilderPost({ body: { action: "save_tracker", bot_id: "tab-bot", show_cards: "on", project_id: String(pid) }, headers: {} }, res, { db });
   assert.match(res.redirected, /saved=1/);
   const viaTab = JSON.parse((await bot("tab-bot")).definition);
   // The legacy tab save also normalises these containers (unchanged behaviour).

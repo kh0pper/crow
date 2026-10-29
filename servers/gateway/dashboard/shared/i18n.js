@@ -1396,6 +1396,8 @@ export const translations = {
   "botbuilder.hintTrackerColumns": { en: "These become the board columns. Items whose status was removed appear in an \"other\" column.", es: "Estas se convierten en las columnas del tablero. Los elementos cuyo estado fue eliminado aparecen en una columna \"otros\"." },
   "botbuilder.hintSelfLearningFeed": { en: "What the bot learned after its conversations. Learned and improved skills are already in use; suggested or held ones wait for your approval above. &#9888; = wording flagged for your review.", es: "Lo que el bot aprendió tras sus conversaciones. Las habilidades aprendidas y mejoradas ya están en uso; las sugeridas o retenidas esperan tu aprobación arriba. &#9888; = redacción marcada para tu revisión." },
   "botbuilder.btnSendToBot": { en: "Send to bot", es: "Enviar al bot" },
+  "botbuilder.trackerShowCards": { en: "Show this bot its project's cards", es: "Mostrar a este bot las tarjetas de su proyecto" },
+  "botbuilder.trackerCustomReadonly": { en: "Uses a custom tracker ({slug}). Leave as is.", es: "Usa un registro personalizado ({slug}). Déjalo así." },
   "botbuilder.trackerOptKanban": { en: "Kanban board", es: "Tablero Kanban" },
   "botbuilder.trackerOptTaskList": { en: "Task list (flat checklist)", es: "Lista de tareas (lista simple)" },
   "botbuilder.trackerOptCustom": { en: "Custom tracker", es: "Tablero personalizado" },

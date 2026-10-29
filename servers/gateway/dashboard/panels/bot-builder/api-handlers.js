@@ -26,7 +26,7 @@ import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs
 import { worldRootFor, planCarryOver, applyCarryOver, undoCarryOver } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
-import { applyTrackerChoice } from "./tracker-choice.js";
+import { applyTrackerChoice, applyShowCards } from "./tracker-choice.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
 import { guardPolicyForSave } from "./policy-guard.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
@@ -535,12 +535,8 @@ export async function handleBotBuilderPost(req, res, { db }) {
       // M3b: project_id is owned by the column now.
       const next = b.project_id ? Number(b.project_id) : null;
       columnProjectIdUpdate = next;
-      // S3: tracker_config (shared with board_on via applyTrackerChoice)
-      applyTrackerChoice(def, {
-        projectId: next, type: b.tracker_type || "kanban",
-        slug: b.tracker_slug, contextFields: b.context_fields,
-        queueFilterKey: b.queue_filter_key, queueFilterValue: b.queue_filter_value,
-      });
+      // The "show cards" switch (a custom-tracker def is left untouched; see applyShowCards).
+      applyShowCards(def, { projectId: next, on: b.show_cards === "on" || b.show_cards === "true" });
     } else if (tab === "skills") {
       const rawSkills = [].concat(b.skills || []).filter(Boolean);
       def.skills = rawSkills.map((s) => normalizeSkillName(s)).filter(Boolean);

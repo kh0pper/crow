@@ -34,3 +34,31 @@ export function applyTrackerChoice(def, { projectId = null, type = "kanban", slu
   }
   return def;
 }
+
+/** The tracker type a def runs with (tracker.mjs's own default is kanban when the field is unset). */
+export function trackerType(def) {
+  const tc = def && def.tracker_config;
+  return tc && typeof tc === "object" && tc.type ? String(tc.type) : "";
+}
+
+/** The "Show this bot its project's cards" switch: kanban and task-list are On; none, unset and missing are Off. */
+export function trackerOn(def) {
+  const ty = trackerType(def);
+  return ty === "kanban" || ty === "task-list";
+}
+
+/** A custom-tracker bot has no switch: its tracker is left as it is. */
+export function trackerIsCustom(def) {
+  return trackerType(def) === "custom";
+}
+
+/**
+ * Apply the switch. A custom-tracker def is never changed by it (a crafted show_cards is ignored; the
+ * project link alone may move, and tracker_config stays untouched). On keeps task-list when the bot
+ * already is task-list, else kanban; Off writes none. Returns true when it wrote a tracker.
+ */
+export function applyShowCards(def, { projectId = null, on = false } = {}) {
+  if (trackerIsCustom(def)) { def.project_id = projectId; return false; }
+  applyTrackerChoice(def, { projectId, type: on ? (trackerType(def) === "task-list" ? "task-list" : "kanban") : "none" });
+  return true;
+}
