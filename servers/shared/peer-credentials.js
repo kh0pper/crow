@@ -1,8 +1,8 @@
 /**
  * Peer credentials store for cross-host gateway-to-gateway RPC.
  *
- * Each entry in <instance home>/peer-tokens.json (CROW_HOME, default
- * ~/.crow — see PEER_TOKENS_PATH below) binds an instance ID to the
+ * Each entry in <instance home>/secrets/peer-tokens.json (CROW_HOME, default
+ * ~/.crow — see peerTokensFile below) binds an instance ID to the
  * plaintext credentials this node needs to make outbound calls to that
  * peer AND to verify inbound calls from it. Because both sides use the
  * same file shape, pairing is symmetric: a single ceremony provisions
@@ -32,9 +32,9 @@
 
 import {
   existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, renameSync,
-  openSync, writeSync, closeSync, unlinkSync,
+  openSync, writeSync, closeSync, unlinkSync, fsyncSync, readdirSync, lstatSync,
 } from "fs";
-import { resolve, dirname } from "path";
+import { resolve, dirname, basename, join } from "path";
 import { resolveCrowHome } from "./crow-home.js";
 import { randomBytes } from "crypto";
 
@@ -49,18 +49,42 @@ import { randomBytes } from "crypto";
 // module is evaluated BEFORE the gateway's in-body .env loader runs — a
 // module-load constant would silently ignore a CROW_HOME set only in .env,
 // recreating the very wrong-instance failure this resolution exists to stop.
+//
+// The default lives in <CROW_HOME>/secrets (700), the dir the pi sandbox
+// hides from bots behind a tmpfs: a same-uid bot with a shell must not be able
+// to open every pair's bearer and signing key by path. Older versions kept it
+// at <CROW_HOME>/peer-tokens.json; that file is moved here once (at gateway
+// boot, or by the first reader or writer that finds it), and one re-created
+// there later is set aside, never merged (see reconcileLegacyLocked).
 function peerTokensFile() {
   return process.env.CROW_PEER_TOKENS_PATH
-    || resolve(resolveCrowHome(), "peer-tokens.json");
+    || resolve(resolveCrowHome(), "secrets", "peer-tokens.json");
+}
+
+/** The pre-secrets/ location, or null when an override names the store. */
+function legacyPeerTokensFile() {
+  if (process.env.CROW_PEER_TOKENS_PATH) return null;
+  return resolve(resolveCrowHome(), "peer-tokens.json");
 }
 
 function ensureDir() {
   // Anchor on the resolved tokens path: with CROW_PEER_TOKENS_PATH set to an
   // arbitrary location, we must create THAT file's parent, not ~/.crow.
   const dir = dirname(peerTokensFile());
+  if (process.env.CROW_PEER_TOKENS_PATH) {
+    try { mkdirSync(dir, { recursive: true }); } catch {}
+    return;
+  }
+  ensureSecretsDir(dir);
+}
+
+/** Create <CROW_HOME>/secrets 700 (or tighten an existing one we own). */
+export function ensureSecretsDir(dir) {
+  try { mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {}
   try {
-    mkdirSync(dir, { recursive: true });
-  } catch {}
+    const st = statSync(dir);
+    if (st.uid === process.getuid?.() && (st.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
+  } catch { /* best effort; a read-only view (inside the pi sandbox) is fine */ }
 }
 
 /**
@@ -89,10 +113,18 @@ function checkPermissions(path) {
 
 /**
  * Load the peer-tokens.json file. Returns an empty object if missing or
- * if permissions check fails.
+ * if permissions check fails. A store still (or again) at the pre-secrets/
+ * path is first moved (or set aside) under the lock; if that cannot run (a
+ * read-only view) and only the old file exists, it is read where it is.
  */
 export function loadPeerCreds() {
-  const p = peerTokensFile();
+  let p = peerTokensFile();
+  const legacy = legacyPeerTokensFile();
+  if (legacy && existsSync(legacy)) {
+    try { reconcileLegacyIfDue(); } catch (err) { warnOnce(`reconcile:${legacy}`, `[peer-credentials] could not move ${legacy} into ${p}: ${err.message}`); }
+    // Only before this host's first move (the old layout still in force).
+    if (!existsSync(p) && !existsSync(p + MIGRATED_SUFFIX) && existsSync(legacy)) p = legacy;
+  }
   if (!checkPermissions(p)) return {};
   try {
     if (!existsSync(p)) return {};
@@ -101,6 +133,13 @@ export function loadPeerCreds() {
     console.warn(`[peer-credentials] Failed to parse ${p}: ${err.message}`);
     return {};
   }
+}
+
+const _warned = new Set();
+function warnOnce(key, msg) {
+  if (_warned.has(key)) return;
+  _warned.add(key);
+  console.warn(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +192,7 @@ function isStale(lockPath, holder) {
   return !pidAlive(Number(holder.pid));
 }
 
-function acquireStoreLock(lockPath) {
+function acquireStoreLock(lockPath, waitMs = LOCK_WAIT_MS) {
   const started = Date.now();
   const me = { pid: process.pid, ts: Date.now(), boot: bootId(), nonce: randomBytes(6).toString("hex") };
   let holder = null;
@@ -187,8 +226,8 @@ function acquireStoreLock(lockPath) {
       } catch { /* someone else broke it */ }
       continue;
     }
-    if (Date.now() - started > LOCK_WAIT_MS) {
-      throw new Error(`[peer-credentials] could not lock ${lockPath} within ${LOCK_WAIT_MS} ms (holder pid ${holder?.pid ?? "?"})`);
+    if (Date.now() - started > waitMs) {
+      throw new Error(`[peer-credentials] could not lock ${lockPath} within ${waitMs} ms (holder pid ${holder?.pid ?? "?"})`);
     }
     sleepSync(2 + Math.floor(Math.random() * 5));
   }
@@ -212,10 +251,22 @@ function readForWrite(p) {
   return raw.trim() ? JSON.parse(raw) : {};
 }
 
-function writeStore(dest, creds) {
+// Test seam: called at named points of a durable write (crash tests).
+let _fault = null;
+export function _setPeerCredsFaultForTest(fn) { _fault = typeof fn === "function" ? fn : null; }
+
+function fsyncDir(dir) {
+  let fd;
+  try { fd = openSync(dir, "r"); fsyncSync(fd); } catch { /* not supported here */ } finally { if (fd !== undefined) try { closeSync(fd); } catch {} }
+}
+
+/** Write `data` to `dest` (600) through a per-writer tmp file: fsync, rename, fsync the dir. */
+function writeDurable(dest, data) {
   const tmp = `${dest}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify(creds, null, 2), { mode: 0o600 });
+    const fd = openSync(tmp, "wx", 0o600);
+    try { writeSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
+    _fault?.("tmp-written");
     // renameSync is atomic on POSIX for same-filesystem rename
     renameSync(tmp, dest);
   } catch (err) {
@@ -224,6 +275,193 @@ function writeStore(dest, creds) {
   }
   // Belt & suspenders — re-apply mode in case renameSync preserved different perms
   chmodSync(dest, 0o600);
+  fsyncDir(dirname(dest));
+  _fault?.("renamed");
+}
+
+function writeStore(dest, creds) {
+  writeDurable(dest, JSON.stringify(creds, null, 2));
+}
+
+/** Under the store lock, any `<store>.<pid>.<hex>.tmp` belongs to a writer that died mid-write. */
+function removeCrashedTmps(dest) {
+  const prefix = basename(dest) + ".";
+  let names = [];
+  try { names = readdirSync(dirname(dest)); } catch { return; }
+  for (const n of names) {
+    if (n.startsWith(prefix) && /^\d+\.[0-9a-f]{12}\.tmp$/.test(n.slice(prefix.length))) {
+      try { unlinkSync(join(dirname(dest), n)); } catch { /* gone */ }
+    }
+  }
+}
+
+/** Copy `from` to `to` durably, verify the bytes, then remove `from`. */
+function moveVerified(from, to, bytes = readFileSync(from)) {
+  writeDurable(to, bytes);
+  if (!readFileSync(to).equals(bytes)) throw new Error(`[peer-credentials] copy of ${from} to ${to} did not verify; old file kept`);
+  unlinkSync(from);
+  fsyncDir(dirname(from));
+}
+
+/** The PT-1 one-time snapshot and its marker move along with the store. */
+function movePt1Files(legacy, dest) {
+  const prefix = basename(legacy) + ".pre-pt1.";
+  let names = [];
+  try { names = readdirSync(dirname(legacy)); } catch { return; }
+  for (const n of names) {
+    if (!n.startsWith(prefix)) continue;
+    const from = join(dirname(legacy), n);
+    const to = `${dest}.pre-pt1.${n.slice(prefix.length)}`;
+    try {
+      const bytes = readFileSync(from);
+      if (existsSync(to)) {
+        if (readFileSync(to).equals(bytes) || n === basename(legacy) + ".pre-pt1.done") { unlinkSync(from); continue; }
+        console.warn(`[peer-credentials] ${from} and ${to} both exist and differ; both kept (shred the old one once verified)`);
+        continue;
+      }
+      moveVerified(from, to, bytes);
+    } catch (err) {
+      console.warn(`[peer-credentials] could not move ${from}: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * Move a single-writer secret file (the peer-relay token) from its old path
+ * into the secrets dir: copy (600, fsync), verify, remove the old one. When
+ * both exist the new one wins; the old one is removed only when identical.
+ */
+export function migrateLegacySecretFile(from, to) {
+  if (!existsSync(from)) return { action: "none" };
+  ensureSecretsDir(dirname(to));
+  removeCrashedTmps(to);
+  const bytes = readFileSync(from);
+  if (!existsSync(to)) {
+    moveVerified(from, to, bytes);
+    console.log(`[secrets] moved ${from} -> ${to} (mode 600, hidden from bot sandboxes)`);
+    return { action: "moved" };
+  }
+  if (readFileSync(to).equals(bytes)) {
+    unlinkSync(from);
+    return { action: "removed-identical" };
+  }
+  console.error(`[secrets] WARNING: both ${from} and ${to} exist and differ; using ${to} and keeping both. Shred ${from} once checked.`);
+  return { action: "kept-both" };
+}
+
+const MIGRATED_SUFFIX = ".migrated";
+
+/**
+ * Once this host is on the secrets/ layout (the marker beside the store), a
+ * file at the old path is never adopted: a bot shell inside the sandbox can
+ * still WRITE there, so merging it would let a bot plant a peer key in the
+ * store it cannot read. It is an older process's write (or a plant): saved
+ * aside in the hidden dir for the operator, removed from the old path, and
+ * logged with the peer ids it names (never a key).
+ */
+function setAsideLegacy(legacy, dest, bytes) {
+  const aside = `${dest}.legacy-${Date.now()}`;
+  writeDurable(aside, bytes);
+  unlinkSync(legacy);
+  let ids = "?";
+  try { const o = JSON.parse(bytes.toString("utf-8") || "{}"); ids = Object.keys(o || {}).join(", ") || "none"; } catch { ids = "unparseable"; }
+  console.error(`[peer-credentials] WARNING: ${legacy} was re-created after the store moved to ${dest} (an older Crow process, or a bot). ` +
+    `It was NOT merged; saved at ${aside} (mode 600, peers: ${ids}). Restart any older Crow process; re-pair a peer it paired, or merge by hand, then shred ${aside}.`);
+  return { action: "set-aside", aside };
+}
+
+function writeMarker(dest) {
+  const marker = dest + MIGRATED_SUFFIX;
+  if (!existsSync(marker)) writeFileSync(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
+}
+
+/**
+ * With the store lock held: move a store at the pre-secrets/ path, or set
+ * aside one re-created there later. Takes that path's own lock too, so an
+ * older writer's read-modify-write there finishes first (older code only
+ * knows that lock; new code always takes the store lock first, so the two
+ * never deadlock).
+ */
+function reconcileLegacyLocked(dest, waitMs = LOCK_WAIT_MS) {
+  const legacy = legacyPeerTokensFile();
+  if (!legacy) return { action: "none" };
+  if (!existsSync(legacy)) {
+    // First contact on the new layout: from now on the old path is untrusted.
+    if (existsSync(dirname(dest))) { try { writeMarker(dest); } catch { /* read-only view */ } }
+    return { action: "none" };
+  }
+  const legacyLock = `${legacy}.lock`;
+  const lme = acquireStoreLock(legacyLock, waitMs);
+  try {
+    if (!existsSync(legacy)) return { action: "none" };
+    removeCrashedTmps(dest);
+    const st = lstatSync(legacy);
+    if (!st.isFile() || st.uid !== process.getuid?.()) {
+      warnOnce(`nonfile:${legacy}`, `[peer-credentials] WARNING: ${legacy} is not a regular file of this user; not moved or read. Remove it by hand.`);
+      return { action: "kept-both" };
+    }
+    const migrated = existsSync(dest + MIGRATED_SUFFIX);
+    const oldBytes = readFileSync(legacy);
+    if (!existsSync(dest)) {
+      if (migrated) return setAsideLegacy(legacy, dest, oldBytes);
+      writeDurable(dest, oldBytes);
+      if (!readFileSync(dest).equals(oldBytes)) throw new Error(`[peer-credentials] copy of ${legacy} to ${dest} did not verify; old file kept`);
+      writeMarker(dest);
+      unlinkSync(legacy);
+      fsyncDir(dirname(legacy));
+      movePt1Files(legacy, dest);
+      console.log(`[peer-credentials] moved the peer credential store ${legacy} -> ${dest} (mode 600, hidden from bot sandboxes)`);
+      return { action: "moved" };
+    }
+    if (readFileSync(dest).equals(oldBytes)) {
+      writeMarker(dest);
+      unlinkSync(legacy);
+      movePt1Files(legacy, dest);
+      console.log(`[peer-credentials] removed ${legacy}: identical to ${dest}`);
+      return { action: "removed-identical" };
+    }
+    if (migrated) return setAsideLegacy(legacy, dest, oldBytes);
+    console.error(`[peer-credentials] WARNING: both ${legacy} and ${dest} exist and differ; using ${dest} and keeping both. ` +
+      `Compare them, merge any peer you still need into ${dest}, then shred ${legacy}.`);
+    return { action: "kept-both" };
+  } finally {
+    releaseStoreLock(legacyLock, lme);
+  }
+}
+
+/** Take the store lock and reconcile the old path. */
+function reconcileLegacy(waitMs = LOCK_WAIT_MS) {
+  ensureDir();
+  const dest = peerTokensFile();
+  const lockPath = `${dest}.lock`;
+  const me = acquireStoreLock(lockPath, waitMs);
+  try { return reconcileLegacyLocked(dest, waitMs); } finally { releaseStoreLock(lockPath, me); }
+}
+
+// Readers (a hot path) wait briefly for the locks, and a state they could not
+// settle (kept both, a busy or planted lock) is retried at most once a minute.
+const READER_LOCK_WAIT_MS = 250;
+const READER_RETRY_MS = 60_000;
+const _unsettledAt = new Map();
+function reconcileLegacyIfDue() {
+  const legacy = legacyPeerTokensFile();
+  const at = _unsettledAt.get(legacy);
+  if (at !== undefined && Date.now() - at < READER_RETRY_MS) return { action: "kept-both" };
+  let r;
+  try { r = reconcileLegacy(READER_LOCK_WAIT_MS); } catch (err) { _unsettledAt.set(legacy, Date.now()); throw err; }
+  if (r.action === "kept-both") _unsettledAt.set(legacy, Date.now()); else _unsettledAt.delete(legacy);
+  return r;
+}
+
+/**
+ * The one-time boot migration (the gateway runs it before the PT-1 sweeper).
+ * Idempotent; also run lazily by every reader and writer that finds a store
+ * at the old path. Returns { action: "none" | "moved" | "removed-identical"
+ * | "kept-both" | "set-aside" }.
+ */
+export function migratePeerCredsStore() {
+  if (!legacyPeerTokensFile()) return { action: "none" };
+  return reconcileLegacy();
 }
 
 /**
@@ -238,6 +476,14 @@ export function updatePeerCreds(mutator) {
   const lockPath = `${dest}.lock`;
   const me = acquireStoreLock(lockPath);
   try {
+    // A store still at the old path is moved first (or one re-created there
+    // set aside), so this write can never strand it. After the move a failure
+    // there (e.g. a lock a bot planted beside the old path) never blocks a
+    // write: the old path holds nothing the store needs.
+    try { reconcileLegacyLocked(dest); } catch (err) {
+      if (!existsSync(dest + MIGRATED_SUFFIX)) throw err;
+      warnOnce(`reconcile-w:${dest}`, `[peer-credentials] could not clear the old store path: ${err.message}`);
+    }
     const all = readForWrite(dest);
     const out = mutator(all);
     if (!(out && out.write === false)) writeStore(dest, all);

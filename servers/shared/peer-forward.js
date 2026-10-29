@@ -2,7 +2,7 @@
  * Forwarder for cross-host RPC.
  *
  * Given a target instance ID, resolves its gateway URL from the instance
- * registry, loads peer credentials from ~/.crow/peer-tokens.json, signs
+ * registry, loads peer credentials from <CROW_HOME>/secrets/peer-tokens.json, signs
  * the request, and fires it. Returns the response JSON + metadata.
  *
  * Trust boundary:

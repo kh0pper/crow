@@ -103,6 +103,15 @@ function touchesCrowDb(block) {
 }
 
 // ---- A5: extension addon servers -> minted per-bot pi blocks ---------------
+/**
+ * This instance's peer-relay token, read here (outside the pi sandbox): its
+ * file is in <crowHome>/secrets, which the sandbox hides from pi and every
+ * child it spawns, the remote proxy included. Empty when not minted yet.
+ */
+function readRelayToken(crowHome) {
+  try { return readFileSync(join(crowHome, "secrets", "peer-relay-token"), "utf8").trim(); } catch { return ""; }
+}
+
 // A bot may select an MCP server that lives in <crowHome>/mcp-addons.json but
 // is ABSENT from the canonical ~/.pi/agent/mcp.json (e.g. texas-gov-data,
 // bots-sql-mcp, tasks on MPA). pi-lab's additive merge (CONFIRMED against the
@@ -389,7 +398,7 @@ export function writeBotMcp(def, opts = {}) {
       proxyPath,
       node,
       relayBaseUrl: `http://127.0.0.1:${gatewayPort}`,
-      relayTokenPath: join(crowHome, "peer-relay-token"),
+      relayToken: readRelayToken(crowHome),
       actor,
     });
     // Like every other stdio block, the proxy carries the bot's actor env.

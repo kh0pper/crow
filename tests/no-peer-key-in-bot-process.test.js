@@ -132,7 +132,7 @@ const servers = [];
 after(async () => {
   if (child && child.exitCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
   for (const s of servers) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r())); }
-  try { chmodSync(join(scratch, "crowhome", "peer-tokens.json"), 0o600); } catch {}
+  try { chmodSync(join(scratch, "crowhome", "secrets", "peer-tokens.json"), 0o600); } catch {}
   rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -160,9 +160,10 @@ test("runtime: no canary in the blocks, the spawn env, or the running proxy chil
   const sessionDir = join(scratch, "session");
   mkdirSync(crowHome, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
-  const store = join(crowHome, "peer-tokens.json");
+  mkdirSync(join(crowHome, "secrets"), { recursive: true, mode: 0o700 });
+  const store = join(crowHome, "secrets", "peer-tokens.json");
   writeFileSync(store, JSON.stringify({ [PEER]: { auth_token: CANARY_TOKEN, signing_key: CANARY_KEY } }), { mode: 0o600 });
-  writeFileSync(join(crowHome, "peer-relay-token"), RELAY_TOKEN, { mode: 0o600 });
+  writeFileSync(join(crowHome, "secrets", "peer-relay-token"), RELAY_TOKEN, { mode: 0o600 });
   initGatewayActorKey();
 
   const relayed = [];

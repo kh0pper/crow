@@ -76,7 +76,7 @@ test("round-trip through the registered server: schema advertised + args forward
 // Item 46 PR-B (B4): the default client talks to the gateway's relay only.
 test("default client: missing relay env → empty tool list, no throw", async () => {
   const saved = {};
-  for (const k of ["CROW_REMOTE_RELAY_URL", "CROW_REMOTE_RELAY_TOKEN_PATH"]) { saved[k] = process.env[k]; delete process.env[k]; }
+  for (const k of ["CROW_REMOTE_RELAY_URL", "CROW_REMOTE_RELAY_TOKEN"]) { saved[k] = process.env[k]; delete process.env[k]; }
   try {
     const { listTools } = await buildRemoteProxyServer();
     assert.deepEqual((await listTools()).tools, []);
@@ -85,15 +85,15 @@ test("default client: missing relay env → empty tool list, no throw", async ()
   }
 });
 
-test("default client: an unreadable relay token file → empty tool list, no throw", async () => {
-  const saved = { u: process.env.CROW_REMOTE_RELAY_URL, p: process.env.CROW_REMOTE_RELAY_TOKEN_PATH };
+test("default client: an empty relay token → empty tool list, no throw", async () => {
+  const saved = { u: process.env.CROW_REMOTE_RELAY_URL, p: process.env.CROW_REMOTE_RELAY_TOKEN };
   process.env.CROW_REMOTE_RELAY_URL = "http://127.0.0.1:9/peer-relay/x/memory/mcp";
-  process.env.CROW_REMOTE_RELAY_TOKEN_PATH = "/nonexistent/peer-relay-token";
+  process.env.CROW_REMOTE_RELAY_TOKEN = "  ";
   try {
     const { listTools } = await buildRemoteProxyServer();
     assert.deepEqual((await listTools()).tools, []);
   } finally {
     if (saved.u === undefined) delete process.env.CROW_REMOTE_RELAY_URL; else process.env.CROW_REMOTE_RELAY_URL = saved.u;
-    if (saved.p === undefined) delete process.env.CROW_REMOTE_RELAY_TOKEN_PATH; else process.env.CROW_REMOTE_RELAY_TOKEN_PATH = saved.p;
+    if (saved.p === undefined) delete process.env.CROW_REMOTE_RELAY_TOKEN; else process.env.CROW_REMOTE_RELAY_TOKEN = saved.p;
   }
 });

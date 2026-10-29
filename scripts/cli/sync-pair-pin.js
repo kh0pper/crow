@@ -6,7 +6,9 @@
  * the owner clears the pin here and the peer syncs unbound again until its
  * next bound handshake re-pins it.
  *
- * Usage (this instance's env: CROW_DATA_DIR / CROW_DB_PATH, CROW_PEER_TOKENS_PATH):
+ * Usage (this instance's env: CROW_HOME, CROW_DATA_DIR / CROW_DB_PATH, CROW_PEER_TOKENS_PATH;
+ * the pair key is read from <CROW_HOME>/secrets/peer-tokens.json unless
+ * CROW_PEER_TOKENS_PATH names the store):
  *   node scripts/cli/sync-pair-pin.js --list
  *   node scripts/cli/sync-pair-pin.js --fingerprint <peer-id>
  *   node scripts/cli/sync-pair-pin.js --clear <peer-id>
@@ -27,6 +29,7 @@ import { defaultPairKey, pairSubkey } from "../../servers/shared/sync-pair-bindi
 import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../../servers/shared/self-dial-address.js";
 import { createNotification } from "../../servers/shared/notifications.js";
 import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
+import { peerTokensPath } from "../../servers/shared/peer-credentials.js";
 
 const USAGE = `Usage:
   node scripts/cli/sync-pair-pin.js --list
@@ -127,7 +130,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, ui
   else if (uid !== owner) return fail(`refusing: run this as the owner of ${dbPath} (uid ${owner}), not uid ${uid} (a sudo run would leave root-owned -wal/-shm files)`);
 
   // The credential store and data dir resolve from process.env; apply ours for the call.
-  const keys = ["CROW_DATA_DIR", "CROW_DB_PATH", "CROW_PEER_TOKENS_PATH"];
+  const keys = ["CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_PEER_TOKENS_PATH"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   for (const k of keys) { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
   let db;
@@ -140,7 +143,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, ui
     if (!row) return fail(`${JSON.stringify(String(args.peerId ?? "").slice(0, 60))} is not a known peer of this instance`);
     if (args.act === "fingerprint") {
       const fp = fingerprint(row.id);
-      if (!fp) return fail(`no pair key for ${row.id} in the credential store`);
+      if (!fp) return fail(`no pair key for ${row.id} in the credential store (${peerTokensPath()})`);
       out(`${fp}\n`);
       return 0;
     }

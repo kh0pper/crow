@@ -10,7 +10,7 @@
  *
  * Both modes:
  *   - Register the peer in this node's crow_instances table (trusted=1).
- *   - Store { auth_token, signing_key } in ~/.crow/peer-tokens.json.
+ *   - Store { auth_token, signing_key } in <CROW_HOME>/secrets/peer-tokens.json.
  *
  * Usage:
  *   node scripts/cli/instance-pair.js --generate-otc            (on the PEER)

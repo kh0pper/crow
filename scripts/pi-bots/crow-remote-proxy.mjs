@@ -13,13 +13,13 @@
  * docs/architecture/instances.md), so this process never talks to the peer. It
  * connects to its own gateway's loopback relay (CROW_REMOTE_RELAY_URL,
  * servers/gateway/routes/peer-relay.js) with the path-scoped relay token read
- * from CROW_REMOTE_RELAY_TOKEN_PATH and the X-Crow-Actor-* headers the gateway
+ * from CROW_REMOTE_RELAY_TOKEN (the bot engine reads the token file outside
+ * the sandbox; inside, its secrets dir is hidden) and the X-Crow-Actor-* headers the gateway
  * signed for this bot and its session (CROW_REMOTE_ACTOR_*). The gateway verifies the
  * bot, re-checks its selection, and forwards with the peer bearer, signing
  * the tools/call itself. This module must not import the peer credential
  * store, directly or transitively (tests/no-peer-key-in-bot-process.test.js).
  */
-import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -38,11 +38,8 @@ const ACTOR_HEADERS = {
 /** Real client factory: a StreamableHTTP client to this gateway's peer relay. */
 async function defaultClientFactory() {
   const relayUrl = process.env.CROW_REMOTE_RELAY_URL || "";
-  const tokenPath = process.env.CROW_REMOTE_RELAY_TOKEN_PATH || "";
-  if (!relayUrl || !tokenPath) throw new Error("crow-remote-proxy: missing CROW_REMOTE_RELAY_* env");
-  let token = "";
-  try { token = readFileSync(tokenPath, "utf8").trim(); } catch { token = ""; }
-  if (!token) throw new Error("crow-remote-proxy: relay token unreadable");
+  const token = String(process.env.CROW_REMOTE_RELAY_TOKEN || "").trim();
+  if (!relayUrl || !token) throw new Error("crow-remote-proxy: missing CROW_REMOTE_RELAY_* env");
   const headers = { Authorization: `Bearer ${token}` };
   for (const [envName, headerName] of Object.entries(ACTOR_HEADERS)) {
     const v = process.env[envName];

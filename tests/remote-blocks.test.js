@@ -35,7 +35,7 @@ test("mount map covers the five core capabilities only", () => {
   assert.equal(REMOTE_CANON_MOUNT["texas-gov-data"], undefined); // addon — deferred
 });
 
-const RELAY = { relayBaseUrl: "http://127.0.0.1:3001", relayTokenPath: "/home/alex/.crow/peer-relay-token" };
+const RELAY = { relayBaseUrl: "http://127.0.0.1:3001", relayToken: "relay-token-fixture" };
 
 test("mintRemoteBlocks mints one stdio block per (instance,capability) aimed at the gateway relay; no peer URL, token or key", () => {
   const def = { tools: { remote_mcp: ["abc12345deadbeef::crow-memory"] } };
@@ -48,7 +48,7 @@ test("mintRemoteBlocks mints one stdio block per (instance,capability) aimed at 
   assert.deepEqual(b.args, ["/repo/scripts/pi-bots/crow-remote-proxy.mjs"]);
   assert.deepEqual(b.env, {
     CROW_REMOTE_RELAY_URL: "http://127.0.0.1:3001/peer-relay/abc12345deadbeef/memory/mcp",
-    CROW_REMOTE_RELAY_TOKEN_PATH: "/home/alex/.crow/peer-relay-token",
+    CROW_REMOTE_RELAY_TOKEN: "relay-token-fixture",
   }, "exactly the relay env: the peer's URL never reaches the bot");
   assert.ok(!JSON.stringify(b).includes("bravo.example"));
   assert.ok(!JSON.stringify(b).includes("auth_token"));

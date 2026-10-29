@@ -71,14 +71,15 @@ export function remoteServersForBot(def) {
  * @param {string} o.proxyPath  absolute path to crow-remote-proxy.mjs
  * @param {string} o.node       absolute node binary
  * @param {string} o.relayBaseUrl   this gateway's loopback base, e.g. http://127.0.0.1:3001
- * @param {string} o.relayTokenPath absolute path to this instance's peer-relay-token
+ * @param {string} o.relayToken     this instance's peer-relay token (the value: its file lives in
+ *   the secrets dir the pi sandbox hides, so the proxy, which runs inside, cannot open it)
  * @param {{botId:string, sessionId?:string|number, threadId?:string, gatewayType?:string}} [o.actor]
  *   the bot this turn runs as and its bot_sessions.id; its session-bound relay
  *   signature is added when this process holds the per-boot actor key (or its
  *   gateway presigned this exact tuple, actor-sig.mjs presignActors)
  * @returns {{ blocks: Record<string,object>, warnings: string[] }}
  */
-export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, relayBaseUrl, relayTokenPath, actor } = {}) {
+export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, relayBaseUrl, relayToken, actor } = {}) {
   const blocks = {};
   const warnings = [];
   const base = typeof relayBaseUrl === "string" ? relayBaseUrl.replace(/\/+$/, "") : "";
@@ -93,7 +94,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, r
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — unknown/revoked peer or no gateway_url for instance '${instanceId}'`);
       continue;
     }
-    if (!base || !relayTokenPath) {
+    if (!base || !relayToken) {
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — no gateway relay configured`);
       continue;
     }
@@ -104,7 +105,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, r
     }
     const env = {
       CROW_REMOTE_RELAY_URL: `${base}/peer-relay/${encodeURIComponent(instanceId)}${mount}/mcp`,
-      CROW_REMOTE_RELAY_TOKEN_PATH: relayTokenPath,
+      CROW_REMOTE_RELAY_TOKEN: relayToken,
     };
     if (actor && actor.botId != null && String(actor.botId) !== "") {
       env.CROW_REMOTE_ACTOR_ID = String(actor.botId);

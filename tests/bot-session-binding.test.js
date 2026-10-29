@@ -38,7 +38,8 @@ writeFileSync(process.env.PI_MODELS_JSON, JSON.stringify({ providers: { stub: { 
 process.env.HOME = join(dir, "fakehome");
 mkdirSync(join(process.env.HOME, ".pi", "agent"), { recursive: true });
 writeFileSync(join(process.env.HOME, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }));
-writeFileSync(join(process.env.CROW_HOME, "peer-relay-token"), "relay-token-x", { mode: 0o600 });
+mkdirSync(join(process.env.CROW_HOME, "secrets"), { recursive: true, mode: 0o700 });
+writeFileSync(join(process.env.CROW_HOME, "secrets", "peer-relay-token"), "relay-token-x", { mode: 0o600 });
 
 const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");

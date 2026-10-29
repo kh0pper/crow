@@ -8,8 +8,9 @@
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "../shared/crow-home.js";
-import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { ensureSecretsDir, migrateLegacySecretFile } from "../shared/peer-credentials.js";
 import {
   readSetting, writeSetting, deleteLocalSetting,
 } from "./dashboard/settings/registry.js";
@@ -236,7 +237,11 @@ export async function ensureArtifactsToken(db) {
 }
 
 // Peer-relay token (item 46 PR-B): same shape as the artifacts token (hash in
-// a local-scope setting, raw value in <crowHome>/peer-relay-token 0600). A pi
+// a local-scope setting, raw value in <crowHome>/secrets/peer-relay-token 600,
+// in the 700 dir the pi sandbox hides from bots; older versions kept it at
+// <crowHome>/peer-relay-token and it is moved at boot). The bot engine reads
+// it outside the sandbox and hands its VALUE to the remote proxy in the
+// proxy's block env, never a path a bot shell could open. A pi
 // bot's remote proxy presents it, with its signed actor headers, to the
 // loopback relay at /peer-relay/... (routes/peer-relay.js), which validates it
 // itself. It is accepted NOWHERE else: localTokenAuthMiddleware never consults
@@ -244,6 +249,9 @@ export async function ensureArtifactsToken(db) {
 const PEER_RELAY_HASH_KEY = "mcp_peer_relay_token_hash";
 const PEER_RELAY_CREATED_KEY = "mcp_peer_relay_token_created";
 export function peerRelayTokenPath() {
+  return join(crowHome(), "secrets", "peer-relay-token");
+}
+function legacyPeerRelayTokenPath() {
   return join(crowHome(), "peer-relay-token");
 }
 
@@ -252,7 +260,7 @@ export async function generatePeerRelayToken(db) {
   await writeSetting(db, PEER_RELAY_HASH_KEY, sha256Hex(token), { scope: "local" });
   await writeSetting(db, PEER_RELAY_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = peerRelayTokenPath();
-  mkdirSync(dirname(path), { recursive: true });
+  ensureSecretsDir(dirname(path));
   writeFileSync(path, token, { mode: 0o600 });
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
@@ -270,6 +278,19 @@ export async function validatePeerRelayToken(db, token) {
 
 export async function ensurePeerRelayToken(db) {
   const hash = await readSetting(db, PEER_RELAY_HASH_KEY);
+  // An older version's token at <crowHome>/peer-relay-token moves into
+  // secrets/ only when it is the minted one (its hash matches): a bot shell
+  // can write the old path, so anything else there is discarded.
+  const legacy = legacyPeerRelayTokenPath();
+  try {
+    if (existsSync(legacy)) {
+      const tok = readFileSync(legacy, "utf8").trim();
+      if (hash && tok && sha256Hex(tok) === hash) migrateLegacySecretFile(legacy, peerRelayTokenPath());
+      else { unlinkSync(legacy); console.warn(`[gateway] discarded ${legacy}: not this instance's minted relay token`); }
+    }
+  } catch (err) {
+    console.warn(`[gateway] could not move the peer-relay token into secrets/: ${err.message}`);
+  }
   if (hash && existsSync(peerRelayTokenPath())) return { minted: false };
   await generatePeerRelayToken(db);
   return { minted: true };
