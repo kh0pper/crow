@@ -111,7 +111,8 @@ async function retirePending(ctx) {
  *    A phone_open from the insert (a race) re-runs openPhone once, which moves out a row that has just expired,
  *    and retries the insert once; only a second phone_open is already-sent [rv3 m4].
  *  - "Sent" only when the push went out [rv1 C5]: a notify that returns null (the type is off) or throws moves
- *    the row to failed "not_sent", and Crow says it could not send it.
+ *    the row to failed "not_sent" (markNotSent). Null says the alerts are off (handoff_phone_off); a throw says
+ *    the phone could not be reached just now (handoff_phone_failed).
  */
 async function proposeToPhone(ctx, task, target, lang) {
   const { core, db, device, transcript } = ctx;
@@ -136,16 +137,33 @@ async function proposeToPhone(ctx, task, target, lang) {
   const name = typeof device.name === "string" ? device.name.trim() : "";
   const display = name || voiceLine("handoff_display_fallback", lang);
   let n = null;
+  let threw = false;
   try {
     n = await core.notify(db, {
       type: "attention", priority: "high", title: voiceLine("handoff_phone_title", lang, { display, bot: target.name }),
       body: task, action_url: phoneConfirmPath(id), source: "crow-voice",
     });
-  } catch (err) { (ctx.log || console.warn)(`[voice-handoff] ${id}: phone notification failed (${err?.message || err})`); }
+  } catch (err) { threw = true; (ctx.log || console.warn)(`[voice-handoff] ${id}: phone notification failed (${err?.message || err})`); }
   if (n != null) return done("sent_to_phone", voiceLine("handoff_sent_to_phone", lang));
-  try { await store.transition(db, id, ["awaiting_phone"], "failed", { detail: "not_sent" }); }
-  catch (err) { (ctx.log || console.warn)(`[voice-handoff] ${id}: could not mark not_sent (${err?.message || err})`); }
-  return done("phone_off", voiceLine("handoff_phone_off", lang));
+  await markNotSent(ctx, id);
+  // A null is the type turned off (the operator can fix it); a throw is a passing failure: try again soon.
+  return threw ? done("phone_failed", voiceLine("handoff_phone_failed", lang)) : done("phone_off", voiceLine("handoff_phone_off", lang));
+}
+
+/**
+ * The push did not go out: awaiting_phone → failed "not_sent", retried once. A row left awaiting_phone would
+ * answer every next ask with "already sent" for the whole 30 min, so when both tries throw the row is moved to
+ * expired instead (its own try); only that failing too is left to the sweep, and logged.
+ */
+async function markNotSent(ctx, id) {
+  const { store } = ctx.core;
+  const log = ctx.log || console.warn;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try { await store.transition(ctx.db, id, ["awaiting_phone"], "failed", { detail: "not_sent" }); return; }
+    catch (err) { log(`[voice-handoff] ${id}: could not mark not_sent, try ${attempt} (${err?.message || err})`); }
+  }
+  try { await store.transition(ctx.db, id, ["awaiting_phone"], "expired", { detail: "not_sent" }); }
+  catch (err) { log(`[voice-handoff] ${id}: could not expire the unsent row (${err?.message || err})`); }
 }
 
 /**
@@ -153,7 +171,7 @@ async function proposeToPhone(ctx, task, target, lang) {
  * entry 3.8's yes reads, and the server's spoken proposal. On a kiosk, or any surface but a phone or the
  * glasses, the proposal goes to the phone instead (proposeToPhone), for the tool and the "which" answer alike.
  * ctx: { core, pending, db, device, surface, lang, transcript, candidates }. botId must be one of the candidates.
- * → { ok: true, final: true, effect: false, code: "proposed" | "sent_to_phone" | "phone_off" | "already_sent", say }
+ * → { ok: true, final: true, effect: false, code: "proposed" | "sent_to_phone" | "phone_off" | "phone_failed" | "already_sent", say }
  */
 export async function proposeHandoff(ctx, task, botId) {
   const { core, pending, db, device, transcript, candidates } = ctx;

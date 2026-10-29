@@ -67,6 +67,8 @@ export const VOICE_LINES = Object.freeze({
     // "sent" only once the push really went out [rv1 C5]; one open phone confirmation per kiosk [rv2 m4].
     handoff_sent_to_phone: "I've sent that to your phone to confirm.",
     handoff_phone_off: "I couldn't send that to your phone, because Crow's alerts are turned off there. Ask me from your phone instead.",
+    // The push itself failed (an error, not the alerts turned off): a passing failure, so try again.
+    handoff_phone_failed: "I couldn't reach your phone just now — try again in a moment.",
     handoff_already_sent: "I've already sent one to your phone. Confirm or decline that first.",
     // The push's title; {display} is the kiosk's name, or handoff_display_fallback when it has none.
     handoff_phone_title: "Crow on {display}: hand a task to {bot}?",
@@ -123,6 +125,7 @@ export const VOICE_LINES = Object.freeze({
     handoff_already: "Eso ya lo tiene {bot}.",
     handoff_sent_to_phone: "Te lo he enviado al teléfono para que lo confirmes.",
     handoff_phone_off: "No pude enviártelo al teléfono porque las alertas de Crow están desactivadas. Pídemelo desde el teléfono.",
+    handoff_phone_failed: "No pude avisar a tu teléfono ahora mismo; inténtalo de nuevo en un momento.",
     handoff_already_sent: "Ya te envié una al teléfono. Confírmala o recházala primero.",
     handoff_phone_title: "Crow en {display}: ¿pasarle una tarea a {bot}?",
     handoff_display_fallback: "el quiosco",

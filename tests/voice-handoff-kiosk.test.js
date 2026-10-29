@@ -43,6 +43,7 @@ const TASK = "research radio history and write it up";
 const SENT = "I've sent that to your phone to confirm.";
 const OFF = "I couldn't send that to your phone, because Crow's alerts are turned off there. Ask me from your phone instead.";
 const ALREADY = "I've already sent one to your phone. Confirm or decline that first.";
+const FAILED = "I couldn't reach your phone just now — try again in a moment.";
 const says = (t) => [{ type: "content_delta", text: t }, { type: "done" }];
 const call = (args, id = "h1", name = HANDOFF_TOOL_NAME) => [{ type: "tool_call", id, name, arguments: args }, { type: "done" }];
 
@@ -69,14 +70,14 @@ function freshDb(bots) {
  * The fake turn with the real hand-off wired as defaultVoiceDeps wires it, on a kiosk named "Kitchen".
  * notify: "ok" (a notification id), "off" (null: the type is turned off) or "throw".
  */
-function setup({ bots = [WRITER, HELPER], rounds, notify = "ok", deviceName = "Kitchen", over = {} } = {}) {
+function setup({ bots = [WRITER, HELPER], rounds, notify = "ok", deviceName = "Kitchen", over = {}, wrapStore = (x) => x } = {}) {
   const h = harness({ bot: CROW, chatTools: [], rounds, ...over });
   const db = freshDb(bots);
   const bus = new EventEmitter();
   const pending = createPendingStore({ now: h.c.now });
   const pushes = [];
   const confirms = [];
-  const store = createHandoffStore({ now: h.c.now });
+  const store = wrapStore(createHandoffStore({ now: h.c.now }));
   const core = createHandoffCore({
     store,
     summaries: createSummaryCache({ bus, now: h.c.now }),
@@ -143,14 +144,61 @@ test("notifications off: Crow says so, and the row is failed not_sent", async ()
   assert.equal(s.pending.get("kiosk-1"), null);
 });
 
-test("a notify that throws is the same as notifications off: failed not_sent, the phone-off line, logged", async () => {
+test("a notify that throws: failed not_sent, the generic could-not-reach line (not phone-off), logged", async () => {
   const s = setup({ notify: "throw", rounds: [call({ task: TASK, bot: "writer" })] });
   const r = await s.turn(ASK);
   assert.equal(r.failed, null);
-  assert.deepEqual(s.h.calls.spoken, [OFF]);
+  assert.deepEqual(s.h.calls.spoken, [FAILED]);
   const [row] = await s.rows();
   assert.deepEqual([row.status, row.detail], ["failed", "not_sent"]);
   assert.ok(s.h.calls.logs.some((m) => /phone notification failed \(db locked\)/.test(m)));
+  const es = setup({ notify: "throw", rounds: [call({ task: "investigar la radio", bot: "writer" })] });
+  await es.turn("pídele a writer que investigue la radio", { lang: "es" });
+  assert.deepEqual(es.h.calls.spoken, ["No pude avisar a tu teléfono ahora mismo; inténtalo de nuevo en un momento."]);
+  assert.ok(VOICE_LINES.en.handoff_phone_failed && VOICE_LINES.es.handoff_phone_failed, "in en and es");
+});
+
+/** A store whose awaiting_phone → `to` transitions throw the first `times[to]` times. */
+const flakyTransitions = (times, seen) => (store) => ({
+  ...store,
+  async transition(db, id, from, to, ...rest) {
+    seen.push(to);
+    if ((times[to] ?? 0) > 0) { times[to]--; throw new Error("busy " + to); }
+    return store.transition(db, id, from, to, ...rest);
+  },
+});
+
+test("a not_sent mark that throws once is retried, and the row is failed", async () => {
+  const seen = [];
+  const s = setup({ notify: "off", wrapStore: flakyTransitions({ failed: 1 }, seen), rounds: [call({ task: TASK, bot: "writer" })] });
+  await s.turn(ASK);
+  assert.deepEqual(s.h.calls.spoken, [OFF]);
+  assert.deepEqual(seen, ["failed", "failed"]);
+  const [row] = await s.rows();
+  assert.deepEqual([row.status, row.detail], ["failed", "not_sent"]);
+  assert.ok(s.h.calls.logs.some((m) => /could not mark not_sent, try 1 \(busy failed\)/.test(m)));
+});
+
+test("a not_sent mark that throws twice expires the row, so the next ask is sent, not already-sent", async () => {
+  const seen = [];
+  const s = setup({ notify: "throw", wrapStore: flakyTransitions({ failed: 2 }, seen), rounds: [call({ task: TASK, bot: "writer" })] });
+  await s.turn(ASK);
+  assert.deepEqual(s.h.calls.spoken, [FAILED]);
+  assert.deepEqual(seen, ["failed", "failed", "expired"]);
+  const [row] = await s.rows();
+  assert.deepEqual([row.status, row.detail], ["expired", "not_sent"]);
+  assert.equal(await s.store.openPhone(s.db, "kiosk-1", "handoff"), null, "no open phone row blocks the next ask");
+});
+
+test("all three tries throwing is logged and leaves the row to the sweep", async () => {
+  const seen = [];
+  const s = setup({ notify: "off", wrapStore: flakyTransitions({ failed: 2, expired: 1 }, seen), rounds: [call({ task: TASK, bot: "writer" })] });
+  const r = await s.turn(ASK);
+  assert.equal(r.failed, null, "the turn still answers");
+  assert.deepEqual(s.h.calls.spoken, [OFF]);
+  assert.deepEqual(seen, ["failed", "failed", "expired"]);
+  assert.equal((await s.rows())[0].status, "awaiting_phone");
+  assert.ok(s.h.calls.logs.some((m) => /could not expire the unsent row \(busy expired\)/.test(m)));
 });
 
 test("a failed not_sent row does not block the next kiosk proposal", async () => {
