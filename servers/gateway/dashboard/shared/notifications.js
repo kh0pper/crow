@@ -1132,6 +1132,8 @@ export function tamagotchiJs(lang) {
     } catch(e) {}
   }
 
+  // The shell's attention group tells the bird when its issues changed (an ack).
+  document.addEventListener('crow:attention-changed', function() { pollNotifications(); });
   pollNotifications();
   refreshRambleBird();
   // 5-min fallback poll. Live updates come via the Turbo Stream at

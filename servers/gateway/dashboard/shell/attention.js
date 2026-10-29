@@ -18,7 +18,8 @@ import { t } from "../shared/i18n.js";
 const BACKUP_HREF = "/dashboard/nest?action=backup";
 
 function actionHtml(issue) {
-  if (!issue.actionLabel || !issue.actionHref) return "";
+  // Same-origin paths only ("/x", never "//host"): a link in this group never leaves the dashboard.
+  if (!issue.actionLabel || typeof issue.actionHref !== "string" || !/^\/(?!\/)/.test(issue.actionHref)) return "";
   const label = escapeHtml(issue.actionLabel);
   if (issue.actionHref === BACKUP_HREF) {
     return `<form class="shell-attn-form" method="POST" action="/dashboard/nest/backup"><input type="hidden" name="_csrf" value=""><button class="shell-attn-btn" type="submit">${label}</button></form>`;

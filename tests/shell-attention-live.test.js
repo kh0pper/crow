@@ -16,13 +16,19 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
+import { foreignMappingKey } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
+import { fill, t } from "../servers/gateway/dashboard/shared/i18n.js";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SHOT = process.env.ATTENTION_SHOT || "";
+const FOREIGN_KEY = foreignMappingKey(":3008", ["/s", "/s-assets"]);
 const ISSUES = [
-  { id: "exposure:foreign:127.0.0.1:3008", severity: "warn", label: "A service on this computer (port 3008) is public on the internet through /s, /s-assets", actionLabel: "Review access", actionHref: "/dashboard/settings?section=integrations", ack: { kind: "exposure-foreign", key: "127.0.0.1:3008|/s,/s-assets" } },
+  // As exposureSignal builds it: severity info, the real label, a hashed ack key.
+  { id: "exposure:foreign::3008", severity: "info", label: fill(t("signals.exposure.foreign", "en"), { list: "/s, /s-assets → :3008" }), actionLabel: t("signals.exposure.action", "en"), actionHref: "/dashboard/settings?section=connections", ack: { kind: "exposure-foreign", key: FOREIGN_KEY } },
   { id: "updates", severity: "info", label: "An update is available: 1.4.2", actionLabel: "Open updates", actionHref: "/dashboard/settings?section=updates", ack: null },
 ];
+const acked = new Set();
+let lastAck = null;
 
 let chrome = null, server = null, port = 0, HOST = "127.0.0.1";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -42,11 +48,30 @@ before(async () => {
       // Like the real route: the language comes from the crow_lang cookie.
       const fragLang = /(?:^|;\s*)crow_lang=es\b/.test(req.headers.cookie || "") ? "es" : "en";
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
-      return res.end(attentionGroupHtml(ISSUES, fragLang));
+      return res.end(attentionGroupHtml(ISSUES.filter((i) => !(i.ack && acked.has(i.ack.key))), fragLang));
+    }
+    // The real route's two hops: POST ack -> back (or /dashboard/attention) ->
+    // the page with ?sheet=attention (the real GET /dashboard/attention in new mode).
+    if (url === "/dashboard/health/ack" && req.method === "POST") {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const f = new URLSearchParams(body);
+        lastAck = Object.fromEntries(f);
+        if (f.get("kind") === "exposure-foreign" && f.get("key") && f.get("_csrf")) acked.add(f.get("key"));
+        const back = f.get("back") || "";
+        res.writeHead(303, { location: /^\/dashboard\/[^/]/.test(back) ? back : "/dashboard/attention" });
+        res.end();
+      });
+      return;
+    }
+    if (url === "/dashboard/attention") {
+      res.writeHead(303, { location: "/dashboard/perch?sheet=attention" });
+      return res.end();
     }
     if (url === "/api/notifications/count") {
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ count: 2, attention: ISSUES.length, health: null }));
+      return res.end(JSON.stringify({ count: 2, attention: ISSUES.filter((i) => !(i.ack && acked.has(i.ack.key))).length, health: null }));
     }
     if (url.startsWith("/api/")) { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ notifications: [], items: [] })); }
     if (url.startsWith("/vendor/turbo")) { res.writeHead(200, { "content-type": "application/javascript" }); return res.end(turbo); }
@@ -110,6 +135,7 @@ async function tab(path, { width = 390, height = 844, dark = false } = {}) {
   await cdp("Network.enable");
   await cdp("Network.clearBrowserCookies");
   if (/[?&]lang=es\b/.test(path)) await cdp("Network.setCookie", { name: "crow_lang", value: "es", url: `http://${HOST}:${port}/` });
+  await cdp("Network.setCookie", { name: "crow_csrf", value: "tok-live", url: `http://${HOST}:${port}/` });
   await cdp("Page.navigate", { url: `http://${HOST}:${port}${path}` });
   await until("document.readyState==='complete'&&!!document.getElementById('crow-bird-btn')", "the page");
   // Fonts and two frames settle before any layout check.
@@ -145,8 +171,10 @@ for (const [lang, heading] of [["en", "Needs attention"], ["es", "Necesita atenc
     if (!chrome) return ctx.skip("no headless Chrome");
     const p = await tab(`/dashboard/perch?lang=${lang}`);
     try {
+      // Prefetched at page load: the group is in the closed sheet already.
+      await p.until("document.querySelectorAll('[data-shell-attention] .shell-attn-row').length===2", "the prefetched group");
       await p.ev("document.getElementById('crow-bird-btn').click(); 1");
-      await p.until("document.getElementById('shell-avatar').open && document.querySelectorAll('[data-shell-attention] .shell-attn-row').length===2", "the sheet and its two rows");
+      assert.equal(await p.ev("document.getElementById('shell-avatar').open && document.querySelectorAll('[data-shell-attention] .shell-attn-row').length"), 2, "rows are there at the moment of opening");
       await p.ev(SETTLED);
       const g = JSON.parse(await p.ev(`JSON.stringify(${GEOMETRY})`));
       assert.equal(g.headings[0], heading);
@@ -222,5 +250,35 @@ test("badge includes attention", async (ctx) => {
   try {
     // count 2 + attention 2
     await p.until("document.getElementById('crow-bubble-count') && document.getElementById('crow-bubble-count').textContent==='4' && document.getElementById('crow-bubble').style.display!=='none'", "the badge to read 4");
+  } finally { await p.close(); }
+});
+
+test("This is expected: two 303 hops, the sheet reopens on the same page with that row gone", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  acked.clear(); lastAck = null;
+  const p = await tab("/dashboard/bot-builder?x=1");
+  try {
+    await p.until("document.querySelectorAll('[data-shell-attention] .shell-attn-row').length===2", "the prefetched group");
+    // The ack form returns to this page with the sheet open (not to Chat).
+    assert.equal(await p.ev("document.querySelector('[data-shell-attention] input[name=back]').value"), "/dashboard/bot-builder?x=1&sheet=attention");
+    await p.ev("document.getElementById('crow-bird-btn').click(); 1");
+    await p.until("document.getElementById('shell-avatar').open", "the sheet");
+    await p.ev("document.querySelector('[data-shell-attention] .shell-attn-btn--quiet').click(); 1");
+    await p.until("location.pathname==='/dashboard/bot-builder' && document.getElementById('shell-avatar').open && document.querySelectorAll('[data-shell-attention] .shell-attn-row').length===1", "the sheet reopened with one row");
+    assert.equal(await p.ev("location.search"), "?x=1", "the sheet parameter is dropped again");
+    assert.match(await p.ev("document.querySelector('[data-shell-attention]').textContent"), /An update is available/);
+    assert.doesNotMatch(await p.ev("document.querySelector('[data-shell-attention]').textContent"), /3008/);
+    assert.deepEqual(lastAck, { _csrf: "tok-live", kind: "exposure-foreign", key: FOREIGN_KEY, back: "/dashboard/bot-builder?x=1&sheet=attention" });
+    await p.until("document.getElementById('crow-bubble-count').textContent==='3'", "the badge: 2 notifications + 1 issue");
+  } finally { await p.close(); acked.clear(); }
+});
+
+test("a repeated ?sheet= on the page is not duplicated in the back path", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const p = await tab("/dashboard/perch?sheet=attention&sheet=attention");
+  try {
+    await p.until("document.querySelectorAll('[data-shell-attention] input[name=back]').length>0", "the group");
+    const back = await p.ev("document.querySelector('[data-shell-attention] input[name=back]').value");
+    assert.equal((back.match(/sheet=/g) || []).length, 1, back);
   } finally { await p.close(); }
 });

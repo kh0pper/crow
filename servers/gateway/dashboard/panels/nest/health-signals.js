@@ -45,6 +45,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname, networkInterfaces } from "node:os";
@@ -115,6 +116,21 @@ export function pruneResolved(lastMap, activeIssueIds) {
  * info — pruneResolved). Returns the new map, whether it changed, and the ids
  * pushed. `notify(issue)` is the caller's createNotification wrapper.
  */
+/**
+ * The notification a pushed health issue becomes (post-listen.js's monitor
+ * passes it to createNotification). It lands on the attention route.
+ */
+export function healthNotification(issue) {
+  return {
+    type: "system",
+    source: `health-monitor:${issue.id}`,
+    priority: "high",
+    title: issue.label,
+    body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
+    action_url: "/dashboard/attention",
+  };
+}
+
 export async function runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) {
   const map = { ...lastMap };
   let dirty = false;
@@ -889,8 +905,10 @@ function isPublicSafeBackendPath(p, prefixes) {
 // allowlist), so it is surfaced as an info line — visible, never silent — not
 // as this Crow's warning. Anything we cannot attribute (non-proxy handlers,
 // TCP forwarders, unparseable targets) is treated as this Crow's and warns.
+// A fixed-length key ("m1:" + sha256 hex): the ack route caps a key at 1024
+// characters, and a target with many mounts would otherwise never be ackable.
 export function foreignMappingKey(target, mounts) {
-  return target + "|" + mounts.slice().sort().join(",");
+  return "m1:" + createHash("sha256").update(target + "|" + mounts.slice().sort().join(",")).digest("hex");
 }
 
 // Keys of acknowledged foreign mappings (a JSON array in a local setting).

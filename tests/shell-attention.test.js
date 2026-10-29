@@ -72,6 +72,15 @@ test("fragment escapes labels", async () => {
   assert.match(html, /&lt;img/);
 });
 
+test("an action link must be a same-origin path", () => {
+  for (const href of ["//evil.example/x", "https://evil.example/x", "javascript:alert(1)", ""]) {
+    const html = attentionGroupHtml([{ ...WARN, actionHref: href }], "en");
+    assert.doesNotMatch(html, /shell-attn-action/, href);
+    assert.match(html, /Disk is almost full/);
+  }
+  assert.match(attentionGroupHtml([{ ...WARN, actionHref: "/dashboard/x" }], "en"), /href="\/dashboard\/x"/);
+});
+
 test("backup issue keeps its POST form", () => {
   const html = attentionGroupHtml([BACKUP], "en");
   assert.match(html, /<form class="shell-attn-form" method="POST" action="\/dashboard\/nest\/backup">/);
@@ -118,7 +127,7 @@ test("the merged sheet has an empty attention slot before the tray; the plain on
   const merged = shellAvatarSheet({ lang: "en", tray: "<div>TRAY</div>" });
   const slot = merged.indexOf("data-shell-attention");
   assert.ok(slot > 0 && slot < merged.indexOf("TRAY"));
-  assert.match(merged, /<section class="shell-attention" data-shell-attention aria-live="polite"><\/section>/);
+  assert.match(merged, /<section class="shell-attention" data-shell-attention><\/section>/);
   assert.doesNotMatch(shellAvatarSheet({ lang: "en" }), /data-shell-attention/);
 });
 

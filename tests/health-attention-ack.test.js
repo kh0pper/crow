@@ -97,9 +97,17 @@ async function getAcks() {
 }
 
 
+const K3008 = () => signals.foreignMappingKey(":3008", ["/s", "/s-assets"]);
+
 test("foreignMappingKey sorts mounts", () => {
-  assert.equal(signals.foreignMappingKey(":3008", ["/s-assets", "/s"]), ":3008|/s,/s-assets");
-  assert.equal(signals.foreignMappingKey(":3008", ["/s", "/s-assets"]), ":3008|/s,/s-assets");
+  const k = signals.foreignMappingKey(":3008", ["/s-assets", "/s"]);
+  assert.equal(signals.foreignMappingKey(":3008", ["/s", "/s-assets"]), k);
+  assert.match(k, /^m1:[0-9a-f]{64}$/);
+  assert.notEqual(signals.foreignMappingKey(":3008", ["/s"]), k);
+  assert.notEqual(signals.foreignMappingKey(":3009", ["/s", "/s-assets"]), k);
+  // Fixed length however many mounts: always under the ack route's 1024 cap.
+  const many = Array.from({ length: 400 }, (_, i) => "/mount-number-" + i);
+  assert.equal(signals.foreignMappingKey(":3008", many).length, k.length);
 });
 
 test("two targets give two issues with ack keys", async () => {
@@ -107,19 +115,19 @@ test("two targets give two issues with ack keys", async () => {
   const issues = await foreignIssues();
   assert.deepEqual(issues.map((i) => i.id).sort(), ["exposure:foreign::3008", "exposure:foreign::3009"]);
   const a = issues.find((i) => i.id.endsWith(":3008"));
-  assert.deepEqual(a.ack, { kind: "exposure-foreign", key: ":3008|/s,/s-assets" });
+  assert.deepEqual(a.ack, { kind: "exposure-foreign", key: K3008() });
   assert.match(a.label, /\/s-assets/);
   assert.doesNotMatch(a.label, /\/hook/);
 });
 
 test("ack hides only its own mapping", async () => {
-  await setAcks(JSON.stringify([":3008|/s,/s-assets"]));
+  await setAcks(JSON.stringify([K3008()]));
   const issues = await foreignIssues();
   assert.deepEqual(issues.map((i) => i.id), ["exposure:foreign::3009"]);
 });
 
 test("a changed mapping flags again", async () => {
-  await setAcks(JSON.stringify([":3008|/s,/s-assets"]));
+  await setAcks(JSON.stringify([K3008()]));
   const cfg = structuredClone(FOREIGN);
   cfg.Web["crow.example.ts.net:443"].Handlers["/extra"] = { Proxy: "http://127.0.0.1:3008/extra" };
   const issues = await foreignIssues(cfg);
@@ -170,7 +178,7 @@ test("ack invalidates the cache", async () => {
   await setAcks("[]");
   assert.equal((await foreignIssues()).length, 2);
   // Same cached result is served until the ack route invalidates it.
-  await post("/dashboard/health/ack", { kind: "exposure-foreign", key: ":3009|/hook" });
+  await post("/dashboard/health/ack", { kind: "exposure-foreign", key: signals.foreignMappingKey(":3009", ["/hook"]) });
   const db = createDbClient();
   try {
     const r = await signals.collectHealthSignals(db); // no manual invalidate
@@ -187,9 +195,21 @@ test("attention redirects by mode", async () => {
   assert.equal(c.location, "/dashboard/nest?open=1");
 });
 
-test("health and lockout notifications point at /dashboard/attention", () => {
-  const post = readFileSync(join(REPO, "servers/gateway/boot/post-listen.js"), "utf8");
+test("health and lockout notifications point at /dashboard/attention", async () => {
+  // The health monitor: drive the real notify cycle with a stub notify and the
+  // real builder post-listen.js passes to createNotification.
+  const sent = [];
+  const issue = { id: "disk", severity: "warn", label: "Disk is almost full", actionLabel: "Open storage", actionHref: "/x" };
+  await signals.runHealthNotifyCycle({
+    issues: [issue], lastMap: {}, nowMs: Date.now(),
+    notify: (i) => { sent.push(signals.healthNotification(i)); },
+  });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].action_url, "/dashboard/attention");
+  assert.equal(sent[0].source, "health-monitor:disk");
+  // The login lockout notification is built inline inside the login handler
+  // and cannot be driven from here; its source is still checked by pattern.
   const auth = readFileSync(join(REPO, "servers/gateway/dashboard/auth.js"), "utf8");
-  assert.match(post, /source: `health-monitor:\$\{issue\.id\}`[\s\S]{0,200}action_url: "\/dashboard\/attention"/);
   assert.match(auth, /source: "security:lockout"[\s\S]{0,300}action_url: "\/dashboard\/attention"/);
 });
+

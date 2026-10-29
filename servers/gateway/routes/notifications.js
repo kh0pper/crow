@@ -16,7 +16,7 @@ import { Router } from "express";
 import { createDbClient } from "../../db.js";
 import { cleanupNotifications } from "../../shared/notifications.js";
 import { collectHealthSignals } from "../dashboard/panels/nest/health-signals.js";
-import { parseCookies } from "../dashboard/auth.js";
+import { readSetting } from "../dashboard/settings/registry.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 
 export default function notificationsRouter(dashboardAuth, { collectSignals = collectHealthSignals } = {}) {
@@ -127,8 +127,8 @@ export default function notificationsRouter(dashboardAuth, { collectSignals = co
       // (the new-mode bird adds them to its badge; the classic bell ignores them).
       let attention = 0;
       try {
-        const cookieLang = parseCookies(req).crow_lang;
-        const lang = SUPPORTED_LANGS.includes(cookieLang) ? cookieLang : "en";
+        const setLang = await readSetting(db, "language");
+        const lang = SUPPORTED_LANGS.includes(setLang) ? setLang : "en";
         attention = ((await collectSignals(db, { lang })).issues || []).length;
       } catch {
         attention = 0;

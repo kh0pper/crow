@@ -379,7 +379,7 @@ export async function runPostListenSetup(server, app, deps) {
     const HEALTH_MONITOR_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min
     const runHealthMonitorCycle = async () => {
       try {
-        const { collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle } =
+        const { collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle, healthNotification } =
           await import("../dashboard/panels/nest/health-signals.js");
         const { createNotification } = await import("../../shared/notifications.js");
         const { readSetting } = await import("../dashboard/settings/registry.js");
@@ -407,14 +407,7 @@ export async function runPostListenSetup(server, app, deps) {
             issues: signals.issues,
             lastMap,
             nowMs: Date.now(),
-            notify: (issue) => createNotification(db, {
-              type: "system",
-              source: `health-monitor:${issue.id}`,
-              priority: "high",
-              title: issue.label,
-              body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
-              action_url: "/dashboard/attention",
-            }),
+            notify: (issue) => createNotification(db, healthNotification(issue)),
           });
           lastMap = cycle.lastMap;
           const mapDirty = cycle.dirty;

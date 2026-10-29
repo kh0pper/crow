@@ -13,7 +13,6 @@ import { collectHealthSignals, invalidateHealthCache } from "./nest/health-signa
 import { getPeerOverview } from "../overview-cache.js";
 import { readSetting, writeSetting } from "../settings/registry.js";
 import { Router } from "express";
-import { parseCookies } from "../auth.js";
 import { SUPPORTED_LANGS } from "../shared/i18n.js";
 import { resolveRequestMode, safeReturnPath } from "../shell/request.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../../instance-registry.js";
@@ -93,11 +92,13 @@ export function healthAttentionRouter({ createDbClient }) {
 
   // The sheet's "Needs attention" group, loaded each time the sheet opens.
   router.get("/dashboard/attention/fragment", async (req, res) => {
-    const cookieLang = parseCookies(req).crow_lang;
-    const lang = SUPPORTED_LANGS.includes(cookieLang) ? cookieLang : "en";
     const db = createDbClient();
     let issues = [];
+    let lang = "en";
     try {
+      // The layout's language: the per-instance "language" setting.
+      const setLang = await readSetting(db, "language");
+      if (SUPPORTED_LANGS.includes(setLang)) lang = setLang;
       issues = (await collectHealthSignals(db, { lang })).issues || [];
     } catch {
       issues = [];

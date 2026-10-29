@@ -106,19 +106,47 @@ export function shellClientJs() {
           }; })(tb), true);
         }
       }
-      // The "Needs attention" group: fetched each time the sheet opens (the
-      // open attribute is the one signal that covers every opener), and the
-      // alert landing (?sheet=attention) opens the sheet once, then drops the
-      // parameter so a reload or Back does not reopen it.
+      // The "Needs attention" group: prefetched once at page load (so the
+      // group is already there when the sheet opens and nothing shifts under a
+      // finger), refetched on every open (the open attribute is the one signal
+      // that covers every opener) and replaced only when the markup changed.
+      // Only the latest response is applied. The alert landing
+      // (?sheet=attention) opens the sheet once, then drops the parameter so a
+      // reload or Back does not reopen it.
       var attnSlot = document.querySelector('[data-shell-attention]');
       if (attnSlot) {
         var attnDlg = attnSlot.closest('dialog');
+        var attnSeq = 0;
+        // "This is expected" returns to the page the user is on, with the sheet open.
+        var fixAttnBack = function () {
+          var back = location.pathname;
+          try {
+            var u = new URL(location.href);
+            u.searchParams.set('sheet', 'attention');
+            back = u.pathname + u.search;
+          } catch (e) {}
+          var fields = attnSlot.querySelectorAll('input[name="back"]');
+          for (var f = 0; f < fields.length; f++) fields[f].value = back;
+        };
         var loadAttention = function () {
+          var mine = ++attnSeq;
           fetch('/dashboard/attention/fragment', { credentials: 'same-origin', cache: 'no-store' })
             .then(function (r) { return r.ok ? r.text() : null; })
-            .then(function (html) { if (html !== null) attnSlot.innerHTML = html; })
+            .then(function (html) {
+              if (mine !== attnSeq || html === null) return;
+              if (attnSlot.__attnHtml !== html) {
+                attnSlot.innerHTML = html; attnSlot.__attnHtml = html;
+                // The bird's badge counts these issues: tell it when they changed
+                // (window-wide, so a Turbo visit after an ack counts too).
+                var changed = window.__crowAttnLast !== undefined && window.__crowAttnLast !== html;
+                window.__crowAttnLast = html;
+                if (changed) document.dispatchEvent(new Event('crow:attention-changed'));
+              }
+              fixAttnBack();
+            })
             .catch(function () {});
         };
+        (window.requestIdleCallback || function (fn) { setTimeout(fn, 200); })(loadAttention);
         if (attnDlg && typeof MutationObserver === 'function') {
           new MutationObserver(function () { if (attnDlg.open) loadAttention(); })
             .observe(attnDlg, { attributes: true, attributeFilter: ['open'] });
