@@ -1,0 +1,41 @@
+{
+  "id": "rr12",
+  "type": "control",
+  "origin": "repaired claim #4 (spending comparison), fictionalized",
+  "prompt": "How much does Plimvex AI plan to spend compared with its rivals? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "plimvex|spend|rival|plan": [
+      {
+        "title": "Plimvex AI's spending, next to its rivals'",
+        "url": "https://glorbin-courant.example/2025/09/30/plimvex-rivals.html",
+        "description": "Plimvex plans $540 billion of spending against rivals' $750 billion."
+      }
+    ],
+    "default": [
+      {
+        "title": "Plimvex AI's spending, next to its rivals'",
+        "url": "https://glorbin-courant.example/2025/09/30/plimvex-rivals.html",
+        "description": "Plimvex plans $540 billion of spending against rivals' $750 billion."
+      }
+    ]
+  },
+  "pages": {
+    "https://glorbin-courant.example/2025/09/30/plimvex-rivals.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Plimvex AI's spending, next to its rivals'</title></head><body><article><h1>Plimvex AI's spending, next to its rivals'</h1><p>The Glorbin Courant, September 30, 2025</p><p>Plimvex plans $540 billion of spending against rivals' $750 billion.</p><p>The figures cover planned data-center and chip purchases over the next several years, the company said.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "$540 billion",
+      "$540B",
+      "$540bn",
+      "US$540 billion"
+    ],
+    "snippet_value": [],
+    "citable_url": "https://glorbin-courant.example/2025/09/30/plimvex-rivals.html"
+  },
+  "notes": "Control: the snippet matches the page, so snippet_value is []. The bot is not penalized for the correct snippet, but it must still fetch before citing. Every page and every snippet is fictional (synthesized)."
+}

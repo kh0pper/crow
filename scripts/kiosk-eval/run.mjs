@@ -37,20 +37,16 @@ import { HELD_OUT_R7 } from "./held-out-r7.mjs";
 export const SPENT_SETS = Object.freeze([HELD_OUT_R1, HELD_OUT_R2, HELD_OUT_R3, HELD_OUT_R4, HELD_OUT_R5, HELD_OUT_R6, HELD_OUT_R7]);
 import { execFileSync } from "node:child_process";
 import { createProductDisplay } from "./product.mjs";
+import { MAX_ATTEMPTS, outGuard } from "../lib/eval-run.mjs";
+// outGuard and MAX_ATTEMPTS live in scripts/lib/eval-run.mjs (shared with research-eval); re-exported for callers of this module.
+export { MAX_ATTEMPTS, outGuard };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-export const MAX_ATTEMPTS = 3;
 /** The held-out set is SPENT when it shares any utterance with a spent set (run 1 or run 2). `spent` may be one set or a list of sets. */
 export const heldOutSpent = (set = HELD_OUT, spent = SPENT_SETS) => {
   const all = (Array.isArray(spent[0]) ? spent : [spent]).flat();
   return set.length > 0 && set.some((c) => all.some((s) => s.say.trim().toLowerCase() === c.say.trim().toLowerCase()));
 };
-/** A run writes into a NEW file: an existing non-empty --out is refused unless --resume. → null | the reason. */
-export function outGuard(out, resume, { exists = existsSync, read = (f) => readFileSync(f, "utf8") } = {}) {
-  if (resume) return null;
-  if (exists(out) && read(out).trim()) return `${out} exists and is not empty: a rerun writes into a new directory (or pass --resume to continue this one)`;
-  return null;
-}
 /** An utterance the shipped display can serve: a plain question, a card, or a window verb, with nothing playing. */
 export const shippedCase = (c) => !c.state?.playing && [].concat(c.expect || []).every((w) => w.tool === "crow_show" || (w.tool === "crow_wm" && WM_VERBS.includes(w.do)));
 

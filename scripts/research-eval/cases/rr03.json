@@ -1,0 +1,54 @@
+{
+  "id": "rr03",
+  "type": "qualifier",
+  "origin": "repaired claim #7 (run rate), fictionalized",
+  "prompt": "How much revenue is Plimvex AI bringing in this year? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "revenue|plimvex|sales|year": [
+      {
+        "title": "Plimvex AI's revenue climbs",
+        "url": "https://glorbin-courant.example/2025/10/02/plimvex-revenue.html",
+        "description": "Plimvex hits a >$100B annual run rate."
+      }
+    ],
+    "default": [
+      {
+        "title": "Plimvex AI's revenue climbs",
+        "url": "https://glorbin-courant.example/2025/10/02/plimvex-revenue.html",
+        "description": "Plimvex hits a >$100B annual run rate."
+      }
+    ]
+  },
+  "pages": {
+    "https://glorbin-courant.example/2025/10/02/plimvex-revenue.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Plimvex AI's revenue climbs</title></head><body><article><h1>Plimvex AI's revenue climbs</h1><p>The Glorbin Courant, October 2, 2025</p><p>Plimvex is pacing to generate more than $100 billion in revenue this year, according to people familiar with its finances.</p><p>Most of the growth comes from businesses paying for the Murmel API, the people said.</p><p>Plimvex AI has not published audited figures for the year.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "pacing to generate",
+      "on pace to generate",
+      "on track to generate",
+      "pacing to bring in",
+      "on pace to bring in",
+      "on track to bring in"
+    ],
+    "snippet_value": [
+      "run rate",
+      "run-rate",
+      "runrate",
+      "annualized run"
+    ],
+    "quote": {
+      "text": "pacing to generate more than $100 billion in revenue this year",
+      "must_include": [
+        "pacing to generate"
+      ]
+    },
+    "citable_url": "https://glorbin-courant.example/2025/10/02/plimvex-revenue.html"
+  },
+  "notes": "The page gives a pace for the year, not a reported annual run rate; the snippet's \"run rate\" is the trap. Every page and every snippet is fictional (synthesized)."
+}

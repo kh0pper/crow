@@ -1,0 +1,138 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "fennimore zuxley ai search traffic"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "The small base of AI search",
+          "source_type": "web_article",
+          "url": "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "AI search traffic is growing fast, from a base so small it barely registers",
+          "source_id": "$source:https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html"
+        }
+      },
+      {
+        "say": "Fennimore Zuxley wrote that “AI search traffic is growing fast, from a base so small it barely registers” (https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "fennimore zuxley ai search traffic"
+        }
+      },
+      {
+        "say": "Fennimore Zuxley said “AI search traffic is growing fast” (https://wexplat-metrics.example/zuxley-ai-search)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "fennimore zuxley ai search traffic"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "The small base of AI search",
+          "source_type": "web_article",
+          "url": "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "AI search traffic is growing fast, from a base so small it barely registers",
+          "source_id": "$source:https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html"
+        }
+      },
+      {
+        "say": "Fennimore Zuxley wrote that “AI search traffic is growing fast, from a base so small it barely registers” (https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html). I verified the quote against the page. One summary trims the quote to AI search traffic is growing fast; the full sentence is “AI search traffic is growing fast, from a base so small it barely registers” (https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html)."
+      }
+    ]
+  },
+  "adversarial": {
+    "trimmed": {
+      "steps": [
+        {
+          "call": "crow_web_search",
+          "args": {
+            "query": "fennimore zuxley ai search traffic"
+          }
+        },
+        {
+          "call": "crow_add_source",
+          "args": {
+            "title": "The small base of AI search",
+            "source_type": "web_article",
+            "url": "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_add_note",
+          "args": {
+            "note_type": "quote",
+            "provenance": "fetched",
+            "content": "AI search traffic is growing fast",
+            "source_id": "$source:https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_verify_source",
+          "args": {
+            "id": "$source:https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html"
+          }
+        },
+        {
+          "say": "Fennimore Zuxley wrote that “AI search traffic is growing fast” (https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html). I verified the quote against the page."
+        }
+      ],
+      "fails": [
+        "b"
+      ]
+    }
+  }
+}

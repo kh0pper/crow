@@ -1,0 +1,70 @@
+{
+  "id": "rr06",
+  "type": "misattribution",
+  "origin": "repaired claim #3 (compute ratio), fictionalized",
+  "prompt": "What do the leaked Oxtarra Cloud figures say about its inference spending against its revenue, and who reported them? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "oxtarra|inference|leak|spend": [
+      {
+        "title": "Oxtarra Cloud's inference bill",
+        "url": "https://wexplat-metrics.example/oxtarra-inference",
+        "description": "Glorbin Courant-leaked Oxtarra data: $4 spent for every $1 earned."
+      },
+      {
+        "title": "Inside Oxtarra Cloud's inference costs",
+        "url": "https://snorrel-dispatch.example/2025/q3-oxtarra.html",
+        "description": "Documents show what Oxtarra Cloud spends to serve models."
+      }
+    ],
+    "default": [
+      {
+        "title": "Oxtarra Cloud's inference bill",
+        "url": "https://wexplat-metrics.example/oxtarra-inference",
+        "description": "Glorbin Courant-leaked Oxtarra data: $4 spent for every $1 earned."
+      },
+      {
+        "title": "Inside Oxtarra Cloud's inference costs",
+        "url": "https://snorrel-dispatch.example/2025/q3-oxtarra.html",
+        "description": "Documents show what Oxtarra Cloud spends to serve models."
+      }
+    ]
+  },
+  "pages": {
+    "https://snorrel-dispatch.example/2025/q3-oxtarra.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Inside Oxtarra Cloud's inference costs</title></head><body><article><h1>Inside Oxtarra Cloud's inference costs</h1><p>Snorrel Dispatch, November 2025</p><p>Documents seen by Snorrel Dispatch show Oxtarra Cloud spent $5.02 billion on inference against revenue of at least $2.273 billion.</p><p>The documents cover the first three quarters of the year and do not break the spending down by customer.</p><p>Oxtarra Cloud declined to comment on the documents.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "$5.02 billion",
+      "$5.02B",
+      "$5.02bn"
+    ],
+    "snippet_value": [
+      "$4 spent for every $1",
+      "$4 for every $1",
+      "$4 per $1",
+      "$4 spent per $1",
+      "US$4 for every US$1",
+      "four dollars for every dollar",
+      "4-to-1",
+      "4 to 1"
+    ],
+    "attribution": {
+      "right": [
+        "Snorrel Dispatch",
+        "Snorrel"
+      ],
+      "wrong": [
+        "Glorbin Courant",
+        "Glorbin",
+        "the Courant"
+      ]
+    },
+    "citable_url": "https://snorrel-dispatch.example/2025/q3-oxtarra.html"
+  },
+  "notes": "The aggregator credits the leak to the wrong outlet and states a ratio the documents never give. The Wexplat page is not in the fixture set (an off-set fetch); the Snorrel page is citable. Every page and every snippet is fictional (synthesized)."
+}

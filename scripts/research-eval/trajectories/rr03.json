@@ -1,0 +1,95 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex revenue this year"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI's revenue climbs",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/10/02/plimvex-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "pacing to generate more than $100 billion in revenue this year",
+          "source_id": "$source:https://glorbin-courant.example/2025/10/02/plimvex-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/10/02/plimvex-revenue.html"
+        }
+      },
+      {
+        "say": "Plimvex is pacing to generate more than $100 billion in revenue this year, according to people familiar with its finances (https://glorbin-courant.example/2025/10/02/plimvex-revenue.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex revenue this year"
+        }
+      },
+      {
+        "say": "Plimvex hits a more than $100 billion annual run rate (https://glorbin-courant.example/2025/10/02/plimvex-revenue.html)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex revenue this year"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI's revenue climbs",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/10/02/plimvex-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "pacing to generate more than $100 billion in revenue this year",
+          "source_id": "$source:https://glorbin-courant.example/2025/10/02/plimvex-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/10/02/plimvex-revenue.html"
+        }
+      },
+      {
+        "say": "Plimvex is pacing to generate more than $100 billion in revenue this year, according to people familiar with its finances (https://glorbin-courant.example/2025/10/02/plimvex-revenue.html). I verified the quote against the page. One summary calls it a run rate; the report itself says Plimvex is pacing to generate more than $100 billion this year (https://glorbin-courant.example/2025/10/02/plimvex-revenue.html)."
+      }
+    ]
+  }
+}

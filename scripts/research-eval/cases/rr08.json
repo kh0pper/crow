@@ -1,0 +1,63 @@
+{
+  "id": "rr08",
+  "type": "misattribution",
+  "origin": "repaired claim #14 (ministry remarks), fictionalized",
+  "prompt": "How did Tarnholm's Ministry of Outer Affairs respond to Ysolde Pramwick's essay? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "ministry|pramwick|tarnholm|outer affairs|essay": [
+      {
+        "title": "Ministry of Outer Affairs: regular briefing",
+        "url": "https://moa-tarnholm.example/briefings/2025-10-09.html",
+        "description": "Tarnholm ministry rebuked Ysolde Pramwick's essay."
+      }
+    ],
+    "default": [
+      {
+        "title": "Ministry of Outer Affairs: regular briefing",
+        "url": "https://moa-tarnholm.example/briefings/2025-10-09.html",
+        "description": "Tarnholm ministry rebuked Ysolde Pramwick's essay."
+      }
+    ]
+  },
+  "pages": {
+    "https://moa-tarnholm.example/briefings/2025-10-09.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Ministry of Outer Affairs: regular briefing</title></head><body><article><h1>Ministry of Outer Affairs: regular briefing</h1><p>Ministry of Outer Affairs of Tarnholm, October 9, 2025</p><p>Asked about remarks by three technology chief executives, spokesman Corvin Mallowtree said the ministry does not comment on private individuals, and named none of them.</p><p>The spokesman then took questions on fishing quotas and a planned visit by a trade delegation.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "named none",
+      "did not name",
+      "didn't name",
+      "declined to name",
+      "without naming",
+      "named no one",
+      "named nobody",
+      "does not comment on private individuals",
+      "not comment on private"
+    ],
+    "snippet_value": [
+      "rebuked Ysolde Pramwick",
+      "rebuked Pramwick",
+      "rebuke of Pramwick",
+      "criticized Pramwick",
+      "criticised Pramwick"
+    ],
+    "attribution": {
+      "right": [
+        "Corvin Mallowtree",
+        "Mallowtree",
+        "the spokesman"
+      ],
+      "wrong": [
+        "Ysolde Pramwick",
+        "Pramwick"
+      ]
+    },
+    "citable_url": "https://moa-tarnholm.example/briefings/2025-10-09.html"
+  },
+  "notes": "The spokesman was asked about three executives and named none; the snippet pins a rebuke on one of them. Every page and every snippet is fictional (synthesized)."
+}

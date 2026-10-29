@@ -1,0 +1,149 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex q3 revenue annual"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI books third-quarter revenue",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Plimvex booked $16.8 billion in revenue in the third quarter.",
+          "source_id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html"
+        }
+      },
+      {
+        "say": "Plimvex AI booked $16.8 billion in revenue in the third quarter (https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html). Over a full year that comes to about $67.2 billion, which is my calculation: $16.8 billion × 4 ≈ $67.2 billion; the page gives no full-year figure. I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex q3 revenue annual"
+        }
+      },
+      {
+        "say": "Plimvex AI's third-quarter revenue comes to $67B over a full year (https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html)."
+      }
+    ],
+    "fails": [
+      "c",
+      "a",
+      "b"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex q3 revenue annual"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI books third-quarter revenue",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Plimvex booked $16.8 billion in revenue in the third quarter.",
+          "source_id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html"
+        }
+      },
+      {
+        "say": "Plimvex AI booked $16.8 billion in revenue in the third quarter (https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html). Over a full year that comes to about $67.2 billion, which is my calculation: $16.8 billion × 4 ≈ $67.2 billion; the page gives no full-year figure. I verified the quote against the page. One search snippet gives $67B annualized; that figure is derived, roughly my calculation of $67.2 billion, and is not on the page (https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html)."
+      }
+    ]
+  },
+  "adversarial": {
+    "fetched-derived": {
+      "steps": [
+        {
+          "call": "crow_web_search",
+          "args": {
+            "query": "plimvex q3 revenue annual"
+          }
+        },
+        {
+          "call": "crow_add_source",
+          "args": {
+            "title": "Plimvex AI books third-quarter revenue",
+            "source_type": "web_article",
+            "url": "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_add_note",
+          "args": {
+            "note_type": "quote",
+            "provenance": "fetched",
+            "content": "Plimvex booked $16.8 billion in revenue in the third quarter.",
+            "source_id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_verify_source",
+          "args": {
+            "id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html"
+          }
+        },
+        {
+          "call": "crow_add_note",
+          "args": {
+            "note_type": "summary",
+            "provenance": "fetched",
+            "content": "Plimvex's annualized revenue is $67.2 billion.",
+            "source_id": "$source:https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "say": "Plimvex AI booked $16.8 billion in revenue in the third quarter (https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html). Over a full year that comes to about $67.2 billion, which is my calculation: $16.8 billion × 4 ≈ $67.2 billion; the page gives no full-year figure. I verified the quote against the page."
+        }
+      ],
+      "fails": [
+        "c"
+      ]
+    }
+  }
+}

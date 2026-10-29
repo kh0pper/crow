@@ -1,0 +1,96 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex third quarter results date"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI reports third-quarter revenue",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/10/15/plimvex-q3.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Plimvex reported third-quarter revenue on October 14.",
+          "source_id": "$source:https://glorbin-courant.example/2025/10/15/plimvex-q3.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/10/15/plimvex-q3.html"
+        }
+      },
+      {
+        "say": "Plimvex AI reported its third-quarter results on October 14 (https://glorbin-courant.example/2025/10/15/plimvex-q3.html). October 15 is derived from the URL's date, not stated on the page. I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex third quarter results date"
+        }
+      },
+      {
+        "say": "Plimvex AI reported its third-quarter results on October 15 (https://glorbin-courant.example/2025/10/15/plimvex-q3.html)."
+      }
+    ],
+    "fails": [
+      "c",
+      "a",
+      "b"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex third quarter results date"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI reports third-quarter revenue",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/10/15/plimvex-q3.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Plimvex reported third-quarter revenue on October 14.",
+          "source_id": "$source:https://glorbin-courant.example/2025/10/15/plimvex-q3.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/10/15/plimvex-q3.html"
+        }
+      },
+      {
+        "say": "Plimvex AI reported its third-quarter results on October 14 (https://glorbin-courant.example/2025/10/15/plimvex-q3.html). October 15 is derived from the URL's date, not stated on the page. I verified the quote against the page. One search result is dated the 15th, but that date is derived from the URL; the page itself says October 14 (https://glorbin-courant.example/2025/10/15/plimvex-q3.html)."
+      }
+    ]
+  }
+}

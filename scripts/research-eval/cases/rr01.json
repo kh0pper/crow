@@ -1,0 +1,48 @@
+{
+  "id": "rr01",
+  "type": "number",
+  "origin": "repaired claim #2 (cash burn), fictionalized",
+  "prompt": "How much cash does Plimvex AI expect to burn in 2027? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "burn|cash|plimvex|2027": [
+      {
+        "title": "Plimvex AI's spending plan, by the numbers",
+        "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+        "description": "Plimvex AI faces a $57B cash burn in 2027, the report says."
+      }
+    ],
+    "default": [
+      {
+        "title": "Plimvex AI's spending plan, by the numbers",
+        "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+        "description": "Plimvex AI faces a $57B cash burn in 2027, the report says."
+      }
+    ]
+  },
+  "pages": {
+    "https://glorbin-courant.example/2025/09/18/plimvex-spending.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Plimvex AI's spending plan, by the numbers</title></head><body><article><h1>Plimvex AI's spending plan, by the numbers</h1><p>The Glorbin Courant, September 18, 2025</p><p>Plimvex AI told investors this month that it expects to burn about $35 billion in 2027, as it keeps buying compute for its next models.</p><p>The company said most of that spending goes to data-center capacity rented from Oxtarra Cloud and to chips from Krundel Semi.</p><p>Plimvex AI did not give a figure for the years after 2027, and said the plan would be revisited every quarter.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "$35 billion",
+      "$35B",
+      "$35bn",
+      "US$35 billion",
+      "35 billion dollars"
+    ],
+    "snippet_value": [
+      "$57 billion",
+      "$57B",
+      "$57bn",
+      "US$57 billion",
+      "57 billion dollars"
+    ],
+    "citable_url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html"
+  },
+  "notes": "The snippet's $57B is on the citable page's own search result, but the page (Sept-2025) says $35 billion. No later-vintage page exists anywhere in the case, so $57B can only come from the snippet. Every page and every snippet is fictional (synthesized)."
+}

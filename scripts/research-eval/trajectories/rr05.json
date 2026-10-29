@@ -1,0 +1,95 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "tarnholm imported data center equipment"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Authority adopts rule for imported data-center equipment",
+          "source_type": "web_article",
+          "url": "https://tfa-tarnholm.example/notices/2025-41.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "The Authority adopted a component-part authorization rule for imported data-center equipment.",
+          "source_id": "$source:https://tfa-tarnholm.example/notices/2025-41.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://tfa-tarnholm.example/notices/2025-41.html"
+        }
+      },
+      {
+        "say": "Tarnholm's Frequency Authority adopted a component-part authorization rule for imported data-center equipment, and a ban on foreign optical transceivers remains a draft (https://tfa-tarnholm.example/notices/2025-41.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "tarnholm imported data center equipment"
+        }
+      },
+      {
+        "say": "Tarnholm bans foreign data-center gear outright (https://tfa-tarnholm.example/notices/2025-41.html)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "tarnholm imported data center equipment"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Authority adopts rule for imported data-center equipment",
+          "source_type": "web_article",
+          "url": "https://tfa-tarnholm.example/notices/2025-41.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "The Authority adopted a component-part authorization rule for imported data-center equipment.",
+          "source_id": "$source:https://tfa-tarnholm.example/notices/2025-41.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://tfa-tarnholm.example/notices/2025-41.html"
+        }
+      },
+      {
+        "say": "Tarnholm's Frequency Authority adopted a component-part authorization rule for imported data-center equipment, and a ban on foreign optical transceivers remains a draft (https://tfa-tarnholm.example/notices/2025-41.html). I verified the quote against the page. One search result says Tarnholm bans foreign data-center gear; that is wrong, since the transceiver ban remains a draft (https://tfa-tarnholm.example/notices/2025-41.html)."
+      }
+    ]
+  }
+}
