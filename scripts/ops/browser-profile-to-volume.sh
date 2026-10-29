@@ -252,24 +252,44 @@ PY
 }
 
 # ---- the deadman (out of process) ------------------------------------------------
-# A detached transient systemd unit: if neither "done" nor "rolled-back" is in
-# $BACKUP/state when it fires, and the container there is still the OLD one
-# (its image) and not running, it restores the restart policy and starts it.
+# A detached transient systemd unit. When it fires:
+#   - finished ("done", "rolled-back", "replaced" in $BACKUP/state): nothing;
+#   - the run itself is still alive (its pid in $BACKUP/pid): SIGTERM it, so its
+#     own rollback runs, and wait up to 120 s for it;
+#   - then only if the container there is still the OLD one (its image) and not
+#     running: restore the restart policy and start it. "fired" is written only
+#     when the start worked; a failure writes "start-failed" (the next run
+#     refuses until it is resolved) and is logged: journalctl --user -u <unit>.
+# It needs the user's systemd manager to outlive the SSH session: enable
+# lingering for the operator (loginctl enable-linger), as on the lab hosts.
 arm_deadman() {
   local dm="$BACKUP/deadman.sh" dockerbin
   dockerbin="$(command -v "$DOCKER")"
   {
     echo '#!/bin/sh'
     echo "# crow-browser profile migration deadman for $CONTAINER (armed $STAMP)"
-    echo "grep -qxE 'done|rolled-back' '$BACKUP/state' 2>/dev/null && exit 0"
+    echo "grep -qxE 'done|rolled-back|replaced' '$BACKUP/state' 2>/dev/null && exit 0"
+    echo "pid=\"\$(cat '$BACKUP/pid' 2>/dev/null)\""
+    echo "if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null && grep -q browser-profile-to-volume \"/proc/\$pid/cmdline\" 2>/dev/null; then"
+    echo "  echo \"deadman: the migration (pid \$pid) is still running at the deadline: stopping it so its own rollback runs\" >&2"
+    echo "  kill -TERM \"\$pid\""
+    echo "  i=0; while kill -0 \"\$pid\" 2>/dev/null && [ \$i -lt 120 ]; do sleep 1; i=\$((i+1)); done"
+    echo "  grep -qxE 'done|rolled-back|replaced' '$BACKUP/state' 2>/dev/null && exit 0"
+    echo "fi"
     echo "img=\"\$('$dockerbin' inspect '$CONTAINER' --format '{{.Image}}' 2>/dev/null)\""
     echo "run=\"\$('$dockerbin' inspect '$CONTAINER' --format '{{.State.Running}}' 2>/dev/null)\""
     echo "[ \"\$img\" = '$IMAGE' ] || exit 0"
     echo "[ \"\$run\" = true ] && exit 0"
     echo "'$dockerbin' update --restart='$POLICY' '$CONTAINER'"
-    echo "'$dockerbin' start '$CONTAINER'"
-    echo "'$dockerbin' rmi '$NEXT_TAG' >/dev/null 2>&1"
-    echo "echo fired > '$BACKUP/state'"
+    echo "if '$dockerbin' start '$CONTAINER'; then"
+    echo "  '$dockerbin' rmi '$NEXT_TAG' >/dev/null 2>&1"
+    echo "  echo fired > '$BACKUP/state'"
+    echo "  echo \"deadman: restarted the old container $CONTAINER\" >&2"
+    echo "else"
+    echo "  echo start-failed > '$BACKUP/state'"
+    echo "  echo \"deadman: could NOT start $CONTAINER: docker start $CONTAINER\" >&2"
+    echo "  exit 1"
+    echo "fi"
   } > "$dm"
   chmod 700 "$dm"
   "$SYSTEMD_RUN" --user --quiet --collect --unit="$DEADMAN_UNIT" --on-active="${CROW_MIGRATE_DEADMAN_SECS:-900}s" /bin/sh "$dm" \
@@ -300,8 +320,8 @@ cleanup_hint() {
 rollback() {
   local code=$?
   set +e
-  trap - EXIT INT TERM HUP
-  trap '' PIPE
+  trap - EXIT
+  trap '' INT TERM HUP PIPE      # a second Ctrl-C or HUP must not cut the rollback short
   [ "$STAGE" = done ] && exit "$code"
   [ "$STAGE" = start ] && exit "$code"
   note "FAILED or interrupted during '$STAGE': putting things back"
@@ -310,7 +330,8 @@ rollback() {
       note "the recreate already replaced the old container. NOT rolling back automatically."
       note "the profile is in volume $VOLUME and $BACKUP/profile.tar; the old image is $PREV_TAG;"
       note "the old bundle files are in $BACKUP/bundle-files. Retry: cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME docker compose -p $PROJECT up -d --no-build"
-      note "the deadman ($DEADMAN_UNIT) stays armed but will not touch a replaced container."
+      disarm_deadman replaced
+      note "the deadman ($DEADMAN_UNIT) is disarmed: if you recover by hand with the old image, nothing restarts it behind you."
       cleanup_hint
       exit 1
     fi
@@ -357,12 +378,13 @@ mkdir -p "$BACKUP"
 chmod 700 "$INSTANCE_HOME/browser-profile-backup" "$BACKUP"
 echo armed > "$BACKUP/state"
 arm_deadman
-say "deadman armed: $DEADMAN_UNIT (${CROW_MIGRATE_DEADMAN_SECS:-900}s)"
+echo "$$" > "$BACKUP/pid"
+say "deadman armed: $DEADMAN_UNIT (${CROW_MIGRATE_DEADMAN_SECS:-900}s; its log: journalctl --user -u ${DEADMAN_UNIT}.service)"
 
 # ---- 4. a graceful stop: Chromium flushes cookies and logins first ------------
 STAGE=stop
+POLICY_CHANGED=1   # before the change: restoring the original policy is harmless either way
 "$DOCKER" update --restart=no "$CONTAINER" >/dev/null
-POLICY_CHANGED=1
 if [ "$WAS_RUNNING" = "true" ]; then
   # CDP Browser.close: the way that commits the cookie store (Chromium's own
   # SIGTERM path, and docker stop's SIGKILL, do not). SIGTERM is the fallback.

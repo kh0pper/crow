@@ -13,8 +13,8 @@ import { z } from "zod";
 import { chromium } from "playwright";
 import { buildStealthScript, getContextOptions, humanType, humanClick, delay } from "./stealth.js";
 import { getRandomProfile } from "./profiles.js";
-import { readFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { stateDir, stateRoot, containerName, cdpPort } from "./instance.js";
@@ -33,6 +33,12 @@ import { BLOCKED_URL_PATTERNS, isBlockedUrl, blockedResult } from "./blocked-hos
  * @param {string} [options.instructions] - MCP server instructions
  * @returns {McpServer}
  */
+/** { CROW_HOME: <realpath> } when CROW_HOME is set (else {}), for compose runs. */
+export function canonicalCrowHome(env = process.env) {
+  if (!env.CROW_HOME) return {};
+  try { return { CROW_HOME: realpathSync(env.CROW_HOME) }; } catch { return { CROW_HOME: resolvePath(env.CROW_HOME) }; }
+}
+
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
     `http://127.0.0.1:${cdpPort()}`;
@@ -158,7 +164,9 @@ export function createBrowserServer(options = {}) {
           try {
             execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--force-recreate"], {
               timeout: 90000,
-              env: { ...process.env, CROW_BROWSER_PROXY: proxy_url },
+              // A canonical CROW_HOME (symlinks resolved): the container stamps its
+              // profile with it and refuses a different spelling on the next start.
+              env: { ...process.env, ...canonicalCrowHome(), CROW_BROWSER_PROXY: proxy_url },
             });
           } catch (e) {
             return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${e.message}` }], isError: true };

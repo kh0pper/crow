@@ -278,3 +278,10 @@ test("round 3: Browser.close is bounded (timeout 10), and the marker compares ca
   assert.match(script, /^  timeout 10 python3 - "\$1" <<'PY' >\/dev\/null 2>&1$/m);
   assert.match(script, /^INSTANCE_HOME="\$\(realpath -m -- /m);
 });
+
+test("F6: the proxy_url relaunch passes a canonical CROW_HOME (the profile marker compares the host path)", () => {
+  const src = read("bundles/browser/server/server.js");
+  assert.match(src, /export function canonicalCrowHome\(env = process\.env\)/);
+  assert.match(src, /try \{ return \{ CROW_HOME: realpathSync\(env\.CROW_HOME\) \}; \}/);
+  assert.match(src, /env: \{ \.\.\.process\.env, \.\.\.canonicalCrowHome\(\), CROW_BROWSER_PROXY: proxy_url \}/);
+});

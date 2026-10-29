@@ -48,7 +48,7 @@ case "$1" in
   exec) case " $* " in *" pgrep "*) exit 1 ;; esac; exit 0 ;;
   cp) [ "$FAKE_FAIL" = cp ] && exit 1; [ -n "$FAKE_SLOW_CP" ] && sleep "$FAKE_SLOW_CP"; tar -cf - -C "$FAKE/profile-src" chromium-crow ;;
   stop) echo false > "$FAKE/running"; echo "$3" ;;
-  start) echo true > "$FAKE/running"; echo "$2" ;;
+  start) [ -n "$FAKE_START_FAILS" ] && exit 1; echo true > "$FAKE/running"; echo "$2" ;;
   run)
     case " $* " in
       *" --entrypoint tar "*) cat > /dev/null; [ "$FAKE_FAIL" = restore ] && exit 1; exit 0 ;;
@@ -110,7 +110,7 @@ function setup(over = {}) {
     FAKE_FAIL: over.fail ?? "", FAKE_UP_EXIT: over.upExit ?? "0", FAKE_UP_REPLACES: over.upReplaces ?? "", FAKE_SLOW_BUILD: over.slowBuild ?? "",
     FAKE_SLOW_CP: over.slowCp ?? "", FAKE_COMPOSE_VERSION: over.composeVersion ?? "5.1.2",
     CROW_MIGRATE_SYSTEMD_RUN: join(dir, "systemd-run"), CROW_MIGRATE_SYSTEMCTL: join(dir, "systemctl"),
-    CROW_MIGRATE_DEADMAN_SECS: over.deadmanSecs ?? "900", FAKE_ACTIVE_TIMER: over.activeTimer ?? "",
+    CROW_MIGRATE_DEADMAN_SECS: over.deadmanSecs ?? "900", FAKE_ACTIVE_TIMER: over.activeTimer ?? "", FAKE_START_FAILS: over.startFails ?? "",
     CROW_MIGRATE_NOW: "20261029-120000", CROW_MIGRATE_CDP_WAIT: "1", CROW_MIGRATE_CLOSE_WAIT: "1",
   };
   const run = (args) => {
@@ -265,6 +265,9 @@ test("a recreate that already replaced the old container is not rolled back blin
   assert.match(r.out, /--delete-backup /);
   assert.ok(!r.calls.includes("start crow-browser"));
   assert.ok(!r.calls.includes("volume rm browser_chromium-profile"), "the volume holds the profile now: kept");
+  // F3: the deadman is disarmed there too, so a later manual recovery is not undone behind the operator.
+  assert.ok(r.calls.includes("systemctl --user stop crow-browser-deadman-browser-20261029-120000.timer"));
+  assert.equal(readFileSync(join(s.home, "browser-profile-backup", "20261029-120000", "state"), "utf8").trim(), "replaced");
 });
 
 test("an interrupt (SIGTERM / Ctrl-C) during the slow build rolls back: the old container keeps serving", async () => {
@@ -334,7 +337,7 @@ test("the deadman: a SIGKILLed run (no rollback at all) is undone out of process
 
   // The deadman never touches a container that is already running, or a replaced one.
   const dm = readFileSync(join(s.home, "browser-profile-backup", "20261029-120000", "deadman.sh"), "utf8");
-  assert.match(dm, /grep -qxE 'done\|rolled-back'/);
+  assert.match(dm, /grep -qxE 'done\|rolled-back\|replaced'/);
   assert.match(dm, /\[ "\$img" = 'sha256:fakeimage' \] \|\| exit 0/);
   assert.match(dm, /\[ "\$run" = true \] && exit 0/);
 
@@ -424,4 +427,44 @@ test("the script never runs on its own: nothing in the repo calls it", () => {
     { cwd: new URL("..", import.meta.url).pathname, encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean);
   for (const f of out) assert.match(f, /\.(md|yml)$/, f + " may mention it, never run it");
   assert.doesNotMatch(readFileSync(SCRIPT, "utf8"), /^\s*(cp -r|rm -rf) \//m);
+});
+
+test("F2: a deadman that fires while the run is still alive stops the run (its own rollback runs) instead of starting the container under it", async () => {
+  const s = setup({ slowCp: "6", deadmanSecs: "2" });
+  const child = s.runAsync(ARGS);
+  const code = await new Promise((r) => child.on("exit", r));
+  assert.notEqual(code, 0, "the run was stopped");
+  const backup = join(s.home, "browser-profile-backup", "20261029-120000");
+  for (let i = 0; i < 100 && !/rolled-back|fired/.test(existsSync(join(backup, "state")) ? readFileSync(join(backup, "state"), "utf8") : ""); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(readFileSync(join(backup, "state"), "utf8").trim(), "rolled-back", "the run's own rollback finished; the deadman then did nothing");
+  const calls = s.calls();
+  assert.equal(calls.filter((c) => c === "start crow-browser").length, 1, "started once, by the rollback: " + calls.slice(-6).join(" | "));
+  assert.match(readFileSync(join(backup, "rollback.log"), "utf8"), /interrupted during 'backup'/);
+  assert.match(readFileSync(join(backup, "pid"), "utf8"), /^\d+\n$/);
+});
+
+test("F4: the deadman writes 'fired' only when the start worked; a failed start writes 'start-failed' (which blocks the next run)", async () => {
+  const s = setup({ slowCp: "8", deadmanSecs: "2", startFails: "1" });
+  const child = s.runAsync(ARGS);
+  for (let i = 0; i < 200 && !s.calls().includes("stop -t 30 crow-browser"); i++) await new Promise((r) => setTimeout(r, 50));
+  child.kill("SIGKILL");
+  await new Promise((r) => child.on("exit", r));
+  const state = join(s.home, "browser-profile-backup", "20261029-120000", "state");
+  for (let i = 0; i < 100 && readFileSync(state, "utf8").trim() === "armed"; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(readFileSync(state, "utf8").trim(), "start-failed");
+  // The next run on this instance refuses until the operator resolves it.
+  const again = s.run([...ARGS, "--dry-run"]);
+  assert.equal(again.code, 1);
+  assert.match(again.out, /backup state 'start-failed'/);
+});
+
+test("F1/F5 and the deadman's own checks, in the script", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const rb = src.slice(src.indexOf("rollback() {"), src.indexOf("\n}\n", src.indexOf("rollback() {")));
+  assert.match(rb, /trap '' INT TERM HUP PIPE/, "F1: signals are ignored during the rollback, not reset to their defaults");
+  assert.doesNotMatch(rb, /trap - EXIT INT/);
+  assert.ok(src.indexOf("POLICY_CHANGED=1   # before the change") < src.indexOf('"$DOCKER" update --restart=no "$CONTAINER"'), "F5: the flag before the change");
+  assert.match(src, /grep -qxE 'done\|rolled-back\|replaced'/);
+  assert.match(src, /journalctl --user -u \$\{DEADMAN_UNIT\}\.service/, "F4: where its log is");
+  assert.match(src, /loginctl enable-linger/, "F8: the lingering requirement is documented");
 });
