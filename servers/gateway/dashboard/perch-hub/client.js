@@ -4,6 +4,7 @@ import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
+import { sessionCardsJs } from "../shared/session-cards.js";
 import { perchDictationJs } from "./dictation.js";
 import { perchBrowserTileJs } from "./browser-tile.js";
 import { perchTakeOverJs } from "./take-over.js";
@@ -720,12 +721,16 @@ export function perchHubJs(lang = "en") {
   /* Which list control had focus, so a re-render can put it back. Only when
      focus was INSIDE the list body: a poll must never pull focus out of the
      composer. */
+  /* The element whose children are the rows: the cards' list in new mode. */
+  function listHost(body){
+    return findIn(body,function(c){ return hasClass(c,'ph-list')&&!hasClass(c,'archived-list'); })||body;
+  }
   function listFocusMark(body){
     var ae=document.activeElement;
     if(!ae||ae===body||!body.contains||!body.contains(ae)) return null;
     var sid=ae.getAttribute?ae.getAttribute('data-sid'):null;
     if(!sid) return null;
-    var rows=body.children||[], idx=-1;
+    var rows=listHost(body).children||[], idx=-1;
     for(var i=0;i<rows.length;i++){ if(rows[i].contains&&rows[i].contains(ae)){ idx=i; break; } }
     return {sid:sid,more:hasClass(ae,'roost-more'),idx:idx};
   }
@@ -737,13 +742,106 @@ export function perchHubJs(lang = "en") {
     if(!target){
       /* The row is gone (closed, archived): the next row's ⋯ — which now sits
          at the same index — or, with none left, New session. */
-      var r=mark.idx>=0?(body.children||[])[mark.idx]:null;
-      target=findIn(r,function(c){ return hasClass(c,'roost-more'); })||el('perch-new');
+      var r=mark.idx>=0?(listHost(body).children||[])[mark.idx]:null;
+      target=findIn(r,function(c){ return hasClass(c,'roost-more'); })||el('perch-new')||document.querySelector('[data-ph-start]');
     }
     focusEl(target);
   }
 
+  /* New mode (the session sheet exists): the list is the project home's
+     session cards (shared/session-cards.js): title, bot, project, day; a live
+     dot or a Waiting chip; never an id or a state word. The whole card opens
+     the session; Rename and Archive sit in its menu. Idle bot rows are not
+     drawn: "Start a session" above the list starts any bot. */
+  var CARDS_MODE=!!el('perch-session-sheet');
+  var SC_NO_SESSIONS='${tJs("shell.noSessions", lang)}';
+  function cardModelOf(r){
+    var p=projectOfRow(r,PROJECTS);
+    var here=!!p&&SCOPE!=null&&/^[1-9][0-9]*$/.test(String(SCOPE))&&Number(SCOPE)===Number(r.projectId);
+    return sessionCardModel({sessionId:r.sessionId,label:r.label,botName:r.botName||r.botId,state:r.state,
+      pendingUi:r.pendingUi,lastAt:r.lastActivityAt},
+      {projectName:(p&&!here)?p.name:null,projectSlug:sessionHref(r,PROJECTS,SCOPE)?p.slug:null});
+  }
+  /* The menu's name for a card: what the card itself reads as. */
+  function cardName(m){ return [m.title||SC_UNTITLED,m.botName].filter(Boolean).join(' \u00b7 '); }
+  function plainClick(ev){ return !!ev&&ev.button===0&&!ev.metaKey&&!ev.ctrlKey&&!ev.shiftKey&&!ev.altKey; }
+  function renderCards(rows,archived){
+    var body=el('perch-list-body'); if(!body) return;
+    deferredList=null;
+    var mark=listFocusMark(body);
+    clearEl(body); rowIndex={};
+    var arch=Array.isArray(archived)?archived:[];
+    var live=(rows||[]).filter(function(r){ return !!(r&&r.sessionId); });
+    live.sort(function(a,b){
+      if(!!b.pendingUi!==!!a.pendingUi) return b.pendingUi?1:-1;
+      var x=String(a.lastActivityAt||''), y=String(b.lastActivityAt||'');
+      if(x!==y) return x<y?1:-1;
+      return String(a.sessionId).localeCompare(String(b.sessionId));
+    });
+    if(!live.length&&!arch.length){ body.appendChild(line('empty',SC_NO_SESSIONS)); flushPendingNote(); restoreListFocus(body,mark); return; }
+    var now=new Date();
+    if(live.length){
+      var ul=document.createElement('ul'); ul.className='ph-list';
+      live.forEach(function(r){
+        rowIndex[r.sessionId]=r;
+        var m=cardModelOf(r);
+        var day=identDay(r,now,IDENT_LANG);
+        var li=scCardEl(m,day?day.charAt(0).toUpperCase()+day.slice(1):'');
+        var a=li.firstChild;
+        /* Opened the way a row's Open did (openRow: in place, or through the
+           project's scope); a modified click keeps the link's own behaviour. */
+        a.onclick=function(ev){
+          if(!plainClick(ev)) return;
+          if(ev.preventDefault) ev.preventDefault();
+          rowIndex[r.sessionId]=r; openRow(r);
+        };
+        buildRowMenu(li,r.sessionId,[
+          {cls:'roost-rename',label:RENAME_LABEL,run:function(){ renameSession(r.sessionId,r.label||''); }},
+          {cls:'roost-archive',label:ARCHIVE_LABEL,run:function(){ archiveSession(r.sessionId); }}
+        ]);
+        var more=findIn(li,function(c){ return hasClass(c,'roost-more'); });
+        if(more){
+          more.className='roost-more ph-card-more';
+          more.setAttribute('aria-label',ROW_ACTIONS.replace('{session}',function(){ return cardName(m); }));
+        }
+        ul.appendChild(li);
+      });
+      body.appendChild(ul);
+    }
+    renderArchivedCards(body,arch);
+    flushPendingNote();
+    restoreListFocus(body,mark);
+  }
+  /* The Archived toggle, as cards: title and bot, and Unarchive. */
+  function renderArchivedCards(body,archived){
+    if(!body||!archived||!archived.length) return;
+    var head=document.createElement('button');
+    head.type='button'; head.className='archived-toggle';
+    head.textContent=ARCHIVED_LABEL+' ('+archived.length+')';
+    head.setAttribute('aria-expanded',archivedOpen?'true':'false');
+    var ul=document.createElement('ul'); ul.className='ph-list archived-list'; ul.hidden=!archivedOpen;
+    archived.forEach(function(a){
+      if(!a||!a.sessionId) return;
+      var m=sessionCardModel({sessionId:a.sessionId,label:a.label,botName:a.botName||a.botId},{});
+      var li=scCardEl(m,'');
+      var link=li.firstChild, box=document.createElement('div');
+      box.className='ph-row archived-row';
+      while(link.firstChild) box.appendChild(link.firstChild);
+      li.replaceChild(box,link);
+      var u=document.createElement('button');
+      u.type='button'; u.className='roost-rename ph-card-more ph-card-text'; u.textContent=UNARCHIVE_LABEL;
+      u.setAttribute('data-sid',a.sessionId);
+      u.onclick=function(){ unarchiveSession(a.sessionId); };
+      li.appendChild(u);
+      ul.appendChild(li);
+    });
+    head.onclick=function(){ archivedOpen=!archivedOpen; ul.hidden=!archivedOpen; head.setAttribute('aria-expanded',archivedOpen?'true':'false'); };
+    body.appendChild(head);
+    body.appendChild(ul);
+  }
+
   function renderList(rows,archived){
+    if(CARDS_MODE){ renderCards(rows,archived); return; }
     var body=el('perch-list-body'); if(!body) return;
     deferredList=null;
     var mark=listFocusMark(body);
@@ -1031,7 +1129,7 @@ export function perchHubJs(lang = "en") {
   }
   /* The operator's own pick ends the ?bot= preselect: a later poll that
      first offers that bot must not override what they chose. */
-  el('perch-new-bot').onchange=function(){ wantBot=null; syncLaunchModels(); };
+  if(el('perch-new-bot')) el('perch-new-bot').onchange=function(){ wantBot=null; syncLaunchModels(); };
 
   /* The launch control's own handler. Resolves the bot from the picker when
      there is one, then hands off to startSession() verbatim — the 409/403/
@@ -1057,7 +1155,7 @@ export function perchHubJs(lang = "en") {
     var cwd=cwdEl?String(cwdEl.value||'').trim():'';
     startSession(pick.id,pick.name,model,cwd||null);
   }
-  el('perch-new').onclick=startNewSession;
+  if(el('perch-new')) el('perch-new').onclick=startNewSession;   /* classic only: new mode starts from the shared start control */
 
   /* ---- open-anywhere C2: the server-backed directory picker ------------
      A modal overlay fed by GET /browse (directory NAMES + paths only, never
@@ -4158,6 +4256,7 @@ ${perchPhoneCardJs(lang)}
 ${perchArtifactCardJs(lang)}
 ${perchCardChipJs(lang)}
 ${perchBriefingJs(lang)}
+${sessionCardsJs(lang)}
 
 ${perchDictationJs(lang)}
 

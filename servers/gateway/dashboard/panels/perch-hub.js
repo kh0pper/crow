@@ -16,6 +16,7 @@ import { perchHubContent } from "../perch-hub/html.js";
 import { engineStatus } from "../../bot-engine-status.js";
 import { t } from "../shared/i18n.js";
 import { activeProjects } from "../../../shared/shell-items.js";
+import { attachableBots, projectBots, startData } from "./project-home/data.js";
 
 export default {
   id: "perch",
@@ -38,12 +39,27 @@ export default {
       try { projects = await activeProjects(db); }
       catch (err) { console.warn("[perch] project list failed:", err?.message || err); }
     }
+    // New mode: "Start a session" (shared/session-cards.js) offers the
+    // project's bots in a project, every Perch-attachable bot elsewhere, with
+    // the lead (or ?bot=<id>, the Bot Builder card's Chat link) picked.
+    let start = null;
+    if (newMode) {
+      const scope = req.crowScope || { all: true };
+      const want = req.query && typeof req.query.bot === "string" ? req.query.bot : null;
+      try {
+        const bots = !db ? [] : scope.projectId ? await projectBots(db, scope.projectId) : await attachableBots(db);
+        start = startData(bots, want);
+      } catch (err) {
+        console.warn("[perch] start bots failed:", err?.message || err);
+        start = startData([]);
+      }
+    }
     return layout({
       title: t("perch.title", lang),
       // Shell P2: in the new shell the Chat tab shows the current project's
       // conversations. Classic Perch gets no scope and stays as it was.
       content: perchHubContent(lang, engineStatus(),
-        newMode ? { scope: req.crowScope || { all: true }, projects } : {}),
+        newMode ? { scope: req.crowScope || { all: true }, projects, start } : {}),
     });
   },
 };

@@ -177,7 +177,7 @@ const jarNew = (extra = {}) => ({ crow_session: "new-sess", crow_csrf: "tok", [M
 const scopeCookies = (cookies) => cookies.filter((c) => c.startsWith(SCOPE + "=") || /^crow_scope/.test(c));
 /** The page's visible text: tags and their attributes removed. */
 const textOf = (html) => html.replace(/<script[\s\S]*?<\/script>/g, " ").replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]*>/g, " ");
-const section = (html, cls) => (html.match(new RegExp(`<section class="ph-section ${cls}">([\\s\\S]*?)</section>`)) || [])[1] || "";
+const section = (html, cls) => (html.match(new RegExp(`<section class="ph-section ${cls}"[^>]*>([\\s\\S]*?)</section>`)) || [])[1] || "";
 
 test("the home renders start, needs-you and earlier sessions for the slug", async () => {
   const r = await get("/dashboard/project/garden", jarNew());
@@ -430,9 +430,10 @@ test("the New project link opens the create form", async () => {
 test("Start a session goes to /dashboard/perch?project=<slug>#<sid>; the client has no backticks", async () => {
   const { projectHomeClientJs } = await import("../servers/gateway/dashboard/panels/project-home/client.js");
   const js = projectHomeClientJs("en");
-  assert.match(js, /location\.href = '\/dashboard\/perch\?project=' \+ encodeURIComponent\(slug\) \+ '#' \+ encodeURIComponent\(sid\)/);
+  // The shared start control (shared/session-cards.js) names the project in its section.
+  assert.match(js, /location\.href = '\/dashboard\/perch' \+ \(slug \? '\?project=' \+ encodeURIComponent\(slug\) : ''\) \+ '#' \+ encodeURIComponent\(sid\)/);
   assert.match(js, /getAttribute\('data-project-slug'\)/);
   assert.ok(!js.includes("`"));
   const r = await get("/dashboard/project/garden", jarNew());
-  assert.match(r.body, /data-project-slug="garden"/);
+  assert.match(r.body, /data-ph-start-root data-project-id="\d+" data-project-slug="garden">/);
 });
