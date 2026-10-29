@@ -20,8 +20,8 @@
  * Activity rail carry), "model" (the fake pi's sent frames, turn prompts and images: what the
  * model would see), "seam" (the engine's audit and meter calls), "db-bytes" (crow.db, tasks.db
  * and their -wal/-shm files, raw bytes), "tables" (perch_session_files, audit_log,
- * project_audit_log, notifications), "files" (every file under the scratch CROW_HOME and data
- * dir), "responses" (every HTTP response body the harness received).
+ * project_audit_log, notifications), "files" (every file under the scratch dir: CROW_HOME,
+ * the data dir and the bot session dirs), "responses" (every HTTP response body the harness received).
  *
  * No pi transcript JSONL sink, by design: the fake pi writes none, and a secret's value never
  * goes to pi at all, so the "model" sink (everything pi would receive: sent frames, turn
@@ -38,12 +38,23 @@ import { join, relative } from "node:path";
 import { format } from "node:util";
 import http from "node:http";
 
+import { findSecrets } from "../../servers/shared/secret-detect.js";
+
 const REPO = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-/** A random 32-character canary with upper, lower and digit characters (so the detector's
- *  entropy rule would also see it). */
+/** A random 32-character canary with upper, lower and digit characters that the shared
+ *  detector flags whole on its own (a pasted canary is a secret by every rule a later task
+ *  relies on; the rare random token the entropy rule's structure signals miss is redrawn). */
 export function makeCanary(length = 32) {
+  for (;;) {
+    const c = drawCanary(length);
+    const hits = findSecrets(c);
+    if (hits.length === 1 && hits[0].start === 0 && hits[0].end === c.length) return c;
+  }
+}
+
+function drawCanary(length) {
   for (;;) {
     const bytes = randomBytes(length * 2);
     let s = "";
@@ -390,7 +401,8 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
       const { rows } = await db.execute(`SELECT * FROM ${table}`);
       rows.forEach((r, i) => { if (inText(r)) add("tables", `${table} row ${i}`); });
     }
-    for (const root of [crowHome, dataDir, join(dir, "bots")]) {
+    // The whole scratch dir (CROW_HOME, the data dir, bot session dirs, models.json, sys.md).
+    for (const root of [dir]) {
       for (const f of walkFiles(root)) {
         if (!hasBytes(readFileSync(f))) continue;
         const path = f.startsWith(crowHome + "/") ? relative(crowHome, f) : relative(dir, f);

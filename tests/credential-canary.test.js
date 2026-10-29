@@ -190,3 +190,38 @@ test("(d) the services connect submit with the canary as a value", async () => {
   assert.equal(bad.status, 400);
   assert.deepEqual(await h.grepEverywhere(c2), []);
 });
+
+// ---------------------------------------------------------------------------
+// The Perch router's handler for errors that are not body errors
+// ---------------------------------------------------------------------------
+
+test("perch router: a non-body error keeps its own status (500 otherwise) and logs name, method and route, never the message", async () => {
+  const { default: express } = await import("express");
+  const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const c = makeCanary();
+  let nextErr = null;
+  const gate = (req, res, next) => next(nextErr);
+  const app = express();
+  app.use(perchInteractiveApiRouter(gate, { engine: () => h.engine, annotate: async (m) => m, providerModels: () => [], piProviders: () => null }));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}/dashboard/perch-api`;
+  try {
+    for (const [err, status, code] of [
+      [Object.assign(new TypeError("leaked " + c), { status: 503 }), 503, "internal"],
+      [Object.assign(new RangeError("leaked " + c), { statusCode: 418 }), 418, "request_failed"],
+      [new Error("leaked " + c), 500, "internal"],
+      [Object.assign(new Error("leaked " + c), { status: 302 }), 500, "internal"],
+    ]) {
+      nextErr = err;
+      const before = h.console.lines.length;
+      const r = await fetch(base + "/browse?path=" + c);
+      assert.equal(r.status, status, err.name);
+      assert.deepEqual(await r.json(), { error: code });
+      assert.deepEqual(h.console.lines.slice(before), [`[perch-interactive-api] request failed: ${err.name} GET /dashboard/perch-api/browse`]);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+  assert.deepEqual(await h.grepEverywhere(c), []);
+});

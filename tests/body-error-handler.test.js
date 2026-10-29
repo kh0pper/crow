@@ -27,11 +27,11 @@ test("parse, size, encoding and charset refusals answer bad_body with the parser
     assert.deepEqual(lines, ["[gateway] bad body"]);
     assert.equal(passed.length, 0);
   }
-  assert.equal(isBodyParserError(Object.assign(new Error("x"), { status: 400, body: "" })), true, "a 400 carrying a body");
 });
 
-test("every other error passes to next(err) unchanged, and nothing is answered", () => {
-  for (const err of [new Error("boom"), Object.assign(new Error("nope"), { status: 400 }), Object.assign(new Error("gone"), { status: 404, body: "x" }), Object.assign(new Error("t"), { type: "other.thing" })]) {
+test("every other error passes to next(err) unchanged, and nothing is answered (a status alone is not a body error)", () => {
+  assert.equal(isBodyParserError(Object.assign(new Error("x"), { status: 400, body: "" })), false);
+  for (const err of [new Error("boom"), Object.assign(new Error("nope"), { status: 400 }), Object.assign(new Error("gone"), { status: 404, body: "x" }), Object.assign(new Error("bad"), { status: 400, body: "x" }), Object.assign(new Error("big"), { status: 413, body: "x" }), Object.assign(new Error("t"), { type: "other.thing" })]) {
     const { res, passed, lines } = run(err);
     assert.equal(passed[0], err);
     assert.equal(res.statusCode, null);
