@@ -8,12 +8,17 @@
  *   - CROW_TRUSTED_PROXIES set: the agent never trusts a local proxy, Serve is the only door;
  *   - CROW_DASHBOARD_PUBLIC set: a full-Crow setting with no meaning here, refused so a copied
  *     gateway env is caught;
- *   - a bind address of 0.0.0.0 or :: (any all-zero spelling): the agent is loopback-only.
+ *   - CROW_SERVE_PEER_UIDS=off: Serve's headers would be trusted on their shape alone, so any
+ *     local process could pose as Serve (a numeric uid list, including a test's own uid, is fine);
+ *   - a bind address that is not loopback (127.0.0.0/8, ::1, localhost): an allowlist, because
+ *     "0", "0.0", "00.0.0.0", "::ffff:0.0.0.0" and the like all bind every interface, and a
+ *     tailnet address would skip Serve.
  *
- * Pure: reads the filesystem, never writes. Node built-ins only.
+ * Root dirs and identity files are followed through symlinks; recursion below a root is not.
+ * Pure: reads the filesystem, never writes.
  */
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { isIP } from "node:net";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { isLoopbackAddr } from "../shared/peer-class.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -24,8 +29,13 @@ const SEED_RE = /"seed"\s*:/;
 
 const isIdentityName = (n) => n === "identity.json" || n.startsWith("identity.json.");
 
+/** A real (not symlinked) directory: used for recursion below a root. */
 function isDir(p) {
   try { const st = lstatSync(p); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; }
+}
+/** A directory, following symlinks: used for the roots themselves. */
+function isDirFollow(p) {
+  try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
 function seedFileIn(dir) {
@@ -35,7 +45,7 @@ function seedFileIn(dir) {
     if (!isIdentityName(n)) continue;
     const p = join(dir, n);
     try {
-      const st = lstatSync(p);
+      const st = statSync(p); // follows a symlinked identity file
       if (!st.isFile()) continue;
       const text = st.size > MAX_IDENTITY_BYTES ? "" : readFileSync(p, "utf8");
       // Too big to be an identity, or unreadable: refuse rather than guess.
@@ -47,9 +57,9 @@ function seedFileIn(dir) {
   return null;
 }
 
-/** `dir` and, to `depth` levels, its subdirectories (symlinks not followed). */
-function seedFileUnder(dir, depth) {
-  if (!isDir(dir)) return null;
+/** `dir` and, to `depth` levels, its real subdirectories (symlinked subdirs not followed). */
+function seedFileUnder(dir, depth, root = true) {
+  if (!(root ? isDirFollow(dir) : isDir(dir))) return null;
   const hit = seedFileIn(dir);
   if (hit || depth <= 0) return hit;
   let names;
@@ -58,7 +68,7 @@ function seedFileUnder(dir, depth) {
     if (SKIP.has(n)) continue;
     const sub = join(dir, n);
     if (!isDir(sub)) continue;
-    const h = seedFileUnder(sub, depth - 1);
+    const h = seedFileUnder(sub, depth - 1, false);
     if (h) return h;
   }
   return null;
@@ -79,13 +89,10 @@ export function findSeedIdentity({ env = process.env, satHome, home = homedir() 
   return null;
 }
 
-/** True for 0.0.0.0, ::, [::], ::0, 0:0:0:0:0:0:0:0 and the like. */
-export function isWildcardHost(h) {
+/** Only loopback binds are allowed: 127.0.0.0/8, ::1 (any spelling), localhost. */
+export function isAllowedBindHost(h) {
   const s = String(h ?? "").trim().replace(/^\[(.*)\]$/, "$1");
-  const fam = isIP(s);
-  if (fam === 4) return s.split(".").every((o) => Number(o) === 0);
-  if (fam === 6) return /^[0:]+$/.test(s);
-  return false;
+  return s !== "" && isLoopbackAddr(s);
 }
 
 const present = (v) => v != null && String(v).trim() !== "";
@@ -98,8 +105,11 @@ export function bootGuardMessage({ env = process.env, satHome, host, home = home
   if (present(env.CROW_DASHBOARD_PUBLIC)) {
     return "refusing to start: CROW_DASHBOARD_PUBLIC is set; that is a full Crow setting, unset it on a satellite";
   }
-  if (isWildcardHost(host)) {
-    return `refusing to start: bind address ${host} would listen on every interface; the satellite agent binds loopback only (CROW_SATELLITE_HOST)`;
+  if (String(env.CROW_SERVE_PEER_UIDS ?? "").trim().toLowerCase() === "off") {
+    return "refusing to start: CROW_SERVE_PEER_UIDS=off would accept Serve's headers without checking the socket owner; leave it unset (tailscaled's uid 0)";
+  }
+  if (!isAllowedBindHost(host)) {
+    return `refusing to start: bind address ${host} is not loopback; the satellite agent binds 127.0.0.1 only and is reached through Tailscale Serve (CROW_SATELLITE_HOST)`;
   }
   const seed = findSeedIdentity({ env, satHome, home });
   if (seed) {

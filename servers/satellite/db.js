@@ -42,7 +42,14 @@ const V1 = `
     nonce_s   TEXT PRIMARY KEY,
     nonce_c   TEXT NOT NULL,
     issued_at INTEGER NOT NULL,
-    used_at   INTEGER
+    used_at   INTEGER,
+    source    TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS pair_tries (
+    code_hash TEXT NOT NULL,
+    source    TEXT NOT NULL,
+    wrong     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (code_hash, source)
   );
   CREATE INDEX IF NOT EXISTS idx_pair_nonces_issued ON pair_nonces (issued_at);
   CREATE TABLE IF NOT EXISTS cert_serials (

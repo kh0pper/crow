@@ -31,14 +31,14 @@ if (cmd === "status") {
   const key = needKey();
   const cert = readCert(satHome);
   const pinned = readPinned(satHome);
-  const paired = certIsLive(cert, key.ed25519_pub);
+  const paired = certIsLive(cert, pinned, key.ed25519_pub);
   console.log(paired ? "paired" : "not paired");
   console.log(`satellite id: ${formatFingerprint(key.satellite_id)}`);
   if (pinned?.crow_id) console.log(`crow id: ${pinned.crow_id}`);
   if (cert?.payload?.expires_at) console.log(`cert expires ${cert.payload.expires_at}`);
 } else if (cmd === "pair-code") {
   const key = needKey();
-  if (certIsLive(readCert(satHome), key.ed25519_pub)) {
+  if (certIsLive(readCert(satHome), readPinned(satHome), key.ed25519_pub)) {
     console.error("already paired; unpair from crow (or run the installer with --repair) before making a pairing code");
     process.exit(1);
   }
