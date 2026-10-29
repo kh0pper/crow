@@ -78,6 +78,7 @@ import {
   loadBotRow, loadGiveTarget, getOffer, listOffers, claimOffer, renewLease, releaseClaim,
   settleOffer, findOfferCard, recoverThread, claimOfferNotes, unclaimOfferNotes, offerTag,
 } from "../board/offer-service.js";
+import { takeSecretNotes, returnSecretNotes } from "../secrets/request-store.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -607,12 +608,19 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         console.warn("[perch-interactive-api] offer note claim failed:", e.message);
       }
     }
+    // Credential card (spec §10.2): the outcome of a password request rides the same way, as
+    // fixed lines from secrets/request-store.js (in memory, taken once; handed back when the
+    // turn never started). Never a value: no value is ever held there.
+    const secretLines = message.trim() ? takeSecretNotes(sid) : [];
     try {
       const eng = resolveEngine();
-      const text = notes.lines.length ? notes.lines.join("\n") + "\n\n" + message : message;
+      // "[Crow] " marks a gateway line, as offerNoteLine does.
+      const lines = [...secretLines.map((l) => "[Crow] " + l), ...notes.lines];
+      const text = lines.length ? lines.join("\n") + "\n\n" + message : message;
       const result = await eng.message(sid, text, images);
       res.status(202).json({ turnId: result.turnId });
     } catch (err) {
+      returnSecretNotes(sid, secretLines);
       if (notes.claims.length) {
         try { await unclaimOfferNotes(ndb, notes.claims); } catch (e) { console.warn("[perch-interactive-api] offer note unclaim failed:", e.message); }
       }

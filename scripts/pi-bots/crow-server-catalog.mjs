@@ -29,7 +29,7 @@ import {
   resolveEnvValue,
 } from "../server-registry.js";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
-import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor } from "./actor-sig.mjs";
+import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor, signSecretsActor } from "./actor-sig.mjs";
 // Leaf module (registry read only): no path back to ext_registry.mjs or mcp_writer.mjs.
 import { isLegacyConfiguredAddon, addonDerivedEnv } from "../../servers/gateway/services/legacy-sources.js";
 
@@ -190,6 +190,30 @@ function artifactsBlock(crowHome, { botId, threadId, gatewayType, port } = {}) {
   return { url: `http://127.0.0.1:${gatewayPort}/artifacts/mcp`, headers };
 }
 
+/** The catalog name of the credential card's mount (spec §10.2). */
+export const SECRETS_SERVER = "crow-secrets";
+
+// The secrets token lives in <crowHome>/secrets (the 700 dir the pi sandbox hides from bots),
+// rotated at every gateway boot (local-token.js SECRETS_TOKEN); this runs outside the sandbox.
+function secretsTokenPath(crowHome) { return join(crowHome, "secrets", "secrets-token"); }
+
+/** Credential card: {url, headers} block for /secrets/mcp, signed with kind "secrets" like
+ *  artifactsBlock. crow_request_secret answers only a signed Perch actor (secrets/mcp.js).
+ *  Absent token file → null. */
+function secretsBlock(crowHome, { botId, threadId, gatewayType, port } = {}) {
+  let token;
+  try { token = readFileSync(secretsTokenPath(crowHome), "utf8").trim(); } catch { return null; }
+  if (!token) return null;
+  const gatewayPort = port || process.env.CROW_GATEWAY_PORT || 3001;
+  const headers = { Authorization: "Bearer " + token, "X-Crow-Actor-Kind": "bot" };
+  if (botId) headers["X-Crow-Actor-Id"] = String(botId);
+  if (threadId) headers["X-Crow-Actor-Thread"] = String(threadId);
+  if (gatewayType) headers["X-Crow-Actor-Gateway"] = String(gatewayType);
+  const sig = signSecretsActor({ botId, threadId, gatewayType });
+  if (sig) headers["X-Crow-Actor-Sig"] = sig;
+  return { url: `http://127.0.0.1:${gatewayPort}/secrets/mcp`, headers };
+}
+
 function applyJournalGuard(env) {
   // The WAL-unlink scar: every server touching a crow.db runs journal DELETE.
   if (env && env.CROW_DB_PATH) env.CROW_JOURNAL_MODE = "DELETE";
@@ -309,6 +333,8 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   if (phone) { servers.phone = phone; coreNames.push("phone"); }
   const artifacts = artifactsBlock(crowHome, { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });
   if (artifacts) { servers.artifacts = artifacts; coreNames.push("artifacts"); }
+  const secrets = secretsBlock(crowHome, { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });
+  if (secrets) { servers[SECRETS_SERVER] = secrets; coreNames.push(SECRETS_SERVER); }
 
   for (const spec of CORE_SERVERS) {
     const { block } = coreBlock(spec, binding, repoEnv, node);

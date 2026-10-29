@@ -527,6 +527,11 @@ export function pathScopedToken({ name, hashKey, createdKey, home }) {
 // Key names follow this file's existing `mcp_<x>_token_hash` / `_created` shape.
 export const SERVICES_TOKEN = pathScopedToken({ name: "services", hashKey: "mcp_services_token_hash", createdKey: "mcp_services_token_created" });
 export const SATELLITE_TOOLS_TOKEN = pathScopedToken({ name: "satellite-tools", hashKey: "mcp_satellite_tools_token_hash", createdKey: "mcp_satellite_tools_token_created" });
+// Credential card (spec §10.2): the bots' token for /secrets/(mcp|sse|messages) only, rotated at
+// boot like the families above (a bot's config is rebuilt every turn). On that mount it proves
+// nothing on its own: crow_request_secret also needs a signed Perch actor (secrets/mcp.js).
+export const SECRETS_TOKEN = pathScopedToken({ name: "secrets", hashKey: "mcp_secrets_token_hash", createdKey: "mcp_secrets_token_created" });
+const SECRETS_PATH_RE = /^\/secrets\/(?:mcp|sse|messages)$/;
 
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
@@ -577,6 +582,9 @@ export function localTokenAuthMiddleware(db) {
       }
       if (!req.localTokenAuth && ARTIFACTS_PATH_RE.test(req.path) && await validateArtifactsToken(db, token)) {
         req.localTokenAuth = { token: "local-mcp", scope: "artifacts" };
+      }
+      if (!req.localTokenAuth && SECRETS_PATH_RE.test(req.path) && await SECRETS_TOKEN.validate(db, token)) {
+        req.localTokenAuth = { token: "local-mcp", scope: "secrets" };
       }
     } catch (err) {
       // Treat a DB/read error as non-fatal: log and fall through to the other

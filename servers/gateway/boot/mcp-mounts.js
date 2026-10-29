@@ -22,10 +22,10 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken, SERVICES_TOKEN, SATELLITE_TOOLS_TOKEN } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken, SERVICES_TOKEN, SATELLITE_TOOLS_TOKEN, SECRETS_TOKEN } from "../local-token.js";
 import { peerRelayRouter } from "../routes/peer-relay.js";
 import { actorSignRouter } from "../routes/actor-sign.js";
-import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
+import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig, verifySecretsActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -95,7 +95,7 @@ export async function rotateCloudDoorTokenAtBoot({
  */
 export async function rotateFamilyTokensAtBoot({
   createDb = createDbClient, log = console,
-  tokens = [[SERVICES_TOKEN, "services-tools"], [SATELLITE_TOOLS_TOKEN, "satellite-tools"]],
+  tokens = [[SERVICES_TOKEN, "services-tools"], [SATELLITE_TOOLS_TOKEN, "satellite-tools"], [SECRETS_TOKEN, "secrets"]],
 } = {}) {
   for (const [tok, label] of tokens) {
     try {
@@ -401,6 +401,18 @@ export async function mountMcpServers(app, deps) {
   // this process (idempotent; the phone mount below reuses it).
   initGatewayActorKey();
   mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions, verifyActor: verifyBoardActorSig, verifyThread: verifyBoardThreadActorSig }), sessionManager, authMiddleware, peerExposureGate);
+  // Credential card (spec §10.2): the bot-only /secrets mount, core like /board. Its token
+  // (SECRETS_TOKEN) rotates with the families above; crow_request_secret also needs a signed
+  // Perch actor whose session is resident and awake in this process (never woken by a check).
+  // The card itself rides the secrets/mcp.js emitSecretCard seam. A failure never blocks boot.
+  try {
+    const { createSecretsMcpServer } = await import("../secrets/mcp.js");
+    const isLiveSession = async (sid, opts) => (await import("../perch-interactive.js")).isLiveResidentSession(sid, opts);
+    mountMcpServer(app, "/secrets", () => createSecretsMcpServer({ verifyActor: verifySecretsActorSig, isLiveSession }), sessionManager, authMiddleware, peerExposureGate);
+    console.log("[gateway] secrets MCP mounted at /secrets/mcp");
+  } catch (err) {
+    console.warn(`[gateway] secrets mount skipped: ${err.message}`);
+  }
   // Phone bundle (plan A): core-mounted like /board, but only when the bundle
   // is installed. The server factory is imported by PATH from the installed
   // copy (ramble-transport precedent). A failure here never blocks boot.

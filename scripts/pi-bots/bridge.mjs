@@ -54,6 +54,8 @@ import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, c
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
+import { impliedServers } from "./mcp_writer.mjs";
+import { SECRETS_SERVER } from "./crow-server-catalog.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
 // bot-world.mjs so P2's interactive engine can build the SAME world without
@@ -188,6 +190,14 @@ export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactiv
   // lets per-session narrowing below still take it away.
   if (interactive) {
     tools = [tools, "ask_user", "send_user_file"].filter(Boolean).join(",");
+  }
+  // Credential card (spec §10.2): a def granting the browser or a Workspace server is also
+  // granted crow_request_secret (mcp_writer.mjs impliedServers writes its block), but only
+  // where the tool can answer: an interactive (Perch) spawn. Channel csvs stay byte-identical,
+  // and narrowing below can still take it away.
+  if (interactive && impliedServers(def).includes(SECRETS_SERVER)) {
+    const name = `mcp__${SECRETS_SERVER}__crow_request_secret`;
+    if (!tools.split(",").includes(name)) tools = [tools, name].filter(Boolean).join(",");
   }
   // C-6: per-session narrowing is applied to the FINAL csv — AFTER the
   // subagent append — so a session can narrow `subagent` away too. Narrowing
