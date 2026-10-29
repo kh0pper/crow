@@ -193,7 +193,7 @@ export function localMarkSwitch(p, { localMarks, salt, ownAddrs, lang = "en" }) 
 }
 
 /** markLocal refusals with their own line (?local=<reason>). */
-const LOCAL_REFUSALS = new Set(["ip_literal", "public_address", "flagged_cloud"]);
+const LOCAL_REFUSALS = new Set(["ip_literal", "public_address", "flagged_cloud", "known_cloud"]);
 
 const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
 const USED_BY_MAX = 4;

@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { rmScratch } from "./helpers/safe-rm.js";
 import { createDbClient } from "../servers/db.js";
 import {
-  readLocalMarks, markLocal, unmarkLocal, isStrictCloud, strictVoiceKeysInUse, upgradeLocalMarks,
+  readLocalMarks, markLocal, unmarkLocal, isMarkableRow, addLocalMarksChangeListener, isStrictCloud, strictVoiceKeysInUse, upgradeLocalMarks,
   logStrictDisagreement, localMarkTokenFor, LOCAL_MARKS_KEY, LOCAL_MARKS_SEEDED_KEY, LOCAL_NOTICE_SHOWN_KEY,
 } from "../servers/shared/provider-local-marks.js";
 import { isCloudKey, whereItRuns } from "../servers/shared/model-roles.js";
@@ -505,4 +505,39 @@ test("providers tab: a refused mark redirects with its reason and shows its line
   assert.ok(html.includes(t("providers.localRefused.ip_literal", "es")));
   const plain = await tab.render({ req: { query: { local: "<script>" } }, db, lang: "en", piAgentDir: null, tasksDbPaths: [] });
   assert.equal(plain.includes("<script>"), false);
+});
+
+test("a known cloud preset URL is strict cloud whatever its host column says, and can't be marked", async () => {
+  const db = await seeded();
+  await ins(db, "zai-x", "https://api.z.ai/api/coding/paas/v4", "local", ["glm-x"]);
+  invalidateRoleContext();
+  const r = await markLocal(db, "zai-x", { actor: "t" });
+  assert.deepEqual(r, { ok: false, reason: "known_cloud" });
+  assert.equal(Object.hasOwn(await readLocalMarks(db), "zai-x"), false);
+  const providers = await providersOf(db);
+  const row = providers.find((p) => p.id === "zai-x");
+  assert.equal(isMarkableRow(row, { ownAddrs: OWN }), false, "no This-is-local checkbox");
+  assert.equal(isStrictCloud("zai-x/glm-x", { providers, localMarks: {}, ownAddrs: OWN }), true);
+  // A mark that somehow exists never makes it local, for the strict check or the Models page.
+  const forged = { "zai-x": { host: "api.z.ai", at: "x", by: "x" } };
+  assert.equal(isStrictCloud("zai-x/glm-x", { providers, localMarks: forged, ownAddrs: OWN }), true);
+  assert.equal(isCloudKey("zai-x/glm-x", { providers, localMarks: forged, ownAddrs: OWN }), true);
+  // Control: a non-preset DNS row with the same forged mark shape is local.
+  assert.equal(isStrictCloud("lan-dns/m1", { providers, localMarks: { "lan-dns": { host: "box.example.internal" } }, ownAddrs: OWN }), false);
+  assert.ok(t("providers.localRefused.known_cloud", "en").length > 0);
+  assert.notEqual(t("providers.localRefused.known_cloud", "es"), t("providers.localRefused.known_cloud", "en"));
+});
+
+test("marks-change listeners fire on mark and unmark", async () => {
+  const db = await seeded();
+  const seen = [];
+  const off = addLocalMarksChangeListener((id) => seen.push(id));
+  try {
+    assert.deepEqual(await markLocal(db, "lan-dns", { actor: "t" }), { ok: true });
+    await unmarkLocal(db, "lan-dns");
+    await unmarkLocal(db, "lan-dns"); // nothing to remove: no event
+    assert.deepEqual(seen, ["lan-dns", "lan-dns"]);
+  } finally { off(); }
+  await markLocal(db, "lan-dns", { actor: "t" });
+  assert.deepEqual(seen, ["lan-dns", "lan-dns"], "unsubscribed");
 });

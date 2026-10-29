@@ -21,6 +21,7 @@ import { isIP } from "node:net";
 import { EMBED_TASKS, RERANK_TASKS } from "./provider-task.js";
 import { servingClassOf } from "../gateway/models/serving-class.js";
 import { doorKindOf, isDoorUrl } from "../gateway/models/door-resolve.js";
+import { presetForRow } from "./provider-recommendations.js";
 
 export const MAX_CHAIN_DEPTH = 4;
 const MAX_VISITS = 16;
@@ -142,8 +143,8 @@ function defaultResolveDoor(row, providers) {
  * `localMarks` ({[rowId]: {host}}, provider-local-marks.js: the operator's
  * "This is local", instance scope) turns an "unknown" DNS-name hop local, but
  * only while the row's current hostname equals the recorded `host` (a peer
- * rewriting the base URL lapses it) and the row's stored `host` is not
- * "cloud". A mark never touches an IP-literal hop: a public, reserved or
+ * rewriting the base URL lapses it), the row's stored `host` is not
+ * "cloud", and its base URL is not a known cloud preset (presetForRow). A mark never touches an IP-literal hop: a public, reserved or
  * documentation literal stays what its address says. Without marks,
  * `host === "cloud"` on a row is never consulted. The classifier and safety
  * never pass marks.
@@ -161,6 +162,7 @@ function hopVerdict(h, own, localSuffixes) {
 /** Does a current "This is local" mark cover this hop? */
 function markedLocal(row, h, localMarks) {
   if (!localMarks || typeof localMarks !== "object" || isIP(h) || row?.host === "cloud") return false;
+  if (presetForRow(row) !== null) return false; // a known cloud preset URL (api.z.ai, ...) is never local
   if (typeof row?.id !== "string" || !Object.hasOwn(localMarks, row.id)) return false;
   const m = localMarks[row.id];
   return !!m && typeof m.host === "string" && m.host === h;
