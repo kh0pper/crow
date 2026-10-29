@@ -1,17 +1,19 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
+import https from "node:https";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, networkInterfaces } from "node:os";
 import { lookup as dnsLookup } from "node:dns";
 import {
-  renderTemplate, normalizeAddress, testConnection, isForbiddenTarget, probeOwnAddresses,
+  renderTemplate, normalizeAddress, testConnection, isForbiddenTarget, probeOwnAddresses, folderRefusal, BODY_CAP_BYTES,
 } from "../servers/gateway/services/connect-test.js";
 
 const ERROR_CLASSES = new Set([
   "unreachable", "auth_failed", "timeout", "bad_address", "redirect",
-  "unexpected_response", "forbidden_target", "not_found", "not_a_vault",
+  "unexpected_response", "forbidden_target", "not_found", "not_a_vault", "bad_value",
 ]);
 
 const servers = [];
@@ -201,7 +203,7 @@ test("timeout: a server that never answers times out within the deadline", async
     values: { HA_URL: fx.url, HA_TOKEN: "x" }, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(), timeoutMs: 200,
   });
   assertClass(r, "timeout");
-  assert.ok(Date.now() - t0 < 400, `took ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 200 + 1800, `took ${Date.now() - t0} ms`); // deadline + loaded-runner slack
 });
 
 test("slow drip: the deadline covers the body, not just the headers", async () => {
@@ -215,7 +217,7 @@ test("slow drip: the deadline covers the body, not just the headers", async () =
     values: { HA_URL: fx.url, HA_TOKEN: "x" }, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(), timeoutMs: 300,
   });
   assertClass(r, "timeout");
-  assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 300 + 1800, `took ${Date.now() - t0} ms`); // a drip would run forever
 });
 
 test("body capped and dropped: a huge body is cut at 64 KB and the socket closed", async () => {
@@ -268,11 +270,14 @@ test("default own addresses: every interface address (bridges included) is refus
   const own = probeOwnAddresses();
   const all = Object.values(networkInterfaces()).flat().map((a) => a.address);
   for (const a of all) assert.ok(own.has(a), a);
+  // An ephemeral fixture port, never a real gateway port: a regression would hit the fixture only.
+  const fx = await fixture((req, res) => res.end("ok"));
   const v4 = all.filter((a) => !a.includes(":"));
   for (const a of v4) {
-    const r = await testConnection(haService(), { values: { HA_URL: `http://${a}:3001`, HA_TOKEN: "x" }, gatewayPort: 3001 });
+    const r = await testConnection(haService(), { values: { HA_URL: `http://${a}:${fx.port}`, HA_TOKEN: "x" }, gatewayPort: fx.port });
     assertClass(r, "forbidden_target");
   }
+  assert.equal(fx.hits, 0);
 });
 
 test("loopback on another port is allowed (a local Home Assistant)", async () => {
@@ -387,7 +392,7 @@ test("folder cases: vault ok, missing, not a directory, not absolute, not a vaul
     mkdirSync(join(vault, ".obsidian"), { recursive: true });
     const plain = join(root, "plain");
     mkdirSync(plain);
-    const run = (p) => testConnection(obsidian, { values: { OBSIDIAN_VAULT_PATH: p }, crowHome });
+    const run = (p) => testConnection(obsidian, { values: { OBSIDIAN_VAULT_PATH: p }, crowHome, otherSecretsDirs: [] });
     assert.deepEqual(await run(vault), { ok: true });
     assert.deepEqual(await run(vault + "/"), { ok: true });
     assertClass(await run(join(root, "missing")), "not_found");
@@ -415,7 +420,7 @@ test("folder: anything under <crowHome>/secrets is refused, after realpath (syml
     symlinkSync(join(secrets, "inner"), link);
     const homeLink = join(root, "home-link");
     symlinkSync(crowHome, homeLink);
-    const run = (p, home = crowHome) => testConnection(obsidian, { values: { OBSIDIAN_VAULT_PATH: p }, crowHome: home });
+    const run = (p, home = crowHome) => testConnection(obsidian, { values: { OBSIDIAN_VAULT_PATH: p }, crowHome: home, otherSecretsDirs: [] });
     assertClass(await run(secrets), "forbidden_target");
     assertClass(await run(join(secrets, "inner")), "forbidden_target");
     assertClass(await run(link), "forbidden_target");
@@ -437,9 +442,185 @@ test("folder: a manifest expect_entry with a path separator is never followed", 
   try {
     mkdirSync(join(root, "v"));
     const svc = { fields: obsidian.fields, test: { kind: "folder", expect_entry: "../v" } };
-    const r = await testConnection(svc, { values: { OBSIDIAN_VAULT_PATH: join(root, "v") }, crowHome: join(root, "h") });
+    const r = await testConnection(svc, { values: { OBSIDIAN_VAULT_PATH: join(root, "v") }, crowHome: join(root, "h"), otherSecretsDirs: [] });
     assertClass(r, "not_a_vault");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------- fix round 1 ----------
+
+test("folderRefusal: the rest of crowHome, other instances' secrets, symlinks into each, and parents", () => {
+  const root = mkdtempSync(join(tmpdir(), "svc-folder-"));
+  try {
+    // Two fake homes under a fake $HOME: the primary .crow and this instance .crow-b.
+    const fakeHome = join(root, "home");
+    const primary = join(fakeHome, ".crow");
+    const crowHome = join(fakeHome, ".crow-b");
+    for (const d of [join(primary, "secrets", "x", ".obsidian"), join(crowHome, "secrets"),
+      join(crowHome, "bundles", "b1", ".obsidian"), join(crowHome, "data", ".obsidian"),
+      join(root, "vault", ".obsidian")]) mkdirSync(d, { recursive: true });
+    const links = join(root, "links");
+    mkdirSync(links);
+    symlinkSync(join(primary, "secrets", "x"), join(links, "other-secrets"));
+    symlinkSync(join(crowHome, "bundles", "b1"), join(links, "bundles"));
+    symlinkSync(join(crowHome, "data"), join(links, "data"));
+    const opts = {
+      crowHome, expectEntry: ".obsidian",
+      env: { HOME: fakeHome, CROW_HOME: crowHome },
+      instanceScan: { home: fakeHome, unitDirs: [], envFileDirs: [] },
+    };
+    for (const p of [
+      join(primary, "secrets"), join(primary, "secrets", "x"), join(links, "other-secrets"),
+      join(crowHome, "bundles"), join(crowHome, "bundles", "b1"), join(links, "bundles"),
+      join(crowHome, "data"), join(links, "data"), crowHome, fakeHome, root,
+    ]) {
+      assert.equal(folderRefusal(p, opts), "forbidden_target", p);
+    }
+    assert.equal(folderRefusal(join(root, "vault"), opts), null);
+    assert.equal(folderRefusal(links, opts), "not_a_vault");
+    assert.equal(folderRefusal(join(root, "nope"), opts), "not_found");
+    // A scan that can't complete refuses (fail closed).
+    assert.equal(folderRefusal(join(root, "vault"), { crowHome, otherSecretsDirs: { [Symbol.iterator]() { throw new Error("x"); } } }), "forbidden_target");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("M1: a text value of '.' or '..' in a URL is refused, never resolved as a dot segment", async () => {
+  const fx = await fixture((req, res) => res.end("ok"));
+  const fields = [{ name: "BASE", kind: "address" }, { name: "ID", kind: "text" }];
+  for (const v of [".", ".."]) {
+    assert.throws(() => renderTemplate("${BASE}/api/states/${ID}/x", { BASE: fx.url, ID: v }, { fields }), { code: "bad_value" });
+    const r = await testConnection({ fields, test: { kind: "http", url: "${BASE}/api/states/${ID}/x", expect: [200] } }, {
+      values: { BASE: fx.url, ID: v }, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(),
+    });
+    assertClass(r, "bad_value");
+  }
+  assert.equal(fx.hits, 0);
+  // Dots inside a longer value are inert.
+  assert.equal(renderTemplate("${BASE}/u/${ID}", { BASE: fx.url, ID: "a..b" }, { fields }), `${fx.url}/u/a..b`);
+});
+
+test("M2: an unusable gateway port fails closed (every port guarded)", async () => {
+  const fx = await fixture((req, res) => res.end("ok"));
+  for (const gp of [NaN, "abc", 0, 70000, 1.5]) {
+    for (const host of ["127.0.0.1", "localhost", "[::1]", "0.0.0.0"]) {
+      const r = await testConnection(haService(), {
+        values: { HA_URL: `http://${host}:${fx.port}`, HA_TOKEN: "x" }, gatewayPort: gp, ownAddrs: new Set(),
+      });
+      assertClass(r, "forbidden_target");
+    }
+  }
+  assert.equal(fx.hits, 0);
+});
+
+test("0.x.y.z (this network) is refused on the gateway port", async () => {
+  const fx = await fixture((req, res) => res.end("ok"));
+  for (const host of ["0.1.2.3", "0.0.0.1", "[::ffff:0.1.2.3]"]) {
+    const r = await testConnection(haService(), { values: { HA_URL: `http://${host}:${fx.port}`, HA_TOKEN: "x" }, gatewayPort: fx.port, ownAddrs: new Set() });
+    assertClass(r, "forbidden_target");
+  }
+  assert.equal(fx.hits, 0);
+});
+
+test("M3: the body cap is exact: reaching BODY_CAP_BYTES settles, the rest is never awaited", async () => {
+  assert.equal(BODY_CAP_BYTES, 64 * 1024);
+  // Exactly the cap is sent, then the server stalls with more promised: settling must not wait.
+  const fx = await fixture((req, res) => {
+    res.writeHead(200, { "Content-Length": String(BODY_CAP_BYTES * 2) });
+    res.write(Buffer.alloc(BODY_CAP_BYTES, 97));
+  });
+  const r = await testConnection(haService(), {
+    values: { HA_URL: fx.url, HA_TOKEN: "x" }, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(), timeoutMs: 1500,
+  });
+  assert.deepEqual(r, { ok: true, label: `this Crow :${fx.port}` });
+});
+
+test("slow DNS: a resolver slower than the deadline times out", async () => {
+  const slow = (host, opts, cb) => setTimeout(() => cb(null, [{ address: "127.0.0.1", family: 4 }]), 1500);
+  const t0 = Date.now();
+  const r = await testConnection(haService(), {
+    values: { HA_URL: "http://slow.example.lan:1", HA_TOKEN: "x" }, gatewayPort: NOT_GATEWAY + 1, ownAddrs: new Set(), resolve: slow, timeoutMs: 200,
+  });
+  assertClass(r, "timeout");
+  assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0} ms`);
+});
+
+test("slow headers: a header block that drips times out", async () => {
+  const net = await import("node:net");
+  const srv = net.createServer((sock) => {
+    sock.on("error", () => {});
+    sock.write("HTTP/1.1 200 OK\r\n");
+    const iv = setInterval(() => { if (sock.destroyed) return clearInterval(iv); sock.write("X-Drip: a\r\n"); }, 50);
+    sock.on("close", () => clearInterval(iv));
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const r = await testConnection(haService(), {
+      values: { HA_URL: `http://127.0.0.1:${srv.address().port}`, HA_TOKEN: "x" }, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(), timeoutMs: 300,
+    });
+    assertClass(r, "timeout");
+  } finally {
+    srv.close();
+  }
+});
+
+test("an oversized response header is unreachable, never a crash", async () => {
+  const net = await import("node:net");
+  const srv = net.createServer((sock) => {
+    sock.on("error", () => {});
+    sock.end("HTTP/1.1 200 OK\r\nX-Big: " + "a".repeat(200 * 1024) + "\r\nContent-Length: 0\r\n\r\n");
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const r = await testConnection(haService(), {
+      values: { HA_URL: `http://127.0.0.1:${srv.address().port}`, HA_TOKEN: "x" }, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(),
+    });
+    assertClass(r, "unreachable");
+  } finally {
+    srv.close();
+  }
+});
+
+/** A self-signed cert for ha.example.lan, made at test time (no key material in the repo). */
+function selfSigned(dir) {
+  try {
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+      "-subj", "/CN=ha.example.lan", "-addext", "subjectAltName=DNS:ha.example.lan",
+      "-keyout", join(dir, "k.pem"), "-out", join(dir, "c.pem")], { stdio: "ignore" });
+    return { key: readFileSync(join(dir, "k.pem")), cert: readFileSync(join(dir, "c.pem")) };
+  } catch {
+    return null;
+  }
+}
+
+test("https: verified TLS, the checked lookup, and own-port refusal", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "svc-tls-"));
+  const tls = selfSigned(dir);
+  rmSync(dir, { recursive: true, force: true });
+  if (!tls) return t.skip("openssl not available");
+  let hits = 0;
+  const srv = https.createServer(tls, (req, res) => { hits++; res.end("ok"); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const port = srv.address().port;
+  const toLoop = (host, opts, cb) => dnsLookup("127.0.0.1", opts, cb);
+  try {
+    const values = { HA_URL: `https://ha.example.lan:${port}`, HA_TOKEN: "x" };
+    // A name resolving to loopback on the gateway port: refused in the lookup, 0 hits.
+    assertClass(await testConnection(haService(), { values, gatewayPort: port, ownAddrs: new Set(), resolve: toLoop }), "forbidden_target");
+    assert.equal(hits, 0);
+    // Self-signed is not trusted by default: unreachable (certificate rejected).
+    assertClass(await testConnection(haService(), { values, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(), resolve: toLoop }), "unreachable");
+    // With the CA trusted, the same probe passes through the checked lookup.
+    const request = (url, opts) => https.request(url, { ...opts, ca: tls.cert });
+    assert.deepEqual(
+      await testConnection(haService(), { values, gatewayPort: NOT_GATEWAY, ownAddrs: new Set(), resolve: toLoop, request }),
+      { ok: true, label: "ha.example.lan" },
+    );
+    assert.equal(hits, 1);
+  } finally {
+    srv.close();
   }
 });

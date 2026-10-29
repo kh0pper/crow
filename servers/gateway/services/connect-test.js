@@ -13,19 +13,22 @@
  *  - One total deadline covers DNS, connect, headers and body. The body is read to at most 64 KB
  *    and discarded; it never reaches the caller.
  *  - Template values can't add a header line or change the URL's host.
- *  - The result is `{ ok: true, label? }` or `{ ok: false, error }` with `error` one fixed class.
+ *  - Folders go through folderRefusal, the one rule the save route and the spawn re-check reuse.
+ *  - The result is `{ ok: true, label? }` or `{ ok: false, error }` with `error` one fixed class
+ *    (the plan's list, plus `bad_value` for a "." / ".." URL value).
  *    Nothing here logs, and no upstream message, header or body is ever returned.
  */
 import http from "node:http";
 import https from "node:https";
 import { lookup as dnsLookup } from "node:dns";
-import { realpath, stat } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve as resolvePath, join } from "node:path";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import { classifyIp, parseIPv6 } from "../../shared/ip-classify.js";
 import { getOwnAddresses } from "../../shared/locality.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
+import { instanceSecretsDirs } from "../../shared/secret-values.js";
 import { gatewayListenPort } from "../listen-port.js";
 import { t, fill } from "../dashboard/shared/i18n.js";
 
@@ -79,7 +82,11 @@ function substitute(tpl, values, kinds, where, probe) {
       return where === "header" ? addr.replace(HEADER_BAD_RE, "") : addr;
     }
     const v = probe ?? String(values?.[name] ?? "");
-    return where === "header" ? v.replace(HEADER_BAD_RE, "") : encodeURIComponent(v);
+    if (where === "header") return v.replace(HEADER_BAD_RE, "");
+    // encodeURIComponent leaves "." and ".." alone and new URL resolves them as dot segments
+    // (WHATWG treats "%2e" as a dot too), so a value that is exactly one would move the path.
+    if (v === "." || v === "..") throw new ProbeError("bad_value");
+    return encodeURIComponent(v);
   });
 }
 
@@ -87,7 +94,7 @@ function substitute(tpl, values, kinds, where, probe) {
  * Fill a `connect.test` template. `in: "url"` (default) or `"header"`.
  * Address fields go in normalised (a bad one throws `{code:"bad_address"}`); other values are
  * encodeURIComponent'd in a URL and stripped of CR/LF/NUL (and any byte a header can't carry) in a
- * header. For a URL, the rendered origin must equal the origin with every non-address value set to
+ * header. In a URL a value that is exactly "." or ".." throws `{code:"bad_value"}`. For a URL, the rendered origin must equal the origin with every non-address value set to
  * a fixed probe, so no value can move the host.
  */
 export function renderTemplate(tpl, values, { fields, in: where = "url" } = {}) {
@@ -185,12 +192,14 @@ async function probeHttp(service, opts) {
     for (const [k, v] of Object.entries(spec.headers || {})) {
       headers[k] = renderTemplate(v, values, { fields: service.fields, in: "header" });
     }
-  } catch {
-    return fail("bad_address");
+  } catch (e) {
+    return fail(e instanceof ProbeError && e.code === "bad_value" ? "bad_value" : "bad_address");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return fail("bad_address");
   const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
-  const guarded = port === Number(gatewayPort);
+  // An unusable gateway port fails closed: the rule then guards every port.
+  const gp = Number(gatewayPort);
+  const guarded = !Number.isInteger(gp) || gp < 1 || gp > 65535 || port === gp;
   const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
   // IP literals and "localhost" are decided here: node:net connects to a literal without a lookup.
   if (guarded && isForbiddenTarget(host, ownAddrs)) return fail("forbidden_target");
@@ -242,9 +251,14 @@ async function probeHttp(service, opts) {
         return label === undefined ? { ok: true } : { ok: true, label };
       };
       let read = 0;
+      // Exactly BODY_CAP_BYTES are kept (and then dropped): the chunk that crosses the cap is
+      // sliced, and the socket is destroyed.
       res.on("data", (chunk) => {
-        read += chunk.length;
-        if (read > BODY_CAP_BYTES) { settle(ok()); res.destroy(); }
+        if (settled) return;
+        const room = BODY_CAP_BYTES - read;
+        const kept = chunk.length > room ? chunk.subarray(0, room) : chunk;
+        read += kept.length;
+        if (kept !== chunk || read >= BODY_CAP_BYTES) { settle(ok()); res.destroy(); }
       });
       res.on("end", () => settle(ok()));
       res.on("error", () => settle(signal.aborted ? fail("timeout") : fail("unreachable")));
@@ -260,47 +274,70 @@ function within(child, parent) {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-async function realOr(p) {
-  try { return await realpath(p); } catch { return p; }
+function realOr(p) {
+  try { return realpathSync(p); } catch { return p; }
 }
 
-async function probeFolder(service, { values, crowHome }) {
-  const field = (service.fields || []).find((f) => f.kind === "folder");
-  const raw = field ? values?.[field.name] : undefined;
-  if (typeof raw !== "string" || !raw.trim() || !isAbsolute(raw.trim())) return fail("not_found");
+/**
+ * The one folder rule, shared by Connect and test, the save route and the spawn re-check.
+ * Returns null when `path` may be used as a folder service's root, else the error class:
+ *  - `not_found`: not a non-empty absolute path, missing, or not a directory;
+ *  - `forbidden_target`: after realpath, inside or containing this instance's home (its secrets,
+ *    bundles' .env files, data/crow.db) or any other Crow home's secrets dir on this host
+ *    (instanceSecretsDirs). A scan that can't be completed refuses (fail closed);
+ *  - `not_a_vault`: `expectEntry` given and not present (a name, never a path).
+ * Options: `crowHome`, `env` and `instanceScan` (passed to instanceSecretsDirs), or
+ * `otherSecretsDirs` to supply the other homes' secrets dirs directly.
+ */
+export function folderRefusal(path, {
+  crowHome = resolveCrowHome(),
+  expectEntry = null,
+  env = process.env,
+  instanceScan,
+  otherSecretsDirs,
+} = {}) {
+  if (typeof path !== "string" || !path.trim() || !isAbsolute(path.trim())) return "not_found";
   let real;
   try {
-    real = await realpath(raw.trim());
+    real = realpathSync(path.trim());
   } catch {
-    return fail("not_found");
+    return "not_found";
   }
-  // Refuse the secrets dir, anything in it, and anything containing it (a vault there would hand
-  // the child every secret), comparing real paths both lexically and after symlinks.
   const home = resolvePath(crowHome);
-  const secretsDirs = new Set([
-    join(home, "secrets"),
-    await realOr(join(home, "secrets")),
-    join(await realOr(home), "secrets"),
-  ]);
-  for (const s of secretsDirs) {
-    if (within(real, s) || within(s, real)) return fail("forbidden_target");
+  const guarded = new Set([home, realOr(home), join(home, "secrets"), realOr(join(home, "secrets"))]);
+  try {
+    const others = otherSecretsDirs ?? instanceSecretsDirs({ ...env, CROW_HOME: home }, instanceScan);
+    for (const d of others) { guarded.add(resolvePath(d)); guarded.add(realOr(d)); }
+  } catch {
+    return "forbidden_target";
+  }
+  for (const g of guarded) {
+    if (within(real, g) || within(g, real)) return "forbidden_target";
   }
   try {
-    if (!(await stat(real)).isDirectory()) return fail("not_found");
+    if (!statSync(real).isDirectory()) return "not_found";
   } catch {
-    return fail("not_found");
+    return "not_found";
   }
-  const entry = service.test.expect_entry;
-  if (entry != null) {
-    if (typeof entry !== "string" || !entry || entry.includes("/") || entry.includes("\\") || entry === "." || entry === "..") {
-      return fail("not_a_vault");
-    }
+  if (expectEntry != null) {
+    const e = expectEntry;
+    if (typeof e !== "string" || !e || e.includes("/") || e.includes("\\") || e === "." || e === "..") return "not_a_vault";
     try {
-      await stat(join(real, entry));
+      statSync(join(real, e));
     } catch {
-      return fail("not_a_vault");
+      return "not_a_vault";
     }
   }
+  return null;
+}
+
+function probeFolder(service, { values, crowHome, env, instanceScan, otherSecretsDirs }) {
+  const field = (service.fields || []).find((f) => f.kind === "folder");
+  const raw = field ? values?.[field.name] : undefined;
+  const refusal = folderRefusal(raw, {
+    crowHome, expectEntry: service.test.expect_entry ?? null, env, instanceScan, otherSecretsDirs,
+  });
+  if (refusal) return fail(refusal);
   const label = labelFor(service, values);
   return label === undefined ? { ok: true } : { ok: true, label };
 }
@@ -318,6 +355,9 @@ export async function testConnection(service, {
   resolve = dnsLookup,
   crowHome = resolveCrowHome(),
   lang = "en",
+  env = process.env,
+  instanceScan,
+  otherSecretsDirs,
 } = {}) {
   const spec = service?.test;
   try {
@@ -326,7 +366,7 @@ export async function testConnection(service, {
         values, gatewayPort, ownAddrs: ownAddrs || probeOwnAddresses(), timeoutMs, request, resolve, lang,
       });
     }
-    if (spec?.kind === "folder") return await probeFolder(service, { values, crowHome });
+    if (spec?.kind === "folder") return probeFolder(service, { values, crowHome, env, instanceScan, otherSecretsDirs });
     return fail("unexpected_response");
   } catch {
     return fail("unreachable");
