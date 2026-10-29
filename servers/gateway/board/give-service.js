@@ -15,6 +15,7 @@ import { updateCard, createCard } from "./card-service.js";
 import { appendAudit } from "../../shared/project-acl.js";
 import { ensureItem } from "../../shared/shell-items.js";
 import { loadGiveTarget } from "./offer-service.js";
+import { assertAssignableBot } from "./bot-lookup.js";
 
 /** The instance-global tasks store, resolved once at module load (same idiom
  * as bot-board-api.js's own TASKS_DB constant). */
@@ -153,6 +154,7 @@ export function giveAudit(db, row, cardId, extra) {
  */
 export async function createTaskForBot(db, tdb, botId, { title, description = null, tags = null, audit = {} } = {}) {
   const row = await loadGiveTarget(db, botId);
+  await assertAssignableBot(db, botId); // the one guard every assignment path shares
   const t = typeof tdb === "function" ? tdb() : tdb;
   const { id: cardId } = await createCard(t, { title, description, project_id: Number(row.project_id), assigned_bot: botId, tags }, DASHBOARD_ACTOR);
   try {

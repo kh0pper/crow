@@ -69,8 +69,7 @@ import {
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "./board/plan-service.js";
 import { reportResult, decideResult, listResults } from "./board/result-service.js";
 import { askDecision, notifyBatch } from "./board/decision-service.js";
-import { isEnabledBot } from "./board/bot-lookup.js";
-import { isVoiceBotId } from "../shared/voice-bot.js";
+import { assertAssignableBot } from "./board/bot-lookup.js";
 import { offerCard } from "./board/offer-service.js";
 
 const TASKS_DB = tasksDbPath();
@@ -370,10 +369,7 @@ export function createBoardMcpServer(options = {}) {
       const isTracker = fields.board_id != null || !!fields.slug;
       if (fields.assigned_bot != null && fields.assigned_bot !== "") {
         if (isTracker) throw fail("assigned_bot applies to cards only, not tracker items", "bad_field", 400);
-        if (isVoiceBotId(fields.assigned_bot)) throw fail("the voice bot never takes cards", "bad_bot", 400);
-        if (!(await isEnabledBot(cdb, fields.assigned_bot))) {
-          throw fail(`assigned_bot is not an enabled bot: ${fields.assigned_bot}`, "bad_bot", 400);
-        }
+        await assertAssignableBot(cdb, fields.assigned_bot);
       }
       if (isTracker) {
         let boardId = fields.board_id != null ? Number(fields.board_id) : null;
