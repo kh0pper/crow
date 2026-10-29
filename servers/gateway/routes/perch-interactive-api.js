@@ -1107,12 +1107,21 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const cardId = parseCardId(body);
     if (cardId == null) return jsonError(res, 400, "bad_request");
 
-    let tdb;
+    let tdb, cdb;
     try {
       tdb = createDbClient(TASKS_DB);
       await loadDispatchableCard(tdb, cardId);
 
       const eng = resolveEngine();
+      // The session's bot is checked BEFORE anything is claimed: attachCard
+      // claims the card and writes the row, so a late refusal would leave the
+      // session bound. A null snap falls through to attachCard's own
+      // no_such_session handling.
+      const snap = await eng.get(sid);
+      if (snap) {
+        cdb = createDbClient();
+        await assertBotUnblocked(cdb, snap.botId);
+      }
       // Fix round 1 (coordinator-reported Important): exclude THIS session's
       // own perch-live row from the occupancy check — otherwise a session
       // re-asserting the card it already holds 409s against itself, and
@@ -1122,14 +1131,13 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       await eng.checkCardFree(cardId, { excludeSessionId: sid });
       const result = await eng.attachCard(sid, cardId);
 
-      const cdb = createDbClient();
-      try { await assertBotUnblocked(cdb, result.botId); } finally { try { cdb.close(); } catch { /* already closed */ } }
       await updateCard(tdb, cardId, { assigned_bot: result.botId }, DASHBOARD_ACTOR);
 
       res.json({ ok: true, cardId });
     } catch (err) {
       mapEngineError(res, err);
     } finally {
+      if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
       if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     }
   });

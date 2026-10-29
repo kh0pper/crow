@@ -283,7 +283,7 @@ beforeEach(() => {
     },
     async get(sid) {
       engineCalls.get.push({ sid });
-      return { sessionId: sid, botId: "chatty", threadId: sid, rowId: 1, state: "awake", pendingUi: null, lastError: null, model: "local/qwen" };
+      return { sessionId: sid, botId: sid === "sess-voice" ? "crow.voice" : "chatty", threadId: sid, rowId: 1, state: "awake", pendingUi: null, lastError: null, model: "local/qwen" };
     },
     async subscribe(sid, fn) {
       engineCalls.subscribe.push({ sid, fn });
@@ -751,6 +751,8 @@ test("POST /interactive/:sid/attach-card refuses a session bound to crow.voice a
   assert.equal(status, 400);
   assert.equal(body.error, "bot_unavailable");
   assert.equal(taskRow(cardId).assigned_bot, null);
+  assert.deepEqual(engineCalls.attachCard, [], "nothing was claimed or attached");
+  assert.deepEqual(engineCalls.checkCardFree, []);
 });
 
 test("POST /interactive/:sid/attach-card 400s bad_request for a missing or non-integer card_id", async () => {
