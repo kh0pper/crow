@@ -377,25 +377,50 @@ export function llmCloudTokenPath() {
   return join(crowHome(), "llm-cloud-token");
 }
 
-/** New random 32-byte hex token every call. Stores its hash (local scope),
- *  then writes the raw value atomically: a temp file in the same directory,
- *  chmod 0600, rename over the old file. A reader sees the old token or the
- *  new one, never a partial or world-readable file. Returns the raw token. */
+/** New random 32-byte hex token every call. Order keeps the file and the
+ *  stored hash matching whenever a step fails:
+ *    1. write the raw value to a temp file in the same directory (wx, 0600),
+ *       then chmod 0600: a failure here changes nothing;
+ *    2. store the new hash (local scope): a failure here removes the temp
+ *       file, and the old file and old hash still match;
+ *    3. rename the temp file over the old one: a failure here puts the old
+ *       hash back, so the old file keeps validating.
+ *  A reader sees the old token or the new one, never a partial or
+ *  world-readable file. Returns the raw token. */
 export async function rotateLlmCloudToken(db) {
   const token = randomBytes(32).toString("hex");
-  await writeSetting(db, LLM_CLOUD_HASH_KEY, sha256Hex(token), { scope: "local" });
-  await writeSetting(db, LLM_CLOUD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = llmCloudTokenPath();
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const dropTmp = () => { try { unlinkSync(tmp); } catch { /* already gone */ } };
   try {
     writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
     chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
   } catch (err) {
-    try { unlinkSync(tmp); } catch { /* already gone */ }
+    dropTmp();
     throw err;
   }
+  let oldHash;
+  try {
+    oldHash = await readSetting(db, LLM_CLOUD_HASH_KEY);
+    await writeSetting(db, LLM_CLOUD_HASH_KEY, sha256Hex(token), { scope: "local" });
+  } catch (err) {
+    dropTmp();
+    throw err;
+  }
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    dropTmp();
+    try {
+      if (oldHash) await writeSetting(db, LLM_CLOUD_HASH_KEY, oldHash, { scope: "local" });
+      else await deleteLocalSetting(db, LLM_CLOUD_HASH_KEY);
+    } catch { /* best effort: the next boot rotates again */ }
+    throw err;
+  }
+  try {
+    await writeSetting(db, LLM_CLOUD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  } catch { /* informational only */ }
   return token;
 }
 

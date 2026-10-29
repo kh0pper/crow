@@ -59,6 +59,28 @@ test("other hosts pi checks", () => {
   assert.deepEqual(piCompatFor("https://api.cerebras.ai/v1", "m"), { supportsStore: false, supportsDeveloperRole: false });
 });
 
+// Table cases for the hosts the tests above don't name. Each expected object
+// was checked against the installed pi 0.85.1 detectCompat; the live test at
+// the bottom re-checks every row against that function when it is installed.
+const D = { supportsStore: false, supportsDeveloperRole: false };
+const HOST_TABLE = [
+  ["https://api.together.ai/v1", "m", { ...D, supportsReasoningEffort: false, maxTokensField: "max_tokens", thinkingFormat: "together", supportsStrictMode: false, supportsLongCacheRetention: false }],
+  ["https://API.DeepSeek.com/v1", "d", { ...D, maxTokensField: "max_tokens", requiresReasoningContentOnAssistantMessages: true, thinkingFormat: "deepseek" }],
+  ["https://llm.chutes.ai/v1", "c", { ...D, maxTokensField: "max_tokens" }],
+  ["https://opencode.ai/zen/v1", "o", { ...D }],
+  ["https://api.cloudflare.com/client/v4/accounts/a/ai/v1", "c", { ...D, supportsLongCacheRetention: false }],
+  ["https://gateway.ai.cloudflare.com/v1/a/b/openai", "c", { ...D, supportsReasoningEffort: false, maxTokensField: "max_tokens", supportsStrictMode: false, supportsLongCacheRetention: false }],
+  ["https://integrate.api.nvidia.com/v1", "n", { ...D, supportsReasoningEffort: false, maxTokensField: "max_tokens", supportsStrictMode: false, supportsLongCacheRetention: false }],
+  ["https://api.ant-ling.com/v1", "a", { ...D, supportsReasoningEffort: false, maxTokensField: "max_tokens", thinkingFormat: "ant-ling", supportsLongCacheRetention: false }],
+  ["https://open.bigmodel.cn/api/paas/v4", "g", { ...D, supportsReasoningEffort: false, maxTokensField: "max_tokens", thinkingFormat: "zai" }],
+];
+
+for (const [url, id, want] of HOST_TABLE) {
+  test(`table: ${new URL(url).hostname}`, () => {
+    assert.deepEqual(piCompatFor(url, id), want);
+  });
+}
+
 test("a host pi has no rule for gets null", () => {
   assert.equal(piCompatFor("https://api.example.com/v1", "m1"), null);
   assert.equal(piCompatFor("not a url", "m1"), null);
@@ -88,7 +110,7 @@ function findPinnedInstall() {
       join(root, "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "all.js"),
       join(root, "..", "pi-ai", "dist", "providers", "all.js"),
     ]) {
-      if (existsSync(ai)) return { allJs: ai, seen };
+      if (existsSync(ai)) return { allJs: ai, root, seen };
     }
   }
   return { allJs: null, seen };
@@ -104,4 +126,47 @@ test("drift: PI_BUILTIN_PROVIDER_IDS equals the installed pi-ai registry", async
   }
   const { builtinProviders } = await import(pathToFileURL(allJs).href);
   assert.deepEqual([...PI_BUILTIN_PROVIDER_IDS], builtinProviders().map((p) => p.id));
+});
+
+// Live check: pull detectCompat out of the installed openai-completions chunk
+// and confirm that "what pi derives through the door" merged with
+// piCompatFor equals what pi derives talking to the upstream directly.
+const DOOR = { provider: "crow-door", baseUrl: "http://127.0.0.1:3001/llm/c/cloud-a/v1" };
+const LIVE_CASES = [
+  ["https://api.z.ai/api/coding/paas/v4", "glm-5.3"],
+  ["https://openrouter.ai/api/v1", "anthropic/claude-sonnet-5.5"],
+  ["https://openrouter.ai/api/v1", "openai/gpt-5"],
+  ["https://openrouter.ai/api/v1", "qwen/qwen3-max"],
+  ["https://api.deepseek.com/v1", "deepseek-chat"],
+  ["https://api.together.xyz/v1", "m"],
+  ["https://api.moonshot.ai/v1", "kimi-k2"],
+  ["https://api.x.ai/v1", "grok-4"],
+  ["https://api.cerebras.ai/v1", "m"],
+  ["https://api.example.com/v1", "m1"],
+  ...HOST_TABLE.map(([u, id]) => [u, id]),
+];
+
+test("live: piCompatFor reproduces the installed detectCompat for every case", (t) => {
+  const { allJs, root: piRoot, seen } = findPinnedInstall();
+  if (!allJs) {
+    const why = seen.length ? `installed pi versions ${seen.join(", ")}, none is ${PI_PINNED_VERSION}` : "pi is not installed";
+    console.log(`[pi-compat] live detectCompat check skipped: ${why}`);
+    t.skip(why);
+    return;
+  }
+  const chunks = join(piRoot, "dist", "bundle", "chunks");
+  const file = readdirSync(chunks).find((n) => /^openai-completions-.*\.js$/.test(n));
+  assert.ok(file, "the openai-completions chunk exists in the pinned install");
+  const src = readFileSync(join(chunks, file), "utf8");
+  const i = src.indexOf("function detectCompat(model)");
+  const j = src.indexOf("function getCompat(model)");
+  assert.ok(i >= 0 && j > i, "detectCompat and getCompat are where 0.85.1 has them");
+  // eslint-disable-next-line no-new-func
+  const detectCompat = new Function(`${src.slice(i, j)}; return detectCompat;`)();
+  const viaDoor = detectCompat({ ...DOOR, id: "m" });
+  for (const [url, id] of LIVE_CASES) {
+    const provider = url.includes("openrouter.ai") ? "openrouter" : "crow-door";
+    const upstream = detectCompat({ provider, baseUrl: url, id });
+    assert.deepEqual({ ...viaDoor, ...(piCompatFor(url, id) || {}) }, upstream, `${url} ${id}`);
+  }
 });

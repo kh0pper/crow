@@ -60,6 +60,33 @@ export async function persistSyncDeploymentVerdict(db, { feedsDisabled, noAuth }
   await writeSetting(db, "sync_deployment_enabled", feedsDisabled ? "0" : "1", { scope: "local" });
 }
 
+/**
+ * Roles phase 2 Task 14: the cloud-door token (/llm/c) is ROTATED on every
+ * boot, not ensured: a fresh value per start. Running pi processes pick it up
+ * on their next request (their models.json apiKey command reads the file each
+ * time). Best-effort, like the other boot token blocks: a failure is logged
+ * (err.message only) and boot continues. Exported with injectable deps so the
+ * failure path is unit-testable without standing up mountMcpServers.
+ * @returns {Promise<boolean>} true when the token was rotated
+ */
+export async function rotateCloudDoorTokenAtBoot({
+  createDb = createDbClient, rotate = rotateLlmCloudToken, log = console,
+} = {}) {
+  try {
+    const tokenDb = createDb();
+    try {
+      await rotate(tokenDb);
+      log.log("[gateway] cloud-door token rotated");
+      return true;
+    } finally {
+      try { tokenDb.close(); } catch {}
+    }
+  } catch (err) {
+    log.warn(`[gateway] rotateLlmCloudToken failed: ${err.message}`);
+    return false;
+  }
+}
+
 export async function mountMcpServers(app, deps) {
   const { authMiddleware, noAuth, instructions, routerInstructions, sessionManager } = deps;
 
@@ -331,21 +358,8 @@ export async function mountMcpServers(app, deps) {
   // the key never leaves this process.
   app.use(actorSignRouter({ createDbClient }));
 
-  // Roles phase 2 Task 14: the cloud-door token (/llm/c) is ROTATED on every
-  // boot, not ensured: a fresh value per start. Running pi processes pick it
-  // up on their next request (their models.json apiKey command reads the
-  // file each time). Best-effort, like the blocks above.
-  try {
-    const tokenDb = createDbClient();
-    try {
-      await rotateLlmCloudToken(tokenDb);
-      console.log("[gateway] cloud-door token rotated");
-    } finally {
-      try { tokenDb.close(); } catch {}
-    }
-  } catch (err) {
-    console.warn(`[gateway] rotateLlmCloudToken failed: ${err.message}`);
-  }
+  // Roles phase 2 Task 14: rotate the cloud-door token (best-effort).
+  await rotateCloudDoorTokenAtBoot();
 
   // S5: board actor headers count only with a signature from the per-boot
   // in-memory key, so the key must exist before any bot world is built in
