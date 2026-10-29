@@ -1643,6 +1643,7 @@ export function perchHubJs(lang = "en") {
 
   function openStream(sid,resync){
     closeStream();
+    stateSeen=false;   /* R1.2 PR 2: this stream has not replayed its state yet (histSettledIdle) */
     /* EXPLICIT REPLACE, by identity. closeStream() above can only reach the
        connection THIS instance holds; a stream opened for this session by an
        older instance (or by a path that lost its handle) is named only by the
@@ -1679,6 +1680,7 @@ export function perchHubJs(lang = "en") {
       });
     };
     on('state',function(d){
+      stateSeen=true;
       setTurnInFlight(turnFlagFor(d));
       cardTurnState(d.state);                 /* P5: a turn ending may mean a card offer or a lane move */
       /* An expired card leaves once the engine drops it (the next message). */
@@ -2212,7 +2214,7 @@ export function perchHubJs(lang = "en") {
           if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
         });
-        if(SHEET){ toolGroupsSettleHistory(); histSettledIdle=!turnInFlight; }   /* R1.2 PR 2: a reload mid-turn reads "running", whichever arrives first */
+        if(SHEET){ toolGroupsSettleHistory(); histSettledIdle=!turnInFlight&&!stateSeen; }   /* R1.2 PR 2: a reload mid-turn reads "running", whichever arrives first */
         settleSeamEchoes(userTexts);
         flushHistBuf(batchTexts, pair[1].items, tailErr, pair[1].shots);
       });
@@ -3791,7 +3793,10 @@ export function perchHubJs(lang = "en") {
     var g=(typeof SHEET!=='undefined'&&SHEET)?toolGroupFor(tr):null;
     if(g){
       g.total++; g.running++;
-      if(!hist) g.ended=false;           /* a live chip proves the turn is still going */
+      /* A live chip proves the turn is still going, but only while one is
+         in flight: frames replayed by flushHistBuf after the turn's reply
+         belong to a finished turn and fold as such. */
+      if(!hist&&typeof turnInFlight!=='undefined'&&turnInFlight) g.ended=false;
       var agents=Array.isArray(d&&d.agents)?d.agents:
         (isSubagentTool(d&&d.name)?subagentNames(d&&d.argsText):[]);
       if(!isSubagentTool(d&&d.name)) g.others++;
@@ -3949,6 +3954,12 @@ export function perchHubJs(lang = "en") {
      the window in which a late replayed state frame belongs to the batch's
      last turn (setTurnInFlight). */
   var histSettledIdle=false;
+  /* Whether the current stream has delivered a state frame. The engine
+     replays its state on subscribe, so an idle replay seen BEFORE the
+     history settles already said "no turn": the window must not open then,
+     or the next turn (from another client, the board) would rejoin the
+     finished turn's groups. Reset in openStream, set in on('state'). */
+  var stateSeen=false;
   function toolGroupsSettleHistory(){
     if(!turnInFlight) return;
     toolGroups.forEach(function(g){ if(g.ended&&g.turn===toolTurn){ g.ended=false; toolGroupOpen(g,true); toolGroupRefresh(g); } });

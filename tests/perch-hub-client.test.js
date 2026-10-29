@@ -5700,6 +5700,48 @@ test("after an idle history, a turn the operator sends starts a new group (the p
     "group[See what happened · 1 step|false|bash]", "group[See what happened · running|true|read]"]);
 });
 
+test("idle state replayed BEFORE the history, then a new turn: a fresh group, the finished one stays folded", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "toolResult", toolCallId: "n1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+  ];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({
+    "/transcript": () => gate.then(() => makeResponse(200, { events })) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: false });   // the subscribe replay: idle
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  es._serverFrame("state", { state: "awake", turnInFlight: true });    // a turn from another client or the board
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "n2" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), [
+    "group[See what happened · 1 step|false|bash]", "group[See what happened · running|true|read]"]);
+});
+
+test("a reply that lands while the history loads: buffered tool frames replay as a finished, folded group", async () => {
+  const events = [{ type: "message", message: { role: "user", content: "go" } }];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({
+    "/transcript": () => gate.then(() => makeResponse(200, { events })) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "b1" });
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "b1", resultText: "ok", isError: false });
+  es._serverFrame("reply", { text: "all done", turnId: "tb" });
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 1 step|false|bash]"],
+    "never \"running\" after the reply");
+});
+
 test("a reload of a finished turn stays folded (no turn in flight)", async () => {
   const events = [
     { type: "message", message: { role: "user", content: "go" } },
