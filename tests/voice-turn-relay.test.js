@@ -429,3 +429,80 @@ test("an answer relay is never saved into the voice conversation; an operator re
   await o.turn("thanks");
   assert.ok(o.log[1].messages.some((m) => m.role === "user" && m.content === "what did writer find"), "an operator relay is history");
 });
+
+// Fix round 2.
+const { wantsAction, wantsActionFollowUp } = await import("../bundles/kiosk/server/action-intent.js");
+const { relayKindOf } = await import("../servers/gateway/voice/turn.js");
+const { createToolFamilies } = await import("../servers/gateway/voice/tool-families.js");
+const FAM = () => createToolFamilies({ manifests: { projects: { tools: {}, voiceIntent: { en: ["project", "projects"], es: ["proyecto"] } }, blog: { tools: {} }, memory: { tools: {} } } });
+const CANT = "CANT_DO";
+const projCall = [{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }];
+
+test("relayKindOf: only an absent or \"operator\" kind is the operator; any unknown kind is the answer", () => {
+  assert.equal(relayKindOf({ relayThreadId: "t" }), "operator");
+  assert.equal(relayKindOf({ relayThreadId: "t", relayKind: "operator" }), "operator");
+  assert.equal(relayKindOf({ relayThreadId: "t", relayKind: "answer" }), "answer");
+  for (const k of ["answr", "", "OPERATOR", 7, false]) assert.equal(relayKindOf({ relayThreadId: "t", relayKind: k }), "answer", String(k));
+  assert.equal(relayKindOf({ relayKind: "operator" }), null, "no relay, no kind");
+});
+
+test("an unknown relayKind runs as an answer turn: no endpoint fast path, no tools", async () => {
+  let ran = 0;
+  const a = answerHarness([says("Paused it.")]);
+  await a.turn("Pause.", { relayThreadId: "t", relayKind: "answr", fastPaths: () => (ran++, { say: "Paused.", verb: "pause" }) });
+  assert.equal(ran, 0);
+  assert.deepEqual(a.log[0].tools, []);
+});
+
+for (const text of ["Writer sent the email to your landlord and set a reminder for 3.", "Writer added the meeting to your calendar."]) {
+  test(`an answer relay of action-sounding bot text speaks the model's short version, never a can't-do: ${text}`, async () => {
+    assert.equal(wantsAction(text), true, "the kiosk reads these words as an action request");
+    for (const bot of [undefined, VOICE]) {
+      const h = harness({ ...(bot ? { bot } : {}), chatTools: ["crow_projects"], rounds: [says("Writer did it.")] });
+      h.deps.toolFamilies = FAM();
+      const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: text, sink: h.sink, ...ANSWER, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, familiesOnIntent: true, cantDoText: CANT, notReadyText: "NOT_READY" });
+      assert.equal(h.log.length, 1, "the model was asked");
+      assert.deepEqual(h.calls.spoken, ["Writer did it."]);
+      for (const k of ["action_intent", "action_no_tool", "action_not_ready", "action_no_backend", "claim_blocked"]) assert.equal(r.timings[k], undefined, k);
+    }
+    // The control: the operator relay of the same words is an action request.
+    const o = harness({ chatTools: [], rounds: [says("Writer did it.")] });
+    const ro = await o.runner.runVoiceTurn({ db: {}, device: o.device, transcript: text, sink: o.sink, ...RELAY, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, familiesOnIntent: true, cantDoText: CANT });
+    assert.equal(ro.timings.action_intent, true);
+  });
+}
+
+test("an answer relay never changes the operator's follow-up state (last families, last action)", async () => {
+  // Families: the operator's projects follow-up survives a bot answer in between.
+  const h = harness({ chatTools: ["crow_projects"], rounds: [projCall, says("You have two. "), says("Writer found two. "), says("The second is Garden. ")] });
+  h.deps.toolFamilies = FAM();
+  const fam = (t, o = {}) => h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: t, sink: h.sink, familiesOnIntent: true, ...o });
+  await fam("List my projects.");
+  await fam("Writer found two.", ANSWER);
+  await fam("And the second one?");
+  assert.deepEqual(h.log.at(-1).tools, ["crow_projects"], "the operator's follow-up is still a follow-up");
+  // Last action: the operator's action request still guards the follow-up after a bot answer in between.
+  const a = harness({ chatTools: [], rounds: [says("Writer is on it. "), says("Done, I've moved it to 9. ")] });
+  a.deps.toolFamilies = FAM();
+  const act = (t, o = {}) => a.runner.runVoiceTurn({ db: {}, device: a.device, transcript: t, sink: a.sink, familiesOnIntent: true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, cantDoText: CANT, ...o });
+  const r1 = await act("Add a car appointment for 815am Monday to my calendar");
+  assert.equal(r1.timings.action_no_tool, true);
+  await act("Writer is on it.", ANSWER);
+  const r3 = await act("Move it to 9 instead.");
+  assert.equal(r3.timings.claim_blocked, true, "the follow-up is still an action turn: the unbacked claim is replaced");
+  assert.equal(a.calls.spoken.at(-1), CANT);
+});
+
+test("a relay of either kind runs known reads only: crow_create_post is refused_policy, a read runs", async () => {
+  const post = [{ type: "tool_call", id: "w", name: "crow_create_post", arguments: { title: "x" } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_create_post", "crow_projects"], rounds: [post, says("I can't from here. "), projCall, says("You have two. ")] });
+  const r1 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "write a blog post titled x", sink: h.sink, ...RELAY });
+  assert.deepEqual(r1.timings.tools, ["crow_create_post:refused_policy"]);
+  const r2 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "list my projects", sink: h.sink, ...RELAY });
+  assert.deepEqual(r2.timings.tools, ["crow_projects:ok"]);
+  assert.deepEqual(h.calls.executed, ["crow_projects"], "only the read ran");
+  // The control: the operator's own turn runs the write.
+  const c = harness({ chatTools: ["crow_create_post"], rounds: [post, says("Done. ")] });
+  await c.runner.runVoiceTurn({ db: {}, device: c.device, transcript: "write a blog post titled x", sink: c.sink });
+  assert.deepEqual(c.calls.executed, ["crow_create_post"]);
+});

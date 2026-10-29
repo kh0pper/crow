@@ -246,14 +246,17 @@ export function isRelayTurn(opts) {
   return typeof opts?.relayThreadId === "string" && opts.relayThreadId.trim() !== "";
 }
 
-/** A relay turn's kind: "answer" (opts.relayKind "answer": the transcript is the bot's answer text) or "operator" (the
- * default: the operator's relayed turn); null when the turn is no relay. */
+/** A relay turn's kind: "operator" (the operator's relayed turn) only when opts.relayKind is absent or "operator";
+ * "answer" (the transcript is the bot's answer text) for "answer" and for anything unknown (the safer reading);
+ * null when the turn is no relay. */
 export function relayKindOf(opts) {
   if (!isRelayTurn(opts)) return null;
-  return opts.relayKind === "answer" ? "answer" : "operator";
+  return opts.relayKind == null || opts.relayKind === "operator" ? "operator" : "answer";
 }
 
 // A relay turn never answers or arms the spoken-yes confirm gate (the relay contract): its words are not the operator's.
+// Nor does it run anything that is not a known read (fix round 2): inside the session, actions are the session bot's.
+const RELAY_READ_ONLY = "Nothing can be changed from here: this turn only reads. Tell the user to ask the session's bot for it, then end your turn — do not call another tool.";
 const RELAY_NO_CONFIRM = "This needs the user's own spoken yes, and this turn is not the user speaking. Tell the user to ask for it themselves, then end your turn — do not call another tool.";
 
 export function createVoiceTurnRunner(deps) {
@@ -563,16 +566,20 @@ export function createVoiceTurnRunner(deps) {
    *     refused_policy), and none of Crow's own tools is loaded (neither opts.ownTools nor deps.ownTools);
    *   - a call the spoken-yes confirm gate would hold is refused_policy before the gate: a relay neither answers a
    *     held question nor arms a new one, and in finally it clears the gate's entry for the device;
+   *   - only known reads run (toolEffect "read"): a write, or a tool whose effect is unknown (a display tool
+   *     included), is refused_policy; inside the session, actions go through the session bot's own confirmations;
    *   - deps.voiceActions.fastPath and turnContext are never called, and the STT rewrite is skipped (the words were
    *     not misheard), so no hand-off matcher reads the transcript and a pending entry never makes an action turn;
    *   - deps.voiceActions.afterTurn still runs in finally with relay: true, on every outcome (opts.fastPaths answering
    *     with no model call included): it clears every pending entry on the device and expires its hand-off row;
    *   - timings.relay = true.
-   *   opts.relayKind: "operator" (the default) | "answer". An operator relay runs opts.fastPaths and is saved to the
+   *   opts.relayKind: "operator" (only when absent or "operator") | "answer" (also any unknown value). An operator relay runs opts.fastPaths and is saved to the
    *   voice conversation as usual. An answer relay (the transcript is the bot's answer text, spoken in short) skips
    *   opts.fastPaths, sends its model round with NO tools at all (the endpoint's extra tools included), is never
-   *   recorded in the transcript buffer or the transcript log, is never stamped in the voice memory, and is never
-   *   saved to the device's voice conversation (its "user" message would be the bot's own words).
+   *   recorded in the transcript buffer or the transcript log, is never stamped in the voice memory, is never
+   *   saved to the device's voice conversation (its "user" message would be the bot's own words), is never an
+   *   action turn (no can't-do, no-backend or not-ready line: the model speaks the short version), and never
+   *   changes the device's follow-up state (last families, last action, the own-tool window).
    * opts.noTranscript: true keeps this turn out of the opt-in transcript buffer (the kiosk turn check).
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
@@ -865,7 +872,8 @@ export function createVoiceTurnRunner(deps) {
         wants: (f, t) => (ownLists.has(f) ? ownWants(f, t) : famBase.wants(f, t)),
       } : famBase;
       const ownWhenAsked = [...ownWhen.keys()].some((f) => whenHit(f, transcript)) && !displayObject(transcript);
-      actionAsked = (typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true) || ownWhenAsked;
+      // An answer turn's words are the bot's report, never a request: no action intent (fix round 2).
+      actionAsked = !answerTurn && ((typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true) || ownWhenAsked);
       // Rule 6 ([rev2 I11], rev 2.1): an action request that names only routine objects with no backend. A calendar
       // with a Crow reminder tool at hand is a fallback turn (the reminder is offered, no escalation); anything else
       // is the can't-do line, below.
@@ -974,9 +982,9 @@ export function createVoiceTurnRunner(deps) {
       // Action turns (see ACTION_NOTE above). The add-on wrapper (crow_tools) is never in famIds: when the quick
       // model is not offered it, the assistant still has tools, and the router must know.
       // The voice bot also keeps an action request inside the window (voice memory actionAt) for a follow-up phrase.
-      const actionTurn = actionAsked || vaCtx?.pending === true || (typeof opts.actionWhen === "function"
+      const actionTurn = !answerTurn && (actionAsked || vaCtx?.pending === true || (typeof opts.actionWhen === "function"
         && (lastAction.has(device.id) || (voiceKind && memory.actionAt(device.id) != null))
-        && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
+        && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true));
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
       // only one whose holdText/must reads the transcript as a display request is.
       const displayAsked = extra.some((x) => offered.has(x.definition.name)
@@ -997,7 +1005,7 @@ export function createVoiceTurnRunner(deps) {
       const actionWithheld = cls0.actionWithheld(actionAsked, displayBacks, (t) => ownCounts || !ownByName.has(t.name)) && !quickBacked;
       if (actionAsked) timings.action_intent = true;
       // A routine object with no backend: no model call and no escalation (a calendar falls back to a reminder instead).
-      if (noBackend) {
+      if (noBackend && !answerTurn) {
         timings.action_no_backend = true;
         await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
         return result;
@@ -1042,7 +1050,7 @@ export function createVoiceTurnRunner(deps) {
       // A turn the router escalated (or that fell back from an escalation) is offered every family.
       // An action-intent escalation that could not get the larger model: say so, never hand the quick model
       // every tool (with the add-on wrapper that is hundreds of tool names) to guess with.
-      if (decision.reason === "action-intent" && !result.escalated) {
+      if (decision.reason === "action-intent" && !result.escalated && !answerTurn) {
         timings.action_not_ready = true;
         await speakLine(String(opts.notReadyText || NOT_READY_TEXT));
         return result;
@@ -1156,6 +1164,11 @@ export function createVoiceTurnRunner(deps) {
         const soft = SOFT_DENY[tc.name] || names.map((n) => SOFT_DENY[n]).find(Boolean);
         if (soft && (deny.has(tc.name) || names.some((n) => deny.has(n)))) return refuse("refused_policy", soft, true);
         if (names.some((n) => deny.has(n)) || deny.has(tc.name)) return refuse("refused_policy", `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`, true);
+        // A relay turn (either kind) runs known reads only: a write, or a tool whose effect is not known, is refused.
+        if (relay) {
+          const effects = [tc.name, ...names].map((n) => toolEffect(n));
+          if (effects.includes("write") || !effects.includes("read")) return refuse("refused_policy", RELAY_READ_ONLY, true);
+        }
         if (names.some((n) => deps.isMemoryTool(n))) {
           if (!memoryOn) return refuse("refused_policy", MEMORY_OFF, true);
           if (!memoryOffered) return refuse("not_offered", MEMORY_NOT_ASKED, true);
@@ -1974,13 +1987,14 @@ export function createVoiceTurnRunner(deps) {
       return result;
     } finally {
       if (budgetTimer) (deps.clearTimeout || clearTimeout)(budgetTimer);
-      if (opts.familiesOnIntent === true && device?.id && result.transcript) {
+      // An answer turn never changes the operator's follow-up state (fix round 2): families, action, own window.
+      if (opts.familiesOnIntent === true && device?.id && result.transcript && !answerTurn) {
         if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, { set: usedFamilies, at: now() }); else lastFamilies.delete(device.id);
       }
-      if (typeof opts.actionWhen === "function" && device?.id && result.transcript) {
+      if (typeof opts.actionWhen === "function" && device?.id && result.transcript && !answerTurn) {
         if (actionAsked) lastAction.add(device.id); else lastAction.delete(device.id);
       }
-      if (device?.id && result.transcript) {
+      if (device?.id && result.transcript && !answerTurn) {
         if (ownOffered || [...(usedFamilies || [])].some((f) => String(f).startsWith("own:"))) lastOwn.set(device.id, now()); else lastOwn.delete(device.id);
       }
       // The voice memory: own families offered on intent or used are stamped (a carried-only one never is), and an
