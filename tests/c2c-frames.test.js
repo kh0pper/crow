@@ -148,3 +148,12 @@ test("every cap is exact: at the limit passes, one byte over fails", () => {
     assert.deepEqual(sized(cap + 1), BAD, kind);
   }
 });
+
+test("a null target parses and stays null; other non-id targets are bad_frame", () => {
+  const r = parseFrame(mk("project.invite", { toInstanceId: null }));
+  assert.equal(r.ok, true);
+  assert.equal(r.frame.to_instance_id, null);
+  assert.deepEqual(parseFrame(mk("project.invite", { toInstanceId: "" })), BAD);
+  assert.deepEqual(parseFrame(mk("project.invite", { toInstanceId: 5 })), BAD);
+  assert.deepEqual(parseFrame(mk("project.invite", { fromInstanceId: null })), BAD);
+});
