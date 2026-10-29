@@ -77,6 +77,22 @@ async function loadProject(db, project) {
   return p ? { id: Number(p.id), slug: String(p.slug ?? ""), name: String(p.name ?? p.slug ?? ""), tasks_db_uri: p.tasks_db_uri ?? null } : null;
 }
 
+/**
+ * The summary's SOURCE rank, stored by the summary job when it wrote the
+ * summary (summary_flags.source_rank: where the session's own model ran). A
+ * missing or unreadable value counts as this box, the most private, so such a
+ * summary only ever reaches a this-box target. Never re-derived from the bot's
+ * model today: the bot may have been switched since.
+ */
+function storedSourceRank(raw) {
+  if (raw == null || raw === "") return RANK_HERE;
+  try {
+    const f = JSON.parse(String(raw));
+    const r = f && f.source_rank;
+    return Number.isInteger(r) && r >= RANK_HERE && r <= RANK_CLOUD ? r : RANK_HERE;
+  } catch { return RANK_HERE; }
+}
+
 function flagsOutside(raw) {
   if (raw == null || raw === "") return false;
   try { const f = JSON.parse(String(raw)); return !!(f && f.outside_content); } catch { return true; } // unreadable flags fail closed
@@ -168,7 +184,7 @@ async function boardFacts(project, since, { tasksDbPath, tasksDb }) {
  *   facts:Array<{kind:"moved"|"result"|"decided", cardId, title, at, to?, outcome?, choice?}>,
  *   memories:Array<{id, excerpt}>, since:string, empty:boolean}>}
  */
-export async function buildBriefing(db, project, { tasksDbPath, tasksDb = null, now = Date.now(), where = null, resolveRole = null } = {}) {
+export async function buildBriefing(db, project, { tasksDbPath, tasksDb = null, now = Date.now() } = {}) {
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
   const p = await loadProject(db, project);
   const empty = { project: null, summaries: [], facts: [], memories: [], since: sqliteTime(nowMs - FACT_WINDOW_DAYS * 86400000), empty: true };
@@ -178,14 +194,13 @@ export async function buildBriefing(db, project, { tasksDbPath, tasksDb = null, 
   // home (the operator) passes none and sees everything.
   const tr = project && typeof project === "object" ? project.targetRank : undefined;
   const targetRank = tr === undefined || tr === null ? null : (Number.isInteger(tr) && tr >= RANK_HERE && tr <= RANK_CLOUD ? tr : RANK_CLOUD);
-  const deps = targetRank == null ? null : { where: where || await defaultWhere(db), resolveRole: resolveRole || defaultResolveRole };
 
   const all = await projectSummaries(db, p.id, botId);
   const summaries = [];
   for (const r of all.slice(0, SUMMARY_LIMIT)) {
     // A summary never reaches a model less private than its own session's:
-    // the source ranks as this box unless proven otherwise.
-    if (deps && (await sourceRank(db, r, deps)) < targetRank) continue;
+    // the rank stored when it was written; missing counts as this box.
+    if (targetRank != null && storedSourceRank(r.summary_flags) < targetRank) continue;
     const tainted = flagsOutside(r.summary_flags) || await sessionTainted(db, r.bot_id, String(r.thread_id));
     summaries.push({
       threadId: String(r.thread_id),
@@ -203,7 +218,8 @@ export async function buildBriefing(db, project, { tasksDbPath, tasksDb = null, 
   let facts = [];
   try { facts = await boardFacts(p, since, { tasksDbPath, tasksDb }); }
   catch { facts = []; } // an unreadable tasks.db costs the facts, never the page
-  // Less private than this box: facts are a card id and a verb, nothing written.
+  // Less private than this box: facts are a card id and a verb, nothing
+  // written. Ruling (I5): card titles reach a this-box target only.
   if (targetRank != null && targetRank > RANK_HERE) facts = facts.map((f) => ({ kind: f.kind, cardId: f.cardId, at: f.at }));
 
   // Memories are for the operator's page only: never in a session's briefing.
@@ -215,8 +231,10 @@ export async function buildBriefing(db, project, { tasksDbPath, tasksDb = null, 
       .filter((m) => m.excerpt);
   }
 
+  // Less private than this box: the project's name stays home too.
+  const shareNames = targetRank == null || targetRank === RANK_HERE;
   return {
-    project: { id: p.id, slug: p.slug, name: p.name },
+    project: shareNames ? { id: p.id, slug: p.slug, name: p.name } : { id: p.id, slug: "", name: "" },
     summaries, facts, memories, since,
     empty: !summaries.length && !facts.length && !memories.length,
   };
@@ -263,18 +281,6 @@ function defaultModelOf(definition) {
 }
 
 /**
- * Where a summary's own session ran, as a rank: the row's explicit model, else
- * the bot's default. Unknown or unproven counts as this box (the most private
- * source), so it only ever goes to a this-box target.
- */
-async function sourceRank(db, r, { where, resolveRole }) {
-  const key = await concreteKey(db, r.model || defaultModelOf(r.definition), resolveRole);
-  if (!key) return RANK_HERE;
-  const w = where(key);
-  return w === "other_box" ? 1 : w === "cloud" ? RANK_CLOUD : RANK_HERE;
-}
-
-/**
  * The rank of the model a new session will run on (the receiver): `modelKey`
  * (a "provider/id" or "role:…" key). Unknown or unproven counts as the cloud.
  */
@@ -299,9 +305,22 @@ export async function targetRankForBot(db, botId, opts = {}) {
  * line of at most FIELD_CHARS. Model-facing, so always in English; its first
  * line is BRIEFING_MARKER.
  */
+const injectable = (fragments) => (fragments && typeof fragments === "object" ? (fragments.summaries || []) : [])
+  .filter((s) => s && !s.outsideContent && oneLine(s.summary));
+
+/**
+ * The thread ids whose summaries briefingText(fragments) quotes, in the order
+ * of their lines under "Earlier sessions:". Stored beside the block
+ * (bot_sessions.briefing_refs) so a Forget can strip that summary from it.
+ */
+export function briefingRefs(fragments) {
+  if (!briefingText(fragments)) return [];
+  return injectable(fragments).map((s) => String(s.threadId ?? ""));
+}
+
 export function briefingText(fragments) {
   if (!fragments || typeof fragments !== "object") return "";
-  const sums = (fragments.summaries || []).filter((s) => s && !s.outsideContent && oneLine(s.summary));
+  const sums = injectable(fragments);
   const facts = (fragments.facts || []).filter(Boolean);
   if (!sums.length && !facts.length) return "";
   const lines = [BRIEFING_MARKER];
@@ -324,6 +343,29 @@ export function briefingText(fragments) {
 }
 
 /**
+ * The block with one quoted summary removed: the `index`-th "> " line under
+ * "Earlier sessions:" (briefing_refs order). The section goes when it empties;
+ * with no summary and no fact left the result is "" (no briefing at all).
+ * Values are flattened to one line by briefingText, so a summary can never
+ * span or forge lines here.
+ */
+export function stripBriefingSummary(text, index) {
+  const lines = String(text || "").split("\n");
+  const head = lines.indexOf("Earlier sessions:");
+  if (head === -1 || !Number.isInteger(index) || index < 0) return String(text || "");
+  let end = head + 1;
+  while (end < lines.length && lines[end].startsWith("> ")) end++;
+  const quoted = lines.slice(head + 1, end);
+  if (index >= quoted.length) return String(text || "");
+  quoted.splice(index, 1);
+  // The blank line before the header goes with an emptied section.
+  const out = quoted.length
+    ? [...lines.slice(0, head + 1), ...quoted, ...lines.slice(end)]
+    : [...lines.slice(0, lines[head - 1] === "" ? head - 1 : head), ...lines.slice(end)];
+  return out.some((l) => l.startsWith("> ")) ? out.join("\n") : "";
+}
+
+/**
  * Put the block where Perch puts it: a marked section appended to the
  * session's system prompt (pi's --append-system-prompt file,
  * piRpcOpts.appendSystemPromptFile), never the operator's message.
@@ -343,6 +385,7 @@ export function briefingText(fragments) {
  * @param {{file?:string}} [opts]
  * @returns {object} piRpcOpts
  */
+// Ruling (I5, final review): KEEP the appended system prompt as the placement; pi-lab's benchmark relies on applyBriefing.
 export function applyBriefing(piRpcOpts, text, { file = null } = {}) {
   if (!piRpcOpts || typeof piRpcOpts !== "object" || typeof text !== "string" || !text.trim()) return piRpcOpts;
   const src = piRpcOpts.appendSystemPromptFile;
@@ -420,16 +463,71 @@ export function briefingPromptFile(crowHome, botId, sessionId) {
   return join(dir, sid + ".system-prompt.md");
 }
 
-/** Record a session's briefing and its rank on the thread's newest perch-live row. */
-export async function recordBriefing(db, threadId, text, rank = null) {
+/**
+ * Remove a session's gateway-owned system prompt copy (stop, archive). The
+ * ids are checked like briefingPromptFile's; nothing is created, and a path
+ * under a linked directory is left alone. Never throws.
+ */
+export function removeBriefingPromptFile(crowHome, botId, sessionId) {
+  try {
+    const bot = String(botId || ""), sid = String(sessionId || "");
+    if (!crowHome || !BOT_ID_RE.test(bot) || !SID_RE.test(sid)) return false;
+    ensureRealDir(String(crowHome), { create: false });
+    const dir = join(String(crowHome), "perch-briefings", bot);
+    ensureRealDir(join(String(crowHome), "perch-briefings"), { create: false });
+    ensureRealDir(dir, { create: false });
+    unlinkSync(join(dir, sid + ".system-prompt.md")); // a link is removed, never followed
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Record a session's briefing, its rank and its refs (the thread ids whose
+ * summaries it quotes, briefingRefs order) on the thread's newest perch-live row.
+ */
+export async function recordBriefing(db, threadId, text, rank = null, refs = []) {
   if (typeof text !== "string" || !text.trim()) return false;
   const r = Number.isInteger(rank) ? rank : RANK_HERE;
+  const ids = Array.isArray(refs) ? refs.map(String) : [];
   const w = await db.execute({
-    sql: `UPDATE bot_sessions SET briefing = ?, briefing_rank = ?
+    sql: `UPDATE bot_sessions SET briefing = ?, briefing_rank = ?, briefing_refs = ?
            WHERE id = (SELECT id FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live' ORDER BY id DESC LIMIT 1)`,
-    args: [text, String(r), String(threadId)],
+    args: [text, String(r), JSON.stringify(ids), String(threadId)],
   });
   return Number(w.rowsAffected || 0) > 0;
+}
+
+/**
+ * Forget reaches other sessions' briefings: strip `threadId`'s summary from
+ * every stored briefing whose refs name it (the engine writes each session's
+ * system prompt file fresh from this row on its next wake). A briefing left
+ * with nothing becomes NULL. Returns how many rows changed.
+ */
+async function stripForgottenFromBriefings(db, threadId) {
+  const id = String(threadId);
+  const rows = await rowsOrEmpty(db, {
+    sql: "SELECT id, briefing, briefing_refs FROM bot_sessions WHERE briefing_refs IS NOT NULL AND instr(briefing_refs, ?) > 0",
+    args: [JSON.stringify(id)],
+  });
+  let changed = 0;
+  for (const r of rows) {
+    let refs;
+    try { refs = JSON.parse(String(r.briefing_refs)); } catch { refs = null; }
+    if (!Array.isArray(refs)) continue;
+    let text = r.briefing == null ? "" : String(r.briefing);
+    // From the end, so the earlier indexes stay valid (a thread is quoted once).
+    for (let i = refs.length - 1; i >= 0; i--) {
+      if (String(refs[i]) !== id) continue;
+      text = stripBriefingSummary(text, i);
+      refs.splice(i, 1);
+    }
+    await db.execute({
+      sql: "UPDATE bot_sessions SET briefing = ?, briefing_refs = ? WHERE id = ?",
+      args: [text.trim() ? text : null, text.trim() ? JSON.stringify(refs) : null, r.id],
+    });
+    changed++;
+  }
+  return changed;
 }
 
 /**
@@ -475,7 +573,9 @@ async function defaultSyncManager() {
  * path (so the delete syncs to paired instances), clear the row's summary and
  * summary_at, and set summary_flags to {"forgotten_at": now} on the thread's
  * newest row. The summary job skips a forgotten session until its transcript
- * changes after that time (session-summary.js), so Forget is sticky.
+ * changes after that time, and then summarises only the later turns
+ * (session-summary.js), so Forget is sticky. The summary is also stripped from
+ * every other session's stored briefing that quotes it (briefing_refs).
  * @returns {Promise<{forgotten:boolean, memoryDeleted:boolean}>}
  */
 export async function forgetSummary(db, threadId, { syncManager, now = Date.now() } = {}) {
@@ -493,6 +593,8 @@ export async function forgetSummary(db, threadId, { syncManager, now = Date.now(
     args: [id],
   });
   const forgotten = memoryDeleted || Number(w.rowsAffected || 0) > 0;
+  // Every briefing that quotes this summary loses it, forgotten or not here.
+  await stripForgottenFromBriefings(db, id);
   if (forgotten) {
     const nowMs = now instanceof Date ? now.getTime() : Number(now);
     await db.execute({
