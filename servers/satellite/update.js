@@ -12,7 +12,8 @@
  *   - classifyCheckRuns (shared with the gateway's auto-update) says "green" for it. Unlike the
  *     gateway, "unknown" and "pending" refuse: a satellite updates only to a knowably green sha.
  * Then (apply): satellite.db backup → `git merge --ff-only <target>` → `npm ci --omit=dev` only if
- * package-lock.json changed (systemd-run --user --scope -p MemoryMax=600M, nice, ionice) → the
+ * package-lock.json changed (systemd-run --user --scope -p MemoryMax=600M, nice, ionice; the MCP
+ * children are stopped first via `beforeInstall`) → the
  * NEW tree's `cli.js self-check` (its module graph loads) → its `cli.js migrate`
  * (SAT_SCHEMA_VERSION, each step transactional) → supervised restart: exit
  * UPDATE_RESTART_EXIT_CODE, which the unit's Restart=on-failure restarts.
@@ -85,7 +86,7 @@ export function applyPendingDbRestore(satHome, log = console.warn) {
 
 export function createUpdater({
   db, satHome, appRoot = APP_ROOT, runner = execRun, now = Date.now, log = console.log,
-  fetchCheckRuns, exit = (code) => process.exit(code), nodePath = process.execPath,
+  fetchCheckRuns, exit = (code) => process.exit(code), nodePath = process.execPath, beforeInstall = async () => {},
 }) {
   const git = (args, timeout = 120000) => runner("git", args, { cwd: appRoot, timeout });
   const checkRuns = fetchCheckRuns || ((sha) => githubCheckRuns({ runner, appRoot, sha }));
@@ -152,6 +153,8 @@ export function createUpdater({
       note(`fast-forwarded ${from.slice(0, 12)} → ${to.slice(0, 12)}`);
       if (lockChanged) {
         npmRan = true;
+        // npm ci under 600 MB on a small box: the MCP children make room first (§10).
+        try { await beforeInstall(); } catch { /* best effort */ }
         const [cmd, args] = npmCiCommand();
         await runner(cmd, args, { cwd: appRoot, timeout: 1800000 });
         note("dependencies installed (npm ci --omit=dev)");

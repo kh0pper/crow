@@ -325,6 +325,10 @@ export function createMcpHost({
     pids: (id) => { const e = children.get(id); return e?.pid && !e.stopping ? [e.pid] : []; },
     running: () => [...children.keys()],
     toolsStatus: () => Object.fromEntries(allCache.all().map((r) => [r.bundle, { version: r.version, sha256: r.sha256 }])),
+    /** Stop every running child (they start again on the next call). */
+    async stopChildren() {
+      await Promise.all([...children.values()].map((e) => stopEntry(e)));
+    },
     async stopAll() {
       closed = true;
       await Promise.all([...children.values()].map((e) => stopEntry(e)));

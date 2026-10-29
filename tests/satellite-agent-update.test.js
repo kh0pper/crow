@@ -159,9 +159,14 @@ test("happy path, lockfile unchanged: backup, ff-only merge, no npm, self-check 
   assert.equal(last.to, TARGET);
 });
 
-test("lockfile changed: npm ci --omit=dev runs under the 600 MB scope with nice + ionice", async () => {
+test("lockfile changed: the MCP children stop, then npm ci --omit=dev runs under the 600 MB scope with nice + ionice", async () => {
   const w = world({ runner: fakeRunner({ out: { [`git diff --name-only ${CUR} ${TARGET}`]: "package-lock.json\n" } }) });
-  assert.equal((await w.updater.update(TARGET)).ok, true);
+  const order = [];
+  const up = U.createUpdater({ db: w.db, satHome: w.satHome, appRoot: w.appRoot, fetchCheckRuns: async () => green, exit: (c) => w.exits.push(c), log: () => {},
+    runner: async (cmd, args, opts) => { if (cmd === "systemd-run") order.push("npm"); return w.runner(cmd, args, opts); },
+    beforeInstall: async () => { order.push("stop-children"); } });
+  assert.equal((await up.update(TARGET)).ok, true);
+  assert.deepEqual(order, ["stop-children", "npm"]);
   const npm = w.runner.calls.find((c) => c.line.startsWith("systemd-run"));
   assert.equal(npm.line, "systemd-run --user --scope -p MemoryMax=600M nice -n 10 ionice -c2 -n7 npm ci --omit=dev");
   assert.equal(npm.cwd, w.appRoot);
