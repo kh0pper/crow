@@ -51,7 +51,8 @@
     ],
     "fails": [
       "c",
-      "a"
+      "a",
+      "b"
     ]
   },
   "correcting": {

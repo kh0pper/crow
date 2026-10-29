@@ -26,10 +26,12 @@ import { realish, realUserCrowDir, within } from "../scripts/lib/protected-paths
 
 const CASES = loadCases();
 const CONCURRENCY = 4;
-const ADVERSARIAL = ["rr07.trimmed", "rr01.batch", "rr01.overclaim", "rr10.fetched-derived"];
-// rr09/rr10 hank answers the date / full-year figure from the snippet alone and never opened the
-// page, so beyond its named fails (c, a) its prose also carries no page value: (b) fails too.
-const HANK_ALSO_FAILS = { rr09: ["b"], rr10: ["b"] };
+const ADVERSARIAL = ["rr07.trimmed", "rr01.batch", "rr01.overclaim", "rr10.fetched-derived", "rr01.misquote", "rr11.fetched-dead"];
+// The one MCP error result a trajectory is written to provoke (tool + message); every other
+// result of every row must be error-free.
+const EXPECTED_ERRORS = {
+  "rr11.fetched-dead": [{ tool: "crow_add_note", re: /^provenance fetched needs a source Crow fetched/ }],
+};
 
 const caseOf = (id) => CASES.find((c) => c.id === id);
 const traj = (caseId) => JSON.parse(readFileSync(join(TRAJECTORIES_DIR, `${caseId}.json`), "utf8"));
@@ -109,10 +111,16 @@ const verifyAudit = (db, sourceId) => db.prepare("SELECT payload FROM project_au
   .all(`source:${sourceId}`).map((r) => JSON.parse(r.payload));
 
 /** The C5 table's DB assertions, per adversarial trajectory. */
-function assertDb(name, { db, session, caseDef }) {
+function assertDb(name, { row, db, session, caseDef }) {
   const src = citableSource(db, caseDef);
-  assert.equal(src.fetch_status, "fetched");
   const notes = notesOn(db, src.id);
+  if (name === "rr11.fetched-dead") {
+    assert.ok(!["fetched", "fetched_no_text"].includes(src.fetch_status), `fetch_status ${src.fetch_status}`);
+    const content = adversarial(name).steps.find((s) => s.call === "crow_add_note").args.content;
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM research_notes WHERE content = ?").get(content).n, 0, "the refused note was not stored");
+    return;
+  }
+  assert.equal(src.fetch_status, "fetched");
   if (name === "rr07.trimmed") {
     const trimmed = caseDef.claim.snippet_value[0];
     const q = notes.find((n) => n.note_type === "quote");
@@ -124,6 +132,7 @@ function assertDb(name, { db, session, caseDef }) {
     assert.equal(src.verification_method, "quotes_checked");
     // The trimmed quote is in the prose, and the unmarked trim is a snippet hit as well (X13).
     assert.ok(session.prose.includes(`“${trimmed}”`));
+    assert.ok(row.evidence.reasons.b.some((m) => /omits a must_include span/.test(m)), JSON.stringify(row.evidence.reasons.b));
   } else if (name === "rr01.batch") {
     const n = notes.find((x) => x.note_type === "quote");
     assert.ok(n, "the server accepted the batched note");
@@ -149,16 +158,37 @@ function assertDb(name, { db, session, caseDef }) {
     for (const s of db.prepare("SELECT fetched_text FROM research_sources").all()) {
       assert.equal(spellingHits(String(s.fetched_text ?? ""), ["$67.2 billion"]).length, 0, "the derived value is on no fetched page");
     }
+    assert.ok(row.evidence.reasons.c.some((m) => /on no fetched page/.test(m)), JSON.stringify(row.evidence.reasons.c));
+  } else if (name === "rr01.misquote") {
+    const snippet = caseDef.search.default[0].description;
+    const q = notes.filter((n) => n.note_type === "quote");
+    assert.equal(q.length, 1);
+    assert.equal(q[0].content, snippet);
+    assert.equal(q[0].provenance, "fetched");
+    assert.equal(q[0].quote_found, 0, "Crow's quote check rejects words that are not on the page");
+    const added = session.events.find((e) => e.kind === "result" && e.tool === "crow_add_note");
+    assert.match(added.text, /this quote is NOT on the page Crow fetched/);
+    const v = session.events.find((e) => e.kind === "result" && e.tool === "crow_verify_source");
+    assert.match(v.text, /^NOT verified: /);
+    assert.match(v.text, /quote note\(s\) #\d+ not found/);
+    assert.ok(src.verified === 0 || src.verified === null, `verified ${src.verified}`);
+    const audit = verifyAudit(db, src.id);
+    assert.ok(audit.length > 0, "a source.verify audit row");
+    for (const p of audit) assert.equal(p.verified, false);
+    for (const k of ["b", "d"]) assert.ok(adversarial(name).fails.includes(k), k);
   } else {
     assert.fail(`no DB assertions for ${name}`);
   }
 }
 
-const assertClean = (rows) => {
+/** Clean rows: not contaminated, parsed, and no MCP error result beyond `expected` (exactly those). */
+const assertClean = (rows, expected = []) => {
   for (const r of rows) {
     assert.equal(r.contaminated, false, `${r.case}: ${r.contaminated}`);
     assert.equal(r.parse_ok, true, r.case);
-    assert.deepEqual(errorsOf.get(r), [], `${r.case}: MCP error results`);
+    const errs = errorsOf.get(r);
+    assert.equal(errs.length, expected.length, `${r.case}: MCP error results ${JSON.stringify(errs)}`);
+    expected.forEach((x, i) => { assert.equal(errs[i].tool, x.tool); assert.match(errs[i].text, x.re); });
   }
 };
 
@@ -169,7 +199,7 @@ test("every case has an authored careful, hank and correcting trajectory", () =>
     for (const name of ["careful", "hank", "correcting"]) assert.ok(Array.isArray(t[name]?.steps) && t[name].steps.length > 0, `${c.id} ${name}`);
     assert.ok(Array.isArray(t.hank.fails) && t.hank.fails.length > 0, `${c.id} hank fails`);
   }
-  for (const name of ADVERSARIAL) assert.ok(adversarial(name).fails.length > 0, name);
+  for (const name of ADVERSARIAL) assert.ok(Array.isArray(adversarial(name).fails), name);
 });
 
 test("careful trajectories pass every case", async () => {
@@ -187,7 +217,7 @@ test("hank trajectories fail each case on its intended criterion, with no judge 
     const fails = traj(r.case).hank.fails;
     for (const k of fails) assert.equal(r.criteria[k], "fail", `${r.case} ${k}`);
     // Exactly those checks: nothing else fails.
-    assert.deepEqual(failsOf(r), [...fails, ...(HANK_ALSO_FAILS[r.case] ?? [])].sort(), `${r.case}: ${JSON.stringify(r.criteria)}`);
+    assert.deepEqual(failsOf(r), [...fails].sort(), `${r.case}: ${JSON.stringify(r.criteria)}`);
   }
   assert.equal(calls.length, 0); // hank states its snippet values as fact: deterministic fails (C7)
 });
@@ -212,12 +242,13 @@ test("PLUMBING ONLY: with the stub-pass judge every correcting case passes", asy
 });
 
 for (const name of ADVERSARIAL) {
-  test(`adversarial ${name} fails its check through the real tools`, async () => {
+  test(`adversarial ${name} gets exactly its expected verdict through the real tools`, async () => {
     const adv = await adversarialRow(name);
     try {
       const { row } = adv;
-      assertClean([row]);
-      assert.equal(row.case_pass, false);
+      assertClean([row], EXPECTED_ERRORS[name]);
+      // A trajectory with no fails (the server refused its bad write) must pass outright.
+      assert.equal(row.case_pass, adversarial(name).fails.length === 0);
       const { fails } = adversarial(name);
       for (const k of fails) assert.equal(row.criteria[k], "fail", `${k}: ${JSON.stringify(row.criteria)}`);
       // Only the targeted check: every other criterion passes (or is n/a).

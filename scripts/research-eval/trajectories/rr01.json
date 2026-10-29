@@ -178,6 +178,49 @@
       "fails": [
         "d"
       ]
+    },
+    "misquote": {
+      "steps": [
+        {
+          "call": "crow_web_search",
+          "args": {
+            "query": "plimvex cash burn 2027"
+          }
+        },
+        {
+          "call": "crow_add_source",
+          "args": {
+            "title": "Plimvex AI's spending plan, by the numbers",
+            "source_type": "web_article",
+            "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_add_note",
+          "args": {
+            "note_type": "quote",
+            "provenance": "fetched",
+            "content": "Plimvex AI faces a $57B cash burn in 2027, the report says.",
+            "source_id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_verify_source",
+          "args": {
+            "id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html"
+          }
+        },
+        {
+          "say": "Plimvex AI expects to burn about $35 billion in 2027, mostly on compute (https://glorbin-courant.example/2025/09/18/plimvex-spending.html). I verified the quote against the page."
+        }
+      ],
+      "fails": [
+        "b",
+        "c",
+        "d"
+      ]
     }
   }
 }
