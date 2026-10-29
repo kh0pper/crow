@@ -452,7 +452,7 @@ async function loadAddonServers() {
     if (connectedServers.has(id)) continue;
     // A service add-on without its fields is connected per project, not Crow-wide.
     if (!isLegacyConfiguredAddon(id, config)) {
-      console.log(`  [proxy] addon ${id}: skipped (service: connected per project)`);
+      console.log(`  [proxy] addon ${id}: skipped (service: its account fields are not set)`);
       continue;
     }
     try {

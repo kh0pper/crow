@@ -115,14 +115,14 @@ test("catalog skips unconfigured service", () => {
   try {
     delete process.env.HA_TOKEN;
     const { servers, unconfigured } = crowServerCatalog(homeWithHa({ HA_URL: "http://ha.example" }));
-    assert.equal(unconfigured["home-assistant"], "service: connected per project");
+    assert.equal(unconfigured["home-assistant"], "service: its account fields are not set");
     assert.equal(servers["home-assistant"], undefined);
-    assert.notEqual(unconfigured.funkwhale, "service: connected per project");
+    assert.notEqual(unconfigured.funkwhale, "service: its account fields are not set");
 
     // Configured through the environment instead: not skipped as a service.
     process.env.HA_TOKEN = "test-token-6";
     const again = crowServerCatalog(homeWithHa({ HA_URL: "http://ha.example" }));
-    assert.notEqual(again.unconfigured["home-assistant"], "service: connected per project");
+    assert.notEqual(again.unconfigured["home-assistant"], "service: its account fields are not set");
   } finally {
     if (saved === undefined) delete process.env.HA_TOKEN; else process.env.HA_TOKEN = saved;
   }

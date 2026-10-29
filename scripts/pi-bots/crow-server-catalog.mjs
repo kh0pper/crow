@@ -326,7 +326,7 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   const addonEnv = { ...repoEnv, ...process.env };
   for (const [id, addon] of Object.entries(readAddons(crowHome))) {
     if (!isLegacyConfiguredAddon(id, addon, undefined, addonEnv)) {
-      unconfigured[id] = "service: connected per project";
+      unconfigured[id] = "service: its account fields are not set";
       continue;
     }
     const cwd = resolve(addon.cwd || join(crowHome, "bundles", id));
