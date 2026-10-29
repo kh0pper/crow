@@ -71,7 +71,7 @@ test("outbound nulls project_id and carries project_uuid; the transform is pure"
     await probe.emitChange("memories", "insert", row);
     const sent = captured.find((e) => e.table === "memories");
     assert.ok(sent, "the memory reached the probe feed");
-    assert.equal(sent.row.project_id, null, "project_id is local: null on the wire");
+    assert.ok(!("project_id" in sent.row), "project_id is local: never on the wire");
     assert.equal(sent.row.project_uuid, U_SHARED, "project_uuid rides as is");
     assert.equal(row.project_id, 10, "the caller's row is not mutated");
 
@@ -82,7 +82,10 @@ test("outbound nulls project_id and carries project_uuid; the transform is pure"
     await probe.emitChange("memories", "update", { id: 8, content: "plain edited" });
     const plainSent = captured.filter((e) => e.table === "memories" && e.row.id === 8);
     assert.equal(plainSent.length, 2);
-    for (const e of plainSent) assert.ok(!("project_uuid" in e.row), `${e.op}: no project_uuid key on the wire`);
+    for (const e of plainSent) {
+      assert.ok(!("project_uuid" in e.row), `${e.op}: no project_uuid key on the wire`);
+      assert.ok(!("project_id" in e.row), `${e.op}: no project_id key on the wire`);
+    }
     assert.ok("project_uuid" in plain, "the caller's row is not mutated");
     assert.equal((await mem(a.db, 7)).project_id, 10, "the local row keeps its project");
     try { await probe.close(); } catch {}
@@ -208,6 +211,26 @@ test("a mixed-version peer that sends no project_uuid leaves it null and breaks 
     }));
     assert.deepEqual(await mem(b.db, 302), { id: 302, content: "B filed, edited by old peer", project_id: 40, project_uuid: U_SHARED });
 
+    // _checkConflict compares like with like: the local row loses project_id
+    // (and nothing else here) under the transform, exactly as the wire row does.
+    // An equal-lamport re-delivery naming the same project is noise...
+    await b.db.execute("UPDATE memories SET lamport_ts = 60 WHERE id = 302");
+    await b.mgr._applyEntry(a.id, signed({
+      table: "memories", op: "update",
+      row: { id: 302, content: "B filed, edited by old peer", project_uuid: U_SHARED },
+      lamport_ts: 60, instance_id: a.id,
+    }));
+    assert.equal(await conflicts(b.db), 0, "equivalent re-delivery: no conflict despite the local project_id");
+    // ...while a real difference at the same lamport is still a conflict, and local wins.
+    await b.mgr._applyEntry(a.id, signed({
+      table: "memories", op: "update",
+      row: { id: 302, content: "different", project_uuid: U_SHARED },
+      lamport_ts: 60, instance_id: a.id,
+    }));
+    assert.equal(await conflicts(b.db), 1, "a real stale edit is still caught");
+    assert.equal((await mem(b.db, 302)).content, "B filed, edited by old peer");
+    await b.db.execute("DELETE FROM sync_conflicts");
+
     // And over the real link, memories written without project_uuid (every
     // existing writer) still sync both ways exactly as before.
     link = await linkPeers(a, b);
@@ -226,50 +249,3 @@ test("a mixed-version peer that sends no project_uuid leaves it null and breaks 
   }
 });
 
-test("an incoming row with an unknown column applies with the column dropped, logged once per column, no values", async () => {
-  const fleet = await makeFleet();
-  const warn = console.warn;
-  const logged = [];
-  console.warn = (...args) => { logged.push(args.join(" ")); };
-  try {
-    const { a, b, identity } = fleet;
-    const signed = (entry) => ({ ...entry, signature: sign(JSON.stringify(entry), identity.ed25519Priv) });
-    await b.mgr._applyEntry(a.id, signed({
-      table: "memories", op: "insert",
-      row: { id: 501, content: "from a newer peer", category: "general", future_col: "SECRET-VALUE-1" },
-      lamport_ts: 5, instance_id: a.id,
-    }));
-    assert.deepEqual(await mem(b.db, 501), { id: 501, content: "from a newer peer", project_id: null, project_uuid: null });
-    await b.mgr._applyEntry(a.id, signed({
-      table: "memories", op: "update",
-      row: { id: 501, content: "newer peer edit", future_col: "SECRET-VALUE-2", other_future: 1 },
-      lamport_ts: 6, instance_id: a.id,
-    }));
-    assert.equal((await mem(b.db, 501)).content, "newer peer edit", "the update applied too");
-    await b.mgr._applyEntry(a.id, signed({
-      table: "memories", op: "insert",
-      row: { id: 502, content: "second", category: "general", future_col: "SECRET-VALUE-3" },
-      lamport_ts: 7, instance_id: a.id,
-    }));
-    assert.ok(await mem(b.db, 502));
-    const drops = logged.filter((l) => l.includes("dropping inbound column"));
-    assert.deepEqual(drops.sort(), [
-      "[instance-sync] dropping inbound column memories.future_col: not a column of the local table",
-      "[instance-sync] dropping inbound column memories.other_future: not a column of the local table",
-    ], "one line per table and column");
-    assert.ok(!logged.some((l) => l.includes("SECRET-VALUE")), "values are never logged");
-
-    // A column added at runtime is picked up (the cache re-reads on an unknown key).
-    await b.db.execute("ALTER TABLE memories ADD COLUMN future_col TEXT");
-    await b.mgr._applyEntry(a.id, signed({
-      table: "memories", op: "update",
-      row: { id: 502, future_col: "kept" },
-      lamport_ts: 8, instance_id: a.id,
-    }));
-    const { rows } = await b.db.execute("SELECT future_col FROM memories WHERE id = 502");
-    assert.equal(rows[0].future_col, "kept");
-  } finally {
-    console.warn = warn;
-    await fleet.cleanup();
-  }
-});
