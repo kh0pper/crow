@@ -88,3 +88,12 @@ test("remove: only the hosting satellite's records go; unpair removes all of the
   assert.ok(!existsSync(join(paths.skillsDir, "demo.md")), "the unedited skill is removed");
   assert.deepEqual(I.bundleHost("demo", paths), { where: null });
 });
+
+test("L2: removing a bundle crow has no record of on this satellite touches nothing (skills included)", () => {
+  const { paths, app } = scratch();
+  mkdirSync(paths.skillsDir, { recursive: true });
+  writeFileSync(join(paths.skillsDir, "demo.md"), "# demo skill\n"); // identical to the shipped one
+  const r = I.removeSatelliteInstall({ id: "demo", satelliteId: SAT, appBundles: app, paths });
+  assert.equal(r.code, "not_on_this_server");
+  assert.ok(existsSync(join(paths.skillsDir, "demo.md")));
+});

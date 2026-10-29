@@ -2905,7 +2905,16 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       installedAt: new Date().toISOString(),
       ...consentRecord(manifest, consentVerified),
     });
-    saveInstalled(installedSnapshot);
+    // Written from a FRESH read (SAT-5 review M3): the snapshot is as of validation, and anything
+    // recorded since (a satellite install, another bundle) must survive. Only this bundle's own
+    // entry comes from the snapshot, at its current position when it already has one.
+    {
+      const own = installedSnapshot.find((i) => i.id === bundleId);
+      const current = getInstalled();
+      const at = current.findIndex((i) => i?.id === bundleId);
+      if (at >= 0) current[at] = own; else current.push(own);
+      saveInstalled(current);
+    }
     appendLog(job, "Installation tracked");
     // Recorded: the project connections an earlier uninstall paused come back (and their
     // keychain secrets), for every bundle, unconditionally (Task 12).

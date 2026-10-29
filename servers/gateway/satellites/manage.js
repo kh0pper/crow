@@ -31,7 +31,8 @@ import { satelliteFetch } from "./client.js";
 import { getSatellite, getToolPin, putToolPin, deleteToolPins, updateSatelliteIfNotRevoked } from "./store.js";
 import { bundleHost, installPaths, recordSatelliteInstall, removeSatelliteInstall, removeAllForSatellite, satelliteInstalls } from "./installs.js";
 import { fetchToolList } from "./remote.js";
-import { checkToolList, diffTools, toolsSha, toolsState, lastRecord, MAX_TOOLS } from "./tools-pin.js";
+import { sanitizeStatus } from "./status-sanitize.js";
+import { checkToolList, diffTools, toolsSha, toolsState, lastRecord, reportedTools, MAX_TOOLS } from "./tools-pin.js";
 import { discardStagedMgmtKey } from "./mgmt-keys.js";
 import { createSatellitePoller } from "./poller.js";
 import { createCertRenewer, certDaysLeft } from "./renewal.js";
@@ -51,6 +52,7 @@ const JOB_RE = /^[0-9a-f]{16}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_MAX = 64;
 const LOG_MAX_BYTES = 300 * 1024;
+const LOG_TEXT_CAP = 256 * 1024;
 const ENV_KEY = /^[A-Z_][A-Z0-9_]{0,127}$/;
 
 /** Calls allowed on an agent older than crow (spec §11.1 "update first"). */
@@ -164,6 +166,10 @@ export function createSatelliteManager({
     if (job.status !== "complete") return null;
     const id = rec.bundle;
     if (rec.action === "install") {
+      // Re-read the row AFTER the relay: an unpair that landed while the job report was in
+      // flight wins (recordSatelliteInstall is synchronous from here on, nothing interleaves).
+      const cur = await getSatellite(db, sat.id);
+      if (!cur || cur.status === "revoked") return { ok: false, code: "revoked" };
       const m = manifestOf(id);
       if (!m || m.id !== id || !satelliteEligible(m)) {
         log(`[satellites] ${sat.id}: install of ${id} finished but ${id} is no longer satellite-eligible here; not recorded`);
@@ -207,7 +213,8 @@ export function createSatelliteManager({
   /** The Servers card data for one satellite row (no network beyond a cached git count). */
   async function card(db, sat) {
     const rec = lastRecord(sat);
-    const st = rec?.status || null;
+    // Sanitized again on read (review M1): an older or hand-edited record never reaches the card raw.
+    const st = rec?.status && typeof rec.status === "object" ? sanitizeStatus(rec.status) : null;
     const installed = [];
     const ids = new Set([...(st?.installed || []).map((b) => b.id), ...satelliteInstalls(P(), sat.id).map((r) => r.id)]);
     for (const id of [...ids].sort()) {
@@ -221,12 +228,13 @@ export function createSatelliteManager({
     }
     const p = Number(sat.agent_protocol);
     return {
-      polled_at: rec?.polled_at ?? null, error: rec?.error ?? null, sha: st?.sha ?? null,
+      polled_at: typeof rec?.polled_at === "string" ? rec.polled_at.slice(0, 40) : null,
+      error: typeof rec?.error === "string" ? rec.error.slice(0, 48) : null, sha: st?.sha ?? null,
       behind_by: st?.sha ? await behindBy(st.sha) : null,
       cert_days_left: certDaysLeft(sat, now()),
       mem: st?.mem ?? null, psi_memory_some_avg10: st?.psi_memory_some_avg10 ?? null,
       disk_free_bytes: st?.disk_free_bytes ?? null, uptime_s: st?.uptime_s ?? null,
-      skew_ms: rec?.skew_ms ?? null, installed,
+      skew_ms: typeof rec?.skew_ms === "number" && Number.isFinite(rec.skew_ms) ? rec.skew_ms : null, installed,
       update_first: !Number.isInteger(p) || p < AGENT_PROTOCOL,
     };
   }
@@ -325,7 +333,16 @@ export function createSatelliteManager({
       qs.set("since", query.since);
     }
     const q = qs.toString();
-    return simple(db, satId, "logs", "GET", () => `/satellite/v1/bundles/${id}/logs${q ? `?${q}` : ""}`, null, { maxBytes: LOG_MAX_BYTES });
+    return simple(db, satId, "logs", "GET", () => `/satellite/v1/bundles/${id}/logs${q ? `?${q}` : ""}`, null, { maxBytes: LOG_MAX_BYTES }).then((r) => {
+      // The satellite caps its log at 256 KiB; crow holds it to that too, after parsing (review L3).
+      if (r.status === 200) {
+        const log = typeof r.json.log === "string" ? r.json.log : "";
+        const buf = Buffer.from(log, "utf8");
+        const capped = buf.length > LOG_TEXT_CAP ? buf.subarray(0, LOG_TEXT_CAP).toString("utf8").replace(/\uFFFD$/, "") : log;
+        r.json = { log: capped, truncated: r.json.truncated === true || capped !== log };
+      }
+      return r;
+    });
   }
   const backups = (db, satId, bundle) => { const id = bundleId(bundle); return simple(db, satId, "backups", "GET", () => `/satellite/v1/bundles/${id}/backups`); };
 
@@ -350,7 +367,8 @@ export function createSatelliteManager({
   async function rotateKey(db, satId) {
     const sat = await satOf(db, satId);
     const r = await theRenewer.rotateKey(db, sat);
-    return { status: r.rotated ? 200 : 502, json: r.rotated ? { rotated: true } : { rotated: false, error: r.code } };
+    const status = r.rotated ? 200 : ["rotation_pending", "revoked", "no_mgmt_key"].includes(r.code) ? 409 : 502;
+    return { status, json: r.rotated ? { rotated: true } : { rotated: false, error: r.code } };
   }
 
   async function rename(db, satId, body = {}) {
@@ -378,7 +396,7 @@ export function createSatelliteManager({
     const pin = await getToolPin(db, sat.id, id);
     let old = [];
     try { old = pin ? JSON.parse(pin.tools_json) : []; } catch { old = []; }
-    const reported = (lastRecord(sat)?.status?.tools || {})[id] || null;
+    const reported = reportedTools(sat, id);
     const version = reported?.version ?? null;
     return {
       status: 200,
@@ -403,7 +421,7 @@ export function createSatelliteManager({
     const prev = await getToolPin(db, sat.id, id);
     await thePoller.pollNow(db, sat.id).catch(() => null); // the reported hash next to the pin
     const fresh = (await getSatellite(db, sat.id)) || sat;
-    const version = (lastRecord(fresh)?.status?.tools || {})[id]?.version ?? manifestOf(id)?.version ?? null;
+    const version = reportedTools(fresh, id)?.version ?? manifestOf(id)?.version ?? null;
     await putToolPin(db, {
       satellite_id: sat.id, bundle: id, version: version == null ? null : String(version), tools_sha256: sha,
       tools_json: JSON.stringify(list),
@@ -416,6 +434,7 @@ export function createSatelliteManager({
 
   // ── unpair cleanup (the pairing service does the signed unpair and the revocation) ──────────
   function afterUnpair(satId) {
+    for (const k of [...startedJobs.keys()]) if (k.startsWith(`${satId}:`)) startedJobs.delete(k);
     const ids = removeAllForSatellite({ satelliteId: satId, appBundles: appBundlesDir(), paths: P(), log });
     try { discardStagedMgmtKey(satId, { env }); } catch (err) { log(`[satellites] staged key ${satId}: ${err.message}`); }
     return ids;
@@ -426,6 +445,7 @@ export function createSatelliteManager({
   return {
     card, eligibleBundles, install, consent, uninstall, job, lifecycle, repin, getEnv, putEnv, logs, backups,
     update, refresh, renewCert, rotateKey, rename, tools, approveTools, afterUnpair, peers, finishJob,
+    pendingJobs: (satId) => [...startedJobs.keys()].filter((k) => k.startsWith(`${satId}:`)).length,
     poller: thePoller, renewer: theRenewer, bootSha: () => bootShaFn() || null,
   };
 }

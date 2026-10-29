@@ -124,10 +124,12 @@ export function loadStagedMgmtKey(satId, { env = process.env } = {}) {
   return loadKeyFile(stagedMgmtKeyPath(satId, env), satId);
 }
 
-/** The staged key becomes the live key (old live key shredded). Returns the new key record. */
-export function promoteStagedMgmtKey(satId, { env = process.env } = {}) {
+/** The staged key becomes the live key (old live key shredded) when it is `expectedPub`. Returns the new key record. */
+export function promoteStagedMgmtKey(satId, { env = process.env, expectedPub } = {}) {
   const staged = loadStagedMgmtKey(satId, { env });
   if (!staged) throw new Error(`mgmt-keys: no staged key for ${satId}`);
+  // The caller names the key it sent in the cert: a staged file swapped meanwhile is never promoted.
+  if (typeof expectedPub !== "string" || staged.ed25519_pub !== expectedPub) throw new Error(`mgmt-keys: staged key for ${satId} is not the expected one`);
   shredMgmtKey(satId, { env });
   writePrivateFile(mgmtKeyPath(satId, env), JSON.stringify(staged));
   shredPath(stagedMgmtKeyPath(satId, env));

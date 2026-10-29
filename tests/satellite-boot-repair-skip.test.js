@@ -53,3 +53,32 @@ test("a local install of a bundle hosted on a satellite is refused (one host per
     B._setAppBundlesForTest(join(import.meta.dirname, "..", "bundles"));
   }
 });
+
+test("M3: a local install writes installed.json from a fresh read — a satellite entry written meanwhile survives", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "satskip-repo3-"));
+  const id = "localdemo";
+  const manifest = { id, name: id, description: "d", type: "bundle", category: "productivity", version: "0.1.0", env_vars: [] };
+  put(repo, `${id}/manifest.json`, JSON.stringify(manifest));
+  const gw = join(mkdtempSync(join(tmpdir(), "satskip-gw-")), ".env");
+  writeFileSync(gw, "# gateway\n");
+  B._setAppBundlesForTest(repo);
+  B._setAppEnvPathForTest(gw);
+  B._setRestartHookForTest(() => {});
+  try {
+    put(HOME, "installed.json", "[]");
+    const snapshot = []; // validation saw an empty installed.json
+    // ...then a satellite install was recorded before this install wrote its entry.
+    const sat = { id: "remote", mode: "satellite", host: "sat_aaaaaaaaaaaaaaaaaaaa", version: "1.0.0" };
+    put(HOME, "installed.json", JSON.stringify([sat]));
+    const job = B._createJobForTest(id, "install");
+    const r = await B.runInstallJob(id, {}, { job, installedSnapshot: snapshot, consentVerified: false, manifest });
+    assert.equal(r.ok, true, r.reason);
+    const after = JSON.parse(readFileSync(join(HOME, "installed.json"), "utf8"));
+    assert.deepEqual(after.find((e) => e.id === "remote"), sat, "the satellite record is kept");
+    assert.equal(after.filter((e) => e.id === id).length, 1);
+  } finally {
+    B._setAppBundlesForTest(join(import.meta.dirname, "..", "bundles"));
+    B._setAppEnvPathForTest(null);
+    B._setRestartHookForTest(null);
+  }
+});

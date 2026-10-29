@@ -26,6 +26,7 @@ import { satelliteFetch } from "./client.js";
 import { listSatellites, getSatellite, updateSatelliteIfNotRevoked, getToolPin } from "./store.js";
 import { readHealth, fetchToolList } from "./remote.js";
 import { diffTools, formatDiff, lastRecord } from "./tools-pin.js";
+import { sanitizeStatus } from "./status-sanitize.js";
 
 export const POLL_INTERVAL_MS = 60000;
 export const UNREACHABLE_AFTER_MS = 10 * 60000;
@@ -109,7 +110,8 @@ export function createSatellitePoller({
       if (!(await updateSatelliteIfNotRevoked(db, sat.id, patch))) return { ok: false, code: "revoked" };
       return { ok: false, code: rec.error, answered: true };
     }
-    const status = r.json || {};
+    // Only the whitelisted, type-checked form is ever stored (review M1).
+    const status = sanitizeStatus(r.json);
     rec.status = status;
     patch.last_seen_at = new Date(t).toISOString();
     if (Number.isInteger(status.agent_protocol)) patch.agent_protocol = status.agent_protocol;

@@ -10,6 +10,7 @@
 import { t, fill } from "../dashboard/shared/i18n.js";
 import { listSatellites, getToolPin } from "./store.js";
 import { lastRecord, toolsState } from "./tools-pin.js";
+import { sanitizeStatus } from "./status-sanitize.js";
 import { certDaysLeft, EXPIRY_WARN_DAYS } from "./renewal.js";
 import { SERVERS_URL } from "./poller.js";
 
@@ -33,7 +34,8 @@ export async function satellitesSignal(db, lang = "en", nowFn = () => Date.now()
     if (days !== null && days < EXPIRY_WARN_DAYS) {
       issue(`satellites:${s.id}:cert`, fill(t(days < 0 ? "signals.satellites.certExpired" : "signals.satellites.certExpiring", lang), { name: s.name, days: Math.max(days, 0) }));
     }
-    for (const bundle of Object.keys(lastRecord(s)?.status?.tools || {})) {
+    const st = lastRecord(s)?.status;
+    for (const bundle of Object.keys(st && typeof st === "object" ? sanitizeStatus(st).tools : {})) {
       let pin = null;
       try { pin = await getToolPin(db, s.id, bundle); } catch { pin = null; }
       if (pin && toolsState(s, bundle, pin).state === "changed") {

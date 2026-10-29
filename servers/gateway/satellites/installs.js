@@ -109,10 +109,13 @@ export function recordSatelliteInstall({ id, satelliteId, version = null, appBun
 export function removeSatelliteInstall({ id, satelliteId, appBundles, paths = installPaths(), log = () => {} }) {
   const rec = readInstalled(paths.installed).find((r) => r?.id === id);
   if (rec && !(isSatelliteEntry(rec) && rec.host === satelliteId)) return { ok: false, code: "not_on_this_server" };
-  if (rec) writeInstalled(paths.installed, readInstalled(paths.installed).filter((r) => r?.id !== id));
   let addons = null;
   try { addons = readAddons(paths.addons); } catch (err) { log(`[satellites] mcp-addons unreadable: ${err.message}`); }
-  if (addons && addons[id]?.transport === SATELLITE_MODE && addons[id].satellite_id === satelliteId) {
+  const ownAddon = !!(addons && addons[id]?.transport === SATELLITE_MODE && addons[id].satellite_id === satelliteId);
+  // Nothing of crow's says this satellite hosts `id`: touch nothing, skills included (review L2).
+  if (!rec && !ownAddon) return { ok: false, code: "not_on_this_server" };
+  if (rec) writeInstalled(paths.installed, readInstalled(paths.installed).filter((r) => r?.id !== id));
+  if (ownAddon) {
     delete addons[id];
     writePrivateFile(paths.addons, JSON.stringify(addons, null, 2));
   }
