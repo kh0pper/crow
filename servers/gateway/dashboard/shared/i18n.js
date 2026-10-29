@@ -4154,6 +4154,7 @@ export const translations = {
   "voiceHandoff.stopStatus.done_pending_start": { en: "Confirmed. {bot}'s task will stop as soon as it starts. Anything it makes is kept.", es: "Confirmado. La tarea de {bot} se parará en cuanto empiece. Lo que haga se queda." },
   "voiceHandoff.stopStatus.done_stopping": { en: "Confirmed. {bot}'s task is stopping now. What it made so far is kept.", es: "Confirmado. La tarea de {bot} se está parando. Lo que hizo hasta ahora se queda." },
   "voiceHandoff.stopStatus.not_sent": { en: "This couldn't be sent to your phone, so {bot}'s task kept running. Ask Crow again.", es: "No se pudo enviar a tu teléfono, así que la tarea de {bot} siguió en marcha. Pídeselo a Crow otra vez." },
+  "services.keychain.deleteServiceRow": { en: "This key belongs to a project connection. Disconnect it on the project's Services page instead.", es: "Esta clave pertenece a una conexión de un proyecto. Desconéctala en la página Servicios del proyecto." },
   "services.field.HA_URL": { en: "Address", es: "Dirección" },
   "services.field.HA_TOKEN": { en: "Token", es: "Token" },
   "services.field.GITHUB_PERSONAL_ACCESS_TOKEN": { en: "Token", es: "Token" },

@@ -15,8 +15,8 @@ const ENTRIES = [
   { id: 5, kind: "extension", label: "Vaultwarden — live token", bundle_id: "vaultwarden", env_key: "X", username: null, url: null, origin: "generated", status: "active", updated_at: "2026-10-03T12:00:00.000Z", readable: true },
 ];
 
-function boot({ method = "password", vaultAvailable = true, routes = {}, confirmAnswer = true, port = null, crow = null, userAgent = "Mozilla/5.0 (X11; Linux x86_64)" } = {}) {
-  const html = renderPasswordsPage({ entries: ENTRIES, method, vaultAvailable, lang: "en" });
+function boot({ entries = ENTRIES, method = "password", vaultAvailable = true, routes = {}, confirmAnswer = true, port = null, crow = null, userAgent = "Mozilla/5.0 (X11; Linux x86_64)" } = {}) {
+  const html = renderPasswordsPage({ entries, method, vaultAvailable, lang: "en" });
   const client = passwordsClientJS("en");
   const js = client.slice(client.indexOf("<script>") + 8, client.lastIndexOf("</script>"));
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
@@ -433,4 +433,28 @@ test("a javascript: entry url renders as plain text, never an href; http(s) stay
   assert.ok(!/href="javascript:/i.test(html));
   assert.ok(html.includes("javascript:alert(1)"), "shown as text");
   assert.match(html, /<a href="HTTPS:\/\/ok\.example\/x"/);
+});
+
+test("R14 — a refused delete of a project connection's key keeps the row and says where to disconnect it (en + es)", async () => {
+  const svc = { id: 6, kind: "service", label: "GitHub — Work", bundle_id: "github", env_key: "GITHUB_PERSONAL_ACCESS_TOKEN", username: null, url: null, origin: "typed", status: "active", updated_at: "2026-10-03T12:00:00.000Z", readable: true, connection_uuid: "u-7" };
+  const s = boot({ entries: [...ENTRIES, svc], routes: { "/delete": () => ({ status: 409, d: { error: "service_row" } }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
+  const msg = s.document.getElementById("pw-delete-refused");
+  assert.equal(msg.hidden, true, "hidden until a delete is refused");
+  assert.equal(msg.textContent, t("services.keychain.deleteServiceRow", "en"));
+  s.click(s.document.querySelector('tr.pw-row[data-id="6"] .pw-delete'));
+  await s.settle();
+  assert.deepEqual(s.calls.find((c) => c.url.endsWith("/delete")).body, { id: 6 });
+  assert.notEqual(s.document.querySelector('tr.pw-row[data-id="6"]'), null, "the row stays");
+  assert.equal(msg.hidden, false);
+
+  // Any other refusal does not show it.
+  const o = boot({ routes: { "/delete": () => ({ status: 500, d: { error: "Keychain error. Nothing was revealed." } }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
+  o.click(o.document.querySelector('tr.pw-row[data-id="2"] .pw-delete'));
+  await o.settle();
+  assert.equal(o.document.getElementById("pw-delete-refused").hidden, true);
+
+  const es = t("services.keychain.deleteServiceRow", "es");
+  assert.notEqual(es, "services.keychain.deleteServiceRow");
+  assert.notEqual(es, t("services.keychain.deleteServiceRow", "en"));
+  assert.match(renderPasswordsPage({ entries: [svc], method: "password", vaultAvailable: false, lang: "es" }), new RegExp(es));
 });

@@ -74,6 +74,7 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
       ${noReauth}
       ${vaultNeedsHttps ? `<p id="pw-vault-https-note" style="font-size:0.8rem;color:var(--crow-text-muted)">${t("keychain.vaultNeedsHttps", lang)}</p>` : ""}
       <p id="pw-grant" style="font-size:0.8rem;color:var(--crow-text-muted)"></p>
+      <p id="pw-delete-refused" role="alert" class="alert alert-error" hidden>${t("services.keychain.deleteServiceRow", lang)}</p>
       ${table}
       <div id="pw-reauth" class="pw-panel" hidden>
         <strong>${t("passwords.reauthTitle", lang)}</strong>
@@ -225,7 +226,11 @@ export function passwordsClientJS(lang) {
         row.querySelector(".pw-delete").addEventListener("click", function() {
           var generated = row.getAttribute("data-origin") === "generated" && row.getAttribute("data-status") === "active";
           if (!confirm(generated ? '${tJs("passwords.deleteGeneratedConfirm", lang)}' : '${tJs("passwords.deleteConfirm", lang)}')) return;
-          guarded("/delete", generated ? { id: id, confirm_generated: true } : { id: id }, function(res) { if (res.status === 200) row.remove(); });
+          guarded("/delete", generated ? { id: id, confirm_generated: true } : { id: id }, function(res) {
+            if (res.status === 200) { row.remove(); return; }
+            // A project connection's key: the server refuses, and the page says where to disconnect it.
+            if (res.status === 409 && res.d.error === "service_row") document.getElementById("pw-delete-refused").hidden = false;
+          });
         });
         var vaultBtn = row.querySelector(".pw-vault");
         if (vaultBtn) vaultBtn.addEventListener("click", function() {

@@ -89,6 +89,7 @@ export function keychainApiRouter({
       await handler(req, res, db);
     } catch (err) {
       if (err?.code === "KEYCHAIN_KEY_MISSING") { if (!res.headersSent) res.status(409).json(KEY_MISSING); return; }
+      if (err?.code === "KEYCHAIN_SERVICE_ROW") { if (!res.headersSent) res.status(409).json({ error: "service_row" }); return; }
       if (err?.code === "KEYCHAIN_KEY_INVALID") { if (!res.headersSent) res.status(409).json({ code: "key_invalid", error: err.message }); return; }
       console.error("[keychain] request failed:", err?.code || err?.name || "error");
       if (!res.headersSent) res.status(500).json({ error: "Keychain error. Nothing was revealed." });
@@ -176,6 +177,7 @@ export function keychainApiRouter({
     if (entry.origin === "generated" && entry.status === "active" && req.body?.confirm_generated !== true) {
       return res.status(409).json({ code: "generated_in_use", error: `Crow generated this and keeps no other copy: without it you may not be able to sign in to ${entry.bundle_id || "the extension"}, or read data it encrypted. Export or save it elsewhere first.` });
     }
+    // A project connection's key goes only with its connection: deleteEntry refuses it (409 service_row).
     await deleteEntry(db, entry.id);
     await audit(db, "keychain_delete", { ip: req.ip, details: auditDetails(entry) });
     res.json({ ok: true });
