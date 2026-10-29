@@ -1,0 +1,376 @@
+/**
+ * pick-probe: "Test the picks" (roles phase 2b, Task 10). Every request is a
+ * stub requestFn; no real provider is contacted. Fixture keys are made up.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Readable } from "node:stream";
+import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createClient } from "@libsql/client";
+
+import { probePick, probeRecommended, pickCheckOf } from "../servers/gateway/ai/pick-probe.js";
+import { addProvider, testProviderKey } from "../servers/gateway/ai/add-provider.js";
+import { isInstanceScope } from "../servers/gateway/dashboard/settings/sync-allowlist.js";
+
+const KEY = "fixture-key-zz9";
+const reply = (status, body = {}, headers = {}) => ({
+  status, headers, stream: Readable.from([Buffer.from(typeof body === "string" ? body : JSON.stringify(body))]),
+});
+function stub(fn) {
+  const calls = [];
+  const f = async (url, opts) => { calls.push({ url, ...opts, body: opts?.body ? JSON.parse(opts.body) : undefined }); return fn(url, opts, calls.length); };
+  f.calls = calls;
+  return f;
+}
+const openaiRow = { id: "cloud-a", baseUrl: "https://api.openai.com/v1/", apiKey: KEY };
+const otherRow = { id: "local-chat", baseUrl: "https://api.example.com/v1", apiKey: KEY };
+const toolReply = (name) => reply(200, { choices: [{ message: { tool_calls: [{ function: { name, arguments: "{}" } }] } }] });
+
+function entry(id, kind = "chat") { return { model_id: id, id_verified: true, kind, status: "stable", retires: null }; }
+function writeRec(roles) {
+  const f = join(mkdtempSync(join(tmpdir(), "pickprobe-")), "recs.json");
+  writeFileSync(f, JSON.stringify({ schema_version: 1, accessed: "2026-10-01", review_by: "2027-01-28", source_notes: "", providers: { openai: { roles } } }));
+  return f;
+}
+function recFile(reviewBy) {
+  const f = join(mkdtempSync(join(tmpdir(), "pickprobe-")), "recs.json");
+  const e = (id, kind = "chat") => ({ model_id: id, id_verified: true, kind, status: "stable", retires: null });
+  writeFileSync(f, JSON.stringify({
+    schema_version: 1, accessed: "2026-10-01", review_by: reviewBy, source_notes: "",
+    providers: { openai: { roles: { coordinator: [e("m-shared")], everyday: [e("m-shared")], quick: [e("m-small")], embed: [e("m-embed", "embed")] } } },
+  }));
+  return f;
+}
+async function freshDb() {
+  const db = createClient({ url: ":memory:" });
+  await db.execute("CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)");
+  return db;
+}
+
+test("tool call required", async () => {
+  const text = stub(() => reply(200, { choices: [{ message: { content: "hello" } }] }));
+  assert.deepEqual(await probePick(openaiRow, "m", { requestFn: text }), { ok: false, code: "no_tool_call" });
+  const good = stub(() => toolReply("crow_probe"));
+  assert.deepEqual(await probePick(openaiRow, "m", { requestFn: good }), { ok: true, code: "ok" });
+  const c = good.calls[0];
+  assert.equal(c.url, "https://api.openai.com/v1/chat/completions");
+  assert.equal(c.method, "POST");
+  assert.equal(c.mode, "cloud");
+  assert.equal(c.body.tool_choice, "required");
+  assert.equal(c.body.max_tokens, 64);
+  assert.equal(c.body.tools[0].function.name, "crow_probe");
+  assert.equal(c.headers.Authorization, `Bearer ${KEY}`);
+  assert.equal((await probePick(openaiRow, "m", { requestFn: stub(() => toolReply("other_tool")) })).code, "no_tool_call");
+  assert.deepEqual(await probePick(openaiRow, "m", { requestFn: stub(() => reply(302, "", { location: "https://elsewhere.example.com/" })) }), { ok: false, code: "redirect" });
+  assert.deepEqual(await probePick(openaiRow, "m", { requestFn: stub(() => reply(429)) }), { ok: false, code: "http_429" });
+  assert.deepEqual(await probePick(openaiRow, "m", { requestFn: stub(() => { throw Object.assign(new Error("x"), { code: "ECONNREFUSED" }); }) }), { ok: false, code: "unreachable" });
+});
+
+test("mode is other for a row with no preset", async () => {
+  const f = stub(() => toolReply("crow_probe"));
+  await probePick(otherRow, "m", { requestFn: f });
+  assert.equal(f.calls[0].mode, "other");
+});
+
+test("anthropic shape", async () => {
+  const row = { id: "cloud-a", baseUrl: "https://api.anthropic.com", apiKey: KEY };
+  const f = stub(() => reply(200, { content: [{ type: "text", text: "hi" }, { type: "tool_use", name: "crow_probe", input: { ok: true } }] }));
+  assert.deepEqual(await probePick(row, "m", { requestFn: f }), { ok: true, code: "ok" });
+  const c = f.calls[0];
+  assert.equal(c.url, "https://api.anthropic.com/v1/messages");
+  assert.deepEqual(c.body.tool_choice, { type: "any" });
+  assert.equal(c.body.max_tokens, 64);
+  assert.equal(c.body.tools[0].name, "crow_probe");
+  assert.deepEqual(c.body.tools[0].input_schema.required, ["ok"]);
+  assert.equal(c.headers["x-api-key"], KEY);
+  assert.equal(c.headers["anthropic-version"], "2023-06-01");
+  assert.equal(c.headers.Authorization, undefined);
+  const none = stub(() => reply(200, { content: [{ type: "text", text: "hi" }] }));
+  assert.equal((await probePick(row, "m", { requestFn: none })).code, "no_tool_call");
+});
+
+test("embed", async () => {
+  const ok = stub(() => reply(200, { data: [{ embedding: [0.1] }] }));
+  assert.deepEqual(await probePick(openaiRow, "e", { kind: "embed", requestFn: ok }), { ok: true, code: "ok" });
+  assert.equal(ok.calls[0].url, "https://api.openai.com/v1/embeddings");
+  assert.deepEqual(ok.calls[0].body, { model: "e", input: "ok" });
+  assert.deepEqual(await probePick(openaiRow, "e", { kind: "embed", requestFn: stub(() => reply(200, { data: [] })) }), { ok: false, code: "bad_embedding" });
+});
+
+test("checks expire", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(() => toolReply("crow_probe")), listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2026-11-01T00:00:00Z"), recOpts: { file }, row: openaiRow });
+  assert.equal(c.ok, true);
+  assert.equal(c.code, "ok");
+  assert.match(c.at, /^\d{4}-\d\d-\d\dT/);
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now: new Date("2027-02-01T00:00:00Z"), recOpts: { file }, row: openaiRow }), null);
+  assert.equal(await pickCheckOf(db, "cloud-a", "never", { now: new Date("2026-11-01T00:00:00Z"), recOpts: { file }, row: openaiRow }), null);
+});
+
+test("shared model probed once; results stored in an instance-scope key", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  const f = stub((url) => (url.endsWith("/embeddings") ? reply(200, { data: [{ embedding: [1] }] }) : toolReply("crow_probe")));
+  const out = await probeRecommended(db, "cloud-a", { roles: ["coordinator", "everyday", "quick", "embed", "rerank"], requestFn: f, listRowsFn: async () => [openaiRow], recOpts: { file } });
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.filter((c) => c.body.model === "m-shared").length, 1);
+  assert.deepEqual(out.coordinator, { modelId: "m-shared", ok: true, code: "ok" });
+  assert.deepEqual(out.everyday, out.coordinator);
+  assert.equal(out.embed.modelId, "m-embed");
+  assert.equal(out.rerank, undefined);
+  const { rows } = await db.execute("SELECT value FROM dashboard_settings WHERE key='provider_pick_checks'");
+  const stored = JSON.parse(rows[0].value);
+  assert.deepEqual(Object.keys(stored["cloud-a"]).sort(), ["m-embed|embed", "m-shared|chat", "m-small|chat"]);
+  assert.equal(isInstanceScope("provider_pick_checks"), true);
+});
+
+test("the key never reaches a log, a result or the stored checks", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  const seen = [];
+  const orig = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+  for (const k of Object.keys(orig)) console[k] = (...a) => seen.push(a.map(String).join(" "));
+  const leaky = () => { throw Object.assign(new Error(`connect failed with ${KEY}`), { code: `E_${KEY}` }); };
+  let out, failing;
+  try {
+    out = await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(leaky), listRowsFn: async () => [openaiRow], recOpts: { file } });
+    failing = await probePick(openaiRow, "m", { requestFn: stub(leaky) });
+  } finally { Object.assign(console, orig); }
+  assert.equal(failing.code, "unreachable");
+  assert.ok(seen.length > 0, "the failure was logged");
+  const { rows } = await db.execute("SELECT key, value FROM dashboard_settings");
+  assert.ok(!JSON.stringify([out, failing, rows, seen]).includes(KEY));
+});
+
+test("same model id as chat and as embed keeps both checks", async () => {
+  const db = await freshDb();
+  const file = writeRec({ coordinator: [entry("dual")], embed: [entry("dual", "embed")] });
+  const f = stub((url) => (url.endsWith("/embeddings") ? reply(200, { data: [] }) : toolReply("crow_probe")));
+  await probeRecommended(db, "cloud-a", { roles: ["coordinator", "embed"], requestFn: f, listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const now = new Date("2026-11-01T00:00:00Z");
+  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "chat", now, recOpts: { file }, row: openaiRow })).ok, true);
+  assert.equal((await pickCheckOf(db, "cloud-a", "dual", { kind: "embed", now, recOpts: { file }, row: openaiRow })).code, "bad_embedding");
+});
+
+test("concurrent runs for two providers both keep their results", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  const rowB = { ...openaiRow, id: "cloud-b" };
+  const slow = stub(async () => { await new Promise((r) => setTimeout(r, 10)); return toolReply("crow_probe"); });
+  const listRowsFn = async () => [openaiRow, rowB];
+  await Promise.all([
+    probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: slow, listRowsFn, recOpts: { file } }),
+    probeRecommended(db, "cloud-b", { roles: ["quick"], requestFn: slow, listRowsFn, recOpts: { file } }),
+  ]);
+  const now = new Date("2026-11-01T00:00:00Z");
+  assert.ok(await pickCheckOf(db, "cloud-a", "m-small", { now, recOpts: { file }, row: openaiRow }));
+  assert.ok(await pickCheckOf(db, "cloud-b", "m-small", { now, recOpts: { file }, row: rowB }));
+});
+
+test("a stored model listing limits the probed pick", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  const f = stub(() => toolReply("crow_probe"));
+  const out = await probeRecommended(db, "cloud-a", { roles: ["coordinator", "quick"], requestFn: f, listRowsFn: async () => [{ ...openaiRow, models: [{ id: "m-small" }] }], recOpts: { file } });
+  assert.deepEqual(Object.keys(out), ["quick"]);
+  assert.equal(f.calls.length, 1);
+});
+
+test("a body over 1 MB, a body past the deadline and a non-2xx body", async () => {
+  const big = { status: 200, headers: {}, stream: Readable.from([Buffer.alloc(1_100_000, 0x20)]) };
+  assert.equal((await probePick(openaiRow, "m", { requestFn: async () => big })).code, "no_tool_call");
+  assert.equal(big.stream.destroyed, true);
+  const stalled = new Readable({ read() {} });
+  const slow = { status: 200, headers: {}, stream: stalled, deadline: Date.now() + 40 };
+  // A body that never finishes is a timeout (retryable, L2), not a bad answer.
+  assert.equal((await probePick(openaiRow, "e", { kind: "embed", requestFn: async () => slow })).code, "timeout");
+  assert.equal(stalled.destroyed, true);
+  const err = { status: 500, headers: {}, stream: Readable.from([Buffer.from("x".repeat(100))]) };
+  assert.equal((await probePick(openaiRow, "m", { requestFn: async () => err })).code, "http_500");
+  assert.equal(err.stream.destroyed, true);
+});
+
+test("no silent probe: the real addProvider flow makes no pick request", async () => {
+  const urls = [];
+  const requestFn = async (url) => { urls.push(url); return reply(200, { data: [{ id: "m" }] }); };
+  const r = await addProvider({}, { presetId: "openai", apiKey: KEY, modelIds: ["m"] }, {
+    testFn: (input) => testProviderKey(input, { requestFn }),
+    listRowsFn: async () => [], upsertProviderFn: async () => {}, invalidateFn: () => {},
+  });
+  assert.equal(r.ok, true);
+  assert.ok(urls.length > 0, "the key test did run");
+  assert.deepEqual(urls.filter((u) => /\/(chat\/completions|embeddings|v1\/messages)$/.test(u)), []);
+  const src = readFileSync(new URL("../servers/gateway/ai/add-provider.js", import.meta.url), "utf8");
+  assert.ok(!/pick-probe/.test(src), "add-provider.js must not import pick-probe.js");
+});
+
+/** Every module specifier a source names: import … from, export … from, bare import, dynamic import. */
+function specifiersOf(src) {
+  const out = [];
+  for (const re of [
+    /\b(?:import|export)\s[^;]*?\bfrom\s*["']([^"']+)["']/g,
+    /\bimport\s*["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ]) for (const m of src.matchAll(re)) out.push(m[1]);
+  return out;
+}
+const BANNED_SPEC = /safe-upstream|pick-probe|^(node:)?(https?|http2|net|tls|dgram|dns)(\/|$)|undici|node-fetch|axios/;
+
+test("specifiersOf sees every import form", () => {
+  const src = 'import a from "./a.js";\nexport { b } from "./b.js";\nexport * from "./c.js";\nimport "./d.js";\nconst e = await import("./e.js");\nimport {\n  f,\n} from "node:https";';
+  assert.deepEqual(specifiersOf(src).sort(), ["./a.js", "./b.js", "./c.js", "./d.js", "./e.js", "node:https"].sort());
+  assert.ok(BANNED_SPEC.test("node:https") && BANNED_SPEC.test("http") && BANNED_SPEC.test("../gateway/models/safe-upstream.js"));
+  assert.ok(!BANNED_SPEC.test("node:fs") && !BANNED_SPEC.test("./provider-presets.js"));
+});
+
+test("check storage lives in a read-only module with no request path", async () => {
+  // Walk the whole local import chain from pick-checks.js.
+  const root = new URL("../servers/shared/pick-checks.js", import.meta.url);
+  const seen = new Set();
+  const queue = [root.href];
+  while (queue.length) {
+    const href = queue.shift();
+    if (seen.has(href)) continue;
+    seen.add(href);
+    const src = readFileSync(new URL(href), "utf8");
+    assert.ok(!/\bfetch\s*\(/.test(src), `${href} calls fetch`);
+    for (const spec of specifiersOf(src)) {
+      assert.ok(!BANNED_SPEC.test(spec), `${href} imports ${spec}`);
+      if (spec.startsWith(".")) queue.push(new URL(spec, href).href);
+      else assert.ok(spec.startsWith("node:"), `${href} imports package ${spec}`);
+    }
+  }
+  assert.ok(seen.size >= 2, "the walk reached pick-checks.js's own imports");
+  const checks = await import("../servers/shared/pick-checks.js");
+  const probe = await import("../servers/gateway/ai/pick-probe.js");
+  assert.equal(probe.pickCheckOf, checks.pickCheckOf, "pick-probe re-exports the one reader");
+  assert.equal(probe.PICK_CHECKS_KEY, checks.PICK_CHECKS_KEY);
+  // add-provider and role-picks read checks only through pick-checks.js.
+  for (const f of ["../servers/gateway/ai/add-provider.js", "../servers/shared/role-picks.js"]) {
+    const s = readFileSync(new URL(f, import.meta.url), "utf8");
+    assert.ok(!/pick-probe/.test(s), `${f} must not mention pick-probe`);
+    assert.ok(specifiersOf(s).some((x) => x.endsWith("/pick-checks.js")), `${f} reads checks through pick-checks.js`);
+  }
+});
+
+test("a check is tied to the key and the address it ran with (F3)", async () => {
+  const db = await freshDb();
+  const file = recFile("2027-01-28");
+  await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(() => toolReply("crow_probe")), listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const now = new Date("2026-11-01T00:00:00Z");
+  const opts = { kind: "chat", now, recOpts: { file } };
+  assert.equal((await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: openaiRow })).ok, true);
+  // The same address with a trailing slash or upper-case host is the same address.
+  assert.equal((await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: { ...openaiRow, baseUrl: "https://API.openai.com/v1" } })).ok, true);
+  // The same id re-added with a new key, or pointed elsewhere: not tested.
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: { ...openaiRow, apiKey: "fixture-key-other" } }), null);
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: { ...openaiRow, baseUrl: "https://api.example.com/v1" } }), null);
+  // No row to compare with: not tested.
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", opts), null);
+  // The stored fingerprint is a truncated sha256, never the key.
+  const { rows } = await db.execute("SELECT value FROM dashboard_settings WHERE key='provider_pick_checks'");
+  const c = JSON.parse(rows[0].value)["cloud-a"]["m-small|chat"];
+  assert.match(c.fp, /^[0-9a-f]{16}$/);
+  assert.equal(c.url, "https://api.openai.com/v1");
+  assert.ok(!rows[0].value.includes(KEY));
+  // A check stored before stamps existed reads as not tested.
+  await db.execute({ sql: "UPDATE dashboard_settings SET value = ? WHERE key='provider_pick_checks'",
+    args: [JSON.stringify({ "cloud-a": { "m-small|chat": { ok: true, code: "ok", at: "2026-10-30T00:00:00Z" } } })] });
+  assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: openaiRow }), null);
+});
+
+test("busy, server-error, unreachable, redirect and timed-out checks are retryable: not tested, code kept (L2)", async () => {
+  const now = new Date("2026-11-01T00:00:00Z");
+  const file = recFile("2027-01-28");
+  const results = [
+    [() => reply(429), "http_429"],
+    [() => reply(503), "http_503"],
+    [() => reply(500), "http_500"],
+    [() => reply(307, "", { location: "https://api.example.com/x" }), "redirect"],
+    [() => { throw Object.assign(new Error("nope"), { code: "ECONNREFUSED" }); }, "unreachable"],
+    [() => ({ status: 200, headers: {}, stream: new Readable({ read() {} }) }), "timeout"],
+  ];
+  for (const [fn, code] of results) {
+    const db = await freshDb();
+    await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(fn), listRowsFn: async () => [openaiRow], recOpts: { file }, timeoutMs: 50 });
+    const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now, recOpts: { file }, row: openaiRow });
+    assert.deepEqual({ ok: c.ok, code: c.code, retryable: c.retryable }, { ok: false, code, retryable: true }, code);
+  }
+  // Definite failures stay failures.
+  for (const [fn, code] of [
+    [() => reply(200, { choices: [{ message: { content: "hi" } }] }), "no_tool_call"],
+    [() => reply(400), "http_400"], [() => reply(404), "http_404"], [() => reply(401), "http_401"],
+  ]) {
+    const db = await freshDb();
+    await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(fn), listRowsFn: async () => [openaiRow], recOpts: { file } });
+    const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now, recOpts: { file }, row: openaiRow });
+    assert.equal(c.ok, false, code);
+    assert.equal(c.code, code);
+    assert.notEqual(c.retryable, true, code);
+  }
+  const db = await freshDb();
+  await probeRecommended(db, "cloud-a", { roles: ["embed"], requestFn: stub(() => reply(200, { data: [] })), listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const e = await pickCheckOf(db, "cloud-a", "m-embed", { kind: "embed", now, recOpts: { file }, row: openaiRow });
+  assert.equal(e.code, "bad_embedding");
+  assert.notEqual(e.retryable, true);
+});
+
+// --- Alibaba Model Studio: a probe without tool_choice "required" (ninth preset) --------
+
+const msRow = { id: "modelstudio", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", apiKey: KEY };
+
+test("modelstudio probes with tool_choice auto and thinking off; ok only when crow_probe comes back", async () => {
+  const good = stub(() => toolReply("crow_probe"));
+  assert.deepEqual(await probePick(msRow, "qwen3.8-max", { requestFn: good }), { ok: true, code: "ok" });
+  const c = good.calls[0];
+  assert.equal(c.url, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions");
+  assert.equal(c.mode, "cloud");
+  assert.equal(c.body.tool_choice, "auto");
+  assert.equal(c.body.enable_thinking, false);
+  assert.equal(c.body.model, "qwen3.8-max");
+  assert.equal(c.body.max_tokens, 64);
+  assert.equal(c.body.tools[0].function.name, "crow_probe");
+  assert.equal(c.headers.Authorization, `Bearer ${KEY}`);
+  // "auto" lets the model answer in text: that is still a failed check.
+  const text = stub(() => reply(200, { choices: [{ message: { content: "Sure, ok is true." } }] }));
+  assert.deepEqual(await probePick(msRow, "qwen3.8-max", { requestFn: text }), { ok: false, code: "no_tool_call" });
+  assert.equal((await probePick(msRow, "qwen3.8-max", { requestFn: stub(() => toolReply("other_tool")) })).code, "no_tool_call");
+  // Every region gets the same probe shape.
+  const hk = stub(() => toolReply("crow_probe"));
+  await probePick({ ...msRow, baseUrl: "https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1" }, "m", { requestFn: hk });
+  assert.equal(hk.calls[0].body.tool_choice, "auto");
+  assert.equal(hk.calls[0].body.enable_thinking, false);
+});
+
+test("other presets keep tool_choice required and send no extra body; an embed probe is unchanged on modelstudio", async () => {
+  for (const row of [openaiRow, otherRow, { id: "z", baseUrl: "https://api.z.ai/api/paas/v4", apiKey: KEY }]) {
+    const f = stub(() => toolReply("crow_probe"));
+    await probePick(row, "m", { requestFn: f });
+    assert.equal(f.calls[0].body.tool_choice, "required", row.baseUrl);
+    assert.equal(Object.hasOwn(f.calls[0].body, "enable_thinking"), false, row.baseUrl);
+  }
+  const e = stub(() => reply(200, { data: [{ embedding: [0.1] }] }));
+  assert.deepEqual(await probePick(msRow, "text-embedding-v4", { kind: "embed", requestFn: e }), { ok: true, code: "ok" });
+  assert.deepEqual(e.calls[0].body, { model: "text-embedding-v4", input: "ok" });
+});
+
+test("modelstudio probeRecommended: a row with no stored models probes the primaries; ticked ones narrow it", async () => {
+  const db = await freshDb();
+  const f = stub((url) => (url.endsWith("/embeddings") ? reply(200, { data: [{ embedding: [1] }] }) : toolReply("crow_probe")));
+  const out = await probeRecommended(db, "modelstudio", { roles: ["coordinator", "quick", "embed", "rerank"], requestFn: f, listRowsFn: async () => [{ ...msRow, models: [] }] });
+  assert.equal(out.coordinator.modelId, "qwen3.8-max");
+  assert.equal(out.quick.modelId, "qwen3.8-flash");
+  assert.equal(out.embed.modelId, "text-embedding-v4");
+  assert.equal(out.rerank, undefined);
+  for (const c of f.calls.filter((x) => x.url.endsWith("/chat/completions"))) assert.equal(c.body.tool_choice, "auto");
+
+  const db2 = await freshDb();
+  const g = stub(() => toolReply("crow_probe"));
+  const narrowed = await probeRecommended(db2, "modelstudio", { roles: ["coordinator", "quick"], requestFn: g, listRowsFn: async () => [{ ...msRow, models: [{ id: "qwen3.8-flash" }] }] });
+  assert.equal(narrowed.coordinator, undefined, "the coordinator primary was not ticked");
+  assert.equal(narrowed.quick.modelId, "qwen3.8-flash");
+});

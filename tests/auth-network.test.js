@@ -140,7 +140,9 @@ test("rejectFunneled middleware: /api/roles and /api/providers are never funnel-
   const server = await startTestApp();
   try {
     const port = server.address().port;
-    for (const path of ["/api/roles/voice/picks", "/api/roles/quick/preview", "/api/roles/stt/profile", "/api/providers/test"]) {
+    for (const path of ["/api/roles/voice/picks", "/api/roles/quick/preview", "/api/roles/stt/profile", "/api/providers/test",
+      "/api/providers", "/api/providers/cloud-a/plan", "/api/providers/cloud-a/probe",
+      "/api/providers/cloud-a/recommended/preview", "/api/providers/cloud-a/recommended"]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }
@@ -148,7 +150,8 @@ test("rejectFunneled middleware: /api/roles and /api/providers are never funnel-
     server.close();
   }
   const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
-  for (const path of ["/api/roles/voice/picks", "/api/providers/test"]) {
+  for (const path of ["/api/roles/voice/picks", "/api/providers/test", "/api/providers", "/api/providers/cloud-a/plan",
+    "/api/providers/cloud-a/probe", "/api/providers/cloud-a/recommended/preview", "/api/providers/cloud-a/recommended"]) {
     assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
   }
 });
@@ -229,6 +232,8 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/dashboard/perch-api/browser/state",
       // R1.2: a project's home.
       "/dashboard/project/x",
+      // R1.2 PR 5: the apps launcher's read.
+      "/dashboard/shell-api/apps?project=all",
     ]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
@@ -267,6 +272,27 @@ test("dashboardAuth refuses an unauthenticated /dashboard/perch-api request inst
   const noSession = await run(mkReq({ ip: "10.0.0.5", headers: { host: "x" } }));
   assert.equal(noSession.nexted, false, "a request with no crow_session cookie must never reach the perch API");
   assert.equal(noSession.redirected, "/dashboard/login");
+});
+
+test("the apps API needs a session", async () => {
+  // R1.2 PR 5: GET /dashboard/shell-api/apps installs dashboardAuth on its own
+  // path, so it is closed wherever it is mounted. The real dashboardAuth over a
+  // real socket: an off-network caller is refused and the handler never runs.
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  const { appsApiRouter } = await import("../servers/gateway/routes/apps-api.js");
+  let authCalls = 0;
+  const spy = (req, res, next) => { authCalls++; return dashboardAuth(req, res, next); };
+  const app = express();
+  app.use(appsApiRouter(spy));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const r = await request(server.address().port, "/dashboard/shell-api/apps?project=all");
+    assert.equal(authCalls, 1, "the router runs dashboardAuth on /apps");
+    assert.equal(r.status, 403);
+    assert.doesNotMatch(String(r.body || ""), /"apps"/);
+  } finally {
+    server.close();
+  }
 });
 
 test("dashboardAuth refuses an unauthenticated /dashboard/perch-api/interactive request instead of calling next()", async () => {

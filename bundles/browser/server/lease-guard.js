@@ -30,6 +30,7 @@
  * on an older core), the tools run as before, without a lease.
  */
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { appImport } from "./app-root.js";
 import { stateDir } from "./instance.js";
 
@@ -104,6 +105,32 @@ function within(p, ms, fallback) {
   ]);
 }
 
+/** This bundle's version, from its own manifest (the installed copy's, when installed). */
+export function ownBundleVersion() {
+  try {
+    const m = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+    return typeof m.version === "string" ? m.version : null;
+  } catch { return null; }
+}
+
+/**
+ * Tell the gateway this server enforces the lease (R1.2 PR 5): enforced.json
+ * in the lease directory, written atomically, naming this bundle's version.
+ * The gateway offers Take over only while that version matches the installed
+ * manifest. Never blocks startup: a failure is logged (stderr; stdout is the
+ * MCP channel) and the server carries on.
+ */
+function reportEnforced(lease, dir, opts) {
+  if (opts.reportEnforced === false || typeof lease.writeEnforced !== "function") return;
+  try {
+    const bundleVersion = "bundleVersion" in opts ? opts.bundleVersion : ownBundleVersion();
+    if (!bundleVersion) throw new Error("no bundle version");
+    lease.writeEnforced(dir, { bundleVersion, now: Date.now() });
+  } catch (e) {
+    try { console.error("[browser] lease enforcement not reported: " + String((e && e.code) || "error").slice(0, 40)); } catch { /* no stderr */ }
+  }
+}
+
 /**
  * Wrap every later server.tool(...) registration with the lease.
  *
@@ -129,6 +156,7 @@ export function installLeaseGuard(server, opts = {}) {
   const enabled = !!(lease && dir);
   const guard = { holder, external, enabled, exiting: null };
   if (!enabled) return guard;
+  reportEnforced(lease, dir, opts);
 
   async function targetIdNow() {
     try {

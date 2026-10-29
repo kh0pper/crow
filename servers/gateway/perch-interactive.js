@@ -163,7 +163,8 @@ import { readLease, isFree as isLeaseFree, renewIfHeld as renewBrowserLease, rel
 import { isBrowserTool, isWaitForUser, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
 import { createWatcher as createBrowserWatcher, createFinalShotHook } from "./browser-tile/watcher.js";
 import { storeShot } from "./browser-tile/shots.js";
-import { createTakeOver as createBrowserTakeOver } from "./browser-tile/take-over.js";
+import { createTakeOver as createBrowserTakeOver, createAppTakeOvers } from "./browser-tile/take-over.js";
+import { appTileInfo, desktopApp, takeOverOffered, appLeaseDir } from "./apps/app-tile.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -1609,6 +1610,30 @@ export function createInteractiveEngine({
     forceBreakAfterMs: FORCE_BREAK_AFTER_MS,
     log,
   });
+
+  /**
+   * R1.2 PR 5: Take over for any other desktop app (the embedded app tile).
+   * One controller per app id, made only after the route has checked the app
+   * (an installed desktop app whose lease is declared and enforced). The
+   * browser keeps browserTakeOver above (its operator note and stall pause);
+   * another app's holding only blocks that app's own bots, through its lease.
+   */
+  const appTakeOvers = createAppTakeOvers({
+    browser: browserTakeOver,
+    dirFor: (appId) => (desktopApp(appId, { crowHome }) ? appLeaseDir(appId, { crowHome }) : null),
+    now, setTimer, clearTimer,
+    isAlive: typeof browserCfg.isAlive === "function" ? browserCfg.isAlive : null,
+    forceBreakAfterMs: FORCE_BREAK_AFTER_MS,
+    log,
+  });
+  // The browser's Take over is offered whenever its own /browser/take-over
+  // route would accept (browserTakeOver has a lease directory); any other app
+  // needs its declared lease confirmed (app-tile.js takeOverOffered).
+  const browserAccepts = () => browserDir() !== null;
+  /** An installed desktop app's tile ({ id, label, src, takeOver }) or null. */
+  function appTile(appId) { return appTileInfo(appId, { crowHome, browserAccepts }); }
+  /** May this app be taken over now? (the browser: its route accepts; another app: lease declared and enforced) */
+  function appTakeOverOffered(appId) { return takeOverOffered(desktopApp(appId, { crowHome }), { crowHome, browserAccepts }); }
 
   /** The session has a live turn using the browser. */
   function browserTurnLive(sessionId) {
@@ -4374,6 +4399,7 @@ export function createInteractiveEngine({
     writeLeases();
     if (browserWatcher) { try { browserWatcher.close(); } catch { /* closed */ } }
     try { browserTakeOver.close(); } catch { /* closed */ }
+    try { appTakeOvers.close(); } catch { /* closed */ }
     return { stopped: live.length };
   }
 
@@ -4500,6 +4526,11 @@ export function createInteractiveEngine({
     browserTakeOver,
     browserTurnLive,
     browserLinkOk,
+    /** R1.2 PR 5, the embedded app tile: appTakeOvers.get(appId, { create }),
+     *  appTile(appId), appTakeOverOffered(appId). */
+    appTakeOvers,
+    appTile,
+    appTakeOverOffered,
     /** The frames route's watcher (null unless this engine watches a browser). */
     get browserWatcher() { return browserWatcher; },
     /** Precondition-test surface (r1 S10) — also the internal resolver. */

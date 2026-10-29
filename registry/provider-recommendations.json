@@ -1,0 +1,3462 @@
+{
+  "schema_version": 1,
+  "accessed": "2026-10-28",
+  "review_by": "2027-01-28",
+  "source_notes": "provider role research, 2026-10-28",
+  "agentic_is_judgement": true,
+  "providers": {
+    "openrouter": {
+      "docs_urls": [
+        "https://openrouter.ai/api/v1/models",
+        "https://openrouter.ai/api/v1/embeddings/models",
+        "https://openrouter.ai/api/v1/models?output_modalities=rerank",
+        "https://openrouter.ai/docs/api/reference/limits",
+        "https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key"
+      ],
+      "endpoint_check": "2026-10-28: base https://openrouter.ai/api/v1; GET /models is public (no key), so the key is tested with GET /key, Authorization: Bearer <key>.",
+      "deprecations": [
+        {
+          "model_id": "meta-llama/llama-3.1-70b-instruct",
+          "date": "2026-11-03",
+          "replacement": null
+        },
+        {
+          "model_id": "nousresearch/hermes-3-llama-3.1-70b",
+          "date": "2026-11-02",
+          "replacement": null
+        },
+        {
+          "model_id": "nousresearch/hermes-3-llama-3.1-405b",
+          "date": "2026-11-02",
+          "replacement": null
+        },
+        {
+          "model_id": "bytedance-seed/seed-2.0-code",
+          "date": "2026-11-11",
+          "replacement": null
+        },
+        {
+          "model_id": "bytedance-seed/seed-1.6",
+          "date": "2026-11-11",
+          "replacement": null
+        },
+        {
+          "model_id": "bytedance-seed/seed-1.6-flash",
+          "date": "2026-11-11",
+          "replacement": null
+        },
+        {
+          "model_id": "upstage/solar-pro-3",
+          "date": "2026-10-30",
+          "replacement": null
+        },
+        {
+          "model_id": "poolside/laguna-s-2.1",
+          "date": "2026-10-31",
+          "replacement": null,
+          "note": ":free variants too"
+        },
+        {
+          "model_id": "poolside/laguna-xs-2.1",
+          "date": "2026-10-31",
+          "replacement": null,
+          "note": ":free variants too"
+        },
+        {
+          "model_id": "z-ai/glm-4.5",
+          "date": "2026-12-31",
+          "replacement": null
+        },
+        {
+          "model_id": "z-ai/glm-4.5v",
+          "date": "2026-12-31",
+          "replacement": null
+        },
+        {
+          "model_id": "dots-studio/dots-3-note-preview:free",
+          "date": "2026-12-31",
+          "replacement": null
+        }
+      ],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "anthropic/claude-sonnet-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Original vendor, tools plus 1M context. OpenRouter slugs use dots where native ids use hyphens."
+          },
+          {
+            "model_id": "openai/gpt-6.1-terra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 5,
+              "price_verified": true
+            },
+            "note": "Cheaper, 1M+ context."
+          },
+          {
+            "model_id": "google/gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.825,
+              "out": 4.125,
+              "price_verified": true
+            },
+            "note": "Cheapest of the three, 1M context."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "anthropic/claude-haiku-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Cheap, same vendor as the coordinator."
+          },
+          {
+            "model_id": "openai/gpt-6-luna",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Same price, different vendor."
+          },
+          {
+            "model_id": "nvidia/nemotron-3.5-lightning:free",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free variant, rate-limited and may change; paid nvidia/nemotron-3.5-lightning is $0.07 / $0.20 at 262,144."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "anthropic/claude-opus-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Top Anthropic tier for planning."
+          },
+          {
+            "model_id": "openai/gpt-6-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Half the price."
+          },
+          {
+            "model_id": "qwen/qwen3.8-max-0902",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Open-weight family vendor's top model."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "openai/gpt-6.1-terra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 5,
+              "price_verified": true
+            },
+            "note": "Mid-price default worker."
+          },
+          {
+            "model_id": "anthropic/claude-sonnet-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Also the escalation tier."
+          },
+          {
+            "model_id": "deepseek/deepseek-v4-pro-0813",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.32,
+              "out": 3.96,
+              "price_verified": true
+            },
+            "note": "Cheap long-context. Base price from the live /api/v1/models listing on 2026-10-28 (the research had $0.66 / $1.98, which is the listed off-peak override: weekends and some UTC windows)."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "anthropic/claude-opus-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Escalation above everyday."
+          },
+          {
+            "model_id": "openai/gpt-6-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Cheaper escalation."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "google/gemini-4-argon",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Different vendor from the builder, so correlated blind spots are less likely."
+          },
+          {
+            "model_id": "anthropic/claude-opus-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Strongest reviewer if budget allows."
+          },
+          {
+            "model_id": "openai/gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Same price as the primary."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "google/gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.825,
+              "out": 4.125,
+              "price_verified": true
+            },
+            "note": "Image, video, audio and file input."
+          },
+          {
+            "model_id": "anthropic/claude-sonnet-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Image and file input."
+          },
+          {
+            "model_id": "nvidia/nemotron-3.5-super-vl:free",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free variant, rate-limited; image and video input. Paid $0.15 / $0.50 at 1,048,576."
+          },
+          {
+            "model_id": "google/gemma-4-31b-it:free",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "unverified",
+            "context": 262144,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free variant, rate-limited; images and video."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "anthropic/claude-haiku-5.5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Text only: needs speech in and out from other roles. Latency not published."
+          },
+          {
+            "model_id": "openai/gpt-6-luna",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Text only; same price."
+          },
+          {
+            "model_id": "inception/mercury-3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.35,
+              "price_verified": true
+            },
+            "note": "Text only; diffusion LLM sold on speed (claim not verified)."
+          }
+        ],
+        "embed": [
+          {
+            "model_id": "qwen/qwen3-embedding-8b",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 40960,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.01,
+              "price_verified": true
+            },
+            "note": "Cheapest strong text embedder on the list."
+          },
+          {
+            "model_id": "openai/text-embedding-3-small",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 8192,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.02,
+              "price_verified": true
+            },
+            "note": "Original vendor."
+          },
+          {
+            "model_id": "nvidia/nemotron-3.5-embed-8b:free",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 32768,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free variant; text and image embeddings."
+          },
+          {
+            "model_id": "voyageai/voyage-4",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 32000,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.06,
+              "price_verified": true
+            },
+            "note": "Alternative embedder."
+          }
+        ],
+        "rerank": [
+          {
+            "model_id": "cohere/rerank-4-fast",
+            "id_verified": true,
+            "kind": "rerank",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 32768,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "API lists $0 per token; likely billed per search (unverified)."
+          },
+          {
+            "model_id": "voyageai/rerank-2.5",
+            "id_verified": true,
+            "kind": "rerank",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 32000,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "Alternative reranker; price unit unverified."
+          },
+          {
+            "model_id": "nvidia/nemotron-3.5-rerank-8b:free",
+            "id_verified": true,
+            "kind": "rerank",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": null,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free variant, rate-limited."
+          }
+        ]
+      }
+    },
+    "anthropic": {
+      "docs_urls": [
+        "https://platform.claude.com/docs/en/about-claude/models/overview",
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+        "https://platform.claude.com/docs/en/api/overview",
+        "https://platform.claude.com/docs/en/api/models/list",
+        "https://platform.claude.com/docs/en/api/versioning"
+      ],
+      "endpoint_check": "2026-10-28: base https://api.anthropic.com; GET /v1/models lists models and needs a key. Auth: Authorization: Bearer, or x-api-key (documented as a legacy fallback, still supported). anthropic-version is required; 2026-10-21 is the latest, 2023-06-01 is still a listed version and is what Crow's adapter sends.",
+      "deprecations": [
+        {
+          "model_id": "claude-sonnet-4-5-20250929",
+          "date": "2026-11-30",
+          "replacement": "claude-sonnet-5-5"
+        },
+        {
+          "model_id": "claude-opus-4-5-20251101",
+          "date": "2026-11-24",
+          "replacement": null,
+          "note": "retires not sooner than this date"
+        },
+        {
+          "model_id": "claude-haiku-4-5-20251001",
+          "date": "2026-10-15",
+          "replacement": null,
+          "note": "retires not sooner than this date"
+        }
+      ],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "claude-opus-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Long-running agentic coding and knowledge work; moderate latency, cheaper than Fable. Retires not sooner than 2027-09-22."
+          },
+          {
+            "model_id": "claude-fable-5-1",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Long-horizon agentic work; use when Opus 5.5 evals fall short."
+          },
+          {
+            "model_id": "claude-sonnet-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Cheapest plausible orchestrator; fast."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "claude-haiku-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Fastest and cheapest current model. Prompts over 100K tokens cost $0.50 / $2.50."
+          },
+          {
+            "model_id": "claude-sonnet-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Step up when the scout needs judgement."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "claude-fable-5-1",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Demanding reasoning; adaptive thinking always on, default effort high. Retires not sooner than 2027-09-01."
+          },
+          {
+            "model_id": "claude-opus-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Much cheaper; raise effort for harder plans."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "claude-sonnet-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Best combination of speed and intelligence. Rejects thinking type disabled. Retires not sooner than 2027-09-28."
+          },
+          {
+            "model_id": "claude-haiku-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Budget builder for simple tasks (price for prompts up to 100K tokens)."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "claude-opus-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Next tier above Sonnet 5.5."
+          },
+          {
+            "model_id": "claude-fable-5-1",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Top tier."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "claude-opus-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Strong reviewer at moderate cost."
+          },
+          {
+            "model_id": "claude-sonnet-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Cheaper review pass."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "claude-sonnet-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "All current models accept image input; best speed/quality."
+          },
+          {
+            "model_id": "claude-haiku-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Cheap image reading."
+          },
+          {
+            "model_id": "claude-opus-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 20,
+              "price_verified": true
+            },
+            "note": "Harder visual reasoning."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "claude-haiku-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Text only: no native audio, needs speech in and out from other roles. Latency unverified."
+          },
+          {
+            "model_id": "claude-sonnet-5-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Text only; fast tier with more capability."
+          }
+        ]
+      }
+    },
+    "openai": {
+      "docs_urls": [
+        "https://developers.openai.com/api/docs/models",
+        "https://developers.openai.com/api/docs/pricing",
+        "https://developers.openai.com/api/docs/deprecations",
+        "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+        "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+        "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini",
+        "https://developers.openai.com/api/docs/models/gpt-live-1",
+        "https://developers.openai.com/api/docs/models/gpt-transcribe",
+        "https://developers.openai.com/api/docs/models/text-embedding-3-large",
+        "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
+        "https://developers.openai.com/api/reference/resources/models/methods/list"
+      ],
+      "endpoint_check": "2026-10-28: GET https://api.openai.com/v1/models with Authorization: Bearer <key>.",
+      "deprecations": [
+        {
+          "model_id": "gpt-4o",
+          "date": "2027-01-14",
+          "replacement": "gpt-6-luna",
+          "note": "dated snapshots"
+        },
+        {
+          "model_id": "gpt-4o-mini",
+          "date": "2027-01-14",
+          "replacement": "gpt-6-luna",
+          "note": "dated snapshots"
+        },
+        {
+          "model_id": "gpt-4.1",
+          "date": "2027-01-14",
+          "replacement": "gpt-6-luna",
+          "note": "dated snapshots"
+        },
+        {
+          "model_id": "gpt-4.1-mini",
+          "date": "2027-01-14",
+          "replacement": "gpt-6-luna",
+          "note": "dated snapshots"
+        },
+        {
+          "model_id": "gpt-5.4-nano",
+          "date": "2027-04-01",
+          "replacement": null,
+          "note": "replacements named as gpt-6-luna / gpt-6-sol"
+        },
+        {
+          "model_id": "gpt-5.1",
+          "date": "2027-04-01",
+          "replacement": null,
+          "note": "replacements named as gpt-6-luna / gpt-6-sol"
+        },
+        {
+          "model_id": "gpt-5.3-codex",
+          "date": "2027-04-01",
+          "replacement": null,
+          "note": "replacements named as gpt-6-luna / gpt-6-sol"
+        },
+        {
+          "model_id": "gpt-5",
+          "date": "2026-12-11",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-5-mini",
+          "date": "2026-12-11",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-5-nano",
+          "date": "2026-12-11",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-5-pro",
+          "date": "2026-12-11",
+          "replacement": null
+        },
+        {
+          "model_id": "o3",
+          "date": "2026-12-11",
+          "replacement": null
+        },
+        {
+          "model_id": "o3-pro",
+          "date": "2026-12-11",
+          "replacement": null
+        },
+        {
+          "model_id": "o1",
+          "date": "2026-10-23",
+          "replacement": null
+        },
+        {
+          "model_id": "o1-pro",
+          "date": "2026-10-23",
+          "replacement": null
+        },
+        {
+          "model_id": "o3-mini",
+          "date": "2026-10-23",
+          "replacement": null
+        },
+        {
+          "model_id": "o4-mini",
+          "date": "2026-10-23",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-4.1-nano",
+          "date": "2026-10-23",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-4-turbo",
+          "date": "2026-10-23",
+          "replacement": null
+        },
+        {
+          "model_id": "tts-1",
+          "date": "2027-01-06",
+          "replacement": "gpt-realtime-2.1-mini"
+        },
+        {
+          "model_id": "tts-1-hd",
+          "date": "2027-01-06",
+          "replacement": "gpt-realtime-2.1-mini"
+        },
+        {
+          "model_id": "gpt-4o-mini-tts",
+          "date": "2027-01-06",
+          "replacement": "gpt-realtime-2.1-mini"
+        },
+        {
+          "model_id": "whisper-1",
+          "date": "2027-02-26",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-4o-transcribe",
+          "date": "2027-02-26",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-4o-mini-transcribe",
+          "date": "2027-02-26",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-4o-transcribe-diarize",
+          "date": "2027-02-26",
+          "replacement": null
+        },
+        {
+          "model_id": "gpt-realtime",
+          "date": "2027-01-20",
+          "replacement": "gpt-realtime-2.1",
+          "note": "2025-08-28 snapshot"
+        },
+        {
+          "model_id": "gpt-realtime-mini",
+          "date": "2027-01-20",
+          "replacement": "gpt-realtime-2.1-mini"
+        },
+        {
+          "model_id": "gpt-audio",
+          "date": "2027-01-20",
+          "replacement": null,
+          "note": "replacements named as gpt-realtime-2.1, gpt-realtime-2.1-mini, gpt-audio-1.5"
+        },
+        {
+          "model_id": "gpt-audio-mini",
+          "date": "2027-01-20",
+          "replacement": null,
+          "note": "replacements named as gpt-realtime-2.1, gpt-realtime-2.1-mini, gpt-audio-1.5"
+        },
+        {
+          "model_id": "sora-2",
+          "date": "2026-09-24",
+          "replacement": null,
+          "note": "Videos API shut down too"
+        },
+        {
+          "model_id": "sora-2-pro",
+          "date": "2026-09-24",
+          "replacement": null,
+          "note": "Videos API shut down too"
+        }
+      ],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Near-Astra performance at lower cost; tools need the Responses API. Prompts over 272K input tokens cost 2x in, 1.5x out."
+          },
+          {
+            "model_id": "gpt-6-astra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Most capable; reasoning effort up to max."
+          },
+          {
+            "model_id": "gpt-6.1-terra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 5,
+              "price_verified": true
+            },
+            "note": "Cheaper, computer-use oriented."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "gpt-6-luna",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Most efficient for high-volume tasks. On Chat Completions, function calling only with reasoning_effort none."
+          },
+          {
+            "model_id": "gpt-6.1-terra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 5,
+              "price_verified": true
+            },
+            "note": "Fast and efficient."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "gpt-6-astra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Most capable for demanding work."
+          },
+          {
+            "model_id": "gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Much cheaper, near-Astra per OpenAI."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Default worker value pick."
+          },
+          {
+            "model_id": "gpt-6.1-terra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 5,
+              "price_verified": true
+            },
+            "note": "Cheaper worker."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "gpt-6-astra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Top tier."
+          },
+          {
+            "model_id": "gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Mid-cost escalation."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Cross-vendor reviewer; cost-effective."
+          },
+          {
+            "model_id": "gpt-6-astra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 10,
+              "out": 50,
+              "price_verified": true
+            },
+            "note": "Hardest reviews."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "gpt-6.1-terra",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 5,
+              "price_verified": true
+            },
+            "note": "Fast for visual reasoning; text and image in."
+          },
+          {
+            "model_id": "gpt-6.1-sol",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Stronger."
+          },
+          {
+            "model_id": "gpt-6-luna",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1050000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Cheapest image input."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "gpt-realtime-2.1-mini",
+            "id_verified": true,
+            "kind": "realtime",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 128000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.6,
+              "out": 2.4,
+              "price_verified": true
+            },
+            "note": "Native speech in and out with tool use (text price shown; audio $10 / $20 per 1M). 32K max output."
+          },
+          {
+            "model_id": "gpt-live-1",
+            "id_verified": true,
+            "kind": "realtime",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": null,
+            "price": {
+              "unit": "per_minute",
+              "in": 0.05,
+              "price_verified": true
+            },
+            "note": "Full-duplex voice, billed per second; backend model and tools billed separately. Latency not published."
+          },
+          {
+            "model_id": "gpt-realtime-2.1",
+            "id_verified": true,
+            "kind": "realtime",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 4,
+              "out": 24,
+              "price_verified": true
+            },
+            "note": "Larger realtime model (text price shown; audio $32 / $64 per 1M)."
+          }
+        ],
+        "embed": [
+          {
+            "model_id": "text-embedding-3-large",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.13,
+              "price_verified": true
+            },
+            "note": "Best OpenAI embedding; max input and dimensions unverified."
+          },
+          {
+            "model_id": "text-embedding-3-small",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.02,
+              "price_verified": true
+            },
+            "note": "Cheap."
+          }
+        ]
+      }
+    },
+    "google": {
+      "docs_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-embedding-2",
+        "https://ai.google.dev/gemini-api/docs/openai"
+      ],
+      "endpoint_check": "2026-10-28: OpenAI-compatible base https://generativelanguage.googleapis.com/v1beta/openai/ ; GET /models lists models; Authorization: Bearer <Gemini API key>.",
+      "none_found": [
+        "rerank"
+      ],
+      "deprecations": [
+        {
+          "model_id": "gemini-2.5-flash-image",
+          "date": "2026-10-02",
+          "replacement": null,
+          "note": "shut down"
+        }
+      ],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "gemini-4-argon",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Stable flagship. Paid price; rises on 2026-12-01 to $4.00 / $20.00. No free tier."
+          },
+          {
+            "model_id": "gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 3.75,
+              "price_verified": true
+            },
+            "note": "Positioned for long-horizon agents; far cheaper. Paid price; rises on 2027-01-01 to $1.50 / $7.50. Free tier available."
+          },
+          {
+            "model_id": "gemini-3.1-pro-preview",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 12,
+              "price_verified": true
+            },
+            "note": "PREVIEW. $4.00 / $18.00 above 200K. Variant gemini-3.1-pro-preview-customtools for bash plus custom tools."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "gemini-3.5-flash-lite",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.3,
+              "out": 2.5,
+              "price_verified": true
+            },
+            "note": "Fastest, most cost-effective 3.5 model. Free tier available."
+          },
+          {
+            "model_id": "gemini-3.1-flash-lite",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "no",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.25,
+              "out": 1.5,
+              "price_verified": true
+            },
+            "note": "Cheaper input (audio $0.50). Free tier available."
+          },
+          {
+            "model_id": "gemini-2.5-flash-lite",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "restricted",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "no",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.1,
+              "out": 0.4,
+              "price_verified": true
+            },
+            "note": "Restricted access (prior users only); do not build on."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "gemini-4-argon",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Best reasoning flagship. Paid price; rises on 2026-12-01 to $4.00 / $20.00. No free tier."
+          },
+          {
+            "model_id": "gemini-3.1-pro-preview",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 12,
+              "price_verified": true
+            },
+            "note": "PREVIEW."
+          },
+          {
+            "model_id": "gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 3.75,
+              "price_verified": true
+            },
+            "note": "Thinking low/medium/high (minimal errors). Paid price; rises on 2027-01-01 to $1.50 / $7.50. Free tier available."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 3.75,
+              "price_verified": true
+            },
+            "note": "Stable default worker. Paid price; rises on 2027-01-01 to $1.50 / $7.50. Free tier available."
+          },
+          {
+            "model_id": "gemini-3.6-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "unverified",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 3.75,
+              "price_verified": true
+            },
+            "note": "Previous generation; price rises to $1.50 / $7.50 (date not stated)."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "gemini-4-argon",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "Escalation tier. Paid price; rises on 2026-12-01 to $4.00 / $20.00. No free tier."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 3.75,
+              "price_verified": true
+            },
+            "note": "Cheap with thinking on. Paid price; rises on 2027-01-01 to $1.50 / $7.50. Free tier available."
+          },
+          {
+            "model_id": "gemini-4-argon",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 10,
+              "price_verified": true
+            },
+            "note": "For hard reviews. Paid price; rises on 2026-12-01 to $4.00 / $20.00. No free tier."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "gemini-3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 3.75,
+              "price_verified": true
+            },
+            "note": "Image, video and audio input at the text rate. Paid price; rises on 2027-01-01 to $1.50 / $7.50. Free tier available."
+          },
+          {
+            "model_id": "gemini-3.5-flash-lite",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.3,
+              "out": 2.5,
+              "price_verified": true
+            },
+            "note": "Cheap image reading."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "gemini-3.8-live",
+            "id_verified": true,
+            "kind": "realtime",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 4.5,
+              "price_verified": true
+            },
+            "note": "Live API, audio to audio, default for voice agents (text price shown; audio in $3.00, audio out $12.00 per 1M). Free tier available."
+          },
+          {
+            "model_id": "gemini-3.8-live-extended-thinking",
+            "id_verified": true,
+            "kind": "realtime",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "no",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 4.5,
+              "price_verified": true
+            },
+            "note": "More background reasoning, higher latency."
+          },
+          {
+            "model_id": "gemini-3.1-flash-live-preview",
+            "id_verified": true,
+            "kind": "realtime",
+            "status": "preview",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "no",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.75,
+              "out": 4.5,
+              "price_verified": true
+            },
+            "note": "PREVIEW, legacy; Google recommends 3.8 Live."
+          }
+        ],
+        "embed": [
+          {
+            "model_id": "gemini-embedding-2",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "no",
+            "context": 8192,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.2,
+              "price_verified": true
+            },
+            "note": "Multimodal (image $0.45, audio $6.50, video $12.00 per 1M); dimensions 128-3,072. Free tier available."
+          }
+        ]
+      }
+    },
+    "zai": {
+      "docs_urls": [
+        "https://docs.z.ai/guides/overview/pricing",
+        "https://docs.z.ai/guides/overview/overview",
+        "https://docs.z.ai/guides/llm/glm-5.3",
+        "https://docs.z.ai/guides/llm/glm-5.3-flash",
+        "https://docs.z.ai/guides/llm/glm-4.7",
+        "https://docs.z.ai/guides/vlm/glm-4.6v",
+        "https://docs.z.ai/llms.txt",
+        "https://docs.z.ai/api-reference/introduction",
+        "https://docs.z.ai/devpack/tool/others.md"
+      ],
+      "endpoint_check": "2026-10-28: general base https://api.z.ai/api/paas/v4 (API introduction); GLM Coding Plan base https://api.z.ai/api/coding/paas/v4 (devpack tool integration page); Authorization: Bearer <key>. No models-list or key-check endpoint is documented; confirmed live 2026-10-28: /models returns 200 with key and 401 with a bad key, on both bases.",
+      "none_found": [
+        "voice",
+        "embed",
+        "rerank"
+      ],
+      "deprecations": [],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "glm-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Flagship, text-only input; reasoning always on (cannot be disabled). 128K max output."
+          },
+          {
+            "model_id": "glm-5.3-flashx",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.37,
+              "out": 1.25,
+              "price_verified": true
+            },
+            "note": "About 200 tok/s; multimodal input. Not on the GLM Coding Plan yet."
+          },
+          {
+            "model_id": "glm-5.2",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "unverified",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Older flagship; id inferred."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "glm-5.3-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Cheap; image, video and file input, text out."
+          },
+          {
+            "model_id": "glm-4.7-flash",
+            "id_verified": false,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 200000,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free; id inferred; tool support is series-level."
+          },
+          {
+            "model_id": "glm-4.7-flashx",
+            "id_verified": false,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 200000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.07,
+              "out": 0.4,
+              "price_verified": true
+            },
+            "note": "Cheapest paid; id inferred; tool support is series-level."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "glm-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Use reasoning_effort high or max."
+          },
+          {
+            "model_id": "glm-5.1",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "yes",
+            "context": 200000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Docs: long-running tasks; id inferred."
+          },
+          {
+            "model_id": "glm-5",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "yes",
+            "context": 200000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1,
+              "out": 3.2,
+              "price_verified": true
+            },
+            "note": "Docs: agentic planning; id inferred."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "glm-5.3-flashx",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.37,
+              "out": 1.25,
+              "price_verified": true
+            },
+            "note": "Fast builder."
+          },
+          {
+            "model_id": "glm-4.7",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 200000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.6,
+              "out": 2.2,
+              "price_verified": true
+            },
+            "note": "Agentic coding; tool support is series-level."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "glm-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Escalation."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "glm-5.3-flashx",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.37,
+              "out": 1.25,
+              "price_verified": true
+            },
+            "note": "Cheap reviewer."
+          },
+          {
+            "model_id": "glm-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Hard reviews."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "glm-4.6v",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 128000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.3,
+              "out": 0.9,
+              "price_verified": true
+            },
+            "note": "Image, video and file in, text out; multimodal tool use."
+          },
+          {
+            "model_id": "glm-5.3-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Newer, cheaper, 1M context."
+          },
+          {
+            "model_id": "glm-4.6v-flashx",
+            "id_verified": false,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "no",
+            "context": 128000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.04,
+              "out": 0.4,
+              "price_verified": true
+            },
+            "note": "Lightweight; id inferred."
+          },
+          {
+            "model_id": "glm-4.6v-flash",
+            "id_verified": false,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "unverified",
+            "agentic": "no",
+            "context": 128000,
+            "price": {
+              "unit": "free",
+              "price_verified": true
+            },
+            "note": "Free; id inferred."
+          }
+        ]
+      }
+    },
+    "groq": {
+      "docs_urls": [
+        "https://console.groq.com/docs/models",
+        "https://console.groq.com/docs/deprecations",
+        "https://console.groq.com/docs/tool-use",
+        "https://console.groq.com/docs/vision",
+        "https://console.groq.com/docs/model/openai/gpt-oss-120b",
+        "https://console.groq.com/docs/model/openai/gpt-oss-20b",
+        "https://console.groq.com/docs/model/qwen/qwen3.8-27b",
+        "https://console.groq.com/docs/model/minimaxai/minimax-m2.7",
+        "https://console.groq.com/docs/model/meta-models/muse-spark-open"
+      ],
+      "endpoint_check": "2026-10-28: GET https://api.groq.com/openai/v1/models with Authorization: Bearer <key> (models page example).",
+      "deprecations": [
+        {
+          "model_id": "playai-tts",
+          "date": "2025-12-31",
+          "replacement": null,
+          "note": "older PlayAI TTS models"
+        },
+        {
+          "model_id": "meta-llama/llama-guard-4-12b",
+          "date": "2026-03-05",
+          "replacement": "openai/gpt-oss-safeguard-20b"
+        },
+        {
+          "model_id": "llama-3.3-70b-versatile",
+          "date": "2026-08-16",
+          "replacement": null,
+          "note": "models page still shows Production (Enterprise)"
+        },
+        {
+          "model_id": "llama-3.1-8b-instant",
+          "date": "2026-08-16",
+          "replacement": null,
+          "note": "models page still shows Production (Enterprise)"
+        },
+        {
+          "model_id": "qwen/qwen3.6-27b",
+          "date": "2026-09-14",
+          "replacement": null
+        },
+        {
+          "model_id": "groq/compound",
+          "date": "2026-09-21",
+          "replacement": null
+        },
+        {
+          "model_id": "groq/compound-mini",
+          "date": "2026-09-21",
+          "replacement": null
+        }
+      ],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "openai/gpt-oss-120b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Production, ~500 tok/s; no parallel tool calls. 65,536 max output."
+          },
+          {
+            "model_id": "qwen/qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.8,
+              "out": 4,
+              "price_verified": true
+            },
+            "note": "Preview; parallel tools, but only 16K output."
+          },
+          {
+            "model_id": "meta-models/muse-spark-open",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "enterprise",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "Preview, Enterprise only, access via Groq sales."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "openai/gpt-oss-20b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.075,
+              "out": 0.3,
+              "price_verified": true
+            },
+            "note": "Production, ~1,000 tok/s."
+          },
+          {
+            "model_id": "openai/gpt-oss-120b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "More capable."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "openai/gpt-oss-120b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Reasoning with browser search and code execution."
+          },
+          {
+            "model_id": "qwen/qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.8,
+              "out": 4,
+              "price_verified": true
+            },
+            "note": "Preview, reasoning."
+          },
+          {
+            "model_id": "minimaxai/minimax-m2.7",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "enterprise",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 196608,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "Preview, Enterprise only."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "openai/gpt-oss-120b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Cheapest capable production model."
+          },
+          {
+            "model_id": "qwen/qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.8,
+              "out": 4,
+              "price_verified": true
+            },
+            "note": "Preview."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "qwen/qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.8,
+              "out": 4,
+              "price_verified": true
+            },
+            "note": "Preview; no larger public model (muse-spark-open and minimax-m2.7 are Enterprise)."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "qwen/qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.8,
+              "out": 4,
+              "price_verified": true
+            },
+            "note": "Preview; different family from a gpt-oss builder."
+          },
+          {
+            "model_id": "openai/gpt-oss-120b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Production."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "qwen/qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "preview",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.8,
+              "out": 4,
+              "price_verified": true
+            },
+            "note": "Preview; up to 3 images, 20 MB, 2,048 tokens per image."
+          },
+          {
+            "model_id": "meta-models/muse-spark-open",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "enterprise",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 131072,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "Preview, Enterprise only; up to 5 images."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "openai/gpt-oss-20b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.075,
+              "out": 0.3,
+              "price_verified": true
+            },
+            "note": "Text only; ~1,000 tok/s, the fastest listed text model."
+          },
+          {
+            "model_id": "openai/gpt-oss-120b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 131072,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Text only; ~500 tok/s, stronger."
+          }
+        ]
+      }
+    },
+    "together": {
+      "docs_urls": [
+        "https://www.together.ai/pricing",
+        "https://docs.together.ai/docs/serverless-models",
+        "https://docs.together.ai/docs/serverless/models.md",
+        "https://docs.together.ai/docs/deprecations",
+        "https://docs.together.ai/docs/function-calling",
+        "https://docs.together.ai/docs/inference/openai-compatibility.md"
+      ],
+      "endpoint_check": "2026-10-28: OpenAI-compatibility page gives base https://api.together.ai/v1 (US-only: https://us-api.together.ai/v1); models.list maps to GET /v1/models; Authorization: Bearer <key>. The older api.together.xyz domain is still the default in several clients.",
+      "deprecations": [
+        {
+          "model_id": "MiniMaxAI/MiniMax-M3",
+          "date": "2026-11-06",
+          "replacement": null
+        },
+        {
+          "model_id": "thinkingmachines/Inkling",
+          "date": "2026-11-06",
+          "replacement": null
+        },
+        {
+          "model_id": "google/gemma-4-31B-it",
+          "date": "2026-09-14",
+          "replacement": null
+        },
+        {
+          "model_id": "thinkingmachines/Inkling-Small",
+          "date": "2026-09-14",
+          "replacement": null
+        },
+        {
+          "model_id": "intfloat/multilingual-e5-large-instruct",
+          "date": "2026-09-14",
+          "replacement": null
+        },
+        {
+          "model_id": "openai/gpt-oss-20b",
+          "date": "2026-09-14",
+          "replacement": "Qwen/Qwen3.5-9B",
+          "note": "page also says 09-15"
+        }
+      ],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "moonshotai/Kimi-K3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Chat plus vision, 1M context (cached input $0.30)."
+          },
+          {
+            "model_id": "zai-org/GLM-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048575,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Cheaper, 1M context."
+          },
+          {
+            "model_id": "deepseek-ai/DeepSeek-V4-Pro-0813",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.32,
+              "out": 3.96,
+              "price_verified": true
+            },
+            "note": "Cheapest 1M-context flagship."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "Qwen/Qwen3.8-Flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.47,
+              "price_verified": true
+            },
+            "note": "Cheap scout."
+          },
+          {
+            "model_id": "zai-org/GLM-5.3-Flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1048575,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Same price class."
+          },
+          {
+            "model_id": "MiniMaxAI/MiniMax-M3.1-Flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Cheap 1M context."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "Qwen/Qwen3.8-2.4T-A95B",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Largest listed model; context not listed."
+          },
+          {
+            "model_id": "moonshotai/Kimi-K3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Verified long context."
+          },
+          {
+            "model_id": "zai-org/GLM-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048575,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Cheaper."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "zai-org/GLM-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048575,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Default worker."
+          },
+          {
+            "model_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.3,
+              "out": 1.2,
+              "price_verified": true
+            },
+            "note": "Cheap builder with very low cached-input price ($0.006)."
+          },
+          {
+            "model_id": "Qwen/Qwen3.7-Plus",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.32,
+              "out": 1.28,
+              "price_verified": true
+            },
+            "note": "Cheap."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "moonshotai/Kimi-K3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Escalation tier."
+          },
+          {
+            "model_id": "Qwen/Qwen3.8-2.4T-A95B",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Cheaper; context not listed."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "deepseek-ai/DeepSeek-V4-Pro-0813",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.32,
+              "out": 3.96,
+              "price_verified": true
+            },
+            "note": "Different family from a GLM builder."
+          },
+          {
+            "model_id": "moonshotai/Kimi-K3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Strongest listed."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "nvidia/NVIDIA-Nemotron-3.5-Super-VL",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 262144,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Chat plus vision, cheap."
+          },
+          {
+            "model_id": "moonshotai/Kimi-K3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1048576,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Chat plus vision."
+          },
+          {
+            "model_id": "Qwen/Qwen3.5-9B",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 262144,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.17,
+              "out": 0.25,
+              "price_verified": true
+            },
+            "note": "Chat plus vision, small."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "Qwen/Qwen3.8-Flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.47,
+              "price_verified": true
+            },
+            "note": "Text only; cheap and small. Latency unverified."
+          },
+          {
+            "model_id": "zai-org/GLM-5.3-Flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1048575,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.5,
+              "price_verified": true
+            },
+            "note": "Text only; same class."
+          }
+        ]
+      }
+    },
+    "modelstudio": {
+      "docs_urls": [
+        "https://help.aliyun.com/en/model-studio/base-url",
+        "https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope",
+        "https://www.alibabacloud.com/help/en/model-studio/get-api-key",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen-function-calling",
+        "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+        "https://www.alibabacloud.com/help/en/model-studio/models",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-flash",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen3-7-plus",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-27b",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-2-4t-a95b",
+        "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-omni-flash",
+        "https://www.alibabacloud.com/help/en/model-studio/deepseek-api",
+        "https://www.alibabacloud.com/help/en/model-studio/deepseek-v4-1-flash",
+        "https://www.alibabacloud.com/help/en/model-studio/deepseek-v4-pro",
+        "https://www.alibabacloud.com/help/en/model-studio/glm",
+        "https://www.alibabacloud.com/help/en/model-studio/kimi-api",
+        "https://www.alibabacloud.com/help/en/model-studio/embedding-interfaces-compatible-with-openai",
+        "https://www.alibabacloud.com/help/en/model-studio/text-rerank-api",
+        "https://www.alibabacloud.com/help/en/model-studio/new-free-quota",
+        "https://www.alibabacloud.com/help/en/model-studio/what-is-model-studio",
+        "https://www.alibabacloud.com/help/en/legal/latest/api-term-of-use",
+        "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
+        "https://www.alibabacloud.com/help/en/model-studio/token-plan-personal-overview"
+      ],
+      "endpoint_check": "2026-10-28 (docs only, no live call): bases https://dashscope-intl.aliyuncs.com/compatible-mode/v1 (Singapore), https://dashscope-us.aliyuncs.com/compatible-mode/v1 (US Virginia), https://dashscope.aliyuncs.com/compatible-mode/v1 (Beijing), https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1 (Hong Kong); Authorization: Bearer <key>; keys are region-bound (cross-region use returns 401 invalid_api_key). No models-list endpoint is documented (unverified); key test = POST /chat/completions with max_tokens 1. The docs call the shared DashScope domain legacy but still available and recommend a workspace-dedicated domain (which needs a per-user workspace id, so the preset keeps the DashScope domain); watch for its retirement at review.",
+      "none_found": [
+        "rerank"
+      ],
+      "notes": {
+        "free_quota": "The free quota applies only to the Singapore region with International deployment scope (the intl variant): typically 1,000,000 tokens per model, valid 90 days, not poolable. No other region (US Virginia included) has one. Once it is spent, calls continue and are billed pay as you go by default; the docs mention no spending cap (unverified). Source: https://www.alibabacloud.com/help/en/model-studio/new-free-quota",
+        "tool_choice": "The docs say Qwen models do not support tool_choice \"required\", and no model supports it in thinking mode; DeepSeek models here think by default. The preset's probe asks with tool_choice \"auto\" and enable_thinking false and still passes only on a real crow_probe call.",
+        "rerank": "Rerank is a DashScope-native endpoint (not OpenAI-compatible), so the role has no entry until Crow has an adapter for it.",
+        "voice": "Crow's voice role is the text LLM behind the voice router, so it gets the text model qwen3.8-flash. qwen3.8-omni-flash-realtime is not listed: its WebSocket protocol is unverified against Crow's realtime adapter.",
+        "distribution": "Distribution and business note (2026-10-28 research, section 9). Shipping this preset puts no Alibaba code or credential in Crow: it is a base URL, a header style and a curated model list, and each user supplies their own key from their own Alibaba Cloud account, so the sublicensing and key-sharing clauses are not engaged as long as Crow never embeds a shared key or fronts one. The things to settle before it ships: (1) the key is region-bound and the endpoint is regional, so the user picks a region and a wrong choice looks like a bad key (401 invalid_api_key); (2) the mainland China and Hong Kong variants send prompts to servers in those jurisdictions, which a Crow user handling student or other regulated data (FERPA-covered records, for one) must not do by accident, so the default must be intl or us and the cn/hk variants need a plain data-location label; (3) the free quota is Singapore-only, expires in 90 days and rolls into billing by default, so the add-provider flow should say that before the first call; (4) the model ids move quickly (qwen3.8-max has a 0902 snapshot, DeepSeek has -0813 and -1017 snapshots), so a review_by date and an \"id not found\" fallback matter more here than for the other presets; (5) the terms question is unresolved (the Model Studio product terms were not retrieved, and whether the general API terms govern the model API is unverified), so before the preset is advertised, the maintainers or counsel should read the Model Studio product terms and confirm that a client app which lets users paste their own pay-as-you-go key is within them. Per the add-on licensing rule, the Qwen open-weight releases (for example qwen3.8-2.4t-a95b) are a separate question from this hosted API and the license text was not in the docs read; nothing here says Crow could redistribute them. No model weights are shipped by this preset."
+      },
+      "deprecations": [],
+      "roles": {
+        "coordinator": [
+          {
+            "model_id": "qwen3.8-max",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Flagship. Does not support tool_choice required. Snapshot qwen3.8-max-0902 exists."
+          },
+          {
+            "model_id": "kimi-k3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Always thinks (thinking cannot be turned off), and tool_choice required is not supported in thinking mode, so a forced tool call or \"Test the picks\" may fail on it; the function-calling page example uses required anyway (unverified which holds). Not on US Virginia. Context not stated in docs."
+          },
+          {
+            "model_id": "deepseek-v4-pro-0813",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.66,
+              "out": 1.98,
+              "price_verified": true
+            },
+            "note": "Idle-hours price (22:00-08:00 UTC+8); busy 1.32 / 3.96. tool_choice not mentioned on its page."
+          }
+        ],
+        "quick": [
+          {
+            "model_id": "qwen3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.47,
+              "price_verified": true
+            },
+            "note": "Cheapest. Qwen models do not support tool_choice required."
+          },
+          {
+            "model_id": "deepseek-v4.1-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.6,
+              "price_verified": true
+            },
+            "note": "Idle-hours price; busy 0.3 / 1.2. Documents tool_choice required. Hybrid thinking, on by default."
+          },
+          {
+            "model_id": "qwen3.8-omni-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.47,
+              "price_verified": true
+            },
+            "note": "Audio and video in as well; text out. Thinking is controlled by reasoning_effort, not enable_thinking, so the probe does not turn it off for this model."
+          }
+        ],
+        "deep": [
+          {
+            "model_id": "qwen3.8-max",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Thinking mode available (chain of thought up to 262,144 tokens)."
+          },
+          {
+            "model_id": "deepseek-v4-pro-0813",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.66,
+              "out": 1.98,
+              "price_verified": true
+            },
+            "note": "Idle-hours price. Reasoning effort low, high or max."
+          },
+          {
+            "model_id": "qwen3.8-2.4t-a95b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "unverified",
+            "context": 1000000,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "Open-source flagship release; Singapore and Beijing only; price not captured."
+          }
+        ],
+        "everyday": [
+          {
+            "model_id": "qwen3.7-plus",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.4,
+              "out": 1.6,
+              "price_verified": true
+            },
+            "note": "Up to 256K input; 1.2 / 4.8 above. Pricing page shows a limited-time 20% off."
+          },
+          {
+            "model_id": "qwen3.8-27b",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "partial",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.5,
+              "out": 3,
+              "price_verified": true
+            },
+            "note": "Singapore only."
+          },
+          {
+            "model_id": "glm-5.3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 1.4,
+              "out": 4.4,
+              "price_verified": true
+            },
+            "note": "Always thinks (thinking cannot be turned off; enable_thinking false does nothing), so a forced tool call or \"Test the picks\" may fail on it, and max_tokens counts its reasoning."
+          }
+        ],
+        "expert": [
+          {
+            "model_id": "qwen3.8-max",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Same model as coordinator."
+          },
+          {
+            "model_id": "kimi-k3",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": null,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 3,
+              "out": 15,
+              "price_verified": true
+            },
+            "note": "Different family. Always thinks (thinking cannot be turned off), so a forced tool call or \"Test the picks\" may fail on it. Not on US Virginia."
+          }
+        ],
+        "critic": [
+          {
+            "model_id": "deepseek-v4-pro-0813",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.66,
+              "out": 1.98,
+              "price_verified": true
+            },
+            "note": "Different model family from the Qwen builder picks, so a review is not self-review. Idle-hours price."
+          },
+          {
+            "model_id": "qwen3.8-max",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Same family as the Qwen builders."
+          }
+        ],
+        "vision": [
+          {
+            "model_id": "qwen3.7-plus",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.4,
+              "out": 1.6,
+              "price_verified": true
+            },
+            "note": "Image, text and video in."
+          },
+          {
+            "model_id": "qwen3.8-max",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "yes",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 2,
+              "out": 6,
+              "price_verified": true
+            },
+            "note": "Image, text and video in."
+          },
+          {
+            "model_id": "qwen3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.47,
+              "price_verified": true
+            },
+            "note": "Cheapest image and video input."
+          }
+        ],
+        "voice": [
+          {
+            "model_id": "qwen3.8-flash",
+            "id_verified": true,
+            "kind": "chat",
+            "status": "stable",
+            "retires": null,
+            "tools": "yes",
+            "agentic": "no",
+            "context": 1000000,
+            "price": {
+              "unit": "per_mtok_in_out",
+              "in": 0.15,
+              "out": 0.47,
+              "price_verified": true
+            },
+            "note": "Text only: the voice role is the text model behind the voice router, with speech in and out handled separately."
+          }
+        ],
+        "embed": [
+          {
+            "model_id": "text-embedding-v4",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 8192,
+            "price": {
+              "unit": "per_mtok_in",
+              "in": 0.07,
+              "price_verified": true
+            },
+            "note": "Dimensions 2048, 1536, 1024 (default), 768, 512, 256, 128, 64. 10 rows per batch, 8,192 tokens per line. Beijing price 0.072. Listed for Singapore, Beijing and Hong Kong; not for US Virginia (unverified there)."
+          },
+          {
+            "model_id": "qwen3.7-text-embedding",
+            "id_verified": true,
+            "kind": "embed",
+            "status": "stable",
+            "retires": null,
+            "tools": "n/a",
+            "agentic": "n/a",
+            "context": 128000,
+            "price": {
+              "unit": "unknown",
+              "price_verified": false
+            },
+            "note": "Dimensions 2560, 2048, 1536, 1024 (default), 768, 512, 256. 20 rows per batch, 128,000 tokens per line. Listed for Singapore only. Price not found on the pricing page."
+          }
+        ]
+      }
+    }
+  }
+}

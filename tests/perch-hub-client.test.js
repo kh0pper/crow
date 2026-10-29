@@ -5960,7 +5960,9 @@ test("an ask closes the composer's + menu", async () => {
   const src = perchHubJs("en");
   const s = src.indexOf("function renderAsk(card)");
   const body = src.slice(s, braceMatchEnd(src, s) + 1);
-  assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);\s*plusClose\(false\);/, "renderAsk closes the sheet and the + menu");
+  assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);/, "renderAsk closes the sheet");
+  assert.match(body, /plusClose\(false\);/, "renderAsk closes the + menu");
+  assert.ok(body.indexOf("plusClose(false)") < body.indexOf("if(card.expired)"), "the + menu closes before any ask is drawn");
 });
 
 // ---- R1.2 PR 3, Task 2: the Make tab opens on This card --------------------

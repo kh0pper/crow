@@ -234,12 +234,14 @@ export function modelsClientJS({ lang = "en" } = {}) {
     return el('span', 'mr-where mr-where-' + code, WHERE[code]);
   }
 
-  function pickItem(id, text, where, recommended, allowed, onChoose) {
+  function pickItem(id, text, where, recommended, allowed, onChoose, provider) {
     var b = el('button', 'mc-pick');
     b.type = 'button';
     b.setAttribute('data-mc-pick', id);
     b.setAttribute('aria-pressed', 'false');
     b.appendChild(el('span', 'mc-pick-label', text));
+    // The provider beside the model: two models with the same name from different providers stay apart.
+    if (provider && provider !== text) b.appendChild(el('span', 'mc-pick-provider', provider));
     if (where) b.appendChild(whereChip(where));
     if (recommended) {
       var star = el('span', 'mc-star', '★');
@@ -289,7 +291,7 @@ export function modelsClientJS({ lang = "en" } = {}) {
         st.pickLabels[p.key] = text;
         pickItem(p.key, text, p.where, p.recommended === true, p.allowed !== false, function () {
           choose({ model: p.key, label: text }, '/preview', chatBody(p.key));
-        });
+        }, str(p.providerLabel));
       });
     }
     if (!ui.items.length) ui.list.appendChild(el('p', 'mc-empty', T.notSetUp));

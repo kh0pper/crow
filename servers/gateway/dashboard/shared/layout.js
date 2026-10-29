@@ -341,6 +341,7 @@ function renderShellDocument({ docHead, title, content, scripts, afterContent, h
   const sh = shell || {};
   const ctx = { scope: sh.scope || { all: true }, projects: Array.isArray(sh.projects) ? sh.projects : [], lang, counts: sh.counts, homeSlug: sh.homeSlug ?? null };
   if (typeof sh.getPanel === "function") ctx.getPanel = sh.getPanel;
+  if (sh.apps && typeof sh.apps === "object") ctx.apps = sh.apps;
   const tab = sh.tab === "chat" || sh.tab === "board" || sh.tab === "make" ? sh.tab : null;
   return `${docHead}
 <body class="shell${bodyClass ? " " + bodyClass : ""}">

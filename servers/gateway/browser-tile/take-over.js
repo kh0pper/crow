@@ -25,6 +25,7 @@
  * thrown to the route, which answers "browser busy" — never a hang.
  */
 import * as sharedLease from "../../shared/browser-lease.js";
+import { existsSync } from "node:fs";
 
 /** Take over waits at most this long for an in-flight bot call (spec §7 item 7). */
 export const IN_CALL_WAIT_MS = 30_000;
@@ -215,5 +216,46 @@ export function createTakeOver({
     },
     state: () => state,
     close() { closed = true; clearPoll(); clearLoss(); },
+  };
+}
+
+/**
+ * R1.2 PR 5: Take over for any desktop app, keyed by app id. "browser" is the
+ * engine's own browserTakeOver (unchanged); every other app gets its own
+ * controller over its own lease directory (dirFor(appId) → dir or null), with
+ * no onHeld (only the browser has an operator note and a stall pause).
+ *
+ * get(appId) returns an existing controller; get(appId, { create: true })
+ * makes one. The caller (the take-over route) creates only for an app it has
+ * checked, so the map holds at most one controller per installed desktop app.
+ * { create: true, ifDirExists: true } (Hand back of an app this gateway never
+ * took) makes one only when the app's lease directory already exists: with no
+ * directory there is no holding to free, and a hand back must not create one.
+ */
+export function createAppTakeOvers({ browser = null, dirFor, ...opts } = {}) {
+  const ctls = new Map();
+  let closed = false;
+  return {
+    get(appId, { create = false, ifDirExists = false } = {}) {
+      if (appId === "browser") return browser;
+      if (ctls.has(appId)) return ctls.get(appId);
+      if (!create || closed) return null;
+      if (ifDirExists) {
+        let d = null;
+        try { d = dirFor(appId); } catch { d = null; }
+        if (!d || !existsSync(d)) return null;
+      }
+      const ctl = createTakeOver({
+        ...opts,
+        dir: () => { try { return dirFor(appId); } catch { return null; } },
+        onHeld: () => {},
+      });
+      ctls.set(appId, ctl);
+      return ctl;
+    },
+    close() {
+      closed = true;
+      for (const c of ctls.values()) { try { c.close(); } catch { /* closed */ } }
+    },
   };
 }

@@ -92,6 +92,7 @@ import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
 import perchApiRouter from "../routes/perch.js";
 import { shellApiRouter } from "../routes/shell-api.js";
+import { appsApiRouter } from "../routes/apps-api.js";
 import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
@@ -723,6 +724,10 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // The router still installs dashboardAuth on its own prefix (bot-board-api
   // idiom) so it is closed wherever it is mounted.
   router.use(perchApiRouter(dashboardAuth));
+
+  // Shell: the apps launcher's read (GET /dashboard/shell-api/apps). Same slot
+  // and rails as the Perch API above; its own dashboardAuth covers only /apps.
+  router.use(appsApiRouter(dashboardAuth));
 
   // Shell: move an item (thread, artifact, Workspace file) between projects.
   // Same slot and rails as the Perch API above.

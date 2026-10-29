@@ -31,6 +31,7 @@ const IDENTICAL_OK = new Set([
   "nav.blog",
   "nav.perch", // "Perch Hub" — product name
   "login.2faPlaceholder", // "000000"
+  "shell.apps", // "Apps": the Spanish UI says "apps" too (shell.appsAll "Todas las apps")
   "common.error", // "Error" is Spanish too
   "notif.ram",
   "notif.cpus",
@@ -90,6 +91,15 @@ const IDENTICAL_OK = new Set([
   // Bot-engine uninstall blast-radius (C4 Task 10)
   "extensions.engineBlastItem", // "{name} ({types})" — pure template shape, no words to translate
   "perch.title", // a product name, identical in both languages
+  // Add a provider presets (roles phase 2b Task 12): provider names are proper nouns
+  "providers.preset.openrouter",
+  "providers.preset.anthropic",
+  "providers.preset.openai",
+  "providers.preset.google",
+  "providers.preset.zai",
+  "providers.preset.groq",
+  "providers.preset.together",
+  "providers.preset.modelstudio",
 ]);
 
 const keys = Object.keys(translations);

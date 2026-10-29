@@ -199,13 +199,67 @@ export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, get
     </nav>`;
 }
 
-/** The drawer: projects, then the "More of Crow" grid. */
-export function shellDrawer({ scope, projects, lang, counts, homeSlug, getPanel = registryGetPanel }) {
+/**
+ * One launcher tile: an app (data-app-id/-kind; a desktop app may open as a
+ * tile in the open session, shell/client.js) or an extra tile
+ * (apps/extra-tiles.js, always a page link). `icon` is trusted markup from
+ * shared/app-icons.js. A direct-mode app carries its port and path, and the
+ * client points the link at https://<hostname>:<port><path>; the href here is
+ * its no-JS fallback. A link out of the dashboard skips Turbo.
+ */
+export function launcherTileHtml(x, { extra = false } = {}) {
+  const href = String(x.href || "/dashboard/extensions");
+  const attrs = extra
+    ? ` data-launcher-tile="${escapeHtml(x.id)}"`
+    : ` data-app-id="${escapeHtml(x.id)}" data-app-kind="${x.kind === "desktop" ? "desktop" : "page"}"` +
+      (x.directPort != null ? ` data-direct-port="${escapeHtml(String(x.directPort))}" data-direct-path="${escapeHtml(String(x.path || "/"))}"` : "");
+  const turbo = href.startsWith("/dashboard/") ? "" : ' data-turbo="false"';
+  return `<a href="${escapeHtml(href)}" class="shell-app${extra ? " shell-app--extra" : ""}"${attrs}${turbo}><span class="shell-app-icon" aria-hidden="true">${x.icon || ""}</span><span class="shell-app-label">${escapeHtml(x.label)}</span></a>`;
+}
+
+/** A grid's tiles: the apps, an empty line when there are none, then the extra tiles. */
+export function launcherGridHtml({ apps, tiles, view, lang }) {
+  const list = Array.isArray(apps) ? apps : [];
+  let empty = "";
+  if (!list.length) {
+    empty = view === "project"
+      ? `<p class="shell-apps-empty">${escapeHtml(t("shell.appsEmptyProject", lang))} · <button type="button" class="shell-apps-goto" data-apps-goto="all">${escapeHtml(t("shell.appsAll", lang))}</button></p>`
+      : `<p class="shell-apps-empty">${escapeHtml(t("shell.appsEmptyAll", lang))} · <a href="/dashboard/extensions">${escapeHtml(label("nav.extensions", "Extensions", lang))}</a></p>`;
+  }
+  return list.map((a) => launcherTileHtml(a)).join("") + empty + (Array.isArray(tiles) ? tiles : []).map((x) => launcherTileHtml(x, { extra: true })).join("");
+}
+
+/**
+ * The drawer's Apps section (new mode): a This project / All apps switch
+ * (This project only when the scope is one project) over a 4-column grid,
+ * rendered for the current scope (apps/launcher.js launcherFor). All, under a
+ * project scope, is fetched on the first switch (GET /dashboard/shell-api/apps).
+ */
+function appsSection({ apps, lang }) {
+  if (!apps || typeof apps !== "object") return "";
+  const isProject = apps.scope === "project" && apps.projectSlug;
+  const view = isProject ? "project" : "all";
+  const chip = (v, key, on) =>
+    `<button type="button" class="shell-apps-chip" data-apps-view="${v}" aria-pressed="${on ? "true" : "false"}">${escapeHtml(t(key, lang))}</button>`;
+  const chips = isProject
+    ? `<div class="shell-apps-chips" role="group" aria-label="${escapeHtml(t("shell.appsShow", lang))}">${chip("project", "shell.appsThisProject", true)}${chip("all", "shell.appsAll", false)}</div>`
+    : `<div class="shell-apps-chips" role="group" aria-label="${escapeHtml(t("shell.appsShow", lang))}">${chip("all", "shell.appsAll", true)}</div>`;
+  const grid = `<div class="shell-apps-grid" data-apps-grid="${view}" data-loaded="1">${launcherGridHtml({ apps: apps.apps, tiles: apps.tiles, view, lang })}</div>`;
+  const allGrid = isProject ? '<div class="shell-apps-grid" data-apps-grid="all" hidden></div>' : "";
+  return `<section class="shell-apps" aria-labelledby="shell-apps-title" data-apps-loading="${escapeHtml(t("shell.appsLoading", lang))}" data-apps-failed="${escapeHtml(t("shell.appsLoadFailed", lang))}" data-apps-empty-all="${escapeHtml(t("shell.appsEmptyAll", lang))}">
+        <h3 class="shell-heading" id="shell-apps-title">${escapeHtml(t("shell.apps", lang))}</h3>
+        ${chips}${grid}${allGrid}
+      </section>`;
+}
+
+/** The drawer: projects, the Apps launcher (new mode), then the "More of Crow" grid. */
+export function shellDrawer({ scope, projects, lang, counts, homeSlug, apps, getPanel = registryGetPanel }) {
   return `<dialog id="shell-drawer" class="shell-sheet shell-drawer" aria-labelledby="shell-drawer-title">
     <div class="shell-sheet-inner">
       ${closeButton(lang)}
       <h3 class="shell-heading" id="shell-drawer-title">${escapeHtml(t("shell.projects", lang))}</h3>
       ${projectForm({ scope, projects, lang, counts, homeSlug })}
+      ${appsSection({ apps, lang })}
       ${moreDetails({ lang, getPanel })}
       ${archivedLink(lang)}
     </div>
