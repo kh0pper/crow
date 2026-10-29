@@ -5,7 +5,9 @@
  *   GET  /dashboard/services/api/project/:slug                  the page's data (loadServicesPage)
  *   POST /dashboard/services/api/project/:slug/connect          {serviceId, accountLabel, values}
  *   POST /dashboard/services/api/connection/:uuid/test          test again
- *   POST /dashboard/services/api/connection/:uuid/disconnect    idempotent
+ *   POST /dashboard/services/api/connection/:uuid/disconnect    idempotent; stops the connection's child
+ *   POST /dashboard/services/api/connection/:uuid/restart       Settings → Advanced (R8): stop the child,
+ *                                                               clear its cooldown, start it once (Task 14)
  *   GET  /dashboard/services/api/uninstall-preflight/:id        read-only: {affectedProjects:[{slug, name}]}
  *                                                               for the Extensions uninstall confirm (Task 12)
  *
@@ -45,6 +47,7 @@ import { SUPPORTED_LANGS, t } from "../dashboard/shared/i18n.js";
 import { installedBundleIds } from "../skills-catalog.js";
 import { testConnection as defaultTestConnection, normalizeAddress, folderRefusal, suggestLabel } from "../services/connect-test.js";
 import { servicesUiEnabled } from "../services/ui-flag.js";
+import { ChildError, childState, ensureChild, resetChildFailures, stopChild } from "../services/children.js";
 import { requireDashboardSessionJson } from "./models.js";
 import { crowServerCatalog } from "../../../scripts/pi-bots/crow-server-catalog.mjs";
 import { readCanonicalMcp } from "../../../scripts/pi-bots/mcp_writer.mjs";
@@ -382,6 +385,7 @@ export function servicesApiRouter({
     const ok = !!result && result.ok === true;
     const error = ok ? null : CONNECTION_ERROR_CLASSES.has(result?.error) ? result.error : "unexpected_response";
     if (!ok) console.warn("[services] test failed: " + error);
+    else resetChildFailures(conn.uuid);   // a passing test is the owner's repair too
     const after = await recordTest(db, conn.uuid, { ok, error });
     const { status } = connectionDisplayStatus(after || conn, { installed: true });
     res.json(ok ? { ok: true, status } : { ok: false, status, error });
@@ -393,8 +397,30 @@ export function servicesApiRouter({
     // Idempotent. The secrets stay in the keychain as 'disconnected' (never served, still masked;
     // the keychain page deletes them for good), and the masking hash stays recorded.
     await disconnectConnection(db, conn.uuid, { actor: "local" });
+    await stopChild(conn.uuid, { forget: true });
     refresh();
     res.json({ ok: true });
+  }));
+
+  // R8: the operator's repair lever. Stops the child, forgets its failures and cooldown, then
+  // starts it once (which also refreshes the service's tool cache). A connection whose error a
+  // start can't disprove (a failed live test) answers 404 like any connection that isn't served.
+  router.post(`${SERVICES_API_BASE}/connection/:uuid/restart`, withDb(async (req, res, db) => {
+    const conn = await ownConnection(req, res, db);
+    if (!conn) return;
+    await stopChild(conn.uuid);
+    resetChildFailures(conn.uuid);
+    try {
+      const { tools } = await ensureChild(db, conn.uuid, { crowHome: home(), repair: true });
+      res.json({ ok: true, childState: childState(conn.uuid), tools: tools.length });
+    } catch (err) {
+      const code = err instanceof ChildError ? err.code : "child_unavailable";
+      if (code === "not_active") return res.status(404).json({ error: "not_found" });
+      if (code === "busy") return res.status(409).json({ error: "busy" });
+      if (code === "not_installed") return res.status(400).json({ error: "not_installed" });
+      console.warn("[services] restart failed: child_unavailable");
+      res.status(502).json({ error: "child_unavailable", childState: childState(conn.uuid) });
+    }
   }));
 
   // The Extensions uninstall confirm: which projects' connections the uninstall would pause. Read

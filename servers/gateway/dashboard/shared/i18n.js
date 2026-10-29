@@ -4261,6 +4261,13 @@ export const translations = {
   "projectHome.errStale": { en: "The bot changed while you were moving it. Nothing was changed; try again.", es: "El bot cambi\u00f3 mientras lo mov\u00edas. No se cambi\u00f3 nada; int\u00e9ntalo de nuevo." },
   "projectHome.errOther": { en: "Couldn't move that bot. Nothing was changed.", es: "No se pudo mover ese bot. No se cambi\u00f3 nada." },
   "projectHome.forbidden": { en: "You can't change this project.", es: "No puedes cambiar este proyecto." },
+  // Task 14: each connection's child in Advanced (state, Restart).
+  "services.child.running": { en: "Running", es: "En marcha" },
+  "services.child.stopped": { en: "Stopped", es: "Detenido" },
+  "services.child.starting": { en: "Starting", es: "Iniciando" },
+  "services.child.error": { en: "Error", es: "Error" },
+  "services.child.cooling": { en: "Waiting after failures", es: "En espera tras fallos" },
+  "settings.integrations.restartChild": { en: "Restart", es: "Reiniciar" },
   "projectHome.services": { en: "Services", es: "Servicios" },
   "projLife.manage": { en: "Manage project", es: "Gestionar proyecto" },
   "projLife.archive": { en: "Archive project", es: "Archivar proyecto" },

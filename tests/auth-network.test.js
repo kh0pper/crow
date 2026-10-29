@@ -390,6 +390,7 @@ test("rejectFunneled middleware: the Services API is never funnel-exposed", asyn
   const paths = ["/dashboard/services/api/project/home", "/dashboard/services/api/project/home/connect",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/test",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/restart",
     "/dashboard/services/api/uninstall-preflight/github"];
   const server = await startTestApp();
   try {
@@ -428,6 +429,14 @@ test("the Services API's own gate: Funnel and off-network refused, no session 40
     let preNoSession;
     try { preNoSession = await request(port, "/dashboard/services/api/uninstall-preflight/github"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
     assert.equal(preNoSession.status, 401, "the preflight needs a dashboard session");
+    // Task 14 (R8): the child restart sits behind the same gate.
+    const restartPath = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/restart";
+    const reFunnel = await request(port, restartPath, { "tailscale-funnel-request": "?1" });
+    assert.equal(reFunnel.status, 403, "restart is never served over the Funnel");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let reNoSession;
+    try { reNoSession = await request(port, restartPath); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(reNoSession.status, 401, "restart needs a dashboard session");
     assert.equal(opened, 0, "no request reached a handler");
   } finally {
     server.close();
