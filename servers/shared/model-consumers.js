@@ -10,7 +10,7 @@ import { isRoleRef, roleIdOf, CORE_ROLES, resolveRoleKey } from "./model-roles.j
 import { VOICE_ROUTE_DEFAULTS } from "./voice-route-defaults.js";
 import { parseClassifierSetting, CLASSIFIER_SETTING_KEY } from "./bot-bash-policy.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
-import { DEFAULT_ROUTES } from "../gateway/ai/smart-router.js";
+import { DEFAULT_ROUTES, SMART_TIER_ROLES } from "../gateway/ai/smart-router.js";
 import { MULTI_AGENT_CAPABLE } from "../../scripts/pi-bots/pi_extensions_allowlist.mjs";
 import { LOCAL_FALLBACK } from "../../scripts/pi-bots/model_resolver.mjs";
 import { str, readJsonFile, agentModels } from "./pi-agent-config.js";
@@ -209,11 +209,14 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
   };
   envOr("COMPANION_FAST_MODEL", VOICE_ROUTE_DEFAULTS.fast, "llm-router:fast", "Voice router (fast)", "settings.providers.job.voiceFast");
   envOr("COMPANION_ESCALATION_MODEL", VOICE_ROUTE_DEFAULTS.escalate, "llm-router:escalate", "Voice router (escalate)", "settings.providers.job.voiceEscalate");
-  for (const [tier, value] of Object.entries(DEFAULT_ROUTES)) {
-    if (!value) continue;
+  // One slot per tier that a role can name (I11), so binding `vision` lists the
+  // vision tier too. A tier with no baked default (vision) is dynamic: null.
+  for (const tier of Object.keys(SMART_TIER_ROLES)) {
     // `default` has no env reader in smart-router.js (it is not run through tierDefault).
     const e = tier === "default" ? null : str(process.env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`]);
-    job(`smart-router:${tier}`, `Smart router (${tier})`, `settings.providers.job.smart.${tier}`, e ? `env:CROW_SMART_ROUTER_${tier.toUpperCase()}` : "default", value, { providerOnly: true });
+    const value = e || str(DEFAULT_ROUTES[tier]);
+    const field = e ? `env:CROW_SMART_ROUTER_${tier.toUpperCase()}` : "default";
+    job(`smart-router:${tier}`, `Smart router (${tier})`, `settings.providers.job.smart.${tier}`, field, value, value ? { providerOnly: true } : { providerOnly: true, dynamic: true });
   }
   const setting = async (k) => { try { return str(await readSetting(db, k)); } catch (e) { note(e); return null; } };
   for (const [id, label, labelKey, envName, key] of [
@@ -274,19 +277,44 @@ function chainOf(roleId, { bindings = {}, customDefs = {} } = {}) {
   return out;
 }
 
-/** Slots whose value is role:<roleId>, plus those of every role whose fallback chain reaches roleId. */
-export function consumersOfRole(slots, roleId, { bindings = {}, customDefs = {} } = {}) {
-  const ids = new Set([roleId]);
-  const known = new Set([...CORE_ROLES.map((r) => r.id), ...Object.keys(bindings), ...Object.keys(customDefs)]);
-  for (const s of slots) if (isRoleRef(s.value)) known.add(roleIdOf(s.value));
+/**
+ * Every role that can reach roleId -> the role path from it to roleId (the
+ * shortest found; roleId itself maps to [roleId]). A role reaches through its
+ * bound `role:` ref or its fallback chain (stored, or the default when none is
+ * stored), transitively. Known roles: the core ones, every bound or custom id,
+ * and `extraIds` (e.g. role refs found in slots).
+ */
+export function rolePathsTo(roleId, { bindings = {}, customDefs = {}, extraIds = [] } = {}) {
+  const paths = new Map([[roleId, [roleId]]]);
+  const known = new Set([...CORE_ROLES.map((r) => r.id), ...Object.keys(bindings), ...Object.keys(customDefs), ...extraIds]);
+  // Level by level, so each path is a shortest one.
   let grew = true;
   while (grew) {
     grew = false;
+    const level = new Map(paths);
     for (const r of known) {
-      if (ids.has(r)) continue;
-      if (chainOf(r, { bindings, customDefs }).some((f) => ids.has(f))) { ids.add(r); grew = true; }
+      if (paths.has(r)) continue;
+      const next = chainOf(r, { bindings, customDefs }).find((f) => level.has(f));
+      if (next !== undefined) { paths.set(r, [r, ...level.get(next)]); grew = true; }
     }
   }
+  return paths;
+}
+
+/**
+ * The role plus every role whose bound ref or fallback chain reaches it,
+ * transitively. Potential reach: for a consumer that follows only a chosen
+ * role this over-approximates, which only makes a warning broader.
+ * @returns {Set<string>}
+ */
+export function rolesReaching(roleId, ctx = {}) {
+  return new Set(rolePathsTo(roleId, ctx).keys());
+}
+
+/** Slots whose value is role:<roleId>, plus those of every role whose fallback chain reaches roleId. */
+export function consumersOfRole(slots, roleId, { bindings = {}, customDefs = {} } = {}) {
+  const extraIds = slots.filter((s) => isRoleRef(s.value)).map((s) => roleIdOf(s.value));
+  const ids = rolesReaching(roleId, { bindings, customDefs, extraIds });
   return slots.filter((s) => isRoleRef(s.value) && ids.has(roleIdOf(s.value)));
 }
 
