@@ -81,6 +81,9 @@ export function perchHubJs(lang = "en") {
     cancelHistRetry(); histGen++;
     /* Live browser tile: every frame poller aborts, the observer disconnects. */
     retireBrowserTiles();
+    /* R1.2 PR 5: the app tiles go too, and with them the browser tile's
+       password row (its revealed password and re-auth callback are wiped). */
+    resetAppTiles();
     /* The Take over sheet closes with the page; the operator keeps the
        browser until Hand back or the 5-minute heartbeat loss. */
     closeTakeOver();

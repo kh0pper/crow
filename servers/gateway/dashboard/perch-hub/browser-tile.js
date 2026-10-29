@@ -559,6 +559,11 @@ export function perchBrowserTileJs(lang = "en") {
     if(atTiles[t.id]===t) delete atTiles[t.id];
     if(byUser){ var inp=el('perch-input'); if(inp&&inp.focus) inp.focus(); }
   }
+  /* Turbo is about to snapshot the page: no tile's password row keeps a
+     revealed password or a typed re-auth (take-over.js turbo:before-cache). */
+  function atWipePasswords(){
+    for(var k in atTiles){ var p=atTiles[k].pwS; if(p&&typeof toWipePassword==='function'){ toWipePassword(p); p.rInput.value=''; } }
+  }
   function resetAppTiles(){
     for(var k in atTiles) atDrop(atTiles[k],false);
     atTiles={}; atGen++;

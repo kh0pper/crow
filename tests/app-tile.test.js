@@ -422,7 +422,7 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
     line: (cls, text) => { const d = makeEl("div"); d.className = cls; d.textContent = text == null ? "" : String(text); return d; },
   };
   vm.createContext(sandbox);
-  vm.runInContext(`(function(){\n${lift("csrf")}\n${lift("perchApi")}\n${perchBrowserTileJs(lang)}\n${perchTakeOverJs(lang)}\n;globalThis.__reset=resetBrowserTiles;\n})();`, sandbox);
+  vm.runInContext(`(function(){\n${lift("csrf")}\n${lift("perchApi")}\n${perchBrowserTileJs(lang)}\n${perchTakeOverJs(lang)}\n;globalThis.__reset=resetBrowserTiles;globalThis.__resetApps=resetAppTiles;\n})();`, sandbox);
   const open = async (appId) => {
     const ev = new CustomEvent("crow:open-app-tile", { detail: { appId }, cancelable: true });
     sandbox.document.dispatchEvent(ev);
@@ -675,4 +675,56 @@ test("a 1.3.10-shaped installed browser (no desktop, no mcpServers) is a page li
   assert.equal(byClass(h.transcript, "ph-atile").length, 0);
   assert.deepEqual(h.calls, [], "no tile request");
   _resetCatalogCache();
+});
+
+// Password hygiene: a Turbo snapshot and a retired hub keep nothing of the password.
+test("turbo:before-cache wipes the sheet's and the browser tile's revealed password and typed re-auth", async () => {
+  const h = await hub({ links: [BROWSER_LINK], tile: browserServer() });
+  await h.open("browser");
+  const tile = byClass(h.transcript, "ph-atile")[0];
+  byClass(tile, "to-copy")[0].onclick();
+  await tick();
+  const tilePw = byClass(tile, "to-pw")[0];
+  assert.equal(tilePw.textContent, "vnc-Secret-77", "the tile shows it (no clipboard)");
+  byClass(tile, "to-reauth-input")[0].value = "typed";
+  byClass(tile, "at-take")[0].onclick();
+  await tick();
+  const sheet = byClass(h.root, "ph-tosheet")[0];
+  byClass(sheet, "to-copy")[0].onclick();
+  await tick();
+  const sheetPw = byClass(sheet, "to-pw")[0];
+  assert.equal(sheetPw.textContent, "vnc-Secret-77", "the sheet shows it too");
+  byClass(sheet, "to-reauth-input")[0].value = "typed";
+
+  h.sandbox.document.dispatchEvent(new Event("turbo:before-cache"));
+  assert.equal(sheetPw.textContent, ""); assert.equal(sheetPw.hidden, true);
+  assert.equal(byClass(sheet, "to-reauth-input")[0].value, "");
+  assert.equal(tilePw.textContent, ""); assert.equal(tilePw.hidden, true);
+  assert.equal(byClass(tile, "to-reauth-input")[0].value, "");
+});
+
+test("HUB.retire resets the app tiles, wiping the browser tile's password and its pending re-auth", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const src = perchHubJs("en");
+  const at = src.indexOf("HUB.retire=function(){");
+  const body = src.slice(at, src.indexOf("\n  };", at));
+  assert.ok(at > -1 && /\bresetAppTiles\(\);/.test(body), "HUB.retire calls resetAppTiles()");
+
+  let reveals = 0;
+  const h = await hub({ links: [BROWSER_LINK], tile: browserServer({ takeOver: false, reveal: () => (++reveals === 1 ? { status: 403, body: { code: "reauth_required" } } : { status: 200, body: { secret: "vnc-Secret-77" } }) }) });
+  await h.open("browser");
+  const tile = byClass(h.transcript, "ph-atile")[0];
+  byClass(tile, "to-copy")[0].onclick();
+  await tick();
+  assert.equal(byClass(tile, "to-reauth")[0].hidden, false, "a re-auth is pending (its retry callback held)");
+  byClass(tile, "to-reauth-input")[0].value = "typed";
+  const reauthGo = byClass(tile, "to-reauth-go")[0];
+  h.sandbox.__resetApps();          /* what HUB.retire now runs */
+  assert.equal(byClass(h.transcript, "ph-atile").length, 0, "the tile is gone");
+  assert.equal(byClass(tile, "to-reauth-input")[0].value, "", "the typed re-auth is wiped");
+  // A late confirm on the dropped row does nothing: no retry, no reveal.
+  reauthGo.onclick();
+  await tick();
+  assert.equal(reveals, 1, "the pending retry never runs after retire");
+  assert.equal(byClass(tile, "to-pw")[0].textContent, "");
 });

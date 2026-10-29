@@ -330,6 +330,15 @@ export function perchTakeOverJs(lang = "en") {
     };
   })();
 
+  /* Turbo snapshots the body before a visit: a password shown in the
+     clipboard-refused window (the sheet's or the browser app tile's) and a
+     typed re-auth never land in that snapshot. Once per document. */
+  bindOnce(document,'turbo:before-cache','toCache',function(){
+    var s=toSheet;
+    if(s){ toWipePassword(s); s.rInput.value=''; }
+    if(typeof atWipePasswords==='function') atWipePasswords();
+  });
+
   bindOnce(document,'perch:browser-takeover','takeOver',function(ev){
     if(!live()) return;
     openTakeOver(ev&&ev.detail);
