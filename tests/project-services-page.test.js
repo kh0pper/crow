@@ -160,7 +160,7 @@ test("Also on your Crow lists Trello from another project, with Add one here; th
   await withFlag(async () => {
     const spring = await get("/dashboard/project/spring/services");
     assert.match(spring.body, /<h3 class="svc-label">Also on your Crow<\/h3>/);
-    assert.ok(textOf(spring.body).includes("Trello are connected in other projects."));
+    assert.ok(textOf(spring.body).includes("Trello is connected in another project."));
     assert.match(spring.body, /class="svc-inline" data-svc-add>Add one here</);
 
     const home = await get("/dashboard/project/home/services");
@@ -170,8 +170,8 @@ test("Also on your Crow lists Trello from another project, with Add one here; th
     assert.ok(textOf(home.body).includes("GitHub and Trello are connected in other projects."), "joined in the page's language");
 
     const kitchen = await get("/dashboard/project/kitchen/services");
-    assert.ok(textOf(kitchen.body).includes("GitHub are connected in other projects."));
-    assert.ok(!/Trello are connected/.test(textOf(kitchen.body)), "a service connected here is not 'also'");
+    assert.ok(textOf(kitchen.body).includes("GitHub is connected in another project."));
+    assert.ok(!/Trello (is|are) connected/.test(textOf(kitchen.body)), "a service connected here is not 'also'");
   });
 });
 
@@ -236,10 +236,12 @@ test("phone first: no fixed width above 360 px; every control at least 44 px; th
     const px = Number(m[1]) * (m[2] === "px" ? 1 : 16);
     assert.ok(px <= 360, `min-width ${m[0]}`);
   }
-  for (const sel of [".svc-add", ".svc-menu > summary", ".svc-menu-item", ".svc-inline"]) {
+  for (const sel of [".svc-project", ".svc-add", ".svc-menu > summary", ".svc-menu-item", ".svc-inline"]) {
     const rule = css.slice(css.indexOf(`body.shell ${sel} {`));
     assert.match(rule.slice(0, rule.indexOf("}")), /min-height:\s*44px/, `${sel} is a 44 px target`);
   }
+  const pill = css.slice(css.indexOf("body.shell .svc-pill {"));
+  assert.doesNotMatch(pill.slice(0, pill.indexOf("}")), /nowrap/, "a long status wraps instead of squeezing the name");
   const js = projectServicesClientJs();
   assert.ok(!js.includes("`"), "no backtick");
   assert.match(js, /'X-Crow-Csrf': csrf\(\)/);
@@ -249,4 +251,14 @@ test("phone first: no fixed width above 360 px; every control at least 44 px; th
     const src = readFileSync(join(REPO, "servers/gateway/dashboard/panels", f), "utf8");
     assert.doesNotMatch(src, /#[0-9a-fA-F]{6}\b/, `${f} uses tokens, not hex colours`);
   }
+});
+
+test("the confirm text fills its placeholders in one pass: a label holding {project} stays as typed", async () => {
+  const { projectServicesHtml } = await import("../servers/gateway/dashboard/panels/project-services/html.js");
+  const html = projectServicesHtml({
+    project: { slug: "spring", name: "Spring" },
+    connections: [{ uuid: "00000000-0000-4000-8000-000000000009", serviceId: "github", name: "GitHub", accountLabel: "{project}", status: "active", lastTestedAt: null }],
+    hasMembers: false, alsoOnCrow: [],
+  }, "en");
+  assert.match(html, /data-confirm="Disconnect GitHub \(\{project\}\) from Spring\?/);
 });

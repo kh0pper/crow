@@ -37,6 +37,14 @@ function joinNames(names, lang) {
   }
 }
 
+/**
+ * {name} placeholders filled in ONE pass, so a value that itself holds "{project}" (an account
+ * label is free text) is inserted verbatim and never substituted again.
+ */
+function fillOnce(str, params) {
+  return String(str).replace(/\{(\w+)\}/g, (m, k) => (Object.hasOwn(params, k) ? String(params[k]) : m));
+}
+
 function iconLetter(name) {
   const c = String(name || "?").trim().charAt(0);
   return c ? c.toUpperCase() : "?";
@@ -46,7 +54,7 @@ function connectionRow(c, project, lang, now) {
   const status = PILL_STATUSES.has(c.status) ? c.status : "error";
   const when = c.lastTestedAt ? testedWhen(c.lastTestedAt, lang, now) : "";
   const sub = [c.accountLabel, when ? fill(t("services.tested", lang), { when }) : ""].filter(Boolean).join(" · ");
-  const confirm = fill(t("services.disconnect.confirm", lang), { service: c.name, label: c.accountLabel, project: project.name });
+  const confirm = fillOnce(t("services.disconnect.confirm", lang), { service: c.name, label: c.accountLabel, project: project.name });
   const retest = status === "needs_install"
     ? ""
     : `<button type="button" class="svc-menu-item" data-svc-retest>${escapeHtml(t("services.retest", lang))}</button>`;
@@ -80,7 +88,7 @@ export function projectServicesHtml(page, lang, { now = new Date() } = {}) {
   const also = alsoOnCrow.length
     ? `<section class="svc-section svc-also">
       <h3 class="svc-label">${escapeHtml(t("services.section.also", lang))}</h3>
-      <p class="svc-also-line">${escapeHtml(fill(t("services.also.line", lang), { names: joinNames(alsoOnCrow.map((s) => s.name), lang) }))} <button type="button" class="svc-inline" data-svc-add>${escapeHtml(t("services.also.add", lang))}</button></p>
+      <p class="svc-also-line">${escapeHtml(fill(t(alsoOnCrow.length === 1 ? "services.also.lineOne" : "services.also.line", lang), { names: joinNames(alsoOnCrow.map((s) => s.name), lang) }))} <button type="button" class="svc-inline" data-svc-add>${escapeHtml(t("services.also.add", lang))}</button></p>
     </section>`
     : "";
   return `<div class="svc" data-svc data-project-slug="${escapeHtml(project.slug)}">

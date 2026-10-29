@@ -13,7 +13,7 @@ export function projectServicesCss() {
   body.shell .svc-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
   body.shell .svc-head-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
   body.shell .svc-project {
-    align-self: flex-start; display: inline-flex; align-items: center; min-height: 32px; max-width: 100%;
+    align-self: flex-start; display: inline-flex; align-items: center; min-height: 44px; max-width: 100%;
     font-size: 0.8rem; color: var(--crow-text-secondary); text-decoration: none; overflow-wrap: anywhere;
   }
   body.shell .svc-project:hover { color: var(--crow-accent); text-decoration: underline; }
@@ -47,7 +47,7 @@ export function projectServicesCss() {
   body.shell .svc-sub { font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   body.shell .svc-pill {
     flex: none; padding: 4px 8px; border-radius: var(--crow-radius-pill, 999px);
-    font-size: 0.75rem; font-weight: 600; white-space: nowrap;
+    font-size: 0.75rem; font-weight: 600; max-width: 6.5rem; text-align: center; overflow-wrap: anywhere;
     background: var(--crow-bg-elevated); color: var(--crow-text-secondary);
   }
   body.shell .svc-pill--active { background: color-mix(in srgb, var(--crow-success) 16%, transparent); color: var(--crow-success); }

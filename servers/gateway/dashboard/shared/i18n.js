@@ -4217,6 +4217,7 @@ export const translations = {
   "services.section.connected": { en: "Connected in this project", es: "Conectado en este proyecto" },
   "services.section.also": { en: "Also on your Crow", es: "También en tu Crow" },
   "services.also.line": { en: "{names} are connected in other projects.", es: "{names} están conectados en otros proyectos." },
+  "services.also.lineOne": { en: "{names} is connected in another project.", es: "{names} está conectado en otro proyecto." },
   "services.also.add": { en: "Add one here", es: "Añadir uno aquí" },
   "services.members.line": { en: "Each person connects their own accounts, on their own Crow. Their bots never use yours.", es: "Cada persona conecta sus propias cuentas, en su propio Crow. Sus bots nunca usan las tuyas." },
   "services.ownerOnly.line": { en: "Bots use these only when you start the conversation. Messages from other people never reach your accounts.", es: "Los bots los usan solo cuando tú inicias la conversación. Los mensajes de otras personas nunca llegan a tus cuentas." },
