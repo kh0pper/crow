@@ -56,6 +56,7 @@ import {
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
+import { isSatelliteEntry } from "../satellites/installs.js";
 import { envValueProblem, encodeEnvValue, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
 import { projectsUsingBundle } from "../../shared/service-connections.js";
@@ -1010,6 +1011,7 @@ export async function restoreInstalledBundleServices({ log = (m) => console.log(
   for (const rec of getInstalled()) {
     const id = rec?.id;
     if (typeof id !== "string" || !isValidBundleId(id)) continue;
+    if (isSatelliteEntry(rec)) continue; // hosted on a satellite (SAT-5)
     n += (await restoreServicesAfterInstall(id, { log: (m) => log(`${id}: ${m}`) })).connections;
   }
   return n;
@@ -1021,6 +1023,7 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
   for (const rec of getInstalled()) {
     const id = rec?.id;
     if (typeof id !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(id)) continue;
+    if (isSatelliteEntry(rec)) continue; // its secrets live on the satellite (SAT-5)
     const manifest = getInstalledFirstManifest(id);
     const keys = keychainGeneratedKeys(manifest);
     if (keys.length === 0) continue;
@@ -1072,6 +1075,22 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
 
     const appSrc = join(appBundles, id);
     if (!existsSync(appSrc)) continue; // not a first-party bundle — skip
+
+    // A satellite-hosted bundle (SAT-5) runs on the satellite: nothing is copied here and its
+    // mcp-addons satellite entry is never touched; only its skills are synced from this checkout.
+    if (isSatelliteEntry(entry)) {
+      try {
+        const out = syncBundleSkills({
+          id, src: appSrc, manifest: readJsonSafe(join(appSrc, "manifest.json"), null),
+          mode: skillMode, skillsDir: SKILLS_DIR, recordPath: SKILL_RECORD_PATH, ledger, log,
+        });
+        skillLines.push(...out.lines);
+        skillsKept.push(...out.kept);
+      } catch (err) {
+        errors.push({ id, error: `skill sync: ${err.message}` });
+      }
+      continue;
+    }
 
     const destDir = join(BUNDLES_DIR, id);
     const touched = [];
@@ -2188,6 +2207,11 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
 
   // Check not already installed
   const installed = getInstalled();
+  const onSatellite = installed.find((i) => i.id === bundleId && isSatelliteEntry(i));
+  if (onSatellite) {
+    // One host per bundle id (SAT-5, spec §8): a bundle on a satellite is never also local.
+    return { ok: false, status: 409, code: "installed_on_satellite", error: `Bundle '${bundleId}' is installed on a server; manage it from Extensions › Servers`, extra: { code: "installed_on_satellite", host: onSatellite.host } };
+  }
   if (installed.find((i) => i.id === bundleId)) {
     // `extra.code` is the stable answer clients match (the Services Install sheet); the text stays.
     return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed`, extra: { code: "already_installed" } };
@@ -3450,6 +3474,10 @@ export default function bundlesRouter() {
 
     const orchRefusal = bundleOrchestrationRefusal(bundle_id);
     if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+
+    if (getInstalled().some((i) => i.id === bundle_id && isSatelliteEntry(i))) {
+      return res.status(409).json({ error: `Bundle '${bundle_id}' is installed on a server; remove it from Extensions › Servers`, code: "installed_on_satellite" });
+    }
 
     const bundleDir = join(BUNDLES_DIR, bundle_id);
     if (!existsSync(bundleDir)) {

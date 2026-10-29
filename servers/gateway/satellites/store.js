@@ -60,7 +60,7 @@ export async function insertSatellite(db, row) {
   );
 }
 
-const PATCH_COLS = ["name", "tailnet_host", "cert_json", "cert_serial", "cert_expires_at", "primary_url",
+const PATCH_COLS = ["name", "tailnet_host", "mgmt_pubkey", "cert_json", "cert_serial", "cert_expires_at", "primary_url",
   "agent_protocol", "status", "last_status_json", "last_seen_at", "unreachable_since"];
 
 export async function updateSatelliteStatus(db, id, patch) {

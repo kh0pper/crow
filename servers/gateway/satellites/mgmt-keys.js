@@ -72,3 +72,68 @@ export function shredMgmtKey(satId, { env = process.env } = {}) {
   }
   unlinkSync(path);
 }
+
+// ── rotation (spec §3.2; the old key stays live until the satellite answers 200) ───────────────
+//
+// A rotation stages the new key in <id>.mgmt.next.json (same format and modes). The live
+// <id>.mgmt.json is only replaced by promoteStagedMgmtKey, after the satellite has accepted the
+// cert that names the new key; until then every request is still signed with the old key.
+
+export function stagedMgmtKeyPath(satId, env = process.env) {
+  checkId(satId);
+  return join(satellitesSecretsDir(env), `${satId}.mgmt.next.json`);
+}
+
+function loadKeyFile(path, satId) {
+  let rec;
+  try { rec = JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+  if (!rec || rec.version !== 1 || rec.satellite_id !== satId
+    || !/^[0-9a-f]{64}$/.test(rec.ed25519_priv) || !/^[0-9a-f]{64}$/.test(rec.ed25519_pub)) return null;
+  return rec;
+}
+
+function shredPath(path) {
+  let fd;
+  try { fd = openSync(path, "r+"); } catch (err) {
+    if (err.code === "ENOENT") return;
+    throw err;
+  }
+  try {
+    const size = Math.max(fstatSync(fd).size, 256);
+    writeSync(fd, randomBytes(size), 0, size, 0);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  unlinkSync(path);
+}
+
+/** A staged key for a rotation; an earlier staged key is shredded first (it was never promoted). */
+export function createStagedMgmtKey(satId, { env = process.env, now = Date.now() } = {}) {
+  const path = stagedMgmtKeyPath(satId, env);
+  shredPath(path);
+  ensureSecretsDir(secretsDir(env));
+  ensureSecretsDir(satellitesSecretsDir(env));
+  const kp = generateKeypair();
+  const rec = { version: 1, satellite_id: satId, ed25519_priv: kp.privHex, ed25519_pub: kp.pubHex, created_at: new Date(now).toISOString() };
+  writePrivateFile(path, JSON.stringify(rec));
+  return rec;
+}
+
+export function loadStagedMgmtKey(satId, { env = process.env } = {}) {
+  return loadKeyFile(stagedMgmtKeyPath(satId, env), satId);
+}
+
+/** The staged key becomes the live key (old live key shredded). Returns the new key record. */
+export function promoteStagedMgmtKey(satId, { env = process.env } = {}) {
+  const staged = loadStagedMgmtKey(satId, { env });
+  if (!staged) throw new Error(`mgmt-keys: no staged key for ${satId}`);
+  shredMgmtKey(satId, { env });
+  writePrivateFile(mgmtKeyPath(satId, env), JSON.stringify(staged));
+  shredPath(stagedMgmtKeyPath(satId, env));
+  return staged;
+}
+
+export function discardStagedMgmtKey(satId, { env = process.env } = {}) {
+  shredPath(stagedMgmtKeyPath(satId, env));
+}

@@ -378,6 +378,10 @@ export async function mountFeatureRoutes(app, deps) {
     const { default: satellitesRouter } = await import("../routes/satellites.js");
     app.use(satellitesRouter());
     console.log("Satellites API mounted at /api/satellites");
+    // SAT-5: status poller (60 s) and daily cert renewal, in-process and unref'd; each tick is
+    // one SELECT when nothing is paired. CROW_SATELLITE_TIMERS=0 turns them off.
+    const { startSatelliteTimers } = await import("../satellites/runtime.js");
+    startSatelliteTimers();
   } catch (err) {
     console.warn("[satellites] Failed to mount:", err.message);
   }
