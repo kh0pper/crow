@@ -35,7 +35,8 @@ const SKEW_MS = 60_000;
 // dated within the first BOOT_GRACE_MS after boot are pre_boot (a weaker
 // label for at most that long, never a refusal). The suite's multi-gateway
 // tests shorten it (testTunableMs: only inside the scratch suite env).
-const BOOT_GRACE_MS = testTunableMs("CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS", SKEW_MS);
+// minMs 1: this is a comparison window, not a timer, so no floor is needed.
+const BOOT_GRACE_MS = testTunableMs("CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS", SKEW_MS, { minMs: 1 });
 const NONCE_CAP = 2000;
 const LOG_WINDOW_MS = 3_600_000;
 const LOG_CAP = 1024;

@@ -131,7 +131,7 @@ export class Instance {
       // remote-actor.js treats headers dated in the first minute after boot as
       // pre_boot (servers/shared/test-timing.js: honoured only in the suite's
       // scratch env); these gateways sign and verify seconds after they start.
-      CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS: "250",
+      CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS: "1",
     });
     if (this.sync) {
       Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP }, SYNC_TIMING);
