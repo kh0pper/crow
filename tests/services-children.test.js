@@ -104,8 +104,8 @@ async function connect(serviceId, { projectId, label = "work", secrets = {}, con
   return withDb(async (d) => {
     const key = await ensureWriteKey(d, { crowHome: HOME });
     const c = await SC.createConnection(d, { projectId: pid, serviceId, accountLabel: label, secrets, config, testedAt: new Date() }, { key });
-    // As the owner's connect route does (Task 16c fix round 1): the binding in the hidden dir.
-    SENS.recordConnectionBinding(c, { crowHome: HOME });
+    // As the owner's connect route does (Task 16c): the binding and its fingerprints in the hidden dir.
+    SENS.recordConnectionBinding(c, { crowHome: HOME, service: serviceById(serviceId), values: { config: c.config, secrets } });
     return c;
   });
 }
@@ -484,6 +484,7 @@ async function withApi(fn) {
   app.use(servicesApiRouter({
     dbFactory: () => createDbClient(), sessionGate: stubGate, installedIds: () => new Set(BUNDLES), uiEnabled: () => true,
     crowHome: HOME, reservedNames: () => new Set(), refreshMasking: () => {},
+    ownerCheck: async (_db, req) => req.dashboardSession === "s1",   // the stub gate's session is the owner's (review I1)
   }));
   const s = await new Promise((resolve) => { const x = app.listen(0, "127.0.0.1", () => resolve(x)); });
   try { return await fn(s); } finally { s.close(); }
@@ -1072,10 +1073,93 @@ test("binding: a bot flips an obsidian row's service_id to github in crow.db →
   assert.equal(err?.reason, "binding_mismatch");
   assert.equal(spawnCount(), before);
 
-  // Once bound (as the owner's connect route would have), it starts.
-  SENS.recordConnectionBinding(gh, { crowHome: HOME });
+  // Once bound with its fingerprints (as the owner's connect route would have), it starts.
+  SENS.recordConnectionBinding(gh, { crowHome: HOME, service: serviceById("github"), values: { config: gh.config, secrets: { [GH]: "test-token-nb" } } });
   const ok = await withDb((d) => C.ensureChild(d, gh.uuid, { crowHome: HOME }));
   assert.ok(ok.client);
   assert.equal(spawnCount(), before + 1);
   await C.stopChild(gh.uuid);
+});
+
+// ---- Task 16c fix round 2 (review C1): fingerprints ----------------------------------------------
+
+test("fingerprints: a notion token transplanted into an HA connection's HA_TOKEN row, or a rewritten HA_URL, is refused at spawn; a missing fingerprint is refused; a normal connection starts", async () => {
+  BUNDLES.push("home-assistant");
+  writeInstalled();
+  writeAddons();
+  try {
+    const ha = await connect("home-assistant", { config: { HA_URL: "http://127.0.0.1:8123" }, secrets: { HA_TOKEN: "test-token-ha-1" } });
+    const nt = await connect("notion", { secrets: { NOTION_TOKEN: "test-token-notion-9" } });
+    const start = () => withDb((d) => C.ensureChild(d, ha.uuid, { crowHome: HOME }));
+    const refusedAtSpawn = async (label) => {
+      const before = spawnCount();
+      let err = null;
+      const logs = [];
+      const orig = console.warn;
+      console.warn = (...a) => { logs.push(a.map(String).join(" ")); };
+      try { await start(); } catch (e) { err = e; } finally { console.warn = orig; }
+      assert.ok(err instanceof C.ChildError, `${label}: refused`);
+      assert.equal(err.code, "not_active", label);
+      assert.equal(err.reason, "fingerprint_mismatch", label);
+      assert.equal(spawnCount(), before, `${label}: nothing spawned`);
+      assert.deepEqual(logs, ["[services] connection values changed since connect, child not started"], `${label}: one fixed line`);
+      assert.ok(!logs.join("").includes("test-token"), `${label}: no value logged`);
+      const row = await withDb((d) => SC.getConnection(d, ha.uuid));
+      assert.equal(row.status, "active", `${label}: the row is left as it is`);
+    };
+
+    // A normal connection starts.
+    const n0 = spawnCount();
+    assert.ok((await start()).client);
+    assert.equal(spawnCount(), n0 + 1);
+    await C.stopChild(ha.uuid);
+
+    // The transplant: notion's sealed blob into HA's HA_TOKEN row (same key id; the seal has no AAD).
+    const own = await withDb(async (d) => (await d.execute({ sql: "SELECT secret_sealed, key_id FROM crow_keychain WHERE connection_uuid = ? AND env_key = 'HA_TOKEN'", args: [ha.uuid] })).rows[0]);
+    await withDb((d) => d.execute({
+      sql: `UPDATE crow_keychain SET secret_sealed = (SELECT secret_sealed FROM crow_keychain WHERE connection_uuid = ? AND env_key = 'NOTION_TOKEN'),
+              key_id = (SELECT key_id FROM crow_keychain WHERE connection_uuid = ? AND env_key = 'NOTION_TOKEN')
+            WHERE connection_uuid = ? AND env_key = 'HA_TOKEN'`,
+      args: [nt.uuid, nt.uuid, ha.uuid],
+    }));
+    await refusedAtSpawn("transplanted token");
+    await withDb((d) => d.execute({ sql: "UPDATE crow_keychain SET secret_sealed = ?, key_id = ? WHERE connection_uuid = ? AND env_key = 'HA_TOKEN'", args: [own.secret_sealed, own.key_id, ha.uuid] }));
+    assert.ok((await start()).client, "the owner's own token again: starts");
+    await C.stopChild(ha.uuid);
+
+    // A rewritten address (a listener the bot controls).
+    await withDb((d) => d.execute({ sql: "UPDATE service_connections SET config = ? WHERE uuid = ?", args: [JSON.stringify({ HA_URL: "http://203.0.113.9:9" }), ha.uuid] }));
+    await refusedAtSpawn("rewritten HA_URL");
+    await withDb((d) => d.execute({ sql: "UPDATE service_connections SET config = ? WHERE uuid = ?", args: [JSON.stringify({ HA_URL: "http://127.0.0.1:8123" }), ha.uuid] }));
+
+    // A binding with no fingerprints (made before them, or by anything but the connect route).
+    SENS.recordConnectionBinding(ha, { crowHome: HOME });
+    await refusedAtSpawn("missing fingerprint");
+    SENS.recordConnectionBinding(ha, { crowHome: HOME, service: serviceById("home-assistant"), values: { config: { HA_URL: "http://127.0.0.1:8123" }, secrets: { HA_TOKEN: "test-token-ha-1" } } });
+    assert.ok((await start()).client, "re-recorded by the owner: starts");
+    await C.stopChild(ha.uuid);
+
+    // The fingerprint key gone (or replaced): nothing verifies.
+    const keyFile = join(HOME, "secrets", SENS.FINGERPRINT_KEY_FILENAME);
+    const savedKey = readFileSync(keyFile, "utf8");
+    writeFileSync(keyFile, "f".repeat(64) + "\n", { mode: 0o600 });
+    try { await refusedAtSpawn("another fingerprint key"); } finally { writeFileSync(keyFile, savedKey, { mode: 0o600 }); }
+  } finally {
+    BUNDLES.pop();
+    writeInstalled();
+    writeAddons();
+  }
+});
+
+test("listedTools (review I2): null for a sensitive connection (notion by default) and for one switched private; a correct open one lists", async () => {
+  const nt = await connect("notion", { label: "lt", secrets: { NOTION_TOKEN: "test-token-lt" } });
+  assert.equal(await withDb((d) => C.listedTools(d, nt.uuid, { crowHome: HOME })), null, "notion: private by default");
+  const gh = await github("test-token-lt2", { label: "lt" });
+  await withDb((d) => C.ensureChild(d, gh.uuid, { crowHome: HOME }));   // fills the tool cache
+  await C.stopChild(gh.uuid);
+  assert.ok(await withDb((d) => C.listedTools(d, gh.uuid, { crowHome: HOME })), "github lists");
+  SENS.setSensitivityOverride(gh, true, { crowHome: HOME });
+  assert.equal(await withDb((d) => C.listedTools(d, gh.uuid, { crowHome: HOME })), null, "switched private: not listed");
+  SENS.setSensitivityOverride(gh, false, { crowHome: HOME });
+  assert.ok(await withDb((d) => C.listedTools(d, gh.uuid, { crowHome: HOME })));
 });

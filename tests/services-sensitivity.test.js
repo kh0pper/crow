@@ -173,7 +173,7 @@ test("fix round 1: the binding. A row whose service_id isn't the one the owner c
   assert.equal(SENS.isSensitiveConnection({ uuid: u, serviceId: "github" }, { crowHome: HOME }), true);
   assert.equal(SENS.isSensitiveConnection({ uuid: uuid(41), serviceId: "github" }, { crowHome: HOME }), false, "a correct row");
   assert.equal(statSync(BINDINGS).mode & 0o777, 0o600);
-  assert.equal(JSON.parse(readFileSync(BINDINGS, "utf8"))[u], "obsidian");
+  assert.deepEqual(JSON.parse(readFileSync(BINDINGS, "utf8"))[u], { serviceId: "obsidian" });
   // Bad values are never recorded.
   for (const bad of [{ uuid: "x", serviceId: "github" }, { uuid: uuid(42), serviceId: "../x" }, { uuid: uuid(42), serviceId: 3 }]) {
     assert.throws(() => SENS.recordConnectionBinding(bad, { crowHome: HOME }), (e) => e.code === "bad_value");

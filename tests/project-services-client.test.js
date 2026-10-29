@@ -548,7 +548,7 @@ test("Private switch: a locked service is checked, disabled, says so and never p
   const box = r1.querySelector("[data-svc-private]");
   assert.equal(box.checked, true);
   assert.equal(box.disabled, true);
-  assert.equal(r1.querySelector("[data-svc-private-note]").textContent, "Siempre privado en este servicio");
+  assert.equal(r1.querySelector("[data-svc-private-note]").textContent, "Siempre privado para este servicio");
   assert.equal(r1.querySelector(".svc-private-switch").textContent.trim(), "Tratar como privado");
   box.dispatchEvent(new s.window.Event("change", { bubbles: true }));
   await s.settle();

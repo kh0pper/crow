@@ -55,7 +55,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { serviceById, renderDerivedEnv } from "../../shared/service-catalog.js";
 import { recordChildFailure, recordChildRecovered, servableConnection } from "../../shared/service-connections.js";
-import { connectionBindingOk } from "../../shared/service-sensitivity.js";
+import { connectionBindingOk, isSensitiveConnection, verifyConnectionFingerprints } from "../../shared/service-sensitivity.js";
 import { redactAcross, redactSecrets, redactThenTruncate, MIN_SECRET_LENGTH } from "../../shared/redact-secrets.js";
 import { resolveAddonCommand, checkLauncherArgs } from "../../shared/resolve-command.js";
 import { serviceSecretsFor } from "../keychain/store.js";
@@ -550,6 +550,18 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
     }
   }
 
+  // Review C1: the values about to be injected must be the ones the owner connected. A bot that
+  // writes crow.db could copy another connection's sealed token into this row (the seal has no
+  // AAD) or point an address at its own listener; the keyed fingerprints in the hidden dir catch
+  // both. Refused before anything spawns; never logs a value; never records an error on the row.
+  if (!verifyConnectionFingerprints(conn, service, { config: conn.config, secrets }, { crowHome })) {
+    console.warn("[services] connection values changed since connect, child not started");
+    r.state = "stopped";
+    const err = new ChildError("not_active");
+    err.reason = "fingerprint_mismatch";
+    throw err;
+  }
+
   const cwd = typeof entry.cwd === "string" && entry.cwd ? entry.cwd : join(crowHome, "bundles", service.bundleId);
   const rc = resolveAddonCommand(entry.command, { sha256: entry.command_sha256, cwd });
   if (rc.missing || checkLauncherArgs(rc.command, entry.args)) {
@@ -786,7 +798,8 @@ export function listableConnection(conn) {
 export async function listedTools(db, uuid, { crowHome = resolveCrowHome() } = {}) {
   const conn = await servableConnection(db, uuid, { allowError: true });
   if (!listableConnection(conn)) return null;
-  if (!connectionBindingOk(conn, { crowHome })) return null;
+  // Review I2: the bot-facing feed (Tasks 18-20) never lists a sensitive or mismatched connection.
+  if (!connectionBindingOk(conn, { crowHome }) || isSensitiveConnection(conn, { crowHome })) return null;
   return serviceTools(conn.serviceId, { crowHome });
 }
 

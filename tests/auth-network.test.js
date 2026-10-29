@@ -1080,21 +1080,27 @@ test("auth-network: the Services Private switch refuses SSO, onhost and this-mac
   const app = express();
   app.use(servicesApiRouter({ uiEnabled: () => true, sessionGate: gate, dbFactory: fakeDb }));
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
-  const post = (headers) => new Promise((resolve, reject) => {
+  const SENS_PATH = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive";
+  const post = (headers, path = SENS_PATH) => new Promise((resolve, reject) => {
     const body = JSON.stringify({ sensitive: false });
     const r = http.request({ host: "127.0.0.1", port: server.address().port, method: "POST",
-      path: "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive",
+      path,
       headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), cookie: "crow_session=s1; crow_csrf=c1", "x-crow-csrf": "c1", ...headers } },
     (res) => { let t = ""; res.on("data", (c) => (t += c)); res.on("end", () => resolve({ status: res.statusCode, text: t })); });
     r.on("error", reject);
     r.end(body);
   });
   try {
+    // Review I1: connect, test, disconnect and restart are the owner's too.
+    const u = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001";
+    const paths = [SENS_PATH, "/dashboard/services/api/project/home/connect", `${u}/test`, `${u}/disconnect`, `${u}/restart`];
     for (const [label, sc, from] of [["sso", "dashboard sso src:peer-1", "laptop"], ["onhost", "dashboard onhost", "laptop"], ["this machine", "dashboard", null]]) {
       scopes = sc;
-      const r = await post(from ? { "x-test-from": from } : {});
-      assert.equal(r.status, 403, `${label}: ${r.status} ${r.text}`);
-      assert.deepEqual(JSON.parse(r.text), { error: "not_owner" }, label);
+      for (const path of paths) {
+        const r = await post(from ? { "x-test-from": from } : {}, path);
+        assert.equal(r.status, 403, `${label} ${path}: ${r.status} ${r.text}`);
+        assert.deepEqual(JSON.parse(r.text), { error: "not_owner" }, `${label} ${path}`);
+      }
     }
     assert.equal(wrote, 0, "a refused request never looks up the connection");
     scopes = "dashboard";
