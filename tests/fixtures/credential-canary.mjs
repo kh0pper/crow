@@ -23,6 +23,10 @@
  * project_audit_log, notifications), "files" (every file under the scratch CROW_HOME and data
  * dir), "responses" (every HTTP response body the harness received).
  *
+ * No pi transcript JSONL sink, by design: the fake pi writes none, and a secret's value never
+ * goes to pi at all, so the "model" sink (everything pi would receive: sent frames, turn
+ * prompts, images) is the boundary that matters. A transcript is only what pi received.
+ *
  * The default allowlist is the one by-design copy: `secrets/pi-bot-secret-values` under
  * CROW_HOME (the masking values file, map §4). Pass `allow` to add more (see grepEverywhere).
  */
@@ -274,6 +278,9 @@ export async function createCanaryHarness({ services = true, teeConsole = false 
     annotate: async (m) => m, providerModels: () => [], piProviders: () => null,
   }));
   app.use(dash);
+  // The gateway's last handler (servers/gateway/index.js registers it after every router).
+  const { bodyErrorHandler } = await import("../../servers/gateway/body-error-handler.js");
+  app.use(bodyErrorHandler);
   const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const port = server.address().port;
 

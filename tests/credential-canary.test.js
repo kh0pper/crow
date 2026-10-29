@@ -9,8 +9,8 @@
  * flipped to live by that task:
  *   (a) the keychain card submit                               → Task 3
  *   (b) a composer /message and /steer with the canary pasted   → Task 4
- *   (c) a malformed-JSON body: /message (LIVE now), the submit route → Task 3,
- *       /steer (its body goes through the gateway's global parser) → Task 4
+ *   (c) a malformed-JSON body: /message, /steer and other global-parser routes (LIVE now),
+ *       the submit route → Task 3
  *   (d) the services connect submit with the canary as a value  (LIVE now: the route exists;
  *       Task 4 adds the Connect card's own case)
  *
@@ -99,11 +99,29 @@ test("(c) a malformed-JSON body to the secret submit route", { todo: "Task 3: th
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 
-test("(c) a malformed-JSON /steer body holding the canary", { todo: "Task 4: /steer's body goes through the gateway's global 1mb parser, which has no error handler" }, async () => {
+test("(c) a malformed-JSON /steer body holding the canary (the global parser): fixed answer, fixed line, zero hits", async () => {
   const c = makeCanary();
   const s = await h.spawnSession("steer-malformed-bot");
+  const before = h.console.lines.length;
   const r = await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/steer`, `{"message": ${c}}`);
   assert.equal(r.status, 400);
+  assert.deepEqual(r.json, { error: "bad_body" });
+  assert.deepEqual(h.console.lines.slice(before), ["[gateway] bad body"]);
+  assert.deepEqual(await h.grepEverywhere(c), []);
+});
+
+test("(c) other routes on the global parser: an ask /answer and an unrouted path answer bad_body with zero hits", async () => {
+  const c = makeCanary();
+  const s = await h.spawnSession("answer-malformed-bot");
+  for (const path of [`/dashboard/perch-api/interactive/${s.sessionId}/answer`, "/api/no-such-route"]) {
+    const r = await h.post(path, `{"value": ${c}}`);
+    assert.equal(r.status, 400, path);
+    assert.deepEqual(r.json, { error: "bad_body" }, path);
+  }
+  const big = await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/answer`, JSON.stringify({ value: c + "x".repeat(1024 * 1024) }));
+  assert.equal(big.status, 413);
+  assert.deepEqual(big.json, { error: "bad_body" });
+  assert.equal(h.pi().sent.length, 0, "nothing reached pi");
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 
