@@ -1495,3 +1495,124 @@ test("runRows: a unit that throws stops the run; the in-flight unit finishes on 
   assert.match(dropped, /: pass, dropped \(the run failed\)/);
   assert.ok(!logs.some((m) => /ENOENT/.test(m)), logs.join("\n"));
 });
+
+// ---- Task 9: report.mjs ----
+const { summarize: summarize9, compareArms, wilcoxonSignedRankP, mcnemarP, refusals } = await import("../scripts/research-eval/report.mjs");
+const { SAMPLING: SAMPLING9, seedFor: seedFor9 } = await import("../scripts/research-eval/score.mjs");
+const REPORT = join(ROOT, "scripts", "research-eval", "report.mjs");
+
+// A scored row. pass sets every criterion to pass (else b fails); `criteria` overrides; case_pass
+// carries `pass` as written, so an override can make it stale.
+const row9 = (arm, caseId, rep, pass, criteria = {}, extra = {}) => ({
+  arm, model: "stub", case: caseId, type: extra.type ?? "number", rep, ok: true, parse_ok: true, contaminated: false,
+  criteria: { a: "pass", b: pass ? "pass" : "fail", c: "n/a", d: "pass", ...criteria }, case_pass: pass,
+  evidence: { reasons: { a: [], b: pass ? [] : ["no page value in the prose"], c: [], d: [] }, prose_hits: { judged: [] } },
+  undecided: criteria.b === "undecided", sampling: { ...SAMPLING9, seed: seedFor9(rep) }, judge_reason: null, ...extra,
+});
+// cases → per-case pass counts out of 3 reps, for one arm.
+const armRows = (arm, passes) => Object.entries(passes).flatMap(([c, k]) => [0, 1, 2].map((rep) => row9(arm, c, rep, rep < k)));
+
+test("headline is the mean of per-case pass proportions; undecided is non-pass", () => {
+  const rows = [row9("A", "rr01", 0, true), row9("A", "rr01", 1, false), row9("A", "rr01", 2, true),
+    row9("A", "rr02", 0, true, { b: "undecided" }), row9("A", "rr02", 1, true), row9("A", "rr02", 2, true)];
+  const s = summarize9(rows).arms.get("A");
+  assert.equal(s.headline, (2 / 3 + 2 / 3) / 2);
+  assert.deepEqual(s.undecided_rows, [{ case: "rr02", rep: 0 }]);
+  assert.equal(s.criteria_rates.b, 4 / 6, "undecided is non-pass in the b rate");
+  assert.equal(s.criteria_rates.c, null, "n/a leaves the denominator");
+  assert.equal(s.cases.get("rr02").criteria.b, 2 / 3);
+  assert.equal(s.by_type.number.cases, 2);
+  assert.equal(s.by_type.dead_page.headline, null);
+});
+
+test("summarize recomputes case pass from criteria, ignoring a stale case_pass", () => {
+  const stale = row9("A", "rr01", 0, true, { b: "fail" });
+  assert.equal(stale.case_pass, true);
+  const rows = [stale, row9("A", "rr01", 1, false, {}, { case_pass: true }), row9("A", "rr01", 2, true, {}, { case_pass: false })];
+  const c = summarize9(rows).arms.get("A").cases.get("rr01");
+  assert.equal(c.passes, 1);
+  assert.equal(c.pass_prop, 1 / 3);
+});
+
+test("a contaminated row (criteria null) is counted apart, never scored, and refuses a verdict", () => {
+  const bad = { ...row9("A", "rr01", 2, false), ok: false, contaminated: "transport failure after 3 attempts", criteria: null, case_pass: false, evidence: { errors: ["spawn failed"] } };
+  const rows = [row9("A", "rr01", 0, true), row9("A", "rr01", 1, true), bad];
+  const s = summarize9(rows).arms.get("A");
+  assert.equal(s.cases.get("rr01").reps, 2);
+  assert.equal(s.headline, 1);
+  assert.deepEqual(s.contaminated_rows, [{ case: "rr01", rep: 2, reason: "transport failure after 3 attempts" }]);
+  const r = refusals(rows);
+  assert.ok(r.some((l) => /^contaminated: A\/rr01\/rep 2/.test(l)), r.join("\n"));
+  assert.ok(r.some((l) => /fewer than 3 scored reps: A\/rr01 has 2/.test(l)), r.join("\n"));
+});
+
+test("compareArms pairs by case, not by rep index, and drops ties", () => {
+  // A's passes sit on different rep indices than B's, so a rep-index pairing would see other counts.
+  const A = armRows("A", { rr01: 3, rr02: 2, rr03: 1, rr04: 2 });
+  const B = [...armRows("B", { rr01: 0, rr02: 1, rr03: 0 }), ...[0, 1, 2].map((rep) => row9("B", "rr04", rep, rep > 0))];
+  const c = compareArms(summarize9([...A, ...B]), "A", "B");
+  assert.equal(c.pairs, 4);
+  assert.equal(c.better, 3);
+  assert.equal(c.worse, 0);
+  assert.equal(c.ties, 1);
+  assert.equal(c.sign_p, 0.125);
+  assert.equal(c.sign_p_reverse, 1);
+  assert.equal(c.inconclusive, true);
+  assert.deepEqual(c.majority, { a_only: 2, b_only: 0 });
+  assert.equal(c.mcnemar_p, mcnemarP(2, 0));
+  assert.equal(c.wilcoxon_p, wilcoxonSignedRankP([1, 1 / 3, 1 / 3]));
+});
+
+test("compareArms: six cases all better is conclusive at SIGN_ALPHA", () => {
+  const ids = ["rr01", "rr02", "rr03", "rr04", "rr05", "rr06"];
+  const c = compareArms(summarize9([...armRows("A", Object.fromEntries(ids.map((i) => [i, 3]))), ...armRows("B", Object.fromEntries(ids.map((i) => [i, 0])))]), "A", "B");
+  assert.equal(c.sign_p, 1 / 64);
+  assert.equal(c.inconclusive, false);
+});
+
+test("wilcoxon exact p: all-positive n=5 two-sided is 0.0625", () => {
+  assert.equal(wilcoxonSignedRankP([1, 2, 3, 4, 5]), 0.0625);
+  assert.equal(wilcoxonSignedRankP([]), 1);
+  assert.equal(wilcoxonSignedRankP([0, 0]), 1);
+  assert.equal(wilcoxonSignedRankP([1, -1]), 1, "a symmetric pair is no evidence");
+  // ties get average ranks: |d| = 1,1,1 → ranks 2,2,2; all positive → 2 of 8 assignments are as extreme.
+  assert.equal(wilcoxonSignedRankP([1, 1, 1]), 0.25);
+  assert.throws(() => wilcoxonSignedRankP(Array.from({ length: 21 }, (_, i) => i + 1)), /n ≤ 20/);
+});
+
+test("mcnemar: b=0,c=0 → 1; b=6,c=0 → 0.03125", () => {
+  assert.equal(mcnemarP(0, 0), 1);
+  assert.equal(mcnemarP(6, 0), 0.03125);
+  assert.equal(mcnemarP(0, 6), 0.03125);
+});
+
+test("refusals: contaminated rows and n<3 refuse a verdict; the CLI exits 6", () => {
+  assert.deepEqual(refusals(armRows("A", { rr01: 3, rr02: 1 })), []);
+  const r = refusals([row9("A", "rr01", 0, true), { header: true, run: "x" }, row9("A", "rr01", 0, true),
+    row9("A", "rr02", 0, true, {}, { sampling: { ...SAMPLING9, temperature: 0, seed: 1000 } })]);
+  assert.ok(r.some((l) => /^not a row/.test(l)), r.join("\n"));
+  assert.ok(r.some((l) => /^duplicate row: A\/rr01\/rep 0/.test(l)), r.join("\n"));
+  assert.ok(r.some((l) => /^sampling differs/.test(l)), r.join("\n"));
+  const f = join(H, "t9-one-rep.jsonl");
+  write7(f, JSON.stringify(row9("A", "rr01", 0, true)) + "\n");
+  const res = spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(res.status, 6, res.stderr);
+  assert.match(res.stdout, /NO VERDICT/);
+  assert.match(res.stdout, /fewer than 3 scored reps: A\/rr01 has 1/);
+});
+
+test("the CLI on a complete two-arm file prints the tables and exits 0, with no gate verdict", () => {
+  const rows = [...armRows("A", { rr01: 3, rr02: 2 }), ...armRows("B", { rr01: 1, rr02: 2 })];
+  rows[3] = row9("A", "rr02", 0, true, { b: "undecided" }, { judge_reason: "no judge configured", evidence: { reasons: { a: [], b: [], c: [], d: [] }, prose_hits: { judged: [{ start: 0, end: 4 }] } } });
+  const f = join(H, "t9-two-arms.jsonl");
+  write7(f, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const res = spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  assert.match(res.stdout, /A {2}rr01 \(number\) {2}pass 3\/3/);
+  assert.match(res.stdout, /r0: b: undecided \(no judge configured\)/);
+  assert.match(res.stdout, /b: no page value in the prose/);
+  assert.match(res.stdout, /judge: 1 rows reached it, 1 spans sent/);
+  assert.match(res.stdout, /Undecided rows[^\n]*\n {2}A\/rr02\/rep 0/);
+  assert.match(res.stdout, /A vs B: 2 cases; A higher on 1, lower on 1, tied 0; [^\n]*INCONCLUSIVE/);
+  assert.doesNotMatch(res.stdout, /NO VERDICT|VERDICT:|PASS {2}|FAIL {2}/);
+});
