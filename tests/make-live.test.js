@@ -270,14 +270,18 @@ test("a ready preview fills its tile, and a type tile is the same size (phone an
   }
 });
 
-test("390 px: the previews-off line is one line, at most 64 px tall, details collapsed", async (ctx) => {
+test("390 px: the previews-off notice is compact (at most two rows, no sideways overflow), details collapsed", async (ctx) => {
   if (!chrome) return ctx.skip("no headless Chrome");
   for (const lang of ["en", "es"]) {
     await setLang(lang); fixture("artifacts"); await setPreviews(false);
     const p = await open("/dashboard/make", { width: 390, height: 844 });
     try {
+      // Two rows at most: one row on most fonts, but the es text can wrap on a runner with
+      // different fallback fonts (CI). The old card took a third of the screen.
       const h = await p.ev("document.querySelector('.mk-previews-off').getBoundingClientRect().height");
-      assert.ok(h > 0 && h <= 64, `${lang}: off line is ${h}px`);
+      assert.ok(h > 0 && h <= 100, `${lang}: off notice is ${h}px (≤ 100, two rows)`);
+      const o = await p.ev("(function(){ var e=document.querySelector('.mk-previews-off'); return e.scrollWidth <= e.clientWidth + 1 && document.documentElement.scrollWidth <= window.innerWidth; })()");
+      assert.equal(o, true, `${lang}: no sideways overflow`);
       assert.equal(await p.ev("document.querySelector('.mk-previews-what').open"), false);
       assert.ok(await p.ev("document.querySelector('.mk-previews-what summary').getBoundingClientRect().height") >= 44);
     } finally { await p.close(); }
