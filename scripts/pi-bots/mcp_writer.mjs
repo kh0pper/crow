@@ -222,7 +222,9 @@ export function buildBotMcp(def, canonical, opts = {}) {
   const catalog = opts.catalog || {};
   // An IMPLIED name (impliedServers) joins only when the catalog has it: unlike an explicit or
   // ensured name it never warns (an instance without the secrets token just doesn't offer it).
-  const implied = impliedServers(def).filter((n) => catalog[n]);
+  // Only for an interactive (Perch) spawn, the same gate as bridge.mjs buildToolsCsv: a channel
+  // or job bot could never use crow_request_secret, so it gets no entry at all.
+  const implied = opts.interactive === true ? impliedServers(def).filter((n) => catalog[n]) : [];
   const want = [...new Set([...serversForBot(def), ...ensure, ...implied])];
   const unconfigured = opts.unconfigured || {};
   const binding = opts.binding;
@@ -392,6 +394,7 @@ export function writeBotMcp(def, opts = {}) {
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
+    interactive: opts.interactive === true,
     actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId } : undefined,
   });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has

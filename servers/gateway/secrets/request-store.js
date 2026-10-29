@@ -20,6 +20,8 @@ import { randomBytes } from "node:crypto";
 import { getTarget } from "./targets.js";
 
 export const SECRET_REQUEST_TTL_MS = 10 * 60 * 1000;
+/** A queued note nobody took (the chat was never used again) is dropped after this. */
+export const SECRET_NOTE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** The fixed lines a bot can be told about a request. Never bot text, never a value. */
 export const SECRET_NOTES = Object.freeze({
@@ -33,7 +35,7 @@ const LABEL_MAX = 80;
 
 let clock = () => Date.now();
 const requests = new Map(); // id -> frozen request
-const notes = new Map(); // sessionId -> string[]
+const notes = new Map(); // sessionId -> [{ line, at }]
 
 export class SecretRequestError extends Error {
   constructor(code, message) {
@@ -54,7 +56,7 @@ export function cleanLabel(v) {
 export function addSecretNote(sessionId, line) {
   const sid = String(sessionId);
   const list = notes.get(sid) || [];
-  list.push(String(line));
+  list.push({ line: String(line), at: clock() });
   notes.set(sid, list);
 }
 
@@ -63,9 +65,22 @@ function expire(r) {
   addSecretNote(r.sessionId, SECRET_NOTES.expired);
 }
 
-/** Drop every request past its expiry, each with its expired note. */
+/** Drop every request past its expiry (each with its expired note), then every note older
+ *  than SECRET_NOTE_TTL_MS, so the queue of a chat that is never used again cannot grow. */
 export function sweepExpired(now = clock()) {
   for (const r of [...requests.values()]) if (now >= r.expiresAt) expire(r);
+  for (const [sid, list] of [...notes.entries()]) {
+    const fresh = list.filter((n) => now - n.at < SECRET_NOTE_TTL_MS);
+    if (!fresh.length) notes.delete(sid);
+    else if (fresh.length !== list.length) notes.set(sid, fresh);
+  }
+}
+
+/** The session stopped or was archived: drop its requests and its queued notes (no note). */
+export function forgetSession(sessionId) {
+  const sid = String(sessionId);
+  for (const r of [...requests.values()]) if (r.sessionId === sid) requests.delete(r.id);
+  notes.delete(sid);
 }
 
 /** The session's open request, or null. */
@@ -185,14 +200,15 @@ export function takeSecretNotes(sessionId) {
   const sid = String(sessionId);
   const list = notes.get(sid) || [];
   notes.delete(sid);
-  return list;
+  return list.map((n) => n.line);
 }
 
 /** Hand lines back (the turn they were taken for never started), ahead of any newer ones. */
 export function returnSecretNotes(sessionId, lines) {
   if (!Array.isArray(lines) || !lines.length) return;
   const sid = String(sessionId);
-  notes.set(sid, [...lines, ...(notes.get(sid) || [])]);
+  const at = clock();
+  notes.set(sid, [...lines.map((line) => ({ line: String(line), at })), ...(notes.get(sid) || [])]);
 }
 
 /** Test seams. */
