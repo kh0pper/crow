@@ -26,3 +26,15 @@ export async function isEnabledBot(cdb, botId) {
     return false;
   }
 }
+
+/**
+ * The one assignment guard every card path calls before a bot is written onto
+ * a card: the voice bot and any missing or disabled bot are refused with the
+ * `{code, http}` shape the routes and the board MCP already map. Reads
+ * crow.db only (never tasks.db).
+ */
+export async function assertAssignableBot(cdb, botId) {
+  if (await isEnabledBot(cdb, botId)) return;
+  const what = isVoiceBotId(botId) ? "the voice bot never takes cards" : `assigned_bot is not an enabled bot: ${botId}`;
+  throw Object.assign(new Error(what), { code: "bad_bot", http: 400 });
+}

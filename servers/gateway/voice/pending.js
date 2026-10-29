@@ -9,13 +9,14 @@
  * matchYesNo is built on PR 1's isAffirmative/isNegative (turn-helpers.js): one yes/no rule for the voice
  * turn. On top of it, a yes that names another bot or carries an action ("yes, but send it to …") is not a
  * plain yes (null: the model hears it as a correction). A correction names a new target: a bot, or one of
- * the CORRECTION_PHRASES below ("give it to", "instead"…); a bare action verb does not make one.
+ * HANDOFF_TARGET_PHRASES ("give it to", "instead"…); a bare action verb does not make one.
  */
 import { isAffirmative, isNegative } from "./turn-helpers.js";
-import { phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
+import { phraseWords, listMatches } from "./tool-families.js";
+import { HANDOFF_PROPOSAL_TTL_MS, HANDOFF_TARGET_PHRASES } from "./handoff-constants.js";
 
-/** How long a pending proposal waits for its yes (plan constant). */
-export const HANDOFF_PROPOSAL_TTL_MS = 120_000;
+/** How long a pending proposal waits for its yes (it lives in handoff-constants.js, re-exported here). */
+export { HANDOFF_PROPOSAL_TTL_MS };
 
 // which_calendar (PR 2.1 Task 6): Crow asks which calendar or task list to use when none is chosen or its own (own-tools.js).
 const PENDING_KINDS = new Set(["routine", "handoff", "which", "which_calendar", "stop"]);
@@ -56,13 +57,9 @@ function stripLeadIns(text) {
   return rest;
 }
 
-// A yes is a correction only when it names a NEW target: one of these phrases, or a bot in otherBots. A verb
-// with only a pronoun object ("yes, add it", "sí, bórralo") is a plain yes, as PR 1's confirm gate reads it.
-const CORRECTION_PHRASES = normalizeIntentLists({
-  en: ["give it to", "send it to", "pass it to", "instead", "rather"],
-  es: ["en vez", "en lugar", "mejor a", "daselo a"],
-});
-
+// A yes is a correction only when it names a NEW target: one of HANDOFF_TARGET_PHRASES (the one list the
+// hand-off request reader shares), or a bot in otherBots. A verb with only a pronoun object ("yes, add it",
+// "sí, bórralo") is a plain yes, as PR 1's confirm gate reads it.
 // A correction lead: "but"/"pero", or words that change the held call ("mejor mañana", "make it four",
 // "at four", "a las cuatro"), each only when more words follow it ("yes, make it" alone is still a yes).
 const CORRECTION_LEADS = [["but"], ["pero"], ["mejor"], ["make", "it"], ["at"], ["a", "las"]];
@@ -70,6 +67,26 @@ const leadsCorrection = (words) => CORRECTION_LEADS.some((lead) => {
   for (let i = 0; i + lead.length < words.length; i++) if (lead.every((w, j) => words[i + j] === w)) return true;
   return false;
 });
+// A content-change cue after a NO ("no, make it about radio drama", "no, que sea sobre la radio"): the task is
+// being changed, so the hand-off fastPath lets the model re-propose. Deliberately narrower than CORRECTION_LEADS
+// (which serve the yes path): "no, mejor no", "no but thanks" and "no, not at the moment" are plain declines.
+const CONTENT_CHANGE_LEADS = [["make", "it"], ["change", "it", "to"], ["change", "it"], ["make", "that"],
+  ["que", "sea"], ["hazlo", "sobre"], ["hazlo", "de"], ["cambialo", "a"]];
+const NEGATIVE_PARTICLES = new Set(["no", "not", "nunca", "never", "ni", "nada", "nothing"]);
+/** The transcript changes what was asked: a content-change cue with more words after it, and no negative particle
+ * right after the cue ("make it not…", "que sea no…" still decline). The LONGEST cue at a position decides, so
+ * "change it to nothing" is judged after "change it to", not after "change it". */
+export function changesContent(transcript) {
+  const words = phraseWords(transcript);
+  for (let i = 0; i < words.length; i++) {
+    let longest = 0;
+    for (const lead of CONTENT_CHANGE_LEADS) {
+      if (lead.length > longest && i + lead.length < words.length && lead.every((w, j) => words[i + j] === w)) longest = lead.length;
+    }
+    if (longest) return !NEGATIVE_PARTICLES.has(words[i + longest]);
+  }
+  return false;
+}
 
 /**
  * "yes" | "no" | null. yes: isAffirmative, and the utterance names no bot in otherBots (ids or names), no
@@ -82,7 +99,7 @@ export function matchYesNo(transcript, { otherBots = [] } = {}) {
   if (!isAffirmative(t)) return null;
   const words = phraseWords(t);
   const bots = (Array.isArray(otherBots) ? otherBots : []).map((b) => phraseWords(String(b ?? ""))).filter((w) => w.length);
-  if (listMatches(words, bots) || listMatches(words, CORRECTION_PHRASES)) return null;
+  if (listMatches(words, bots) || listMatches(words, HANDOFF_TARGET_PHRASES)) return null;
   // "yes, but at four" / "sí, mejor mañana" / "yes, make it four": a correction lead with more words after it changes what was asked.
   if (leadsCorrection(words)) return null;
   return "yes";

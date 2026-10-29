@@ -41,7 +41,8 @@ import { loadRoleContext } from "../../shared/model-roles-store.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
 import { listRolePicks, providerLabel } from "../../shared/role-picks.js";
 import { readPickChecks, pickCheckOf, checkKindFor, isProbeKind } from "../../shared/pick-checks.js";
-import { candidatePick, presetForRow, isRecommendationsStale, loadRecommendations, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { candidatePick, presetForRow, isRecommendationsStale, loadRecommendations, recommendedModelIds, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
+import { presetById } from "../../shared/provider-presets.js";
 import { friendlyModel } from "../dashboard/shared/bot-display.js";
 import { testProviderKey, addProvider, planRecommended, combinedPreview, applyRecommended } from "../ai/add-provider.js";
 import { probeRecommended } from "../ai/pick-probe.js";
@@ -362,6 +363,12 @@ export default function rolesApiRouter({
       if (Number.isFinite(r?.status)) out.status = r.status;
       if (Array.isArray(r?.models)) out.models = r.models.filter((m) => typeof m === "string");
       if (r?.truncated === true) out.truncated = true;
+      // A provider with no model list (modelsPath null): offer its recommended
+      // ids as the choices, flagged so the sheet says there is no list.
+      if (out.ok && out.models === null && presetById(body.presetId)?.modelsPath === null) {
+        out.models = recommendedModelIds(body.presetId, recOpts);
+        out.noListing = true;
+      }
       out.recommended = out.ok ? recommendedIds(body.presetId, out.models, recOpts) : [];
       res.json(out);
     } catch (err) {

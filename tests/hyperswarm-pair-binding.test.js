@@ -61,6 +61,7 @@ import { contactCbMessage, wireContactBinding, markInstanceCbPinned } from "../s
 import { pairSubkey, hyperswarmMac, markPairPinned, defaultPairKey } from "../servers/shared/sync-pair-binding.js";
 import { getPeerTrustHealth, _resetPeerTrustHealth } from "../servers/shared/peer-trust-health.js";
 import { _setAllowLoopbackAddressesForTest } from "../servers/sharing/tailnet-sync.js";
+import { _dbKeepers, _walTripwires } from "../servers/db.js";
 
 const PRE_PT3_SHA = "8afbabaf5cacc1b1c590451218d46eff43692072"; // PT-2.0: bare signature
 const PT3_SHA = "d733b582bbbc977a377c60bf95893cf2d5902635";     // PT-3: channel-bound, pre-PT-2a
@@ -71,6 +72,104 @@ const logs = [];
 const realConsole = { log: console.log, warn: console.warn, error: console.error };
 const capture = (...a) => { logs.push(a.map(String).join(" ")); if (process.env.TEST_LOUD) realConsole.log(...a); };
 const refusedFor = (reason) => logs.some((l) => l === `[peer-manager] instance-sync connection refused: ${reason}`);
+/** The captured peer-manager / sharing lines, for an assertion message. */
+const pmLogs = () => logs.filter((l) => l.startsWith("[peer-manager]") || l.startsWith("[sharing]")).slice(-20).join(" | ") || "(none)";
+
+// ---------------------------------------------------------------- waits
+// Every positive wait is a bounded until(): it returns as soon as the event
+// happens, so a generous bound costs nothing on a fast box and keeps a
+// starved CI runner (small runner, the whole suite in parallel) from failing
+// on time alone. PT2A_WAIT_SCALE overrides the factor.
+const SCALE = Math.max(1, Number(process.env.PT2A_WAIT_SCALE) || 4);
+const W = (ms) => ms * SCALE;
+
+// ---------------------------------------------------------------- teardown
+/*
+ * Every resource a test opens (streams and their sockets, PeerManagers,
+ * InstanceSyncManagers, DBs and their WAL keepers, scratch dirs, fleets) is
+ * registered here. A test's steps run LIFO in its t.after, so links close
+ * before the managers that replicate over them, managers before their DBs,
+ * DBs before their dirs, and they run when an assertion throws too. Each
+ * step is capped (STEP_CAP_MS) so a stuck close cannot hang the file; the
+ * file-level after() runs anything a test left behind.
+ *
+ * Why the order matters: an admission that just happened still has its
+ * key exchange in flight (getFeedKeyForInstance / onInstanceKeyReceived →
+ * initInstance opens a Hypercore). Removing the side's dir under that open
+ * either throws ENOTEMPTY from rmSync (a failed after-hook) or crashes the
+ * process (rocksdb-native SIGSEGVs in its open callback when the open
+ * fails). So a side refuses new opens once its teardown starts, waits for
+ * the opens in flight, closes, and only then is its dir removed.
+ */
+const STEP_CAP_MS = 15_000;
+const pendingSteps = new Set();
+const perTestSteps = new WeakMap();
+async function runStep(step) {
+  if (!pendingSteps.delete(step)) return;
+  let timer;
+  try {
+    await Promise.race([
+      Promise.resolve().then(step.fn),
+      new Promise((r) => { timer = setTimeout(() => { realConsole.error(`[teardown] ${step.label}: not done after ${STEP_CAP_MS} ms, moving on`); r(); }, STEP_CAP_MS); }),
+    ]);
+  } catch (err) {
+    realConsole.error(`[teardown] ${step.label}: ${err?.message ?? err}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function onTeardown(t, label, fn) {
+  const step = { label, fn };
+  pendingSteps.add(step);
+  let list = perTestSteps.get(t);
+  if (!list) {
+    list = [];
+    perTestSteps.set(t, list);
+    t.after(async () => { while (list.length) await runStep(list.pop()); });
+  }
+  list.push(step);
+}
+/** Close this process's WAL keeper and tripwire for every DB under `dir` (db.js keeps one per path). */
+function releaseDbFiles(dir) {
+  for (const [path, keeper] of [..._dbKeepers]) {
+    if (!path.startsWith(dir)) continue;
+    try { keeper.close(); } catch {}
+    _dbKeepers.delete(path);
+  }
+  for (const [path, tw] of [..._walTripwires]) {
+    if (!path.startsWith(dir)) continue;
+    clearInterval(tw.timer);
+    _walTripwires.delete(path);
+  }
+}
+const removeDir = (dir) => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+/** From now on `side`'s manager opens no feed; the opens in flight are awaited, then it closes. */
+function guardSideOpens(side) {
+  side.closed = false;
+  side.inflight = new Set();
+  const init = side.mgr.initInstance.bind(side.mgr);
+  side.mgr.initInstance = (...a) => {
+    if (side.closed) return Promise.reject(new Error("side torn down"));
+    const p = init(...a);
+    side.inflight.add(p);
+    p.then(() => side.inflight.delete(p), () => side.inflight.delete(p));
+    return p;
+  };
+}
+async function closeSide(side) {
+  side.closed = true;
+  for (let i = 0; i < 3; i++) {
+    await Promise.allSettled([...side.inflight]);
+    try { await side.mgr.close(); } catch {}
+    if (side.inflight.size === 0 && !side.mgr.outFeeds?.size && !side.mgr.inFeeds?.size) break;
+  }
+  side.quiet = side.inflight.size === 0;
+}
+/** Remove a side's dir only once its manager is quiet: never under an open in flight (see above). */
+function removeSideDir(side) {
+  if (!side.quiet) { realConsole.error(`[teardown] ${side.dir}: left in place, feed opens still in flight`); return; }
+  removeDir(side.dir);
+}
 
 // ---------------------------------------------------------------- old trees
 const trees = {};
@@ -89,7 +188,8 @@ before(async () => {
     };
   }
 }, { timeout: 900_000 });
-after(() => {
+after(async () => {
+  for (const step of [...pendingSteps].reverse()) await runStep(step);
   Object.assign(console, realConsole);
   for (const t of Object.values(trees)) t.tree?.cleanup();
 });
@@ -269,12 +369,11 @@ async function makeSide(t, identity, id, { ISM = InstanceSyncManager } = {}) {
   mgr.dataDir = join(dir, "instance-sync"); // keep feeds out of ~/.crow
   mgr.feedsDisabled = false;                // the suite env disables feeds
   const pairKeys = new Map();
-  const side = { id, db, mgr, dir, identity, pairKeys, pairKeyLookup: (peerId) => pairKeys.get(peerId) ?? null };
-  t.after(async () => {
-    try { await mgr.close(); } catch {}
-    try { db.close?.(); } catch {}
-    rmSync(dir, { recursive: true, force: true });
-  });
+  const side = { t, id, db, mgr, dir, identity, pairKeys, pairKeyLookup: (peerId) => pairKeys.get(peerId) ?? null };
+  guardSideOpens(side);
+  onTeardown(t, `rm ${dir}`, () => removeSideDir(side));
+  onTeardown(t, `db ${id}`, () => { try { db.close?.(); } catch {} releaseDbFiles(dir); });
+  onTeardown(t, `mgr ${id}`, () => closeSide(side));
   return side;
 }
 
@@ -298,7 +397,17 @@ async function makePair(t, { aISM, bISM, shape = "crow", identity = null } = {})
 // ---------------------------------------------------------------- nodes
 /** Spy the wired callbacks and replicate; every spy calls through. */
 function spy(pm, side, kind) {
-  const s = { instanceConnected: [], keyReceived: [], feedKeyAsked: [], replicate: [] };
+  const s = { instanceConnected: [], keyReceived: [], feedKeyAsked: [], replicate: [], kills: [] };
+  // Who closed which stream, and why (diagnostics; U-H8 also asserts on it).
+  if (typeof pm._kill === "function") {
+    const kill = pm._kill.bind(pm);
+    pm._kill = (conn, state) => { s.kills.push({ conn, via: state?._refuseWhy ? `refuse:${state._refuseWhy}` : "kill" }); return kill(conn, state); };
+  }
+  if (typeof pm._refuseInstance === "function") {
+    const refuse = pm._refuseInstance.bind(pm);
+    pm._refuseInstance = (conn, state, why) => { if (state) state._refuseWhy = why; return refuse(conn, state, why); };
+  }
+  onTeardown(side.t, `pm ${side.id}`, () => pm.destroy?.());
   const wrap = (name, list) => {
     const inner = pm[name];
     if (typeof inner !== "function") return;
@@ -357,25 +466,30 @@ function tapWrites(conn) {
   return frames;
 }
 
-async function streams(xInitiator) {
+async function streams(t, xInitiator) {
   const [s1, s2] = await socketPair();
   const x = new NoiseSecretStream(xInitiator, s1);
   const y = new NoiseSecretStream(!xInitiator, s2);
   x.on("error", () => {}); y.on("error", () => {});
+  onTeardown(t, "stream pair", () => { for (const s of [x, y, s1, s2]) { try { s.destroy(); } catch {} } });
   return [x, y];
 }
+const killsOn = (N, conn) => N.spies.kills.filter((k) => k.conn === conn).map((k) => k.via);
 
 /** Link node X and node Y; X is the Noise initiator when `xInitiator`. */
 async function link(t, X, Y, { xInitiator = true } = {}) {
-  const [x, y] = await streams(xInitiator);
+  const [x, y] = await streams(t, xInitiator);
   const wx = tapWrites(x), wy = tapWrites(y);
   const st = { xClosed: false, yClosed: false };
   x.once("close", () => { st.xClosed = true; });
   y.once("close", () => { st.yClosed = true; });
+  x.on("error", (e) => { st.xErr = e?.message ?? String(e); });
+  y.on("error", (e) => { st.yErr = e?.message ?? String(e); });
   X.pm._handleConnection(x, {});
   Y.pm._handleConnection(y, {});
-  t.after(() => { x.destroy(); y.destroy(); });
-  return { x, y, wx, wy, st };
+  /** Why the link is in the state it is (assertion messages). */
+  const why = () => `x closed=${st.xClosed}${st.xErr ? ` (error: ${st.xErr})` : ""} by X:[${killsOn(X, x)}] Y:[${killsOn(Y, y)}]; y closed=${st.yClosed}${st.yErr ? ` (error: ${st.yErr})` : ""}; x sent [${wx.map((f) => f.type)}]; y sent [${wy.map((f) => f.type)}]; logs: ${pmLogs()}`;
+  return { x, y, wx, wy, st, why };
 }
 
 /**
@@ -387,7 +501,7 @@ async function link(t, X, Y, { xInitiator = true } = {}) {
 async function rawSibling(t, N, identity, {
   challengeId, responseId = undefined, pb = true, pbKeyHex = null, pbMacOverride = undefined, pbFrame = true, after = [], pmInitiator = true, proof = "cb",
 } = {}) {
-  const [p, r] = await streams(pmInitiator);
+  const [p, r] = await streams(t, pmInitiator);
   const pmFrames = tapWrites(p);
   let closed = false;
   r.once("close", () => { closed = true; });
@@ -399,13 +513,12 @@ async function rawSibling(t, N, identity, {
     buf = ls.pop();
     for (const l of ls) if (l.trim()) { try { got.push(JSON.parse(l)); } catch {} }
   });
-  t.after(() => { p.destroy(); r.destroy(); });
   N.pm._handleConnection(p, {});
   const ask = { type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, pubkey: identity.ed25519Pubkey, crowId: identity.crowId };
   if (pb) ask.pb = 1;
   if (challengeId !== undefined) ask.instance_id = challengeId;
   r.write(JSON.stringify(ask) + "\n");
-  assert.ok(await until(() => got.some((f) => f.type === "challenge"), 3000, 5), "the node sent its challenge");
+  assert.ok(await until(() => got.some((f) => f.type === "challenge"), W(3000), 5), "the node sent its challenge");
   const theirs = got.find((f) => f.type === "challenge");
   await r.opened;
   const hh = Buffer.from(r.handshakeHash).toString("hex");
@@ -447,13 +560,23 @@ const outKeyHex = (side, peerId) => side.mgr.getOutFeedKey(peerId)?.toString("he
 
 let marker = 9000;
 /** Markers both ways over the live link (or, with `expect: false`, none). */
-async function markers(x, y, { expect = true, label = "" } = {}) {
+async function markers(x, y, { expect = true, label = "", link: L = null } = {}) {
   const m1 = ++marker, m2 = ++marker;
   await writeAndEmit(x, m1, `${label} x→y`);
   await writeAndEmit(y, m2, `${label} y→x`);
   if (expect) {
-    assert.ok(await until(() => hasMemory(y.db, m1), 10_000), `${label}: marker x→y`);
-    assert.ok(await until(() => hasMemory(x.db, m2), 10_000), `${label}: marker y→x`);
+    // Per feed: peer, key prefix, length, replicating peers; per side: live
+    // streams per peer. peers=0 with a live stream, or a link closed with
+    // "Invalid open message", means one side's replication muxer was attached
+    // after the peer's first replication frames had gone by (replicate()
+    // runs only after async admission work): that link never replicates.
+    const one = (dir, k, f) => `${dir} ${k.slice(0, 10)} key=${f.key?.toString("hex").slice(0, 8)} len=${f.length} peers=${f.peers?.length ?? "?"}`;
+    const feeds = (s) => [...(s.mgr.outFeeds?.entries?.() ?? [])].map(([k, f]) => one("out", k, f))
+      .concat([...(s.mgr.inFeeds?.entries?.() ?? [])].map(([k, f]) => one("in", k, f)))
+      .concat([...(s.mgr._activeStreams?.entries?.() ?? [])].map(([k, set]) => `streams ${k.slice(0, 10)}=${set.size}`)).join(", ");
+    const diag = () => `x feeds [${feeds(x)}], y feeds [${feeds(y)}]; ${L ? `link: ${L.why()}` : `logs: ${pmLogs()}`}`;
+    assert.ok(await until(() => hasMemory(y.db, m1), W(10_000)), `${label}: marker x→y (${diag()})`);
+    assert.ok(await until(() => hasMemory(x.db, m2), W(10_000)), `${label}: marker y→x (${diag()})`);
     return { xy: true, yx: true };
   }
   await sleep(1000);
@@ -493,7 +616,7 @@ test("U-H1 new↔new: both offer pb, both send a pair-binding frame with pb_mac 
       const { a, b } = await makePair(t, { shape });
       const A = newNode(a), B = newNode(b);
       const L = await link(t, A, B, { xInitiator: aInit });
-      assert.ok(await until(() => A.spies.instanceConnected.length === 1 && B.spies.instanceConnected.length === 1, 8000), `${label}: admitted both ways`);
+      assert.ok(await until(() => A.spies.instanceConnected.length === 1 && B.spies.instanceConnected.length === 1, W(8000)), `${label}: admitted both ways`);
       for (const [w, who] of [[L.wx, "A"], [L.wy, "B"]]) {
         assert.equal(framesOf(w, "challenge")[0]?.pb, 1, `${label}: ${who} offers pb`);
         const resp = framesOf(w, "challenge-response");
@@ -508,8 +631,8 @@ test("U-H1 new↔new: both offer pb, both send a pair-binding frame with pb_mac 
       }
       assert.deepEqual(A.spies.instanceConnected, [[SHARED_CROW_ID, b.id]]);
       assert.deepEqual(B.spies.instanceConnected, [[SHARED_CROW_ID, a.id]]);
-      assert.ok(await until(async () => (await pairPin(a, b.id)) === "1" && (await pairPin(b, a.id)) === "1", 3000), `${label}: both pinned`);
-      assert.ok(await until(() => A.spies.keyReceived.length === 1 && B.spies.keyReceived.length === 1, 5000), `${label}: feed keys both ways`);
+      assert.ok(await until(async () => (await pairPin(a, b.id)) === "1" && (await pairPin(b, a.id)) === "1", W(3000)), `${label}: both pinned`);
+      assert.ok(await until(() => A.spies.keyReceived.length === 1 && B.spies.keyReceived.length === 1, W(5000)), `${label}: feed keys both ways`);
       assert.equal(feedKeyVia(L.wx), "instance-key");
       assert.equal(feedKeyVia(L.wy), "instance-key");
       assert.deepEqual(A.spies.keyReceived, [[b.id, outKeyHex(b, a.id)]]);
@@ -520,7 +643,7 @@ test("U-H1 new↔new: both offer pb, both send a pair-binding frame with pb_mac 
       assert.equal(h.unboundPeers[b.id], undefined);
       // The binding does not depend on the row shape; replication does
       // (handleInstanceConnection filters crow_id = the claimed Crow ID).
-      if (shape === "crow") await markers(a, b, { label });
+      if (shape === "crow") await markers(a, b, { label, link: L });
     }
   }
 });
@@ -532,7 +655,7 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
     _resetPeerTrustHealth();
     const A = newNode(a);
     const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "control: B's real key is admitted");
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), "control: B's real key is admitted");
     assert.equal(R.closed, false);
     assert.equal(await pairPin(a, b.id), "1", "control: A pinned B");
     // A answered the raw node's pb:1 offer, after its proof, with a MAC under the pair key.
@@ -544,7 +667,7 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
     logs.length = 0;
     const A = newNode(a);
     const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id });
-    assert.ok(await until(() => R.closed, 5000), "pinned: destroyed");
+    assert.ok(await until(() => R.closed, W(5000)), "pinned: destroyed");
     await sleep(100);
     assert.ok(refusedFor("guard:pb_required_pinned"), "pinned: guard:pb_required_pinned");
     assertInert(A, "U-H2 pinned", { frames: R.pmFrames });
@@ -554,7 +677,7 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
     logs.length = 0;
     const A = newNode(a);
     const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: randomBytes(32).toString("hex") });
-    assert.ok(await until(() => R.closed, 5000), "wrong key: destroyed");
+    assert.ok(await until(() => R.closed, W(5000)), "wrong key: destroyed");
     await sleep(100);
     assert.ok(refusedFor("guard:pb_invalid"), "wrong key: guard:pb_invalid");
     assertInert(A, "U-H2 wrong key", { frames: R.pmFrames });
@@ -565,14 +688,14 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
     logs.length = 0;
     const A = newNode(p2.a, { mode: "require" });
     const R = await rawSibling(t, A, p2.identity, { challengeId: p2.b.id, responseId: p2.b.id });
-    assert.ok(await until(() => R.closed, 5000), "require: destroyed");
+    assert.ok(await until(() => R.closed, W(5000)), "require: destroyed");
     await sleep(100);
     assert.ok(refusedFor("guard:pb_required"), "require: guard:pb_required");
     assertInert(A, "U-H2 require", { frames: R.pmFrames });
     // Control, same harness: the real key is admitted in require.
     const A2 = newNode(p2.a, { mode: "require" });
     await rawSibling(t, A2, p2.identity, { challengeId: p2.b.id, responseId: p2.b.id, pbKeyHex: p2.pairKey });
-    assert.ok(await until(() => A2.spies.instanceConnected.length === 1, 5000), "require control: the real key is admitted");
+    assert.ok(await until(() => A2.spies.instanceConnected.length === 1, W(5000)), "require control: the real key is admitted");
   }
 });
 
@@ -606,8 +729,8 @@ async function mixedLeg(t, { which, newInit, setup, expect }) {
   const L = await link(t, N, O, { xInitiator: newInit });
   const row = { leg: label, which, order: newInit ? "new=initiator" : "old=initiator", setup };
   if (expect === "admit") {
-    assert.ok(await until(() => N.spies.instanceConnected.length === 1 && O.spies.instanceConnected.length === 1, 8000), `${label}: admitted both ways`);
-    assert.ok(await until(() => N.spies.keyReceived.length === 1 && O.spies.keyReceived.length === 1, 5000), `${label}: feed keys both ways`);
+    assert.ok(await until(() => N.spies.instanceConnected.length === 1 && O.spies.instanceConnected.length === 1, W(8000)), `${label}: admitted both ways`);
+    assert.ok(await until(() => N.spies.keyReceived.length === 1 && O.spies.keyReceived.length === 1, W(5000)), `${label}: feed keys both ways`);
     const viaNew = feedKeyVia(L.wx), viaOld = feedKeyVia(L.wy);
     assert.equal(viaNew, which === "pt3" ? "instance-key" : "piggyback", `${label}: new→old feed key`);
     assert.equal(viaOld, which === "pt3" ? "instance-key" : "piggyback", `${label}: old→new feed key`);
@@ -615,12 +738,12 @@ async function mixedLeg(t, { which, newInit, setup, expect }) {
     assert.deepEqual(O.spies.keyReceived, [[n.id, outKeyHex(n, o.id)]]);
     assert.equal(framesOf(L.wx, "challenge-response")[0]?.pb_mac, undefined, `${label}: no pb_mac in the cb reply`);
     assert.deepEqual(framesOf(L.wx, "pair-binding"), [], `${label}: the old node asked without pb, so no pair-binding frame`);
-    const m = await markers(n, o, { label });
+    const m = await markers(n, o, { label, link: L });
     assert.match(getPeerTrustHealth().unboundPeers[o.id]?.message || "", /without pair binding/, `${label}: the new side raises "without pair binding"`);
     assert.equal(await pairPin(n, o.id), null, `${label}: no pair pin for a legacy peer`);
     Object.assign(row, { newSide: "admitted (legacy)", oldSide: "admitted", keyNewToOld: viaNew, keyOldToNew: viaOld, markerNewToOld: m.xy, markerOldToNew: m.yx });
   } else {
-    assert.ok(await until(() => L.st.xClosed, 8000), `${label}: the new side destroys the connection`);
+    assert.ok(await until(() => L.st.xClosed, W(8000)), `${label}: the new side destroys the connection`);
     await sleep(300);
     assert.ok(refusedFor(expect), `${label}: refused ${expect} (${logs.filter((l) => l.includes("refused")).join(" | ")})`);
     assertInert(N, label, { frames: L.wx });
@@ -660,7 +783,7 @@ test("U-H4 relay (regression, closed by PT-3's cb_sig): a non-seed relay between
     const { a, b } = await makePair(t);
     const A = newNode(a), B = newNode(b);
     await link(t, A, B);
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1 && B.spies.instanceConnected.length === 1, 8000), "control: direct link admitted");
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1 && B.spies.instanceConnected.length === 1, W(8000)), "control: direct link admitted");
   }
   logs.length = 0;
   const { a, b } = await makePair(t);
@@ -670,7 +793,7 @@ test("U-H4 relay (regression, closed by PT-3's cb_sig): a non-seed relay between
   const sa = new NoiseSecretStream(true, a1), ma = new NoiseSecretStream(false, m1);
   const mb = new NoiseSecretStream(true, m2), sb = new NoiseSecretStream(false, b1);
   for (const s of [sa, ma, mb, sb]) s.on("error", () => {});
-  t.after(() => { for (const s of [sa, ma, mb, sb]) s.destroy(); });
+  onTeardown(t, "relay streams", () => { for (const s of [sa, ma, mb, sb, a1, m1, m2, b1]) { try { s.destroy(); } catch {} } });
   ma.on("data", (d) => { try { mb.write(d); } catch {} });
   mb.on("data", (d) => { try { ma.write(d); } catch {} });
   let aClosed = false, bClosed = false;
@@ -681,7 +804,7 @@ test("U-H4 relay (regression, closed by PT-3's cb_sig): a non-seed relay between
   B.pm._handleConnection(sb, {});
   await Promise.all([sa.opened, sb.opened]);
   assert.notEqual(Buffer.from(sa.handshakeHash).toString("hex"), Buffer.from(sb.handshakeHash).toString("hex"), "the two legs have different handshake hashes");
-  assert.ok(await until(() => aClosed && bClosed, 8000), "both sides destroy the relayed connection");
+  assert.ok(await until(() => aClosed && bClosed, W(8000)), "both sides destroy the relayed connection");
   await sleep(200);
   assert.ok(refusedFor("key") || logs.some((l) => l.includes("did not prove our key")), "refused: the cb_sig does not verify on the other leg");
   assertInert(A, "U-H4 A", { frames: wa });
@@ -715,7 +838,7 @@ test("U-H5 the guard runs inside the frame chain: an instance-key sent right aft
     const ev = timed(A);
     const t0 = Date.now();
     await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, after: [{ type: "instance-key", instance_id: b.id, feed_key_hex: FEED }] });
-    assert.ok(await until(() => ev.some((e) => e[0] === "key"), 5000), "ok: the key is applied");
+    assert.ok(await until(() => ev.some((e) => e[0] === "key"), W(5000)), "ok: the key is applied");
     const g = ev.find((e) => e[0] === "guard"), k = ev.find((e) => e[0] === "key");
     assert.equal(g[2], true, "ok: legacy in auto");
     assert.ok(g[1] - t0 >= 450, "the pin lookup was delayed");
@@ -728,7 +851,7 @@ test("U-H5 the guard runs inside the frame chain: an instance-key sent right aft
     const A = newNode(a, { db: slowDb });
     const ev = timed(A);
     const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, after: [{ type: "instance-key", instance_id: b.id, feed_key_hex: FEED }] });
-    assert.ok(await until(() => R.closed, 5000), "pinned: destroyed");
+    assert.ok(await until(() => R.closed, W(5000)), "pinned: destroyed");
     await sleep(700);
     assert.deepEqual(ev.map((e) => e[0]), ["guard"], "pinned: the guard refused and no key was applied");
     assert.ok(refusedFor("guard:pb_required_pinned"));
@@ -748,7 +871,7 @@ test("U-H6 a sibling without an instance id (auto): replicates and refreshes onl
     // Control: nothing pinned → both rows ride the connection.
     const A = newNode(a);
     await rawSibling(t, A, identity, {});
-    assert.ok(await until(() => A.spies.replicate.length === 2, 5000), "control: both rows replicate");
+    assert.ok(await until(() => A.spies.replicate.length === 2, W(5000)), "control: both rows replicate");
     assert.deepEqual([...A.spies.replicate].sort(), [bId, cId].sort());
     assert.deepEqual(A.spies.instanceConnected, [[SHARED_CROW_ID, null]]);
   }
@@ -757,7 +880,7 @@ test("U-H6 a sibling without an instance id (auto): replicates and refreshes onl
   {
     const A = newNode(a);
     await rawSibling(t, A, identity, {});
-    assert.ok(await until(() => A.spies.replicate.length === 1, 5000), "pinned: one row replicates");
+    assert.ok(await until(() => A.spies.replicate.length === 1, W(5000)), "pinned: one row replicates");
     await sleep(300);
     assert.deepEqual(A.spies.replicate, [cId], "only the unpinned row");
     assert.notEqual(await seen(cId), "2000-01-01 00:00:00", "the unpinned row is marked seen");
@@ -767,7 +890,7 @@ test("U-H6 a sibling without an instance id (auto): replicates and refreshes onl
     logs.length = 0;
     const A = newNode(a, { mode: "require" });
     const R = await rawSibling(t, A, identity, {});
-    assert.ok(await until(() => R.closed, 5000), "require: destroyed");
+    assert.ok(await until(() => R.closed, W(5000)), "require: destroyed");
     await sleep(100);
     assert.ok(refusedFor("guard:pb_required"));
     assertInert(A, "U-H6 require", { frames: R.pmFrames });
@@ -778,7 +901,7 @@ test("U-H6 a sibling without an instance id (auto): replicates and refreshes onl
 test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound → legacy in auto (no Nest record: no row), refused in require; a trusted row that is unbound IS recorded; the production lookup over a 0600 store sends a pair-binding MAC and binds", T, async (t) => {
   const { identity, a, b, pairKey } = await makePair(t);
   const dir = mkdtempSync(join(tmpdir(), "pt2a-hs-store-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  onTeardown(t, `rm ${dir}`, () => removeDir(dir));
   const store = join(dir, "peer-tokens.json");
   writeFileSync(store, JSON.stringify({ "inst-real": { signing_key: randomBytes(32).toString("hex") }, [b.id]: { signing_key: pairKey } }), { mode: 0o600 });
   chmodSync(store, 0o600);
@@ -791,7 +914,7 @@ test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound �
     _resetPeerTrustHealth();
     const A = newNode(a, { pairKeyLookup: defaultPairKey });
     const R = await rawSibling(t, A, identity, { challengeId: "constructor" });
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "auto: admitted as legacy");
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), "auto: admitted as legacy");
     assert.deepEqual(A.spies.instanceConnected, [[SHARED_CROW_ID, "constructor"]]);
     assert.equal(framesOf(R.pmFrames, "challenge-response")[0]?.pb_mac, undefined);
     assert.equal(framesOf(R.pmFrames, "pair-binding")[0]?.pb_mac, null, "no MAC for an id the store does not own");
@@ -805,7 +928,7 @@ test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound �
     _resetPeerTrustHealth();
     const A = newNode(a, { pairKeyLookup: defaultPairKey, mode: "require" });
     const R = await rawSibling(t, A, identity, { challengeId: "constructor" });
-    assert.ok(await until(() => R.closed, 5000), "require: destroyed");
+    assert.ok(await until(() => R.closed, W(5000)), "require: destroyed");
     await sleep(100);
     assert.ok(refusedFor("guard:pb_required"));
     assert.deepEqual(Object.keys(getPeerTrustHealth().pairBindingRefusals), [], "no Nest record for an id with no row");
@@ -816,7 +939,7 @@ test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound �
     _resetPeerTrustHealth();
     const A = newNode(a, { pairKeyLookup: defaultPairKey });
     await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id });
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "unbound B: admitted as legacy");
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), "unbound B: admitted as legacy");
     assert.match(getPeerTrustHealth().unboundPeers[b.id]?.message || "", /without pair binding/, "a trusted row gets the record");
     assert.equal(await pairPin(a, b.id), null);
   }
@@ -825,7 +948,7 @@ test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound �
     // pair-binding frame carries the MAC, and B's MAC binds and pins.
     const A = newNode(a, { pairKeyLookup: defaultPairKey });
     const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "bound B: admitted");
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), "bound B: admitted");
     const hh = Buffer.from(R.conn.handshakeHash).toString("hex");
     assert.equal(framesOf(R.pmFrames, "pair-binding")[0]?.pb_mac,
       hyperswarmMac(pairSubkey(pairKey), { responder: a.id, challenger: b.id, challenge: R.ask.challenge, handshakeHash: hh }));
@@ -841,7 +964,7 @@ test("U-H7d (real guard) self-loopback is killed before the guard: no Nest recor
     _resetPeerTrustHealth();
     const A = newNode(a, { mode: "require" });
     const R = await rawSibling(t, A, identity, { challengeId: b.id });
-    assert.ok(await until(() => R.closed, 5000));
+    assert.ok(await until(() => R.closed, W(5000)));
     assert.equal(getPeerTrustHealth().pairBindingRefusals[b.id]?.reason, "pb_required", "control: the recorder is live");
   }
   for (const mode of ["auto", "require"]) {
@@ -849,7 +972,7 @@ test("U-H7d (real guard) self-loopback is killed before the guard: no Nest recor
       _resetPeerTrustHealth();
       const A = newNode(a, { mode });
       const R = await rawSibling(t, A, identity, where === "challenge" ? { challengeId: a.id } : { responseId: a.id });
-      assert.ok(await until(() => R.closed, 5000), `${mode}/${where}: destroyed`);
+      assert.ok(await until(() => R.closed, W(5000)), `${mode}/${where}: destroyed`);
       await sleep(150);
       const h = getPeerTrustHealth();
       assert.deepEqual(Object.keys(h.unboundPeers), [], `${mode}/${where}: no unbound record`);
@@ -872,19 +995,24 @@ test("U-H8 unwired (I3): instance sync on and no guard refuses a genuine sibling
   for (let i = 0; i < 2; i++) {
     const B = newNode(b);
     const L = await link(t, A, B);
-    assert.ok(await until(() => L.st.xClosed, 5000), `unwired #${i + 1}: destroyed`);
-    await sleep(100);
-    assert.deepEqual(calls, []);
-    assert.deepEqual(framesOf(L.wx, "instance-key"), []);
-    assert.deepEqual(framesOf(L.wx, "authenticated"), []);
-    assert.deepEqual(B.spies.instanceConnected, []);
+    const n = `unwired #${i + 1}`;
+    // Causal: A itself closed x, through the unwired fail-closed path (a bare
+    // kill, no _refuseInstance reason). Anything else closing x first (B, a
+    // cap, the pre-auth timer) shows up in L.why().
+    assert.ok(await until(() => L.st.xClosed, W(5000)), `${n}: destroyed (${L.why()})`);
+    assert.deepEqual(killsOn(A, L.x), ["kill"], `${n}: A closed it on the unwired path (${L.why()})`);
+    await sleep(100); // late fires would land by now
+    assert.deepEqual(calls, [], `${n}: no callback ran (${L.why()})`);
+    assert.deepEqual(framesOf(L.wx, "instance-key"), [], `${n}: no instance-key (${L.why()})`);
+    assert.deepEqual(framesOf(L.wx, "authenticated"), [], `${n}: no authenticated (${L.why()})`);
+    assert.deepEqual(B.spies.instanceConnected, [], `${n}: B never connected (${L.why()})`);
   }
-  assert.equal(logs.filter((l) => l.includes("guard:unwired")).length, 1, "logged once");
+  assert.equal(logs.filter((l) => l.includes("guard:unwired")).length, 1, `logged once (logs: ${pmLogs()})`);
   refusalRegistry.push({ label: "U-H8 unwired", N: { spies: { instanceConnected: calls.filter((c) => c[0] === "connected"), keyReceived: calls.filter((c) => c[0] === "key"), feedKeyAsked: calls.filter((c) => c[0] === "feed"), replicate: A.spies.replicate } } });
 
   const A2 = newNode(a), B2 = newNode(b);
-  await link(t, A2, B2);
-  assert.ok(await until(() => A2.spies.instanceConnected.length === 1 && B2.spies.instanceConnected.length === 1, 8000), "control: wired → admitted");
+  const L2 = await link(t, A2, B2);
+  assert.ok(await until(() => A2.spies.instanceConnected.length === 1 && B2.spies.instanceConnected.length === 1, W(8000)), `control: wired → admitted (${L2.why()})`);
 });
 
 // ================================================================ U-X1
@@ -892,20 +1020,27 @@ test("U-X1 one pin, both transports: a peer pinned by a bound TAILNET handshake 
   _setAllowLoopbackAddressesForTest(true);
   t.after(() => _setAllowLoopbackAddressesForTest(false));
   const fleet = await makeFleet();
-  t.after(() => fleet.cleanup());
   const { a, b, identity } = fleet;
   a.identity = identity; b.identity = identity;
+  a.t = t; b.t = t;
+  for (const side of [a, b]) guardSideOpens(side);
+  // LIFO: managers close (after the opens in flight), then DBs and keepers, then the fixture removes the dirs.
+  onTeardown(t, "fleet dirs", () => (a.quiet && b.quiet ? fleet.cleanup() : realConsole.error("[teardown] fleet dirs left in place, feed opens still in flight")));
+  onTeardown(t, "fleet dbs", () => { for (const side of [a, b]) { try { side.db.close?.(); } catch {} releaseDbFiles(side.dir); } });
+  onTeardown(t, "fleet mgrs", () => Promise.all([closeSide(a), closeSide(b)]));
   const quiet = { warn: () => {}, log: () => {} };
   const GA = await startGateway(fleet, a, { log: quiet });
+  onTeardown(t, "gateway A", () => GA.close());
   const GB = await startGateway(fleet, b, { log: quiet });
+  onTeardown(t, "gateway B", () => GB.close());
   try {
     assert.equal(await pairPin(a, b.id), null, "no pin before the tailnet handshake");
     await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${GB.port}`, b.id] });
     await GA.startClients();
-    assert.ok(await until(() => a.mgr.hasDedicatedStream(b.id) && b.mgr.hasDedicatedStream(a.id), 10_000), "the tailnet link forms");
-    assert.ok(await until(async () => (await pairPin(a, b.id)) === "1", 3000), "the bound tailnet handshake pinned B on A");
+    assert.ok(await until(() => a.mgr.hasDedicatedStream(b.id) && b.mgr.hasDedicatedStream(a.id), W(10_000)), "the tailnet link forms");
+    assert.ok(await until(async () => (await pairPin(a, b.id)) === "1", W(3000)), "the bound tailnet handshake pinned B on A");
     GA.stopClients();
-    assert.ok(await until(() => !a.mgr.hasDedicatedStream(b.id) && !b.mgr.hasDedicatedStream(a.id), 5000), "the tailnet link is torn down");
+    assert.ok(await until(() => !a.mgr.hasDedicatedStream(b.id) && !b.mgr.hasDedicatedStream(a.id), W(5000)), "the tailnet link is torn down");
   } finally {
     await GA.close();
     await GB.close();
@@ -915,14 +1050,14 @@ test("U-X1 one pin, both transports: a peer pinned by a bound TAILNET handshake 
   _resetPeerTrustHealth();
   const A = newNode(a);
   const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id });
-  assert.ok(await until(() => R.closed, 5000), "unbound on Hyperswarm: destroyed");
+  assert.ok(await until(() => R.closed, W(5000)), "unbound on Hyperswarm: destroyed");
   await sleep(100);
   assert.ok(refusedFor("guard:pb_required_pinned"), "refused guard:pb_required_pinned");
   assertInert(A, "U-X1 unbound", { frames: R.pmFrames });
 
   const A2 = newNode(a), B2 = newNode(b);
   await link(t, A2, B2);
-  assert.ok(await until(() => A2.spies.instanceConnected.length === 1 && B2.spies.instanceConnected.length === 1, 8000), "control: the real key is admitted on Hyperswarm");
+  assert.ok(await until(() => A2.spies.instanceConnected.length === 1 && B2.spies.instanceConnected.length === 1, W(8000)), "control: the real key is admitted on Hyperswarm");
   assert.equal(await pairPin(b, a.id), "1");
 });
 
@@ -932,17 +1067,16 @@ test("U-H10 stranger probes (no seed, our public Crow ID, pb:1, cb:1): a paired 
   const stranger = deriveInstanceIdentity(randomBytes(32));
   const probe = async (claimId) => {
     const A = newNode(a);
-    const [p, r] = await streams(true);
+    const [p, r] = await streams(t, true);
     const pmFrames = tapWrites(p);
     let closed = false;
     r.once("close", () => { closed = true; });
-    t.after(() => { p.destroy(); r.destroy(); });
     A.pm._handleConnection(p, {});
     r.write(JSON.stringify({ type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, pb: 1, pubkey: stranger.ed25519Pubkey, crowId: identity.crowId, instance_id: claimId }) + "\n");
-    assert.ok(await until(() => pmFrames.some((f) => f.type === "challenge-response"), 3000), `${claimId}: answered`);
+    assert.ok(await until(() => pmFrames.some((f) => f.type === "challenge-response"), W(3000)), `${claimId}: answered`);
     // It cannot prove our key: its own response fails.
     r.write(JSON.stringify({ type: "challenge-response", crowId: identity.crowId, pubkey: identity.ed25519Pubkey, cb_sig: "00".repeat(64) }) + "\n");
-    assert.ok(await until(() => closed, 3000), `${claimId}: refused`);
+    assert.ok(await until(() => closed, W(3000)), `${claimId}: refused`);
     await sleep(100);
     assertInert(A, `U-H10 ${claimId}`, { frames: pmFrames });
     return pmFrames;
@@ -967,15 +1101,16 @@ test("U-H12 a peer that offers cb:1/pb:1 but proves with a bare signature (host 
     // Control: the same offer proven with a cb_sig gets the frame.
     const A = newNode(a);
     const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000));
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)));
     assert.equal(framesOf(R.pmFrames, "pair-binding").length, 1, "control: a cb_sig prover gets the frame");
   }
   const p2 = await makePair(t); // unpinned host (no instance_hs_cb:, no pair pin)
-  const A = newNode(p2.a, { pairBindingWaitMs: 5000 });
+  // A wait far longer than any admission takes: deciding inside it proves A did not wait.
+  const A = newNode(p2.a, { pairBindingWaitMs: 60_000 });
   const t0 = Date.now();
   const R = await rawSibling(t, A, p2.identity, { challengeId: p2.b.id, responseId: p2.b.id, proof: "sig", pbFrame: false });
-  assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "admitted as legacy");
-  assert.ok(Date.now() - t0 < 4000, "decided without waiting for a frame");
+  assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), "admitted as legacy");
+  assert.ok(Date.now() - t0 < 30_000, "decided without waiting for a frame");
   await sleep(200);
   assert.deepEqual(framesOf(R.pmFrames, "pair-binding"), [], "no pair-binding frame for a bare-signature prover");
   assert.equal(await pairPin(p2.a, p2.b.id), null);
@@ -987,14 +1122,14 @@ test("U-H11 a sibling that offers pb but never sends its pair-binding frame is r
   {
     const A = newNode(a, { pairBindingWaitMs: 300 });
     await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
-    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "control: the frame arrives, admitted");
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), "control: the frame arrives, admitted");
   }
   logs.length = 0;
   const A = newNode(a, { pairBindingWaitMs: 300 });
   assert.equal(A.pm.pairBindingWaitMs, 300);
   const t0 = Date.now();
   const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbFrame: false });
-  assert.ok(await until(() => R.closed, 5000), "destroyed");
+  assert.ok(await until(() => R.closed, W(5000)), "destroyed");
   assert.ok(Date.now() - t0 >= 250, "after the wait");
   await sleep(100);
   assert.ok(refusedFor("guard:pb_timeout"), "refused guard:pb_timeout");

@@ -166,3 +166,15 @@ test("the kiosk passes the shared hint through unchanged (no kiosk change needed
   const o = displayTurnOptions(ctx, { settings: { lang: "es" }, crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS } });
   assert.equal(o.hintText, VOICE_LINES.es.hint_say);
 });
+
+test("crowVoiceTurnOptions: relayThreadId passes through, blank is dropped; relayKind rides with it", () => {
+  assert.equal(crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: "thread-1" }).relayThreadId, "thread-1");
+  assert.equal(crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: "thread-1" }).relayKind, "operator", "the default");
+  assert.equal(crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: "thread-1", relayKind: "answer" }).relayKind, "answer");
+  assert.equal(crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: "thread-1", relayKind: "bogus" }).relayKind, "answer", "an unknown kind is the safer one");
+  for (const blank of [undefined, null, "", "   ", 7]) {
+    const o = crowVoiceTurnOptions({ surface: "phone", lang: "en", relayThreadId: blank, relayKind: "answer" });
+    assert.equal("relayThreadId" in o, false, String(blank));
+    assert.equal("relayKind" in o, false, "no relay, no kind");
+  }
+});

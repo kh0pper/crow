@@ -509,6 +509,24 @@ test("fallback-offer mode: a no writes nothing and speaks declined (Spanish too)
   } finally { s.close(); }
 });
 
+test("a routine no is a no only as the whole utterance: 'I changed my mind, make it 5pm' falls through, bare 'forget it' declines", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    for (const [lang, through, bare] of [["en", "I changed my mind, make it 5pm", "forget it"], ["es", "déjalo a las cinco", "déjalo"]]) {
+      const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang, tz: TZ });
+      const r = await run(toolOf(set, "crow_reminder_add"), { text: "lunch", at: "2026-10-26T12:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE, fallback: "calendar" });
+      assert.equal(r.code, "needs_confirm");
+      assert.equal(await own.fastPath({ db: s.db, device: DEVICE, transcript: through, lang, tz: TZ, bot: CROW(), executor: null }), null, through);
+      assert.ok(own.turnContext({ device: DEVICE }).pending, "still waiting: the model hears the correction");
+      const out = await own.fastPath({ db: s.db, device: DEVICE, transcript: bare, lang, tz: TZ, bot: CROW(), executor: null });
+      assert.deepEqual(out, { say: voiceLine("declined", lang), verb: "routine_no" }, bare);
+      assert.equal(own.turnContext({ device: DEVICE }), null);
+    }
+    assert.deepEqual(await s.schedules(), []);
+  } finally { s.close(); }
+});
+
 test("a pending entry on device A is not taken by device B; no device, no fast path", async () => {
   const s = await stores();
   try {

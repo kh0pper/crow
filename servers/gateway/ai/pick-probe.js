@@ -42,10 +42,14 @@ function requestFor(row, modelId, kind) {
     };
   } else {
     url = `${base}/chat/completions`;
+    // A preset whose models refuse "required" (Model Studio) asks with its own
+    // tool_choice and extra fields; the pass rule in judge() is the same.
+    const probe = preset?.probe || {};
     body = {
+      ...(probe.extraBody || {}),
       model: modelId, messages: [{ role: "user", content: PROMPT }],
       tools: [{ type: "function", function: { name: PROBE_TOOL, parameters: TOOL_SCHEMA } }],
-      tool_choice: "required", max_tokens: 64,
+      tool_choice: typeof probe.toolChoice === "string" ? probe.toolChoice : "required", max_tokens: 64,
     };
   }
   return { url, headers, body: JSON.stringify(body), anthropic, mode: preset ? "cloud" : "other" };

@@ -113,9 +113,11 @@ export const SYNCED_TABLES = [
   "ramble_wallet",
 ];
 
-// Tables that must NEVER leave this machine (Crow keychain: human passwords). The
-// keychain has its own key file, but its rows are still never replicated. Checked at load.
-export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain"]);
+// Tables that must NEVER leave this machine (Crow keychain: human passwords; voice_handoffs:
+// the voice hand-off log, which holds the operator's verbatim speech and stays on the instance
+// that heard it). The keychain has its own key file, but its rows are still never replicated.
+// Checked at load.
+export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain", "voice_handoffs"]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {
     if (synced.includes(t)) throw new Error(`instance-sync: table ${t} is local-only and must never be in SYNCED_TABLES`);
@@ -207,6 +209,15 @@ export const INBOUND_DROPPED_COLUMNS = {
   research_notes: ["provenance", "quote_found", "locator", "source_id",
     "created_by", "withdrawn_at", "withdrawn_by", "withdrawn_reason"],
 };
+
+// A wire-row key may only reach SQL as an identifier if it matches this AND is
+// a real column of the table (see InstanceSyncManager._wireColumnsValid).
+const SQL_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Double-quote an identifier. Callers pass only SQL_IDENT_RE-valid names or
+// SYNCED_TABLES entries; the doubling of `"` is belt-and-braces.
+function quoteIdent(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
 
 /**
  * Inbound memories: project_id is local, project_uuid is portable. A row that
@@ -2950,11 +2961,18 @@ export class InstanceSyncManager {
         this._crowContextCols = null;
       }
     }
+    // The column names below are built from filteredRow's keys: without the
+    // PRAGMA whitelist we cannot vet them, so skip rather than build SQL from
+    // raw wire keys (same rule as _applyContact / _applyGroup).
+    if (!this._crowContextCols) {
+      console.warn("[instance-sync] _applyCrowContext: crow_context columns unavailable — skipping");
+      return;
+    }
     const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "updated_at"]);
     let filteredRow = {};
     for (const [k, v] of Object.entries(row)) {
       if (ALWAYS_DROP.has(k)) continue;
-      if (this._crowContextCols && !this._crowContextCols.has(k)) continue;
+      if (!this._crowContextCols.has(k)) continue;
       filteredRow[k] = v;
     }
 
@@ -3936,6 +3954,7 @@ export class InstanceSyncManager {
    * project_uuid was mapped to a local project_id); defaults to row.
    */
   async _applyInsert(table, row, lamportTs, instanceId, compareRow = row) {
+    if (!(await this._wireColumnsValid(table, row, "insert"))) return;
     const cols = Object.keys(row);
     // Add sync metadata
     if (!cols.includes("lamport_ts")) cols.push("lamport_ts");
@@ -3948,10 +3967,10 @@ export class InstanceSyncManager {
     });
 
     const placeholders = cols.map(() => "?").join(", ");
-    const colNames = cols.join(", ");
+    const colNames = cols.map(quoteIdent).join(", ");
 
     const result = await this.db.execute({
-      sql: `INSERT OR IGNORE INTO ${table} (${colNames}) VALUES (${placeholders})`,
+      sql: `INSERT OR IGNORE INTO ${quoteIdent(table)} (${colNames}) VALUES (${placeholders})`,
       args: values,
     });
 
@@ -4003,6 +4022,7 @@ export class InstanceSyncManager {
    * Apply an update operation from a remote instance.
    */
   async _applyUpdate(table, row, lamportTs) {
+    if (!(await this._wireColumnsValid(table, row, "update"))) return;
     if (row.id === undefined) return;
 
     const updates = [];
@@ -4010,18 +4030,18 @@ export class InstanceSyncManager {
 
     for (const [key, value] of Object.entries(row)) {
       if (key === "id") continue;
-      updates.push(`${key} = ?`);
+      updates.push(`${quoteIdent(key)} = ?`);
       params.push(value ?? null);
     }
 
     // Always update lamport_ts
-    updates.push("lamport_ts = ?");
+    updates.push(`"lamport_ts" = ?`);
     params.push(lamportTs);
 
     params.push(row.id);
 
     await this.db.execute({
-      sql: `UPDATE ${table} SET ${updates.join(", ")} WHERE id = ?`,
+      sql: `UPDATE ${quoteIdent(table)} SET ${updates.join(", ")} WHERE "id" = ?`,
       args: params,
     });
   }
@@ -4036,6 +4056,46 @@ export class InstanceSyncManager {
       sql: `DELETE FROM ${table} WHERE id = ?`,
       args: [row.id],
     });
+  }
+
+  /**
+   * Gate for the generic appliers: a wire row's KEYS become SQL identifiers
+   * there (only values are bound), so before any SQL is built the table must
+   * be in SYNCED_TABLES and every key must be a plain identifier that names a
+   * real column of that table (PRAGMA table_info, cached per table; a miss
+   * re-reads once, so a column added at runtime is picked up). Any bad key
+   * rejects the WHOLE entry — nothing is applied. Keys listed in
+   * INBOUND_DROPPED_COLUMNS were already stripped in _applyEntry. A column we
+   * don't have (older/newer peer) is rejected too; before this gate the same
+   * entry failed at SQLite with "no such column", so no working path is lost.
+   */
+  async _wireColumnsValid(table, row, op) {
+    const reject = (why) => {
+      console.error(`[instance-sync] REJECTED inbound ${op} on ${String(table).slice(0, 64)} id=${String(row?.id ?? "?").slice(0, 64)}: ${why} — entry not applied`);
+      return false;
+    };
+    if (!SYNCED_TABLES.includes(table)) return reject("table not in SYNCED_TABLES");
+    if (!row || typeof row !== "object") return reject("row is not an object");
+    if (!this._wireColsCache) this._wireColsCache = new Map();
+    const load = async () => {
+      try {
+        const { rows } = await this.db.execute({ sql: `PRAGMA table_info(${quoteIdent(table)})`, args: [] });
+        const set = new Set(rows.map((r) => r.name));
+        if (set.size) this._wireColsCache.set(table, set);
+        return set;
+      } catch {
+        return new Set();
+      }
+    };
+    let cols = this._wireColsCache.get(table) || await load();
+    for (const key of Object.keys(row)) {
+      if (!SQL_IDENT_RE.test(key)) return reject(`invalid column name ${JSON.stringify(key.slice(0, 64))}`);
+      if (!cols.has(key)) {
+        cols = await load();
+        if (!cols.has(key)) return reject(`unknown column ${JSON.stringify(key.slice(0, 64))}`);
+      }
+    }
+    return true;
   }
 
   /**

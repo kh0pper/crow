@@ -24,7 +24,7 @@ import { buildIdentityBackup, loadInstanceSeed, deriveInstanceIdentity } from ".
 import { instanceSeedDir } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { PROVIDER_PRESETS, presetById } from "../../../shared/provider-presets.js";
 import { candidatePick } from "../../../shared/provider-recommendations.js";
-import { addProviderSheetHtml, addProviderClientJS } from "../shared/add-provider-ui.js";
+import { addProviderSheetHtml, addProviderClientJS, variantOptionsHtml } from "../shared/add-provider-ui.js";
 import { aiStepClientJS } from "./onboarding/ai-step-client.js";
 import { upsertProvider, listProvidersAll } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
@@ -413,9 +413,11 @@ const CLOUD_ERROR_KEYS = {
 
 /** The error line for a closed-enum code, with {provider}/{host}/{status} filled from validated hints (never the key). */
 function cloudErrorLine(code, query, lang) {
-  const key = Object.hasOwn(CLOUD_ERROR_KEYS, code) ? CLOUD_ERROR_KEYS[code] : null;
+  let key = Object.hasOwn(CLOUD_ERROR_KEYS, code) ? CLOUD_ERROR_KEYS[code] : null;
   if (!key) return null;
   const preset = presetById(typeof query?.cloud_preset === "string" ? query.cloud_preset : "");
+  // A preset with its own rejected-key line (Model Studio: "is it the right region?"), as the sheet shows.
+  if (code === "key_rejected" && preset?.keyRejectedKey) key = preset.keyRejectedKey;
   const status = /^\d{3}$/.test(String(query?.cloud_status ?? "")) ? String(query.cloud_status) : "";
   let host = "";
   const url = preset?.baseUrl || preset?.variants?.[0]?.baseUrl;
@@ -450,9 +452,11 @@ function renderAiOptions(lang, ctx = {}) {
 
   const presetOptions = PROVIDER_PRESETS.map((p) =>
     `<option value="${escapeHtml(p.id)}">${escapeHtml(t(p.labelKey, lang))}</option>`).join("");
-  const zai = PROVIDER_PRESETS.find((p) => Array.isArray(p.variants));
-  const variantOptions = (zai ? zai.variants : []).map((v) =>
-    `<option value="${escapeHtml(v.id)}">${escapeHtml(t(v.labelKey, lang))}</option>`).join("");
+  // Each preset's plans or regions under its own name; the POST keeps only the chosen preset's.
+  const variantOptions = variantOptionsHtml(lang);
+  // A preset's own key note (Model Studio: the key is region-bound), named so it reads without the sheet.
+  const presetNotes = PROVIDER_PRESETS.filter((p) => p.keyNoteKey).map((p) =>
+    `<p class="onb-ai-free-blurb">${escapeHtml(t(p.labelKey, lang))}: ${escapeHtml(t(p.keyNoteKey, lang))}</p>`).join("");
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
   const cloudError = cloudErrorText ? callout(cloudErrorText, "error") : "";
@@ -504,7 +508,7 @@ function renderAiOptions(lang, ctx = {}) {
         <label class="onb-ai-field">${t("onboarding.ai.cloudProviderLabel", lang)}
           <select name="preset" id="onb-ai-cloud-preset">${presetOptions}</select>
         </label>
-        <label class="onb-ai-field">${t("models.add.plan", lang)}
+        <label class="onb-ai-field">${t("models.add.planOrRegion", lang)}
           <select name="variant">${variantOptions}</select>
         </label>
         <label class="onb-ai-field">${t("models.add.baseUrl", lang)}
@@ -513,6 +517,7 @@ function renderAiOptions(lang, ctx = {}) {
         <label class="onb-ai-field">${t("onboarding.ai.cloudKeyLabel", lang)}
           <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" required>
         </label>
+        ${presetNotes}
         <label class="onb-ai-field">${t("onboarding.ai.cloudModelLabel", lang)}
           <input type="text" name="model" id="onb-ai-cloud-model" autocomplete="off">
         </label>
@@ -658,7 +663,9 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     const pick = pickFn(preset.id, "everyday");
     const model = typed || (pick && !pick.preview ? pick.model_id : "") || "";
     if (!model) return back("model_required", hint);
-    const variantId = typeof req.body?.variant === "string" && req.body.variant ? req.body.variant : undefined;
+    // A variant from another preset's group (the one list holds them all) means the default.
+    const rawVariant = typeof req.body?.variant === "string" ? req.body.variant : "";
+    const variantId = (preset.variants || []).some((v) => v.id === rawVariant) ? rawVariant : undefined;
     const baseUrl = preset.id === "other" && typeof req.body?.baseUrl === "string" ? req.body.baseUrl.trim() : undefined;
 
     // Loaded here, not at the top: the add flow pulls in the role/consumer modules, which a page render never needs.

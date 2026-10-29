@@ -318,3 +318,59 @@ test("busy, server-error, unreachable, redirect and timed-out checks are retryab
   assert.equal(e.code, "bad_embedding");
   assert.notEqual(e.retryable, true);
 });
+
+// --- Alibaba Model Studio: a probe without tool_choice "required" (ninth preset) --------
+
+const msRow = { id: "modelstudio", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", apiKey: KEY };
+
+test("modelstudio probes with tool_choice auto and thinking off; ok only when crow_probe comes back", async () => {
+  const good = stub(() => toolReply("crow_probe"));
+  assert.deepEqual(await probePick(msRow, "qwen3.8-max", { requestFn: good }), { ok: true, code: "ok" });
+  const c = good.calls[0];
+  assert.equal(c.url, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions");
+  assert.equal(c.mode, "cloud");
+  assert.equal(c.body.tool_choice, "auto");
+  assert.equal(c.body.enable_thinking, false);
+  assert.equal(c.body.model, "qwen3.8-max");
+  assert.equal(c.body.max_tokens, 64);
+  assert.equal(c.body.tools[0].function.name, "crow_probe");
+  assert.equal(c.headers.Authorization, `Bearer ${KEY}`);
+  // "auto" lets the model answer in text: that is still a failed check.
+  const text = stub(() => reply(200, { choices: [{ message: { content: "Sure, ok is true." } }] }));
+  assert.deepEqual(await probePick(msRow, "qwen3.8-max", { requestFn: text }), { ok: false, code: "no_tool_call" });
+  assert.equal((await probePick(msRow, "qwen3.8-max", { requestFn: stub(() => toolReply("other_tool")) })).code, "no_tool_call");
+  // Every region gets the same probe shape.
+  const hk = stub(() => toolReply("crow_probe"));
+  await probePick({ ...msRow, baseUrl: "https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1" }, "m", { requestFn: hk });
+  assert.equal(hk.calls[0].body.tool_choice, "auto");
+  assert.equal(hk.calls[0].body.enable_thinking, false);
+});
+
+test("other presets keep tool_choice required and send no extra body; an embed probe is unchanged on modelstudio", async () => {
+  for (const row of [openaiRow, otherRow, { id: "z", baseUrl: "https://api.z.ai/api/paas/v4", apiKey: KEY }]) {
+    const f = stub(() => toolReply("crow_probe"));
+    await probePick(row, "m", { requestFn: f });
+    assert.equal(f.calls[0].body.tool_choice, "required", row.baseUrl);
+    assert.equal(Object.hasOwn(f.calls[0].body, "enable_thinking"), false, row.baseUrl);
+  }
+  const e = stub(() => reply(200, { data: [{ embedding: [0.1] }] }));
+  assert.deepEqual(await probePick(msRow, "text-embedding-v4", { kind: "embed", requestFn: e }), { ok: true, code: "ok" });
+  assert.deepEqual(e.calls[0].body, { model: "text-embedding-v4", input: "ok" });
+});
+
+test("modelstudio probeRecommended: a row with no stored models probes the primaries; ticked ones narrow it", async () => {
+  const db = await freshDb();
+  const f = stub((url) => (url.endsWith("/embeddings") ? reply(200, { data: [{ embedding: [1] }] }) : toolReply("crow_probe")));
+  const out = await probeRecommended(db, "modelstudio", { roles: ["coordinator", "quick", "embed", "rerank"], requestFn: f, listRowsFn: async () => [{ ...msRow, models: [] }] });
+  assert.equal(out.coordinator.modelId, "qwen3.8-max");
+  assert.equal(out.quick.modelId, "qwen3.8-flash");
+  assert.equal(out.embed.modelId, "text-embedding-v4");
+  assert.equal(out.rerank, undefined);
+  for (const c of f.calls.filter((x) => x.url.endsWith("/chat/completions"))) assert.equal(c.body.tool_choice, "auto");
+
+  const db2 = await freshDb();
+  const g = stub(() => toolReply("crow_probe"));
+  const narrowed = await probeRecommended(db2, "modelstudio", { roles: ["coordinator", "quick"], requestFn: g, listRowsFn: async () => [{ ...msRow, models: [{ id: "qwen3.8-flash" }] }] });
+  assert.equal(narrowed.coordinator, undefined, "the coordinator primary was not ticked");
+  assert.equal(narrowed.quick.modelId, "qwen3.8-flash");
+});

@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
-  REPO, PT3_SHA, SYNC_TIMING, bootPair, pairInto, until, useLoopbackSync, writeMarker, hasMarker, markerDrained, pairPinned, settingsRevoke,
+  REPO, PT3_SHA, SYNC_TIMING, bootPair, pairInto, until, useLoopbackSync, writeMarker, hasMarker, markerDrained, outboxDiag, pairPinned, settingsRevoke,
 } from "./fixtures/peer-pair.mjs";
 import { oldTree } from "./fixtures/old-tree.mjs";
 import { makeRealDb, addPeerRow, writeAndEmit } from "./fixtures/sync-fleet.mjs";
@@ -85,19 +85,12 @@ async function flowsBoth(a, b, label) {
 
 /** A marker written on `from` is drained into its out-feed for `to`, and still never reaches `to`. */
 async function blocked(from, to, label) {
-  // The drain only counts once this marker's outbox row was SEEN queued
+  // The drain only counts once this marker's outbox row was recorded queued
   // (otherwise an outbox query that never matches would read as "drained").
-  // writeMarker looks right after the store, but the gateway's timed
-  // drain can still land in that gap: such a marker is inconclusive, not a
-  // pass, so write a fresh one. Every assertion below is on a marker that was
-  // seen queued; a query that never matches fails all attempts.
-  const ATTEMPTS = 3;
-  let text = null;
-  for (let i = 0; i < ATTEMPTS && !text; i++) {
-    const t = `pt2a ${label} ${from.name}->${to.name} ${tag()}`;
-    if ((await writeMarker(from, t)).queued) text = t;
-  }
-  assert.ok(text, `${label}: none of ${ATTEMPTS} markers on ${from.name} was seen queued in sync_outbox (the drain check would be vacuous)`);
+  // writeMarker reads the scratch DB's trigger-fed audit copy of sync_outbox,
+  // so the gateway's timed drain cannot race it; a row that never queued fails.
+  const text = `pt2a ${label} ${from.name}->${to.name} ${tag()}`;
+  assert.ok((await writeMarker(from, text)).queued, `${label}: the marker on ${from.name} was never queued in sync_outbox (the drain check would be vacuous)\n${outboxDiag(from, text)}`);
   assert.ok(await until(() => markerDrained(from, text), FLOW_MS, 500), `${label}: ${from.name} never drained its marker (no out-feed for ${to.name}?)`);
   await new Promise((r) => setTimeout(r, QUIET_MS));
   assert.equal(hasMarker(to, text), false, `${label}: ${from.name}'s marker reached ${to.name} over a refused link`);

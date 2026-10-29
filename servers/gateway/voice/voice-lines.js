@@ -47,6 +47,24 @@ export const VOICE_LINES = Object.freeze({
     last_write_recap_named: "{title} is on the {calendar} calendar for {when}.",
     last_write_recap_task_crow: "{title} is on Crow's task list.",
     last_write_recap_task_named: "{title} is on the {list} list.",
+    // The hand-off (handoff.js, PR 3): Crow proposes, asks which bot, or says none can; nothing is created yet.
+    // {bot} is always the bot's display name.
+    handoff_propose: "I'll have {bot} {task} — okay?",
+    handoff_propose_queued: "{bot} can't start right now, so this would wait on {bot}'s board: {task}. Put it there?",
+    handoff_model_starts: " {bot}'s model will need to start first.",
+    handoff_which: "That could go to {a} or to {b} — which one?",
+    handoff_which_one: "Should {a} take that?",
+    handoff_none: "None of your bots can take that from here.",
+    // The spoken yes (handoff.js confirm): "on it" only once the bot really started on an up model; the start
+    // failure is a notification title too. {task} is the confirmed task line.
+    handoff_started: "Okay, {bot}'s on it.",
+    handoff_starting_up: "It's on {bot}'s board, and {bot} is starting up. I'll tell you if it can't.",
+    handoff_start_failed: "{bot} couldn't start {task}. It's waiting on {bot}'s board.",
+    handoff_queued: "Okay, it's on {bot}'s board. {bot} can't start it right now, so it will wait there.",
+    handoff_failed: "Sorry, I couldn't hand that to {bot}, so nothing was started.",
+    handoff_already: "That one is already with {bot}.",
+    // A stop that landed while the yes was still starting the bot (the status lines proper are PR 5).
+    status_stopped: "{bot}'s task was stopped. What it made so far is kept.",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -83,6 +101,19 @@ export const VOICE_LINES = Object.freeze({
     last_write_recap_named: "{title} está en el calendario {calendar} para el {when}.",
     last_write_recap_task_crow: "{title} está en la lista de tareas de Crow.",
     last_write_recap_task_named: "{title} está en la lista {list}.",
+    handoff_propose: "Puedo pedirle a {bot}: {task}. ¿Vale?",
+    handoff_propose_queued: "{bot} no puede empezar ahora, así que esto esperaría en el tablero de {bot}: {task}. ¿Lo dejo ahí?",
+    handoff_model_starts: " Antes tendrá que arrancar el modelo de {bot}.",
+    handoff_which: "Eso podría ir a {a} o a {b}. ¿A cuál?",
+    handoff_which_one: "¿Se lo paso a {a}?",
+    handoff_none: "Ninguno de tus bots puede encargarse de eso desde aquí.",
+    handoff_started: "Vale, {bot} se pone con ello.",
+    handoff_starting_up: "Está en el tablero de {bot}, y {bot} se está poniendo en marcha. Te aviso si no puede.",
+    handoff_start_failed: "{bot} no pudo empezar: {task}. Está esperando en el tablero de {bot}.",
+    handoff_queued: "Vale, está en el tablero de {bot}. {bot} no puede empezar ahora, así que esperará ahí.",
+    handoff_failed: "Lo siento, no pude pasárselo a {bot}, así que no se ha empezado nada.",
+    handoff_already: "Eso ya lo tiene {bot}.",
+    status_stopped: "La tarea de {bot} se paró. Lo que hizo hasta ahora se queda.",
   }),
 });
 

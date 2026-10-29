@@ -890,6 +890,13 @@ export function createInteractiveEngine({
       browser: null,
       browserChain: null,
       subscribers: new Set(),
+      // Voice hand-off: turn-outcome watchers, kept APART from `subscribers`
+      // so a watcher never counts as "someone watching" for the away pushes;
+      // and the first counted turn's record `{outcome, errorText, pushed}`,
+      // replayed to a `{ first: true }` watcher that registers after that
+      // turn already ended. See turnEnded / watchTurns.
+      turnWatchers: new Set(),
+      firstTurn: null,
       idleTimer: null,
       stallTimer: null,
       // Track 3 Task 6: card binding. `cardId` is the board card this
@@ -1309,12 +1316,76 @@ export function createInteractiveEngine({
    *  stall, onTurnError, onTurnEnd or a failed overflow recovery reports it
    *  first (a stall's abort can race a rejected prompt). The hub draws it as
    *  the turn's danger row; the hub also dedupes per turnId. */
-  function emitTurnError(s, turn, text, reason) {
+  function emitTurnError(s, turn, text, reason, outcome) {
+    turnEnded(s, turn, outcome, text);
     if (turn.errorShown) return;
     turn.errorShown = true;
     const frame = { type: "error", text, turnId: turn.id };
     if (reason) frame.reason = reason;
     emit(s, frame);
+  }
+
+  /**
+   * Voice hand-off: the ONE place a turn's outcome is decided for a watcher.
+   * Every path that completes, fails or refuses a turn reports through here
+   * (the audit of those sites is in the private engineering notes), and
+   * `turn.watched` makes it fire once per turn whichever path reports first,
+   * the same discipline as `errorShown` above. `outcome` is ok | failed |
+   * stalled | exited | refused. An aborted or parked turn never reaches it:
+   * those are not outcomes.
+   *
+   * The first counted turn is recorded on `s.firstTurn` (replayed by
+   * watchTurns({ first: true })), but only while no deferred overflow turn is
+   * pending: a later turn that ends while turn 1 is still compacting is not
+   * turn 1. `pushed` on the record is written by the caller AFTER its own
+   * away-push decision (markPushed), so a replay can say whether the operator
+   * was already told. Watchers run synchronously here, BEFORE that decision,
+   * so one can `suppressPush()` this turn's push.
+   */
+  function turnEnded(s, turn, outcome, errorText) {
+    if (!turn || turn.watched) return;
+    turn.watched = true;
+    const record = { outcome, errorText: errorText == null ? null : String(errorText), pushed: false };
+    turn.ended = record;
+    const deferredPending = s.overflowTurn != null && s.overflowTurn.turn !== turn;
+    const first = s.firstTurn == null && !deferredPending;
+    if (first) s.firstTurn = record;
+    fireTurnWatchers(s, record, { first, replay: false, suppressPush: () => { turn.noPush = true; } });
+  }
+
+  /** The turn's away push went out: say so on its record. */
+  function markPushed(turn) {
+    if (turn.ended) turn.ended.pushed = true;
+  }
+
+  /** Deliver one outcome: to every plain watcher, and to the `first` watchers
+   *  only when it is the first counted turn (they are dropped once served). */
+  function fireTurnWatchers(s, record, { first, replay, suppressPush }) {
+    for (const w of [...s.turnWatchers]) {
+      if (w.first) {
+        if (!first) continue;
+        s.turnWatchers.delete(w);
+      }
+      callTurnWatcher(s, w.fn, { outcome: record.outcome, errorText: record.errorText, replay, alreadyPushed: !!record.pushed, suppressPush });
+    }
+  }
+
+  function callTurnWatcher(s, fn, ctx) {
+    try { fn(ctx); } catch (e) { log(s.sessionId + ": turn watcher failed (non-fatal): " + ((e && e.message) || e)); }
+  }
+
+  /** message() refused before any turn existed (session_stopped, cycle_busy,
+   *  a synchronous reservation throw): there is no turn to report, so the
+   *  refusal itself is recorded as the first outcome when nothing else has
+   *  been, and the first-turn watchers hear it now. Not turn_in_progress: a
+   *  turn IS running, and it reports for itself. */
+  function refusedBeforeTurn(s, e) {
+    const code = e && e.code;
+    if (!code || code === "turn_in_progress") return;
+    if (s.firstTurn || s.overflowTurn) return;
+    const record = { outcome: "refused", errorText: String(code), pushed: false };
+    s.firstTurn = record;
+    fireTurnWatchers(s, record, { first: true, replay: false, suppressPush: () => {} });
   }
 
   /** Review M1: pi's overflow recovery finished. willRetry → the compacted
@@ -1325,16 +1396,23 @@ export function createInteractiveEngine({
   function onOverflowCompactionEnd(s, m) {
     s.overflowCompacting = false;
     const pending = s.overflowTurn;
-    if (!pending || m.willRetry) return;
+    if (!pending) return;
+    if (m.willRetry) {
+      // Not an outcome yet. The deferred turn ends with the retry's own
+      // agent_end (onChildEvent), a second compaction_end here, the child's
+      // exit, or message()'s backstop.
+      pending.retrying = true;
+      return;
+    }
     s.overflowTurn = null;
     if (pending.turn.aborted || m.aborted) return;
-    emitTurnError(s, pending.turn, m.errorMessage ? redactErrorText(m.errorMessage) : pending.errorText, "turn_error");
+    emitTurnError(s, pending.turn, m.errorMessage ? redactErrorText(m.errorMessage) : pending.errorText, "turn_error", "failed");
   }
 
   function onStall(s, turn) {
     if (s.turn !== turn || turn.aborted) return;
     s.lastError = "turn stalled";
-    emitTurnError(s, turn, "turn stalled");
+    emitTurnError(s, turn, "turn stalled", null, "stalled");
     // A single tool silent past the window IS aborted — named operator-facing
     // policy (r2 S12).
     abortInFlight(s).catch(() => {});
@@ -2621,17 +2699,24 @@ export function createInteractiveEngine({
     pi.exited.then(() => {
       if (s.pi !== pi) return;                       // an expected close
       const deadTurn = s.turn;                       // strand 1: the frame names it
-      s.overflowCompacting = false;                  // review M1: dies with the child
+      const deferred = s.overflowTurn;               // review M1: dies with the child too
+      let message = "pi exited unexpectedly";
+      try {
+        if (typeof pi._exitError === "function") message = pi._exitError("responding").message;
+      } catch { /* keep the generic message */ }
+      // Voice hand-off: both end as "exited", BEFORE the state below is
+      // cleared (the first-turn record reads it). Aborted or parked: not an
+      // outcome. If the deferred turn's own agent_end is queued behind this
+      // exit, `turn.watched` lets only one through.
+      if (deadTurn && !deadTurn.aborted && !deadTurn.parked) turnEnded(s, deadTurn, "exited", message);
+      if (deferred && !deferred.turn.aborted) turnEnded(s, deferred.turn, "exited", message);
+      s.overflowCompacting = false;
       s.overflowTurn = null;
       s.pi = null;
       s.turn = null;
       clearStall(s);
       clearIdle(s);
       dropAsk(s);                                    // r1 S4 (+ PR-A dance state; 2026-10-20 group)
-      let message = "pi exited unexpectedly";
-      try {
-        if (typeof pi._exitError === "function") message = pi._exitError("responding").message;
-      } catch { /* keep the generic message */ }
       s.lastError = message;
       // Operators read the gateway log, not the drawer: without this line a
       // child that dies at spawn (an unknown provider) left only "world
@@ -2645,7 +2730,10 @@ export function createInteractiveEngine({
       // in the normal case; this is the defensive belt-and-braces twin named
       // in the module header, for an exit that lands after state was marked
       // stopped by some other path).
-      if (s.state === "stopped") releaseCard(s.cardId, s.sessionId);
+      if (s.state === "stopped") {
+        releaseCard(s.cardId, s.sessionId);
+        s.turnWatchers.clear();                      // voice hand-off: stop() cleared them already
+      }
       writeLeases();
       // reason "pi_exit": the drawer shows this one IN the chat (the operator's
       // message went nowhere), not only on the Activity rail.
@@ -2762,8 +2850,28 @@ export function createInteractiveEngine({
       case "model_select":
         onModelSelect(s, m);
         return;
+      case "agent_end": {
+        // Voice hand-off: the compacted retry's own agent_end. The bridge
+        // ended the deferred turn on the overflow agent_end, so this one
+        // reaches no turn (onTurnEnd's review M1 note) — it is the honest end
+        // of that deferred turn. willRetry:true is pi's auto-retry, not an
+        // end. A failed retry KEEPS the overflow state so pi's second
+        // compaction_end still draws the error row exactly as before
+        // (`turn.watched` drops its turnEnded); a recovered one clears it.
+        const pending = s.overflowTurn;
+        if (s.turn === null && pending && pending.retrying && m.willRetry !== true) {
+          const err = lastAssistantError(m.messages);
+          if (err) turnEnded(s, pending.turn, "failed", redactErrorText(err.errorMessage));
+          else {
+            turnEnded(s, pending.turn, "ok");
+            s.overflowTurn = null;
+            s.overflowCompacting = false;
+          }
+        }
+        return;
+      }
       default:
-        // agent_end, message_update, … — not part of the lens vocabulary.
+        // message_update, … — not part of the lens vocabulary.
         // Silence is the contract, not an oversight.
     }
   }
@@ -3221,17 +3329,20 @@ export function createInteractiveEngine({
         failed = null;
         deferred = true;
       }
-      if (failed) emitTurnError(s, turn, errorText, "turn_error");
+      if (failed) emitTurnError(s, turn, errorText, "turn_error", "failed");
+      else if (!deferred) turnEnded(s, turn, "ok");   // voice hand-off: a deferred turn's end comes later
       // The id of the turn this reply COMPLETES (see the text frame above):
       // without it a reconnected drawer cannot tell "I already rendered this
       // turn" from "I already rendered a different one".
       emit(s, { type: "reply", text: replyText, turnId: turn.id });
       // Track 3 Task 8: an operator watching the drawer live (any live
       // subscriber) already sees the reply — the push is for someone who
-      // is AWAY, and only for a turn that actually took a while.
+      // is AWAY, and only for a turn that actually took a while. Voice
+      // hand-off: nor when this turn's push was suppressed (its result
+      // reached the operator by another rail).
       if (s.subscribers.size === 0 && !deferred) {
         const ranS = (now() - turn.startedAt) / 1000;
-        if (ranS >= notifyMinRunS()) {
+        if (ranS >= notifyMinRunS() && !turn.noPush) {
           pushAttention({
             type: "attention",
             priority: "normal",
@@ -3239,6 +3350,7 @@ export function createInteractiveEngine({
             body: maskSecrets(failed ? errorText : replyText).slice(0, 140),
             action_url: "/dashboard/bot-board#bird=" + s.sessionId,
           });
+          markPushed(turn);
         }
       }
     }
@@ -3262,7 +3374,7 @@ export function createInteractiveEngine({
     const message = String((err && err.message) || err);
     s.lastError = message;
     // Strand 1: this text now reaches the chat, and it can carry pi's stderr.
-    emitTurnError(s, turn, redactErrorText(message));
+    emitTurnError(s, turn, redactErrorText(message), null, "failed");
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
 
     // A PREFLIGHT refusal never started an agent loop (C-12 (h)): the child is
@@ -3330,9 +3442,10 @@ export function createInteractiveEngine({
     const detail = sessionBudgetMessage({ count: b.count, cap: b.cap, model: (s.resolved && s.resolved.model) || "?" });
     forgetCap(s);
     s.lastError = detail;
+    turnEnded(s, turn, "refused", detail);           // voice hand-off: before the push decision
     // A card dispatch starts its turn fire-and-forget, so with nobody
     // watching the refusal would go unseen: push it, like an away reply.
-    if (s.subscribers.size === 0) {
+    if (s.subscribers.size === 0 && !turn.noPush) {
       pushAttention({
         type: "attention",
         priority: "normal",
@@ -3340,6 +3453,7 @@ export function createInteractiveEngine({
         body: detail.slice(0, 140),
         action_url: "/dashboard/bot-board#bird=" + s.sessionId,
       });
+      markPushed(turn);
     }
     if (s.turn === turn) s.turn = null;
     writeRow(s, { status: "waiting-user" }).catch(() => {});
@@ -3354,6 +3468,7 @@ export function createInteractiveEngine({
     if (s.state !== "stopped") s.state = "hibernating";
     const message = s.lastError || "pi exited before the turn could start";
     s.lastError = message;
+    turnEnded(s, turn, "refused", message);          // voice hand-off
     writeLeases();
     emit(s, { type: "error", text: message, reason: "pi_exit" });
     emit(s, stateEvent(s));
@@ -3518,30 +3633,40 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     // ---- one synchronous block: guards + reservation, no await between ----
-    if (s.state === "stopped") throw engineError("session_stopped");
-    if (s.turn) throw engineError("turn_in_progress");
-    // Track 3 Task 7 fix round 1: a cycle() in flight leaves this session
-    // transiently `s.pi === null` mid-hibernate — WITHOUT this check
-    // `needsWake` below would read true and message() would try to WAKE a
-    // session cycle() is already in the middle of respawning, racing
-    // startChild() the same way two concurrent cycle()s used to. Refuse with
-    // the same typed code cycle() itself uses for "busy right now".
-    if (s.cycling) throw engineError("cycle_busy");
+    // (Voice hand-off: a refusal thrown in here has no turn to report, so
+    // refusedBeforeTurn records it as the first outcome instead.)
     const needsWake = !s.pi;
-    // r1 C8: the wake path re-gates. Track 3 Task 7: reserveWithEviction is
-    // itself synchronous up to its own handover — a synchronous throw here
-    // (interactive_capacity with no eligible victim, pi_capacity,
-    // perch_disabled) propagates BEFORE the turn is ever claimed, exactly
-    // like the old bare reserveSlot() call. Only the EVICTION path returns a
-    // promise; it is awaited INSIDE the try below (its own post-hibernate
-    // pi_capacity re-check can fail AFTER the turn is claimed, so that
-    // failure needs the same reservation-release cleanup as any other wake
-    // failure).
-    const pending = needsWake ? reserveWithEviction(S, s) : null;
+    let pending = null;
+    try {
+      if (s.state === "stopped") throw engineError("session_stopped");
+      if (s.turn) throw engineError("turn_in_progress");
+      // Track 3 Task 7 fix round 1: a cycle() in flight leaves this session
+      // transiently `s.pi === null` mid-hibernate — WITHOUT this check
+      // `needsWake` above would read true and message() would try to WAKE a
+      // session cycle() is already in the middle of respawning, racing
+      // startChild() the same way two concurrent cycle()s used to. Refuse with
+      // the same typed code cycle() itself uses for "busy right now".
+      if (s.cycling) throw engineError("cycle_busy");
+      // r1 C8: the wake path re-gates. Track 3 Task 7: reserveWithEviction is
+      // itself synchronous up to its own handover — a synchronous throw here
+      // (interactive_capacity with no eligible victim, pi_capacity,
+      // perch_disabled) propagates BEFORE the turn is ever claimed, exactly
+      // like the old bare reserveSlot() call. Only the EVICTION path returns a
+      // promise; it is awaited INSIDE the try below (its own post-hibernate
+      // pi_capacity re-check can fail AFTER the turn is claimed, so that
+      // failure needs the same reservation-release cleanup as any other wake
+      // failure).
+      pending = needsWake ? reserveWithEviction(S, s) : null;
+    } catch (e) {
+      refusedBeforeTurn(s, e);
+      throw e;
+    }
     // Track 3 Task 8: startedAt is this turn's own clock reading, distinct
     // from any lastEventAt touch — onTurnEnd diffs against it to decide
     // whether a "<bot> replied" attention push clears PERCH_NOTIFY_MIN_RUN_S.
-    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now(), errorShown: false };
+    // Voice hand-off: `watched` (turnEnded ran), `noPush` (its away push is
+    // suppressed), `ended` (its outcome record).
+    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now(), errorShown: false, watched: false, noPush: false, ended: null };
     s.turn = turn;
     // 2026-10-20: the operator wrote again, so an expired question is dealt
     // with: the session is no longer waiting on it.
@@ -3550,7 +3675,12 @@ export function createInteractiveEngine({
     // retry that recovered leaves it set; a compaction still running (the
     // operator sent again while it summarizes) keeps it, so its failure still
     // reaches the turn it belongs to. attachExit clears it with the child.
-    if (!s.overflowCompacting) s.overflowTurn = null;
+    // Voice hand-off backstop: a retry that finished without an agent_end we
+    // matched ended that turn, and the operator is sending again.
+    if (!s.overflowCompacting && s.overflowTurn) {
+      if (s.overflowTurn.retrying) turnEnded(s, s.overflowTurn.turn, "ok");
+      s.overflowTurn = null;
+    }
     // ---------------------------------------------------------------------
     try {
       if (needsWake) {
@@ -3562,6 +3692,10 @@ export function createInteractiveEngine({
         await writeRow(s, { status: "active" });
       }
     } catch (e) {
+      // Voice hand-off: the turn existed, so its refusal is its end — except
+      // a cross-process turn_in_progress (assertRowClaimable), which another
+      // process's turn owns and reports.
+      if (!e || e.code !== "turn_in_progress") turnEnded(s, turn, "refused", (e && (e.code || e.message)) || e);
       s.turn = null;
       if (needsWake) {
         // I-3: release the reservation UNCONDITIONALLY and FIRST. The old
@@ -4252,6 +4386,7 @@ export function createInteractiveEngine({
     s.pi = null;
     if (s.turn) s.turn.aborted = true;               // a late agent_end stays silent
     s.turn = null;
+    s.turnWatchers.clear();                          // voice hand-off: a stop is not an outcome
     clearStall(s);
     clearIdle(s);
     settleAsk(s);                                    // 2026-10-20
@@ -4344,6 +4479,48 @@ export function createInteractiveEngine({
       }
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
+  }
+
+  /**
+   * Voice hand-off: watch a session's turn outcomes WITHOUT counting as a
+   * subscriber (the away pushes still fire). Synchronous on purpose: it reads
+   * the resident map directly, never resolveSession, so nothing can run
+   * between the first-turn check and the registration. `fn(ctx)` receives
+   * `{ outcome, errorText, replay, alreadyPushed, suppressPush }`; `outcome`
+   * is ok | failed | stalled | exited | refused, and `suppressPush()` drops
+   * this turn's own away push when called synchronously from `fn`. With
+   * `first: true` the watcher hears the session's first counted turn once,
+   * replayed at once (`replay: true`, `alreadyPushed` from the record) when
+   * that turn already ended, then it is dropped. Without it, every turn end.
+   * Returns the unwatch function. A throw in `fn` is caught and logged.
+   */
+  function watchTurns(sessionId, fn, { first = false } = {}) {
+    if (typeof fn !== "function") throw engineError("bad_request");
+    const s = sessions.get(String(sessionId));
+    if (!s) throw engineError("no_such_session");
+    if (first && s.firstTurn) {
+      const r = s.firstTurn;
+      callTurnWatcher(s, fn, { outcome: r.outcome, errorText: r.errorText, replay: true, alreadyPushed: !!r.pushed, suppressPush: () => {} });
+      return () => {};
+    }
+    const w = { fn, first: !!first };
+    s.turnWatchers.add(w);
+    return () => { s.turnWatchers.delete(w); };
+  }
+
+  /**
+   * Voice hand-off: a result on `cardId` just reached the operator by its own
+   * rail, so the RUNNING turn of the session holding that card must not push
+   * "replied" as well. Turn-scoped and unstored: with no holder or no running
+   * turn it does nothing (a later turn pushes as usual). Returns whether a
+   * turn was marked.
+   */
+  function suppressTurnEndPush(cardId) {
+    const holder = cardClaims.get(Number(cardId));
+    const s = holder == null ? null : sessions.get(holder);
+    if (!s || !s.turn) return false;
+    s.turn.noPush = true;
+    return true;
   }
 
   async function get(sessionId) {
@@ -4592,6 +4769,10 @@ export function createInteractiveEngine({
     abort,
     stop,
     subscribe,
+    /** Voice hand-off: turn-outcome watchers and the turn-scoped push
+     * suppression — see their own docs. */
+    watchTurns,
+    suppressTurnEndPush,
     get,
     list,
     stopAll,

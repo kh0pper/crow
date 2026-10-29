@@ -145,6 +145,10 @@ const DESTRUCTIVE_REGEX = /^crow_(delete|remove|destroy|unpublish)_/;
 // English words end at \b; Spanish ones at a space, punctuation or the end (\b fails after "í" in JS).
 export const AFFIRMATIVE_STARTS = /^\s*(?:(?:yes|yeah|yep|yup|sure|confirmed?|do it|go ahead|please do|sounds good|proceed|ok|okay)\b|¡?(?:s[ií]|claro|dale|hazlo|adelante|vale|de acuerdo)(?=[\s,.!?]|$))/i;
 export const NEGATIVE_STARTS = /^\s*(?:(?:no|nope|cancel|stop|wait|nevermind|never mind)\b|¡?(?:no|espera|cancela|para)(?=[\s,.!?]|$))/i;
+// A refusal that is a no only as the WHOLE utterance (plus punctuation or polite filler): "forget it", "I changed
+// my mind", "déjalo", "olvídalo". With anything else after it ("I changed my mind, make it 5pm", "déjalo a las
+// cinco", "déjalo así") it is a correction or an instruction, never a decline, and the utterance falls through.
+export const WHOLE_UTTERANCE_NO = /^[\s¡]*(?:forget it|i(?:'ve| have)? changed my mind|d[eé]jalo|olv[ií]dalo|(?:he cambiado|cambi[eé]) de idea)(?:[\s,.!?¡¿;:]+(?:please|thanks|thank you|por favor|gracias))*[\s,.!?¡¿;:]*$/i;
 
 // A negation in the first few words ("claro que no", "of course not", "yes, no wait") is never a yes.
 const NEGATION_WORDS = new Set(["no", "not", "nope", "don't", "dont", "never", "nunca", "tampoco"]);
@@ -154,7 +158,7 @@ const leadNegated = (text) => String(text || "").toLowerCase().replace(/[\u2018\
 /** A spoken yes: starts as one, and no negation word in its first few words. */
 export const isAffirmative = (text) => AFFIRMATIVE_STARTS.test(text || "") && !leadNegated(text);
 /** A spoken no: starts as one, or a negation word in its first few words. */
-export const isNegative = (text) => NEGATIVE_STARTS.test(text || "") || leadNegated(text);
+export const isNegative = (text) => NEGATIVE_STARTS.test(text || "") || WHOLE_UTTERANCE_NO.test(text || "") || leadNegated(text);
 
 export function isDestructiveTool(name) {
   if (!name) return false;
@@ -268,6 +272,8 @@ export function createConfirmGate({ now = Date.now, ttlMs = CONFIRM_TTL_MS } = {
       pending.set(deviceId, { toolName: eff, argsHash: hash, at: now() });
       return "confirm";
     },
+    /** Forget this device's held call (a relay turn ends it: turn.js's relay contract). */
+    clear(deviceId) { pending.delete(deviceId); },
     /** Is this very call (name + canonical args) waiting for a yes on this device? A read: nothing changes. */
     has({ deviceId, eff, args }) {
       const p = pending.get(deviceId);

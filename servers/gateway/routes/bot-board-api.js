@@ -100,7 +100,7 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { decideOption } from "../board/decision-service.js";
-import { isEnabledBot } from "../board/bot-lookup.js";
+import { assertAssignableBot, isEnabledBot } from "../board/bot-lookup.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 import { parseCookies } from "../dashboard/auth.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
@@ -194,6 +194,19 @@ function workerLiveness(pid) {
 // (D-T1.3 provenance; brief-pinned shape) — the plan drawer, and any other
 // card-service/plan-service call this file makes.
 const DASHBOARD_ACTOR = { kind: "human", id: null, jobId: null };
+
+/** The dashboard's refusal for a bot that may not take a card: the shared
+ * assertAssignableBot decides, the voice bot keeps its `bot_unavailable` code.
+ * Returns the sent response, or null when the bot is assignable. */
+async function refuseBot(cdb, res, botId) {
+  try {
+    await assertAssignableBot(cdb, botId);
+    return null;
+  } catch (e) {
+    if (!e || e.code !== "bad_bot") throw e;
+    return jsonError(res, 400, "assigned_bot not found or disabled", isVoiceBotId(botId) ? { code: "bot_unavailable" } : undefined);
+  }
+}
 
 // Maps a service-layer {message, code, http} error to the response. 409s use
 // the router's existing {reason} shape (matched by client.js's `r.j.reason`
@@ -429,8 +442,8 @@ export default function botBoardApiRouter(dashboardAuth) {
       // pi_bot_defs is a crow.db lookup; card-service is tasks.db-only and
       // has no business making it, so this stays here too.
       if (botSet && botVal != null) {
-        if (isVoiceBotId(botVal)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
-        if (!(await isEnabledBot(cdb, botVal))) return jsonError(res, 400, "assigned_bot not found or disabled");
+        const refused = await refuseBot(cdb, res, botVal);
+        if (refused) return refused;
       }
       tdb = createDbClient(TASKS_DB);
       const cur = await getCard(tdb, id);
@@ -898,8 +911,8 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (card.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       const bot = card.assigned_bot ? String(card.assigned_bot) : "";
       if (!bot) return jsonError(res, 400, "card has no assigned_bot");
-      if (isVoiceBotId(bot)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
-      if (!(await isEnabledBot(cdb, bot))) return jsonError(res, 400, "assigned_bot not found or disabled");
+      const refused = await refuseBot(cdb, res, bot);
+      if (refused) return refused;
       const def = await resolveBoardDef(tdb, { projectId: card.project_id });
       if (isTerminal(def, card.status)) {
         return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });
