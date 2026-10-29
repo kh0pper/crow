@@ -2,9 +2,10 @@
  * Settings Section: Models (roles Phase 2, the simple view).
  *
  * One page with every role: what fills it, where that runs and its status.
- * Changing a role (the Change buttons) and Add a provider are wired by later
- * work; this page is the server render. Advanced is today's LLM page
- * (`?section=llm`), still deep-linkable but no longer in the menu.
+ * "Change" opens the change sheet (`<dialog id="models-change">`, filled by
+ * models/client.js through /api/roles); Add a provider is wired by later
+ * work. Advanced is today's LLM page (`?section=llm`), still deep-linkable
+ * but no longer in the menu.
  *
  * Search ranking stays out of the list until something fills it on purpose;
  * "Show search ranking" (`?section=models&show=rerank`) renders it anyway.
@@ -12,6 +13,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { buildRoleRows, ROLE_GROUPS, FILLED_STATUSES } from "./models/rows.js";
+import { modelsClientJS } from "./models/client.js";
 
 const WHERE_CODES = new Set(["here", "other_box", "cloud", "unproven", "missing"]);
 
@@ -52,7 +54,7 @@ function rowHtml(row, lang) {
       </div>
       <div class="mr-actions">
         ${details}
-        <button type="button" class="mr-change" data-role="${escapeHtml(row.id)}">${escapeHtml(t("models.ui.change", lang))}</button>
+        <button type="button" class="mr-change" data-role="${escapeHtml(row.id)}" data-role-kind="${escapeHtml(row.kind || "chat")}" data-role-label="${escapeHtml(t(row.labelKey, lang))}" aria-haspopup="dialog" aria-controls="models-change">${escapeHtml(t("models.ui.change", lang))}</button>
       </div>
     </article>`;
 }
@@ -78,6 +80,37 @@ const STYLE = `<style>
   .mr-note { margin:0.25rem 0 0; font-size:0.8rem; color:var(--crow-text-muted); }
   .mr-actions { display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem; }
   .mr-details { display:inline-flex; align-items:center; min-height:44px; color:var(--crow-accent); text-decoration:none; font-size:0.9rem; }
+  #models-change { border:none; padding:0; width:min(560px, 100%); max-width:100%; max-height:85dvh; box-sizing:border-box; overflow:auto;
+    border-radius:var(--crow-radius-card); background:var(--crow-bg-surface); color:var(--crow-text-primary); box-shadow:0 -8px 32px rgba(0,0,0,0.18); }
+  #models-change::backdrop { background:rgba(0,0,0,0.4); }
+  #models-change[open]:not(:modal) { position:fixed; inset:auto 0 0; z-index:1200; margin:0 auto; }
+  @media (max-width: 480px) {
+    #models-change { width:100%; margin:auto 0 0; border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0; }
+  }
+  .mc-inner { padding:16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); display:flex; flex-direction:column; gap:0.75rem; min-width:0; }
+  .mc-head { display:flex; align-items:center; justify-content:space-between; gap:0.5rem; }
+  .mc-title { font-size:1.05rem; margin:0; overflow-wrap:anywhere; }
+  .mc-close { width:44px; height:44px; flex:0 0 44px; border:none; border-radius:50%; background:transparent; color:var(--crow-text-secondary); font-size:1.4rem; cursor:pointer; }
+  .mc-list { display:flex; flex-direction:column; gap:0.4rem; }
+  .mc-pick { display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem; width:100%; min-height:44px; padding:0.5rem 0.75rem; box-sizing:border-box; text-align:left;
+    font:inherit; color:var(--crow-text-primary); background:var(--crow-bg-elevated); border:1px solid var(--crow-border); border-radius:var(--crow-radius-control); cursor:pointer; overflow-wrap:anywhere; }
+  .mc-pick[aria-pressed="true"] { border-color:var(--crow-accent); box-shadow:0 0 0 1px var(--crow-accent); }
+  .mc-pick:disabled { cursor:not-allowed; opacity:0.7; }
+  .mc-pick-label { flex:1 1 auto; min-width:0; }
+  .mc-star { color:var(--crow-accent); }
+  .mc-pick-note { flex-basis:100%; font-size:0.8rem; color:var(--crow-text-muted); }
+  .mc-warn { display:flex; flex-direction:column; gap:0.35rem; font-size:0.9rem; overflow-wrap:anywhere; }
+  .mc-warn p { margin:0; }
+  .mc-warn [hidden] { display:none; }
+  .mc-group { font-size:0.8rem; margin:0.25rem 0 0; color:var(--crow-text-secondary); }
+  .mc-names { margin:0; padding-left:1.2rem; }
+  .mc-cloud, .mc-changed { font-weight:600; }
+  .mc-check { display:flex; align-items:flex-start; gap:0.5rem; min-height:44px; padding-top:0.6rem; box-sizing:border-box; cursor:pointer; }
+  .mc-check input { width:20px; height:20px; flex:0 0 20px; margin:0; }
+  .mc-error { margin:0; color:var(--crow-error); font-size:0.85rem; }
+  .mc-error:empty { display:none; }
+  .mc-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:0.5rem; position:sticky; bottom:0; background:var(--crow-bg-surface); padding-top:0.5rem; }
+  .mc-save:disabled { opacity:0.5; cursor:not-allowed; }
 </style>`;
 
 /** The page from built rows (pure; `show` lists hidden roles to render anyway). */
@@ -103,7 +136,9 @@ export function renderModelsPage(rows, { lang = "en", show = [] } = {}) {
       </div>
     </div>
     ${groups}
-    ${showRerank}`;
+    ${showRerank}
+    <dialog id="models-change" class="mc-sheet" aria-labelledby="models-change-title"></dialog>
+    <script>${modelsClientJS({ lang })}</script>`;
 }
 
 function showParam(req) {

@@ -35,6 +35,8 @@ const rowsFor = (opts = {}) =>
   buildRoleRows(db, { env: {}, ownAddrs: OWN, localInstanceId: () => "i-self", classifierStatusFn: noClassifier, ...opts });
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.id, r]));
 const count = (s, needle) => s.split(needle).length - 1;
+/** The rendered rows only: the change sheet's client script carries the copy too. */
+const pageOf = (html) => html.slice(0, html.indexOf('<dialog id="models-change"'));
 
 before(async () => {
   console.warn = () => {};
@@ -155,7 +157,7 @@ test("speech: an azure profile with no endpoint and the voice bot's own profile"
 
 test("render", async () => {
   const rows = await rowsFor();
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  const html = pageOf(await modelsSection.render({ req: { query: {} }, db, lang: "en" }));
   const visible = rows.filter((r) => !r.hidden).length;
   assert.equal(count(html, 'data-role="'), visible, "one Change button per visible row");
   assert.equal(count(html, 'data-role="rerank"'), 0, "search ranking hidden");
@@ -167,6 +169,7 @@ test("render", async () => {
   assert.ok(html.includes("Crow&#39;s default") || html.includes("Crow's default") || html.includes("Crow&#x27;s default"));
   assert.ok(html.includes("This box"));
   assert.ok(!html.includes(SECRET), "no provider api_key or speech profile apiKey value");
+  assert.ok(!(await modelsSection.render({ req: { query: {} }, db, lang: "en" })).includes(SECRET), "nor in the sheet's script");
   const shown = await modelsSection.render({ req: { query: { show: "rerank" } }, db, lang: "en" });
   assert.equal(count(shown, 'data-role="rerank"'), 1);
   assert.ok(!shown.includes("Show search ranking"));
@@ -195,7 +198,7 @@ test("/dashboard/models unchanged", () => {
 });
 
 test("es", async () => {
-  const html = await modelsSection.render({ req: { query: {} }, db, lang: "es" });
+  const html = pageOf(await modelsSection.render({ req: { query: {} }, db, lang: "es" }));
   assert.ok(html.includes("Aún no configurado"));
   assert.ok(html.includes("Añadir un proveedor"));
 });
