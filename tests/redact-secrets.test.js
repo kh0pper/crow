@@ -47,3 +47,17 @@ test("a secret straddling the cap is redacted, never cut into a prefix", () => {
 test("redactThenTruncate leaves short input whole", () => {
   assert.equal(redactThenTruncate("hello sk-secret-1", ["sk-secret-1"], 100).toString(), `hello ${REDACTED}`);
 });
+
+test("a secret that contains another is redacted whole, in either order", () => {
+  const short = "abcd", long = "abcd-LONGSECRET-xyz";
+  for (const list of [[short, long], [long, short]]) {
+    const out = redactSecrets(`x ${long} y ${short} z`, list);
+    assert.equal(out, `x ${REDACTED} y ${REDACTED} z`);
+    assert.ok(!out.includes("LONGSECRET"), "no remainder of the longer secret survives");
+  }
+});
+
+test("regex characters in a secret are matched literally, and duplicates are harmless", () => {
+  assert.equal(redactSecrets("a.b*c(d) and aXbbc(d)", ["a.b*c(d)", "a.b*c(d)"]), `${REDACTED} and aXbbc(d)`);
+  assert.equal(redactSecrets("p$&q$1r", ["p$&q$1r"]), REDACTED);
+});

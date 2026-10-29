@@ -17,11 +17,18 @@ export function maxSecretBytes(secrets, { minLen = MIN_SECRET_LENGTH } = {}) {
   return usable(secrets, minLen).reduce((m, s) => Math.max(m, Buffer.byteLength(s)), 0);
 }
 
-/** Replaces every occurrence of every secret in `text` (coerced with String()). */
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Replaces every occurrence of every secret in `text` (coerced with String()),
+ * in one pass, longest secret first: when one secret contains another, the
+ * longer one is matched whole, so no remainder of it can survive.
+ */
 export function redactSecrets(text, secrets, { minLen = MIN_SECRET_LENGTH } = {}) {
-  let out = String(text);
-  for (const s of usable(secrets, minLen)) out = out.split(s).join(REDACTED);
-  return out;
+  const list = [...new Set(usable(secrets, minLen))].sort((a, b) => b.length - a.length);
+  const out = String(text);
+  if (!list.length) return out;
+  return out.replace(new RegExp(list.map(escapeRegExp).join("|"), "g"), REDACTED);
 }
 
 /** A header value (string or array of strings), redacted. */
