@@ -75,6 +75,43 @@ export async function withSkillTools(def, { crowHome, log = () => {}, repoSkills
 }
 
 /**
+ * The board verbs a bot uses to work its project's cards. Approving a plan and
+ * deciding a result are left out: they're the operator's (board-mcp refuses a
+ * bot actor anyway). Briefing tools stay a def choice.
+ */
+export const BOARD_BOT_TOOLS = Object.freeze([
+  "board/board_list_boards", "board/board_list_items", "board/board_get_item",
+  "board/board_create_item", "board/board_update_item", "board/board_move_item",
+  "board/board_archive_item", "board/board_unarchive_item",
+  "board/board_get_plan", "board/board_save_plan", "board/board_report_result",
+  "board/board_ask_decision", "board/board_notify_decisions", "board/board_offer_card",
+]);
+
+/**
+ * When the world mounts the board server for a def that never selected it,
+ * also grant the board verbs on a COPY of the def, so pi's --tools allowlist
+ * (bridge buildToolsCsv) doesn't filter them out: a mounted server whose tools
+ * the allowlist drops is invisible to the model. Never past the model's tool
+ * cap (the same budget skill tools use); a refusal is logged.
+ */
+export async function withBoardTools(def, { wanted, log = () => {}, budget = null } = {}) {
+  if (!wanted || !def || typeof def !== "object" || botGrantsServer(def, "board")) return def;
+  const stored = (def.tools && def.tools.crow_mcp) || [];
+  const candidate = { ...def, tools: { ...(def.tools || {}), crow_mcp: [...stored, ...BOARD_BOT_TOOLS] } };
+  try {
+    const b = budget || (await (await import("./artifacts-companions.mjs")).defaultCompanionBudget(def));
+    if (Number.isInteger(b.cap) && b.cap > 0 && b.countFor(candidate) > b.cap) {
+      log("board tools not added (tool limit): the bot can't use its board until tools are trimmed in Bot Builder");
+      return def;
+    }
+  } catch (e) {
+    log("board tool budget check failed; adding board tools anyway: " + ((e && e.message) || e));
+  }
+  log("board tools added: " + BOARD_BOT_TOOLS.length);
+  return candidate;
+}
+
+/**
  * Does this def's crow_mcp selection grant `server` — whole (`artifacts`),
  * per tool (`artifacts/artifact_create`) or in the bridge's toolAllowlist
  * spelling (`artifacts__artifact_create`)? This is a COPY of the artifacts
@@ -270,10 +307,15 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // A selected repo skill's declared `server/tool` entries (skill-tools.mjs),
   // on a COPY of the def so writeBotMcp, prepareSpawn and buildToolsCsv all
   // see the same list; never past the model's tool cap, never a declined one.
-  const def = await withSkillTools(bot.def, { crowHome, log, repoSkillsDir });
   // M3b atomic cutover: column is authoritative. JSON copy is ignored even
   // if present (legacy fixtures may still carry it; new bots don't write it).
   const projectId = bot.project_id == null ? null : Number(bot.project_id);
+  // Whether this turn mounts the board server (writeWorldMcp's ensureServers):
+  // a job turn, a card-bound session, or a Perch turn of a project bot that
+  // is shown its cards. The same turns get the board verbs in the allowlist.
+  const projectBoard = gatewayType === "perch" && projectShowsCards(projectId, bot.def);
+  const def = await withBoardTools(await withSkillTools(bot.def, { crowHome, log, repoSkillsDir }),
+    { wanted: !!(jobId || cardBound || projectBoard), log });
   const projectSpace = B.loadProjectSpace(projectId);
   const projectMembers = B.loadProjectMembers(projectId);
   // session_dir resolution: prefer the project workspace when available
@@ -378,7 +420,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // config with its id before anything is spawned.
   const session = B.getSession(botId, threadId);
   const mcpArgs = { def, sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
-    displayName: bot.display_name, cardBound, projectBoard: gatewayType === "perch" && projectShowsCards(projectId, def), mcpDelivery, log };
+    displayName: bot.display_name, cardBound, projectBoard, mcpDelivery, log };
   const { mcpConfig, signedSessionId } = await writeWorldMcp(mcpArgs, session ? session.id : null);
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
