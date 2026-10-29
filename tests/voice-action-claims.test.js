@@ -119,12 +119,30 @@ test("claimsAction: a question, a read answer or a plain fact about a day is not
   assert.equal(claimsAction("The meeting is on Tuesday, want me to add it?"), true);
 });
 
+// CPU time of fn, in ms. A fixed bound in ms flakes on a loaded CI runner, so the speed tests compare
+// against a control of the same length measured in the same run (plain words no pattern dwells on), with
+// a wide absolute ceiling as a backstop: catastrophic backtracking on capped text costs seconds and
+// hundreds of times the control, while a busy runner slows both sides alike.
+const cpuMs = (fn) => {
+  const t0 = process.cpuUsage();
+  fn();
+  const d = process.cpuUsage(t0);
+  return (d.user + d.system) / 1000;
+};
+const MAX_RATIO = 25;
+const MAX_MS = 5000;
+// The control gets a floor so a near-zero measurement can't make the ratio meaningless.
+const assertLinear = (adversarialMs, controlMs, label) => {
+  const budget = Math.min(MAX_MS, MAX_RATIO * Math.max(controlMs, 20));
+  assert.ok(adversarialMs < budget, `${label}: ${adversarialMs.toFixed(1)} ms vs control ${controlMs.toFixed(1)} ms (budget ${budget.toFixed(0)} ms)`);
+};
+
 test("claimText: capped before any pattern runs; long repetitive input is fast", () => {
   assert.equal(claimText("x".repeat(CLAIM_MAX_CHARS + 500)).length, CLAIM_MAX_CHARS);
-  const t0 = process.cpuUsage();
-  for (const unit of ["i ve ", "i ll also ", "te lo ", "he ", "it s all ", "would you like me to ", "a"]) claimsAction(unit.repeat(1000) + "?");
-  const d = process.cpuUsage(t0);
-  assert.ok((d.user + d.system) / 1000 < 200, "linear patterns on capped text");
+  const units = ["i ve ", "i ll also ", "te lo ", "he ", "it s all ", "would you like me to ", "a"];
+  const control = cpuMs(() => { for (const unit of units) claimsAction("lorem ipsum ".repeat(Math.ceil(unit.length * 1000 / 12)) + "?"); });
+  const adversarial = cpuMs(() => { for (const unit of units) claimsAction(unit.repeat(1000) + "?"); });
+  assertLinear(adversarial, control, "linear patterns on capped text");
 });
 
 test("claimsAction: Spanish negations are not claims", () => {
@@ -137,13 +155,15 @@ test("claimsReminder: a promised reminder or follow-up, which a saved memory is 
 });
 
 test("claimsAction: adversarial model output stays fast (patterns run on capped text; the lookbehinds are bounded)", () => {
-  const t0 = process.cpuUsage();
-  for (const unit of ["no te ", "no te lo ", "no ", "i m ", "let me ", "is are ", "te lo te lo ", "que lo ", "me ", "writer y "]) {
-    claimsAction(unit.repeat(500) + "he anadido"); claimsReminder(unit.repeat(500) + "recordar");
-    claimsAction(unit.repeat(500) + "pare"); claimsAction(unit.repeat(500) + "esta en ello"); claimsAction(unit.repeat(500) + "ya empezo");
-  }
-  const d = process.cpuUsage(t0);
-  assert.ok((d.user + d.system) / 1000 < 300, `${(d.user + d.system) / 1000} ms`);
+  const units = ["no te ", "no te lo ", "no ", "i m ", "let me ", "is are ", "te lo te lo ", "que lo ", "me ", "writer y "];
+  const run = (pad) => { for (const unit of units) {
+    const head = pad(unit);
+    claimsAction(head + "he anadido"); claimsReminder(head + "recordar");
+    claimsAction(head + "pare"); claimsAction(head + "esta en ello"); claimsAction(head + "ya empezo");
+  } };
+  const control = cpuMs(() => run((unit) => "lorem ipsum ".repeat(Math.ceil(unit.length * 500 / 12))));
+  const adversarial = cpuMs(() => run((unit) => unit.repeat(500)));
+  assertLinear(adversarial, control, "adversarial model output");
 });
 
 test("claimsAction: known trade-offs, pinned (only ever read on an action turn no tool backed)", () => {
