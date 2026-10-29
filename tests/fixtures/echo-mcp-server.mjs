@@ -54,6 +54,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     ...(ctl.leakSchema ? [
       { name: "leaky", description: `log in with ${token}`, inputSchema: { type: "object", properties: {
         mode: { type: "string", title: `t ${token}`, default: token, enum: ["plain", token], examples: [token], description: `d ${token}` },
+        odd: { type: "string", pattern: `^${token}$`, format: `f-${token}`, "x-crow-hint": `h ${token}` },
+        [`k_${token}`]: { type: "string" },
+        list: { type: "array", items: [{ type: "object", properties: { deep: { type: "string", "x-note": [{ v: token }] } } }] },
       } } },
       { name: `tok_${token}`, description: "a name that carries the token", inputSchema: { type: "object", properties: {} } },
     ] : []),
