@@ -29,10 +29,11 @@ export const BODY_CAPS = {
 };
 
 const HEX32 = /^[0-9a-f]{32}$/;
-const ID_MAX = 128;
+const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const CTRL = /[\u0000-\u001f\u007f]/;
 const NO_SEQ = new Set(["project.ack", "project.refuse"]);
 
-/** Build a frame envelope (no validation; callers validate via parseFrame in tests). */
+/** Build a frame envelope. Undefined epoch/seq are omitted. */
 export function buildFrame({ kind, projectUuid, epoch, seq, fromInstanceId, toInstanceId, body }) {
   const frame = {
     type: C2C_TYPE, v: 1, kind,
@@ -48,55 +49,84 @@ export function buildFrame({ kind, projectUuid, epoch, seq, fromInstanceId, toIn
   return frame;
 }
 
-const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
-const isStr = (x, max) => typeof x === "string" && x.length > 0 && x.length <= max;
+const isObj = (x) => {
+  if (x === null || typeof x !== "object" || Array.isArray(x)) return false;
+  const p = Object.getPrototypeOf(x);
+  return p === Object.prototype || p === null;
+};
+const isId = (x) => typeof x === "string" && ID_RE.test(x);
+const isText = (x, max) =>
+  typeof x === "string" && x.length > 0 && x.length <= max && x.isWellFormed() && !CTRL.test(x);
 const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
 
-function validBody(kind, b) {
+/** Rebuild a body from known keys only; null when invalid. */
+function cleanBody(kind, b) {
   switch (kind) {
     case "project.invite":
-      return isStr(b.name, 200) && ROLES.includes(b.role) && isStr(b.owner_instance_id, ID_MAX);
+      return isText(b.name, 200) && ROLES.includes(b.role) && isId(b.owner_instance_id)
+        ? { name: b.name, role: b.role, owner_instance_id: b.owner_instance_id } : null;
     case "project.accept":
-      return isStr(b.visitor_instance_id, ID_MAX);
+      return isId(b.visitor_instance_id) ? { visitor_instance_id: b.visitor_instance_id } : null;
     case "project.decline":
-      return b.reason === undefined || b.reason === "declined" || b.reason === "left";
+      if (b.reason === undefined) return {};
+      return b.reason === "declined" || b.reason === "left" ? { reason: b.reason } : null;
     case "project.role":
-      return ROLES.includes(b.role);
+      return ROLES.includes(b.role) ? { role: b.role } : null;
     case "project.unshare":
-      return true;
+      return {};
     case "project.ack":
-      return Array.isArray(b.seqs) && b.seqs.length <= 256 && b.seqs.every(isSeq);
-    case "project.refuse":
-      return isSeq(b.seq) && REFUSALS.includes(b.reason)
-        && (b.detail === undefined || (typeof b.detail === "string" && b.detail.length <= 200));
+      return Array.isArray(b.seqs) && b.seqs.length <= 256 && b.seqs.every(isSeq)
+        ? { seqs: b.seqs.slice() } : null;
+    case "project.refuse": {
+      if (!isSeq(b.seq) || !REFUSALS.includes(b.reason)) return null;
+      const out = { seq: b.seq, reason: b.reason };
+      if (b.detail !== undefined) {
+        if (!(typeof b.detail === "string" && b.detail.length <= 200 && b.detail.isWellFormed() && !CTRL.test(b.detail))) return null;
+        out.detail = b.detail;
+      }
+      return out;
+    }
     default:
-      return false;
+      return null;
   }
 }
 
-/** @returns {{ok:true, frame:object}|{ok:false, reason:"bad_frame"|"unsupported"}} */
+/**
+ * Validate an untrusted payload. On success returns a REBUILT frame (known
+ * fields only), never the raw payload. Never throws.
+ * @returns {{ok:true, frame:object}|{ok:false, reason:"bad_frame"|"unsupported"}}
+ */
 export function parseFrame(payload) {
   const bad = { ok: false, reason: "bad_frame" };
   try {
-    if (!isObj(payload)) return bad;
-    if (payload.type !== C2C_TYPE || payload.v !== 1) return bad;
-    const { kind } = payload;
+    if (!isObj(payload) || payload.type !== C2C_TYPE) return bad;
+    if (payload.v !== 1) return { ok: false, reason: "unsupported" };
+    const kind = payload.kind;
     if (typeof kind !== "string" || kind.length > 64) return bad;
     if (!PLAN1_KINDS.includes(kind)) return { ok: false, reason: "unsupported" };
-    if (typeof payload.project_uuid !== "string" || !HEX32.test(payload.project_uuid)) return bad;
-    if (!isStr(payload.from_instance_id, ID_MAX) || !isStr(payload.to_instance_id, ID_MAX)) return bad;
-    const ackish = NO_SEQ.has(kind);
-    if (ackish) {
-      if (payload.seq !== undefined) return bad;
-      if (payload.epoch !== undefined && !(typeof payload.epoch === "string" && HEX32.test(payload.epoch))) return bad;
+    const { project_uuid, from_instance_id, to_instance_id, epoch, seq, body } = payload;
+    if (typeof project_uuid !== "string" || !HEX32.test(project_uuid)) return bad;
+    if (!isId(from_instance_id) || !isId(to_instance_id)) return bad;
+    const frame = { type: C2C_TYPE, v: 1, kind, project_uuid };
+    if (NO_SEQ.has(kind)) {
+      if (seq !== undefined) return bad;
+      if (epoch !== undefined) {
+        if (typeof epoch !== "string" || !HEX32.test(epoch)) return bad;
+        frame.epoch = epoch;
+      }
     } else {
-      if (!isSeq(payload.seq)) return bad;
-      if (typeof payload.epoch !== "string" || !HEX32.test(payload.epoch)) return bad;
+      if (!isSeq(seq) || typeof epoch !== "string" || !HEX32.test(epoch)) return bad;
+      frame.epoch = epoch;
+      frame.seq = seq;
     }
-    if (!isObj(payload.body)) return bad;
-    if (Buffer.byteLength(JSON.stringify(payload.body)) > BODY_CAPS[kind]) return bad;
-    if (!validBody(kind, payload.body)) return bad;
-    return { ok: true, frame: payload };
+    frame.from_instance_id = from_instance_id;
+    frame.to_instance_id = to_instance_id;
+    if (!isObj(body)) return bad;
+    if (Buffer.byteLength(JSON.stringify(body)) > BODY_CAPS[kind]) return bad;
+    const clean = cleanBody(kind, body);
+    if (!clean) return bad;
+    frame.body = clean;
+    return { ok: true, frame };
   } catch {
     return bad;
   }
