@@ -178,15 +178,6 @@ export function isCloudKey(key, opts) {
 /** id -> i18n key of the role's one-line job. */
 export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r) => [r.id, `settings.roleJobs.${r.id}`])));
 
-// RFC 5737 documentation blocks: unroutable in practice, so naming one as a
-// "cloud" upstream is harmless, and they are the fixtures tests use for cloud.
-const DOC_V4 = [[0xc0000200, 24], [0xc6336400, 24], [0xcb007100, 24]];
-function isDocumentationV4(h) {
-  if (isIP(h) !== 4) return false;
-  const n = h.split(".").reduce((a, o) => a * 256 + Number(o), 0);
-  return DOC_V4.some(([base, bits]) => Math.floor(n / 2 ** (32 - bits)) === Math.floor(base / 2 ** (32 - bits)));
-}
-
 /**
  * Where does a model run? "here" (loopback or one of this box's addresses),
  * "other_box" (local-network but not ours), "cloud" (proven public), "unproven"
@@ -208,7 +199,7 @@ export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultRes
     let row = first;
     for (let hops = 0; row && hops <= MAX_DOOR_HOPS; hops++) {
       const h = hostnameOf(row.baseUrl);
-      if (h && isIP(h) && !own.has(h) && addressClass(h) && !isDirectPublic(h) && !isDocumentationV4(h) && !isLocalHop(h)) return "unproven";
+      if (h && isIP(h) && !own.has(h) && addressClass(h) && !isDirectPublic(h) && !isLocalHop(h)) return "unproven";
       const up = resolveDoor(row, providers);
       if (up === row) break;
       row = up;
