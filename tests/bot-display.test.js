@@ -59,9 +59,10 @@ test("friendlyModel: falls back to the id after the provider", () => {
 
 const gw = (...types) => ({ gateways: types.map((type) => ({ type })) });
 
-test("purposeLine: perch, glasses and companion read as what the bot does", () => {
+test("purposeLine: perch, glasses and companion read as what the bot does; a kept glasses record reads as retired", () => {
   assert.equal(purposeLine(gw("perch"), "en"), "Chats in Perch");
-  assert.equal(purposeLine(gw("glasses"), "en"), "Voice assistant on your glasses");
+  assert.equal(purposeLine(gw("glasses"), "en"), "Glasses now answer as Crow");
+  assert.equal(purposeLine(gw("glasses"), "es"), "Las gafas ahora responden como Crow");
   assert.equal(purposeLine(gw("companion"), "en"), "AI Companion on a display");
   assert.equal(purposeLine(gw("gmail"), "en"), "Answers on Gmail");
   assert.equal(purposeLine(gw("crow-messages"), "en"), "Answers on Crow Messages");
