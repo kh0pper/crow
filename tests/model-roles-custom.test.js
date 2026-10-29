@@ -11,11 +11,12 @@ import { tmpdir } from "node:os";
 import http from "node:http";
 import express from "express";
 import { createDbClient } from "../servers/db.js";
+import { friendlyModel } from "../servers/gateway/dashboard/shared/bot-display.js";
 import { parseBindingRows, resolveRoleKey } from "../servers/shared/model-roles.js";
 import {
-  customRoleIdFor, saveCustomRole, deleteCustomRole, invalidateRoleContext, readCustomRoleDefs, addBindingsChangeListener,
+  customRoleIdFor, saveCustomRole, deleteCustomRole, invalidateRoleContext, readCustomRoleDefs, addBindingsChangeListener, loadRoleContext,
 } from "../servers/shared/model-roles-store.js";
-import { previewCustomRoleEdit } from "../servers/shared/role-change.js";
+import { previewCustomRoleEdit, applyCustomRoleEdit } from "../servers/shared/role-change.js";
 import { customRoleConsumers } from "../servers/shared/role-consumers.js";
 import { clearProviderTaskCache } from "../servers/shared/provider-task.js";
 import rolesApiRouter from "../servers/gateway/routes/roles-api.js";
@@ -38,6 +39,9 @@ const raw = (key, value) =>
 const settingOf = async (key) =>
   (await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [key] })).rows[0]?.value ?? null;
 const consumersFn = (d, id) => customRoleConsumers(d, id, { env: {} });
+/** The tests' own catalog: never the live registry/model-catalog.json. */
+const CATALOG = Object.freeze([{ id: "fixture-big", serving: { class: "windowed" } }]);
+const ctxOf = () => loadRoleContext(db, { maxAgeMs: 0, getOrCreateLocalInstanceId: () => "i-self", catalog: CATALOG });
 
 const dbFactory = () => new Proxy(db, { get: (t, k) => (k === "close" ? () => {} : Reflect.get(t, k)) });
 const passGate = (req, _res, next) => next();
@@ -45,7 +49,7 @@ const passGate = (req, _res, next) => next();
 function startApp(opts = {}) {
   const app = express();
   app.use(express.json());
-  app.use(rolesApiRouter({ dbFactory, sessionGate: passGate, env: {}, ownAddrs: OWN, localInstanceId: () => "i-self", ...opts }));
+  app.use(rolesApiRouter({ dbFactory, sessionGate: passGate, env: {}, ownAddrs: OWN, localInstanceId: () => "i-self", catalog: CATALOG, ...opts }));
   return new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
 }
 
@@ -96,8 +100,8 @@ after(() => { console.warn = origWarn; rmSync(dir, { recursive: true, force: tru
 beforeEach(async () => {
   await db.executeMultiple("DELETE FROM providers; DELETE FROM dashboard_settings; DELETE FROM dashboard_settings_overrides; DELETE FROM pi_bot_defs;");
   await ins("local-chat", "http://127.0.0.1:8003/v1", [{ id: "m1" }]);
-  // A windowed catalog model (registry/model-catalog.json): runs only in a model window.
-  await ins("big", "http://127.0.0.1:8090/v1", [{ id: "b1" }], { catalogId: "glm-5.3-flash" });
+  // A windowed model (the CATALOG fixture): runs only in a model window.
+  await ins("big", "http://127.0.0.1:8090/v1", [{ id: "b1" }], { catalogId: "fixture-big" });
   invalidateRoleContext();
   clearProviderTaskCache();
 });
@@ -111,7 +115,7 @@ const coder = async (allowHeavy = true) => {
 // --- the flag -----------------------------------------------------------------
 
 test("big models flag", () => {
-  const providers = [{ id: "big", baseUrl: "http://10.0.0.5:8000/v1", host: "local", disabled: false, models: [{ id: "b1" }], gpuPolicy: { catalogId: "big-cat" } }];
+  const providers = [{ id: "big", baseUrl: "http://100.64.20.5:8000/v1", host: "local", disabled: false, models: [{ id: "b1" }], gpuPolicy: { catalogId: "big-cat" } }];
   const models = { providers: { big: { models: [{ id: "b1" }] } } };
   const catalog = [{ id: "big-cat", serving: { class: "windowed" } }];
   const rows = (def) => [
@@ -161,9 +165,10 @@ test("ids", async () => {
     const r = await saveCustomRole(db, { label: "  Coder  ", job: "Writes code", capability: "chat", allowHeavy: true }, { actor: "dashboard:owner" });
     assert.deepEqual(r, { ok: true, id: "c-coder" });
     assert.deepEqual(JSON.parse(await settingOf("model_role_def.c-coder")), { label: "Coder", job: "Writes code", capability: "chat", allowHeavy: true });
-    const r2 = await saveCustomRole(db, { label: "Coder", capability: "vision", allowHeavy: "yes" });
+    // Another name with the same slug gets the next id (the same name is name_taken).
+    const r2 = await saveCustomRole(db, { label: "Coder!", capability: "vision", allowHeavy: "yes" });
     assert.deepEqual(r2, { ok: true, id: "c-coder-2" });
-    assert.deepEqual(JSON.parse(await settingOf("model_role_def.c-coder-2")), { label: "Coder", job: "", capability: "vision" });
+    assert.deepEqual(JSON.parse(await settingOf("model_role_def.c-coder-2")), { label: "Coder!", job: "", capability: "vision" });
     assert.equal(fired, 2);
   } finally { off(); }
   const defs = await readCustomRoleDefs(db);
@@ -180,11 +185,14 @@ test("a stale binding row is never inherited by a new role's id", async () => {
 
 test("edit previewed", async () => {
   await coder(true);
-  const pv = await previewCustomRoleEdit(db, "c-coder", { label: "Coder", capability: "chat", allowHeavy: false }, { env: {}, ownAddrs: OWN });
+  const pv = await previewCustomRoleEdit(db, "c-coder", { label: "Coder", capability: "chat", allowHeavy: false }, { ctx: await ctxOf(), env: {}, ownAddrs: OWN });
   assert.equal(pv.current.key, "big/b1");
   assert.equal(pv.next.key, null);
   assert.equal(typeof pv.previewHash, "string");
-  const same = await previewCustomRoleEdit(db, "c-coder", { label: "Coder", capability: "chat", allowHeavy: true }, { env: {}, ownAddrs: OWN });
+  assert.equal(pv.next.label, null);
+  const same = await previewCustomRoleEdit(db, "c-coder", { label: "Coder", capability: "chat", allowHeavy: true }, { ctx: await ctxOf(), env: {}, ownAddrs: OWN });
+  assert.equal(same.next.key, "big/b1");
+  assert.equal(same.next.label, friendlyModel("big/b1", (await ctxOf()).providers) || "big/b1", "the friendly name");
   assert.notEqual(same.previewHash, pv.previewHash, "the hash covers the definition");
 
   await withServer(async (s) => {
@@ -193,6 +201,7 @@ test("edit previewed", async () => {
     assert.equal(no.status, 409);
     assert.equal(no.json.reason, "needs_preview");
     assert.equal(no.json.preview.next.key, null);
+    assert.equal(no.text.includes(SECRET), false, "no key in the 409 preview");
     assert.equal(JSON.parse(await settingOf("model_role_def.c-coder")).allowHeavy, true, "nothing written");
 
     const p = await call(s, "POST", "/api/roles/custom/c-coder/preview", { body });
@@ -279,6 +288,7 @@ test("route order", async () => {
     const del = await call(s, "DELETE", "/api/roles/custom/c-coder");
     assert.equal(del.status, 409);
     assert.equal(del.json.reason, "in_use");
+    assert.equal(del.text.includes(SECRET), false, "no key in the delete 409");
     assert.ok(del.json.consumers.some((c) => c.id === "b1" && c.label === "Night bot"));
     const core = await call(s, "DELETE", "/api/roles/custom/everyday");
     assert.equal(core.status, 400);
@@ -471,4 +481,116 @@ test("Delete asks once more, then lists what still uses the role", async () => {
   assert.equal(h.calls[0].headers["X-Crow-Csrf"], "tok-1");
   assert.equal(one(h.dialog, "data-custom-error").textContent, "This role is in use, so it can't be deleted. Used by: Night bot, Builder");
   assert.equal(h.visits.length, 0);
+});
+
+// --- fix round 1 ------------------------------------------------------------------
+
+test("names: invisible characters refused, a bad job has its own code, names are unique ignoring case", async () => {
+  for (const bad of ["Co\u200Bder", "Co\u202Eredoc", "\u2066Coder\u2069", "Co\uFEFFder", "Co\u200Ddeer"]) {
+    assert.deepEqual(await saveCustomRole(db, { label: bad, capability: "chat" }), { ok: false, reason: "invalid_label" }, JSON.stringify(bad));
+  }
+  assert.deepEqual(await saveCustomRole(db, { label: "Coder", job: "x".repeat(161), capability: "chat" }), { ok: false, reason: "invalid_job" });
+  assert.deepEqual(await saveCustomRole(db, { label: "Coder", job: "writes\u202Ecode", capability: "chat" }), { ok: false, reason: "invalid_job" });
+
+  assert.deepEqual(await saveCustomRole(db, { label: "Coder", capability: "chat" }), { ok: true, id: "c-coder" });
+  assert.deepEqual(await saveCustomRole(db, { label: "CODER", capability: "vision" }), { ok: false, reason: "name_taken" });
+  assert.deepEqual(await saveCustomRole(db, { label: "Reader", capability: "chat" }), { ok: true, id: "c-reader" });
+  assert.deepEqual(await saveCustomRole(db, { id: "c-reader", label: "coder", capability: "chat" }), { ok: false, reason: "name_taken" }, "an edit can't take another's name");
+  assert.deepEqual(await saveCustomRole(db, { id: "c-coder", label: "CoDeR", capability: "chat" }), { ok: true, id: "c-coder" }, "renaming itself is fine");
+  // A create whose computed id already has a definition (a def written under another name) is refused, never overwritten.
+  await raw("model_role_def.c-writer", JSON.stringify({ label: "Something else", capability: "chat" }));
+  await raw("model_role_def.c-writer-2", JSON.stringify({ label: "Other", capability: "chat" }));
+  invalidateRoleContext();
+  const w = await saveCustomRole(db, { label: "Writer", capability: "chat" });
+  assert.deepEqual(w, { ok: true, id: "c-writer-3" });
+  assert.equal(JSON.parse(await settingOf("model_role_def.c-writer")).label, "Something else");
+
+  await withServer(async (s) => {
+    const r = await call(s, "POST", "/api/roles/custom", { body: { label: "reader", capability: "chat" } });
+    assert.equal(r.status, 409);
+    assert.equal(r.json.reason, "name_taken");
+    const j = await call(s, "POST", "/api/roles/custom", { body: { label: "Fresh", job: "y".repeat(200), capability: "chat" } });
+    assert.equal(j.status, 400);
+    assert.equal(j.json.reason, "invalid_job");
+  });
+});
+
+test("delete rolls back when the consumer check throws, and leaves no open transaction", async () => {
+  await coder(false);
+  await assert.rejects(deleteCustomRole(db, "c-coder", { consumersFn: async () => { throw new Error("boom"); } }), /boom/);
+  assert.ok(await settingOf("model_role_def.c-coder"), "the definition is still there");
+  assert.ok(await settingOf("model_role.c-coder"), "the binding is still there");
+  // A dangling BEGIN would make the next BEGIN IMMEDIATE throw.
+  assert.deepEqual(await saveCustomRole(db, { label: "After", capability: "chat" }), { ok: true, id: "c-after" });
+});
+
+test("an incomplete consumer scan refuses the delete", async () => {
+  await coder(false);
+  // A pi_bot_defs read that fails for a reason other than a missing table.
+  const broken = new Proxy(db, {
+    get: (t, k) => (k === "execute"
+      ? async (arg) => {
+          const sql = typeof arg === "string" ? arg : arg.sql;
+          if (/FROM pi_bot_defs/.test(sql)) throw new Error("disk I/O error");
+          return t.execute(arg);
+        }
+      : Reflect.get(t, k)),
+  });
+  await assert.rejects(customRoleConsumers(broken, "c-coder", { env: {} }), /incomplete/);
+  await assert.rejects(deleteCustomRole(broken, "c-coder", { consumersFn }), /incomplete/);
+  assert.ok(await settingOf("model_role_def.c-coder"), "nothing deleted");
+});
+
+test("sub-agent map and phone slots count as consumers", async () => {
+  await coder(false);
+  await raw("model_role_subagents", JSON.stringify({ planner: { role: "c-coder" }, scout: { role: "everyday" } }));
+  let r = await deleteCustomRole(db, "c-coder", { consumersFn });
+  assert.equal(r.reason, "in_use");
+  assert.deepEqual(r.consumers.map((c) => `${c.kind}:${c.id}`), ["subagent:planner"]);
+
+  await db.execute("DELETE FROM dashboard_settings WHERE key = 'model_role_subagents'");
+  await raw("phone_local_model", "role:c-coder");
+  r = await deleteCustomRole(db, "c-coder", { consumersFn });
+  assert.equal(r.reason, "in_use");
+  assert.deepEqual(r.consumers.map((c) => `${c.kind}:${c.id}`), ["phone:phone_local_model"]);
+  assert.equal(r.consumers[0].labelKey, "settings.providers.phone.local");
+});
+
+test("the server refuses a custom edit missing its unattended or cloud ack", async () => {
+  // Unattended: a bot with a non-Perch gateway runs on its own.
+  await coder(true);
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?,?,?)",
+    args: ["b1", "Night bot", JSON.stringify({ models: { default: "role:c-coder" }, gateways: [{ type: "discord" }] })],
+  });
+  const edit = { id: "c-coder", label: "Coder", capability: "chat", allowHeavy: false };
+  const opts = async () => ({ ctx: await ctxOf(), env: {}, ownAddrs: OWN });
+  const pv = await previewCustomRoleEdit(db, "c-coder", edit, await opts());
+  assert.equal(pv.needs.ackUnattended, true);
+  let r = await applyCustomRoleEdit(db, edit, { ...(await opts()), previewHash: pv.previewHash });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "needs_ack_unattended");
+  assert.equal(JSON.parse(await settingOf("model_role_def.c-coder")).allowHeavy, true, "nothing written");
+  r = await applyCustomRoleEdit(db, edit, { ...(await opts()), previewHash: pv.previewHash, ackUnattended: true });
+  assert.deepEqual(r, { ok: true, id: "c-coder" });
+
+  // Cloud: turning big models on newly reaches a big model on a public address.
+  await db.execute("DELETE FROM pi_bot_defs");
+  await ins("cloud-big", "https://203.0.113.5/v1", [{ id: "x1" }], { catalogId: "fixture-big" });
+  await raw("model_role_def.c-cloud", JSON.stringify({ label: "Cloudy", capability: "chat" }));
+  await raw("model_role.c-cloud", JSON.stringify({ model: "cloud-big/x1" }));
+  invalidateRoleContext();
+  await withServer(async (s) => {
+    const body = { id: "c-cloud", label: "Cloudy", capability: "chat", allowHeavy: true };
+    const p = await call(s, "POST", "/api/roles/custom/c-cloud/preview", { body });
+    assert.equal(p.json.needs.ackCloud, true);
+    assert.equal(p.text.includes(SECRET), false);
+    const no = await call(s, "POST", "/api/roles/custom", { body: { ...body, previewHash: p.json.previewHash } });
+    assert.equal(no.status, 409);
+    assert.equal(no.json.reason, "needs_ack_cloud");
+    assert.equal(no.text.includes(SECRET), false, "no key in the 409 preview");
+    const ok = await call(s, "POST", "/api/roles/custom", { body: { ...body, previewHash: p.json.previewHash, ackCloud: true } });
+    assert.equal(ok.status, 200);
+    assert.equal(JSON.parse(await settingOf("model_role_def.c-cloud")).allowHeavy, true);
+  });
 });

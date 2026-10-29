@@ -327,7 +327,9 @@ export async function previewCustomRoleEdit(db, id, def, { ctx, env = process.en
   const nextCustomDefs = { ...ctx.customDefs, [id]: n.def };
   const pv = await previewRoleChange(db, id, change, { ctx, env, localMarks, ownAddrs, nextCustomDefs });
   const previewHash = createHash("sha256").update(JSON.stringify([pv.previewHash, id, n.def.capability, !!n.def.allowHeavy])).digest("hex");
-  return { ...pv, previewHash };
+  // The sheet names the model the way the page does, never by its raw key alone.
+  const label = pv.next.key ? friendlyModel(pv.next.key, ctx.providers) || pv.next.key : null;
+  return { ...pv, next: { ...pv.next, label }, previewHash };
 }
 
 /**
@@ -336,16 +338,18 @@ export async function previewCustomRoleEdit(db, id, def, { ctx, env = process.en
  * changes either needs the hash of a fresh previewCustomRoleEdit (refusals:
  * needs_preview without one, preview_changed on a mismatch) and the acks
  * that preview asks for (needs_ack_unattended, needs_ack_cloud). A refusal
- * after a preview carries it.
+ * after a preview carries it. `ctx` (default a fresh RoleContext) is the
+ * context the preview is computed in; the route passes the one its own
+ * preview route uses.
  * @returns {Promise<{ok:true, id:string}|{ok:false, reason:string, preview?:RolePreview}>}
  */
 export async function applyCustomRoleEdit(db, def = {}, {
-  actor, previewHash, ackUnattended = false, ackCloud = false, env = process.env, localMarks, ownAddrs,
+  actor, previewHash, ackUnattended = false, ackCloud = false, env = process.env, localMarks, ownAddrs, ctx,
 } = {}) {
   const n = normalizeCustomDef(def);
   if (n.error) return { ok: false, reason: n.error };
   if (def.id === undefined || def.id === null) return saveCustomRole(db, { ...n.def }, { actor });
-  const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
+  ctx ??= await loadRoleContext(db, { maxAgeMs: 0 });
   const was = isValidCustomRoleId(def.id) ? ctx.customDefs?.[def.id] : null;
   if (!was) return { ok: false, reason: "unknown_role" };
   if (defMoves(was, n.def)) {

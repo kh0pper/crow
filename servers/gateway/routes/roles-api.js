@@ -176,6 +176,7 @@ const langOf = (req) => {
  * @param {() => Date} [opts.now]           the clock for pick checks
  * @param {Function} [opts.classifierStatusFn]  the safety row's status (plans)
  * @param {object} [opts.recOpts]           recommendations file options (tests)
+ * @param {object[]} [opts.catalog]         model catalog entries instead of registry/model-catalog.json (tests)
  */
 export default function rolesApiRouter({
   dbFactory = createDbClient,
@@ -190,6 +191,7 @@ export default function rolesApiRouter({
   now = () => new Date(),
   classifierStatusFn,
   recOpts,
+  catalog,
 } = {}) {
   const router = Router();
   /** This box's addresses, probed at most once per request and passed down. */
@@ -216,7 +218,7 @@ export default function rolesApiRouter({
     }
   };
 
-  const loadCtx = (db) => loadRoleContext(db, { maxAgeMs: 0, getOrCreateLocalInstanceId: localInstanceId });
+  const loadCtx = (db) => loadRoleContext(db, { maxAgeMs: 0, getOrCreateLocalInstanceId: localInstanceId, ...(catalog ? { catalog } : {}) });
 
   async function hasTrustedPeer(db) {
     let self = null;
@@ -247,12 +249,13 @@ export default function rolesApiRouter({
 
   /** The definition fields of a body (never an id or anything else). */
   const customDefBody = (b) => ({ label: b?.label, job: b?.job, capability: b?.capability, allowHeavy: b?.allowHeavy === true });
-  const CUSTOM_STATUS = { invalid_label: 400, invalid_capability: 400, unknown_role: 404 };
+  const CUSTOM_STATUS = { invalid_label: 400, invalid_job: 400, invalid_capability: 400, unknown_role: 404, name_taken: 409 };
 
   router.post("/api/roles/custom", csrfMiddleware, withDb("custom save", async (db, req, res) => {
     const b = req.body || {};
     const id = b.id === undefined || b.id === null ? undefined : b.id;
     const r = await applyCustomRoleEdit(db, { id, ...customDefBody(b) }, {
+      ctx: id === undefined ? undefined : await loadCtx(db),
       actor: actorOf(req),
       previewHash: typeof b.previewHash === "string" ? b.previewHash : undefined,
       ackUnattended: b.ackUnattended === true,
@@ -277,7 +280,8 @@ export default function rolesApiRouter({
 
   router.delete("/api/roles/custom/:id", csrfMiddleware, withDb("custom delete", async (db, req, res) => {
     const r = await deleteCustomRole(db, req.params.id, {
-      consumersFn: (d, id) => customRoleConsumers(d, id, { env }),
+      // Runs inside the delete's BEGIN IMMEDIATE: it must stay synchronous DB reads (see deleteCustomRole).
+    consumersFn: (d, id) => customRoleConsumers(d, id, { env }),
       actor: actorOf(req),
     });
     if (r.ok) return res.json({ ok: true });

@@ -117,8 +117,12 @@ const CUSTOM_PREFIX = "c-";
 const SLUG_MAX = 32;
 const LABEL_MAX = 40;
 const JOB_MAX = 160;
-// No control characters (C0, DEL, C1) or line/paragraph separators in a label or job.
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+// Refused in a label or job: control characters (C0, DEL, C1), line/paragraph
+// separators, and the invisible characters that can make shown text lie:
+// zero-width and direction marks (U+200B-200F, U+061C), bidi embeddings and
+// overrides (U+202A-202E), word joiners and invisible operators (U+2060-2064),
+// bidi isolates (U+2066-2069) and the BOM (U+FEFF).
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u061c\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 
 /**
  * The id for a new custom role: `c-` + a slug of the label ([a-z0-9-], at most
@@ -141,6 +145,9 @@ export function customRoleIdFor(label, existingIds = []) {
   }
 }
 
+/** Two names are the same when they match ignoring case (after NFKC). */
+const nameKey = (label) => String(label).normalize("NFKC").toLowerCase();
+
 /** Every custom id with a definition OR a leftover binding row: a new role never inherits a stale binding. */
 async function customIdsInUse(db) {
   const { rows } = await db.execute({
@@ -157,8 +164,9 @@ async function customIdsInUse(db) {
 }
 
 /**
- * A custom role definition as stored, or {error}: label trimmed 1-40 (no
- * control characters), job trimmed to at most 160 (optional), capability
+ * A custom role definition as stored, or {error}: label trimmed 1-40
+ * (`invalid_label`), job trimmed to at most 160 (optional, `invalid_job`),
+ * neither with a CONTROL_RE character, capability
  * `chat` | `vision`, allowHeavy only when it is boolean true.
  */
 export function normalizeCustomDef({ label, job, capability, allowHeavy } = {}) {
@@ -166,7 +174,7 @@ export function normalizeCustomDef({ label, job, capability, allowHeavy } = {}) 
   if (!l || l.length > LABEL_MAX || CONTROL_RE.test(l)) return { error: "invalid_label" };
   if (!CUSTOM_CAPABILITIES.includes(capability)) return { error: "invalid_capability" };
   const j = typeof job === "string" ? job.trim() : "";
-  if (j.length > JOB_MAX || CONTROL_RE.test(j)) return { error: "invalid_label" };
+  if (j.length > JOB_MAX || CONTROL_RE.test(j)) return { error: "invalid_job" };
   const def = { label: l, job: j, capability };
   if (allowHeavy === true) def.allowHeavy = true;
   return { def };
@@ -180,20 +188,42 @@ export function normalizeCustomDef({ label, job, capability, allowHeavy } = {}) 
  * no definition is `unknown_role`. An edit that changes what the role may
  * use is previewed first: the route requires the hash (role-change.js
  * previewCustomRoleEdit); this writer does not check it.
- * @returns {Promise<{ok:true, id:string}|{ok:false, reason:"invalid_label"|"invalid_capability"|"unknown_role"}>}
+ *
+ * The read and the write share one BEGIN IMMEDIATE ... COMMIT, so two saves
+ * at once cannot both pass the checks: a name already used by another
+ * custom role (compared case-insensitively, after NFKC) is `name_taken`, and
+ * so is a create whose computed id already has a definition.
+ * @returns {Promise<{ok:true, id:string}|{ok:false, reason:"invalid_label"|"invalid_job"|"invalid_capability"|"unknown_role"|"name_taken"}>}
  */
 export async function saveCustomRole(db, { id, label, job, capability, allowHeavy } = {}, { actor } = {}) {
   const n = normalizeCustomDef({ label, job, capability, allowHeavy });
   if (n.error) return { ok: false, reason: n.error };
-  let roleId;
-  if (id !== undefined && id !== null) {
+  const editing = id !== undefined && id !== null;
+  if (editing && (typeof id !== "string" || !isValidCustomRoleId(id))) return { ok: false, reason: "unknown_role" };
+  // Everything between BEGIN and COMMIT must stay synchronous DB work (see deleteCustomRole).
+  await db.execute("BEGIN IMMEDIATE");
+  let result;
+  try {
     const { customDefs } = await readRoleRows(db);
-    if (typeof id !== "string" || !isValidCustomRoleId(id) || !customDefs[id]) return { ok: false, reason: "unknown_role" };
-    roleId = id;
-  } else {
-    roleId = customRoleIdFor(n.def.label, await customIdsInUse(db));
+    const want = nameKey(n.def.label);
+    const clash = Object.entries(customDefs).some(([other, d]) => other !== id && typeof d.label === "string" && nameKey(d.label) === want);
+    if (editing && !customDefs[id]) result = { ok: false, reason: "unknown_role" };
+    else if (clash) result = { ok: false, reason: "name_taken" };
+    else {
+      const roleId = editing ? id : customRoleIdFor(n.def.label, await customIdsInUse(db));
+      if (!editing && customDefs[roleId]) result = { ok: false, reason: "name_taken" };
+      else {
+        await writeSetting(db, ROLE_DEF_PREFIX + roleId, JSON.stringify(n.def), { scope: "global" });
+        result = { ok: true, id: roleId };
+      }
+    }
+    await db.execute("COMMIT");
+  } catch (e) {
+    try { await db.execute("ROLLBACK"); } catch { /* already closed */ }
+    throw e;
   }
-  await writeSetting(db, ROLE_DEF_PREFIX + roleId, JSON.stringify(n.def), { scope: "global" });
+  if (!result.ok) return result;
+  const roleId = result.id;
   if (typeof actor === "string" && actor) console.log(`[roles] custom role ${roleId} saved by ${actor}`);
   invalidateRoleContext();
   fireListeners(roleId);
@@ -232,6 +262,13 @@ export async function deleteCustomRole(db, id, { consumersFn, actor } = {}) {
   if (typeof id === "string" && CORE_IDS.has(id.toLowerCase())) return { ok: false, reason: "core_role" };
   if (typeof id !== "string" || !isValidCustomRoleId(id)) return { ok: false, reason: "unknown_role" };
   if (typeof consumersFn !== "function") throw new TypeError("deleteCustomRole: consumersFn is required");
+  // WARNING: everything between BEGIN IMMEDIATE and COMMIT, consumersFn
+  // included, must stay synchronous better-sqlite3 work (awaits that settle
+  // as microtasks only: no fs/promises, timers, network or another process).
+  // A real async wait would let another request run; its write on its own
+  // connection would then hit SQLite's busy wait, which better-sqlite3 runs
+  // synchronously, blocking the event loop for up to busy_timeout (30 s,
+  // servers/db.js), and this COMMIT could not run until it gave up.
   await db.execute("BEGIN IMMEDIATE");
   let result;
   try {
@@ -277,7 +314,7 @@ export function invalidateRoleContext() {
   generation++;
 }
 
-async function buildContext(db, getOwnId) {
+async function buildContext(db, getOwnId, catalog) {
   const { bindings, customDefs } = await readRoleRows(db);
   const { rows } = await db.execute("SELECT * FROM providers ORDER BY disabled ASC, id");
   const providers = rows.map(providerRowToObject);
@@ -287,7 +324,7 @@ async function buildContext(db, getOwnId) {
     customDefs,
     providers,
     models: modelsFor(enabledRows),
-    catalog: loadCatalog(),
+    catalog: Array.isArray(catalog) ? catalog : loadCatalog(),
     ownInstanceId: wrapOwnId(getOwnId),
   };
 }
@@ -297,8 +334,9 @@ async function buildContext(db, getOwnId) {
  * per db for maxAgeMs. An injected getOrCreateLocalInstanceId (a test seam)
  * bypasses the cache.
  */
-export async function loadRoleContext(db, { maxAgeMs = 1000, getOrCreateLocalInstanceId } = {}) {
-  if (getOrCreateLocalInstanceId) return buildContext(db, getOrCreateLocalInstanceId);
+export async function loadRoleContext(db, { maxAgeMs = 1000, getOrCreateLocalInstanceId, catalog } = {}) {
+  // `catalog` (a test seam) is honoured only on the uncached path, with an injected id.
+  if (getOrCreateLocalInstanceId) return buildContext(db, getOrCreateLocalInstanceId, catalog);
   const hit = contextCache.get(db);
   if (hit && hit.gen === generation && Date.now() - hit.at < maxAgeMs) return hit.promise;
   const promise = buildContext(db, defaultGetOwnId);

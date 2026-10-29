@@ -2351,7 +2351,9 @@ export const translations = {
   "models.custom.cap.chat": { en: "Text", es: "Texto" },
   "models.custom.cap.vision": { en: "Text and images", es: "Texto e imágenes" },
   "models.custom.deleteConfirm": { en: "Delete {name}? The model chosen for it goes too. Tap Delete again to confirm.", es: "¿Eliminar {name}? También se elimina el modelo elegido para él. Toca Eliminar otra vez para confirmar." },
-  "models.custom.invalidLabel": { en: "Give the role a name of up to 40 characters.", es: "Ponle al rol un nombre de hasta 40 caracteres." },
+  "models.custom.invalidLabel": { en: "Give the role a name of up to 40 characters, with no hidden characters.", es: "Ponle al rol un nombre de hasta 40 caracteres, sin caracteres ocultos." },
+  "models.custom.invalidJob": { en: "Describe what it does in up to 160 characters, with no hidden characters.", es: "Describe lo que hace en hasta 160 caracteres, sin caracteres ocultos." },
+  "models.custom.nameTaken": { en: "You already have a role with that name. Pick another one.", es: "Ya tienes un rol con ese nombre. Elige otro." },
   "models.custom.previewNext": { en: "After this change it uses: {model}", es: "Después de este cambio usará: {model}" },
   "models.custom.previewNone": { en: "After this change it has no model it can use.", es: "Después de este cambio no tendrá ningún modelo que pueda usar." },
   // Sheet chrome (not in the copy table): the recommended star's label and the generic failure.

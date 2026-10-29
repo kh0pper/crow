@@ -118,7 +118,9 @@ export async function listRoleConsumers(db, roleId, { slots, bindings, customDef
  * nothing and does not count), and sub-agents mapped to the role. Roles that
  * name it are the store's own check (deleteCustomRole). Reads this db only:
  * no tasks store is opened (unattended detection is off), so it is safe
- * inside the delete's transaction.
+ * inside the delete's transaction. Keep it that way: it runs between BEGIN
+ * IMMEDIATE and COMMIT, where a real async wait could stall the event loop
+ * (the warning in deleteCustomRole).
  * @returns {Promise<Array<{kind:string, id:string, label:string, labelKey?:string}>>}
  */
 export async function customRoleConsumers(db, roleId, { env = process.env } = {}) {

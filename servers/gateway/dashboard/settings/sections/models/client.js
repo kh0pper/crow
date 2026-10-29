@@ -527,6 +527,8 @@ export function customRolesClientJS({ lang = "en" } = {}) {
     inUse: '${tJs("models.custom.inUse", lang)}',
     confirmDelete: '${tJs("models.custom.deleteConfirm", lang)}',
     invalidLabel: '${tJs("models.custom.invalidLabel", lang)}',
+    invalidJob: '${tJs("models.custom.invalidJob", lang)}',
+    nameTaken: '${tJs("models.custom.nameTaken", lang)}',
     next: '${tJs("models.custom.previewNext", lang)}',
     none: '${tJs("models.custom.previewNone", lang)}',
     changes: '${tJs("models.warn.changes", lang)}',
@@ -721,7 +723,7 @@ export function customRolesClientJS({ lang = "en" } = {}) {
     st.ackU = false;
     ui.warn.textContent = '';
     if (changed) line('mc-changed', T.changed);
-    var nk = pv.next && str(pv.next.key);
+    var nk = pv.next && (str(pv.next.label) || str(pv.next.key));
     line('mc-next', nk ? fill(T.next, { model: nk }) : T.none);
     var cons = pv.consumers || {};
     var moved = [];
@@ -781,7 +783,7 @@ export function customRolesClientJS({ lang = "en" } = {}) {
         renderPreview(d.preview, d.reason === 'preview_changed');
         return updateSave();
       }
-      fail(d.reason === 'invalid_label' ? T.invalidLabel : T.failed);
+      fail(d.reason === 'invalid_label' ? T.invalidLabel : d.reason === 'invalid_job' ? T.invalidJob : d.reason === 'name_taken' ? T.nameTaken : T.failed);
     });
   }
 
