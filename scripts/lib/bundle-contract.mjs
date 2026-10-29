@@ -127,6 +127,7 @@ function validateConnect(manifest) {
   const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
   const fields = Array.isArray(c.fields) ? c.fields : [];
   const names = new Set(fields.map((f) => f.name));
+  if (names.size !== fields.length) errors.push("connect.fields has duplicate field names");
   for (const f of fields) {
     const ev = envVars.find((v) => v && v.name === f.name);
     if (!ev) errors.push(`connect.fields ${f.name} must name a declared env_vars entry`);
@@ -143,6 +144,7 @@ function validateConnect(manifest) {
       if (!names.has(m[1])) errors.push(`connect.${where}: \${${m[1]}} is not a connect field`);
     }
   };
+  for (const [key, url] of Object.entries(c.step_links || {})) checkTemplate(`step_links ${key}`, url);
   for (const [env, d] of Object.entries(c.derived_env || {})) checkTemplate(`derived_env ${env}`, d.template);
   const t = c.test;
   if (t && t.kind === "http") {
@@ -268,7 +270,6 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
     }
   }
-
 
   // connect block (project services): referential checks the shape cannot express.
   if (manifest && manifest.connect) errors.push(...validateConnect(manifest));

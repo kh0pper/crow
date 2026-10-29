@@ -87,3 +87,30 @@ test("folder test shape", () => {
   const r = v(mk({ method: "folder", group: "paste", fields: [], test: { kind: "folder", expect_entry: ".obsidian" } }));
   assert.equal(r.ok, true, r.errors.join("; "));
 });
+
+test("method oauth needs an oauth block; provider is google only", () => {
+  has(v(mk({ method: "oauth", group: "signin", fields: [] })), "needs an oauth block");
+  const r = v(mk({ method: "oauth", group: "signin", fields: [], oauth: { provider: "github", scopes: ["a"] } }));
+  assert.equal(r.ok, false);
+  has(r, "shape");
+});
+
+test("label_from needs an address field", () => {
+  const m = mk({ label_from: "address", fields: [{ name: "HA_TOKEN", kind: "secret", label_key: "k" }] });
+  has(v(m), "label_from");
+});
+
+test("discover.mdns must be a string", () => {
+  const d = (mdns) => v(mk({ discover: { kind: "http", url: "http://127.0.0.1:1/", expect: [200], mdns } }));
+  assert.equal(d("_hass._tcp").ok, true);
+  assert.equal(d(5).ok, false);
+});
+
+test("step_links values use field names only", () => {
+  has(v(mk({ step_links: { "s.one": "https://example.com/${NOPE}" } })), "NOPE");
+});
+
+test("duplicate field names are refused", () => {
+  const f = { name: "HA_URL", kind: "address", label_key: "k" };
+  has(v(mk({ fields: [f, f] })), "duplicate");
+});
