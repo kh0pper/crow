@@ -375,7 +375,7 @@ const yyyymmdd = (d) => `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padS
 /**
  * Rename the workspace to <dataDir>/deleted-projects/<uuid>-<YYYYMMDD>/. renameSync moves the
  * directory entry itself: links inside (and the dir, if it is itself a link) move as links and
- * nothing is followed. Only <dataDir>/projects/<slug>/workspace is moved. @returns {boolean} moved
+ * nothing is followed. Only <dataDir>/projects/<slug>/workspace is moved. @returns {string|false} the new path, or false
  */
 function moveWorkspace(project, dataDir, now, partial) {
   const ws = project.workspace_dir;
@@ -394,7 +394,7 @@ function moveWorkspace(project, dataDir, now, partial) {
     let dest = base;
     for (let n = 2; workspaceExists(dest); n++) dest = `${base}-${n}`;
     renameSync(ws, dest);
-    return true;
+    return dest;
   } catch (err) {
     console.warn(`[project-lifecycle] delete ${project.id}: workspace rename failed:`, err?.message || err);
     partial.push("workspace");
@@ -414,7 +414,7 @@ function moveWorkspace(project, dataDir, now, partial) {
  * @param {string} [opts.crowHome]  accepted, unused (see deleteSummary)
  * @param {Function} [opts._beforeTransaction]  test seam: runs after the pre-transaction steps, before BEGIN
  * @param {Function} [opts._beforeTombstone]  test seam: runs inside the transaction, before the tombstone
- * @returns {Promise<{ ok: true, counts: object, partial?: string[] } |
+ * @returns {Promise<{ ok: true, counts: object, movedTo?: string, partial?: string[] } |
  *   { ok: false, code: 'bad_actor'|'not_owner'|'shared'|'bots'|'name_mismatch'|'failed', detail?: object }>}
  */
 export async function deleteProject(db, projectId, {
@@ -462,11 +462,17 @@ export async function deleteProject(db, projectId, {
   }
   await purgeCards(project, { tasksDbPath }, partial);
   await purgeFiles(db, id, storageDelete || defaultStorageDeleteFor(db), partial);
-  const workspaceMoved = moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
+  const movedTo = moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
+  const workspaceMoved = !!movedTo;
   const result = { ...counts, workspaceMoved };
   await auditLog(db, "project.delete", {
     actor,
     details: { project_id: id, uuid: project.uuid, slug: project.slug, name: project.name, counts: result, ...(partial.length ? { partial } : {}) },
   });
-  return { ok: true, counts: result, ...(partial.length ? { partial } : {}) };
+  return { ok: true, counts: result, ...(movedTo ? { movedTo } : {}), ...(partial.length ? { partial } : {}) };
+}
+
+/** Where deleted workspaces are moved to: <dataDir>/deleted-projects (for showing the new path). */
+export function deletedProjectsDir(dataDir) {
+  return join(projectsDataDir(dataDir), "deleted-projects");
 }

@@ -17,6 +17,7 @@ import { getInteractiveEngine } from "../../perch-interactive.js";
 import { canManageProject } from "../../apps/extra-tiles.js";
 import { resolveCrowHome } from "../../../../scripts/pi-bots/ext_registry.mjs";
 import { moveBotToProject } from "./bot-builder/move-bot.js";
+import { handleLifecyclePost, deleteConfirmHtml } from "../shared/project-lifecycle-ui.js";
 import { loadProjectHome } from "./project-home/data.js";
 import { projectHomeHtml, projectMissingHtml, projectForbiddenHtml } from "./project-home/html.js";
 import { projectHomeCss } from "./project-home/css.js";
@@ -66,8 +67,24 @@ export default {
       const who = r.code === "conflict" ? `&bot=${encodeURIComponent(botId)}` : "";
       return res.redirectAfterPost(`${home}?error=${encodeURIComponent(r.code)}${who}`);
     }
+    // Archive and Delete (§15). The helper re-checks canOwnProject; nothing from the body is spread into the lifecycle calls.
+    if (req.method === "POST") {
+      const handled = await handleLifecyclePost(req, res, {
+        db, lang, layout, projectId: project.id, forbiddenHtml: projectForbiddenHtml(lang),
+        urls: { post: home, confirm: (extra) => `${home}?delete=1&${extra}` },
+      });
+      if (handled) return handled.page;
+    }
     const q = req.query || {};
     const one = (v) => (typeof v === "string" ? v : "");
+    if (one(q.delete) === "1") {
+      const view = await deleteConfirmHtml(db, req, project, lang, { urls: { post: home, cancel: home }, error: one(q.error) });
+      if (view.forbidden) {
+        res.status(403);
+        return layout({ title: project.name, content: projectHomeCss() + projectForbiddenHtml(lang) });
+      }
+      return layout({ title: project.name, content: projectHomeCss() + view.html });
+    }
     // The shell already counted every project for the drawer (resolveShellPage).
     const data = await loadProjectHome(db, project, { engine, counts: req.crowShellCounts || null,
       canManage, moveId: one(q.move) || null, movedId: one(q.moved) || null,
