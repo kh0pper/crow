@@ -7,8 +7,9 @@
  *   unpaired (no live cert):          POST /satellite/v1/pair/hello, POST /satellite/v1/pair/complete
  *   paired:                           both pairing routes 409 {error:"already_paired"}
  *   /satellite/v1/* (not pair/*)      signed requests only (auth.js), signed JSON answers:
- *                                     GET status, POST cert, POST unpair (routes.js), plus
- *                                     whatever `signedRoutes` registers
+ *                                     GET status, POST cert, POST unpair (routes.js), bundle
+ *                                     management + jobs (bundles.js), plus whatever
+ *                                     `signedRoutes` registers
  *
  * Never imports the dashboard, memory, sharing, router, init-db or crow.db.
  */
@@ -20,6 +21,7 @@ import { ensureSatelliteKey, readCert, readPinned, writeCert, writePinned } from
 import { createSatAuth } from "./auth.js";
 import { recoverStagedCert } from "./certs.js";
 import { registerCoreRoutes } from "./routes.js";
+import { registerBundleRoutes } from "./bundles.js";
 import { createScheduler } from "./scheduler.js";
 import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
@@ -66,9 +68,11 @@ export function readAppSha(root = APP_ROOT) {
 
 /**
  * `signedRoutes`: functions (router, ctx) that add routes behind auth (later tasks' bundle, job
- * and MCP routes); ctx = {db, key, satHome, state, now, out, sendSigned}.
+ * and MCP routes); ctx = {db, key, satHome, state, now, out, sendSigned}. `bundleDeps`: the
+ * bundle manager's injectable runners and readers (composeRunner, dockerRunner, readText,
+ * mcpPids, npmRunner, appBundlesDir); omitted, the real docker / compose / proc are used.
  */
-export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn }) {
+export function createSatelliteApp({ db, key, satHome, now = Date.now, out = console.log, sha = null, signedRoutes = [], statusReaders, authLog = console.warn, bundleDeps = {} }) {
   // A cert commit a crash interrupted is finished (or discarded) before anything reads the files.
   recoverStagedCert({ db, key, satHome, now });
   const state = { cert: readCert(satHome), pinned: readPinned(satHome) };
@@ -154,6 +158,7 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
   signed.use(auth.verify);
   const ctx = { db, key, satHome, state, now, out, sendSigned: auth.sendSigned };
   registerCoreRoutes(signed, { ...ctx, sha, statusReaders });
+  registerBundleRoutes(signed, { ...ctx, ...bundleDeps });
   for (const add of signedRoutes) add(signed, ctx);
   signed.use((_req, res) => auth.sendSigned(res, 404, { error: "not_found" }));
   app.use("/satellite/v1", signed);
@@ -179,13 +184,13 @@ export function createSatelliteApp({ db, key, satHome, now = Date.now, out = con
  * Open state, build the app and listen. Guards are the caller's job (index.js).
  * → {server, host, port, app, db, key, home, satelliteId, isPaired, issuePairCode, close}.
  */
-export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog } = {}) {
+export async function startAgent({ env = process.env, now = Date.now, out = console.log, sha, signedRoutes, statusReaders, authLog, bundleDeps } = {}) {
   const satHome = resolveSatHome(env);
   const { host, port } = resolveBind(env);
   const db = openSatelliteDb(satHome);
   const key = ensureSatelliteKey(satHome, { now: now() });
   const { app, isPaired, state, refusals } = createSatelliteApp({
-    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog,
+    db, key, satHome, now, out, sha: sha === undefined ? readAppSha() : sha, signedRoutes, statusReaders, authLog, bundleDeps,
   });
   const server = await new Promise((ok, fail) => {
     const s = app.listen(port, host, () => ok(s));
