@@ -18,7 +18,8 @@
  *
  * Control channel: JSON lines on fd 3. Request {id, op, args}; reply
  * {id, ok, result} or {id, ok:false, error}. Unsolicited {ready:true} once the
- * MCP client is connected, the swarm exists and the Nostr receive path is wired.
+ * MCP client is connected, the swarm exists, the Nostr receive path is wired
+ * and the node is announced on every full contact's DHT topic.
  */
 import net from "node:net";
 import readline from "node:readline";
@@ -171,8 +172,38 @@ readline.createInterface({ input: ctl }).on("line", async (line) => {
 });
 ctl.on("close", () => process.exit(0));
 
-// Ready: the swarm exists and the Nostr receive path is wired (a node must be
-// subscribed before a peer publishes its invite acceptance).
+/**
+ * Whether the boot has announced this node on every full contact's DHT topic.
+ * The boot joins those topics after peerManager.start(), asynchronously. A
+ * Hyperswarm join is one DHT traversal that collects peers on the way and
+ * stores this node's record at the end, so a peer that joins the same topic
+ * while that traversal is still running can miss this node (and this node
+ * miss it) until the next refresh, ten minutes later: a restarted node and a
+ * test peer started right after it never connect. Once the first announce has
+ * completed, any peer that joins later finds this node on its own lookup.
+ * Resolves null when announced, or the reason it is not by `deadline`.
+ */
+async function contactTopicsAnnounced(deadline) {
+  const pause = () => new Promise((r) => setTimeout(r, 50));
+  // The rows the boot joins (boot.js initSharingRuntime): full contacts only.
+  const ids = toObjects(await db.execute({
+    sql: "SELECT crow_id FROM contacts WHERE is_blocked = 0 AND ed25519_pubkey != '' "
+      + "AND (request_status IS NULL OR request_status NOT IN ('pending', 'accepted'))",
+    args: [],
+  })).map((r) => r.crow_id);
+  const missing = () => ids.filter((id) => !peerManager.topics?.has(id));
+  while (missing().length > 0) {
+    if (Date.now() > deadline) return `contact topics not joined: ${missing().join(", ")}`;
+    await pause();
+  }
+  const flushed = Promise.all(ids.map((id) => peerManager.swarm.status(peerManager.topics.get(id))?.flushed()));
+  const late = new Promise((r) => setTimeout(() => r("late"), Math.max(deadline - Date.now(), 0)));
+  return (await Promise.race([flushed, late])) === "late" ? "a contact topic announce did not complete" : null;
+}
+
+// Ready: the swarm exists, the Nostr receive path is wired (a node must be
+// subscribed before a peer publishes its invite acceptance), and this node is
+// announced on every full contact's topic (contactTopicsAnnounced above).
 const t0 = Date.now();
 while (Date.now() - t0 < 30_000) {
   if (peerManager.swarm && getReceiveHealth().receiveWired === true) break;
@@ -182,5 +213,7 @@ const h = getReceiveHealth();
 if (!peerManager.swarm || h.receiveWired !== true) {
   reply({ ready: false, error: `not ready: swarm=${!!peerManager.swarm} receiveWired=${h.receiveWired} ${h.lastError || ""}` });
 } else {
-  reply({ ready: true, identity: await ops.identity() });
+  const notAnnounced = await contactTopicsAnnounced(t0 + 40_000); // inside the parent's 45 s ready wait
+  if (notAnnounced) reply({ ready: false, error: `not ready: ${notAnnounced}` });
+  else reply({ ready: true, identity: await ops.identity() });
 }
