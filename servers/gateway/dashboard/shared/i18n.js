@@ -3353,6 +3353,8 @@ export const translations = {
   // opened from the bot's name.
   "perch.sheetTitleBot": { en: "{bot} · Session details", es: "{bot} · Detalles de la sesión" },
   "perch.backProject": { en: "← Back to the project home", es: "← Volver al inicio del proyecto" },
+  "perch.plusLabel": { en: "Attach or dictate", es: "Adjuntar o dictar" },
+  "perch.composerPlaceholderProject": { en: "Message # {project}", es: "Mensaje # {project}" },
   "perch.identToday": { en: "today", es: "hoy" },
   "perch.identYesterday": { en: "yesterday", es: "ayer" },
   "perch.sheetTitle": { en: "Session details", es: "Detalles de la sesión" },

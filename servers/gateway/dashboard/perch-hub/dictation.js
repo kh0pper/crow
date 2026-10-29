@@ -176,6 +176,7 @@ export function perchDictationJs(lang = "en") {
   }
   function dictShowMic(on){
     var mic=el('perch-dictate'); if(mic) mic.hidden=!on;
+    if(typeof plusSync==='function') plusSync();
     var comp=el('perch-composer');
     if(comp&&comp.classList) comp.classList.toggle('has-dictate',!!on);
   }
@@ -227,7 +228,9 @@ export function perchDictationJs(lang = "en") {
   }
   function dictCancelByUser(){
     dictationCancel();
-    var mic=el('perch-dictate'); if(mic&&!mic.hidden&&mic.focus) mic.focus();
+    var mic=el('perch-dictate'); var pm=el('perch-plus-menu');
+    if(pm&&pm.hidden){ var pl=el('perch-plus'); if(pl&&pl.focus) pl.focus(); }   /* new mode: the mic lives in the closed "+" menu */
+    else if(mic&&!mic.hidden&&mic.focus) mic.focus();
   }
 
   /* Capability: the browser checks once per page instance, the server probe

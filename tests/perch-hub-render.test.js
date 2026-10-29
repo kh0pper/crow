@@ -1711,3 +1711,45 @@ test("new-mode head has no sid text", async () => {
   const classic = await renderPerch("en", {});
   assert.ok(!classic.includes('id="perch-ident-sub"') && !classic.includes('id="perch-card-line"'));
 });
+
+// ---------------------------------------------------------------------------
+// R1.2 PR 2, Task 4: the composer pill (new mode only).
+// ---------------------------------------------------------------------------
+function composerSlice(html) {
+  const a = html.indexOf('<div id="perch-composer"');
+  const b = html.indexOf("</section>", a);
+  assert.ok(a > 0 && b > a, "the composer is present");
+  return html.slice(a, b);
+}
+
+test("classic composer is unchanged", async () => {
+  // Pinned from the build before the pill existed.
+  const PINS = {
+    en: "da01565e16ee4952d7d4a51b4957e6d3d442a77e68eca37049565bf8c75f0af0",
+    es: "63b3f704e40765a0d1e6882e6ab9a76e09551f9f1610889f7462c9c125514b91",
+  };
+  for (const lang of ["en", "es"]) {
+    const html = await renderPerch(lang);
+    assert.equal(sha(composerSlice(html)), PINS[lang], `${lang}: classic composer`);
+    assert.doesNotMatch(composerSlice(html), /perch-plus|class="pill/, "no pill in classic");
+  }
+});
+
+test("new mode: plus menu holds attach and dictate with ids unchanged", async () => {
+  const html = await renderPerch("en", NEW);
+  const c = composerSlice(html);
+  assert.match(c, /<div id="perch-composer" class="pill">/);
+  const plus = openTag(c, "perch-plus");
+  assert.match(plus, /aria-label="Attach or dictate"/);
+  assert.match(plus, /aria-expanded="false"/);
+  assert.match(plus, /aria-controls="perch-plus-menu"/);
+  const menu = c.slice(c.indexOf('<div id="perch-plus-menu"'), c.indexOf('<div id="perch-draft-note"'));
+  assert.ok(menu.includes('id="perch-attach"') && menu.includes('id="perch-dictate"'), "both live in the menu");
+  assert.match(openTag(menu, "perch-plus-menu"), /\shidden>/, "the menu ships closed");
+  assert.match(openTag(menu, "perch-dictate"), /\shidden/, "dictate ships hidden until its probe passes");
+  for (const id of ["perch-input", "perch-send", "perch-abort", "perch-cmdmenu", "perch-file-input", "perch-draft-note", "perch-dictation-bar"]) {
+    assert.ok(c.includes(`id="${id}"`), `${id} keeps its id`);
+  }
+  assert.ok(c.indexOf('id="perch-input"') < c.indexOf('id="perch-send"'), "the input precedes Send in the pill row");
+  assert.doesNotMatch(c, /class="send-row"/);
+});

@@ -413,6 +413,30 @@ body.shell #perch-draft-note[hidden]{display:none}
    up to the 120px ceiling above, then scrolls inside itself — a pasted
    essay must not push Send off screen, the one sin this page's whole flex
    chain exists to prevent. */
+/* R1.2 PR 2, new mode only (html.js renders .pill only with the sheet): the
+   composer is a one-line pill. The textarea starts at one line and grows to
+   five (line-height 1.5, so the ceiling follows the text size), then scrolls
+   inside itself. "+" opens #perch-plus-menu, a popover that grows UPWARD from
+   the composer (the same containing block the slash menu uses), holding
+   Attach and Dictate. Every target is 44px. */
+#perch-hub-root #perch-composer.pill .pill-row{display:flex;align-items:flex-end;gap:6px;min-width:0;
+border:1px solid var(--line);border-radius:24px;background:var(--card);padding:4px}
+#perch-hub-root #perch-composer.pill .pill-row:focus-within{border-color:var(--teal)}
+#perch-hub-root #perch-composer.pill textarea{flex:1 1 auto;min-width:0;box-sizing:border-box;border:0;background:transparent;
+box-shadow:none;outline:none;resize:none;margin:0;padding:11px 8px;font:inherit;line-height:1.5;
+min-height:44px;max-height:calc(7.5em + 22px);overflow-y:auto}
+#perch-hub-root #perch-composer.pill #perch-plus{flex:none;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;
+border-radius:22px;display:inline-flex;align-items:center;justify-content:center}
+#perch-hub-root #perch-composer.pill #perch-plus svg{width:20px;height:20px}
+#perch-hub-root #perch-composer.pill #perch-plus[hidden]{display:none}
+#perch-hub-root #perch-composer.pill #perch-send,#perch-hub-root #perch-composer.pill #perch-abort{flex:none;min-height:44px;border-radius:22px;padding:0 16px}
+#perch-plus-menu{position:absolute;bottom:100%;left:0;margin-bottom:6px;min-width:200px;max-width:100%;background:var(--card);
+border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.18);overflow:hidden;z-index:21}
+#perch-plus-menu[hidden]{display:none}
+#perch-hub-root #perch-plus-menu button{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;text-align:left;
+border:0;border-bottom:1px solid var(--line);border-radius:0;background:none;color:var(--ink);padding:10px 14px}
+#perch-hub-root #perch-plus-menu button:last-of-type{border-bottom:0}
+#perch-hub-root #perch-plus-menu button[hidden]{display:none}
 /* Wave 1: copy buttons, ported from pi-lab (copy-msg floats in the message,
    copy-pre pins to its code fence's corner). Deliberately quiet: they are
    chrome on somebody's answer, not controls competing with the composer.

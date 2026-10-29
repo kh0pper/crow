@@ -18,6 +18,7 @@ const TAB_ICONS = {
 };
 
 /** Close glyph for the session sheet (the shell sheets' X). */
+const PLUS_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
 const CLOSE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>`;
 const CHEVRON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>`;
 
@@ -28,6 +29,26 @@ function identButton(lang) {
   // The description sits OUTSIDE the button so it does not join the
   // button's name (the bot name): it says what the button opens.
   return `<button type="button" id="perch-ident-btn" class="perch-ident-btn" aria-haspopup="dialog" aria-controls="perch-session-sheet" aria-describedby="perch-ident-desc"><span class="perch-ident-text"><span class="title" id="perch-bot-name"></span><span class="perch-ident-sub" id="perch-ident-sub"></span></span>${CHEVRON_SVG}</button><span class="vh" id="perch-ident-desc">${escapeHtml(t("perch.sheetTitle", lang))}</span><a class="perch-card-line" id="perch-card-line" hidden></a>`;
+}
+
+/** New mode: the composer as a one-line pill. "+" opens a popover holding
+ *  Attach and Dictate (ids unchanged; dictation's probe still decides the
+ *  mic's [hidden], and the client hides "+" when neither is available). The
+ *  row is hidden as a whole while dictating (dictation-css.js). */
+function pillRow(lang) {
+  return `<div class="pill-row">
+        <button type="button" id="perch-plus" class="quiet" aria-label="${escapeHtml(t("perch.plusLabel", lang))}" title="${escapeHtml(t("perch.plusLabel", lang))}" aria-haspopup="true" aria-expanded="false" aria-controls="perch-plus-menu">${PLUS_SVG}</button>
+        <textarea id="perch-input" rows="1" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
+        <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
+        <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
+      </div>
+      <div id="perch-plus-menu" role="group" aria-label="${escapeHtml(t("perch.plusLabel", lang))}" hidden>
+        <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
+        <input type="file" id="perch-file-input" style="display:none" accept="image/*">
+        <button type="button" id="perch-dictate" class="quiet" hidden>${MIC_SVG}<span>${escapeHtml(t("perch.dictate", lang))}</span></button>
+      </div>
+      <div id="perch-draft-note" role="status" hidden></div>
+`;
 }
 
 /** New mode: the opening half of the session sheet, which wraps the Session,
@@ -254,13 +275,13 @@ ${engineBanner(engine, lang)}
     <div id="perch-working" hidden aria-live="polite">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       <span>${escapeHtml(t("perch.working", lang))}</span></div>
-    <div id="perch-composer">
+    <div id="perch-composer"${sheet ? ' class="pill"' : ""}>
       <!-- Wave 3: the slash-command menu, anchored above the composer (which
            is position:sticky, so it IS the containing block). Rows are
            client-rendered from pi's own get_commands registry — never a
            hardcoded list. -->
       <div id="perch-cmdmenu" hidden></div>
-      <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
+${sheet ? pillRow(lang) : `      <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
       <div id="perch-draft-note" role="status" hidden></div>
       <div class="send-row">
         <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
@@ -272,7 +293,7 @@ ${engineBanner(engine, lang)}
         <button type="button" id="perch-dictate" class="quiet" hidden>${MIC_SVG}<span>${escapeHtml(t("perch.dictate", lang))}</span></button>
         <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
         <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
-      </div>
+      </div>`}
       <!-- The recording bar: replaces the textarea + send row while dictating
            (dictation-css.js keys that on #perch-composer[data-dictation]).
            Words beside the icons at 600px and wider, icon-only below — so

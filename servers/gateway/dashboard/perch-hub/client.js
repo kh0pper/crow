@@ -1879,6 +1879,11 @@ export function perchHubJs(lang = "en") {
   var IDENT_LANG='${lang === "es" ? "es" : "en"}';
   var SHEET_TITLE_BOT='${tJs("perch.sheetTitleBot", lang)}';
   var BACK_PROJECT='${tJs("perch.backProject", lang)}';
+  var PLACEHOLDER_DEFAULT='${tJs("perch.composerPlaceholder", lang)}';
+  var PLACEHOLDER_PROJECT='${tJs("perch.composerPlaceholderProject", lang)}';
+  /* Classic keeps the 120px ceiling; the new-mode pill is capped by its CSS
+     (five lines), so the script only has to follow the content. */
+  var PILL=!!document.getElementById('perch-session-sheet');
   var PROJECTS=(function(){
     var n=document.getElementById('perch-projects'); if(!n) return [];
     try{ var v=JSON.parse(n.textContent||'[]'); return Array.isArray(v)?v:[]; }catch(e){ return []; }
@@ -1928,6 +1933,11 @@ export function perchHubJs(lang = "en") {
     var row=rowIndex[current.sid];
     var sub=el('perch-ident-sub');
     if(sub) sub.textContent=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
+    var ci=el('perch-input');
+    if(ci){
+      var pr=projectOfRow(row,PROJECTS);
+      ci.setAttribute('placeholder',pr?PLACEHOLDER_PROJECT.split('{project}').join(String(pr.name)):PLACEHOLDER_DEFAULT);
+    }
     var t=el('perch-sheet-title');
     if(t) t.textContent=SHEET_TITLE_BOT.split('{bot}').join(String(botName||''));
     var back=el('perch-back');
@@ -2696,6 +2706,7 @@ export function perchHubJs(lang = "en") {
     input.value=v==null?'':String(v);
     input.style.height='auto';
     if(v) input.style.height=Math.min(input.scrollHeight||72,120)+'px';
+    if(v&&PILL) input.style.height=(input.scrollHeight||44)+'px';
     /* A marker this page is not itself waiting on belongs to a send that was
        cut off by a reload: if the draft is that very text, say so. */
     if(!sendingNow[sid]){
@@ -3161,6 +3172,46 @@ export function perchHubJs(lang = "en") {
     };
   }
 
+  /* R1.2 PR 2, new mode: the composer's "+" popover (html.js pillRow). It
+     holds Attach and Dictate; it is a popover, not a modal: Escape closes it
+     and returns focus to "+", a tap outside closes it, and focus is never
+     trapped. "+" hides when neither entry is available, and re-checks when
+     dictation's probe shows or hides the mic (dictShowMic calls plusSync). */
+  var plusBtn=el('perch-plus'), plusMenu=el('perch-plus-menu');
+  function plusSync(){
+    if(!plusBtn||!plusMenu) return;
+    var mic=el('perch-dictate');
+    var any=!!attachBtn||!!(mic&&!mic.hidden);
+    plusBtn.hidden=!any;
+    if(!any) plusClose(false);
+  }
+  function plusClose(refocus){
+    if(!plusBtn||!plusMenu||plusMenu.hidden) return;
+    plusMenu.hidden=true;
+    plusBtn.setAttribute('aria-expanded','false');
+    if(refocus&&plusBtn.focus) plusBtn.focus();
+  }
+  if(plusBtn&&plusMenu){
+    plusBtn.onclick=function(){
+      if(plusMenu.hidden){ plusMenu.hidden=false; plusBtn.setAttribute('aria-expanded','true'); }
+      else plusClose(false);
+    };
+    plusMenu.addEventListener('click',function(e){
+      var b=e.target&&e.target.closest?e.target.closest('button'):null;
+      if(b) plusClose(false);              /* choosing an entry closes the menu */
+    });
+    bindOnce(document,'keydown','plusEsc',function(e){
+      if(e.key==='Escape'&&plusMenu&&!plusMenu.hidden){ plusClose(true); }
+    });
+    bindOnce(document,'pointerdown','plusOutside',function(e){
+      if(!plusMenu||plusMenu.hidden) return;
+      var tg=e.target;
+      if(plusMenu.contains(tg)||plusBtn.contains(tg)) return;
+      plusClose(false);
+    });
+    plusSync();
+  }
+
   /* Carried-over fix: send(), closeSession() and the abort path were all
      written by an earlier task but never connected to the DOM — the chat
      view rendered and Send did nothing. #perch-back sets location.hash=''
@@ -3182,6 +3233,7 @@ export function perchHubJs(lang = "en") {
     composerInput.oninput=function(){
       this.style.height='auto';
       this.style.height=Math.min(this.scrollHeight||72,120)+'px';
+      if(PILL) this.style.height=(this.scrollHeight||44)+'px';       /* the pill's CSS caps it at five lines */
       maybeCmdMenu(this.value);            /* Wave 3: '/' opens the command menu */
       draftSaveSoon();                     /* Shell P2: the unsent draft survives a reload */
     };
