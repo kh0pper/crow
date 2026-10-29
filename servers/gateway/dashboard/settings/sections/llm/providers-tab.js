@@ -121,9 +121,16 @@ export function duplicateClusters(providers) {
  */
 export function botsSwitch(p, { consent, salt, lang = "en" }) {
   if (p.disabled || !isCloudRow(p)) return "";
+  if (!salt) {
+    // No salt (it could not be created): nothing can be checked or granted now.
+    return `<div class="llm-bots-switch">
+            <button type="button" role="switch" aria-checked="false" disabled><span class="llm-bots-track" aria-hidden="true"></span>${escapeHtml(t("providers.botsMayUse", lang))}</button>
+            <div class="llm-bots-unavailable">${escapeHtml(t("providers.botsUnavailable", lang))}</div>
+          </div>`;
+  }
   const on = consentVerdict(p, Object.hasOwn(consent, p.id) ? consent[p.id] : null, { salt }) === "ok";
   const label = escapeHtml(t("providers.botsMayUse", lang));
-  const token = !on && salt ? `
+  const token = !on ? `
             <input type="hidden" name="consent_token" value="${escapeHtml(consentTokenFor(p, salt))}">` : "";
   return `<form method="post" class="llm-bots-switch">
             <input type="hidden" name="action" value="${on ? "llm_provider_bots_deny" : "llm_provider_bots_allow"}">
@@ -282,6 +289,8 @@ export default {
       .llm-bots-track::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:var(--crow-bg-surface); }
       .llm-bots-switch button[aria-checked="true"] .llm-bots-track { background:var(--crow-accent); }
       .llm-bots-switch button[aria-checked="true"] .llm-bots-track::after { left:14px; }
+      .llm-bots-switch button[disabled] { cursor:not-allowed; opacity:0.6; }
+      .llm-bots-unavailable { font-size:0.75rem; color:var(--crow-text-muted); }
       .llm-bots-switch button:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
       .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {

@@ -33,7 +33,7 @@ test("a session POST of llm_provider_bots_allow without the CSRF token is 403; w
   });
   const salt = await ensureCloudConsentSalt(db);
   const { rows } = await db.execute("SELECT * FROM providers WHERE id = 'cloud-p'");
-  const token = consentTokenFor({ baseUrl: rows[0].base_url, apiKey: rows[0].api_key }, salt);
+  const token = consentTokenFor({ id: rows[0].id, baseUrl: rows[0].base_url, apiKey: rows[0].api_key }, salt);
 
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
   await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");

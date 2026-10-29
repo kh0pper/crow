@@ -172,6 +172,20 @@ test("a grant needs what was seen: a token or the written URL and key; a rewrite
   assert.ok(!seenToken.includes(entry.keyFp));
 });
 
+test("the token is bound to the row id: same address and key, another row, another token", async () => {
+  const db = newDb();
+  await ins(db, "cloud-x", "https://api.example.com/v1", { key: KEY_A });
+  await ins(db, "cloud-y", "https://api.example.com/v1", { key: KEY_A });
+  const salt = await ensureCloudConsentSalt(db);
+  const tx = consentTokenFor(await rowOf(db, "cloud-x"), salt);
+  const ty = consentTokenFor(await rowOf(db, "cloud-y"), salt);
+  assert.notEqual(tx, ty);
+  assert.deepEqual(await grantCloudConsent(db, "cloud-y", { actor: "t", expect: { consentToken: tx } }), { ok: false, reason: "changed" });
+  assert.equal(await verdictOf(db, "cloud-y"), "not_consented");
+  assert.deepEqual(await grantCloudConsent(db, "cloud-x", { actor: "t", expect: { consentToken: tx } }), { ok: true });
+  assert.equal(await verdictOf(db, "cloud-y"), "not_consented", "granting x never grants y");
+});
+
 test("grant refuses rows that are not cloud rows, or are disabled", async () => {
   const db = newDb();
   await ins(db, "local-chat", "http://127.0.0.1:8003/v1");
@@ -294,6 +308,33 @@ test("a row rewritten between render and click is refused, with a plain line", a
   // A consented row whose address then changed reads as off, so ticking it agrees again.
   await db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = ?", args: ["https://203.0.113.9/v1", "cloud-p"] });
   assert.match(trOf(await render(), "cloud-p"), /llm_provider_bots_allow/);
+});
+
+test("when the salt can't be created, the switch renders disabled with a plain line", async () => {
+  const db = await seeded();
+  const noSalt = {
+    execute: (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/INSERT OR IGNORE INTO dashboard_settings/.test(sql)) return Promise.reject(new Error("read-only"));
+      return db.execute(q);
+    },
+  };
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  let h, hEs;
+  try {
+    h = await tab.render({ req: { query: {} }, db: noSalt, lang: "en", piAgentDir: null, tasksDbPaths: [] });
+    hEs = await tab.render({ req: { query: {} }, db: noSalt, lang: "es", piAgentDir: null, tasksDbPaths: [] });
+  } finally { console.warn = orig; }
+  const tr = trOf(h, "cloud-p");
+  assert.match(tr, /role="switch" aria-checked="false" disabled/);
+  assert.ok(!tr.includes("llm_provider_bots_"), "no action to post");
+  assert.ok(!tr.includes("consent_token"), "no tokenless form");
+  assert.equal(t("providers.botsUnavailable", "en"), "Can't set this right now. Reload the page.");
+  assert.ok(tr.includes("Can&#39;t set this right now. Reload the page.") || tr.includes("Can't set this right now. Reload the page."));
+  assert.ok(trOf(hEs, "cloud-p").includes(t("providers.botsUnavailable", "es")));
+  assert.ok(warns.some((w) => /consent salt/.test(w)));
 });
 
 // --- addProvider grants ------------------------------------------------------

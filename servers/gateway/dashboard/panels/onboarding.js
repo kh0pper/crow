@@ -459,6 +459,7 @@ function renderAiOptions(lang, ctx = {}) {
     `<p class="onb-ai-free-blurb">${escapeHtml(t(p.labelKey, lang))}: ${escapeHtml(t(p.keyNoteKey, lang))}</p>`).join("");
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
+  const botsFailed = cloudOk && req.query.bots === "failed" ? callout(escapeHtml(t("models.add.botsFailed", lang)), "warning") : "";
   const cloudError = cloudErrorText ? callout(cloudErrorText, "error") : "";
   const docsHref = docsUrl((lang === "es" ? "es/" : "") + "getting-started/free-cloud-ai");
 
@@ -498,7 +499,7 @@ function renderAiOptions(lang, ctx = {}) {
     </div>
 
     <div id="onb-ai-panel-cloud" class="onb-ai-panel"${cloudChecked ? "" : " hidden"}>
-      ${cloudSuccess}
+      ${cloudSuccess}${botsFailed}
       ${cloudError}
       <button type="button" class="onb-ai-add" data-models-add aria-haspopup="dialog" aria-controls="models-add">${t("models.add.title", lang)}</button>
       <noscript>
@@ -677,7 +678,8 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
       const status = Number.isInteger(result.status) && result.status >= 100 && result.status <= 599 ? `&cloud_status=${result.status}` : "";
       return back(Object.hasOwn(CLOUD_ERROR_KEYS, result.code) ? result.code : "save_failed", hint + status);
     }
-    return res.redirectAfterPost(`${base}&cloud=ok`);
+    // The row is saved; say so, and say when bots can't use it yet (the consent grant failed).
+    return res.redirectAfterPost(`${base}&cloud=ok${result.consent === "failed" ? "&bots=failed" : ""}`);
   } catch (err) {
     console.error("[onboarding] cloud provider setup failed:", err.message); // message only — never the api key
     return back("save_failed");

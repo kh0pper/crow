@@ -110,12 +110,14 @@ function expectationOf(row, salt) {
 
 /**
  * The opaque token a page renders for `row` (32 hex): an HMAC over the row's
- * target and key fingerprint under the salt. It never carries the key or
- * keyFp, and a different address or key gives a different token.
+ * id, target and key fingerprint under the salt. It never carries the key or
+ * keyFp; another row (even one with the same address and key), address or
+ * key gives a different token.
  */
 export function consentTokenFor(row, salt) {
   const { target, keyFp } = expectationOf(row, salt);
-  return createHmac("sha256", Buffer.from(salt, "hex")).update(JSON.stringify(["consent-token-v1", target, keyFp])).digest("hex").slice(0, 32);
+  const id = typeof row?.id === "string" ? row.id : "";
+  return createHmac("sha256", Buffer.from(salt, "hex")).update(JSON.stringify(["consent-token-v2", id, target, keyFp])).digest("hex").slice(0, 32);
 }
 
 /** This box's salt, minted on first use (render calls this to put a token on the page). */
