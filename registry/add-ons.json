@@ -5104,7 +5104,7 @@
     {
       "id": "phone",
       "name": "Phone",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
       "type": "bundle",
       "author": "Crow",

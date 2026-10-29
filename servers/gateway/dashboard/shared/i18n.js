@@ -2457,6 +2457,7 @@ export const translations = {
   "settings.providers.job.safety": { en: "Bot safety classifier", es: "Clasificador de seguridad de bots" },
   "settings.providers.phone.local": { en: "Phone calls (local model)", es: "Llamadas telefónicas (modelo local)" },
   "settings.providers.phone.cloud": { en: "Phone calls (cloud model)", es: "Llamadas telefónicas (modelo en la nube)" },
+  "phone.localNotProvenLocal": { en: "The local model must run on a provider Crow can prove is local.", es: "El modelo local debe ejecutarse en un proveedor que Crow pueda confirmar como local." },
   "settings.providers.pi.defaultModel": { en: "pi default model", es: "modelo predeterminado de pi" },
   "settings.providers.pi.planMode": { en: "pi planning setting", es: "ajuste de planificación de pi" },
   "settings.providers.pi.critic": { en: "pi critic setting", es: "ajuste de crítico de pi" },
