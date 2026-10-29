@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# crow-satellite: the satellite box's CLI (SAT-4, spec §4.1 step 6), a thin wrapper for
+# servers/satellite/cli.js. The installer links it as /usr/local/bin/crow-satellite.
+#   crow-satellite status      paired / not paired, satellite id, crow id, cert expiry
+#   crow-satellite pair-code   void any live code and print a fresh one (console only)
+# SAT_HOME (default ~/.crow-satellite) is the agent's CROW_HOME. A CROW_HOME already in the
+# shell is ignored, so the CLI never writes into a full Crow's home.
+set -euo pipefail
+
+usage() {
+  echo "usage: crow-satellite status | pair-code" >&2
+  exit 2
+}
+[ $# -eq 1 ] || usage
+case "$1" in
+  status | pair-code) ;;
+  *) usage ;;
+esac
+
+APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export CROW_PROFILE=satellite
+export CROW_HOME="${SAT_HOME:-$HOME/.crow-satellite}"
+exec node "$APP_DIR/servers/satellite/cli.js" "$1"
