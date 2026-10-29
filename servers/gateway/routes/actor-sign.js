@@ -27,12 +27,21 @@
  *   6. sessionId given: a live session of this bot (signed-session.js)
  *      whose thread and gateway are the request's                    else 403
  *      jobId given: a running bot_jobs row of this bot that THIS host's
- *      main process claimed (worker_pid)                              else 403
+ *      main process claimed (worker_pid; signed-session.js
+ *      resolveRunningJob)                                             else 403
+ *      a scope (v3) kind asked for ("service", SCOPE_ACTOR_KINDS): only
+ *      for that job, with bot_jobs.principal = 'owner' (NULL or a missing
+ *      column is not the owner), and only for one of the job's own two
+ *      tuples (job-<id>/job, or board-card-<its card_id>/board); never for
+ *      a job-less (s:-only) turn: Gmail, Telegram, Slack, Discord.
+ *      Otherwise the WHOLE request is refused, no partial sigs       else 403
  *      no session: only a generic job's own tuple (thread "job-<id>",
  *      gateway "job"), and no session kind                       else 403/400
- *   7. this process holds the key                                    else 503
+ *   7. this process holds the keys (the scope key too, for a scope kind;
+ *      signed under the job-first scope j:<job_id>)                  else 503
  * So a host can only obtain signatures for a real, live session (or a job it
- * is running) of a bot it hosts, and for exactly that session's tuple.
+ * is running) of a bot it hosts, and for exactly that session's tuple; and a
+ * scope-bound signature only for an owner's job it is running.
  *
  * Reachable only from loopback, and nothing in it trusts a header: step 1 is
  * classifyPeer (servers/shared/peer-class.js), which reads the TCP socket and
@@ -47,16 +56,16 @@
  */
 import { Router } from "express";
 import { classifyPeer } from "../../shared/peer-class.js";
-import { resolveSignedSession, sessionMatchesTuple } from "../../shared/signed-session.js";
+import { resolveSignedSession, sessionMatchesTuple, resolveRunningJob, jobMatchesTuple } from "../../shared/signed-session.js";
 import { createBotHostCallerResolver } from "../bot-host-caller.js";
-import { SESSION_ACTOR_KINDS, hasActorKey, signKindForTuple } from "../../../scripts/pi-bots/actor-sig.mjs";
+import { SESSION_ACTOR_KINDS, SCOPE_ACTOR_KINDS, hasActorKey, signKindForTuple } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
 import { resolveDbPath } from "../../db.js";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 export const ACTOR_SIGN_PATH = "/internal/actor-sign";
-export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", ...SESSION_ACTOR_KINDS]);
+export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", ...SESSION_ACTOR_KINDS, ...SCOPE_ACTOR_KINDS]);
 
 const REFUSE_LOG_WINDOW_MS = 3_600_000;
 const REFUSE_LOG_CAP = 64;
@@ -145,6 +154,7 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
     const kinds = Array.isArray(b.kinds) ? [...new Set(b.kinds)] : null;
     if (!kinds || !kinds.length || !kinds.every((k) => ACTOR_SIGN_KINDS.includes(k))) return fail(400, "kinds must be a non-empty list of known kinds");
     const wantsSession = kinds.some((k) => SESSION_ACTOR_KINDS.includes(k));
+    const wantsScope = kinds.some((k) => SCOPE_ACTOR_KINDS.includes(k));
     if (sessionId !== undefined && sessionId !== "" && !/^[1-9][0-9]{0,15}$/.test(sessionId.trim())) return fail(400, "malformed sessionId");
     const hasSession = sessionId !== undefined && sessionId !== "";
     if (wantsSession && !hasSession) return fail(400, "session kinds need a sessionId");
@@ -168,14 +178,17 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
       if (JOB_GATEWAYS.has(gatewayType) && (jobId === undefined || jobId === "")) return fail(403, "a job turn is signed only with the job this host claimed");
 
       // 6. A live session (or running job) of that bot, for exactly its tuple.
+      // A scope kind is only ever an owner job's (below); a job-less turn never gets one.
+      if (wantsScope && (jobId === undefined || jobId === "")) return fail(403, "scope kinds are signed only for an owner's running job");
       if (jobId !== undefined && jobId !== "") {
-        let job = null;
-        try {
-          const r = await db.execute({ sql: "SELECT status, worker_pid FROM bot_jobs WHERE job_id = ? AND bot_id = ?", args: [jobId, botId] });
-          job = r.rows[0] || null;
-        } catch { job = null; }
-        if (!job || job.status !== "running") return fail(403, "no running job of this bot");
-        if (Number(job.worker_pid) !== who.pid) return fail(403, "the job was claimed by another host");
+        // Resolved without the pid first, so "not running" and "another host's" stay distinct.
+        const job = await resolveRunningJob(db, { botId, jobId });
+        if (!job) return fail(403, "no running job of this bot");
+        if (job.workerPid !== who.pid) return fail(403, "the job was claimed by another host");
+        if (wantsScope) {
+          if (job.principal !== "owner") return fail(403, "scope kinds are signed only for an owner's running job");
+          if (!jobMatchesTuple(job, { threadId, gatewayType })) return fail(403, "the tuple is not the job's");
+        }
       }
       if (hasSession) {
         const s = await resolveSignedSession(db, { botId, sessionId });
@@ -192,6 +205,8 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
       const sigs = {};
       for (const kind of kinds) {
         const sig = signKindForTuple(kind, tuple);
+        // A scope kind that cannot be signed (no scope key) refuses the whole request.
+        if (!sig && SCOPE_ACTOR_KINDS.includes(kind)) return fail(503, "the gateway holds no scope key");
         if (sig) sigs[kind] = sig;
       }
       return res.json({ sigs });
