@@ -94,14 +94,17 @@ function cut(s, max) {
  * model always fits.
  *
  * @param {{definition: string|object, project_id: number|null}} row  a pi_bot_defs row
+ * @param {{lang?:string, customDefs?:object}} [opts]  a `role:` model reads as the role's name
+ *   (friendlyModel: core roles in `lang`, custom roles by their label from `customDefs`).
+ *   The line is English text for the voice model, so `lang` defaults to "en".
  */
-export function botCapabilitySummary(row) {
+export function botCapabilitySummary(row, { lang = "en", customDefs = {} } = {}) {
   const def = parseDef(row && row.definition);
   const boardOn = boardState(row || {}).state === "on";
   const body = [purposePart(def, boardOn), toolsPart(def), skillsPart(def)].filter(Boolean).join("; ");
   const key = def.models && typeof def.models.default === "string" ? def.models.default : "";
   // A bot on the instance default model (no models.default) gets no model part.
-  const shown = key ? friendlyModel(key) : "";
+  const shown = key ? friendlyModel(key, null, { lang, customDefs }) : "";
   const model = SAFE_MODEL.test(shown) ? shown : "";
   if (!model) return cut(body, HANDOFF_SUMMARY_MAX_CHARS);
   const tail = "model: " + model;
@@ -120,6 +123,11 @@ async function readCandidates(db, voiceDef) {
   } catch {
     return { ok: false, list: [] };
   }
+  let customDefs = {};
+  try {
+    const { readCustomRoleDefs } = await import("../../shared/model-roles-store.js");
+    customDefs = await readCustomRoleDefs(db);
+  } catch { customDefs = {}; } // no role rows: custom role refs show their id
   const list = [];
   for (const row of rows) {
     const botId = String(row.bot_id);
@@ -131,7 +139,7 @@ async function readCandidates(db, voiceDef) {
     list.push({
       bot_id: botId,
       name: cleanName(row.display_name, botId),
-      summary: botCapabilitySummary(row),
+      summary: botCapabilitySummary(row, { lang: "en", customDefs }),
       perch: perchAttached(def),
       model_key: def.models?.default ?? null,
     });

@@ -379,12 +379,14 @@ async function handoffSection(db, v, lang, sec, hint) {
       .filter((r) => !isVoiceBotId(String(r.bot_id)) && !isVoiceBotDef(parseDef(r)));
   } catch { bots = []; }
   const allowed = v.handoff.allowed_bots;
+  let customDefs = {};
+  try { customDefs = await (await import("../../../../shared/model-roles-store.js")).readCustomRoleDefs(db); } catch { customDefs = {}; }
   const items = bots.map((r) => {
     const id = String(r.bot_id);
     const off = boardState(r).state !== "on";
     return `<li><input type="hidden" name="allowed_bots_shown" value="${escapeHtml(id)}" form="btb-vsave"><label class="btb-vcheck"><input type="checkbox" name="allowed_bots" value="${escapeHtml(id)}" form="btb-vsave"${allowed.includes(id) ? " checked" : ""}> ` +
       `<b>${escapeHtml(cleanName(r.display_name, id))}</b></label> ` +
-      `<span class="btb-hint">${escapeHtml(botCapabilitySummary(r))}</span>` +
+      `<span class="btb-hint">${escapeHtml(botCapabilitySummary(r, { customDefs }))}</span>` +
       (Number(r.enabled) ? "" : ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBotOff", lang))}</span>`) +
       (off ? ` <span class="btb-hint">${escapeHtml(t("botbuilder.voiceHandoffBoardOff", lang))}</span>` : "") + `</li>`;
   }).join("");
