@@ -242,3 +242,49 @@ test("fix 3: prepareSpawn maps the provider (before the bridge writes an active 
   const bare = { ...world, def: { ...world.def, models: { default: "openai/gpt-x" } } };
   await assert.rejects(prepareSpawn(bare, {}), (e) => e instanceof PiModelUnavailableError);
 });
+
+// --- Final fix wave ----------------------------------------------------------
+
+test("final F1: a row whose own id is in the reserved crow-c- namespace maps to nothing, on any home", () => {
+  // The primary wrote the door entry for its row cloud-a; a row literally
+  // named crow-c-cloud-a (peer-written, or made by a co-hosted operator) must
+  // never borrow it, and the prefix is matched without regard to case.
+  const json = { providers: { "crow-c-cloud-a": {}, "CROW-C-x": {}, "crow-c-x": {} } };
+  for (const where of [DEFAULT, COHOSTED]) {
+    assert.equal(piProviderIdFor("crow-c-cloud-a", json, where), null, `crow-c-cloud-a on ${where.crowHome}`);
+    assert.equal(piProviderIdFor("CROW-C-x", json, where), null, `CROW-C-x on ${where.crowHome}`);
+    assert.equal(piProviderIdFor("Crow-C-cloud-a", { providers: {} }, where), null, "no entry at all");
+  }
+  assert.deepEqual(piSpawnTarget("crow-c-cloud-a", "c1", json, COHOSTED),
+    { ok: false, reason: 'model "crow-c-cloud-a/c1" is not available to the bot engine' });
+});
+
+test("final F1: the bridge refuses a turn bound to a crow-c-* row, on the primary and on a co-hosted home", async () => {
+  writeFileSync(MODELS, JSON.stringify({ providers: { "crow-c-cloud-a": { models: [{ id: "c1" }] } } }));
+  await assert.rejects(spawnReport({ provider: "crow-c-cloud-a", model: "c1", mode: "off" }),
+    (e) => e instanceof PiModelUnavailableError && /model "crow-c-cloud-a\/c1" is not available to the bot engine/.test(e.message));
+  const r4 = join(USER_HOME, ".crow-r4");
+  mkdirSync(join(r4, "data"), { recursive: true });
+  const prev = { h: process.env.CROW_HOME, d: process.env.CROW_DATA_DIR };
+  process.env.CROW_HOME = r4;
+  process.env.CROW_DATA_DIR = join(r4, "data");
+  try {
+    await assert.rejects(spawnReport({ provider: "CROW-C-cloud-a", model: "c1", mode: "off" }),
+      (e) => e instanceof PiModelUnavailableError && /not available to the bot engine/.test(e.message));
+  } finally {
+    process.env.CROW_HOME = prev.h;
+    process.env.CROW_DATA_DIR = prev.d;
+  }
+});
+
+test("final F3c: the bridge's piModelsJsonPath honours PI_CODING_AGENT_DIR (and PI_MODELS_JSON still wins)", async () => {
+  const { piModelsJsonPath, piProviderIdHere } = await import("../scripts/pi-bots/pi_provider_id.mjs");
+  const agentDir = mkdtempSync(join(tmpdir(), "crow-provider-id-agent-"));
+  assert.equal(piModelsJsonPath({ HOME: "/home/u", PI_CODING_AGENT_DIR: agentDir }), join(agentDir, "models.json"));
+  assert.equal(piModelsJsonPath({ HOME: "/home/u" }), join("/home/u", ".pi", "agent", "models.json"));
+  assert.equal(piModelsJsonPath({ HOME: "/home/u", PI_CODING_AGENT_DIR: agentDir, PI_MODELS_JSON: "/x/m.json" }), "/x/m.json");
+  // End to end: the mapping reads the agent dir's file.
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { "crow-c-cloud-a": { models: [{ id: "c1" }] } } }));
+  const env = { HOME: USER_HOME, CROW_HOME: HOME, PI_CODING_AGENT_DIR: agentDir };
+  assert.equal(piProviderIdHere("cloud-a", { env }), "crow-c-cloud-a");
+});

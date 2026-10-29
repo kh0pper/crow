@@ -3,6 +3,8 @@
  * Which pi provider a bot turn spawns with, for a providers-row id (roles
  * phase 2, Task 17). The model half of the key never changes.
  *
+ *  0. Null for a row id in the reserved door namespace (crow-c-*, any case),
+ *     before every other rule and on every home.
  *  1. The row's own id, when pi's models.json has an entry under it (a
  *     hand-written entry, or a cloud row allow-listed by
  *     CROW_PI_MODELS_SYNC_CLOUD): the operator's entry wins.
@@ -68,6 +70,10 @@ function lookup(idx, id) {
  */
 export function piProviderIdFor(rowId, piModelsJson, { crowHome, homeDir } = {}) {
   if (typeof rowId !== "string" || !rowId) return null;
+  // The crow-c- namespace belongs to the door entries (pi-models-sync skips
+  // such rows): a row literally named crow-c-X, on any home and in any case,
+  // would otherwise borrow the primary's door entry for row X (N1).
+  if (rowId.toLowerCase().startsWith(DOOR_ID_PREFIX)) return null;
   // A case variant of a built-in ("OpenAI") resolves to the built-in in pi
   // whatever the file says: refuse it. The exact built-in id keeps rule 1
   // (an operator's own hand-written override).
