@@ -12,7 +12,8 @@ import { createDbClient } from "../servers/db.js";
 import { invalidateRoleContext } from "../servers/shared/model-roles-store.js";
 import { clearProviderTaskCache } from "../servers/shared/provider-task.js";
 import { buildRoleRows } from "../servers/gateway/dashboard/settings/sections/models/rows.js";
-import modelsSection from "../servers/gateway/dashboard/settings/sections/models.js";
+import modelsSection, { modelsPreview, noNetworkLookup } from "../servers/gateway/dashboard/settings/sections/models.js";
+import { getClassifierStatus } from "../servers/gateway/dashboard/panels/bot-builder/classifier-status.js";
 import { shellAvatarSheet } from "../servers/gateway/dashboard/shell/chrome.js";
 
 let dir, db;
@@ -60,7 +61,10 @@ beforeEach(async () => {
   await bind("everyday", { model: "local-chat/m1" });
   await bind("quick", { model: "gone/x", fallback: [] });
   await raw("tts_profiles", JSON.stringify([
-    { id: "k1", name: "Kokoro here", provider: "kokoro", baseUrl: "http://127.0.0.1:8880", defaultVoice: "af_bella", isDefault: true },
+    { id: "k1", name: "Kokoro here", provider: "kokoro", baseUrl: "http://127.0.0.1:8880", apiKey: SECRET, defaultVoice: "af_bella", isDefault: true },
+  ]));
+  await raw("stt_profiles", JSON.stringify([
+    { id: "s9", name: "Hosted ears", provider: "deepgram", apiKey: SECRET, isDefault: false },
   ]));
   invalidateRoleContext();
   clearProviderTaskCache();
@@ -126,8 +130,10 @@ test("speech details", async () => {
   assert.equal(r.tts.model.where, "here");
   assert.equal(r.tts.status.code, "ready");
   assert.ok(r.tts.detailsHref.endsWith("subtab=tts"));
-  assert.equal(r.stt.status.code, "not_set");
+  assert.equal(r.stt.status.code, "ready", "the first profile is the default when none is marked");
+  assert.equal(r.stt.model.where, "cloud");
   assert.ok(r.stt.detailsHref.endsWith("subtab=stt"));
+  assert.ok(!JSON.stringify([r.stt, r.tts]).includes(SECRET), "no profile apiKey in a row");
 });
 
 test("speech: an azure profile with no endpoint and the voice bot's own profile", async () => {
@@ -160,7 +166,7 @@ test("render", async () => {
   assert.ok(html.includes("Show search ranking"));
   assert.ok(html.includes("Crow&#39;s default") || html.includes("Crow's default") || html.includes("Crow&#x27;s default"));
   assert.ok(html.includes("This box"));
-  assert.ok(!html.includes(SECRET), "no provider api_key value");
+  assert.ok(!html.includes(SECRET), "no provider api_key or speech profile apiKey value");
   const shown = await modelsSection.render({ req: { query: { show: "rerank" } }, db, lang: "en" });
   assert.equal(count(shown, 'data-role="rerank"'), 1);
   assert.ok(!shown.includes("Show search ranking"));
@@ -192,4 +198,79 @@ test("es", async () => {
   const html = await modelsSection.render({ req: { query: {} }, db, lang: "es" });
   assert.ok(html.includes("Aún no configurado"));
   assert.ok(html.includes("Añadir un proveedor"));
+});
+
+// --- Fix round 1 -------------------------------------------------------------
+
+const insCls = () => ins("local-cls", "http://127.0.0.1:8031/v1", [{ id: "qwen3.5-4b" }]);
+const insCloud = () => ins("cloud-a", "https://8.8.8.8/v1", [{ id: "c1" }]);
+const realClassifier = { classifierStatusFn: getClassifierStatus };
+
+test("safety bound to a cloud model shows the classifier's automatic pick, not the cloud model", async () => {
+  await insCls();
+  await insCloud();
+  await bind("safety", { model: "cloud-a/c1" });
+  invalidateRoleContext();
+  const s = byId(await rowsFor(realClassifier)).safety;
+  assert.equal(s.chosen, true);
+  assert.equal(s.status.code, "default");
+  assert.equal(s.model.key, "local-cls/qwen3.5-4b");
+  assert.equal(s.refused, true);
+  assert.notEqual(s.model.where, "cloud");
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  assert.ok(html.includes("Classifier refuses models that aren"), "the refusal is said on the row");
+  const safetyCard = html.slice(html.indexOf('data-row-id="safety"'), html.indexOf('data-row-id="image"'));
+  assert.ok(!safetyCard.includes(">c1<"), "the refused cloud model is not shown");
+  assert.ok(safetyCard.includes(">qwen3.5-4b<"), "the automatic pick is shown");
+});
+
+test("safety bound to a local model the classifier takes is ready with it", async () => {
+  await insCls();
+  await bind("safety", { model: "local-cls/qwen3.5-4b" });
+  invalidateRoleContext();
+  const s = byId(await rowsFor(realClassifier)).safety;
+  assert.equal(s.status.code, "ready");
+  assert.equal(s.model.key, "local-cls/qwen3.5-4b");
+  assert.equal(s.refused, undefined);
+});
+
+test("unset safety shows Crow's default with the classifier's pick", async () => {
+  await insCls();
+  invalidateRoleContext();
+  const s = byId(await rowsFor(realClassifier)).safety;
+  assert.equal(s.chosen, false);
+  assert.equal(s.status.code, "default");
+  assert.equal(s.model.key, "local-cls/qwen3.5-4b");
+  assert.equal(s.model.where, "here");
+});
+
+test("unset rerank shows Crow's default and stays hidden; bound rerank is visible", async () => {
+  await ins("local-rr", "http://127.0.0.1:8032/v1", [{ id: "r1", task: "rerank" }]);
+  invalidateRoleContext();
+  let r = byId(await rowsFor()).rerank;
+  assert.equal(r.status.code, "default");
+  assert.equal(r.model.key, "local-rr/r1");
+  assert.equal(r.hidden, true);
+  await bind("rerank", { model: "local-rr/r1" });
+  invalidateRoleContext();
+  r = byId(await rowsFor()).rerank;
+  assert.equal(r.status.code, "ready");
+  assert.equal(r.hidden, false);
+  const html = await modelsSection.render({ req: { query: {} }, db, lang: "en" });
+  assert.equal(count(html, 'data-role="rerank"'), 1);
+  assert.ok(!html.includes("Show search ranking"));
+});
+
+test("the menu preview never waits on DNS for the classifier", async () => {
+  let given = null;
+  const stub = async (_db, opts) => {
+    given = opts;
+    await opts.lookup("classifier.example"); // a real resolver here could stall the whole menu
+    return { state: "missing" };
+  };
+  const deadline = new Promise((_, rej) => setTimeout(() => rej(new Error("preview waited")), 500));
+  const p = await Promise.race([modelsPreview(db, "en", { classifierStatusFn: stub }), deadline]);
+  assert.match(p, /^\d+ of 15 roles ready$/);
+  assert.equal(given.lookup, noNetworkLookup);
+  assert.equal(given.probe, false);
 });

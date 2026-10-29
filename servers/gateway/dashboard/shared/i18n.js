@@ -2306,6 +2306,7 @@ export const translations = {
   "models.group.safety": { en: "Safety", es: "Seguridad" },
   "models.group.making": { en: "Making", es: "Crear" },
   "models.add.title": { en: "Add a provider", es: "Añadir un proveedor" },
+  "models.warn.refused": { en: "{consumer} refuses models that aren't proven local and keeps its automatic pick", es: "{consumer} rechaza los modelos no confirmados como locales y mantiene su elección automática" },
   "settings.providers.job.voiceFast": { en: "Voice router (fast)", es: "Enrutador de voz (rápido)" },
   "settings.providers.job.voiceEscalate": { en: "Voice router (escalate)", es: "Enrutador de voz (escalada)" },
   "settings.providers.job.smart.code": { en: "Smart router (code)", es: "Enrutador inteligente (código)" },

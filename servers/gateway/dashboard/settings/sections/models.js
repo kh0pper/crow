@@ -33,9 +33,11 @@ function rowHtml(row, lang) {
   const model = row.model
     ? `<div class="mr-model"><span class="mr-model-label">${escapeHtml(row.model.label || row.model.key || "")}</span>${whereChip(row.model.where, lang)}</div>`
     : "";
-  const note = row.voiceBot
+  const note = (row.voiceBot
     ? `<p class="mr-note">${escapeHtml(fill(t("models.ui.voiceBotUses", lang), { name: row.voiceBot.name }))}</p>`
-    : "";
+    : "") + (row.refused
+    ? `<p class="mr-note mr-refused">${escapeHtml(fill(t("models.warn.refused", lang), { consumer: t(row.labelKey, lang) }))}</p>`
+    : "");
   const details = row.detailsHref
     ? `<a class="mr-details" href="/dashboard/settings${escapeHtml(row.detailsHref)}" data-turbo-frame="_top">${escapeHtml(t("models.ui.details", lang))}</a>`
     : "";
@@ -109,6 +111,21 @@ function showParam(req) {
   return (Array.isArray(s) ? s : typeof s === "string" ? s.split(",") : []).map((x) => String(x).trim()).filter(Boolean);
 }
 
+/**
+ * The menu preview never waits on DNS: a classifier named by hostname is
+ * counted as configured without resolving it (the page itself resolves it).
+ * Any address passes the tailnet check, so a name that would resolve off the
+ * tailnet can overcount by one; the page shows the true state.
+ */
+export const noNetworkLookup = async () => [{ address: "127.0.0.1", family: 4 }];
+
+/** "{n} of {total} roles ready" without any network wait. */
+export async function modelsPreview(db, lang = "en", { classifierStatusFn } = {}) {
+  const rows = await buildRoleRows(db, { classifierLookup: noNetworkLookup, ...(classifierStatusFn ? { classifierStatusFn } : {}) });
+  const n = rows.filter((r) => FILLED_STATUSES.includes(r.status?.code)).length;
+  return fill(t("models.ui.readyCount", lang), { n, total: rows.length });
+}
+
 export default {
   id: "models",
   group: "ai",
@@ -119,11 +136,7 @@ export default {
   labelKey: "settings.section.models",
 
   async getPreview({ db, lang = "en" }) {
-    try {
-      const rows = await buildRoleRows(db);
-      const n = rows.filter((r) => FILLED_STATUSES.includes(r.status?.code)).length;
-      return fill(t("models.ui.readyCount", lang), { n, total: rows.length });
-    } catch { return ""; }
+    try { return await modelsPreview(db, lang); } catch { return ""; }
   },
 
   async render({ req, db, lang = "en" }) {

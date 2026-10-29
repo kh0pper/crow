@@ -38,8 +38,8 @@ export const ROLE_GROUPS = Object.freeze([
 
 /** Roles hidden unless something fills them on purpose (a binding, a pin or an env var). */
 const HIDDEN_UNLESS_BOUND = new Set(["rerank"]);
-/** Roles with a consumer default: unset shows that consumer's current pick as "Crow's default". */
-const CONSUMER_DEFAULT = new Set(["safety", "embed", "rerank"]);
+/** Roles with a consumer default: unset shows that consumer's current pick as "Crow's default" (safety: safetyStatus). */
+const CONSUMER_DEFAULT = new Set(["embed", "rerank"]);
 /** Env vars that fill the whole role (the value is a model key for voice, a provider id otherwise). */
 const ROLE_ENV = Object.freeze({ voice: "COMPANION_FAST_MODEL", embed: LEGACY_PINS.embed.env, rerank: LEGACY_PINS.rerank.env });
 const TASKS = Object.freeze({ embed: EMBED_TASKS, rerank: RERANK_TASKS });
@@ -93,15 +93,39 @@ async function readPin(db, roleId) {
   }
 }
 
-/** The classifier's current pick (the setting, a chosen role, else the automatic pick), never probed. */
-async function classifierModel(db, ctx, whereOpts, classifierStatusFn) {
+/**
+ * The classifier's current pick (the setting, a chosen role, else the
+ * automatic pick), never probed: {model, source} or null. `source` is the
+ * classifier's own ("setting" | "role" | "auto"); a chosen safety role it
+ * refused (cloud, or rejected by selectBotClassifier) gives source "auto".
+ */
+async function classifierPick(db, ctx, whereOpts, classifierStatusFn, lookup) {
   try {
-    const st = await classifierStatusFn(db, { probe: false });
+    const st = await classifierStatusFn(db, { probe: false, ...(lookup ? { lookup } : {}) });
     if (st?.state !== "ready" || !st.providerId || !st.model) return null;
-    return modelOf(`${st.providerId}/${st.model}`, ctx, whereOpts);
+    return { model: modelOf(`${st.providerId}/${st.model}`, ctx, whereOpts), source: st.source || null };
   } catch (e) {
     console.warn(`[models] classifier status failed: ${e?.message}`);
     return null;
+  }
+}
+
+/**
+ * The safety row shows what the classifier actually uses, never the bound
+ * model by itself: a chosen role the classifier took is "ready"; a chosen role
+ * it refused keeps the automatic pick as "default" with `refused: true`; a
+ * seeded or missing binding shows the automatic pick as "default".
+ */
+function safetyStatus(row, pick) {
+  if (pick && row.chosen && pick.source === "role") {
+    row.status = { code: "ready" };
+    row.model = pick.model;
+  } else if (pick) {
+    row.status = { code: "default" };
+    row.model = pick.model;
+    if (row.chosen) row.refused = true;
+  } else {
+    row.status = { code: row.chosen ? "not_available" : "not_set" };
   }
 }
 
@@ -113,7 +137,7 @@ async function voiceBotDef(db) {
 }
 
 /** A chat-style row (thinking, voice, seeing, safety). */
-async function chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStatusFn }) {
+async function chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStatusFn, classifierLookup }) {
   const id = def.id;
   const b = ctx.bindings?.[id] || null;
   const seeded = !!(b && b.model != null && b.seeded === true);
@@ -131,7 +155,11 @@ async function chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStat
   } else if (pin) {
     row.pin = pin;
     row.status = { code: "pinned" };
-    row.model = id === "safety" ? await classifierModel(db, ctx, whereOpts, classifierStatusFn) : providerModel(pin.value, id, ctx, whereOpts);
+    row.model = id === "safety"
+      ? (await classifierPick(db, ctx, whereOpts, classifierStatusFn, classifierLookup))?.model || null
+      : providerModel(pin.value, id, ctx, whereOpts);
+  } else if (id === "safety") {
+    safetyStatus(row, await classifierPick(db, ctx, whereOpts, classifierStatusFn, classifierLookup));
   } else {
     let r;
     try { r = resolveRoleKey(`role:${id}`, { ...ctx, need: NEED[id] || def.capability }); } catch (e) {
@@ -146,9 +174,7 @@ async function chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStat
       row.model = modelOf(r.key, ctx, whereOpts);
     } else if (r.reason === "unset") {
       if (CONSUMER_DEFAULT.has(id)) {
-        const m = id === "safety"
-          ? await classifierModel(db, ctx, whereOpts, classifierStatusFn)
-          : providerModel(pickProviderByTask(ctx.providers || [], TASKS[id]), id, ctx, whereOpts);
+        const m = providerModel(pickProviderByTask(ctx.providers || [], TASKS[id]), id, ctx, whereOpts);
         if (m) { row.status = { code: "default" }; row.model = m; }
       }
     } else {
@@ -199,9 +225,10 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
  * @param {object} [opts.localMarks]
  * @param {() => string} [opts.localInstanceId]  test seam for the role context
  * @param {Function} [opts.classifierStatusFn]   test seam (default getClassifierStatus)
+ * @param {Function} [opts.classifierLookup]     DNS lookup handed to the classifier status (the menu preview passes one that never touches the network)
  * @returns {Promise<Array<object>>} RoleRow[] in page order, each with its `group`
  */
-export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, localInstanceId, classifierStatusFn = getClassifierStatus } = {}) {
+export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, localInstanceId, classifierStatusFn = getClassifierStatus, classifierLookup } = {}) {
   const ctx = await loadRoleContext(db, { maxAgeMs: 0, ...(localInstanceId ? { getOrCreateLocalInstanceId: localInstanceId } : {}) });
   const whereOpts = { ...(ownAddrs ? { ownAddrs } : {}), ...(localMarks ? { localMarks } : {}) };
   // Voice keys from the same context the rows use.
@@ -221,7 +248,7 @@ export async function buildRoleRows(db, { env = process.env, ownAddrs, localMark
       } else if (SPEECH[id]) {
         row = await speechRow(db, def, { whereOpts, voiceDef });
       } else {
-        row = await chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStatusFn });
+        row = await chatRow(db, def, ctx, { env, whereOpts, voiceKeys, classifierStatusFn, classifierLookup });
       }
       rows.push({ ...row, group: g.id, labelKey: ROLE_LABEL_KEYS[id], jobKey: ROLE_JOB_KEYS[id] });
     }
