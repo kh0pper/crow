@@ -10,7 +10,7 @@
  *
  * This module must never import the bridge, better-sqlite3 or servers/db*; a test asserts it.
  */
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { protectedHit, protectedRoots, realish, realUserCrowDir, within } from "./protected-paths.mjs";
@@ -179,4 +179,133 @@ export function childEnv({ home, botId, runId, piCli, extraEnv = {}, turnTimeout
     PIBOT_PI_CLI: piCli,
     ...extra,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Process tree kill (D4, R3). Linux only: everything is read from /proc. The walk goes strictly
+// DOWN from a given pid by ppid chain; nothing is ever matched by name.
+// ---------------------------------------------------------------------------------------------
+
+export const KILL_GRACE_MS = 5000;
+
+const defaultReadProc = (p) => readFileSync(p, "latin1");
+const defaultListPids = () => readdirSync("/proc").filter((n) => /^\d+$/.test(n)).map(Number);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Parse /proc/<pid>/stat: split after the LAST ")" because comm may hold spaces and parens. */
+function parseStat(text) {
+  const i = text.lastIndexOf(")");
+  if (i < 0) return null;
+  const f = text.slice(i + 1).trim().split(/\s+/);
+  return { state: f[0], ppid: Number(f[1]), pgrp: Number(f[2]) };
+}
+function statOf(pid, readProc) {
+  try { return parseStat(readProc(`/proc/${pid}/stat`)); } catch { return null; }
+}
+/** Alive = readable stat and not a zombie. */
+const isAlive = (pid, readProc = defaultReadProc) => { const s = statOf(pid, readProc); return !!s && s.state !== "Z"; };
+
+/** Every descendant of pid (ppid chain, breadth-first), excluding pid itself. */
+export function descendants(pid, { readProc = defaultReadProc, listPids = defaultListPids } = {}) {
+  const kids = new Map();
+  for (const n of listPids()) {
+    const s = statOf(n, readProc);
+    if (!s || !Number.isFinite(s.ppid)) continue;
+    if (!kids.has(s.ppid)) kids.set(s.ppid, []);
+    kids.get(s.ppid).push(n);
+  }
+  const out = [];
+  const seen = new Set([pid]);
+  for (let q = [pid]; q.length;) {
+    const next = [];
+    for (const p of q) for (const c of kids.get(p) || []) if (!seen.has(c)) { seen.add(c); out.push(c); next.push(c); }
+    q = next;
+  }
+  return out;
+}
+
+const signal = (target, sig) => { try { process.kill(target, sig); } catch (e) { if (e.code !== "ESRCH") throw e; } };
+
+/** SIGTERM/SIGKILL a snapshot. A pgid is signalled as a group only when every live member is in the set. */
+function signalSet(pids, sig) {
+  const set = new Set(pids);
+  const groups = new Map();
+  for (const n of defaultListPids()) { // one scan: pgid -> members (all live processes)
+    const s = statOf(n, defaultReadProc);
+    if (!s || s.state === "Z") continue;
+    if (!groups.has(s.pgrp)) groups.set(s.pgrp, []);
+    groups.get(s.pgrp).push(n);
+  }
+  const ownPgid = statOf(process.pid, defaultReadProc)?.pgrp;
+  const done = new Set();
+  for (const pid of set) {
+    const s = statOf(pid, defaultReadProc);
+    if (!s) continue;
+    const g = s.pgrp;
+    if (g > 1 && g !== ownPgid && !done.has(g) && (groups.get(g) || []).every((m) => set.has(m))) {
+      done.add(g);
+      signal(-g, sig);
+    }
+  }
+  for (const pid of set) signal(pid, sig); // idempotent after a group signal; covers shared groups
+}
+
+async function waitGone(pids, ms) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const left = pids.filter((p) => isAlive(p));
+    if (!left.length || Date.now() >= end) return left;
+    await sleep(Math.min(25, Math.max(1, end - Date.now())));
+  }
+}
+
+/**
+ * Kill pid's whole tree (pi runs detached, in its own group, so a group kill of the child alone
+ * would orphan it). includeRoot:false kills only the descendants. TERM, wait graceMs, re-walk to
+ * catch late children, KILL the remainder, then re-walk once more if the root is still alive.
+ * Resolves with whatever is still alive.
+ */
+export async function killTree(pid, { graceMs = KILL_GRACE_MS, includeRoot = true } = {}) {
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) throw new DriverRefusal(`killTree refuses pid ${pid}`);
+  const known = new Set();
+  const collect = () => {
+    const found = [...(includeRoot && isAlive(pid) ? [pid] : []), ...descendants(pid)].filter((p) => p !== process.pid);
+    for (const p of found) known.add(p);
+    return found;
+  };
+  for (let round = 0; round < 2; round++) {
+    const snap = collect();
+    if (!snap.length) break;
+    signalSet(snap, "SIGTERM");
+    await waitGone(snap, graceMs);
+    // Late children (spawned after the snapshot, e.g. on SIGTERM) are only reachable through the root.
+    const live = [...new Set([...snap, ...collect()])].filter((p) => isAlive(p));
+    if (live.length) { signalSet(live, "SIGKILL"); await waitGone(live, 1000); }
+    if (!isAlive(pid)) break; // root gone: nothing left to re-walk from
+    if (!includeRoot && !descendants(pid).length) break;
+  }
+  return { survivors: [...known].filter((p) => isAlive(p)) };
+}
+
+/**
+ * Every pid whose environ carries CROW_EVAL_RUN_ID=<runId> exactly. Fails closed: an unreadable
+ * environ (EACCES) on a process owned by our uid counts as a survivor; other users' processes
+ * and vanished pids are skipped.
+ */
+export function survivorsByMarker(runId, { readProc = defaultReadProc, listPids = defaultListPids, uid = process.getuid() } = {}) {
+  const want = `CROW_EVAL_RUN_ID=${runId}`;
+  const out = [];
+  for (const n of listPids()) {
+    if (n === process.pid) continue;
+    try {
+      if (readProc(`/proc/${n}/environ`).split("\0").includes(want)) out.push(n);
+    } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ESRCH") continue;
+      try {
+        const m = /^Uid:\s+(\d+)/m.exec(readProc(`/proc/${n}/status`));
+        if (m && Number(m[1]) === uid) out.push(n);
+      } catch { /* vanished while checking */ }
+    }
+  }
+  return out;
 }
