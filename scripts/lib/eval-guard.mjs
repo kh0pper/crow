@@ -5,6 +5,7 @@
  * them first and load the server stack only after one passes.
  */
 import { tmpdir } from "node:os";
+import { isDeepStrictEqual, types } from "node:util";
 import { protectedHit, protectedRoots, realish, realUserCrowDir, within } from "./protected-paths.mjs";
 
 const strictlyInside = (p, root) => p !== root && within(p, root);
@@ -52,4 +53,66 @@ export function assertEvalSeam() {
     const rule = String(err && err.message).replace(/^research-eval fixture server refused: /, "");
     throw new Error(`eval-only seam refused: ${rule}`);
   }
+}
+
+const SPAWN_FILE_KEY = "appendSystemPromptFile";
+const isPlain = (o) => o !== null && typeof o === "object" && !Array.isArray(o) && [Object.prototype, null].includes(Object.getPrototypeOf(o));
+
+/**
+ * A deep copy of a spawn's PiRpc options for an eval-only transform to work on: plain objects
+ * and arrays copied (own string and symbol keys, data values only), functions and primitives by
+ * reference, anything else through structuredClone. The bridge keeps the original untouched and
+ * never uses the transform's object (checkEvalSpawnOpts).
+ */
+export function cloneSpawnOpts(value) {
+  if (value === null || typeof value !== "object") return value; // primitives and functions
+  if (Array.isArray(value)) return value.map((v) => cloneSpawnOpts(v));
+  if (isPlain(value)) {
+    const out = Object.getPrototypeOf(value) === null ? Object.create(null) : {};
+    for (const k of Reflect.ownKeys(value)) {
+      const d = Object.getOwnPropertyDescriptor(value, k);
+      if (d && d.enumerable && "value" in d) out[k] = cloneSpawnOpts(d.value);
+    }
+    return out;
+  }
+  return structuredClone(value);
+}
+
+/**
+ * The check on an eval-only spawn transform's result (bridge.mjs handleInbound,
+ * opts.evalSpawnTransform): returns the ONE value the bridge takes from it, the
+ * appendSystemPromptFile path, read once from a data descriptor. Refused ("eval spawn transform
+ * refused: <rule>") unless `next` is a plain, non-Proxy object whose own keys (Reflect.ownKeys,
+ * symbols included) are the clone's, plus appendSystemPromptFile at most, every other key a data
+ * property deep-equal to the ORIGINAL's (so a transform that mutated its clone is caught), and a
+ * changed path is a string strictly inside the REAL process.env.CROW_HOME. The bridge then
+ * builds the spawn options from the original, never from `next`.
+ * @param {object} original the PiRpc options the bridge built (never handed to the transform)
+ * @param {object} clone cloneSpawnOpts(original), what the transform received
+ * @param {unknown} next the transform's result
+ * @returns {string|undefined} the appendSystemPromptFile to spawn with
+ */
+export function checkEvalSpawnOpts(original, clone, next) {
+  const refuse = (rule) => { throw new Error(`eval spawn transform refused: ${rule}`); };
+  if (types.isProxy(next)) refuse("the result must not be a Proxy");
+  if (!isPlain(next)) refuse("the result must be a plain object");
+  const want = new Set(Reflect.ownKeys(clone));
+  const got = Reflect.ownKeys(next);
+  for (const k of want) if (!got.includes(k)) refuse(`key ${String(k)} was removed`);
+  for (const k of got) {
+    if (k === SPAWN_FILE_KEY) continue;
+    if (!want.has(k)) refuse(`key ${String(k)} was added`);
+    const d = Object.getOwnPropertyDescriptor(next, k);
+    if (!d || !("value" in d)) refuse(`key ${String(k)} must be a data property`);
+    if (!isDeepStrictEqual(d.value, original[k])) refuse(`key ${String(k)} was changed`);
+  }
+  const d = Object.getOwnPropertyDescriptor(next, SPAWN_FILE_KEY);
+  if (!d) return original[SPAWN_FILE_KEY];
+  if (!("value" in d) || typeof d.value !== "string") refuse(`${SPAWN_FILE_KEY} must be a string data property`);
+  const f = d.value; // read once
+  if (f === original[SPAWN_FILE_KEY]) return f;
+  const home = process.env.CROW_HOME;
+  if (typeof home !== "string" || !home) refuse("CROW_HOME is not set");
+  if (!f || !strictlyInside(realish(f), realish(home))) refuse(`${SPAWN_FILE_KEY} must be a path strictly inside CROW_HOME`);
+  return f;
 }

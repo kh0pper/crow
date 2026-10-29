@@ -9,9 +9,25 @@
  * every gateway variable to a closed port). Nothing here is a sandbox.
  *
  * API: runConversation({...}) resolves to { ok, contaminated, reason, threads: [{ id,
- * sessionPaths, turns }], meta }. A configuration error throws DriverRefusal and is never
- * retried. A run-time failure returns ok: false with a contaminated reason, and the caller may
- * retry under MAX_ATTEMPTS.
+ * sessionPaths, turns, summary, briefing }], meta }. A configuration error throws DriverRefusal
+ * and is never retried. A run-time failure returns ok: false with a contaminated reason, and the
+ * caller may retry under MAX_ATTEMPTS.
+ *
+ * Session summaries and briefings (R1.2 PR 4) mirror Perch's own call sequence. A thread with
+ * `summariseAfter` is summarised after its last turn by summarizeSessionByThread (the function
+ * Perch's close hook calls, which reads CROW_SESSION_SUMMARIES itself); a thread with
+ * `briefingBefore` gets briefingText(buildBriefing(...)) for the rank of the bot's model, applied
+ * by handleInbound's eval-only evalSpawnTransform exactly where Perch puts it (an appended system prompt file,
+ * never the operator's message) and recorded on its row. Such threads are Perch sessions in the
+ * DB (kind perch-live, filed under `projectId` in shell_items), and the run gets a provider
+ * registry: the scratch `providers` table mirrors `models`, so the roles store, the privacy
+ * ranks and the summary's model call resolve through their real paths. Results carry only
+ * outcomes, sizes and hashes, never summary or briefing text. The summary's model call is
+ * injected (meta.summary_transport "injected"): a direct POST to the quick model's endpoint from
+ * the run's checked `models`, never llm-router, so a host box reservation cannot contaminate it.
+ * PR 4 runs seed the scratch provider registry, which also feeds tool-budget caps and the
+ * classifier, so benchmark arms that are compared must all use the same PR 4 option shape: turn
+ * the flags off, keep the options on.
  *
  * Deliberately NOT done here: registering the run in the host's schedule, an out-of-process
  * deadman watchdog, obtaining the operator's OK, starting or warming a model (the warm and
@@ -54,6 +70,29 @@ const refuse = (msg) => { throw new DriverRefusal(`live pi driver refused: ${msg
 const strictlyInside = (p, root) => p !== root && within(p, root);
 
 export const EXTRA_ENV_ALLOW = Object.freeze(["CROW_SESSION_SUMMARIES", "CROW_SESSION_BRIEFING"]);
+/** Perch's session id shape (briefing.js briefingPromptFile): a briefed thread's id must have it. */
+export const PERCH_SID_RE = /^perchlive-[0-9a-f]{8}$/;
+/**
+ * The summary outcomes that are a real "no summary" (or a summary). Fail closed: any other
+ * reason (model_failed, box_reserved, error, a missing result, anything new) contaminates the row.
+ */
+export const SUMMARY_OUTCOMES = Object.freeze(["ok", "disabled", "no_model", "less_private", "visited_project", "no_transcript",
+  "unchanged", "forgotten", "empty_transcript", "empty_output"]);
+
+/** The contamination string for a thread's summary event, or null when it is an outcome. */
+export function summaryContamination(summary) {
+  if (summary === null || summary === undefined) return null; // the thread was not asked to summarise
+  const reason = summary && typeof summary.reason === "string" ? summary.reason : null;
+  if (reason !== null && SUMMARY_OUTCOMES.includes(reason) && typeof summary.written === "boolean") return null;
+  return `summary ${reason ?? "missing"}${summary && summary.detail ? ` (${summary.detail})` : ""}`;
+}
+
+/**
+ * bridge.mjs's escalation token (model_resolver.mjs ESCALATE_RE, copied: that module's imports
+ * reach servers/db.js; a test asserts the two stay identical). A briefed thread may not escalate.
+ */
+const ESCALATE_RE = /(^|\s)!escalate(\s|$)/i;
+export const escalateRequested = (msg) => ESCALATE_RE.test(String(msg || ""));
 export const GATEWAY_PORTS = Object.freeze([3001, 3002]);
 export const PARENT_ENV_ALLOW = Object.freeze(["PATH", "LANG", "TZ", "TMPDIR", "TERM", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"]);
 
@@ -235,6 +274,9 @@ export function childEnv({ home, botId, runId, piCli, extraEnv = {}, turnTimeout
     const ok = PARENT_ENV_ALLOW.includes(k) || k.startsWith("LC_") || k === "NODE_TEST_CONTEXT" || (testCtx && k.startsWith("PIBOT_TEST_"));
     if (ok && !SECRET_NAME_RE.test(k)) picked[k] = v;
   }
+  // Test-only: the box reservation file the summary job reads (else the host's real one).
+  const resv = testCtx ? parent.PIBOT_TEST_BOX_RESERVATION_PATH : undefined;
+  if (resv !== undefined && !(typeof resv === "string" && strictlyInside(realish(resv), realish(home)))) refuse("PIBOT_TEST_BOX_RESERVATION_PATH must be strictly inside the scratch home");
   const agentDir = join(home, "pi-agent");
   return {
     ...scratchEnv(home, botId, picked),
@@ -252,8 +294,88 @@ export function childEnv({ home, botId, runId, piCli, extraEnv = {}, turnTimeout
     // marker too, so survivorsByMarker sees an escaped pi. Pinned: a parent value never lands.
     CROW_BOT_ENV_ALLOW: "CROW_EVAL_RUN_ID",
     PIBOT_PI_CLI: piCli,
+    ...(resv !== undefined ? { CROW_BOX_RESERVATION_PATH: resv } : {}),
     ...extra,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR 4 hooks (session summaries and the project briefing). This module never loads them itself:
+// they pull in the DB stack. checkPr4Hooks imports them in a throwaway node process instead.
+// ---------------------------------------------------------------------------------------------
+
+const PR4_ROOT = join(import.meta.dirname, "..", "..", "servers");
+/** [module path, the exports the child uses]: every module the child imports for PR 4. */
+export const PR4_MODULES = Object.freeze([
+  [join(PR4_ROOT, "db.js"), ["createDbClient"]],
+  [join(PR4_ROOT, "shared", "model-roles-store.js"), ["setBinding"]],
+  [join(PR4_ROOT, "shared", "shell-items.js"), ["assertLiveProject", "ensureItem"]],
+  [join(import.meta.dirname, "..", "pi-bots", "instance-paths.mjs"), ["tasksDbPath"]],
+  [join(PR4_ROOT, "gateway", "perch", "session-summary.js"), ["summarizeSessionByThread"]],
+  [join(PR4_ROOT, "gateway", "perch", "briefing.js"), ["buildBriefing", "briefingText", "briefingRefs", "briefingEnabled", "pruneBriefing",
+    "targetRankOf", "applyBriefing", "briefingPromptFile", "recordBriefing", "reconcileBriefing", "sessionBriefing"]],
+  [join(PR4_ROOT, "memory", "summary-recall.js"), ["askerRank"]],
+]);
+const PR4_PROBE = `const { pathToFileURL } = await import("node:url");
+const mods = JSON.parse(process.argv[1]);
+for (const [path, names] of mods) {
+  const m = await import(pathToFileURL(path).href);
+  for (const n of names) if (typeof m[n] !== "function") throw new Error(path + " has no export " + n);
+}`;
+
+/** Throws DriverRefusal "PR 4 hooks not available" unless every PR 4 module imports with its exports. */
+export function checkPr4Hooks({ env, cwd, modules = PR4_MODULES } = {}) {
+  try {
+    execFileSync(process.execPath, ["--input-type=module", "-e", PR4_PROBE, JSON.stringify(modules)], { env, cwd, stdio: ["ignore", "ignore", "pipe"], timeout: 60_000 });
+  } catch (e) {
+    const tail = String((e && e.stderr) || (e && e.message) || "").trim().split("\n").filter(Boolean).slice(-1)[0] || "import failed";
+    refuse(`PR 4 hooks not available (${tail.slice(0, 200)})`);
+  }
+}
+
+/**
+ * The PR 4 thread options, checked before anything spawns. Returns true when any thread uses
+ * them (the run then gets the provider registry and the hooks probe).
+ */
+export function checkPr4Options(threads, { quickModel, models, gatewayType, botDef }) {
+  let any = false;
+  let summarise = false;
+  for (const th of threads) {
+    for (const k of ["summariseAfter", "briefingBefore"]) {
+      if (th[k] !== undefined && typeof th[k] !== "boolean") refuse(`thread ${th.id} ${k} must be a boolean`);
+    }
+    const uses = th.summariseAfter === true || th.briefingBefore === true;
+    if (th.projectId !== undefined) {
+      if (!Number.isInteger(th.projectId) || th.projectId < 1) refuse(`thread ${th.id} projectId must be a positive integer`);
+      if (!uses) refuse(`thread ${th.id} projectId is only for a thread with summariseAfter or briefingBefore`);
+    }
+    if (th.briefingBefore === true) {
+      if (th.projectId === undefined) refuse(`thread ${th.id} briefingBefore needs a projectId (Perch briefs only a filed session)`);
+      if (!PERCH_SID_RE.test(th.id)) refuse(`thread ${th.id} briefingBefore needs a Perch session id (perchlive-<8 hex>)`);
+      // Perch withholds a briefing from a model less private than the one it was built for; the
+      // driver builds it for models.default, so no other model may be reachable on this thread.
+      const extra = Object.keys((botDef && botDef.models) || {}).filter((k) => k !== "default");
+      if (extra.length) refuse(`thread ${th.id} briefingBefore needs botDef.models with only "default" (has ${extra.join(", ")})`);
+      for (const t of th.turns) {
+        const texts = [t && t.text, t && t.otherwise, ...((t && Array.isArray(t.answers) ? t.answers : []).map((a) => a && a.text))];
+        if (texts.some((x) => typeof x === "string" && escalateRequested(x))) refuse(`thread ${th.id} briefingBefore: a turn asks to !escalate`);
+      }
+    }
+    any = any || uses;
+    summarise = summarise || th.summariseAfter === true;
+  }
+  if (any && gatewayType !== "perch") refuse('summariseAfter and briefingBefore need gatewayType "perch"');
+  if (summarise && (quickModel === null || quickModel === undefined)) refuse("summariseAfter needs quickModel (the quick role's model, provider/id)");
+  if (quickModel !== null && quickModel !== undefined) {
+    if (!summarise) refuse("quickModel needs a thread with summariseAfter");
+    if (typeof quickModel !== "string" || !quickModel.includes("/")) refuse("quickModel must be provider/id");
+    const i = quickModel.indexOf("/");
+    const p = models.providers[quickModel.slice(0, i)];
+    // The summary's call goes straight to this provider's endpoint, so it must be a checked one.
+    if (!p) refuse(`quickModel provider ${quickModel.slice(0, i)} is not in models (the summary's endpoint must be a checked one)`);
+    if (!Array.isArray(p.models) || !p.models.some((m) => m && m.id === quickModel.slice(i + 1))) refuse(`quickModel names unknown model ${quickModel}`);
+  }
+  return any;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -559,7 +681,7 @@ function sessionPathsOf(turns, home) {
 export async function runConversation({
   botDef, models, scratchHome, threads, env = {}, allowHosts = [], allowServers, allowSkills = [], piPackages = [],
   gatewayType = "perch", gatewayPorts = [], piCli, turnTimeoutMs = 600_000, turnSlackMs = TURN_SLACK_MS, wallMs,
-  prodMaxPi, capacityCount = null, mcpOverrides = null, allowToolless = false, parentEnv = process.env, log = () => {},
+  prodMaxPi, capacityCount = null, mcpOverrides = null, allowToolless = false, quickModel = null, parentEnv = process.env, log = () => {},
 } = {}) {
   const sinceBootSec = bootSecNow();
   const runId = randomUUID();
@@ -603,6 +725,7 @@ export async function runConversation({
       refuse(`thread ${th.id} was already run in this scratch home (use a fresh scratch or a new thread id)`);
     }
   }
+  const pr4 = checkPr4Options(threads, { quickModel, models, gatewayType, botDef });
   if (!Array.isArray(piPackages)) refuse("piPackages must be an array");
   for (const p of piPackages) {
     if (typeof p !== "string" || !isAbsolute(p)) refuse(`piPackages entry ${p} must be an absolute path`);
@@ -611,6 +734,8 @@ export async function runConversation({
   // Validates piCli, turnTimeoutMs and env; the same env serves every thread.
   const cenv = childEnv({ home, botId: botDef.id, runId, piCli, extraEnv: env, turnTimeoutMs, parent: parentEnv });
   const turnMs = Math.max(1000, turnTimeoutMs + turnSlackMs);
+  // Fail early: a run that asks for PR 4's hooks refuses here when they cannot be loaded.
+  if (pr4) checkPr4Hooks({ env: cenv, cwd: home });
 
   const agentDir = join(home, "pi-agent");
   mkdirSync(agentDir, { recursive: true });
@@ -628,6 +753,9 @@ export async function runConversation({
     packages: await Promise.all(piPackages.map(async (path) => ({ path, sha: await gitSha(path) }))),
     crow_sha: await gitSha(CROW_ROOT),
     flags: null,
+    // PR 4 runs: per thread, the recall gate's rank for the bot (askerRank) and the briefing's target rank.
+    ranks: pr4 ? {} : null,
+    summary_transport: threads.some((th) => th.summariseAfter === true) ? "injected" : null,
   };
   const wallEnd = Date.now() + wallMs;
   const out = [];
@@ -638,9 +766,11 @@ export async function runConversation({
     if (Date.now() >= wallEnd) { contaminated = "conversation exceeded wallMs"; break; }
     const r = await runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wallEnd, say, job: {
       botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount, mcpOverrides, runId, thread,
+      pr4, quickModel,
     } });
     if (meta.flags === null && r.flags) meta.flags = r.flags;
-    out.push({ id: thread.id, sessionPaths: r.sessionPaths, turns: r.turns });
+    if (pr4 && r.recallRank !== null) meta.ranks[thread.id] = { recall: r.recallRank, briefing: r.briefing ? r.briefing.rank : null };
+    out.push({ id: thread.id, sessionPaths: r.sessionPaths, turns: r.turns, summary: r.summary, briefing: r.briefing });
     if (r.contaminated) { contaminated = r.contaminated; reason = r.reason; break; }
   }
   return { ok: contaminated === null, contaminated, reason, threads: out, meta };
@@ -669,6 +799,9 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
   const drain = progressTail(progressPath);
   const turns = [];
   let flags = null;
+  let summary = null;
+  let briefing = null;
+  let recallRank = null;
   let done = false;
   let badLine = null;
   let turnDeadline = null;
@@ -681,6 +814,9 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
       if (e.ev === "start") flags = e.flags ?? null;
       else if (e.ev === "turn-start") { turnN = Number(e.turn) + 1; turnDeadline = Date.now() + turnMs; }
       else if (e.ev === "turn-end") { turnDeadline = null; turns.push(e); }
+      else if (e.ev === "briefing") briefing = { chars: e.chars, sha256: e.sha256, rank: e.rank };
+      else if (e.ev === "rank") recallRank = e.recall;
+      else if (e.ev === "summary") summary = { written: e.written, reason: e.reason, ...(e.detail ? { detail: e.detail } : {}), transport: e.transport };
       else if (e.ev === "done") done = true;
     }
   };
@@ -761,5 +897,8 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
     why = modelErrorOf(text);
     if (!why && userMessagesOf(text) < turns.length) why = "session transcript is missing turns";
   }
-  return { contaminated: why, reason: why ? tailOf(errPath) || null : null, turns, sessionPaths, flags };
+  // The quick model was meant to be up (or a reservation held the box): not a "no summary" row.
+  if (!why && job.thread.summariseAfter === true) why = summaryContamination(summary ?? { reason: null });
+  const pub = summary ? { written: summary.written, reason: summary.reason } : null;
+  return { contaminated: why, reason: why ? tailOf(errPath) || null : null, turns, sessionPaths, flags, summary: pub, briefing, recallRank };
 }

@@ -1020,6 +1020,15 @@ function parseCardIntent(msg) {
 }
 
 export async function handleInbound(opts) {
+  // Eval-only seam (the live pi driver, scripts/lib/live-pi-driver.mjs): a caller-supplied
+  // transform of this spawn's PiRpc options. Refused unless THIS process is an eval scratch (the
+  // guard reads the real process.env, never an option); channel turns never pass one, and then
+  // the guard is never even loaded.
+  let evalGuard = null;
+  if (typeof opts.evalSpawnTransform === "function") {
+    (await import("../lib/eval-guard.mjs")).assertEvalSeam();
+    evalGuard = await import("../lib/eval-guard.mjs");
+  }
   const bot_id = opts.bot_id, gateway_thread_id = opts.gateway_thread_id, user_message = opts.user_message;
   // Gateway-agnostic: the inbound adapter (gmail bridge_tick, discord_gateway)
   // declares its transport. Defaults to gmail for legacy callers that omit it.
@@ -1248,6 +1257,17 @@ export async function handleInbound(opts) {
   // POST /llm/acquire; without this a cold on-demand model (:8003) makes pi
   // return "Connection error" → "(no reply)" on Discord/Gmail. Non-fatal.
   await warmModel(resolved.provider, log);
+
+  // The eval-only spawn transform (guarded at the top of this function), right before pi. It
+  // works on a deep clone; the bridge takes ONE value back (appendSystemPromptFile, checked to
+  // be inside the scratch home) and spawns from its own untouched original.
+  if (evalGuard !== null) {
+    const original = spawnPrep.piRpcOpts;
+    const clone = evalGuard.cloneSpawnOpts(original);
+    const next = await opts.evalSpawnTransform(clone);
+    const f = evalGuard.checkEvalSpawnOpts(original, clone, next);
+    spawnPrep.piRpcOpts = Object.assign({}, original, { appendSystemPromptFile: f });
+  }
 
   // piRpcOpts carries {def, sessionDir, resolved, selfAuthoringDir,
   // remoteEnabled, narrowedTools, appendSystemPromptFile}; the resume decision
