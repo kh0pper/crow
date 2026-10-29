@@ -12,6 +12,8 @@ import {
 
 const S = { kind: "service", botId: "hank", sessionId: "7", threadId: "t-100", gatewayType: "gmail" };
 const J = { kind: "service", botId: "hank", jobId: "job-abc123-x9y8z7", threadId: "job-job-abc123-x9y8z7", gatewayType: "job" };
+// M1: a job scope names the claiming worker; by default the signing process.
+const JREF = `j:${J.jobId}@${process.pid}`;
 const v = (a, scope) => ({ kind: a.kind, botId: a.botId, scope, threadId: a.threadId, gatewayType: a.gatewayType });
 
 beforeEach(() => { _resetActorKeyForTest(); _resetPresignedForTest(); });
@@ -24,8 +26,10 @@ test("the scope kinds are exactly ['service'], frozen", () => {
 test("scopeRefFor: a job wins whenever one exists; else a valid session; else null", () => {
   assert.equal(scopeRefFor({ sessionId: "7" }), "s:7");
   assert.equal(scopeRefFor({ sessionId: 7 }), "s:7");
-  assert.equal(scopeRefFor({ jobId: "job-a-b" }), "j:job-a-b");
-  assert.equal(scopeRefFor({ sessionId: "7", jobId: "job-a-b" }), "j:job-a-b", "job wins (H1)");
+  assert.equal(scopeRefFor({ jobId: "job-a-b" }), `j:job-a-b@${process.pid}`, "the claiming worker defaults to this process");
+  assert.equal(scopeRefFor({ jobId: "job-a-b", workerPid: 4242 }), "j:job-a-b@4242");
+  assert.equal(scopeRefFor({ sessionId: "7", jobId: "job-a-b", workerPid: 4242 }), "j:job-a-b@4242", "job wins (H1)");
+  for (const workerPid of [0, -1, 1.5, "x", "4242", null, 1e12]) assert.equal(scopeRefFor({ jobId: "job-a-b", workerPid }), null, `bad worker pid ${workerPid}`);
   for (const bad of [{}, { sessionId: "0" }, { sessionId: "07" }, { sessionId: "x" }, { jobId: "" }, { jobId: "  " },
     { jobId: "a b" }, { jobId: "x".repeat(129) }, { jobId: "job/../x" }, { jobId: 5 }]) {
     assert.equal(scopeRefFor(bad), null, JSON.stringify(bad));
@@ -39,7 +43,7 @@ test("v3 round trip for s: and j:, and the message vector", () => {
   assert.match(ss, /^[0-9a-f]{64}$/);
   assert.match(sj, /^[0-9a-f]{64}$/);
   assert.equal(verifyScopeActorSig({ ...v(S, "s:7"), sig: ss }), true);
-  assert.equal(verifyScopeActorSig({ ...v(J, "j:" + J.jobId), sig: sj }), true);
+  assert.equal(verifyScopeActorSig({ ...v(J, JREF), sig: sj }), true);
   assert.equal(verifyScopeActorSig({ ...v(S, "s:7"), sig: ss.toUpperCase() }), true, "hex case-insensitive");
   assert.equal(verifyScopeActorSig({ ...v(S, " s:7 "), botId: " hank ", sig: ss }), true, "fields trimmed, like v1/v2");
 });
@@ -48,7 +52,7 @@ test("job wins when both ids are given", () => {
   initGatewayActorKey();
   const both = signScopeActor({ ...J, sessionId: "7" });
   assert.equal(both, signScopeActor(J));
-  assert.equal(verifyScopeActorSig({ ...v(J, "j:" + J.jobId), sig: both }), true);
+  assert.equal(verifyScopeActorSig({ ...v(J, JREF), sig: both }), true);
   assert.equal(verifyScopeActorSig({ ...v(J, "s:7"), sig: both }), false);
 });
 
@@ -67,10 +71,10 @@ test("v3 never verifies as v1/v2 and v1/v2 never verify as v3", () => {
 test("tampering any field fails; another kind fails; bad shapes fail", () => {
   initGatewayActorKey();
   const sig = signScopeActor(J);
-  const base = v(J, "j:" + J.jobId);
+  const base = v(J, JREF);
   assert.equal(verifyScopeActorSig({ ...base, sig }), true, "positive control");
   for (const [name, over] of Object.entries({
-    bot: { botId: "otto" }, scope: { scope: "j:job-other" }, "scope kind": { scope: "s:7" }, thread: { threadId: "job-x" },
+    bot: { botId: "otto" }, scope: { scope: `j:job-other@${process.pid}` }, "worker": { scope: `j:${J.jobId}@1` }, "no worker": { scope: `j:${J.jobId}` }, "scope kind": { scope: "s:7" }, thread: { threadId: "job-x" },
     gateway: { gatewayType: "board" }, kind: { kind: "peer-relay" }, "unknown kind": { kind: "bot" },
     "no bot": { botId: "" }, "bad scope": { scope: "x:1" }, "bad session scope": { scope: "s:07" }, "no scope": { scope: undefined },
   })) assert.equal(verifyScopeActorSig({ ...base, ...over, sig }), false, name);
@@ -124,7 +128,7 @@ test("signKindForTuple: a scope kind signs with the scope key for a JOB tuple on
   initGatewayActorKey();
   const sig = signKindForTuple("service", { botId: J.botId, jobId: J.jobId, threadId: J.threadId, gatewayType: J.gatewayType });
   assert.equal(sig, signScopeActor(J));
-  assert.equal(verifyScopeActorSig({ ...v(J, "j:" + J.jobId), sig }), true);
+  assert.equal(verifyScopeActorSig({ ...v(J, JREF), sig }), true);
   assert.equal(signKindForTuple("service", { ...J, sessionId: "7" }), sig, "job first");
   assert.equal(signKindForTuple("service", { botId: "hank", sessionId: "7", threadId: "t-100", gatewayType: "gmail" }), null, "§4.4: no s: through the relay");
 });
@@ -141,5 +145,16 @@ test("presign: with no keys, a stub relay's service sig is used for exactly that
   assert.equal(signScopeActor({ ...J, jobId: "job-other", threadId: "job-job-other" }), null, "another job");
   assert.equal(signScopeActor({ ...J, threadId: "job-x" }), null, "another thread");
   assert.equal(signScopeActor(S), null, "a session scope");
-  assert.equal(verifyScopeActorSig({ ...v(J, "j:" + J.jobId), sig: X }), false, "verification never reads the cache");
+  assert.equal(verifyScopeActorSig({ ...v(J, JREF), sig: X }), false, "verification never reads the cache");
+});
+
+test("M1: the worker pid is inside the MAC: a signature for one claimer never verifies for another", () => {
+  initGatewayActorKey();
+  const a = signScopeActor({ ...J, workerPid: 4242 });
+  assert.equal(verifyScopeActorSig({ ...v(J, `j:${J.jobId}@4242`), sig: a }), true);
+  assert.equal(verifyScopeActorSig({ ...v(J, `j:${J.jobId}@4243`), sig: a }), false);
+  assert.equal(signScopeActor({ ...J, workerPid: 0 }), null, "a bad worker pid signs nothing");
+  // the relay signs for the CALLER's pid, not its own
+  const r = signKindForTuple("service", { botId: J.botId, jobId: J.jobId, threadId: J.threadId, gatewayType: J.gatewayType, workerPid: 4242 });
+  assert.equal(r, a);
 });

@@ -110,15 +110,22 @@ export function jobMatchesTuple(job, { threadId, gatewayType } = {}) {
 
 // The v3 scope ref: a copy of scripts/pi-bots/actor-sig.mjs SCOPE_RE (this
 // module imports nothing from scripts/), pinned to it by tests/signed-scope.test.js.
-export const SCOPE_REF_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128})$/;
+// A job scope names its claiming worker: "j:<job_id>@<worker_pid>" (job ids
+// never contain "@"), so a job re-claimed by another host (stale-claim
+// recovery) no longer resolves for the first host's signature.
+export const SCOPE_REF_RE = /^(s:[1-9][0-9]{0,15}|j:[A-Za-z0-9._:-]{1,128}@[1-9][0-9]{0,9})$/;
 
 /**
  * Resolve the scope a verified v3 signature names (spec §4.2):
  *  - "s:<id>": a live session of the bot whose thread and gateway are the tuple's;
- *  - "j:<id>": a running job of the bot whose tuple is one of jobMatchesTuple's.
+ *  - "j:<id>@<pid>": a running job of the bot, claimed by that worker pid
+ *    (bot_jobs.worker_pid), whose tuple is one of jobMatchesTuple's.
  * `defProjectId` is the bot def's own pi_bot_defs.project_id (the authority;
  * null stays null), never anything from the request. A bot without a def is
- * null. `sessionProjectId` is returned for s: only, `principal` for j: only.
+ * null, and so is a disabled bot (pi_bot_defs.enabled != 1): the owner turning
+ * a bot off ends its live scopes at once, as the signing relay already refuses
+ * to sign for it. `sessionProjectId` is returned for s: only, `principal` for
+ * j: only.
  * @returns {Promise<object|null>} null for anything else. Never throws.
  */
 export async function resolveSignedScope(db, { botId, scopeRef, threadId, gatewayType } = {}) {
@@ -127,26 +134,26 @@ export async function resolveSignedScope(db, { botId, scopeRef, threadId, gatewa
     const ref = scopeRef.trim();
     if (!SCOPE_REF_RE.test(ref)) return null;
     const bot = botId.trim();
-    const id = ref.slice(2);
     let out = null;
     if (ref.startsWith("s:")) {
-      const s = await resolveSignedSession(db, { botId: bot, sessionId: id });
+      const s = await resolveSignedSession(db, { botId: bot, sessionId: ref.slice(2) });
       if (!s || !sessionMatchesTuple(s, { threadId, gatewayType })) return null;
       out = { scope: "session", id: s.id, botId: s.botId, threadId: s.threadId, gatewayType: s.gatewayType, sessionProjectId: s.projectId };
     } else {
-      const j = await resolveRunningJob(db, { botId: bot, jobId: id });
+      const at = ref.lastIndexOf("@");
+      const j = await resolveRunningJob(db, { botId: bot, jobId: ref.slice(2, at), workerPid: Number(ref.slice(at + 1)) });
       if (!j || !jobMatchesTuple(j, { threadId, gatewayType })) return null;
       const f = (v) => (v == null ? "" : String(v).trim());
       out = { scope: "job", id: j.jobId, botId: j.botId, threadId: f(threadId), gatewayType: f(gatewayType), principal: j.principal };
     }
     let def;
     try {
-      const r = await db.execute({ sql: "SELECT project_id FROM pi_bot_defs WHERE bot_id = ?", args: [bot] });
+      const r = await db.execute({ sql: "SELECT project_id, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [bot] });
       def = r.rows[0] || null;
     } catch {
       return null;
     }
-    if (!def) return null;
+    if (!def || Number(def.enabled) !== 1) return null;
     const defProjectId = def.project_id == null ? null : Number(def.project_id);
     return out.scope === "session"
       ? { scope: out.scope, id: out.id, botId: out.botId, threadId: out.threadId, gatewayType: out.gatewayType, defProjectId, sessionProjectId: out.sessionProjectId }

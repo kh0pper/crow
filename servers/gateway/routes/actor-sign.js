@@ -38,7 +38,8 @@
  *      no session: only a generic job's own tuple (thread "job-<id>",
  *      gateway "job"), and no session kind                       else 403/400
  *   7. this process holds the keys (the scope key too, for a scope kind;
- *      signed under the job-first scope j:<job_id>)                  else 503
+ *      signed under the job-first scope j:<job_id>@<this host's pid>,
+ *      so the signature dies if another host re-claims the job)       else 503
  * So a host can only obtain signatures for a real, live session (or a job it
  * is running) of a bot it hosts, and for exactly that session's tuple; and a
  * scope-bound signature only for an owner's job it is running.
@@ -201,7 +202,8 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
 
       // 7. Sign with this process's key; the key itself never leaves.
       if (!hasActorKey()) return fail(503, "the gateway holds no actor key");
-      const tuple = { botId, sessionId, threadId, gatewayType, jobId };
+      // workerPid: a scope kind's j: scope names the claim this host holds (who.pid, checked in step 6).
+      const tuple = { botId, sessionId, threadId, gatewayType, jobId, workerPid: who.pid };
       const sigs = {};
       for (const kind of kinds) {
         const sig = signKindForTuple(kind, tuple);

@@ -30,18 +30,20 @@ before(() => {
     const bot = d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?, ?, ?, 1, ?)");
     bot.run("hank", "Hank", "{}", 42);
     bot.run("otto", "Otto", "{}", null);
+    d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('dora', 'Dora', '{}', 0, 42)").run();
     const ins = d.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, archived_at, project_id) VALUES (?, ?, ?, ?, ?, ?)");
     for (const [name, b, gw, thread, status, archived, proj] of [
       ["live", "hank", "gmail", "t-100", "active", null, 7], ["stopped", "hank", "gmail", "t-101", "stopped", null, null],
       ["done", "hank", "gmail", "t-103", "done", null, null], ["archived", "hank", "gmail", "t-102", "active", "2026-10-01 00:00:00", null],
       ["otto", "otto", "discord", "t-200", "active", null, null], ["ghost", "ghost", "gmail", "t-300", "active", null, null],
+      ["dora", "dora", "gmail", "t-400", "active", null, null],
     ]) SESS[name] = String(ins.run(b, gw, thread, status, archived, proj).lastInsertRowid);
     const cols = withPrincipal ? "(job_id, bot_id, goal, status, worker_pid, card_id, principal)" : "(job_id, bot_id, goal, status, worker_pid, card_id)";
     const job = d.prepare(`INSERT INTO bot_jobs ${cols} VALUES (?, ?, 'g', ?, ?, ?${withPrincipal ? ", ?" : ""})`);
     for (const [id, b, status, pid, card, principal] of [
       ["job-own-1", "hank", "running", 4242, null, "owner"], ["job-cron-1", "hank", "running", 4242, null, null],
       ["job-card-1", "hank", "running", 4242, 5, "owner"], ["job-fin-1", "hank", "completed", 4242, null, "owner"],
-      ["job-otto-1", "otto", "running", 4242, null, "owner"],
+      ["job-otto-1", "otto", "running", 4242, null, "owner"], ["job-dora-1", "dora", "running", 4242, null, "owner"],
     ]) job.run(...[id, b, status, pid, card, ...(withPrincipal ? [principal] : [])]);
     d.close();
   };
@@ -81,7 +83,7 @@ test("resolveRunningJob: null for a finished job, another bot, another worker, b
 test("resolveRunningJob: a database without bot_jobs.principal reads principal null (never the owner)", async () => {
   const j = await resolveRunningJob(plain, { botId: "hank", jobId: "job-own-1" });
   assert.deepEqual(j, { jobId: "job-own-1", botId: "hank", cardId: null, principal: null, workerPid: 4242 });
-  const s = await resolveSignedScope(plain, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" });
+  const s = await resolveSignedScope(plain, { botId: "hank", scopeRef: "j:job-own-1@4242", threadId: "job-job-own-1", gatewayType: "job" });
   assert.equal(s.principal, null);
 });
 
@@ -99,32 +101,32 @@ test("resolveSignedScope s: a live session of the bot, for exactly its tuple; pr
 });
 
 test("resolveSignedScope j: a running job for its generic tuple or its own card's tuple only", async () => {
-  const g = await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" });
+  const g = await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-own-1@4242", threadId: "job-job-own-1", gatewayType: "job" });
   assert.deepEqual(g, { scope: "job", id: "job-own-1", botId: "hank", threadId: "job-job-own-1", gatewayType: "job", defProjectId: 42, principal: "owner" });
   assert.equal("sessionProjectId" in g, false, "no session project on a job scope");
-  const c = await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-card-1", threadId: "board-card-5", gatewayType: "board" });
+  const c = await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-card-1@4242", threadId: "board-card-5", gatewayType: "board" });
   assert.deepEqual(c, { scope: "job", id: "job-card-1", botId: "hank", threadId: "board-card-5", gatewayType: "board", defProjectId: 42, principal: "owner" });
-  assert.equal((await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-card-1", threadId: "job-job-card-1", gatewayType: "job" })).id, "job-card-1",
+  assert.equal((await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-card-1@4242", threadId: "job-job-card-1", gatewayType: "job" })).id, "job-card-1",
     "a card job's generic tuple is its own too");
   for (const [name, a] of Object.entries({
-    "another card": { scopeRef: "j:job-card-1", threadId: "board-card-6", gatewayType: "board" },
-    "a card tuple for a job with no card": { scopeRef: "j:job-own-1", threadId: "board-card-5", gatewayType: "board" },
-    "board-card-null": { scopeRef: "j:job-own-1", threadId: "board-card-null", gatewayType: "board" },
-    "card thread on the job gateway": { scopeRef: "j:job-card-1", threadId: "board-card-5", gatewayType: "job" },
-    "another job's tuple": { scopeRef: "j:job-own-1", threadId: "job-job-cron-1", gatewayType: "job" },
-    "a session tuple": { scopeRef: "j:job-own-1", threadId: "t-100", gatewayType: "gmail" },
-    finished: { scopeRef: "j:job-fin-1", threadId: "job-job-fin-1", gatewayType: "job" },
-    "another bot's": { scopeRef: "j:job-otto-1", threadId: "job-job-otto-1", gatewayType: "job" },
+    "another card": { scopeRef: "j:job-card-1@4242", threadId: "board-card-6", gatewayType: "board" },
+    "a card tuple for a job with no card": { scopeRef: "j:job-own-1@4242", threadId: "board-card-5", gatewayType: "board" },
+    "board-card-null": { scopeRef: "j:job-own-1@4242", threadId: "board-card-null", gatewayType: "board" },
+    "card thread on the job gateway": { scopeRef: "j:job-card-1@4242", threadId: "board-card-5", gatewayType: "job" },
+    "another job's tuple": { scopeRef: "j:job-own-1@4242", threadId: "job-job-cron-1", gatewayType: "job" },
+    "a session tuple": { scopeRef: "j:job-own-1@4242", threadId: "t-100", gatewayType: "gmail" },
+    finished: { scopeRef: "j:job-fin-1@4242", threadId: "job-job-fin-1", gatewayType: "job" },
+    "another bot's": { scopeRef: "j:job-otto-1@4242", threadId: "job-job-otto-1", gatewayType: "job" },
   })) assert.equal(await resolveSignedScope(withP, { botId: "hank", ...a }), null, name);
 });
 
 test("resolveSignedScope: defProjectId comes from the def, never the request; a null def project stays null", async () => {
-  const r = await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job", defProjectId: 99, projectId: 99 });
+  const r = await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-own-1@4242", threadId: "job-job-own-1", gatewayType: "job", defProjectId: 99, projectId: 99 });
   assert.equal(r.defProjectId, 42);
   const d = new Database(withPath);
   d.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, worker_pid, principal) VALUES ('job-o-2', 'otto', 'g', 'running', 1, 'owner')").run();
   d.close();
-  const o = await resolveSignedScope(withP, { botId: "otto", scopeRef: "j:job-o-2", threadId: "job-job-o-2", gatewayType: "job", defProjectId: 99 });
+  const o = await resolveSignedScope(withP, { botId: "otto", scopeRef: "j:job-o-2@1", threadId: "job-job-o-2", gatewayType: "job", defProjectId: 99 });
   assert.equal(o.defProjectId, null);
   const os = await resolveSignedScope(withP, { botId: "otto", scopeRef: "s:" + SESS.otto, threadId: "t-200", gatewayType: "discord" });
   assert.equal(os.defProjectId, null);
@@ -138,8 +140,8 @@ test("resolveSignedScope: a bot with no def, malformed scope refs, a failed read
   }
   for (const botId of [undefined, "", 5]) assert.equal(await resolveSignedScope(withP, { botId, scopeRef: "s:" + SESS.live, threadId: "t-100", gatewayType: "gmail" }), null);
   const broken = { execute: async () => { throw new Error("db gone"); } };
-  assert.equal(await resolveSignedScope(broken, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" }), null);
-  assert.equal(await resolveSignedScope(null, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" }), null);
+  assert.equal(await resolveSignedScope(broken, { botId: "hank", scopeRef: "j:job-own-1@4242", threadId: "job-job-own-1", gatewayType: "job" }), null);
+  assert.equal(await resolveSignedScope(null, { botId: "hank", scopeRef: "j:job-own-1@4242", threadId: "job-job-own-1", gatewayType: "job" }), null);
   assert.equal(await resolveSignedScope(withP), null);
 });
 
@@ -148,9 +150,41 @@ test("resolveSignedScope: a bot with no def, malformed scope refs, a failed read
 test("SCOPE_REF_RE (signed-session.js) is actor-sig.mjs's SCOPE_RE: same source, same verdicts", () => {
   assert.equal(SCOPE_REF_RE.source, SCOPE_RE.source);
   assert.equal(SCOPE_REF_RE.flags, SCOPE_RE.flags);
-  const accept = ["s:1", "s:7", "s:1234567890123456", "j:job-abc123-x9y8z7", "j:a", "j:A.b_c:d-e", `j:${"x".repeat(128)}`];
-  const reject = ["", "s:", "s:0", "s:07", "s:12345678901234567", "s:x", "j:", "j:a b", "j:job/../x", `j:${"x".repeat(129)}`,
-    "k:1", "S:1", " s:1", "s:1 ", "s:1\n", "j:a\nb", "sj:1"];
+  const accept = ["s:1", "s:7", "s:1234567890123456", "j:job-abc123-x9y8z7@4242", "j:a@1", "j:A.b_c:d-e@99", `j:${"x".repeat(128)}@1234567890`];
+  const reject = ["", "s:", "s:0", "s:07", "s:12345678901234567", "s:x", "j:", "j:a b", "j:job/../x", `j:${"x".repeat(129)}@1`,
+    "k:1", "S:1", " s:1", "s:1 ", "s:1\n", "j:a\nb", "sj:1",
+    // M1: a job scope always names the claiming worker pid
+    "j:a", "j:job-abc123-x9y8z7", "j:a@", "j:a@0", "j:a@07", "j:a@-1", "j:a@x", "j:a@12345678901", "j:a@1@2", "j:@1"];
   for (const v of accept) { assert.equal(SCOPE_REF_RE.test(v), true, `ref accepts ${v}`); assert.equal(SCOPE_RE.test(v), true, `sig accepts ${v}`); }
   for (const v of reject) { assert.equal(SCOPE_REF_RE.test(v), false, `ref rejects ${JSON.stringify(v)}`); assert.equal(SCOPE_RE.test(v), false, `sig rejects ${JSON.stringify(v)}`); }
+});
+
+test("I3: resolveSignedScope refuses a disabled bot (pi_bot_defs.enabled != 1), for both scope kinds", async () => {
+  assert.equal(await resolveSignedScope(withP, { botId: "dora", scopeRef: "j:job-dora-1@4242", threadId: "job-job-dora-1", gatewayType: "job" }), null, "job of a disabled bot");
+  assert.equal(await resolveSignedScope(withP, { botId: "dora", scopeRef: "s:" + SESS.dora, threadId: "t-400", gatewayType: "gmail" }), null, "session of a disabled bot");
+  // and the moment the owner turns it back on, it resolves
+  const d = new Database(withPath);
+  d.prepare("UPDATE pi_bot_defs SET enabled = 1 WHERE bot_id = 'dora'").run();
+  try {
+    assert.ok(await resolveSignedScope(withP, { botId: "dora", scopeRef: "j:job-dora-1@4242", threadId: "job-job-dora-1", gatewayType: "job" }), "enabled again");
+  } finally {
+    d.prepare("UPDATE pi_bot_defs SET enabled = 0 WHERE bot_id = 'dora'").run();
+    d.close();
+  }
+});
+
+test("M1: a j: scope names the claiming worker; a job re-claimed by another worker no longer resolves", async () => {
+  const at = (pid) => resolveSignedScope(withP, { botId: "hank", scopeRef: `j:job-own-1@${pid}`, threadId: "job-job-own-1", gatewayType: "job" });
+  assert.ok(await at(4242), "the claiming worker");
+  assert.equal(await at(4243), null, "another worker's pid");
+  const d = new Database(withPath);
+  d.prepare("UPDATE bot_jobs SET worker_pid = 5151 WHERE job_id = 'job-own-1'").run();
+  try {
+    assert.equal(await at(4242), null, "re-claimed by another host: the first host's scope is dead");
+    assert.ok(await at(5151), "the new claimer's scope resolves");
+  } finally {
+    d.prepare("UPDATE bot_jobs SET worker_pid = 4242 WHERE job_id = 'job-own-1'").run();
+    d.close();
+  }
+  assert.equal(await resolveSignedScope(withP, { botId: "hank", scopeRef: "j:job-own-1", threadId: "job-job-own-1", gatewayType: "job" }), null, "no pid, no scope");
 });

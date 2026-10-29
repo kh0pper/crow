@@ -300,7 +300,7 @@ test("service: an owner job this host claimed gets a v3 sig for its generic tupl
   const r = await ask({ ...OWNJOB, kinds: ["service", "bot"] });
   assert.equal(r.status, 200, r.text);
   assert.deepEqual(Object.keys(r.json.sigs).sort(), ["bot", "service"]);
-  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: "j:job-own-1", threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.service }), true);
+  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: `j:job-own-1@${process.pid}`, threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.service }), true);
   assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: "s:1", threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.service }), false);
   assert.equal(verifyActorSig({ kind: "bot", botId: "hank", threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs.bot }), true);
 });
@@ -309,7 +309,7 @@ test("service: an owner card job with its own board-card tuple gets a sig; anoth
   const CARD = { botId: "hank", sessionId: SESS.card, threadId: "board-card-5", gatewayType: "board", jobId: "job-card-1" };
   const r = await ask({ ...CARD, kinds: ["service", "peer-relay"] });
   assert.equal(r.status, 200, r.text);
-  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: "j:job-card-1", threadId: "board-card-5", gatewayType: "board", sig: r.json.sigs.service }), true,
+  assert.equal(verifyScopeActorSig({ kind: "service", botId: "hank", scope: `j:job-card-1@${process.pid}`, threadId: "board-card-5", gatewayType: "board", sig: r.json.sigs.service }), true,
     "the job wins over the session");
   const other = await ask({ ...CARD, sessionId: SESS.card6, threadId: "board-card-6", kinds: ["service"] });
   assert.equal(other.status, 403, "another card id: " + other.text);
