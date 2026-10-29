@@ -8,6 +8,23 @@
  * child with the effective skill tools), and (c) pi never seeing a gateway URL (childEnv pins
  * every gateway variable to a closed port). Nothing here is a sandbox.
  *
+ * API: runConversation({...}) resolves to { ok, contaminated, reason, threads: [{ id,
+ * sessionPaths, turns }], meta }. A configuration error throws DriverRefusal and is never
+ * retried. A run-time failure returns ok: false with a contaminated reason, and the caller may
+ * retry under MAX_ATTEMPTS.
+ *
+ * Deliberately NOT done here: registering the run in the host's schedule, an out-of-process
+ * deadman watchdog, obtaining the operator's OK, starting or warming a model (the warm and
+ * gateway targets are pinned to a closed port) and building a network namespace. Those belong
+ * to the run script and runbook.
+ *
+ * Known gap: the child's HOME is the scratch home, so the bridge's instance-secrets masking
+ * (servers/shared/secret-values.js instanceSecretsDirs) looks for sibling instances under the
+ * scratch home and does not mask the real ones. The eval bot gets no shell, and its file tools
+ * are confined to write_paths inside the scratch.
+ *
+ * The design and live results are kept in the private engineering notes.
+ *
  * This module must never import the bridge, better-sqlite3 or servers/db*; a test asserts it.
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
