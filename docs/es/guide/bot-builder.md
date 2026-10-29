@@ -18,7 +18,7 @@ Un agente es una definición con varias partes. El editor las agrupa en cuatro p
 
 | Pestaña | Qué controla |
 |---|---|
-| **Lo básico** | El nombre del agente, su personalidad e instrucciones, su modelo (más un modelo más potente opcional para preguntas difíciles y un modelo de voz rápido para gafas, quiosco y compañero) y el único canal por el que la gente lo contacta: Gmail, Discord, Telegram, Slack, gafas Meta, un quiosco de Compañero de IA, Mensajes de Crow o Perch. Solo se muestran los ajustes del canal elegido. |
+| **Lo básico** | El nombre del agente, su personalidad e instrucciones, su modelo (más un modelo más potente opcional para preguntas difíciles y un modelo de voz rápido para gafas, quiosco y compañero) y el único canal por el que la gente lo contacta: Gmail, Discord, Telegram, Slack, un quiosco de Compañero de IA, Mensajes de Crow o Perch. Solo se muestran los ajustes del canal elegido. |
 | **Capacidades** | Lo que puede hacer: leer o editar archivos en sus carpetas, ejecutar comandos, usar la memoria y qué servicios conectados puede usar. Cada servicio es una fila con **Apagado / Solo lectura / Todo / Personalizado**; Personalizado abre una lista con buscador de las herramientas de ese servicio, cada una marcada como "lee" o "hace cambios". Aquí también se eligen las habilidades. |
 | **Seguridad** | Si el correo que escribe se guarda como borrador para ti o se envía directamente, qué carpetas puede ver y modificar, y las acciones sobre las que siempre debe preguntarte antes. |
 | **Actividad** | Una lista de verificación, el interruptor Activar / Desactivar, las habilidades que esperan tu revisión y sus conversaciones recientes. |

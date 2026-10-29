@@ -28,8 +28,8 @@ An agent is a definition stored in the `pi_bot_defs` table in Crow's `crow.db`. 
 │   discord_gateway.mjs Discord channel                             │
 │   bridge_tick.mjs     Gmail channel                               │
 ├──────────────────────────────────────────────────────────────────┤
-│  bundles/meta-glasses/  glasses gateway: bound bot drives the     │
-│                         scoped, permission-enforced voice turn    │
+│  bundles/meta-glasses/  glasses gateway: the voice turn,          │
+│                         answering as Crow (crow.voice)            │
 ├──────────────────────────────────────────────────────────────────┤
 │  crow.db (SQLite, WAL)  pi_bot_defs + shared Crow data            │
 └──────────────────────────────────────────────────────────────────┘
@@ -68,7 +68,7 @@ When an agent selects a tool from an extension that is not part of Crow's canoni
 | **AI Companion** | `bundles/companion/` + the gateway's `/llm/v1` router (`servers/gateway/routes/llm-router.js`) | The [companion](/architecture/companion)'s OLVV loop with the avatar and features set on the bot's Basics tab (channel *AI Companion (kiosk)*); voice itself answers as Crow, with the router routing fast (4B) → escalate (35B) |
 | **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | The agent is reachable as a contact over Crow's peer messaging; authorized senders' encrypted DMs drive the runtime and the agent replies from its own derived identity. See [Crow Messages](#crow-messages-bots-as-contacts) below. |
 
-> The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — so the bound agent's persona/skills/tools drive the turn, but the engine is the voice front end, not pi. See [AI Companion](/architecture/companion).
+> The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — the engine is the voice front end, not pi, and it answers as `crow.voice` (persona, tools and limits come from Crow's voice bot). A companion device's binding carries only its avatar and features. See [AI Companion](/architecture/companion).
 
 ## Crow Messages: bots as contacts
 

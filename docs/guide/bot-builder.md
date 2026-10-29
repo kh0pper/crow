@@ -18,7 +18,7 @@ An agent is a definition with a few parts. The editor groups them into four tabs
 
 | Tab | What it controls |
 |---|---|
-| **Basics** | The agent's name, its persona and instructions, its model (plus an optional stronger model for hard questions and a fast voice model for glasses, kiosk and companion), and the one channel people reach it on: Gmail, Discord, Telegram, Slack, Meta glasses, an AI Companion kiosk, Crow Messages or Perch. Only the chosen channel's settings are shown. |
+| **Basics** | The agent's name, its persona and instructions, its model (plus an optional stronger model for hard questions and a fast voice model for glasses, kiosk and companion), and the one channel people reach it on: Gmail, Discord, Telegram, Slack, an AI Companion kiosk, Crow Messages or Perch. Only the chosen channel's settings are shown. |
 | **Abilities** | What it can do: read or edit files in its folders, run commands, use memory, and which connected services it may use. Each service is one row with **Off / Read-only / All / Custom**; Custom opens a searchable list of that service's tools, each marked "reads" or "changes things". Skills are chosen here too. |
 | **Safety** | Whether email it writes is saved as a draft for you or sent directly, which folders it can look at and change, and the actions it must always ask you about first. |
 | **Activity** | A readiness checklist, the Enable / Disable switch, skills waiting for your review, and its recent conversations. |
