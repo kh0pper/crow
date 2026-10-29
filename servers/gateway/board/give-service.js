@@ -58,6 +58,17 @@ export function parseDef(row) {
   }
 }
 
+/** assertAssignableBot, thrown in the shape the Perch routes map to their
+ * `bot_unavailable` refusal (400). Defence in depth on the dispatch paths. */
+export async function assertBotUnblocked(db, botId) {
+  try {
+    await assertAssignableBot(db, botId);
+  } catch (e) {
+    if (e && e.code === "bad_bot") throw routeFail("bot unavailable", "bot_unavailable", 400);
+    throw e;
+  }
+}
+
 /**
  * The dispatch core — POST /bots/:id/dispatch and "Give to…" with start:true
  * both run THIS, so the two can never gate differently. Checks, in order:
@@ -69,6 +80,7 @@ export function parseDef(row) {
  * one action), and fires turn 1 without awaiting it. Every refusal is thrown
  * in the {code, http} shape mapEngineError() maps.
  *
+ * `ctx.db` is the crow.db client (the assignment guard reads it).
  * `ctx.tdb` is opened here on first need (so an engine/perch refusal never
  * touches the tasks store) and left open for the CALLER to close.
  *
@@ -77,6 +89,7 @@ export function parseDef(row) {
  * which a refused dispatch (or a give that never starts) must not do.
  */
 export async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance = false }) {
+  await assertBotUnblocked(ctx.db, botId);
   if (resolveEngineStatus().state !== "ready") throw routeFail("engine_required", "engine_required", 409);
   const def = row ? parseDef(row) : {};
   if (!perchAttached(def)) throw routeFail("perch_not_attached", "perch_not_attached", 403);
@@ -154,7 +167,7 @@ export function giveAudit(db, row, cardId, extra) {
  */
 export async function createTaskForBot(db, tdb, botId, { title, description = null, tags = null, audit = {} } = {}) {
   const row = await loadGiveTarget(db, botId);
-  await assertAssignableBot(db, botId); // the one guard every assignment path shares
+  await assertBotUnblocked(db, botId); // the one guard every assignment path shares
   const t = typeof tdb === "function" ? tdb() : tdb;
   const { id: cardId } = await createCard(t, { title, description, project_id: Number(row.project_id), assigned_bot: botId, tags }, DASHBOARD_ACTOR);
   try {

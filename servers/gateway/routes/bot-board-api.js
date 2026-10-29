@@ -195,10 +195,6 @@ function workerLiveness(pid) {
 // card-service/plan-service call this file makes.
 const DASHBOARD_ACTOR = { kind: "human", id: null, jobId: null };
 
-// Maps a service-layer {message, code, http} error to the response. 409s use
-// the router's existing {reason} shape (matched by client.js's `r.j.reason`
-// fallback everywhere else in this file); everything else is jsonError's
-// {error} shape.
 /** The dashboard's refusal for a bot that may not take a card: the shared
  * assertAssignableBot decides, the voice bot keeps its `bot_unavailable` code.
  * Returns the sent response, or null when the bot is assignable. */
@@ -212,6 +208,10 @@ async function refuseBot(cdb, res, botId) {
   }
 }
 
+// Maps a service-layer {message, code, http} error to the response. 409s use
+// the router's existing {reason} shape (matched by client.js's `r.j.reason`
+// fallback everywhere else in this file); everything else is jsonError's
+// {error} shape.
 function serviceError(res, e) {
   // `code` rides alongside `reason` (added Track 1 Task 5) so client.js can
   // map a KNOWN error to an i18n'd string (board.errArchived/board.errLocked)

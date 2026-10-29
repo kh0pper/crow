@@ -106,7 +106,10 @@ test("board_create_item accepts an enabled ordinary bot", async () => {
 });
 
 test("board_update_item cannot set assigned_bot at all", async () => {
-  const [seed] = cards().filter((c) => c.assigned_bot === "helper");
+  const t0 = rawTasks();
+  const seedId = Number(t0.prepare("INSERT INTO tasks_items (title, assigned_bot) VALUES ('u','helper')").run().lastInsertRowid);
+  t0.close();
+  const seed = cards().find((c) => c.id === seedId);
   const before = JSON.stringify(seed);
   const parsed = tools.board_update_item.inputSchema.safeParse({ id: seed.id, assigned_bot: "crow.voice" });
   assert.ok(!parsed.success || !("assigned_bot" in parsed.data), "the schema drops assigned_bot");
@@ -141,11 +144,11 @@ test("the dashboard execute route refuses a card already carrying crow.voice", a
   assert.equal(r.body.code, "bot_unavailable");
 });
 
-test("the give service's create path refuses crow.voice before touching tasks.db", async () => {
+test("the give service's create path refuses crow.voice before touching tasks.db (defence in depth)", async () => {
   const { createTaskForBot } = await import("../servers/gateway/board/give-service.js");
   const before = cards().length;
   let opened = false;
-  await assert.rejects(createTaskForBot(cdb, () => { opened = true; return tdb; }, "crow.voice", { title: "t" }), (e) => e.http === 400);
+  await assert.rejects(createTaskForBot(cdb, () => { opened = true; return tdb; }, "crow.voice", { title: "t" }), (e) => e.http === 400 && e.code === "bot_unavailable");
   assert.equal(opened, false);
   assert.equal(cards().length, before);
 });

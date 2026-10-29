@@ -57,7 +57,7 @@ import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard, getCard } from "../board/card-service.js";
 import {
-  loadDispatchableCard, parseDef, dispatchCard, startAfterGive, giveAudit, createTaskForBot,
+  loadDispatchableCard, parseDef, dispatchCard, assertBotUnblocked, startAfterGive, giveAudit, createTaskForBot,
   fileStartedThread, DASHBOARD_ACTOR,
 } from "../board/give-service.js";
 import { lockState } from "./board-lock.js";
@@ -762,7 +762,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     if (cardId == null) return jsonError(res, 400, "bad_request");
 
     const db = createDbClient();
-    const ctx = { tdb: null };
+    const ctx = { db, tdb: null };
     try {
       const row = await loadBotRow(db, botId);
       const result = await dispatchCard(ctx, { row, getEng: resolveEngine, botId, cardId, note });
@@ -797,7 +797,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const note = body.note == null ? "" : String(body.note).slice(0, MESSAGE_CAP);
 
     const db = createDbClient();
-    const ctx = { tdb: null };
+    const ctx = { db, tdb: null };
     try {
       ctx.tdb = createDbClient(TASKS_DB);
       const cur = await loadDispatchableCard(ctx.tdb, cardId);
@@ -838,7 +838,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const note = body.note == null ? "" : String(body.note).slice(0, MESSAGE_CAP);
 
     const db = createDbClient();
-    const ctx = { tdb: null };
+    const ctx = { db, tdb: null };
     try {
       const { cardId, row } = await createTaskForBot(db, () => (ctx.tdb = createDbClient(TASKS_DB)), botId,
         { title, audit: { start: body.start === true } });
@@ -1122,6 +1122,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       await eng.checkCardFree(cardId, { excludeSessionId: sid });
       const result = await eng.attachCard(sid, cardId);
 
+      const cdb = createDbClient();
+      try { await assertBotUnblocked(cdb, result.botId); } finally { try { cdb.close(); } catch { /* already closed */ } }
       await updateCard(tdb, cardId, { assigned_bot: result.botId }, DASHBOARD_ACTOR);
 
       res.json({ ok: true, cardId });
