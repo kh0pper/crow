@@ -72,6 +72,39 @@ export async function updateSatelliteStatus(db, id, patch) {
     [...keys.map((k) => patch[k]), id]);
 }
 
+/** True when the satellite tables exist; false on a not-yet-migrated instance. */
+export async function satellitesMigrated(db) {
+  try {
+    await db.execute({ sql: "SELECT 1 FROM satellites LIMIT 0", args: [] });
+    return true;
+  } catch (err) {
+    if (isNotMigrated(err)) return false;
+    throw err;
+  }
+}
+
+const REPLACE_COLS = ["name", "tailnet_host", "satellite_pubkey", "mgmt_pubkey", "cert_json", "cert_serial",
+  "cert_expires_at", "primary_url", "agent_protocol", "last_seen_at"];
+
+/**
+ * Re-pair (spec §4.3): replace a REVOKED row in place with a fresh pairing (new cert and mgmt
+ * key), status active, revoked_at NULL, unreachable_since and last_status_json cleared.
+ * One UPDATE guarded by status = 'revoked', so it is atomic and never touches an active or
+ * unreachable row. Revocation records are kept. Returns true when a row was replaced.
+ */
+export async function replaceRevokedSatellite(db, row) {
+  const missing = REPLACE_COLS.filter((c) => c !== "last_seen_at" && c !== "agent_protocol" && (row[c] === undefined || row[c] === null));
+  if (missing.length) throw new Error(`replaceRevokedSatellite: missing column(s): ${missing.join(", ")}`);
+  const r = await write(
+    db,
+    `UPDATE satellites SET ${REPLACE_COLS.map((c) => `${c} = ?`).join(", ")},
+       status = 'active', revoked_at = NULL, unreachable_since = NULL, last_status_json = NULL
+     WHERE id = ? AND status = 'revoked'`,
+    [...REPLACE_COLS.map((c) => row[c] ?? null), row.id],
+  );
+  return Number(r?.rowsAffected || 0) === 1;
+}
+
 export async function markRevoked(db, id, at) {
   await write(db, "UPDATE satellites SET status = 'revoked', revoked_at = ? WHERE id = ?", [at, id]);
 }

@@ -119,11 +119,17 @@ test("owner: start, complete, list, unpair through the routes", async () => {
     assert.equal(st.status, 200);
     assert.equal(st.json.satellite_id, fake.satId);
     assert.deepEqual(st.json.whois, { unknown: true });
-    const bad = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st.json.pairing_id, code: P.generatePairCode().code, name: "x" });
+    assert.equal(st.json.warning, "whois_unavailable");
+    const nw = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st.json.pairing_id, code: CODE, name: "x" });
+    assert.equal(nw.status, 409);
+    assert.equal(nw.json.error, "whois_required");
+    const truthy = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st.json.pairing_id, code: CODE, name: "x", confirm_without_whois: "yes" });
+    assert.equal(truthy.json.error, "whois_required");
+    const bad = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st.json.pairing_id, code: P.generatePairCode().code, name: "x", confirm_without_whois: true });
     assert.equal(bad.status, 400);
     assert.equal(bad.json.error, "pairing_refused");
     const st2 = await call(s, "POST", "/api/satellites/pair/start", { host: FAKE_HOST });
-    const ok = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st2.json.pairing_id, code: CODE, name: "Office" });
+    const ok = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st2.json.pairing_id, code: CODE, name: "Office", confirm_without_whois: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.json));
     const list = await call(s, "GET", "/api/satellites");
     assert.equal(list.status, 200);
@@ -149,7 +155,7 @@ test("not migrated: list is empty, writers answer 503 not_migrated", async () =>
     assert.equal(list.status, 200);
     assert.deepEqual(list.json.satellites, []);
     const st = await call(s, "POST", "/api/satellites/pair/start", { host: FAKE_HOST });
-    const c = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st.json.pairing_id, code: CODE, name: "x" });
+    const c = await call(s, "POST", "/api/satellites/pair/complete", { pairing_id: st.json.pairing_id, code: CODE, name: "x", confirm_without_whois: true });
     assert.equal(c.status, 503);
     assert.equal(c.json.error, "not_migrated");
     const u = await call(s, "POST", `/api/satellites/${fake.satId}/unpair`, {});

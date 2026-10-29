@@ -196,11 +196,64 @@ test("not migrated: complete refuses before any network, no key made", async () 
   assert.equal(existsSync(keyPath(fake.satId)), false);
 });
 
-test("whois failure does not block pairing; it is shown as unknown", async () => {
+test("whois failure does not block pairing; it is unknown and needs an explicit confirm", async () => {
+  const db = await freshDb();
   const fake = createFakeSatellite({ code: CODE });
   const svc = service(fake, { whoisImpl: async () => { throw new Error("no tailscale"); } });
   const start = await svc.startPairing({ host: FAKE_HOST });
   assert.deepEqual(start.whois, { unknown: true });
+  assert.equal(start.warning, "whois_unavailable");
+  await assert.rejects(svc.completePairing({ db, pairing_id: start.pairing_id, code: CODE, name: "x" }), { code: "whois_required", status: 409 });
+  assert.equal(fake.state.requests.length, 1);
+  assert.equal(svc.pendingCount(), 1);
+  const ok = await svc.completePairing({ db, pairing_id: start.pairing_id, code: CODE, name: "x", confirm_without_whois: true });
+  assert.equal(ok.satellite_id, fake.satId);
+  const known = await service(createFakeSatellite({ code: CODE })).startPairing({ host: FAKE_HOST });
+  assert.equal("warning" in known, false);
+});
+
+test("two parallel completes for one pending id: exactly one row, its key matches", async () => {
+  const db = await freshDb();
+  const fake = createFakeSatellite({ code: CODE });
+  const svc = service(fake);
+  const start = await svc.startPairing({ host: FAKE_HOST });
+  const rs = await Promise.allSettled([
+    svc.completePairing({ db, pairing_id: start.pairing_id, code: CODE, name: "a" }),
+    svc.completePairing({ db, pairing_id: start.pairing_id, code: CODE, name: "b" }),
+  ]);
+  assert.equal(rs.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(rs.find((r) => r.status === "rejected").reason.code, "unknown_pairing");
+  assert.equal((await S.listSatellites(db)).length, 1);
+  const row = await S.getSatellite(db, fake.satId);
+  assert.equal(K.loadMgmtKey(fake.satId).ed25519_pub, row.mgmt_pubkey);
+  assert.equal(fake.state.requests.filter((r) => r.url.endsWith("/pair/complete")).length, 1);
+});
+
+test("parallel completes for two pending ids of one satellite: one proceeds, key not clobbered", async () => {
+  const db = await freshDb();
+  const fake = createFakeSatellite({ code: CODE });
+  const svc = service(fake);
+  const a = await svc.startPairing({ host: FAKE_HOST });
+  const b = await svc.startPairing({ host: FAKE_HOST });
+  const rs = await Promise.allSettled([
+    svc.completePairing({ db, pairing_id: a.pairing_id, code: CODE, name: "a" }),
+    svc.completePairing({ db, pairing_id: b.pairing_id, code: CODE, name: "b" }),
+  ]);
+  assert.equal(rs.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(rs.find((r) => r.status === "rejected").reason.code, "pairing_in_progress");
+  const row = await S.getSatellite(db, fake.satId);
+  assert.equal(K.loadMgmtKey(fake.satId).ed25519_pub, row.mgmt_pubkey);
+});
+
+test("a key left on disk by a crashed attempt is replaced, not a blocker", async () => {
+  const db = await freshDb();
+  const fake = createFakeSatellite({ code: CODE });
+  const svc = service(fake);
+  const orphan = K.createMgmtKey(fake.satId);
+  await svc.completePairing({ db, ...(await svc.startPairing({ host: FAKE_HOST })), code: CODE, name: "x" });
+  const row = await S.getSatellite(db, fake.satId);
+  assert.notEqual(row.mgmt_pubkey, orphan.ed25519_pub);
+  assert.equal(K.loadMgmtKey(fake.satId).ed25519_pub, row.mgmt_pubkey);
 });
 
 test("parseWhois: tagged node → node + tags; untagged → node + login", async () => {
@@ -215,10 +268,16 @@ test("parseWhois: tagged node → node + tags; untagged → node + login", async
 test("bad host, unreachable, pending cap", async () => {
   const fake = createFakeSatellite({ code: CODE });
   const svc = service(fake);
-  for (const host of ["", "https://x", "a/b", "x:443", "-bad.example", "a b"]) {
+  for (const host of ["", "https://x", "a/b", "x:443", "-bad.example", "a b", "localhost", "127.0.0.1", "::1",
+    "169.254.169.254", "10.0.0.5", "8.8.8.8", "100.128.0.1", "100.63.255.255", "example.com", "ts.net",
+    "x.ts.net.example.com", "satellite.example.ts.net:443", "a..ts.net"]) {
     await assert.rejects(svc.startPairing({ host }), { code: "bad_host" });
   }
   assert.equal(fake.state.requests.length, 0);
+  const { normalizeHost } = await import("../servers/gateway/satellites/pairing.js");
+  assert.equal(normalizeHost("Satellite.Example.TS.NET."), "satellite.example.ts.net");
+  assert.equal(normalizeHost("100.64.20.5"), "100.64.20.5");
+  assert.equal(normalizeHost("100.127.255.254"), "100.127.255.254");
   const down = service(createFakeSatellite({ code: CODE, tamper: { unreachable: true } }));
   await assert.rejects(down.startPairing({ host: FAKE_HOST }), { code: "unreachable" });
   for (let i = 0; i < 8; i++) await svc.startPairing({ host: FAKE_HOST });
@@ -318,5 +377,47 @@ test("unpair of an unreachable satellite still does crow's side", async () => {
   const r = await svc.unpairSatellite({ db, id: row.id, reason: "lost" });
   assert.equal(r.reached, false);
   assert.equal((await S.getSatellite(db, row.id)).status, "revoked");
+  assert.equal(existsSync(keyPath(row.id)), false);
+});
+
+test("unpair then re-pair replaces the revoked row in place; revocation records are kept", async () => {
+  const { db, fake, svc, row } = await pairedFixture();
+  await svc.unpairSatellite({ db, id: row.id, reason: "owner" });
+  const again = await svc.completePairing({ db, ...(await svc.startPairing({ host: FAKE_HOST })), code: CODE, name: "Back" });
+  assert.equal(again.repaired, true);
+  const r2 = await S.getSatellite(db, row.id);
+  assert.equal(r2.status, "active");
+  assert.equal(r2.revoked_at, null);
+  assert.equal(r2.name, "Back");
+  assert.notEqual(r2.mgmt_pubkey, row.mgmt_pubkey);
+  assert.notEqual(r2.cert_serial, row.cert_serial);
+  assert.equal(K.loadMgmtKey(row.id).ed25519_pub, r2.mgmt_pubkey);
+  assert.equal((await S.listSatellites(db)).length, 1);
+  const revs = (await db.execute("SELECT serial FROM satellite_revocations")).rows.map((x) => x.serial);
+  assert.deepEqual(revs, [row.cert_serial]);
+  // The new pairing manages the satellite.
+  const st = await satelliteFetch(r2, { method: "GET", path: "/satellite/v1/status", caller: "owner-local", fetchImpl: fake.fetchImpl });
+  assert.equal(st.status, 200);
+});
+
+test("unpair: a failing revocation write still shreds the key and deletes pins", async () => {
+  const { db, svc, row } = await pairedFixture();
+  await S.putToolPin(db, { satellite_id: row.id, bundle: "b", tools_sha256: "h", tools_json: "[]", approved_at: "t" });
+  const broken = new Proxy(db, { get: (t, k) => (k === "execute"
+    ? async (arg) => {
+      if (String(arg?.sql ?? arg).includes("satellite_revocations")) throw new Error("disk full");
+      return t.execute(arg);
+    }
+    : Reflect.get(t, k)) });
+  await assert.rejects(svc.unpairSatellite({ db: broken, id: row.id }), /disk full/);
+  assert.equal(existsSync(keyPath(row.id)), false);
+  assert.equal(await S.getToolPin(db, row.id, "b"), null);
+});
+
+test("unpair of an already revoked satellite still shreds a key left on disk", async () => {
+  const { db, svc, row } = await pairedFixture();
+  await svc.unpairSatellite({ db, id: row.id });
+  K.createMgmtKey(row.id);
+  await assert.rejects(svc.unpairSatellite({ db, id: row.id }), { code: "already_revoked" });
   assert.equal(existsSync(keyPath(row.id)), false);
 });

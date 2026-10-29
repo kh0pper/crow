@@ -3,14 +3,19 @@
  *
  * Every pairing packet flows crow → satellite over the satellite's Serve :443:
  *   1. startPairing: POST /satellite/v1/pair/hello {nonce_c}; check the hello signature and that
- *      satellite_id derives from satellite_pubkey; look the address up with `tailscale whois`.
- *      A pending record is kept in memory only (10 min, at most 8). Nothing is signed.
+ *      satellite_id derives from satellite_pubkey; look the address up with `tailscale whois`
+ *      (when that fails the answer says warning "whois_unavailable" and complete then needs an
+ *      explicit confirm_without_whois). The host must be a *.ts.net name or a 100.64.0.0/10
+ *      address. A pending record is kept in memory only (10 min, at most 8). Nothing is signed.
  *   2. completePairing (the owner confirmed and typed the code): the code is normalised (and a
  *      malformed one refused) before any network; crow makes the mgmt key, signs the cert, sends
  *      the MAC (never the code), verifies the done signature, then inserts the `satellites` row.
- *      Any failure shreds the new key and inserts nothing.
+ *      Any failure shreds the new key and inserts nothing. The pending record is claimed
+ *      synchronously, so two concurrent completes can't both proceed. A revoked row for the
+ *      same satellite is replaced in place on success (re-pair, spec §4.3).
  *   3. unpairSatellite: signed POST /satellite/v1/unpair (best-effort), then crow's side alone:
- *      row revoked, signed revocation stored, mgmt key shredded, tool pins deleted.
+ *      row revoked, signed revocation stored; the mgmt key is shredded and tool pins deleted
+ *      whatever fails first.
  *
  * Network calls are injectable (`fetchImpl`, `whoisImpl`); errors are PairingError {code, status}.
  */
@@ -26,7 +31,8 @@ import { loadIdentityIfPresent } from "../../sharing/identity.js";
 import { getOrCreateLocalInstanceId, selfPairingAddress } from "../instance-registry.js";
 import { getBootSha } from "../convergence.js";
 import {
-  getSatellite, insertSatellite, markRevoked, recordRevocation, deleteToolPins, isNotMigrated,
+  getSatellite, insertSatellite, markRevoked, recordRevocation, deleteToolPins,
+  satellitesMigrated, replaceRevokedSatellite,
 } from "./store.js";
 import { createMgmtKey, shredMgmtKey } from "./mgmt-keys.js";
 import { issueCert, revokeSatelliteRecord } from "./certs.js";
@@ -49,13 +55,25 @@ const fail = (code, status, detail) => new PairingError(code, status, detail);
 
 const LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
 const HOST_RE = new RegExp(`^${LABEL}(?:\\.${LABEL})*$`);
-/** A tailnet DNS name or an IPv4 literal; no scheme, port, path or user info. */
+/** True for an IPv4 literal inside the tailnet range 100.64.0.0/10. */
+export function isTailnetIPv4(h) {
+  if (isIP(h) !== 4) return false;
+  const [a, b] = h.split(".").map(Number);
+  return a === 100 && b >= 64 && b <= 127;
+}
+
+/**
+ * A MagicDNS name (valid labels, ending in ".ts.net", at least one label before it) or a
+ * 100.64.0.0/10 IPv4 literal; case-insensitive. Anything else (localhost, loopback,
+ * link-local, a public name or address, a scheme, port, path or user info) is refused
+ * before any network.
+ */
 export function normalizeHost(input) {
   if (typeof input !== "string") return null;
   const h = input.trim().toLowerCase().replace(/\.$/, "");
   if (!h || h.length > 253) return null;
-  if (isIP(h) === 4) return h;
-  return HOST_RE.test(h) ? h : null;
+  if (isIP(h)) return isTailnetIPv4(h) ? h : null;
+  return HOST_RE.test(h) && h.endsWith(".ts.net") && h.split(".").length >= 3 ? h : null;
 }
 
 const NAME_MAX = 64;
@@ -103,6 +121,7 @@ export function createPairingService({
   timeoutMs = 15000,
 } = {}) {
   const pending = new Map();
+  const inflight = new Set(); // satellite ids with a complete in flight
   let starts = [];
 
   const sweep = () => {
@@ -163,79 +182,110 @@ export function createPairingService({
     pending.set(pairing_id, {
       host: h, nonce_c, nonce_s, satellite_id, satellite_pubkey, agent_protocol, whois, expires: now() + PENDING_TTL_MS,
     });
-    return { pairing_id, satellite_id, fingerprint: formatFingerprint(satellite_id), whois };
+    const out = { pairing_id, satellite_id, fingerprint: formatFingerprint(satellite_id), whois };
+    if (whois.unknown) out.warning = "whois_unavailable"; // complete then needs confirm_without_whois
+    return out;
   }
 
   async function assertMigrated(db) {
+    if (!(await satellitesMigrated(db))) throw fail("not_migrated", 503);
+  }
+
+  /** Make the mgmt key without ever replacing a live one; a key left by a crashed attempt is shredded. */
+  function freshMgmtKey(satId) {
     try {
-      await db.execute({ sql: "SELECT 1 FROM satellites LIMIT 0", args: [] });
+      return createMgmtKey(satId, { replace: false, env });
     } catch (err) {
-      if (isNotMigrated(err)) throw fail("not_migrated", 503);
-      throw err;
+      if (!/already exists/.test(String(err?.message))) throw err;
+      // We hold the in-flight claim for this satellite and its row is absent or revoked
+      // (checked by the caller), so no live pairing uses this file: it is an orphan.
+      shredMgmtKey(satId, { env });
+      return createMgmtKey(satId, { replace: false, env });
     }
   }
 
-  async function completePairing({ db, pairing_id, code, name } = {}) {
+  async function completePairing({ db, pairing_id, code, name, confirm_without_whois = false } = {}) {
     sweep();
     const p = typeof pairing_id === "string" ? pending.get(pairing_id) : undefined;
     if (!p) throw fail("unknown_pairing", 404);
-    const norm = normalizePairCode(code);
-    if (!norm) throw fail("bad_code", 400);
-    const label = normalizeName(name, p.host);
-    if (!label) throw fail("bad_name", 400);
-
-    await assertMigrated(db);
-    const identity = identityFn();
-    if (!identity) throw fail("no_identity", 409);
-    const instanceId = instanceIdFn();
-    const primaryUrl = await primaryUrlFn(db);
-    if (typeof primaryUrl !== "string" || !/^https:\/\//.test(primaryUrl)) throw fail("no_primary_url", 409);
-    const existing = await getSatellite(db, p.satellite_id);
-    if (existing) {
-      // A revoked row keeps its id (the same satellite key); re-pairing it needs a store
-      // change (see the SAT-1 task report), so it is refused for now.
-      throw fail(existing.status === "revoked" ? "previously_revoked" : "already_paired", 409);
+    // Claim synchronously, before any await: a second complete for this id finds nothing.
+    pending.delete(pairing_id);
+    if (inflight.has(p.satellite_id)) {
+      pending.set(pairing_id, p);
+      throw fail("pairing_in_progress", 409);
     }
-
-    pending.delete(pairing_id); // single use from here on: any failure means a fresh hello
-    const key = createMgmtKey(p.satellite_id, { replace: true, env });
+    inflight.add(p.satellite_id);
+    // Pre-network refusals give the pending record back (it is still valid to retry).
+    const refuse = (code, status) => {
+      if (p.expires > now()) pending.set(pairing_id, p);
+      return fail(code, status);
+    };
     try {
-      const t = now();
-      const cert = issueCert({
-        identity, instanceId, primaryUrl, satellite_id: p.satellite_id,
-        satellite_pubkey: p.satellite_pubkey, mgmt_pubkey: key.ed25519_pub, now: t,
-      });
-      const certHash = certSha256(cert);
-      const mac = pairMac(norm, { nonceC: p.nonce_c, nonceS: p.nonce_s, certSha256: certHash, satelliteId: p.satellite_id });
-      let r;
-      try {
-        r = await postPair(p.host, "/satellite/v1/pair/complete", {
-          cert, crow_id: cert.payload.crow_id, root_pubkey: cert.payload.root_pubkey,
-          primary_instance_id: instanceId, primary_url: primaryUrl, target_sha: targetShaFn() || null,
-          protocol: AGENT_PROTOCOL, nonce_s: p.nonce_s, mac,
-        });
-      } catch (err) {
-        if (err instanceof PairingError) throw err;
-        throw fail("unreachable", 502);
-      }
-      if (r.status !== 200) throw fail("pairing_refused", 400, ERR_CODE.test(r.json?.error) ? r.json.error : "refused");
-      const doneSig = r.json?.sig;
-      const doneStr = Buffer.from(doneSigningString({ nonceC: p.nonce_c, certSha256: certHash }), "utf8");
-      if (typeof doneSig !== "string" || !verifyBytes(p.satellite_pubkey, doneStr, doneSig)) throw fail("bad_done_sig", 502);
+      const norm = normalizePairCode(code);
+      if (!norm) throw refuse("bad_code", 400);
+      const label = normalizeName(name, p.host);
+      if (!label) throw refuse("bad_name", 400);
+      if (p.whois?.unknown && confirm_without_whois !== true) throw refuse("whois_required", 409);
+      if (!(await satellitesMigrated(db))) throw refuse("not_migrated", 503);
+      const identity = identityFn();
+      if (!identity) throw refuse("no_identity", 409);
+      const instanceId = instanceIdFn();
+      const primaryUrl = await primaryUrlFn(db);
+      if (typeof primaryUrl !== "string" || !/^https:\/\//.test(primaryUrl)) throw refuse("no_primary_url", 409);
+      const existing = await getSatellite(db, p.satellite_id);
+      if (existing && existing.status !== "revoked") throw refuse("already_paired", 409);
+      const repair = !!existing; // a revoked row is replaced in place on success (spec §4.3)
 
-      const at = new Date(t).toISOString();
-      await insertSatellite(db, {
-        id: p.satellite_id, name: label, tailnet_host: p.host, satellite_pubkey: p.satellite_pubkey,
-        mgmt_pubkey: key.ed25519_pub, cert_json: JSON.stringify(cert), cert_serial: cert.payload.serial,
-        cert_expires_at: cert.payload.expires_at, primary_url: primaryUrl, agent_protocol: p.agent_protocol,
-        status: "active", last_seen_at: at, created_at: at,
-      });
-      return { satellite_id: p.satellite_id, name: label, fingerprint: formatFingerprint(p.satellite_id), cert_expires_at: cert.payload.expires_at };
-    } catch (err) {
-      try { shredMgmtKey(p.satellite_id, { env }); } catch { /* best effort */ }
-      if (err?.code === "not_migrated") throw fail("not_migrated", 503);
-      throw err;
+      const key = freshMgmtKey(p.satellite_id);
+      try {
+        const t = now();
+        const cert = issueCert({
+          identity, instanceId, primaryUrl, satellite_id: p.satellite_id,
+          satellite_pubkey: p.satellite_pubkey, mgmt_pubkey: key.ed25519_pub, now: t,
+        });
+        const certHash = certSha256(cert);
+        const mac = pairMac(norm, { nonceC: p.nonce_c, nonceS: p.nonce_s, certSha256: certHash, satelliteId: p.satellite_id });
+        let r;
+        try {
+          r = await postPair(p.host, "/satellite/v1/pair/complete", {
+            cert, crow_id: cert.payload.crow_id, root_pubkey: cert.payload.root_pubkey,
+            primary_instance_id: instanceId, primary_url: primaryUrl, target_sha: targetShaFn() || null,
+            protocol: AGENT_PROTOCOL, nonce_s: p.nonce_s, mac,
+          });
+        } catch (err) {
+          if (err instanceof PairingError) throw err;
+          throw fail("unreachable", 502);
+        }
+        if (r.status !== 200) throw fail("pairing_refused", 400, ERR_CODE.test(r.json?.error) ? r.json.error : "refused");
+        const doneSig = r.json?.sig;
+        const doneStr = Buffer.from(doneSigningString({ nonceC: p.nonce_c, certSha256: certHash }), "utf8");
+        if (typeof doneSig !== "string" || !verifyBytes(p.satellite_pubkey, doneStr, doneSig)) throw fail("bad_done_sig", 502);
+
+        const at = new Date(t).toISOString();
+        const row = {
+          id: p.satellite_id, name: label, tailnet_host: p.host, satellite_pubkey: p.satellite_pubkey,
+          mgmt_pubkey: key.ed25519_pub, cert_json: JSON.stringify(cert), cert_serial: cert.payload.serial,
+          cert_expires_at: cert.payload.expires_at, primary_url: primaryUrl, agent_protocol: p.agent_protocol,
+          last_seen_at: at,
+        };
+        if (repair) {
+          if (!(await replaceRevokedSatellite(db, row))) throw fail("already_paired", 409);
+        } else {
+          await insertSatellite(db, { ...row, status: "active", created_at: at });
+        }
+        return { satellite_id: p.satellite_id, name: label, fingerprint: formatFingerprint(p.satellite_id), cert_expires_at: cert.payload.expires_at, repaired: repair };
+      } catch (err) {
+        try { shredMgmtKey(p.satellite_id, { env }); } catch { /* best effort */ }
+        if (err?.code === "not_migrated" && !(err instanceof PairingError)) throw fail("not_migrated", 503);
+        throw err;
+      }
+    } finally {
+      inflight.delete(p.satellite_id);
     }
+  }
+
+  function shredQuietly(id) {
+    try { shredMgmtKey(id, { env }); } catch (err) { console.warn(`[satellites] shred ${id}: ${err.message}`); }
   }
 
   async function unpairSatellite({ db, id, reason } = {}) {
@@ -244,22 +294,28 @@ export function createPairingService({
     await assertMigrated(db);
     const row = await getSatellite(db, id);
     if (!row) throw fail("not_found", 404);
-    if (row.status === "revoked") throw fail("already_revoked", 409);
+    if (row.status === "revoked") {
+      shredQuietly(id); // a key an earlier, interrupted unpair left on disk
+      throw fail("already_revoked", 409);
+    }
     const identity = identityFn();
     if (!identity) throw fail("no_identity", 409);
 
     let reached = false;
-    try {
-      const r = await satelliteFetch(row, { method: "POST", path: "/satellite/v1/unpair", body: { reason: why }, caller: "owner-local", fetchImpl, env, timeoutMs });
-      reached = r.status === 200;
-    } catch { reached = false; } // unreachable is fine: crow does its side alone (§3.3)
-
     const t = now();
     const at = new Date(t).toISOString();
-    await markRevoked(db, id, at);
-    await recordRevocation(db, revokeSatelliteRecord({ identity, serial: row.cert_serial, satellite_id: id, reason: why, now: t }));
-    try { shredMgmtKey(id, { env }); } catch (err) { console.warn(`[satellites] shred ${id}: ${err.message}`); }
-    await deleteToolPins(db, id);
+    try {
+      try {
+        const r = await satelliteFetch(row, { method: "POST", path: "/satellite/v1/unpair", body: { reason: why }, caller: "owner-local", fetchImpl, env, timeoutMs });
+        reached = r.status === 200;
+      } catch { reached = false; } // unreachable is fine: crow does its side alone (§3.3)
+      await markRevoked(db, id, at);
+      await recordRevocation(db, revokeSatelliteRecord({ identity, serial: row.cert_serial, satellite_id: id, reason: why, now: t }));
+    } finally {
+      // Whatever failed above, crow stops being able to manage this satellite.
+      shredQuietly(id);
+      try { await deleteToolPins(db, id); } catch (err) { console.warn(`[satellites] tool pins ${id}: ${err.message}`); }
+    }
     return { satellite_id: id, reached, revoked_at: at };
   }
 
