@@ -1,0 +1,118 @@
+/**
+ * Hand-off intent (PR 3, Task 3.5): the en/es phrase matchers that say whether a spoken request is bigger
+ * work for a bot, a question about one, or a stop. Pure functions; no DB.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { wantsHandoff, wantsHandoffStatus, wantsHandoffStop, HANDOFF_INTENT_WORDS, HANDOFF_TARGET_PHRASES } from "../servers/gateway/voice/handoff-intent.js";
+import { HANDOFF_TARGET_WORDS } from "../servers/gateway/voice/handoff-constants.js";
+import { normalizeIntentLists, listMatches, phraseWords, INTENT_MAX_CHARS } from "../servers/gateway/voice/tool-families.js";
+
+const BOTS = ["Writer", "bot-hank"];
+
+test("wantsHandoff: research, write-ups and a named bot are hand-offs", () => {
+  for (const t of [
+    "research the history of community radio in Houston and write it up",
+    "have writer draft a reply",
+    "investiga la radio comunitaria",
+    "ask hank to look into solar panels",
+    "que writer escriba un informe",
+    "can you write a report on bus routes",
+    "haz un informe de los gastos",
+    "bot hank",
+  ]) assert.equal(wantsHandoff(t, BOTS), true, t);
+});
+
+test("wantsHandoff: everyday requests are not", () => {
+  for (const t of ["what is the weather", "add lunch to my calendar", "have a nice day", "play some jazz", "que hora es", "pon musica", ""]) {
+    assert.equal(wantsHandoff(t, BOTS), false, t);
+  }
+  assert.equal(wantsHandoff("have writer draft a reply", []), true, "\"draft a\" is a hand-off phrase on its own");
+  assert.equal(wantsHandoff("tell writer hello", []), false, "with no bots, a name is only a word");
+  assert.equal(wantsHandoff("tell writer hello", BOTS), true, "a whole bot name counts");
+  assert.equal(wantsHandoff("tell writers hello", BOTS), false, "only a WHOLE name");
+  assert.equal(wantsHandoff(null, BOTS), false);
+  assert.equal(wantsHandoff("tell writer hello", null), false, "botNames that is not an array is no names");
+  assert.equal(wantsHandoff("tell writer hello", [null, 7, { name: "writer" }, ""]), false, "only strings are names");
+});
+
+test("wantsHandoffStatus: asking about a hand-off", () => {
+  for (const t of ["how's it going with writer", "is it done yet", "what's the status of the research", "any news on the report", "how far along is it", "como va la investigacion", "como lo lleva", "ya termino", "ya esta listo el informe"]) {
+    assert.equal(wantsHandoffStatus(t, BOTS), true, t);
+  }
+  assert.equal(wantsHandoffStatus("how is writer doing", BOTS), true, "how is <bot> doing");
+  assert.equal(wantsHandoffStatus("is bot hank done", BOTS), true, "is <bot> done");
+  assert.equal(wantsHandoffStatus("how is writer doing", []), false, "the bot check needs the bot");
+  assert.equal(wantsHandoffStatus("how is my mom doing", BOTS), false, "not a bot");
+});
+
+test("wantsHandoffStatus: ordinary questions are not status", () => {
+  for (const t of ["how's the weather", "how is it going to be tomorrow", "is it raining", "como va a estar el clima", "ya esta bien", "ya esta aqui la pizza", "ya esta lloviendo", "play some jazz", ""]) {
+    assert.equal(wantsHandoffStatus(t, BOTS), false, t);
+  }
+  assert.equal(wantsHandoffStatus("how's it going"), true, "botNames is optional");
+});
+
+test("wantsHandoffStop: named, pronoun, or null", () => {
+  assert.equal(wantsHandoffStop("stop writer", BOTS), "named");
+  assert.equal(wantsHandoffStop("stop it", BOTS), "pronoun");
+  assert.equal(wantsHandoffStop("stop the music", BOTS), null);
+  for (const t of ["cancel the research", "please halt that task", "stop the hand off", "cancel bot hank now", "cancela la tarea", "deten a writer", "detén la investigación", "para a writer", "para la tarea por favor", "oye crow para writer"]) {
+    assert.equal(wantsHandoffStop(t, BOTS), "named", t);
+  }
+  for (const t of ["cancel that", "stop that please", "páralo", "cancélalo ya"]) assert.equal(wantsHandoffStop(t, BOTS), "pronoun", t);
+  for (const t of ["stop that song", "cancel it tomorrow and book friday", "stop", "what is the weather", "", null]) assert.equal(wantsHandoffStop(t, BOTS), null, String(t));
+  assert.equal(wantsHandoffStop("stop writer", []), null, "a name is a bot only when it is one");
+});
+
+test("wantsHandoffStop: \"para\" means stop only as the first word, with the target ending the sentence", () => {
+  for (const t of [
+    "escribe una nota para writer",
+    "necesito un regalo para mi mama",
+    "para la tarea de mañana necesito un lapiz",
+    "compra pan para la investigacion de quimica",
+    "esto es para writer y para hank",
+    "para mi la tarea es facil",
+  ]) assert.equal(wantsHandoffStop(t, BOTS), null, t);
+  assert.equal(wantsHandoffStop("para la investigacion", BOTS), "named");
+});
+
+test("HANDOFF_TARGET_PHRASES: frozen, normalized, a superset of the correction words", () => {
+  assert.ok(Object.isFrozen(HANDOFF_TARGET_PHRASES) && HANDOFF_TARGET_PHRASES.every(Object.isFrozen));
+  assert.deepEqual(HANDOFF_TARGET_PHRASES, normalizeIntentLists(HANDOFF_TARGET_WORDS));
+  assert.deepEqual([...HANDOFF_TARGET_WORDS.en], ["give it to", "send it to", "pass it to", "hand it to", "instead", "rather"]);
+  assert.deepEqual([...HANDOFF_TARGET_WORDS.es], ["en vez", "en lugar", "mejor a", "daselo a", "pasaselo a"]);
+  assert.equal(HANDOFF_TARGET_PHRASES.length, HANDOFF_TARGET_WORDS.en.length + HANDOFF_TARGET_WORDS.es.length, "no phrase dropped");
+});
+
+test("en/es parity: every list has both languages, keeps every phrase, and each phrase works in a sentence", () => {
+  const lists = { target: HANDOFF_TARGET_WORDS, ...HANDOFF_INTENT_WORDS };
+  for (const [name, l] of Object.entries(lists)) {
+    assert.ok(Object.isFrozen(l) && Object.isFrozen(l.en) && Object.isFrozen(l.es), `${name} is frozen`);
+    assert.ok(l.en.length > 0 && l.es.length > 0, `${name} has en and es`);
+    assert.equal(normalizeIntentLists(l).length, l.en.length + l.es.length, `${name}: no phrase is dropped by normalization`);
+  }
+  // Each phrase, said in a sentence, is read by its matcher (both languages).
+  const say = {
+    work: (p) => assert.equal(wantsHandoff(`please ${p} the bus routes`, []), true, `work: ${p}`),
+    status: (p) => assert.equal(wantsHandoffStatus(`${p} el proyecto`, []), true, `status: ${p}`),
+    stopVerbs: (p) => assert.equal(wantsHandoffStop(`${p} la tarea`, []), "named", `stop verb: ${p}`),
+    stopTargets: (p) => assert.equal(wantsHandoffStop(`stop ${p}`, []), "named", `stop target: ${p}`),
+    stopPronouns: (p) => assert.equal(wantsHandoffStop(p, []), "pronoun", `stop pronoun: ${p}`),
+  };
+  assert.deepEqual(Object.keys(say).sort(), Object.keys(HANDOFF_INTENT_WORDS).sort(), "every list is exercised");
+  for (const [name, check] of Object.entries(say)) for (const lang of ["en", "es"]) for (const p of HANDOFF_INTENT_WORDS[name][lang]) check(p);
+  for (const lang of ["en", "es"]) for (const p of HANDOFF_TARGET_WORDS[lang]) assert.ok(listMatches(phraseWords(`yes, ${p} writer`), HANDOFF_TARGET_PHRASES), `target: ${p}`);
+});
+
+test("the input cap: only the first INTENT_MAX_CHARS (400) are read; a 10k input is fast", () => {
+  assert.equal(INTENT_MAX_CHARS, 400);
+  const pad = "blah ".repeat(200);
+  assert.equal(wantsHandoff(`research solar ${pad}`, BOTS), true);
+  assert.equal(wantsHandoff(`${pad} research solar`, BOTS), false, "past the cap is not read");
+  const big = "have ".repeat(2000) + "writer";
+  const names = Array.from({ length: 500 }, (_, i) => `bot ${i} ${"x".repeat(50)}`);
+  for (const fn of [() => wantsHandoff(big, names), () => wantsHandoffStatus(big, names), () => wantsHandoffStop("para ".repeat(2000), names)]) {
+    const t0 = performance.now(); fn(); assert.ok(performance.now() - t0 < 50);
+  }
+});

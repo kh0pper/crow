@@ -1,9 +1,10 @@
 /**
- * Every HANDOFF_* constant of the voice hand-off, in one place (no imports, so any voice module can
- * read it without an import cycle). Times are milliseconds.
+ * Every HANDOFF_* constant of the voice hand-off, in one place. Its one import is tool-families.js, which
+ * imports nothing, so any voice module can read it without an import cycle. Times are milliseconds.
  *
  * VOICE_MODE_WINDOW_MS is not here: it belongs to voice-memory.js and is imported from there.
  */
+import { normalizeIntentLists } from "./tool-families.js";
 
 /** How long a spoken proposal waits for its yes (the pending store, and a `proposed` row's expires_at). */
 export const HANDOFF_PROPOSAL_TTL_MS = 120_000;
@@ -41,3 +42,14 @@ export const HANDOFF_STATUSES = Object.freeze([
 export const HANDOFF_OPEN = Object.freeze(["starting", "started", "queued", "quiet"]);
 /** The languages a row's async lines are spoken in. */
 export const HANDOFF_LANGS = Object.freeze(["en", "es"]);
+
+/**
+ * The words that name a NEW target for a hand-off ("give it to writer", "mejor a writer", "instead"): a
+ * yes carrying one is a correction, not a plain yes (pending.js), and a request carrying one asks for a bot.
+ * HANDOFF_TARGET_WORDS is the raw en/es list; HANDOFF_TARGET_PHRASES is it as listMatches reads it.
+ */
+export const HANDOFF_TARGET_WORDS = Object.freeze({
+  en: Object.freeze(["give it to", "send it to", "pass it to", "hand it to", "instead", "rather"]),
+  es: Object.freeze(["en vez", "en lugar", "mejor a", "daselo a", "pasaselo a"]),
+});
+export const HANDOFF_TARGET_PHRASES = Object.freeze(normalizeIntentLists(HANDOFF_TARGET_WORDS).map((p) => Object.freeze(p)));
