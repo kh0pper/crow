@@ -27,6 +27,9 @@
 
 import { remoteServersForBot, parseRemoteInvocationFlag } from "../../../scripts/pi-bots/remote-blocks.mjs";
 import { TRUSTED_PEER_SQL } from "../../shared/peer-trust.js";
+import { signingFetch } from "../../shared/remote-actor.js";
+import { defaultPairKey } from "../../shared/sync-pair-binding.js";
+import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
 
 /**
  * Map<canonicalId, Set<toolName>> of a bot's per-capability tool selections from
@@ -169,7 +172,26 @@ export function rewriteAudioResult(result, gatewayUrl, instanceId) {
  * so the remote's instanceAuth middleware recognises us and peer-exposure gates
  * the call against the remote's remote_exposed_tools allowlist.
  */
-export async function createRemoteRouterClient({ instanceId, gatewayUrl }) {
+/**
+ * With `actor` ({ botId, name }, from the gateway's own row for the bound bot)
+ * the transport's fetch signs tools/call requests with the gateway-held pair
+ * subkey so the peer can name the bot (item 46 PR-B). The key is looked up per
+ * call inside this process and never handed to the bot. Without `actor` (the
+ * discovery clients) behaviour is unchanged. `getLocalId` is a seam; its
+ * production default is the instance registry's id.
+ */
+const UNSIGNED_LOG_WINDOW_MS = 3_600_000;
+const _unsignedLogged = new Map();
+export function _resetVoiceUnsignedLogForTests() { _unsignedLogged.clear(); }
+function noteUnsigned(botId, instanceId) {
+  const k = `${botId}\n${instanceId}`;
+  const last = _unsignedLogged.get(k);
+  if (last !== undefined && Date.now() - last < UNSIGNED_LOG_WINDOW_MS) return;
+  _unsignedLogged.set(k, Date.now());
+  console.error(`[voice-remote] sending unsigned: no pair key for ${instanceId}`);
+}
+
+export async function createRemoteRouterClient({ instanceId, gatewayUrl, actor, getLocalId }) {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
   const { getPeerCreds } = await import("../../shared/peer-credentials.js");
@@ -181,7 +203,17 @@ export async function createRemoteRouterClient({ instanceId, gatewayUrl }) {
     ? { headers: { Authorization: `Bearer ${creds.auth_token}` } }
     : undefined;
 
-  const transport = new StreamableHTTPClientTransport(url, requestInit ? { requestInit } : undefined);
+  const opts = requestInit ? { requestInit } : {};
+  if (actor && typeof actor.botId === "string" && BOT_ID_RE.test(actor.botId)) {
+    const localId = getLocalId
+      ? getLocalId()
+      : (await import("../instance-registry.js")).getOrCreateLocalInstanceId();
+    opts.fetch = signingFetch({
+      keyLookup: defaultPairKey, src: localId, aud: instanceId, mount: "/router",
+      bot: actor.botId, name: actor.name, onUnsigned: () => noteUnsigned(actor.botId, instanceId),
+    });
+  }
+  const transport = new StreamableHTTPClientTransport(url, Object.keys(opts).length ? opts : undefined);
   const client = new Client({ name: `crow-voice-remote-${instanceId}`, version: "0.1.0" });
   await Promise.race([
     client.connect(transport),
@@ -302,7 +334,14 @@ export async function buildRemoteVoiceContext(db, botDef, deps = {}) {
   const clients = new Map();
   function clientFor(instanceId) {
     if (!clients.has(instanceId)) {
-      clients.set(instanceId, clientFactory({ instanceId, gatewayUrl: urls.get(instanceId) }));
+      // The bot identity is the gateway's own row for the bound bot, never tool args.
+      const actor = botDef?.bot_id
+        ? { botId: botDef.bot_id, name: botDef.display_name ?? botDef.bot_id }
+        : undefined;
+      clients.set(instanceId, clientFactory({
+        instanceId, gatewayUrl: urls.get(instanceId),
+        ...(actor ? { actor, ...(deps.getLocalId ? { getLocalId: deps.getLocalId } : {}) } : {}),
+      }));
     }
     return clients.get(instanceId); // a Promise<client>; awaited by callers
   }

@@ -132,6 +132,26 @@ function withHeaders(existing, add) {
   return { ...out, ...add };
 }
 
+const ACTOR_HEADER_NAMES = [REMOTE_ACTOR_HEADER, REMOTE_ACTOR_SIG_HEADER];
+const isActorName = (k) => ACTOR_HEADER_NAMES.includes(String(k).toLowerCase());
+
+/** init without any caller-supplied actor headers; the same object when it has none. */
+function stripActorHeaders(init) {
+  const h = init?.headers;
+  if (!h) return init;
+  if (h instanceof Headers) {
+    if (!ACTOR_HEADER_NAMES.some((n) => h.has(n))) return init;
+    const out = new Headers(h);
+    for (const n of ACTOR_HEADER_NAMES) out.delete(n);
+    return { ...init, headers: out };
+  }
+  if (Array.isArray(h)) {
+    return h.some((p) => isActorName(p[0])) ? { ...init, headers: h.filter((p) => !isActorName(p[0])) } : init;
+  }
+  if (!Object.keys(h).some(isActorName)) return init;
+  return { ...init, headers: Object.fromEntries(Object.entries(h).filter(([k]) => !isActorName(k))) };
+}
+
 /**
  * A fetch that signs tools/call POSTs. The key is looked up on every call and
  * never held in the closure; without one the request goes out unsigned.
@@ -142,13 +162,13 @@ export function signingFetch({ keyLookup, src, aud, mount, bot, name, fetchImpl 
     if (init && String(init.method || "").toUpperCase() === "POST" && typeof init.body === "string") {
       try { body = JSON.parse(init.body); } catch { body = null; }
     }
-    if (!isToolCall(body)) return fetchImpl(url, init);
+    if (!isToolCall(body)) return fetchImpl(url, stripActorHeaders(init));
     let key = null;
     try { key = keyLookup(aud); } catch { key = null; }
     const signed = key ? signRemoteActor({ signingKeyHex: key, bot, name, src, aud, mount, body }) : null;
     if (!signed) {
       try { onUnsigned?.(); } catch { /* never affects the call */ }
-      return fetchImpl(url, init);
+      return fetchImpl(url, stripActorHeaders(init));
     }
     return fetchImpl(url, { ...init, headers: withHeaders(init.headers, signed) });
   };

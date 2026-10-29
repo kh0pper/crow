@@ -337,3 +337,35 @@ test("noteRemoteActorResult rate limits and never leaks", () => {
   const again = captureConsole(() => noteRemoteActorResult({ sourceId: ALPHA, mount: MOUNT, result: { ok: false, reason: "bad_sig" } }));
   assert.equal(again.length, 1);
 });
+
+test("unsigned path strips caller-supplied actor headers, keeps the rest", async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => { seen.push(init); return {}; };
+  const lower = { [REMOTE_ACTOR_HEADER]: "forged", [REMOTE_ACTOR_SIG_HEADER]: "forged", "x-keep": "1" };
+  const mixed = { "X-Crow-Remote-Actor": "forged", "X-Crow-Remote-Actor-Sig": "forged", "x-keep": "1" };
+  const noKey = signingFetch({ keyLookup: () => null, src: ALPHA, aud: BRAVO, mount: MOUNT, bot: "hank", name: "Hank", fetchImpl });
+  const withKey = signingFetch({ keyLookup: () => KEY, src: ALPHA, aud: BRAVO, mount: MOUNT, bot: "hank", name: "Hank", fetchImpl });
+  const body = JSON.stringify(BODY);
+  const notCall = JSON.stringify({ ...BODY, method: "tools/list" });
+  const cases = [
+    [noKey, { method: "POST", body, headers: lower }],
+    [noKey, { method: "POST", body, headers: mixed }],
+    [noKey, { method: "POST", body, headers: new Headers(mixed) }],
+    [noKey, { method: "POST", body, headers: Object.entries(lower) }],
+    [withKey, { method: "POST", body: notCall, headers: lower }],
+    [withKey, { method: "GET", headers: mixed }],
+  ];
+  for (const [f, init] of cases) {
+    seen.length = 0;
+    await f("u", init);
+    const h = new Headers(seen[0].headers);
+    assert.equal(h.get(REMOTE_ACTOR_HEADER), null);
+    assert.equal(h.get(REMOTE_ACTOR_SIG_HEADER), null);
+    assert.equal(h.get("x-keep"), "1");
+  }
+  // an init with no actor headers is passed through untouched
+  const plain = { method: "POST", body: notCall, headers: { a: "b" } };
+  seen.length = 0;
+  await withKey("u", plain);
+  assert.equal(seen[0], plain);
+});
