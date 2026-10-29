@@ -21,7 +21,7 @@ import { createBotHostCallerResolver } from "../servers/gateway/bot-host-caller.
 import {
   initGatewayActorKey, _resetActorKeyForTest, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig,
   verifyBoardThreadActorSig, verifyPeerRelayActorSig, presignActors, _resetPresignedForTest,
-  signPeerRelayActor, signBoardActor, signActor, verifyScopeActorSig,
+  signPeerRelayActor, signBoardActor, signActor, verifyScopeActorSig, setActorKey,
 } from "../scripts/pi-bots/actor-sig.mjs";
 
 let dir, dbPath, base, srv;
@@ -357,4 +357,21 @@ test("a board-gateway session is signed only for a job this host claimed", async
   r = await ask({ ...CARD, jobId: "job-run-1", kinds: ["peer-relay", "board"] });
   assert.equal(r.status, 200, "its own claimed job: " + r.text);
   assert.equal(verifyPeerRelayActorSig({ ...CARD, sig: r.json.sigs["peer-relay"] }), true);
+});
+
+// Step 7 for a scope kind: a process that holds only the v1/v2 key (setActorKey,
+// as a child does) and no scope key refuses the WHOLE request with 503, even
+// for an owner job it claimed; never a partial answer with the v1 kinds.
+test("service: no scope key -> 503 for the whole request, no sigs", async () => {
+  _resetActorKeyForTest();
+  try {
+    assert.equal(setActorKey("ab".repeat(32)), true, "v1/v2 key installed");
+    const r = await ask({ ...OWNJOB, kinds: ["bot", "service"] });
+    assert.equal(r.status, 503, r.text);
+    assert.equal(r.json?.sigs, undefined, "no partial sigs");
+    assert.equal((await ask({ ...OWNJOB, kinds: ["bot"] })).status, 200, "control: the v1 kind alone still signs");
+  } finally {
+    _resetActorKeyForTest();
+    initGatewayActorKey();
+  }
 });
