@@ -20,6 +20,7 @@ import { renderSkipLink, skipLinkCss, focusCss, ensureTableHeaders, linkPhoneNum
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { pathToFileURL } from "url";
+import { APP_ROOT } from "../server/app-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,8 +28,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let FONT_IMPORT, designTokensCss, renderMarkdown, sanitizeFtsQuery;
 
 async function loadSharedModules() {
-  // Try repo-relative paths first, then installed bundle paths
-  const repoRoot = resolve(__dirname, "../../../");
+  // The app root, found the same way from the repo and from an installed copy
+  // under ~/.crow/bundles (a path relative to this file only works in the repo).
+  const repoRoot = APP_ROOT;
 
   try {
     const tokens = await import(pathToFileURL(resolve(repoRoot, "servers/gateway/dashboard/shared/design-tokens-legacy.js")).href);
