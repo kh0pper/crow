@@ -372,7 +372,9 @@ const rowsOf = (db, { buildRowsFn = buildRoleRows, env, ownAddrs, localMarks, lo
  * lists the pick, the resolver would use it, and its stored check passed
  * (else `none_offered`, `not_listed`, `not_tested`, `failed_check`). An
  * offered pick is pre-ticked (`apply`) only for a role whose row says
- * `not_set`; a seeded role, a role running a default or fallback today, and
+ * `not_set` (or `not_available` while unbound: its chain dead-ends, L1); a
+ * chosen or seeded role whose chain dead-ends (`why: "not_available"`), a
+ * seeded role, a role running a default or fallback today, and
  * any cloud pick for embed or rerank are `optIn` (I8; `why: "cloud"` for the
  * last when nothing runs it today). Roles the operator chose, or that an env
  * var or setting pin fills, are `set`; a role the page has no row for is
@@ -402,14 +404,21 @@ export async function planRecommended(db, providerId, opts = {}) {
     const key = pick ? `${providerId}/${pick.model_id}` : null;
     if (!key || !resolvesTo(ctx, roleId, key)) { skip("not_listed"); continue; }
     const check = checkIn(checks, providerId, pick.model_id, { kind: checkKindFor(roleId), now, recOpts, row });
-    if (!check) { skip("not_tested"); continue; }
+    if (!check || check.retryable) { skip("not_tested"); continue; }
     if (!check.ok) { skip("failed_check"); continue; }
 
     const r = rows.get(roleId);
     if (!r) { skip("unknown"); continue; }
-    const code = r.status?.code;
-    if (r.chosen || r.pin || SET_STATUSES.has(code)) { skip("set"); continue; }
+    let code = r.status?.code;
     const current = r.model || null;
+    if (r.pin || SET_STATUSES.has(code)) { skip("set"); continue; }
+    // A dead-end chain (not_available): a role the operator chose, or Crow
+    // seeded, is offered unticked; an unbound one is simply empty (L1).
+    if (code === "not_available") {
+      if (r.chosen || r.seeded) { out.optIn.push({ roleId, key, current, why: "not_available" }); continue; }
+      code = "not_set";
+    }
+    if (r.chosen) { skip("set"); continue; }
     if (r.seeded) { out.optIn.push({ roleId, key, current, why: "seeded" }); continue; }
     if (RUNS_TODAY.has(code)) { out.optIn.push({ roleId, key, current, why: "runs_today" }); continue; }
     if (code !== "not_set") { skip("set"); continue; }
@@ -501,7 +510,8 @@ const CORE_IDS = new Set(CORE_ROLES.map((r) => r.id));
  */
 function stillEmptyOf(rows) {
   return rows
-    .filter((r) => CORE_IDS.has(r.id) && r.kind === "chat" && r.id !== "rerank" && !r.hidden && r.status?.code === "not_set")
+    .filter((r) => CORE_IDS.has(r.id) && r.kind === "chat" && r.id !== "rerank" && !r.hidden
+      && (r.status?.code === "not_set" || (r.status?.code === "not_available" && !r.chosen && !r.seeded)))
     .map((r) => r.id);
 }
 

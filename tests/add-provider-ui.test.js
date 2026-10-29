@@ -424,6 +424,24 @@ test("a preview that keeps answering 409 stops at the generic line instead of lo
   assert.ok(h.parts.error.textContent.length > 0);
 });
 
+test("a chosen role whose model is gone is offered unticked with a plain reason (L1); a retryable check says try again later (L2)", async () => {
+  const plan = {
+    ...PLAN,
+    picks: [{ ...PLAN.picks[0], check: { ok: false, code: "http_429", at: "2026-10-30T10:00:00.000Z", retryable: true } }],
+    apply: [],
+    optIn: [{ roleId: "coordinator", key: "openrouter/anthropic/claude-opus-5.5", current: { key: "local-chat/m9", label: "m9" }, why: "not_available" }],
+    skipped: [{ roleId: "quick", why: "not_tested" }],
+  };
+  const h = harness(fullRoutes([{ match: (u) => u === "/api/providers/openrouter/plan", reply: () => json(200, plan) }]));
+  await saved(h);
+  const box = byAttr(h.parts.recList, "data-ap-rec", "coordinator")[0];
+  assert.equal(box.checked, false);
+  assert.ok(h.parts.recList.textContent.includes("What it uses now isn't available on this Crow."), h.parts.recList.textContent);
+  const row = byAttr(h.parts.picks, "data-ap-pick", "quick")[0].textContent;
+  assert.ok(row.includes("Not tested yet") && row.includes("Couldn't check right now (http_429). Try again later."), row);
+  assert.ok(!row.includes("Not offered: failed check"), row);
+});
+
 test("?add=1 opens the sheet on load; closing after a save reloads the page", async () => {
   const h = harness(fullRoutes(), { open: true });
   await flush();

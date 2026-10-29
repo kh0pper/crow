@@ -186,7 +186,8 @@ test("a body over 1 MB, a body past the deadline and a non-2xx body", async () =
   assert.equal(big.stream.destroyed, true);
   const stalled = new Readable({ read() {} });
   const slow = { status: 200, headers: {}, stream: stalled, deadline: Date.now() + 40 };
-  assert.equal((await probePick(openaiRow, "e", { kind: "embed", requestFn: async () => slow })).code, "bad_embedding");
+  // A body that never finishes is a timeout (retryable, L2), not a bad answer.
+  assert.equal((await probePick(openaiRow, "e", { kind: "embed", requestFn: async () => slow })).code, "timeout");
   assert.equal(stalled.destroyed, true);
   const err = { status: 500, headers: {}, stream: Readable.from([Buffer.from("x".repeat(100))]) };
   assert.equal((await probePick(openaiRow, "m", { requestFn: async () => err })).code, "http_500");
@@ -280,4 +281,40 @@ test("a check is tied to the key and the address it ran with (F3)", async () => 
   await db.execute({ sql: "UPDATE dashboard_settings SET value = ? WHERE key='provider_pick_checks'",
     args: [JSON.stringify({ "cloud-a": { "m-small|chat": { ok: true, code: "ok", at: "2026-10-30T00:00:00Z" } } })] });
   assert.equal(await pickCheckOf(db, "cloud-a", "m-small", { ...opts, row: openaiRow }), null);
+});
+
+test("busy, server-error, unreachable, redirect and timed-out checks are retryable: not tested, code kept (L2)", async () => {
+  const now = new Date("2026-11-01T00:00:00Z");
+  const file = recFile("2027-01-28");
+  const results = [
+    [() => reply(429), "http_429"],
+    [() => reply(503), "http_503"],
+    [() => reply(500), "http_500"],
+    [() => reply(307, "", { location: "https://api.example.com/x" }), "redirect"],
+    [() => { throw Object.assign(new Error("nope"), { code: "ECONNREFUSED" }); }, "unreachable"],
+    [() => ({ status: 200, headers: {}, stream: new Readable({ read() {} }) }), "timeout"],
+  ];
+  for (const [fn, code] of results) {
+    const db = await freshDb();
+    await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(fn), listRowsFn: async () => [openaiRow], recOpts: { file }, timeoutMs: 50 });
+    const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now, recOpts: { file }, row: openaiRow });
+    assert.deepEqual({ ok: c.ok, code: c.code, retryable: c.retryable }, { ok: false, code, retryable: true }, code);
+  }
+  // Definite failures stay failures.
+  for (const [fn, code] of [
+    [() => reply(200, { choices: [{ message: { content: "hi" } }] }), "no_tool_call"],
+    [() => reply(400), "http_400"], [() => reply(404), "http_404"], [() => reply(401), "http_401"],
+  ]) {
+    const db = await freshDb();
+    await probeRecommended(db, "cloud-a", { roles: ["quick"], requestFn: stub(fn), listRowsFn: async () => [openaiRow], recOpts: { file } });
+    const c = await pickCheckOf(db, "cloud-a", "m-small", { kind: "chat", now, recOpts: { file }, row: openaiRow });
+    assert.equal(c.ok, false, code);
+    assert.equal(c.code, code);
+    assert.notEqual(c.retryable, true, code);
+  }
+  const db = await freshDb();
+  await probeRecommended(db, "cloud-a", { roles: ["embed"], requestFn: stub(() => reply(200, { data: [] })), listRowsFn: async () => [openaiRow], recOpts: { file } });
+  const e = await pickCheckOf(db, "cloud-a", "m-embed", { kind: "embed", now, recOpts: { file }, row: openaiRow });
+  assert.equal(e.code, "bad_embedding");
+  assert.notEqual(e.retryable, true);
 });

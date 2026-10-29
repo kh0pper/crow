@@ -407,7 +407,10 @@ export default function rolesApiRouter({
           label: friendlyModel(key, ctx.providers) || p.model_id,
           providerLabel: providerLabel(row.id, ctx.providers),
           probed,
-          check: check ? { ok: check.ok, code: check.code, at: typeof check.at === "string" ? check.at : null } : null,
+          check: check ? {
+            ok: check.ok, code: check.code, at: typeof check.at === "string" ? check.at : null,
+            ...(check.retryable ? { retryable: true } : {}),
+          } : null,
         });
       }
     }

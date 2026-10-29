@@ -2360,6 +2360,8 @@ export const translations = {
   "models.add.stillEmpty": { en: "Still empty: {roles}. Add another provider for them.", es: "Aún vacíos: {roles}. Añade otro proveedor para ellos." },
   "models.add.why.seeded": { en: "Crow set this one up for you. Tick it to switch to the recommended model.", es: "Crow lo configuró por ti. Márcalo para cambiar al modelo recomendado." },
   "models.add.why.runs_today": { en: "Something already covers this role. Tick it to switch.", es: "Algo ya cubre este rol. Márcalo para cambiar." },
+  "models.add.why.not_available": { en: "What it uses now isn't available on this Crow.", es: "Lo que usa ahora no está disponible en este Crow." },
+  "models.add.tryLater": { en: "Couldn't check right now ({code}). Try again later.", es: "No se pudo probar ahora ({code}). Inténtalo más tarde." },
   "models.add.why.cloud": { en: "This would send your memories or searches to the cloud, so it stays off unless you tick it.", es: "Esto enviaría tus memorias o búsquedas a la nube, así que queda desactivado salvo que lo marques." },
   "models.add.skip.set": { en: "You already chose a model for this.", es: "Ya elegiste un modelo para esto." },
   "models.add.skip.none_offered": { en: "This provider has no recommendation for this role.", es: "Este proveedor no tiene una recomendación para este rol." },

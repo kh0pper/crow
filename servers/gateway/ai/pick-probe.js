@@ -73,6 +73,7 @@ export async function probePick(row, modelId, { kind = "chat", requestFn = safeR
   try {
     res = await requestFn(req.url, { method: "POST", headers: req.headers, body: req.body, mode: req.mode, timeoutMs });
   } catch (err) {
+    if (err?.code === "TIMEOUT") return { ok: false, code: "timeout" };
     console.warn(`[pick-probe] request failed: ${typeof err?.code === "string" && err.code.length <= 40 && !err.code.includes(row?.apiKey || row?.api_key || "\u0000") ? err.code : "error"}`);
     return { ok: false, code: "unreachable" };
   }
@@ -80,7 +81,11 @@ export async function probePick(row, modelId, { kind = "chat", requestFn = safeR
   if (status >= 300 && status < 400) { discard(res); return { ok: false, code: "redirect" }; }
   if (!(status >= 200 && status < 300)) { discard(res); return { ok: false, code: `http_${status}` }; }
   let json;
-  try { json = await readJson(res, { maxBytes: 1_000_000 }); } catch {
+  try {
+    json = await readJson(res, { maxBytes: 1_000_000, deadline: Number.isFinite(res?.deadline) ? res.deadline : Date.now() + timeoutMs });
+  } catch (err) {
+    // An answer that never finished is retryable; one too big or not JSON is a failure.
+    if (err?.code === "TIMEOUT") return { ok: false, code: "timeout" };
     return { ok: false, code: kind === "embed" ? "bad_embedding" : "no_tool_call" };
   }
   const code = judge(json, kind, req.anthropic);

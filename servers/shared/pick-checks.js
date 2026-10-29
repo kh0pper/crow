@@ -43,7 +43,9 @@ export function checkStamp(row) {
  * The check for one model in an already-read object, or null (not tested)
  * when none exists, the recommendations are past `review_by`, no `row` is
  * given, or the check was made with another key or address than `row` has
- * now (a check stored without a stamp counts as another). Pure.
+ * now (a check stored without a stamp counts as another). A failed check with
+ * a retryable code comes back with `retryable: true`, which every reader
+ * treats as not tested. Pure.
  */
 export function checkIn(checks, providerId, modelId, { kind = "chat", now = new Date(), recOpts, row } = {}) {
   if (!row || isRecommendationsStale(now, recOpts)) return null;
@@ -51,7 +53,19 @@ export function checkIn(checks, providerId, modelId, { kind = "chat", now = new 
   if (!c || typeof c !== "object") return null;
   const stamp = checkStamp(row);
   if (c.fp !== stamp.fp || c.url !== stamp.url) return null;
-  return { ok: !!c.ok, code: String(c.code), at: c.at };
+  const out = { ok: !!c.ok, code: String(c.code), at: c.at };
+  // Busy, failing or unreachable says nothing about the model: not tested, code kept (L2).
+  if (!out.ok && isRetryableCode(out.code)) out.retryable = true;
+  return out;
+}
+
+/**
+ * Probe codes that say nothing about the model (try again later): a busy or
+ * failing server (429, any 5xx), no answer, a redirect, or a timeout.
+ * no_tool_call, bad_embedding and other 4xx are definite failures.
+ */
+export function isRetryableCode(code) {
+  return code === "http_429" || /^http_5\d\d$/.test(String(code)) || code === "unreachable" || code === "redirect" || code === "timeout";
 }
 
 /** The stored check for a model against `opts.row`, or null (not tested). */

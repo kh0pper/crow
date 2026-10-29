@@ -613,6 +613,40 @@ test("the same id re-added with a new key, or at a new address, is not tested (F
   }
 });
 
+test("a dead-end chain (not_available): unbound is filled pre-ticked, chosen or seeded is opt-in (L1)", async () => {
+  const { buildRoleRows } = await import("../servers/gateway/dashboard/settings/sections/models/rows.js");
+  const deadEnd = (over) => async (db, o) => (await buildRoleRows(db, o)).map((r) => (over[r.id] ? { ...r, ...over[r.id], status: { code: "not_available" } } : r));
+  const h = await planDb();
+  try {
+    // expert unbound, coordinator chosen, voice seeded, all dead-ending; quick a fallback today; embed cloud.
+    const plan = await planRecommended(h.db, "cloud-a", planOpts({
+      buildRowsFn: deadEnd({ expert: { chosen: false, seeded: false }, quick: { chosen: true, seeded: false }, voice: { seeded: true, chosen: false } }),
+    }));
+    assert.deepEqual(plan.apply.map((x) => x.roleId), ["expert"]);
+    assert.equal(typeof plan.apply[0].preview.previewHash, "string");
+    assert.equal(whyOf(plan.optIn, "quick"), "not_available");
+    assert.equal(whyOf(plan.optIn, "voice"), "not_available");
+    assert.equal(whyOf(plan.optIn, "embed"), "runs_today");
+    assert.equal(whyOf(plan.skipped, "everyday"), "set");
+    // An unbound cloud embed that dead-ends is still never pre-ticked.
+    const emb = await planRecommended(h.db, "cloud-a", planOpts({ buildRowsFn: deadEnd({ embed: { chosen: false, seeded: false } }) }));
+    assert.equal(whyOf(emb.optIn, "embed"), "cloud");
+    assert.ok(!emb.apply.some((x) => x.roleId === "embed"));
+  } finally { h.close(); }
+});
+
+test("a retryable check is not tested, never failed_check (L2)", async () => {
+  const h = await planDb({ checks: { "cloud-a": { ...OK_CHECKS["cloud-a"],
+    "gpt-6-luna|chat": { ok: false, code: "http_429", at: "2026-10-28T00:00:00Z" },
+    "text-embedding-3-large|embed": { ok: false, code: "unreachable", at: "2026-10-28T00:00:00Z" } } } });
+  try {
+    const plan = await planRecommended(h.db, "cloud-a", planOpts());
+    for (const r of ["expert", "quick", "voice", "embed"]) assert.equal(whyOf(plan.skipped, r), "not_tested", r);
+    // A definite failure is still a failure.
+    assert.equal(whyOf(plan.skipped, "coordinator"), "failed_check");
+  } finally { h.close(); }
+});
+
 test("a provider with no preset offers nothing", async () => {
   const h = await planDb();
   try {

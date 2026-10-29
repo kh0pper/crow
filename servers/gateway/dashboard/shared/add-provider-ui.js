@@ -27,7 +27,7 @@ import { loadRecommendations } from "../../../shared/provider-recommendations.js
 
 const TEST_CODES = ["ok", "key_rejected", "bad_key", "rate_limited", "unreachable", "not_found", "bad_url", "forbidden_target", "provider_error"];
 const ERR_CODES = ["unknown_preset", "bad_model", "save_failed"];
-const WHY_CODES = ["seeded", "runs_today", "cloud"];
+const WHY_CODES = ["seeded", "runs_today", "cloud", "not_available"];
 const SKIP_CODES = ["set", "none_offered", "not_listed", "not_tested", "failed_check", "unknown"];
 const LABEL_PREFIXES = ["settings.providers.job.", "settings.providers.phone.", "settings.roles."];
 
@@ -194,6 +194,7 @@ export function addProviderClientJS({ lang = "en" } = {}) {
     saved: '${tJs("models.add.saved", lang)}',
     truncated: '${tJs("models.add.truncated", lang)}',
     notTested: '${tJs("models.add.notTested", lang)}',
+    tryLater: '${tJs("models.add.tryLater", lang)}',
     passed: '${tJs("models.add.passed", lang)}',
     probeFailed: '${tJs("models.add.probeFailed", lang)}',
     checkedOn: '${tJs("models.add.checkedOn", lang)}',
@@ -480,6 +481,8 @@ export function addProviderClientJS({ lang = "en" } = {}) {
 
   function statusText(p) {
     if (!p.check || typeof p.check !== 'object') return T.notTested;
+    // A busy or unreachable server says nothing about the model (L2).
+    if (p.check.retryable === true) return T.notTested + ' · ' + fill(T.tryLater, { code: str(p.check.code) });
     var d = dateOf(p.check.at);
     var when = d ? ' · ' + fill(T.checkedOn, { date: d }) : '';
     return (p.check.ok === true ? T.passed : T.probeFailed) + when;
