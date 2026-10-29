@@ -5085,6 +5085,19 @@ export function createInteractiveEngine({
     return { delivered: true, botId: s.botId };
   }
 
+  /**
+   * Credential card (spec §10.2): is this a RESIDENT session of this bot with a live child?
+   * sessions.get only, never resolveSession: a check must never adopt a row or wake a
+   * hibernating child. The caller must name the bot (as notifyCard's I3).
+   */
+  function isLiveSession(sessionId, opts) {
+    const s = sessions.get(String(sessionId));
+    if (!s) return false;
+    const want = opts && opts.botId != null ? String(opts.botId) : null;
+    if (!want || want !== s.botId) return false;
+    return s.state === "awake" && !!s.pi;
+  }
+
   return {
     spawn,
     message,
@@ -5122,6 +5135,8 @@ export function createInteractiveEngine({
       const s = sessions.get(String(sessionId));
       return s ? s.briefingDelivered : undefined;
     },
+    /** Credential card: a resident, awake session of the named bot (never wakes one). */
+    isLiveSession,
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,
     /** Artifacts chat-first pointer frames (spec v1.6 D25) — resident sessions
@@ -5215,6 +5230,14 @@ export async function notifyCardToResident(sid, frame, opts) {
   const eng = getInteractiveEngine({ createIfMissing: false });
   if (!eng || typeof eng.notifyCard !== "function") return { delivered: false, botId: null, reason: "no_engine" };
   return eng.notifyCard(sid, frame, opts);
+}
+
+/** The credential card's liveness check for the /secrets mount: never creates an engine; with
+ * no engine in this process no session is live. */
+export function isLiveResidentSession(sessionId, opts) {
+  const eng = getInteractiveEngine({ createIfMissing: false });
+  if (!eng || typeof eng.isLiveSession !== "function") return false;
+  return eng.isLiveSession(sessionId, opts);
 }
 
 /** The one default emitExternal hook for callers outside the engine (the

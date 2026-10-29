@@ -2,7 +2,7 @@
  * Actor-header binding (S2, 2026-10-02).
  *
  * Kinds signed with the one per-boot key (each its own MAC domain, so none
- * replays as another): "bot" (phone), "board", "board-thread", "artifacts"
+ * replays as another): "bot" (phone), "board", "board-thread", "artifacts", "secrets"
  * over the v1 tuple below, and the session-bound (v2) kind "peer-relay"
  * (the loopback relay to paired peers, item 46 PR-B, below).
  *
@@ -166,6 +166,22 @@ export function signArtifactsActor({ botId, threadId, gatewayType } = {}) {
 /** Constant-time check of a presented artifacts signature. False without a key. */
 export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = {}) {
   return verifyActorSig({ kind: "artifacts", botId, threadId, gatewayType, sig });
+}
+
+// ---- secrets actor headers (credential card, spec §10.2) ----
+//
+// /secrets/mcp attributes a crow_request_secret call to (bot, thread, gateway).
+// Same key and MAC; kind "secrets", so no phone, board or artifacts signature
+// replays here, nor a secrets signature there.
+
+/** Signature for the secrets actor headers, or null without a key / bot id. */
+export function signSecretsActor({ botId, threadId, gatewayType } = {}) {
+  return signActor({ kind: "secrets", botId, threadId, gatewayType });
+}
+
+/** Constant-time check of a presented secrets signature. False without a key. */
+export function verifySecretsActorSig({ botId, threadId, gatewayType, sig } = {}) {
+  return verifyActorSig({ kind: "secrets", botId, threadId, gatewayType, sig });
 }
 
 // ---- session-bound actor headers, v2 (item 46 PR-B) ----
