@@ -572,11 +572,16 @@ test("a stop row's page lines are its own: starting, expired, and a target that 
   const mid = await (await s.get(starting)).text();
   assert.ok(!hasForm(mid));
   assert.match(mid, /Confirmed\. Stopping Writer's task…/);
-  // A done stop row carries core.stop's status: a stop still landing is never "Stopped".
-  const pendingStart = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-5" });
+  // A done stop row carries core.stop's status: a stop still landing is never "Stopped" (while its target is
+  // still landing: see the next test).
+  const landing = await s.insert({ status: "stopped", device_id: "kiosk-5" });
+  await s.core.store.setFields(s.db, landing, { detail: "pending_start" });
+  const pendingStart = await s.insert({ kind: "stop", target_id: landing, device_id: "kiosk-5" });
   await s.core.store.transition(s.db, pendingStart, ["awaiting_phone"], "done", { detail: "pending_start" });
   assert.match(await (await s.get(pendingStart)).text(), /Confirmed\. Writer's task will stop as soon as it starts\. Anything it makes is kept\./);
-  const stopping = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-6", lang: "es" });
+  const retrying = await s.insert({ status: "stopped", device_id: "kiosk-6", session_id: "s6" });
+  await s.core.store.setFields(s.db, retrying, { detail: "stop_pending", session_id: "s6" });
+  const stopping = await s.insert({ kind: "stop", target_id: retrying, device_id: "kiosk-6", lang: "es" });
   await s.core.store.transition(s.db, stopping, ["awaiting_phone"], "done", { detail: "stopping" });
   assert.match(await (await s.get(stopping)).text(), /Confirmado\. La tarea de Writer se está parando\. Lo que hizo hasta ahora se queda\./);
   const notSent = await s.insert({ kind: "stop", target_id: target, device_id: "kiosk-7" });
@@ -590,6 +595,36 @@ test("a stop row's page lines are its own: starting, expired, and a target that 
   assert.ok(!hasForm(late));
   assert.match(late, /Esto caducó, así que la tarea de Writer siguió en marcha\./);
   assert.ok(!/No se empezó nada/.test(late));
+});
+
+test("a done stop row's line follows its target: once the hand-off really stopped, the page says stopped (PR 6 carry)", async () => {
+  const s = await setup();
+  // core.stop won before the session existed: the target is stopped, detail pending_start, no session yet.
+  const target = await s.insert({ status: "stopped" });
+  await s.core.store.setFields(s.db, target, { detail: "pending_start" });
+  const id = await s.insert({ kind: "stop", target_id: target });
+  await s.core.store.transition(s.db, id, ["awaiting_phone"], "done", { detail: "pending_start" });
+  assert.match(await (await s.get(id)).text(), /will stop as soon as it starts/);
+  // finishStart lost its CAS, stopped the session the moment it existed and wrote its id: the stop landed.
+  await s.core.store.setFields(s.db, target, { session_id: "s1" });
+  let page = await (await s.get(id)).text();
+  assert.match(page, /Stopped\. What Writer made so far is kept\./);
+  assert.ok(!/will stop as soon as it starts/.test(page), page);
+  assert.equal((await s.row(id)).detail, "pending_start", "read at render: nothing is written");
+  // A stop left for the sweep's retry is "stopping" until the retry clears it, then stopped (es too).
+  const t2 = await s.insert({ status: "stopped", device_id: "kiosk-2" });
+  await s.core.store.setFields(s.db, t2, { detail: "stop_pending", session_id: "s2" });
+  const id2 = await s.insert({ kind: "stop", target_id: t2, device_id: "kiosk-2", lang: "es" });
+  await s.core.store.transition(s.db, id2, ["awaiting_phone"], "done", { detail: "stopping" });
+  assert.match(await (await s.get(id2)).text(), /se está parando/);
+  await s.core.store.setFields(s.db, t2, { detail: null });
+  page = await (await s.get(id2)).text();
+  assert.match(page, /Parado\. Lo que Writer hizo hasta ahora se queda\./);
+  // A target that ended any other way is no stop still landing either.
+  const t3 = await s.insert({ status: "done", device_id: "kiosk-3" });
+  const id3 = await s.insert({ kind: "stop", target_id: t3, device_id: "kiosk-3" });
+  await s.core.store.transition(s.db, id3, ["awaiting_phone"], "done", { detail: "pending_start" });
+  assert.match(await (await s.get(id3)).text(), /Stopped\. What Writer made so far is kept\./);
 });
 
 test("every voiceHandoff page string is in English and Spanish", () => {
