@@ -7,7 +7,7 @@
  * request of any kind, so adding a provider or listing picks can import it
  * without any path to a probe.
  */
-import { isRecommendationsStale } from "../../shared/provider-recommendations.js";
+import { isRecommendationsStale } from "./provider-recommendations.js";
 
 export const PICK_CHECKS_KEY = "provider_pick_checks";
 

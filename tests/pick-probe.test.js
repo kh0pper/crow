@@ -207,15 +207,44 @@ test("no silent probe: the real addProvider flow makes no pick request", async (
   assert.ok(!/pick-probe/.test(src), "add-provider.js must not import pick-probe.js");
 });
 
+/** Every module specifier a source names: import … from, export … from, bare import, dynamic import. */
+function specifiersOf(src) {
+  const out = [];
+  for (const re of [
+    /\b(?:import|export)\s[^;]*?\bfrom\s*["']([^"']+)["']/g,
+    /\bimport\s*["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ]) for (const m of src.matchAll(re)) out.push(m[1]);
+  return out;
+}
+const BANNED_SPEC = /safe-upstream|pick-probe|^(node:)?(https?|http2|net|tls|dgram|dns)(\/|$)|undici|node-fetch|axios/;
+
+test("specifiersOf sees every import form", () => {
+  const src = 'import a from "./a.js";\nexport { b } from "./b.js";\nexport * from "./c.js";\nimport "./d.js";\nconst e = await import("./e.js");\nimport {\n  f,\n} from "node:https";';
+  assert.deepEqual(specifiersOf(src).sort(), ["./a.js", "./b.js", "./c.js", "./d.js", "./e.js", "node:https"].sort());
+  assert.ok(BANNED_SPEC.test("node:https") && BANNED_SPEC.test("http") && BANNED_SPEC.test("../gateway/models/safe-upstream.js"));
+  assert.ok(!BANNED_SPEC.test("node:fs") && !BANNED_SPEC.test("./provider-presets.js"));
+});
+
 test("check storage lives in a read-only module with no request path", async () => {
-  const src = readFileSync(new URL("../servers/gateway/ai/pick-checks.js", import.meta.url), "utf8");
-  const imports = [...src.matchAll(/^\s*import\s[^;]*?from\s+["']([^"']+)["']/gm)].map((m) => m[1]);
-  assert.ok(imports.length > 0);
-  for (const spec of imports) {
-    assert.ok(!/safe-upstream|pick-probe|^node:(https?|http2|net|tls|dgram|dns)$|undici|node-fetch/.test(spec), `pick-checks.js imports ${spec}`);
+  // Walk the whole local import chain from pick-checks.js.
+  const root = new URL("../servers/shared/pick-checks.js", import.meta.url);
+  const seen = new Set();
+  const queue = [root.href];
+  while (queue.length) {
+    const href = queue.shift();
+    if (seen.has(href)) continue;
+    seen.add(href);
+    const src = readFileSync(new URL(href), "utf8");
+    assert.ok(!/\bfetch\s*\(/.test(src), `${href} calls fetch`);
+    for (const spec of specifiersOf(src)) {
+      assert.ok(!BANNED_SPEC.test(spec), `${href} imports ${spec}`);
+      if (spec.startsWith(".")) queue.push(new URL(spec, href).href);
+      else assert.ok(spec.startsWith("node:"), `${href} imports package ${spec}`);
+    }
   }
-  assert.ok(!/\bfetch\s*\(|\bimport\s*\(/.test(src), "no fetch, no dynamic import");
-  const checks = await import("../servers/gateway/ai/pick-checks.js");
+  assert.ok(seen.size >= 2, "the walk reached pick-checks.js's own imports");
+  const checks = await import("../servers/shared/pick-checks.js");
   const probe = await import("../servers/gateway/ai/pick-probe.js");
   assert.equal(probe.pickCheckOf, checks.pickCheckOf, "pick-probe re-exports the one reader");
   assert.equal(probe.PICK_CHECKS_KEY, checks.PICK_CHECKS_KEY);
@@ -223,6 +252,6 @@ test("check storage lives in a read-only module with no request path", async () 
   for (const f of ["../servers/gateway/ai/add-provider.js", "../servers/shared/role-picks.js"]) {
     const s = readFileSync(new URL(f, import.meta.url), "utf8");
     assert.ok(!/pick-probe/.test(s), `${f} must not mention pick-probe`);
-    assert.ok(/pick-checks\.js/.test(s), `${f} reads checks through pick-checks.js`);
+    assert.ok(specifiersOf(s).some((x) => x.endsWith("/pick-checks.js")), `${f} reads checks through pick-checks.js`);
   }
 });

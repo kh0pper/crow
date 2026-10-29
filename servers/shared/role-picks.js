@@ -16,7 +16,7 @@ import { friendlyModel } from "../gateway/dashboard/shared/bot-display.js";
 import { getOwnAddresses } from "./locality.js";
 import { t, fill } from "../gateway/dashboard/shared/i18n.js";
 import { presetForRow, recommendedFor } from "./provider-recommendations.js";
-import { checkIn, checkKindFor } from "../gateway/ai/pick-checks.js";
+import { checkIn, checkKindFor } from "./pick-checks.js";
 
 const WHERE_RANK = Object.freeze({ here: 0, other_box: 1, cloud: 2, unproven: 3, missing: 4 });
 /** I12: only the provider matters at run time for these, so one pick per provider. */

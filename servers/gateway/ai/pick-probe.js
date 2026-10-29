@@ -12,7 +12,7 @@ import { presetById, normalizeBaseUrl, ANTHROPIC_VERSION } from "../../shared/pr
 import { candidatePick, presetForRow, RECOMMENDATION_ROLES } from "../../shared/provider-recommendations.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { safeRequest, readJson } from "../models/safe-upstream.js";
-import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf } from "./pick-checks.js";
+import { PICK_CHECKS_KEY, readPickChecks, pickCheckOf } from "../../shared/pick-checks.js";
 
 // The read side lives in pick-checks.js (no request path); re-exported here for existing callers.
 export { PICK_CHECKS_KEY, pickCheckOf };

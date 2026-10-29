@@ -15,8 +15,8 @@ import { invalidateProvidersCache } from "../../shared/providers.js";
 import { isDoorUrl } from "../models/door-resolve.js";
 import { safeRequest, readJson, preflightRefused } from "../models/safe-upstream.js";
 // Read-only check storage: this module never runs a pick check itself.
-import { readPickChecks, checkIn, checkKindFor } from "./pick-checks.js";
-import { resolveRoleKey, isCloudKey } from "../../shared/model-roles.js";
+import { readPickChecks, checkIn, checkKindFor } from "../../shared/pick-checks.js";
+import { resolveRoleKey, isCloudKey, CORE_ROLES } from "../../shared/model-roles.js";
 import { loadRoleContext } from "../../shared/model-roles-store.js";
 import { scanSlots } from "../../shared/model-consumers.js";
 import { previewRoleChange, applyRoleChange } from "../../shared/role-change.js";
@@ -362,7 +362,8 @@ const rowsOf = (db, { buildRowsFn = buildRoleRows, env, ownAddrs, localMarks, lo
  * `not_set`; a seeded role, a role running a default or fallback today, and
  * any cloud pick for embed or rerank are `optIn` (I8; `why: "cloud"` for the
  * last when nothing runs it today). Roles the operator chose, or that an env
- * var or setting pin fills, are `set`.
+ * var or setting pin fills, are `set`; a role the page has no row for is
+ * `unknown`.
  *
  * Never carries the key. Seams: `buildRowsFn`, `classifierStatusFn`,
  * `classifierLookup`, `localInstanceId`, `recOpts`, `now`.
@@ -392,8 +393,9 @@ export async function planRecommended(db, providerId, opts = {}) {
     if (!check.ok) { skip("failed_check"); continue; }
 
     const r = rows.get(roleId);
-    const code = r?.status?.code;
-    if (!r || r.chosen || r.pin || SET_STATUSES.has(code)) { skip("set"); continue; }
+    if (!r) { skip("unknown"); continue; }
+    const code = r.status?.code;
+    if (r.chosen || r.pin || SET_STATUSES.has(code)) { skip("set"); continue; }
     const current = r.model || null;
     if (r.seeded) { out.optIn.push({ roleId, key, current, why: "seeded" }); continue; }
     if (RUNS_TODAY.has(code)) { out.optIn.push({ roleId, key, current, why: "runs_today" }); continue; }
@@ -475,8 +477,27 @@ export async function combinedPreview(db, items, opts = {}) {
   return (await combine(db, items, opts)).result;
 }
 
+const CORE_IDS = new Set(CORE_ROLES.map((r) => r.id));
+
+/**
+ * The built-in core roles still empty: visible chat-style rows whose status is
+ * `not_set`. Never custom roles (they are the operator's own, not gaps Crow
+ * fills), never rerank (hidden unless chosen), never image/video (media), and
+ * never stt/tts: those are speech profiles, set up on their own tab, not by a
+ * provider's model picks.
+ */
 function stillEmptyOf(rows) {
-  return rows.filter((r) => r.kind === "chat" && r.id !== "rerank" && !r.hidden && r.status?.code === "not_set").map((r) => r.id);
+  return rows
+    .filter((r) => CORE_IDS.has(r.id) && r.kind === "chat" && r.id !== "rerank" && !r.hidden && r.status?.code === "not_set")
+    .map((r) => r.id);
+}
+
+/** True when the role's live binding is now the chosen `key` (the write landed). */
+async function bindingLanded(db, roleId, key, localInstanceId) {
+  try {
+    const b = (await freshCtx(db, localInstanceId)).bindings?.[roleId];
+    return !!(b && b.model === key && b.seeded !== true);
+  } catch { return false; }
 }
 
 /**
@@ -489,7 +510,9 @@ function stillEmptyOf(rows) {
  * acks, one at a time: the first with the hash the user saw, each later one
  * with a hash taken after the writes before it (the combined hash already
  * covered them). A write that fails is listed in `refused` and the rest are
- * still tried, so `applied` is exactly what was written.
+ * still tried. When applyRoleChange throws, the binding is read back: the
+ * role is `applied` if the write landed, `save_failed` only if it did not, so
+ * `applied` is exactly what was written.
  * @returns {Promise<{applied:Array<{roleId,key}>, refused:Array<{roleId,reason}>, stillEmpty:string[]}>}
  */
 export async function applyRecommended(db, providerId, {
@@ -525,8 +548,8 @@ export async function applyRecommended(db, providerId, {
       });
     } catch (err) {
       console.warn(`[add-provider] apply ${it.roleId} failed: ${err?.message}`);
-      r = { ok: false, reason: "save_failed" };
-      wrote = true; // unknown: judge the next one on the live state
+      r = (await bindingLanded(db, it.roleId, it.key, seams.localInstanceId)) ? { ok: true } : { ok: false, reason: "save_failed" };
+      wrote = true; // judge the next one on the live state either way
     }
     if (r?.ok) { applied.push({ roleId: it.roleId, key: it.key }); wrote = true; }
     else refused.push({ roleId: it.roleId, reason: typeof r?.reason === "string" ? r.reason : "save_failed" });

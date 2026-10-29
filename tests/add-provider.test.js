@@ -666,5 +666,74 @@ test("a write failing midway is reported as partial, never as success", async ()
     });
     assert.deepEqual(thrown.applied, []);
     assert.deepEqual(thrown.refused, [{ roleId: roles[1], reason: "save_failed" }]);
+    assert.equal(await bindingOf(h.db, roles[1]), null);
+    // A throw after the write landed (a listener, a cache clear) still reports it applied.
+    const late = await applyRecommended(h.db, "cloud-a", {
+      ...opts, roles: [roles[1]], previewHash: (await combinedPreview(h.db, [plan.apply[1]], opts)).previewHash,
+      actor: "test", ackUnattended: true, ackCloud: true,
+      applyRoleChangeFn: async (...a) => { await applyRoleChange(...a); throw new Error("listener"); },
+    });
+    assert.deepEqual(late.refused, []);
+    assert.deepEqual(late.applied.map((x) => x.roleId), [roles[1]]);
+    assert.equal(JSON.parse(await bindingOf(h.db, roles[1])).model, "cloud-a/gpt-6-luna");
+  } finally { h.close(); }
+});
+
+test("a state change after the preview refuses every role and writes nothing", async () => {
+  for (const staleCtx of [false, true]) {
+    const h = await planDb({ everyday: false, smartChat: true });
+    try {
+      const opts = planOpts();
+      const { loadRoleContext } = await import("../servers/shared/model-roles-store.js");
+      const ctxBefore = await loadRoleContext(h.db, { maxAgeMs: 0, getOrCreateLocalInstanceId: () => "i-self" });
+      const plan = await planRecommended(h.db, "cloud-a", opts);
+      const roles = plan.apply.map((x) => x.roleId);
+      assert.ok(roles.includes("expert"));
+      const { previewHash } = await combinedPreview(h.db, plan.apply, opts);
+      if (staleCtx) {
+        // A binding change only a fresh context sees: coordinator now falls back to expert.
+        await h.raw("model_role.coordinator", JSON.stringify({ model: "local-chat/m1", fallback: ["expert"] }));
+      } else {
+        await h.db.execute({
+          sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?,?,?)",
+          args: ["b-late", "B", JSON.stringify({ models: { default: "role:expert" }, gateways: [] })],
+        });
+      }
+      invalidateRoleContext();
+      assert.notEqual((await combinedPreview(h.db, plan.apply, opts)).previewHash, previewHash, `the change moves the hash, staleCtx=${staleCtx}`);
+      const r = await applyRecommended(h.db, "cloud-a", {
+        ...opts, ...(staleCtx ? { ctx: ctxBefore } : {}), roles, previewHash, actor: "test", ackUnattended: true, ackCloud: true,
+      });
+      assert.deepEqual(r.applied, [], `staleCtx=${staleCtx}`);
+      assert.equal(r.refused.length, roles.length);
+      assert.ok(r.refused.every((x) => x.reason === "preview_changed"), `staleCtx=${staleCtx}`);
+      for (const role of roles) assert.equal(await bindingOf(h.db, role), null, `${role} staleCtx=${staleCtx}`);
+    } finally { h.close(); }
+  }
+});
+
+test("a role with no row is skipped as unknown, not set", async () => {
+  const h = await planDb();
+  try {
+    const { buildRoleRows } = await import("../servers/gateway/dashboard/settings/sections/models/rows.js");
+    const buildRowsFn = async (db, o) => (await buildRoleRows(db, o)).filter((r) => r.id !== "expert");
+    const plan = await planRecommended(h.db, "cloud-a", planOpts({ buildRowsFn }));
+    assert.equal(whyOf(plan.skipped, "expert"), "unknown");
+    assert.ok(!plan.apply.some((x) => x.roleId === "expert"));
+  } finally { h.close(); }
+});
+
+test("stillEmpty lists only built-in visible core chat roles", async () => {
+  const h = await planDb();
+  try {
+    const { buildRoleRows } = await import("../servers/gateway/dashboard/settings/sections/models/rows.js");
+    const buildRowsFn = async (db, o) => [
+      ...(await buildRoleRows(db, o)),
+      { id: "c-notes", kind: "chat", hidden: false, status: { code: "not_set" }, chosen: false, seeded: false, group: "custom" },
+    ];
+    const r = await applyRecommended(h.db, "cloud-a", { ...planOpts({ buildRowsFn }), roles: [] });
+    assert.ok(r.stillEmpty.includes("vision"));
+    assert.ok(!r.stillEmpty.includes("c-notes"), "custom roles never count");
+    for (const x of ["stt", "tts", "rerank", "image", "video"]) assert.ok(!r.stillEmpty.includes(x), x);
   } finally { h.close(); }
 });
