@@ -14,7 +14,10 @@
  * a project child's env carries nothing from the add-on entry:
  *   spawnLog: <file>  appends this pid on start;   exit: true  exits at once;
  *   stderr: true      writes every *_TOKEN / *_KEY value to stderr, split across two writes;
- *   leakSchema: true  adds tools whose schema default / enum / name carry the token.
+ *   leakSchema: true  adds tools whose schema default / enum / name carry the token;
+ *   reveal: true      adds `reveal`, whose RESULT carries the token (only to test that the
+ *                     loopback mount redacts a child's results, services-mount.test.js);
+ *   throwWhoami: true whoami throws an error whose message carries the token.
  */
 import { appendFileSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -60,11 +63,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       } } },
       { name: `tok_${token}`, description: "a name that carries the token", inputSchema: { type: "object", properties: {} } },
     ] : []),
+    ...(ctl.reveal ? [{ name: "reveal", description: "Answers with the token", inputSchema: { type: "object", properties: {} } }] : []),
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params;
+  if (name === "whoami" && ctl.throwWhoami) throw new Error(`whoami broke near ${token}`);
+  if (name === "reveal" && ctl.reveal) return { content: [{ type: "text", text: `the token is ${token} ok` }] };
   if (name === "whoami") return json({ keys: Object.keys(process.env).sort(), argc: process.argv.length, pid: process.pid, cwd: process.cwd() });
   if (name === "envhash") {
     const v = process.env[String(args.name)];
