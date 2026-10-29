@@ -68,6 +68,7 @@ import { StringDecoder } from "node:string_decoder";
 import { isLocalPeer } from "../../shared/peer-class.js";
 import { isLocalClassTarget, isForbiddenTarget, isDoorUrl } from "./door-resolve.js";
 import { consentVerdict, cloudDoorIneligibleReason } from "../../shared/cloud-consent.js";
+import { redactHeaderValue, redactSecrets, redactThenTruncate, maxSecretBytes } from "../../shared/redact-secrets.js";
 import { safeRequest } from "./safe-upstream.js";
 import { extractUsageFromOpenAIResponse, extractUsageFromAnthropicStream } from "../../shared/metering.js";
 
@@ -88,7 +89,6 @@ export const STRIPPED_BODY_FIELDS = Object.freeze({
 const STRIP_ALWAYS = Object.freeze([...STRIPPED_BODY_FIELDS.openai, ...STRIPPED_BODY_FIELDS.anthropic]);
 const ANTHROPIC_DEFAULT_VERSION = "2023-06-01";
 export const ERROR_BODY_MAX = 1_000_000;
-const REDACTED = "[redacted]";
 
 export const CLOUD_TIMEOUTS = Object.freeze({ headersMs: 10 * 60_000, idleMs: 2 * 60_000, totalMs: 30 * 60_000 });
 export const CLOUD_MAX_CONCURRENT = 8;
@@ -166,17 +166,8 @@ function callerToken(headers) {
 
 const send = (res, status, code, message) => res.status(status).json({ error: { code, message } });
 
-/** Replaces every literal secret (8+ characters, so a short key cannot shred the text). */
-function redactor(secrets) {
-  const list = secrets.filter((s) => typeof s === "string" && s.length >= 8);
-  const redact = (text) => {
-    let out = String(text);
-    for (const s of list) out = out.split(s).join(REDACTED);
-    return out;
-  };
-  redact.maxLen = list.reduce((m, s) => Math.max(m, Buffer.byteLength(s)), 0);
-  return redact;
-}
+// The door only redacts secrets of 8+ characters (shared default is 4).
+const SECRET_OPTS = Object.freeze({ minLen: 8 });
 
 /** A decompressor for one content-encoding, or null (identity) / undefined (unsupported). */
 function decoderFor(encoding) {
@@ -312,7 +303,11 @@ export function createCloudDoor(deps) {
     const sent = { ...body };
     for (const f of STRIP_ALWAYS) delete sent[f];
     const payload = JSON.stringify(sent);
-    const redact = redactor([target.apiKey, callerToken(req.headers)]);
+    const secrets = [target.apiKey, callerToken(req.headers)];
+    const redact = (text) => redactSecrets(text, secrets, SECRET_OPTS);
+    redact.header = (v) => redactHeaderValue(v, secrets, SECRET_OPTS);
+    redact.truncated = (body, cap) => redactThenTruncate(body, secrets, cap, SECRET_OPTS);
+    redact.maxLen = maxSecretBytes(secrets, SECRET_OPTS);
     const label = `${target.providerId}/${target.model}`;
     const op = req.params[0];
 
@@ -352,7 +347,7 @@ export function createCloudDoor(deps) {
       res.status(up.status);
       for (const [k, v] of Object.entries(up.headers || {})) {
         if (v === undefined) continue;
-        if (RESPONSE_HEADER_ALLOW.includes(k) || RATELIMIT_HEADER.test(k)) res.setHeader(k, Array.isArray(v) ? v.map(redact) : redact(v));
+        if (RESPONSE_HEADER_ALLOW.includes(k) || RATELIMIT_HEADER.test(k)) res.setHeader(k, redact.header(v));
       }
       if (!res.getHeader("content-type")) res.setHeader("content-type", "application/json");
     };
@@ -466,8 +461,7 @@ export function createCloudDoor(deps) {
     if (!ok) return send(res, 502, "UPSTREAM_UNREACHABLE", "the provider's error answer could not be read");
     console.log(`[llm-router] cloud ${op} -> ${label} error body ${size} bytes`);
     passHeaders();
-    const whole = redact(Buffer.concat(chunks).subarray(0, keep).toString("utf8"));
-    res.end(Buffer.from(whole, "utf8").subarray(0, ERROR_BODY_MAX));
+    res.end(redact.truncated(Buffer.concat(chunks), ERROR_BODY_MAX));
   }
 
   return { gate, handle };
