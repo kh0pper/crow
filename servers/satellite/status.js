@@ -47,7 +47,11 @@ export function collectStatus({
     uptime_s: Math.floor(Number(uptime()) || 0),
     installed: installed.map((b) => ({ id: String(b.id), version: b.version == null ? null : String(b.version) })),
     // tool_cache per bundle (§7.3, §9.1): crow pins the sha256 of each bundle's cached tools/list.
-    tools: Object.fromEntries(Object.entries(tools || {}).map(([id, t]) => [String(id), { version: t?.version == null ? null : String(t.version), sha256: String(t?.sha256 || "") }])),
+    // A bundle whose list could not be cached (too large) shows {version, error} instead.
+    tools: Object.fromEntries(Object.entries(tools || {}).map(([id, t]) => [String(id), {
+      version: t?.version == null ? null : String(t.version),
+      ...(t?.sha256 ? { sha256: String(t.sha256) } : { error: String(t?.error || "tools_unavailable") }),
+    }])),
   };
   const size = () => Buffer.byteLength(JSON.stringify(status));
   if (size() > STATUS_MAX_BYTES) {

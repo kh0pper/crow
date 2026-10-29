@@ -424,16 +424,27 @@ test("BoundedStdioTransport counts bytes since the last newline across chunks", 
   assert.equal(t2.overflowed, true, "8 + 5 bytes before the newline is over 10");
 });
 
-test("a tool list over the cap is never cached: the install job reports it and no row is written", async () => {
-  childLog();
+test("a tool list over the cap is never cached: the install job reports it, status shows the error, the next boot does not retry", async () => {
+  const log = childLog();
   process.env.FAKE_MCP_VARIANT = "huge";
   try {
     const t = await boot();
     const job = await install(t, "demo");
     assert.ok(job.log.some((l) => /tool list too large \(\d+ KiB, the cap is 256 KiB\); not cached/.test(l)), JSON.stringify(job.log));
-    assert.equal(t.a.db.prepare("SELECT COUNT(*) AS n FROM tool_cache WHERE bundle = 'demo'").get().n, 0);
-    assert.deepEqual((await call(t, "GET", "status")).json.tools, {});
+    const row = t.a.db.prepare("SELECT sha256, tools_json FROM tool_cache WHERE bundle = 'demo'").get();
+    assert.equal(row.sha256, "", "a failure row, never a list");
+    assert.equal(JSON.parse(row.tools_json).error, "tools_too_large");
+    assert.deepEqual((await call(t, "GET", "status")).json.tools, { demo: { version: "1.0.0", error: "tools_too_large" } });
+    const list = await rpc(t, "demo", "tools/list");
+    assert.match(list.json.error.message, /too large/);
     await waitFor(() => t.a.mcpHost.pids("demo").length === 0, "the caching child to stop");
+    // The next boot does not retry the same version.
+    const starts = log.lines("start").length;
+    await t.a.close();
+    const t2 = await boot({ s: { home: t.home, key: t.key, mgmt: t.mgmt }, bundles: [] });
+    await sleep(300);
+    assert.equal(log.lines("start").length, starts, "reconcile skipped the recorded failure");
+    assert.equal((await call(t2, "GET", "status")).json.tools.demo.error, "tools_too_large");
   } finally {
     delete process.env.FAKE_MCP_VARIANT;
   }
@@ -481,4 +492,31 @@ test("batches are supported: each tools/call's _meta is overwritten with the sig
     assert.match(m.error.message, /^result too large \(\d+ KiB\)$/);
   }
   assert.deepEqual(H.oversizeAnswer({ jsonrpc: "2.0", id: 5, method: "tools/call" }, 300), { jsonrpc: "2.0", id: 5, error: { code: -32603, message: "result too large (300 KiB)" } });
+});
+
+test("each request gets its own abort signal: 20 calls on one child add no listeners to the child's signal", async () => {
+  childLog();
+  const t = await boot();
+  await install(t, "demo");
+  await callTool(t, "demo", "demo_echo");
+  const { getEventListeners } = await import("node:events");
+  const sig = t.a.mcpHost._childSignal("demo");
+  assert.ok(sig);
+  for (let i = 0; i < 20; i++) await callTool(t, "demo", "demo_echo", { x: String(i) });
+  assert.equal(t.a.mcpHost._childSignal("demo"), sig, "the same child served all 20");
+  assert.equal(getEventListeners(sig, "abort").length, 0);
+});
+
+test("send() waiting on drain settles when the child goes away", async () => {
+  const tr = new H.BoundedStdioTransport({ command: process.execPath, args: ["-e", "setTimeout(() => {}, 30000)"], env: { PATH: process.env.PATH } });
+  await tr.start();
+  const pid = tr.pid;
+  const sent = tr.send({ jsonrpc: "2.0", method: "x", params: { pad: "p".repeat(4 * 1024 * 1024) } });
+  let settled = false;
+  sent.then(() => { settled = true; }, () => { settled = true; });
+  await sleep(100);
+  assert.equal(settled, false, "the child does not read stdin: the write is waiting for drain");
+  process.kill(pid, "SIGKILL");
+  await assert.rejects(Promise.race([sent, sleep(5000).then(() => "timeout")]).then((v) => { if (v === "timeout") throw new Error("never settled"); return v; }), /Not connected|EPIPE|never settled/);
+  assert.equal(settled, true);
 });
