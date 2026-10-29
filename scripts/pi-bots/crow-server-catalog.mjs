@@ -30,6 +30,8 @@ import {
 } from "../server-registry.js";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor } from "./actor-sig.mjs";
+// Leaf module (registry read only): no path back to ext_registry.mjs or mcp_writer.mjs.
+import { isLegacyConfiguredAddon } from "../../servers/gateway/services/legacy-sources.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -319,7 +321,14 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
     else servers[spec.name] = block;
     coreNames.push(spec.name);
   }
+  // A service add-on's fields count as set in its entry, the repo .env, or the
+  // caller's environment (the child inherits it), as in the gateway's proxy.
+  const addonEnv = { ...repoEnv, ...process.env };
   for (const [id, addon] of Object.entries(readAddons(crowHome))) {
+    if (!isLegacyConfiguredAddon(id, addon, undefined, addonEnv)) {
+      unconfigured[id] = "service: connected per project";
+      continue;
+    }
     const cwd = resolve(addon.cwd || join(crowHome, "bundles", id));
     if (!existsSync(cwd)) {
       unconfigured[id] = `bundle not installed on this instance (${cwd})`;

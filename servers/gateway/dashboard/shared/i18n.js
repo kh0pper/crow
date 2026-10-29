@@ -2467,6 +2467,7 @@ export const translations = {
   "settings.tools": { en: "tools", es: "herramientas" },
   "settings.notSet": { en: "Not set", es: "No configurado" },
   "settings.noConfigNeeded": { en: "No configuration needed — works out of the box.", es: "No se necesita configuración — funciona de inmediato." },
+  "settings.legacyToggleHint": { en: "No API key required. Set {env}=1 to turn it on.", es: "No hace falta una clave de API. Pon {env}=1 para activarlo." },
   "settings.requires": { en: "Requires", es: "Requiere" },
   "settings.getApiKey": { en: "Get API Key", es: "Obtener clave API" },
   "settings.docs": { en: "Docs", es: "Documentación" },

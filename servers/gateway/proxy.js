@@ -18,7 +18,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
-import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
+import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView } from "./services/legacy-sources.js";
 import { createDbClient } from "../db.js";
 import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
@@ -73,12 +73,21 @@ export function resolveCrowHome() {
   return resolveSharedCrowHome();
 }
 
+/** The listed vars that are set in the gateway's environment. */
+function envFromVars(vars = []) {
+  const env = {};
+  for (const v of vars) if (process.env[v]) env[v] = process.env[v];
+  return env;
+}
+
 /**
  * Spawn a single external server, connect, and discover its tools.
+ * `integration.env` (a legacy source) is the child's own vars; otherwise the
+ * listed `envVars` are read from the gateway's environment (data backends).
  * Returns { client, childProcess, tools } or null on failure.
  */
 async function connectToServer(integration) {
-  const spawnEnv = getSpawnEnv(integration);
+  const spawnEnv = integration.env || envFromVars(integration.envVars);
   // A data backend brings its own allowlisted base env (never the gateway's
   // whole environment); built-in integrations keep the old behaviour.
   const env = {
@@ -86,11 +95,8 @@ async function connectToServer(integration) {
     ...spawnEnv,
   };
 
-  // Support argsTransform for servers that need env values in args (e.g., Render bearer token)
   let command = integration.command;
-  let args = integration.argsTransform
-    ? integration.argsTransform(spawnEnv)
-    : integration.args;
+  let args = integration.args;
 
   // Data backends: the last check runs here, synchronously, with no await
   // between it and the spawn inside client.connect() below.
@@ -181,7 +187,7 @@ export function remoteBotActorForCwd(cwd) {
 
 /**
  * Connect to an MCP server installed as a bundle addon (from ~/.crow/mcp-addons.json).
- * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
+ * Unlike connectToServer(), this takes the add-on entry's flat env dict.
  */
 async function connectAddonServer(id, config) {
   const CONNECT_TIMEOUT_MS = 60_000;
@@ -364,8 +370,9 @@ export async function initProxyServers() {
   try {
   cleanupStaleAddonProcesses();
 
-  const configured = INTEGRATIONS.filter((i) => {
-    if (!isIntegrationConfigured(i)) return false;
+  // Crow-wide sources configured through .env (deleted by PR 4, Home migration).
+  const configured = legacyEnvSources().filter((i) => {
+    if (connectedServers.has(i.id)) return false;
     if (i.requires && i.requires.length > 0) {
       const hasBins = i.requires.every((bin) => {
         try {
@@ -435,6 +442,11 @@ async function loadAddonServers() {
 
   for (const [id, config] of entries) {
     if (connectedServers.has(id)) continue;
+    // A service add-on without its fields is connected per project, not Crow-wide.
+    if (!isLegacyConfiguredAddon(id, config)) {
+      console.log(`  [proxy] addon ${id}: skipped (service: connected per project)`);
+      continue;
+    }
     try {
       await connectAddonServer(id, config);
     } catch (err) {
@@ -875,8 +887,8 @@ export function _markAddonsSettled() {
  * Get status of all integrations for the /health and /setup endpoints.
  */
 export function getProxyStatus() {
-  const integrationStatus = INTEGRATIONS.map((integration) => {
-    const configured = isIntegrationConfigured(integration);
+  const integrationStatus = legacyIntegrationsView().map((integration) => {
+    const configured = integration.configured;
 
     let requiresMissing = false;
     if (integration.requires && integration.requires.length > 0) {
@@ -906,6 +918,9 @@ export function getProxyStatus() {
       requiresMissing,
       requires: integration.requires || [],
       docsUrl: integration.docsUrl || null,
+      category: integration.category,
+      steps: integration.steps,
+      toggleEnv: integration.toggleEnv,
     };
   });
 

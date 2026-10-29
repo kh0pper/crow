@@ -3,8 +3,9 @@
  */
 
 import { escapeHtml, badge } from "../../shared/components.js";
-import { t, tJs } from "../../shared/i18n.js";
+import { t, tJs, fill } from "../../shared/i18n.js";
 import { getProxyStatus } from "../../../proxy.js";
+import { legacyIntegrationsView } from "../../../services/legacy-sources.js";
 import { isSupervised } from "../../../../shared/supervisor.js";
 
 export default {
@@ -22,7 +23,7 @@ export default {
 
   async render({ lang }) {
     const proxyStatus = getProxyStatus();
-    const { INTEGRATIONS: allIntegrations } = await import("../../../integrations.js");
+    const allIntegrations = legacyIntegrationsView();
     const categories = { productivity: [], communication: [], development: [] };
     const statusMap = new Map(proxyStatus.map((s) => [s.id, s]));
     for (const integration of allIntegrations) {
@@ -104,8 +105,13 @@ export default {
 
         bodyContent += `<div class="int-actions">${saveBtn}${removeBtn}${links}</div>`;
 
-        if (item.keyInstructions) {
-          bodyContent += `<p class="int-note" style="margin-top:0.5rem">${escapeHtml(item.keyInstructions)}</p>`;
+        const instructions = item.steps.length > 0
+          ? item.steps.map((k) => t(k, lang)).join(" → ")
+          : item.toggleEnv
+            ? fill(t("settings.legacyToggleHint", lang), { env: item.toggleEnv })
+            : item.keyInstructions;
+        if (instructions) {
+          bodyContent += `<p class="int-note" style="margin-top:0.5rem">${escapeHtml(instructions)}</p>`;
         }
 
         html += `<div class="int-card" data-integration="${escapeHtml(item.id)}">
@@ -243,10 +249,9 @@ function pollHealth(attempts) {
   async handleAction({ req, res, db, action }) {
     if (action === "save_integration") {
       const { integration_id } = req.body;
-      const { INTEGRATIONS } = await import("../../../integrations.js");
       const { resolveEnvPath, writeEnvVar, sanitizeEnvValue } = await import("../../../env-manager.js");
 
-      const integration = INTEGRATIONS.find((i) => i.id === integration_id);
+      const integration = legacyIntegrationsView().find((i) => i.id === integration_id);
       if (!integration) {
         res.json({ ok: false, error: "Unknown integration" });
         return true;
@@ -282,10 +287,9 @@ function pollHealth(attempts) {
 
     if (action === "remove_integration") {
       const { integration_id } = req.body;
-      const { INTEGRATIONS } = await import("../../../integrations.js");
       const { resolveEnvPath, removeEnvVar } = await import("../../../env-manager.js");
 
-      const integration = INTEGRATIONS.find((i) => i.id === integration_id);
+      const integration = legacyIntegrationsView().find((i) => i.id === integration_id);
       if (!integration) {
         res.json({ ok: false, error: "Unknown integration" });
         return true;

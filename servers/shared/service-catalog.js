@@ -32,6 +32,7 @@ function toEntry(m) {
     name: m.name,
     description: m.description,
     icon: m.icon,
+    category: m.category,
     bundleId: m.id,
     version: m.version,
     server: {

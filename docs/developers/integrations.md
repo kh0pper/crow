@@ -14,25 +14,37 @@ Search for an existing MCP server package:
 
 If no package exists, you can build one using the `@modelcontextprotocol/sdk` package.
 
-## Step 2: Add to Integrations Registry
+## Step 2: Add a Bundle Manifest with a `connect` Block
 
-Add an entry to `servers/gateway/integrations.js`:
+Create `bundles/your-service/manifest.json`. The `connect` block makes it a service: it names the fields a person fills in and the steps the dashboard shows (add each `label_key` and step key, in English and Spanish, to `servers/gateway/dashboard/shared/i18n.js`). Then run `npm run build-registry`.
 
-```js
+```json
 {
-  id: "your-service",
-  name: "Your Service",
-  description: "Brief description of what this integration does",
-  npmPackage: "@scope/mcp-server-your-service",
-  envVars: [
-    {
-      name: "YOUR_SERVICE_API_KEY",
-      description: "API key from Your Service",
-      helpUrl: "https://yourservice.com/api-keys"
-    }
+  "id": "your-service",
+  "name": "Your Service",
+  "version": "1.0.0",
+  "description": "Brief description of what this integration does",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "productivity",
+  "server": {
+    "command": "npx",
+    "args": ["-y", "@scope/mcp-server-your-service"],
+    "envKeys": ["YOUR_SERVICE_API_KEY"]
+  },
+  "env_vars": [
+    { "name": "YOUR_SERVICE_API_KEY", "description": "API key from Your Service", "required": true, "secret": true }
   ],
-  command: "npx",
-  args: ["-y", "@scope/mcp-server-your-service"],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      { "name": "YOUR_SERVICE_API_KEY", "kind": "secret", "label_key": "services.field.YOUR_SERVICE_API_KEY" }
+    ],
+    "steps": ["services.steps.your-service.1", "services.steps.your-service.2"]
+  },
+  "ports": [],
+  "webUI": null
 }
 ```
 

@@ -14,25 +14,37 @@ Busca un paquete de servidor MCP existente:
 
 Si no existe ningún paquete, puedes construir uno usando el paquete `@modelcontextprotocol/sdk`.
 
-## Paso 2: Agrégala al registro de integraciones
+## Paso 2: Agrega un manifiesto de bundle con un bloque `connect`
 
-Agrega una entrada en `servers/gateway/integrations.js`:
+Crea `bundles/your-service/manifest.json`. El bloque `connect` lo convierte en un servicio: nombra los campos que la persona rellena y los pasos que muestra el panel (agrega cada `label_key` y cada clave de paso, en inglés y en español, a `servers/gateway/dashboard/shared/i18n.js`). Luego ejecuta `npm run build-registry`.
 
-```js
+```json
 {
-  id: "your-service",
-  name: "Your Service",
-  description: "Brief description of what this integration does",
-  npmPackage: "@scope/mcp-server-your-service",
-  envVars: [
-    {
-      name: "YOUR_SERVICE_API_KEY",
-      description: "API key from Your Service",
-      helpUrl: "https://yourservice.com/api-keys"
-    }
+  "id": "your-service",
+  "name": "Your Service",
+  "version": "1.0.0",
+  "description": "Brief description of what this integration does",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "productivity",
+  "server": {
+    "command": "npx",
+    "args": ["-y", "@scope/mcp-server-your-service"],
+    "envKeys": ["YOUR_SERVICE_API_KEY"]
+  },
+  "env_vars": [
+    { "name": "YOUR_SERVICE_API_KEY", "description": "API key from Your Service", "required": true, "secret": true }
   ],
-  command: "npx",
-  args: ["-y", "@scope/mcp-server-your-service"],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      { "name": "YOUR_SERVICE_API_KEY", "kind": "secret", "label_key": "services.field.YOUR_SERVICE_API_KEY" }
+    ],
+    "steps": ["services.steps.your-service.1", "services.steps.your-service.2"]
+  },
+  "ports": [],
+  "webUI": null
 }
 ```
 

@@ -4,7 +4,10 @@ import {
   serviceCatalog, serviceById, labelSlug, blockNameFor, cleanLabel,
   renderDerivedEnv, isServiceManifest, _resetServiceCatalogForTest,
 } from "../servers/shared/service-catalog.js";
-import { INTEGRATIONS } from "../servers/gateway/integrations.js";
+
+// Today's Notion envTransform output for NOTION_TOKEN "ntn_abc123", pinned when the
+// integrations list was retired (its module is deleted).
+const LEGACY_NOTION = { OPENAPI_MCP_HEADERS: "{\"Authorization\":\"Bearer ntn_abc123\",\"Notion-Version\":\"2022-06-28\"}" };
 
 test("catalog reads the registry bundles", () => {
   _resetServiceCatalogForTest();
@@ -46,8 +49,7 @@ test("blockNameFor and cleanLabel", () => {
 
 test("renderDerivedEnv matches today's Notion envTransform and escapes", () => {
   const notion = serviceById("notion");
-  const legacy = INTEGRATIONS.find((i) => i.id === "notion").envTransform({ NOTION_TOKEN: "ntn_abc123" });
-  assert.deepEqual(renderDerivedEnv(notion, { NOTION_TOKEN: "ntn_abc123" }), legacy);
+  assert.deepEqual(renderDerivedEnv(notion, { NOTION_TOKEN: "ntn_abc123" }), LEGACY_NOTION);
   const tricky = renderDerivedEnv(notion, { NOTION_TOKEN: 'a"b\\c' });
   assert.equal(JSON.parse(tricky.OPENAPI_MCP_HEADERS).Authorization, 'Bearer a"b\\c');
 });
