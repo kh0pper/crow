@@ -2283,7 +2283,7 @@
         "touchscreen"
       ],
       "icon": "monitor",
-      "description": "Turn a browser into a home display: your Ramble bird as a voice companion (tap to talk; Crow runs speech-to-text, your chosen bot and text-to-speech), with on-screen timers, recipes and notes. Pair it with a code; tailnet only.",
+      "description": "Turn a browser into a home display: your Ramble bird as a voice companion (tap to talk; Crow runs speech-to-text, answers as Crow and speaks with text-to-speech), with on-screen timers, recipes and notes. Pair it with a code; tailnet only.",
       "server": {
         "command": "node",
         "args": [

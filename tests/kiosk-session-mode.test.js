@@ -547,7 +547,7 @@ async function crowServe({ def, ensure = true, providers = [], voiceExtra = {}, 
         await db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id IN (?, 'helper')", args: [CROW] });
         for (const [id] of providers) await db.execute({ sql: "DELETE FROM providers WHERE id = ?", args: [id] });
       });
-        },
+    },
   };
 }
 const crowDef = async (over = {}, voice = {}) => {
@@ -738,6 +738,18 @@ test("the kiosk turn check answers as the Crow voice bot (botId crow.voice)", as
     assert.ok(f.calls.length >= 3);
     for (const c of f.calls) { assert.equal(c.botId, CROW); assert.equal(c.surface, "kiosk"); assert.equal(c.noEscalate, true); }
   } finally { await f.close(); }
+});
+
+test("a runtime without the shared voice module has no assistant: the session hello closes 4403 no_bot and stores nothing", async () => {
+  const f = await serve({ runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true }, { crowVoice: undefined });
+  try {
+    const before = await withDb((db) => store.listDevices(db));
+    const c = await f.open();
+    await c.until(() => c.closed);
+    assert.deepEqual(c.closed, { code: 4403, reason: "no_bot" });
+    assert.ok(!c.msgs.some((m) => m.type === "ready"));
+    assert.equal((await withDb((db) => store.listDevices(db))).length, before.length);
+  } finally { f.close(); }
 });
 
 // ─── B3: the player bar's endpoint and the bar display's lifetime (dormant until a bar hello) ───

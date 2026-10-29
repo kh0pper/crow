@@ -15,9 +15,7 @@
 import { escapeHtml, actionBar } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t, fill } from "../../shared/i18n.js";
-import { getTtsProfiles } from "../../../ai/tts/index.js";
-import { getSttProfiles } from "../../../ai/stt/index.js";
-import { loadModelOptions, loadVisionProfiles } from "./data-queries.js";
+import { loadModelOptions } from "./data-queries.js";
 import { renderGatewayFields, engineGateRequiredDomFields } from "./gateway-fields.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { isEngineAbsent } from "./engine-gate.js";

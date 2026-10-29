@@ -27,6 +27,7 @@ import { learningMode } from "./def-adapter.js";
 
 const OK = `<span class="btb-ok" aria-hidden="true">&#10003;</span>`;
 const WARN = `<span class="btb-status-warn" aria-hidden="true">&#9888;</span>`;
+const INFO = `<span class="btb-check-info" aria-hidden="true">&#8505;</span>`;
 const ERR = `<span class="btb-err" aria-hidden="true">&#10007;</span>`;
 
 function row(icon, label, detail, fixHref, fixLabel) {
@@ -142,7 +143,10 @@ export async function renderReadiness(db, bot, def, lang) {
       t("botbuilder.checkChannelNone", lang), tabHref("basics"), fixLabel));
   } else {
     const missing = missingGatewayFields(gw);
-    if (missing.length) {
+    if (gw.type === "glasses") {
+      // Retired: a kept glasses record is informational only, never OK and never a warning.
+      rows.push(row(INFO, t("botbuilder.checkChannel", lang), t("botbuilder.bxGlassesRetiredShort", lang), null, fixLabel));
+    } else if (missing.length) {
       rows.push(row(WARN, t("botbuilder.checkChannel", lang),
         `${escapeHtml(gw.type)} — ` +
         fill(t("botbuilder.checkChannelIncomplete", lang), { fields: escapeHtml(missing.map((f) => t("botbuilder.fld_" + f, lang)).join(", ")) }),
