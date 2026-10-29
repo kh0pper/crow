@@ -35,8 +35,9 @@ import { getOwnAddresses } from "./locality.js";
 import { providerRowToObject } from "./provider-row.js";
 import { invalidateRoleContext } from "./model-roles-store.js";
 import { presetHostFor } from "./provider-recommendations.js";
+import { LOCAL_MARKS_KEY, parseMarksMap as parseMap, readLocalMarks } from "./provider-local-marks-read.js";
 
-export const LOCAL_MARKS_KEY = "provider_local_marks";
+export { LOCAL_MARKS_KEY, readLocalMarks };
 export const LOCAL_MARKS_SEEDED_KEY = "provider_local_marks_seeded";
 export const LOCAL_NOTICE_SHOWN_KEY = "provider_local_notice_shown";
 /** The value LOCAL_NOTICE_SHOWN_KEY takes once the operator dismisses the Models page banner. */
@@ -58,17 +59,6 @@ async function writeValue(db, key, value) {
   });
 }
 
-function parseMap(v) {
-  try {
-    const parsed = v ? JSON.parse(v) : {};
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch { return {}; }
-}
-
-/** Every mark on this box, or {} when none is stored or it does not parse. */
-export async function readLocalMarks(db) {
-  try { return parseMap(await readValue(db, LOCAL_MARKS_KEY)); } catch { return {}; }
-}
 
 // ---- change listeners ------------------------------------------------------------
 

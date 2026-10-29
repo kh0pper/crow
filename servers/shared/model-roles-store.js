@@ -18,7 +18,7 @@ import { providerRowToObject } from "./provider-row.js";
 import { loadCatalog, wrapOwnId } from "./model-roles-env.js";
 import { writeSetting } from "../gateway/dashboard/settings/registry.js";
 import { getOrCreateLocalInstanceId as defaultGetOwnId } from "../gateway/instance-registry.js";
-import { readLocalMarks } from "./provider-local-marks.js";
+import { readLocalMarks } from "./provider-local-marks-read.js";
 
 const CORE_IDS = new Set(CORE_ROLES.map((r) => r.id));
 
