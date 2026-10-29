@@ -78,7 +78,7 @@ async function setup(t, { job = {}, knobs = {}, extraEnv = {}, turnTimeoutMs = 2
   const jobPath = join(s.home, "job.json");
   const progressPath = join(s.home, "progress.ndjson");
   const fullJob = {
-    botDef: botDef(), gatewayType: "perch", allowServers: [], allowSkills: [], prodMaxPi: 99,
+    botDef: botDef(), gatewayType: "perch", allowServers: [], allowSkills: [], allowToolless: true, prodMaxPi: 99,
     capacityCount: null, mcpOverrides: null, runId, thread: { id: "thread-1", turns: [{ text: "hello" }] }, ...job,
   };
   writeFileSync(jobPath, JSON.stringify(fullJob));
@@ -179,6 +179,23 @@ test("refuses a tool surface outside allowServers", async (t) => {
   assert.equal(r.code, 1, stderr(ctx));
   await assertNoSurvivors(ctx);
   assert.match(stderr(ctx), /crow_mcp server memory is not in allowServers/);
+  assert.equal(existsSync(ctx.capture), false);
+});
+
+test("refuses an effective tool grant with no server/tool entry", async (t) => {
+  const ctx = await setup(t, { job: { allowToolless: false } });
+  const r = await runChild(t, ctx);
+  assert.equal(r.code, 1, stderr(ctx));
+  await assertNoSurvivors(ctx);
+  assert.match(stderr(ctx), /effective tools: .*server\/tool/);
+  assert.equal(existsSync(ctx.capture), false);
+});
+
+test("refuses a non-boolean allowToolless", async (t) => {
+  const ctx = await setup(t, { job: { allowToolless: "yes" } });
+  const r = await runChild(t, ctx);
+  assert.equal(r.code, 1, stderr(ctx));
+  assert.match(stderr(ctx), /allowToolless must be a boolean/);
   assert.equal(existsSync(ctx.capture), false);
 });
 

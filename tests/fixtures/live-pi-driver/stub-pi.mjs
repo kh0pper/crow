@@ -16,6 +16,9 @@
  *   PIBOT_TEST_NO_JSONL=1  write no session file (not "..._NO_SESSION": SECRET_NAME_RE matches
  *                          SESSION, so childEnv and the bridge's env scrub would drop it)
  *   PIBOT_TEST_IGNORE_TERM=1 ignore SIGTERM and stdin EOF (only SIGKILL stops it)
+ *   PIBOT_TEST_MODEL_ERROR_ON_TURN=N  the Nth prompt of the session (1-based) records a failed
+ *                          model call the way real pi does: an assistant message with no content,
+ *                          stopReason "error" and an errorMessage
  *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker } per prompt
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
@@ -60,7 +63,7 @@ function priorPrompts() {
   return n;
 }
 
-function record(role, text) {
+function record(role, text, failed = null) {
   if (!writeSession) return;
   if (!sessionFile) {
     mkdirSync(sessionDir, { recursive: true });
@@ -70,7 +73,9 @@ function record(role, text) {
   const id = randomUUID().slice(0, 8);
   const message = role === "user"
     ? { role, content: [{ type: "text", text }], timestamp: Date.now() }
-    : { role, content: [{ type: "text", text }], provider: "stub", model: "m1", stopReason: "stop", timestamp: Date.now() };
+    : failed
+      ? { role, content: [], provider: "stub", model: "m1", stopReason: "error", errorMessage: failed, timestamp: Date.now() }
+      : { role, content: [{ type: "text", text }], provider: "stub", model: "m1", stopReason: "stop", timestamp: Date.now() };
   appendFileSync(sessionFile, JSON.stringify({ type: "message", id, parentId: lastId, timestamp: now(), message }) + "\n");
   lastId = id;
 }
@@ -95,6 +100,12 @@ process.stdin.on("data", (chunk) => {
       out({ type: "response", command: "prompt", id: m.id, success: true });
       if (env.PIBOT_TEST_CRASH === "1") process.exit(1);
       if (env.PIBOT_TEST_HANG === "1") continue;
+      if (Number(env.PIBOT_TEST_MODEL_ERROR_ON_TURN) === n + 1) {
+        const failed = `400: stub model error on turn ${n + 1}`;
+        record("assistant", "", failed);
+        out({ type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: failed }] });
+        continue;
+      }
       const text = replies.length ? String(replies[Math.min(n, replies.length - 1)]) : "ok";
       record("assistant", text);
       out({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text }] }] });

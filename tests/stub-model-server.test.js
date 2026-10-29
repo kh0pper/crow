@@ -127,3 +127,14 @@ test("binds loopback only; two servers coexist", async () => {
     assert.notEqual(a.baseUrl, b.baseUrl);
   } finally { await a.close(); await b.close(); }
 });
+
+test("an error reply is an HTTP error body, and the script moves on", async () => {
+  const s = await startStubModel({ script: [{ error: { status: 400, message: "bad turn" } }, { text: "next" }] });
+  try {
+    const r = await post(s.baseUrl, { model: "stub-m1", stream: true, messages: [] });
+    assert.equal(r.status, 400);
+    assert.deepEqual(await r.json(), { error: { message: "bad turn" } });
+    const r2 = await post(s.baseUrl, { model: "stub-m1", stream: false, messages: [] });
+    assert.equal((await r2.json()).choices[0].message.content, "next");
+  } finally { await s.close(); }
+});

@@ -150,6 +150,38 @@ export function checkToolSurface(botDef, { allowServers, allowSkills = [], scrat
 }
 
 /**
+ * Refuses a grant with no `server/tool` crow_mcp entry. pi's --tools matches exact names, so a
+ * bare server (crow_mcp: ["crow-projects"] → mcp__crow-projects, the router-mode name) or an
+ * empty list gives pi no MCP tool at all and the row measures nothing (seen with real pi).
+ * The parent checks the static def, the child the effective one; `allowToolless` (stub tests)
+ * is the only bypass.
+ */
+export function checkToolGrant(botDef, { allowToolless = false } = {}) {
+  if (allowToolless === true) return;
+  const entries = botDef && botDef.tools && botDef.tools.crow_mcp;
+  const granted = Array.isArray(entries) && entries.some((e) => typeof e === "string" && /^[^/]+\/[^/]+$/.test(e));
+  if (!granted) refuse('no crow_mcp entry of the form "server/tool": a bare server or an empty grant gives pi no MCP tool (allowToolless bypasses this)');
+}
+
+/**
+ * The first failed model call in a pi session JSONL, as a contamination string, or null: an
+ * assistant message whose stopReason is "error" or "aborted". pi records a failed call this way
+ * and the bridge still reports the turn as asked (seen with real pi: a 400 became "(no reply)").
+ */
+export function modelErrorOf(jsonl) {
+  for (const line of String(jsonl ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const m = o && o.type === "message" ? o.message : null;
+    if (m && m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
+      return `model call failed: ${String(m.errorMessage ?? `stopReason ${m.stopReason}`).slice(0, 200)}`;
+    }
+  }
+  return null;
+}
+
+/**
  * The child's environment: an allowlist of the parent env, scratchEnv on top, the pinned
  * driver variables, then the validated extraEnv. No key from the parent may look like a secret;
  * that check runs before extraEnv goes on (CROW_SESSION_* would match SECRET_NAME_RE).
@@ -469,7 +501,7 @@ function sessionPathsOf(turns, home) {
 export async function runConversation({
   botDef, models, scratchHome, threads, env = {}, allowHosts = [], allowServers, allowSkills = [], piPackages = [],
   gatewayType = "perch", piCli, turnTimeoutMs = 600_000, turnSlackMs = TURN_SLACK_MS, wallMs,
-  prodMaxPi = LIFECYCLE_DEFAULTS.maxPi, mcpOverrides = null, parentEnv = process.env, log = () => {},
+  prodMaxPi = LIFECYCLE_DEFAULTS.maxPi, mcpOverrides = null, allowToolless = false, parentEnv = process.env, log = () => {},
 } = {}) {
   const sinceBootSec = bootSecNow();
   const runId = randomUUID();
@@ -491,6 +523,8 @@ export async function runConversation({
   checkEndpoints(models, { allowHosts, gatewayPort: process.env.CROW_GATEWAY_PORT, gatewayPorts });
   checkBotDef(botDef, models, home);
   checkToolSurface(botDef, { allowServers, allowSkills, scratchHome: home });
+  if (typeof allowToolless !== "boolean") refuse("allowToolless must be a boolean");
+  checkToolGrant(botDef, { allowToolless });
   if (!Array.isArray(threads) || !threads.length) refuse("threads must be a non-empty array");
   const ids = new Set();
   for (const th of threads) {
@@ -533,7 +567,7 @@ export async function runConversation({
   for (const thread of threads) {
     if (Date.now() >= wallEnd) { contaminated = "conversation exceeded wallMs"; break; }
     const r = await runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wallEnd, say, job: {
-      botDef, gatewayType, allowServers, allowSkills, prodMaxPi, capacityCount: null, mcpOverrides, runId, thread,
+      botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount: null, mcpOverrides, runId, thread,
     } });
     if (meta.flags === null && r.flags) meta.flags = r.flags;
     out.push({ id: thread.id, sessionPaths: r.sessionPaths, turns: r.turns });
@@ -643,6 +677,13 @@ async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wall
     const paths = sessionPathsOf(turns, home);
     if (!paths) why = SESSION_MISSING;
     else sessionPaths = paths;
+  }
+  // A failed model call contaminates the whole thread, whichever turn it was (Lane D).
+  for (const p of sessionPaths) {
+    if (why) break;
+    let text = "";
+    try { text = readFileSync(p, "utf8"); } catch (e) { why = `cannot read session ${p}: ${e.message}`; break; }
+    why = modelErrorOf(text);
   }
   return { contaminated: why, reason: why ? tailOf(errPath) || null : null, turns, sessionPaths, flags };
 }

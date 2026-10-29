@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolvePiCli } from "../scripts/pi-bots/pi_resolver.mjs";
 import { settledSurvivorsByMarker, bootSecNow } from "../scripts/lib/live-pi-driver.mjs";
-import { realPiPrereqs, runRealStubConversation } from "../scripts/lib/record-stub-session.mjs";
+import { realPiPrereqs, runRealStubConversation, THREADS } from "../scripts/lib/record-stub-session.mjs";
 import { parseSession, TOOL_PREFIX } from "../scripts/research-eval/session-log.mjs";
 
 const pre = realPiPrereqs();
@@ -37,6 +37,7 @@ test("real pi: tool call round-trip over two threads", { skip, timeout: 900_000 
   const results = p.events.filter((e) => e.kind === "result");
   assert.equal(results.length, 1);
   assert.equal(results[0].isError, false, results[0].text);
+  assert.ok(results[0].text.includes("research eval"), `the call read the scratch DB's project: ${results[0].text}`);
   assert.equal(p.prose, "noted");
 
   assert.ok(stub.requests.length >= 3, `stub saw ${stub.requests.length} requests`);
@@ -47,4 +48,21 @@ test("real pi: tool call round-trip over two threads", { skip, timeout: 900_000 
   assert.equal(sid(day1).length, 1);
   assert.equal(sid(day2).length, 1);
   assert.notEqual(sid(day1)[0], sid(day2)[0]);
+});
+
+test("real pi: a model call failing on turn 2 contaminates the whole thread", { skip, timeout: 900_000 }, async (t) => {
+  const sinceBootSec = bootSecNow();
+  const run = await runRealStubConversation({
+    piCli: pre.piCli, piLab: pre.piLab,
+    script: [{ text: "one" }, { error: { status: 400, message: "stub refuses turn 2" } }],
+    threads: [{ id: "day-1", turns: [{ text: "first" }, { text: "second" }] }, THREADS[1]],
+  });
+  t.after(() => run.cleanup());
+  const { result: r, events } = run;
+  assert.equal(r.ok, false);
+  assert.match(r.contaminated, /^model call failed: .*stub refuses turn 2/);
+  assert.equal(r.threads.length, 1, "day 2 never runs");
+  assert.equal(r.threads[0].turns.length, 2);
+  const runId = events.find((e) => e.runId)?.runId;
+  assert.deepEqual(await settledSurvivorsByMarker(runId, { sinceBootSec }), []);
 });

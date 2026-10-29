@@ -3,6 +3,7 @@
  *
  * Replies come from a script (one entry per POST /v1/chat/completions):
  *   { text } | { toolCalls: [{ name | nameEndsWith, arguments }] } | { hang: true }
+ *   | { error: { status, message } }  (an HTTP error body instead of a completion)
  * Past the end of the script the reply is "(stub: script exhausted)".
  * Streams standard chat.completion.chunk SSE when the request sets stream:true,
  * otherwise one chat.completion JSON body. No module-level state.
@@ -62,6 +63,9 @@ export async function startStubModel({ script = [], host = "127.0.0.1" } = {}) {
     const created = Math.floor(Date.now() / 1000);
     const id = `chatcmpl-stub-${next}`;
 
+    if (reply.error) {
+      return sendJson(res, reply.error.status ?? 400, { error: { message: String(reply.error.message ?? "stub error") } });
+    }
     if (reply.hang) {
       res.writeHead(200, stream
         ? { "content-type": "text/event-stream", "cache-control": "no-cache" }

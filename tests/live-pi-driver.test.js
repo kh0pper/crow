@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import {
-  runConversation, DriverRefusal, SESSION_MISSING, TURN_SLACK_MS, survivorsByMarker, settledSurvivorsByMarker, bootSecNow,
+  runConversation, DriverRefusal, SESSION_MISSING, modelErrorOf, TURN_SLACK_MS, survivorsByMarker, settledSurvivorsByMarker, bootSecNow,
 } from "../scripts/lib/live-pi-driver.mjs";
 import { makeScratch, makeTemplate } from "../scripts/research-eval/scratch.mjs";
 
@@ -77,7 +77,7 @@ async function setup(t, { knobs = {}, over = {} } = {}) {
     s.cleanup();
   });
   const opts = {
-    botDef: botDef(), models: models(), scratchHome: s.home, threads: twoThreads(), allowServers: [],
+    botDef: botDef(), models: models(), scratchHome: s.home, threads: twoThreads(), allowServers: [], allowToolless: true,
     piCli: STUB, wallMs: 120_000, turnTimeoutMs: 20_000, prodMaxPi: 99,
     parentEnv: { ...process.env, PIBOT_TEST_CAPTURE: capture, ...knobs },
     log: (e) => events.push({ ...e, t: Date.now() }),
@@ -261,6 +261,48 @@ test("missing session file is contaminated", async (t) => {
   assert.equal(r.ok, false);
   assert.equal(r.contaminated, SESSION_MISSING);
   assert.equal(r.threads.length, 1);
+  await ctx.noSurvivors();
+});
+
+test("model call error on turn 1 contaminates the thread", async (t) => {
+  const ctx = await setup(t, { knobs: { PIBOT_TEST_MODEL_ERROR_ON_TURN: "1" } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, false);
+  assert.equal(r.contaminated, "model call failed: 400: stub model error on turn 1");
+  assert.equal(r.threads.length, 1, "day 2 never runs");
+  await ctx.noSurvivors();
+});
+
+test("model call error on turn 2 only contaminates the whole thread", async (t) => {
+  const ctx = await setup(t, { knobs: { PIBOT_TEST_MODEL_ERROR_ON_TURN: "2" } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, false);
+  assert.equal(r.contaminated, "model call failed: 400: stub model error on turn 2");
+  assert.equal(r.threads.length, 1);
+  assert.equal(r.threads[0].turns.length, 2, "both turns ran; the scan after the thread caught turn 2");
+  await ctx.noSurvivors();
+});
+
+test("modelErrorOf: error and aborted count, a clean stop does not, the message is capped", () => {
+  const line = (message) => JSON.stringify({ type: "message", message });
+  assert.equal(modelErrorOf(line({ role: "assistant", content: [], stopReason: "stop" })), null);
+  assert.equal(modelErrorOf(line({ role: "assistant", stopReason: "aborted" })), "model call failed: stopReason aborted");
+  const long = modelErrorOf(line({ role: "assistant", stopReason: "error", errorMessage: "x".repeat(500) }));
+  assert.equal(long, `model call failed: ${"x".repeat(200)}`);
+  assert.equal(modelErrorOf(line({ role: "user", stopReason: "error" })), null);
+});
+
+test("an empty or bare-server tool grant is refused unless allowToolless", async (t) => {
+  const ctx = await setup(t, { over: { threads: [{ id: "day-1", turns: [{ text: "hi" }] }] } });
+  const bare = botDef({ tools: { pi_builtin: ["read"], crow_mcp: ["crow-projects"] } });
+  const base = { ...ctx.opts, botDef: bare, allowServers: ["crow-projects"] };
+  for (const over of [{ allowToolless: false }, { allowToolless: undefined }, { botDef: botDef(), allowToolless: false }]) {
+    await assert.rejects(runConversation({ ...base, ...over }), (e) => e instanceof DriverRefusal && /server\/tool/.test(e.message), JSON.stringify(over));
+  }
+  await assert.rejects(runConversation({ ...base, allowToolless: "yes" }), (e) => e instanceof DriverRefusal && /allowToolless/.test(e.message));
+  assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
+  const r = await runConversation({ ...base, allowToolless: true });
+  assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
   await ctx.noSurvivors();
 });
 

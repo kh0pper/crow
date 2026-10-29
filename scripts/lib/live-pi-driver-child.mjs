@@ -7,7 +7,7 @@
  *
  *   node live-pi-driver-child.mjs <job.json> <progress.ndjson>
  *
- * Job: { botDef, gatewayType, allowServers, allowSkills, prodMaxPi, capacityCount,
+ * Job: { botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount,
  *        mcpOverrides, runId, thread: { id, turns: [{ text, answers?: [{ when, text }], otherwise? }] } }
  * `capacityCount` is a test-only stand-in for countLivePi() (null in a real run).
  *
@@ -40,6 +40,7 @@ function readJob(path, env) {
   if (!botDef || typeof botDef.id !== "string" || !botDef.id) throw refuse("job.botDef.id must be a non-empty string");
   if (botDef.id !== env.CROW_ACTOR_BOT_ID) throw refuse("job.botDef.id must equal CROW_ACTOR_BOT_ID");
   if (typeof job.runId !== "string" || job.runId !== env.CROW_EVAL_RUN_ID) throw refuse("job.runId must equal CROW_EVAL_RUN_ID");
+  if (job.allowToolless !== undefined && typeof job.allowToolless !== "boolean") throw refuse("job.allowToolless must be a boolean");
   if (job.gatewayType !== undefined && (typeof job.gatewayType !== "string" || !job.gatewayType)) throw refuse("job.gatewayType must be a string");
   if (!Number.isInteger(job.prodMaxPi) || job.prodMaxPi < 1) throw refuse("job.prodMaxPi must be a positive integer");
   if (job.capacityCount !== undefined && job.capacityCount !== null) {
@@ -83,7 +84,7 @@ async function main(argv, env) {
   const thread = job.thread.id;
 
   // Only now the driver helpers (crow-home.js, bot-env.js, pi_lifecycle.mjs: no DB, no bridge).
-  const { checkToolSurface, killTree } = await import("./live-pi-driver.mjs");
+  const { checkToolSurface, checkToolGrant, killTree } = await import("./live-pi-driver.mjs");
   installDeathWatch(killTree);
 
   // Pre-spawn asserts (R2, R7): no warm target, and the static tool surface.
@@ -103,7 +104,10 @@ async function main(argv, env) {
     // The EFFECTIVE tool surface: the def plus its skills' declared tools, checked again in full.
     const { withSkillTools } = await import("../pi-bots/bot-world.mjs");
     const effective = await withSkillTools(job.botDef, { crowHome: env.CROW_HOME, log: (m) => console.error(`[child] ${m}`) });
-    try { checkToolSurface(effective, surface); } catch (e) { throw refuse(`effective tools: ${e.message}`); }
+    try {
+      checkToolSurface(effective, surface);
+      checkToolGrant(effective, { allowToolless: job.allowToolless === true });
+    } catch (e) { throw refuse(`effective tools: ${e.message}`); }
 
     // Seed the bot (D6), after the guard.
     const { id, ...rest } = job.botDef;

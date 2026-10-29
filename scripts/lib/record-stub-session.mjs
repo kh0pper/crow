@@ -14,7 +14,7 @@
  * driver pins every gateway variable to a closed port.
  */
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
+import { hostname, tmpdir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runConversation } from "./live-pi-driver.mjs";
@@ -57,7 +57,17 @@ export function realPiPrereqs(env = process.env) {
  * Runs the two-thread conversation. Resolves `{ result, stub, scratch, events }`; the caller
  * runs `cleanup()` (stub, scratch, template) when done reading the session files.
  */
-export async function runRealStubConversation({ piCli, piLab, prodMaxPi, log = () => {} }) {
+export const THREADS = Object.freeze([
+  { id: "day-1", turns: [{ text: "List my projects, then say what you saw." }] },
+  { id: "day-2", turns: [{ text: "Good morning." }] },
+]);
+
+/**
+ * Runs the conversation (default: the two recorded threads over SCRIPT). Resolves
+ * `{ result, stub, scratch, events, cleanup }`; the caller runs `cleanup()` (stub, scratch,
+ * template) when done reading the session files.
+ */
+export async function runRealStubConversation({ piCli, piLab, prodMaxPi, script = SCRIPT, threads = THREADS, log = () => {} }) {
   const template = await makeTemplate({ botId: BOT });
   let stub = null;
   let scratch = null;
@@ -68,16 +78,13 @@ export async function runRealStubConversation({ piCli, piLab, prodMaxPi, log = (
   };
   try {
     scratch = await makeScratch({ botId: BOT, template });
-    stub = await startStubModel({ script: SCRIPT.map((s) => ({ ...s })) });
+    stub = await startStubModel({ script: script.map((s) => ({ ...s })) });
     const events = [];
     const result = await runConversation({
       botDef: botDef(),
       models: { providers: { stub: { baseUrl: stub.baseUrl, api: "openai-completions", apiKey: "stub", models: [{ id: "stub-m1" }] } } },
       scratchHome: scratch.home,
-      threads: [
-        { id: "day-1", turns: [{ text: "List my projects, then say what you saw." }] },
-        { id: "day-2", turns: [{ text: "Good morning." }] },
-      ],
+      threads: threads.map((th) => ({ ...th, turns: th.turns.map((t) => ({ ...t })) })),
       allowServers: ["crow-projects"],
       piPackages: [piLab],
       piCli,
@@ -109,6 +116,25 @@ export function scrub(text, { scratchHome, piLab, piCli }) {
   return out;
 }
 
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Throws when scrubbed text still names this box: "/home/", the tmp dir, the user name or the
+ * host name. The host name is matched as a bare token (not inside a word, an id or a
+ * "-"/"_" compound) and case-sensitively, because a host can share its name with the product
+ * ("crow-projects", "the Crow dashboard" are fine; "crow." or "crow:" is not).
+ */
+export function assertScrubbed(text, { tmp = tmpdir(), user = userInfo().username, host = hostname() } = {}) {
+  const t = String(text);
+  const hits = [];
+  if (t.includes("/home/")) hits.push("/home/");
+  if (tmp && tmp.length > 1 && t.includes(tmp)) hits.push(`tmpdir ${tmp}`);
+  if (user && t.includes(user)) hits.push("the user name");
+  if (host && new RegExp(`(?<![\\w-])${escapeRe(host)}(?![\\w-])`).test(t)) hits.push("the host name");
+  if (hits.length) throw new Error(`refusing to write the fixture: the scrubbed session still contains ${hits.join(", ")}`);
+  return t;
+}
+
 const isMain = (() => {
   try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
 })();
@@ -125,7 +151,7 @@ if (isMain) {
     if (!result.ok) { console.error(`run failed: ${result.contaminated}\n${result.reason ?? ""}`); code = 1; }
     else {
       const raw = readFileSync(result.threads[0].sessionPaths[0], "utf8");
-      writeFileSync(resolve(out), scrub(raw, { scratchHome: scratch.home, piLab: pre.piLab, piCli: pre.piCli }));
+      writeFileSync(resolve(out), assertScrubbed(scrub(raw, { scratchHome: scratch.home, piLab: pre.piLab, piCli: pre.piCli })));
       console.error(`wrote ${out}`);
     }
   } finally { await run.cleanup(); }
