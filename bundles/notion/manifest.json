@@ -1,0 +1,68 @@
+{
+  "id": "notion",
+  "name": "Notion",
+  "version": "1.0.0",
+  "description": "Wiki pages, databases, knowledge base",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": [
+    "notion",
+    "wiki",
+    "notes"
+  ],
+  "icon": "book",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@notionhq/notion-mcp-server"
+    ],
+    "envKeys": [
+      "NOTION_TOKEN"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "NOTION_TOKEN",
+      "description": "Notion internal integration secret",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "NOTION_TOKEN",
+        "kind": "secret",
+        "label_key": "services.field.NOTION_TOKEN"
+      }
+    ],
+    "steps": [
+      "services.steps.notion.1",
+      "services.steps.notion.2",
+      "services.steps.notion.3"
+    ],
+    "derived_env": {
+      "OPENAPI_MCP_HEADERS": {
+        "template": "{\"Authorization\":\"Bearer ${NOTION_TOKEN}\",\"Notion-Version\":\"2022-06-28\"}",
+        "encoding": "json"
+      }
+    },
+    "test": {
+      "kind": "http",
+      "url": "https://api.notion.com/v1/users/me",
+      "headers": {
+        "Authorization": "Bearer ${NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28"
+      },
+      "expect": [
+        200
+      ]
+    }
+  },
+  "ports": [],
+  "webUI": null
+}

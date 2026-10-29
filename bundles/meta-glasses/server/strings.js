@@ -7,8 +7,8 @@ export const STRINGS = {
   en: {
     fallback: "Sorry, I got stuck on that one. Try asking again.",
     failed: "Something went wrong on my side. Try again in a moment.",
-    too_large: "This assistant is too large for the quick voice model. Choose another assistant for these glasses in Crow.",
-    no_bot: "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.",
+    too_large: "Crow's voice settings are too large for the quick voice model. Open Crow in Bot Builder.",
+    no_bot: "Crow's voice is turned off. Check Crow in Bot Builder.",
     stt_failed: "I couldn't hear that. Speech recognition is not answering.",
     didnt_catch: "I didn't catch that.",
     photo_failed: "I couldn't take a photo.",
@@ -25,8 +25,8 @@ export const STRINGS = {
   es: {
     fallback: "Perdón, me atoré con eso. Intenta preguntar otra vez.",
     failed: "Algo salió mal de mi lado. Intenta de nuevo en un momento.",
-    too_large: "Este asistente es demasiado grande para el modelo de voz rápido. Elige otro asistente para estos lentes en Crow.",
-    no_bot: "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.",
+    too_large: "La configuración de voz de Crow es demasiado grande para el modelo de voz rápido. Abre Crow en Bot Builder.",
+    no_bot: "La voz de Crow está apagada. Revisa Crow en Bot Builder.",
     stt_failed: "No pude escucharte. El reconocimiento de voz no responde.",
     didnt_catch: "No entendí eso.",
     photo_failed: "No pude tomar la foto.",

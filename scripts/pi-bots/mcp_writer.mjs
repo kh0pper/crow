@@ -103,6 +103,15 @@ function touchesCrowDb(block) {
 }
 
 // ---- A5: extension addon servers -> minted per-bot pi blocks ---------------
+/**
+ * This instance's peer-relay token, read here (outside the pi sandbox): its
+ * file is in <crowHome>/secrets, which the sandbox hides from pi and every
+ * child it spawns, the remote proxy included. Empty when not minted yet.
+ */
+function readRelayToken(crowHome) {
+  try { return readFileSync(join(crowHome, "secrets", "peer-relay-token"), "utf8").trim(); } catch { return ""; }
+}
+
 // A bot may select an MCP server that lives in <crowHome>/mcp-addons.json but
 // is ABSENT from the canonical ~/.pi/agent/mcp.json (e.g. texas-gov-data,
 // bots-sql-mcp, tasks on MPA). pi-lab's additive merge (CONFIRMED against the
@@ -377,15 +386,23 @@ export function writeBotMcp(def, opts = {}) {
   if (opts.remoteEnabled) {
     const node = opts.node || process.execPath;
     const proxyPath = opts.proxyPath || join(import.meta.dirname, "crow-remote-proxy.mjs");
-    // Pin the spawned proxy to THIS instance's peer-tokens.json (peer-credentials.js
-    // hardcodes ~/.crow otherwise — wrong for ~/.crow-mpa where the bot runtime lives).
-    const peerTokensPath = opts.peerTokensPath || join(crowHome, "peer-tokens.json");
+    // Item 46 PR-B: the proxy calls THIS gateway's loopback relay (same port
+    // convention as the board block), never the peer, and holds no peer
+    // credential. The relay token is this instance's; the actor is this turn's.
+    const gatewayPort = opts.gatewayPort || process.env.CROW_GATEWAY_PORT || 3001;
+    // opts.sessionId: this turn's bot_sessions.id, which the relay signature
+    // binds (actor-sig.mjs v2) and the relay resolves and checks.
+    const actor = opts.botId ? { botId: opts.botId, sessionId: opts.sessionId, threadId: opts.threadId, gatewayType: opts.gatewayType } : undefined;
     const { blocks, warnings } = mintRemoteBlocks(def, {
       peerGatewayUrls: opts.peerGatewayUrls || {},
       proxyPath,
       node,
-      peerTokensPath,
+      relayBaseUrl: `http://127.0.0.1:${gatewayPort}`,
+      relayToken: readRelayToken(crowHome),
+      actor,
     });
+    // Like every other stdio block, the proxy carries the bot's actor env.
+    if (opts.botId) applyActorEnv(blocks, actorEnvFor({ botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId }));
     remoteWarnings = warnings;
     for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
   }

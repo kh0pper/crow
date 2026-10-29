@@ -13,6 +13,8 @@
  * ensurePipelineRunsTable() — every entry point CREATE-IF-NOT-EXISTS on first use.
  * All statements are idempotent. Pure constant, no side effects on import.
  */
+import { BOT_JOBS_PRINCIPAL_COLUMN } from "../../servers/shared/project-services-schema.js";
+
 export const BOT_JOBS_DDL = `
   CREATE TABLE IF NOT EXISTS bot_jobs (
     job_id        TEXT PRIMARY KEY,
@@ -34,7 +36,8 @@ export const BOT_JOBS_DDL = `
     claimed_at    TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     started_at    TEXT,
-    ended_at      TEXT
+    ended_at      TEXT,
+    principal     TEXT                             -- who started it (migration 0019); NULL fails closed
   );
 
   CREATE INDEX IF NOT EXISTS idx_bot_jobs_status
@@ -58,6 +61,7 @@ export const BOT_JOBS_DDL = `
 export const BOT_JOBS_ADDED_COLUMNS = [
   { name: "card_id", ddl: "ALTER TABLE bot_jobs ADD COLUMN card_id INTEGER" },
   { name: "card_action", ddl: "ALTER TABLE bot_jobs ADD COLUMN card_action TEXT" },
+  { name: BOT_JOBS_PRINCIPAL_COLUMN.column, ddl: BOT_JOBS_PRINCIPAL_COLUMN.ddl },
 ];
 
 /**

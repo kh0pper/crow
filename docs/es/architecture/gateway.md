@@ -97,30 +97,35 @@ node servers/gateway/index.js --no-auth
 
 ## Proxy de integraciones
 
-El sistema de proxy (`proxy.js` + `integrations.js`) agrega servidores MCP externos en el endpoint `/tools/mcp`:
+El sistema de proxy (`proxy.js` + `services/legacy-sources.js`) agrega servidores MCP externos en el endpoint `/tools/mcp`:
 
-1. Al arrancar, lee qué claves de API están presentes en las variables de entorno
-2. Para cada integración configurada, lanza el servidor MCP como proceso hijo
+1. Al arrancar, lee los bundles de servicio (manifiestos del registro con un bloque `connect`) y comprueba cuáles de sus campos están definidos en las variables de entorno
+2. Para cada servicio configurado, lanza el servidor MCP como proceso hijo (después siguen los complementos instalados en `mcp-addons.json`; un complemento de servicio solo arranca cuando sus campos están definidos)
 3. Se conecta vía transporte stdio y descubre las herramientas disponibles
 4. Prefija los nombres de las herramientas con el ID de la integración (p. ej., `github_create_issue`)
 5. Expone todas las herramientas a través de un único endpoint MCP
 
 ### Agregar una nueva integración
 
-Edita `servers/gateway/integrations.js`:
+Agrega `bundles/my-service/manifest.json` con un bloque `connect` y luego ejecuta `npm run build-registry`:
 
-```js
+```json
 {
-  id: "my-service",
-  name: "My Service",
-  description: "What it does",
-  command: "npx",
-  args: ["-y", "mcp-server-my-service"],
-  envVars: ["MY_SERVICE_API_KEY"],
-  keyUrl: "https://example.com/api-keys",
-  keyInstructions: "How to get the key.",
+  "id": "my-service",
+  "name": "My Service",
+  "description": "What it does",
+  "type": "mcp-server",
+  "server": { "command": "npx", "args": ["-y", "mcp-server-my-service"], "envKeys": ["MY_SERVICE_API_KEY"] },
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [{ "name": "MY_SERVICE_API_KEY", "kind": "secret", "label_key": "services.field.MY_SERVICE_API_KEY" }],
+    "steps": ["services.steps.my-service.1"]
+  }
 }
 ```
+
+Consulta [Crear integraciones](../developers/integrations.md) para el manifiesto completo.
 
 ## Página de configuración
 

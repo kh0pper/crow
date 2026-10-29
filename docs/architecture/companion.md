@@ -34,6 +34,8 @@ Model routing runs in-process in the gateway: `servers/gateway/routes/llm-router
 
 `generate-config.py` points OLVV's `base_url` at the router when `COMPANION_PROXY_URL` is set (default `http://localhost:3001/llm/v1`); unset it to talk to a model directly.
 
+> **Voice is Crow.** Kiosk, glasses and the phone all answer as the Crow voice bot (`crow.voice`); the per-device bot binding described below is retired for voice, and Crow hands bigger jobs to your bots after you say yes. See [Kiosk](/architecture/kiosk#hand-offs).
+
 ## Models: fast voice, escalate for agentic work
 
 | Role | Provider / model | Engine | Notes |
@@ -49,7 +51,7 @@ The companion resolves models through `servers/gateway/ai/resolve-profile.js` (`
 
 ## Binding a bot (the companion channel)
 
-A companion **device** (a kiosk tablet / room display) binds to a Bot Builder agent exactly like a Meta Glasses device: the device record (`device-store.js`, tagged `device_kind:"companion"`) carries `bound_bot_id`, and the kiosk shows that bot's persona/avatar plus the per-device `companion_features` toggles. Configure it on the bot's **Basics** tab (channel *AI Companion*). The model pair is global (the gateway's `/llm/v1` router); per-device variation is persona/avatar/voice/features only. See [kiosk mode](/guide/kiosk-mode).
+A companion **device** (a kiosk tablet / room display) still has a device record (`device-store.js`, tagged `device_kind:"companion"`) carrying `bound_bot_id`, and the companion shows the avatar plus the per-device `companion_features` toggles. Configure them on a bot's **Basics** tab (channel *AI Companion (kiosk)*). Voice answers (kiosk, glasses, phone) are Crow's, not that bot's. The model pair is global (the gateway's `/llm/v1` router); per-device variation is avatar/features only. See [kiosk mode](/guide/kiosk-mode).
 
 ### `companion_features` semantics
 

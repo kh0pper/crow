@@ -36,6 +36,7 @@ test("flag ON: every remote csv entry is a tool pi-lab registers for the minted 
   const csv = toolAllowlist(def, { remoteEnabled: true });
   const { blocks, warnings } = mintRemoteBlocks(def, {
     peerGatewayUrls: { g1abcdef: "http://127.0.0.1:9" }, proxyPath: "/p.mjs", node: "/n",
+    relayBaseUrl: "http://127.0.0.1:3001", relayToken: "relay-token-fixture",
   });
   assert.deepEqual(warnings, []);
   const peerTools = ["crow_store_memory", "crow_search_memories", "crow_create_post"];

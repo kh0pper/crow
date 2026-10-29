@@ -854,6 +854,9 @@ test("a yes by voice through the turn speaks the server's line and is a fast pat
 test("a topic change expires the proposal, and a pending routine entry survives a non-relay turn", async () => {
   const s = await setup();
   const { id } = await s.propose();
+  // The proposing turn's own afterTurn keeps its question (P19, PR 6 fix round 1); the next turn is the topic change.
+  await s.actions.afterTurn({ db: s.db, device: DEVICE, calledTools: [], relay: false });
+  assert.equal(s.pending.get(DEVICE.id).kind, "handoff");
   const { turn } = withTurn(s, [says("Sunny. ")]);
   await turn("what's the weather tomorrow");
   assert.equal((await s.row(id)).status, "expired");
@@ -894,6 +897,28 @@ test("which, then \"the helper one\", re-proposes helper; \"what's on the menu\"
   s.done();
 });
 
+test("through the runner: a which hand-off, then \"writer\", proposes; the yes then confirms and the card is made (f; PR 6 fix round 1)", async () => {
+  const s = await setup();
+  const { h, turn } = withTurn(s, [call({ task: TASK, candidates: ["writer", "helper"] })]);
+  await turn("could someone research radio history");
+  assert.equal(h.calls.spoken[0], "That could go to Writer or to Helper — which one?");
+  assert.equal(s.pending.get(DEVICE.id).kind, "which", "the asking turn keeps its which");
+  const p = await turn("writer");
+  assert.equal(p.fastPath, true);
+  assert.equal(p.timings.verb, "handoff_which");
+  const e = s.pending.get(DEVICE.id);
+  assert.equal(e.kind, "handoff", "the which answer's proposal survives its own turn");
+  assert.equal(e.bot_id, "writer");
+  assert.equal((await s.row(e.id)).status, "proposed", "and its row is not expired");
+  const y = await turn("yes");
+  assert.equal(y.fastPath, true);
+  assert.equal(y.timings.verb, "handoff_started");
+  const cards = await s.cards();
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].assigned_bot, "writer");
+  s.done();
+});
+
 test("turnContext names the pending hand-off or the which options, and nothing else", async () => {
   const s = await setup();
   assert.equal(s.actions.turnContext({ device: DEVICE }), null);
@@ -912,14 +937,15 @@ test("startHandoffSweep runs the store's sweep with the in-flight set, the card 
   let present = eng;
   const asked = [];
   const core = createHandoffCore({
-    store: { sweep: async (db, opts) => { seen.push({ db, opts }); return { expired: 0 }; } },
+    store: { sweep: async (db, opts) => { seen.push({ db, opts }); return { expired: 0 }; }, openRows: async () => [] },
     summaries: { get: async () => [] }, engine: async (o) => { asked.push(o); return present; }, log: () => {},
   });
   const fake = { execute: async () => ({ rows: [] }), closed: 0, close() { fake.closed++; } };
   const sweep = startHandoffSweep({ core, intervalMs: 3_600_000, openDb: () => fake });
   try {
     assert.equal(startHandoffSweep({ core, intervalMs: 1 }), sweep, "armed once per core");
-    await sweep.runOnce();
+    const out = await sweep.runOnce();
+    assert.deepEqual(out, { expired: 0, reconciled: { rows: 0, ended: 0, quiet: 0, resumed: 0, done: 0 } }, "the reconcile (5.3) rides the same pass");
     assert.equal(seen.length, 1);
     assert.equal(seen[0].db, fake);
     assert.equal(fake.closed, 1, "the pass closes its db");

@@ -41,9 +41,11 @@ import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, exists
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
+import { hasActorKey, presignActors } from "./actor-sig.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
+import { piProviderIdHere } from "./pi_provider_id.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { addSkillToolsGuarded } from "./skill-tools.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
@@ -142,6 +144,79 @@ export function skillNamesFor(def, { crowHome, kitInstalled = false, houseStyle 
 /** The house-style block a spawn appends (spec §4.4 "the bot is told"; review M3). */
 export function houseStylePromptBlock(hs) {
   return `## House style\n\nThis bot's artifacts use the house style "${hs.name}" (theme:${hs.id}). Crow adds its fonts and colours to every artifact you save. Documents and diagrams pick it up by themselves. In a page, link these files in the <head>: ${hs.links.join(", ")}; then use the CSS variables from the design-themes skill. Do not choose your own palette or fonts.`;
+}
+
+/** The kinds a turn's config carries signatures for (crow-server-catalog.mjs + remote-blocks.mjs). */
+const PRESIGN_KINDS = ["bot", "board", "artifacts", "board-thread"];
+
+/**
+ * Write (or, in fd mode, build) the per-bot MCP config for this turn, with its
+ * actor signatures bound to `sessionId` (bot_sessions.id, or null). A
+ * key-less host (the pibot-* systemd units) first asks its gateway's loopback
+ * signing relay for this turn's signatures (actor-sig.mjs presignActors); the
+ * key never reaches it. Without a session or job the gateway signs nothing,
+ * so no request is made. Never throws: a failed build leaves no config.
+ * @returns {Promise<{mcpConfig: object|null, signedSessionId: number|null}>}
+ */
+async function writeWorldMcp(a, sessionId) {
+  const sid = sessionId == null ? null : Number(sessionId);
+  let signed = hasActorKey();
+  if (!signed && (sid != null || a.jobId)) {
+    const port = process.env.CROW_GATEWAY_PORT || 3001;
+    signed = await presignActors({
+      gatewayUrl: "http://127.0.0.1:" + port, botId: a.botId, sessionId: sid, threadId: a.threadId,
+      gatewayType: a.gatewayType, jobId: a.jobId,
+      kinds: sid != null ? [...PRESIGN_KINDS, "peer-relay"] : PRESIGN_KINDS,
+    });
+    if (!signed) a.log("actor signatures unavailable from the gateway; this turn's actor headers are unsigned");
+  }
+  let mcpConfig = null;
+  try {
+    // acceptance F2: a card-bound session (or a job turn) must be able to
+    // call board_report_result — ensure the board entry is minted.
+    const w = writeBotMcp(a.def, {
+      sessionDir: a.sessionDir, crowHome: a.crowHome, remoteEnabled: a.remoteEnabled, peerGatewayUrls: a.peerGatewayUrls,
+      botId: a.botId, jobId: a.jobId, threadId: a.threadId, gatewayType: a.gatewayType, sessionId: sid,
+      displayName: a.displayName,
+      ensureServers: (a.jobId || a.cardBound) ? ["board"] : [],
+      write: a.mcpDelivery === "file",
+    });
+    mcpConfig = w.json || null;
+    if (w.warnings.length) a.log("mcp.json warnings: " + w.warnings.join("; "));
+    if (w.remoteWarnings && w.remoteWarnings.length) {
+      for (const warn of w.remoteWarnings) a.log("remote-tool: " + warn);
+    }
+    if (w.journalGuarded.length) a.log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
+    if (w.minted && w.minted.length) a.log("mcp.json minted from extensions: " + w.minted.join(","));
+  } catch (e) {
+    a.log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
+    // fd mode: a failed build must still not leave an earlier turn's signed
+    // file behind (pi ignores it — no PI_BOT_MCP_CONFIG — but another reader
+    // would not). The child then gets an empty bot layer, as a missing file did.
+    if (a.mcpDelivery === "fd") removeStaleBotMcp(join(a.sessionDir, ".mcp.json"));
+  }
+  return { mcpConfig, signedSessionId: signed && sid != null ? sid : null };
+}
+
+/**
+ * Item 46 PR-B: make the world's config bind THIS turn's session. Called by a
+ * caller once its bot_sessions row exists (after its own upsert, before the
+ * spawn). When the config was built for another session — or for none (a
+ * first turn: no row existed at buildBotWorld time), or a key-less host could
+ * not get signatures then (the session was not live yet) — the config is
+ * rebuilt with the row's id; otherwise nothing happens. The session rows are
+ * not touched. Returns true when it rebuilt; the caller then hands
+ * `world.mcpConfig` to the spawn (prepareSpawn copied the old one).
+ */
+export async function bindWorldSession(world, session) {
+  if (!world || !world._mcpArgs || !session || session.id == null) return false;
+  const id = Number(session.id);
+  if (world.signedSessionId === id) return false;
+  const { mcpConfig, signedSessionId } = await writeWorldMcp(world._mcpArgs, id);
+  world.mcpConfig = mcpConfig;
+  world.sessionId = id;
+  world.signedSessionId = signedSessionId;
+  return true;
 }
 
 /**
@@ -278,30 +353,15 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // it in memory — PiRpc pipes it to pi on an inherited fd — and removes any
   // stale on-disk copy. file delivery is the pre-S6 write, unchanged.
   const mcpDelivery = mcpConfigDelivery();
-  let mcpConfig = null;
-  try {
-    // acceptance F2: a card-bound session (or a job turn) must be able to
-    // call board_report_result — ensure the board entry is minted.
-    const w = writeBotMcp(def, {
-      sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
-      displayName: bot.display_name,
-      ensureServers: (jobId || cardBound) ? ["board"] : [],
-      write: mcpDelivery === "file",
-    });
-    mcpConfig = w.json || null;
-    if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
-    if (w.remoteWarnings && w.remoteWarnings.length) {
-      for (const warn of w.remoteWarnings) log("remote-tool: " + warn);
-    }
-    if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
-    if (w.minted && w.minted.length) log("mcp.json minted from extensions: " + w.minted.join(","));
-  } catch (e) {
-    log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
-    // fd mode: a failed build must still not leave an earlier turn's signed
-    // file behind (pi ignores it — no PI_BOT_MCP_CONFIG — but another reader
-    // would not). The child then gets an empty bot layer, as a missing file did.
-    if (mcpDelivery === "fd") removeStaleBotMcp(join(sessionDir, ".mcp.json"));
-  }
+  // Item 46 PR-B: the session this turn's actor signatures bind (the v2
+  // relay signature names bot_sessions.id). A pure read, moved up from after
+  // the config write so the config can carry it. A first turn of a thread has
+  // no row yet: the caller stamps one, then bindWorldSession() rebuilds the
+  // config with its id before anything is spawned.
+  const session = B.getSession(botId, threadId);
+  const mcpArgs = { def, sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
+    displayName: bot.display_name, cardBound, mcpDelivery, log };
+  const { mcpConfig, signedSessionId } = await writeWorldMcp(mcpArgs, session ? session.id : null);
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
   // that reached pi_bot_defs via an out-of-band DB edit (the GUI only offers
@@ -313,7 +373,6 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
       " — Bot Builder never runs `pi install`; add via the pi-lab repo + scripts/pi-bots/pi_extensions_allowlist.mjs");
   }
 
-  const session = B.getSession(botId, threadId);
   // C-6: the same SELECT * that resolves pi_session_id also carries this
   // session's saved narrowing (Perch writes it; Bot Builder still owns the
   // envelope). NULL on every non-perch row => PiRpc sees undefined => the
@@ -332,6 +391,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,
     mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session, botClassifier,
     narrowedTools, gatewayType, kitInstalled, houseStyle,
+    // Item 46 PR-B: the session id the config's actor signatures bind, or
+    // null when it binds none (no row yet, or a key-less host whose gateway
+    // signed nothing). bindWorldSession() compares against it.
+    sessionId: session ? Number(session.id) : null, signedSessionId, _mcpArgs: mcpArgs,
     // "Turn on a board" fallback carry-over (world-root.mjs): entries linked
     // one by one from the bot's own pre-project root resolve outside every
     // root pi-lab's realpath read gate knows, so that old root joins the read
@@ -415,6 +478,10 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // M2: fail the turn before spawning when pi cannot use the resolved model.
   const piCheck = await checkPiModel(resolved);
   if (!piCheck.ok) throw new PiModelUnavailableError(piCheck.message);
+  // Task 17: the pi provider (crow-c-* for a consented cloud row), mapped
+  // here, before the bridge records the session as active.
+  const piProvider = piProviderIdHere(resolved.provider);
+  if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
 
   return {
     sysFile,
@@ -424,6 +491,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       def,
       sessionDir: world.sessionDir,
       resolved,
+      piProvider,
       selfAuthoringDir,
       remoteEnabled: world.remoteEnabled,
       botClassifier: world.botClassifier || null,

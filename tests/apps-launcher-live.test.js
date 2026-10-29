@@ -244,6 +244,37 @@ test("the session apps button opens the sheet", async (t) => {
   } finally { await u.close(); filed = true; }
 });
 
+// The dialog's close event fires a task AFTER close() (the browser already hands
+// focus back to the apps button inside close()), so a reopen can run before it.
+// That late event belongs to the sheet that closed: it must not drop the
+// reopened sheet's answer (a grid stuck on "Loading") or pull focus out of it.
+// Closing and reopening in ONE task makes the late event certain, not a race.
+test("a reopen before the close event lands keeps its tiles and its focus", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  filed = true;
+  const s = await tab(390, 844, `/dashboard/perch#${SID}`, PERCH_READY);
+  try {
+    await s.click("#perch-apps-btn");
+    await s.waitFor("document.querySelectorAll('#perch-apps-grid .shell-app').length===3", "the tiles");
+    const order = await s.json(`(function(){
+      var d=document.getElementById('perch-apps-sheet'), seen=[];
+      d.addEventListener('close',function(){ seen.push('close event, open='+d.open); },{once:true});
+      d.close();
+      seen.push('reopen');
+      document.getElementById('perch-apps-btn').click();
+      window.__closeOrder=seen;
+      return JSON.stringify({open:d.open});
+    })()`);
+    assert.equal(order.open, true, "the reopen opened the sheet");
+    await s.waitFor("window.__closeOrder.length===2", "the late close event");
+    assert.deepEqual(JSON.parse(await s.evalIn("JSON.stringify(window.__closeOrder)")), ["reopen", "close event, open=true"],
+      "the close event really landed after the reopen");
+    await s.waitFor("document.querySelectorAll('#perch-apps-grid .shell-app').length===3", "the reopened sheet's tiles");
+    assert.equal(await s.evalIn("document.getElementById('perch-apps-sheet').contains(document.activeElement)"), true,
+      "focus stays in the reopened sheet");
+  } finally { await s.close(); }
+});
+
 test("an ask arriving while the apps sheet is open closes it", async (t) => {
   if (!available) return t.skip("no headless Chrome");
   filed = true;

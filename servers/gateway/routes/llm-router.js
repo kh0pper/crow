@@ -7,6 +7,7 @@
  *                                   (or a door forward when explicitly addressed)
  *   POST /llm/v1/{completions,embeddings,rerank}   door forwards only
  *   POST /llm/p/<provider>/v1/...    the provider-scoped door
+ *   POST /llm/c/<provider>/v1/...    the cloud door (consented cloud rows only)
  *   GET  /llm/v1/models             companion ids + forwardable door models
  *
  * It does ONE job: choose which local model answers each turn, then forward the
@@ -35,6 +36,20 @@
  * here (first middleware, so CROW_DASHBOARD_PUBLIC cannot bypass it) and by
  * the global rejectFunneledMiddleware (asserted in tests/auth-network.test.js).
  * Mirrors routes/companion-proxy.js. NOT a pi gateway: it never spawns pi.
+ *
+ * The cloud door /llm/c is stricter than the rest (roles phase 2, Task 16;
+ * models/cloud-door.js): it adds a real provider key inside the gateway, so
+ * the tailnet is NOT enough. Only a loopback socket with no forwarding header
+ * and no Tailscale identity header, carrying the per-boot cloud-door token
+ * (and no other token), reaches it; Funnel is refused by name. It forwards
+ * only to the row's own base URL, only while this box's consent still matches
+ * that URL and key (re-read every request), over https, through safeRequest.
+ * No --no-auth bypass exists: the router never reads that flag. A same-box
+ * forwarder that adds no forwarding or tailscale-* header (`tailscale serve
+ * --tcp` onto this port, a host-network container) looks exactly like a bot:
+ * there the token is the only gate. Provider server tools (web_search and the
+ * like) pass, since they run on the user's own key; OpenRouter's
+ * models/route/provider and anthropic's mcp_servers are stripped.
  */
 
 import express from "express";
@@ -54,6 +69,10 @@ import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, isDoorUrl, DOO
 import { isForeignInstanceHost } from "../../shared/provider-host.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { providerDoorUrl } from "../models/door.js";
+import { createCloudDoor, CLOUD_DOOR_DEFAULTS } from "../models/cloud-door.js";
+import { validateLlmCloudToken } from "../local-token.js";
+import { readCloudConsent, readCloudConsentSalt } from "../../shared/cloud-consent.js";
+import { providerRowToObject } from "../../shared/provider-row.js";
 import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../shared/relative-dates.js";
 import { withTurnContext } from "../voice/context-echo.js";
 import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
@@ -152,6 +171,24 @@ export function companionModelIds(keys) {
     .map((k) => (typeof k === "string" ? splitKey(k)[1] : undefined))
     .filter(Boolean);
   return [...new Set([...ids, COMPANION_TURN_MODEL])];
+}
+
+/** The cloud door's token check: the cloud-door hash only (never the local or models token). */
+async function defaultCloudTokenAuth(token) {
+  if (!token) return false;
+  try { return await validateLlmCloudToken(db(), token); } catch { return false; }
+}
+
+/** One row, read fresh from the providers table (never the 30 s providers cache). */
+async function defaultCloudProviders(id) {
+  const { rows } = await db().execute({ sql: "SELECT * FROM providers WHERE id = ?", args: [id] });
+  return rows[0] ? { [id]: providerRowToObject(rows[0]) } : {};
+}
+
+/** This box's consent map and salt, read fresh on every request. */
+async function defaultCloudConsent() {
+  const [consent, salt] = await Promise.all([readCloudConsent(db()), readCloudConsentSalt(db())]);
+  return { consent, salt };
 }
 
 async function defaultDoorAuth(token) {
@@ -780,8 +817,15 @@ export default function llmRouterRouter(opts = {}) {
     recordUsageFn: (event) => recordUsageEvent(db(), event),
     // The voice keys per request (m6): a seam, so router tests never need the db() singleton.
     resolveVoiceKeysFn: (dbc) => resolveVoiceKeys(dbc),
+    // The cloud door (/llm/c). lookupFn/allowAddressFn are tests-only seams.
+    cloudTokenAuthFn: defaultCloudTokenAuth,
+    cloudProvidersFn: defaultCloudProviders,
+    consentFn: defaultCloudConsent,
+    tenantIdFn: resolveTenantId,
+    ...CLOUD_DOOR_DEFAULTS,
     ...opts,
   };
+  const cloudDoor = createCloudDoor(deps);
   const router = express.Router();
   // Defense in depth (review C4): the global rejectFunneledMiddleware can be
   // bypassed by CROW_DASHBOARD_PUBLIC=true; /llm never is.
@@ -804,6 +848,14 @@ export default function llmRouterRouter(opts = {}) {
   };
   router.use("/llm/v1", sourceGate);
   router.use("/llm/p", sourceGate);
+  // The cloud door's own gate: loopback socket, no forwarding or Tailscale
+  // header, the cloud-door token. Before the body parser, so a refused caller's
+  // body is never parsed.
+  router.use("/llm/c", (req, res, next) => {
+    cloudDoor.gate(req, res, next).catch(() => {
+      if (!res.headersSent) res.status(403).json({ error: { code: "CLOUD_SOURCE_REFUSED", message: "the cloud door refused this request" } });
+    });
+  });
   // Route-scoped 10mb JSON limit: the global parser is 1mb and a multi-turn
   // companion/glasses transcript (with tool history + base64 image parts) can
   // exceed that and 413.
@@ -836,6 +888,15 @@ export default function llmRouterRouter(opts = {}) {
         });
     });
   }
+  router.post("/llm/c/:provider/v1/*", (req, res) => {
+    cloudDoor.handle(req, res).catch((err) => {
+      console.error(`[llm-router] cloud door failed: ${err?.message || err}`);
+      if (res.headersSent) { if (!res.writableEnded) res.destroy(); return; }
+      res.status(502).json({ error: { code: "router_error", message: "the cloud door failed" } });
+    });
+  });
+  // Nothing else under /llm/c is served, and nothing falls through to later routes.
+  router.all(["/llm/c", "/llm/c/*"], (req, res) => res.status(404).json({ error: { code: "NOT_FOUND", message: "the cloud door serves POST /llm/c/<provider>/v1/<op> only" } }));
   router.get("/llm/p/:provider/v1/models", (req, res) => {
     const p = ((deps.loadProvidersFn() || {}).providers || {})[req.params.provider];
     const listed = p ? listDoorModels({ [req.params.provider]: p }) : [];

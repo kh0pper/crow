@@ -165,6 +165,7 @@ import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
+import { piProviderIdHere, rowIdForPiProvider } from "../../scripts/pi-bots/pi_provider_id.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
 import { readLease, isFree as isLeaseFree, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
@@ -712,6 +713,9 @@ export function createInteractiveEngine({
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
+  // The env the bridge's provider mapping reads (pi_provider_id.mjs): this
+  // engine's instance env over the process's HOME / PI_MODELS_JSON.
+  const piEnv = () => Object.assign({}, process.env, env);
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
   // Approval-card secret masking (2026-10-26): anchor (by dev/ino) the
@@ -1876,7 +1880,24 @@ export function createInteractiveEngine({
    * shape is perch.js `saveNarrowing`'s, NOT the retired `claimTurn`'s (which
    * hardcoded kind='perch') and never ON CONFLICT (the index is not unique).
    */
-  async function writeRow(s, { status, piSessionDir = null, model = null }, control = "run") {
+  /** Item 46 PR-B: undo spawn()'s pre-spawn INSERT when the spawn never got to
+   *  its own row write, so a failed spawn leaves no row (as before). Only a
+   *  row that never carried a pi session is removed. */
+  async function dropPreMintedRow(s) {
+    const id = s.rowId;
+    s.rowPreMinted = false;
+    s.rowId = null;
+    if (id == null) return;
+    const db = createDbClient();
+    try {
+      await db.execute({ sql: "DELETE FROM bot_sessions WHERE id = ? AND pi_session_id IS NULL", args: [id] });
+    } finally { try { db.close(); } catch {} }
+  }
+
+  async function writeRow(s, { status, piSessionDir = null, model = null, preMint = false }, control = "run") {
+    // Item 46 PR-B: spawn()'s pre-spawn row names no card (see spawn()), so a
+    // row stranded by a crash in that window never holds the card.
+    const cardId = preMint ? null : s.cardId;
     const db = createDbClient();
     try {
       await db.batch([
@@ -1908,7 +1929,7 @@ export function createInteractiveEngine({
           // narrowed_tools is NEVER restamped here: the INSERT below seeds a
           // forced (locked) narrowing once; after that the narrow route is its
           // only writer, so extra narrowing the owner adds is never erased.
-          args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
+          args: [status, control, cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
         },
         {
           sql:
@@ -1917,7 +1938,7 @@ export function createInteractiveEngine({
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
           // A row this INSERT mints is brand new and cannot have a name yet;
           // label defaults to NULL and writeLabel() owns it from there.
-          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.forcedNarrowing || null, s.botId, s.threadId],
+          args: [s.botId, s.threadId, status, control, cardId, s.projectId, piSessionDir, model, s.cwd || null, s.forcedNarrowing || null, s.botId, s.threadId],
         },
       ]);
       const { rows } = await db.execute({
@@ -2466,6 +2487,13 @@ export function createInteractiveEngine({
       throw engineError("narrowing_invalid");
     }
     if (!s.forcedNarrowing && storedList && storedList.includes(NARROWING_LOCK)) s.forcedNarrowing = stored;
+    // Item 46 PR-B: spawn()'s pre-minted row seeded the narrowing known then.
+    // A lock learned only now must be seeded by the post-spawn INSERT exactly
+    // as before (and verified by spawn()), so that row is given back. The
+    // config then names a session that no longer exists, so this session has
+    // NO remote (peer) tools: the relay refuses a dead session. Only reachable
+    // when the world reports a lock the fresh row did not carry.
+    if (s.rowPreMinted && (s.forcedNarrowing || null) !== (s.preMintNarrowing || null)) await dropPreMintedRow(s);
     if (s.forcedNarrowing) world.narrowedTools = mergeDisabled(stored, s.forcedNarrowing);
     // D22 provenance (R3-L1): with any third-party pi extension loaded, a tool
     // named like a pi builtin may not BE the builtin, so builtin names stop
@@ -2531,7 +2559,12 @@ export function createInteractiveEngine({
         model: s.currentModelParts.modelId,
         key: s.currentModel,
       });
-      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved });
+      // piProvider was mapped for the def's model: map the override here,
+      // with this engine's env like every other Perch mapping (never
+      // process.env), and refuse a row the bot engine cannot run.
+      const piProvider = piProviderIdHere(prep.resolved.provider, { env: piEnv() });
+      if (piProvider == null) throw engineError("bad_request");
+      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved, piProvider });
     }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
@@ -2673,6 +2706,8 @@ export function createInteractiveEngine({
       // pinned bot defs to their old default across restarts (adoptRow treats
       // every stamped value as an override). writeModel() owns the column.
     });
+    // The row is now the spawned session's own (spawn() keeps it on a later failure).
+    s.rowPreMinted = false;
 
     const st = await pi.getState().catch(() => null);
     const reported = st && st.data && st.data.sessionId;
@@ -2902,14 +2937,15 @@ export function createInteractiveEngine({
   function onModelSelect(s, m) {
     const model = m && m.model;
     if (!model || !model.provider || !model.id) return;
-    const key = model.provider + "/" + model.id;
+    const provider = rowIdForPiProvider(model.provider, { env: piEnv() }); // crow-c-<row> → <row> (Task 17)
+    const key = provider + "/" + model.id;
     if (s.currentModel === key) return;
-    s.currentModelParts = { provider: model.provider, modelId: model.id };
+    s.currentModelParts = { provider, modelId: model.id };
     s.currentModel = key;
     // onTurnEnd's meterTurn({resolved: s.resolved}) prices whatever
     // s.resolved says NOW, not what the turn started on — so the model that
     // actually served the reply is what gets metered.
-    s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    s.resolved = Object.assign({}, s.resolved, { provider, model: model.id, key });
     s.budgetNotice = null;                        // strand 2: it described the old model
     // Fix round 3 R1: a /model typed in the TUI is an operator choice exactly
     // like the drawer's switch, and must survive a restart too. Never throws
@@ -3591,6 +3627,25 @@ export function createInteractiveEngine({
       throw e;
     }
     // ---------------------------------------------------------------------
+    // Item 46 PR-B: the session-bound actor signatures in the child's MCP
+    // config name bot_sessions.id, so the row must exist before startChild
+    // builds the world. It used to be minted by startChild's post-spawn
+    // writeRow; it is minted here instead, with the same INSERT (and the same
+    // forced-narrowing seed), but parked ('waiting-user', a status the signed
+    // session check accepts) and with NO card: the post-spawn write sets
+    // 'active' and the card exactly as before. So a row stranded by a crash in
+    // between neither reads as a live claim nor locks the card. If the spawn
+    // fails (or stopAll() runs) before that post-spawn write, the row is
+    // deleted again, so a failed spawn leaves no row, as before. A failed
+    // pre-write is non-fatal: startChild's write mints the row as it always
+    // did (the config then binds no session).
+    try {
+      await writeRow(s, { status: "waiting-user", preMint: true });
+      s.rowPreMinted = s.rowId != null;
+      s.preMintNarrowing = s.forcedNarrowing || null;
+    } catch (e) {
+      log(s.sessionId + ": pre-spawn row write failed (non-fatal): " + ((e && e.message) || e));
+    }
     try {
       await startChild(S, s);
       // R1.2 PR 4: the row now exists; it becomes the briefing's source of truth.
@@ -3622,7 +3677,8 @@ export function createInteractiveEngine({
       // hibernating forever and whose fresh claim 409s any wake. Gated on
       // rowId, not on `pi`: writeRow's insert branch would otherwise MINT a
       // row for a spawn that never got far enough to have one.
-      if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
+      if (s.rowPreMinted) await dropPreMintedRow(s).catch(() => {});
+      else if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
       writeLeases();
       throw e;
     }
@@ -4003,15 +4059,21 @@ export function createInteractiveEngine({
         emit(s, { type: "log", text: "model choice cleared — the next wake follows the bot's own model" });
       } else {
       const { provider, modelId } = opts.model;
+      // Task 17: the live child knows a consented cloud row as its crow-c-*
+      // door entry (the bridge's own mapping); the session stays in row ids.
+      // A bare built-in PiRpc would refuse is refused here, awake or asleep,
+      // before any warm.
+      const piProvider = piProviderIdHere(provider, { env: piEnv() });
+      if (piProvider == null) throw engineError("bad_request");
       if (s.pi) {
         // Warm BEFORE the switch (spec: pi-lab's local-models starter
         // self-disables when a bot spawns it, so the provider must already be
         // serving before pi's own set_model tries to route to it).
         const slog = sessionLog(s);
         await S.warmModel(provider, slog);
-        const res = await s.pi.commandSince({ type: "set_model", provider, modelId });
+        const res = await s.pi.commandSince({ type: "set_model", provider: piProvider, modelId });
         const data = (res && res.data) || {};
-        const rProvider = data.provider || provider;
+        const rProvider = data.provider ? rowIdForPiProvider(data.provider, { env: piEnv() }) : provider;
         const rId = data.id || modelId;
         const rKey = rProvider + "/" + rId;
         const changed = s.currentModel !== rKey;
@@ -4149,7 +4211,9 @@ export function createInteractiveEngine({
       s.pi.commandSince({ type: "get_available_models" }),
       s.pi.commandSince({ type: "get_available_thinking_levels" }),
     ]);
-    const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
+    // Row ids, like the catalogue control() validates against (Task 17).
+    const models = ((modelsRes && modelsRes.data && modelsRes.data.models) || [])
+      .map((m) => (m && typeof m.provider === "string" ? { ...m, provider: rowIdForPiProvider(m.provider, { env: piEnv() }) } : m));
     const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
     // Read AFTER the RPCs: a model_select the child emitted while we were
     // waiting is the newest truth, and the picker is about to be set from it.
@@ -4673,6 +4737,9 @@ export function createInteractiveEngine({
   async function stopAll({ timeoutMs = DEFAULT_STOP_ALL_MS } = {}) {
     stopLeaseRefresh();
     const live = [...sessions.values()].filter((s) => s.pi);
+    // Item 46 PR-B: a spawn still before its post-spawn row write has no child
+    // yet; its pre-minted row is given back, as a failed spawn's is.
+    await Promise.all([...sessions.values()].filter((s) => !s.pi && s.rowPreMinted).map((s) => dropPreMintedRow(s).catch(() => {})));
     await Promise.all(live.map(async (s) => {
       const pi = s.pi;
       s.pi = null;

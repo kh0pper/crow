@@ -200,6 +200,45 @@
       "official": true
     },
     {
+      "id": "arxiv",
+      "name": "arXiv",
+      "version": "1.0.0",
+      "description": "Academic paper search and full-text retrieval",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "arxiv",
+        "papers",
+        "research"
+      ],
+      "icon": "file-text",
+      "server": {
+        "command": "uvx",
+        "args": [
+          "arxiv-mcp-server"
+        ],
+        "envKeys": []
+      },
+      "requires": {
+        "bins": [
+          "uvx"
+        ]
+      },
+      "env_vars": [],
+      "connect": {
+        "method": "toggle",
+        "group": "builtin",
+        "fields": [],
+        "steps": [],
+        "legacy_enable_env": "CROW_ENABLE_ARXIV"
+      },
+      "ports": [],
+      "webUI": null,
+      "notes": "No account or key needed.",
+      "official": true
+    },
+    {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
       "version": "1.0.1",
@@ -372,6 +411,69 @@
       "verify_paths": [
         "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
       ],
+      "official": true
+    },
+    {
+      "id": "brave-search",
+      "name": "Brave Search",
+      "version": "1.0.0",
+      "description": "Web search for research and fact-checking",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "development",
+      "tags": [
+        "search",
+        "web",
+        "research"
+      ],
+      "icon": "search",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-brave-search"
+        ],
+        "envKeys": [
+          "BRAVE_API_KEY"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "BRAVE_API_KEY",
+          "description": "Brave Search API key",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "BRAVE_API_KEY",
+            "kind": "secret",
+            "label_key": "services.field.BRAVE_API_KEY"
+          }
+        ],
+        "steps": [
+          "services.steps.brave-search.1",
+          "services.steps.brave-search.2",
+          "services.steps.brave-search.3"
+        ],
+        "test": {
+          "kind": "http",
+          "url": "https://api.search.brave.com/res/v1/web/search?q=crow&count=1",
+          "headers": {
+            "X-Subscription-Token": "${BRAVE_API_KEY}",
+            "Accept": "application/json"
+          },
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
       "official": true
     },
     {
@@ -802,6 +904,80 @@
       "official": true
     },
     {
+      "id": "canvas-lms",
+      "name": "Canvas LMS",
+      "version": "1.0.0",
+      "description": "Course and assignment management",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "canvas",
+        "lms",
+        "courses"
+      ],
+      "icon": "graduation-cap",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-canvas-lms"
+        ],
+        "envKeys": [
+          "CANVAS_BASE_URL",
+          "CANVAS_API_TOKEN"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "CANVAS_BASE_URL",
+          "description": "Canvas address (e.g. https://your-school.instructure.com)",
+          "required": true
+        },
+        {
+          "name": "CANVAS_API_TOKEN",
+          "description": "Canvas access token",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "CANVAS_BASE_URL",
+            "kind": "address",
+            "label_key": "services.field.CANVAS_BASE_URL"
+          },
+          {
+            "name": "CANVAS_API_TOKEN",
+            "kind": "secret",
+            "label_key": "services.field.CANVAS_API_TOKEN"
+          }
+        ],
+        "steps": [
+          "services.steps.canvas-lms.1",
+          "services.steps.canvas-lms.2",
+          "services.steps.canvas-lms.3"
+        ],
+        "test": {
+          "kind": "http",
+          "url": "${CANVAS_BASE_URL}/api/v1/users/self",
+          "headers": {
+            "Authorization": "Bearer ${CANVAS_API_TOKEN}"
+          },
+          "expect": [
+            200
+          ]
+        },
+        "label_from": "address"
+      },
+      "ports": [],
+      "webUI": null,
+      "official": true
+    },
+    {
       "id": "changedetection",
       "name": "Change Detection",
       "version": "1.0.0",
@@ -1081,6 +1257,68 @@
       },
       "env_vars": [],
       "notes": "The renderer turns Vega-Lite, Mermaid and D2 specs into SVG. It listens on 127.0.0.1:8018 only, and its rendering container has no route to the internet. Library files are copied into each artifact version when it is saved, never served from a shared path. v1: install it on the main Crow instance only; other instances on the same machine keep showing chart and diagram code as code. Licences: LICENSES.md and NOTICE.",
+      "official": true
+    },
+    {
+      "id": "discord",
+      "name": "Discord",
+      "version": "1.0.0",
+      "description": "Community servers and channels",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "communication",
+      "tags": [
+        "discord",
+        "chat",
+        "community"
+      ],
+      "icon": "message-circle",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-discord"
+        ],
+        "envKeys": [
+          "DISCORD_BOT_TOKEN"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "DISCORD_BOT_TOKEN",
+          "description": "Discord bot token",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "DISCORD_BOT_TOKEN",
+            "kind": "secret",
+            "label_key": "services.field.DISCORD_BOT_TOKEN"
+          }
+        ],
+        "steps": [
+          "services.steps.discord.1",
+          "services.steps.discord.2",
+          "services.steps.discord.3"
+        ],
+        "test": {
+          "kind": "http",
+          "url": "https://discord.com/api/v10/users/@me",
+          "headers": {
+            "Authorization": "Bot ${DISCORD_BOT_TOKEN}"
+          },
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
       "official": true
     },
     {
@@ -1788,6 +2026,70 @@
       "official": true
     },
     {
+      "id": "github",
+      "name": "GitHub",
+      "version": "1.0.0",
+      "description": "Repos, issues, pull requests, code search",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "development",
+      "tags": [
+        "github",
+        "git",
+        "code",
+        "issues"
+      ],
+      "icon": "git",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-github"
+        ],
+        "envKeys": [
+          "GITHUB_PERSONAL_ACCESS_TOKEN"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "description": "GitHub personal access token",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "kind": "secret",
+            "label_key": "services.field.GITHUB_PERSONAL_ACCESS_TOKEN"
+          }
+        ],
+        "steps": [
+          "services.steps.github.1",
+          "services.steps.github.2",
+          "services.steps.github.3"
+        ],
+        "test": {
+          "kind": "http",
+          "url": "https://api.github.com/user",
+          "headers": {
+            "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
+            "User-Agent": "crow"
+          },
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
+      "official": true
+    },
+    {
       "id": "gotosocial",
       "name": "GoToSocial",
       "version": "1.0.2",
@@ -1881,7 +2183,7 @@
     {
       "id": "home-assistant",
       "name": "Home Assistant",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "description": "Control your smart home through Home Assistant — lights, temperature, switches, and more",
       "type": "mcp-server",
       "author": "Crow",
@@ -1933,6 +2235,50 @@
       "ports": [],
       "webUI": null,
       "notes": "Connects to an existing Home Assistant instance. Includes safety checkpoints for physical device control.",
+      "connect": {
+        "method": "token",
+        "group": "network",
+        "fields": [
+          {
+            "name": "HA_URL",
+            "kind": "address",
+            "label_key": "services.field.HA_URL"
+          },
+          {
+            "name": "HA_TOKEN",
+            "kind": "secret",
+            "label_key": "services.field.HA_TOKEN"
+          }
+        ],
+        "steps": [
+          "services.steps.home-assistant.1",
+          "services.steps.home-assistant.2",
+          "services.steps.home-assistant.3"
+        ],
+        "step_links": {
+          "services.steps.home-assistant.1": "${HA_URL}/profile/security"
+        },
+        "discover": {
+          "kind": "http",
+          "url": "http://127.0.0.1:8123/api/",
+          "expect": [
+            200,
+            401
+          ],
+          "mdns": "homeassistant.local"
+        },
+        "test": {
+          "kind": "http",
+          "url": "${HA_URL}/api/",
+          "headers": {
+            "Authorization": "Bearer ${HA_TOKEN}"
+          },
+          "expect": [
+            200
+          ]
+        },
+        "label_from": "address"
+      },
       "official": true
     },
     {
@@ -2270,7 +2616,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.4.4",
+      "version": "0.4.7",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -2283,7 +2629,7 @@
         "touchscreen"
       ],
       "icon": "monitor",
-      "description": "Turn a browser into a home display: your Ramble bird as a voice companion (tap to talk; Crow runs speech-to-text, your chosen bot and text-to-speech), with on-screen timers, recipes and notes. Pair it with a code; tailnet only.",
+      "description": "Turn a browser into a home display: your Ramble bird as a voice companion (tap to talk; Crow runs speech-to-text, answers as Crow and speaks with text-to-speech), with on-screen timers, recipes and notes. Pair it with a code; tailnet only.",
       "server": {
         "command": "node",
         "args": [
@@ -3678,7 +4024,7 @@
     {
       "id": "meta-glasses",
       "name": "Meta Glasses",
-      "version": "0.3.4",
+      "version": "0.3.6",
       "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. The Crow Android app uses Meta's official Wearables Device Access Toolkit to give the glasses a voice turn powered by your configured STT + AI + TTS profiles.",
       "type": "mcp-server",
       "author": "Crow",
@@ -4280,6 +4626,75 @@
       "official": true
     },
     {
+      "id": "notion",
+      "name": "Notion",
+      "version": "1.0.0",
+      "description": "Wiki pages, databases, knowledge base",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "notion",
+        "wiki",
+        "notes"
+      ],
+      "icon": "book",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@notionhq/notion-mcp-server"
+        ],
+        "envKeys": [
+          "NOTION_TOKEN"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "NOTION_TOKEN",
+          "description": "Notion internal integration secret",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "NOTION_TOKEN",
+            "kind": "secret",
+            "label_key": "services.field.NOTION_TOKEN"
+          }
+        ],
+        "steps": [
+          "services.steps.notion.1",
+          "services.steps.notion.2",
+          "services.steps.notion.3"
+        ],
+        "derived_env": {
+          "OPENAPI_MCP_HEADERS": {
+            "template": "{\"Authorization\":\"Bearer ${NOTION_TOKEN}\",\"Notion-Version\":\"2022-06-28\"}",
+            "encoding": "json"
+          }
+        },
+        "test": {
+          "kind": "http",
+          "url": "https://api.notion.com/v1/users/me",
+          "headers": {
+            "Authorization": "Bearer ${NOTION_TOKEN}",
+            "Notion-Version": "2022-06-28"
+          },
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
+      "official": true
+    },
+    {
       "id": "ntfy",
       "name": "Push Notifications (ntfy)",
       "version": "1.1.0",
@@ -4326,7 +4741,7 @@
     {
       "id": "obsidian",
       "name": "Obsidian Vault",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",
       "type": "mcp-server",
       "author": "Crow",
@@ -4369,6 +4784,24 @@
       "ports": [],
       "webUI": null,
       "notes": "MCP server only — reads your local vault. No Docker required.",
+      "connect": {
+        "method": "folder",
+        "group": "builtin",
+        "fields": [
+          {
+            "name": "OBSIDIAN_VAULT_PATH",
+            "kind": "folder",
+            "label_key": "services.field.OBSIDIAN_VAULT_PATH"
+          }
+        ],
+        "steps": [
+          "services.steps.obsidian.1"
+        ],
+        "test": {
+          "kind": "folder",
+          "expect_entry": ".obsidian"
+        }
+      },
       "official": true
     },
     {
@@ -5302,6 +5735,77 @@
       "official": true
     },
     {
+      "id": "render",
+      "name": "Render",
+      "version": "1.0.0",
+      "description": "Manage your Render deployment, services, and environment",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "development",
+      "tags": [
+        "render",
+        "deploy",
+        "hosting"
+      ],
+      "icon": "cloud",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-remote",
+          "https://mcp.render.com/mcp",
+          "--header",
+          "Authorization:${AUTH_HEADER}"
+        ],
+        "envKeys": [
+          "RENDER_API_KEY"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "RENDER_API_KEY",
+          "description": "Render API key",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "RENDER_API_KEY",
+            "kind": "secret",
+            "label_key": "services.field.RENDER_API_KEY"
+          }
+        ],
+        "steps": [
+          "services.steps.render.1",
+          "services.steps.render.2",
+          "services.steps.render.3"
+        ],
+        "derived_env": {
+          "AUTH_HEADER": {
+            "template": "Bearer ${RENDER_API_KEY}",
+            "encoding": "raw"
+          }
+        },
+        "test": {
+          "kind": "http",
+          "url": "https://api.render.com/v1/owners?limit=1",
+          "headers": {
+            "Authorization": "Bearer ${RENDER_API_KEY}"
+          },
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
+      "official": true
+    },
+    {
       "id": "romm",
       "name": "RoMM",
       "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
@@ -6021,6 +6525,77 @@
       ],
       "webUI": null,
       "notes": "Federal returns only — no state income tax support. Supports MFJ, Single, HoH filing. 2025 tax year. Generates filled IRS PDFs ready to mail and step-by-step guided filing instructions. Saved returns and uploaded documents are encrypted at rest with a key Crow generates and keeps in Settings → Passwords; the figures read from documents (shown on the Documents tab) are stored unencrypted in Crow's database. Documents uploaded before tax 2.1.0 are encrypted when the dashboard next starts; plain copies may remain in earlier backups or on the disk until overwritten. Not a substitute for professional tax advice.",
+      "official": true
+    },
+    {
+      "id": "trello",
+      "name": "Trello",
+      "version": "1.0.0",
+      "description": "Board and card management",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "trello",
+        "boards",
+        "tasks"
+      ],
+      "icon": "kanban",
+      "server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-server-trello"
+        ],
+        "envKeys": [
+          "TRELLO_API_KEY",
+          "TRELLO_TOKEN"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "TRELLO_API_KEY",
+          "description": "Trello API key",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "TRELLO_TOKEN",
+          "description": "Trello token",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "TRELLO_API_KEY",
+            "kind": "secret",
+            "label_key": "services.field.TRELLO_API_KEY"
+          },
+          {
+            "name": "TRELLO_TOKEN",
+            "kind": "secret",
+            "label_key": "services.field.TRELLO_TOKEN"
+          }
+        ],
+        "steps": [
+          "services.steps.trello.1",
+          "services.steps.trello.2",
+          "services.steps.trello.3"
+        ],
+        "test": {
+          "kind": "http",
+          "url": "https://api.trello.com/1/members/me?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}",
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
       "official": true
     },
     {
@@ -6806,7 +7381,7 @@
     {
       "id": "workspace",
       "name": "Crow Workspace",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
       "type": "bundle",
       "author": "Crow",
@@ -7040,6 +7615,83 @@
       "ports": [],
       "webUI": null,
       "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. On first-run the admin account is created via the web UI; there is no CLI bootstrap.",
+      "official": true
+    },
+    {
+      "id": "zotero",
+      "name": "Zotero",
+      "version": "1.0.0",
+      "description": "Citation and reference management",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "zotero",
+        "citations",
+        "references"
+      ],
+      "icon": "book-open",
+      "server": {
+        "command": "uvx",
+        "args": [
+          "zotero-mcp"
+        ],
+        "envKeys": [
+          "ZOTERO_API_KEY",
+          "ZOTERO_USER_ID"
+        ]
+      },
+      "requires": {
+        "bins": [
+          "uvx"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "ZOTERO_API_KEY",
+          "description": "Zotero API key",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "ZOTERO_USER_ID",
+          "description": "Zotero user ID",
+          "required": true
+        }
+      ],
+      "connect": {
+        "method": "token",
+        "group": "paste",
+        "fields": [
+          {
+            "name": "ZOTERO_API_KEY",
+            "kind": "secret",
+            "label_key": "services.field.ZOTERO_API_KEY"
+          },
+          {
+            "name": "ZOTERO_USER_ID",
+            "kind": "text",
+            "label_key": "services.field.ZOTERO_USER_ID"
+          }
+        ],
+        "steps": [
+          "services.steps.zotero.1",
+          "services.steps.zotero.2",
+          "services.steps.zotero.3"
+        ],
+        "test": {
+          "kind": "http",
+          "url": "https://api.zotero.org/users/${ZOTERO_USER_ID}/items?limit=1",
+          "headers": {
+            "Zotero-API-Key": "${ZOTERO_API_KEY}"
+          },
+          "expect": [
+            200
+          ]
+        }
+      },
+      "ports": [],
+      "webUI": null,
       "official": true
     }
   ]

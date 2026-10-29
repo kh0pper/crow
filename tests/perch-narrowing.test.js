@@ -385,7 +385,7 @@ test("strand 2: the remote csv entry is a tool pi actually offers for the minted
   const { piLabRegisteredNames, piOfferedTools } = await import("./helpers/pi-tool-names.mjs");
   const remote = { tools: { pi_builtin: ["read"], remote_mcp: ["abcdef0123456789::crow-memory", "bad-entry"] } };
   const { csv } = buildToolsCsv(remote, { resolved: { provider: "stub", model: "m1", key: "stub/m1" }, remoteEnabled: true });
-  const { blocks } = mintRemoteBlocks(remote, { peerGatewayUrls: { abcdef0123456789: "http://127.0.0.1:9" }, proxyPath: "/p.mjs", node: "/n" });
+  const { blocks } = mintRemoteBlocks(remote, { peerGatewayUrls: { abcdef0123456789: "http://127.0.0.1:9" }, proxyPath: "/p.mjs", node: "/n", relayBaseUrl: "http://127.0.0.1:3001", relayToken: "relay-token-fixture" });
   const registered = ["read", ...piLabRegisteredNames(blocks, { "crow-remote-abcdef01-crow-memory": ["crow_store_memory", "crow_search_memories"] })];
   assert.deepEqual(piOfferedTools(csv, registered), ["read", "mcp__crow-remote-abcdef01-crow-memory"]);
   assert.equal(piOfferedTools(csv, registered).length, csv.split(",").length, "budget count == tools offered");

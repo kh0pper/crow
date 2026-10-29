@@ -159,6 +159,40 @@ export function createHandoffStore({ now = Date.now } = {}) {
       return rows;
     },
 
+    /**
+     * Hand-off rows (kind 'handoff') in `statuses` (HANDOFF_OPEN by default), every surface and device, newest
+     * first; `withCard` keeps only rows that have a card. The sweep's reconcile and the completion's restore.
+     */
+    async openRows(db, { statuses = HANDOFF_OPEN, withCard = false } = {}) {
+      const list = Array.isArray(statuses) && statuses.length ? statuses : HANDOFF_OPEN;
+      list.forEach(assertStatus);
+      const { rows } = await db.execute({
+        sql: `SELECT * FROM voice_handoffs WHERE kind = 'handoff' AND status IN (${list.map(() => "?").join(",")})
+               ${withCard ? "AND card_id IS NOT NULL" : ""} ORDER BY created_at DESC, rowid DESC`,
+        args: [...list],
+      });
+      return rows;
+    },
+
+    /**
+     * Hand-off rows that ended (done, failed, stopped) at or after `sinceMs`, newest first: a status question
+     * about work that just finished. Scoped to one device (`deviceId`, a kiosk), to the personal surfaces
+     * (`personal`: surface != 'kiosk'), or to every surface (`all`: a phone hears about a kiosk's hand-off too,
+     * amended P23); with none of them, no rows (a scope is always named).
+     */
+    async endedSince(db, sinceMs, { deviceId = null, personal = false, all = false } = {}) {
+      const since = Number(sinceMs);
+      if (!Number.isFinite(since)) throw new Error("voice_handoffs: endedSince needs a time");
+      const where = deviceId != null ? "device_id = ?" : all ? "1 = 1" : personal ? "surface != 'kiosk'" : null;
+      if (!where) return [];
+      const { rows } = await db.execute({
+        sql: `SELECT * FROM voice_handoffs WHERE kind = 'handoff' AND status IN ('done', 'failed', 'stopped')
+               AND ended_at IS NOT NULL AND ended_at >= ? AND ${where} ORDER BY ended_at DESC, rowid DESC`,
+        args: deviceId != null ? [since, String(deviceId)] : [since],
+      });
+      return rows;
+    },
+
     async recent(db, limit = 20) {
       const n = Math.max(1, Math.min(200, Math.floor(Number(limit)) || 20));
       const { rows } = await db.execute({

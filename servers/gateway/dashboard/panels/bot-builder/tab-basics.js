@@ -15,9 +15,7 @@
 import { escapeHtml, actionBar } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t, fill } from "../../shared/i18n.js";
-import { getTtsProfiles } from "../../../ai/tts/index.js";
-import { getSttProfiles } from "../../../ai/stt/index.js";
-import { loadModelOptions, loadVisionProfiles } from "./data-queries.js";
+import { loadModelOptions } from "./data-queries.js";
 import { renderGatewayFields, engineGateRequiredDomFields } from "./gateway-fields.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { isEngineAbsent } from "./engine-gate.js";
@@ -102,7 +100,9 @@ export async function renderBasics(ctx) {
   // A stored type this editor does not manage (e.g. a "coming soon" one)
   // stays selectable as itself and is never rewritten by a Basics save.
   const curType = savedType;
-  const types = CHANNEL_TYPES.includes(savedType) ? CHANNEL_TYPES : [...CHANNEL_TYPES, savedType];
+  // "glasses" is retired: offered only for a bot that already has it (read-only), never for a new one.
+  const offered = savedType === "glasses" ? CHANNEL_TYPES : CHANNEL_TYPES.filter((v) => v !== "glasses");
+  const types = offered.includes(savedType) ? offered : [...offered, savedType];
   const typeLabel = {
     gmail: "Gmail", discord: "Discord", telegram: "Telegram", slack: "Slack",
     glasses: t("botbuilder.bxChGlasses", lang), companion: t("botbuilder.bxChCompanion", lang),
@@ -121,35 +121,8 @@ export async function renderBasics(ctx) {
     if (simple) {
       inner = simple.fields + simple.hint;
     } else if (type === "glasses") {
-      const { devices, opts } = await deviceOptions(db, botId, rec.device_id, lang);
-      const selDev = devices.find((d) => String(d.id) === String(rec.device_id || "")) || null;
-      const [ttsP, sttP, visionP] = await Promise.all([
-        getTtsProfiles(db).catch(() => []), getSttProfiles(db).catch(() => []), loadVisionProfiles(db),
-      ]);
-      const profileSel = (name, label, profiles, selId) =>
-        `<label class="btb-inline-field">${escapeHtml(label)} <select name="${name}" class="btb-select"><option value="">${escapeHtml(t("botbuilder.bxDeviceDefault", lang))}</option>` +
-        profiles.map((p) => `<option value="${escapeHtml(String(p.id))}"${String(p.id) === String(selId || "") ? " selected" : ""}>${escapeHtml(p.name || String(p.id))}</option>`).join("") +
-        // a profile the device still holds but the list no longer offers stays selected
-        (selId && !profiles.some((p) => String(p.id) === String(selId))
-          ? `<option value="${escapeHtml(String(selId))}" selected>${escapeHtml(fill(t("botbuilder.bxProfileMissing", lang), { id: String(selId) }))}</option>` : "") +
-        `</select></label>`;
-      let noVoiceWarn = "";
-      try {
-        const { voiceUnavailableSelections } = await import("../../../ai/tool-executor.js");
-        const unavailable = voiceUnavailableSelections(def);
-        if (unavailable.length) {
-          noVoiceWarn = `<p class="btb-notice-warn">${fill(t("botbuilder.warnNoVoiceTools", lang), { tools: `<code>${unavailable.map(escapeHtml).join("</code>, <code>")}</code>` })}</p>`;
-        }
-      } catch { /* tool-executor unavailable */ }
-      inner =
-        field(t("botbuilder.gwLabelPairedDevice", lang), `<select name="gw_device_id" class="btb-select">${opts}</select>`,
-          devices.length ? "" : t("botbuilder.hintNoGlassesDevices", lang)) +
-        `<div class="btb-group"><label>${escapeHtml(t("botbuilder.bxVoices", lang))}</label><div class="btb-inline-fields">` +
-        profileSel("gw_stt_profile_id", t("botbuilder.bxStt", lang), sttP, selDev && selDev.stt_profile_id) +
-        profileSel("gw_tts_profile_id", t("botbuilder.bxTts", lang), ttsP, selDev && selDev.tts_profile_id) +
-        profileSel("gw_vision_profile_id", t("botbuilder.bxVision", lang), visionP, selDev && selDev.vision_profile_id) +
-        `</div><p class="btb-hint">${escapeHtml(t("botbuilder.bxVoicesHint", lang))}</p></div>` +
-        noVoiceWarn + `<p class="btb-hint">${t("botbuilder.gwHintGlasses", lang)}</p>`;
+      // Retired: glasses answer as Crow. A stored record is kept as it is and shown read-only.
+      inner = `<p class="btb-notice-info">${escapeHtml(t("botbuilder.bxGlassesRetired", lang))}</p>`;
     } else if (type === "companion") {
       const { opts } = await deviceOptions(db, botId, rec.device_id, lang, { markGlasses: true });
       const cf = def.companion_features || {};

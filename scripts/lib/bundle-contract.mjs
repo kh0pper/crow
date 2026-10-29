@@ -120,6 +120,47 @@ function fileExists(bundleDir, rel) {
   return existsSync(p);
 }
 
+/** Referential checks for the `connect` block (the ajv shape already passed). */
+function validateConnect(manifest) {
+  const errors = [];
+  const c = manifest.connect;
+  const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
+  const fields = Array.isArray(c.fields) ? c.fields : [];
+  const names = new Set(fields.map((f) => f.name));
+  if (names.size !== fields.length) errors.push("connect.fields has duplicate field names");
+  for (const f of fields) {
+    const ev = envVars.find((v) => v && v.name === f.name);
+    if (!ev) errors.push(`connect.fields ${f.name} must name a declared env_vars entry`);
+    else if (f.kind === "secret" && ev.secret !== true) errors.push(`connect.fields ${f.name}: kind "secret" needs an env_vars entry with secret: true`);
+  }
+  if (c.method === "toggle" && fields.length > 0) errors.push("connect: method toggle has no fields");
+  if (c.legacy_enable_env !== undefined && c.method !== "toggle") errors.push("connect.legacy_enable_env is only for method toggle");
+  if (c.oauth !== undefined && c.method !== "oauth") errors.push("connect.oauth is only allowed with method oauth");
+  if (c.method === "oauth" && c.oauth === undefined) errors.push("connect: method oauth needs an oauth block");
+  if (c.label_from !== undefined && !fields.some((f) => f.kind === "address")) errors.push("connect.label_from needs an address field");
+
+  const checkTemplate = (where, tpl) => {
+    for (const m of String(tpl).matchAll(/\$\{([^}]*)\}/g)) {
+      if (!names.has(m[1])) errors.push(`connect.${where}: \${${m[1]}} is not a connect field`);
+    }
+  };
+  for (const [key, url] of Object.entries(c.step_links || {})) checkTemplate(`step_links ${key}`, url);
+  for (const [env, d] of Object.entries(c.derived_env || {})) checkTemplate(`derived_env ${env}`, d.template);
+  const t = c.test;
+  if (t && t.kind === "http") {
+    checkTemplate("test.url", t.url);
+    for (const [h, v] of Object.entries(t.headers || {})) checkTemplate(`test.headers ${h}`, v);
+    const addr = fields.filter((f) => f.kind === "address").map((f) => "${" + f.name + "}");
+    if (!t.url.startsWith("https://") && !addr.some((a) => t.url.startsWith(a))) {
+      errors.push("connect.test.url must start with https:// or an address field template");
+    }
+  }
+  if (c.discover && !c.discover.url.startsWith("http://127.0.0.1:") && !c.discover.url.startsWith("https://")) {
+    errors.push("connect.discover.url must start with http://127.0.0.1: or https://");
+  }
+  return errors;
+}
+
 /**
  * Validate one manifest object against the contract.
  * @param {object} manifest parsed manifest.json
@@ -229,6 +270,9 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
     }
   }
+
+  // connect block (project services): referential checks the shape cannot express.
+  if (manifest && manifest.connect) errors.push(...validateConnect(manifest));
 
   // 4. Dependency bundles exist (via injected resolver)
   const deps = [

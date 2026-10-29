@@ -249,6 +249,8 @@ export function createGlassesTurns(deps) {
         displayMissedText: L.photo_failed,
         memoryOn: vs.memory !== false,
         memoryWhen: wantsMemory,
+        // Voice hand-off PR 5 (P21): a pronoun "stop it" is asked about while the glasses play (or paused) music.
+        mediaActive: () => ["playing", "paused"].includes(deps.playback.state(deviceId)),
         // No model call for a playback control that fits the current state, or a plain time or date question.
         fastPaths: async (t) => {
           const m = matchTransport(t, deps.playback.state(deviceId));

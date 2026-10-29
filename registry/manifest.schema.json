@@ -62,7 +62,93 @@
     "requires": {
       "type": "object",
       "additionalProperties": true,
-      "properties": { "bundles": { "type": "array", "items": { "type": "string" } } }
+      "properties": {
+        "bundles": { "type": "array", "items": { "type": "string" } },
+        "bins": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "connect": {
+      "type": "object",
+      "required": ["method", "group", "fields", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "enum": ["token", "oauth", "toggle", "folder"] },
+        "group": { "type": "string", "enum": ["network", "signin", "paste", "builtin"] },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "kind", "label_key"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+              "kind": { "type": "string", "enum": ["secret", "text", "address", "folder"] },
+              "label_key": { "type": "string", "minLength": 1 },
+              "help_key": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "steps": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "step_links": { "type": "object", "additionalProperties": { "type": "string" } },
+        "derived_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["template", "encoding"],
+            "additionalProperties": false,
+            "properties": {
+              "template": { "type": "string" },
+              "encoding": { "type": "string", "enum": ["raw", "json"] }
+            }
+          }
+        },
+        "discover": {
+          "type": "object",
+          "required": ["kind", "url", "expect"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string", "enum": ["http"] },
+            "url": { "type": "string" },
+            "expect": { "type": "array", "items": { "type": "integer" } },
+            "mdns": { "type": "string" }
+          }
+        },
+        "test": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "url", "expect"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "type": "string", "enum": ["http"] },
+                "url": { "type": "string" },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "expect": { "type": "array", "items": { "type": "integer" } }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "type": "string", "enum": ["folder"] },
+                "expect_entry": { "type": "string" }
+              }
+            }
+          ]
+        },
+        "oauth": {
+          "type": "object",
+          "required": ["provider", "scopes"],
+          "additionalProperties": false,
+          "properties": {
+            "provider": { "type": "string", "enum": ["google"] },
+            "scopes": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "label_from": { "type": "string", "enum": ["address"] },
+        "legacy_enable_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+      }
     },
     "optional_bundles": { "type": "array", "items": { "type": "string" } },
     "env_vars": {

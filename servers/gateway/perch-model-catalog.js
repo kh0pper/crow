@@ -50,6 +50,7 @@ import { homedir } from "node:os";
 import { isIP } from "node:net";
 import { loadProviders } from "../shared/providers.js";
 import { resolvePiCli } from "../../scripts/pi-bots/pi_resolver.mjs";
+import { piProviderIdFor } from "../../scripts/pi-bots/pi_provider_id.mjs";
 
 /**
  * Tasks a Perch session can never be driven by. An entry is EXCLUDED only
@@ -262,7 +263,10 @@ function piAiNear(cliPath, list) {
  * missing models.json is not unknown: pi then has its built-ins only.
  *
  * @param {object} [deps] test seams
- * @returns {Promise<{custom: Set<string>, builtin: Set<string>, keyed: Set<string>} | null>}
+ * - `map(rowId)`: the pi provider the bridge would spawn for that row
+ *   (pi_provider_id.mjs), or null when PiRpc would refuse it.
+ *
+ * @returns {Promise<{custom: Set<string>, builtin: Set<string>, keyed: Set<string>, map: (id: string) => string|null} | null>}
  */
 export async function loadPiProviderNames({
   env = process.env, read = readFileSync, list = readdirSync, cli = resolvePiCli,
@@ -272,10 +276,12 @@ export async function loadPiProviderNames({
   const file = env.PI_MODELS_JSON || join(agentDir, "models.json");
   const custom = new Set();
   let raw = null;
+  let parsed = null;
   try { raw = read(file, "utf8"); } catch { raw = null; }
   if (raw != null) {
     try {
       const j = JSON.parse(raw);
+      parsed = j;
       for (const k of Object.keys((j && j.providers) || {})) {
         if (!k.startsWith("$")) custom.add(k.toLowerCase());
       }
@@ -311,7 +317,13 @@ export async function loadPiProviderNames({
     if (!ok) { try { ok = envKey(p); } catch { ok = false; } }
     if (ok) keyed.add(p);
   }
-  return { custom, builtin, keyed };
+  // Task 17: the provider pi will really be spawned with, by the bridge's
+  // own rule (scripts/pi-bots/pi_provider_id.mjs): a consented cloud row is
+  // its crow-c-* door entry, a bare built-in with no entry is refused (null).
+  const homeDir = env.HOME || homedir();
+  const where = { crowHome: env.CROW_HOME || join(homeDir, ".crow"), homeDir };
+  const map = (rowId) => piProviderIdFor(rowId, parsed, where);
+  return { custom, builtin, keyed, map };
 }
 
 function ipv4InNetwork(h) {
@@ -391,7 +403,11 @@ export function pickerModels(models, { defaultKey = null, referenced = [], pi = 
   const piRank = (provider) => {
     if (runnableAll) return 2;
     if (!pi) return null;
-    const p = String(provider || "").toLowerCase();
+    // The bridge's mapping, when the caller has it: what PiRpc refuses is
+    // not runnable, and a consented cloud row ranks by its door entry.
+    const mapped = typeof pi.map === "function" ? pi.map(String(provider || "")) : provider;
+    if (mapped == null) return 0;
+    const p = String(mapped).toLowerCase();
     if (pi.custom.has(p)) return 2;
     // A built-in counts only when pi holds a key for it (fix round 1 I2).
     // A caller with no `keyed` answer predates that check: resolvable is

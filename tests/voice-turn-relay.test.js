@@ -328,9 +328,15 @@ test("R15: each afterTurn hook clears only its own kinds on a relay, and nothing
   await s.own.afterTurn({ db: s.db, ...dev, relay: true });
   assert.equal(s.pending.get(DEVICE.id).id, id2, "the own-tools hook leaves a hand-off");
   assert.equal((await s.row(id2)).status, "proposed");
+  // A stop is the hand-off hook's own kind (PR 5, P19): outside a relay, an unanswered one is taken too, so a
+  // later stray "yes" stops nothing; a crow_handoff call in the turn keeps only a proposal or a which, never a
+  // stop (5.4 fix round 1).
+  s.pending.set(DEVICE.id, { kind: "stop", id: "h-x", name: "Writer" });
+  await s.handoff.afterTurn({ db: s.db, ...dev, calledTools: [HANDOFF_TOOL_NAME], relay: false });
+  assert.equal(s.pending.get(DEVICE.id), null, "a turn that called crow_handoff takes an unanswered stop too");
   s.pending.set(DEVICE.id, { kind: "stop", id: "h-x", name: "Writer" });
   await s.handoff.afterTurn({ db: s.db, ...dev, relay: false });
-  assert.equal(s.pending.get(DEVICE.id).kind, "stop", "outside a relay the hand-off hook leaves a stop to PR 5");
+  assert.equal(s.pending.get(DEVICE.id), null, "outside a relay the hand-off hook takes an unanswered stop (P19)");
 });
 
 // Fix round 1: the spoken-yes confirm gate (turn-helpers.js createConfirmGate). The default harness bot is an ordinary

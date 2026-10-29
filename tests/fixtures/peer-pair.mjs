@@ -34,12 +34,35 @@ export const REPO = new URL("../..", import.meta.url).pathname;
 const UID = String(typeof process.getuid === "function" ? process.getuid() : 0);
 export const sha = (s) => createHash("sha256").update(s).digest("hex");
 
-function freePort() {
-  return new Promise((resolve, reject) => {
+/**
+ * A gateway port, probed free on the gateway's own bind (0.0.0.0) and taken
+ * from BELOW the kernel's ephemeral range. The port stays unbound while the
+ * gateway is down (between init and boot, and across every reboot of a
+ * pairing), and a port from listen(0) is one the kernel hands straight back
+ * to the next listen(0) or outbound connect on the host: in CI, another test
+ * file's gateway once took a peer's port while it rebooted into pairing mode,
+ * answered /health, and refused the enroll (enrollment_disabled). Below the
+ * ephemeral range only an explicit picker can collide; boot() also checks
+ * that its own child is the listener.
+ */
+function ephemeralLow() {
+  try { return Number(readFileSync("/proc/sys/net/ipv4/ip_local_port_range", "utf8").trim().split(/\s+/)[0]) || 32768; } catch { return 32768; }
+}
+const PORT_LO = 10_000;
+function probe(port) {
+  return new Promise((resolve) => {
     const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+    s.once("error", () => resolve(false));
+    s.listen(port, "0.0.0.0", () => s.close(() => resolve(true)));
   });
+}
+async function freePort() {
+  const hi = Math.min(ephemeralLow(), 32768);
+  for (let i = 0; i < 200; i++) {
+    const port = PORT_LO + Math.floor(Math.random() * (hi - PORT_LO));
+    if (await probe(port)) return port;
+  }
+  throw new Error("peer-pair: no free port below the ephemeral range");
 }
 
 const SCRUB = ["CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_BACKUP_DIR", "CROW_INSTANCES_JSON_PATH", "CROW_REFCOUNT_PATH",
@@ -107,7 +130,10 @@ export class Instance {
     mkdirSync(this.dataDir, { recursive: true });
     this.id = id || `inst-${name}-${randomBytes(4).toString("hex")}`;
     writeFileSync(join(this.dataDir, "instance-id"), `${this.id}\n`);
-    this.tokensPath = join(this.dir, "peer-tokens.json");
+    // The store lives in the hidden secrets dir (an override naming the old
+    // <CROW_HOME>/peer-tokens.json default is treated as outdated and moved).
+    mkdirSync(join(this.dir, "secrets"), { recursive: true, mode: 0o700 });
+    this.tokensPath = join(this.dir, "secrets", "peer-tokens.json");
     this.log = "";
     this.child = null;
   }
@@ -129,6 +155,10 @@ export class Instance {
       // Every child, new and old tree: Hyperswarm never carries instance
       // sync here, so tailnet is the only sync transport.
       CROW_INSTANCE_SYNC_HYPERSWARM: "0",
+      // remote-actor.js treats headers dated in the first minute after boot as
+      // pre_boot (servers/shared/test-timing.js: honoured only in the suite's
+      // scratch env); these gateways sign and verify seconds after they start.
+      CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS: "1",
     });
     if (this.sync) {
       Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP }, SYNC_TIMING);
@@ -190,14 +220,34 @@ export class Instance {
     for (;;) {
       if (Date.now() > deadline) throw new Error(`${this.name}: gateway not healthy\n${this.log.slice(-3000)}`);
       const done = await Promise.race([exited.then(() => true), new Promise((r) => setTimeout(() => r(false), 250))]);
-      if (done) throw new Error(`${this.name}: gateway exited during boot\n${this.log.slice(-3000)}`);
+      if (done) {
+        this.child = null;
+        // Port taken by someone else before this instance ever served: no
+        // peer, row or relay knows its port yet, so move it and boot again.
+        if (/EADDRINUSE/.test(this.log) && !this.served && (this._portRetries = (this._portRetries || 0) + 1) <= 3) {
+          await this.movePort();
+          return this.boot({ otc, extraEnv, repo });
+        }
+        throw new Error(`${this.name}: gateway exited during boot\n${this.log.slice(-3000)}`);
+      }
+      // Ready only once THIS child has bound the port (its listen callback
+      // logs this line): until then a 200 from /health may be whatever else
+      // holds the port, which is not this instance and not in pairing mode.
+      if (!this.log.includes(`Crow Gateway listening on http://0.0.0.0:${this.port}`)) continue;
       try {
         const r = await fetch(`http://127.0.0.1:${this.port}/health`);
         if (r.status === 200) break;
       } catch { /* not up yet */ }
     }
+    this.served = true;
     if (!this.relays) this.relays = new Map();
     return this;
+  }
+
+  /** A fresh port for an instance that has never served (its self row follows). */
+  async movePort() {
+    this.port = await freePort();
+    this.sql("UPDATE crow_instances SET gateway_url = ? WHERE id = ?", [`http://${this.ip}:${this.port}`, this.id]);
   }
 
   /** The URL `caller` uses to reach this gateway (a relay presenting caller's tailnet IP). */
@@ -249,6 +299,27 @@ export class Instance {
       [sha(token), new Date(Date.now() + 3_600_000).toISOString()]);
     return token;
   }
+}
+
+/** An Instance whose pair CLI enrolls under its own name: the CLI reads $HOSTNAME, never the real host's. */
+export class Named extends Instance { get env() { return { ...super.env, HOSTNAME: this.name }; } }
+
+/**
+ * Install the real Workspace add-on on `inst` (mcp-addons.json → its own tree's
+ * bundles/workspace/server/index.js) against the hermetic fake Nextcloud `fake`
+ * (tests/helpers/workspace-fake-nextcloud.js), and expose `exposed` to peers.
+ * Takes effect at the next boot.
+ */
+export function installWorkspace(inst, fake, { exposed = ["workspace"] } = {}) {
+  const dir = join(inst.dir, "bundles", "workspace");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".env"),
+    "WORKSPACE_BOOTSTRAP_DONE=1\nWORKSPACE_PUBLIC_HOST=crow.test\nWORKSPACE_BOT_APP_PASSWORD=pw-secret-123\nWORKSPACE_ONLYOFFICE_JWT_SECRET=jwt\n", { mode: 0o600 });
+  writeFileSync(join(inst.dir, "mcp-addons.json"), JSON.stringify({
+    workspace: { command: "node", args: ["server/index.js"], cwd: join(inst.repo, "bundles", "workspace"),
+      env: { WORKSPACE_NC_INTERNAL_URL: fake.ncUrl, WORKSPACE_OO_INTERNAL_URL: fake.ooUrl } },
+  }), { mode: 0o600 });
+  inst.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('remote_exposed_tools', ?)", [JSON.stringify(exposed)]);
 }
 
 const mod = (p) => JSON.stringify(new URL(`../../${p}`, import.meta.url).href);

@@ -13,6 +13,9 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Router } from "express";
 import { recordSessionStart, recordToolCall, recordSessionEnd } from "../session-logger.js";
 import { applyLocalTokenAuth } from "../local-token.js";
+import { verifyRemoteActor, noteRemoteActorResult } from "../../shared/remote-actor.js";
+import { defaultPairKey } from "../../shared/sync-pair-binding.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 
 /**
  * Simple in-memory EventStore for StreamableHTTPServerTransport resumability.
@@ -51,6 +54,31 @@ class InMemoryEventStore {
  */
 function sessionOwner(req) {
   return req.auth?.clientId || null;
+}
+
+/**
+ * Item 46 PR-B: the remote actor a paired peer's GATEWAY signed for this tools/call, verified against the
+ * pair key of the bearer-authenticated peer (servers/shared/remote-actor.js). Returns the record for
+ * req.auth.extra.remoteActor, or null. Every outcome is handed to noteRemoteActorResult (its rate-limited
+ * "accepted" / "downgraded" line), and anything that goes wrong is a failed verify: the call keeps the
+ * "Crow (via <name>)" label and still runs. Only a single JSON-RPC object is ever verified, never a batch.
+ */
+function verifiedRemoteActor(req, prefix) {
+  const body = req.body;
+  if (req.method !== "POST" || !body || typeof body !== "object" || Array.isArray(body) || body.method !== "tools/call") return null;
+  const sourceId = req.instanceAuth.instance.id;
+  let result;
+  try {
+    result = verifyRemoteActor({
+      headers: req.headers, body, peerId: sourceId, localId: getOrCreateLocalInstanceId(), mount: prefix, keyLookup: defaultPairKey,
+    });
+  } catch {
+    result = { ok: false, reason: "verify_error" };
+  }
+  try { noteRemoteActorResult({ sourceId, mount: prefix, result }); } catch { /* logging never affects the call */ }
+  if (!result?.ok) return null;
+  const { bot, name, src } = result.actor;
+  return { kind: "bot", id: bot, name, instanceId: src };
 }
 
 /**
@@ -257,6 +285,9 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
           // Handlers see this as extra.authInfo.extra; peerActorMeta (shared/peer-label.js) forwards it.
           extra: { peerName: req.instanceAuth.peerName ?? null },
         };
+        // A peer gateway's signed bot actor upgrades the label to "<bot> (bot from <name>)"; never refuses.
+        const remoteActor = verifiedRemoteActor(req, prefix);
+        if (remoteActor) req.auth.extra.remoteActor = remoteActor;
         return next();
       }
       // F6c-2: a validated local MCP token is a full local-operator credential

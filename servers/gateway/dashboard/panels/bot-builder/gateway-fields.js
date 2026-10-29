@@ -34,9 +34,10 @@ export const GATEWAY_REQUIRED_FIELDS = {
   telegram: ["token"],
   slack: ["bot_token", "app_token"],
   "crow-messages": [],
-  // Voice types work only once a device is bound (the voice turn reads
-  // device.bound_bot_id; a type-only record is a UI draft, W1-4).
-  glasses: ["device_id"],
+  // Retired: glasses answer as Crow, so a stored glasses record needs nothing to be complete.
+  glasses: [],
+  // Companion works only once a device is bound (the voice turn reads device.bound_bot_id; a type-only record
+  // is a UI draft, W1-4).
   companion: ["device_id"],
   // Perch (originally Perch Hub P1, C-4): the chat surface is native to the
   // dashboard, addressed by bot id — there is nothing per-bot to collect, so

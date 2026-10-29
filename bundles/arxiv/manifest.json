@@ -1,0 +1,38 @@
+{
+  "id": "arxiv",
+  "name": "arXiv",
+  "version": "1.0.0",
+  "description": "Academic paper search and full-text retrieval",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": [
+    "arxiv",
+    "papers",
+    "research"
+  ],
+  "icon": "file-text",
+  "server": {
+    "command": "uvx",
+    "args": [
+      "arxiv-mcp-server"
+    ],
+    "envKeys": []
+  },
+  "requires": {
+    "bins": [
+      "uvx"
+    ]
+  },
+  "env_vars": [],
+  "connect": {
+    "method": "toggle",
+    "group": "builtin",
+    "fields": [],
+    "steps": [],
+    "legacy_enable_env": "CROW_ENABLE_ARXIV"
+  },
+  "ports": [],
+  "webUI": null,
+  "notes": "No account or key needed."
+}

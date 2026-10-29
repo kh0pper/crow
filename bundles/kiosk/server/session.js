@@ -11,6 +11,9 @@
  *       false closes 4401 (the login ended); a throw at a turn closes 1011 (retry).
  *   onClose(device)          the socket closed and was not replaced by a newer one.
  *
+ * deps.onLive(device) / deps.onGone(device) (optional, every display): a display's hello made it the device's live
+ * session / that live session ended (its socket closed unreplaced, or it was unpaired). A throw is logged.
+ *
  * How a turn ends, as the page sees it: every turn_start is answered by exactly ONE closing frame for
  * that turn_id — `turn_done` when the turn ran (also when it failed or was interrupted), or
  * `turn_over { turn_id, reason: "empty" | "too_long" | "busy" }` when it never ran. The page ends
@@ -35,6 +38,7 @@ export function createSessionHub(deps) {
   const setT = deps.setTimeout || setTimeout;
   const clearT = deps.clearTimeout || clearTimeout;
   const sendJson = (ws, obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+  const hook = (name, d) => { try { deps[name]?.(d); } catch (err) { deps.log?.(`[kiosk] ${name} hook failed: ${err?.message}`); } };
 
   function attach(ws, opts = {}) {
     let device = null;
@@ -161,6 +165,7 @@ export function createSessionHub(deps) {
       const prior = sessions.get(d.id);
       sessions.set(d.id, self);
       if (prior && prior.ws !== ws) { try { prior.ws.close(4000, "superseded"); } catch {} }
+      hook("onLive", d);
       try {
         await sendReady();
         sendJson(ws, { type: "wm", action: "snapshot", windows: deps.wm.list(d.id) });
@@ -328,6 +333,7 @@ export function createSessionHub(deps) {
         // grace-period cut — it lives as long as the login (the runtime's sweep ends it at logout).
         if (!caps.bar) deps.media?.sessionLost(device.id);
         try { opts.onClose?.(device, caps); } catch (err) { deps.log?.(`[kiosk] close hook failed: ${err?.message}`); }
+        hook("onGone", device);
       }
     });
     ws.on("error", () => {});
@@ -343,6 +349,7 @@ export function createSessionHub(deps) {
       if (!s) return false;
       sessions.delete(id);
       try { s.ws.close(code, reason); } catch {}
+      if (s.device) hook("onGone", s.device);
       return true;
     },
     sendTo(id, obj) { const s = sessions.get(id); if (!s || s.ws.readyState !== 1) return false; s.ws.send(JSON.stringify(obj)); return true; },

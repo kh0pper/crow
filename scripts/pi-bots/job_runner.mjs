@@ -37,9 +37,11 @@ import { tmpdir } from "node:os";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
+import { piProviderIdHere } from "./pi_provider_id.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
+import { hasActorKey, presignActors } from "./actor-sig.mjs";
 import { withSkillTools } from "./bot-world.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
@@ -336,6 +338,13 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // /tmp/pibot-job-* dir — PiRpc pipes the built JSON to pi instead.
     const mcpDelivery = mcpConfigDelivery();
     let mcpConfig = null;
+    // Item 46 PR-B: a key-less host (the pibot-bridge@ tick drains jobs) asks
+    // its gateway's loopback signing relay for this job's phone signature; the
+    // key never reaches it. The gateway signs only for a running job of this
+    // bot, and only its own (bot, "job-<id>", "job") tuple. Never throws.
+    if (!hasActorKey()) {
+      await presignActors({ gatewayUrl: "http://127.0.0.1:" + (process.env.CROW_GATEWAY_PORT || 3001), ...jobActor(job), jobId: job.job_id, kinds: ["bot"] });
+    }
     try {
       const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
         write: mcpDelivery === "file" });
@@ -355,6 +364,8 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // M2: fail the job before spawning when pi cannot use the resolved model.
     const piCheck = await checkPiModel(resolved);
     if (!piCheck.ok) throw new PiModelUnavailableError(piCheck.message);
+    const piProvider = piProviderIdHere(resolved.provider);
+    if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
     log(`job ${job.job_id} bot=${job.bot_id} model=${resolved.key}`);
 
     // Warm the bundle (no-op for cloud/already-resident) before the turn.
@@ -364,7 +375,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     await warmModel(resolved.provider, log);
 
     const pi = new bridge.PiRpc({
-      def, sessionDir, resolved, selfAuthoringDir: null,
+      def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
     });

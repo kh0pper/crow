@@ -3,9 +3,11 @@
  * that capability's tool in its model request, and a call through it reaches
  * the peer. Real code: bridge.mjs buildToolsCsv, remote-blocks.mjs
  * mintRemoteBlocks, crow-remote-proxy.mjs, pi-lab extensions/mcp-client.ts and
- * the pi CLI (--mode rpc). Fakes: a loopback peer serving /memory/mcp behind
- * a bearer check, and a loopback OpenAI-compatible model that records each
- * request's tools and answers the first one with a call to the remote tool.
+ * the pi CLI (--mode rpc). Fakes: a loopback stand-in for the gateway's peer
+ * relay (item 46 PR-B: the proxy never talks to a peer itself) serving
+ * /peer-relay/<peer>/memory/mcp behind the relay-token check, and a loopback
+ * OpenAI-compatible model that records each request's tools and answers the
+ * first one with a call to the remote tool.
  *
  * Runs only where a pi CLI (pi_resolver ladder) and a pi-lab checkout
  * (pi-lab-compat findPiLabDir, or PIBOT_PI_LAB_DIR) both exist — CI has
@@ -62,11 +64,12 @@ test("a selected remote capability reaches the pi bot's model, and a call throug
   for (const d of [home, agentDir, crowHome, sessions]) mkdirSync(d, { recursive: true });
   for (const p of [home, agentDir, crowHome, botDir]) assert.ok(p.startsWith(scratch + "/") && !/\/\.crow/.test(p));
 
-  // Fake peer: /memory/mcp, stateless, bearer-checked; records tool calls.
-  const TOKEN = "fake-peer-token-not-a-secret";
+  // Fake relay: /peer-relay/<peer>/memory/mcp, stateless, relay-token-checked; records tool calls.
+  const TOKEN = "fake-relay-token-not-a-secret";
+  const PEER_ID = "abcdef1234567890fakepeer";
   const peerCalls = [];
   const peerPort = await listen(http.createServer(async (req, res) => {
-    if (!req.url.startsWith("/memory/mcp")) { res.writeHead(404); return res.end(); }
+    if (!req.url.startsWith(`/peer-relay/${PEER_ID}/memory/mcp`)) { res.writeHead(404); return res.end(); }
     if (req.headers.authorization !== `Bearer ${TOKEN}`) { res.writeHead(401); return res.end(); }
     let body = ""; for await (const c of req) body += c;
     const s = new McpServer({ name: "fake-peer-memory", version: "0.0.1" });
@@ -79,7 +82,6 @@ test("a selected remote capability reaches the pi bot's model, and a call throug
     await t.handleRequest(req, res, body ? JSON.parse(body) : undefined);
   }));
 
-  const PEER_ID = "abcdef1234567890fakepeer";
   const REMOTE_TOOL = "mcp__crow-remote-abcdef12-crow-memory";
 
   // Fake model: request 1 → call the remote gateway tool; later → plain text.
@@ -106,18 +108,17 @@ test("a selected remote capability reaches the pi bot's model, and a call throug
     baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none",
     models: [{ id: "fake-model", name: "fake", reasoning: false, input: ["text"], contextWindow: 32000, maxTokens: 1000,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
-  const peerTokensPath = join(crowHome, "peer-tokens.json");
-  writeFileSync(peerTokensPath, JSON.stringify({ [PEER_ID]: { auth_token: TOKEN } }), { mode: 0o600 });
 
   const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
   const { mintRemoteBlocks } = await import("../scripts/pi-bots/remote-blocks.mjs");
   const def = { tools: { pi_builtin: ["read"], crow_mcp: [], remote_mcp: [`${PEER_ID}::crow-memory`] } };
   const { csv } = buildToolsCsv(def, { resolved: { provider: "fake", model: "fake-model" }, remoteEnabled: true });
   const { blocks, warnings } = mintRemoteBlocks(def, {
-    peerGatewayUrls: { [PEER_ID]: `http://127.0.0.1:${peerPort}` },
+    peerGatewayUrls: { [PEER_ID]: "http://127.0.0.1:9" },
     proxyPath: join(REPO, "scripts", "pi-bots", "crow-remote-proxy.mjs"),
     node: process.execPath,
-    peerTokensPath,
+    relayBaseUrl: `http://127.0.0.1:${peerPort}`,
+    relayToken: TOKEN,
   });
   assert.deepEqual(warnings, []);
   assert.ok(csv.split(",").includes(REMOTE_TOOL), csv);

@@ -30,6 +30,7 @@ import { getCard, moveCard, recordMutation } from "./card-service.js";
 import { resolveBoardDef, isTerminal } from "../routes/board-defs.js";
 import { nowStamp } from "./util.js";
 import { doneStatus } from "../dashboard/panels/board/lanes.js";
+import { resultNoticeFor } from "./result-requesters.js";
 
 function fail(msg, code, http) {
   return Object.assign(new Error(msg), { code, http });
@@ -67,16 +68,25 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
   const resultId = Number(ins.lastInsertRowid);
   await recordMutation(tdb, { itemId, verb: "result_report", actor, detail: { outcome: [null, String(outcome)] } });
 
+  // Voice hand-off (result-requesters.js): a rail that asked for this card's
+  // result (the hand-off's "voice" kind) answers with its own notice, resolved
+  // NOW, while the reporting bot's turn is still running, so its turn-end mark
+  // lands on that turn; null means the card is nobody's and today's rule holds.
+  // The send is in `finally` below: a refused auto-move still tells the operator.
+  const notice = await resultNoticeFor(cdb, { card: cur, outcome, summaryMd, resultId, actor: a, tdb });
+
   let status = "recorded";
-  if (outcome === "success" && cur.autonomy === "auto" && def.terminal_values.includes("done")) {
-    await moveCard(tdb, cdb, itemId, "done", actor, { lockExempt: actor });
-    const stamp = nowStamp();
-    await tdb.execute({
-      sql: "UPDATE board_results SET status='approved', decided_at=?, decided_via='auto' WHERE id=?",
-      args: [stamp, resultId],
-    });
-    status = "approved";
-  } else if (cur.autonomy === "gated") {
+  try {
+    if (outcome === "success" && cur.autonomy === "auto" && def.terminal_values.includes("done")) {
+      await moveCard(tdb, cdb, itemId, "done", actor, { lockExempt: actor });
+      const stamp = nowStamp();
+      await tdb.execute({
+        sql: "UPDATE board_results SET status='approved', decided_at=?, decided_via='auto' WHERE id=?",
+        args: [stamp, resultId],
+      });
+      status = "approved";
+    }
+  } finally {
     // Track 3 Task 8: a gated card never auto-moves on ANY outcome — this
     // result_report is the ONLY signal an operator gets that a bot finished
     // and is waiting on a decision. Blocking event: always pushes,
@@ -85,18 +95,29 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
     // downstream sender, and a notification error must never undo the
     // result row already committed above. `cdb` (crow.db) is where the
     // shared notifications table lives — this file never resolves its own
-    // path (module header).
-    try {
-      const { createNotification } = await import("../../shared/notifications.js");
-      await createNotification(cdb, {
-        type: "attention",
-        priority: "high",
-        title: (cur.title ? `"${cur.title}"` : `Card #${itemId}`) + " needs review",
-        body: summaryMd || `${String(outcome)} reported by ${a.kind || "bot"}${a.id ? " " + a.id : ""}`,
-        action_url: "/dashboard/bot-board#card=" + itemId,
-      });
-    } catch {
-      // Non-fatal — the result row is already committed.
+    // path (module header). A card another rail claimed gets that rail's
+    // notice instead, whatever its autonomy; an unclaimed non-gated card
+    // gets none, as before.
+    const send = notice ?? (cur.autonomy === "gated" ? {
+      type: "attention",
+      priority: "high",
+      title: (cur.title ? `"${cur.title}"` : `Card #${itemId}`) + " needs review",
+      body: summaryMd || `${String(outcome)} reported by ${a.kind || "bot"}${a.id ? " " + a.id : ""}`,
+      action_url: "/dashboard/bot-board#card=" + itemId,
+    } : null);
+    if (send) {
+      let sent = null;
+      try {
+        const { createNotification } = await import("../../shared/notifications.js");
+        sent = await createNotification(cdb, send);
+      } catch {
+        // Non-fatal — the result row is already committed.
+      }
+      // A rail's notice may ask to hear that it really went out (the hand-off speaks its heads-up only then):
+      // never after a send that threw or was turned off (createNotification → null).
+      if (sent && typeof send.onSent === "function") {
+        try { send.onSent(sent); } catch { /* the rail's own hook: never undoes the result */ }
+      }
     }
   }
 

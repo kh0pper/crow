@@ -242,8 +242,9 @@ export function createRouterServer(options = {}) {
             const result = await entry.client.callTool({
               name: action,
               arguments: params || {},
-              // A paired instance's call says so ({kind:"peer", from}); nothing the caller sent is forwarded.
-              ...peerActorMeta(extra),
+              // A paired instance's call says so ({kind:"peer", from}, or its gateway's verified bot for an
+              // add-on that opted in); nothing the caller sent is forwarded.
+              ...peerActorMeta(extra, { allowRemoteBot: !!entry.remoteBotActor }),
             });
             return result;
           } catch (error) {

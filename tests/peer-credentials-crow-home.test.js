@@ -9,7 +9,7 @@
  * credentials — producing missing_peer_credentials locally and hmac_mismatch
  * at the peer. These tests pin the resolution order:
  *
- *   CROW_PEER_TOKENS_PATH > CROW_HOME/peer-tokens.json > homedir()/.crow/peer-tokens.json
+ *   CROW_PEER_TOKENS_PATH > CROW_HOME/secrets/peer-tokens.json > homedir()/.crow/secrets/peer-tokens.json
  *
  * The tokens path is resolved at CALL time (ESM hoists static imports ahead
  * of the gateway's .env loader, so a module-load constant would miss .env-only
@@ -102,7 +102,8 @@ test("CROW_HOME set: loads peer-tokens.json from CROW_HOME, not homedir", async 
   });
 
   const mod = await freshModule({ home: fakeHome, crowHome });
-  assert.equal(mod.peerTokensPath(), resolve(crowHome, "peer-tokens.json"));
+  assert.equal(mod.peerTokensPath(), resolve(crowHome, "secrets", "peer-tokens.json"));
+  // Written at the pre-secrets/ path: the first read moves it into secrets/.
   const all = mod.loadPeerCreds();
   assert.deepEqual(Object.keys(all), ["crow:aaaaaaaaaa"]);
   assert.equal(mod.getPeerCreds("crow:aaaaaaaaaa").auth_token, "a".repeat(64));
@@ -116,7 +117,7 @@ test("CROW_HOME set, file absent: returns empty — no fallthrough to homedir", 
   writeTokensFile(join(fakeHome, ".crow", "peer-tokens.json"), SAMPLE);
 
   const mod = await freshModule({ home: fakeHome, crowHome });
-  assert.equal(mod.peerTokensPath(), resolve(crowHome, "peer-tokens.json"));
+  assert.equal(mod.peerTokensPath(), resolve(crowHome, "secrets", "peer-tokens.json"));
   assert.deepEqual(mod.loadPeerCreds(), {});
   assert.equal(mod.getPeerCreds("crow:aaaaaaaaaa"), null);
 });
@@ -150,7 +151,7 @@ test("write path: setPeerCreds writes into CROW_HOME, creating the dir, mode 060
   });
   assert.equal(entry.auth_token, "c".repeat(64));
 
-  const written = join(crowHome, "peer-tokens.json");
+  const written = join(crowHome, "secrets", "peer-tokens.json");
   assert.equal(existsSync(written), true, "file must land under CROW_HOME");
   assert.equal(statSync(written).mode & 0o777, 0o600);
   const onDisk = JSON.parse(readFileSync(written, "utf-8"));
@@ -181,7 +182,7 @@ test("default (no vars): derives homedir()/.crow/peer-tokens.json — path deriv
   assert.equal(homedir(), fakeHome, "safety net: homedir must be the scratch dir");
   assert.equal(
     mod.peerTokensPath(),
-    resolve(fakeHome, ".crow", "peer-tokens.json"),
+    resolve(fakeHome, ".crow", "secrets", "peer-tokens.json"),
   );
 });
 
@@ -200,7 +201,7 @@ test("CALL-time resolution: CROW_HOME set AFTER import is honored (ESM-hoisting 
   process.env.CROW_HOME = instHome; // simulates the .env loader running post-import
   assert.equal(
     mod.peerTokensPath(),
-    resolve(instHome, "peer-tokens.json"),
+    resolve(instHome, "secrets", "peer-tokens.json"),
     "path must follow env set after module evaluation"
   );
   const creds = mod.loadPeerCreds();

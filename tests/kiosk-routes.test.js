@@ -20,7 +20,6 @@ import { resolveDisplayBird, DEFAULT_BIRD } from "../bundles/kiosk/server/bird.j
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { readPortrait, portraitMood } from "../servers/sharing/profile-avatar.js";
 import { wrapPcmAsWav } from "../servers/gateway/voice/turn-helpers.js";
-import { DASH_VOICE_PATH, displayPath, dashBody, dashAutoBody, displayBody } from "./fixtures/voice-use-bodies.mjs";
 
 let srv, base, rt, raw, tailnet = true, session = true;
 const db = () => ({ execute: (q) => raw.execute(q), close() {} });
@@ -684,6 +683,8 @@ test("fit: the listing gives every assistant its fit (with and without memories)
     assert.deepEqual(q.denyTools, KIOSK_DENY_TOOLS);
     assert.equal(q.promptSuffix, displayPromptSuffix(null));
     assert.deepEqual(q.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"]);
+    assert.equal(q.handoffs, true, "the kiosk fit counts Crow's hand-off tool");
+    assert.equal(q.surface, "kiosk");
     const n = f.asked.length;
     await (await fetch(f.b + "/api/kiosk/admin/displays")).json();
     assert.equal(f.asked.length, n, "the 5 s panel poll does not re-read every skill file: fits are cached");
@@ -750,33 +751,37 @@ test("fit: pairing never checks an assistant (every display answers as Crow): a 
   } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
 });
 
-test("fit: rebinding a display to a too-large assistant is refused; other saves on an already-bound display are not; the fit uses the display's memory setting", async () => {
+test("a display's assistant is no longer settable: a posted bound_bot_id (too large or not) is ignored, nothing is written, other settings still save", async () => {
   await raw.execute({ sql: `INSERT INTO pi_bot_defs VALUES ${FIT_BOTS}`, args: [] });
-  const f = await fitRuntime({ household: "full", "fit-general": "no_skills", "fit-huge": "too_large", "fit-edge": { off: "no_skills", on: "too_large" } });
+  const f = await fitRuntime({ household: "full", "fit-huge": "too_large", "fit-edge": { off: "no_skills", on: "too_large" } });
   try {
     await store.pairDevice(db(), { id: "kiosk-fit-a", name: "Fit A", device_kind: "kiosk" });
     await store.updateDeviceProfiles(db(), "kiosk-fit-a", { bound_bot_id: "household" });
-    const no = await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-huge" });
-    assert.equal(no.status, 400);
-    assert.deepEqual(await no.json(), { error: "bot_too_large" });
-    assert.equal((await store.findDevice(db(), "kiosk-fit-a")).bound_bot_id, "household", "nothing was saved");
-    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-edge" })).status, 200, "fits without skills while memories are off");
-    // A display that is ALREADY on a too-large assistant can still save its other settings (and can leave it).
-    await store.updateDeviceProfiles(db(), "kiosk-fit-a", { bound_bot_id: "fit-huge" });
+    const n = f.asked.length;
+    for (const bound_bot_id of ["fit-huge", "fit-edge", "no-such-bot"]) {
+      assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id })).status, 200, bound_bot_id);
+      assert.equal((await store.findDevice(db(), "kiosk-fit-a")).bound_bot_id, "household", "the stored value is untouched");
+    }
+    assert.equal(f.asked.length, n, "and no fit check ran for it");
     assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-huge", kiosk_settings: { vad_hangover_ms: 600 } })).status, 200);
-    assert.equal((await store.findDevice(db(), "kiosk-fit-a")).kiosk_settings.vad_hangover_ms, 600);
-    // Memories on: the same assistant no longer fits → refused with the display's own setting.
-    await store.updateDeviceProfiles(db(), "kiosk-fit-a", { bound_bot_id: "household", kiosk_settings: { memory_integration: true } });
-    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-edge" })).status, 400);
-    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-edge", kiosk_settings: { memory_integration: false } })).status, 200, "the posted memory setting is the one that counts");
+    const d = await store.findDevice(db(), "kiosk-fit-a");
+    assert.equal(d.kiosk_settings.vad_hangover_ms, 600, "the other setting saved");
+    assert.equal(d.bound_bot_id, "household");
   } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
+});
+
+test("POST /api/kiosk/admin/dashboard-voice is gone: 404, and the setting is never written", async () => {
+  const before = settings.get("kiosk_dashboard_bot_id");
+  const r = await j("/api/kiosk/admin/dashboard-voice", { method: "POST", body: JSON.stringify({ bot_id: "household" }) });
+  assert.equal(r.status, 404);
+  assert.equal(settings.get("kiosk_dashboard_bot_id"), before);
 });
 
 test("fit (wired): every kiosk voice turn carries the too-large line in the display's language", async () => {
   assert.equal(kioskTooLargeText("en"), STRINGS.en.err_bot_too_large);
   assert.equal(kioskTooLargeText("es"), STRINGS.es.err_bot_too_large);
   assert.equal(kioskTooLargeText(undefined), STRINGS.en.err_bot_too_large);
-  for (const L of ["en", "es"]) assert.match(STRINGS[L].err_bot_too_large, /Kiosk/, "the line says where to fix it");
+  for (const L of ["en", "es"]) assert.match(STRINGS[L].err_bot_too_large, /Bot Builder/, "the line says where to fix it");
   const { token } = await store.pairDevice(db(), { id: "kiosk-fit-es", name: "es", device_kind: "kiosk", kiosk_settings: { lang: "es" } });
   await store.updateDeviceProfiles(db(), "kiosk-fit-es", { bound_bot_id: "household" });
   const w = new WebSocket(wsUrl(base));
@@ -1521,47 +1526,6 @@ test("r8b (review M2): a server from listen() closes at once even while a wired 
   await new Promise((res) => (ws.readyState === 3 ? res() : ws.on("close", res)));
 });
 
-// ── Item 20 PR 3: Bot Builder's "Use for voice…" writes through these same routes ─────────────
-test("same path: the Bot Builder dialog's bodies store exactly what the Kiosk panel's saves store — the dashboard setting, a display's assistant (nothing else), and the open page gets its config", async () => {
-  await raw.execute({ sql: "INSERT INTO pi_bot_defs VALUES ('vu-other','Other','{}',1)", args: [] });
-  await store.pairDevice(db(), { id: "kiosk-vu 1", name: "Kitchen", device_kind: "kiosk", stt_profile_id: "fw", tts_profile_id: "kk", kiosk_settings: { follow_up: true, vad_hangover_ms: 600 } });
-  await store.updateDeviceProfiles(db(), "kiosk-vu 1", { bound_bot_id: "household" });
-  const pushed = [];
-  const push = rt.hub.pushConfig;
-  rt.hub.pushConfig = async (id) => { pushed.push(id); return push.call(rt.hub, id); };
-  const post = (path, body) => j(path, { method: "POST", body: JSON.stringify(body) });
-  const prevChoice = settings.get("kiosk_dashboard_bot_id");
-  try {
-    const before = await store.findDevice(db(), "kiosk-vu 1");
-    // The dialog: a display → vu-other.
-    const r = await post(displayPath("kiosk-vu 1"), displayBody("vu-other"));
-    assert.equal(r.status, 200);
-    const afterDialog = await store.findDevice(db(), "kiosk-vu 1");
-    assert.equal(afterDialog.bound_bot_id, "vu-other");
-    const { bound_bot_id: _a, ...restBefore } = before;
-    const { bound_bot_id: _b, ...restAfter } = afterDialog;
-    assert.deepEqual(restAfter, restBefore, "nothing but the assistant changed (voice, speech model, settings, token)");
-    assert.deepEqual(pushed, ["kiosk-vu 1"], "the open page gets its new config at once");
-    // The Kiosk panel's own Save when only the assistant changed (kiosk.js savePatch) posts the same body.
-    await store.updateDeviceProfiles(db(), "kiosk-vu 1", { bound_bot_id: "household" });
-    assert.equal((await post(displayPath("kiosk-vu 1"), { bound_bot_id: "vu-other" })).status, 200);
-    assert.deepEqual(await store.findDevice(db(), "kiosk-vu 1"), afterDialog, "the panel's save lands on the same record");
-    // Phone & dashboard: the dialog's {bot_id} and back to Automatic, the setting the voice socket reads.
-    const d1 = await (await post(DASH_VOICE_PATH, dashBody("vu-other"))).json();
-    assert.deepEqual([d1.ok, d1.bot_id, d1.effective_bot_id], [true, "vu-other", "vu-other"]);
-    assert.equal(settings.get("kiosk_dashboard_bot_id"), "vu-other");
-    const d2 = await (await post(DASH_VOICE_PATH, dashAutoBody())).json();
-    assert.equal(d2.bot_id, null);
-    assert.equal(settings.get("kiosk_dashboard_bot_id"), "", "the same empty value the panel's Automatic option posts");
-    assert.equal(d2.effective_bot_id, d2.auto_bot_id, "Automatic is who answers now");
-  } finally {
-    rt.hub.pushConfig = push;
-    if (prevChoice === undefined) settings.delete("kiosk_dashboard_bot_id"); else settings.set("kiosk_dashboard_bot_id", prevChoice);
-    await store.unpairDevice(db(), "kiosk-vu 1");
-    await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'vu-other'", args: [] });
-  }
-});
-
 // ── PR 2.1 Task 7: the opt-in voice transcripts, an admin dashboard-session GET beside the metrics ──
 test("voice transcripts: a session gets the device's entries, no-store; no session is 401; Funnel is 403 even with the dashboard public", async () => {
   const { createTranscriptBuffer } = await import("../servers/gateway/voice/transcript-buffer.js");
@@ -1645,4 +1609,50 @@ test("upgrade gate (/api/kiosk/session): Serve from tailscaled's uid passes; the
     if (prevUids === undefined) delete process.env.CROW_SERVE_PEER_UIDS; else process.env.CROW_SERVE_PEER_UIDS = prevUids;
     k.stop();
   }
+});
+
+test("presence (voice hand-off 5.2): each live display is a voice surface the hub speaks for; closing it unregisters it", async () => {
+  const P = await import("../servers/gateway/voice/presence.js");
+  P._resetPresenceForTest();
+  // The main runtime has no registerVoiceSurface (an older core): its displays are never registered.
+  const plain = await connect("kiosk-no-presence");
+  assert.deepEqual(P.voiceSurfaces(), []);
+  plain.ws.close();
+
+  const regs = [];
+  const k = createKioskRuntime(runtimeDeps({ registerVoiceSurface: (id, impl) => { regs.push({ id, impl }); return P.registerVoiceSurface(id, impl); } }));
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, k);
+  try {
+    const { token } = await store.pairDevice(db(), { id: "kiosk-presence", name: "Kitchen", device_kind: "kiosk" });
+    const ws = new WebSocket(wsUrl(b));
+    const msgs = [];
+    await new Promise((r) => ws.on("open", r));
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-presence", token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(P.voiceSurfaces(), [{ deviceId: "kiosk-presence", surface: "kiosk" }]);
+    const { impl } = regs.at(-1);
+    assert.equal(impl.connected(), true);
+    assert.equal(impl.lastTurnAt(), null, "no turn yet");
+    assert.equal(impl.busy(), false);
+    assert.equal((await P.announce({ originDeviceId: "kiosk-presence", lineFor: () => "Writer has finished a task." })).spokenOn, null, "no turn in the window");
+    // A turn: lastTurnAt is set, and the heads-up then goes through the hub's queued speech (P28).
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "p1" }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 100 && !msgs.some((m) => m.type === "turn_done"); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(typeof impl.lastTurnAt(), "number");
+    for (let i = 0; i < 50 && impl.busy(); i++) await new Promise((r) => setTimeout(r, 10));
+    const before = speakCalls.length;
+    const r = await P.announce({ originDeviceId: "kiosk-presence", lineFor: (surface) => (surface === "kiosk" ? "Writer has finished a task." : "wrong line") });
+    assert.deepEqual(r, { spokenOn: "kiosk-presence", surface: "kiosk" });
+    for (let i = 0; i < 50 && speakCalls.length === before; i++) await new Promise((r2) => setTimeout(r2, 10));
+    assert.equal(speakCalls.at(-1).text, "Writer has finished a task.");
+    ws.close();
+    for (let i = 0; i < 50 && P.voiceSurfaces().length; i++) await new Promise((r2) => setTimeout(r2, 10));
+    assert.deepEqual(P.voiceSurfaces(), [], "the closed display is unregistered");
+    assert.equal(impl.connected(), false);
+  } finally { k.stop(); s.close(); P._resetPresenceForTest(); }
 });

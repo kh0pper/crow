@@ -28,9 +28,8 @@ Un agente es una definición almacenada en la tabla `pi_bot_defs` de la `crow.db
 │   discord_gateway.mjs canal de Discord                            │
 │   bridge_tick.mjs     canal de Gmail                              │
 ├──────────────────────────────────────────────────────────────────┤
-│  bundles/meta-glasses/  gateway de lentes: el bot vinculado       │
-│                         dirige el turno de voz acotado y con      │
-│                         permisos aplicados                        │
+│  bundles/meta-glasses/  gateway de lentes: el turno de voz,       │
+│                         que responde como Crow (crow.voice)       │
 ├──────────────────────────────────────────────────────────────────┤
 │  crow.db (SQLite, WAL)  pi_bot_defs + datos compartidos de Crow   │
 └──────────────────────────────────────────────────────────────────┘
@@ -65,11 +64,11 @@ Cuando un agente selecciona una herramienta de una extensión que no forma parte
 |---|---|---|
 | **Gmail** | `bridge_tick.mjs` | Sondea un buzón conectado, redacta borradores o envía respuestas sujeto a la política |
 | **Discord** | `discord_gateway.mjs` | Un WebSocket de Discord de larga vida que dirige el runtime, con una lista de usuarios permitidos por agente |
-| **Meta Glasses** | `bundles/meta-glasses/` | Un dispositivo emparejado se vincula a un agente y dirige el turno de voz rápido |
-| **AI Companion** | `bundles/companion/` + el router `/llm/v1` del gateway (`servers/gateway/routes/llm-router.js`) | Un dispositivo kiosko se vincula a un agente; el bucle OLVV del [companion](/es/architecture/companion) ejecuta la persona/avatar/herramientas de ese agente, con el router que enruta rápido (4B) → escalado (35B) |
+| **Meta Glasses** | `bundles/meta-glasses/` | Las gafas emparejadas responden como Crow, el bot de voz (`crow.voice`); no hay un bot por dispositivo |
+| **AI Companion** | `bundles/companion/` + el router `/llm/v1` del gateway (`servers/gateway/routes/llm-router.js`) | El bucle OLVV del [companion](/es/architecture/companion) con el avatar y las funciones ajustados en la pestaña Lo básico del bot (canal *Compañero de IA (quiosco)*); la voz responde como Crow, con el router que enruta rápido (4B) → escalado (35B) |
 | **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | El agente es accesible como contacto a través de la mensajería entre pares de Crow; los DM cifrados de remitentes autorizados dirigen el runtime y el agente responde desde su propia identidad derivada. Consulta [Crow Messages](#crow-messages-los-bots-como-contactos) abajo. |
 
-> Los canales de Meta Glasses y AI Companion ejecutan su propio bucle de voz (el turno de voz de los lentes; OLVV para el companion) en lugar del runtime pi `bridge.mjs` — así que la persona/skills/herramientas del agente vinculado dirigen el turno, pero el motor es el front end de voz, no pi. Consulta [AI Companion](/es/architecture/companion).
+> Los canales de Meta Glasses y AI Companion ejecutan su propio bucle de voz (el turno de voz de los lentes; OLVV para el companion) en lugar del runtime pi `bridge.mjs` — el motor es el front end de voz, no pi, y responde como `crow.voice` (la persona, las herramientas y los límites vienen del bot de voz de Crow). La vinculación de un dispositivo companion solo lleva su avatar y sus funciones. Consulta [AI Companion](/es/architecture/companion).
 
 ## Crow Messages: los bots como contactos
 
@@ -90,18 +89,19 @@ Dos invariantes estructurales hacen que las salas sean seguras y no solo ajustad
 
 ## La vía de voz
 
-Un dispositivo de lentes lleva un `bound_bot_id`. Cuando un dispositivo está vinculado, su turno de voz lo dirige ese agente en lugar de un perfil genérico:
+La voz (quiosco, lentes, Hablar con Crow en el teléfono) siempre responde como el bot de voz de Crow, `crow.voice`; el `bound_bot_id` de cada dispositivo ya no se lee para la voz. Los ajustes de Crow dirigen el turno:
 
-- **Prompt**: la persona y las skills del agente vinculado, más un breve apéndice de estilo de voz.
-- **Herramientas**: un conjunto acotado. Las categorías de herramientas centrales de Crow se incluyen cuando el agente seleccionó una herramienta bajo el servidor correspondiente, y las herramientas de una extensión se incluyen solo cuando el agente las seleccionó y el servidor está conectado. Un mapa de canónico a categoría de voz decide qué selecciones tienen un equivalente de voz; las selecciones sin equivalente se muestran como una advertencia en el editor en lugar de descartarse en silencio.
-- **Modelo y voz**: el `fast_voice_model` del agente, resuelto a través del sistema de perfiles de Crow, con los perfiles de habla, texto-a-voz y visión del dispositivo aportando las voces.
-- **Permisos**: un wrapper de despacho consciente de la política corre antes de que se ejecute cualquier herramienta. Resuelve la acción efectiva detrás de cualquier wrapper de herramienta de propósito general y luego aplica los conjuntos de confirmación y denegación del agente y su modo `external_send` (degradando las publicaciones a borradores y bloqueando los envíos reales). Una acción bloqueada o que requiere confirmación se responde por voz.
+- **Prompt**: la persona y las skills del bot de voz, más un breve apéndice de estilo de voz.
+- **Herramientas**: un conjunto acotado. Las categorías de herramientas centrales de Crow se incluyen cuando el bot de voz seleccionó una herramienta bajo el servidor correspondiente, y las de una extensión solo cuando las seleccionó y el servidor está conectado. Las selecciones sin equivalente de voz se muestran como advertencia en el editor en lugar de descartarse en silencio.
+- **Modelo y voz**: el `fast_voice_model` del bot de voz, resuelto a través del sistema de perfiles de Crow, con los perfiles de habla, texto-a-voz y visión del dispositivo aportando las voces.
+- **Permisos**: un wrapper de despacho consciente de la política corre antes de que se ejecute cualquier herramienta. Resuelve la acción efectiva detrás de cualquier wrapper de propósito general y aplica el conjunto de denegación del bot de voz. Una acción bloqueada o que requiere confirmación se responde por voz.
+- **Encargos**: Crow puede encargar trabajos más grandes a tus otros bots cuando dices que sí. Consulta [Quiosco](/es/architecture/kiosk#encargos).
 
 Este wrapper es la frontera de seguridad para la voz. Cierra la brecha que dejaba la antigua puerta de confirmación basada solo en nombres, que podía evadirse enrutando una acción protegida a través de una herramienta wrapper.
 
 ## Trabajo profundo
 
-El trabajo de larga duración se entrega como un trabajo en segundo plano mediante la herramienta `crow_delegate`. El trabajo se encola en la tabla compartida `bot_jobs` y lo ejecuta un worker de pi en el proceso anfitrión del Bot Builder — un único agente fuerte realizando el trabajo de varios pasos en un contexto coherente. El agente acusa recibo de inmediato con un ID de trabajo y el resultado se entrega en un turno posterior (se obtiene con `crow_job_status`, o se envía al canal de origen), ya que el trabajo sobrevive al turno que lo inició. Una vía persistente de notificación de finalización es un siguiente paso planeado.
+El trabajo de larga duración se entrega como un trabajo en segundo plano mediante la herramienta `crow_delegate`. El trabajo se encola en la tabla compartida `bot_jobs` y lo ejecuta un worker de pi en el proceso anfitrión del Bot Builder — un único agente fuerte realizando el trabajo de varios pasos en un contexto coherente. El agente acusa recibo de inmediato con un ID de trabajo y el resultado se entrega en un turno posterior (se obtiene con `crow_job_status`, o se envía al canal de origen), ya que el trabajo sobrevive al turno que lo inició. Los encargos de voz tienen su propia vía de finalización: `board/result-requesters.js` lleva el informe final de la tarjeta a una sola notificación (y a un aviso hablado si el operador sigue hablando), en lugar del aviso genérico del tablero. Consulta [Quiosco](/es/architecture/kiosk#encargos).
 
 ## Autoescritura opcional (opt-in)
 

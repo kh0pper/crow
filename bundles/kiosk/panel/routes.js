@@ -37,6 +37,13 @@ const { ensureKioskAnnounceToken, validateKioskAnnounceToken } = await appImport
 const { PERCH_TOKENS } = await appImport("servers/gateway/dashboard/shared/design-tokens.js");
 const { readPortrait } = await appImport("servers/sharing/profile-avatar.js");
 const { createKioskRuntime, createSttWarmup, kioskThemeCss } = await bImport("server/runtime.js");
+// Live voice surfaces (presence.js, voice hand-off PR 5): guarded, so an older core without it (or one that fails to
+// load) still loads this panel, and the displays are simply never registered (P29).
+const presence = await appImport("servers/gateway/voice/presence.js").catch((err) => {
+  console.warn(`[kiosk] voice presence unavailable: ${err?.message || err}`);
+  return null;
+});
+const registerVoiceSurface = typeof presence?.registerVoiceSurface === "function" ? presence.registerVoiceSurface : null;
 const { resolveDisplayBird } = await bImport("server/bird.js");
 
 /** An installed add-on's environment, read at the moment it is needed (a token change applies without a restart). Never logged. */
@@ -73,6 +80,7 @@ const runtime = createKioskRuntime({
   files: { publicDir: join(BUNDLE_DIR, "public"), birdSvgPath: join(APP_ROOT, "bundles", "ramble", "server", "bird-svg.cjs") },
   announceToken: { validate: validateKioskAnnounceToken },
   addonEnv, dataDir: resolveDataDir(),
+  registerVoiceSurface,
 });
 
 {

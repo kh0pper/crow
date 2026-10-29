@@ -32,7 +32,7 @@ import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, mentionsLock, allowEntryMatches } fr
 import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-permission-policy.js";
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
-import { buildBotBaseEnv, botEnvScrubbed } from "../../servers/shared/bot-env.js";
+import { buildBotBaseEnv, botEnvScrubbed, PEER_CREDENTIAL_ENV, stripPeerCredentialEnv } from "../../servers/shared/bot-env.js";
 import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
@@ -59,12 +59,14 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // bot-world.mjs so P2's interactive engine can build the SAME world without
 // this module's per-turn channel semantics. bot-world imports back LAZILY —
 // see its CYCLE NOTE.
-import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
+import { buildBotWorld, prepareSpawn, bindWorldSession } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
+import { piProviderIdHere } from "./pi_provider_id.mjs";
+import { PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
@@ -100,7 +102,9 @@ export function filterSpawnEnvWithReport(def) {
     // not be able to turn the sandbox off for itself.
     // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
     // must not point pi at a file of its choosing.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_MODEL_ROLES_FILE") { stripped.push(k); continue; }
+    // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
+    // peer credential store.
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
     spawnEnv[k] = def.spawn_env[k];
   }
   return { spawnEnv, stripped };
@@ -284,6 +288,16 @@ export class PiRpc {
     // is NO hardcoded crow-local anywhere in the spawn path anymore.
     const resolved = opts.resolved;
     this.resolved = resolved;
+    // Task 17: the pi provider for this row (pi_provider_id.mjs): a consented
+    // cloud row runs as its crow-c-* door entry, whose key pi reads from the
+    // door token file itself, so no token is placed in this env. A bare pi
+    // built-in with no entry refuses here (never the operator's pi login).
+    // prepareSpawn (and job_runner) map it BEFORE any bot_sessions row is
+    // written and pass it in, so the throw below is only the fallback for a
+    // caller that spawns without them (skill_review).
+    const piProvider = typeof opts.piProvider === "string" && opts.piProvider ? opts.piProvider : piProviderIdHere(resolved.provider);
+    if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
+    this.piProvider = piProvider;
     // Test seam: nodeBin/cliPath let tests drive the exit-surface path with a
     // stub child instead of a real pi (which would wire live MCP servers).
     // Without the seam, requirePiCli throws the honest "bot engine (pi) is
@@ -300,7 +314,7 @@ export class PiRpc {
     // project trust (before that variable existed it read cwd/.mcp.json —
     // verified live on 0.82.0 2026-07-25 with this flag set).
     // Older pi (0.74.2) accepts the flag too, so no version gating.
-    const args = [cliPath, "--mode", "rpc", "--no-approve", "--provider", resolved.provider, "--model", resolved.model,
+    const args = [cliPath, "--mode", "rpc", "--no-approve", "--provider", piProvider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
     // Phase 3.1 (R9/R11): multi-agent is allowed iff the operator opted in
     // (def.permission_policy.multi_agent) AND the POST-resolution model is
@@ -377,7 +391,7 @@ export class PiRpc {
     // Any classifier key a def carried is dropped: only the bridge sets it.
     delete piPolicy.classifier;
     // Stored values read the way the Bot Builder shows them: the retired
-    // "sandbox" runs as auto (Kevin ruling 2026-10-08), unknown as deny.
+    // "sandbox" runs as auto (operator ruling 2026-10-08), unknown as deny.
     // No shell at all while the env scrub is switched off.
     // ONE accessor for the stored mode and the Perch-only rule (shared with
     // the save and peer guards): sandbox/unknown run as deny; ask/auto run
@@ -435,11 +449,11 @@ export class PiRpc {
     if (strippedSpawnEnv.length) {
       console.error("[pi-bots] stripped engine-reserved spawn_env keys from bot def: " + strippedSpawnEnv.join(", "));
     }
-    // Kevin ruling 2026-10-08: an explicit env allowlist — the gateway's .env
+    // Operator ruling 2026-10-08: an explicit env allowlist — the gateway's .env
     // secrets never reach a bot process (servers/shared/bot-env.js).
     const env = Object.assign({}, buildBotBaseEnv(process.env),
       { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),
-        PI_PROVIDER: resolved.provider,
+        PI_PROVIDER: piProvider,
         PIBOT_SUBAGENT_DEPTH: "0",
         // The bot's closed-world MCP config lives in the WORLD ROOT, not at
         // spawnCwd: pi-lab's mcp-client loads the global file plus this file
@@ -457,6 +471,9 @@ export class PiRpc {
       // Model roles: the instance's role snapshot. After extraEnv (M2), so
       // nothing a caller or def passes can repoint it.
       { CROW_MODEL_ROLES_FILE: roleSnapshotPath() });
+    // Item 46 PR-B: whatever was merged above (an operator allow, passthrough,
+    // extraEnv), pi never learns where the peer credential store is.
+    stripPeerCredentialEnv(env);
     // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
     // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
     // just for sitting under the instance's data dir. INTERACTIVE (Perch)
@@ -1211,6 +1228,14 @@ export async function handleInbound(opts) {
     pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }, opts.kind ? { kind: String(opts.kind) } : {}));
+
+  // Item 46 PR-B: the config's actor signatures bind this session's id. A
+  // first turn of a thread had no row when the world was built (the row is
+  // stamped just above, at exactly the point it always was), so the config is
+  // rebuilt now with its id, before anything is spawned. No-op otherwise.
+  if (await bindWorldSession(world, session)) {
+    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { mcpConfig: world.mcpConfig });
+  }
 
   // Warm the resolved model bundle before spawning pi (same as runJob). The
   // bridge is a separate process from the gateway, so it warms over HTTP via

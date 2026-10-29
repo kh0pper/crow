@@ -12,7 +12,7 @@ export const commentDefs = [
   { name: "ws_docs_list_comments", description: "ALL comments in a .docx (never truncated): id, author, date, content, quoted_text (the highlighted text), resolved, replies. Resolved threads only with include_resolved.",
     schema: { ...fileRef, include_resolved: z.boolean().optional().default(false) },
     run: async (a, c) => { const { entry, d } = await loadDocx(c.getConfig(), refOf(a)); return { path: entry.path, file_id: entry.fileId, comments: listComments(d, a.include_resolved) }; } },
-  { name: "ws_docs_add_comment", description: "Add a comment (authored by the acting bot as '<name> (bot)', else 'Crow') anchored to the first occurrence of quoted_text (a real highlight; it cannot cross a tab or line break), or to the first body paragraph without it.",
+  { name: "ws_docs_add_comment", description: "Add a comment (authored by the acting bot as '<name> (bot)', else 'Crow'; a comment from a paired instance reads 'Crow (via <instance>)', and '<bot> (bot from <instance>)' means that instance's gateway asserts its bot wrote it) anchored to the first occurrence of quoted_text (a real highlight; it cannot cross a tab or line break), or to the first body paragraph without it.",
     schema: { ...fileRef, content: z.string().min(1).max(10000), quoted_text: z.string().min(1).max(2000).optional(), ...writeOpts },
     run: (a, c) => docxWrite(c, a, (d) => ({ changed: 1, summary: "add comment", data: addComment(d, a.content, a.quoted_text, authorFor(a.__actor)) })) },
   { name: "ws_docs_reply_comment", description: "Reply to a comment thread (comment_id = the thread's first comment).",

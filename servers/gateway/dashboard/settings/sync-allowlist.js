@@ -154,6 +154,10 @@ export const INSTANCE_SCOPE_KEYS = {
   model_role_subagents:       "pi sub-agent to model role map (per install)",
   // "Test the picks" results (per provider and model); a check is only about this install's key.
   provider_pick_checks:       "Recommended-pick test results (per install)",
+  // Which cloud provider rows bots may use (servers/shared/cloud-consent.js).
+  // Provider rows sync, so consent must not: each box agrees for itself.
+  llm_cloud_door_rows:        "Cloud rows bots may use, pinned to address and key (per install)",
+  llm_cloud_consent_salt:     "Salt for the cloud-consent key fingerprints (per install)",
 };
 
 /**

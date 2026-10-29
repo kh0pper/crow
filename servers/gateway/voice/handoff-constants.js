@@ -32,6 +32,9 @@ export const HANDOFF_QUIET_AFTER_MS = 30 * 60_000;
 export const HANDOFF_ASKED_RETAIN_MS = 7 * 24 * 3600_000;
 
 export const HANDOFF_KINDS = Object.freeze(["handoff", "stop"]);
+/** The surfaces where a spoken yes is the operator's own (a dashboard tab speaks as "phone"); any other
+ * surface, a missing one included, is a shared display: "kiosk". */
+export const PERSONAL_SURFACES = Object.freeze(new Set(["phone", "glasses"]));
 /** No CHECK in the table: the store validates against this list. `partial` is deliberately absent (only a
  * final report ends a hand-off), and `quiet` (a session paused with no result) is open, not ended. */
 export const HANDOFF_STATUSES = Object.freeze([
@@ -40,6 +43,14 @@ export const HANDOFF_STATUSES = Object.freeze([
 ]);
 /** The statuses that count as an open hand-off (openForDevice, openPersonal). */
 export const HANDOFF_OPEN = Object.freeze(["starting", "started", "queued", "quiet"]);
+/**
+ * A pending question as a hand-off file asks it (pending.set's entry): its fields plus a fresh `mark` object.
+ * The store copies an entry shallowly on set, get and take, so the mark is the one thing that stays the same
+ * object for exactly one asked question: handoff.js afterTurn keys its one-turn grace on it (P19, fix round 1
+ * of PR 6 Task 6.3). Every pending.set in the hand-off files goes through this (a source test checks), so a
+ * re-asked question is a new mark with a grace of its own.
+ */
+export const askedEntry = (fields) => ({ ...fields, mark: {} });
 /** The languages a row's async lines are spoken in. */
 export const HANDOFF_LANGS = Object.freeze(["en", "es"]);
 

@@ -8,8 +8,9 @@
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "../shared/crow-home.js";
-import { writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { ensureSecretsDir, migrateLegacySecretFile } from "../shared/peer-credentials.js";
 import {
   readSetting, writeSetting, deleteLocalSetting,
 } from "./dashboard/settings/registry.js";
@@ -235,6 +236,66 @@ export async function ensureArtifactsToken(db) {
   return { minted: true };
 }
 
+// Peer-relay token (item 46 PR-B): same shape as the artifacts token (hash in
+// a local-scope setting, raw value in <crowHome>/secrets/peer-relay-token 600,
+// in the 700 dir the pi sandbox hides from bots; older versions kept it at
+// <crowHome>/peer-relay-token and it is moved at boot). The bot engine reads
+// it outside the sandbox and hands its VALUE to the remote proxy in the
+// proxy's block env, never a path a bot shell could open. A pi
+// bot's remote proxy presents it, with its signed actor headers, to the
+// loopback relay at /peer-relay/... (routes/peer-relay.js), which validates it
+// itself. It is accepted NOWHERE else: localTokenAuthMiddleware never consults
+// it, so it authenticates no MCP mount.
+const PEER_RELAY_HASH_KEY = "mcp_peer_relay_token_hash";
+const PEER_RELAY_CREATED_KEY = "mcp_peer_relay_token_created";
+export function peerRelayTokenPath() {
+  return join(crowHome(), "secrets", "peer-relay-token");
+}
+function legacyPeerRelayTokenPath() {
+  return join(crowHome(), "peer-relay-token");
+}
+
+export async function generatePeerRelayToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, PEER_RELAY_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, PEER_RELAY_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = peerRelayTokenPath();
+  ensureSecretsDir(dirname(path));
+  writeFileSync(path, token, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validatePeerRelayToken(db, token) {
+  if (!token || typeof token !== "string") return false;
+  const stored = await readSetting(db, PEER_RELAY_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function ensurePeerRelayToken(db) {
+  const hash = await readSetting(db, PEER_RELAY_HASH_KEY);
+  // An older version's token at <crowHome>/peer-relay-token moves into
+  // secrets/ only when it is the minted one (its hash matches): a bot shell
+  // can write the old path, so anything else there is discarded.
+  const legacy = legacyPeerRelayTokenPath();
+  try {
+    if (existsSync(legacy)) {
+      const tok = readFileSync(legacy, "utf8").trim();
+      if (hash && tok && sha256Hex(tok) === hash) migrateLegacySecretFile(legacy, peerRelayTokenPath());
+      else { unlinkSync(legacy); console.warn(`[gateway] discarded ${legacy}: not this instance's minted relay token`); }
+    }
+  } catch (err) {
+    console.warn(`[gateway] could not move the peer-relay token into secrets/: ${err.message}`);
+  }
+  if (hash && existsSync(peerRelayTokenPath())) return { minted: false };
+  await generatePeerRelayToken(db);
+  return { minted: true };
+}
+
 // Kiosk announce token (kiosk spec §4.1): lets the kiosk bundle's stdio MCP
 // server reach the gateway's live display sessions through loopback-only
 // /api/kiosk/internal/*. Same shape as the board/phone tokens (hash in a
@@ -314,6 +375,92 @@ export async function ensureModelsToken(db) {
 }
 
 export const MODELS_TOKEN_KEYS = { MODELS_HASH_KEY, MODELS_CREATED_KEY };
+
+// Cloud-door token (roles phase 2, Task 14): lets bots reach cloud models
+// through the gateway's /llm/c door without ever holding a provider key. pi
+// reads it per request from a models.json `!<command>` apiKey (pi runs that
+// command uncached on every auth resolve), so a token rotated at boot reaches
+// a pi process that is already running.
+//
+// The file deliberately lives at <crowHome>/llm-cloud-token, OUTSIDE
+// <crowHome>/secrets/: the bot sandbox (bwrap) hides secrets/ from pi, so a
+// token there would be unreadable to the bots it exists for. Peer tokens are
+// moving INTO secrets/; this one is different on purpose: it is meant for
+// bots, and it is scoped to the cloud door only. validateLlmCloudToken checks
+// this one hash and nothing else, so no other token (local, board, phone,
+// artifacts, kiosk, models) opens the door, and this token opens nothing but
+// the door (no other validator consults its hash).
+//
+// Rotated on EVERY boot (no ensure/no-op path): a fresh random value per start.
+const LLM_CLOUD_HASH_KEY = "mcp_llm_cloud_token_hash";
+const LLM_CLOUD_CREATED_KEY = "mcp_llm_cloud_token_created";
+export function llmCloudTokenPath() {
+  return join(crowHome(), "llm-cloud-token");
+}
+
+/** New random 32-byte hex token every call. Order keeps the file and the
+ *  stored hash matching whenever a step fails:
+ *    1. write the raw value to a temp file in the same directory (wx, 0600),
+ *       then chmod 0600: a failure here changes nothing;
+ *    2. store the new hash (local scope): a failure here removes the temp
+ *       file, and the old file and old hash still match;
+ *    3. rename the temp file over the old one: a failure here puts the old
+ *       hash back, so the old file keeps validating.
+ *  A reader sees the old token or the new one, never a partial or
+ *  world-readable file. Returns the raw token. */
+export async function rotateLlmCloudToken(db) {
+  const token = randomBytes(32).toString("hex");
+  const path = llmCloudTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const dropTmp = () => { try { unlinkSync(tmp); } catch { /* already gone */ } };
+  try {
+    writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+    chmodSync(tmp, 0o600);
+  } catch (err) {
+    dropTmp();
+    throw err;
+  }
+  let oldHash;
+  try {
+    oldHash = await readSetting(db, LLM_CLOUD_HASH_KEY);
+    await writeSetting(db, LLM_CLOUD_HASH_KEY, sha256Hex(token), { scope: "local" });
+  } catch (err) {
+    dropTmp();
+    throw err;
+  }
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    dropTmp();
+    try {
+      if (oldHash) await writeSetting(db, LLM_CLOUD_HASH_KEY, oldHash, { scope: "local" });
+      else await deleteLocalSetting(db, LLM_CLOUD_HASH_KEY);
+    } catch (restoreErr) {
+      // Best effort: the next boot rotates again. Until then the stored hash
+      // matches no file, so bots cannot reach the door.
+      console.warn(`[llm-cloud-token] could not put the old hash back after a failed rename: ${restoreErr.message}`);
+    }
+    throw err;
+  }
+  try {
+    await writeSetting(db, LLM_CLOUD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  } catch { /* informational only */ }
+  return token;
+}
+
+/** Timing-safe check against the cloud-door hash ONLY. */
+export async function validateLlmCloudToken(db, token) {
+  if (!token || typeof token !== "string") return false;
+  const stored = await readSetting(db, LLM_CLOUD_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export const LLM_CLOUD_TOKEN_KEYS = { HASH: LLM_CLOUD_HASH_KEY, CREATED: LLM_CLOUD_CREATED_KEY };
 
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,

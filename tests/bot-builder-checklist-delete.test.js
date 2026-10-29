@@ -114,6 +114,20 @@ test("gmail fully configured: Channel row is ready with address + allowed count"
   assert.ok(html.includes("2 allowed sender(s)"));
 });
 
+test("a kept glasses record is an informational note, never OK and never a warning (en + es)", async () => {
+  const bot = mkBot({ gateways: [{ type: "glasses", device_id: "dev-1" }] });
+  const en = await renderReadiness(db, bot, defOf(bot), "en");
+  const es = await renderReadiness(db, bot, defOf(bot), "es");
+  assert.ok(en.includes("Glasses now answer as Crow"), en);
+  assert.ok(es.includes("Las gafas ahora responden como Crow"), es);
+  for (const html of [en, es]) {
+    const row = html.split("<tr>").find((r) => r.includes("answer as Crow") || r.includes("responden como Crow"));
+    assert.ok(row.includes("btb-check-info"), "neutral info icon");
+    assert.ok(!row.includes("btb-ok") && !row.includes("btb-status-warn") && !row.includes("btb-err"), "not OK, not a warning");
+    assert.ok(!row.includes("dev-1"), "does not claim a working device");
+  }
+});
+
 test("no gateway: Channel row warns but does not error", async () => {
   const bot = mkBot({ gateways: [] });
   const html = await renderReadiness(db, bot, defOf(bot), "en");

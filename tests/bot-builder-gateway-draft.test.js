@@ -100,15 +100,19 @@ test("companion save with gw_face_tracking absent persists face_tracking: false"
   assert.equal(def.companion_features?.face_tracking, false, "absent checkbox persists false");
 });
 
-test("device-less glasses save persists the type as a draft", async () => {
-  const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "glasses" } },
-    res, { db }
-  );
-  assert.match(res.redirected, /saved=1/);
-  const def = await readDef();
-  assert.equal(def.gateways[0]?.type, "glasses");
+test("glasses are retired: a glasses save (with or without a device) neither stores a record nor binds a device", async () => {
+  const { updateDeviceProfiles, pairDevice, findDevice } = await import("../servers/shared/device-store.js");
+  await pairDevice(db, { id: "glasses-keep", name: "Glasses", generation: "unknown" });
+  await updateDeviceProfiles(db, "glasses-keep", { bound_bot_id: "someone-else" });
+  const before = JSON.stringify(await findDevice(db, "glasses-keep"));
+  const priorDef = await readDef();
+  for (const extra of [{}, { gw_device_id: "glasses-keep", gw_tts_profile_id: "t" }]) {
+    const res = mkRes();
+    await handleBotBuilderPost({ body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "glasses", ...extra } }, res, { db });
+    assert.match(res.redirected, /saved=1/);
+    assert.deepEqual((await readDef()).gateways, priorDef.gateways, "no glasses record");
+    assert.equal(JSON.stringify(await findDevice(db, "glasses-keep")), before, "the device is untouched");
+  }
 });
 
 test("typed kiosk name pairs + binds a companion device in one Save (no glasses bundle needed)", async () => {

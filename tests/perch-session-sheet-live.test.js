@@ -297,6 +297,46 @@ for (const [w, h] of [[1280, 900], [390, 844]]) {
   });
 }
 
+// The dialog's close event fires a task AFTER close() (the browser hands focus
+// back to the bot name inside close() itself), so a reopen can run before it.
+// That late event belongs to the sheet that closed: it must not pull focus out
+// of the reopened sheet or reset it. Closing and reopening in ONE task makes the
+// late event certain, not a race (the apps sheet's twin is in
+// tests/apps-launcher-live.test.js).
+test("a reopen before the close event lands keeps focus in the sheet and its tab", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(1280, 900);
+  try {
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet");
+    await s.click("perch-tab-btn-activity");
+    await s.waitFor("!document.getElementById('perch-tab-activity').hidden", "Activity");
+    const opened = await s.json(`(function(){
+      var d=document.getElementById('perch-session-sheet'), seen=[];
+      d.addEventListener('close',function(){ seen.push('close event, open='+d.open); },{once:true});
+      d.close();
+      seen.push('reopen');
+      document.getElementById('perch-ident-btn').click();
+      window.__closeOrder=seen;
+      return JSON.stringify({open:d.open,active:document.activeElement&&document.activeElement.id});
+    })()`);
+    assert.equal(opened.open, true, "the reopen opened the sheet");
+    assert.equal(opened.active, "perch-tab-btn-activity", "the reopen focused its tab");
+    await s.waitFor("window.__closeOrder.length===2", "the late close event");
+    assert.deepEqual(JSON.parse(await s.evalIn("JSON.stringify(window.__closeOrder)")), ["reopen", "close event, open=true"],
+      "the close event really landed after the reopen");
+    await s.evalIn("new Promise(function(r){ setTimeout(r,50); })");
+    const after = await s.json(SHEET);
+    assert.equal(after.open, true, "still open");
+    assert.equal(after.active, "perch-tab-btn-activity", "focus stays on the reopened sheet's tab");
+    assert.deepEqual(after.selected, ["activity"], "the reopened sheet keeps its tab");
+    // A real close afterwards still hands focus back to the bot name.
+    await s.key("Escape");
+    await s.waitFor(CLOSED, "Escape to close it");
+    await s.waitFor("document.activeElement&&document.activeElement.id==='perch-ident-btn'", "focus back on the bot name");
+  } finally { await s.close(); }
+});
+
 test("sheet shows live activity and returns focus", async (t) => {
   if (!available) return t.skip("no headless Chrome");
   const s = await tab(390, 844);

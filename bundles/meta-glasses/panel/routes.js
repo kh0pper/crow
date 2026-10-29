@@ -97,6 +97,13 @@ const { createGlassesTurns, playableTtsProfile, voicedTtsProfile, voiceBotToolNa
 // One set of voice rules for every surface (passed to createGlassesTurns as deps.crowVoice).
 const { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader } = await appImport("servers/gateway/voice/crow-voice.js");
 const { stringsFor } = await bImport("server/strings.js");
+// Live voice surfaces (presence.js, voice hand-off PR 5): guarded, so an older core without it (or one that fails to
+// load) still loads this panel, and the glasses are simply never registered.
+const _presence = await appImport("servers/gateway/voice/presence.js").catch((err) => {
+  console.warn(`[meta-glasses] voice presence unavailable: ${err?.message || err}`);
+  return null;
+});
+const registerVoiceSurface = typeof _presence?.registerVoiceSurface === "function" ? _presence.registerVoiceSurface : null;
 
 /* ---------- Device-token routes: who may call, and how often ----------
  * These routes are reached with a device token, not a dashboard session, and sit outside the
@@ -421,6 +428,7 @@ export async function remintPhotoRefs(db, content) {
 const TURN_CAP_MS = 90_000;                 // a turn is aborted here whatever it is doing
 const TURN_LOCK_WAIT_MS = 8_000;            // how long a new turn waits for a library relay to finish sending
 const _turnAborts = new Map();              // deviceId → AbortController of the turn in flight
+const _lastTurnAt = new Map();              // deviceId → ms of the operator's last voice turn (presence.js)
 const _voiceDeps = await defaultVoiceDeps();
 const _voice = createVoiceTurnRunner(_voiceDeps);
 // The Crow voice bot as the glasses see it (its voice, its STT, cloud or not): cached 30 s, reloaded on a bot-defs change.
@@ -496,6 +504,7 @@ async function waitForTurnLock(deviceId, ws, ms) {
 /** One spoken turn for a connected device, from the end of speech to the last byte of its reply. */
 async function runSessionTurn(ws, deviceId, audio) {
   const startedAt = Date.now();
+  _lastTurnAt.set(deviceId, startedAt);
   if (!(await waitForTurnLock(deviceId, ws, TURN_LOCK_WAIT_MS))) {
     sendText(ws, { type: "error", code: "turn_busy", recoverable: true });
     return;
@@ -513,6 +522,7 @@ async function runSessionTurn(ws, deviceId, audio) {
     clearTimeout(cap);
     if (_turnAborts.get(deviceId) === ac) _turnAborts.delete(deviceId);
     releaseTurnLock(deviceId, ws);
+    _lastTurnAt.set(deviceId, Date.now());
   }
   // Library audio starts only after the turn's speech went out and its lock is free.
   if (entry?.playback && ws.readyState === 1) startEnvelopePlayback(deviceId, entry.playback);
@@ -1004,6 +1014,7 @@ export function setupWebSocket(server) {
         try { prior.ws.close(1000, "superseded"); } catch {}
       }
       _sessions.set(deviceId, { ws, device, openedAt: Date.now(), lastPingAt: Date.now() });
+      const unregisterSurface = registerGlassesSurface(deviceId, ws);
 
       sendText(ws, { type: "ready", session_id: `${deviceId}:${Date.now()}` });
 
@@ -1122,6 +1133,7 @@ export function setupWebSocket(server) {
         const ac = _turnAborts.get(deviceId);
         if (ac && _turnLocks.get(deviceId)?.ws === ws) ac.abort();
         // Playback state belongs to the device's CURRENT socket: a superseded one leaves it alone.
+        try { unregisterSurface(); } catch {}   // this socket's registration only: a newer one stays
         if (_sessions.get(deviceId)?.ws === ws) {
           _sessions.delete(deviceId);
           clearAudioQueue(deviceId);
@@ -1868,6 +1880,39 @@ export async function pushTtsToDevice(deviceId, text) {
     return { delivered: false, reason: err.message };
   } finally {
     releaseTurnLock(deviceId, sess.ws);
+  }
+}
+
+/** Quiet hours (the reminders' setting): nothing is spoken on the glasses then. A read that fails is not quiet. */
+async function glassesQuietNow() {
+  const db = openAppDb();
+  try {
+    const { readSetting } = await loadSettingsReg();
+    return isQuietHours((await readSetting(db, "meta_glasses_voice_quiet_hours")) || "");
+  } catch { return false; } finally { try { db.close?.(); } catch {} }
+}
+
+/**
+ * This socket as a live voice surface (presence.js): the spoken heads-up goes through pushTtsToDevice (P28: its
+ * { delivered } as a boolean), never in quiet hours (as glassesReminder) [rev2 M3]. Busy while a turn or a library
+ * relay holds the device's turn lock. → its unregister (a no-op without presence).
+ */
+function registerGlassesSurface(deviceId, ws) {
+  if (!registerVoiceSurface) return () => {};
+  try {
+    return registerVoiceSurface(deviceId, {
+      surface: "glasses",
+      speak: async (text) => {
+        if (await glassesQuietNow()) return false;
+        return (await pushTtsToDevice(deviceId, text))?.delivered === true;
+      },
+      lastTurnAt: () => _lastTurnAt.get(deviceId) ?? null,
+      connected: () => _sessions.get(deviceId)?.ws === ws && ws.readyState === 1 && deviceIsPresent(deviceId),
+      busy: () => _turnLocks.has(deviceId),
+    });
+  } catch (err) {
+    console.warn(`[meta-glasses] voice surface ${deviceId} not registered: ${err?.message || err}`);
+    return () => {};
   }
 }
 

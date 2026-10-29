@@ -1,0 +1,70 @@
+{
+  "id": "render",
+  "name": "Render",
+  "version": "1.0.0",
+  "description": "Manage your Render deployment, services, and environment",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "development",
+  "tags": [
+    "render",
+    "deploy",
+    "hosting"
+  ],
+  "icon": "cloud",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote",
+      "https://mcp.render.com/mcp",
+      "--header",
+      "Authorization:${AUTH_HEADER}"
+    ],
+    "envKeys": [
+      "RENDER_API_KEY"
+    ]
+  },
+  "env_vars": [
+    {
+      "name": "RENDER_API_KEY",
+      "description": "Render API key",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [
+      {
+        "name": "RENDER_API_KEY",
+        "kind": "secret",
+        "label_key": "services.field.RENDER_API_KEY"
+      }
+    ],
+    "steps": [
+      "services.steps.render.1",
+      "services.steps.render.2",
+      "services.steps.render.3"
+    ],
+    "derived_env": {
+      "AUTH_HEADER": {
+        "template": "Bearer ${RENDER_API_KEY}",
+        "encoding": "raw"
+      }
+    },
+    "test": {
+      "kind": "http",
+      "url": "https://api.render.com/v1/owners?limit=1",
+      "headers": {
+        "Authorization": "Bearer ${RENDER_API_KEY}"
+      },
+      "expect": [
+        200
+      ]
+    }
+  },
+  "ports": [],
+  "webUI": null
+}

@@ -97,30 +97,35 @@ node servers/gateway/index.js --no-auth
 
 ## Integration Proxy
 
-The proxy system (`proxy.js` + `integrations.js`) aggregates external MCP servers into the `/tools/mcp` endpoint:
+The proxy system (`proxy.js` + `services/legacy-sources.js`) aggregates external MCP servers into the `/tools/mcp` endpoint:
 
-1. On startup, reads which API keys are present in environment variables
-2. For each configured integration, spawns the MCP server as a child process
+1. On startup, reads the service bundles (registry manifests with a `connect` block) and checks which of their fields are set in environment variables
+2. For each configured service, spawns the MCP server as a child process (installed add-ons in `mcp-addons.json` follow; a service add-on starts only when its fields are set)
 3. Connects via stdio transport and discovers available tools
 4. Prefixes tool names with the integration ID (e.g., `github_create_issue`)
 5. Exposes all tools through a single MCP endpoint
 
 ### Adding a New Integration
 
-Edit `servers/gateway/integrations.js`:
+Add `bundles/my-service/manifest.json` with a `connect` block, then run `npm run build-registry`:
 
-```js
+```json
 {
-  id: "my-service",
-  name: "My Service",
-  description: "What it does",
-  command: "npx",
-  args: ["-y", "mcp-server-my-service"],
-  envVars: ["MY_SERVICE_API_KEY"],
-  keyUrl: "https://example.com/api-keys",
-  keyInstructions: "How to get the key.",
+  "id": "my-service",
+  "name": "My Service",
+  "description": "What it does",
+  "type": "mcp-server",
+  "server": { "command": "npx", "args": ["-y", "mcp-server-my-service"], "envKeys": ["MY_SERVICE_API_KEY"] },
+  "connect": {
+    "method": "token",
+    "group": "paste",
+    "fields": [{ "name": "MY_SERVICE_API_KEY", "kind": "secret", "label_key": "services.field.MY_SERVICE_API_KEY" }],
+    "steps": ["services.steps.my-service.1"]
+  }
 }
 ```
+
+See [Building Integrations](../developers/integrations.md) for the full manifest.
 
 ## Setup Page
 

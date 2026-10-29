@@ -153,6 +153,64 @@ Supporting endpoints (all behind the same `dashboardAuth` as every perch-api rou
 
 The hub's chat surface is four tabs (Chat / Session / Files / Activity). Tab switching is pure visibility toggling on the client — it never touches the SSE lifecycle, which belongs to the session, not the tab. Log/tool/error frames route to the Activity rail; the Chat transcript keeps only messages, ask cards, and hard failures.
 
+## Actor signatures and the peer relay
+
+A bot's MCP config carries actor headers signed with a per-boot key that lives only in the gateway's memory (`scripts/pi-bots/actor-sig.mjs`). Each kind of signature is its own MAC domain, so none can be replayed as another:
+
+- **v1 kinds** `bot` (phone), `board`, `board-thread` and `artifacts` sign `["crow-actor-v1", kind, bot, thread, gateway]` (`board` signs the job id in the thread field).
+- **v2 kinds** bind the bot session: `["crow-actor-v2", kind, bot, session, thread, gateway]`, where `session` is the turn's `bot_sessions.id`. The only v2 kind today is `peer-relay`, used by the peer relay below. A verifier resolves the session itself and refuses one that is gone, ended (`done`/`stopped`), archived, another bot's, or on another thread or gateway (`servers/shared/signed-session.js`).
+
+Fields are trimmed on both sides, by the MAC and by every tuple-to-session comparison.
+
+### The peer relay: how a pi bot calls a paired instance
+
+A pi bot never talks to a paired peer, and no pair key, signing key or peer bearer is handed to a bot or pi process (not in its env, config or argv). That holds for a bot without a shell. A bot with an open shell running as the gateway's user can still read the credential files under `CROW_HOME` by path (see the known residual in [Instances](../architecture/instances.md)). Its remote-tools proxy (`scripts/pi-bots/crow-remote-proxy.mjs`, one stdio block per selected `<instance>::<capability>`) calls its own gateway instead:
+
+```
+POST|GET|DELETE  http://127.0.0.1:<gateway port>/peer-relay/<instanceId>/<mount>/mcp
+```
+
+The block's env is exactly:
+
+| Variable | Meaning |
+|---|---|
+| `CROW_REMOTE_RELAY_URL` | the loopback relay URL above |
+| `CROW_REMOTE_RELAY_TOKEN` | the path-scoped relay token minted at gateway boot, by value. Its file, `<CROW_HOME>/secrets/peer-relay-token`, is in the directory the pi sandbox hides, so the bot engine reads it outside the sandbox and the proxy never opens it |
+| `CROW_REMOTE_ACTOR_ID`, `CROW_REMOTE_ACTOR_SESSION`, `CROW_REMOTE_ACTOR_THREAD`, `CROW_REMOTE_ACTOR_GATEWAY`, `CROW_REMOTE_ACTOR_SIG` | the turn's bot, session, thread and gateway, and their v2 `peer-relay` signature, sent as `X-Crow-Actor-{Id,Session,Thread,Gateway,Sig}` |
+
+The relay (`servers/gateway/routes/peer-relay.js`) runs these checks in order, and each refusal is a JSON-RPC error that never reaches the peer:
+
+1. The request is a plain loopback one: no forwarding or `tailscale-*` header.
+2. It carries the relay token.
+3. The v2 actor signature verifies, and the signed session is live and is the bot's own.
+4. `feature_flags.remote_invocation` is on.
+5. The mount is a core capability mount (memory, projects, sharing, storage, blog), and the bot's own row selects that instance and capability. This is the source-side policy, re-checked on every call.
+6. The peer is trusted and has a gateway URL and a bearer.
+7. The body is not a batch.
+
+The relay then forwards to the peer with the peer bearer. It passes only `content-type`, `accept`, `mcp-session-id`, `mcp-protocol-version` and `last-event-id`; every `X-Crow-Actor-*` header and the relay token are stripped. On `tools/call` it adds the remote-actor signature for the verified bot under the pair subkey, naming the bot row's display name (never a name the request carries). A peer with no pair key is forwarded unsigned, and its label falls back to `Crow (via <name>)`. The answer streams back, SSE included. The peer's own exposure gate stays the authoritative allow or deny.
+
+### Separate bot hosts
+
+The in-gateway bot runtime signs directly with the per-boot key, and the supervised Discord child gets the key over stdin. The separate systemd hosts (`pibot-bridge@`, `pibot-gateways@`, `pibot-discord@`) never get the key. Before each turn they ask their own gateway's loopback signing relay (`POST /internal/actor-sign`) for that turn's signatures.
+
+The relay accepts a caller only when it is the main process of an installed bot host unit:
+
+- **Manager.** The unit belongs to the configured systemd manager.
+- **Installed, not transient.** It is `Transient=no`, and its unit file is the template from `scripts/pi-bots/systemd/` in an allowed unit directory.
+- **This instance.** It loads a root-owned `/etc/crow/pibot-<instance>.env` that names this gateway's database. `install-runtime.sh` writes that file.
+- **Its own socket.** The connecting socket is held by the unit's `MainPID`, inside that unit's cgroup.
+
+The relay then signs only for a live session (or a job that host claimed) of an enabled bot that host serves, on that bot's own gateway. A job or card turn is signed only with the job that host claimed, even when it names a session.
+
+This check protects against callers that cannot run code as the gateway's user, such as a fetch tool, another uid or a container. It does not protect against a bot with an open shell: that bot can rewrite a host's code (the checkout and the node on its `PATH` are writable by the same user) and then run as a legitimate host.
+
+| Setting (gateway env) | Values | Meaning |
+|---|---|---|
+| `CROW_BOT_HOST_MANAGER` | `system` (default) \| `user` | Which systemd manager's units count as bot hosts. `system`: units under `/etc/systemd/system`, `/lib/systemd/system` or `/usr/lib/systemd/system` (what `install-runtime.sh` installs). `user`: only the gateway user's `~/.config/systemd/user` units, for an install that runs its bot hosts with `systemctl --user`. The two are never combined. |
+
+`user` mode is weaker: the gateway's own user can write `~/.config/systemd/user`, so any process running as that user can install a look-alike unit there. Use it only on a single-user box where that user is already trusted. A transient unit (`systemd-run --unit=pibot-…`) is refused in both modes.
+
 ## The pi sandbox (defense in depth, not containment)
 
 Every pi child goes through `PiRpc` in `scripts/pi-bots/bridge.mjs`, whatever started it (channel turns, Perch sessions, background jobs, skill review, the Discord child). That spawn runs through `scripts/pi-bots/pi_sandbox.mjs`.

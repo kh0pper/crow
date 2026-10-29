@@ -119,12 +119,30 @@ test("claimsAction: a question, a read answer or a plain fact about a day is not
   assert.equal(claimsAction("The meeting is on Tuesday, want me to add it?"), true);
 });
 
+// CPU time of fn, in ms. A fixed bound in ms flakes on a loaded CI runner, so the speed tests compare
+// against a control of the same length measured in the same run (plain words no pattern dwells on), with
+// a wide absolute ceiling as a backstop: catastrophic backtracking on capped text costs seconds and
+// hundreds of times the control, while a busy runner slows both sides alike.
+const cpuMs = (fn) => {
+  const t0 = process.cpuUsage();
+  fn();
+  const d = process.cpuUsage(t0);
+  return (d.user + d.system) / 1000;
+};
+const MAX_RATIO = 25;
+const MAX_MS = 5000;
+// The control gets a floor so a near-zero measurement can't make the ratio meaningless.
+const assertLinear = (adversarialMs, controlMs, label) => {
+  const budget = Math.min(MAX_MS, MAX_RATIO * Math.max(controlMs, 20));
+  assert.ok(adversarialMs < budget, `${label}: ${adversarialMs.toFixed(1)} ms vs control ${controlMs.toFixed(1)} ms (budget ${budget.toFixed(0)} ms)`);
+};
+
 test("claimText: capped before any pattern runs; long repetitive input is fast", () => {
   assert.equal(claimText("x".repeat(CLAIM_MAX_CHARS + 500)).length, CLAIM_MAX_CHARS);
-  const t0 = process.cpuUsage();
-  for (const unit of ["i ve ", "i ll also ", "te lo ", "he ", "it s all ", "would you like me to ", "a"]) claimsAction(unit.repeat(1000) + "?");
-  const d = process.cpuUsage(t0);
-  assert.ok((d.user + d.system) / 1000 < 200, "linear patterns on capped text");
+  const units = ["i ve ", "i ll also ", "te lo ", "he ", "it s all ", "would you like me to ", "a"];
+  const control = cpuMs(() => { for (const unit of units) claimsAction("lorem ipsum ".repeat(Math.ceil(unit.length * 1000 / 12)) + "?"); });
+  const adversarial = cpuMs(() => { for (const unit of units) claimsAction(unit.repeat(1000) + "?"); });
+  assertLinear(adversarial, control, "linear patterns on capped text");
 });
 
 test("claimsAction: Spanish negations are not claims", () => {
@@ -137,10 +155,15 @@ test("claimsReminder: a promised reminder or follow-up, which a saved memory is 
 });
 
 test("claimsAction: adversarial model output stays fast (patterns run on capped text; the lookbehinds are bounded)", () => {
-  const t0 = process.cpuUsage();
-  for (const unit of ["no te ", "no te lo ", "no ", "i m ", "let me ", "is are ", "te lo te lo "]) { claimsAction(unit.repeat(500) + "he anadido"); claimsReminder(unit.repeat(500) + "recordar"); }
-  const d = process.cpuUsage(t0);
-  assert.ok((d.user + d.system) / 1000 < 300, `${(d.user + d.system) / 1000} ms`);
+  const units = ["no te ", "no te lo ", "no ", "i m ", "let me ", "is are ", "te lo te lo ", "que lo ", "me ", "writer y "];
+  const run = (pad) => { for (const unit of units) {
+    const head = pad(unit);
+    claimsAction(head + "he anadido"); claimsReminder(head + "recordar");
+    claimsAction(head + "pare"); claimsAction(head + "esta en ello"); claimsAction(head + "ya empezo");
+  } };
+  const control = cpuMs(() => run((unit) => "lorem ipsum ".repeat(Math.ceil(unit.length * 500 / 12))));
+  const adversarial = cpuMs(() => run((unit) => unit.repeat(500)));
+  assertLinear(adversarial, control, "adversarial model output");
 });
 
 test("claimsAction: known trade-offs, pinned (only ever read on an action turn no tool backed)", () => {
@@ -235,4 +258,42 @@ test("claimsAction: a start with a time, a span or the weather after it, or a Sp
     "La película ya ha empezado.", "El partido ha empezado.", "La reunión ha empezado.", "El temporizador ya ha empezado.",
   ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
   for (const t of ["Writer ya ha empezado.", "Han empezado."]) assert.equal(claimsAction(t), true, t);
+});
+
+test("claimsAction: a first-person stop is a held claim; a thing that stopped on its own is not (PR 6 carry)", () => {
+  for (const t of [
+    "Okay, I stopped Writer.", "I've halted it.", "I have stopped the research.", "I just stopped it.", "I halted Writer's task.",
+    "Paré la tarea de Writer.", "Vale, detuve a Writer.", "He parado la tarea.", "Lo he detenido.", "Ya he parado a Writer.", "La detuve.", "Cancelé la tarea.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), true, t);
+  for (const t of [
+    "The rain stopped.", "The music has stopped.", "It stopped raining.", "Your timer has stopped.", "Writer stopped by earlier.",
+    "La lluvia paró.", "La música se detuvo.", "No he parado nada.", "No lo detuve.", "Espero que pare la lluvia.", "¿Quieres que lo pare?",
+    "Me detuve a pensar.", "Me he parado en la esquina.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+});
+
+test("claimsAction: the Spanish hand-off claims, with an agent subject where the sentence has one (PR 6 carry)", () => {
+  const agents = ["Writer", "Helper"];
+  for (const t of [
+    "Writer está en ello.", "Writer ya está en ello.", "Writer y Helper están en ello.", "El agente está en ello.", "Ya está en ello.", "Está en ello.", "Vale ya está en ello.", "Estoy en ello.",
+    "Le pasé la tarea a Writer.", "Le he pasado la tarea a Helper.", "Le encargué la investigación a Writer.", "Le he encargado el informe a Writer.", "Ya le pasé el encargo.",
+    "Writer ya empezó.", "El asistente ya empezó con la tarea.", "Helper comenzó.",
+  ]) assert.equal(claimsAction(t, { agents }), true, t);
+  for (const t of [
+    "Writer no está en ello.", "No estoy en ello.", "Todavía no está en ello.", "La tapa está en ello.",
+    "Todavía no le pasé la tarea a Writer.", "Espero que no le pase nada.", "Lo que le pase a tu coche.", "Cuando le pase algo, avísame.",
+    "La película ya empezó.", "Ya empezó.", "La lluvia ya empezó.", "El partido comenzó a las ocho.",
+  ]) assert.equal(claimsAction(t, { agents }), false, t);
+  // As in English, "<X> está en ello" / "<X> ya empezó" names an agent only when X is one.
+  for (const t of ["Writer está en ello.", "Writer ya empezó."]) assert.equal(claimsAction(t), false, `no agents: ${t}`);
+});
+
+test("claimsAction: Spanish subjunctives and a start with a time are no claims (6.3 fix round 2)", () => {
+  const agents = ["Writer"];
+  for (const t of [
+    "Saldremos cuando pare la lluvia.", "Ojalá pare pronto.", "En cuanto pare la lluvia salimos.", "Si pare, avísame.", "Aunque pare, sigue.", "Mientras pare el tráfico, espera.",
+    "Que se lo pase bien.", "Espero que se lo pase bien.",
+    "El equipo comenzó a las ocho.", "Writer empezó a la una.", "El equipo empezó el lunes.", "Writer comenzó 9 en punto.", "El equipo empezó a llover.",
+  ]) assert.equal(claimsAction(t, { agents }), false, t);
+  for (const t of ["Paré la tarea de Writer.", "Se lo pasé a Writer.", "Writer ya empezó.", "El equipo comenzó a trabajar en ello."]) assert.equal(claimsAction(t, { agents }), true, t);
 });

@@ -1,6 +1,11 @@
 /**
  * Actor-header binding (S2, 2026-10-02).
  *
+ * Kinds signed with the one per-boot key (each its own MAC domain, so none
+ * replays as another): "bot" (phone), "board", "board-thread", "artifacts"
+ * over the v1 tuple below, and the session-bound (v2) kind "peer-relay"
+ * (the loopback relay to paired peers, item 46 PR-B, below).
+ *
  * A bot's per-turn MCP config carries X-Crow-Actor-{Kind,Id,Thread,Gateway}
  * so /phone/mcp can attribute a call plan to the bot and deliver the result
  * back to the conversation that asked. Those headers sit next to a SHARED
@@ -27,8 +32,11 @@
  *  - Other processes that build bot worlds receive the key over a pipe, never
  *    the environment: the gateway hands it to the supervised Discord child on
  *    stdin (CROW_ACTOR_KEY_STDIN=1 only says "read stdin", it is not secret).
- *    A process with no key signs nothing; its bots' phone plans are then
- *    unattributed (owner notification only, no Perch card, no thread reply).
+ *    The separate systemd bot hosts get no key at all: they ask the
+ *    gateway's loopback signing relay for each turn's signatures
+ *    (presignActors below). A process with no key and no presigned
+ *    signature signs nothing; its bots' phone plans are then unattributed
+ *    (owner notification only, no Perch card, no thread reply).
  *
  * What this stops (exactly):
  *  - forging only the thread/gateway headers, or naming a bot id without
@@ -79,18 +87,24 @@ export function hasActorKey() { return !!key; }
 /** Test seam only. */
 export function _resetActorKeyForTest() { key = null; }
 
-function mac(k, { kind = "bot", botId, threadId, gatewayType }) {
-  // JSON array, not a joined string: no field value can shift a boundary.
-  // Fields are trimmed on BOTH sides: HTTP strips edge whitespace from header
-  // values, so an untrimmed MAC would silently fail for such an id.
-  const f = (v) => (v == null ? "" : String(v).trim());
-  const msg = JSON.stringify(["crow-actor-v1", f(kind), f(botId), f(threadId), f(gatewayType)]);
-  return createHmac("sha256", k).update(msg).digest("hex");
+// Fields are trimmed on BOTH sides: HTTP strips edge whitespace from header
+// values, so an untrimmed MAC would silently fail for such an id.
+const f = (v) => (v == null ? "" : String(v).trim());
+
+// JSON array, not a joined string: no field value can shift a boundary.
+function v1Message({ kind = "bot", botId, threadId, gatewayType }) {
+  return JSON.stringify(["crow-actor-v1", f(kind), f(botId), f(threadId), f(gatewayType)]);
 }
 
-/** Signature for the actor headers, or null when this process holds no key. */
+function mac(k, actor) {
+  return createHmac("sha256", k).update(v1Message(actor)).digest("hex");
+}
+
+/** Signature for the actor headers, or null when this process holds no key
+ *  (and its gateway presigned nothing for exactly this tuple, see below). */
 export function signActor(actor) {
-  if (!key || !actor || actor.botId == null || String(actor.botId).trim() === "") return null;
+  if (!actor || actor.botId == null || String(actor.botId).trim() === "") return null;
+  if (!key) return presignedFor(v1Message(actor));
   return mac(key, actor);
 }
 
@@ -136,6 +150,171 @@ export function signArtifactsActor({ botId, threadId, gatewayType } = {}) {
 /** Constant-time check of a presented artifacts signature. False without a key. */
 export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = {}) {
   return verifyActorSig({ kind: "artifacts", botId, threadId, gatewayType, sig });
+}
+
+// ---- session-bound actor headers, v2 (item 46 PR-B) ----
+//
+// The v1 tuple names no bot session, and a thread lookup can be ambiguous, so
+// a v1 signature can be replayed into another session of the same bot on the
+// same thread. A v2 signature binds the session (bot_sessions.id):
+//
+//   sig = HMAC-SHA256(key, JSON(["crow-actor-v2", kind, bot, session, thread, gateway]))
+//
+// The verifier resolves that session itself and checks it (still live, this
+// bot's), so a session-scoped mount learns the session's project from the row,
+// never from the request. v2 is only for the kinds below; the v1 kinds above
+// stay byte-identical. Different version tag, so no v1 signature verifies as
+// v2 or the reverse, and the kind field keeps every v2 kind its own domain.
+
+/** The kinds signed over the session-bound (v2) tuple. */
+// Only "peer-relay" today. A later kind is added here with its own verifier;
+// the set is closed, so nothing can mint a v2 kind that no verifier checks.
+export const SESSION_ACTOR_KINDS = Object.freeze(["peer-relay"]);
+
+/** A bot_sessions.id as the decimal string the MAC binds, or null. */
+function sessionField(v) {
+  if (typeof v === "number") return Number.isSafeInteger(v) && v > 0 ? String(v) : null;
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return /^[1-9][0-9]{0,15}$/.test(t) ? t : null;
+}
+
+function v2Message({ kind, botId, sessionId, threadId, gatewayType }) {
+  return JSON.stringify(["crow-actor-v2", f(kind), f(botId), sessionField(sessionId), f(threadId), f(gatewayType)]);
+}
+
+function v2Valid({ kind, botId, sessionId }) {
+  return SESSION_ACTOR_KINDS.includes(kind) && botId != null && String(botId).trim() !== "" && sessionField(sessionId) !== null;
+}
+
+/** Session-bound signature, or null without a key (and no presigned match),
+ *  a bot id, a valid session id, or a session kind. */
+export function signSessionActor(actor = {}) {
+  if (!v2Valid(actor)) return null;
+  const msg = v2Message(actor);
+  if (!key) return presignedFor(msg);
+  return createHmac("sha256", key).update(msg).digest("hex");
+}
+
+/** Constant-time check of a presented session-bound signature. False without a key. */
+export function verifySessionActorSig({ sig, ...actor } = {}) {
+  if (!key || !v2Valid(actor) || typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig.trim())) return false;
+  const want = createHmac("sha256", key).update(v2Message(actor)).digest();
+  const got = Buffer.from(sig.trim(), "hex");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+// ---- peer-relay actor headers (item 46 PR-B) ----
+//
+// A pi bot's remote-tools proxy (crow-remote-proxy.mjs) calls a paired peer
+// through the gateway's loopback relay (servers/gateway/routes/peer-relay.js),
+// never directly: no pair key, signing key or peer bearer reaches a bot
+// process. The relay forwards only for a bot it verified with this signature
+// (v2: bound to the bot session, which the relay resolves and checks), then
+// signs the peer-bound tools/call with the pair subkey itself. Kind
+// "peer-relay": no phone, board, board-thread or artifacts signature can be
+// replayed here, nor this one there.
+
+/** Signature for the peer-relay actor headers, or null without a key / bot id / session id. */
+export function signPeerRelayActor({ botId, sessionId, threadId, gatewayType } = {}) {
+  return signSessionActor({ kind: "peer-relay", botId, sessionId, threadId, gatewayType });
+}
+
+/** Constant-time check of a presented peer-relay signature. False without a key. */
+export function verifyPeerRelayActorSig({ botId, sessionId, threadId, gatewayType, sig } = {}) {
+  return verifySessionActorSig({ kind: "peer-relay", botId, sessionId, threadId, gatewayType, sig });
+}
+
+// ---- presigned signatures for a key-less bot host (item 46 PR-B) ----
+//
+// The separate bot hosts (the pibot-bridge@ tick, the pibot-gateways@ and
+// pibot-discord@ runners) hold no key, and none may ever reach them. Before a
+// turn's config is built, such a host asks its own gateway's loopback signing
+// relay (POST /internal/actor-sign, servers/gateway/routes/actor-sign.js) for
+// the signatures of this turn's exact tuples. The gateway authenticates the
+// calling process (it must be the main process of one of those systemd
+// units), checks the bot and its live session, and returns signatures only:
+// never the key. They are cached here in memory and handed out by the sign*
+// functions above only when this process holds no key, and only for exactly
+// the tuple the gateway signed. Verification never reads the cache.
+
+const PRESIGN_CAP = 256;
+const presigned = new Map(); // message -> hex sig, insertion-ordered (LRU on write)
+
+function presignedFor(msg) {
+  const v = presigned.get(msg);
+  return v === undefined ? null : v;
+}
+
+function remember(msg, sig) {
+  presigned.delete(msg);
+  if (presigned.size >= PRESIGN_CAP) presigned.delete(presigned.keys().next().value);
+  presigned.set(msg, sig);
+}
+
+/** Test seam only. */
+export function _resetPresignedForTest() { presigned.clear(); }
+
+/** The exact message each kind signs for a turn's tuple (the catalog's tuples). */
+function messageFor(kind, { botId, sessionId, threadId, gatewayType, jobId }) {
+  if (SESSION_ACTOR_KINDS.includes(kind)) return v2Valid({ kind, botId, sessionId }) ? v2Message({ kind, botId, sessionId, threadId, gatewayType }) : null;
+  if (kind === "board") return v1Message({ kind, botId, threadId: jobId, gatewayType: null });
+  if (kind === "bot" || kind === "artifacts" || kind === "board-thread") return v1Message({ kind, botId, threadId, gatewayType });
+  return null;
+}
+
+/**
+ * Ask this host's gateway to sign a turn's actor tuples. Never throws: any
+ * failure leaves the cache without them, so the turn runs unsigned (today's
+ * behaviour on a key-less host). Resolves true when at least one signature
+ * was cached.
+ */
+export async function presignActors({ gatewayUrl, botId, sessionId, threadId, gatewayType, jobId, kinds = [], fetchImpl = globalThis.fetch, timeoutMs = 5000 } = {}) {
+  try {
+    if (!gatewayUrl || botId == null || String(botId).trim() === "" || !Array.isArray(kinds) || !kinds.length) return false;
+    const tuple = {
+      botId: String(botId),
+      ...(sessionId != null && sessionId !== "" ? { sessionId: String(sessionId) } : {}),
+      ...(threadId != null ? { threadId: String(threadId) } : {}),
+      ...(gatewayType != null ? { gatewayType: String(gatewayType) } : {}),
+      ...(jobId != null && jobId !== "" ? { jobId: String(jobId) } : {}),
+    };
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), timeoutMs);
+    let body;
+    try {
+      const r = await fetchImpl(String(gatewayUrl).replace(/\/+$/, "") + "/internal/actor-sign", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...tuple, kinds: kinds.map(String) }),
+        signal: ac.signal,
+      });
+      if (!r.ok) return false;
+      body = await r.json();
+    } finally { clearTimeout(t); }
+    const sigs = body && typeof body === "object" && body.sigs && typeof body.sigs === "object" ? body.sigs : null;
+    if (!sigs) return false;
+    let n = 0;
+    for (const kind of kinds) {
+      const sig = sigs[kind];
+      if (typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig)) continue;
+      const msg = messageFor(kind, tuple);
+      if (!msg) continue;
+      remember(msg, sig.toLowerCase());
+      n++;
+    }
+    return n > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Gateway side of the signing relay: the signature of one kind over a turn's
+ *  tuple with THIS process's key (null without one or for an unknown kind). */
+export function signKindForTuple(kind, tuple = {}) {
+  if (!key || tuple.botId == null || String(tuple.botId).trim() === "") return null;
+  const msg = messageFor(kind, tuple);
+  return msg ? createHmac("sha256", key).update(msg).digest("hex") : null;
 }
 
 // ---- board thread binding (redesign P5, Task 5.1) ----

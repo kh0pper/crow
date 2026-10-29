@@ -133,12 +133,15 @@ export function preflightRefused(url, { mode = "cloud", gatewayPortValue, ownAdd
  * `readJson` enforces it on the body, so a slow-drip body cannot outlast it.
  * `safeRequest` itself does not cut a body short, because the door streams.
  * `transport` is a test seam standing in for node:http / node:https.
+ * `signal` (an AbortSignal) destroys the request, before or after the
+ * response headers, with err.code ABORTED (the door passes a client abort on).
  */
 export function safeRequest(url, {
   method = "GET", headers = {}, body, mode = "cloud", timeoutMs = 8000,
-  lookupFn = dns.lookup, allowAddressFn = () => false, transport,
+  lookupFn = dns.lookup, allowAddressFn = () => false, transport, signal,
 } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(fail("ABORTED", "the request was aborted"));
     const deadline = Date.now() + timeoutMs;
     const refused = preflightRefused(url, { mode });
     if (refused === "BAD_URL") return reject(fail("BAD_URL", "not an http(s) URL Crow can use"));
@@ -162,6 +165,11 @@ export function safeRequest(url, {
     const timer = setTimeout(() => req.destroy(fail("TIMEOUT", `no answer in ${timeoutMs} ms`)), timeoutMs);
     req.setTimeout(timeoutMs, () => req.destroy(fail("TIMEOUT", `idle for ${timeoutMs} ms`)));
     req.on("error", (err) => done(reject, err));
+    if (signal) {
+      const onAbort = () => req.destroy(fail("ABORTED", "the request was aborted"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      req.on("close", () => signal.removeEventListener("abort", onAbort));
+    }
     if (body != null) req.write(body);
     req.end();
   });

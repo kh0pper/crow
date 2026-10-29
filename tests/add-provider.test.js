@@ -191,6 +191,11 @@ test("providerIdFor: free id, same account reuses, another account gets -2", () 
   for (const r of [custom, long, taken]) assert.ok(!r.id.startsWith("crow-c-"));
 });
 
+test("re-review (c): providerIdFor skips the door namespace in any case", () => {
+  assert.throws(() => providerIdFor("CROW-C-x", { rows: [] }), /no free provider id/);
+  assert.throws(() => providerIdFor("Crow-C-x", { rows: [] }), /no free provider id/);
+});
+
 test("modelEntryFor reads the recommendations", () => {
   assert.deepEqual(modelEntryFor("openai", "text-embedding-3-large"), { id: "text-embedding-3-large", task: "embedding" });
   const vision = modelEntryFor("openai", "gpt-6.1-terra");
