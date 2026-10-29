@@ -415,7 +415,11 @@ export async function rotateLlmCloudToken(db) {
     try {
       if (oldHash) await writeSetting(db, LLM_CLOUD_HASH_KEY, oldHash, { scope: "local" });
       else await deleteLocalSetting(db, LLM_CLOUD_HASH_KEY);
-    } catch { /* best effort: the next boot rotates again */ }
+    } catch (restoreErr) {
+      // Best effort: the next boot rotates again. Until then the stored hash
+      // matches no file, so bots cannot reach the door.
+      console.warn(`[llm-cloud-token] could not put the old hash back after a failed rename: ${restoreErr.message}`);
+    }
     throw err;
   }
   try {

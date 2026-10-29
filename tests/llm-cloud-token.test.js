@@ -112,6 +112,36 @@ test("a failed rename puts the old hash back", async () => {
   await rotateLlmCloudToken(db); // leave a normal file for later tests
 });
 
+test("final F3a: a failed rename whose hash restore also fails warns with the error message only", async () => {
+  await rotateLlmCloudToken(db);
+  rmSync(llmCloudTokenPath());
+  mkdirSync(llmCloudTokenPath());
+  writeFileSync(join(llmCloudTokenPath(), "x"), "x");
+  // A DB whose first write (the new hash) lands and every later write fails.
+  let writes = 0;
+  const flaky = {
+    execute(q) {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/^\s*(INSERT|UPDATE|DELETE)/i.test(sql) && ++writes > 1) return Promise.reject(new Error("restore write refused"));
+      return db.execute(q);
+    },
+  };
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.map(String).join(" "));
+  try {
+    await assert.rejects(() => rotateLlmCloudToken(flaky));
+  } finally {
+    console.warn = orig;
+    rmSync(llmCloudTokenPath(), { recursive: true, force: true });
+  }
+  assert.equal(warns.length, 1, JSON.stringify(warns));
+  assert.match(warns[0], /restore write refused/);
+  assert.match(warns[0], /llm-cloud-token|cloud/i);
+  assert.ok(!/[0-9a-f]{64}/.test(warns[0]), "no token or hash in the line");
+  await rotateLlmCloudToken(db); // leave a normal file and hash for later tests
+});
+
 test("the cloud token opens nothing else: every other validator refuses it", async () => {
   const cloud = await rotateLlmCloudToken(db);
   const validators = {
