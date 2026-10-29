@@ -58,7 +58,7 @@ import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard, getCard } from "../board/card-service.js";
 import {
   loadDispatchableCard, parseDef, dispatchCard, assertBotUnblocked, startAfterGive, giveAudit, createTaskForBot,
-  fileStartedThread, DASHBOARD_ACTOR,
+  DASHBOARD_ACTOR,
 } from "../board/give-service.js";
 import { lockState } from "./board-lock.js";
 import { resolveBoardDef, isTerminal } from "./board-defs.js";
@@ -88,8 +88,7 @@ const MESSAGE_CAP = 32_000;
  * bot-board-api.js's own TASKS_DB constant. */
 const TASKS_DB = tasksDbPath();
 
-/** Every provenance write this router makes is an operator action from the
- * dashboard — same shape as bot-board-api.js's own DASHBOARD_ACTOR. */
+// DASHBOARD_ACTOR lives in board/give-service.js
 
 /** Accept / Ask for a change errors: 409 'already_decided' or 'stale' (anything else someone got
  * to first: a newer result, an archive), 404 'not_found', 400 'bad_request'. */

@@ -295,13 +295,14 @@ function watchFirstTurn(core, eng, h, sessionId) {
  * to the sweep writes the session id and leaves the session running (the card exists, and the result still
  * reaches the operator). A spawn that did not start queues the row and reports it.
  */
-async function finishStart(core, db, eng, h, r) {
+async function finishStart(core, db, getEng, h, r) {
   const { store } = core;
   if (r.started !== true) {
     if (await store.transition(db, h.id, ["starting"], "queued", { detail: String(r.code || "start_failed") })) await notifyStartFailed(core, db, h);
     return false;
   }
   const ids = { session_id: r.sessionId, thread_id: r.threadId ?? null };
+  const eng = await getEng();   // started, so dispatchCard already resolved it: this is the memoized singleton
   if (await store.transition(db, h.id, ["starting"], "started", ids)) {
     watchFirstTurn(core, eng, h, r.sessionId);   // before any other await: the engine replays a turn 1 that already ended
     if (r.threadId) await core.give.fileStartedThread(db, { threadId: r.threadId, projectId: h.projectId });
@@ -327,7 +328,7 @@ async function finishStart(core, db, eng, h, r) {
 /**
  * core.confirm(db, id, decision, via) → { status, say }. `via` is "voice" (a spoken yes; a dashboard tab too) or
  * "phone" (the phone confirm page, PR 4); each confirms only its own row state. Statuses: declined | started |
- * starting | stopped | queued | failed | already | expired | wrong_kind | none. Every line is in the row's language.
+ * starting | stopped | queued | failed | already | expired | wrong_kind | none | bad_decision (anything but "yes"/"no"). Every line is in the row's language.
  *
  *  1. Only a `handoff` row; a stop row is never confirmed here (wrong_kind, no write).
  *  2. no → declined (live: an expired row is not declined, it is expired).
@@ -348,6 +349,7 @@ async function confirm(core, db, id, decision, via) {
   if (row.kind !== "handoff") return { status: "wrong_kind" };
   const from = via === "phone" ? ["awaiting_phone"] : ["proposed"];
   const h = { id, lang: langOf(row.lang), name: await botName(db, row.bot_id), task: row.task, deviceId: row.device_id, cardId: null, projectId: null };
+  if (decision !== "yes" && decision !== "no") return { status: "bad_decision" };
   if (decision === "no") {
     if (await store.transition(db, id, from, "declined", {}, { live: true })) return { status: "declined", say: voiceLine("declined", h.lang) };
     return lostConfirm(core, db, h, from, "no");
@@ -390,18 +392,20 @@ async function confirm(core, db, id, decision, via) {
       return await settle(core, db, h, "queued", !target.perch ? "perch_not_attached" : "model_unavailable", "handoff_queued");
     }
 
-    const eng = await core.engine();
+    // Lazy and memoized: the engine singleton is minted only when dispatchCard gets past its own checks.
+    let engP = null;
+    const getEng = () => (engP ??= core.engine());
     // ctx.db is the assignment guard's crow.db read (dispatchCard); it is used only before the spawn.
-    const p = core.give.startAfterGive({ db, tdb }, { row: created.row, getEng: () => eng, botId: row.bot_id, cardId: created.cardId, start: true, note: "" });
+    const p = core.give.startAfterGive({ db, tdb }, { row: created.row, getEng, botId: row.bot_id, cardId: created.cardId, start: true, note: "" });
     const raced = await Promise.race([p.then((r) => ({ r })), core.wait(HANDOFF_START_BUDGET_MS).then(() => null)]);
     const vars = { bot: h.name, task: h.task };
     if (raced && raced.r.started !== true) return await settle(core, db, h, "queued", String(raced.r.code || "start_failed"), "handoff_queued");
     if (raced && avail === "up") {
-      const won = await finishStart(core, db, eng, h, raced.r);
+      const won = await finishStart(core, db, getEng, h, raced.r);
       return won ? { status: "started", say: voiceLine("handoff_started", h.lang, vars) } : { status: "stopped", say: voiceLine("status_stopped", h.lang, vars) };
     }
     detached = true;
-    p.then((r) => core.withDb((d) => finishStart(core, d, eng, h, r)))
+    p.then((r) => core.withDb((d) => finishStart(core, d, getEng, h, r)))
       .catch((err) => core.log(`[voice-handoff] ${id}: the detached start failed (${err?.message || err})`))
       .finally(() => { core.inFlight.delete(id); closeTasks(); });
     return { status: "starting", say: voiceLine("handoff_starting_up", h.lang, vars) };

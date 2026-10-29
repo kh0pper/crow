@@ -670,6 +670,29 @@ test("a bot without Perch is queued with perch_not_attached and never started", 
   s.done();
 });
 
+test("a decision that is not exactly yes or no is refused: no card, no transition, no audit row", async () => {
+  const s = await setup();
+  const { id } = await s.propose();
+  for (const bad of ["maybe", undefined, "", null, 1, true]) {
+    assert.deepEqual(await s.core.confirm(s.db, id, bad, "voice"), { status: "bad_decision" });
+  }
+  assert.equal((await s.row(id)).status, "proposed");
+  assert.deepEqual(await s.cards(), []);
+  assert.equal((await s.tdb.execute("SELECT COUNT(*) AS n FROM board_mutations")).rows[0].n, 0);
+  s.done();
+});
+
+test("a confirmed yes for a bot without Perch never resolves the engine", async () => {
+  const s = await setup();
+  let asked = 0;
+  s.core.engine = async () => { asked += 1; return s.eng; };
+  const { id } = await s.propose({ bot: "plain", transcript: "have plain do it" });
+  await s.core.confirm(s.db, id, "yes", "voice");
+  assert.equal(asked, 0);
+  assert.equal((await s.row(id)).status, "queued");
+  s.done();
+});
+
 test("a dispatch refused inside the budget is queued with its code; refused after the budget, it is notified", async () => {
   const s = await setup();
   const { id } = await s.propose();

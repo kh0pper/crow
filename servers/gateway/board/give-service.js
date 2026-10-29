@@ -93,7 +93,7 @@ export async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skip
   if (resolveEngineStatus().state !== "ready") throw routeFail("engine_required", "engine_required", 409);
   const def = row ? parseDef(row) : {};
   if (!perchAttached(def)) throw routeFail("perch_not_attached", "perch_not_attached", 403);
-  const eng = getEng();
+  const eng = await getEng();
 
   if (!ctx.tdb) ctx.tdb = createDbClient(TASKS_DB);
   await loadDispatchableCard(ctx.tdb, cardId);
