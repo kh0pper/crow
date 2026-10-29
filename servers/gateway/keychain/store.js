@@ -7,7 +7,7 @@
  * open — never a crash, never a wrong plaintext.
  */
 import { sealSecret, openSecret } from "../../sharing/secret-box.js";
-import { KEYCHAIN_DDL } from "./schema.js";
+import { KEYCHAIN_DDL, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL } from "./schema.js";
 import { keychainKeyState, createKeychainKey, KeychainKeyInvalidError } from "./key.js";
 
 export const KEYCHAIN_TABLE = "crow_keychain";
@@ -35,6 +35,10 @@ const ensured = new WeakSet();
 export async function ensureKeychainTable(db) {
   if (ensured.has(db)) return;
   await db.executeMultiple(KEYCHAIN_DDL);
+  // A table created before migration 0019 lacks connection_uuid: add it before the index on it.
+  const cols = (await db.execute("PRAGMA table_info(crow_keychain)")).rows.map((r) => r.name);
+  if (!cols.includes(KEYCHAIN_CONNECTION_COLUMN.column)) await db.execute(KEYCHAIN_CONNECTION_COLUMN.ddl);
+  await db.executeMultiple(KEYCHAIN_SERVICE_INDEX_DDL);
   ensured.add(db);
 }
 
