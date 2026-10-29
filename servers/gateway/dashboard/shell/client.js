@@ -47,6 +47,65 @@ export function shellClientJs() {
       for (var i = 0; i < openers.length; i++) {
         openers[i].addEventListener('click', function (e) { openSheet(e.currentTarget); });
       }
+      // The mascot (or bell) opens the "Notifications and settings" sheet,
+      // which holds its tray (phone review 2026-10-29). Its own inline
+      // handler toggles the tray (and loads the list when it shows it) on a
+      // tap, and leaves it alone for the click that only ended a long-press
+      // (Talk to Crow). So: note the tray's state before that handler (a
+      // capture listener on the button runs first) and open the sheet when
+      // it changed. A changed state, not "now shown": a reopen that lands
+      // before the last close event has reset the tray toggles it the
+      // other way.
+      function trayOf(btn) { return document.getElementById(btn.getAttribute('data-shell-tray')); }
+      function resetTray(btn) {
+        var tr = trayOf(btn);
+        if (tr) tr.style.display = 'none';
+        btn.setAttribute('aria-expanded', 'false');
+      }
+      var trayOpeners = document.querySelectorAll('[data-shell-tray]');
+      for (var ti = 0; ti < trayOpeners.length; ti++) {
+        var tb = trayOpeners[ti];
+        tb.addEventListener('click', function (e) {
+          var tr = trayOf(e.currentTarget);
+          e.currentTarget.__trayBefore = tr ? tr.style.display : null;
+        }, true);
+        tb.addEventListener('click', function (e) {
+          var btn = e.currentTarget, tr = trayOf(btn);
+          if (!tr || tr.style.display === btn.__trayBefore) return;
+          var dlg = document.getElementById(btn.getAttribute('aria-controls'));
+          if (!dlg || dlg.open) return;
+          tr.style.display = 'block';
+          btn.setAttribute('aria-expanded', 'true');
+          dlg.__shellOpener = btn;
+          if (typeof dlg.showModal === 'function') dlg.showModal();
+          else dlg.setAttribute('open', '');
+        });
+        // The bell is a div with role=button: Enter and Space press it. An
+        // armed bell (data-crow-talk) already gets that from crow-talk.js; a
+        // second press would toggle the tray straight back.
+        if (tb.tagName !== 'BUTTON' && !tb.hasAttribute('data-crow-talk')) tb.addEventListener('keydown', function (e) {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          e.currentTarget.click();
+        });
+        var home = document.getElementById(tb.getAttribute('aria-controls'));
+        if (home) {
+          // A late close event after a quick reopen belongs to the closed sheet.
+          home.addEventListener('close', (function (btn) { return function (e) { if (!e.currentTarget.open) resetTray(btn); }; })(tb));
+          // "Talk to Crow" inside the sheet: the overlay cannot take focus
+          // behind a modal dialog, so the sheet closes first (capture phase,
+          // before the row's own handler), with focus parked on the mascot
+          // for the overlay to hand back when it closes.
+          home.addEventListener('click', (function (btn) { return function (e) {
+            var row = e.target && e.target.closest ? e.target.closest('.crow-talk-row') : null;
+            if (!row) return;
+            var dlg = e.currentTarget;
+            dlg.__shellOpener = null;
+            closeSheet(dlg);
+            if (typeof btn.focus === 'function') btn.focus();
+          }; })(tb), true);
+        }
+      }
       var sheets = document.querySelectorAll('dialog.shell-sheet');
       for (var j = 0; j < sheets.length; j++) {
         var dlg = sheets[j];

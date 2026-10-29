@@ -60,10 +60,19 @@ export function detailsHref(card, hrefByCard) {
   return (hrefByCard && hrefByCard.get(Number(card.id))) || drawerHref(card.id, null);
 }
 
-/** Where tapping a card goes: its conversation if it has one, else its details (detailsHref). */
-export function cardHref(card, threadByCard, hrefByCard) {
+/**
+ * Where tapping a card goes: its conversation if it has one, else its details
+ * (detailsHref). A conversation on a card filed in a live project carries
+ * ?project=<slug> (`slugByProject`, project id → slug), so the server renders
+ * that project's chip and scope.
+ */
+export function cardHref(card, threadByCard, hrefByCard, slugByProject) {
   const thread = threadByCard && threadByCard.get(Number(card.id));
-  return thread ? `/dashboard/perch#${encodeURIComponent(thread)}` : detailsHref(card, hrefByCard);
+  if (!thread) return detailsHref(card, hrefByCard);
+  const slug = slugByProject && card.project_id != null ? slugByProject.get(Number(card.project_id)) : null;
+  return slug
+    ? `/dashboard/perch?project=${encodeURIComponent(slug)}#${encodeURIComponent(thread)}`
+    : `/dashboard/perch#${encodeURIComponent(thread)}`;
 }
 
 // The face's Accept button. On a card with an open decision Accept can never
@@ -113,7 +122,7 @@ function cardHtml(card, ctx, lang, lane) {
   const seen = `data-seen-result="${seenResult}" data-seen-version="${escapeHtml(cardVersion(card))}"`;
   return `<li class="sb-card" data-card="${id}">` +
     shellFace(card, locked, lang, def, bird) +
-    `<a class="sb-open" href="${escapeHtml(cardHref(card, ctx.threads, ctx.hrefByCard))}" draggable="false"><span class="sb-vh" data-sb-name>#${id} ${title}</span></a>` +
+    `<a class="sb-open" href="${escapeHtml(cardHref(card, ctx.threads, ctx.hrefByCard, ctx.slugByProject))}" draggable="false"><span class="sb-vh" data-sb-name>#${id} ${title}</span></a>` +
     `<button type="button" class="sb-move" data-sb-move data-from="${lane}" data-refuse="${refuse}" ${seen} aria-haspopup="dialog">${escapeHtml(t("shell.move", lang))}<span class="sb-vh"> #${id} ${title}</span></button>` +
     `<a class="sb-details" href="${escapeHtml(detailsHref(card, ctx.hrefByCard))}" draggable="false">${escapeHtml(t("shell.cardDetails", lang))}</a>` +
     `</li>`;

@@ -332,7 +332,7 @@ ${layoutTailJs()}
 /**
  * The shell variant's body: the classic .main-content chain (header with the
  * page title and the header bird, the instance strip, .content-body), plus
- * the project chip and avatar in the header, the Chat / Board / Make nav
+ * the project chip and the mascot (or, with no tray handed in, an avatar) in the header, the Chat / Board / Make nav
  * after </main>, and the drawer and avatar dialogs. No sidebar, no sidebar
  * scripts; the voice, CSRF, auth-boundary, service-worker and toast code is
  * the classic layout's own.
@@ -343,16 +343,19 @@ function renderShellDocument({ docHead, title, content, scripts, afterContent, h
   if (typeof sh.getPanel === "function") ctx.getPanel = sh.getPanel;
   if (sh.apps && typeof sh.apps === "object") ctx.apps = sh.apps;
   const tab = sh.tab === "chat" || sh.tab === "board" || sh.tab === "make" ? sh.tab : null;
+  // The mascot's tray (dashboard/index.js): when present the mascot opens the
+  // one "Notifications and settings" sheet and there is no avatar button.
+  const tray = typeof sh.tray === "string" && sh.tray !== "" ? sh.tray : null;
   return `${docHead}
 <body class="shell${bodyClass ? " " + bodyClass : ""}">
   ${crowTalkOverlayHtml(lang)}
   <div class="dashboard">
     <main class="main-content">
-      <header class="content-header">
+      <header class="content-header${tab ? " shell-header--tab" : ""}">
         <h2>${escapeHtml(title)}</h2>
         ${shellHeaderChip(ctx)}
         ${headerIcons ? `<div class="header-icons">${headerIcons}</div>` : ""}
-        ${shellAvatarButton(ctx)}
+        ${tray ? "" : shellAvatarButton(ctx)}
       </header>
       ${instanceTabsStrip}
       <div class="content-body">
@@ -363,7 +366,7 @@ function renderShellDocument({ docHead, title, content, scripts, afterContent, h
     ${afterContent || ""}
   </div>
   ${shellDrawer(ctx)}
-  ${shellAvatarSheet(ctx)}
+  ${shellAvatarSheet({ ...ctx, tray })}
   <script>
     // No sidebar on shell pages: the shared Escape listener's call is a no-op.
     function closeSidebar() {}

@@ -5479,11 +5479,11 @@ test("identSubtitle: today / yesterday / weekday / date / no project", async () 
   const row = (lastActivityAt) => ({ projectId: 3, lastActivityAt });
   // Build local-noon stamps so the local calendar day is unambiguous.
   const local = (y, m, d) => { const x = new Date(y, m, d, 12, 0, 0); return x.toISOString().slice(0, 19).replace("T", " "); };
-  assert.equal(identSubtitle(row(local(2026, 9, 28)), PROJ, now, "en"), "# Homework Club · today");
-  assert.equal(identSubtitle(row(local(2026, 9, 27)), PROJ, now, "en"), "# Homework Club · yesterday");
-  assert.equal(identSubtitle(row(local(2026, 9, 24)), PROJ, now, "en"), "# Homework Club · Saturday");
-  assert.match(identSubtitle(row(local(2026, 8, 1)), PROJ, now, "en"), /^# Homework Club · Sep 1$/);
-  assert.equal(identSubtitle({ projectId: 3, lastActivityAt: null }, PROJ, now, "en"), "# Homework Club");
+  assert.equal(identSubtitle(row(local(2026, 9, 28)), PROJ, now, "en"), "Homework Club · today");
+  assert.equal(identSubtitle(row(local(2026, 9, 27)), PROJ, now, "en"), "Homework Club · yesterday");
+  assert.equal(identSubtitle(row(local(2026, 9, 24)), PROJ, now, "en"), "Homework Club · Saturday");
+  assert.match(identSubtitle(row(local(2026, 8, 1)), PROJ, now, "en"), /^Homework Club · Sep 1$/);
+  assert.equal(identSubtitle({ projectId: 3, lastActivityAt: null }, PROJ, now, "en"), "Homework Club");
   assert.equal(identSubtitle({ projectId: null, lastActivityAt: local(2026, 9, 28) }, PROJ, now, "en"), "today");
   assert.equal(identSubtitle({ projectId: null, lastActivityAt: null }, PROJ, now, "en"), "");
   void at;
@@ -5895,7 +5895,7 @@ test("a group folding at turn end hands focus from its body to its line", async 
   assert.equal(hub.doc.activeElement, g.children[0], "focus moved to the line, not lost");
 });
 
-test("new mode: the composer placeholder names the session's project from the embedded #perch-projects JSON", async () => {
+test("new mode: the composer keeps its short placeholder, the chip is left to the server's scope, the sheet carries the full line", async () => {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const src = perchHubJs("en");
   const grab = (startMark, endMark) => {
@@ -5903,25 +5903,32 @@ test("new mode: the composer placeholder names the session's project from the em
     assert.ok(a > -1, startMark + " missing");
     return src.slice(a, src.indexOf(endMark, a) + endMark.length);
   };
+  const attrEl = (text) => ({ textContent: text, attrs: {}, setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; } });
   const nodes = {
     "perch-projects": { textContent: JSON.stringify([{ id: 7, slug: "alpha", name: "Alpha <b>" }]) },
     "perch-session-sheet": {},
-    "perch-input": { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+    "perch-input": attrEl(""),
+    "perch-sheet-sub": attrEl(""),
   };
-  const prelude = `var document={getElementById:function(i){return N[i]||null;}};
-    function el(i){return document.getElementById(i);}
-    var N=arguments[0]; var current={sid:'s1'}; var rowIndex={s1:{projectId:7},s2:{projectId:null}};
-    var PLACEHOLDER_PROJECT='Message # {project}', PLACEHOLDER_DEFAULT='Message';
-    function identSubtitle(){return '';} function backTarget(){return null;}
+  nodes["perch-input"].attrs.placeholder = "Message";
+  const chip = attrEl("Everything");
+  const prelude = `var document={getElementById:function(i){return N[i]||null;},querySelector:function(q){return q==='.shell-scope-name'?C:null;}};
+    function el(i){return document.getElementById(i);} function live(){return true;} var IDENT_LANG='en';
+    var N=arguments[0], C=arguments[1]; var current={sid:'s1'}; var rowIndex={s1:{projectId:7},s2:{projectId:null}};
+    function identSubtitle(r){return r&&r.projectId?'Alpha <b> \u00b7 today':'today';} function backTarget(){return null;}
     ` + grab("var PROJECTS=(function", "})();") + "\n" + grab("function projectOfRow", "\n  }\n") + "\n";
   const showIdent = new Function(
     prelude + src.slice(src.indexOf("function showIdent"), braceMatchEnd(src, src.indexOf("function showIdent")) + 1) +
     "; return {showIdent:showIdent,setSid:function(s){current.sid=s;}};",
-  )(nodes);
+  )(nodes, chip);
   showIdent.showIdent("Bot");
-  assert.equal(nodes["perch-input"].attrs.placeholder, "Message # Alpha <b>");
+  assert.equal(nodes["perch-input"].attrs.placeholder, "Message", "the placeholder no longer carries the project");
+  assert.equal(chip.textContent, "Everything", "the chip names the real scope: the client never relabels it");
+  assert.equal(nodes["perch-sheet-sub"].textContent, "Alpha <b> \u00b7 today", "the sheet carries the full context line");
   showIdent.setSid("s2");
   showIdent.showIdent("Bot");
+  assert.equal(chip.textContent, "Everything");
   assert.equal(nodes["perch-input"].attrs.placeholder, "Message");
 });
 
@@ -5975,4 +5982,16 @@ test("makeTabHref: a card gives the card scope with no project (no cookie-writin
   assert.equal(makeTabHref("/dashboard/make", null), "/dashboard/make");
   assert.equal(makeTabHref("/dashboard/make?project=x", undefined), "/dashboard/make?project=x");
   assert.equal(makeTabHref("/dashboard/extensions?q=artifacts", 12), "/dashboard/extensions?q=artifacts", "no Make panel: left alone");
+});
+
+test("sessionHref: a filed session outside the view's scope opens with ?project=<slug>; inside it, or unfiled, it opens in place", async () => {
+  const projectOfRow = await extract("projectOfRow");
+  const sessionHref = await extract("sessionHref", "var projectOfRow=" + projectOfRow.toString() + ";");
+  const P = [{ id: 3, slug: "hw-club", name: "Homework Club" }, { id: 4, slug: "a b", name: "Spaced" }];
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 3 }, P, "all"), "/dashboard/perch?project=hw-club#s1");
+  assert.equal(sessionHref({ sessionId: "s 2", projectId: 4 }, P, "unassigned"), "/dashboard/perch?project=a%20b#s%202");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 4 }, P, "3"), "/dashboard/perch?project=a%20b#s1", "another project's session");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 3 }, P, "3"), null, "already in its project: in place");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: null }, P, "all"), null, "unfiled: in place");
+  assert.equal(sessionHref({ sessionId: "s1", projectId: 3 }, [], null), null, "classic (no projects): in place");
 });

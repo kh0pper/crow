@@ -6,7 +6,7 @@ import { Router } from "express";
 import express from "express";
 import { renderLayout, renderLogin, render2faVerify, render2faRecovery, render2faSetup, renderResetRequest, renderResetForm } from "./shared/layout.js";
 import { playerBarHtml, playerBarJs } from "./shared/player.js";
-import { headerIconsHtml, headerIconsJs, tamagotchiHtml, tamagotchiJs } from "./shared/notifications.js";
+import { headerIconsHtml, headerIconsJs, headerIconsTrayHtml, tamagotchiHtml, tamagotchiJs, tamagotchiTrayHtml } from "./shared/notifications.js";
 import {
   dashboardAuth,
   isPasswordSet,
@@ -1035,12 +1035,21 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       // session display, so both the tray row and the long-press exist only
       // when the INSTALLED Kiosk panel declares it and its routes loaded.
       const talkAvailable = isCrowTalkAvailable(getPanel("kiosk"), getPanelRoutes().has("kiosk"));
-      const headerOpts = { talkAvailable };
-      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang, headerOpts) : headerIconsHtml(lang, headerOpts);
       const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
 
       // New shell or classic, per device; sets req.crowMode and req.crowScope.
       const shellOpts = await resolveShellPage(req, res, db, panelId, lang);
+
+      // New shell (phone review 2026-10-29): the mascot (or bell) opens ONE
+      // "Notifications and settings" sheet, which holds its tray; classic
+      // keeps the dropdown tray in the header.
+      const sheet = shellOpts.variant === "shell";
+      const headerOpts = { talkAvailable, sheet };
+      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang, headerOpts) : headerIconsHtml(lang, headerOpts);
+      if (sheet) {
+        const tray = tamaEnabled ? tamagotchiTrayHtml(lang, { talkAvailable }) : headerIconsTrayHtml(lang, { talkAvailable });
+        shellOpts.shell = { ...shellOpts.shell, tray };
+      }
 
       const result = await panel.handler(req, res, {
         db,

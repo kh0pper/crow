@@ -3565,7 +3565,7 @@ export const translations = {
   "perch.backList": { en: "Back to the sessions", es: "Volver a las sesiones" },
   "perch.appsLabel": { en: "Apps for this project", es: "Apps de este proyecto" },
   "perch.plusLabel": { en: "Attach or dictate", es: "Adjuntar o dictar" },
-  "perch.composerPlaceholderProject": { en: "Message # {project}", es: "Mensaje # {project}" },
+  "perch.composerPlaceholderPill": { en: "Message", es: "Mensaje" },
   "perch.identToday": { en: "today", es: "hoy" },
   "perch.identYesterday": { en: "yesterday", es: "ayer" },
   "perch.sheetTitle": { en: "Session details", es: "Detalles de la sesión" },
@@ -4006,6 +4006,8 @@ export const translations = {
   "shell.notNow": { en: "Not now", es: "Ahora no" },
   "settings.section.crowMode": { en: "New Crow", es: "El nuevo Crow" },
   "shell.account": { en: "Settings and mode", es: "Ajustes y modo" },
+  "shell.notifSettings": { en: "Notifications and settings", es: "Notificaciones y ajustes" },
+  "shell.notifSettingsHold": { en: "Notifications and settings. Press and hold to talk to Crow.", es: "Notificaciones y ajustes. Mantén pulsado para hablar con Crow." },
 
   // ─── Make tab (P4) ───
   "shell.makeAll": { en: "All", es: "Todo" },

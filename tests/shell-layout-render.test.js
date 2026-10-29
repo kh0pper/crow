@@ -98,7 +98,7 @@ test("classic with an explicit variant renders the same as the default", () => {
 
 test("the shell keeps the classic chain", () => {
   const html = renderLayout(shellOpts());
-  const order = ['class="main-content"', 'class="content-header"', 'id="crow-instance-tabs"', 'class="content-body"'];
+  const order = ['class="main-content"', 'class="content-header', 'id="crow-instance-tabs"', 'class="content-body"'];
   let at = -1;
   for (const needle of order) {
     const i = html.indexOf(needle);
@@ -238,7 +238,7 @@ test("the chip sits inside the content header, and project names are escaped", (
   const html = renderLayout(shellOpts({
     shell: { scope: { projectId: 9 }, projects: [{ id: 9, slug: "x", name: "<b>Evil</b>" }] },
   }));
-  const header = html.match(/<header class="content-header">[\s\S]*?<\/header>/)[0];
+  const header = html.match(/<header class="content-header[^"]*">[\s\S]*?<\/header>/)[0];
   assert.ok(header.includes('class="shell-scope"'));
   assert.ok(header.includes('class="shell-avatar"'));
   assert.ok(!html.includes("<b>Evil</b>"));
@@ -353,7 +353,7 @@ test("the Perch height subtracts the tab bar", () => {
   assert.ok(heights[0].includes("100vh") && heights[1].includes("100dvh"));
 });
 
-test("the phone chat view hides the tab bar", () => {
+test("the phone chat view keeps the tab bar, stepping it aside only for an on-screen keyboard", () => {
   const css = perchHubCss();
   const start = css.indexOf(`@media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){`);
   assert.ok(start >= 0, "phone media block present");
@@ -364,13 +364,16 @@ test("the phone chat view hides the tab bar", () => {
     else if (css[i] === "}" && --depth === 0) { end = i; break; }
   }
   const block = css.slice(start, end);
-  assert.ok(block.includes('body.shell[data-view="chat"] .shell-tabs{display:none}'));
-  assert.ok(block.includes('body.shell[data-view="chat"]{--shell-tabs-h:0px}'));
+  // Phone review 2026-10-29: Chat · Board · Make stays in an open chat.
+  assert.ok(!block.includes('body.shell[data-view="chat"] .shell-tabs{display:none}'));
+  assert.ok(!block.includes('body.shell[data-view="chat"]{--shell-tabs-h:0px}'));
+  assert.ok(block.includes('body.shell[data-view="chat"][data-perch-kb] .shell-tabs{display:none}'));
+  assert.ok(block.includes('body.shell[data-view="chat"][data-perch-kb]{--shell-tabs-h:0px}'));
 });
 
 test("the bird header survives", () => {
   const html = renderLayout(shellOpts());
-  const header = html.match(/<header class="content-header">[\s\S]*?<\/header>/)[0];
+  const header = html.match(/<header class="content-header[^"]*">[\s\S]*?<\/header>/)[0];
   assert.ok(header.includes(BIRD), "headerIcons verbatim inside .content-header");
   assert.ok(html.includes('id="crow-talk-overlay"'), "Talk to Crow overlay kept");
   assert.ok(html.includes("window.openCrowTalk"), "Talk to Crow JS kept");
@@ -383,4 +386,46 @@ test("the shell client JS has no backticks and wires the dialogs", () => {
   const html = renderLayout(shellOpts());
   assert.ok(html.includes(js), "client JS is emitted on shell pages");
   assert.ok(!renderLayout(CLASSIC_OPTS).includes(js), "and not on classic pages");
+});
+
+// Phone review 2026-10-29: with the mascot's tray (dashboard/index.js passes
+// shell.tray in new mode), the mascot opens ONE "Notifications and settings"
+// sheet and there is no separate avatar button.
+test("with the mascot's tray: one Notifications and settings sheet, tray first, and no avatar button (en, es)", async () => {
+  const { tamagotchiHtml, tamagotchiTrayHtml } = await import("../servers/gateway/dashboard/shared/notifications.js");
+  for (const lang of ["en", "es"]) {
+    const html = renderLayout(shellOpts({ lang, headerIcons: tamagotchiHtml(lang, { sheet: true }), shell: { tray: tamagotchiTrayHtml(lang) } }));
+    const header = html.match(/<header class="content-header[^"]*">[\s\S]*?<\/header>/)[0];
+    assert.ok(!html.includes('class="shell-avatar"'), "no avatar button");
+    assert.ok(!header.includes('id="crow-dropdown"'), "the tray is not in the header");
+    const bird = header.match(/<button[^>]*id="crow-bird-btn"[^>]*>/)[0];
+    const name = lang === "es" ? "Notificaciones y ajustes" : "Notifications and settings";
+    assert.ok(bird.includes(`aria-label="${name}"`), bird);
+    assert.ok(bird.includes('aria-haspopup="dialog"') && bird.includes('aria-controls="shell-avatar"') && bird.includes('data-shell-tray="crow-dropdown"'));
+    const sheet = html.match(/<dialog id="shell-avatar"[\s\S]*?<\/dialog>/)[0];
+    assert.ok(sheet.includes(`aria-label="${name}"`));
+    const list = sheet.indexOf('id="notif-list"'), settings = sheet.indexOf('href="/dashboard/settings"');
+    assert.ok(list > 0 && settings > list, "the notifications come first, then the settings links");
+    assert.ok(sheet.includes('href="/dashboard/settings?section=integrations"') && sheet.includes('name="mode" value="classic"'));
+    assert.equal((html.match(/id="notif-list"/g) || []).length, 1, "one notifications list on the page");
+  }
+});
+
+test("classic and tray-less renders keep their tray in the header and the avatar fallback", async () => {
+  const { tamagotchiHtml } = await import("../servers/gateway/dashboard/shared/notifications.js");
+  const classic = tamagotchiHtml("en");
+  assert.ok(classic.includes('id="crow-dropdown"') && classic.includes('aria-controls="crow-dropdown"') && !classic.includes("data-shell-tray"));
+  assert.ok(renderLayout(shellOpts()).includes('class="shell-avatar"'), "no tray handed in: the avatar button stays the way to settings");
+});
+
+test("phones: the title leaves the header row (own line, or screen-reader only on a tab page), and the chip name can shrink", () => {
+  const css = shellCss();
+  const m = css.match(/@media \(max-width: 1023px\) \{[\s\S]*?\n  \}/);
+  assert.ok(m, "the phone header block");
+  assert.match(m[0], /body\.shell \.content-header \{ flex-wrap: wrap;/);
+  assert.match(m[0], /body\.shell \.content-header h2 \{[^}]*order: 10;[^}]*flex: 1 0 100%;/);
+  assert.match(m[0], /body\.shell \.content-header\.shell-header--tab h2 \{[^}]*clip-path: inset\(50%\)/);
+  assert.match(css, /body\.shell \.shell-scope-name \{ min-width: 0;/);
+  assert.ok(renderLayout(shellOpts({ shell: { tab: "board" } })).includes('<header class="content-header shell-header--tab">'));
+  assert.ok(renderLayout(shellOpts({ shell: { tab: null } })).includes('<header class="content-header">'));
 });

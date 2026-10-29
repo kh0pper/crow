@@ -71,6 +71,8 @@ export function perchHubJs(lang = "en") {
   HUB.retire=function(){
     retired=true;
     stopListPolling(); cancelReconnect(); stopWatchdog(); closeStream(); stopIdentRefresh();
+    /* The keyboard flag belongs to this instance's chat (applyVV). */
+    if(document.body&&typeof document.body.removeAttribute==='function') document.body.removeAttribute('data-perch-kb');
     /* The artifact viewer pane holds a document keydown listener while open
        (artifact-card.js): leaving the hub with it open must not strand it. */
     closeArtifactPane();
@@ -770,7 +772,7 @@ export function perchHubJs(lang = "en") {
       b.type='button'; b.textContent=r.sessionId?OPEN_LABEL:TALK_LABEL;
       if(r.sessionId) b.setAttribute('data-sid',r.sessionId);
       b.onclick=r.sessionId
-        ? function(){ rowIndex[r.sessionId]=r; location.hash=r.sessionId; }
+        ? function(){ rowIndex[r.sessionId]=r; openRow(r); }
         : function(){ startSession(r.botId,r.botName); };
       row.appendChild(b);
       /* Only a live session has actions; an idle bot row has nothing to
@@ -1406,7 +1408,9 @@ export function perchHubJs(lang = "en") {
     setToken(root,'perch-narrow',w>0&&w<=NARROW_MAX);
   }
   applyNarrow();
-  bindOnce(window,'resize','narrowResize',function(){ if(live()) applyNarrow(); });
+  /* One resize listener: it also refits the head's context line (a rotation
+     changes whether the day fits beside the project name). */
+  bindOnce(window,'resize','narrowResize',function(){ if(live()){ applyNarrow(); refreshIdent(); if(typeof applyVV==='function') applyVV(); } });
 
   /* TEXT SIZE. #407 (2026-10-02) gave Perch its own five-step A− / A / A+;
      since A11Y-TEXTSIZE (2026-10-03) the control is a CONSUMER of the
@@ -1485,8 +1489,9 @@ export function perchHubJs(lang = "en") {
   }
   bindOnce(document,'visibilitychange','visibility',function(){
     if(document.visibilityState==='visible'){ reviveStream(); refreshIdent(); }
+    if(typeof applyVV==='function') applyVV();
   });
-  bindOnce(window,'pageshow','pageshow',reviveStream);
+  bindOnce(window,'pageshow','pageshow',function(){ reviveStream(); if(typeof applyVV==='function') applyVV(); });
   bindOnce(window,'online','online',reviveStream);
 
   /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
@@ -1886,8 +1891,6 @@ export function perchHubJs(lang = "en") {
   var IDENT_LANG='${lang === "es" ? "es" : "en"}';
   var SHEET_TITLE_BOT='${tJs("perch.sheetTitleBot", lang)}';
   var BACK_PROJECT='${tJs("perch.backProject", lang)}', BACK_LIST='${tJs("perch.backList", lang)}';
-  var PLACEHOLDER_DEFAULT='${tJs("perch.composerPlaceholder", lang)}';
-  var PLACEHOLDER_PROJECT='${tJs("perch.composerPlaceholderProject", lang)}';
   var APPS_EMPTY='${tJs("shell.appsEmptyProject", lang)}', APPS_LOADING='${tJs("shell.appsLoading", lang)}', APPS_FAILED='${tJs("shell.appsLoadFailed", lang)}';
   /* Classic keeps the 120px ceiling; the new-mode pill is capped by its CSS
      (five lines), so the script only has to follow the content. */
@@ -1924,11 +1927,26 @@ export function perchHubJs(lang = "en") {
       return d.toLocaleDateString(lang==='es'?'es':'en',{month:'short',day:'numeric'});
     }catch(e){ return d.toDateString(); }
   }
+  /* The head's context line: the project's name, then the day when it fits
+     (showIdent drops the day before the name would ellipsize). */
   function identSubtitle(row,projects,now,lang){
     var p=projectOfRow(row,projects);
     var day=identDay(row,now,lang);
     if(!p) return day;
-    return '# '+p.name+(day?' \\u00b7 '+day:'');
+    return p.name+(day?' \\u00b7 '+day:'');
+  }
+  /* Where a session row opens. A session filed in a project other than the
+     view's scope opens through /dashboard/perch?project=<slug>, so the server
+     renders that project's chip and scope (a real scope, never a relabel);
+     anything else opens in place. New mode only: classic has no PROJECTS. */
+  function sessionHref(row,projects,scope){
+    var p=projectOfRow(row,projects); if(!p||!row||!row.sessionId) return null;
+    if(scope!=null&&/^[1-9][0-9]*$/.test(String(scope))&&Number(scope)===Number(row.projectId)) return null;
+    return '/dashboard/perch?project='+encodeURIComponent(p.slug)+'#'+encodeURIComponent(row.sessionId);
+  }
+  function openRow(r){
+    var to=sessionHref(r,PROJECTS,SCOPE);
+    if(to) location.href=to; else location.hash=r.sessionId;
   }
   /* Where Back goes: the session's project home, or null (the list). */
   function backTarget(row,projects){
@@ -1939,13 +1957,26 @@ export function perchHubJs(lang = "en") {
   function showIdent(botName){
     var sheet=el('perch-session-sheet'); if(!sheet) return;
     var row=rowIndex[current.sid];
+    var pr=projectOfRow(row,PROJECTS);
+    var full=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
     var sub=el('perch-ident-sub');
-    if(sub) sub.textContent=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
-    var ci=el('perch-input');
-    if(ci){
-      var pr=projectOfRow(row,PROJECTS);
-      ci.setAttribute('placeholder',pr?PLACEHOLDER_PROJECT.split('{project}').join(String(pr.name)):PLACEHOLDER_DEFAULT);
+    if(sub){
+      sub.textContent=full;
+      /* Phone review 2026-10-29: the day goes before the project name would
+         ellipsize (the sheet below still carries the day). Measured after
+         layout: showIdent can run while the chat view is still opening. */
+      if(pr){
+        var fit=function(){
+          if(!live()||sub.textContent!==full) return;
+          if(sub.scrollWidth>sub.clientWidth) sub.textContent=String(pr.name);
+        };
+        fit();
+        if(typeof requestAnimationFrame==='function') requestAnimationFrame(fit);
+      }
     }
+    /* The full line, in the session sheet under its title. */
+    var ss=el('perch-sheet-sub');
+    if(ss) ss.textContent=full;
     var t=el('perch-sheet-title');
     if(t) t.textContent=SHEET_TITLE_BOT.split('{bot}').join(String(botName||''));
     /* Back is a "←" icon (html.js backIconButton): only its accessible name
@@ -4193,15 +4224,47 @@ ${perchTakeOverJs(lang)}
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */
+  /* Phone review 2026-10-29: the shell's Chat/Board/Make bar stays in an open
+     chat, so while an on-screen keyboard is up body[data-perch-kb] lets
+     css.js hide the bar and drop --shell-tabs-h, and the composer rides
+     right above the keyboard. "Up" is two facts at once: a text field has
+     focus, and more than KB_MIN_PX of the layout viewport is covered. The
+     cover is measured zoom-proof (innerHeight - vv.height * vv.scale: a
+     pinch zoom shrinks vv.height by exactly the scale, a keyboard does not),
+     and the focus rule means a blur always brings the bar back, whatever the
+     viewport reports. A browser that resizes the layout viewport instead
+     covers nothing: the fixed bar then rides above the keyboard with the
+     composer above it. */
+  var KB_MIN_PX=120;
+  function textFieldFocused(){
+    var a=document.activeElement; if(!a||!a.tagName) return false;
+    var tag=String(a.tagName).toUpperCase();
+    if(tag==='TEXTAREA') return true;
+    if(tag==='INPUT') return !/^(button|checkbox|radio|submit|reset|file|range|color|image|hidden)$/i.test(String(a.type||''));
+    return !!a.isContentEditable;
+  }
   if(window.visualViewport){
     var vv=window.visualViewport;
     var applyVV=function(){
       if(!live()) return;
       var hidden=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
+      var scale=typeof vv.scale==='number'&&vv.scale>0?vv.scale:1;
+      var covered=window.innerHeight-vv.height*scale;
+      if(typeof body.setAttribute==='function'&&typeof body.removeAttribute==='function'){
+        if(covered>KB_MIN_PX&&textFieldFocused()) body.setAttribute('data-perch-kb','');
+        else body.removeAttribute('data-perch-kb');
+      }
       el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
     };
     bindOnce(vv,'resize','vvResize',applyVV);
     bindOnce(vv,'scroll','vvScroll',applyVV);
+    /* Some browsers fire none of the viewport events on a rotation, a return
+       to the tab or a back-forward restore (window resize, visibilitychange
+       and pageshow reuse their one listener each, further up); a blur moves
+       focus a task later. */
+    bindOnce(window,'orientationchange','vvOrient',applyVV);
+    bindOnce(document,'focusout','vvFocusout',function(){ setTimeout(applyVV,0); });
+    bindOnce(document,'focusin','vvFocusin',applyVV);
   }
 
   /* BOOTSTRAP — a hashchange event fires only on a LATER change to the hash;

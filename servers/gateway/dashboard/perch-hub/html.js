@@ -65,7 +65,7 @@ function appsSheet(lang) {
 function pillRow(lang) {
   return `<div class="pill-row">
         <button type="button" id="perch-plus" class="quiet" aria-label="${escapeHtml(t("perch.plusLabel", lang))}" title="${escapeHtml(t("perch.plusLabel", lang))}" aria-expanded="false" aria-controls="perch-plus-menu">${PLUS_SVG}</button>
-        <textarea id="perch-input" rows="1" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
+        <textarea id="perch-input" rows="1" placeholder="${escapeHtml(t("perch.composerPlaceholderPill", lang))}" aria-label="${escapeHtml(t("perch.composerPlaceholderPill", lang))}"></textarea>
         <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
         <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
       </div>
@@ -89,7 +89,7 @@ function sheetOpen(lang) {
   return `
     <dialog id="perch-session-sheet" class="perch-sheet" aria-labelledby="perch-sheet-title">
     <div class="perch-sheet-inner">
-    <div class="perch-sheet-head"><h3 class="perch-sheet-title" id="perch-sheet-title">${escapeHtml(t("perch.sheetTitle", lang))}</h3><button type="button" class="quiet perch-sheet-close" id="perch-sheet-close" aria-label="${escapeHtml(t("common.close", lang))}" title="${escapeHtml(t("common.close", lang))}">${CLOSE_SVG}</button></div>
+    <div class="perch-sheet-head"><div class="perch-sheet-heading"><h3 class="perch-sheet-title" id="perch-sheet-title">${escapeHtml(t("perch.sheetTitle", lang))}</h3><p class="perch-sheet-sub" id="perch-sheet-sub"></p></div><button type="button" class="quiet perch-sheet-close" id="perch-sheet-close" aria-label="${escapeHtml(t("common.close", lang))}" title="${escapeHtml(t("common.close", lang))}">${CLOSE_SVG}</button></div>
     <div id="perch-sheet-tabs" role="tablist" aria-label="${escapeHtml(t("perch.tabsLabel", lang))}">
       ${tab("session", "perch.tabSession", "true")}
       ${tab("files", "perch.tabFiles", "false")}

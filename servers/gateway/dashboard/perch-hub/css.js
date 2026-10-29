@@ -422,18 +422,30 @@ overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;borde
    five (line-height 1.5, so the ceiling follows the text size), then scrolls
    inside itself. "+" opens #perch-plus-menu, a popover that grows UPWARD from
    the composer (the same containing block the slash menu uses), holding
-   Attach and Dictate. Every target is 44px. */
-#perch-hub-root #perch-composer.pill .pill-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:6px;min-width:0;
+   Attach and Dictate. Every target is 44px.
+   Phone review 2026-10-29: ONE row at any width. The row never wraps (a long
+   placeholder's flex-basis pushed "+" onto its own line) and the field is
+   the one flexible item at flex-basis 0, so "+" and Send always keep their
+   place. It says how it fits the way the phone-row guard allows
+   (tests/dashboard-phone-rows.test.js): nowrap + its own overflow-x. Nothing
+   in it can overflow, and the 4px padding keeps the 2px+2px focus rings
+   inside the box the scroller clips to. */
+#perch-hub-root #perch-composer.pill .pill-row{display:flex;flex-wrap:nowrap;overflow-x:auto;align-items:flex-end;gap:6px;min-width:0;
 border:1px solid var(--line);border-radius:24px;background:var(--card);padding:4px}
 #perch-hub-root #perch-composer.pill .pill-row:focus-within{border-color:var(--teal)}
-#perch-hub-root #perch-composer.pill textarea{flex:1 1 auto;min-width:0;box-sizing:border-box;border:0;background:transparent;
+#perch-hub-root #perch-composer.pill textarea{flex:1 1 0;min-width:0;width:auto;box-sizing:border-box;border:0;background:transparent;
 box-shadow:none;outline:none;resize:none;margin:0;padding:11px 8px;font:inherit;line-height:1.5;
 min-height:44px;max-height:calc(7.5em + 22px);overflow-y:auto}
+/* iOS Safari zooms the page into any field whose text is under 16px; on a
+   touch screen (and at phone/tablet widths) the pill field is 16px. */
+@media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px), (pointer:coarse){
+  #perch-hub-root #perch-composer.pill textarea{font-size:16px}
+}
 #perch-hub-root #perch-composer.pill #perch-plus{flex:none;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;
 border-radius:22px;display:inline-flex;align-items:center;justify-content:center}
 #perch-hub-root #perch-composer.pill #perch-plus svg{width:20px;height:20px}
 #perch-hub-root #perch-composer.pill #perch-plus[hidden]{display:none}
-#perch-hub-root #perch-composer.pill #perch-send,#perch-hub-root #perch-composer.pill #perch-abort{flex:none;min-height:44px;border-radius:22px;padding:0 16px}
+#perch-hub-root #perch-composer.pill #perch-send,#perch-hub-root #perch-composer.pill #perch-abort{flex:none;min-width:44px;min-height:44px;height:44px;border-radius:22px;padding:0 12px;font-size:14px;line-height:1}
 #perch-plus-menu{position:absolute;bottom:100%;left:0;margin-bottom:6px;min-width:200px;max-width:100%;background:var(--card);
 border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.18);overflow:hidden;z-index:21}
 #perch-plus-menu[hidden]{display:none}
@@ -465,10 +477,14 @@ border:0;border-bottom:1px solid var(--line);border-radius:0;background:none;col
    the split view (desktop) are untouched. */
 @media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){
   body[data-view="chat"] #perch-hub-root > header{display:none}
-  /* The new shell: an open chat takes the whole height; the back button
-     returns to the list, where the tab bar is back. */
-  body.shell[data-view="chat"] .shell-tabs{display:none}
-  body.shell[data-view="chat"]{--shell-tabs-h:0px}
+  /* The new shell (phone review 2026-10-29): the Chat/Board/Make bar stays
+     in an open chat, and the app shell's height (layout.js) already ends
+     above it through --shell-tabs-h, so the composer sits on the bar. Only
+     while an on-screen keyboard is up (client.js applyVV sets the
+     data-perch-kb flag) does the bar step aside, so the composer can ride
+     right above the keyboard; it is back the moment the keyboard closes. */
+  body.shell[data-view="chat"][data-perch-kb] .shell-tabs{display:none}
+  body.shell[data-view="chat"][data-perch-kb]{--shell-tabs-h:0px}
   /* The shell keeps its 16px side gutter in the compact chat header too. */
   body.shell[data-view="chat"]:has(#perch-chat) .content-header{padding-left:16px;padding-right:16px}
   body[data-view="chat"] #perch-hub-root .perch-head{flex-wrap:nowrap;justify-content:flex-start;gap:10px}
@@ -950,7 +966,7 @@ border-top:1px solid var(--line);flex-shrink:0}
    Sessions list beside the chat is the way back to the list, so Back shows
    only for a filed session ([data-home], client.js showIdent), where it goes
    to the project home. */
-#perch-hub-root .perch-head #perch-back.perch-back-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;font-size:20px;line-height:1}
+#perch-hub-root .perch-head #perch-back.perch-back-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;font-size:20px;line-height:1;margin-right:6px}
 #perch-hub-root .perch-head .perch-ident:has(#perch-ident-btn){flex:1 1 auto;min-width:0}
 @media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-hub-root .perch-head #perch-back.perch-back-icon{display:none}
@@ -977,6 +993,10 @@ border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;back
 padding:8px 16px calc(16px + env(safe-area-inset-bottom, 0px))}
 #perch-hub-root .perch-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
 #perch-hub-root .perch-sheet-title{font-size:15px;font-weight:600;min-width:0}
+/* The head's long context line ("project · day") lives here in full. */
+#perch-hub-root .perch-sheet-heading{min-width:0;display:flex;flex-direction:column;gap:2px}
+#perch-hub-root .perch-sheet-sub{margin:0;font-size:13px;color:var(--dim);overflow-wrap:anywhere}
+#perch-hub-root .perch-sheet-sub:empty{display:none}
 #perch-hub-root .perch-sheet-close{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;margin-right:-8px;border-radius:50%;border-color:transparent;background:transparent}
 #perch-hub-root .perch-sheet-close:hover{background:var(--teal-soft)}
 #perch-hub-root .perch-sheet-close svg{width:20px;height:20px}
