@@ -199,10 +199,38 @@ export const EXCLUDED_COLUMNS = {
 // conflict row). An un-upgraded or hostile peer may still send these keys.
 // research_notes.source_id is a local FK (source rows are not synced, ids are per-instance), so
 // a peer's value would point a note at an unrelated local source, e.g. a quotes_checked one.
+// memories.project_id is a local FK too (project_spaces ids are per-instance): an un-upgraded
+// peer still sends its own id, which would file the memory under an unrelated local project.
+// The receiver derives project_id from project_uuid instead (mapInboundMemoryProject).
 export const INBOUND_DROPPED_COLUMNS = {
+  memories: ["project_id"],
   research_notes: ["provenance", "quote_found", "locator", "source_id",
     "created_by", "withdrawn_at", "withdrawn_by", "withdrawn_reason"],
 };
+
+/**
+ * Inbound memories: project_id is local, project_uuid is portable. A row that
+ * carries project_uuid (even null) gets project_id set to the local
+ * project_spaces.id with that uuid, or NULL when this instance has no such
+ * project (the memory lands unfiled; project_uuid is kept). A row without the
+ * key (an un-upgraded peer, or an update that does not touch the project)
+ * is returned unchanged, so project_id is left as it is. Pure: never mutates
+ * the input. Exported for tests.
+ */
+export async function mapInboundMemoryProject(db, row) {
+  if (!row || typeof row !== "object" || !Object.prototype.hasOwnProperty.call(row, "project_uuid")) return row;
+  const uuid = row.project_uuid;
+  let projectId = null;
+  if (typeof uuid === "string" && uuid !== "") {
+    try {
+      const { rows } = await db.execute({ sql: "SELECT id FROM project_spaces WHERE uuid = ?", args: [uuid] });
+      if (rows.length > 0) projectId = Number(rows[0].id);
+    } catch (err) {
+      console.warn("[instance-sync] memories project_uuid lookup failed (landing unfiled):", err.message);
+    }
+  }
+  return { ...row, project_id: projectId };
+}
 
 function dropInboundColumns(table, row) {
   const drop = INBOUND_DROPPED_COLUMNS[table];
@@ -218,6 +246,11 @@ function dropInboundColumns(table, row) {
 // aren't synced), so we NULL it on the wire. Synced notes show up on peers
 // as project-less (null project_id).
 const OUTBOUND_TRANSFORMS = {
+  // memories.project_id is a local FK (project_spaces ids are per-instance).
+  // project_uuid (the project's portable id) rides as is; the receiver maps it
+  // back to its own project (mapInboundMemoryProject). Nulled both ways, so the
+  // local row passed through here in _checkConflict compares equal on it.
+  memories: (row) => ({ ...row, project_id: null }),
   // source_id is a local FK too (research_sources rows are not synced).
   research_notes: (row) => ({ ...row, project_id: null, source_id: null }),
   // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
@@ -2781,8 +2814,16 @@ export class InstanceSyncManager {
 
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
+    // memories: project_uuid -> this instance's project_id. The equivalence
+    // checks compare the WIRE row (project_id absent/null, like the local row
+    // after OUTBOUND_TRANSFORMS), so a mapped project_id never manufactures a
+    // conflict; the mapped row is what gets written, and what a conflict row
+    // records as the losing version (so a restore files it locally).
+    const applyRow = table === "memories" && op !== "delete"
+      ? await mapInboundMemoryProject(this.db, row) : row;
+
     if ((op === "update" || op === "delete") && row.id !== undefined) {
-      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row, op);
+      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row, op, applyRow);
       if (conflict === "skip") return; // Local version wins
     }
 
@@ -2795,10 +2836,10 @@ export class InstanceSyncManager {
     try {
       switch (op) {
         case "insert":
-          await this._applyInsert(table, row, lamport_ts, instance_id);
+          await this._applyInsert(table, applyRow, lamport_ts, instance_id, row);
           break;
         case "update":
-          await this._applyUpdate(table, row, lamport_ts, instance_id);
+          await this._applyUpdate(table, applyRow, lamport_ts, instance_id);
           if (notePrior) await this._invalidateNoteQuoteCheck(row, notePrior);
           break;
         case "delete":
@@ -3707,9 +3748,12 @@ export class InstanceSyncManager {
    * drop real concurrent edits of rows both instances received from one origin.
    *
    * @param {string} op - 'update' or 'delete' (caller gates before calling)
+   * @param {object} [loggedRow] - the incoming row as it would be written
+   *   (memories: project_id mapped from project_uuid), recorded as the losing
+   *   version; defaults to incomingRow. Comparison always uses incomingRow.
    * @returns {Promise<"apply"|"skip">}
    */
-  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op) {
+  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op, loggedRow = incomingRow) {
     try {
       const { rows } = await this.db.execute({
         sql: `SELECT * FROM ${table} WHERE id = ?`,
@@ -3748,7 +3792,7 @@ export class InstanceSyncManager {
           table, String(rowId),
           localRow.instance_id || this.localInstanceId, incomingInstanceId,
           localTs, incomingTs,
-          JSON.stringify(localRow), JSON.stringify(incomingRow),
+          JSON.stringify(localRow), JSON.stringify(loggedRow),
           op || "update",
         );
         if (inserted) await this._notifyConflict();
@@ -3869,8 +3913,11 @@ export class InstanceSyncManager {
    *   Nostr+sync delivery is the live example)
    * - Local row equivalent → benign re-delivery, done
    * - Local row differs → log conflict op='insert' + notify (D7 surfacing)
+   *
+   * compareRow is the WIRE row for the equivalence check (memories: before
+   * project_uuid was mapped to a local project_id); defaults to row.
    */
-  async _applyInsert(table, row, lamportTs, instanceId) {
+  async _applyInsert(table, row, lamportTs, instanceId, compareRow = row) {
     const cols = Object.keys(row);
     // Add sync metadata
     if (!cols.includes("lamport_ts")) cols.push("lamport_ts");
@@ -3916,7 +3963,7 @@ export class InstanceSyncManager {
       // a false insert-conflict for an otherwise-identical row.
       const transform = OUTBOUND_TRANSFORMS[table];
       const localForCompare = transform ? transform({ ...localRow }) : localRow;
-      if (rowsEquivalent(localForCompare, row)) {
+      if (rowsEquivalent(localForCompare, compareRow)) {
         return; // Benign re-delivery
       }
 

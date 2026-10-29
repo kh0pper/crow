@@ -1383,6 +1383,12 @@ try {
 
 await addColumnIfMissing("memories", "instance_id", "TEXT DEFAULT NULL");
 await addColumnIfMissing("memories", "project_id", "INTEGER DEFAULT NULL");
+// memories.project_uuid (session summaries, R1.2 PR 4): the project's portable
+// id (project_spaces.uuid). project_id is a local FK — project_spaces ids are
+// per-instance — so instance sync nulls project_id on the wire and the
+// receiver maps project_uuid back to its own project (or leaves it unfiled).
+// NULL on every existing row. Also added by scripts/migrations/0020.
+await addColumnIfMissing("memories", "project_uuid", "TEXT");
 
 try {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_instance_id ON memories(instance_id)");
@@ -2698,6 +2704,9 @@ await initTable("bot_sessions table", `
     narrowed_tools    TEXT,
     label             TEXT,
     archived_at       TEXT,
+    summary           TEXT,
+    summary_at        TEXT,
+    summary_flags     TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2761,6 +2770,24 @@ await addColumnIfMissing("bot_sessions", "cwd", "TEXT");
 // migration to add the column or its /roost SELECT 500s). Additive-only — no
 // SCHEMA_GENERATION bump.
 await addColumnIfMissing("bot_sessions", "archived_at", "TEXT");
+
+// bot_sessions.summary / .summary_at / .summary_flags (session summaries,
+// R1.2 PR 4): a finished session's short summary, when it was written, and a
+// JSON flag bag (e.g. {"outside_content":true}). NULL on every existing row
+// ("no summary yet"). Same both-places idiom as `archived_at` above: CREATE
+// body for fresh installs, these guarded ALTERs for pre-existing ones, listed
+// in BOT_SESSIONS_CANONICAL_COLUMNS so the control-CHECK rebuild carries them,
+// AND the standalone rail scripts/migrations/0020-session-summaries.mjs (plus
+// guarded ALTERs in init-pi-bots.mjs). summary_at is indexed: the briefing
+// reads "summaries since X". Additive-only — no SCHEMA_GENERATION bump.
+await addColumnIfMissing("bot_sessions", "summary", "TEXT");
+await addColumnIfMissing("bot_sessions", "summary_at", "TEXT");
+await addColumnIfMissing("bot_sessions", "summary_flags", "TEXT");
+try {
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_bot_sessions_summary_at ON bot_sessions (summary_at)");
+} catch (err) {
+  console.warn(`Warning: could not create idx_bot_sessions_summary_at: ${err.message}`);
+}
 
 // perch_session_files (PR-E, audit item 12): durable history of files the
 // agent SENT to a perch chat via send_user_file's crow-file: relay. One row
@@ -2888,7 +2915,7 @@ await initTable("card_offers table", `
 // is never reached, so the next run retries the migration.
 //
 // I13: PRAGMA table_info(bot_sessions) is diffed against the canonical
-// 20-column list BEFORE any DDL — an unrecognized host-present column (or a
+// 23-column list BEFORE any DDL — an unrecognized host-present column (or a
 // canonical column gone missing) aborts the migration instead of silently
 // vanishing with its data, matching the reference rebuild's C2/N1 guard.
 //
@@ -2906,7 +2933,8 @@ const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
   "control", "model", "cwd", "escalated", "kind", "narrowed_tools",
-  "label", "archived_at", "created_at", "updated_at",
+  "label", "archived_at", "summary", "summary_at", "summary_flags",
+  "created_at", "updated_at",
 ];
 await (async () => {
   const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
@@ -2970,6 +2998,9 @@ await (async () => {
         narrowed_tools    TEXT,
         label             TEXT,
         archived_at       TEXT,
+        summary           TEXT,
+        summary_at        TEXT,
+        summary_flags     TEXT,
         created_at        TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
       )
