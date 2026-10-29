@@ -93,6 +93,8 @@ export function tickBotSchedules({ log = () => {} } = {}) {
         const jobId = generateJobId();
         const deliver = spec.deliver_to == null ? null
           : (typeof spec.deliver_to === "string" ? spec.deliver_to : JSON.stringify(spec.deliver_to));
+        // principal stays NULL (not the owner's turn): plan decision 1. A schedule records no creator
+        // (Known bound), so a cron job never uses the owner's connected accounts.
         d.prepare(
           "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate) " +
           "VALUES (?,?,?,'queued',?,?,?,?)"

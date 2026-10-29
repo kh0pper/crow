@@ -89,6 +89,7 @@ export async function deliverPhoneResult(db, call, deps) {
     const bot = (await db.execute({ sql: "SELECT enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0];
     if (!bot || !bot.enabled) return { via: "notify_only" };
     await ensureBotJobs(db);
+    // principal stays NULL: a phone-delivered job is not the owner's turn (plan decision 1).
     const jobId = "job-" + Date.now().toString(36) + "-" + randomBytes(3).toString("hex");
     await db.execute({ sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, escalate) VALUES (?, ?, ?, 'queued', ?, 'phone', 0)",
       args: [jobId, botId, goal, JSON.stringify(d)] });
@@ -106,6 +107,7 @@ export function enginePerchMessage(getEngine) {
   return async (sid, text) => {
     const eng = getEngine({ createIfMissing: false });
     if (!eng) throw Object.assign(new Error("no perch engine"), { code: "no_engine" });
-    await eng.message(sid, text, []);
+    // Project services (plan decision 1): call content is third-party text, never the owner's own turn.
+    await eng.message(sid, text, [], { principal: "other" });
   };
 }

@@ -187,7 +187,8 @@ test("C2: enginePerchMessage — no engine is a TRANSIENT no_engine; an engine g
   const got = [];
   const send = enginePerchMessage(({ createIfMissing }) => { assert.equal(createIfMissing, false); return { message: async (...a) => { got.push(a); } }; });
   await send("p1", "hi");
-  assert.deepEqual(got, [["p1", "hi", []]]);
+  // Project services: call content is never the owner's own turn (plan decision 1).
+  assert.deepEqual(got, [["p1", "hi", [], { principal: "other" }]]);
   const busy = enginePerchMessage(() => ({ message: async () => { throw Object.assign(new Error("turn_in_progress"), { code: "turn_in_progress" }); } }));
   await assert.rejects(busy("p1", "hi"), (e) => e.code === "turn_in_progress", "engine codes pass through unchanged");
 });

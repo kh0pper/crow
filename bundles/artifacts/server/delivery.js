@@ -96,15 +96,19 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "chat", crea
   await reclassifyAtDelivery(db, round);
   const downgraded = wasTrusted && round.untrusted;
   const text = await roundMessage(db, round);
+  // Project services (plan decision 1): a delivered round is never the owner's own turn, trusted or not. Its
+  // text is composed from the artifact and its comments and sent by this module (often from the sweep, long
+  // after the owner's Send), so the bot gets no connected accounts for it.
+  const OTHER = { principal: "other" };
   const spawnAndSend = async (narrowed) => {
-    const s = await engine.spawn(narrowed ? { botId: round.bot_id, narrowedTools: UNTRUSTED_ALLOW } : { botId: round.bot_id });
+    const s = await engine.spawn(narrowed ? { botId: round.bot_id, narrowedTools: UNTRUSTED_ALLOW, ...OTHER } : { botId: round.bot_id, ...OTHER });
     try {
       // The taint record is written BEFORE the round text is sent.
       if (narrowed) await markSessionTainted(db, round.bot_id, s.threadId, "untrusted-round");
       // session_id holds the THREAD id: the bot's actor headers carry the
       // thread, and mcp.js scopes untrusted rounds by it.
       await setDelivery(db, round.id, { status: "working", delivery: "perch-session", sessionId: s.threadId });
-      await engine.message(s.sessionId, text);
+      await engine.message(s.sessionId, text, undefined, OTHER);
     } catch (e) {
       // R2-L5: never leave a spawned session running unrecorded, and unbind it.
       try { await engine.stop(s.sessionId); } catch {}
@@ -151,7 +155,7 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "chat", crea
     if (seen && seen.state === "stopped") return fail("target_asleep");
     // Send first, bind after (a busy chat leaves the round unbound and
     // retryable). message() wakes a hibernating chat itself (B8).
-    try { await engine.message(seen ? seen.sessionId : target, text); }
+    try { await engine.message(seen ? seen.sessionId : target, text, undefined, OTHER); }
     catch (e) { if (ASLEEP.has(codeOf(e))) return fail("target_asleep"); throw e; }
     await setDelivery(db, round.id, { status: "working", delivery: "perch-session", sessionId: target });
     return { status: "working", delivery: "perch-session", threadId: target };
