@@ -466,10 +466,10 @@ test("an existing instance sees the button, not previews", async () => {
     },
   });
   try {
-  for (const [lang, button, line] of [["en", "Turn on", "Previews are off."], ["es", "Activar", "Vistas previas desactivadas."]]) {
+  for (const [lang, button, line, aria] of [["en", "Turn on", "Previews are off.", "Turn on previews"], ["es", "Activar", "Vistas previas desactivadas.", "Activar vistas previas"]]) {
     const html = (await page(lang)).body;
     assert.match(html, new RegExp(`<form[^>]*method="post"[^>]*action="/dashboard/make/previews/enable"`));
-    assert.match(html, new RegExp(`<button type="submit" class="mk-start-act mk-linkbtn">${button}</button>`));
+    assert.match(html, new RegExp(`<button type="submit" class="mk-start-act mk-linkbtn" aria-label="${aria}">${button}</button>`), `${lang}: the short button says what it turns on`);
     assert.match(html, /name="_csrf"/);
     assert.match(html, /name="back" value="\/dashboard\/make/);
     assert.match(html, /<details class="mk-previews-what"><summary>/);

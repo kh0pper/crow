@@ -12,10 +12,13 @@
  * Hidden from the classic sidebar: classic keeps Artifacts as its own page; Make is a tab of the
  * new shell (shell/chrome.js points the tab here once this panel is registered).
  */
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { t } from "../shared/i18n.js";
-import { cardSummary, documentsForCard } from "../../make/card-docs.js";
+import { documentsForCard } from "../../make/card-docs.js";
+import { createDbClient } from "../../../db.js";
+import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { listMakeItems } from "../../make/sources.js";
 import { itemPreview, previewDeps, previewLineKey, previewsEnabled } from "../../make/previews.js";
 import { markSeen, getItem, activeProjects } from "../../../shared/shell-items.js";
@@ -29,16 +32,38 @@ const FILTER_IDS = ["all", "documents", "pages", "shared"];
 
 /**
  * Which documents Make shows. ?scope=card:<id> (a valid card id) is one card, ?scope=all is every
- * project, anything else is the shell's project chip when it is a single project, else all. Reads
- * only the query and the shell's already-resolved scope: it never sets the project or a cookie.
+ * project, anything else is the shell's project chip when it is a single project or Unassigned
+ * (the chip's scope is passed through), else all. Reads only the query and the shell's
+ * already-resolved scope: it never sets the project or a cookie.
  */
 export function parseMakeScope(query, crowScope) {
   const raw = typeof query?.scope === "string" ? query.scope : "";
   const m = /^card:([1-9]\d{0,15})$/.exec(raw);
   if (m) return { kind: "card", cardId: m[1] };
   if (raw === "all") return { kind: "all" };
-  if (crowScope?.projectId != null) return { kind: "project", scope: crowScope };
+  if (crowScope?.projectId != null || crowScope?.unassigned) return { kind: "project", scope: crowScope };
   return { kind: "all" };
+}
+
+/**
+ * A top-level card's title and project from tasks.db, in one query; null for an unknown card, a
+ * missing tasks.db or any read failure (card mode then shows the card's empty line, never an error).
+ */
+async function cardRow(cardId) {
+  const path = tasksDbPath();
+  if (!existsSync(path)) return null;
+  let tdb;
+  try {
+    tdb = createDbClient(path);
+    const { rows } = await tdb.execute({ sql: "SELECT title, project_id FROM tasks_items WHERE id = ? AND board_id IS NULL", args: [Number(cardId)] });
+    if (!rows[0]) return null;
+    return { title: String(rows[0].title ?? ""), projectId: rows[0].project_id == null ? null : Number(rows[0].project_id) };
+  } catch (err) {
+    console.warn(`[make] card lookup failed: ${err.message}`);
+    return null;
+  } finally {
+    try { tdb && tdb.close(); } catch { /* already closed */ }
+  }
 }
 
 let lister = listMakeItems;
@@ -128,31 +153,34 @@ export default {
       return enabled ? itemPreview(db, item, deps) : { previewState: "off", previewUrl: null, previewReason: "not_enabled" };
     };
     let cardRefs = null;
-    let cardTitle = "";
+    let card = null;
     if (parsed.kind === "card") {
       const docs = await documentsForCard(db, parsed.cardId, { lang });
       cardRefs = new Set(docs.map((d) => `${d.kind}:${d.ref}`));
-      cardTitle = (await cardSummary(db, parsed.cardId))?.title || "";
+      card = await cardRow(parsed.cardId);
     }
     const model = await lister(db, scope, { crowHome: crowHome(), filter, previews, ...(cardRefs ? { cardRefs } : {}) });
     // One line under the chips for a renderer reason (the first one any tile met).
     const reason = enabled ? (model.items || []).map((i) => i.previewReason).find((r) => previewLineKey(r)) || null : null;
     const explicit = typeof req.query.scope === "string" && (parsed.kind === "card" || req.query.scope === "all") ? req.query.scope : null;
-    const backQs = [explicit && `scope=${encodeURIComponent(explicit)}`, filter !== "all" && `filter=${filter}`].filter(Boolean).join("&");
+    const backQs = [explicit && `scope=${encodeURIComponent(explicit)}`, parsed.kind !== "card" && cardQ && `card=${cardQ}`, filter !== "all" && `filter=${filter}`].filter(Boolean).join("&");
     const back = backQs ? `/dashboard/make?${backQs}` : "/dashboard/make";
-    // The project a new thing starts in: the shell's chip, else Unassigned.
-    let project = { id: "unassigned", name: t("shell.unassigned", lang) };
-    if (shellScope.projectId != null) {
-      try {
-        const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [Number(shellScope.projectId)] });
-        if (rows[0]) project = { id: Number(shellScope.projectId), name: String(rows[0].name || shellScope.slug || "") };
-      } catch (err) { console.warn(`[make] project name lookup failed: ${err.message}`); }
-    }
     let projects = [];
     try { projects = await activeProjects(db); } catch (err) { console.warn(`[make] project list failed: ${err.message}`); }
+    const live = (pid) => (pid == null ? null : projects.find((p) => p.id === Number(pid)) || null);
+    // The project a new thing starts in: in card mode the CARD's own project (its documents land on
+    // the card, so they belong where the card is), else the shell's chip; Unassigned when neither
+    // is a live project.
+    const unassigned = { id: "unassigned", name: t("shell.unassigned", lang) };
+    const start = live(parsed.kind === "card" ? card?.projectId : shellScope.projectId);
+    const project = start ? { id: start.id, name: String(start.name || start.slug || "") } : unassigned;
+    // The This project chip names the shell's chip (a project, or Unassigned), never the card's.
+    const chip = live(shellScope.projectId);
+    const projectName = shellScope.unassigned ? unassigned.name
+      : shellScope.projectId != null ? String(chip?.name || shellScope.slug || "") : null;
     return layout({
       title: t("shell.tabMake", lang),
-      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, scope: { mode: parsed.kind, cardId, cardTitle, explicit, projectName: shellScope.projectId != null ? project.name : null }, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
+      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, startCard: parsed.kind === "card" && card ? parsed.cardId : null, scope: { mode: parsed.kind, cardId, cardTitle: card?.title || "", explicit, projectName }, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
     });
   },
 };

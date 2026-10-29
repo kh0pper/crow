@@ -89,11 +89,16 @@ test("card scope lists only the card's documents and ignores the project scope",
 
 test("scope and filter combine; the active chip has aria-current; chips are links", async () => {
   seam({ items: [item()], ...OK });
-  const r = await get("/dashboard/make?scope=all&filter=documents");
+  const r = await get("/dashboard/make?project=garden&scope=all&filter=documents");
   assert.equal(r.status, 200);
-  assert.match(r.body, /<nav class="mk-scope-chips" role="group" aria-label="Show">/);
-  assert.match(r.body, /href="\/dashboard\/make\?scope=all&amp;filter=documents" aria-current="page"/);
-  assert.doesNotMatch(r.body, /This card/);
+  assert.match(r.body, /<div class="mk-scope-chips" role="group" aria-label="Show">/);
+  assert.doesNotMatch(r.body, /<nav class="mk-scope-chips"/);
+  assert.match(r.body, /href="\/dashboard\/make\?scope=all&amp;filter=documents" aria-current="true"/);
+  assert.match(r.body, /mk-chip mk-chip-on" href="\/dashboard\/make\?scope=all&amp;filter=documents" aria-current="true"/, "the type row marks its chip the same way");
+  assert.doesNotMatch(r.body, /mk-(scope-)?chip[^"]*" href="[^"]*" aria-current="page"/);
+  // Spec §5.5: the scope row is the first row, the type filters the second.
+  assert.ok(r.body.indexOf('class="mk-scope-chips"') < r.body.indexOf('class="mk-bar"'), "scope row first");
+  assert.doesNotMatch(r.body, /class="mk-scope-chip[^"]*"[^>]*>This card</);
   assert.match(r.body, /href="\/dashboard\/make\?scope=all&amp;filter=pages"/);
 });
 
@@ -110,7 +115,7 @@ test("card scope passes cardRefs, shows the header, and writes no cookie", async
   assert.ok(!seen.at(-1).opts.cardRefs.has("artifact:art_other01"));
   assert.match(r.body, /Documents for #7/);
   assert.match(r.body, /This card/);
-  assert.match(r.body, /href="\/dashboard\/make\?scope=card%3A7" aria-current="page"/);
+  assert.match(r.body, /href="\/dashboard\/make\?scope=card%3A7" aria-current="true"/);
   assert.equal(r.setCookie, null, "a scope GET sets no cookie at all");
 });
 
@@ -131,9 +136,9 @@ test("This project shows when a project chip is set and hides otherwise; the car
   const plain = await get("/dashboard/make");
   assert.doesNotMatch(plain.body, /scope=project/);
   const proj = await get("/dashboard/make?project=garden");
-  assert.match(proj.body, /href="\/dashboard\/make\?scope=project" aria-current="page">Garden</);
+  assert.match(proj.body, /href="\/dashboard\/make\?scope=project" aria-current="true">Garden</);
   const all = await get("/dashboard/make?project=garden&scope=all");
-  assert.match(all.body, /scope=all&amp;filter=pages|href="\/dashboard\/make\?scope=all" aria-current="page"/);
+  assert.match(all.body, /scope=all&amp;filter=pages|href="\/dashboard\/make\?scope=all" aria-current="true"/);
   // The card title comes from tasks.db and is bot text: it must be escaped.
   const { createDbClient } = await import("../servers/db.js");
   const t = createDbClient(process.env.CROW_TASKS_DB_PATH);
@@ -178,4 +183,168 @@ test("en and es strings", async () => {
     assert.ok(t(k, "en") && t(k, "en") !== k, k);
     assert.ok(t(k, "es") && t(k, "es") !== t(k, "en"), `${k} es`);
   }
+});
+
+// ── Final review fix wave ──
+
+test("the Unassigned shell scope stays Unassigned: a project-kind scope with its own chip", async () => {
+  assert.deepEqual(make.parseMakeScope({}, { unassigned: true }), { kind: "project", scope: { unassigned: true } });
+  assert.equal(make.parseMakeScope({ scope: "all" }, { unassigned: true }).kind, "all");
+  seen = [];
+  seam({ items: [], ...OK });
+  const r = await get("/dashboard/make?project=unassigned");
+  assert.deepEqual(seen.at(-1).scope, { unassigned: true }, "the lister gets the Unassigned scope, not all");
+  assert.match(r.body, /href="\/dashboard\/make\?scope=project" aria-current="true">Unassigned</);
+  const { createDbClient } = await import("../servers/db.js");
+  const { writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js");
+  const sdb = createDbClient();
+  await writeSetting(sdb, "language", "es");
+  let es;
+  try { es = await get("/dashboard/make?project=unassigned"); } finally { await writeSetting(sdb, "language", "en"); sdb.close(); }
+  assert.match(es.body, /href="\/dashboard\/make\?scope=project" aria-current="true">Sin asignar</, "es chip label");
+});
+
+test("no scope row when All would be its only chip", async () => {
+  seam({ items: [item()], ...OK });
+  for (const path of ["/dashboard/make", "/dashboard/make?scope=all", "/dashboard/make?project=all"]) {
+    const r = await get(path);
+    assert.doesNotMatch(r.body, /class="mk-scope-chips"/, path);
+    assert.match(r.body, /class="mk-chips"/, `${path}: the type filters still show`);
+  }
+});
+
+test("the previews back link keeps ?card= like the chips do", async () => {
+  seam({ items: [item()], ...OK });
+  const r = await get("/dashboard/make?card=7&filter=pages");
+  assert.match(r.body, /name="back" value="\/dashboard\/make\?card=7&amp;filter=pages"/);
+  const c = await get("/dashboard/make?scope=card:7");
+  assert.match(c.body, /name="back" value="\/dashboard\/make\?scope=card%3A7"/);
+});
+
+// A Workspace bundle stub under CROW_HOME: create tools, mkcol and stat read globalThis.__scopeWs.
+function stubWorkspace(home) {
+  const ws = join(home, "bundles", "workspace", "server");
+  mkdirSync(join(ws, "tools"), { recursive: true });
+  mkdirSync(join(ws, "nc"), { recursive: true });
+  writeFileSync(join(home, "bundles", "workspace", "manifest.json"), "{}");
+  writeFileSync(join(home, "installed.json"), JSON.stringify([{ id: "workspace" }]));
+  const w = (f, s) => writeFileSync(join(ws, f), s);
+  w("config.js", "export function getConfig() { return { webBase: 'https://ws.example.test' }; }");
+  w("server.js", "export const realClock = { now: () => 0 };");
+  w("tools/common.js", "export function toPublic(e, cfg) { return { file_id: e.fileId, web_url: cfg.webBase + '/f/' + e.fileId }; }");
+  w("nc/dav.js", `export async function mkcol() { return true; }
+export async function listRecent() { return []; }
+export async function stat(cfg, { file_id }) {
+  const s = globalThis.__scopeWs;
+  if (s.fail) { const e = new Error("boom"); e.code = s.fail; throw e; }
+  const f = s.files.get(file_id);
+  if (!f) { const e = new Error("gone"); e.code = "not_found"; throw e; }
+  return f;
+}`);
+  const def = (name, exportName) => `export const ${exportName} = [{ name: "${name}", run: async (args) => { const s = globalThis.__scopeWs; s.next += 1; s.files.set(s.next, { fileId: s.next, name: args.title + ".docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", modified: "2026-10-28T10:00:00.000Z", isFolder: false }); s.folders.push(args.folder); return { created: true, file_id: s.next }; } }];`;
+  w("tools/docs.js", def("ws_docs_create", "docsWriteDefs"));
+  w("tools/sheets.js", def("ws_sheets_create", "sheetsDefs"));
+  w("tools/slides.js", def("ws_slides_create", "slidesDefs"));
+}
+
+test("a blank document started on This card lands on the card, filed under the CARD's project", async () => {
+  make._setMakeSeamsForTest();
+  globalThis.__scopeWs = { files: new Map(), next: 300, folders: [], fail: null };
+  stubWorkspace(process.env.CROW_HOME);
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  await db.execute("INSERT INTO project_spaces (slug, name, type, status) VALUES ('kitchen','Kitchen','general','active')");
+  const kitchen = Number((await db.execute("SELECT id FROM project_spaces WHERE slug='kitchen'")).rows[0].id);
+  const garden = Number((await db.execute("SELECT id FROM project_spaces WHERE slug='garden'")).rows[0].id);
+  const tdb = createDbClient(process.env.CROW_TASKS_DB_PATH);
+  await tdb.execute("CREATE TABLE IF NOT EXISTS tasks_items (id INTEGER PRIMARY KEY, title TEXT, status TEXT, project_id INTEGER, action_needed TEXT, data_json TEXT, board_id INTEGER)");
+  await tdb.execute({ sql: "INSERT OR REPLACE INTO tasks_items (id,title,status,project_id) VALUES (8,'Menu card','open',?)", args: [kitchen] });
+  tdb.close();
+  try {
+    // The shell chip says Garden; the card lives in Kitchen. The sheet starts in the card's project.
+    const page = await get("/dashboard/make?project=garden&scope=card:8");
+    assert.match(page.body, /Documents for #8 Menu card/);
+    assert.match(page.body, new RegExp(`<dialog id="mk-start" class="mk-sheet" data-project="${kitchen}" data-card="8"`));
+    assert.match(page.body, /<span class="mk-project-chip" data-mk-chip>Kitchen<\/span>/);
+    assert.match(page.body, /This card has no documents yet/);
+    // The client posts the card with the blank document; the server validates and links it.
+    const post = (body) => fetch(base + "/dashboard/make-api/blank", { method: "POST", headers: { ...NET, "content-type": "application/json", cookie: "crow_session=new-sess; crow_csrf=tok", "x-crow-csrf": "tok" }, body: JSON.stringify(body) });
+    const bad = await post({ kind: "docx", title: "Nope", project_id: garden, card_id: 99999 });
+    assert.equal(bad.status, 400);
+    assert.equal((await bad.json()).error, "bad_card");
+    assert.equal(globalThis.__scopeWs.next, 300, "an unknown card creates nothing");
+    assert.equal((await post({ kind: "docx", title: "Nope", card_id: "8" })).status, 400, "card_id must be a number");
+    const r = await post({ kind: "docx", title: "Shopping list", project_id: kitchen, card_id: 8 });
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.equal(out.ok, true);
+    assert.equal(out.filed, true);
+    assert.deepEqual(globalThis.__scopeWs.folders, ["Crow/kitchen"]);
+    const row = (await db.execute({ sql: "SELECT project_id, card_id FROM shell_items WHERE item_kind='workspace_file' AND item_ref=?", args: [String(out.fileId)] })).rows[0];
+    assert.equal(Number(row.project_id), kitchen, "filed under the card's project");
+    assert.equal(Number(row.card_id), 8, "linked to the card");
+    const after = await get("/dashboard/make?project=garden&scope=card:8");
+    assert.match(after.body, /Shopping list\.docx/, "it shows in the card's This card view");
+    assert.doesNotMatch(after.body, /This card has no documents yet/);
+    // A card id from the client outranks project_id: the card decides the filing.
+    const r2 = await post({ kind: "docx", title: "Second", project_id: garden, card_id: 8 });
+    const id2 = (await r2.json()).fileId;
+    const row2 = (await db.execute({ sql: "SELECT project_id FROM shell_items WHERE item_kind='workspace_file' AND item_ref=?", args: [String(id2)] })).rows[0];
+    assert.equal(Number(row2.project_id), kitchen);
+    // Outside card mode the sheet carries no card.
+    const plain = await get("/dashboard/make?project=garden");
+    assert.doesNotMatch(plain.body, /data-card=/);
+  } finally {
+    db.close();
+  }
+});
+
+test("card mode: a Workspace error that is not not_found shows Workspace unavailable, not the empty line", async () => {
+  make._setMakeSeamsForTest();
+  globalThis.__scopeWs = { files: new Map(), next: 400, folders: [], fail: null };
+  stubWorkspace(process.env.CROW_HOME);
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  const { setItemCard } = await import("../servers/shared/shell-items.js");
+  await setItemCard(db, "workspace_file", "777", 9);
+  db.close();
+  globalThis.__scopeWs.fail = "forbidden";
+  const r = await get("/dashboard/make?scope=card:9");
+  assert.ok(r.body.includes("Workspace can&#39;t be reached right now.") || r.body.includes("Workspace can't be reached right now."));
+  assert.doesNotMatch(r.body, /This card has no documents yet/);
+  // A file that is simply gone (not_found) is skipped: the card is empty, and says so.
+  globalThis.__scopeWs.fail = null;
+  const gone = await get("/dashboard/make?scope=card:9");
+  assert.match(gone.body, /This card has no documents yet/);
+  assert.doesNotMatch(gone.body, /can(&#39;|')t be reached/);
+});
+
+test("card mode Workspace lookups: at most 50 ids, four at a time, one deadline, first hard error stops", async () => {
+  const { listMakeItems } = await import("../servers/gateway/make/sources.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  const home = process.env.CROW_HOME;
+  const refs = new Set(Array.from({ length: 60 }, (_, i) => `workspace_file:${i + 1}`));
+  // Bounded: 60 ids give 50 lookups, never more than 4 at once.
+  let calls = 0, inFlight = 0, peak = 0;
+  const counted = async () => { calls++; inFlight++; peak = Math.max(peak, inFlight); await new Promise((r) => setTimeout(r, 2)); inFlight--; throw Object.assign(new Error("gone"), { code: "not_found" }); };
+  const m = await listMakeItems(db, { all: true }, { crowHome: home, cardRefs: refs, wsStat: counted });
+  assert.equal(calls, 50);
+  assert.ok(peak <= 4 && peak >= 2, `peak ${peak}`);
+  assert.equal(m.workspace, "installed");
+  // The first error that is not not_found/bad_ref: unavailable, and no more lookups start.
+  calls = 0;
+  const failing = async () => { calls++; throw Object.assign(new Error("boom"), { code: "forbidden" }); };
+  const f = await listMakeItems(db, { all: true }, { crowHome: home, cardRefs: refs, wsStat: failing });
+  assert.equal(f.workspace, "unavailable");
+  assert.ok(calls <= 4, `stopped after the first failures (${calls})`);
+  // A bad_ref is skipped like a missing file.
+  const badRef = await listMakeItems(db, { all: true }, { crowHome: home, cardRefs: new Set(["workspace_file:5"]), wsStat: async () => { throw Object.assign(new Error("x"), { code: "bad_ref" }); } });
+  assert.equal(badRef.workspace, "installed");
+  // A slow Workspace hits the one overall deadline and counts as unavailable.
+  const t0 = Date.now();
+  const slow = await listMakeItems(db, { all: true }, { crowHome: home, cardRefs: refs, wsStat: () => new Promise(() => {}), wsDeadlineMs: 80 });
+  assert.equal(slow.workspace, "unavailable");
+  assert.ok(Date.now() - t0 < 2000, "one deadline, not one per lookup");
+  db.close();
 });

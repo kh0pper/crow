@@ -191,7 +191,7 @@ test("the sheet offers install instead of actions for a missing bundle", () => {
 });
 
 function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true }, { id: "b2", name: "Off", perch_attached: false }], opts = {}) {
-  const html = renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project: { id: P1, name: "Garden" }, projects: [{ id: 2, slug: "g", name: "Garden" }, { id: 3, slug: "o", name: "Orchard" }] });
+  const html = renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project: { id: P1, name: "Garden" }, projects: [{ id: 2, slug: "g", name: "Garden" }, { id: 3, slug: "o", name: "Orchard" }], startCard: opts.card ?? null });
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
   const calls = [];
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
@@ -268,6 +268,23 @@ test("Blank posts the title and project to make-api", async () => {
   assert.equal(p.headers["X-Crow-Csrf"], "tok123");
   assert.equal(c.loc.href, "https://ws.example.test/f/5", "same tab goes to the file");
   assert.equal(c.opened(), 0, "no popup");
+});
+
+test("on This card, Blank posts the card too; a chat started there carries only the card's project", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed" }, undefined, { card: "8" });
+  c.click(c.$('[data-mk-blank="docx"]'));
+  await c.settle();
+  c.$("[data-mk-title]").value = "Notes";
+  c.click(c.$("[data-mk-submit]"));
+  await c.settle();
+  assert.deepEqual(c.calls.find((x) => x.url === "/dashboard/make-api/blank").body, { kind: "docx", title: "Notes", project_id: P1, card_id: 8 });
+  const chat = bootClient({ artifacts: "installed", workspace: "installed" }, undefined, { card: "8" });
+  chat.click(chat.$('[data-mk-type="document"]'));
+  await chat.settle();
+  chat.$("[data-mk-field]").value = "Write it";
+  chat.click(chat.$("[data-mk-submit]"));
+  await chat.settle();
+  assert.deepEqual(chat.calls.find((x) => x.url.endsWith("/interactive")).body, { project_id: P1 }, "the interactive API takes no card");
 });
 
 // ── Task 4.4: versions stay visible ──

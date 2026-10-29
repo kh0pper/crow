@@ -76,7 +76,7 @@ test("four filter chips with the active one marked", async () => {
   for (const w of ["All", "Documents", "Pages", "Shared"]) assert.match(r.body, new RegExp(`class="mk-chip[^"]*"[^>]*>${w}<`));
   assert.equal((r.body.match(/class="mk-chip[ "]/g) || []).length, 4);
   assert.match(r.body, /href="\/dashboard\/make\?filter=documents"/);
-  assert.match(r.body, /mk-chip mk-chip-on" href="\/dashboard\/make\?filter=documents" aria-current="page"/);
+  assert.match(r.body, /mk-chip mk-chip-on" href="\/dashboard\/make\?filter=documents" aria-current="true"/);
   assert.equal(seen.at(-1).opts.filter, "documents");
   const bad = await get("/dashboard/make?filter=bogus");
   assert.equal(seen.at(-1).opts.filter, "all");

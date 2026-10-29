@@ -11,7 +11,9 @@
  * Perch-attached bot picker, field pre-filled with the type's starter text). Submit POSTs
  * /dashboard/perch-api/bots/:id/interactive {project_id}, then .../interactive/:sid/message {message},
  * then goes to /dashboard/perch#<threadId>. Blank (document, spreadsheet, deck) takes a title and POSTs
- * /dashboard/make-api/blank. Both send the dashboard CSRF token as X-Crow-Csrf.
+ * /dashboard/make-api/blank (with card_id in This card mode, so the file lands on the card). The
+ * interactive API takes no card, so a chat started on This card is filed under the card's project
+ * (the sheet's data-project) but not linked to the card. Both send the CSRF token as X-Crow-Csrf.
  */
 import { tJs } from "../../shared/i18n.js";
 
@@ -82,6 +84,9 @@ export function makeClientJs(lang) {
   var submitBtn = dlg.querySelector('[data-mk-submit]');
   var rawProject = dlg.getAttribute('data-project') || 'unassigned';
   var projectId = /^[1-9][0-9]*$/.test(rawProject) ? Number(rawProject) : 'unassigned';
+  /* This card mode: a blank document is linked to the card (make-api validates it). */
+  var rawCard = dlg.getAttribute('data-card') || '';
+  var cardId = /^[1-9][0-9]{0,15}$/.test(rawCard) ? Number(rawCard) : null;
 
   var type = null;      // the chosen type id
   var blank = false;    // Blank mode: a title instead of a bot and text
@@ -169,7 +174,9 @@ export function makeClientJs(lang) {
       var title = (titleIn.value || '').trim();
       if (!title) return;
       busy = true; if (submitBtn) submitBtn.setAttribute('disabled', ''); say('');
-      post('/dashboard/make-api/blank', { kind: BLANK_KIND[type], title: title, project_id: projectId })
+      var blankBody = { kind: BLANK_KIND[type], title: title, project_id: projectId };
+      if (cardId !== null) blankBody.card_id = cardId;
+      post('/dashboard/make-api/blank', blankBody)
         .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (x) {
           if (!x.ok || !x.d || !x.d.ok) return fail();

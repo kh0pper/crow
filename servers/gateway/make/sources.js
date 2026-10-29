@@ -226,10 +226,50 @@ const WS_TYPES = {
   "application/vnd.oasis.opendocument.presentation": "deck",
 };
 
+const CARD_STAT_MAX = 50;
+const CARD_STAT_CONCURRENCY = 4;
+const CARD_STAT_DEADLINE_MS = 5000;
+
+/**
+ * A card's files: stat each id directly (not the recent list), at most CARD_STAT_MAX ids, four at a
+ * time, all under one deadline. A file that is gone (not_found) or a bad id (bad_ref) is skipped. Any
+ * other failure, or the deadline, means the Workspace can't answer: throw (code not_ready kept, else
+ * unavailable) so the listing says so instead of claiming the card has no files.
+ */
+async function statCardFiles(cfg, fileIds, st, { deadlineMs }) {
+  const ids = fileIds.slice(0, CARD_STAT_MAX);
+  const found = new Array(ids.length).fill(null);
+  let failure = null;
+  let next = 0;
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => { failure ||= Object.assign(new Error(`Workspace lookups passed ${deadlineMs} ms`), { code: "timeout" }); resolve(); }, deadlineMs);
+  });
+  const worker = async () => {
+    while (!failure && next < ids.length) {
+      const i = next++;
+      try {
+        const e = await st(cfg, { file_id: Number(ids[i]) });
+        if (e) found[i] = e;
+      } catch (err) {
+        if (err?.code === "not_found" || err?.code === "bad_ref") continue;
+        failure ||= err;
+      }
+    }
+  };
+  try {
+    await Promise.race([Promise.all(Array.from({ length: Math.min(CARD_STAT_CONCURRENCY, ids.length) }, worker)), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (failure) throw failure;
+  return found.filter(Boolean);
+}
+
 const workspaceImport = (crowHome, file) => import(pathToFileURL(join(crowHome, "bundles", "workspace", "server", file)).href);
 
 /** Office files the Workspace bot can see, newest first. The array carries `status` when it can't list. */
-export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, limit = 40, fileIds = null, stat: statFn = null } = {}) {
+export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, limit = 40, fileIds = null, stat: statFn = null, deadlineMs = CARD_STAT_DEADLINE_MS } = {}) {
   const out = [];
   out.status = "ok";
   let files;
@@ -240,12 +280,7 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
     const [{ getConfig }, dav] = await Promise.all([workspaceImport(crowHome, "config.js"), workspaceImport(crowHome, "nc/dav.js")]);
     const cfg = getConfig();
     if (fileIds) {
-      // A card's files: stat each id directly (a file that is gone is skipped), not the recent list.
-      const st = statFn || dav.stat;
-      files = [];
-      for (const id of fileIds.slice(0, 200)) {
-        try { const e = await st(cfg, { file_id: Number(id) }); if (e) files.push(e); } catch { /* gone or unreadable */ }
-      }
+      files = await statCardFiles(cfg, fileIds, statFn || dav.stat, { deadlineMs });
       limit = Math.max(limit, files.length);
     } else {
       files = await dav.listRecent(cfg, { limit: scoped ? limit * 3 : limit, mimes: Object.keys(WS_TYPES) });
@@ -280,7 +315,7 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
  * previews: async (item) => { previewState, previewUrl, previewReason } (make/previews.js itemPreview),
  * applied only to the items returned; null (previews off) leaves every item a type tile.
  */
-export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null, cardRefs = null, wsStat = null } = {}) {
+export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null, cardRefs = null, wsStat = null, wsDeadlineMs } = {}) {
   // cardRefs (a Set of "kind:ref"): only those items, and the project scope is ignored. The sources
   // are asked for exactly the card's documents.
   if (cardRefs) { scope = { all: true }; limit = undefined; }
@@ -290,7 +325,7 @@ export async function listMakeItems(db, scope = { all: true }, { crowHome, filte
   const lists = [];
   if (artifacts === "installed") lists.push(await listArtifactItems(db, scope, cardRefs ? { ids: refsOf("artifact") } : limit ? { limit } : {}));
   if (workspace === "installed") {
-    const ws = await listWorkspaceItems(db, scope, { crowHome, ...(cardRefs ? { fileIds: refsOf("workspace_file"), stat: wsStat } : limit ? { limit } : {}) });
+    const ws = await listWorkspaceItems(db, scope, { crowHome, ...(cardRefs ? { fileIds: refsOf("workspace_file"), stat: wsStat, ...(wsDeadlineMs ? { deadlineMs: wsDeadlineMs } : {}) } : limit ? { limit } : {}) });
     if (ws.status !== "ok") workspace = ws.status;
     lists.push(ws);
   }
