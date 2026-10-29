@@ -152,6 +152,62 @@ export function resolveActor(extra, verifyActor, verifyThread) {
 // that binds its injected verifier.
 const resolveActorWith = resolveActor;
 
+// ---- bot write scope (2026-10-29) ----
+//
+// A bot changes only cards on its own project's board, or cards assigned to it
+// (a card given to it from another project). It never approves a plan or
+// decides a result: those are the operator's (gated autonomy would mean
+// nothing if the bot could approve its own work). Tracker items (board_id set)
+// keep their earlier rules. An unattributed bot (no verified signature) has no
+// project and no assignments, so it can only create unassigned-project cards.
+
+/** The linked project of a bot (pi_bot_defs.project_id), or null. */
+export async function botProjectOf(cdb, botId) {
+  if (!cdb || !botId) return null;
+  const r = (await cdb.execute({ sql: "SELECT project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+  return r && r.project_id != null ? Number(r.project_id) : null;
+}
+
+/** Throws 403 unless a bot actor may change card `id`. Non-bot actors pass. */
+export async function assertBotMayWriteCard(tdb, cdb, actor, id) {
+  if (!actor || actor.kind !== "bot" || !Number.isInteger(id)) return;
+  const row = (await tdb.execute({ sql: "SELECT project_id, assigned_bot, board_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+  if (!row || row.board_id != null) return; // missing → the caller's 404; tracker items unchanged
+  if (actor.id && row.assigned_bot === actor.id) return;
+  const pid = await botProjectOf(cdb, actor.id);
+  if (pid != null && row.project_id != null && Number(row.project_id) === pid) return;
+  throw fail("a bot can only change cards on its own project's board, or cards assigned to it", "forbidden_project", 403);
+}
+
+/**
+ * Throws 403 unless a bot actor may put a card under parent `parentId`. A
+ * child inherits its parent's project, so the parent must be on the bot's own
+ * project: a card merely assigned to the bot from another project is not
+ * enough (that would let the bot add or move cards into that project).
+ */
+export async function assertBotMayParentUnder(tdb, cdb, actor, parentId) {
+  if (!actor || actor.kind !== "bot" || !Number.isInteger(parentId)) return;
+  const row = (await tdb.execute({ sql: "SELECT project_id, board_id FROM tasks_items WHERE id=?", args: [parentId] })).rows[0];
+  if (!row || row.board_id != null) return; // missing → createCard/updateCard's own 400
+  const pid = await botProjectOf(cdb, actor.id);
+  if (pid != null && row.project_id != null && Number(row.project_id) === pid) return;
+  throw fail("a bot can only put cards under a card on its own project's board", "forbidden_project", 403);
+}
+
+/** The project a bot may create a card in: its own (filled in when omitted). */
+export async function botCreateProject(cdb, actor, requested) {
+  if (!actor || actor.kind !== "bot") return requested;
+  const pid = await botProjectOf(cdb, actor.id);
+  if (requested == null) return pid == null ? undefined : pid;
+  if (pid != null && Number(requested) === pid) return pid;
+  throw fail("a bot can only add cards to its own project's board", "forbidden_project", 403);
+}
+
+/** Plans and results are approved or decided by the operator, never a bot. */
+export function assertNotBot(actor, what) {
+  if (actor && actor.kind === "bot") throw fail(`only the operator can ${what}; a bot can't`, "operator_only", 403);
+}
+
 // ---- card/item dispatch (D-T1.8) ----
 
 async function probeKind(tdb, id) {
@@ -380,7 +436,12 @@ export function createBoardMcpServer(options = {}) {
         }
         return createItem(tdb, boardId, fields, actor);
       }
-      return createCard(tdb, fields, actor);
+      if (fields.autonomy != null) assertNotBot(actor, "set a card's autonomy");
+      if (fields.parent_id != null) await assertBotMayParentUnder(tdb, cdb, actor, Number(fields.parent_id));
+      else fields = { ...fields, project_id: await botCreateProject(cdb, actor, fields.project_id) };
+      // A bot's card never falls back to "the instance's only project": a bot
+      // with no linked project creates an unassigned card.
+      return createCard(tdb, fields, actor, { soleProjectFallback: !actor || actor.kind !== "bot" });
     });
 
   tool(server, "board_update_item",
@@ -402,22 +463,31 @@ export function createBoardMcpServer(options = {}) {
       processing_lease_status: z.string().nullable().optional(),
       data: jsonObject().optional().describe("Tracker item fields as an object of JSON values (merged into the item's data)"),
     },
-    async ({ id, ...fields }, extra) => dispatchUpdate(tdb, id, fields, resolveActor(extra)));
+    async ({ id, ...fields }, extra) => {
+      const actor = resolveActor(extra);
+      await assertBotMayWriteCard(tdb, cdb, actor, id);
+      // A bot can't raise its own card to auto (that would let it close its
+      // own work unapproved), and re-parenting re-inherits the new parent's
+      // project, so the new parent must be writable too.
+      if (fields.autonomy != null) assertNotBot(actor, "change a card's autonomy");
+      if (fields.parent_id != null) await assertBotMayParentUnder(tdb, cdb, actor, Number(fields.parent_id));
+      return dispatchUpdate(tdb, id, fields, actor);
+    });
 
   tool(server, "board_move_item",
     "Move a card or tracker item to a new status (def-validated; stamps completed_at on terminal transitions).",
     { id: z.number().int(), status: z.string() },
-    async ({ id, status }, extra) => dispatchMove(tdb, cdb, id, status, resolveActor(extra)));
+    async ({ id, status }, extra) => { const actor = resolveActor(extra); await assertBotMayWriteCard(tdb, cdb, actor, id); return dispatchMove(tdb, cdb, id, status, actor); });
 
   tool(server, "board_archive_item",
     "Archive a card or tracker item (present-but-hidden; refuses a locked card).",
     { id: z.number().int() },
-    async ({ id }, extra) => dispatchArchive(tdb, cdb, id, resolveActor(extra)));
+    async ({ id }, extra) => { const actor = resolveActor(extra); await assertBotMayWriteCard(tdb, cdb, actor, id); return dispatchArchive(tdb, cdb, id, actor); });
 
   tool(server, "board_unarchive_item",
     "Unarchive a previously archived card or tracker item.",
     { id: z.number().int() },
-    async ({ id }, extra) => dispatchUnarchive(tdb, id, resolveActor(extra)));
+    async ({ id }, extra) => { const actor = resolveActor(extra); await assertBotMayWriteCard(tdb, cdb, actor, id); return dispatchUnarchive(tdb, id, actor); });
 
   // Track 1 review fix wave (Finding 2): plans are a CARD concept (D-T1.4) —
   // plan-service itself trusts item_id blindly (no existence/kind check), so
@@ -440,7 +510,9 @@ export function createBoardMcpServer(options = {}) {
     { item_id: z.number().int(), body_md: z.string().min(1) },
     async ({ item_id, body_md }, extra) => {
       if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
-      return savePlan(tdb, item_id, body_md, resolveActor(extra));
+      const actor = resolveActor(extra);
+      await assertBotMayWriteCard(tdb, cdb, actor, item_id);
+      return savePlan(tdb, item_id, body_md, actor);
     });
 
   tool(server, "board_approve_plan",
@@ -448,7 +520,9 @@ export function createBoardMcpServer(options = {}) {
     { item_id: z.number().int(), version: z.number().int(), via: z.enum(["chat", "dashboard"]).optional() },
     async ({ item_id, version, via }, extra) => {
       if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
-      return approvePlan(tdb, item_id, version, resolveActor(extra), via || "chat");
+      const actor = resolveActor(extra);
+      assertNotBot(actor, "approve a plan");
+      return approvePlan(tdb, item_id, version, actor, via || "chat");
     });
 
   tool(server, "board_report_result",
@@ -459,8 +533,11 @@ export function createBoardMcpServer(options = {}) {
       summary_md: z.string().optional(),
       plan_id: z.number().int().optional(),
     },
-    async ({ item_id, outcome, summary_md, plan_id }, extra) =>
-      reportResult(tdb, cdb, item_id, { outcome, summaryMd: summary_md, planId: plan_id }, resolveActor(extra)));
+    async ({ item_id, outcome, summary_md, plan_id }, extra) => {
+      const actor = resolveActor(extra);
+      await assertBotMayWriteCard(tdb, cdb, actor, item_id);
+      return reportResult(tdb, cdb, item_id, { outcome, summaryMd: summary_md, planId: plan_id }, actor);
+    });
 
   tool(server, "board_decide_result",
     "Approve or reject a recorded result. Never moves the card.",
@@ -470,8 +547,11 @@ export function createBoardMcpServer(options = {}) {
       decision: z.enum(["approved", "rejected"]),
       via: z.enum(["chat", "dashboard"]).optional(),
     },
-    async ({ item_id, result_id, decision, via }, extra) =>
-      decideResult(tdb, item_id, result_id, decision, resolveActor(extra), via || "chat"));
+    async ({ item_id, result_id, decision, via }, extra) => {
+      const actor = resolveActor(extra);
+      assertNotBot(actor, "approve or reject a result");
+      return decideResult(tdb, item_id, result_id, decision, actor, via || "chat");
+    });
 
   // Decision cards (C1 service). Validation is authoritative in
   // validateDecision — the zod shape below only describes the wire format.
@@ -512,7 +592,8 @@ export function createBoardMcpServer(options = {}) {
       // put its question in a chat it is not in.
       const actor = resolveActor(extra);
       const source = actor.thread && actor.thread.gateway === "perch" ? { thread_id: actor.thread.id } : undefined;
-      return askDecision(tdb, cdb, { projectId: project_id, title, tags, decision, source }, actor);
+      const projectId = await botCreateProject(cdb, actor, project_id);
+      return askDecision(tdb, cdb, { projectId, title, tags, decision, source }, actor);
     });
 
   tool(server, "board_notify_decisions",

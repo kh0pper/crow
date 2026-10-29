@@ -438,4 +438,49 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     const mcpB = JSON.parse(readFileSync(join(b.sessionDir, ".mcp.json"), "utf8"));
     assert.ok(!mcpB.mcpServers.board || mcpB.mcpServers.board.disabled, "default (free chat): closed-world selection unchanged");
   });
+
+  test("a bot linked to a project that shows it its cards gets the board in free chat; tracker none, custom or no project do not", async () => {
+    // Kevin 2026-10-29: asked to "organize next steps onto the project board",
+    // a project bot with no board/* selection wrote project notes instead.
+    const { projectShowsCards } = await import("../scripts/pi-bots/bot-world.mjs");
+    assert.equal(projectShowsCards(21, { tracker_config: { type: "kanban" } }), true);
+    assert.equal(projectShowsCards(21, { tracker_config: { type: "task-list" } }), true);
+    assert.equal(projectShowsCards(21, {}), true, "no tracker_config = kanban (tracker.mjs default)");
+    assert.equal(projectShowsCards(21, { tracker_config: { type: "none" } }), false);
+    assert.equal(projectShowsCards(21, { tracker_config: { type: "custom", tracker_slug: "x" } }), false);
+    assert.equal(projectShowsCards(null, { tracker_config: { type: "kanban" } }), false);
+
+    const c = new Database(CROW_DB);
+    const def = (tracker) => JSON.stringify({
+      system_prompt: "You are a project bot.",
+      models: { default: "stub/m1" },
+      tools: { pi_builtin: ["read"], crow_mcp: [] },
+      permission_policy: { bash: "deny", write_paths: [], multi_agent: false },
+      session_dir: join(ROOT, "bots", "projbot"),
+      ...(tracker ? { tracker_config: { type: tracker } } : {}),
+    });
+    const cols = c.prepare("PRAGMA table_info(pi_bot_defs)").all().map((r) => r.name);
+    assert.ok(cols.includes("project_id"), "pi_bot_defs carries project_id");
+    c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,?,?)").run(
+      "projbot", "Project Bot", def("kanban"), 1, 777);
+    c.close();
+    const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+    const on = await buildBotWorld({ botId: "projbot", threadId: "proj-free-a", gatewayType: "perch", log: () => {} });
+    const mcpOn = JSON.parse(readFileSync(join(on.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(mcpOn.mcpServers.board && !mcpOn.mcpServers.board.disabled, "project bot, cards shown: board entry active in free chat");
+
+    const c2 = new Database(CROW_DB);
+    c2.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id=?").run(def("none"), "projbot");
+    c2.close();
+    const off = await buildBotWorld({ botId: "projbot", threadId: "proj-free-b", gatewayType: "perch", log: () => {} });
+    const mcpOff = JSON.parse(readFileSync(join(off.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(!mcpOff.mcpServers.board || mcpOff.mcpServers.board.disabled, "tracker none: no board in free chat");
+
+    const c3 = new Database(CROW_DB);
+    c3.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id=?").run(def("kanban"), "projbot");
+    c3.close();
+    const mail = await buildBotWorld({ botId: "projbot", threadId: "proj-mail", gatewayType: "gmail", log: () => {} });
+    const mcpMail = JSON.parse(readFileSync(join(mail.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(!mcpMail.mcpServers.board || mcpMail.mcpServers.board.disabled, "a channel turn (mail) keeps the def's selection: no board");
+  });
 });

@@ -147,7 +147,7 @@ async function soleProjectId(tdb) {
   }
 }
 
-export async function createCard(tdb, fields, actor) {
+export async function createCard(tdb, fields, actor, { soleProjectFallback = true } = {}) {
   const f = fields || {};
   let projectId = f.project_id == null ? null : Number(f.project_id);
   let parentId = f.parent_id == null ? null : Number(f.parent_id);
@@ -156,7 +156,7 @@ export async function createCard(tdb, fields, actor) {
     const parent = await getCard(tdb, parentId);
     if (!parent) throw fail(`parent card not found: ${parentId}`, "bad_parent", 400);
     projectId = parent.project_id == null ? null : Number(parent.project_id);
-  } else if (projectId == null) {
+  } else if (projectId == null && soleProjectFallback) {
     projectId = await soleProjectId(tdb);
   }
 

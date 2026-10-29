@@ -150,6 +150,19 @@ export function houseStylePromptBlock(hs) {
 const PRESIGN_KINDS = ["bot", "board", "artifacts", "board-thread"];
 
 /**
+ * True when the bot works a project board: it is linked to a project and its
+ * tracker shows it that project's cards (kanban or task-list; "none" and
+ * custom trackers do not). Such a bot gets the board tools on every turn.
+ */
+export function projectShowsCards(projectId, def) {
+  if (projectId == null || !Number.isFinite(Number(projectId))) return false;
+  // Same default as tracker.mjs resolveTrackerType (not imported: that module
+  // resolves its db paths at load).
+  const type = (def && def.tracker_config && def.tracker_config.type) || "kanban";
+  return type === "kanban" || type === "task-list";
+}
+
+/**
  * Write (or, in fd mode, build) the per-bot MCP config for this turn, with its
  * actor signatures bound to `sessionId` (bot_sessions.id, or null). A
  * key-less host (the pibot-* systemd units) first asks its gateway's loopback
@@ -173,12 +186,17 @@ async function writeWorldMcp(a, sessionId) {
   let mcpConfig = null;
   try {
     // acceptance F2: a card-bound session (or a job turn) must be able to
-    // call board_report_result — ensure the board entry is minted.
+    // call board_report_result — ensure the board entry is minted. A bot
+    // linked to a project that shows it its cards gets the board in free chat
+    // too: asked to "put this on the board", a bot without board verbs wrote
+    // project notes instead and reported the board organized. Perch only (the
+    // operator's own chat): the board server does not scope a bot to its own
+    // project yet, so channel turns (mail, Discord) keep the def's selection.
     const w = writeBotMcp(a.def, {
       sessionDir: a.sessionDir, crowHome: a.crowHome, remoteEnabled: a.remoteEnabled, peerGatewayUrls: a.peerGatewayUrls,
       botId: a.botId, jobId: a.jobId, threadId: a.threadId, gatewayType: a.gatewayType, sessionId: sid,
       displayName: a.displayName,
-      ensureServers: (a.jobId || a.cardBound) ? ["board"] : [],
+      ensureServers: (a.jobId || a.cardBound || a.projectBoard) ? ["board"] : [],
       write: a.mcpDelivery === "file",
     });
     mcpConfig = w.json || null;
@@ -360,7 +378,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // config with its id before anything is spawned.
   const session = B.getSession(botId, threadId);
   const mcpArgs = { def, sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
-    displayName: bot.display_name, cardBound, mcpDelivery, log };
+    displayName: bot.display_name, cardBound, projectBoard: gatewayType === "perch" && projectShowsCards(projectId, def), mcpDelivery, log };
   const { mcpConfig, signedSessionId } = await writeWorldMcp(mcpArgs, session ? session.id : null);
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
