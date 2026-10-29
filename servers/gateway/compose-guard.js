@@ -27,13 +27,17 @@ import { fileURLToPath } from "node:url";
 // finished later with Configure): relative, so it resolves inside the bundle dir.
 export const UNSET_SENTINEL = "./crow-unset-value";
 
-/** realpath of p, or of its nearest existing ancestor + the rest (a path Docker would create). */
+/**
+ * realpath of p, or of its nearest existing ancestor + the rest (a path Docker would create).
+ * Always the native realpath(3): Node's JS realpathSync can stop one link short on a chain
+ * of symlinks (seen with a chain ending at a socket), which would hide where a bind really lands.
+ */
 export function resolveHostPath(p, depth = 0) {
   let cur = resolvePath(p);
   const rest = [];
   for (;;) {
     try {
-      const real = realpathSync(cur);
+      const real = realpathSync.native(cur);
       return rest.length ? join(real, ...rest.reverse()) : real;
     } catch {
       // A dangling symlink still decides where Docker creates the path: follow it.
@@ -272,8 +276,8 @@ function isShippedPreviewSeccomp(opt) {
   const m = /^seccomp=(.+)$/.exec(String(opt));
   if (!m || !isAbsolute(m[1])) return false;
   try {
-    const real = realpathSync(m[1]);
-    if (real !== realpathSync(previewSeccompFile)) return false;
+    const real = realpathSync.native(m[1]);
+    if (real !== realpathSync.native(previewSeccompFile)) return false;
     return createHash("sha256").update(readFileSync(real)).digest("hex") === PREVIEW_SECCOMP_SHA256;
   } catch {
     return false;
@@ -416,11 +420,11 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   const sharedEnvFile = (path) => {
     if (!grants.envFiles.length || !existsSync(path)) return false;
     let real;
-    try { real = realpathSync(path); } catch { return false; }
+    try { real = realpathSync.native(path); } catch { return false; }
     const home = ctx.home || homedir();
     return grants.envFiles.some((n) => [join(home, ".crow", "env"), join(ctx.crowHome, "env")].some((dir) => {
       let realDir;
-      try { realDir = realpathSync(dir); } catch { return false; }
+      try { realDir = realpathSync.native(dir); } catch { return false; }
       // As written (no ../ tricks by name) AND where it really is: the file itself, not a
       // symlink out of the folder.
       return resolvePath(path) === join(resolvePath(dir), n) && real === join(realDir, n);

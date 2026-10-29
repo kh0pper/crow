@@ -557,7 +557,7 @@ function installedComposeFiles(composeRel) {
 
 /** realpath when the path exists, else the lexical path. */
 function realOrSelf(p) {
-  try { return realpathSync(p); } catch { return resolvePath(p); }
+  try { return realpathSync.native(p); } catch { return resolvePath(p); }
 }
 
 /** True when a and b are the same path or one contains the other. */
@@ -626,7 +626,7 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
   }
   if (raw.length === 0) return [];
   let rootReal;
-  try { rootReal = realpathSync(appSrc); } catch { return []; }
+  try { rootReal = realpathSync.native(appSrc); } catch { return []; }
 
   const expandEnv = env || composeExpandEnv(destDir);
   const destReal = realOrSelf(destDir);
@@ -650,7 +650,7 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
     const src = join(appSrc, rel);
     let real;
-    try { real = realpathSync(src); if (!statSync(real).isDirectory()) continue; } catch { continue; }
+    try { real = realpathSync.native(src); if (!statSync(real).isDirectory()) continue; } catch { continue; }
     const realRel = relativePath(rootReal, real);
     if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
     const installedCtx = realOrSelf(join(destReal, rel));
@@ -677,7 +677,7 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
   const list = manifest?.refreshFiles;
   if (!Array.isArray(list) || !list.length) return [];
   let rootReal;
-  try { rootReal = realpathSync(appSrc); } catch { return []; }
+  try { rootReal = realpathSync.native(appSrc); } catch { return []; }
   const composeRel = manifestComposeFile(manifest);
   const destReal = realOrSelf(destDir);
   const env = composeExpandEnv(destDir);
@@ -694,7 +694,7 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
     if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
     if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
     let real;
-    try { real = realpathSync(join(appSrc, rel)); } catch { continue; }
+    try { real = realpathSync.native(join(appSrc, rel)); } catch { continue; }
     const realRel = relativePath(rootReal, real);
     if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
     const installed = realOrSelf(join(destReal, rel));

@@ -102,6 +102,22 @@ test("model: a symlink inside the bundle that points at a sensitive path is reso
   assert.equal(check(svc({ build: { context: join(dir, "cfg") } }), { dir }).valid, false, "a build context through the link");
 });
 
+test("model: a chain of two or three symlinks to a sensitive path is followed to the end and refused", () => {
+  for (const target of ["/etc", "/var/run/docker.sock"]) {
+    const dir = bundleDir();
+    // l1 -> l2 -> target (each link absolute), and l3 -> l1 for three links. Node's JS
+    // realpathSync stops one link short when the chain ends at a socket; the native one doesn't.
+    symlinkSync(target, join(dir, "l2"));
+    symlinkSync(join(dir, "l2"), join(dir, "l1"));
+    symlinkSync(join(dir, "l1"), join(dir, "l3"));
+    assert.equal(G.resolveHostPath(join(dir, "l1")), G.resolveHostPath(target), `two links to ${target} resolve to it`);
+    assert.equal(G.resolveHostPath(join(dir, "l3")), G.resolveHostPath(target), `three links to ${target} resolve to it`);
+    for (const l of ["l1", "l3"]) {
+      assert.equal(check(svc({ volumes: [bind(join(dir, l))] }), { manifest: PRIV, consent: true, dir }).valid, false, `${l} -> ... -> ${target} read-write`);
+    }
+  }
+});
+
 test("model: Docker socket read-only needs consent; read-write never", () => {
   const sock = { volumes: [bind("/var/run/docker.sock", true)] };
   assert.equal(check(svc(sock)).valid, false);
