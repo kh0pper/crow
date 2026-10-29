@@ -382,6 +382,25 @@ test("a tailnet socket is refused, even with a valid token", async () => {
   assert.equal(hits.length, 1);
 });
 
+// The single loopback rule (peer-class.js isLocalPeer): a loopback socket the
+// operator listed in CROW_TRUSTED_PROXIES is a same-box reverse proxy, so its
+// callers are not "on this box", even with a valid token and no headers.
+test("a loopback socket listed in CROW_TRUSTED_PROXIES is refused, even with a valid token", async () => {
+  const saved = process.env.CROW_TRUSTED_PROXIES;
+  try {
+    process.env.CROW_TRUSTED_PROXIES = "127.0.0.1";
+    const r = await call("/llm/c/cloud-a/v1/chat/completions");
+    assert.equal(r.status, 403, r.body);
+    assert.equal(r.json().error.code, "CLOUD_SOURCE_REFUSED");
+    process.env.CROW_TRUSTED_PROXIES = "loopback";
+    assert.equal((await call("/llm/c/cloud-a/v1/chat/completions")).status, 403, "the loopback keyword too");
+    assert.equal(hits.length, 0);
+  } finally {
+    if (saved === undefined) delete process.env.CROW_TRUSTED_PROXIES; else process.env.CROW_TRUSTED_PROXIES = saved;
+  }
+  assert.equal((await call("/llm/c/cloud-a/v1/chat/completions")).status, 200, "control: undeclared, the same socket is local");
+});
+
 test("the token is checked after the source: an off-box caller never reaches the token check", async () => {
   let checks = 0;
   const app = express();
