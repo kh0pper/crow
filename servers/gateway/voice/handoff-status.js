@@ -12,8 +12,15 @@
  *   reconcileOpen(core, db)                                                 the sweep's pass over started/quiet rows
  *   rowsInScope(store, db, device, surface, now), resolveRows(transcript, rows, bots)   shared with 5.4 (P20, P23)
  *
- * Scope (P23): a kiosk sees only its own device's rows; a phone or the glasses sees every personal row. Both
- * see the open rows plus the ones that ended in the last HANDOFF_ENDED_WINDOW_MS.
+ * Scope (P23, amended in review): a kiosk sees only its own device's rows; a personal surface (the phone, the
+ * glasses, a dashboard tab) sees ALL the operator's hand-offs, kiosk-started ones included. Both see the open
+ * rows plus the ones that ended in the last HANDOFF_ENDED_WINDOW_MS. The task text is never spoken on a kiosk.
+ *
+ * Races and sends: the "ended" notification goes through notifyRow, which is at-most-once (a send that throws
+ * is logged, never retried), and only the transition that moved the row sends it. A status read that lands
+ * between result-service's result insert and the completion's own CAS ends the row first, so the completion's
+ * notice returns null and result-service sends today's generic "needs review" notice instead of the hand-off's:
+ * still exactly one notification, never none (the window is a few ms inside one process).
  *
  * Subject (P16): the fast path never takes ordinary speech. It answers when (a) a bot is named (`status_none`
  * when that bot has nothing in scope: truthful, never left to the model), or when (b) the work is named
@@ -30,8 +37,8 @@
  * needs-you, never quiet; `waiting-user` older than HANDOFF_QUIET_AFTER_MS moves the row to `quiet` (the claim
  * is kept), and an `active` session moves a quiet row back to `started` [rv2 N2].
  */
-import { HANDOFF_OPEN, HANDOFF_QUIET_AFTER_MS } from "./handoff-constants.js";
-import { wantsHandoffStatus, mayAskStatus, namesWork, isBareStatus, namedBots } from "./handoff-intent.js";
+import { HANDOFF_OPEN, HANDOFF_QUIET_AFTER_MS, PERSONAL_SURFACES } from "./handoff-constants.js";
+import { wantsHandoff, wantsHandoffStatus, mayAskStatus, namesWork, isBareStatus, namedBots } from "./handoff-intent.js";
 import { voiceLine } from "./voice-lines.js";
 import { botName, langOf, notifyRow } from "./handoff-confirm.js";
 import { rememberTopic, topicFor } from "./handoff-topic.js";
@@ -43,15 +50,11 @@ export const HANDOFF_ENDED_WINDOW_MS = 60 * 60_000;
 /** The detail of a row whose session ended with no result (the sweep or a status read found it). */
 export const SESSION_ENDED_NO_RESULT = "session_ended_no_result";
 
-const PERSONAL_SURFACES = new Set(["phone", "glasses"]);
 /** The statuses a card result can end, and the ones the session check reconciles (the sweep's set). */
 const RESULT_STATUSES = Object.freeze(["started", "queued", "quiet"]);
 const SESSION_STATUSES = Object.freeze(["started", "quiet"]);
 const FINAL = new Set(["success", "failure"]);
 const OPEN = new Set(HANDOFF_OPEN);
-/** A stopped row whose stop has not reached a session yet: a stop that landed before the session existed
- * (5.4's `pending_start`), or an engine stop the sweep is still retrying (`stop_pending`). */
-const STOP_PENDING = new Set(["pending_start", "stop_pending"]);
 const SAFE_BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const DETAIL_MAX = 300;
 
@@ -71,11 +74,12 @@ function release(cardId) {
   if (Number.isInteger(n) && n > 0) releaseResult(n);
 }
 
-/** The open rows and the recently ended ones this surface may hear about (P23), hand-off rows only. */
+/** The open rows and the recently ended ones this surface may hear about (P23, amended: a personal surface
+ * sees every device's), hand-off rows only. */
 export async function rowsInScope(store, db, device, surface, now) {
   const kiosk = !PERSONAL_SURFACES.has(surface);
-  const open = kiosk ? await store.openForDevice(db, device.id) : await store.openPersonal(db);
-  const ended = await store.endedSince(db, now - HANDOFF_ENDED_WINDOW_MS, kiosk ? { deviceId: device.id } : { personal: true });
+  const open = kiosk ? await store.openForDevice(db, device.id) : await store.openRows(db);
+  const ended = await store.endedSince(db, now - HANDOFF_ENDED_WINDOW_MS, kiosk ? { deviceId: device.id } : { all: true });
   const handoff = (r) => r.kind === "handoff";
   return { open: open.filter(handoff), ended: ended.filter(handoff) };
 }
@@ -91,23 +95,29 @@ export function resolveRows(transcript, rows, bots) {
   return { named, rows: rows.filter((r) => set.has(r.bot_id)) };
 }
 
-/** The newest perch-live session row for a hand-off: by its session id, else the bot's newest for the card. */
+/**
+ * The perch-live session row that speaks for a hand-off (P11): the NEWER of the row's own session (by
+ * gateway_thread_id) and the bot's newest session for the card, so a card re-run by hand after its first
+ * session ended is read from the run that is live, not the one that stopped.
+ */
 async function sessionFor(db, row) {
+  const found = [];
   if (row.session_id) {
     const { rows } = await db.execute({
-      sql: "SELECT status, updated_at FROM bot_sessions WHERE kind = 'perch-live' AND gateway_thread_id = ? ORDER BY id DESC LIMIT 1",
+      sql: "SELECT id, status, updated_at FROM bot_sessions WHERE kind = 'perch-live' AND gateway_thread_id = ? ORDER BY id DESC LIMIT 1",
       args: [String(row.session_id)],
     });
-    if (rows[0]) return rows[0];
+    if (rows[0]) found.push(rows[0]);
   }
   if (row.card_id != null) {
     const { rows } = await db.execute({
-      sql: "SELECT status, updated_at FROM bot_sessions WHERE kind = 'perch-live' AND card_id = ? AND bot_id = ? ORDER BY id DESC LIMIT 1",
+      sql: "SELECT id, status, updated_at FROM bot_sessions WHERE kind = 'perch-live' AND card_id = ? AND bot_id = ? ORDER BY id DESC LIMIT 1",
       args: [Number(row.card_id), String(row.bot_id)],
     });
-    if (rows[0]) return rows[0];
+    if (rows[0]) found.push(rows[0]);
   }
-  return null;
+  if (!found.length) return null;
+  return found.reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a));
 }
 
 /** The card's newest board result, or null (a tasks.db without the table counts as none). */
@@ -121,12 +131,14 @@ async function newestResult(tdb, cardId) {
   }
 }
 
-/** The line key for a row that is no longer open (or still starting), from its status alone. */
+/** The line key for a row that is no longer open (or still starting), from its status alone. A stopped row
+ * with no session yet is "stopping" (the stop lands when the session appears, [rv3 m3]); one with a session
+ * (a stop the sweep is still retrying included) was stopped. */
 function keyOfEnded(row) {
   switch (row?.status) {
     case "done": return "status_done";
     case "failed": return row.detail === SESSION_ENDED_NO_RESULT ? "status_ended_quiet" : "status_failed";
-    case "stopped": return STOP_PENDING.has(row.detail) ? "status_stopping" : "status_stopped";
+    case "stopped": return row.session_id == null ? "status_stopping" : "status_stopped";
     case "starting": return "status_starting";
     default: return null;
   }
@@ -149,7 +161,10 @@ export async function reconcileRow(core, db, row, { tdb = null, eng = null } = {
   const ended = keyOfEnded(row);
   if (ended) return ended;
   if (!RESULT_STATUSES.includes(row.status)) return null;
-  const lost = async () => keyOfEnded(await store.get(db, row.id)) || "status_running";
+  const lost = async () => {
+    const now = await store.get(db, row.id);
+    return keyOfEnded(now) || (now?.status === "quiet" ? "status_waiting_quiet" : "status_running");
+  };
 
   // 2. The card's newest final result wins [rv3 m3]; a partial is progress, not an end (P12).
   if (row.card_id != null && tdb) {
@@ -278,16 +293,21 @@ async function pickRow(db, rows) {
 export async function status(core, db, { device, surface, transcript, lang, bot = null, pending = null } = {}) {
   if (!db || !device?.id || typeof transcript !== "string" || !mayAskStatus(transcript)) return null;
   const speak = langOf(lang);
+  // The cached candidates and the status check come first; the log is read only once they pass.
+  const bots = new Map((await candidatesOf(core, db, bot)).map((c) => [c.bot_id, c.name]));
+  const names = (m) => [...m].flatMap(([id, name]) => [name, id]);
+  if (!wantsHandoffStatus(transcript, names(bots))) return null;
   const { open, ended } = await rowsInScope(core.store, db, device, surface, core.now());
   const rows = [...open, ...ended];
-  const bots = new Map((await candidatesOf(core, db, bot)).map((c) => [c.bot_id, c.name]));
   for (const r of rows) if (!bots.has(r.bot_id)) bots.set(r.bot_id, await botName(db, r.bot_id));
   const botList = [...bots].map(([bot_id, name]) => ({ bot_id, name }));
-  if (!wantsHandoffStatus(transcript, botList.flatMap((b) => [b.name, b.bot_id]))) return null;
 
   const { named, rows: mine } = resolveRows(transcript, rows, botList);
   let about;
   if (named.length) {
+    // "How's it going, have writer research the bus routes": a work phrase beside the name is a hand-off
+    // request, the model's to propose (the names alone are not asked: a bare name is a hand-off cue too).
+    if (wantsHandoff(transcript, [])) return null;
     if (!mine.length) return { say: voiceLine("status_none", speak), verb: "status_none" };
     about = mine;
   } else if (namesWork(transcript)) {

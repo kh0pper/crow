@@ -30,7 +30,7 @@ import { modelAvailability } from "./model-availability-voice.js";
 import { matchYesNo, changesContent } from "./pending.js";
 import { matchChoice } from "./own-tools.js";
 import { phraseWords, listMatches } from "./tool-families.js";
-import { HANDOFF_TASK_MAX_CHARS } from "./handoff-constants.js";
+import { HANDOFF_TASK_MAX_CHARS, PERSONAL_SURFACES } from "./handoff-constants.js";
 import { confirm, langOf, botName, surfaceLabel, announceHandoff } from "./handoff-confirm.js";
 import { createHandoffCompletion } from "./handoff-completion.js";
 import { status as handoffStatus, answerRow, reconcileOpen } from "./handoff-status.js";
@@ -52,9 +52,7 @@ const OWN_KINDS = new Set(["handoff", "which"]);
 const RELAY_KINDS = new Set(["handoff", "which", "stop"]);
 /** A bot id as the model may read it (the pi-bots BOT_ID_RE): anything else is never offered. */
 const SAFE_BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-/** Where a spoken yes is the operator's (a dashboard tab speaks as "phone"). */
-const PERSONAL_SURFACES = new Set(["phone", "glasses"]);
-/** Any other surface, a missing one included, is a shared display: "kiosk" (its hand-off is confirmed on the phone). */
+/** Any surface but a personal one (PERSONAL_SURFACES), a missing one included, is a shared display: "kiosk" (its hand-off is confirmed on the phone). */
 const handoffSurface = (surface) => (PERSONAL_SURFACES.has(surface) ? surface : "kiosk");
 /** The page a kiosk hand-off's push opens (the phone confirm page, Task 4.2). */
 export const phoneConfirmPath = (id) => "/dashboard/voice/handoffs/" + id;

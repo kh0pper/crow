@@ -32,6 +32,9 @@ export const HANDOFF_QUIET_AFTER_MS = 30 * 60_000;
 export const HANDOFF_ASKED_RETAIN_MS = 7 * 24 * 3600_000;
 
 export const HANDOFF_KINDS = Object.freeze(["handoff", "stop"]);
+/** The surfaces where a spoken yes is the operator's own (a dashboard tab speaks as "phone"); any other
+ * surface, a missing one included, is a shared display: "kiosk". */
+export const PERSONAL_SURFACES = Object.freeze(new Set(["phone", "glasses"]));
 /** No CHECK in the table: the store validates against this list. `partial` is deliberately absent (only a
  * final report ends a hand-off), and `quiet` (a session paused with no result) is open, not ended. */
 export const HANDOFF_STATUSES = Object.freeze([

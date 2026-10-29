@@ -176,13 +176,14 @@ export function createHandoffStore({ now = Date.now } = {}) {
 
     /**
      * Hand-off rows that ended (done, failed, stopped) at or after `sinceMs`, newest first: a status question
-     * about work that just finished. Scoped to one device (`deviceId`, a kiosk) or to the personal surfaces
-     * (`personal`: surface != 'kiosk'); with neither, none (P23: a scope is always named).
+     * about work that just finished. Scoped to one device (`deviceId`, a kiosk), to the personal surfaces
+     * (`personal`: surface != 'kiosk'), or to every surface (`all`: a phone hears about a kiosk's hand-off too,
+     * amended P23); with none of them, no rows (a scope is always named).
      */
-    async endedSince(db, sinceMs, { deviceId = null, personal = false } = {}) {
+    async endedSince(db, sinceMs, { deviceId = null, personal = false, all = false } = {}) {
       const since = Number(sinceMs);
       if (!Number.isFinite(since)) throw new Error("voice_handoffs: endedSince needs a time");
-      const where = deviceId != null ? "device_id = ?" : personal ? "surface != 'kiosk'" : null;
+      const where = deviceId != null ? "device_id = ?" : all ? "1 = 1" : personal ? "surface != 'kiosk'" : null;
       if (!where) return [];
       const { rows } = await db.execute({
         sql: `SELECT * FROM voice_handoffs WHERE kind = 'handoff' AND status IN ('done', 'failed', 'stopped')

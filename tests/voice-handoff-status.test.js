@@ -338,13 +338,58 @@ test("a quiet row read with a session that is not active stays quiet; the hibern
   assert.equal((await t.ask("how's writer doing")).verb, "status_waiting_quiet");
 });
 
-test("stopping and stopped", async () => {
+test("stopping is a stopped row with no session yet; one with a session was stopped, a retried stop included", async () => {
   const s = await setup();
   await s.handoff({ status: "stopped", detail: "pending_start" });
   assert.deepEqual(await s.ask("how's writer doing"), { say: "Writer's task will stop as soon as Writer finishes starting up.", verb: "status_stopping" });
   const t = await setup();
-  await t.handoff({ status: "stopped" });
+  await t.handoff({ status: "stopped", session: "s1" });
   assert.deepEqual(await t.ask("how's writer doing"), { say: "Writer's task was stopped. What it made so far is kept.", verb: "status_stopped" });
+  const u = await setup();
+  await u.handoff({ status: "stopped", session: "s2", detail: "stop_pending" });
+  assert.equal((await u.ask("how's writer doing")).verb, "status_stopped", "the engine stop is still being retried, but the session exists");
+});
+
+test("a compound utterance that also asks for a hand-off goes to the model, even with the bot named", async () => {
+  const s = await setup();
+  const { cardId } = await s.handoff({ session: "s1" });
+  await s.session({ sid: "s1", cardId, status: "active" });
+  for (const t of ["how's it going, have writer research the bus routes", "is writer done? then have helper write up the bus routes", "como va writer, y pidele a helper que investigue las rutas"]) {
+    assert.equal(await s.ask(t), null, t);
+  }
+  assert.equal((await s.ask("how's writer doing")).verb, "status_running", "a plain status question still answers");
+  assert.equal(await s.ask("how's it going, have writer research the bus routes", { bot: null }), null, "no candidates: a plain word still names the bot from its row, and the ask is still the model's");
+});
+
+test("the newer of the row's session and the card's newest session speaks for the hand-off (P11)", async () => {
+  const s = await setup();
+  const { id, cardId } = await s.handoff({ session: "s1" });
+  await s.session({ sid: "s1", cardId, status: "stopped" });
+  // The card was re-run by hand: a newer perch-live session holds it and is active.
+  await s.session({ sid: "s9", cardId, status: "active" });
+  assert.equal((await s.ask("how's writer doing")).verb, "status_running");
+  assert.equal((await s.row(id)).status, "started");
+  assert.deepEqual(s.notifications, []);
+  // The other way round: the row's session is the newer one and it stopped.
+  const t = await setup();
+  const b = await t.handoff({ session: "s2" });
+  await t.session({ sid: "old", cardId: b.cardId, status: "active" });
+  await t.session({ sid: "s2", cardId: b.cardId, status: "stopped" });
+  assert.equal((await t.ask("how's writer doing")).verb, "status_ended_quiet");
+});
+
+test("a CAS lost to a quiet move answers waiting-quiet, not running", async () => {
+  const s = await setup();
+  const { id, cardId } = await s.handoff({ session: "s1" });
+  await s.session({ sid: "s1", cardId, status: "stopped" });
+  const real = s.store.transition;
+  s.store.transition = async (db, rid, from, to, ...rest) => {
+    if (to === "failed") { await real(db, rid, ["started"], "quiet"); return false; }   // someone else moved it first
+    return real(db, rid, from, to, ...rest);
+  };
+  assert.equal((await s.ask("how's writer doing")).verb, "status_waiting_quiet");
+  assert.equal((await s.row(id)).status, "quiet");
+  assert.deepEqual(s.notifications, [], "a lost CAS sends nothing");
 });
 
 test("a named bot with nothing in scope: status_none, never the model", async () => {
@@ -540,6 +585,7 @@ test("rows that were never open are never answered (reconcileRow), and the store
   const p = await s.handoff({ status: "failed" });
   assert.deepEqual((await s.store.endedSince(s.db, T0 - MIN, { deviceId: KIOSK.id })).map((r) => r.id), [k.id]);
   assert.deepEqual((await s.store.endedSince(s.db, T0 - MIN, { personal: true })).map((r) => r.id), [p.id]);
+  assert.deepEqual((await s.store.endedSince(s.db, T0 - MIN, { all: true })).map((r) => r.id).sort(), [k.id, p.id].sort(), "every surface");
   assert.deepEqual(await s.store.endedSince(s.db, T0 - MIN), [], "no scope, no rows");
   assert.deepEqual(await s.store.endedSince(s.db, T0 + 1, { personal: true }), []);
   await assert.rejects(s.store.endedSince(s.db, "soon", { personal: true }), /needs a time/);
@@ -549,14 +595,15 @@ test("rows that were never open are never answered (reconcileRow), and the store
 
 /* ---------- Scope ---------- */
 
-test("a kiosk hears only its own hand-offs, without the task text; the phone does not hear the kiosk's", async () => {
+test("a kiosk hears only its own hand-offs, without the task text; the phone hears every device's (amended P23)", async () => {
   const s = await setup();
   const { cardId } = await s.handoff({ session: "s1", surface: "kiosk", device: KIOSK });
   await s.session({ sid: "s1", cardId, status: "active" });
   assert.deepEqual(await s.ask("how's writer doing", { device: KIOSK, surface: "kiosk" }), { say: "Writer is working on the task.", verb: "status_running" });
   assert.deepEqual(await s.ask("como va writer", { device: KIOSK, surface: "kiosk", lang: "es" }), { say: "Writer está trabajando en: la tarea.", verb: "status_running" });
   assert.deepEqual(await s.ask("how's writer doing", { device: { id: "kiosk-2", name: "Hall" }, surface: "kiosk" }), { say: "There's nothing handed off right now.", verb: "status_none" }, "another kiosk sees nothing (P23)");
-  assert.deepEqual(await s.ask("how's writer doing"), { say: "There's nothing handed off right now.", verb: "status_none" }, "a kiosk row is not a personal one");
+  assert.deepEqual(await s.ask("how's writer doing"), { say: "Writer is working on research radio history.", verb: "status_running" }, "the phone hears about the kiosk's hand-off, with the task");
+  assert.equal((await s.ask("how's writer doing", { device: { id: "glasses-1" }, surface: "glasses" })).verb, "status_running", "the glasses too");
   assert.equal(await s.ask("how's the research going", { device: { id: "kiosk-2" }, surface: "kiosk" }), null);
   // The glasses see the phone's hand-off: every personal row.
   const { cardId: c2 } = await s.handoff({ session: "s2", surface: "glasses", device: { id: "glasses-1", name: "Glasses" } });
