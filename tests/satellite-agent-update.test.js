@@ -251,6 +251,18 @@ test("a rollback that fails is reported as rollback_failed", async () => {
   assert.deepEqual(w.exits, []);
 });
 
+test("a failed rollback after a paused npm ci stays paused (no resume)", async () => {
+  const runner = fakeRunner({ out: { [`git diff --name-only ${CUR} ${TARGET}`]: "package-lock.json\n" }, fail: { "systemd-run": "oom" } });
+  const w = world({ runner });
+  const order = [];
+  const up = U.createUpdater({ db: w.db, satHome: w.satHome, appRoot: w.appRoot, runner, fetchCheckRuns: async () => green, exit: (c) => w.exits.push(c), log: () => {},
+    beforeInstall: async () => { order.push("pause"); }, afterRollback: async () => { order.push("resume"); } });
+  const r = await up.update(TARGET);
+  assert.equal(r.code, "rollback_failed");
+  assert.deepEqual(order, ["pause"], "never resumed from a half-updated tree");
+  assert.deepEqual(w.exits, []);
+});
+
 test("one update at a time", async () => {
   let release;
   const gate = new Promise((r) => { release = r; });

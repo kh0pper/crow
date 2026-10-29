@@ -195,7 +195,9 @@ export function createUpdater({
       }
       writeLast({ from, to, result: rolled ? "rolled_back" : "rollback_failed", steps });
       if (migrating) await exit(UPDATE_RESTART_EXIT_CODE);
-      else { try { await afterRollback(); } catch { /* best effort */ } } // no restart: un-pause the MCP children
+      // Rolled back without a restart: un-pause the MCP children. A FAILED rollback stays paused
+      // (the checkout or node_modules may be half-updated; children must not start from it).
+      else if (rolled) { try { await afterRollback(); } catch { /* best effort */ } }
       return refuse(500, rolled ? "rolled_back" : "rollback_failed", { steps });
     }
     writeLast({ from, to, result: "restarting", steps });

@@ -54,6 +54,7 @@ export const BUSY_TEXT = "This server is busy right now; try again shortly";
 export const START_FAILED_TEXT = "This extension's server could not start";
 export const OVERFLOW_TEXT = "This extension's server sent too much output at once and was stopped";
 export const STDOUT_BACKLOG_MAX = 2 * RESULT_CAP_BYTES;
+export const TOOLS_TOO_LARGE = "tools_too_large";
 const BUNDLE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CROW_META = "crow.dev/";
 
@@ -155,7 +156,20 @@ export class BoundedStdioTransport {
     return new Promise((resolve, reject) => {
       const stdin = this._proc?.stdin;
       if (!stdin || stdin.destroyed) return reject(new Error("Not connected"));
-      if (stdin.write(serializeMessage(message))) resolve(); else stdin.once("drain", resolve);
+      if (stdin.write(serializeMessage(message))) return resolve();
+      // Waiting for drain: settle on drain, or on the child going away (close / stream error).
+      const p = this._proc;
+      const done = (err) => {
+        stdin.off("drain", onDrain); stdin.off("error", onFail); stdin.off("close", onClose); p?.off("close", onClose);
+        if (err) reject(err); else resolve();
+      };
+      const onDrain = () => done();
+      const onFail = (err) => done(err || new Error("Not connected"));
+      const onClose = () => done(new Error("Not connected"));
+      stdin.on("drain", onDrain);
+      stdin.on("error", onFail);
+      stdin.on("close", onClose);
+      p?.on("close", onClose);
     });
   }
   async close() {
@@ -190,7 +204,8 @@ export function createMcpHost({
   const putCache = db.prepare(`INSERT INTO tool_cache (bundle, version, tools_json, sha256, cached_at) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(bundle) DO UPDATE SET version = excluded.version, tools_json = excluded.tools_json, sha256 = excluded.sha256, cached_at = excluded.cached_at`);
   const delCache = db.prepare("DELETE FROM tool_cache WHERE bundle = ?");
-  const allCache = db.prepare("SELECT bundle, version, sha256 FROM tool_cache ORDER BY bundle");
+  const allCache = db.prepare("SELECT bundle, version, sha256, tools_json FROM tool_cache ORDER BY bundle");
+  const failureOf = (r) => { try { return String(JSON.parse(r.tools_json)?.error || "tools_unavailable"); } catch { return "tools_unavailable"; } };
 
   function spawnChild(id, config) {
     const cwd = join(satHome, "bundles", id);
@@ -323,33 +338,56 @@ export function createMcpHost({
   }
 
   // ── tool cache ─────────────────────────────────────────────────────────────
+  /** The cached list, or null (no row, or a recorded failure row: sha256 "" + {error}). */
   function cached(id) {
     const row = getCache.get(id);
-    if (!row) return null;
-    try { return { version: row.version, sha256: row.sha256, tools: JSON.parse(row.tools_json) }; } catch { return null; }
+    if (!row || !row.sha256) return null;
+    try {
+      const tools = JSON.parse(row.tools_json);
+      return Array.isArray(tools) ? { version: row.version, sha256: row.sha256, tools } : null;
+    } catch { return null; }
+  }
+
+  /**
+   * A per-request signal linked to the child's long-lived one. The SDK adds an abort listener to
+   * a request's signal and never removes it; on the shared child signal those listeners (each
+   * holding its request) would pile up for the child's life. → {signal, done()}; call done() in
+   * finally to unlink.
+   */
+  function requestSignal(entry) {
+    const parent = entry.abort.signal;
+    const ac = new AbortController();
+    if (parent.aborted) { ac.abort(parent.reason); return { signal: ac.signal, done() {} }; }
+    const onAbort = () => ac.abort(parent.reason);
+    parent.addEventListener("abort", onAbort, { once: true });
+    return { signal: ac.signal, done: () => parent.removeEventListener("abort", onAbort) };
   }
 
   /** Start the child once, store its whole tools/list, stop it (unless a caller is using it). */
   async function refreshToolCache(id, version) {
     const l = await acquire(id);
     let tools = [];
+    const rs = requestSignal(l.entry);
     try {
       let cursor;
       for (let page = 0; page < 100; page++) {
-        const r = await l.client.request({ method: "tools/list", params: cursor ? { cursor } : {} }, ListToolsResultSchema, { timeout: callTimeoutMs, signal: l.entry.abort.signal });
+        const r = await l.client.request({ method: "tools/list", params: cursor ? { cursor } : {} }, ListToolsResultSchema, { timeout: callTimeoutMs, signal: rs.signal });
         tools.push(...(r.tools || []));
         cursor = r.nextCursor;
         if (!cursor) break;
       }
     } finally {
+      rs.done();
       l.release();
     }
     tools = JSON.parse(JSON.stringify(tools)); // plain JSON values only (canonicalJson refuses undefined)
     const canon = canonicalJson(tools);
     const bytes = Buffer.byteLength(canon);
     if (bytes > RESULT_CAP_BYTES) {
-      // crow could never receive it (every answer is capped): no row, so no stale list either.
-      delCache.run(id);
+      // crow could never receive it (every answer is capped). A failure row (sha256 "", the
+      // error in tools_json) replaces any old list: status shows {version, error}, and
+      // reconcile() does not retry the same version on every boot.
+      putCache.run(id, version == null ? null : String(version), JSON.stringify({ error: TOOLS_TOO_LARGE, kib: Math.ceil(bytes / 1024) }), "", new Date().toISOString());
       const e = children.get(id);
       if (e && e.inflight === 0) await stopEntry(e);
       throw new Error(`tool list too large (${Math.ceil(bytes / 1024)} KiB, the cap is ${RESULT_CAP_BYTES / 1024} KiB); not cached`);
@@ -398,7 +436,12 @@ export function createMcpHost({
       const forwarded = { name: params.name, arguments: isObj(params.arguments) ? params.arguments : {}, _meta: callerMeta(satCaller, params._meta) };
       let result;
       try {
-        result = await l.client.request({ method: "tools/call", params: forwarded }, CallToolResultSchema, { timeout: callTimeoutMs, signal: l.entry.abort.signal });
+        const rs = requestSignal(l.entry);
+        try {
+          result = await l.client.request({ method: "tools/call", params: forwarded }, CallToolResultSchema, { timeout: callTimeoutMs, signal: rs.signal });
+        } finally {
+          rs.done();
+        }
       } catch (err) {
         if (l.entry.transport.overflowed) return errorText(OVERFLOW_TEXT);
         throw err;
@@ -419,7 +462,9 @@ export function createMcpHost({
     /** The running child's pid for gate.js's current-use reader ([] when none). */
     pids: (id) => { const e = children.get(id); return e?.pid && !e.stopping ? [e.pid] : []; },
     running: () => [...children.keys()],
-    toolsStatus: () => Object.fromEntries(allCache.all().map((r) => [r.bundle, { version: r.version, sha256: r.sha256 }])),
+    toolsStatus: () => Object.fromEntries(allCache.all().map((r) => [r.bundle, r.sha256 ? { version: r.version, sha256: r.sha256 } : { version: r.version, error: failureOf(r) }])),
+    /** Test seam: the running child's long-lived abort signal (listener-count checks). */
+    _childSignal: (id) => children.get(id)?.abort?.signal || null,
     /** Stop every running child (they start again on the next call). */
     async stopChildren() {
       await Promise.all([...children.values()].map((e) => stopEntry(e)));
@@ -470,6 +515,7 @@ export function registerMcpRoutes(router, { host, satHome, sendSigned }) {
       server = new Server({ name: `crow-satellite-${id}`, version: "1.0.0" }, { capabilities: { tools: {} } });
       server.setRequestHandler(ListToolsRequestSchema, async () => {
         const c = host.cached(id);
+        if (!c && host.toolsStatus()[id]?.error === TOOLS_TOO_LARGE) throw new McpError(ErrorCode.InternalError, "This extension's tool list is too large for this server");
         if (!c) throw new McpError(ErrorCode.InternalError, "This extension's tool list is not cached yet; try again shortly");
         return { tools: c.tools };
       });
