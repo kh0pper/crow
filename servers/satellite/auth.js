@@ -6,6 +6,10 @@
  *
  *   1. `begin`    reads X-Crow-Sat-Nonce (shape only) so even a refusal can be signed, and sets up
  *                 the audit record (spec §6.3: every signed call writes {ts, route, caller, result}).
+ *                 Only calls whose signature verified are written to `audit`; a refusal before
+ *                 that (not_paired, clock_skew, bad_signature, bad_caller, a body error) is only
+ *                 counted in memory and logged as one summary line at most once a minute, so an
+ *                 unauthenticated caller cannot grow satellite.db.
  *   2. express.raw — the body is kept as the exact bytes received: sha256(body) is in the signed
  *                 string, and a re-serialised JSON value would not hash the same.
  *   3. `verify`   in order: paired at all (else 403 not_paired); verifyRequest against the PINNED mgmt
@@ -28,6 +32,33 @@ export const NONCE_LRU_MAX = 10000;
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const GRACE_ROUTES = new Set(["POST /satellite/v1/cert", "POST /satellite/v1/unpair"]);
 const ROUTE_MAX = 200;
+export const REFUSAL_LOG_MS = 60000;
+
+/**
+ * Unauthenticated refusals: counts per code, one summary line per minute. The first refusal of a
+ * quiet spell logs at once; later ones are counted and reported with the first refusal after
+ * the minute is up (or by flush()).
+ */
+export function createRefusalCounter({ now = Date.now, log = console.warn, windowMs = REFUSAL_LOG_MS } = {}) {
+  let counts = new Map();
+  let lastLog = -Infinity;
+  const flush = () => {
+    if (!counts.size) return false;
+    const parts = [...counts].map(([c, n]) => `${c}=${n}`).join(", ");
+    counts = new Map();
+    lastLog = now();
+    log(`[satellite auth] refused unauthenticated requests: ${parts}`);
+    return true;
+  };
+  return {
+    note(code) {
+      counts.set(code, (counts.get(code) || 0) + 1);
+      if (now() - lastLog >= windowMs) flush();
+    },
+    flush,
+    pending: () => [...counts.values()].reduce((a, b) => a + b, 0),
+  };
+}
 
 /**
  * "unpaired" when there is no cert, it does not verify, it is not for this satellite, or the pin
@@ -88,13 +119,15 @@ export function createSendSigned(privHex, { audit } = {}) {
  * The auth pieces for a satellite app. `getState()` → {cert, pinned} as the agent holds them now
  * (read per request, so a stored rotation takes effect on the very next call).
  */
-export function createSatAuth({ db, key, now = Date.now, getState }) {
+export function createSatAuth({ db, key, now = Date.now, getState, log = console.warn }) {
   const nonces = createNonceGuard({ db, now });
+  const refusals = createRefusalCounter({ now, log });
   const auditStmt = db.prepare("INSERT INTO audit (ts, route, caller, result) VALUES (?, ?, ?, ?)");
   const writeAudit = (res, result) => {
     const a = res.locals.satAudit;
     if (!a || a.done) return;
     a.done = true;
+    if (!a.verified) return refusals.note(String(result).slice(0, 64));
     try { auditStmt.run(new Date(now()).toISOString(), a.route, a.caller ?? null, String(result).slice(0, 64)); } catch { /* never blocks an answer */ }
   };
   const resultOf = (status, obj) => (obj && typeof obj.error === "string" ? obj.error : status < 400 ? "ok" : String(status));
@@ -105,7 +138,7 @@ export function createSatAuth({ db, key, now = Date.now, getState }) {
     const n = req.get("x-crow-sat-nonce");
     if (typeof n === "string" && NONCE_RE.test(n)) res.locals.satRespNonce = n;
     const route = (req.baseUrl + req.path).replace(/^\/satellite\/v1\//, "").slice(0, ROUTE_MAX);
-    res.locals.satAudit = { route, caller: null, done: false };
+    res.locals.satAudit = { route, caller: null, verified: false, done: false };
     // A route that answers without sendSigned (a plain download) is still audited.
     res.on("finish", () => writeAudit(res, res.statusCode < 400 ? "ok" : String(res.statusCode)));
     next();
@@ -121,7 +154,7 @@ export function createSatAuth({ db, key, now = Date.now, getState }) {
       method: req.method, pathQuery: req.originalUrl, body, headers: req.headers, satelliteId: key.satellite_id, now: t,
     });
     if (!v.ok) return refuse(res, 401, v.code);
-    res.locals.satAudit.caller = v.caller;
+    Object.assign(res.locals.satAudit, { caller: v.caller, verified: true });
     if (!nonces.check(v.nonce)) return refuse(res, 401, "replay");
     const routeKey = `${req.method} ${req.baseUrl}${req.path}`;
     if (state === "lapsed" || (state === "grace" && !GRACE_ROUTES.has(routeKey))) return refuse(res, 403, "cert_expired");
@@ -135,5 +168,5 @@ export function createSatAuth({ db, key, now = Date.now, getState }) {
     next();
   }
 
-  return { begin, verify, sendSigned };
+  return { begin, verify, sendSigned, refusals };
 }

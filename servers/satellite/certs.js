@@ -25,11 +25,15 @@
  *     cert.next.json matching the pin and rolls forward: cert.json ← staged. Fail closed in the
  *     meantime (no key is accepted while the files disagree), never fail open.
  *   - after 3: committed; a leftover staged file equals cert.json and is removed at boot.
- * A write that throws (disk full) restores the old pin best-effort and removes the staged file;
- * if that restore also fails, boot recovery rolls forward to the new cert.
+ * A write that throws (disk full): when cert.json still holds the old cert, the old pin is restored
+ * (best effort) and the staged file removed; when cert.json already holds the new cert, the new pin
+ * and the staged file are kept, so the files agree and boot recovery can finish. If the restore
+ * itself fails, boot recovery rolls forward to the staged cert.
  */
 import { acceptCert, verifyCertSignature } from "../shared/satellite-protocol.js";
 import { readCert, readPinned, readStagedCert, removeStagedCert, writeCert, writePinned, writeStagedCert } from "./keys.js";
+
+const DEFAULT_IO = Object.freeze({ writeStagedCert, writePinned, writeCert });
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -52,7 +56,7 @@ const pinMatches = (cert, pinned) => !!pinned && pinned.crow_id === cert.payload
  * Check and store a renewed or rotated cert. `state` = {cert, pinned} (updated in place on
  * success). → {ok:true, rotated} or {ok:false, status, code}. Throws only on an I/O failure.
  */
-export function applyNewCert({ db, key, satHome, state, now }, cert) {
+export function applyNewCert({ db, key, satHome, state, now, io = DEFAULT_IO }, cert) {
   if (!isObj(cert) || !isObj(cert.payload)) return { ok: false, status: 400, code: "bad_request" };
   const seen = db.prepare("SELECT 1 FROM cert_serials WHERE serial = ?");
   const t = now();
@@ -68,12 +72,14 @@ export function applyNewCert({ db, key, satHome, state, now }, cert) {
   try {
     db.transaction(() => {
       db.prepare("INSERT INTO cert_serials (serial, accepted_at) VALUES (?, ?)").run(String(cert.payload.serial), new Date(t).toISOString());
-      writeStagedCert(satHome, cert);
-      writePinned(satHome, pinned);
-      writeCert(satHome, cert);
+      io.writeStagedCert(satHome, cert);
+      io.writePinned(satHome, pinned);
+      io.writeCert(satHome, cert);
     })();
   } catch (err) {
-    try { writePinned(satHome, oldPinned); removeStagedCert(satHome); } catch { /* boot recovery rolls forward */ }
+    if (readCert(satHome)?.sig === state.cert?.sig) {
+      try { writePinned(satHome, oldPinned); removeStagedCert(satHome); } catch { /* boot recovery rolls forward */ }
+    }
     throw err;
   }
   removeStagedCert(satHome);

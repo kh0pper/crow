@@ -62,9 +62,9 @@ export const writePinned = (satHome, pinned) => writePrivateFile(pinnedPath(satH
 export const readStagedCert = (satHome) => readJson(stagedCertPath(satHome));
 export const writeStagedCert = (satHome, cert) => writePrivateFile(stagedCertPath(satHome), JSON.stringify(cert));
 export const removeStagedCert = (satHome) => rmSync(stagedCertPath(satHome), { force: true });
-/** Unpair: the cert first (the commit marker), then the pin, then any staged cert. */
+/** Unpair: any staged cert first (so boot can never roll it forward), then the cert, then the pin. */
 export function removePairingFiles(satHome) {
+  removeStagedCert(satHome);
   rmSync(certPath(satHome), { force: true });
   rmSync(pinnedPath(satHome), { force: true });
-  removeStagedCert(satHome);
 }
