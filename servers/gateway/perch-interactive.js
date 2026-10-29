@@ -2500,9 +2500,10 @@ export function createInteractiveEngine({
 
   /** startChild's services half, for an owner child only. True when the child gets blocks. */
   async function serviceBlocksForChild(S, s, world, prep, slog) {
+    // No seam, no blocks, and no read at all (fix round 1, M1).
+    if (typeof S.withServiceBlocks !== "function") return false;
     try { s.connectionsFingerprint = await connectionsFingerprintOf(world.projectId); }
     catch { s.connectionsFingerprint = null; slog("services: project connections unreadable"); }
-    if (typeof S.withServiceBlocks !== "function") return false;
     const saved = prep.piRpcOpts;
     prep.piRpcOpts = Object.assign({}, saved);
     try {
@@ -3853,7 +3854,9 @@ export function createInteractiveEngine({
     return { sessionId: s.sessionId, threadId: s.threadId, state: s.state };
   }
 
-  async function message(sessionId, text, images, { principal } = {}) {
+  async function message(sessionId, text, images, opts) {
+    // A null or non-object options argument is "no principal" (fix round 1, M8), never a throw.
+    const principal = opts && typeof opts === "object" ? opts.principal : undefined;
     const S = await loadSeams();
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");

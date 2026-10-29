@@ -24,6 +24,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 
 const dir = mkdtempSync(join(tmpdir(), "turn-principal-rails-"));
 process.env.CROW_DATA_DIR = dir;
@@ -41,7 +42,20 @@ const BOT = "helper";
 
 let createInteractiveEngine, _resetInteractiveEngineForTest, createDbClient, resolveSignedScope, isOwnerTurnScope;
 let createToolExecutor, runScheduleNow, tickBotSchedules, give, setStatus;
-let server, port;
+let server, port, perchServer, perchBase;
+
+// Dashboard sessions (fix round 1, I1): the owner's local password session, a session a peer
+// sign-in minted (SSO), and the local token on a signed peer request. The auth stub below sets
+// req.dashboardSession / req.crossHostAuth from a test header, as dashboardAuth would.
+const SESSIONS = { local: "tok-local-owner", sso: "tok-sso-peer" };
+const sessionHeaders = (who) => (who === "none" ? {} : { "x-test-session": who });
+function stubAuth(req, res, next) {
+  const who = req.get("x-test-session");
+  if (who === "local" || who === "peer") req.dashboardSession = SESSIONS.local;
+  if (who === "sso") req.dashboardSession = SESSIONS.sso;
+  if (who === "peer") req.crossHostAuth = true;
+  next();
+}
 
 function raw() { return new Database(DB_FILE); }
 function q(sql, ...args) { const c = raw(); try { return c.prepare(sql).all(...args); } finally { c.close(); } }
@@ -146,6 +160,7 @@ function makeEngine(o = {}) {
   const bridge = makeBridge(o);
   let seq = 0;
   const timers = new Map();
+  bridge._state.fireTimers = () => { const fns = [...timers.values()]; timers.clear(); for (const fn of fns) fn(); };
   const engine = createInteractiveEngine({
     crowHome: CROW_HOME, env: { CROW_HOME }, bridge, log: () => {},
     now: () => 1_700_000_000_000,
@@ -181,6 +196,10 @@ before(async () => {
   mkdirSync(CROW_HOME, { recursive: true });
   writeFileSync(process.env.PI_MODELS_JSON, JSON.stringify({ providers: { "crow-local": { models: [{ id: "qwen3.6-35b-a3b" }] } } }));
   run("INSERT INTO project_spaces (id, slug, name) VALUES (?, 'svc-p', 'Services P')", PROJECT);
+  const hash = (t) => createHash("sha256").update(t).digest("hex");
+  const exp = new Date(Date.now() + 86_400_000).toISOString();
+  run("INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)", hash(SESSIONS.local), exp);
+  run("INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard sso src:peer-1', ?)", hash(SESSIONS.sso), exp);
   const def = JSON.stringify({ gateways: [{ type: "perch" }], tracker_config: { type: "kanban" } });
   run("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)", BOT, "Helper", def, PROJECT);
   const t = new Database(TASKS);
@@ -214,10 +233,25 @@ before(async () => {
   const { default: boardRouter } = await import("../servers/gateway/routes/bot-board-api.js");
   const app = express();
   app.use(express.json());
-  app.use(boardRouter((req, res, next) => next())); // the dashboard's session auth, stubbed
+  app.use(boardRouter(stubAuth)); // the dashboard's session auth, stubbed
   server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   port = server.address().port;
+
+  // The Perch dashboard routes, with a recording engine (tests/perch-interactive-routes.test.js shape).
+  const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const papp = express();
+  const json = express.json();
+  papp.use((req, res, next) => (/^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(req.path) ? next() : json(req, res, next)));
+  papp.use(perchInteractiveApiRouter(stubAuth, {
+    engine: () => recEngine,
+    annotate: async (models) => models,
+    providerModels: () => [],
+    piProviders: () => null,
+  }));
+  perchServer = papp.listen(0, "127.0.0.1");
+  await new Promise((r) => perchServer.once("listening", r));
+  perchBase = "http://127.0.0.1:" + perchServer.address().port + "/dashboard/perch-api";
 });
 
 beforeEach(() => { if (_resetInteractiveEngineForTest) _resetInteractiveEngineForTest(); });
@@ -225,17 +259,34 @@ beforeEach(() => { if (_resetInteractiveEngineForTest) _resetInteractiveEngineFo
 after(() => {
   try { setStatus && setStatus(null); } catch {}
   try { server.closeAllConnections?.(); server.close(); } catch {}
+  try { perchServer.closeAllConnections?.(); perchServer.close(); } catch {}
   rmSync(dir, { recursive: true, force: true });
 });
+
+const execute = (card, who) => fetch(`http://127.0.0.1:${port}/dashboard/bot-board-api/card/${card}/execute`, {
+  method: "POST", headers: { "content-type": "application/json", ...sessionHeaders(who) }, body: "{}",
+});
+
+// A recording engine for the Perch dashboard routes: what principal each call carried.
+let rec;
+const recEngine = {
+  async checkCardFree() {},
+  async spawn(a) { rec.push(["spawn", a.principal]); return { sessionId: "perchlive-rec", threadId: "perchlive-rec", state: "awake" }; },
+  async message(...a) { rec.push(["message", a.length > 3 ? a[3] : "(no options)"]); return { turnId: "t1" }; },
+  async steer(...a) { rec.push(["steer", a.length]); return { ok: true }; },
+  async answer(...a) { rec.push(["answer", a.length]); return { ok: true }; },
+};
+const perchPost = async (path, body, who) => {
+  const r = await fetch(perchBase + path, { method: "POST", headers: { "content-type": "application/json", ...sessionHeaders(who) }, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
 
 // ---------------------------------------------------------------------------
 // owner jobs (rev 4 H2: a job is the owner's exactly when principal = 'owner')
 // ---------------------------------------------------------------------------
 
 test("owner jobs: dashboard card dispatch stamps 'owner' and the job's turn is the owner's", async () => {
-  const res = await fetch(`http://127.0.0.1:${port}/dashboard/bot-board-api/card/501/execute`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  });
+  const res = await execute(501, "local");
   assert.equal(res.status, 200);
   const { jobId } = await res.json();
   assert.equal(q("SELECT principal FROM bot_jobs WHERE job_id=?", jobId)[0].principal, "owner");
@@ -409,9 +460,6 @@ test("injected text drops the owner's turn", async () => {
   assert.deepEqual(fourth.blockNames(), []);
   assert.equal(engine.sessionServicesLive(row.id), false);
   await endTurn(fourth);
-
-  // An owner turn on a child started for someone else is still not live until it cycles: a cycle
-  // that cannot happen leaves the owner without blocks, never anyone else with them.
   await engine.stop(r.sessionId);
 });
 
@@ -474,6 +522,123 @@ test("without the blocks seam nothing cycles and no session is ever live", async
   await engine.message(r.sessionId, "y", [], { principal: "owner" });
   await tick();
   assert.equal(state.instances.length, 1, "no cycle without blocks to give or take");
+  await engine.stop(r.sessionId);
+});
+
+test("a non-owner message waking a hibernated session wakes it as other, without blocks (M3)", async () => {
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  const row = rowFor(r.threadId);
+  assert.equal(engine.sessionServicesLive(row.id), true);
+  const first = state.instances[0];
+  // The idle timer hibernates the session: its child (the one holding blocks) is gone.
+  state.fireTimers();
+  await tick();
+  assert.ok(first._exitCode != null, "hibernated");
+  assert.equal(live(state).length, 0);
+  assert.equal(engine.sessionServicesLive(row.id), false);
+  // An injected round (artifacts' sweep, phone) wakes it.
+  await engine.message(r.sessionId, "a round", [], { principal: "other" });
+  await tick();
+  const woken = live(state)[0];
+  assert.ok(woken && woken !== first);
+  assert.deepEqual(woken.blockNames(), [], "woken without blocks");
+  assert.equal(woken.turns.length, 1);
+  assert.equal(engine.sessionServicesLive(row.id), false);
+  assert.equal(state.blockCalls.length, 1, "only the owner spawn asked for blocks");
+  await endTurn(woken);
+  await engine.stop(r.sessionId);
+});
+
+test("a null or odd options argument to message is safe and is not the owner's (M8)", async () => {
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  for (const opts of [null, "owner", 1, true]) {
+    await engine.message(r.sessionId, "x", [], opts);
+    await tick();
+    const pi = live(state)[0];
+    assert.deepEqual(pi.blockNames(), [], JSON.stringify(opts));
+    assert.equal(engine.sessionServicesLive(rowFor(r.threadId).id), false);
+    await endTurn(pi);
+  }
+  await engine.stop(r.sessionId);
+});
+
+// ---------------------------------------------------------------------------
+// the dashboard's session decides (fix round 1, I1; M2)
+// ---------------------------------------------------------------------------
+
+test("card Execute is the owner's only on a local password session (I1)", async () => {
+  for (const [who, want] of [["sso", null], ["peer", null], ["none", null], ["local", "owner"]]) {
+    const res = await execute(501, who);
+    assert.equal(res.status, 200, who);
+    const { jobId } = await res.json();
+    assert.equal(q("SELECT principal FROM bot_jobs WHERE job_id=?", jobId)[0].principal, want, who);
+    run("UPDATE bot_jobs SET status='completed' WHERE job_id=?", jobId);
+  }
+});
+
+test("the five Perch dashboard routes pass owner only for a local session; steer and answer pass no principal (I1, M2)", async () => {
+  setStatus({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
+  try {
+    const newCard = () => {
+      const t = new Database(TASKS);
+      try { return Number(t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('give me', ?, 'pending')").run(PROJECT).lastInsertRowid); } finally { t.close(); }
+    };
+    for (const [who, want] of [["local", "owner"], ["sso", "other"], ["peer", "other"]]) {
+      rec = [];
+      let r = await perchPost(`/bots/${BOT}/interactive`, {}, who);
+      assert.equal(r.status, 201, who + " spawn " + JSON.stringify(r.body));
+      r = await perchPost("/interactive/perchlive-rec/message", { message: "hi" }, who);
+      assert.equal(r.status, 202, who + " message " + JSON.stringify(r.body));
+      r = await perchPost(`/bots/${BOT}/dispatch`, { card_id: newCard() }, who);
+      assert.equal(r.status, 201, who + " dispatch " + JSON.stringify(r.body));
+      r = await perchPost(`/cards/${newCard()}/give`, { bot_id: BOT, start: true }, who);
+      assert.equal(r.body && r.body.started, true, who + " give " + JSON.stringify(r.body));
+      r = await perchPost(`/bots/${BOT}/tasks`, { title: "a new one", start: true }, who);
+      assert.equal(r.body && r.body.started, true, who + " tasks " + JSON.stringify(r.body));
+      r = await perchPost("/interactive/perchlive-rec/steer", { message: "this way" }, who);
+      assert.equal(r.status, 200, who + " steer");
+      r = await perchPost("/interactive/perchlive-rec/answer", { requestId: "q1", value: "yes" }, who);
+      assert.equal(r.status, 200, who + " answer");
+      await tick();
+      const spawns = rec.filter((c) => c[0] === "spawn").map((c) => c[1]);
+      const messages = rec.filter((c) => c[0] === "message").map((c) => c[1]);
+      assert.deepEqual(spawns, [want, want, want, want], who + ": spawn, dispatch, give, new task");
+      assert.deepEqual(messages, [{ principal: want }, { principal: want }, { principal: want }, { principal: want }], who + ": composer + turn 1 of each start");
+      assert.deepEqual(rec.filter((c) => c[0] === "steer"), [["steer", 2]], "steer carries no principal");
+      assert.deepEqual(rec.filter((c) => c[0] === "answer"), [["answer", 3]], "answer carries no principal");
+    }
+  } finally { setStatus(null); }
+});
+
+test("an SSO session's Perch message reaches the real engine as other: a child holding blocks is cycled off them (I1)", async () => {
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  const row = rowFor(r.threadId);
+  assert.equal(engine.sessionServicesLive(row.id), true);
+  const saved = recEngine.message;
+  recEngine.message = (...a) => engine.message(...a);
+  try {
+    const res = await perchPost(`/interactive/${r.sessionId}/message`, { message: "from a peer" }, "sso");
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    await tick();
+    const pi = live(state)[0];
+    assert.deepEqual(pi.blockNames(), []);
+    assert.equal(pi.turns.length, 1);
+    assert.equal(engine.sessionServicesLive(row.id), false);
+    await endTurn(pi);
+    // The owner's local session then cycles back.
+    const res2 = await perchPost(`/interactive/${r.sessionId}/message`, { message: "me" }, "local");
+    assert.equal(res2.status, 202);
+    await tick();
+    assert.ok(live(state)[0].blockNames().length >= 1);
+    assert.equal(engine.sessionServicesLive(row.id), true);
+    await endTurn(live(state)[0]);
+  } finally { recEngine.message = saved; }
   await engine.stop(r.sessionId);
 });
 
