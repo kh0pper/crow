@@ -185,7 +185,7 @@ export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, get
   const links = tabTargets(getPanel, sp ? projectValue(sp) : null).map((tt) => {
     const current = tt.id === tab ? ' aria-current="page"' : "";
     const text = t(tt.key, lang) + (tt.id === "board" && typeof n === "number" && n > 0 ? ` · ${n}` : "");
-    return `<a href="${tt.href}" class="shell-tab"${current}>${TAB_ICONS[tt.id]}<span>${escapeHtml(text)}</span></a>`;
+    return `<a href="${tt.href}" class="shell-tab" data-shell-tab="${tt.id}"${current}>${TAB_ICONS[tt.id]}<span>${escapeHtml(text)}</span></a>`;
   }).join("");
   return `<nav class="shell-tabs" aria-label="Crow">
       <div class="shell-rail-mark">${crowMarkSvg({ size: 32 })}<span>Crow</span></div>

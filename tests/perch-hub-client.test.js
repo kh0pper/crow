@@ -5962,3 +5962,14 @@ test("an ask closes the composer's + menu", async () => {
   const body = src.slice(s, braceMatchEnd(src, s) + 1);
   assert.match(body, /if\(SHEET&&SHEET\.open\) closeSheet\(\);\s*plusClose\(false\);/, "renderAsk closes the sheet and the + menu");
 });
+
+// ---- R1.2 PR 3, Task 2: the Make tab opens on This card --------------------
+test("makeTabHref: card + slug, card only, no card gives the base", async () => {
+  const makeTabHref = await extract("makeTabHref");
+  assert.equal(makeTabHref("/dashboard/make", 12, "hw-club"), "/dashboard/make?scope=card:12&project=hw-club");
+  assert.equal(makeTabHref("/dashboard/make", 12, "a b"), "/dashboard/make?scope=card:12&project=a%20b");
+  assert.equal(makeTabHref("/dashboard/make", 12, null), "/dashboard/make?scope=card:12");
+  assert.equal(makeTabHref("/dashboard/make", null, "hw-club"), "/dashboard/make");
+  assert.equal(makeTabHref("/dashboard/make?project=x", undefined, null), "/dashboard/make?project=x");
+  assert.equal(makeTabHref("/dashboard/extensions?q=artifacts", 12, null), "/dashboard/extensions?q=artifacts", "no Make panel: left alone");
+});
