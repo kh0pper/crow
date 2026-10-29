@@ -13,6 +13,7 @@
  *   - Reaching the "done" step sets onboarding_completed_at (first time only)
  *   - Done step shows a subtle CSS-only celebration + "what to try" cards
  */
+import { servicesUiEnabled } from "../../services/ui-flag.js";
 import { stepper, section, callout, button, escapeHtml, docsUrl } from "../shared/components.js";
 import { t, fill, SUPPORTED_LANGS } from "../shared/i18n.js";
 import { crowMarkSvg } from "../shared/crow-mark.js";
@@ -902,7 +903,7 @@ function renderStepBody(stem, lang, ctx = {}) {
         + renderPreviewsToggle(lang, ctx.req, ctx.previewsChecked !== false);
     case "integrations":
       return body + callout(t("onboarding.integrationsNote", lang), "info")
-        + linkWrap(deepLink(t("onboarding.openIntegrations", lang), "/dashboard/settings?section=integrations"));
+        + linkWrap(deepLink(t("onboarding.openIntegrations", lang), servicesUiEnabled() ? "/dashboard/projects" : "/dashboard/settings?section=integrations"));
     case "bot":
       // Item 5 PR1: deep-link into the guided creation wizard, not the raw panel.
       return body + linkWrap(deepLink(t("onboarding.openBotBuilder", lang), "/dashboard/bot-builder?new=1"));

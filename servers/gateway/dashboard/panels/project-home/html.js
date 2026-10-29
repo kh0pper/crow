@@ -12,6 +12,7 @@ import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { needsYouLabel } from "../board/needs-you-label.js";
 import { relativeDay } from "./data.js";
+import { servicesUiEnabled } from "../../../services/ui-flag.js";
 
 const KIND_KEY = Object.freeze({ decision: "shell.kindDecision", review: "shell.kindReview", question: "shell.kindQuestion" });
 
@@ -127,8 +128,12 @@ function sessionsSection(data, project, lang, now) {
 }
 
 /** The home page body. */
-export function projectHomeHtml(data, project, lang, { now = new Date() } = {}) {
-  return `<div class="ph" data-ph data-project-id="${Number(project.id)}" data-project-slug="${escapeHtml(project.slug)}">
+export function projectHomeHtml(data, project, lang, { now = new Date(), servicesUi = servicesUiEnabled() } = {}) {
+  // The Services link exists only while CROW_SERVICES_UI is on; off, the markup is exactly as before.
+  const services = servicesUi
+    ? `\n    <nav class="ph-head"><a class="ph-link ph-services" href="/dashboard/project/${encodeURIComponent(project.slug)}/services">${escapeHtml(t("projectHome.services", lang))}</a></nav>`
+    : "";
+  return `<div class="ph" data-ph data-project-id="${Number(project.id)}" data-project-slug="${escapeHtml(project.slug)}">${services}
     ${startSection(data, lang)}
     ${leftOffSection(data, project, lang, now)}
     ${needsSection(data, project, lang)}

@@ -88,6 +88,7 @@ import makePanel, { openMakeItem } from "./panels/make.js";
 import projectHomePanel from "./panels/project-home.js";
 import projectServicesPanel from "./panels/project-services.js";
 import { servicesUiEnabled } from "../services/ui-flag.js";
+import "../services/launcher-tile.js"; // registers the "Add a service" launcher tile
 import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
