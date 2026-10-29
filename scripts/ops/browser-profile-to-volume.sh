@@ -178,6 +178,34 @@ BUILD_NAME="${PROJECT}-crow-browser"
 CDP_PORT="$("$DOCKER" inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^CDP_PORT=\([0-9]\{1,5\}\)$/\1/p' | tail -n 1)"
 CDP_PORT="${CDP_PORT:-9222}"
 
+# ---- an earlier run must be finished first (N2) --------------------------------
+# A deadman left armed by an earlier run (killed, or a rollback that could not
+# start the container) would fire into THIS run: start the old container
+# mid-copy (a torn Cookies/Login Data in the tar) or beside the new one.
+STALE_TIMERS=""
+if command -v "$SYSTEMCTL" >/dev/null 2>&1; then
+  STALE_TIMERS="$("$SYSTEMCTL" --user list-units --state=active --plain --no-legend "crow-browser-deadman-${PROJECT}-*.timer" 2>/dev/null | awk '{print $1}' | grep . || true)"
+fi
+STALE_STATES=""
+for st in "$INSTANCE_HOME"/browser-profile-backup/*/state; do
+  [ -f "$st" ] || continue
+  case "$(cat "$st" 2>/dev/null)" in armed|start-failed) STALE_STATES="$STALE_STATES $(dirname "$st")" ;; esac
+done
+if [ -n "$STALE_TIMERS$STALE_STATES" ]; then
+  {
+    echo "[profile-to-volume] REFUSED: an earlier migration of $PROJECT may still be in flight:"
+    for t in $STALE_TIMERS; do echo "[profile-to-volume]   active deadman timer: $t"; done
+    for d in $STALE_STATES; do echo "[profile-to-volume]   backup state '$(cat "$d/state" 2>/dev/null)': $d"; done
+    echo "[profile-to-volume] Resolve it first:"
+    echo "[profile-to-volume]   1. make sure no browser-profile-to-volume.sh is running (pgrep -af browser-profile-to-volume)"
+    echo "[profile-to-volume]   2. check the container: docker inspect $CONTAINER --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}'"
+    echo "[profile-to-volume]      (bring it back if needed: docker update --restart=unless-stopped $CONTAINER && docker start $CONTAINER)"
+    for t in $STALE_TIMERS; do echo "[profile-to-volume]   3. systemctl --user stop $t"; done
+    for d in $STALE_STATES; do echo "[profile-to-volume]   4. echo resolved > $d/state   (then remove that backup with --delete-backup once you are sure)"; done
+  } >&2
+  exit 1
+fi
+
 say "container:  $CONTAINER (project $PROJECT, running=$WAS_RUNNING, restart=$POLICY)"
 say "bundle dir: $BUNDLE_DIR"
 say "old image:  kept as $PREV_TAG (the rollback image; prune-proof)"

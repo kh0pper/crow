@@ -76,6 +76,7 @@ exit 0
 `;
 const SYSTEMCTL = `#!/usr/bin/env bash
 echo "systemctl $*" >> "$FAKE/calls"
+if [ "$2" = list-units ]; then [ -n "$FAKE_ACTIVE_TIMER" ] && echo "$FAKE_ACTIVE_TIMER loaded active waiting deadman"; exit 0; fi
 [ "$3" = "$(cat "$FAKE/deadman-unit" 2>/dev/null).timer" ] && touch "$FAKE/deadman-stopped"
 exit 0
 `;
@@ -109,7 +110,7 @@ function setup(over = {}) {
     FAKE_FAIL: over.fail ?? "", FAKE_UP_EXIT: over.upExit ?? "0", FAKE_UP_REPLACES: over.upReplaces ?? "", FAKE_SLOW_BUILD: over.slowBuild ?? "",
     FAKE_SLOW_CP: over.slowCp ?? "", FAKE_COMPOSE_VERSION: over.composeVersion ?? "5.1.2",
     CROW_MIGRATE_SYSTEMD_RUN: join(dir, "systemd-run"), CROW_MIGRATE_SYSTEMCTL: join(dir, "systemctl"),
-    CROW_MIGRATE_DEADMAN_SECS: over.deadmanSecs ?? "900",
+    CROW_MIGRATE_DEADMAN_SECS: over.deadmanSecs ?? "900", FAKE_ACTIVE_TIMER: over.activeTimer ?? "",
     CROW_MIGRATE_NOW: "20261029-120000", CROW_MIGRATE_CDP_WAIT: "1", CROW_MIGRATE_CLOSE_WAIT: "1",
   };
   const run = (args) => {
@@ -192,6 +193,37 @@ test("refusals before any change: outside tmux/screen without --no-tty-guard; Co
   assert.match(o.out, /Docker Compose 2\.21\.0 is older than 2\.23\.1/);
   assert.ok(!o.calls.some((c) => MUTATING.test(c)));
   assert.equal(setup({ composeVersion: "2.23.1" }).run([...ARGS, "--dry-run"]).code, 0);
+});
+
+test("N2: an earlier run still in flight (an active deadman timer, or a backup 'armed' / 'start-failed') refuses before any change, with how to clear it", () => {
+  const t = setup({ activeTimer: "crow-browser-deadman-browser-20261029-110000.timer" });
+  const r = t.run(ARGS);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /an earlier migration of browser may still be in flight/);
+  assert.match(r.out, /active deadman timer: crow-browser-deadman-browser-20261029-110000\.timer/);
+  assert.match(r.out, /systemctl --user stop crow-browser-deadman-browser-20261029-110000\.timer/);
+  assert.ok(!r.calls.some((c) => MUTATING.test(c)), r.calls.join(" | "));
+  assert.ok(r.calls.some((c) => /^systemctl --user list-units --state=active --plain --no-legend crow-browser-deadman-browser-\*\.timer$/.test(c)), "it looked for this project's timers only");
+  assert.equal(t.run([...ARGS, "--dry-run"]).code, 1, "a dry run reports it too");
+  for (const state of ["armed", "start-failed"]) {
+    const s = setup();
+    const old = join(s.home, "browser-profile-backup", "20261029-100000");
+    mkdirSync(old, { recursive: true });
+    writeFileSync(join(old, "state"), state + "\n");
+    const o = s.run(ARGS);
+    assert.equal(o.code, 1, state);
+    assert.match(o.out, new RegExp(`backup state '${state}': ${old.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(o.out, /echo resolved > .*\/state/);
+    assert.ok(!o.calls.some((c) => MUTATING.test(c)), state);
+  }
+  // Finished runs do not block (done, rolled-back, replaced, fired, resolved).
+  for (const state of ["done", "rolled-back", "replaced", "fired", "resolved"]) {
+    const s = setup();
+    const old = join(s.home, "browser-profile-backup", "20261029-100000");
+    mkdirSync(old, { recursive: true });
+    writeFileSync(join(old, "state"), state + "\n");
+    assert.equal(s.run([...ARGS, "--dry-run"]).code, 0, state);
+  }
 });
 
 test("a failure before the new container is up puts everything back and starts the OLD container, unchanged", () => {
