@@ -20,7 +20,7 @@ import { actorSignRouter } from "../servers/gateway/routes/actor-sign.js";
 import { createBotHostCallerResolver } from "../servers/gateway/bot-host-caller.js";
 import {
   initGatewayActorKey, _resetActorKeyForTest, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig,
-  verifyBoardThreadActorSig, verifyPeerRelayActorSig, verifyServiceActorSig, presignActors, _resetPresignedForTest,
+  verifyBoardThreadActorSig, verifyPeerRelayActorSig, presignActors, _resetPresignedForTest,
   signPeerRelayActor, signBoardActor, signActor,
 } from "../scripts/pi-bots/actor-sig.mjs";
 
@@ -36,7 +36,7 @@ const hostUnit = (template, instance) => ({
 const ME = hostUnit("bridge", "alpha");
 let units = [ME];
 let envFiles = {}; // path -> instance config text (filled in before())
-const ALL = ["bot", "board", "artifacts", "board-thread", "peer-relay", "service"];
+const ALL = ["bot", "board", "artifacts", "board-thread", "peer-relay"];
 
 before(async () => {
   assert.ok(process.env.CROW_SUITE_SCRATCH, "runs only in the scratch suite env");
@@ -121,7 +121,6 @@ test("a bot host's main process gets every kind for a live session; only sigs co
   assert.equal(verifyArtifactsActorSig({ ...t, sig: s.artifacts }), true);
   assert.equal(verifyBoardThreadActorSig({ ...t, sig: s["board-thread"] }), true);
   assert.equal(verifyPeerRelayActorSig({ ...t, sig: s["peer-relay"] }), true);
-  assert.equal(verifyServiceActorSig({ ...t, sig: s.service }), true);
   for (const l of cap.lines) for (const sig of Object.values(s)) assert.ok(!l.includes(sig), "no signature in a log line");
 });
 
@@ -266,4 +265,26 @@ test("the tuple matches its session with fields trimmed on both sides, as the MA
   const r = await ask({ ...LIVE(), threadId: " t-100 ", kinds: ["peer-relay"] });
   assert.equal(r.status, 200, "a padded thread is the same thread: " + r.text);
   assert.equal(verifyPeerRelayActorSig({ ...LIVE(), sig: r.json.sigs["peer-relay"] }), true, "and signs the trimmed tuple");
+});
+
+// Adversarial review I1: no "service" kind in this PR.
+test("the signing relay refuses kind 'service'", async () => {
+  const r = await ask({ ...LIVE(), kinds: ["service"] });
+  assert.equal(r.status, 400, r.text);
+  assert.equal(r.json?.sigs, undefined);
+  const mixed = await ask({ ...LIVE(), kinds: ["peer-relay", "service"] });
+  assert.equal(mixed.status, 400, "never a partial answer: " + mixed.text);
+  assert.equal((await ask({ ...LIVE(), kinds: ["peer-relay"] })).status, 200, "positive control");
+});
+
+// Adversarial review M3: a job/board-gateway session is signed only with a job this host claimed.
+test("a board-gateway session is signed only for a job this host claimed", async () => {
+  const CARD = { botId: "hank", sessionId: SESS.card, threadId: "board-card-5", gatewayType: "board" };
+  let r = await ask({ ...CARD, kinds: ["peer-relay"] });
+  assert.equal(r.status, 403, "no job: " + r.text);
+  r = await ask({ ...CARD, jobId: "job-elsewhere-1", kinds: ["peer-relay"] });
+  assert.equal(r.status, 403, "another host's job: " + r.text);
+  r = await ask({ ...CARD, jobId: "job-run-1", kinds: ["peer-relay", "board"] });
+  assert.equal(r.status, 200, "its own claimed job: " + r.text);
+  assert.equal(verifyPeerRelayActorSig({ ...CARD, sig: r.json.sigs["peer-relay"] }), true);
 });

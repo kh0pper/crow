@@ -55,8 +55,10 @@ export function remoteServersForBot(def) {
 /**
  * Mint per-(instance,capability) stdio forward-proxy blocks for a bot.
  *
- * Item 46 PR-B (the operator's ruling): no pair key, signing key or peer bearer ever
- * reaches a bot or pi process. The proxy therefore never talks to the peer: it
+ * Item 46 PR-B (the operator's ruling): no pair key, signing key or peer bearer
+ * is handed to a bot or pi process (a bot with an open shell can still read
+ * the credential files under CROW_HOME by path; see
+ * docs/architecture/instances.md). The proxy therefore never talks to the peer: it
  * calls the gateway's loopback relay (servers/gateway/routes/peer-relay.js)
  * with the path-scoped relay token and its signed actor headers, and the
  * gateway forwards. A block's env is exactly the relay env below; it names no

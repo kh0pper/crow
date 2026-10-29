@@ -189,7 +189,13 @@ test("RA-V8 stale in both directions, pre_boot", () => {
   assert.equal(verify(sign({ now: NOW + 59_000 })).ok, true);
   _resetRemoteActorNonces();
   assert.equal(verify(sign(), { processStartMs: NOW + 1 }).reason, "pre_boot");
-  assert.equal(verify(sign(), { processStartMs: NOW }).ok, true);
+  // Adversarial review M2: within the skew window after boot a header may predate it.
+  _resetRemoteActorNonces();
+  assert.equal(verify(sign(), { processStartMs: NOW }).reason, "pre_boot");
+  _resetRemoteActorNonces();
+  assert.equal(verify(sign(), { processStartMs: NOW - 60_000 + 1 }).reason, "pre_boot");
+  _resetRemoteActorNonces();
+  assert.equal(verify(sign(), { processStartMs: NOW - 60_000 }).ok, true);
 });
 
 test("RA-V9 name is sanitized on verify", () => {
@@ -368,4 +374,34 @@ test("unsigned path strips caller-supplied actor headers, keeps the rest", async
   seen.length = 0;
   await withKey("u", plain);
   assert.equal(seen[0], plain);
+});
+
+// Adversarial review M1: the review's sequence. A header 60 s ahead of the
+// receiver's clock is accepted once, refused as a replay at the skew edge, and
+// must still be refused 120 s later (it used to pass again there).
+test("M1: a replay at the far skew boundary is refused", () => {
+  const T = NOW;
+  const h = sign({ now: T + 60_000 });
+  assert.equal(verify(h, { now: T }).ok, true, "first use");
+  assert.equal(verify(h, { now: T + 60_000 }).reason, "replay");
+  const late = verify(h, { now: T + 120_000 });
+  assert.equal(late.ok, false, "never a second acceptance");
+  assert.match(late.reason, /^(replay|stale)$/);
+  for (const dt of [1, 59_999, 60_000, 60_001, 119_999, 120_000, 120_001]) {
+    assert.equal(verify(h, { now: T + dt }).ok, false, `t+${dt}`);
+  }
+});
+
+// Adversarial review M2: the review's sequence. A header captured before a
+// receiver restart (sender clock ahead) must not replay after it.
+test("M2: a header captured before a restart is not accepted after it", () => {
+  const T = NOW;
+  const h = sign({ now: T + 50_000 });   // sender's clock 50 s ahead
+  assert.equal(verify(h, { now: T, processStartMs: 0 }).ok, true, "accepted by the old process");
+  _resetRemoteActorNonces();             // the receiver restarts: nonces are gone
+  const replay = verify(h, { now: T + 20_000, processStartMs: T + 10_000 });
+  assert.equal(replay.ok, false, "the replay after the restart");
+  assert.equal(replay.reason, "pre_boot");
+  // A fresh header 60 s after that boot is accepted again (positive control).
+  assert.equal(verify(sign({ now: T + 70_000 }), { now: T + 70_000, processStartMs: T + 10_000 }).ok, true);
 });

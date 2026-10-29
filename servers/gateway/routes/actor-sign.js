@@ -38,7 +38,10 @@
  * classifyPeer (servers/shared/peer-class.js), which reads the TCP socket and
  * answers "local" only for a loopback socket carrying no forwarding or
  * tailscale-* header; step 2 reads the kernel and systemd. A local process
- * can set any header it likes and gain nothing.
+ * gains nothing by setting a header. The caller check protects against
+ * callers that cannot run code as the gateway's user (an SSRF-style fetch
+ * tool, another uid, a container); it is not protection against a bot with
+ * a shell, which can rewrite a host's code (see bot-host-caller.js).
  *
  * Mountable on a bare express app: every dependency is a function parameter.
  */
@@ -160,6 +163,9 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
       let def = null;
       try { def = row.definition ? JSON.parse(row.definition) : null; } catch { def = null; }
       if (!(await hostsTurn(who.template, def, gatewayType))) return fail(403, `this bot host does not host the bot on gateway '${gatewayType ?? ""}'`);
+      // A job turn (card execution, a generic job) is any bot's: only the job
+      // this host claimed binds it to this host, session or not (step 6).
+      if (JOB_GATEWAYS.has(gatewayType) && (jobId === undefined || jobId === "")) return fail(403, "a job turn is signed only with the job this host claimed");
 
       // 6. A live session (or running job) of that bot, for exactly its tuple.
       if (jobId !== undefined && jobId !== "") {

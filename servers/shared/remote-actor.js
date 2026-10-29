@@ -18,6 +18,7 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { pairSubkeyFor, PAIR_SUBKEY_LABELS } from "./pair-subkey.js";
 import { BOT_ID_RE } from "../../scripts/pi-bots/bot-workspace-env.mjs";
+import { testTunableMs } from "./test-timing.js";
 import { sanitizeActorName } from "../../scripts/pi-bots/actor-env.mjs";
 
 export const REMOTE_ACTOR_HEADER = "x-crow-remote-actor";
@@ -26,7 +27,15 @@ export const REMOTE_ACTOR_SIG_HEADER = "x-crow-remote-actor-sig";
 const MAC_PREFIX = "crow-remote-actor/v1\n";
 const MAX_HEADER = 2048;
 const SKEW_MS = 60_000;
-const NONCE_TTL_MS = 120_000;
+// A header is acceptable while |now - ts| <= SKEW_MS, so its nonce must be
+// remembered until now > ts + SKEW_MS: it expires at ts + SKEW_MS + 1. (A TTL
+// counted from first use let a header dated SKEW_MS ahead pass twice.)
+// After a restart the nonce memory is empty, and a sender clock up to SKEW_MS
+// ahead could date a header captured before the restart after it; so headers
+// dated within the first BOOT_GRACE_MS after boot are pre_boot (a weaker
+// label for at most that long, never a refusal). The suite's multi-gateway
+// tests shorten it (testTunableMs: only inside the scratch suite env).
+const BOOT_GRACE_MS = testTunableMs("CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS", SKEW_MS);
 const NONCE_CAP = 2000;
 const LOG_WINDOW_MS = 3_600_000;
 const LOG_CAP = 1024;
@@ -185,7 +194,7 @@ const fail = (reason) => ({ ok: false, reason });
 
 /** Verify a request's remote-actor headers. Never throws. */
 export function verifyRemoteActor({
-  headers, body, peerId, localId, mount, keyLookup, now = Date.now(), processStartMs = PROCESS_START_MS,
+  headers, body, peerId, localId, mount, keyLookup, now = Date.now(), processStartMs = PROCESS_START_MS, bootGraceMs = BOOT_GRACE_MS,
 } = {}) {
   try {
     const value = headers?.[REMOTE_ACTOR_HEADER];
@@ -216,18 +225,18 @@ export function verifyRemoteActor({
     if (p.aud !== localId) return fail("aud_mismatch");
     if (p.mount !== mount) return fail("mount_mismatch");
     if (Math.abs(now - p.ts) > SKEW_MS) return fail("stale");
-    if (p.ts < processStartMs) return fail("pre_boot");
+    if (p.ts < processStartMs + bootGraceMs) return fail("pre_boot");
     let dig = null;
     if (isToolCall(body)) { try { dig = toolCallDigest(body); } catch { dig = null; } }
     if (dig === null || dig !== p.dig) return fail("digest_mismatch");
 
     let bucket = nonceBuckets.get(peerId);
     const exp = bucket?.get(p.nonce);
-    if (exp !== undefined && exp > now) return fail("replay");
+    if (exp !== undefined && exp >= now) return fail("replay");
     if (!bucket) { bucket = new Map(); nonceBuckets.set(peerId, bucket); }
-    for (const [n, e] of bucket) if (e <= now) bucket.delete(n);
+    for (const [n, e] of bucket) if (e < now) bucket.delete(n);
     if (bucket.size >= NONCE_CAP) return fail("replay_cache_full");
-    bucket.set(p.nonce, now + NONCE_TTL_MS);
+    bucket.set(p.nonce, p.ts + SKEW_MS + 1);
 
     const name = sanitizeActorName(p.name.replace(/[()[\]]/g, ""), p.bot);
     return { ok: true, actor: { bot: p.bot, name, src: p.src } };

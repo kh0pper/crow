@@ -8,9 +8,10 @@ import {
   setActorKey, signActor, verifyActorSig, _resetActorKeyForTest, initGatewayActorKey,
   signBoardActor, signArtifactsActor, signBoardThreadActor,
   SESSION_ACTOR_KINDS, signSessionActor, verifySessionActorSig,
-  signPeerRelayActor, verifyPeerRelayActorSig, signServiceActor, verifyServiceActorSig,
+  signPeerRelayActor, verifyPeerRelayActorSig,
   presignActors, _resetPresignedForTest,
 } from "../scripts/pi-bots/actor-sig.mjs";
+import * as actorSig from "../scripts/pi-bots/actor-sig.mjs";
 
 const KEY_HEX = "11".repeat(32);
 const S = { botId: "hank", sessionId: "7", threadId: "discord:42", gatewayType: "discord" };
@@ -18,9 +19,14 @@ const hmac = (msg) => createHmac("sha256", Buffer.from(KEY_HEX, "hex")).update(m
 
 beforeEach(() => { _resetActorKeyForTest(); _resetPresignedForTest(); });
 
-test("the session kinds are exactly peer-relay and service", () => {
-  assert.deepEqual([...SESSION_ACTOR_KINDS], ["peer-relay", "service"]);
+test("the only session kind is peer-relay; no service kind is minted or exported", () => {
+  assert.deepEqual([...SESSION_ACTOR_KINDS], ["peer-relay"]);
   assert.ok(Object.isFrozen(SESSION_ACTOR_KINDS));
+  assert.equal(actorSig.signServiceActor, undefined);
+  assert.equal(actorSig.verifyServiceActorSig, undefined);
+  initGatewayActorKey();
+  assert.equal(signSessionActor({ kind: "service", ...S }), null, "no code path mints a service signature");
+  assert.equal(actorSig.signKindForTuple("service", S), null);
 });
 
 test("v2 vectors: the MAC is JSON(['crow-actor-v2', kind, bot, session, thread, gateway]), trimmed", () => {
@@ -30,8 +36,6 @@ test("v2 vectors: the MAC is JSON(['crow-actor-v2', kind, bot, session, thread, 
   assert.equal(signSessionActor({ kind: "peer-relay", ...S }), want);
   assert.equal(signPeerRelayActor({ ...S, sessionId: 7 }), want, "a numeric id signs as its decimal string");
   assert.equal(signPeerRelayActor({ botId: " hank ", sessionId: " 7 ", threadId: " discord:42", gatewayType: "discord " }), want);
-  const svc = hmac(JSON.stringify(["crow-actor-v2", "service", "hank", "7", "", ""]));
-  assert.equal(signServiceActor({ botId: "hank", sessionId: "7" }), svc);
 });
 
 test("v1 kinds are byte-identical to before", () => {
@@ -51,11 +55,9 @@ test("a v2 signature for session 7 fails for session 8, another bot, another kin
   assert.equal(verifyPeerRelayActorSig({ ...S, botId: "other", sig }), false, "bound to the bot");
   assert.equal(verifyPeerRelayActorSig({ ...S, threadId: "discord:43", sig }), false, "bound to the thread");
   assert.equal(verifyPeerRelayActorSig({ ...S, gatewayType: "gmail", sig }), false, "bound to the gateway");
-  assert.equal(verifyServiceActorSig({ ...S, sig }), false, "a peer-relay signature is not a service one");
-  assert.equal(verifyPeerRelayActorSig({ ...S, sig: signServiceActor(S) }), false, "nor the reverse");
   assert.equal(verifyActorSig({ kind: "peer-relay", ...S, sig }), false, "not a v1 signature of the same kind");
   assert.equal(verifyPeerRelayActorSig({ ...S, sig: signActor({ kind: "peer-relay", ...S }) }), false, "a v1 one is not a v2 one");
-  assert.equal(verifySessionActorSig({ kind: "service", ...S, sig: signServiceActor(S) }), true, "service positive control");
+  assert.equal(verifySessionActorSig({ kind: "peer-relay", ...S, sig }), true, "the generic verifier agrees");
 });
 
 test("v2 refuses a session id that is not a positive decimal integer, and kinds outside the set", () => {
@@ -93,7 +95,6 @@ test("presign: a key-less process uses its gateway's signatures for the exact tu
     artifacts: signArtifactsActor(S),
     "board-thread": signBoardThreadActor(S),
     "peer-relay": signPeerRelayActor(S),
-    service: signServiceActor(S),
   };
   _resetActorKeyForTest();
   const { srv, seen, url } = await signingRelay(() => ({ body: { sigs: want } }));
@@ -111,7 +112,6 @@ test("presign: a key-less process uses its gateway's signatures for the exact tu
     assert.equal(signArtifactsActor(S), want.artifacts);
     assert.equal(signBoardThreadActor(S), want["board-thread"]);
     assert.equal(signPeerRelayActor(S), want["peer-relay"]);
-    assert.equal(signServiceActor(S), want.service);
     // Exact tuple only.
     assert.equal(signPeerRelayActor({ ...S, sessionId: "8" }), null, "another session");
     assert.equal(signPeerRelayActor({ ...S, botId: "other" }), null, "another bot");
@@ -160,7 +160,7 @@ test("presign: a kind the gateway did not return, or one never asked for, is not
   try {
     assert.equal(await presignActors({ gatewayUrl: url, ...S, kinds: ["peer-relay"] }), true);
     assert.equal(signPeerRelayActor(S), "c".repeat(64));
-    assert.equal(signServiceActor(S), null, "service was not requested");
+    assert.equal(signSessionActor({ kind: "service", ...S }), null, "a returned service sig is never cached");
     assert.equal(signArtifactsActor(S), null, "artifacts was not returned");
   } finally { await close(srv); }
 });

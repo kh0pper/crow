@@ -7,6 +7,7 @@
  * peer identity is set by a stand-in for instanceAuthMiddleware (req.instanceAuth), as the bearer check would.
  * Every negative leg has a positive control in the same harness, and no failure ever refuses the call.
  */
+import "./fixtures/short-boot-grace.mjs"; // before remote-actor.js loads
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, chmodSync, mkdtempSync, rmSync } from "node:fs";

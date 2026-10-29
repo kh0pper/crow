@@ -128,6 +128,10 @@ export class Instance {
       // Every child, new and old tree: Hyperswarm never carries instance
       // sync here, so tailnet is the only sync transport.
       CROW_INSTANCE_SYNC_HYPERSWARM: "0",
+      // remote-actor.js treats headers dated in the first minute after boot as
+      // pre_boot (servers/shared/test-timing.js: honoured only in the suite's
+      // scratch env); these gateways sign and verify seconds after they start.
+      CROW_TEST_REMOTE_ACTOR_BOOT_GRACE_MS: "250",
     });
     if (this.sync) {
       Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP }, SYNC_TIMING);

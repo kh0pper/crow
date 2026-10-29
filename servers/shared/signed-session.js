@@ -1,8 +1,8 @@
 /**
  * The bot session a session-bound actor signature names (item 46 PR-B).
  *
- * A v2 actor signature (scripts/pi-bots/actor-sig.mjs, kinds "peer-relay" and
- * "service") binds a bot_sessions.id. The signature proves which session the
+ * A v2 actor signature (scripts/pi-bots/actor-sig.mjs, kind "peer-relay")
+ * binds a bot_sessions.id. The signature proves which session the
  * gateway signed for; this check says whether that session may still act: the
  * row exists, belongs to the signed bot, is not archived, and has not ended
  * (status "done" or "stopped"). Everything a session-scoped mount needs about
@@ -10,8 +10,8 @@
  * request.
  *
  * Shared by the peer relay (servers/gateway/routes/peer-relay.js), the loopback
- * signing relay (servers/gateway/routes/actor-sign.js) and, later, the
- * project-services mount. `db` is any client with the libsql `execute` shape.
+ * signing relay (servers/gateway/routes/actor-sign.js). `db` is any client
+ * with the libsql `execute` shape.
  */
 
 const ENDED = new Set(["done", "stopped"]);

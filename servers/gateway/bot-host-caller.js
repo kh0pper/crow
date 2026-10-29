@@ -42,6 +42,13 @@
  * same-uid process cannot pull the host's socket out of it (pidfd_getfd needs
  * ptrace rights) or inject into it; root (who writes /etc) is trusted.
  *
+ * What this does NOT stop: code running as the gateway's user. A host's code
+ * and the node its PATH resolves (the checkout, ~/.nvm) are writable by that
+ * user, and a host restarts by itself (the bridge tick every minute), so a bot
+ * with an open shell can plant code that then runs as a legitimate MainPID.
+ * The check protects only against callers that cannot run code: an SSRF-style
+ * fetch tool, another uid, a container. Only a dedicated bot user closes this.
+ *
  * Every reader is a function parameter with a production default.
  */
 import { execFile } from "node:child_process";
@@ -59,6 +66,8 @@ const UNIT_RE = /^(?:pibot-(bridge|gateways|discord)@([A-Za-z0-9_.:-]+)|pibot-(d
 const LIVE_STATES = new Set(["active", "activating", "reloading"]);
 export const SYSTEM_UNIT_DIRS = Object.freeze(["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"]);
 const ENV_FILE_RE = /^\/etc\/crow\/pibot-([A-Za-z0-9_.:-]+)\.env$/;
+const REJECT_LOG_WINDOW_MS = 3_600_000;
+const REJECT_LOG_CAP = 256;
 const UNIT_PROPS = ["Id", "MainPID", "ActiveState", "Transient", "FragmentPath", "ControlGroup", "EnvironmentFiles"];
 
 export function isBotHostUnit(name) { return typeof name === "string" && UNIT_RE.test(name); }
@@ -184,6 +193,7 @@ export function hostDbPathFromEnv(env) {
  * @param {(name:"tcp"|"tcp6") => string} [o.readProcNet]  default: procfs
  * @param {string} [o.userUnitDir]          the one fragment dir allowed in user mode
  * @param {() => number} [o.now]
+ * @param {(line:string) => void} [o.log]  where a unit's rejection reason goes (once an hour each)
  * @param {number} [o.cacheMs]       unit list lifetime
  * @param {number} [o.refreshMinMs]  minimum gap between two unit-list reads
  */
@@ -191,6 +201,7 @@ export function createBotHostCallerResolver({
   manager = configuredManager(), listUnits = defaultListUnits, readFdLinks = defaultReadFdLinks,
   readCgroups = defaultReadCgroups, readStartTime = defaultReadStartTime, readEnvFile = defaultReadEnvFile,
   readProcNet, userUnitDir = join(homedir(), ".config", "systemd", "user"), now = () => Date.now(),
+  log = (m) => console.warn(m),
   cacheMs = 5000, refreshMinMs = 500,
 } = {}) {
   const mgr = manager === "user" ? "user" : "system";
@@ -199,26 +210,51 @@ export function createBotHostCallerResolver({
   let lastAttempt = -Infinity;
   let inflight = null;
 
-  /** One unit record → a qualified host { unit, pid, cgroup, template, instance, hostDbPath, start } | null. */
-  function qualify(u) {
-    if (!u || !LIVE_STATES.has(u.state) || !Number.isSafeInteger(u.pid) || u.pid <= 1) return null;
+  // Why a unit did not qualify, once per (unit, reason) per hour: an operator
+  // drop-in (a second EnvironmentFile, say) must not disable signing silently.
+  // Unit names and reasons only, never a config file's content.
+  const rejectLogged = new Map();
+  function noteReject(unit, reason) {
+    const k = `${unit}\n${reason}`;
+    const t = now();
+    const last = rejectLogged.get(k);
+    if (last !== undefined && t - last < REJECT_LOG_WINDOW_MS) return;
+    rejectLogged.delete(k);
+    if (rejectLogged.size >= REJECT_LOG_CAP) rejectLogged.delete(rejectLogged.keys().next().value);
+    rejectLogged.set(k, t);
+    try { log(`[actor-sign] bot host unit ${unit} does not qualify: ${reason}`); } catch { /* never fatal */ }
+  }
+
+  /** One unit record → a qualified host, or { reject } naming why not. */
+  function qualifyOrReason(u) {
+    if (!u || !LIVE_STATES.has(u.state) || !Number.isSafeInteger(u.pid) || u.pid <= 1) return { reject: null }; // not running: not worth a line
     const t = unitTemplate(u.unit);
-    if (!t || u.transient !== "no" || !u.cgroup) return null;
+    if (!t) return { reject: null };
+    if (u.transient !== "no") return { reject: "transient unit" };
+    if (!u.cgroup) return { reject: "no control group" };
     const frag = String(u.fragment || "");
-    if (!frag.startsWith("/") || normalize(frag) !== frag || !fragmentDirs.includes(dirname(frag)) || basename(frag) !== t.templateFile) return null;
+    if (!frag.startsWith("/") || normalize(frag) !== frag || !fragmentDirs.includes(dirname(frag))) return { reject: `unit file outside the allowed directories (${mgr} manager)` };
+    if (basename(frag) !== t.templateFile) return { reject: `unit file is not the installed template ${t.templateFile}` };
     // The instance config: exactly one root-owned /etc/crow/pibot-<instance>.env.
     const files = Array.isArray(u.envFiles) ? u.envFiles : [];
-    if (files.length !== 1) return null;
+    if (files.length !== 1) return { reject: `needs exactly one environment file, has ${files.length}` };
     const m = ENV_FILE_RE.exec(files[0]);
-    if (!m || (t.instance !== null && m[1] !== t.instance)) return null;
+    if (!m) return { reject: "environment file is not /etc/crow/pibot-<instance>.env" };
+    if (t.instance !== null && m[1] !== t.instance) return { reject: "environment file names another instance" };
     let ef;
-    try { ef = readEnvFile(files[0]); } catch { return null; }
-    if (!ef || !ef.isFile || ef.uid !== 0 || (ef.mode & 0o022) !== 0) return null;
+    try { ef = readEnvFile(files[0]); } catch { return { reject: "environment file unreadable" }; }
+    if (!ef || !ef.isFile || ef.uid !== 0 || (ef.mode & 0o022) !== 0) return { reject: "environment file is not a root-owned file closed to group and other writes" };
     const hostDbPath = hostDbPathFromEnv(parseEnvFile(ef.text));
-    if (!hostDbPath) return null;
+    if (!hostDbPath) return { reject: "environment file names no database (CROW_DB_PATH or CROW_DATA_DIR)" };
     let start;
-    try { start = String(readStartTime(u.pid)); } catch { return null; }
-    return { unit: u.unit, pid: u.pid, cgroup: u.cgroup, template: t.template, instance: t.instance, hostDbPath, start };
+    try { start = String(readStartTime(u.pid)); } catch { return { reject: "main process start time unreadable" }; }
+    return { host: { unit: u.unit, pid: u.pid, cgroup: u.cgroup, template: t.template, instance: t.instance, hostDbPath, start } };
+  }
+
+  function qualify(u) {
+    const r = qualifyOrReason(u);
+    if (r.reject) noteReject(u.unit, r.reject);
+    return r.host || null;
   }
 
   async function read() {

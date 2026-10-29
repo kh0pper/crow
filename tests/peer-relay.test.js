@@ -85,6 +85,7 @@ before(async () => {
   ins.run(ECHO, "echo", ECHO, `http://127.0.0.1:${upstreamPort}/echo`);
   const def = { tools: { remote_mcp: [`${BRAVO}::crow-memory`, `${CHARLIE}::crow-memory`, `${DELTA}::crow-memory`, `${BRAVO}::crow-blog`] } };
   d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?, ?, ?)").run("hank", "Hank Bot", JSON.stringify(def));
+  d.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, ?, ?, 0)").run("dora", "Dora Bot", JSON.stringify(def));
   d.prepare("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)").run(JSON.stringify({ remote_invocation: true }));
   const sess = d.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, archived_at) VALUES (?, ?, ?, ?, ?)");
   for (const [name, bot, status, archived] of [
@@ -92,6 +93,7 @@ before(async () => {
     ["stopped", "hank", "stopped", null], ["done", "hank", "done", null], ["archived", "hank", "active", "2026-10-01 00:00:00"],
     ["otto", "otto", "active", null], ["ghost", "ghost", "active", null],
   ]) SESS[name] = Number(sess.run(bot, "discord", "discord:42", status, archived).lastInsertRowid);
+  SESS.dora = Number(sess.run("dora", "discord", "discord:42", "active", null).lastInsertRowid);
   SESS.otherThread = Number(sess.run("hank", "discord", "discord:99", "active", null).lastInsertRowid);
   SESS.otherGateway = Number(sess.run("hank", "telegram", "discord:42", "active", null).lastInsertRowid);
   ACTOR = { ...ACTOR, sessionId: String(SESS.live) };
@@ -287,7 +289,7 @@ test("forwarded: the peer sees its bearer, no actor headers, a session that roun
   assert.ok(list.headers["mcp-session-id"], "the session id reached the peer");
   assert.equal(call.headers["mcp-session-id"], list.headers["mcp-session-id"], "and round-trips");
 
-  const v = verifyRemoteActor({ headers: call.headers, body: call.body, peerId: LOCAL, localId: BRAVO, mount: "/memory", keyLookup: (id) => (id === LOCAL ? PAIR_KEYS[BRAVO] : null) });
+  const v = verifyRemoteActor({ headers: call.headers, body: call.body, peerId: LOCAL, localId: BRAVO, mount: "/memory", keyLookup: (id) => (id === LOCAL ? PAIR_KEYS[BRAVO] : null), processStartMs: 0 });
   assert.deepEqual(v, { ok: true, actor: { bot: "hank", name: "Hank Bot", src: LOCAL } });
 });
 
@@ -401,4 +403,12 @@ test("the unsigned log window runs on the injected clock", async () => {
     await send();
   } finally { cap.restore(); await r.close(); }
   assert.equal(cap.lines.filter((l) => l.startsWith("[peer-relay] forwarding unsigned")).length, 2, cap.lines.join("\n"));
+});
+
+// Adversarial review M6: a disabled bot's live session does not relay.
+test("refused: a disabled bot, even with a valid signature and a live session", async () => {
+  const dora = { ...ACTOR, botId: "dora", sessionId: String(SESS.dora) };
+  const r = await post(`/peer-relay/${BRAVO}/memory/mcp`, { headers: { Authorization: `Bearer ${relayToken}`, ...actorHeaders(dora) } });
+  assertRefused(r, 403, /not enabled/);
+  assert.equal((await post(`/peer-relay/${BRAVO}/memory/mcp`, { headers: good() })).status, 200, "positive control");
 });

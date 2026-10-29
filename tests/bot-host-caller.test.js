@@ -240,3 +240,29 @@ test("the unit list is cached, single-flight, and its refresh is rate-limited", 
   await assert.rejects(f._candidates());
   assert.equal(calls - before, 1, "one failing read per interval");
 });
+
+// Adversarial review M8: a unit that does not qualify says why, once an hour, without secrets.
+test("a unit's rejection reason is logged once per hour per unit and reason, never the config's content", async () => {
+  let t = 1_000_000;
+  const lines = [];
+  const SECRET = "CROW_DB_PATH=/srv/alpha/data/crow.db\nSOME_TOKEN=s3cr3t-canary";
+  const u = { unit: "pibot-bridge@alpha.service", pid: 4242, state: "active", transient: "no",
+    fragment: "/etc/systemd/system/pibot-bridge@.service", cgroup: "/system.slice/x", envFiles: ["/etc/crow/pibot-alpha.env", "/etc/crow/pibot-extra.env"] };
+  const r = createBotHostCallerResolver({
+    manager: "system", now: () => t, cacheMs: 0, refreshMinMs: 0, log: (m) => lines.push(m),
+    listUnits: async () => [u], readEnvFile: () => ({ isFile: true, uid: 0, mode: 0o100644, text: SECRET }), readStartTime: () => "1",
+  });
+  await r._candidates(); await r._candidates();
+  assert.equal(lines.length, 1, lines.join("\n"));
+  assert.match(lines[0], /pibot-bridge@alpha\.service/);
+  assert.match(lines[0], /environment file/i);
+  assert.ok(!lines[0].includes("s3cr3t") && !lines[0].includes("CROW_DB_PATH="), "no config content in the log");
+  t += 3_600_001;
+  await r._candidates();
+  assert.equal(lines.length, 2, "again after the hour");
+  // A qualifying unit logs nothing.
+  const ok = createBotHostCallerResolver({ manager: "system", log: (m) => lines.push(m), listUnits: async () => [{ ...u, envFiles: ["/etc/crow/pibot-alpha.env"] }],
+    readEnvFile: () => ({ isFile: true, uid: 0, mode: 0o100644, text: SECRET }), readStartTime: () => "1" });
+  assert.equal((await ok._candidates()).length, 1);
+  assert.equal(lines.length, 2);
+});

@@ -3,8 +3,8 @@
  *
  * Kinds signed with the one per-boot key (each its own MAC domain, so none
  * replays as another): "bot" (phone), "board", "board-thread", "artifacts"
- * over the v1 tuple below, and the session-bound (v2) kinds "peer-relay"
- * (the loopback relay to paired peers) and "service" (item 46 PR-B, below).
+ * over the v1 tuple below, and the session-bound (v2) kind "peer-relay"
+ * (the loopback relay to paired peers, item 46 PR-B, below).
  *
  * A bot's per-turn MCP config carries X-Crow-Actor-{Kind,Id,Thread,Gateway}
  * so /phone/mcp can attribute a call plan to the bot and deliver the result
@@ -167,7 +167,9 @@ export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = 
 // v2 or the reverse, and the kind field keeps every v2 kind its own domain.
 
 /** The kinds signed over the session-bound (v2) tuple. */
-export const SESSION_ACTOR_KINDS = Object.freeze(["peer-relay", "service"]);
+// Only "peer-relay" today. A later kind is added here with its own verifier;
+// the set is closed, so nothing can mint a v2 kind that no verifier checks.
+export const SESSION_ACTOR_KINDS = Object.freeze(["peer-relay"]);
 
 /** A bot_sessions.id as the decimal string the MAC binds, or null. */
 function sessionField(v) {
@@ -210,8 +212,8 @@ export function verifySessionActorSig({ sig, ...actor } = {}) {
 // process. The relay forwards only for a bot it verified with this signature
 // (v2: bound to the bot session, which the relay resolves and checks), then
 // signs the peer-bound tools/call with the pair subkey itself. Kind
-// "peer-relay": no phone, board, board-thread, artifacts or service
-// signature can be replayed here, nor this one there.
+// "peer-relay": no phone, board, board-thread or artifacts signature can be
+// replayed here, nor this one there.
 
 /** Signature for the peer-relay actor headers, or null without a key / bot id / session id. */
 export function signPeerRelayActor({ botId, sessionId, threadId, gatewayType } = {}) {
@@ -221,21 +223,6 @@ export function signPeerRelayActor({ botId, sessionId, threadId, gatewayType } =
 /** Constant-time check of a presented peer-relay signature. False without a key. */
 export function verifyPeerRelayActorSig({ botId, sessionId, threadId, gatewayType, sig } = {}) {
   return verifySessionActorSig({ kind: "peer-relay", botId, sessionId, threadId, gatewayType, sig });
-}
-
-// ---- service actor headers (project services, signed here, consumed later) ----
-//
-// The project-services mount resolves the signed session, then its project.
-// Kind "service": its own MAC domain.
-
-/** Signature for the service actor headers, or null without a key / bot id / session id. */
-export function signServiceActor({ botId, sessionId, threadId, gatewayType } = {}) {
-  return signSessionActor({ kind: "service", botId, sessionId, threadId, gatewayType });
-}
-
-/** Constant-time check of a presented service signature. False without a key. */
-export function verifyServiceActorSig({ botId, sessionId, threadId, gatewayType, sig } = {}) {
-  return verifySessionActorSig({ kind: "service", botId, sessionId, threadId, gatewayType, sig });
 }
 
 // ---- presigned signatures for a key-less bot host (item 46 PR-B) ----

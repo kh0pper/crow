@@ -2,8 +2,11 @@
  * Peer relay (item 46 PR-B): the ONLY path by which a pi bot reaches a paired
  * peer's MCP mount.
  *
- * The operator's ruling: no pair key, signing key or peer bearer ever reaches a bot or
- * pi process. So a bot's remote-tools proxy (scripts/pi-bots/crow-remote-proxy.mjs)
+ * The operator's ruling: no pair key, signing key or peer bearer is handed to a
+ * bot or pi process (not in its env, config or argv). This holds for a bot
+ * without a shell; a bot with an open shell running as the gateway's user can
+ * still read the credential files under CROW_HOME by path (the known residual,
+ * docs/architecture/instances.md). So a bot's remote-tools proxy (scripts/pi-bots/crow-remote-proxy.mjs)
  * never talks to a peer. It calls this loopback route on its own gateway with
  * the path-scoped relay token and the per-boot signed actor headers; this
  * gateway verifies the bot, re-checks the source-side policy, and forwards to
@@ -22,6 +25,7 @@
  *      are the signed ones (signed-session.js)                        else 401
  *   4. feature_flags.remote_invocation                               else 403
  *   5. <mount> is a remote capability                                else 404
+ *      the bot is enabled                                            else 403
  *      and the bot's row selected (instanceId, capability)          else 403
  *   6. a trusted peer row with a gateway_url                         else 404
  *      and a peer bearer                                             else 502
@@ -146,13 +150,15 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       const mount = REMOTE_CANON_MOUNT[canonicalId];
       let row = null;
       try {
-        const r = await db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id = ?", args: [bot] });
+        const r = await db.execute({ sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [bot] });
         row = r.rows[0] || null;
       } catch (err) {
         // The relay's own fault, not the bot's: never a misleading "not selected".
         console.error(`[peer-relay] bot lookup failed: ${err && err.message}`);
         return refuse(res, 503, "the peer relay could not read the bot's settings", { id });
       }
+      // A disabled bot relays nothing, whatever sessions it still has.
+      if (row && Number(row.enabled) !== 1) return refuse(res, 403, "the bot is not enabled", { id });
       let def = null;
       try { def = row && row.definition ? JSON.parse(row.definition) : null; } catch { def = null; }
       const selected = !!row && remoteServersForBot(def).some((s) => s.instanceId === instanceId && s.canonicalId === canonicalId);

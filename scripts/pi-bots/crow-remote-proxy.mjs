@@ -7,8 +7,10 @@
  * mount, and carries NO policy of its own. On any connect failure it serves an
  * empty tool list so a turn never crashes.
  *
- * Item 46 PR-B (the operator's ruling): no pair key, signing key or peer bearer ever
- * reaches a bot or pi process, so this process never talks to the peer. It
+ * Item 46 PR-B (the operator's ruling): no pair key, signing key or peer bearer
+ * is handed to a bot or pi process (a bot with an open shell can still read
+ * the credential files under CROW_HOME by path: the known residual in
+ * docs/architecture/instances.md), so this process never talks to the peer. It
  * connects to its own gateway's loopback relay (CROW_REMOTE_RELAY_URL,
  * servers/gateway/routes/peer-relay.js) with the path-scoped relay token read
  * from CROW_REMOTE_RELAY_TOKEN_PATH and the X-Crow-Actor-* headers the gateway

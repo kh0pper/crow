@@ -53,7 +53,7 @@ const deps = () => ({
 });
 const toolCalls = () => captured.filter((c) => c.body?.method === "tools/call" && c.body.params.name === "crow_tools");
 const verifyReq = (c, over = {}) => verifyRemoteActor({
-  headers: c.headers, body: c.body, peerId: LOCAL, localId: PEER, mount: "/router", keyLookup: () => KEY, ...over,
+  headers: c.headers, body: c.body, peerId: LOCAL, localId: PEER, mount: "/router", keyLookup: () => KEY, processStartMs: 0, ...over,
 });
 
 beforeEach(() => {
