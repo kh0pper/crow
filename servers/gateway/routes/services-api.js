@@ -333,7 +333,7 @@ export function servicesApiRouter({
     for (const f of service.fields) {
       if (f.kind !== "folder") continue;
       let real;
-      try { real = realpathSync(values.config[f.name]); } catch { return fail(res, "not_found", { field: f.name }); }
+      try { real = realpathSync.native(values.config[f.name]); } catch { return fail(res, "not_found", { field: f.name }); }
       const refusal = folderRefusal(real, { crowHome: home(), expectEntry: service.test?.expect_entry ?? null });
       if (refusal) return fail(res, refusal, { field: f.name });
       values.config[f.name] = real;
