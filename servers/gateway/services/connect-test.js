@@ -21,7 +21,7 @@
 import http from "node:http";
 import https from "node:https";
 import { lookup as dnsLookup } from "node:dns";
-import { realpathSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve as resolvePath, join } from "node:path";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
@@ -300,14 +300,22 @@ function realOr(p) {
  *    (checkedInstanceSecretsDirs: the scan plus every other-instance dir this instance hid before, the same rule the bot launcher uses). A scan that can't be completed, or a remembered dir that is gone or replaced, refuses (fail closed);
  *  - `not_a_vault`: `expectEntry` given and not present (a name, never a path).
  * Options: `crowHome`, `env` and `instanceScan` (passed to checkedInstanceSecretsDirs), or
- * `otherSecretsDirs` to supply the other homes' secrets dirs directly.
+ * `otherSecretsDirs` to supply the other homes' secrets dirs directly. `scanLinks` (the spawn
+ * re-check, Task 14 M4) also walks the folder and refuses it (`forbidden_target`) when any
+ * symlink inside resolves into or around a guarded dir, or when the folder holds more than
+ * MAX_LINK_SCAN_ENTRIES entries (fail closed: the walk could not finish). Symlinked folders are
+ * judged by their target and not descended; a dangling link is skipped.
  */
+export const MAX_LINK_SCAN_ENTRIES = 100_000;
+
 export function folderRefusal(path, {
   crowHome = resolveCrowHome(),
   expectEntry = null,
   env = process.env,
   instanceScan,
   otherSecretsDirs,
+  scanLinks = false,
+  maxScanEntries = MAX_LINK_SCAN_ENTRIES,
 } = {}) {
   if (typeof path !== "string" || !path.trim() || !isAbsolute(path.trim())) return "not_found";
   let real;
@@ -339,6 +347,36 @@ export function folderRefusal(path, {
       statSync(join(real, e));
     } catch {
       return "not_a_vault";
+    }
+  }
+  if (scanLinks) return plantedLinkRefusal(real, guarded, maxScanEntries);
+  return null;
+}
+
+/** M4: a symlink inside an accepted folder that leads into (or around) a guarded dir. */
+function plantedLinkRefusal(root, guarded, maxEntries) {
+  const stack = [root];
+  let seen = 0;
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;   // unreadable subfolder: the child can't read it either
+    }
+    for (const ent of entries) {
+      if (++seen > maxEntries) return "forbidden_target";
+      const p = join(dir, ent.name);
+      if (ent.isSymbolicLink()) {
+        let target;
+        try { target = realpathSync(p); } catch { continue; }
+        for (const g of guarded) {
+          if (within(target, g) || within(g, target)) return "forbidden_target";
+        }
+      } else if (ent.isDirectory()) {
+        stack.push(p);
+      }
     }
   }
   return null;

@@ -60,6 +60,7 @@ import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } 
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
 import { projectsUsingBundle } from "../../shared/service-connections.js";
+import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
@@ -4104,6 +4105,8 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
+        // Its project connections' children stop now (their rows are paused just below).
+        try { await stopChildrenForBundle(bundle_id); } catch { appendLog(job, "Warning: could not stop this extension's project connections"); }
         const keptPasswords = await markBundleKeychainRemoved(bundle_id, {
           onPaused: (projects) => {
             // The projects whose connections this uninstall paused (needs_install, secrets kept).

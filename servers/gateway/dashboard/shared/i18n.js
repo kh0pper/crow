@@ -4230,6 +4230,13 @@ export const translations = {
   "settings.integrations.sources": { en: "Set up for all of Crow", es: "Configurado para todo Crow" },
   "settings.integrations.connections": { en: "Project connections", es: "Conexiones de proyectos" },
   "settings.integrations.none": { en: "None", es: "Ninguna" },
+  // Task 14: each connection's child in Advanced (state, Restart).
+  "services.child.running": { en: "Running", es: "En marcha" },
+  "services.child.stopped": { en: "Stopped", es: "Detenido" },
+  "services.child.starting": { en: "Starting", es: "Iniciando" },
+  "services.child.error": { en: "Error", es: "Error" },
+  "services.child.cooling": { en: "Waiting after failures", es: "En espera tras fallos" },
+  "settings.integrations.restartChild": { en: "Restart", es: "Reiniciar" },
   "projectHome.services": { en: "Services", es: "Servicios" },
   "shell.addService": { en: "Add a service", es: "Añadir un servicio" },
   "services.status.active": { en: "On", es: "Activo" },

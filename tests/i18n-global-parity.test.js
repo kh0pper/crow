@@ -104,6 +104,8 @@ const IDENTICAL_OK = new Set([
   "providers.preset.groq",
   "providers.preset.together",
   "providers.preset.modelstudio",
+  // Project services Task 14: a connection's child state (the plan's exact copy)
+  "services.child.error", // "Error" is Spanish too
 ]);
 
 const keys = Object.keys(translations);
