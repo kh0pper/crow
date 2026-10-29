@@ -165,6 +165,12 @@ test("unreadable new process is a survivor", () => {
   assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: fixture(1e9), listPids: () => [9] }), [9]);
 });
 
+test("unreadable new zombie is not a survivor", () => {
+  // A same-uid zombie's environ is EACCES as well; it is dead and holds nothing.
+  const zombie = (p) => (p.endsWith("/stat") ? statLine(1e9).replace(") S ", ") Z ") : fixture(1e9)(p));
+  assert.deepEqual(survivorsByMarker("r", { sinceBootSec: 50, readProc: zombie, listPids: () => [9] }), []);
+});
+
 test("survivorsByMarker requires sinceBootSec", () => {
   assert.throws(() => survivorsByMarker("r", {}), /sinceBootSec/);
 });

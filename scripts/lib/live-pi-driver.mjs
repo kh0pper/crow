@@ -1,7 +1,7 @@
 /**
  * Live pi driver: drives a real bot turn by turn through handleInbound() inside a scratch Crow
- * home. This file holds the configuration guards (all pure) and constants; the process tree
- * helpers and runConversation are added by later tasks.
+ * home. This file is the parent: the configuration guards (all pure), the process tree helpers
+ * and runConversation, which spawns one live-pi-driver-child.mjs per thread and owns every limit.
  *
  * v1 threat model (no network namespace in live mode). Isolation is (a) the endpoint allowlist
  * below, (b) a tool surface checked before any pi spawn (checkToolSurface here, and again in the
@@ -10,16 +10,18 @@
  *
  * This module must never import the bridge, better-sqlite3 or servers/db*; a test asserts it.
  */
-import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { protectedHit, protectedRoots, realish, realUserCrowDir, within } from "./protected-paths.mjs";
 import { scratchEnv } from "./eval-scratch.mjs";
 import { INSTANCE_PATH_ENV_KEYS, PINNED_PATH_ENV_KEYS } from "../../servers/shared/crow-home.js";
 import { SECRET_NAME_RE } from "../../servers/shared/bot-env.js";
-// Imported for the later tasks (prodMaxPi default); allowed here, its imports are built-ins only.
-export { LIFECYCLE_DEFAULTS } from "../pi-bots/pi_lifecycle.mjs";
+// The prodMaxPi default; allowed here, its imports are built-ins only.
+import { LIFECYCLE_DEFAULTS } from "../pi-bots/pi_lifecycle.mjs";
+export { LIFECYCLE_DEFAULTS };
 
 /** A bad configuration. Thrown before anything spawns and never retried (D7). */
 export class DriverRefusal extends Error {
@@ -309,8 +311,8 @@ export function bootSecNow(readProc = defaultReadProc) {
  * Every pid whose environ carries CROW_EVAL_RUN_ID=<runId> exactly, whatever its age. Fails
  * closed for a process of our uid whose environ is unreadable (EACCES), but only if it started
  * at or after sinceBootSec (the run's start, seconds since boot): long-lived unreadable
- * processes (sshd, systemd --user, gpg-agent) cannot belong to the run. Other users' processes
- * and vanished pids are skipped.
+ * processes (sshd, systemd --user, gpg-agent) cannot belong to the run. Other users' processes,
+ * zombies and vanished pids are skipped.
  */
 export function survivorsByMarker(runId, { sinceBootSec, readProc = defaultReadProc, listPids = defaultListPids, uid = process.getuid() } = {}) {
   if (!Number.isFinite(sinceBootSec)) throw new DriverRefusal("survivorsByMarker requires a finite sinceBootSec");
@@ -326,10 +328,291 @@ export function survivorsByMarker(runId, { sinceBootSec, readProc = defaultReadP
         const m = /^Uid:\s+(\d+)/m.exec(readProc(`/proc/${n}/status`));
         if (!m || Number(m[1]) !== uid) continue;
         const t = readProc(`/proc/${n}/stat`);
+        if (parseStat(t)?.state === "Z") continue; // a zombie's environ is EACCES too; it is dead
         const startTicks = Number(t.slice(t.lastIndexOf(")") + 1).trim().split(/\s+/)[19]); // stat field 22
         if (!Number.isFinite(startTicks) || startTicks / clkTckHz() >= sinceBootSec) out.push(n);
       } catch { /* vanished while checking */ }
     }
   }
   return out;
+}
+
+/**
+ * survivorsByMarker until it settles: only pids present in every one of `rounds` scans `gapMs`
+ * apart. A same-uid process that is merely exiting (environ EACCES for a moment) drops out; a
+ * live one, marked or unreadable, stays.
+ */
+export async function settledSurvivorsByMarker(runId, { sinceBootSec, rounds = 3, gapMs = 300 } = {}) {
+  let left = survivorsByMarker(runId, { sinceBootSec });
+  for (let i = 1; i < rounds && left.length; i++) {
+    await sleep(gapMs);
+    const now = new Set(survivorsByMarker(runId, { sinceBootSec }));
+    left = left.filter((p) => now.has(p));
+  }
+  return left;
+}
+
+// ---------------------------------------------------------------------------------------------
+// runConversation: threads in order over one scratch home, one detached child per thread.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The bridge's own worst case on top of the turn timeout: a 60 s prompt ack, the 15 s
+ * --list-models check, two 15 s pre-prompt waits (getState, getSessionStats), the 5 s close,
+ * and 30 s margin. The bridge's timeout normally fires first (the child exits 4); the parent
+ * timer is the backstop for a wedged child.
+ */
+export const TURN_SLACK_MS = 140_000;
+export const SESSION_MISSING = "cannot find the pi session file for a completed turn; refusing to report it";
+
+const CHILD = join(import.meta.dirname, "live-pi-driver-child.mjs");
+const CROW_ROOT = join(import.meta.dirname, "..", "..");
+const ERR_TAIL_BYTES = 8192;
+const POLL_MS = 100;
+const EXIT_AFTER_KILL_MS = 10_000;
+const THREAD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** `git -C <path> rev-parse HEAD` (argv, no shell), or null. */
+const gitSha = (path) => new Promise((res) => {
+  execFile("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 10_000 }, (err, out) => {
+    const sha = String(out || "").trim();
+    res(!err && /^[0-9a-f]{40,64}$/.test(sha) ? sha : null);
+  });
+});
+
+function tailOf(path, bytes = ERR_TAIL_BYTES) {
+  let fd;
+  try { fd = openSync(path, "r"); } catch { return ""; }
+  try {
+    const size = fstatSync(fd).size;
+    const n = Math.min(size, bytes);
+    const buf = Buffer.alloc(n);
+    readSync(fd, buf, 0, n, size - n);
+    return buf.toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+/** Reads only complete lines appended since the last call (byte offset, split on raw "\n"). */
+function progressTail(path) {
+  let offset = 0;
+  let partial = Buffer.alloc(0);
+  return () => {
+    let fd;
+    try { fd = openSync(path, "r"); } catch { return []; }
+    try {
+      const size = fstatSync(fd).size;
+      if (size > offset) {
+        const buf = Buffer.alloc(size - offset);
+        const got = readSync(fd, buf, 0, buf.length, offset);
+        offset += got;
+        partial = Buffer.concat([partial, buf.subarray(0, got)]);
+      }
+    } finally { closeSync(fd); }
+    const lines = [];
+    for (let nl; (nl = partial.indexOf(0x0a)) >= 0;) {
+      const l = partial.subarray(0, nl).toString("utf8");
+      partial = partial.subarray(nl + 1);
+      if (l.trim()) lines.push(l);
+    }
+    return lines;
+  };
+}
+
+/** Each distinct piSessionId resolves to exactly one `<sessionDir>/*_<id>.jsonl`, else null. */
+function sessionPathsOf(turns, home) {
+  const byId = new Map();
+  for (const e of turns) {
+    if (typeof e.piSessionId !== "string" || !e.piSessionId || typeof e.sessionDir !== "string") return null;
+    if (byId.has(e.piSessionId) && byId.get(e.piSessionId) !== e.sessionDir) return null;
+    byId.set(e.piSessionId, e.sessionDir);
+  }
+  const out = [];
+  for (const [id, dir] of byId) {
+    if (!strictlyInside(realish(dir), home)) return null;
+    let hits;
+    try { hits = readdirSync(dir).filter((n) => n.endsWith(`_${id}.jsonl`)); } catch { return null; }
+    if (hits.length !== 1) return null;
+    out.push(join(dir, hits[0]));
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Drive `threads` in order through handleInbound, one child per thread, over the same scratch
+ * DB. Bad configuration throws DriverRefusal before anything is written or spawned; a run-time
+ * failure resolves `{ ok: false, contaminated }` and the remaining threads do not run.
+ * `parentEnv` (default process.env) is the env the child's allowlist reads; process.env itself
+ * is never written. `turnSlackMs` may be negative (tests); the parent timer is clamped to 1 s.
+ */
+export async function runConversation({
+  botDef, models, scratchHome, threads, env = {}, allowHosts = [], allowServers, allowSkills = [], piPackages = [],
+  gatewayType = "perch", piCli, turnTimeoutMs = 600_000, turnSlackMs = TURN_SLACK_MS, wallMs,
+  prodMaxPi = LIFECYCLE_DEFAULTS.maxPi, mcpOverrides = null, parentEnv = process.env, log = () => {},
+} = {}) {
+  const sinceBootSec = bootSecNow();
+  const runId = randomUUID();
+  const say = (e) => { try { log(e); } catch { /* a logging hook never breaks a run */ } };
+
+  // --- Before any spawn: every guard, then the pi agent dir. -----------------------------------
+  if (!Array.isArray(allowServers)) refuse("allowServers is required (an array)");
+  if (typeof piCli !== "string" || !isAbsolute(piCli)) refuse("piCli must be an absolute path");
+  if (!existsSync(piCli) || !statSync(piCli).isFile()) refuse(`piCli ${piCli} does not exist`);
+  if (typeof wallMs !== "number" || !Number.isFinite(wallMs) || wallMs <= 0) refuse("wallMs is required (a positive finite number of ms)");
+  if (typeof turnSlackMs !== "number" || !Number.isFinite(turnSlackMs)) refuse("turnSlackMs must be a finite number");
+  if (!Number.isInteger(prodMaxPi) || prodMaxPi < 1) refuse("prodMaxPi must be a positive integer");
+  if (typeof gatewayType !== "string" || !gatewayType) refuse("gatewayType must be a non-empty string");
+  const home = checkScratchHome(scratchHome, parentEnv);
+  checkEndpoints(models, { allowHosts, gatewayPort: parentEnv.CROW_GATEWAY_PORT });
+  checkBotDef(botDef, models, home);
+  checkToolSurface(botDef, { allowServers, allowSkills, scratchHome: home });
+  if (!Array.isArray(threads) || !threads.length) refuse("threads must be a non-empty array");
+  const ids = new Set();
+  for (const th of threads) {
+    if (!th || typeof th.id !== "string" || !THREAD_ID_RE.test(th.id)) refuse(`thread id ${th && th.id} must match ${THREAD_ID_RE}`);
+    if (ids.has(th.id)) refuse(`thread ids must be unique (${th.id} repeats)`);
+    ids.add(th.id);
+    if (!Array.isArray(th.turns) || !th.turns.length) refuse(`thread ${th.id} turns must be a non-empty array`);
+  }
+  if (!Array.isArray(piPackages)) refuse("piPackages must be an array");
+  for (const p of piPackages) {
+    if (typeof p !== "string" || !isAbsolute(p)) refuse(`piPackages entry ${p} must be an absolute path`);
+    if (!existsSync(p)) refuse(`piPackages entry ${p} does not exist`);
+  }
+  // Validates piCli, turnTimeoutMs and env; the same env serves every thread.
+  const cenv = childEnv({ home, botId: botDef.id, runId, piCli, extraEnv: env, turnTimeoutMs, parent: parentEnv });
+  const turnMs = Math.max(1000, turnTimeoutMs + turnSlackMs);
+
+  const agentDir = join(home, "pi-agent");
+  mkdirSync(agentDir, { recursive: true });
+  const providers = {};
+  for (const [name, p] of Object.entries(models.providers)) providers[name] = { ...p, apiKey: p.apiKey ?? "stub" };
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ ...models, providers }, null, 2));
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: piPackages }, null, 2));
+  // Nothing goes in <home>/.pi/agent/mcp.json: absent means no global MCP servers reach the bot.
+
+  const meta = {
+    packages: await Promise.all(piPackages.map(async (path) => ({ path, sha: await gitSha(path) }))),
+    crow_sha: await gitSha(CROW_ROOT),
+    flags: null,
+  };
+  const wallEnd = Date.now() + wallMs;
+  const out = [];
+  let contaminated = null;
+  let reason = null;
+
+  for (const thread of threads) {
+    if (Date.now() >= wallEnd) { contaminated = "conversation exceeded wallMs"; break; }
+    const r = await runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wallEnd, say, job: {
+      botDef, gatewayType, allowServers, allowSkills, prodMaxPi, capacityCount: null, mcpOverrides, runId, thread,
+    } });
+    if (meta.flags === null && r.flags) meta.flags = r.flags;
+    out.push({ id: thread.id, sessionPaths: r.sessionPaths, turns: r.turns });
+    if (r.contaminated) { contaminated = r.contaminated; reason = r.reason; break; }
+  }
+  return { ok: contaminated === null, contaminated, reason, threads: out, meta };
+}
+
+/** One thread: spawn, tail, enforce the timers, wait for exit, sweep by marker, find sessions. */
+async function runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wallEnd, say, job }) {
+  const id = thread.id;
+  const jobPath = join(home, `job-${id}.json`);
+  const progressPath = join(home, `progress-${id}.ndjson`);
+  const errPath = join(home, `driver-${id}.err`);
+  writeFileSync(jobPath, JSON.stringify(job));
+  writeFileSync(progressPath, "");
+  const outFd = openSync(join(home, `driver-${id}.out`), "a");
+  const errFd = openSync(errPath, "a");
+  let child;
+  try {
+    child = spawn(process.execPath, [CHILD, jobPath, progressPath], { cwd: home, env: cenv, stdio: ["ignore", outFd, errFd], detached: true });
+  } finally { closeSync(outFd); closeSync(errFd); }
+  let exited = null;
+  child.on("exit", (code, signal) => { exited = { code, signal }; });
+  child.on("error", (error) => { if (!exited) exited = { code: null, signal: null, error }; });
+  say({ ev: "spawn", thread: id, pid: child.pid, runId });
+
+  const drain = progressTail(progressPath);
+  const turns = [];
+  let flags = null;
+  let done = false;
+  let badLine = null;
+  let turnDeadline = null;
+  let turnN = 0;
+  const take = () => {
+    for (const l of drain()) {
+      let e;
+      try { e = JSON.parse(l); } catch { badLine = badLine || l.slice(0, 200); continue; }
+      say({ ev: "progress", thread: id, line: e });
+      if (e.ev === "start") flags = e.flags ?? null;
+      else if (e.ev === "turn-start") { turnN = Number(e.turn) + 1; turnDeadline = Date.now() + turnMs; }
+      else if (e.ev === "turn-end") { turnDeadline = null; turns.push(e); }
+      else if (e.ev === "done") done = true;
+    }
+  };
+
+  let killReason = null;
+  let treeSurvivors = [];
+  try {
+    let killedAt = null;
+    while (!exited) {
+      take();
+      const now = Date.now();
+      if (!killReason && child.pid) {
+        if (turnDeadline !== null && now >= turnDeadline) killReason = `turn ${turnN} of ${id} exceeded ${turnMs} ms`;
+        else if (now >= wallEnd) killReason = "conversation exceeded wallMs";
+        if (killReason) {
+          killedAt = now;
+          say({ ev: "kill", thread: id, pid: child.pid, at: now, why: killReason });
+          treeSurvivors = (await killTree(child.pid)).survivors;
+        }
+      }
+      if (exited) break;
+      if (killedAt !== null && Date.now() - killedAt > EXIT_AFTER_KILL_MS) break; // unkillable: survivors say so
+      await sleep(POLL_MS);
+    }
+  } finally {
+    // A throw in this loop must not leave the child running.
+    if (!exited && child.pid && isAlive(child.pid)) treeSurvivors = (await killTree(child.pid)).survivors;
+  }
+  take();
+
+  let why = killReason;
+  if (!why) {
+    const x = exited || {};
+    const errTail = tailOf(errPath);
+    if (x.error) why = `child failed to spawn: ${x.error.message}`;
+    else if (x.signal) why = `child killed by ${x.signal}`;
+    else if (x.code === 4) {
+      const last = turns.at(-1);
+      const m = /ended with action \S+: (.*)$/m.exec(errTail);
+      why = last ? `turn ${Number(last.turn) + 1} action ${last.action}${m ? `: ${m[1]}` : ""}` : "child exited 4 without a turn-end";
+    } else if (x.code === 6) why = "prod pi capacity";
+    else if (x.code === 5) why = "child exited 5 (parent died)";
+    else if (x.code !== 0) why = `child exited ${x.code}`;
+    else if (badLine) why = `unparseable progress line: ${badLine}`;
+    else if (!done) why = "child exited 0 without a done event";
+  }
+  if (treeSurvivors.length) why = `${why ? `${why}; ` : ""}killTree survivors: ${treeSurvivors.join(",")}`;
+
+  // After EVERY thread: a pi reparented by an exited child is invisible to the tree walk.
+  const marked = (await settledSurvivorsByMarker(runId, { sinceBootSec })).filter((p) => p !== process.pid);
+  if (marked.length) {
+    // Kill only pids whose environ positively carries the marker; an unreadable one (the
+    // scan fails closed) still contaminates, but is never signalled on a guess.
+    const want = `CROW_EVAL_RUN_ID=${runId}`;
+    const carries = (p) => { try { return defaultReadProc(`/proc/${p}/environ`).split("\0").includes(want); } catch { return false; } };
+    const confirmed = marked.filter(carries);
+    for (const p of confirmed) signal(p, "SIGKILL");
+    await waitGone(confirmed, 1000);
+    const unconfirmed = marked.filter((p) => !confirmed.includes(p));
+    why = `${why ? `${why}; ` : ""}run processes survived the thread: ${confirmed.join(",") || "none"} killed${unconfirmed.length ? `, ${unconfirmed.join(",")} unreadable (not signalled)` : ""}`;
+  }
+
+  let sessionPaths = [];
+  if (!why) {
+    const paths = sessionPathsOf(turns, home);
+    if (!paths) why = SESSION_MISSING;
+    else sessionPaths = paths;
+  }
+  return { contaminated: why, reason: why ? tailOf(errPath) || null : null, turns, sessionPaths, flags };
 }

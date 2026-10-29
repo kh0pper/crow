@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { childEnv, survivorsByMarker, bootSecNow, KILL_GRACE_MS } from "../scripts/lib/live-pi-driver.mjs";
+import { childEnv, survivorsByMarker, settledSurvivorsByMarker, bootSecNow, KILL_GRACE_MS } from "../scripts/lib/live-pi-driver.mjs";
 import { makeScratch, makeTemplate } from "../scripts/research-eval/scratch.mjs";
 
 const REPO = join(import.meta.dirname, "..");
@@ -56,7 +56,12 @@ async function setup(t, { job = {}, knobs = {}, extraEnv = {}, turnTimeoutMs = 2
   const runId = `lpd-child-${randomUUID()}`;
   const sinceBootSec = bootSecNow();
   t.after(() => {
-    for (const pid of survivorsByMarker(runId, { sinceBootSec })) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    // Only a pid whose environ positively carries the marker: an unreadable one may be anything.
+    for (const pid of survivorsByMarker(runId, { sinceBootSec })) {
+      let mine = false;
+      try { mine = readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`CROW_EVAL_RUN_ID=${runId}`); } catch {}
+      if (mine) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    }
     s.cleanup();
   });
   const agentDir = join(s.home, "pi-agent");
@@ -99,14 +104,14 @@ const captured = (ctx) => (existsSync(ctx.capture)
   ? readFileSync(ctx.capture, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 const stderr = (ctx) => (existsSync(ctx.files.err) ? readFileSync(ctx.files.err, "utf8") : "");
 /** After an exit, nothing carrying the run marker may be left (pi carries it: CROW_BOT_ENV_ALLOW). */
-const assertNoSurvivors = (ctx) => assert.deepEqual(survivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec }), []);
+const assertNoSurvivors = async (ctx) => assert.deepEqual(await settledSurvivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec }), []);
 const turnEnds = (ctx) => progress(ctx).filter((e) => e.ev === "turn-end");
 
 test("refuses a live warm target", async (t) => {
   const ctx = await setup(t);
   const r = await runChild(t, ctx, { PIBOT_WARM_GATEWAY_URL: "http://127.0.0.1:3001" });
   assert.equal(r.code, 1, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   assert.equal(existsSync(ctx.capture), false, "no pi may start");
   assert.match(stderr(ctx), /PIBOT_WARM_GATEWAY_URL/);
 });
@@ -115,7 +120,7 @@ test("refuses when prod capacity is at max - 1", async (t) => {
   const ctx = await setup(t, { job: { prodMaxPi: 2, capacityCount: 1 } });
   const r = await runChild(t, ctx);
   assert.equal(r.code, 6, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   const evs = progress(ctx);
   assert.deepEqual(evs.find((e) => e.ev === "capacity"), { ev: "capacity", live: 1, max: 2 });
   assert.equal(evs.some((e) => e.ev === "turn-start" || e.ev === "turn-end"), false);
@@ -126,7 +131,7 @@ test("refuses a test-only capacityCount outside a test context (R-1)", async (t)
   const ctx = await setup(t, { job: { capacityCount: 0 } });
   const r = await runChild(t, ctx, { NODE_TEST_CONTEXT: undefined });
   assert.equal(r.code, 1, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   assert.match(stderr(ctx), /capacityCount/);
   assert.equal(existsSync(ctx.capture), false);
 });
@@ -135,7 +140,7 @@ test("refuses a non-scratch env", async (t) => {
   const ctx = await setup(t);
   const r = await runChild(t, ctx, { CROW_HOME: homedir() });
   assert.equal(r.code, 1, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   assert.equal(existsSync(ctx.progressPath), false, "nothing is written before the guard");
   // The guard's own rule text: the refusal came from assertEvalEnv, before any bridge import.
   assert.match(stderr(ctx), /refused: CROW_HOME must be strictly below the temp dir/);
@@ -151,7 +156,7 @@ test("refuses job and progress paths outside CROW_HOME", async (t) => {
     c.on("exit", (code) => res({ code }));
   });
   assert.equal(r.code, 1);
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   assert.equal(existsSync(outside), false);
   assert.match(stderr(ctx), /strictly inside CROW_HOME/);
 });
@@ -163,7 +168,7 @@ test("refuses a non-empty providers table", async (t) => {
   d.close();
   const r = await runChild(t, ctx);
   assert.equal(r.code, 1, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   assert.match(stderr(ctx), /providers/);
   assert.equal(existsSync(ctx.capture), false);
 });
@@ -172,7 +177,7 @@ test("refuses a tool surface outside allowServers", async (t) => {
   const ctx = await setup(t, { job: { botDef: botDef({ tools: { pi_builtin: ["read"], crow_mcp: ["memory/crow_recall"] } }) } });
   const r = await runChild(t, ctx);
   assert.equal(r.code, 1, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   assert.match(stderr(ctx), /crow_mcp server memory is not in allowServers/);
   assert.equal(existsSync(ctx.capture), false);
 });
@@ -185,7 +190,7 @@ test("runs three turns on one pi session", async (t) => {
   });
   const r = await runChild(t, ctx);
   assert.equal(r.code, 0, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   // The run marker reaches pi itself (childEnv pins CROW_BOT_ENV_ALLOW=CROW_EVAL_RUN_ID).
   const caps = captured(ctx);
   assert.equal(caps.length, 3);
@@ -252,7 +257,7 @@ test("non-asked action stops the thread with exit 4", async (t) => {
   });
   const r = await runChild(t, ctx);
   assert.equal(r.code, 4, stderr(ctx));
-  assertNoSurvivors(ctx);
+  await assertNoSurvivors(ctx);
   const evs = progress(ctx);
   const ends = evs.filter((e) => e.ev === "turn-end");
   assert.equal(ends.length, 1);

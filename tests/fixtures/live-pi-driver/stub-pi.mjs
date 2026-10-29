@@ -13,7 +13,8 @@
  *                          (the last one repeats; absent = "ok")
  *   PIBOT_TEST_HANG=1      ack the prompt and never end the turn
  *   PIBOT_TEST_CRASH=1     ack the prompt, then exit 1
- *   PIBOT_TEST_NO_SESSION=1  write no session file
+ *   PIBOT_TEST_NO_JSONL=1  write no session file (not "..._NO_SESSION": SECRET_NAME_RE matches
+ *                          SESSION, so childEnv and the bridge's env scrub would drop it)
  *   PIBOT_TEST_IGNORE_TERM=1 ignore SIGTERM and stdin EOF (only SIGKILL stops it)
  *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker } per prompt
  */
@@ -34,7 +35,7 @@ if (process.env.PIBOT_TEST_IGNORE_TERM === "1") { process.on("SIGTERM", () => {}
 
 const env = process.env;
 const sessionDir = arg("--session-dir");
-const writeSession = env.PIBOT_TEST_NO_SESSION !== "1" && !!sessionDir;
+const writeSession = env.PIBOT_TEST_NO_JSONL !== "1" && !!sessionDir;
 let replies = [];
 try { replies = JSON.parse(env.PIBOT_TEST_REPLIES || "[]"); } catch { /* none */ }
 
