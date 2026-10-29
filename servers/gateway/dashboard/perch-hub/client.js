@@ -3,6 +3,7 @@ import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchCardChipJs } from "./card-chip.js";
+import { perchBriefingJs } from "./briefing-card.js";
 import { perchDictationJs } from "./dictation.js";
 import { perchBrowserTileJs } from "./browser-tile.js";
 import { perchTakeOverJs } from "./take-over.js";
@@ -1526,7 +1527,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip();
+    resetArtifactCards(); resetCardChip(); resetBriefing();
     resetBrowserTiles();                  /* live browser tile: its pollers and header line die with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
@@ -2104,7 +2105,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip();
+    resetArtifactCards(); resetCardChip(); resetBriefing();
     resetBrowserTiles();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
@@ -2384,6 +2385,7 @@ export function perchHubJs(lang = "en") {
     loadArtifactCards(current.sid);   /* spec v1.6: this chat's artifact cards, same discipline */
     loadCardOffers(current.sid);   /* P5: pending offers and the card-made notes */
     loadCardChip(current.sid);     /* P5: the card this chat is linked to */
+    loadBriefing(current.sid);     /* R1.2 PR 4: the Briefing card on top, the summary in the Session tab */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -2620,7 +2622,7 @@ export function perchHubJs(lang = "en") {
     planState=null; renderPlan();
     toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip();
+    resetArtifactCards(); resetCardChip(); resetBriefing();
     resetFacts();
     /* Composer dictation: a switch drops the recording and frees the mic;
        each open re-probes the server (dictation.js). */
@@ -4124,6 +4126,7 @@ ${perchPhoneCardJs(lang)}
 
 ${perchArtifactCardJs(lang)}
 ${perchCardChipJs(lang)}
+${perchBriefingJs(lang)}
 
 ${perchDictationJs(lang)}
 

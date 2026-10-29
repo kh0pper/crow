@@ -1597,10 +1597,12 @@ test("classic render is unchanged", async () => {
   // Pinned from the build before the sheet existed: classic Perch's tab bar,
   // its four sections and its head must stay byte-identical. Update these
   // only for a change that MEANS to touch classic Perch.
+  // Re-pinned for R1.2 PR 4: the Session section gained the hidden summary
+  // card with Forget (both modes share the section, by design).
   const PINS = {
-    en: { tabs: "8531f31bf496cf60eb740557951aca4dfaab24f8f24b094381ce45164d6b66af",
+    en: { tabs: "3863f216197f3810e82de520eaa584f4c7195d3fcc4a98493044d6512be7aa4b",
       head: "048286e387d9721effbaa09b37155f48a4df2b60c5b157ef27b745061ff43096" },
-    es: { tabs: "1b2342f85e0e5d92b9578b39479ec91a068850292a0471aec4e89a5cafcb530c",
+    es: { tabs: "f143f5894ebafbd367fd2f87e9acc51cb19673557da20a9202012db054f5d1cd",
       head: "f2a1635b13058fef450e71b7a0cf277d0ab112469bc1717a5cd586a6f7f014b6" },
   };
   for (const lang of ["en", "es"]) {

@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
 import { emitOrQueue } from "../../../shared/sync-emit.js";
+import { isSummaryMemorySource } from "../../../shared/summary-source.js";
 
 const PAGE_SIZE = 20;
 
@@ -177,6 +178,12 @@ export default {
         const { id, content, category, importance } = req.body;
         if (id && content) {
           const { rows: existing } = await db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
+          // A session summary is the summary job's alone (single-writer, its
+          // source is reserved): refused, back to the page that says why.
+          if (isSummaryMemorySource(existing[0]?.source)) {
+            res.redirectAfterPost("/dashboard/memory?edit=" + encodeURIComponent(String(id)));
+            return;
+          }
           await db.execute({
             sql: "UPDATE memories SET content = ?, category = ?, importance = ?, updated_at = datetime('now') WHERE id = ?",
             args: [content, category || "general", parseInt(importance, 10) || 5, id],
@@ -236,6 +243,13 @@ export default {
       if (!mem) {
         res.redirect("/dashboard/memory");
         return;
+      }
+
+      if (isSummaryMemorySource(mem.source)) {
+        const body = `<p class="crow-memory-summary-note" style="color:var(--crow-text-muted)">${escapeHtml(t("memory.summaryReadOnly", lang))}</p>
+          <div style="background:var(--crow-bg-elevated);padding:1rem 1.25rem;border-radius:0.5rem;line-height:1.55">${escapeHtml(String(mem.content || ""))}</div>
+          <a href="/dashboard/memory" class="btn btn-secondary" style="margin-top:1rem">${t("memory.cancel", lang)}</a>`;
+        return layout({ title: t("memory.viewPageTitle", lang), content: section(`${t("memory.viewPageTitle", lang)} #${escapeHtml(String(mem.id))}`, body) });
       }
 
       const editForm = `<form method="POST">

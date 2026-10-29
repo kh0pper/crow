@@ -58,14 +58,16 @@ import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { requesterTag } from "../requester-tag.js";
-import { ReservedError } from "../box-reservation.js";
+import { ReservedError, readReservation } from "../box-reservation.js";
 import { ServingClassError } from "../models/serving-class.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { loadProviders } from "../../shared/providers.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
-import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, isDoorUrl, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { isForeignInstanceHost } from "../../shared/provider-host.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { providerDoorUrl } from "../models/door.js";
 import { createCloudDoor, CLOUD_DOOR_DEFAULTS } from "../models/cloud-door.js";
 import { validateLlmCloudToken } from "../local-token.js";
@@ -459,7 +461,100 @@ async function voiceKeysFor(deps) {
 }
 
 export const resolveVoiceKey = (key) => resolveKey(key);
+
+/** completeText's resolver: resolveKey's answer plus the row's `host` (the
+ *  owner check needs it), uncached. */
+async function resolveDirectKey(key) {
+  const [providerId, modelId] = splitKey(key);
+  const r = await resolveProviderConfig(db(), providerId, modelId);
+  return {
+    baseUrl: (r.baseUrl || r.base_url || "").replace(/\/$/, ""),
+    model: r.model || r.modelId || r.model_id || modelId,
+    apiKey: r.apiKey || r.api_key || "none",
+    host: r.host || "local",
+    providerType: r.provider_type || r.providerType || null,
+  };
+}
+
+/** Provider kinds that load a model on the first request (a lazy loader is a
+ *  model starter): completeText never sends them anything. */
+const LAZY_LOADER_RE = /ollama|llama[-_ ]?swap|lemonade|lm[-_ ]?studio|localai/i;
+/** Ollama's well-known port, for a row whose kind was never recorded. */
+const LAZY_LOADER_PORT_RE = /:11434(\/|$)/;
+export function isLazyLoader(up) {
+  return !!up && (LAZY_LOADER_RE.test(String(up.providerType || "")) || LAZY_LOADER_PORT_RE.test(String(up.baseUrl || "")));
+}
+
+/** completeText's skip: `reason` is a fixed code (box_reserved, lazy_loader, ...). */
+export class CompleteTextSkipped extends Error {
+  constructor(reason) { super("completeText: skipped, " + reason); this.reason = reason; }
+}
 export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
+
+/**
+ * One non-streaming completion for gateway-internal jobs (the session summary
+ * job): resolve a raw `provider/model` key the way the router does, POST one
+ * chat request, and return the reply text. Metered like a routed turn.
+ *
+ * It NEVER starts or warms a model: background jobs must not be a new
+ * on-demand model starter (box reservations and operator windows). A model
+ * that is not up fails the call, and the caller writes nothing.
+ * While a box reservation is held it sends nothing (CompleteTextSkipped
+ * "box_reserved"), and it never sends to a provider whose kind loads models
+ * lazily (ollama, llama-swap, lemonade and the like: "lazy_loader"); only a
+ * direct, already-running llama-server-style endpoint is used.
+ * Thinking tags in the reply are stripped. Throws on any failure; the error
+ * message never quotes the prompt or the reply.
+ *
+ * @param {{model:string, prompt:string, maxTokens?:number, timeoutMs?:number}} req
+ * @returns {Promise<string>}
+ */
+export async function completeText({ model, prompt, maxTokens = 400, timeoutMs = 60_000 } = {}, {
+  resolveKeyFn = resolveDirectKey, fetchFn = fetch, recordUsageFn = (event) => recordUsageEvent(db(), event),
+  ownInstanceIdFn = getOrCreateLocalInstanceId, reservationFn = () => readReservation(),
+} = {}) {
+  if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
+  // The box is spoken for (an operator window, a benchmark): a background
+  // job adds no load at all, even to a model that is already up.
+  // The reservation's allow list (isStartAllowed: crow-embed and the like) is
+  // ignored on purpose: it permits STARTING an exempt model, while this job is
+  // optional work that simply waits for the window to end.
+  let held = null;
+  try { held = reservationFn(); } catch { held = { corrupt: true }; } // unreadable: fail closed
+  if (held) throw new CompleteTextSkipped("box_reserved");
+  const up = await resolveKeyFn(model);
+  if (!up || !up.baseUrl) throw new Error("completeText: no base url for the model");
+  if (isLazyLoader(up)) throw new CompleteTextSkipped("lazy_loader");
+  // Never through a door: a /llm/v1 (or /llm/p/<id>/v1) base URL is another
+  // gateway's router, which can start a model on demand there and applies the
+  // companion heuristics; a row owned by another instance (a native-foreign
+  // row, or a co-hosted peer's) is that instance's to start, not ours.
+  if (isDoorUrl(up.baseUrl)) throw new Error("completeText: refused, the model is behind a door");
+  if (isForeignInstanceHost(up.host, ownInstanceIdFn)) throw new Error("completeText: refused, another instance's model");
+  const res = await fetchFn(`${up.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(up.apiKey) },
+    body: JSON.stringify({ model: up.model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, stream: false }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`completeText: upstream status ${res.status}`);
+  let json;
+  try { json = await res.json(); } catch { throw new Error("completeText: invalid upstream body"); }
+  try {
+    const usage = extractUsageFromOpenAIResponse(JSON.stringify(json));
+    if (usage) {
+      await recordUsageFn({
+        tenantId: resolveTenantId(), surface: "llm", providerId: splitKey(model)[0], providerType: null,
+        modelId: up.model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedTokens: usage.cachedTokens,
+      });
+    }
+  } catch { /* metering is best effort */ }
+  const content = json?.choices?.[0]?.message?.content;
+  const text = typeof content === "string"
+    ? content
+    : (Array.isArray(content) ? content.map((c) => (c && typeof c.text === "string" ? c.text : "")).join("") : "");
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^[\s\S]*?<\/think>/i, "").trim();
+}
 
 /** Is the fast model answering right now? A 2 s GET on its models list —
  *  same shape as the orchestrator's readiness probe, kept local so the
