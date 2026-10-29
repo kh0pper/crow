@@ -151,6 +151,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
+import { summarizeSessionByThread } from "./perch/session-summary.js";
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
@@ -692,6 +693,10 @@ export function createInteractiveEngine({
   // the process singleton turns it on (getInteractiveEngine); test engines
   // never watch a browser.
   browserWatch = false,
+  // R1.2 PR 4: the session summary job, run fire-and-forget after an idle
+  // hibernate and on close. Only the process singleton turns it on (it passes
+  // SESSION_SUMMARIZER); test engines inject a stub or run without one.
+  summarize = null,
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
@@ -3645,7 +3650,7 @@ export function createInteractiveEngine({
     // previously saw nothing at all. Narrate the moments they wait on.
     emit(s, { type: "log", text: "cycling: stopping the child and rebuilding its world (spawn-bound settings apply now)" });
     try {
-      await hibernate(s);                              // no-op if already hibernating
+      await hibernate(s, { summary: false });          // no-op if already hibernating
       // ---- one synchronous block: reservation, no await between check+flip
       const pending = reserveWithEviction(S, s);
       // -----------------------------------------------------------------
@@ -3869,7 +3874,7 @@ export function createInteractiveEngine({
       await writeCwd(s);
       applied.cwd = dir;
       bindsAtWake.cwd = dir;
-      if (s.pi) await hibernate(s);
+      if (s.pi) await hibernate(s, { summary: false });
       emit(s, { type: "log", text: "working directory → " + dir + " — resumes there on the next message" });
     }
 
@@ -4206,6 +4211,7 @@ export function createInteractiveEngine({
     emit(s, stateEvent(s));
     // Live browser tile: the operator stopped it, so the turn keeps its shot.
     await finishBrowser(s, turn, { allowShot: true });
+    summarizeLater(s, "close");                      // R1.2 PR 4, fire-and-forget
     return { ok: true };
   }
 
@@ -4323,8 +4329,34 @@ export function createInteractiveEngine({
     return out;
   }
 
-  /** Hibernate: close the child, keep the row. */
-  async function hibernate(s) {
+  /**
+   * R1.2 PR 4: queue the session summary job for this session, fire-and-
+   * forget. It starts on a later macrotask with its own DB client, so neither
+   * hibernate() nor stop() ever waits on it or sees its failure. The job reads
+   * CROW_SESSION_SUMMARIES itself, per use.
+   */
+  function summarizeLater(s, trigger) {
+    if (typeof summarize !== "function") return;
+    const threadId = s.threadId;
+    const sessionModelKey = servingModel(s);
+    const onTitle = (title) => {
+      if (s.label) return;                           // an operator rename wins
+      s.label = normalizeLabel(title);
+      emit(s, stateEvent(s));
+    };
+    setImmediate(() => {
+      let db = null;
+      Promise.resolve()
+        .then(() => { db = createDbClient(); return summarize(db, threadId, { trigger, sessionModelKey, onTitle, env }); })
+        .catch(() => { log(threadId + ": [summary] job failed"); })
+        .finally(() => { if (db) { try { db.close(); } catch { /* already closed */ } } });
+    });
+  }
+
+  /** Hibernate: close the child, keep the row. `summary: false` for the
+   *  close-then-respawn callers (cycle, a cwd change): the session is not
+   *  going idle, so it is not summarised. */
+  async function hibernate(s, { summary = true } = {}) {
     // Track 3 Task 7 (spec I5): an assertion-style guard — hibernate must
     // NEVER destroy a session with a pending ask_user card. cycle() refuses
     // first (cycle_busy) and safe-victim eviction never selects a pendingUi
@@ -4349,6 +4381,7 @@ export function createInteractiveEngine({
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
     emit(s, stateEvent(s));
     await finishBrowser(s, null);                    // live browser tile: release on close
+    if (summary) summarizeLater(s, "idle");
   }
 
   /**
@@ -4579,8 +4612,12 @@ let singleton = null;
  *   `createIfMissing:false`: a gateway that never ran an interactive session
  *   must not mint an engine (and a lease file) on its way out.
  */
+/** The summariser the process singleton's hibernate and close hooks call:
+ *  exactly the exported entry point the pi-lab benchmark drives too. */
+export const SESSION_SUMMARIZER = summarizeSessionByThread;
+
 export function getInteractiveEngine({ createIfMissing = true } = {}) {
-  if (!singleton && createIfMissing) singleton = createInteractiveEngine({ browserWatch: true });
+  if (!singleton && createIfMissing) singleton = createInteractiveEngine({ browserWatch: true, summarize: SESSION_SUMMARIZER });
   return singleton;
 }
 

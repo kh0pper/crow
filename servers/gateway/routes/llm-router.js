@@ -455,6 +455,50 @@ async function voiceKeysFor(deps) {
 export const resolveVoiceKey = (key) => resolveKey(key);
 export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
 
+/**
+ * One non-streaming completion for gateway-internal jobs (the session summary
+ * job): resolve a raw `provider/model` key the way the router does, POST one
+ * chat request, and return the reply text. Metered like a routed turn.
+ *
+ * It NEVER starts or warms a model: background jobs must not be a new
+ * on-demand model starter (box reservations and operator windows). A model
+ * that is not up fails the call, and the caller writes nothing.
+ * Thinking tags in the reply are stripped. Throws on any failure; the error
+ * message never quotes the prompt or the reply.
+ *
+ * @param {{model:string, prompt:string, maxTokens?:number, timeoutMs?:number}} req
+ * @returns {Promise<string>}
+ */
+export async function completeText({ model, prompt, maxTokens = 400, timeoutMs = 60_000 } = {}, {
+  resolveKeyFn = resolveKey, fetchFn = fetch, recordUsageFn = (event) => recordUsageEvent(db(), event),
+} = {}) {
+  if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
+  const up = await resolveKeyFn(model);
+  if (!up || !up.baseUrl) throw new Error("completeText: no base url for the model");
+  const res = await fetchFn(`${up.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(up.apiKey) },
+    body: JSON.stringify({ model: up.model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, stream: false }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`completeText: upstream status ${res.status}`);
+  const json = await res.json();
+  try {
+    const usage = extractUsageFromOpenAIResponse(JSON.stringify(json));
+    if (usage) {
+      await recordUsageFn({
+        tenantId: resolveTenantId(), surface: "llm", providerId: splitKey(model)[0], providerType: null,
+        modelId: up.model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedTokens: usage.cachedTokens,
+      });
+    }
+  } catch { /* metering is best effort */ }
+  const content = json?.choices?.[0]?.message?.content;
+  const text = typeof content === "string"
+    ? content
+    : (Array.isArray(content) ? content.map((c) => (c && typeof c.text === "string" ? c.text : "")).join("") : "");
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^[\s\S]*?<\/think>/i, "").trim();
+}
+
 /** Is the fast model answering right now? A 2 s GET on its models list —
  *  same shape as the orchestrator's readiness probe, kept local so the
  *  router's degrade decision has no orchestrator dependency. */

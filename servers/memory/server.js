@@ -22,6 +22,7 @@ import {
 } from "./embeddings.js";
 import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
+import { insertMemory, updateMemory } from "./memory-write.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
@@ -94,21 +95,11 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Project ID for project-scoped memories"),
     },
     async ({ content, category, context, tags, source, importance, instance_id, project_id }) => {
-      const result = await db.execute({
-        sql: "INSERT INTO memories (content, category, context, tags, source, importance, instance_id, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        args: [content, category, context ?? null, tags ?? null, source ?? null, importance, instance_id ?? null, project_id ?? null],
-      });
-      const memoryId = Number(result.lastInsertRowid);
-
-      // Store embedding asynchronously (non-blocking)
-      storeEmbedding(memoryId, content);
-
-      // Emit sync entry (non-blocking)
-      emitOrQueue(syncManager, db, "memories", "insert", {
-        id: memoryId, content, category, context: context ?? null,
-        tags: tags ?? null, source: source ?? null, importance,
-        instance_id: instance_id ?? null, project_id: project_id ?? null,
-      }).catch(() => {});
+      // One insert path (memory-write.js), shared with the gateway's session
+      // summary job: the INSERT, the async embedding and the sync emit.
+      const memoryId = await insertMemory(db, {
+        content, category, context, tags, source, importance, instance_id, project_id,
+      }, { syncManager, onStored: storeEmbedding });
 
       return {
         content: [
@@ -581,34 +572,12 @@ export function createMemoryServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
       }
 
-      const updates = [];
-      const params = [];
-      if (content !== undefined) { updates.push("content = ?"); params.push(content); }
-      if (category !== undefined) { updates.push("category = ?"); params.push(category); }
-      if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
-      if (importance !== undefined) { updates.push("importance = ?"); params.push(importance); }
-      if (context !== undefined) { updates.push("context = ?"); params.push(context); }
-
-      if (updates.length === 0) {
+      // One update path (memory-write.js): the UPDATE, the re-embed and the sync emit.
+      const changed = await updateMemory(db, id, { content, category, tags, importance, context }, {
+        syncManager, source: rows[0].source ?? null, onContent: storeEmbedding,
+      });
+      if (!changed) {
         return { content: [{ type: "text", text: "No updates provided." }] };
-      }
-
-      updates.push("updated_at = datetime('now')");
-      params.push(id);
-
-      await db.execute({ sql: `UPDATE memories SET ${updates.join(", ")} WHERE id = ?`, args: params });
-
-      // Re-embed if content changed (non-blocking)
-      if (content !== undefined) {
-        storeEmbedding(id, content);
-      }
-
-      // Emit sync entry
-      {
-        const updated = { id, content, category, tags, importance, context, source: rows[0].source ?? null };
-        // Remove undefined fields
-        for (const k of Object.keys(updated)) { if (updated[k] === undefined) delete updated[k]; }
-        emitOrQueue(syncManager, db, "memories", "update", updated).catch(() => {});
       }
 
       return { content: [{ type: "text", text: `Memory #${id} updated.` }] };
