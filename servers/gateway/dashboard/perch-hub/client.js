@@ -2212,7 +2212,7 @@ export function perchHubJs(lang = "en") {
           if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
         });
-        if(SHEET) toolGroupsSettleHistory();   /* R1.2 PR 2: a reload mid-turn reads "running" */
+        if(SHEET){ toolGroupsSettleHistory(); histSettledIdle=!turnInFlight; }   /* R1.2 PR 2: a reload mid-turn reads "running", whichever arrives first */
         settleSeamEchoes(userTexts);
         flushHistBuf(batchTexts, pair[1].items, tailErr, pair[1].shots);
       });
@@ -2665,7 +2665,15 @@ export function perchHubJs(lang = "en") {
     if(next&&!turnInFlight) turnRendered=false;
     /* R1.2 PR 2: the turn's "See what happened" groups fold at its end. */
     if(SHEET&&!next&&turnInFlight) toolGroupsEndTurn();
-    if(SHEET&&next&&!turnInFlight){ toolGroup=null; toolTurn++; }
+    /* A history batch that settled idle and is followed by the session's
+       first state frame saying a turn runs: the replay arrived late, so the
+       batch's last turn IS the running one. Its groups go live again
+       (toolGroupsSettleHistory) instead of a new turn starting. */
+    var lateState=histSettledIdle; histSettledIdle=false;
+    if(SHEET&&next&&!turnInFlight){
+      if(lateState){ turnInFlight=true; toolGroupsSettleHistory(); }
+      else { toolGroup=null; toolTurn++; }
+    }
     turnInFlight=next;
     el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
     el('perch-abort').style.display=turnInFlight?'':'none';
@@ -2764,6 +2772,7 @@ export function perchHubJs(lang = "en") {
   bindOnce(window,'pagehide','draftPagehide',function(){ if(live()) draftSave(); });
 
   function send(){
+    histSettledIdle=false;                 /* a turn the operator starts is a new turn */
     var input=el('perch-input'); if(!input) return;
     var text=input.value;
     if(!sendable(text)||!current.sid) return;
@@ -3877,7 +3886,8 @@ export function perchHubJs(lang = "en") {
     var head=s.see+' \\u00b7 ';
     var failed=Number(c&&c.failed)||0;
     var tail=failed>0?', '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'';
-    if(Number(c&&c.running)>0||turnRunning) return head+s.running;
+    /* Running never hides a failure: "running · 1 failed" until the turn ends. */
+    if(Number(c&&c.running)>0||turnRunning) return head+s.running+(failed>0?' \\u00b7 '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'');
     var names=[];
     ((c&&c.agents)||[]).forEach(function(a){ if(a&&names.indexOf(a)<0) names.push(a); });
     var n=Number(c&&c.total)||0;
@@ -3935,11 +3945,15 @@ export function perchHubJs(lang = "en") {
   /* History settled while a turn runs (a reload mid-turn): the last turn's
      groups are that running turn's, so they are live again. Their line reads
      "running" and they stay open until the turn ends (toolGroupsEndTurn). */
+  /* True from an idle history settle until the next state change or send:
+     the window in which a late replayed state frame belongs to the batch's
+     last turn (setTurnInFlight). */
+  var histSettledIdle=false;
   function toolGroupsSettleHistory(){
     if(!turnInFlight) return;
     toolGroups.forEach(function(g){ if(g.ended&&g.turn===toolTurn){ g.ended=false; toolGroupOpen(g,true); toolGroupRefresh(g); } });
   }
-  function resetToolGroups(){ toolGroup=null; toolGroups=[]; toolTurn=0; }
+  function resetToolGroups(){ toolGroup=null; toolGroups=[]; toolTurn=0; histSettledIdle=false; }
 
   /* ---- PR-E (item 12): inline sent-file cards -----------------------------
      pi-lab's shape: an image renders inline, anything else is a download card

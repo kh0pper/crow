@@ -5531,6 +5531,10 @@ test("groupLabel: running / agents / steps / failed / never all ok", async () =>
   assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, true), "See what happened · running",
     "chips all done but the turn still running: running");
   assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, false), "See what happened · 2 steps");
+  assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: [] }, en, true), "See what happened · running · 1 failed",
+    "a running group says its failure in words");
+  assert.equal(groupLabel({ total: 3, failed: 2, running: 1, agents: [] }, es), "Ver qué pasó · " +
+    es.running + " · 2 fallaron");
   for (const c of [{ total: 2, failed: 0, running: 0, agents: [] }, { total: 0, failed: 0, running: 0 }]) {
     assert.doesNotMatch(groupLabel(c, en), /all ok|ok$/i, "it never says all ok");
   }
@@ -5653,6 +5657,47 @@ test("a reload mid-turn reads running and folds at the reply", async () => {
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 1 step|false|bash]"],
     "the turn's end folds it");
+});
+
+test("a reload mid-turn whose state frame arrives AFTER the history reads running and folds at the reply", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "m1", name: "bash", arguments: {} }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "m1", toolName: "bash", isError: true, content: [{ type: "text", text: "no" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · 1 step, 1 failed|false|bash|err]"], "idle so far: folded");
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });   // the late replay
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · running · 1 failed|true|bash|err]"],
+    "the batch's last turn is the running one: live again, its failure still in words");
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "m2" });
+  es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "m2", resultText: "ok", isError: false });
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 2 steps, 1 failed|false|bash,read|err]"],
+    "the turn's later tools join the same group, and its end folds it with the finished label");
+});
+
+test("after an idle history, a turn the operator sends starts a new group (the previous turn stays folded)", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "go" } },
+    { type: "message", message: { role: "toolResult", toolCallId: "p1", toolName: "bash", content: [{ type: "text", text: "ok" }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+  ];
+  const hub = await mountHub({ sheet: true, fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: false });   // the replay says idle
+  es._serverFrame("state", { state: "awake", turnInFlight: true });    // then a new turn
+  es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "p2" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), [
+    "group[See what happened · 1 step|false|bash]", "group[See what happened · running|true|read]"]);
 });
 
 test("a reload of a finished turn stays folded (no turn in flight)", async () => {
