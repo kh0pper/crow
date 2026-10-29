@@ -668,3 +668,29 @@ test("Task 16c: only the owner: an SSO session, a session from a login on this m
     assert.equal(r.status, 404);
   }, { sessionGate: realGate, uiEnabled: () => false });
 });
+
+test("Task 16c: a binding write that fails undoes the connect: 500 generic, no row, no secret, and a retry with the same label succeeds", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  let failBinding = true;
+  const recordBinding = (conn, opts) => {
+    if (failBinding) throw new Error("disk full");
+    return SENS.recordConnectionBinding(conn, opts);
+  };
+  await withApp(ctx, async (s) => {
+    const { result: r, out } = await capture(() => connectGh(s, "Main", "test-token-bind"));
+    assert.equal(r.status, 500, r.text);
+    assert.deepEqual(r.json, { ok: false }, "no class: the sheet shows services.error.generic");
+    assert.ok(out.includes("[services] connection binding not written"), out.join("|"));
+    assert.ok(!out.join("\n").includes("test-token-bind"), "no value logged");
+    assert.equal((await ctx.db.execute("SELECT COUNT(*) AS n FROM service_connections")).rows[0].n, 0, "no row left");
+    assert.equal((await ctx.db.execute("SELECT COUNT(*) AS n FROM crow_keychain WHERE kind = 'service'")).rows[0].n, 0, "no secret left");
+    const page = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: AUTH });
+    assert.deepEqual(page.json.connections, []);
+    failBinding = false;
+    const again = await connectGh(s, "Main", "test-token-bind");
+    assert.equal(again.status, 201, again.text);
+    const uuid = again.json.connection.uuid;
+    assert.equal(SENS.connectionBindingOk({ uuid, serviceId: "github" }, { crowHome: HOME }), true);
+    assert.equal((await ctx.db.execute("SELECT COUNT(*) AS n FROM service_connections")).rows[0].n, 1);
+  }, { recordBinding });
+});

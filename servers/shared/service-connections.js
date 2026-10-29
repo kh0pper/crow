@@ -283,6 +283,18 @@ async function undoCreate(db, uuid, deleteServiceSecrets) {
   } catch { /* the original error wins; never log */ }
 }
 
+/**
+ * Undo a connection the connect route just made, when a step after createConnection failed (Task
+ * 16c: its binding could not be written). The same order as undoCreate (secrets first, then the
+ * row), but for the row that did go active. Only the creating route calls this, for the uuid it
+ * just got back. Throws on failure (the caller answers 500 either way).
+ */
+export async function rollbackNewConnection(db, uuid, { deleteServiceSecrets = defaultDeleteServiceSecrets } = {}) {
+  if (typeof uuid !== "string" || !uuid) return;
+  await deleteServiceSecrets(db, uuid);
+  await db.execute({ sql: "DELETE FROM service_connections WHERE uuid = ?", args: [uuid] });
+}
+
 /** @returns {Promise<Connection|null>} */
 export async function getConnection(db, uuid) {
   if (typeof uuid !== "string" || !uuid) return null;
