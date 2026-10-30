@@ -209,6 +209,44 @@ export function shellClientJs() {
       }
     })();
 
+    // ─── The Chat tab returns to the open chat (2026-10-29) ───
+    // Chat -> Board -> Chat used to land on the session list. While a chat is
+    // open (/dashboard/perch#perchlive-<8 hex>) it is remembered for this tab;
+    // going back to the list forgets it. The Chat tab then reopens it, when it
+    // belongs to the tab's project (or the tab has none).
+    (function () {
+      var KEY = 'crow.shell.lastChat';
+      function save(v) { try { if (v) sessionStorage.setItem(KEY, v); else sessionStorage.removeItem(KEY); } catch (e) {} }
+      function load() { try { return sessionStorage.getItem(KEY); } catch (e) { return null; } }
+      function projectOf(href) {
+        try {
+          var u = new URL(href, location.origin);
+          if (u.pathname.indexOf('/dashboard/project/') === 0) return decodeURIComponent(u.pathname.slice(19).split('/')[0]);
+          return u.searchParams.get('project') || '';
+        } catch (e) { return null; }
+      }
+      function remember() {
+        if (location.pathname !== '/dashboard/perch') return;
+        save(/^#perchlive-[0-9a-f]{8}$/.test(location.hash) ? location.pathname + location.search + location.hash : null);
+      }
+      remember();
+      if (!window.__crowShellChatReturnBound) {
+        window.__crowShellChatReturnBound = true;
+        if (typeof window.addEventListener === 'function') window.addEventListener('hashchange', remember);
+        document.addEventListener('click', function (e) {
+          if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          var a = e.target && e.target.closest ? e.target.closest('a.shell-tab[data-shell-tab="chat"]') : null;
+          if (!a || location.pathname === '/dashboard/perch') return;
+          var last = load();
+          if (!last) return;
+          var want = projectOf(a.getAttribute('href'));
+          if (want === null || (want !== '' && want !== projectOf(last))) return;
+          e.preventDefault();
+          if (window.Turbo && typeof window.Turbo.visit === 'function') window.Turbo.visit(last); else location.href = last;
+        });
+      }
+    })();
+
     // ─── The apps launcher (R1.2 PR 5): the drawer's Apps grid ───
     // window.CrowApps is shared with the Perch session's apps sheet
     // (perch-hub/client.js): one tile renderer, one open rule.

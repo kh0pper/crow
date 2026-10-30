@@ -91,6 +91,8 @@ test("session holding a needs-you card counts once; a bare waiting session adds 
   ]);
   const m = await counts(db, [{ id: C }], { engine });
   assert.equal(m.get(C), 2); // c_ask once + t-bare
+  // The split the shell's tabs read: the card on Board, the bare chat on Chat.
+  assert.deepEqual(m.parts.get(C), { cards: 1, chats: 1 });
 });
 
 test("a waiting session filed elsewhere doesn't count here", async () => {

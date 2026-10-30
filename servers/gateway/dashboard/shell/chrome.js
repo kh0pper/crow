@@ -183,11 +183,17 @@ function archivedLink(lang) {
 /** The Chat / Board / Make nav, rendered right after </main>. */
 export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, getPanel = registryGetPanel }) {
   const sp = scopedProject(scope, projects);
-  // "Board · N": the scoped project's count (an unknown count or 0 shows none).
-  const n = sp && counts instanceof Map ? counts.get(Number(sp.id)) : null;
+  // "Board · N" counts the scoped project's cards needing you, so it matches
+  // the Board; "Chat · N" its chats waiting on you (the counts Map's `.parts`).
+  // Without the split (an older Map), the Board shows the total as before.
+  // An unknown count or 0 shows none.
+  const total = sp && counts instanceof Map ? counts.get(Number(sp.id)) : null;
+  const part = sp && counts instanceof Map && counts.parts instanceof Map ? counts.parts.get(Number(sp.id)) : null;
+  const badge = { board: part ? part.cards : total, chat: part ? part.chats : null };
   const links = tabTargets(getPanel, sp ? projectValue(sp) : null).map((tt) => {
     const current = tt.id === tab ? ' aria-current="page"' : "";
-    const text = t(tt.key, lang) + (tt.id === "board" && typeof n === "number" && n > 0 ? ` · ${n}` : "");
+    const n = badge[tt.id];
+    const text = t(tt.key, lang) + (typeof n === "number" && n > 0 ? ` · ${n}` : "");
     return `<a href="${tt.href}" class="shell-tab" data-shell-tab="${tt.id}"${current}>${TAB_ICONS[tt.id]}<span>${escapeHtml(text)}</span></a>`;
   }).join("");
   return `<nav class="shell-tabs" aria-label="Crow">
