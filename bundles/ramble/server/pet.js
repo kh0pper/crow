@@ -91,10 +91,7 @@ function stepsAmount(a) {
  * moves/ledger.js BEFORE this is ever called — so the bound is the base energy
  * bar: generous enough that retuning a cap can never silently truncate a pay.
  *
- * ⚠ UNLIKE steps, a move DOES move `last_fed_at`, exactly as a chore always
- * did: it is a deliberate act the person reports, not a background sensor
- * reading arriving every few minutes (R5 is about the sensor). A move that pays
- * 0 moves nothing.
+ * No feed moves the decay clock any more (see petState): decay is wall-clock.
  */
 export const MOVE_FEED_MAX = 100;
 function moveAmount(a) {
@@ -172,6 +169,9 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
     throw new Error(`unknown pet feed event type: ${type}`);
   }
 
+  // Owed decay lands FIRST, so a feed can never erase it (it used to: a feed
+  // reset the clock and the elapsed part-interval was simply forgotten).
+  await petState(db, { now });
   const row = await ensureRow(db);
 
   let places_week = row.places_week;
@@ -196,7 +196,12 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
   else if (counterCol === "unlocks_week") unlocks_week += 1;
   else if (counterCol === "crows_week") crows_week += 1;
 
-  const last_fed_at = delta > 0 && !isSteps ? now : row.last_fed_at;
+  // `last_fed_at` is the DECAY CLOCK (the column keeps its synced name): it only
+  // starts here, on a fresh row's first real feed, and from then on moves only in
+  // whole decay intervals (petState). Feeding never resets it, so decay is 10 per
+  // 6 h of wall time however the feeds are timed (Ramble Moves review, 2026-10-30:
+  // a feed every 5 h 50 m used to skip decay entirely and lay eggs indoors).
+  const last_fed_at = row.last_fed_at == null && delta > 0 && !isSteps ? now : row.last_fed_at;
 
   await db.execute({
     sql: `UPDATE ramble_pet SET energy = ?, mood = ?, places_week = ?, unlocks_week = ?, crows_week = ?,
@@ -295,9 +300,11 @@ export async function doChore(db, kind, { now = Date.now(), emit } = {}) {
 
 /**
  * Read the pet's current state, applying passive decay first (10 energy per
- * full 6h since last_fed_at — the stand-in for a quiet_tick radio feed that
- * doesn't exist yet). Decay is persisted so a second immediate call doesn't
- * subtract again. A fresh row (last_fed_at null) never decays.
+ * full 6h of wall time since the decay clock `last_fed_at` — the stand-in for
+ * a quiet_tick radio feed that doesn't exist yet). The clock advances by the
+ * whole intervals applied, keeping the remainder, so nothing is ever skipped.
+ * Decay is persisted so a second immediate call doesn't subtract again. A fresh
+ * row (last_fed_at null) never decays.
  */
 export async function petState(db, { now = Date.now() } = {}) {
   const row = await ensureRow(db);
@@ -314,7 +321,7 @@ export async function petState(db, { now = Date.now() } = {}) {
       // `row.energy` as the floor argument, so an over-ceiling bird decays by
       // exactly the intervals elapsed rather than snapping to the ceiling.
       energy = clampEnergy(energy - intervals * DECAY_PER_INTERVAL, row.energy, max);
-      last_fed_at = now;
+      last_fed_at = last_fed_at + intervals * DECAY_INTERVAL_MS;
       decayed = true;
     }
   }

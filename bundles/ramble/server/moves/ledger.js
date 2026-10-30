@@ -37,7 +37,7 @@ import { localDay, startOfLocalDay } from "../eggs.js";
 import { insertOnce, casDelta } from "../steps.js";
 import { feed as petFeed, petState } from "../pet.js";
 import { ACTIVITY_KINDS } from "./library.js";
-import { claimCapped, claimIndoor, capDayKey, INDOOR_DAILY_CAP, MOVE_INDOOR_KIND } from "./indoor-cap.js";
+import { claimCapped, claimIndoor, capDayKey, dayKey, INDOOR_DAILY_CAP, MOVE_INDOOR_KIND } from "./indoor-cap.js";
 
 // ledger.js is the moves surface the routes and the panel import; the indoor
 // budget lives in its own module only so pet.js's chores can share it.
@@ -228,7 +228,7 @@ export async function recordLog(db, { activity, minutes, effort, now = Date.now(
  */
 export async function movesDay(db, { day, now = Date.now() } = {}) {
   const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-  const d = capDayKey(day, at);
+  const d = dayKey(day, at);
   const { rows } = await db.execute({
     sql: "SELECT kind, key, delta FROM ramble_wallet WHERE kind IN (?, ?, ?) OR (kind = ? AND key LIKE ?)",
     args: [MOVE_DONE_KIND, MOVE_INDOOR_KIND, MOVE_OUTDOOR_KIND, MOVE_LOG_KIND, d + ":%"],

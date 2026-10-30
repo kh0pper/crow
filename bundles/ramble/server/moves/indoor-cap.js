@@ -43,8 +43,18 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
  * the day it was PICKED for — and anything else falls back to the local day of
  * `now` rather than throwing, so a junk day can never file Health nowhere.
  */
-export function capDayKey(day, now) {
+/** A day key for READING: any well-formed date, else today. */
+export function dayKey(day, now) {
   return typeof day === "string" && DAY_RE.test(day) ? day : localDay(now);
+}
+
+/** A day key for WRITING (paying): today or yesterday only. */
+export function capDayKey(day, now) {
+  // Only today or yesterday (a challenge picked at 23:58 and done at 00:02).
+  // Any other date would open a fresh budget per date and let Health be farmed.
+  const today = localDay(now);
+  if (typeof day !== "string" || !DAY_RE.test(day)) return today;
+  return day === today || day === localDay(now - 24 * 60 * 60 * 1000) ? day : today;
 }
 
 /**

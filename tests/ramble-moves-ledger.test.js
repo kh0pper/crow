@@ -348,7 +348,7 @@ test("the `move` feed event is bounded by MOVE_FEED_MAX, not by the energy ceili
   assert.equal(a.energy, 60 + MOVE_FEED_MAX);
 });
 
-test("a `move` moves the decay clock (as a chore did); steps still do not", async () => {
+test("a `move` starts the decay clock on a fresh bird, and no later feed resets it", async () => {
   const db = await freshDb();
   const a = await feed(db, { type: "move", amount: 7 }, { now: T0 });
   assert.equal(a.energy, 67);
@@ -357,19 +357,30 @@ test("a `move` moves the decay clock (as a chore did); steps still do not", asyn
 
   const b = await feed(db, { type: "move", amount: 40 }, { now: T0 + 1000 });
   assert.equal(b.energy, 100, "clamped by the ceiling");
-  assert.equal(b.last_fed_at, T0 + 1000);
+  assert.equal(b.last_fed_at, T0, "a later feed never resets the clock");
 
   const c = await feed(db, { type: "move", amount: -5 }, { now: T0 + 2000 });
   assert.equal(c.energy, 100, "a negative move pays nothing");
-  assert.equal(c.last_fed_at, T0 + 1000, "and does not move the clock");
-
-  const d = await feed(db, { type: "move", amount: "junk" }, { now: T0 + 3000 });
-  assert.equal(d.last_fed_at, T0 + 1000);
 
   const s = await feed(db, { type: "steps", amount: 5 }, { now: T0 + 4000 });
-  assert.equal(s.last_fed_at, T0 + 1000, "R5: readings never reset the decay clock");
+  assert.equal(s.last_fed_at, T0, "R5: readings never touch the decay clock either");
 
   await assert.rejects(() => feed(db, { type: "nonsense" }, { now: T0 }));
+});
+
+test("decay is wall-clock: feeds every 5 h 48 m cannot skip it, and the part-interval is kept", async () => {
+  const db = await freshDb();
+  const H = 3600 * 1000;
+  await feed(db, { type: "move", amount: 40 }, { now: T0 });         // 100, clock starts at T0
+  let t = T0;
+  for (let i = 0; i < 8; i += 1) {                                   // 8 x 5h48m = 46h24m
+    t += 5 * H + 48 * 60 * 1000;
+    await feed(db, { type: "move", amount: 1 }, { now: t });         // the old clock-reset trick
+  }
+  const s = await petState(db, { now: t });
+  // 46h24m = 7 whole intervals: -70, +8 paid back, from 100 -> 38 at most.
+  assert.ok(s.energy <= 38, "decay landed despite the timed feeds, got " + s.energy);
+  assert.equal(s.last_fed_at, T0 + 7 * 6 * H, "the clock moved by whole intervals, keeping the remainder");
 });
 
 /* ------------------------------------------------------------- sync safety */
@@ -500,6 +511,30 @@ test("EGG SIMULATION: a fortnight of maxed indoor days, no steps and no geo, nev
     "no steps, no walked badge, no seed: this really was an indoor-only fortnight");
 });
 
+test("EGG SIMULATION, adversarial timing: indoor feeds spaced just under 6 h still never reach lay.days", async () => {
+  const db = await freshDb();
+  const seen = [];
+  const emit = collector(seen);
+  const STEP = 5 * HOUR + 57 * 60000;          // just under one decay interval
+  let t = new Date(2026, 9, 5, 0, 30).getTime();
+  const end = t + 21 * 24 * HOUR;
+  let n = 0;
+  while (t < end) {
+    // Rotate the indoor earners: the check-in, a chore, and a 1-minute easy log (the cheapest clock-poke).
+    const k = n % 3;
+    // eslint-disable-next-line no-await-in-loop
+    if (k === 0) await feedAll(db, { type: "checkin" }, { now: t, emit });
+    // eslint-disable-next-line no-await-in-loop
+    else if (k === 1) await doChore(db, ["feed", "preen", "play"][Math.floor(n / 3) % 3], { now: t, emit });
+    // eslint-disable-next-line no-await-in-loop
+    else await recordLog(db, { activity: "yoga", minutes: 1, effort: "easy", now: t, emit });
+    t += STEP; n += 1;
+  }
+  const { days } = await layProgress(db);
+  assert.ok(days < LAY_DAYS_DEFAULT, `timed indoor play banked ${days} lay days; decay must be wall-clock`);
+  assert.equal(await eggCount(db), 0, "no egg was ever laid");
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 const HEART_CELLS = ["9vk79ed", "9v6m2xt", "dr5regw", "gcpvj0d", "u33dc0e", "wecnrmd"];
@@ -515,3 +550,12 @@ async function giveHearts(db, n) {
     });
   }
 }
+
+test("a Done or a log can only credit today or yesterday; other dates fall to today", async () => {
+  const { capDayKey } = await import("../bundles/ramble/server/moves/indoor-cap.js");
+  const now = new Date(2026, 9, 30, 0, 2).getTime();
+  assert.equal(capDayKey("2026-10-30", now), "2026-10-30");
+  assert.equal(capDayKey("2026-10-29", now), "2026-10-29", "the midnight case");
+  assert.equal(capDayKey("2026-10-01", now), "2026-10-30", "a past date opens no new budget");
+  assert.equal(capDayKey("2027-01-01", now), "2026-10-30", "nor a future one");
+});
