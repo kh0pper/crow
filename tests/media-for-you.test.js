@@ -239,3 +239,11 @@ test("Listen podcasts: the newest three unplayed episodes with an https enclosur
   assert.equal(httpsUrl("https://user:pw@cdn.example.invalid/x.mp3"), "", "no credentials in an address");
   assert.equal(httpsUrl("javascript:alert(1)"), "");
 });
+
+test("story titles and source names are plain text: feed entities are decoded (operator report 2026-10-30)", async () => {
+  const src = await seedSource(db, { name: "Al Jazeera &#8211; Breaking News", url: "https://aj.example.invalid/feed" });
+  await article(src, "Showers &amp; downpours for San Antonio again today", 1);
+  const [p] = await forYouStories(db, { now: NOW });
+  assert.equal(p.title, "Showers & downpours for San Antonio again today");
+  assert.equal(p.sourceName, "Al Jazeera – Breaking News");
+});
