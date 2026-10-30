@@ -72,7 +72,8 @@ test("scoreStory: the most specific liked match is the why; a neutral story is '
   assert.deepEqual(scoreStory(a, prof, NOW).why, { kind: "topic", label: "local ai", affinity: 0.8 });
   assert.deepEqual(scoreStory({ ...a, topics: "[]" }, prof, NOW).why, { kind: "source", label: "Wire", affinity: 0.9 });
   assert.deepEqual(scoreStory({ ...a, source_id: 8, topics: "[]" }, prof, NOW).why, { kind: "new" });
-  assert.deepEqual(scoreStory({ ...a, source_id: 8, topics: "[]", popularity_score: 9 }, prof, NOW).why, { kind: "popular" });
+  // Popularity is never a reason (Media Hub never writes popularity_score).
+  assert.deepEqual(scoreStory({ ...a, source_id: 8, topics: "[]", popularity_score: 9 }, prof, NOW).why, { kind: "new" });
   // A topic you don't like (below LIKED) is never the reason.
   assert.deepEqual(scoreStory(a, new Map([["topic:local ai", { key: "local ai", affinity: LIKED - 0.01 }]]), NOW).why, { kind: "new" });
 });

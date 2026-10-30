@@ -48,14 +48,14 @@ export async function loadNews(db, { crowHome = resolveCrowHome(), limit = NEWS_
 }
 
 /**
- * Media Hub's evidence -> words. Only what the evidence says: a liked topic, source or category
- * from the interest profile, popular now, or new from a source you follow.
+ * Media Hub's evidence -> words. Only what the evidence says: a topic, source or category the
+ * interest profile shows you react well to (an affinity built from your reactions, not a follow),
+ * or new from a source you follow (every story's source is one you subscribed to).
  */
 export function whyText(why, lang = "en") {
   const kind = why && typeof why === "object" ? why.kind : null;
   const label = why && why.label != null ? String(why.label).trim() : "";
   if ((kind === "topic" || kind === "source" || kind === "category") && label) return fill(t(`forYou.why.${kind}`, lang), { label });
-  if (kind === "popular") return t("forYou.why.popular", lang);
   return t("forYou.why.new", lang);
 }
 

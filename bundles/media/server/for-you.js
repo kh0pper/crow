@@ -13,8 +13,10 @@
  * (Media Hub's own "For You" sort adds a random diversity term; a digest must not shuffle on reload).
  *
  * `why` is evidence, never prose: { kind: "topic" | "source" | "category", label, affinity } for a
- * liked interest-profile entry the story matches, { kind: "popular" } or { kind: "new" } (fresh from a
- * source you follow). The page turns it into words.
+ * liked interest-profile entry the story matches, else { kind: "new" } (fresh from a source you
+ * follow). The page turns it into words. There is no popularity term: nothing in Media Hub writes
+ * media_articles.popularity_score (it stays at its default 0), so it could never be a reason.
+ * With no profile data a story passes MIN_SCORE up to about 20.6 h old.
  *
  * "Hide this source" sets media_sources.curation_hidden: the source keeps fetching and stays in
  * Media Hub's own feed; it is only left out of these picks, and can be shown again.
@@ -63,15 +65,14 @@ export function scoreStory(a, prof, now) {
   for (const c of list(a.categories)) { const p = prof.get(`category:${c}`); if (p) hits.category.push({ ...p, label: c }); }
   const all = [...hits.topic, ...hits.source, ...hits.category];
   const interest = all.length ? all.reduce((s, h) => s + h.affinity, 0) / all.length : 0.5;
-  const pop = Math.min(1, Math.max(0, Number(a.popularity_score) || 0) / 10);
-  const score = 0.35 * fresh + 0.5 * interest + 0.15 * pop;
+  const score = 0.35 * fresh + 0.5 * interest;
   // The most specific liked match wins: a topic, then the source, then a category.
   let why = null;
   for (const kind of ["topic", "source", "category"]) {
     const best = hits[kind].filter((h) => h.affinity >= LIKED).sort((x, y) => y.affinity - x.affinity)[0];
     if (best) { why = { kind, label: best.label, affinity: Math.round(best.affinity * 100) / 100 }; break; }
   }
-  if (!why) why = pop >= 0.5 ? { kind: "popular" } : { kind: "new" };
+  if (!why) why = { kind: "new" };
   return { score, why };
 }
 
@@ -84,8 +85,7 @@ export async function forYouStories(db, { limit = PICK_MAX, now = Date.now() } =
   if (!cap) return [];
   const since = new Date(now - FRESH_HOURS * 3600000).toISOString();
   const { rows } = await db.execute({
-    sql: `SELECT a.id, a.title, a.url, a.summary, a.pub_date, a.created_at, a.topics, a.categories, a.popularity_score,
-                 a.source_id, s.name AS source_name
+    sql: `SELECT a.id, a.title, a.url, a.summary, a.pub_date, a.created_at, a.topics, a.categories, a.source_id, s.name AS source_name
             FROM media_articles a
             JOIN media_sources s ON s.id = a.source_id
             LEFT JOIN media_article_states st ON st.article_id = a.id

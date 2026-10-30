@@ -163,8 +163,8 @@ test("morning: no tasks.db is an empty morning, never an error", async () => {
 test("news why: each kind of Media Hub evidence has its own words, and nothing else is ever claimed", () => {
   assert.equal(N.whyText({ kind: "topic", label: "local ai", affinity: 0.8 }, "en"), "You like stories about local ai");
   assert.equal(N.whyText({ kind: "source", label: "Example Wire" }, "en"), "You often like stories from Example Wire");
-  assert.equal(N.whyText({ kind: "category", label: "science" }, "en"), "You follow science news");
-  assert.equal(N.whyText({ kind: "popular" }, "en"), "Popular right now");
+  assert.equal(N.whyText({ kind: "category", label: "science" }, "en"), "You often like science news");
+  assert.equal(N.whyText({ kind: "popular" }, "en"), "New from a source you follow", "popularity is never claimed");
   assert.equal(N.whyText({ kind: "new" }, "en"), "New from a source you follow");
   assert.equal(N.whyText({ kind: "topic", label: "  " }, "en"), "New from a source you follow", "a liked kind with no label falls back");
   assert.equal(N.whyText({ kind: "invented", label: "x" }, "en"), "New from a source you follow");
