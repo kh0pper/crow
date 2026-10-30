@@ -88,8 +88,11 @@ export function htmlToText(html) {
     .replace(/<[^>]*>/g, " ")
     .replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (m, n) => {
       const k = n.toLowerCase();
-      if (k.startsWith("#x")) return String.fromCodePoint(parseInt(k.slice(2), 16) || 32);
-      if (k.startsWith("#")) return String.fromCodePoint(Number(k.slice(1)) || 32);
+      if (k.startsWith("#")) {
+        // Feed text is untrusted: an out-of-range code point would throw.
+        const cp = k.startsWith("#x") ? parseInt(k.slice(2), 16) : Number(k.slice(1));
+        return Number.isInteger(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : " ";
+      }
       return ENTITIES[k] ?? m;
     })
     .replace(/\s+/g, " ")
@@ -140,7 +143,8 @@ export async function forYouStories(db, { limit = PICK_MAX, now = Date.now() } =
     if (!url || !title) continue;
     const { score, why } = scoreStory(a, prof, now);
     if (score < MIN_SCORE) continue;
-    const { summary, publisher } = storySummary(a.summary, title);
+    let summary = null, publisher = null;
+    try { ({ summary, publisher } = storySummary(a.summary, title)); } catch { /* one bad item never sinks the list */ }
     scored.push({
       id: Number(a.id), title, url, summary,
       sourceId: Number(a.source_id),

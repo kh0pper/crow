@@ -159,5 +159,6 @@ test("story summaries: feed HTML becomes text, Google News items show their publ
   assert.deepEqual(storySummary("Fed raises rates", "Fed raises rates"), { summary: null, publisher: null });
   assert.deepEqual(storySummary(null, "x"), { summary: null, publisher: null });
   assert.equal(htmlToText("a&#39;b &#x41; &nbsp;c"), "a'b A c");
+  assert.equal(htmlToText("x&#99999999;y&#x110000;z&#0;w"), "x y z w", "out-of-range code points never throw");
   assert.doesNotMatch(String(storySummary("<script>x</script>hi", "t").summary), /</);
 });
