@@ -134,6 +134,16 @@ test("readPrefs: defaults on a fresh db, and one junk field never blanks the res
     level: 2,
     weather: true,
   }, "each field falls back alone; unknown vocabulary members are dropped");
+
+  // Every equipment value unknown is the same statement as none at all: the
+  // default ("no equipment"), never an empty list.
+  await writeSetting(db, PREFS_KEY, JSON.stringify({
+    ...DEFAULT_PREFS, equipment: ["jetpack", "trampoline"],
+  }));
+  assert.deepEqual((await readPrefs(db)).equipment, ["none"]);
+
+  await writeSetting(db, PREFS_KEY, JSON.stringify({ ...DEFAULT_PREFS, equipment: [] }));
+  assert.deepEqual((await readPrefs(db)).equipment, ["none"], "an empty list reads as no equipment");
 });
 
 test("writePrefs: merges, validates, and an unknown limit tag is refused with nothing written", async () => {
@@ -287,6 +297,65 @@ test("swap re-rolls the stored card, counts up to 3, and the fourth refuses", as
   assert.equal(refused.entry.id, last.entry.id, "the last card stays on screen");
   assert.equal(rowsOf(c, "ramble_settings", TODAY_KEY).length, emitsBefore, "a refused swap writes nothing");
   assert.equal(JSON.parse(await readSetting(db, TODAY_KEY)).swap, MAX_SWAPS);
+});
+
+test("the swap cap cannot be reopened by a same-day re-pick", async () => {
+  const db = await freshDb();
+  await writePrefs(db, PREFS);
+  const lib = [
+    entry({ id: "knee-a", skipIf: ["knee"] }),
+    entry({ id: "knee-b", skipIf: ["knee"] }),
+    entry({ id: "safe-1" }),
+  ];
+
+  // The picker is pure, so find a day whose THIRD swap lands on a knee-tagged
+  // card: only then does a later knee limit really rule the stored card out
+  // and force the same-day re-pick this test is about.
+  let found = null;
+  for (let i = 0; i < 400 && found === null; i += 1) {
+    const t = new Date(2026, 9, 5 + i, 12, 0, 0).getTime();
+    const pick = pickChallenge({
+      day: localDay(t), hourLocal: 12, weather: null, prefs: PREFS,
+      history: { done: {}, skipped: {} }, library: lib, swap: MAX_SWAPS,
+    });
+    if (pick && pick.entryId.startsWith("knee-")) found = t;
+  }
+  assert.ok(found, "the fixture needs a day whose swap-3 card is knee-tagged");
+
+  assert.ok(await todayChallenge(db, { now: found, library: lib }));
+  for (let s = 0; s < MAX_SWAPS; s += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const swapped = await swapChallenge(db, { now: found + (s + 1) * 1000, library: lib });
+    assert.equal(swapped.refused, false);
+  }
+  assert.equal(JSON.parse(await readSetting(db, TODAY_KEY)).swap, MAX_SWAPS);
+  const capped = await todayChallenge(db, { now: found + 5000, library: lib });
+  assert.deepEqual(capped.entry.skipIf, ["knee"], "the capped card is the knee entry");
+
+  // The new limit rules the stored card out, so today's card is re-picked.
+  await writePrefs(db, { limits: ["knee"] });
+  const rePicked = await todayChallenge(db, { now: found + 6000, library: lib });
+  assert.equal(rePicked.entry.id, "safe-1", "the ruled-out card is replaced");
+  assert.equal(rePicked.swap, MAX_SWAPS, "a same-day re-pick keeps the day's swap count");
+  assert.equal(JSON.parse(await readSetting(db, TODAY_KEY)).swap, MAX_SWAPS);
+
+  const refused = await swapChallenge(db, { now: found + 7000, library: lib });
+  assert.equal(refused.refused, true, "a re-pick must not hand out fresh swaps");
+  assert.equal(refused.swap, MAX_SWAPS);
+  assert.equal(refused.entry.id, "safe-1");
+});
+
+test("a stored swap beyond the cap is clamped, never reset to 0", async () => {
+  const db = await freshDb();
+  await writePrefs(db, PREFS);
+  const lib = [entry({ id: "a-1" }), entry({ id: "b-2" })];
+  await todayChallenge(db, { now: T0, library: lib });
+  const stored = JSON.parse(await readSetting(db, TODAY_KEY));
+  await writeSetting(db, TODAY_KEY, JSON.stringify({ ...stored, swap: MAX_SWAPS + 6 }));
+
+  const read = await todayChallenge(db, { now: T0 + 1000, library: lib });
+  assert.equal(read.swap, MAX_SWAPS);
+  assert.equal((await swapChallenge(db, { now: T0 + 2000, library: lib })).refused, true);
 });
 
 test("swap on a brand-new day starts the count over", async () => {

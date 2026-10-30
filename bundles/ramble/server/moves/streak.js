@@ -47,9 +47,11 @@ function previousDay(dayStr) {
 }
 
 /**
- * The current streak, read-only. `{ days, nextHeartAt }`; `nextHeartAt` is the
- * multiple of seven the next heart sits on, so the panel can render "3 more
- * days" without importing the rule.
+ * The current streak, read-only. `{ days, nextHeartAt, todayGood }`;
+ * `nextHeartAt` is the multiple of seven the next heart sits on, so the panel
+ * can render "3 more days" without importing the rule. `todayGood` says today
+ * itself qualifies — `days` alone cannot, because a today that has not
+ * qualified yet (or is paused) leaves the count at yesterday's value.
  */
 export async function streakState(db, { now = Date.now() } = {}) {
   const at = asAt(now);
@@ -107,7 +109,8 @@ export async function streakState(db, { now = Date.now() } = {}) {
   for (const day of [...done, ...off, ...steps.keys(), ...minutes.keys()]) {
     if (earliest === null || day < earliest) earliest = day;
   }
-  if (earliest === null) return { days: 0, nextHeartAt: STREAK_HEART_EVERY };
+  const todayGood = good.has(today);
+  if (earliest === null) return { days: 0, nextHeartAt: STREAK_HEART_EVERY, todayGood: false };
 
   let days = 0;
   let cursor = today;
@@ -124,19 +127,23 @@ export async function streakState(db, { now = Date.now() } = {}) {
     cursor = previousDay(cursor);
   }
 
-  return { days, nextHeartAt: STREAK_HEART_EVERY };
+  return { days, nextHeartAt: STREAK_HEART_EVERY, todayGood };
 }
 
 /**
  * Award the streak heart when today brings the streak to a multiple of seven.
- * Idempotent by the key (`streak:<day>`): calling twice on the same day awards
- * once, and calling on a non-multiple day awards nothing. A missed day later
- * does not remove a heart already earned — the ledger only grows.
+ * `todayGood` is required, not just `days % 7`: streakState keeps `days`
+ * unchanged while today has not qualified (or is paused), so the morning after
+ * a heart — or a paused day — still reads seven and would otherwise pay a
+ * second heart for a day that earned nothing. Idempotent by the key
+ * (`streak:<day>`): calling twice on the same day awards once, and calling on
+ * a non-multiple day awards nothing. A missed day later does not remove a
+ * heart already earned — the ledger only grows.
  */
 export async function awardStreakHeart(db, { now = Date.now(), emit } = {}) {
   const at = asAt(now);
-  const { days, nextHeartAt } = await streakState(db, { now: at });
-  if (days <= 0 || days % nextHeartAt !== 0) {
+  const { days, nextHeartAt, todayGood } = await streakState(db, { now: at });
+  if (!todayGood || days <= 0 || days % nextHeartAt !== 0) {
     return { awarded: false, days, nextHeartAt, key: null };
   }
   const key = STREAK_HEART_PREFIX + localDay(at);

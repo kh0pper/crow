@@ -132,6 +132,10 @@ function normalizePrefs(raw) {
   }
   if (Array.isArray(raw.equipment)) {
     out.equipment = raw.equipment.filter((e) => isVocab(e, EQUIPMENT));
+    // Every value unknown (this build cannot read what the peer wrote) is the
+    // same statement as none at all: "no equipment". An empty list would rule
+    // nothing in or out in the picker and lie to the settings UI.
+    if (out.equipment.length === 0) out.equipment = [...DEFAULT_PREFS.equipment];
   }
   if (Array.isArray(raw.limits)) {
     out.limits = raw.limits.filter((t) => isVocab(t, LIMIT_TAGS));
@@ -190,7 +194,12 @@ function normalizeToday(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   if (typeof raw.day !== "string" || !DAY_RE.test(raw.day)) return null;
   if (typeof raw.entryId !== "string" || raw.entryId === "") return null;
-  const swap = Number.isInteger(raw.swap) && raw.swap >= 0 && raw.swap <= MAX_SWAPS ? raw.swap : 0;
+  // A stored count above the cap can only come from a peer's junk or a newer
+  // build: CLAMP it, never reset — resetting to 0 would hand the day fresh
+  // swaps on the next read.
+  const swap = Number.isInteger(raw.swap) && raw.swap >= 0
+    ? Math.min(raw.swap, MAX_SWAPS)
+    : 0;
   const reasons = Array.isArray(raw.reasons) ? raw.reasons.filter((r) => typeof r === "string") : [];
   const why = typeof raw.why === "string" ? raw.why : whyLine(reasons);
   return { day: raw.day, entryId: raw.entryId, swap, reasons, why };
@@ -279,7 +288,8 @@ async function offState(db, day, at, emit) {
  * REUSE: a stored `moves.today` for the same local day is returned as-is
  * (barring a limit that has since ruled it out). Anything else is a new day
  * (or a first run): the previous pick is folded into history and a fresh pick
- * is stored.
+ * is stored. A same-day card the live limits rule out is re-picked carrying
+ * the day's stored swap count, so a replacement never reopens the cap.
  *
  * When prefs.on is false it writes the day's `moveoff` fact and returns
  * `{ off: true }` — the pause neither counts nor breaks the streak.
@@ -315,18 +325,20 @@ export async function todayChallenge(db, {
 
   // A stored card for an earlier day is folded into history as part of the
   // pick below; a card for today that a new limit ruled out is simply
-  // replaced (it was not declined by the user, so it is not a skip).
+  // replaced (it was not declined by the user, so it is not a skip). The
+  // replacement keeps today's swap count: a re-pick must not reopen the cap.
   const earlier = stored && stored.day !== day ? stored : null;
+  const carriedSwap = stored && stored.day === day ? stored.swap : 0;
   const { history, changed } = await historyWithRollover(db, earlier);
   const picked = pickFor({
-    day, at, prefs, history, swap: 0, weather, library: lib, learning,
+    day, at, prefs, history, swap: carriedSwap, weather, library: lib, learning,
   });
   if (!picked) return null;
 
   if (changed) await writeJson(db, HISTORY_KEY, history, emit);
   const why = whyLine(picked.reasons, lang);
   await writeJson(db, TODAY_KEY, {
-    day, entryId: picked.entry.id, swap: 0, reasons: picked.reasons, why,
+    day, entryId: picked.entry.id, swap: carriedSwap, reasons: picked.reasons, why,
   }, emit);
   return {
     day,
@@ -335,7 +347,7 @@ export async function todayChallenge(db, {
     why,
     done: (await rowDelta(db, MOVE_DONE_KIND, day)) !== null,
     off: false,
-    swap: 0,
+    swap: carriedSwap,
   };
 }
 

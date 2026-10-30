@@ -8,7 +8,9 @@
  *     missed full day resets it,
  *   - a `moveoff` (paused) day is stepped over: it neither counts nor breaks,
  *   - the streak heart is awarded on each multiple of seven, once per day, and
- *     a later missed day never takes a heart away,
+ *     only on a day that itself qualifies (a morning with no facts yet, or a
+ *     paused day, must not pay a second heart for the same run),
+ *     and a later missed day never takes a heart away,
  *   - junk ledger keys (bad day, unknown activity/effort, malformed movelog
  *     key) never count.
  *
@@ -66,7 +68,7 @@ test("seven days in a row awards one heart, once", async () => {
   for (let i = -6; i <= 0; i += 1) await doneDay(db, i);
 
   const state = await streakState(db, { now: at(0) });
-  assert.deepEqual(state, { days: 7, nextHeartAt: STREAK_HEART_EVERY });
+  assert.deepEqual(state, { days: 7, nextHeartAt: STREAK_HEART_EVERY, todayGood: true });
   assert.equal(STREAK_HEART_EVERY, 7);
 
   const c = walletCollector();
@@ -90,7 +92,7 @@ test("a moved-off day in the middle is skipped: neither counts nor breaks", asyn
     await (i === -4 ? offDay(db, i) : doneDay(db, i));
   }
   // Seven qualifying days across eight calendar days: the pause is not a miss.
-  assert.deepEqual(await streakState(db, { now: at(0) }), { days: 7, nextHeartAt: 7 });
+  assert.deepEqual(await streakState(db, { now: at(0) }), { days: 7, nextHeartAt: 7, todayGood: true });
   assert.equal((await awardStreakHeart(db, { now: at(0) })).awarded, true);
 });
 
@@ -225,9 +227,45 @@ test("the heart lands on each multiple of seven, and on nothing else", async () 
   assert.equal(await heartsBalance(db), 2);
 });
 
+test("the same run pays once: no heart until TODAY itself qualifies", async () => {
+  const db = await freshDb();
+  for (let i = -6; i <= 0; i += 1) await doneDay(db, i);
+
+  assert.equal((await awardStreakHeart(db, { now: at(0) })).awarded, true);
+  assert.equal(await heartsBalance(db), 1);
+
+  // The next morning has no facts yet, so the count still reads seven (today
+  // is not over) — but today has earned nothing, so nothing is paid.
+  const tomorrow = await streakState(db, { now: at(1) });
+  assert.equal(tomorrow.days, 7);
+  assert.equal(tomorrow.todayGood, false);
+  assert.equal((await awardStreakHeart(db, { now: at(1) })).awarded, false);
+  assert.equal(await heartsBalance(db), 1, "one run, one heart");
+
+  // A paused day keeps the same seven too (it neither counts nor breaks), and
+  // it must not pay for the run either.
+  const paused = await freshDb();
+  for (let i = -6; i <= 0; i += 1) await doneDay(paused, i);
+  assert.equal((await awardStreakHeart(paused, { now: at(0) })).awarded, true);
+  await offDay(paused, 1);
+  const off = await streakState(paused, { now: at(1) });
+  assert.equal(off.days, 7);
+  assert.equal(off.todayGood, false);
+  assert.equal((await awardStreakHeart(paused, { now: at(1) })).awarded, false);
+  assert.equal(await heartsBalance(paused), 1, "a paused day pays nothing");
+
+  // The day the pause ends still pays only when the run reaches a multiple.
+  await doneDay(paused, 2);
+  assert.equal((await streakState(paused, { now: at(2) })).todayGood, true);
+  assert.equal((await awardStreakHeart(paused, { now: at(2) })).awarded, false);
+  assert.equal(await heartsBalance(paused), 1);
+});
+
 test("no facts at all is a zero streak, and nothing is awarded", async () => {
   const db = await freshDb();
-  assert.deepEqual(await streakState(db, { now: at(0) }), { days: 0, nextHeartAt: 7 });
+  assert.deepEqual(await streakState(db, { now: at(0) }), {
+    days: 0, nextHeartAt: 7, todayGood: false,
+  });
   const c = walletCollector();
   assert.equal((await awardStreakHeart(db, { now: at(0), emit: c.emit })).awarded, false);
   assert.equal(c.rows.length, 0);
