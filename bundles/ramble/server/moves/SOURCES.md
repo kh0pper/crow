@@ -21,5 +21,5 @@ search result.
 | NCCIH "Yoga for Health" | UNVERIFIED (US government work) | | | Safety framing and evidence context for yoga entries | UNVERIFIED |
 | US Physical Activity Guidelines (HHS) | UNVERIFIED (US government work) | | | Activity vocabulary and minutes guidance | UNVERIFIED |
 | Wikimedia Commons public-domain pose paintings | Public domain (per individual file pages) | | | Pose illustration references | UNVERIFIED |
-| Winter, *Biomechanics and Motor Control of Human Movement* | Book — bibliographic citation only | n/a | n/a | Segment lengths as a fraction of height (figure builder) | UNVERIFIED |
-| AAOS normal joint range-of-motion tables | Tables — bibliographic citation only | n/a | n/a | Joint angle ranges (figure builder) | UNVERIFIED |
+| Winter, *Biomechanics and Motor Control of Human Movement* (Drillis & Contini 1966 segment lengths) | Book — bibliographic citation only | n/a | n/a | Segment lengths as a fraction of height (figure builder); values from memory, not yet read off the printed figure | UNVERIFIED |
+| AAOS normal joint range-of-motion tables | Tables — bibliographic citation only | Checked via the AAOS norms table in Hendriks et al., Plast Reconstr Surg Glob Open (2020), Supplementary Digital Content 1 | 2026-10-30 | Joint angle ranges (figure builder); the spine row is not in that table | CHECKED (secondary), spine UNVERIFIED |
