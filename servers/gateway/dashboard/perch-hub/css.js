@@ -733,7 +733,9 @@ background:var(--card);color:var(--ink);padding:8px;padding-top:max(8px,env(safe
 display:flex;flex-direction:column;gap:4px;padding:4px;background:var(--card);color:var(--ink);border:1px solid var(--line);
 border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.28);touch-action:none;user-select:none;cursor:grab;
 transition:opacity .2s ease;animation:bf-in .2s ease}
-#perch-hub-root .ph-bfloat[hidden],#perch-hub-root .ph-bfloat [hidden]{display:none}
+/* !important: the part rules below (.bf-img, .bf-frame display:block) have the
+   same specificity and come later, so a plain [hidden] would lose to them */
+#perch-hub-root .ph-bfloat[hidden],#perch-hub-root .ph-bfloat [hidden]{display:none !important}
 #perch-hub-root .ph-bfloat[data-leaving="1"]{opacity:0;pointer-events:none}
 @keyframes bf-in{from{opacity:0;transform:translateY(8px)}}
 #perch-hub-root .ph-bfloat .bf-frame{display:block;width:100%;aspect-ratio:4/3;min-height:44px;padding:0;border:0;border-radius:8px;

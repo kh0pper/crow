@@ -179,11 +179,82 @@ test("the CSS: tokens only, 44 px targets, hidden wins, a reduced-motion version
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(block), "no literal colours");
   assert.match(block, /\.bf-grow,#perch-hub-root \.ph-bfloat \.bf-close\{[^}]*width:44px;height:44px/);
   assert.match(block, /\.bf-bar button\{min-height:44px;min-width:44px/);
-  assert.match(block, /\.ph-bfloat\[hidden\],#perch-hub-root \.ph-bfloat \[hidden\]\{display:none\}/);
   assert.match(block, /prefers-reduced-motion:reduce\)\{#perch-hub-root \.ph-bfloat\{transition:none;animation:none\}/);
   assert.match(block, /\.ph-bfloat\{position:fixed;[^}]*z-index:1100/);
   assert.match(block, /\[data-expanded="1"\]\{[^}]*z-index:1250/, "full screen under the Take over sheet (1300)");
   assert.match(block, /width:min\(40vw,320px\)/);
+});
+
+// A small cascade: the top-level rules of the float's CSS (no @media), descendant
+// selectors only, resolved by !important, specificity, then order.
+function floatRules(css) {
+  css = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const out = [];
+  let i = css.indexOf("#perch-hub-root .ph-bfloat{"), depth = 0, start = i;
+  const end = css.lastIndexOf(".ph-bfloat") + 400;
+  for (; i < end && i < css.length; i++) {
+    const ch = css[i];
+    if (ch === "{") { if (!depth) { out.push({ sel: css.slice(start, i).trim(), at: i }); } depth++; }
+    else if (ch === "}") { depth--; if (!depth) { const r = out[out.length - 1]; r.body = css.slice(r.at + 1, i); start = i + 1; } }
+  }
+  return out.filter((r) => !r.sel.startsWith("@") && r.sel.includes(".ph-bfloat") && !r.body.includes("{"));
+}
+function parseCompound(c) {
+  const o = { id: [], cls: [], attr: [], tag: null };
+  for (const m of c.matchAll(/#([\w-]+)|\.([\w-]+)|\[([\w-]+)(?:="([^"]*)")?\]|^([a-z]+)/g)) {
+    if (m[1]) o.id.push(m[1]); else if (m[2]) o.cls.push(m[2]); else if (m[3]) o.attr.push([m[3], m[4]]); else if (m[5]) o.tag = m[5];
+  }
+  return o;
+}
+function compoundMatches(c, e) {
+  return (!c.tag || c.tag === e.tag) && c.id.every((x) => e.id === x) && c.cls.every((x) => e.cls.includes(x)) &&
+    c.attr.every(([k, v]) => k in e.attrs && (v === undefined || e.attrs[k] === v));
+}
+function selMatches(sel, chain) {
+  const parts = sel.trim().split(/\s+/).map(parseCompound);
+  let ci = chain.length - 1;
+  if (!compoundMatches(parts[parts.length - 1], chain[ci])) return false;
+  for (let p = parts.length - 2; p >= 0; p--) {
+    ci--;
+    while (ci >= 0 && !compoundMatches(parts[p], chain[ci])) ci--;
+    if (ci < 0) return false;
+  }
+  return true;
+}
+function spec(sel) { const c = sel.trim().split(/\s+/).map(parseCompound); let a = 0, b = 0, d = 0; for (const x of c) { a += x.id.length; b += x.cls.length + x.attr.length; d += x.tag ? 1 : 0; } return a * 1e6 + b * 1e3 + d; }
+function computedDisplay(rules, chain) {
+  let best = null;
+  rules.forEach((r, order) => {
+    const m = /(?:^|;)\s*display:([^;!]+)(!important)?/.exec(r.body); if (!m) return;
+    for (const sel of r.sel.split(",")) {
+      if (!selMatches(sel, chain)) continue;
+      const key = [m[2] ? 1 : 0, spec(sel), order];
+      if (!best || key[0] > best.key[0] || (key[0] === best.key[0] && (key[1] > best.key[1] || (key[1] === best.key[1] && key[2] >= best.key[2])))) best = { key, val: m[1].trim() };
+    }
+  });
+  return best ? best.val : null;
+}
+
+test("F3: a hidden part of the float really computes to display:none (mini and full screen)", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const rules = floatRules(perchHubCss());
+  assert.ok(rules.length > 10, "the float's rules were found");
+  const root = { tag: "div", id: "perch-hub-root", cls: [], attrs: {} };
+  for (const expanded of [false, true]) {
+    const node = { tag: "div", id: "perch-bfloat", cls: ["ph-bfloat"], attrs: expanded ? { "data-expanded": "1" } : {} };
+    const frame = { tag: "button", id: "", cls: ["bf-frame"], attrs: {} };
+    const img = { tag: "img", id: "", cls: ["bf-img"], attrs: {} };
+    const bar = { tag: "div", id: "", cls: ["bf-bar"], attrs: {} };
+    const hid = (e) => ({ ...e, attrs: { ...e.attrs, hidden: "" } });
+    const m = expanded ? "full screen" : "mini";
+    assert.equal(computedDisplay(rules, [root, node, frame, img]), "block", m + ": a shown picture is drawn");
+    assert.equal(computedDisplay(rules, [root, node, frame, hid(img)]), "none", m + ": img.hidden wins");
+    assert.equal(computedDisplay(rules, [root, node, hid(frame)]), "none", m + ": frame.hidden wins");
+    for (const c of ["bf-take", "bf-exit"]) assert.equal(computedDisplay(rules, [root, node, bar, hid({ tag: "button", id: "", cls: [c], attrs: {} })]), "none", m + ": " + c);
+    for (const c of ["bf-grow", "bf-close"]) assert.equal(computedDisplay(rules, [root, node, hid({ tag: "button", id: "", cls: [c], attrs: {} })]), "none", m + ": " + c);
+    assert.equal(computedDisplay(rules, [root, hid(node)]), "none", m + ": the node itself");
+    assert.equal(computedDisplay(rules, [root, node]), "flex", m + ": a shown node");
+  }
 });
 
 // ---------------------------------------------------------------------------
