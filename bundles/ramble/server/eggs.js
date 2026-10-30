@@ -529,8 +529,9 @@ export async function layProgress(db) {
  *
  * ⚠ delta is the literal 1. See applyRambleWallet's MAX(delta) rule.
  *
- * ⚠ Called ONLY from the write paths (`feed`, and `doChore` through it) —
- * never from `petState`. `pet.js:18` records the invariant: "petState's
+ * ⚠ Called ONLY from the write paths (`feed` — which geo events, the daily
+ * check-in, `doChore` and the moves ledger all reach through it) — never from
+ * `petState`. `pet.js:18` records the invariant: "petState's
  * decay-on-read write never emits, because a GET must never queue a sync op",
  * and `petState` has no `emit` in scope to pass. A day is therefore earned by
  * DOING something — a walk, a chore, a check-in — not by opening the app,
@@ -538,10 +539,14 @@ export async function layProgress(db) {
  *
  * ⚠ Laying REQUIRES real movement, and that is a design consequence, not an
  * oversight. Decay is 10 per 6 h (-40/day); the most a player who never posts
- * a location fix can earn is checkin 5 + 3 chores x 8 = 29/day. From the
- * default 60 they bank three happy days and then fall below the 60 threshold
- * for good. Do NOT write, in a comment or a doc, that chores and the check-in
- * alone can reach `lay.days`. They cannot.
+ * a location fix can earn is check-in 5 + indoor moves and chores 24 = 29/day
+ * — ONE combined indoor budget (moves/indoor-cap.js INDOOR_DAILY_CAP, the old
+ * 3 x 8 chores purse, now shared by the chores, an indoor challenge Done and
+ * an indoor "something else" log), plus the check-in, which is the only indoor
+ * earner outside it. From the default 60 they bank three happy days and then
+ * fall below the 60 threshold for good. Do NOT write, in a comment or a doc,
+ * that indoor moves, chores and the check-in alone can reach `lay.days`. They
+ * cannot. tests/ramble-moves-ledger.test.js simulates the fortnight.
  */
 export async function recordHappyDay(db, { now = Date.now(), mood, emit } = {}) {
   if (mood !== "happy") return { recorded: false, laid: false };

@@ -9,6 +9,12 @@
  * doChore(db, kind) is the daily-chores seam: the first `feed`/`preen`/`play`
  * completion of the local day feeds the pet via this module's own `feed()`
  * (never `feed.js` — that would be a circular import); a repeat is a no-op.
+ * Since Task 4 a chore's +8 comes out of the SAME indoor daily budget as
+ * self-reported moves (moves/indoor-cap.js, INDOOR_DAILY_CAP): the three chores
+ * are 3 x 8 = 24, which is exactly that budget, so a day whose chores are all
+ * done leaves indoor moves nothing, and a day spent on indoor moves leaves the
+ * chores the remainder. The chore is still marked done either way — a budget is
+ * never a punishment.
  *
  * `ramble_pet` IS in instance-sync's SYNCED_TABLES (servers/sharing/
  * instance-sync.js), keyed on its natural key `owner` (always 'self'), with
@@ -22,6 +28,10 @@
 
 import { localDay, recordHappyDay } from "./eggs.js";
 import { maxEnergy, ENERGY_MAX_BASE_DEFAULT } from "./hearts.js";
+// Shared with moves/ledger.js so chores and moves draw from ONE indoor budget.
+// This module (not ledger.js) on purpose: ledger.js imports pet.js to pay the
+// bird, and indoor-cap.js depends only on steps.js's ledger helpers.
+import { claimIndoor } from "./moves/indoor-cap.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export const DECAY_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -62,15 +72,34 @@ export const FEED_DELTAS = {
 };
 
 /**
- * Spec 2026-10-04 §6: step energy is the one feed whose size varies, so it is
- * not in FEED_DELTAS. Its amount is bounded here, and it never moves
- * `last_fed_at` (R5): readings arrive often, and if each reset the decay clock
- * a bird whose owner opens the app every few hours would never droop at all.
+ * Spec 2026-10-04 §6: step energy is a feed whose size varies, so it is not in
+ * FEED_DELTAS (Task 4's `move` is the other; see below). Its amount is bounded
+ * here, and it never moves `last_fed_at` (R5): readings arrive often, and if
+ * each reset the decay clock a bird whose owner opens the app every few hours
+ * would never droop at all.
  */
 export const STEPS_FEED_MAX = 100;
 function stepsAmount(a) {
   const n = Number(a);
   return Number.isInteger(n) ? Math.max(0, Math.min(STEPS_FEED_MAX, n)) : 0;
+}
+
+/**
+ * Task 4 (moves): a self-reported move pays Health in a variable amount, so
+ * like steps its size is bounded here rather than living in FEED_DELTAS. The
+ * real ceiling is a day's budget — 24 indoor, 20 outdoor, claimed in
+ * moves/ledger.js BEFORE this is ever called — so the bound is the base energy
+ * bar: generous enough that retuning a cap can never silently truncate a pay.
+ *
+ * ⚠ UNLIKE steps, a move DOES move `last_fed_at`, exactly as a chore always
+ * did: it is a deliberate act the person reports, not a background sensor
+ * reading arriving every few minutes (R5 is about the sensor). A move that pays
+ * 0 moves nothing.
+ */
+export const MOVE_FEED_MAX = 100;
+function moveAmount(a) {
+  const n = Number(a);
+  return Number.isInteger(n) ? Math.max(0, Math.min(MOVE_FEED_MAX, n)) : 0;
 }
 
 /** The three daily chore kinds tracked in `ramble_pet.chores_json`. */
@@ -126,14 +155,20 @@ async function ensureRow(db) {
 }
 
 /**
- * Apply one geo-activity event to the pet. Does a weekly rollover (reset the
+ * Apply one activity event to the pet. Does a weekly rollover (reset the
  * three counters when `week_start` is null or >= 7 days old) BEFORE applying
  * the event, then a single UPDATE. Throws on an unknown event type.
+ *
+ * Two events carry their own amount instead of a FEED_DELTAS constant —
+ * `steps` (a sensor reading, which never moves the decay clock) and `move`
+ * (a self-reported move or a chore, paid out of a daily budget in
+ * moves/ledger.js, which DOES move it). Neither bumps a weekly counter.
  */
 export async function feed(db, event, { now = Date.now(), emit } = {}) {
   const type = event && event.type;
   const isSteps = type === "steps";
-  if (!isSteps && !Object.prototype.hasOwnProperty.call(FEED_DELTAS, type)) {
+  const isMove = type === "move";
+  if (!isSteps && !isMove && !Object.prototype.hasOwnProperty.call(FEED_DELTAS, type)) {
     throw new Error(`unknown pet feed event type: ${type}`);
   }
 
@@ -151,7 +186,7 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
     week_start = now;
   }
 
-  const delta = isSteps ? stepsAmount(event.amount) : FEED_DELTAS[type];
+  const delta = isSteps ? stepsAmount(event.amount) : isMove ? moveAmount(event.amount) : FEED_DELTAS[type];
   const max = await maxEnergy(db);
   const energy = clampEnergy(row.energy + delta, row.energy, max);
   const mood = moodFor(energy);
@@ -174,8 +209,8 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
 
   // Phase 3 (spec §4.3): a day counts when the bird is happy while wholly
   // eggless. Idempotent per local day, and a no-op the moment the player
-  // holds any egg. `doChore` reaches this through feed(), so chores and the
-  // daily check-in both count.
+  // holds any egg. `doChore` and the moves ledger both reach this through
+  // feed(), so chores, moves and the daily check-in all count.
   await recordHappyDay(db, { now, mood, emit });
 
   return { owner: "self", mood, energy, energy_max: max, places_week, unlocks_week, crows_week, week_start, last_fed_at };
@@ -207,9 +242,27 @@ export function petFromRow(row, energyMax) {
 /**
  * Complete a daily chore (`feed`, `preen`, or `play`). The first completion
  * of the local day for a given kind persists `chores_json` and feeds the pet
- * (+8 energy, via this module's own `feed()` — never `feed.js`, which would
- * be a circular import); a repeat for the same kind on the same day is a
- * no-op (`done: false`). Throws on an unknown chore kind.
+ * (nominally +8 energy, via this module's own `feed()` — never `feed.js`,
+ * which would be a circular import); a repeat for the same kind on the same
+ * day is a no-op (`done: false`). Throws on an unknown chore kind.
+ *
+ * ⚠ TASK 4: the +8 is CLAIMED, not granted. Chores and self-reported moves
+ * share ONE indoor budget per local day (moves/indoor-cap.js,
+ * INDOOR_DAILY_CAP = 24 = the old 3 x 8), so a chore pays only what is left of
+ * it — possibly 0 — and the chore is marked done either way. Claiming through
+ * the shared helper is also what keeps eggs.js's laying invariant true:
+ * indoor-only activity tops out at 29/day against 40/day of decay.
+ *
+ * The claim is the only change to this path: the return shape is untouched
+ * (`POST /api/ramble/pet/chore` JSONs it verbatim), the chore still feeds
+ * through `feed()` and still resets the decay clock as every positive event
+ * does. What a day's budget has left is read from the ledger, not from here
+ * (moves/ledger.js `movesDay`/`movesRoom`). moves/ledger.js also applies the
+ * bird's OWED decay (`petState`) before paying a move, exactly as steps.js
+ * `settleDay` does: a positive feed resets the decay clock, so decay applied
+ * afterwards would clamp away the Health just paid. This path keeps feed()'s
+ * long-standing behaviour instead, which is what the chore tests are written
+ * against.
  */
 export async function doChore(db, kind, { now = Date.now(), emit } = {}) {
   if (!CHORES.includes(kind)) {
@@ -229,7 +282,14 @@ export async function doChore(db, kind, { now = Date.now(), emit } = {}) {
     args: [JSON.stringify(chores)],
   });
 
-  const pet = await feed(db, { type: "chore" }, { now, emit });
+  // Budget first, then the feed — and the chore stays done whatever the budget
+  // says. FEED_DELTAS.chore is the nominal size of the claim.
+  const { paid } = await claimIndoor(db, { day: localDay(now), points: FEED_DELTAS.chore, now, emit });
+  if (paid <= 0) {
+    const after = await ensureRow(db);
+    return { done: true, chores, pet: petFromRow(after, await maxEnergy(db)) };
+  }
+  const pet = await feed(db, { type: "move", amount: paid }, { now, emit });
   return { done: true, chores, pet };
 }
 
