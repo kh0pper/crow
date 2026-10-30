@@ -724,6 +724,40 @@ background:var(--card);color:var(--ink);padding:8px;padding-top:max(8px,env(safe
 #perch-hub-root .ph-tosheet .to-reauth-error{font-size:13px;color:var(--ink);width:100%}
 #perch-hub-root .ph-tosheet .to-view{flex:1;min-height:0;display:flex}
 #perch-hub-root .ph-tosheet .to-vnc{flex:1;width:100%;min-height:0;border:1px solid var(--line);border-radius:8px;background:var(--sky)}
+/* The floating browser preview (brief 2026-10-29): the live tile's mini
+   player once the tile scrolls away, YouTube style. ~40% of a phone's width,
+   320 px at most; placed by the client (left/top). Above the composer, under
+   the modal sheets (1200) and the Take over sheet (1300); full screen sits
+   between them. Targets are 44 px; Perch tokens only, so dark comes with them. */
+#perch-hub-root .ph-bfloat{position:fixed;left:0;top:0;z-index:1100;box-sizing:border-box;width:min(40vw,320px);min-width:150px;
+display:flex;flex-direction:column;gap:4px;padding:4px;background:var(--card);color:var(--ink);border:1px solid var(--line);
+border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.28);touch-action:none;user-select:none;cursor:grab;
+transition:opacity .2s ease;animation:bf-in .2s ease}
+#perch-hub-root .ph-bfloat[hidden],#perch-hub-root .ph-bfloat [hidden]{display:none}
+#perch-hub-root .ph-bfloat[data-leaving="1"]{opacity:0;pointer-events:none}
+@keyframes bf-in{from{opacity:0;transform:translateY(8px)}}
+#perch-hub-root .ph-bfloat .bf-frame{display:block;width:100%;aspect-ratio:4/3;min-height:44px;padding:0;border:0;border-radius:8px;
+background:var(--sky);overflow:hidden;cursor:pointer}
+#perch-hub-root .ph-bfloat .bf-img{display:block;width:100%;height:100%;object-fit:cover;object-position:top;pointer-events:none}
+#perch-hub-root .ph-bfloat[data-dim="1"] .bf-img{opacity:.45}
+#perch-hub-root .ph-bfloat .bf-grow,#perch-hub-root .ph-bfloat .bf-close{position:absolute;top:4px;width:44px;height:44px;padding:0;
+border:0;border-radius:22px;background:var(--card);color:var(--ink);opacity:.9;font-size:20px;line-height:1;cursor:pointer}
+#perch-hub-root .ph-bfloat .bf-grow{left:4px}
+#perch-hub-root .ph-bfloat .bf-close{right:4px}
+#perch-hub-root .ph-bfloat .bf-bar{display:flex;align-items:center;gap:6px;min-width:0;padding:0 4px;font-size:12.5px}
+#perch-hub-root .ph-bfloat .bf-dot{width:9px;height:9px;border-radius:50%;background:var(--alive);flex-shrink:0}
+#perch-hub-root .ph-bfloat .bf-state{display:none;font-weight:600;flex-shrink:0}
+#perch-hub-root .ph-bfloat .bf-host{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .ph-bfloat .bf-bar button{min-height:44px;min-width:44px;padding:8px 14px;flex-shrink:0}
+#perch-hub-root .ph-bfloat:focus-within{outline:2px solid var(--teal);outline-offset:2px}
+#perch-hub-root .ph-bfloat[data-expanded="1"]{left:0 !important;top:0 !important;right:0;bottom:0;width:auto;min-width:0;z-index:1250;
+padding:8px;padding-top:max(8px,env(safe-area-inset-top));border:0;border-radius:0;box-shadow:none;outline:none;
+touch-action:auto;user-select:auto;cursor:default}
+#perch-hub-root .ph-bfloat[data-expanded="1"] .bf-bar{order:-1;font-size:14px}
+#perch-hub-root .ph-bfloat[data-expanded="1"] .bf-state{display:inline}
+#perch-hub-root .ph-bfloat[data-expanded="1"] .bf-frame{flex:1;min-height:0;aspect-ratio:auto;cursor:default}
+#perch-hub-root .ph-bfloat[data-expanded="1"] .bf-img{object-fit:contain;object-position:center}
+@media (prefers-reduced-motion:reduce){#perch-hub-root .ph-bfloat{transition:none;animation:none}}
 /* Spec 2026-10-01: the phone call card (same box as a file card), laid out
    for a phone by the 2026-10-02 polish. min-width:0 + overflow-wrap:anywhere:
    the card never grows past the transcript column, whatever a bot or a

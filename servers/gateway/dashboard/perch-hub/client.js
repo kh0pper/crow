@@ -7,6 +7,7 @@ import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
 import { perchDictationJs } from "./dictation.js";
 import { perchBrowserTileJs } from "./browser-tile.js";
+import { perchBrowserFloatJs } from "./browser-float.js";
 import { perchTakeOverJs } from "./take-over.js";
 import { textSizeRuntimeJs, TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../shared/text-size.js";
 
@@ -1521,8 +1522,9 @@ export function perchHubJs(lang = "en") {
   }
   applyNarrow();
   /* One resize listener: it also refits the head's context line (a rotation
-     changes whether the day fits beside the project name). */
-  bindOnce(window,'resize','narrowResize',function(){ if(live()){ applyNarrow(); refreshIdent(); if(typeof applyVV==='function') applyVV(); } });
+     changes whether the day fits beside the project name) and keeps the
+     floating browser preview inside the viewport (browser-float.js). */
+  bindOnce(window,'resize','narrowResize',function(){ if(live()){ applyNarrow(); refreshIdent(); if(typeof applyVV==='function') applyVV(); bfResize(); } });
 
   /* TEXT SIZE. #407 (2026-10-02) gave Perch its own five-step A− / A / A+;
      since A11Y-TEXTSIZE (2026-10-03) the control is a CONSUMER of the
@@ -4278,6 +4280,7 @@ ${sessionCardsJs(lang)}
 ${perchDictationJs(lang)}
 
 ${perchBrowserTileJs(lang)}
+${perchBrowserFloatJs(lang)}
 ${perchTakeOverJs(lang)}
 
   /* ---- Wave 3: the slash-command menu ------------------------------------
