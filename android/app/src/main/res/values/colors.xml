@@ -8,4 +8,6 @@
     <color name="divider">#3a3a3c</color>
     <color name="status_bar">#1d1d1f</color>
     <color name="nav_bar">#1d1d1f</color>
+    <!-- The launcher icon's backdrop: light, like the dashboard, so the teal bird reads. -->
+    <color name="ic_launcher_background">#f5f0e8</color>
 </resources>
