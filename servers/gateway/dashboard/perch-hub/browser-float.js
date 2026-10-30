@@ -130,7 +130,9 @@ export function perchBrowserFloatJs(lang = "en") {
     close.onclick=function(){ var t=bf.t; if(!t) return; t.noFloat=true; bfSync(); };
     take.onclick=function(){ var t=bf.t; if(!t) return; bfCollapse(); btTakeOver(t); };
     node.onkeydown=bfTrap;
-    node.onpointerdown=bfDown; node.onpointermove=bfMove; node.onpointerup=bfUp; node.onpointercancel=bfUp;
+    node.onpointerdown=bfDown; node.onpointermove=bfMove; node.onpointerup=bfUp;
+    /* a cancelled drag sends no click: the next tap expands */
+    node.onpointercancel=function(ev){ bfUp(ev); bf.dragged=false; };
     (el('perch-hub-root')||document.body).appendChild(node);
   }
 
@@ -170,7 +172,7 @@ export function perchBrowserFloatJs(lang = "en") {
   function bfShow(t){
     bfEnsure();
     if(bf.leaveTimer){ clearTimeout(bf.leaveTimer); bf.leaveTimer=null; }
-    bf.t=t; bfFill(t);
+    bf.t=t; bf.dragged=false; bfFill(t);
     bf.node.removeAttribute('data-leaving'); bf.node.hidden=false;
     bfPlace(bf.choice||(bf.choice=bfLoad())||bfDefault());
   }
@@ -179,7 +181,8 @@ export function perchBrowserFloatJs(lang = "en") {
     var n=bf.node, a=document.activeElement;
     var had=!!(n&&a&&n.contains&&n.contains(a));
     if(bf.expanded) bfSetExpanded(false);
-    bf.t=null; bf.drag=null;
+    bfDragEnd();
+    bf.t=null;
     if(!n||n.hidden) return;
     n.setAttribute('data-leaving','1');
     if(bf.leaveTimer) clearTimeout(bf.leaveTimer);
@@ -194,7 +197,8 @@ export function perchBrowserFloatJs(lang = "en") {
   function bfRemove(){
     if(bf.leaveTimer){ clearTimeout(bf.leaveTimer); bf.leaveTimer=null; }
     if(bf.node&&bf.node.parentNode) bf.node.parentNode.removeChild(bf.node);
-    bf.node=null; bf.t=null; bf.expanded=false; bf.drag=null;
+    bfDragEnd();
+    bf.node=null; bf.t=null; bf.expanded=false;
   }
 
   /* ---- full screen ------------------------------------------------------ */
@@ -244,6 +248,12 @@ export function perchBrowserFloatJs(lang = "en") {
     bf.dragged=false;
     var p=bf.pos||{ x:0, y:0 };
     bf.drag={ id:ev.pointerId, sx:Number(ev.clientX)||0, sy:Number(ev.clientY)||0, x:p.x, y:p.y, moved:false };
+  }
+  /* Hidden or removed mid-drag: no capture left behind, and no stale
+     "that was a drag" to swallow the next float's first tap. */
+  function bfDragEnd(){
+    var d=bf.drag; bf.drag=null; bf.dragged=false;
+    if(d&&d.moved&&bf.node){ try{ if(bf.node.releasePointerCapture) bf.node.releasePointerCapture(d.id); }catch(e){} }
   }
   function bfMove(ev){
     var d=bf.drag; if(!d||!ev||ev.pointerId!==d.id) return;

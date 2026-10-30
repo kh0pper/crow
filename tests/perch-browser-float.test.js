@@ -558,6 +558,31 @@ test("drag moves it, a drag is not a tap, the spot is remembered and clamped on 
   assert.ok(parseInt(f.style.top, 10) <= 400 - 140 - 8);
 });
 
+test("F5: a drag cut short (the player hides, or the pointer is cancelled) never swallows the next tap", async () => {
+  const h = mount();
+  const t = await liveTile(h, "call_1");
+  await h.show(t, false);
+  const f = h.float(), frame = one(f, "bf-frame");
+  const released = [];
+  f.setPointerCapture = () => {}; f.releasePointerCapture = (id) => released.push(id);
+  f.onpointerdown({ pointerId: 1, button: 0, clientX: 0, clientY: 0, target: frame });
+  f.onpointermove({ pointerId: 1, clientX: 0, clientY: -50, preventDefault() {} });
+  await h.show(t, true);                       // the tile scrolls home mid-drag
+  assert.equal(h.floating(), false);
+  assert.deepEqual(released, [1], "the capture is released");
+  f.onpointerup({ pointerId: 1 });             // the late pointerup is ignored
+  await h.show(t, false);
+  frame.onclick();
+  assert.equal(f.getAttribute("data-expanded"), "1", "the first tap of the next float expands");
+  one(f, "bf-exit").onclick();
+  // a cancelled drag (the browser took the gesture): no click follows, the next tap expands
+  f.onpointerdown({ pointerId: 2, button: 0, clientX: 0, clientY: 0, target: frame });
+  f.onpointermove({ pointerId: 2, clientX: 30, clientY: 0, preventDefault() {} });
+  f.onpointercancel({ pointerId: 2 });
+  frame.onclick();
+  assert.equal(f.getAttribute("data-expanded"), "1");
+});
+
 test("a stored spot is used on this device; bad or blocked storage falls back to the default", async () => {
   const h = mount({ stored: JSON.stringify({ x: 20, y: 30 }) });
   const t = await liveTile(h, "call_1");
