@@ -88,7 +88,7 @@ const ON = (j, names, at = 0) => names.some((k) => Math.abs(j[k].y - at) <= 1);
 const CONTACT = {
   feet: (j) => ON(j, FEET),
   hands_feet: (j) => ON(j, ["handL", "handR"]) && ON(j, FEET),
-  seat: (j) => ON(j, ["hip"], -5),
+  seat: (j) => ON(j, ["hip"], -Figure.SEAT_HEIGHT_FRAC * 100),
   back: (j) => ON(j, ["hip", "shoulder"]),
   knees: (j) => ON(j, ["kneeL", "kneeR"]),
 };
