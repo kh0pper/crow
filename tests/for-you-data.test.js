@@ -5,6 +5,8 @@
  *     bots reported in the last day, and "where you left off" from perch/briefing.js;
  *   - the news "why" words (for-you/news.js) for each kind of Media Hub evidence, and the news
  *     states (no Media Hub, an old Media Hub, a working one);
+ *   - Listen (for-you/listen.js): the audio-address check, its states, the Music tile only when
+ *     Music is installed, one failing tile costing only itself, and the escaped markup;
  *   - the weather (for-you/weather.js) over a fake fetch: fixed https hosts only, a timeout,
  *     the cache, and no chip on any failure.
  */
@@ -203,6 +205,87 @@ test("news states: no Media Hub offers the install, an old copy asks for an upda
     assert.match(out, /1 story, picked for you/);
     assert.match(H.newsHtml({ state: "ok", stories: [], hidden: [] }, "en"), /Nothing good in your news right now/);
   } finally { N._setNewsModuleForTest(null); }
+});
+
+// ---- listen ------------------------------------------------------------------
+
+test("listen audio addresses: Media Hub's briefing route or https, nothing else", async () => {
+  const { listenAudioUrl } = await import("../servers/gateway/for-you/listen.js");
+  assert.equal(listenAudioUrl("/api/media/briefings/12/audio"), "/api/media/briefings/12/audio");
+  assert.equal(listenAudioUrl("https://cdn.example.invalid/a b.mp3"), "https://cdn.example.invalid/a%20b.mp3");
+  for (const bad of ["/api/media/briefings/0/audio", "/api/media/briefings/12/audio?x=1", "/api/media/articles/3/audio", "//evil.example.invalid/x.mp3",
+    "http://cdn.example.invalid/x.mp3", "javascript:alert(1)", "data:audio/mpeg;base64,AAAA", "https://u:p@cdn.example.invalid/x.mp3", "", null, " /api/media/briefings/1/audio/../x"]) {
+    assert.equal(listenAudioUrl(bad), "", String(bad));
+  }
+});
+
+test("listen: no Media Hub offers it, an old copy asks for an update, Music shows only when installed, and one failing tile leaves the others", async () => {
+  const L = await import("../servers/gateway/for-you/listen.js");
+  const NOW = Date.parse("2026-10-29T12:00:00Z");
+  writeFileSync(join(HOME, "installed.json"), "[]");
+  assert.deepEqual(await withDb((db) => L.loadListen(db, { crowHome: HOME, now: NOW })), { media: "missing", briefing: null, podcasts: null, music: false, radio: null });
+  assert.match(H.listenHtml({ media: "missing", music: false }, "en"), /href="\/dashboard\/extensions\?q=media"[^>]*>Install Media Hub</);
+  writeFileSync(join(HOME, "installed.json"), JSON.stringify([{ id: "media" }, { id: "music" }]));
+  const old = await withDb((db) => L.loadListen(db, { crowHome: HOME, now: NOW }));
+  assert.deepEqual([old.media, old.music], ["update", true], "the installed copy has no server/for-you.js");
+
+  const calls = [];
+  const mod = {
+    forYouBriefing: async (db, { now }) => { calls.push(now); return { briefing: { id: 5, title: "Morning briefing, <Wednesday>", durationSec: 312, createdAt: new Date(NOW - 2 * 3600000).toISOString(), audioUrl: "/api/media/briefings/5/audio" }, next: null }; },
+    forYouEpisodes: async () => ({ shows: 2, episodes: [
+      { id: 7, title: "Ep \"seven\" <b>", show: "A Show", sourceId: 3, publishedAt: new Date(NOW - 3600000).toISOString(), audioUrl: "https://cdn.example.invalid/7.mp3" },
+      { id: 8, title: "Plain http", show: "A Show", sourceId: 3, publishedAt: "", audioUrl: "http://cdn.example.invalid/8.mp3" },
+      { id: 9, title: "Same-origin path", show: "A Show", sourceId: 3, publishedAt: "", audioUrl: "/api/media/briefings/9/audio" },
+    ] }),
+  };
+  N._setNewsModuleForTest(mod);
+  try {
+    writeFileSync(join(HOME, "installed.json"), JSON.stringify([{ id: "media" }]));
+    const l = await withDb((db) => L.loadListen(db, { crowHome: HOME, now: NOW }));
+    assert.equal(l.media, "ok");
+    assert.equal(l.music, false, "no Music bundle: no tile");
+    assert.deepEqual(calls, [NOW]);
+    assert.equal(l.briefing.item.audioUrl, "/api/media/briefings/5/audio");
+    assert.deepEqual(l.podcasts.episodes.map((e) => e.id), [7], "an episode plays from https only");
+    const out = H.listenHtml(l, "en", NOW);
+    assert.match(out, /<h2 class="fy-kicker" id="fy-listen-h">Listen<\/h2>/);
+    assert.match(out, /Morning briefing, &lt;Wednesday&gt;/, "titles are escaped");
+    assert.match(out, /5 min · 2h/);
+    assert.match(out, /<button type="button" class="fy-btn fy-btn--primary fy-tile-btn" data-fy-play="fy-audio-b5" aria-describedby="fy-listen-b5">Play<\/button>/);
+    assert.match(out, /<audio id="fy-audio-b5" preload="none" src="\/api\/media\/briefings\/5\/audio"><\/audio>/);
+    assert.match(out, /Ep &quot;seven&quot; &lt;b&gt;/);
+    assert.match(out, /<audio id="fy-audio-p7" preload="none" src="https:\/\/cdn\.example\.invalid\/7\.mp3" data-fy-played="7"><\/audio>/);
+    assert.match(out, /href="\/dashboard\/media\?tab=podcasts">All podcasts</);
+    assert.doesNotMatch(out, /Open your music/);
+    assert.doesNotMatch(out, /cdn\.example\.invalid\/8|briefings\/9/);
+    // Even if a bad address reached the markup, the player refuses it.
+    assert.doesNotMatch(H.listenHtml({ media: "ok", briefing: { item: { id: 1, title: "x", audioUrl: "javascript:alert(1)" }, next: null } }, "en"), /<audio|javascript:/);
+
+    // With Music installed: its tile, straight into the Music panel.
+    writeFileSync(join(HOME, "installed.json"), JSON.stringify([{ id: "media" }, { id: "music" }]));
+    const withMusic = await withDb((db) => L.loadListen(db, { crowHome: HOME, now: NOW }));
+    assert.match(H.listenHtml(withMusic, "en", NOW), /<a class="fy-btn fy-tile-btn" href="\/dashboard\/music">Open your music<\/a>/);
+
+    // One tile failing costs only that tile.
+    mod.forYouEpisodes = async () => { throw new Error("no such column"); };
+    const partial = await withDb((db) => L.loadListen(db, { crowHome: HOME, now: NOW }));
+    assert.equal(partial.podcasts, null);
+    assert.ok(partial.briefing.item, "the briefing still shows");
+    assert.equal(partial.music, true);
+
+    // No podcasts followed: no tile. No briefing: the next scheduled time.
+    mod.forYouEpisodes = async () => ({ shows: 0, episodes: [] });
+    mod.forYouBriefing = async () => ({ briefing: null, next: { at: "2026-10-30T13:00:00.000Z", tz: "UTC" } });
+    const quiet = await withDb((db) => L.loadListen(db, { crowHome: HOME, now: NOW }));
+    assert.equal(quiet.podcasts, null);
+    const qhtml = H.listenHtml(quiet, "en", NOW);
+    assert.match(qhtml, /No briefing yet today/);
+    assert.match(qhtml, /The next one is ready at Friday 1:00 PM\./);
+    assert.doesNotMatch(qhtml, /Podcasts/);
+    assert.equal(H.nextBriefingText({ at: "2026-10-29T13:00:00.000Z", tz: "UTC" }, "en", NOW), "1:00 PM", "today: the time alone");
+    assert.match(H.listenHtml({ ...quiet, music: false }, "es", NOW), /Todavía no hay resumen hoy/);
+    assert.equal(H.listenHtml({ media: "ok", briefing: null, podcasts: null, music: false, radio: null }, "en"), "", "nothing to show: no section");
+  } finally { N._setNewsModuleForTest(null); writeFileSync(join(HOME, "installed.json"), "[]"); }
 });
 
 // ---- weather -----------------------------------------------------------------

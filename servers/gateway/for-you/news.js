@@ -18,19 +18,24 @@ import { t, fill } from "../dashboard/shared/i18n.js";
 export const NEWS_MAX = 8;
 
 let override = null;
-/** Test seam: a stand-in for the bundle module ({ forYouStories, hiddenSources }); null restores. */
+/** Test seam: a stand-in for the bundle module ({ forYouStories, hiddenSources, ... }); null restores. Listen uses it too. */
 export function _setNewsModuleForTest(mod) { override = mod || null; }
 
 /** The installed Media Hub's for-you module, or null when its copy predates it. */
-async function mediaModule(crowHome) {
+export async function mediaModule(crowHome) {
   if (override) return override;
   const file = join(crowHome, "bundles", "media", "server", "for-you.js");
   if (!existsSync(file)) return null;
   return import(pathToFileURL(file).href);
 }
 
+/** True when Media Hub is installed (or a test stands in for it). */
+export function mediaInstalled(crowHome) {
+  return !!override || installedBundleIds(crowHome).includes("media");
+}
+
 export async function loadNews(db, { crowHome = resolveCrowHome(), limit = NEWS_MAX, now = Date.now() } = {}) {
-  if (!override && !installedBundleIds(crowHome).includes("media")) return { state: "missing", stories: [], hidden: [] };
+  if (!mediaInstalled(crowHome)) return { state: "missing", stories: [], hidden: [] };
   let mod;
   try { mod = await mediaModule(crowHome); } catch (err) {
     console.warn("[for-you] Media Hub module failed to load:", err && err.message);

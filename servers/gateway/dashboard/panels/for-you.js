@@ -1,6 +1,7 @@
 /**
  * For You (v1): /dashboard/for-you, the operator's morning page beside the Crow home. Your morning
- * (Board facts, for-you/morning.js), Your news (Media Hub's picks, for-you/news.js) and a weather
+ * (Board facts, for-you/morning.js), Listen (today's spoken briefing, podcasts and the Music app,
+ * for-you/listen.js), Your news (Media Hub's picks, for-you/news.js) and a weather
  * chip (Open-Meteo, for-you/weather.js); ?view=customize turns sections on or off and sets the
  * weather city.
  *
@@ -21,6 +22,7 @@ import { readForYouSettings, writeForYouSettings, CITY_MAX, SECTIONS } from "../
 import { geocodeCity, weatherFor } from "../../for-you/weather.js";
 import { loadMorning } from "../../for-you/morning.js";
 import { loadNews } from "../../for-you/news.js";
+import { loadListen } from "../../for-you/listen.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { activeProjects } from "../../../shared/shell-items.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
@@ -114,16 +116,17 @@ export default {
     try { tz = await instanceZone(db); } catch { tz = undefined; }
     // Each section degrades alone: a failed read costs its section one line, never the page.
     const failed = (what, fallback) => (err) => { console.warn(`[for-you] ${what} failed: ${err && err.message}`); return fallback; };
-    const [morning, news, wx] = await Promise.all([
+    const [morning, listen, news, wx] = await Promise.all([
       settings.sections.morning
         ? listProjects(db).then((projects) => loadMorning(db, { projects, tz, now })).catch(failed("morning", { error: true }))
         : null,
+      settings.sections.listen ? loadListen(db, { crowHome, now }).catch(failed("listen", null)) : null,
       settings.sections.news ? loadNews(db, { crowHome, now }).catch(failed("news", { state: "error", stories: [], hidden: [] })) : null,
       settings.sections.weather && settings.place ? weather(settings.place).catch(failed("weather", null)) : null,
     ]);
     return layout({
       title: t("forYou.title", lang),
-      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), morning, news, weather: wx }, lang, now) + forYouClientJs(),
+      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), morning, listen, news, weather: wx }, lang, now) + forYouClientJs(),
     });
   },
 };

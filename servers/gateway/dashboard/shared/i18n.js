@@ -4474,6 +4474,23 @@ export const translations = {
   "forYou.showAgain": { en: "Show again", es: "Mostrar de nuevo" },
   "forYou.shownAgain": { en: "Shown again.", es: "Se muestra de nuevo." },
   "forYou.allOff": { en: "Every section is off. Turn one on in Customize.", es: "Todas las secciones están desactivadas. Activa una en Personalizar." },
+  // For You: Listen (panels/for-you/html.js listenHtml)
+  "forYou.listen": { en: "Listen", es: "Escuchar" },
+  "forYou.briefing": { en: "Morning briefing", es: "Resumen de la mañana" },
+  "forYou.briefingNone": { en: "No briefing yet today", es: "Todavía no hay resumen hoy" },
+  "forYou.briefingNext": { en: "The next one is ready at {time}.", es: "El próximo estará listo: {time}." },
+  "forYou.minutes": { en: "{n} min", es: "{n} min" },
+  "forYou.play": { en: "Play", es: "Reproducir" },
+  "forYou.pause": { en: "Pause", es: "Pausar" },
+  "forYou.playFailed": { en: "Couldn't play", es: "No se pudo reproducir" },
+  "forYou.podcasts": { en: "Podcasts", es: "Pódcasts" },
+  "forYou.podcastsNone": { en: "No new episodes", es: "No hay episodios nuevos" },
+  "forYou.allPodcasts": { en: "All podcasts", es: "Todos los pódcasts" },
+  "forYou.music": { en: "Music", es: "Música" },
+  "forYou.musicTitle": { en: "Your music library", es: "Tu biblioteca de música" },
+  "forYou.openMusic": { en: "Open your music", es: "Abrir tu música" },
+  "forYou.listenMissing": { en: "Media Hub reads you a short news briefing each morning and brings your podcasts here.", es: "Media Hub te lee un breve resumen de noticias cada mañana y trae tus pódcasts aquí." },
+  "forYou.listenUpdate": { en: "Media Hub needs an update before your briefing and podcasts can show here.", es: "Media Hub necesita una actualización antes de que tu resumen y tus pódcasts aparezcan aquí." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

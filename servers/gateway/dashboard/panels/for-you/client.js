@@ -6,6 +6,8 @@
  *   Hide <source>   -> POST /api/media/sources/:id/hidden {hidden:true}, its stories leave the list
  *   Read at <source> -> ... {action:"mark_read"} (fire and forget), so a read story isn't picked again
  *   Show again (customize) -> POST /api/media/sources/:id/hidden {hidden:false}
+ *   Play / Pause (Listen) -> the tile's own <audio> element; one plays at a time. A podcast
+ *     episode that starts playing is marked read ({action:"mark_read"}), so it leaves the list.
  * Messages come from the page's data-fy-* attributes (server-translated).
  *
  * Emitted inside a template literal: this source must contain NO backticks. It re-runs on every
@@ -39,6 +41,19 @@ export function forYouClientJs() {
   root.addEventListener('click', function (e) {
     var t = e.target && e.target.closest ? e.target : null;
     if (!t) return;
+    var play = t.closest('[data-fy-play]');
+    if (play) {
+      var audio = document.getElementById(play.getAttribute('data-fy-play'));
+      if (!audio) return;
+      if (!audio.paused) { audio.pause(); return; }
+      var all = root.querySelectorAll('audio');
+      for (var n = 0; n < all.length; n++) if (all[n] !== audio && !all[n].paused) all[n].pause();
+      var started = audio.play();
+      if (started && typeof started.catch === 'function') {
+        started.catch(function () { play.textContent = root.getAttribute('data-fy-play-failed') || play.textContent; });
+      }
+      return;
+    }
     var opener = t.closest('[data-fy-open]');
     if (opener) {
       var dlg = document.getElementById(opener.getAttribute('data-fy-open'));
@@ -93,6 +108,26 @@ export function forYouClientJs() {
         });
     }
   });
+
+  // Each play button's words follow its audio: Pause while it plays, Play otherwise.
+  function label(audio, which) {
+    var btn = root.querySelector('[data-fy-play="' + audio.id + '"]');
+    if (btn) btn.textContent = root.getAttribute('data-fy-' + which + '-label') || btn.textContent;
+  }
+  var audios = root.querySelectorAll('audio[id^="fy-audio-"]');
+  for (var m = 0; m < audios.length; m++) {
+    audios[m].addEventListener('play', function (e) {
+      var el = e.currentTarget;
+      label(el, 'pause');
+      var played = el.getAttribute('data-fy-played');
+      if (played && !el.__fyMarked) {
+        el.__fyMarked = true;
+        post('/api/media/articles/' + encodeURIComponent(played) + '/action', { action: 'mark_read' }, true).catch(function () {});
+      }
+    });
+    audios[m].addEventListener('pause', function (e) { label(e.currentTarget, 'play'); });
+    audios[m].addEventListener('ended', function (e) { label(e.currentTarget, 'play'); });
+  }
 
   // Focus returns to the story that opened the sheet; open sheets close before Turbo caches the page.
   var sheets = root.querySelectorAll('dialog.fy-sheet');

@@ -6,6 +6,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { whyText, ageText } from "../../../for-you/news.js";
+import { listenAudioUrl } from "../../../for-you/listen.js";
 import { weatherKind } from "../../../for-you/weather.js";
 import { SECTIONS } from "../../../for-you/settings.js";
 
@@ -118,6 +119,91 @@ export function newsHtml(news, lang = "en", now = Date.now()) {
     </section>`;
 }
 
+/** "12 min" from seconds; "" when unknown. */
+export function minutesText(sec, lang = "en") {
+  const n = Number(sec);
+  return n > 0 ? fill(t("forYou.minutes", lang), { n: Math.max(1, Math.round(n / 60)) }) : "";
+}
+
+/** When the next briefing is due: "8:00 AM", or "Friday 8:00 AM" when that is not today (in its zone). */
+export function nextBriefingText(next, lang = "en", now = Date.now()) {
+  const at = Date.parse(next && next.at);
+  if (!Number.isFinite(at)) return "";
+  const fmt = (opts, tz) => new Intl.DateTimeFormat(locale(lang), { ...opts, ...(tz ? { timeZone: tz } : {}) });
+  let tz = next.tz || undefined;
+  try { fmt({}, tz); } catch { tz = undefined; }
+  const day = (ms) => fmt({ year: "numeric", month: "numeric", day: "numeric" }, tz).format(new Date(ms));
+  const time = fmt({ hour: "numeric", minute: "2-digit" }, tz).format(new Date(at));
+  return day(at) === day(now) ? time : `${fmt({ weekday: "long" }, tz).format(new Date(at))} ${time}`;
+}
+
+/** A play button and its audio element. The button names itself; aria-describedby names what plays. */
+function player({ key, audioUrl, labelId, played, primary = false }, lang) {
+  const src = listenAudioUrl(audioUrl);
+  if (!src) return "";
+  return `<button type="button" class="fy-btn${primary ? " fy-btn--primary" : ""} fy-tile-btn" data-fy-play="fy-audio-${key}" aria-describedby="${labelId}">${e(t("forYou.play", lang))}</button>
+      <audio id="fy-audio-${key}" preload="none" src="${e(src)}"${played ? ` data-fy-played="${e(played)}"` : ""}></audio>`;
+}
+
+function briefingTileHtml(b, lang, now) {
+  const kind = `<p class="fy-kicker">${e(t("forYou.briefing", lang))}</p>`;
+  if (!b.item) {
+    const when = b.next ? nextBriefingText(b.next, lang, now) : "";
+    return `<div class="fy-card fy-tile">${kind}
+      <p class="fy-tile-title">${e(t("forYou.briefingNone", lang))}</p>
+      ${when ? `<p class="fy-tile-meta">${e(fill(t("forYou.briefingNext", lang), { time: when }))}</p>` : ""}
+    </div>`;
+  }
+  const it = b.item;
+  const meta = [minutesText(it.durationSec, lang), ageText(it.createdAt, lang, now)].filter(Boolean).map(e).join(" · ");
+  return `<div class="fy-card fy-tile fy-tile--briefing">${kind}
+      <p class="fy-tile-title" id="fy-listen-b${Number(it.id)}">${e(it.title || t("forYou.briefing", lang))}</p>
+      ${meta ? `<p class="fy-tile-meta">${meta}</p>` : ""}
+      ${player({ key: `b${Number(it.id)}`, audioUrl: it.audioUrl, labelId: `fy-listen-b${Number(it.id)}`, primary: true }, lang)}
+    </div>`;
+}
+
+function podcastsTileHtml(p, lang, now) {
+  const rows = p.episodes.map((ep) => {
+    const id = Number(ep.id);
+    const meta = [ep.show, ageText(ep.publishedAt, lang, now)].filter(Boolean).map(e).join(" · ");
+    return `<li class="fy-ep">
+        <span class="fy-ep-text"><span class="fy-tile-meta">${meta}</span><span class="fy-ep-title" id="fy-listen-p${id}">${e(ep.title)}</span></span>
+        ${player({ key: `p${id}`, audioUrl: ep.audioUrl, labelId: `fy-listen-p${id}`, played: id }, lang)}
+      </li>`;
+  }).join("");
+  return `<div class="fy-card fy-tile fy-tile--wide"><p class="fy-kicker">${e(t("forYou.podcasts", lang))}</p>
+      ${rows ? `<ul class="fy-eps">${rows}</ul>` : `<p class="fy-tile-title">${e(t("forYou.podcastsNone", lang))}</p>`}
+      <a class="fy-more-link" href="/dashboard/media?tab=podcasts">${e(t("forYou.allPodcasts", lang))}</a>
+    </div>`;
+}
+
+function musicTileHtml(lang) {
+  return `<div class="fy-card fy-tile"><p class="fy-kicker">${e(t("forYou.music", lang))}</p>
+      <p class="fy-tile-title">${e(t("forYou.musicTitle", lang))}</p>
+      <a class="fy-btn fy-tile-btn" href="/dashboard/music">${e(t("forYou.openMusic", lang))}</a>
+    </div>`;
+}
+
+/**
+ * Listen: the briefing, then Music, then podcasts (a wide tile). A tile whose read failed is
+ * absent. A radio provider's tile would go after the briefing (data.radio, null in v1). With
+ * nothing at all to show, the section is absent too.
+ */
+export function listenHtml(l, lang = "en", now = Date.now()) {
+  const tiles = [];
+  if (l.media === "missing") tiles.push(`<div class="fy-card fy-tile fy-tile--wide"><p class="fy-note">${e(t("forYou.listenMissing", lang))}</p><a class="fy-more-link" href="/dashboard/extensions?q=media">${e(t("forYou.installMedia", lang))}</a></div>`);
+  if (l.media === "update") tiles.push(`<div class="fy-card fy-tile fy-tile--wide"><p class="fy-note">${e(t("forYou.listenUpdate", lang))}</p><a class="fy-more-link" href="/dashboard/extensions?q=media">${e(t("nav.extensions", lang))}</a></div>`);
+  if (l.briefing) tiles.push(briefingTileHtml(l.briefing, lang, now));
+  if (l.music) tiles.push(musicTileHtml(lang));
+  if (l.podcasts) tiles.push(podcastsTileHtml(l.podcasts, lang, now));
+  if (!tiles.length) return "";
+  return `<section class="fy-listen" aria-labelledby="fy-listen-h">
+      <h2 class="fy-kicker" id="fy-listen-h">${e(t("forYou.listen", lang))}</h2>
+      <div class="fy-tiles">${tiles.join("")}</div>
+    </section>`;
+}
+
 /** The chip and its detail line, or "" (no weather: no chip). */
 export function weatherHtml(w, lang = "en") {
   if (!w) return { chip: "", detail: "" };
@@ -132,8 +218,8 @@ export function weatherHtml(w, lang = "en") {
 }
 
 /**
- * The page. `data`: { settings, dateText, morning|null, news|null, weather|null }.
- * A section that is off is absent; with all three off, one line says where to turn them on.
+ * The page. `data`: { settings, dateText, morning|null, listen|null, news|null, weather|null }.
+ * A section that is off is absent; with every one off, one line says where to turn them on.
  */
 export function forYouPageHtml(data, lang = "en", now = Date.now()) {
   const { settings } = data;
@@ -145,6 +231,9 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
     "data-fy-failed": t("forYou.actionFailed", lang),
     "data-fy-done-more": t("forYou.done.more", lang),
     "data-fy-done-less": t("forYou.done.less", lang),
+    "data-fy-play-label": t("forYou.play", lang),
+    "data-fy-pause-label": t("forYou.pause", lang),
+    "data-fy-play-failed": t("forYou.playFailed", lang),
   };
   const attrs = Object.entries(msgs).map(([k, v]) => ` ${k}="${e(v)}"`).join("");
   return `<div class="fy" data-fy${attrs}>
@@ -155,6 +244,7 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
     ${wx.detail}${addCity}
     ${anyOn ? "" : `<p class="fy-note">${e(t("forYou.allOff", lang))}</p>`}
     ${settings.sections.morning && data.morning ? morningHtml(data.morning, lang) : ""}
+    ${settings.sections.listen && data.listen ? listenHtml(data.listen, lang, now) : ""}
     ${settings.sections.news && data.news ? newsHtml(data.news, lang, now) : ""}
   </div>`;
 }
