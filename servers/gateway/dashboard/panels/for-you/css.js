@@ -47,6 +47,19 @@ export function forYouCss() {
   .fy-dot--done { background: var(--crow-success); }
   .fy-dot--left { background: var(--crow-text-secondary); }
   .fy-more-link { display: inline-flex; align-items: center; min-height: 44px; font-size: 0.9rem; color: var(--crow-accent); }
+  .fy-listen { display: flex; flex-direction: column; gap: 12px; }
+  .fy-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 12px; }
+  .fy-tile { display: flex; flex-direction: column; gap: 6px; padding: 12px; }
+  .fy-tile--wide { grid-column: 1 / -1; }
+  .fy-tile-title { margin: 0; font-size: 0.95rem; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+  .fy-tile-meta { margin: 0; font-size: 0.8rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .fy-tile > .fy-tile-btn { margin-top: auto; width: 100%; }
+  .fy-eps { list-style: none; margin: 0; padding: 0; }
+  .fy-ep { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px 0; border-top: 1px solid var(--crow-border); }
+  .fy-ep:first-child { border-top: 0; }
+  .fy-ep-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .fy-ep-title { font-size: 0.95rem; line-height: 1.35; overflow-wrap: anywhere; }
+  .fy-ep .fy-tile-btn { flex-shrink: 0; min-width: 72px; }
   .fy-news { display: flex; flex-direction: column; gap: 12px; }
   .fy-news-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .fy-news-count { font-size: 0.8rem; color: var(--crow-text-secondary); }

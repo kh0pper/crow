@@ -3,6 +3,8 @@
  * source" route: few good stories over many weak ones, each with the evidence for why it is
  * there, no podcast or read or thumbed-down story, at most two per source, and a hidden source
  * left out until it is shown again. The route needs a session and the gateway's CSRF check.
+ * For You's Listen section (1.2.3): today's daily briefing with audio (36 h at most, else the
+ * next scheduled time) and the newest three unplayed https podcast episodes.
  */
 import "./helpers/media-isolate.js";   // first: this file's own home, data dir and database
 import { test, before, after, beforeEach } from "node:test";
@@ -161,4 +163,79 @@ test("story summaries: feed HTML becomes text, Google News items show their publ
   assert.equal(htmlToText("a&#39;b &#x41; &nbsp;c"), "a'b A c");
   assert.equal(htmlToText("x&#99999999;y&#x110000;z&#0;w"), "x y z w", "out-of-range code points never throw");
   assert.doesNotMatch(String(storySummary("<script>x</script>hi", "t").summary), /</);
+});
+
+// ---- Listen (media 1.2.3) -------------------------------------------------------------------
+
+const sqlAgo = (h) => new Date(NOW - h * 3600000).toISOString().replace("T", " ").slice(0, 19);
+async function briefing({ h, kind = "daily", audio = true, status = "ready", title = "Morning briefing" }) {
+  const { resolveAudioDir } = await import("../bundles/media/server/speech.js");
+  const r = await db.execute({ sql: "INSERT INTO media_briefings (title, kind, status, duration_sec, created_at) VALUES (?, ?, ?, 312.4, ?)", args: [title, kind, status, sqlAgo(h)] });
+  const id = Number(r.lastInsertRowid);
+  if (audio) {
+    const { writeFileSync } = await import("node:fs");
+    const file = `${resolveAudioDir()}/briefing-${id}.mp3`;
+    writeFileSync(file, Buffer.from("ID3 not really audio, but not empty"));
+    await db.execute({ sql: "UPDATE media_briefings SET audio_path = ? WHERE id = ?", args: [file, id] });
+  }
+  return id;
+}
+
+test("Listen briefing: the newest daily briefing with audio from the last 36 h; else none, with the next scheduled time", async () => {
+  const { forYouBriefing, BRIEFING_MAX_AGE_HOURS } = await import("../bundles/media/server/for-you.js");
+  await db.execute("DELETE FROM media_briefings");
+  await db.execute("DELETE FROM schedules WHERE task = 'media:briefing'");
+  assert.equal(BRIEFING_MAX_AGE_HOURS, 36);
+  assert.deepEqual(await forYouBriefing(db, { now: NOW }), { briefing: null, next: null }, "no briefing, no schedule");
+
+  await briefing({ h: 40, title: "Morning briefing, Monday" });
+  assert.equal((await forYouBriefing(db, { now: NOW })).briefing, null, "older than 36 h is not today's");
+
+  const today = await briefing({ h: 4, title: "Morning briefing, Wednesday" });
+  await briefing({ h: 2, title: "A topic briefing", kind: "manual" });
+  await briefing({ h: 1, title: "Still voicing", status: "generating", audio: false });
+  await briefing({ h: 1, title: "Voice failed", audio: false });
+  const r = await forYouBriefing(db, { now: NOW });
+  assert.deepEqual(r, {
+    briefing: { id: today, title: "Morning briefing, Wednesday", durationSec: 312.4, createdAt: new Date(NOW - 4 * 3600000).toISOString(), audioUrl: `/api/media/briefings/${today}/audio` },
+    next: null,
+  });
+
+  // None ready: the schedule's next run, when it is on.
+  await db.execute("DELETE FROM media_briefings");
+  await db.execute("INSERT INTO schedules (task, cron_expression, description, enabled) VALUES ('media:briefing', '0 8 * * *', 'Daily news briefing (News)', 1)");
+  const none = await forYouBriefing(db, { now: NOW });
+  assert.equal(none.briefing, null);
+  const at = Date.parse(none.next.at);
+  assert.ok(at > NOW && at <= NOW + 24 * 3600000, none.next.at);
+  assert.equal(typeof none.next.tz, "string");
+  await db.execute("UPDATE schedules SET enabled = 0 WHERE task = 'media:briefing'");
+  assert.equal((await forYouBriefing(db, { now: NOW })).next, null, "a schedule that is off has no next time");
+  await db.execute("DELETE FROM schedules WHERE task = 'media:briefing'");
+});
+
+test("Listen podcasts: the newest three unplayed episodes with an https enclosure, from enabled podcast sources only", async () => {
+  const { forYouEpisodes, httpsUrl } = await import("../bundles/media/server/for-you.js");
+  assert.deepEqual(await forYouEpisodes(db), { shows: 0, episodes: [] }, "no podcasts followed");
+  const show = await seedSource(db, { name: "A &amp; B Show", url: "https://show.example.invalid/feed", type: "podcast" });
+  const off = await seedSource(db, { name: "Paused show", url: "https://off.example.invalid/feed", type: "podcast", enabled: 0 });
+  const news = await seedSource(db, { name: "Wire", url: "https://wire.example.invalid/feed" });
+  const ep = (source_id, title, h, audio_url) => seedArticle(db, { source_id, title, pub_date: hoursAgo(h), audio_url });
+  const e1 = await ep(show, "Episode 1", 1, "https://cdn.example.invalid/1.mp3");
+  const played = await ep(show, "Episode 2 (played)", 2, "https://cdn.example.invalid/2.mp3");
+  await db.execute({ sql: "INSERT INTO media_article_states (article_id, is_read) VALUES (?, 1)", args: [played] });
+  await ep(show, "Episode 3 (http)", 3, "http://cdn.example.invalid/3.mp3");
+  const e4 = await ep(show, "Episode 4", 4, "https://cdn.example.invalid/4.mp3");
+  const e5 = await ep(show, "Episode 5", 5, "https://cdn.example.invalid/5.mp3");
+  await ep(show, "Episode 6", 6, "https://cdn.example.invalid/6.mp3");
+  await ep(off, "From a paused show", 0.5, "https://cdn.example.invalid/p.mp3");
+  await ep(news, "A story with audio", 0.5, "https://cdn.example.invalid/n.mp3");
+
+  const r = await forYouEpisodes(db);
+  assert.equal(r.shows, 1);
+  assert.deepEqual(r.episodes.map((e) => e.id), [e1, e4, e5]);
+  assert.deepEqual(r.episodes[0], { id: e1, title: "Episode 1", show: "A & B Show", sourceId: show, publishedAt: hoursAgo(1), audioUrl: "https://cdn.example.invalid/1.mp3" });
+  assert.equal((await forYouEpisodes(db, { limit: 1 })).episodes.length, 1);
+  assert.equal(httpsUrl("https://user:pw@cdn.example.invalid/x.mp3"), "", "no credentials in an address");
+  assert.equal(httpsUrl("javascript:alert(1)"), "");
 });

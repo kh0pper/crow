@@ -6,6 +6,9 @@
  *   forYouStories(db, opts)        -> [{ id, title, url, summary, sourceId, sourceName, publishedAt, score, why }]
  *   hiddenSources(db)              -> [{ id, name }]   (sources hidden from the picks)
  *   setSourceHidden(db, id, flag)  -> true when a source row matched
+ *   forYouBriefing(db, opts)       -> { briefing: { id, title, durationSec, createdAt, audioUrl } | null,
+ *                                       next: { at, tz } | null }   (For You's Listen section, 1.2.3)
+ *   forYouEpisodes(db, opts)       -> { shows, episodes: [{ id, title, show, sourceId, publishedAt, audioUrl }] }
  *
  * Curation beats quantity: a story is picked only when it is fresh, unread, not thumbed down,
  * links to an http(s) page and scores at least MIN_SCORE. At most PER_SOURCE stories come from one
@@ -181,4 +184,78 @@ export async function setSourceHidden(db, sourceId, hidden) {
   if (!Number.isInteger(id) || id < 1) return false;
   const r = await db.execute({ sql: "UPDATE media_sources SET curation_hidden = ? WHERE id = ?", args: [hidden ? 1 : 0, id] });
   return Number(r.rowsAffected) > 0;
+}
+
+// ---- Listen (media 1.2.3) ------------------------------------------------------------------
+// For You's Listen section: today's spoken briefing and the newest unplayed podcast episodes.
+// The briefing comes from briefing.js and schedule.js (imported on use, so the news picks never
+// load them); its audio is Media Hub's own route. An episode plays from its feed's enclosure,
+// only when that is an https address (an http one would be mixed content on the page).
+
+/** A briefing older than this is not "today's"; null then, and the page says none is ready. */
+export const BRIEFING_MAX_AGE_HOURS = 36;
+export const EPISODES_MAX = 3;
+
+/** The address when it is an absolute https URL, else "". */
+export function httpsUrl(v) {
+  try { const u = new URL(String(v || "").trim()); return u.protocol === "https:" && !u.username && !u.password ? u.href : ""; } catch { return ""; }
+}
+
+/**
+ * The newest finished daily briefing with audio, made in the last BRIEFING_MAX_AGE_HOURS, and when
+ * the next one is due when the schedule is on (`next.at` is UTC ISO, `next.tz` the schedule's zone).
+ */
+export async function forYouBriefing(db, { now = Date.now() } = {}) {
+  const { getLatestBriefing } = await import("./briefing.js");
+  const b = await getLatestBriefing(db, { withAudio: true, maxAgeHours: BRIEFING_MAX_AGE_HOURS, kind: "daily", now });
+  const id = b ? Number(b.id) : 0;
+  const secs = b && b.duration_sec != null ? Number(b.duration_sec) : NaN;
+  const briefing = b && Number.isInteger(id) && id > 0 && b.audio_url === `/api/media/briefings/${id}/audio`
+    ? { id, title: String(b.title || ""), durationSec: secs > 0 ? secs : null, createdAt: b.created_at || null, audioUrl: b.audio_url }
+    : null;
+  let next = null;
+  if (!briefing) {
+    const { readSchedule, scheduleView } = await import("./schedule.js");
+    const s = await readSchedule(db);
+    const view = scheduleView(s.row, s.cfg, now);
+    const at = Number(view.next);
+    if (view.state === "on" && Number.isFinite(at) && at > 0) next = { at: new Date(at).toISOString(), tz: view.tz };
+  }
+  return { briefing, next };
+}
+
+/**
+ * The newest unplayed episodes (not marked read) from enabled podcast sources whose enclosure is
+ * https, newest first, at most `limit`; and how many podcast sources are enabled (0: no tile).
+ * Media Hub doesn't keep an episode's length, so there is none to show.
+ */
+export async function forYouEpisodes(db, { limit = EPISODES_MAX } = {}) {
+  const cap = Math.max(0, Math.min(EPISODES_MAX, Number(limit) || 0));
+  const { rows: count } = await db.execute("SELECT COUNT(*) AS n FROM media_sources WHERE enabled = 1 AND source_type = 'podcast'");
+  const shows = Number(count[0]?.n) || 0;
+  if (!shows || !cap) return { shows, episodes: [] };
+  const { rows } = await db.execute({
+    sql: `SELECT a.id, a.title, a.audio_url, a.pub_date, a.created_at, a.source_id, s.name AS source_name
+            FROM media_articles a
+            JOIN media_sources s ON s.id = a.source_id
+            LEFT JOIN media_article_states st ON st.article_id = a.id
+           WHERE s.enabled = 1 AND s.source_type = 'podcast'
+             AND COALESCE(st.is_read, 0) = 0
+             AND a.audio_url LIKE 'https://%'
+           ORDER BY COALESCE(a.pub_date, a.created_at) DESC, a.id DESC
+           LIMIT ?`,
+    args: [cap * 4],
+  });
+  const episodes = [];
+  for (const a of rows) {
+    const audioUrl = httpsUrl(a.audio_url);
+    const title = htmlToText(a.title);
+    if (!audioUrl || !title) continue;
+    episodes.push({
+      id: Number(a.id), title, show: htmlToText(a.source_name), sourceId: Number(a.source_id),
+      publishedAt: String(a.pub_date || a.created_at || ""), audioUrl,
+    });
+    if (episodes.length >= cap) break;
+  }
+  return { shows, episodes };
 }

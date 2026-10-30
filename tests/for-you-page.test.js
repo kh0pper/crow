@@ -8,7 +8,8 @@
  *     geocodes a changed city once, and a city it can't find is saved with no place (no chip);
  *   - no city: no weather chip, and the quiet "Add your city" link; with one, the chip and the
  *     Open-Meteo attribution;
- *   - the drawer and the mascot sheet carry the For You link only while the flag is on.
+ *   - the drawer and the mascot sheet carry the For You link only while the flag is on;
+ *   - Listen is on by default, sits between Your morning and Your news, and has its own switch.
  * The geocoder and the weather fetch are test seams: nothing here reaches the network.
  */
 import { test, before, after, beforeEach } from "node:test";
@@ -183,7 +184,7 @@ test("customize save: CSRF required; local scope only; a changed city is geocode
     const s = stored();
     assert.equal(s.global, null, "never the synced table");
     assert.deepEqual(JSON.parse(s.local), {
-      sections: { morning: true, news: false, weather: true }, city: "Exampleton",
+      sections: { morning: true, listen: false, news: false, weather: true }, city: "Exampleton",
       place: { name: "Exampleton", admin1: "State", country: "Country", lat: 39.8, lon: -89.6, unit: "celsius" },
     });
 
@@ -218,7 +219,34 @@ test("a city the geocoder can't find, or can't reach, is saved with no place: no
     assert.equal(JSON.parse(stored().local).city, "Offline");
     // Clearing the city clears the place.
     await save({ city: "", section_weather: "1" });
-    assert.deepEqual(JSON.parse(stored().local), { sections: { morning: false, news: false, weather: true }, city: "", place: null });
+    assert.deepEqual(JSON.parse(stored().local), { sections: { morning: false, listen: false, news: false, weather: true }, city: "", place: null });
+  });
+});
+
+test("Listen: on by default, between Your morning and Your news; its Customize switch turns it off and on", async () => {
+  await withFlag(async () => {
+    const c = new Database(DB_FILE);
+    try { c.prepare("DELETE FROM dashboard_settings_overrides WHERE key = 'for_you_settings'").run(); } finally { c.close(); }
+    const page = (await get("/dashboard/for-you")).body;
+    const at = (re) => page.search(re);
+    assert.ok(at(/id="fy-listen-h">Listen</) > at(/id="fy-morning-h"/), "after Your morning");
+    assert.ok(at(/id="fy-listen-h">Listen</) < at(/id="fy-news-h"/), "before Your news");
+    assert.match(page, /Media Hub reads you a short news briefing each morning/, "no Media Hub: the offer, in its own tile");
+    assert.match(page, /data-fy-play-label="Play" data-fy-pause-label="Pause"/);
+    const cz = await get("/dashboard/for-you?view=customize");
+    assert.match(cz.body, /<span>Listen<\/span><input type="checkbox" name="section_listen" value="1" checked>/);
+
+    await save({ city: "", section_morning: "1", section_news: "1" });
+    assert.equal(JSON.parse(stored().local).sections.listen, false);
+    assert.doesNotMatch((await get("/dashboard/for-you")).body, /id="fy-listen-h"/);
+    await save({ city: "", section_listen: "1" });
+    assert.match((await get("/dashboard/for-you")).body, /id="fy-listen-h">Listen</);
+    // The owner gate covers it like the rest: anyone else gets 404, no Listen.
+    for (const sess of ["plain-sess", "sso-sess"]) {
+      const r = await get("/dashboard/for-you", sess);
+      assert.equal(r.status, 404, sess);
+      assert.doesNotMatch(r.body, /fy-listen|fy-audio/, sess);
+    }
   });
 });
 

@@ -85,6 +85,7 @@ const IDENTICAL_OK = new Set([
   "contacts.fieldCrowId", // "Crow ID" — product term
   "contacts.manual",
   "contacts.groupColor", // "Color" is Spanish too
+  "forYou.minutes", // "{n} min": the same abbreviation in Spanish
   "connect.localStdioHeading", // "Local (stdio)"
   // Model Catalog panel (Item G Task 13, reviewed 2026-07-18)
   "models.runtimeBinary", // "Runtime: {name} {release}" — "runtime" is used untranslated in Spanish tech contexts
