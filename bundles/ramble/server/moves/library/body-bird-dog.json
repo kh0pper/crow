@@ -1,0 +1,29 @@
+{
+  "id": "body-bird-dog",
+  "kind": "exercise",
+  "title": "Bird dog",
+  "minutes": 4,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": ["none"],
+  "tags": ["bodyweight", "core", "back", "balance"],
+  "steps": [
+    "Start on your hands and knees with your wrists under your shoulders.",
+    "Reach one arm forward and the opposite leg back until both are level with your back.",
+    "Keep your hips level and your belly firm for one breath.",
+    "Return to the start and switch sides.",
+    "Do 2 sets of 6 reaches per side."
+  ],
+  "works": ["Core", "Back", "Glutes"],
+  "stretches": [],
+  "mistakes": [
+    "Letting your hips tip to one side.",
+    "Lifting your head to look forward instead of down."
+  ],
+  "skipIf": ["wrist", "lower_back"],
+  "easier": "body-dead-bug",
+  "harder": null,
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}

@@ -1,0 +1,28 @@
+{
+  "id": "jog-20",
+  "kind": "walk",
+  "title": "Easy jog 20 minutes",
+  "minutes": 20,
+  "level": 2,
+  "indoor": false,
+  "activity": "jog",
+  "equipment": ["none"],
+  "tags": ["jogging", "outdoors", "steady", "easy"],
+  "steps": [
+    "Walk for 3 minutes to warm up.",
+    "Start an easy jog at a pace where you can still speak a short sentence.",
+    "Jog for 15 minutes, slowing to a walk whenever you need to.",
+    "Walk the last 2 minutes to cool down."
+  ],
+  "works": ["Legs", "Glutes", "Heart and lungs"],
+  "stretches": ["Calves", "Hamstrings", "Quads"],
+  "mistakes": [
+    "Setting off too fast in the first few minutes.",
+    "Landing heavily on your heels."
+  ],
+  "skipIf": ["knee", "ankle", "hip", "high_blood_pressure"],
+  "easier": "walk-jog-intervals",
+  "harder": "jog-30",
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}

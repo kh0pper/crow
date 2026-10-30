@@ -1,0 +1,29 @@
+{
+  "id": "jog-30",
+  "kind": "walk",
+  "title": "Jog 30 minutes",
+  "minutes": 30,
+  "level": 3,
+  "indoor": false,
+  "activity": "jog",
+  "equipment": ["none"],
+  "tags": ["jogging", "outdoors", "endurance", "steady"],
+  "steps": [
+    "Walk for 4 minutes to warm up.",
+    "Jog easily for 10 minutes, keeping a pace you could chat at.",
+    "Walk for 2 minutes to recover.",
+    "Jog 10 minutes more at the same easy pace.",
+    "Walk the last 4 minutes to cool down."
+  ],
+  "works": ["Legs", "Glutes", "Heart and lungs"],
+  "stretches": ["Calves", "Hamstrings", "Quads"],
+  "mistakes": [
+    "Adding distance and speed in the same session.",
+    "Cutting the cool-down walk short."
+  ],
+  "skipIf": ["knee", "ankle", "hip", "high_blood_pressure"],
+  "easier": "jog-20",
+  "harder": null,
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}

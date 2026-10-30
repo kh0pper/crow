@@ -1,0 +1,29 @@
+{
+  "id": "body-chair-squat",
+  "kind": "exercise",
+  "title": "Chair squat",
+  "minutes": 4,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": ["chair"],
+  "tags": ["bodyweight", "lower-body", "squat", "starter"],
+  "steps": [
+    "Stand in front of a chair with your feet hip-width apart.",
+    "Reach your hips back and lower down until you lightly touch the seat.",
+    "Keep your chest up and your knees over your feet.",
+    "Stand back up and squeeze your glutes.",
+    "Do 2 sets of 8."
+  ],
+  "works": ["Legs", "Glutes", "Hips"],
+  "stretches": ["Quads"],
+  "mistakes": [
+    "Dropping onto the chair instead of lowering under control.",
+    "Letting your knees roll inward."
+  ],
+  "skipIf": ["knee", "hip"],
+  "easier": null,
+  "harder": "band-squat",
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}

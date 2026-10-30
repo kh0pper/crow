@@ -1,0 +1,29 @@
+{
+  "id": "body-calf-raise",
+  "kind": "exercise",
+  "title": "Calf raise",
+  "minutes": 3,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": ["chair"],
+  "tags": ["bodyweight", "lower-body", "calves", "balance"],
+  "steps": [
+    "Stand behind a chair and rest your fingertips on the back for balance.",
+    "Press through the balls of your feet and lift your heels as high as feels steady.",
+    "Pause for one breath at the top.",
+    "Lower slowly until your heels touch the floor.",
+    "Do 2 sets of 12."
+  ],
+  "works": ["Calves", "Ankles"],
+  "stretches": ["Calves"],
+  "mistakes": [
+    "Rolling onto the outside edge of your feet.",
+    "Bouncing at the bottom of the movement."
+  ],
+  "skipIf": ["ankle", "balance"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}

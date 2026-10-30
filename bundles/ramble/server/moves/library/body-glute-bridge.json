@@ -1,0 +1,29 @@
+{
+  "id": "body-glute-bridge",
+  "kind": "exercise",
+  "title": "Glute bridge",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": ["none"],
+  "tags": ["bodyweight", "lower-body", "hips", "core"],
+  "steps": [
+    "Lie on your back with your knees bent and your feet flat, hip-width apart.",
+    "Rest your arms along your sides.",
+    "Push through your feet and lift your hips until your body makes a straight line.",
+    "Hold for one breath, then lower slowly.",
+    "Do 2 sets of 10."
+  ],
+  "works": ["Glutes", "Hips", "Core"],
+  "stretches": ["Hips"],
+  "mistakes": [
+    "Arching your lower back at the top.",
+    "Pushing through your toes instead of your heels."
+  ],
+  "skipIf": ["lower_back", "hip"],
+  "easier": null,
+  "harder": "band-glute-bridge",
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}

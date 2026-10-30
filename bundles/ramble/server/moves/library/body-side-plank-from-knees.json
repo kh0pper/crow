@@ -1,0 +1,29 @@
+{
+  "id": "body-side-plank-from-knees",
+  "kind": "exercise",
+  "title": "Side plank from knees",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": ["none"],
+  "tags": ["bodyweight", "core", "side-body", "floor"],
+  "steps": [
+    "Lie on one side with your forearm on the floor under your shoulder and your knees bent.",
+    "Stack your hips and shoulders and press your forearm down.",
+    "Lift your hips until your body makes a straight line from head to knees.",
+    "Hold for 3 slow breaths, then lower.",
+    "Do 2 holds on each side."
+  ],
+  "works": ["Core", "Hips", "Shoulders"],
+  "stretches": [],
+  "mistakes": [
+    "Letting your hips sink toward the floor.",
+    "Rolling your top shoulder forward."
+  ],
+  "skipIf": ["shoulder", "wrist", "hip"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false
+}
