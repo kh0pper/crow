@@ -134,24 +134,40 @@ export async function needsYouCounts(db, projects, { engine, tasksDbPath = TASKS
   const key = list.map((p) => `${p.id}|${p.tasks_db_uri ?? ""}`).sort().join(",") + "@" + tasksDbPath;
   const hit = cacheMs > 0 ? countCache.get(key) : null;
   if (hit) {
-    if (now() - hit.at < cacheMs) return new Map(hit.entries);
+    if (now() - hit.at < cacheMs) return withParts(new Map(hit.entries), hit.parts);
     countCache.delete(key); // expired: dropped when read
   }
   const result = await computeCounts(db, list, engine, tasksDbPath);
   if (cacheMs > 0) {
-    countCache.set(key, { at: now(), entries: [...result] });
+    countCache.set(key, { at: now(), entries: [...result], parts: [...result.parts] });
     while (countCache.size > CACHE_MAX) countCache.delete(countCache.keys().next().value); // oldest first
   }
   return result;
 }
 
+/**
+ * The count's two halves ride along on the Map as `.parts`: projectId ->
+ * { cards, chats } (cards needing you on the Board; waiting chats that hold
+ * none of those cards). The shell's Board tab shows `cards`, so its count
+ * matches the Board, and the Chat tab shows `chats`. The Map's own values are
+ * the totals every other reader already uses.
+ */
+function withParts(map, parts) {
+  map.parts = new Map(parts || []);
+  return map;
+}
+
 async function computeCounts(db, list, engine, tasksDbPath) {
-  const result = new Map();
+  const result = withParts(new Map());
   // No tasks.db: nothing has made a card, so a project's count is its waiting
   // sessions alone; a project with its own store is unknown, as everywhere.
   if (!existsSync(tasksDbPath)) {
     const waiting = await waitingByProject(db, engine);
-    for (const p of list) result.set(p.id, inSharedStore(p, tasksDbPath) ? (waiting.get(p.id) || []).length : null);
+    for (const p of list) {
+      const n = inSharedStore(p, tasksDbPath) ? (waiting.get(p.id) || []).length : null;
+      result.set(p.id, n);
+      if (n != null) result.parts.set(p.id, { cards: 0, chats: n });
+    }
     return result;
   }
 
@@ -180,10 +196,12 @@ async function computeCounts(db, list, engine, tasksDbPath) {
       const held = new Set(needs.map((c) => c.id));
       const extra = (waiting.get(p.id) || []).filter((w) => !(w.cardId != null && held.has(w.cardId))).length;
       result.set(p.id, needs.length + extra);
+      result.parts.set(p.id, { cards: needs.length, chats: extra });
     }
   } catch (err) {
     console.warn("[needs-you] tasks.db unreadable:", err && err.message);
     for (const p of list) result.set(p.id, null);
+    result.parts.clear();
   } finally {
     if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
   }
