@@ -308,9 +308,11 @@ test("the page's client JS carries no backtick (it is emitted inside a template 
  * linkedom node itself (assert.ok(!node), not equal(node, null)): a failure would inspect the whole
  * document graph and hang the run instead of failing it.
  */
+const ORIGIN = "https://crow.example.ts.net";
 async function revealRig({
   path = "/dashboard/perch", hash = "", search = "", view = "list", selection = "", kiosk = false, overlay = false,
-  draft = "", width = 390, link = true, reduce = false, fetchHtml = null, styles = null, prevPath = null,
+  draft = "", width = 390, link = true, reduce = false, fetchHtml = null, fetchOk = true, styles = null, prevPath = null,
+  href = "/dashboard/for-you", referrer = "",
 } = {}) {
   const { shellClientJs } = await import("../servers/gateway/dashboard/shell/client.js");
   const js = shellClientJs();
@@ -331,10 +333,11 @@ async function revealRig({
       </main>
       <nav class="shell-tabs"><a href="/dashboard/perch" aria-current="page">Chat</a></nav>
     </div>
-    <dialog id="shell-drawer">${link ? '<a href="/dashboard/for-you" class="shell-more-item" data-for-you-entry>For You</a>' : ""}</dialog>
+    <dialog id="shell-drawer">${link ? '<a href="' + href + '" class="shell-more-item" data-for-you-entry>For You</a>' : ""}</dialog>
     ${overlay ? "<dialog open></dialog>" : ""}
   </body></html>`);
   if (draft) document.querySelector(".draft").value = draft;
+  Object.defineProperty(document, "referrer", { value: referrer });
   const main = document.querySelector(".main-content");
   const tabs = document.querySelector(".shell-tabs");
   const listeners = {};
@@ -345,7 +348,7 @@ async function revealRig({
   const clock = { t: 1000 };
   let frames = [], rafCalls = 0, timers = [];
   const visits = [], backs = [], fetched = [];
-  const location = { pathname: path, hash, search };
+  const location = { origin: ORIGIN, pathname: path, hash, search };
   const window = {
     innerWidth: width,
     localStorage: { getItem: (k) => (kiosk && k === "crow.kiosk.token" ? "tok" : null) },
@@ -357,10 +360,10 @@ async function revealRig({
   };
   const fetchStub = fetchHtml == null ? undefined : (url, opts) => {
     fetched.push({ url, opts });
-    return Promise.resolve({ ok: true, text: () => Promise.resolve(fetchHtml) });
+    return Promise.resolve({ ok: fetchOk, status: fetchOk ? 200 : 500, text: () => Promise.resolve(fetchHtml) });
   };
   const ctx = vm.createContext({
-    window, document, location, Date: { now: () => clock.t }, String, Math, Array, Promise, DOMParser, fetch: fetchStub,
+    window, document, location, Date: { now: () => clock.t }, String, Math, Array, Promise, DOMParser, URL, AbortController, fetch: fetchStub,
     getComputedStyle: styles || (() => ({ overflowX: "visible" })),
     requestAnimationFrame: (fn) => { rafCalls++; frames.push(fn); return frames.length; },
     cancelAnimationFrame: () => { frames = []; },
@@ -499,6 +502,17 @@ test("the drag reveal: the wrong way never takes over, and a second finger sprin
   assert.ok(!two.panel(), "pinch: the drag lets go");
   assert.deepEqual(two.visits, []);
   assert.equal(two.main.style.transform, "");
+  // The second finger's own touchstart arrives first: it springs back too, even past 35%.
+  const tap = await revealRig();
+  tap.down(60);
+  tap.move(90); tap.move(300); tap.frame();
+  tap.listeners.touchstart({ touches: [{ clientX: 300, clientY: 300 }, { clientX: 100, clientY: 400 }], target: tap.main });
+  assert.equal(tap.move(310), false, "the drag no longer follows");
+  tap.up(310);
+  tap.wait(1000);
+  assert.ok(!tap.panel());
+  assert.deepEqual(tap.visits, [], "no landing");
+  assert.equal(tap.main.style.transform, "");
 });
 
 test("the drag reveal: a vertical scroll is untouched, and a later sideways move does not take it over", async () => {
@@ -564,7 +578,7 @@ test("the drag reveal works over the page's own scroller, and a real sideways sc
 });
 
 test("the reverse drag on For You: right to left pushes it out to the page you came from", async () => {
-  const fromChat = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch" });
+  const fromChat = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch", referrer: ORIGIN + "/dashboard/perch" });
   fromChat.drag(330, 100, { pause: 200 });
   assert.deepEqual(fromChat.backs, ["/dashboard/for-you"], "history.back() to the Crow page before");
   assert.deepEqual(fromChat.visits, []);
@@ -572,10 +586,15 @@ test("the reverse drag on For You: right to left pushes it out to the page you c
   assert.equal(fromChat.panel().style.transform, "translate3d(0px,0,0)", "a plain panel from the right");
   assert.equal(fromChat.panel().children.length, 0);
 
-  const direct = await revealRig({ path: "/dashboard/for-you" });
+  const direct = await revealRig({ path: "/dashboard/for-you", referrer: ORIGIN + "/dashboard/perch" });
   direct.drag(330, 100, { pause: 200 });
   assert.deepEqual(direct.backs, [], "no Crow page before it: never Back out of Crow");
   assert.deepEqual(direct.visits, ["/dashboard/perch"], "the Chat list instead");
+  for (const referrer of ["", "https://elsewhere.example/page", "not a url"]) {
+    const r = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch", referrer });
+    r.drag(330, 100, { pause: 200 });
+    assert.deepEqual([r.backs, r.visits], [[], ["/dashboard/perch"]], `referrer ${JSON.stringify(referrer)}: the Chat list, never Back`);
+  }
 
   const short = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch" });
   short.drag(330, 250, { pause: 200 });
@@ -680,7 +699,7 @@ test("the drag reveal's source never writes fetched text as HTML", async () => {
 });
 
 test("a cached snapshot taken mid-reveal is tidied before it shows, and a new page view starts clean", async () => {
-  const r = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch" });
+  const r = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch", referrer: ORIGIN + "/" });
   r.drag(330, 100, { pause: 200 });
   assert.deepEqual(r.backs, ["/dashboard/for-you"]);
   // Turbo restores the Chat list from a snapshot that carried a mid-drag page and panel.
@@ -693,4 +712,60 @@ test("a cached snapshot taken mid-reveal is tidied before it shows, and a new pa
   assert.equal(snap.querySelector(".main-content").style.willChange, "");
   // The give-up timer from the landing does nothing once the page has moved on.
   r.wait(20000);
+});
+
+test("the drag reveal's sanitizer: no name, background or SVG animation, and no CSS that could load anything", async () => {
+  const fetchHtml = `<html><body class="shell"><div class="dashboard"><main class="main-content">
+    <div class="content-body">
+      <style class="plain">.fy { gap: 16px; }</style>
+      <style class="beacon">.fy { background: url(https://evil.example/b.png); }</style>
+      <style class="imp">@import "https://evil.example/x.css";</style>
+      <style class="esc">.fy { background: \\75 rl(https://evil.example/c.png); }</style>
+      <div class="fy" data-fy>
+        <h1 class="fy-title" style="color: red">For You</h1>
+        <p class="bg" style="background-image: url('https://evil.example/d.png')" background="https://evil.example/e.png">x</p>
+        <img class="named" name="Turbo" src="/img/a.png"><form class="f" name="Turbo"></form>
+        <svg><a href="/x"><animate attributeName="href" to="javascript:pwned()"/><set attributeName="href" to="javascript:pwned()"/>x</a></svg>
+      </div>
+    </div></main></div></body></html>`;
+  const r = await revealRig({ fetchHtml });
+  r.down(60);
+  await new Promise((res) => setImmediate(res));
+  r.move(80); r.move(150); r.frame();
+  const p = r.panel();
+  assert.ok(p.querySelector("style.plain"), "plain For You CSS stays");
+  for (const cls of ["beacon", "imp", "esc"]) assert.ok(!p.querySelector("style." + cls), `style.${cls} is dropped`);
+  assert.equal(p.querySelector(".fy-title").getAttribute("style"), "color: red", "a plain style attribute stays");
+  assert.equal(p.querySelector(".bg").hasAttribute("style"), false, "a style attribute with url( goes");
+  assert.equal(p.querySelector(".bg").hasAttribute("background"), false);
+  assert.equal(p.querySelector(".named").hasAttribute("name"), false, "no named globals");
+  assert.equal(p.querySelector(".f").hasAttribute("name"), false);
+  const html = p.outerHTML;
+  for (const bad of ["evil.example", "<animate", "<set", "javascript:", "@import", "url("]) assert.ok(!html.includes(bad), `nothing like ${bad}`);
+});
+
+test("the drag reveal fetches at most once per page view, even on failure; a new render aborts it; only a /dashboard/ link is used", async () => {
+  const failed = await revealRig({ fetchHtml: "oops", fetchOk: false });
+  failed.down(60);
+  await new Promise((res) => setImmediate(res));
+  failed.up(60);
+  failed.down(70);
+  failed.up(70);
+  assert.equal(failed.fetched.length, 1, "a failure is not retried on every touch");
+  failed.down(60); failed.move(80); failed.move(150); failed.frame(); // the skeleton still shows
+  assert.equal(failed.panel().querySelectorAll(".fy-reveal-card").length, 3);
+
+  const slow = await revealRig({ fetchHtml: "<html></html>" });
+  slow.down(60);
+  const signal = slow.fetched[0].opts.signal;
+  assert.ok(signal && !signal.aborted);
+  slow.listeners["turbo:before-render"]({ detail: { newBody: slow.document.body.cloneNode(true) } });
+  assert.equal(signal.aborted, true, "Turbo rendering another page aborts it");
+
+  for (const href of ["https://evil.example/dashboard/for-you", "//evil.example/dashboard/for-you", "/elsewhere", "/dashboard\\..\\x", "javascript:alert(1)"]) {
+    const r = await revealRig({ href, fetchHtml: "<html></html>" });
+    assert.equal(r.drag(60, 300, { pause: 200 }), 0, `no landing on ${href}`);
+    assert.equal(r.fetched.length, 0, `no fetch of ${href}`);
+    assert.ok(!r.panel());
+  }
 });

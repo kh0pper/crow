@@ -252,7 +252,8 @@ export function shellClientJs() {
     // Discover feed: the page and a For You panel beside it follow the finger
     // 1:1. On release it lands on For You (past COMMIT of the width, or a
     // flick) or springs back. On For You the mirror drag (right to left)
-    // pushes it back out to the page you came from.
+    // pushes it back out: Back when the page before was a Crow page and the
+    // document came from this origin, else the Chat list.
     //
     // Where: the Chat list (/dashboard/perch with no chat open) and a
     // project's home (For You itself for the way back), at phone width (the
@@ -273,10 +274,12 @@ export function shellClientJs() {
     // (data-for-you-entry, rendered only then) is its target.
     //
     // The panel: For You's HTML is fetched once per page view on the first
-    // eligible touch and parsed with DOMParser (nothing in it runs); scripts,
-    // frames, media and dialogs are dropped, then ids, event attributes and
-    // off-site URLs, and the copy goes into an inert panel. Until it arrives
-    // the panel is a skeleton. On commit the page stays where the animation
+    // eligible touch (once, success or not; a new render aborts it) and
+    // parsed with DOMParser (nothing in it runs); scripts, frames, media,
+    // dialogs and SVG animation are dropped, then ids, names, event
+    // attributes, off-site URLs and any CSS that could load something
+    // (url(, @import), and the copy goes into an inert panel. Until it
+    // arrives the panel is a skeleton. On commit the page stays where the animation
     // left it until Turbo renders For You, so nothing flashes. Transforms only,
     // will-change while dragging, one rAF per frame; turbo:before-render tidies
     // anything a cached snapshot carried. With prefers-reduced-motion nothing
@@ -288,9 +291,9 @@ export function shellClientJs() {
       var EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
       var FY = '/dashboard/for-you', CHAT = '/dashboard/perch';
       var PROJECT = /^\\/dashboard\\/project\\/[^\\/]+$/;
-      var DROP = 'script,iframe,frame,frameset,object,embed,link,meta,base,template,noscript,audio,video,source,track,dialog';
+      var DROP = 'script,iframe,frame,frameset,object,embed,link,meta,base,template,noscript,audio,video,source,track,dialog,animate,set,animatemotion,animatetransform';
       var start = null, drag = null, busy = null, raf = 0;
-      var gen = 0, preview = null, fetching = false, here = null, prev = null;
+      var gen = 0, preview = null, tried = false, ctl = null, here = null, prev = null;
 
       function kiosk() {
         try { return !!window.localStorage.getItem('crow.kiosk.token'); } catch (e) { return false; }
@@ -306,6 +309,11 @@ export function shellClientJs() {
       }
       function onForYou() { return location.pathname === FY && !/[?&]view=/.test(location.search || ''); }
       function entry() { return document.querySelector('a[data-for-you-entry]'); }
+      // The link's href, only as a same-origin /dashboard/ path (else null).
+      function entryHref() {
+        var link = entry(), h = link ? String(link.getAttribute('href') || '') : '';
+        return /^\\/dashboard\\//.test(h) && !/[\\s\\\\]/.test(h) ? h : null;
+      }
       function overlayOpen() {
         return !!document.querySelector('dialog[open], [aria-modal="true"]:not([hidden])');
       }
@@ -342,9 +350,14 @@ export function shellClientJs() {
       function shift(x) { return 'translate3d(' + x + 'px,0,0)'; }
 
       // ── The preview: structure only, nothing fetched may run ──
+      // CSS that could load anything: url(, @import, or an escape that could
+      // spell either. The preview never needs an outside resource.
+      function fetchesCss(text) { return /url\\s*\\(|@import|\\\\/i.test(String(text)); }
       function scrub(root) {
         var drop = root.querySelectorAll(DROP);
         for (var i = 0; i < drop.length; i++) if (drop[i].parentNode) drop[i].parentNode.removeChild(drop[i]);
+        var css = root.querySelectorAll('style');
+        for (var c = 0; c < css.length; c++) if (fetchesCss(css[c].textContent) && css[c].parentNode) css[c].parentNode.removeChild(css[c]);
         var all = [root].concat(Array.prototype.slice.call(root.querySelectorAll('*')));
         for (var j = 0; j < all.length; j++) {
           var at = all[j].attributes;
@@ -352,8 +365,9 @@ export function shellClientJs() {
             var name = String(at[k].name).toLowerCase(), val = String(at[k].value || '');
             var url = name === 'href' || name === 'src' || name === 'xlink:href' || name === 'poster';
             // A URL stays only as a same-site path ("/x", never "//x", "/\\x" or one with spaces).
-            var bad = /^on/.test(name) || name === 'id' || name === 'srcset' || name === 'srcdoc' ||
-              name === 'action' || name === 'formaction' || name === 'autofocus' || name === 'data-turbo-permanent' ||
+            // name/form clobber window globals; is= upgrades a custom element on import.
+            var bad = /^on/.test(name) || /^(id|name|form|is|background|ping|cite|data|srcset|srcdoc|action|formaction|autofocus|data-turbo-permanent)$/.test(name) ||
+              (name === 'style' && fetchesCss(val)) ||
               (url && (!/^\\/(?![\\/\\\\])/.test(val) || /[\\s\\\\]/.test(val)));
             if (bad) all[j].removeAttribute(at[k].name);
           }
@@ -371,16 +385,22 @@ export function shellClientJs() {
         }
         return box;
       }
+      // At most one fetch per page view, success or not (a failure keeps the
+      // skeleton); a new render aborts it.
       function prefetch() {
-        var link = entry();
-        if (preview || fetching || !link || typeof fetch !== 'function' || typeof DOMParser !== 'function') return;
+        var href = entryHref();
+        if (tried || !href || typeof fetch !== 'function' || typeof DOMParser !== 'function') return;
+        tried = true;
         var g = gen;
-        fetching = true;
-        fetch(link.getAttribute('href'), { credentials: 'same-origin', headers: { accept: 'text/html' } })
+        ctl = typeof AbortController === 'function' ? new AbortController() : null;
+        fetch(href, { credentials: 'same-origin', headers: { accept: 'text/html' }, signal: ctl ? ctl.signal : undefined })
           .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
           .then(function (html) { if (g === gen) preview = copyOf(new DOMParser().parseFromString(html, 'text/html')); })
-          .catch(function () {})
-          .then(function () { if (g === gen) fetching = false; });
+          .catch(function () {});
+      }
+      function abortFetch() {
+        if (ctl) { try { ctl.abort(); } catch (e) {} }
+        ctl = null;
       }
       // Until the copy arrives: this page's own header and tab bar (no tab
       // lit), the For You title and three grey cards.
@@ -460,10 +480,8 @@ export function shellClientJs() {
       function ready() {
         if (overlayOpen() || selecting() || hasDraft()) return false;
         if (start.dir < 0) return onForYou();
-        var link = entry();
-        if (!surface() || !link) return false;
-        start.href = link.getAttribute('href');
-        return true;
+        start.href = entryHref();
+        return surface() && !!start.href;
       }
       function lock(t) {
         var w = window.innerWidth || 0;
@@ -502,11 +520,20 @@ export function shellClientJs() {
         for (var i = 0; i < d.movers.length; i++) { unstyle(d.movers[i]); d.movers[i].removeAttribute('data-fy-moved'); }
         document.documentElement.style.overflowX = '';
       }
+      // Back only to a Crow page: the page before was one (a /dashboard/ page
+      // other than For You, seen in this window) and the document came from
+      // this origin. Anything else goes to the Chat list.
+      function cameFromCrow() {
+        var ref = '';
+        try { ref = document.referrer ? new URL(document.referrer).origin : ''; } catch (e) { ref = ''; }
+        return !!(prev && prev.indexOf('/dashboard/') === 0 && prev.indexOf(FY) !== 0 &&
+          ref && ref === location.origin && window.history && window.history.length > 1);
+      }
       // Arrived: navigate, and keep the page where it is until the new one
       // renders. If it never does, put the page back.
       function land(d) {
         if (d.dir > 0) go(d.href);
-        else if (prev && prev.indexOf('/dashboard/') === 0 && prev.indexOf(FY) !== 0 && window.history && window.history.length > 1) window.history.back();
+        else if (cameFromCrow()) window.history.back();
         else go(CHAT);
         d.timer = setTimeout(function () { if (document.body.contains(d.panel)) undo(d); }, GIVE_UP_MS);
       }
@@ -531,8 +558,9 @@ export function shellClientJs() {
       }
 
       function begin(e) {
+        if (drag) { cancel(); return; } // a second finger mid-drag: spring back
         start = null;
-        if (busy || drag || !e.touches || e.touches.length !== 1 || kiosk() || !media('(max-width: 1023px)') || overlayOpen()) return;
+        if (busy || !e.touches || e.touches.length !== 1 || kiosk() || !media('(max-width: 1023px)') || overlayOpen()) return;
         var dir = surface() ? 1 : onForYou() ? -1 : 0;
         if (!dir) return;
         var t = e.touches[0], w = window.innerWidth || 0;
@@ -584,7 +612,8 @@ export function shellClientJs() {
       }
       function visit() {
         gen++;
-        preview = null; fetching = false; start = null;
+        abortFetch();
+        preview = null; tried = false; start = null;
         tidy(document.body);
         var at = location.pathname + (location.search || '');
         if (at !== here) { prev = here; here = at; }
@@ -606,6 +635,7 @@ export function shellClientJs() {
         if (busy) clearTimeout(busy.timer);
         start = null; drag = null; busy = null;
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        abortFetch();
         tidy(e && e.detail && e.detail.newBody);
       });
       if (typeof window.addEventListener === 'function') {
