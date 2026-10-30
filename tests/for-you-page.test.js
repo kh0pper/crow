@@ -841,11 +841,12 @@ test("the drag starts on every real page: Crow Talk's always-present, CSS-hidden
 
 // Play hands the audio to the shared player bar (window.crowPlayer), as Media Hub does: an inline
 // <audio> stayed silent in the Android app. Without the bar, the inline element still plays.
-function listenRig({ withBar }) {
+function listenRig({ withBar, withShows = false }) {
   const { document, window } = parseHTML(`<!doctype html><html><body><main data-fy data-fy-play-failed="Couldn't play">
     <p id="fy-listen-b5"> Morning briefing, Friday </p>
     <button type="button" data-fy-play="fy-audio-b5" aria-describedby="fy-listen-b5">Play</button>
     <audio id="fy-audio-b5" preload="none" src="/api/media/briefings/5/audio"></audio>
+    ${withShows ? '<span hidden data-fy-then="fy-audio-b5" data-src="https://cdn.example.invalid/dn.mp3" data-title="Democracy Now! Audio" data-sub="Ep 30"></span>' : ""}
     <span id="fy-listen-p7">Ep 7</span>
     <button type="button" data-fy-play="fy-audio-p7" aria-describedby="fy-listen-p7">Play</button>
     <audio id="fy-audio-p7" preload="none" src="https://cdn.example.invalid/7.mp3" data-fy-played="7"></audio>
@@ -858,13 +859,14 @@ function listenRig({ withBar }) {
     a.pause = () => {};
   }
   // A plain object: linkedom's window is shared between parses, so a stub set on it would leak.
-  const win = withBar ? { crowPlayer: { load: (src, title, sub) => loads.push({ src, title, sub }) } } : {};
+  const queued = [];
+  const win = withBar ? { crowPlayer: { load: (src, title, sub) => loads.push({ src, title, sub }), queue: (items) => queued.push(items) } } : {};
   const fetchStub = (url, opts) => { posts.push({ url, body: JSON.parse(opts.body) }); return Promise.resolve({ ok: true, status: 200 }); };
   const ctx = vm.createContext({ window: win, document, fetch: fetchStub, JSON, encodeURIComponent, decodeURIComponent });
   const { forYouClientJs } = forYouClientMod;
   vm.runInContext(forYouClientJs().replace(/^<script>|<\/script>\s*$/g, ""), ctx);
   const click = (key) => document.querySelector(`[data-fy-play="fy-audio-${key}"]`).dispatchEvent(new window.Event("click", { bubbles: true }));
-  return { loads, posts, inline, click };
+  return { loads, posts, inline, click, queued };
 }
 let forYouClientMod;
 test("For You Play hands the briefing to the shared player bar, and marks an episode read once", async () => {
@@ -885,4 +887,17 @@ test("For You Play falls back to the tile's own audio without the player bar", a
   r.click("b5");
   assert.deepEqual(r.inline, ["fy-audio-b5"]);
   assert.deepEqual(r.loads, []);
+});
+
+test("For You Play queues a briefing's ready shows after it, as Media Hub's own Play does (operator report 2026-10-30)", async () => {
+  forYouClientMod = await import("../servers/gateway/dashboard/panels/for-you/client.js");
+  const r = listenRig({ withBar: true, withShows: true });
+  r.click("b5");
+  assert.deepEqual(r.loads, [], "queued, not loaded alone");
+  assert.deepEqual(JSON.parse(JSON.stringify(r.queued)), [[
+    { src: "/api/media/briefings/5/audio", title: "Morning briefing, Friday", subtitle: "" },
+    { src: "https://cdn.example.invalid/dn.mp3", title: "Democracy Now! Audio", subtitle: "Ep 30" },
+  ]]);
+  r.click("p7");
+  assert.equal(r.loads.length, 1, "an episode has no shows: it loads alone");
 });

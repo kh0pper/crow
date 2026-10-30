@@ -231,7 +231,7 @@ test("listen: no Media Hub offers it, an old copy asks for an update, Music show
 
   const calls = [];
   const mod = {
-    forYouBriefing: async (db, { now }) => { calls.push(now); return { briefing: { id: 5, title: "Morning briefing, <Wednesday>", durationSec: 312, createdAt: new Date(NOW - 2 * 3600000).toISOString(), audioUrl: "/api/media/briefings/5/audio" }, next: null }; },
+    forYouBriefing: async (db, { now }) => { calls.push(now); return { briefing: { id: 5, title: "Morning briefing, <Wednesday>", durationSec: 312, createdAt: new Date(NOW - 2 * 3600000).toISOString(), audioUrl: "/api/media/briefings/5/audio", shows: [{ title: "Show <one>", episode: "Ep \"1\"", audioUrl: "https://cdn.example.invalid/s1.mp3" }, { title: "Bad", episode: "", audioUrl: "/api/media/briefings/9/audio" }] }, next: null }; },
     forYouEpisodes: async () => ({ shows: 2, episodes: [
       { id: 7, title: "Ep \"seven\" <b>", show: "A Show", sourceId: 3, publishedAt: new Date(NOW - 3600000).toISOString(), audioUrl: "https://cdn.example.invalid/7.mp3" },
       { id: 8, title: "Plain http", show: "A Show", sourceId: 3, publishedAt: "", audioUrl: "http://cdn.example.invalid/8.mp3" },
@@ -253,6 +253,8 @@ test("listen: no Media Hub offers it, an old copy asks for an update, Music show
     assert.match(out, /5 min · 2h/);
     assert.match(out, /<button type="button" class="fy-btn fy-btn--primary fy-tile-btn" data-fy-play="fy-audio-b5" aria-describedby="fy-listen-b5">Play<\/button>/);
     assert.match(out, /<audio id="fy-audio-b5" preload="none" src="\/api\/media\/briefings\/5\/audio"><\/audio>/);
+    assert.deepEqual(l.briefing.item.shows, [{ title: "Show <one>", episode: 'Ep "1"', audioUrl: "https://cdn.example.invalid/s1.mp3" }], "a show plays from https only");
+    assert.match(out, /<span hidden data-fy-then="fy-audio-b5" data-src="https:\/\/cdn\.example\.invalid\/s1\.mp3" data-title="Show &lt;one&gt;" data-sub="Ep &quot;1&quot;"><\/span>/);
     assert.match(out, /Ep &quot;seven&quot; &lt;b&gt;/);
     assert.match(out, /<audio id="fy-audio-p7" preload="none" src="https:\/\/cdn\.example\.invalid\/7\.mp3" data-fy-played="7"><\/audio>/);
     assert.match(out, /href="\/dashboard\/media\?tab=podcasts">All podcasts</);
