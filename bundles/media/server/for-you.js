@@ -142,7 +142,8 @@ export async function forYouStories(db, { limit = PICK_MAX, now = Date.now() } =
   const scored = [];
   for (const a of rows) {
     const url = httpUrl(a.url);
-    const title = String(a.title || "").replace(/\s+/g, " ").trim();
+    // Feed titles and source names carry entities too ("Showers &amp; downpours").
+    const title = htmlToText(a.title);
     if (!url || !title) continue;
     const { score, why } = scoreStory(a, prof, now);
     if (score < MIN_SCORE) continue;
@@ -151,7 +152,7 @@ export async function forYouStories(db, { limit = PICK_MAX, now = Date.now() } =
     scored.push({
       id: Number(a.id), title, url, summary,
       sourceId: Number(a.source_id),
-      sourceName: publisher || String(a.source_name || ""),
+      sourceName: publisher || htmlToText(a.source_name),
       publishedAt: String(a.pub_date || a.created_at || ""),
       score: Math.round(score * 1000) / 1000, why,
     });
