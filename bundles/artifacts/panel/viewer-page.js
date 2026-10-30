@@ -40,6 +40,7 @@ export const VIEWER_STRINGS = {
     fallback_remote: "Artifacts on this install can only be shown on the machine Crow runs on.",
     never_password: "Crow never asks for your password inside an artifact.", gone: "This artifact is gone.", pin: "Comment {n}",
     nav: "Leave the artifact", library: "Library", nest: "Crow's Nest", library_title: "Artifacts",
+    fullscreen: "Full screen", exit_fullscreen: "Exit full screen", open_link: "Open this link?", open_link_go: "Open in your browser",
     edit: "Edit", delete: "Delete", save: "Save", edited: "edited", delete_confirm: "Delete this comment?",
     locked_note: "This comment is with the bot right now. You can change it when the bot is done.",
     why_target_unlinked: "That chat isn't linked to this artifact anymore.", why_target_asleep: "That chat is asleep. Open it and Send again.",
@@ -79,6 +80,7 @@ export const VIEWER_STRINGS = {
     fallback_remote: "Los artefactos de esta instalación solo pueden verse en la máquina donde corre Crow.",
     never_password: "Crow nunca te pide la contraseña dentro de un artefacto.", gone: "Este artefacto ya no existe.", pin: "Comentario {n}",
     nav: "Salir del artefacto", library: "Biblioteca", nest: "Nido del Cuervo", library_title: "Artefactos",
+    fullscreen: "Pantalla completa", exit_fullscreen: "Salir de pantalla completa", open_link: "¿Abrir este enlace?", open_link_go: "Abrir en tu navegador",
     edit: "Editar", delete: "Eliminar", save: "Guardar", edited: "editado", delete_confirm: "¿Eliminar este comentario?",
     locked_note: "Este comentario está con el bot ahora mismo. Podrás cambiarlo cuando el bot termine.",
     why_target_unlinked: "Ese chat ya no está vinculado a este artefacto.", why_target_asleep: "Ese chat está dormido. Ábrelo y vuelve a enviar.",
@@ -165,6 +167,8 @@ export function renderViewerPage({ lang = "en", id, v = null, thread = null, bac
 <link rel="stylesheet" href="/artifacts/static/viewer.css">
 </head><body>
 ${links ? `<div id="cv-links" hidden>${links}</div>\n` : ""}<div id="crow-artifact-viewer" data-lang="${L}" data-artifact="${esc(id)}" data-version="${v == null ? "" : esc(v)}" data-thread="${thread == null ? "" : esc(thread)}" data-strings="${esc(JSON.stringify(T))}"></div>
+<button type="button" class="cv-fs-open" id="cv-full-screen">${esc(T.fullscreen)}</button>
+<button type="button" class="cv-exit-fullscreen" id="cv-exit-full-screen" hidden>${esc(T.exit_fullscreen)}</button>
 <script src="/artifacts/static/viewer.js"></script>
 <script src="/artifacts/static/viewer-client.js"></script>
 ${shellHtml}

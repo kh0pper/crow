@@ -148,6 +148,25 @@ test("viewer page: the core viewerCsp (frame-ancestors 'self'), no-store, valida
   assert.ok(ARTIFACT_ID_RE.test("art_abc12345") && !ARTIFACT_ID_RE.test("art_<x>"));
 });
 
+test("viewer page: the full-screen controls (en/es), and the '#full' entry point the client reads", () => {
+  for (const L of ["en", "es"]) {
+    assert.ok(VIEWER_STRINGS[L].fullscreen, `${L}.fullscreen`);
+    assert.ok(VIEWER_STRINGS[L].exit_fullscreen, `${L}.exit_fullscreen`);
+    assert.ok(VIEWER_STRINGS[L].open_link && VIEWER_STRINGS[L].open_link_go, `${L}: link-sheet strings`);
+  }
+  const en = renderViewerPage({ lang: "en", id: "art_abc12345" });
+  assert.match(en, /<button type="button" class="cv-fs-open" id="cv-full-screen">Full screen<\/button>/);
+  assert.match(en, /id="cv-exit-full-screen" hidden>Exit full screen<\/button>/);
+  const es = renderViewerPage({ lang: "es", id: "art_abc12345" });
+  assert.match(es, />Pantalla completa</);
+  assert.match(es, />Salir de pantalla completa</);
+  // The page logic behind "#full": a body class (not the Fullscreen API).
+  const src = readFileSync(new URL("../bundles/artifacts/panel/static/viewer.js", import.meta.url), "utf8");
+  assert.match(src, /location\.hash === "#full"/);
+  assert.match(src, /classList\.add\("cv-fullscreen"\)/);
+  assert.match(src, /classList\.remove\("cv-fullscreen"\)/);
+});
+
 test("bar on every page: renderViewerPage places the player shell after the viewer scripts, before </body>; no shell, no bar (an older core)", () => {
   const html = renderViewerPage({ lang: "en", id: "art_abc12345", shellHtml: "<x-shell></x-shell>" });
   const client = html.indexOf('<script src="/artifacts/static/viewer-client.js"></script>');
@@ -408,6 +427,52 @@ test("live QW4 B2/B3: the full-tab viewer's way out is a slim full-bleed bar (ti
       assert.equal(m.sendOpacity, "1", `and not a faded accent either ${at}`);
       assert.equal(m.sendCursor, "not-allowed", at);
     }
+  } finally { await t.close(); }
+});
+
+test("live: Full screen enters from the toolbar and from '#full', hides the toolbar and rail, keeps the notice + exit button over the frame, and Escape/Exit leave", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const url = `${base}/dashboard/artifacts/view/${encodeURIComponent(pageIds.doc)}`;
+  try {
+    await t.nav(url);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector(".cv-headtools #cv-full-screen")`)) === true, 15000), `viewer + full-screen control in the toolbar (page errors: ${JSON.stringify(t.errors)})`);
+    assert.equal(await t.evalIn(`document.getElementById("cv-full-screen").closest(".cv-headtools") !== null`), true, "the Full screen button sits in the toolbar");
+    assert.ok((await t.evalIn(`document.getElementById("cv-full-screen").getBoundingClientRect().height`)) >= 44, "a 44px target");
+    // '#full' in the URL starts in full screen (a different URL forces a load).
+    await t.nav(`${url}?fs=1#full`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector(".cv-head") && document.body.classList.contains("cv-fullscreen")`)) === true, 15000), `#full started full screen (page errors: ${JSON.stringify(t.errors)})`);
+    const m = JSON.parse(await t.evalIn(`JSON.stringify((() => {
+      const head = document.querySelector(".cv-head"), side = document.querySelector(".cv-side");
+      const stage = document.querySelector(".cv-stage"), r = stage.getBoundingClientRect();
+      const exit = document.getElementById("cv-exit-full-screen");
+      const er = exit.getBoundingClientRect(), ec = getComputedStyle(exit);
+      const note = document.querySelector("#crow-artifact-viewer > .cv-note");
+      const nr = note && note.getBoundingClientRect();
+      return { head: getComputedStyle(head).display, side: getComputedStyle(side).display,
+        stagePos: getComputedStyle(stage).position, x: r.x, y: r.y, w: r.width, h: r.height, iw: innerWidth, ih: innerHeight,
+        exitDisplay: ec.display, exitPos: ec.position, exitW: er.width, exitH: er.height,
+        noteDisplay: note ? getComputedStyle(note).display : null, noteW: nr ? nr.width : 0, noteH: nr ? nr.height : 0,
+        noteText: note ? note.textContent : null };
+    })())`));
+    const at = JSON.stringify(m);
+    assert.equal(m.head, "none", `the toolbar is hidden: ${at}`);
+    assert.equal(m.side, "none", `the comments rail is hidden: ${at}`);
+    assert.equal(m.stagePos, "fixed", `the stage is pinned to the viewport: ${at}`);
+    assert.ok(m.x <= 1 && m.y <= 1 && Math.abs(m.w - m.iw) <= 1 && Math.abs(m.h - m.ih) <= 1, `the frame fills the viewport: ${at}`);
+    assert.notEqual(m.exitDisplay, "none", `the Exit full screen button stays visible: ${at}`);
+    assert.equal(m.exitPos, "fixed", at);
+    assert.ok(m.exitW >= 44 && m.exitH >= 44, `a 44px Exit target: ${at}`);
+    assert.notEqual(m.noteDisplay, "none", `the never-password notice stays visible: ${at}`);
+    assert.ok(m.noteW > 0 && m.noteH > 0 && /never asks for your password/.test(m.noteText), `notice copy: ${at}`);
+    // The Exit button leaves; the toolbar button enters; Escape leaves.
+    await t.evalIn(`document.getElementById("cv-exit-full-screen").click()`);
+    assert.equal(await t.evalIn(`document.body.classList.contains("cv-fullscreen")`), false, "Exit leaves full screen");
+    await t.evalIn(`document.getElementById("cv-full-screen").click()`);
+    assert.equal(await t.evalIn(`document.body.classList.contains("cv-fullscreen")`), true, "the toolbar button enters full screen");
+    await t.evalIn(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+    assert.equal(await t.evalIn(`document.body.classList.contains("cv-fullscreen")`), false, "Escape leaves full screen");
   } finally { await t.close(); }
 });
 
