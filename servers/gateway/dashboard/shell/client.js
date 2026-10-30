@@ -291,10 +291,15 @@ export function shellClientJs() {
         var sel = window.getSelection ? window.getSelection() : null;
         return !!(sel && !sel.isCollapsed && String(sel).trim() !== '');
       }
+      // A box that really scrolls sideways keeps its own swipe. The page's own
+      // vertical scrollers (.content-body, main) are skipped: overflow-y:auto
+      // makes their computed overflow-x "auto" too, and a pixel of overflow
+      // used to block the swipe everywhere.
       function blocked(el) {
         for (var n = el; n && n !== document.body; n = n.parentElement) {
           if (n.matches && n.matches('input,textarea,select,[contenteditable],dialog,canvas,video,[data-no-swipe]')) return true;
-          if (n.scrollWidth > n.clientWidth + 1) {
+          if (n.matches && n.matches('.content-body, main, html')) continue;
+          if (n.scrollWidth > n.clientWidth + 8) {
             var ox = getComputedStyle(n).overflowX;
             if (ox === 'auto' || ox === 'scroll') return true;
           }

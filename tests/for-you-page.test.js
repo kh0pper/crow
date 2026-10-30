@@ -273,7 +273,7 @@ test("the page's client JS carries no backtick (it is emitted inside a template 
 });
 
 /** The swipe block alone, run against a stub page: which gestures navigate and which don't. */
-async function swipeRig({ path = "/dashboard/perch", hash = "", view = "list", selection = "", kiosk = false, overlay = false, draft = "", width = 390, link = true } = {}) {
+async function swipeRig({ path = "/dashboard/perch", hash = "", view = "list", selection = "", kiosk = false, overlay = false, draft = "", width = 390, link = true, target: tgt = null, styles = null } = {}) {
   const { shellClientJs } = await import("../servers/gateway/dashboard/shell/client.js");
   const js = shellClientJs();
   const a = js.indexOf("// ─── For You: the phone swipe");
@@ -298,8 +298,8 @@ async function swipeRig({ path = "/dashboard/perch", hash = "", view = "list", s
     getSelection: () => ({ isCollapsed: !selection, toString: () => selection }),
     Turbo: { visit: (href) => visits.push(href) },
   };
-  vm.runInNewContext(block, { window, document, location: { pathname: path, hash }, getComputedStyle: () => ({ overflowX: "visible" }), Date, String });
-  const target = { parentElement: null, matches: () => false, scrollWidth: 0, clientWidth: 0 };
+  vm.runInNewContext(block, { window, document, location: { pathname: path, hash }, getComputedStyle: styles || (() => ({ overflowX: "visible" })), Date, String });
+  const target = tgt || { parentElement: null, matches: () => false, scrollWidth: 0, clientWidth: 0 };
   return (x0, x1, dy = 0) => {
     listeners.touchstart({ touches: [{ clientX: x0, clientY: 300 }], target });
     listeners.touchend({ changedTouches: [{ clientX: x1, clientY: 300 + dy }] });
@@ -323,4 +323,20 @@ test("the phone swipe: a clear left-to-right swipe on the Chat list or a project
   assert.equal((await swipeRig({ kiosk: true }))(60, 220), 0, "a paired kiosk display");
   assert.equal((await swipeRig({ width: 1280 }))(60, 220), 0, "desktop");
   assert.equal((await swipeRig({ link: false }))(60, 220), 0, "flag off: no link, no target");
+});
+
+test("the phone swipe works over the page's own scroller, and a real sideways scroller still keeps its swipe", async () => {
+  // .content-body scrolls vertically; overflow-y:auto makes its computed
+  // overflow-x "auto" too, and a little horizontal overflow used to block
+  // the swipe on every page (operator report 2026-10-30).
+  const node = (cls, sw, cw, parent) => ({ cls, scrollWidth: sw, clientWidth: cw, parentElement: parent, matches: (sel) => sel.split(",").some((x) => x.trim() === "." + cls) });
+  const contentBody = node("content-body", 400, 390, null);
+  const card = node("ph-row", 300, 300, contentBody);
+  const styles = () => ({ overflowX: "auto" });
+  assert.equal((await swipeRig({ path: "/dashboard/project/garden", target: card, styles }))(60, 220), 1, "over the page's own scroller");
+  const strip = node("chip-strip", 900, 390, contentBody);
+  const chip = node("chip", 80, 80, strip);
+  assert.equal((await swipeRig({ path: "/dashboard/project/garden", target: chip, styles }))(60, 220), 0, "inside a real sideways scroller");
+  const tiny = node("row", 395, 390, contentBody);
+  assert.equal((await swipeRig({ path: "/dashboard/project/garden", target: tiny, styles }))(60, 220), 1, "a few pixels of overflow is not a scroller");
 });
