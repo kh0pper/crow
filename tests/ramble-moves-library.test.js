@@ -7,9 +7,9 @@
  * exercise) or builds entries in-test. Nothing here may depend on the
  * contents of the shipped directory.
  */
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,14 @@ function captureWarnings(fn) {
   console.warn = (...args) => warnings.push(args.join(" "));
   try { return [fn(), warnings]; } finally { console.warn = orig; }
 }
+
+const TEMP_DIRS = [];
+function tempDir() {
+  const d = mkdtempSync(join(tmpdir(), "ramble-moves-"));
+  TEMP_DIRS.push(d);
+  return d;
+}
+after(() => { for (const d of TEMP_DIRS) rmSync(d, { recursive: true, force: true }); });
 
 test("the vocabularies are the fixed lists", () => {
   assert.deepEqual([...ENTRY_KINDS], ["pose", "exercise", "flow", "walk"]);
@@ -186,13 +194,17 @@ test("servedLibrary serves only reviewed entries", () => {
   const served = servedLibrary(FIXTURES);
   assert.ok(served.length > 0);
   assert.ok(served.every((e) => e.reviewed === true));
-  assert.equal(served.length, all.length - 1, "exactly the one unreviewed fixture is held back");
+  assert.equal(served.length, all.length - 2, "the unreviewed pose, and the reviewed flow that names it, are held back");
   assert.equal(entryById(served, "pose-bridge"), null);
+  assert.equal(entryById(served, "flow-morning"), null, "a served flow never points at an unserved pose");
+  for (const e of served) {
+    for (const ref of [e.easier, e.harder]) if (ref) assert.ok(entryById(served, ref), `${e.id} links only to served entries`);
+  }
   assert.ok(entryById(all, "pose-bridge"), "the unreviewed pose is loaded, just not served");
 });
 
 test("loadLibrary skips broken, invalid and dangling entries, naming each in a warning", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ramble-moves-"));
+  const dir = tempDir();
   writeFileSync(join(dir, "broken.json"), "{not json");
   const noSkip = base({ id: "pose-noskip" });
   delete noSkip.skipIf;

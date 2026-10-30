@@ -187,9 +187,21 @@ export function loadLibrary(dir) {
   return out;
 }
 
-/** What the server may show: reviewed entries only. */
+/**
+ * What the server may show: reviewed entries only, closed over their references. A
+ * reviewed flow that names an unreviewed pose is held back too, and an easier/harder
+ * link to an unreviewed entry reads as null, so nothing served points at unserved text.
+ */
 export function servedLibrary(dir) {
-  return loadLibrary(dir).filter((e) => e.reviewed === true);
+  const reviewed = loadLibrary(dir).filter((e) => e.reviewed === true);
+  const ids = new Set(reviewed.map((e) => e.id));
+  return reviewed
+    .filter((e) => e.kind !== "flow" || e.flow.every((step) => ids.has(step.id)))
+    .map((e) => ({
+      ...e,
+      easier: e.easier && ids.has(e.easier) ? e.easier : null,
+      harder: e.harder && ids.has(e.harder) ? e.harder : null,
+    }));
 }
 
 /** Look one entry out of an already-loaded library. */
