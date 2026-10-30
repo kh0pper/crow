@@ -351,6 +351,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       ]);
       const settings = await settingsMod.readForYouSettings(db);
       const place = settings && settings.place ? settings.place : null;
+      if (settings && settings.sections && settings.sections.weather === false) return null; // For You's own weather switch
       if (!place) return null;
       const w = await weatherMod.weatherFor(place);
       return w ? { rain: w.rain, temp: w.temp, code: w.code } : null;
@@ -1339,7 +1340,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     let done;
     try {
       done = await movesMods.ledgerMod.recordChallengeDone(db, {
-        day: day ?? today.day, entry: today.entry, now, emit,
+        // A client day counts only when it is the day the card was picked for
+        // (the 23:58 pick, 00:02 Done case); anything else is the card's own day,
+        // so a Done can never back-fill a missed yesterday.
+        day: day === today.day ? day : today.day, entry: today.entry, now, emit,
       });
     } catch (err) { movesInput(err); }
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });

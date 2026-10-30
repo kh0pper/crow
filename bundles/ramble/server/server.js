@@ -523,6 +523,7 @@ export function createRambleServer(db, options = {}) {
       ]);
       const settings = await readForYouSettings(db);
       if (!settings || !settings.place) return null;
+      if (settings.sections && settings.sections.weather === false) return null; // For You's own weather switch
       const w = await weatherFor(settings.place);
       return w ? { rain: w.rain, temp: w.temp, code: w.code } : null;
     } catch { return null; }
