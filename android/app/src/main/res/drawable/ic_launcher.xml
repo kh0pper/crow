@@ -1,23 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher icon's foreground: the header bird (servers/gateway/dashboard/shared/crow-mark.js,
+     CROW_BODY_GROUP) in lighter teals for the dark backdrop, its 39-unit square scaled 1.5x and centred in the 66dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
-    <!-- Background circle -->
-    <path
-        android:fillColor="#1d1d1f"
-        android:pathData="M54,54m-54,0a54,54 0,1 1,108 0a54,54 0,1 1,-108 0" />
-
-    <!-- Crow silhouette (simplified bird) -->
-    <path
-        android:fillColor="#c8a96e"
-        android:pathData="M34,68 L42,52 L48,56 L54,42 L60,56 L66,52 L74,68 Z" />
-
-    <!-- Eye -->
-    <path
-        android:fillColor="#f5f0e8"
-        android:pathData="M54,50m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
-
+    <group android:scaleX="1.5" android:scaleY="1.5" android:translateX="18" android:translateY="11.25">
+        <path android:strokeColor="#2a9d8f" android:strokeWidth="1.5" android:strokeLineCap="round"
+            android:pathData="M19,42 L17,48 M19,42 L21,48 M29,42 L27,48 M29,42 L31,48" />
+        <path android:fillColor="#2a9d8f" android:pathData="M12,34 a12,10 0 1,0 24,0 a12,10 0 1,0 -24,0 Z" />
+        <path android:fillColor="#8fdcd2" android:fillAlpha="0.5" android:pathData="M8,33 a6,8 0 1,0 12,0 a6,8 0 1,0 -12,0 Z" />
+        <path android:fillColor="#2a9d8f" android:pathData="M15,18 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 Z" />
+        <path android:fillColor="#d9a521" android:pathData="M25,16 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 Z" />
+        <path android:fillColor="#22303a" android:pathData="M27.5,16 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0 Z" />
+        <path android:fillColor="#d9a521" android:pathData="M33,18 L40,20 L33,22 Z" />
+    </group>
 </vector>

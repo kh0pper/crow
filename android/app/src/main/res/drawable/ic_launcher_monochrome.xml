@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer (Android 13+): the bird's silhouette in one colour, the eye cut out (drawn the other way round, so nonZero leaves a hole). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="1.5" android:scaleY="1.5" android:translateX="18" android:translateY="11.25">
+        <path android:strokeColor="#000000" android:strokeWidth="1.5" android:strokeLineCap="round"
+            android:pathData="M19,42 L17,48 M19,42 L21,48 M29,42 L27,48 M29,42 L31,48" />
+        <path android:fillColor="#000000" android:fillType="nonZero"
+            android:pathData="M12,34 a12,10 0 1,0 24,0 a12,10 0 1,0 -24,0 Z M15,18 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 Z M33,18 L40,20 L33,22 Z M25,16 a3,3 0 1,1 6,0 a3,3 0 1,1 -6,0 Z" />
+    </group>
+</vector>
