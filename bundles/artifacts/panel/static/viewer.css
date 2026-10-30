@@ -144,7 +144,16 @@ body{background:#eef1f3}
 #crow-artifact-viewer .cv-fs-open{display:inline-flex}
 body.cv-fullscreen{background:#000}
 body.cv-fullscreen #crow-artifact-viewer{padding:0;min-height:100vh}
-body.cv-fullscreen .cv-head,body.cv-fullscreen .cv-side,body.cv-fullscreen .cv-nav,body.cv-fullscreen .cv-banners{display:none}
+body.cv-fullscreen .cv-head,body.cv-fullscreen .cv-side,body.cv-fullscreen .cv-nav{display:none}
+/* Full screen KEEPS the trust warnings: a danger banner (a tripwire/ CSP
+   failure) or the weaker-isolation note stays over the frame, like the
+   never-password notice below, so a full-screen artifact can never pass for
+   Crow itself. Every other banner is hidden with the rest of the page. */
+body.cv-fullscreen .cv-banners{display:block;position:fixed;left:calc(12px + env(safe-area-inset-left,0px));
+  right:calc(12px + env(safe-area-inset-right,0px));top:calc(68px + env(safe-area-inset-top,0px));z-index:55;
+  margin:0;padding:0;pointer-events:none}
+body.cv-fullscreen .cv-banner{pointer-events:auto}
+body.cv-fullscreen .cv-banner:not(.cv-danger):not(.cv-iso){display:none}
 body.cv-fullscreen .cv-body{display:block}
 body.cv-fullscreen .cv-stage{position:fixed;top:env(safe-area-inset-top,0px);right:env(safe-area-inset-right,0px);
   bottom:env(safe-area-inset-bottom,0px);left:env(safe-area-inset-left,0px);z-index:40;border:0;border-radius:0;background:var(--card)}
@@ -172,5 +181,6 @@ body.cv-fullscreen #crow-artifact-viewer > .cv-note{position:fixed;left:calc(12p
 .cv-linksheet-go{flex:1 1 200px;min-height:44px;display:inline-flex;align-items:center;justify-content:center;
   padding:8px 12px;border:1px solid var(--teal);border-radius:10px;background:var(--teal);color:var(--card);
   font-weight:600;text-align:center;text-decoration:none}
+.cv-linksheet-go.cv-linksheet-wait{pointer-events:none}   /* tapjacking: inert while the sheet settles */
 .cv-linksheet-go:hover,.cv-linksheet-go:focus-visible{text-decoration:underline}
 .cv-linksheet-cancel{flex:0 0 auto}

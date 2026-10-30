@@ -210,11 +210,13 @@ export function anchorHelperSource(nonce) {
     const t = e.target;
     const a = t && t.nodeType === 1 && t.closest ? t.closest("a[href]") : null;
     if (!a) return;
-    const raw = a.getAttribute("href") || "";
-    const s = raw.trim();
+    /* The ATTRIBUTE string, trimmed, is the only reliable source: an SVG <a>'s
+       .href is an SVGAnimatedString, so a.href would stringify to
+       "[object SVGAnimatedString]" and resolve to nothing useful. */
+    const s = (a.getAttribute("href") || "").trim();
     if (!s || s.charAt(0) === "#") return;
     let u = null;
-    try { u = new URL(a.href || raw, document.baseURI || location.href); } catch (err) { return; }
+    try { u = new URL(s, document.baseURI || location.href); } catch (err) { return; }
     const p = u.protocol;
     if (p === "javascript:" || p === "data:" || p === "blob:") { e.preventDefault(); return; }
     if (p !== "http:" && p !== "https:") return;   // mailto:, tel:, ...: the page's own business

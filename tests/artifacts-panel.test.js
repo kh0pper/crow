@@ -473,6 +473,32 @@ test("live: Full screen enters from the toolbar and from '#full', hides the tool
     assert.equal(await t.evalIn(`document.body.classList.contains("cv-fullscreen")`), true, "the toolbar button enters full screen");
     await t.evalIn(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
     assert.equal(await t.evalIn(`document.body.classList.contains("cv-fullscreen")`), false, "Escape leaves full screen");
+    // Full screen KEEPS the trust warnings: a danger banner (or the isolation
+    // note) is pinned over the frame like the never-password notice, so a
+    // full-screen artifact can never pass for Crow itself.
+    const trust = JSON.parse(await t.evalIn(`(() => {
+      const box = document.querySelector(".cv-banners");
+      const b = document.createElement("div"); b.className = "cv-banner cv-danger"; b.id = "cv-trust-probe";
+      b.appendChild(document.createElement("span")).textContent = "A trust warning";
+      box.appendChild(b);
+      document.getElementById("cv-full-screen").click();
+      const hs = getComputedStyle(box), r = b.getBoundingClientRect();
+      const stage = document.querySelector(".cv-stage");
+      return JSON.stringify({ on: document.body.classList.contains("cv-fullscreen"),
+        display: getComputedStyle(b).display, hostDisplay: hs.display, hostPos: hs.position,
+        z: Number(hs.zIndex), stageZ: Number(getComputedStyle(stage).zIndex),
+        w: r.width, h: r.height, top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+        iw: innerWidth, ih: innerHeight });
+    })()`));
+    const at2 = JSON.stringify(trust);
+    assert.equal(trust.on, true, `full screen again: ${at2}`);
+    assert.notEqual(trust.display, "none", `the danger banner stays visible: ${at2}`);
+    assert.equal(trust.hostDisplay, "block", at2);
+    assert.equal(trust.hostPos, "fixed", `the banner layer is pinned over the frame: ${at2}`);
+    assert.ok(trust.z > trust.stageZ, `and above the frame: ${at2}`);
+    assert.ok(trust.w > 0 && trust.h > 0 && trust.top >= 0 && trust.left >= 0 && trust.bottom <= trust.ih && trust.right <= trust.iw, `inside the viewport: ${at2}`);
+    await t.evalIn(`(() => { const b = document.getElementById("cv-trust-probe"); if (b) b.remove(); document.getElementById("cv-exit-full-screen").click(); })()`);
+    assert.equal(await t.evalIn(`document.body.classList.contains("cv-fullscreen")`), false, "and Exit still works with it there");
   } finally { await t.close(); }
 });
 
