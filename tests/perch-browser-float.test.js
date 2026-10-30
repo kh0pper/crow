@@ -355,6 +355,31 @@ test("tap expands to full screen; Escape and Exit return focus to the mini playe
   assert.equal(h.doc.activeElement, h.input);
 });
 
+test("B1: a rotation while full screen: Exit puts the mini player back inside the new viewport", async () => {
+  const h = mount({ innerWidth: 390, innerHeight: 800 });
+  const t = await liveTile(h, "call_1");
+  await h.show(t, false);
+  const f = h.float();
+  assert.equal(f.style.top, (700 - 140 - 12) + "px", "portrait: low on the screen");
+  one(f, "bf-frame").onclick();
+  h.sandbox.window.innerWidth = 800; h.sandbox.window.innerHeight = 390;
+  h.api.bfResize();
+  one(f, "bf-exit").onclick();
+  const x = parseInt(f.style.left, 10), y = parseInt(f.style.top, 10);
+  assert.ok(x >= 8 && x <= 800 - 156 - 8, "left inside: " + x);
+  assert.ok(y >= 8 && y <= 390 - 140 - 8, "top inside: " + y);
+  // Escape too, with a dragged (stored) spot
+  f.onpointerdown({ pointerId: 1, button: 0, clientX: 0, clientY: 0, target: one(f, "bf-frame") });
+  f.onpointermove({ pointerId: 1, clientX: 0, clientY: 100, preventDefault() {} });
+  f.onpointerup({ pointerId: 1 });
+  h.runTimers(0);
+  one(f, "bf-frame").onclick();
+  h.sandbox.window.innerWidth = 390; h.sandbox.window.innerHeight = 300;
+  h.handlers.bfKey({ key: "Escape", preventDefault() {} });
+  assert.ok(parseInt(f.style.top, 10) <= 300 - 140 - 8);
+  assert.ok(parseInt(f.style.left, 10) <= 390 - 156 - 8);
+});
+
 // ---------------------------------------------------------------------------
 // drag and position
 // ---------------------------------------------------------------------------

@@ -195,7 +195,10 @@ export function perchBrowserFloatJs(lang = "en") {
     if(!bf.expanded) return;
     bfSetExpanded(false);
     bfSync();
-    if(bf.t&&bf.frame.focus) bf.frame.focus();
+    if(!bf.t) return;
+    /* a rotation while full screen (bfResize waits for the mini player): back inside the viewport */
+    bfPlace(bf.choice||bfDefault());
+    if(bf.frame.focus) bf.frame.focus();
   }
   bindOnce(document,'keydown','bfKey',function(ev){
     if(!live()||!bf.expanded||!ev||ev.key!=='Escape') return;
