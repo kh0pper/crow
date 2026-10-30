@@ -85,7 +85,11 @@ function mount({ innerWidth = 390, innerHeight = 800, stored, storageThrows = fa
   tabs.getBoundingClientRect = () => tabsRect || { top: 0, left: 0, width: 0, height: 0 };
   const shellTabs = makeEl("nav", doc);
   shellTabs.getBoundingClientRect = () => shellTabsRect || { top: 0, left: 0, width: 0, height: 0 };
-  doc.querySelector = (sel) => (sel === ".shell-tabs" ? shellTabs : null);
+  doc.querySelector = (sel) => {
+    if (sel === ".shell-tabs") return shellTabs;
+    if (sel === "dialog:modal") { if (doc.__modalThrows) throw new SyntaxError("unknown pseudo-class"); return doc.__modal || null; }
+    return null;
+  };
   root.appendChild(transcript); root.appendChild(composer); composer.appendChild(input);
   doc.body = root;
   const store = new Map();
@@ -384,6 +388,32 @@ test("polling: a floating tile counts as on screen; × and a hidden page stop it
     assert.equal(h2.floating(), true);
     assert.equal(h2.pending().length, 1);
   } finally { Date.now = realNow; }
+});
+
+test("F6: a modal sheet over the float pauses its polling; its close resumes it", async () => {
+  const realNow = Date.now;
+  Date.now = () => 1_000_000;
+  try {
+    const h = mount();
+    const t = await liveTile(h, "call_1");
+    await h.show(t, false);
+    assert.equal(h.pending().length, 1);
+    h.doc.__modal = makeEl("dialog", h.doc);           // the session sheet opens (showModal)
+    await h.respond(h.pending()[0], 200, { seq: 1, jpeg: B64, w: 1, h: 1 });
+    assert.equal(h.pending().length, 0, "covered: no next poll");
+    assert.equal(Object.keys(h.HUB.streams).length, 0);
+    assert.equal(h.floating(), true, "still floating underneath");
+    h.doc.__modal = null;
+    h.handlers.bfDialogClose();
+    assert.equal(h.pending().length, 1, "closed: polling again");
+    assert.match(h.pending()[0].url, /after=1/);
+    // a browser without :modal: never treated as covered
+    h.doc.__modalThrows = true;
+    await h.respond(h.pending()[0], 204, null);
+    h.runTimers(1000); await tick();
+    assert.equal(h.pending().length, 1);
+  } finally { Date.now = realNow; }
+  assert.match(perchHubJs("en"), /target\.addEventListener\(type,function\(ev\)\{[\s\S]*?\},!!capture\);/, "bindOnce passes capture through");
 });
 
 // ---------------------------------------------------------------------------

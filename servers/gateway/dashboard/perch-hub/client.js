@@ -117,13 +117,13 @@ export function perchHubJs(lang = "en") {
      is still the registered handler, and must stay inert. */
   HUB.handlers=HUB.handlers||{};
   HUB.bound=HUB.bound||{};
-  function bindOnce(target,type,key,fn){
+  function bindOnce(target,type,key,fn,capture){
     HUB.handlers[key]=fn;
     if(HUB.bound[key]||!target||!target.addEventListener) return;
     HUB.bound[key]=true;
     target.addEventListener(type,function(ev){
       var h=HUB.handlers[key]; if(h) h(ev);
-    });
+    },!!capture);       /* capture: events that do not bubble (a dialog's close) */
   }
 
   /* Turbo tears the document down before the next instance's script runs, so

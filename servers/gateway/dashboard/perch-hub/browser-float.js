@@ -11,7 +11,8 @@ import { tJs } from "../shared/i18n.js";
  * that splices the tile alone runs without this file):
  *   bfSeen(t)    the IntersectionObserver reported t (on screen or not)
  *   bfSync()     the live tile changed (btHeader, btDim, retireBrowserTiles)
- *   bfShowing(t) btCanPoll: a floating tile counts as on screen
+ *   bfShowing(t) btCanPoll: a floating tile counts as on screen (unless a
+ *                modal dialog covers it)
  *   bfResize()   the hub's window resize listener, applyVV (the keyboard) and
  *                switchTab (clamp or re-place the position)
  *
@@ -157,7 +158,15 @@ export function perchBrowserFloatJs(lang = "en") {
     if(bf.expanded&&bf.t===t) return t;            /* full screen stays until closed */
     return t.onScreen?null:t;
   }
-  function bfShowing(t){ return !!t&&bf.t===t&&!!bf.node&&!bf.node.hidden; }
+  /* Shown and not under a modal sheet (the session or apps sheet, a shell
+     dialog: the top layer covers it), so worth polling for. */
+  function bfShowing(t){ return !!t&&bf.t===t&&!!bf.node&&!bf.node.hidden&&!bfCovered(); }
+  function bfCovered(){
+    try{ return !!(document.querySelector&&document.querySelector('dialog:modal')); }catch(e){ return false; }
+  }
+  /* A modal closed: a paused float polls again (the poller stopped itself
+     on its next round while covered). Capture: close does not bubble. */
+  bindOnce(document,'close','bfDialogClose',function(){ if(live()&&bf.t) btMaybeStart(bf.t); },true);
   function bfSeen(t){ t.bfSeen=true; bfSync(); }
   function bfSync(){
     if(!live()){ bfRemove(); return; }
