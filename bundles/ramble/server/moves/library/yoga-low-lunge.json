@@ -6,8 +6,14 @@
   "level": 2,
   "indoor": true,
   "activity": "yoga",
-  "equipment": ["mat"],
-  "tags": ["lunge", "hips", "kneeling"],
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "lunge",
+    "hips",
+    "kneeling"
+  ],
   "steps": [
     "Start on your hands and knees on the mat.",
     "Step one foot forward and place it flat, with the knee above the ankle.",
@@ -15,23 +21,47 @@
     "Rest your hands on your front thigh or on the mat and breathe slowly.",
     "Step back to hands and knees, then change sides."
   ],
-  "works": ["Legs", "Glutes"],
-  "stretches": ["Hips", "Front of the thigh"],
+  "works": [
+    "Legs",
+    "Glutes"
+  ],
+  "stretches": [
+    "Hips",
+    "Front of the thigh"
+  ],
   "mistakes": [
     "Letting the front knee fall inward.",
     "Sinking the hips further than feels comfortable."
   ],
-  "skipIf": ["knee", "hip"],
+  "skipIf": [
+    "knee",
+    "hip"
+  ],
   "easier": "yoga-child",
   "harder": "yoga-high-lunge",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
   "pose": {
-    "neck": 0, "spine": 5,
-    "shoulderL": 15, "elbowL": 10, "wristL": 0,
-    "shoulderR": 30, "elbowR": 20, "wristR": 0,
-    "hipL": 101, "kneeL": 118, "ankleL": 20,
-    "hipR": -20, "kneeR": 90, "ankleR": 4,
+    "neck": 0,
+    "spine": 5,
+    "shoulderL": 15,
+    "elbowL": 10,
+    "wristL": 0,
+    "shoulderR": 30,
+    "elbowR": 20,
+    "wristR": 0,
+    "hipL": 101,
+    "kneeL": 118,
+    "ankleL": 20,
+    "hipR": -20,
+    "kneeR": 90,
+    "ankleR": 4,
     "rootAngle": 0,
     "support": "knees"
   }

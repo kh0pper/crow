@@ -6,8 +6,14 @@
   "level": 1,
   "indoor": true,
   "activity": "yoga",
-  "equipment": ["mat"],
-  "tags": ["floor", "back", "chest"],
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "floor",
+    "back",
+    "chest"
+  ],
   "steps": [
     "Lie face down with your legs long behind you.",
     "Place your hands beside your chest with your elbows close to your body.",
@@ -15,23 +21,48 @@
     "Keep your shoulders down and hold for a couple of breaths.",
     "Lower slowly and rest your cheek on the mat."
   ],
-  "works": ["Back", "Arms"],
-  "stretches": ["Chest", "Front of the body"],
+  "works": [
+    "Back",
+    "Arms"
+  ],
+  "stretches": [
+    "Chest",
+    "Front of the body"
+  ],
   "mistakes": [
     "Pressing up so far that the lower back feels pinched.",
     "Shrugging the shoulders toward the ears."
   ],
-  "skipIf": ["lower_back", "wrist", "pregnancy"],
+  "skipIf": [
+    "lower_back",
+    "wrist",
+    "pregnancy"
+  ],
   "easier": "yoga-cat",
   "harder": null,
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
   "pose": {
-    "neck": -15, "spine": -10,
-    "shoulderL": 35, "elbowL": 115, "wristL": 0,
-    "shoulderR": 35, "elbowR": 115, "wristR": 0,
-    "hipL": -20, "kneeL": 10, "ankleL": -50,
-    "hipR": -20, "kneeR": 10, "ankleR": -50,
+    "neck": -15,
+    "spine": -10,
+    "shoulderL": 35,
+    "elbowL": 115,
+    "wristL": 0,
+    "shoulderR": 35,
+    "elbowR": 115,
+    "wristR": 0,
+    "hipL": -20,
+    "kneeL": 10,
+    "ankleL": -50,
+    "hipR": -20,
+    "kneeR": 10,
+    "ankleR": -50,
     "rootAngle": 70,
     "support": "seat"
   }

@@ -6,8 +6,15 @@
   "level": 1,
   "indoor": true,
   "activity": "bodyweight",
-  "equipment": ["none"],
-  "tags": ["bodyweight", "core", "back", "floor"],
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "bodyweight",
+    "core",
+    "back",
+    "floor"
+  ],
   "steps": [
     "Lie on your back with your knees bent over your hips and your arms pointing at the ceiling.",
     "Press your lower back gently toward the floor.",
@@ -15,15 +22,26 @@
     "Return to the start and switch sides.",
     "Do 2 sets of 6 per side."
   ],
-  "works": ["Core", "Hips"],
+  "works": [
+    "Core",
+    "Hips"
+  ],
   "stretches": [],
   "mistakes": [
     "Letting your lower back lift off the floor.",
     "Holding your breath as you move."
   ],
-  "skipIf": ["lower_back"],
+  "skipIf": [
+    "lower_back"
+  ],
   "easier": null,
   "harder": "body-bird-dog",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

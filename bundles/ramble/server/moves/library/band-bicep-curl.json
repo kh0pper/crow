@@ -6,8 +6,14 @@
   "level": 1,
   "indoor": true,
   "activity": "band",
-  "equipment": ["band"],
-  "tags": ["band", "arms", "strength"],
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "arms",
+    "strength"
+  ],
   "steps": [
     "Stand on the middle of the band with your feet hip-width apart.",
     "Hold one end in each hand with your arms long and your palms facing forward.",
@@ -15,7 +21,9 @@
     "Lower slowly until your arms are long again.",
     "Do 2 sets of 12."
   ],
-  "works": ["Arms"],
+  "works": [
+    "Arms"
+  ],
   "stretches": [],
   "mistakes": [
     "Swinging your elbows forward to lift the band.",
@@ -24,6 +32,12 @@
   "skipIf": [],
   "easier": "band-row",
   "harder": null,
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

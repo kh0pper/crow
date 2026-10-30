@@ -6,8 +6,15 @@
   "level": 2,
   "indoor": true,
   "activity": "band",
-  "equipment": ["band"],
-  "tags": ["band", "lower-body", "hips", "strength"],
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "lower-body",
+    "hips",
+    "strength"
+  ],
   "steps": [
     "Lie on your back with the band looped just above your knees.",
     "Bend your knees and set your feet flat, hip-width apart.",
@@ -15,15 +22,30 @@
     "Press your knees gently apart against the band.",
     "Lower slowly and repeat. Do 2 sets of 10."
   ],
-  "works": ["Glutes", "Hips", "Core"],
-  "stretches": ["Hips"],
+  "works": [
+    "Glutes",
+    "Hips",
+    "Core"
+  ],
+  "stretches": [
+    "Hips"
+  ],
   "mistakes": [
     "Pushing your ribs up instead of lifting from the hips.",
     "Letting your knees fall together against the band."
   ],
-  "skipIf": ["lower_back", "hip"],
+  "skipIf": [
+    "lower_back",
+    "hip"
+  ],
   "easier": "body-glute-bridge",
   "harder": "band-squat",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

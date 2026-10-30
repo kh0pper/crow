@@ -6,8 +6,15 @@
   "level": 2,
   "indoor": false,
   "activity": "walk",
-  "equipment": ["none"],
-  "tags": ["walking", "hills", "stairs", "outdoors"],
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "walking",
+    "hills",
+    "stairs",
+    "outdoors"
+  ],
   "steps": [
     "Warm up on flat ground for 5 minutes.",
     "Walk up a gentle slope or one flight of stairs at a steady pace.",
@@ -16,15 +23,34 @@
     "Cool down on flat ground for the last 5 minutes.",
     "Hold a rail on the stairs if you feel unsteady at any point."
   ],
-  "works": ["Legs", "Glutes", "Heart and lungs"],
-  "stretches": ["Calves", "Hips"],
+  "works": [
+    "Legs",
+    "Glutes",
+    "Heart and lungs"
+  ],
+  "stretches": [
+    "Calves",
+    "Hips"
+  ],
   "mistakes": [
     "Leaning back on the way downhill.",
     "Taking stairs two at a time before you are ready."
   ],
-  "skipIf": ["knee", "ankle", "hip", "balance", "high_blood_pressure"],
+  "skipIf": [
+    "knee",
+    "ankle",
+    "hip",
+    "balance",
+    "high_blood_pressure"
+  ],
   "easier": "walk-brisk-30",
   "harder": "walk-jog-intervals",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

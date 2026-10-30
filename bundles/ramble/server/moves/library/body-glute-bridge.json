@@ -6,8 +6,15 @@
   "level": 2,
   "indoor": true,
   "activity": "bodyweight",
-  "equipment": ["none"],
-  "tags": ["bodyweight", "lower-body", "hips", "core"],
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "bodyweight",
+    "lower-body",
+    "hips",
+    "core"
+  ],
   "steps": [
     "Lie on your back with your knees bent and your feet flat, hip-width apart.",
     "Rest your arms along your sides.",
@@ -15,15 +22,30 @@
     "Hold for one breath, then lower slowly.",
     "Do 2 sets of 10."
   ],
-  "works": ["Glutes", "Hips", "Core"],
-  "stretches": ["Hips"],
+  "works": [
+    "Glutes",
+    "Hips",
+    "Core"
+  ],
+  "stretches": [
+    "Hips"
+  ],
   "mistakes": [
     "Arching your lower back at the top.",
     "Pushing through your toes instead of your heels."
   ],
-  "skipIf": ["lower_back", "hip"],
+  "skipIf": [
+    "lower_back",
+    "hip"
+  ],
   "easier": null,
   "harder": "band-glute-bridge",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

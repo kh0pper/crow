@@ -6,31 +6,61 @@
   "level": 2,
   "indoor": true,
   "activity": "yoga",
-  "equipment": ["mat"],
-  "tags": ["floor", "back", "strength"],
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "floor",
+    "back",
+    "strength"
+  ],
   "steps": [
     "Lie on your back with your knees bent and your feet flat on the mat.",
     "Keep your feet hip-width apart and your arms beside you.",
     "Press through your feet and lift your hips a small amount.",
     "Hold for a couple of breaths, then lower your hips slowly."
   ],
-  "works": ["Glutes", "Legs"],
-  "stretches": ["Chest", "Front of the body"],
+  "works": [
+    "Glutes",
+    "Legs"
+  ],
+  "stretches": [
+    "Chest",
+    "Front of the body"
+  ],
   "mistakes": [
     "Pushing the hips higher than feels comfortable for the lower back.",
     "Letting the knees splay outward."
   ],
-  "skipIf": ["lower_back", "neck"],
+  "skipIf": [
+    "lower_back",
+    "neck"
+  ],
   "easier": null,
   "harder": null,
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
   "pose": {
-    "neck": 15, "spine": 0,
-    "shoulderL": -33, "elbowL": 5, "wristL": 0,
-    "shoulderR": -33, "elbowR": 5, "wristR": 0,
-    "hipL": -17, "kneeL": 101, "ankleL": 0,
-    "hipR": -17, "kneeR": 101, "ankleR": 0,
+    "neck": 15,
+    "spine": 0,
+    "shoulderL": -33,
+    "elbowL": 5,
+    "wristL": 0,
+    "shoulderR": -33,
+    "elbowR": 5,
+    "wristR": 0,
+    "hipL": -17,
+    "kneeL": 101,
+    "ankleL": 0,
+    "hipR": -17,
+    "kneeR": 101,
+    "ankleR": 0,
     "rootAngle": -118,
     "support": "feet"
   }

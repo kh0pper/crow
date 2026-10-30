@@ -45,7 +45,7 @@
       "license": "MIT (this repository)"
     }
   ],
-  "reviewed": false,
+  "reviewed": true,
   "pose": {
     "neck": -25,
     "spine": -15,

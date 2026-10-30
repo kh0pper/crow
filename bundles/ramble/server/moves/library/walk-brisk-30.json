@@ -6,23 +6,48 @@
   "level": 1,
   "indoor": false,
   "activity": "walk",
-  "equipment": ["none"],
-  "tags": ["walking", "outdoors", "brisk", "steady"],
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "walking",
+    "outdoors",
+    "brisk",
+    "steady"
+  ],
   "steps": [
     "Warm up with 5 minutes of easy walking.",
     "Pick up the pace until your breathing is deeper but you can still speak a short sentence.",
     "Hold that pace for 20 minutes, easing off if you cannot talk at all.",
     "Slow to an easy walk for the last 5 minutes, then stand still and breathe."
   ],
-  "works": ["Legs", "Glutes", "Heart and lungs"],
-  "stretches": ["Calves", "Hips"],
+  "works": [
+    "Legs",
+    "Glutes",
+    "Heart and lungs"
+  ],
+  "stretches": [
+    "Calves",
+    "Hips"
+  ],
   "mistakes": [
     "Letting your arms hang still instead of swinging them.",
     "Leaning forward from the waist rather than walking tall."
   ],
-  "skipIf": ["knee", "ankle", "hip", "high_blood_pressure"],
+  "skipIf": [
+    "knee",
+    "ankle",
+    "hip",
+    "high_blood_pressure"
+  ],
   "easier": "walk-20",
   "harder": "walk-hills",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

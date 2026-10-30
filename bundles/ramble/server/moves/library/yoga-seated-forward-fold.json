@@ -46,7 +46,7 @@
       "license": "MIT (this repository)"
     }
   ],
-  "reviewed": false,
+  "reviewed": true,
   "pose": {
     "neck": 15,
     "elbowL": 0,

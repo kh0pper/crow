@@ -6,16 +6,30 @@
   "level": 1,
   "indoor": false,
   "activity": "walk",
-  "equipment": ["none"],
-  "tags": ["walking", "easy", "outdoors", "steady"],
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "walking",
+    "easy",
+    "outdoors",
+    "steady"
+  ],
   "steps": [
     "Start with 2 minutes at an easy pace to warm up.",
     "Walk at a pace where you can talk in full sentences.",
     "Keep your shoulders relaxed and your gaze ahead of you.",
     "Slow down for the last 2 minutes, then stand still and breathe."
   ],
-  "works": ["Legs", "Hips", "Heart and lungs"],
-  "stretches": ["Calves", "Hamstrings"],
+  "works": [
+    "Legs",
+    "Hips",
+    "Heart and lungs"
+  ],
+  "stretches": [
+    "Calves",
+    "Hamstrings"
+  ],
   "mistakes": [
     "Starting out faster than you can keep up.",
     "Watching your feet instead of the path ahead."
@@ -23,6 +37,12 @@
   "skipIf": [],
   "easier": null,
   "harder": "walk-brisk-30",
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

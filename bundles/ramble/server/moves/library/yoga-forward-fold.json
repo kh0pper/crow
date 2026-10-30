@@ -6,31 +6,61 @@
   "level": 1,
   "indoor": true,
   "activity": "yoga",
-  "equipment": ["none"],
-  "tags": ["standing", "fold", "calves"],
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "standing",
+    "fold",
+    "calves"
+  ],
   "steps": [
     "Stand with your feet hip-width apart.",
     "Bend your knees a little and fold forward from your hips.",
     "Let your head and arms hang heavy toward the floor.",
     "Stay for a few slow breaths, then roll up slowly one bit at a time."
   ],
-  "works": ["Legs"],
-  "stretches": ["Hamstrings", "Calves", "Lower back"],
+  "works": [
+    "Legs"
+  ],
+  "stretches": [
+    "Hamstrings",
+    "Calves",
+    "Lower back"
+  ],
   "mistakes": [
     "Locking the knees.",
     "Standing up fast and getting light-headed."
   ],
-  "skipIf": ["lower_back", "high_blood_pressure"],
+  "skipIf": [
+    "lower_back",
+    "high_blood_pressure"
+  ],
   "easier": "yoga-halfway-lift",
   "harder": null,
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
   "pose": {
-    "neck": 25, "spine": 20,
-    "shoulderL": 90, "elbowL": 5, "wristL": 0,
-    "shoulderR": 90, "elbowR": 5, "wristR": 0,
-    "hipL": 100, "kneeL": 5, "ankleL": 5,
-    "hipR": 100, "kneeR": 5, "ankleR": 5,
+    "neck": 25,
+    "spine": 20,
+    "shoulderL": 90,
+    "elbowL": 5,
+    "wristL": 0,
+    "shoulderR": 90,
+    "elbowR": 5,
+    "wristR": 0,
+    "hipL": 100,
+    "kneeL": 5,
+    "ankleL": 5,
+    "hipR": 100,
+    "kneeR": 5,
+    "ankleR": 5,
     "rootAngle": 100,
     "support": "feet"
   }

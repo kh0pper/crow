@@ -6,8 +6,15 @@
   "level": 2,
   "indoor": true,
   "activity": "band",
-  "equipment": ["band"],
-  "tags": ["band", "shoulders", "push", "strength"],
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "shoulders",
+    "push",
+    "strength"
+  ],
   "steps": [
     "Stand on the middle of the band and hold one end in each hand at shoulder height.",
     "Keep your ribs down and your belly gently firm.",
@@ -15,15 +22,31 @@
     "Lower slowly back to shoulder height.",
     "Do 2 sets of 8."
   ],
-  "works": ["Shoulders", "Arms", "Core"],
-  "stretches": ["Shoulders"],
+  "works": [
+    "Shoulders",
+    "Arms",
+    "Core"
+  ],
+  "stretches": [
+    "Shoulders"
+  ],
   "mistakes": [
     "Arching your lower back as you press up.",
     "Shrugging your shoulders into your ears."
   ],
-  "skipIf": ["shoulder", "neck", "high_blood_pressure"],
+  "skipIf": [
+    "shoulder",
+    "neck",
+    "high_blood_pressure"
+  ],
   "easier": "band-pull-apart",
   "harder": null,
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

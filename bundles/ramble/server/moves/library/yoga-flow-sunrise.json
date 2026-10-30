@@ -6,31 +6,77 @@
   "level": 1,
   "indoor": true,
   "activity": "yoga",
-  "equipment": ["mat"],
-  "tags": ["morning", "gentle", "full-body"],
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "morning",
+    "gentle",
+    "full-body"
+  ],
   "steps": [
     "Move through the poses in the order listed, taking one slow breath per step.",
     "Hold each pose for the time given, then move on gently.",
     "Rest in mountain pose for a few breaths at the end."
   ],
-  "works": ["Legs", "Back"],
-  "stretches": ["Hamstrings", "Back", "Hips"],
+  "works": [
+    "Legs",
+    "Back"
+  ],
+  "stretches": [
+    "Hamstrings",
+    "Back",
+    "Hips"
+  ],
   "mistakes": [
     "Rushing between poses.",
     "Holding your breath."
   ],
-  "skipIf": ["knee", "wrist", "shoulder", "lower_back", "high_blood_pressure"],
+  "skipIf": [
+    "knee",
+    "wrist",
+    "shoulder",
+    "lower_back",
+    "high_blood_pressure"
+  ],
   "easier": null,
   "harder": null,
-  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
-  "reviewed": false,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
   "flow": [
-    { "id": "yoga-mountain", "holdSeconds": 60 },
-    { "id": "yoga-cat", "holdSeconds": 60 },
-    { "id": "yoga-cow", "holdSeconds": 60 },
-    { "id": "yoga-downward-dog", "holdSeconds": 60 },
-    { "id": "yoga-low-lunge", "holdSeconds": 75 },
-    { "id": "yoga-halfway-lift", "holdSeconds": 45 },
-    { "id": "yoga-forward-fold", "holdSeconds": 75 }
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-cat",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-cow",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-downward-dog",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-low-lunge",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-halfway-lift",
+      "holdSeconds": 45
+    },
+    {
+      "id": "yoga-forward-fold",
+      "holdSeconds": 75
+    }
   ]
 }
