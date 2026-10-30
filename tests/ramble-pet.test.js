@@ -51,13 +51,13 @@ test("feeding visit_place/unlock_mark/meet_crow raises energy and sets happy; co
   assert.equal(afterUnlock.energy, 85); // 75 + 10
   assert.equal(afterUnlock.mood, "happy");
   assert.equal(afterUnlock.unlocks_week, 1);
-  assert.equal(afterUnlock.last_fed_at, now + 1);
+  assert.equal(afterUnlock.last_fed_at, now, "the decay clock starts at the first feed and a later feed never resets it");
 
   const afterCrow = await feed(db2, { type: "meet_crow" }, { now: now + 2 });
   assert.equal(afterCrow.energy, 100); // 85 + 20 clamps at 100
   assert.equal(afterCrow.mood, "happy");
   assert.equal(afterCrow.crows_week, 1);
-  assert.equal(afterCrow.last_fed_at, now + 2);
+  assert.equal(afterCrow.last_fed_at, now);
 });
 
 test("repeated quiet_tick lowers energy to tired then alarmed; quiet_tick does not bump counters or last_fed_at", async () => {
