@@ -1,0 +1,24 @@
+{
+  "id": "pose-warrior",
+  "kind": "pose",
+  "title": "Warrior pose",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["none"],
+  "tags": ["standing", "strength"],
+  "steps": [
+    "Step one foot back and bend the front knee over the ankle.",
+    "Reach both arms out to shoulder height."
+  ],
+  "works": ["Legs", "Shoulders"],
+  "stretches": ["Hip"],
+  "mistakes": ["Letting the front knee drift past the toes."],
+  "skipIf": [],
+  "easier": "pose-mountain",
+  "harder": null,
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": true,
+  "pose": {}
+}

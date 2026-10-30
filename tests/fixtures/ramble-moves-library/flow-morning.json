@@ -1,0 +1,29 @@
+{
+  "id": "flow-morning",
+  "kind": "flow",
+  "title": "Morning flow",
+  "minutes": 8,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["mat"],
+  "tags": ["morning"],
+  "steps": [
+    "Move through each pose in order, holding as listed."
+  ],
+  "works": [],
+  "stretches": [],
+  "mistakes": [],
+  "skipIf": ["balance", "knee"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": true,
+  "flow": [
+    { "id": "pose-mountain", "holdSeconds": 30 },
+    { "id": "pose-child", "holdSeconds": 45 },
+    { "id": "pose-tree", "holdSeconds": 30 },
+    { "id": "pose-warrior", "holdSeconds": 30 },
+    { "id": "pose-bridge", "holdSeconds": 30 }
+  ]
+}
