@@ -276,7 +276,7 @@ const GOLDENS = {
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
-    "sysSha": "60b5db7c4624b8e7278499a8ad63e77f28362b846c472dda9f6624d67eff1033",
+    "sysSha": "8b21884096a00f3286c6e03273b9a5950117d23d8a6995f0ae18f38b66d6c16f",
     "prompt": "PROJECT: (none)\nGATEWAY THREAD: gmail thread_id=gmail-golden — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.\n\nKanban:\n(no project linked)\n\nUser said: \"hello golden\"\n\nReply on the gateway thread. Use tools as needed per your system prompt: if the user asks a simple question (criteria, status, specific employer), call the appropriate query tools and answer; if the user asks for work to be done, run the workflow; if they're just saying hi, reply briefly without tools. Don't ask 'which card?' unless their message is genuinely ambiguous."
   },
   "gmail-resume": {
@@ -306,7 +306,7 @@ const GOLDENS = {
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
-    "sysSha": "60b5db7c4624b8e7278499a8ad63e77f28362b846c472dda9f6624d67eff1033",
+    "sysSha": "8b21884096a00f3286c6e03273b9a5950117d23d8a6995f0ae18f38b66d6c16f",
     "prompt": "PROJECT: (none)\nGATEWAY THREAD: gmail thread_id=gmail-golden — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.\n\nKanban:\n(no project linked)\n\nUser said: \"second turn\"\n\nReply on the gateway thread. Use tools as needed per your system prompt: if the user asks a simple question (criteria, status, specific employer), call the appropriate query tools and answer; if the user asks for work to be done, run the workflow; if they're just saying hi, reply briefly without tools. Don't ask 'which card?' unless their message is genuinely ambiguous."
   },
   "discord": {
@@ -334,7 +334,7 @@ const GOLDENS = {
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
-    "sysSha": "60b5db7c4624b8e7278499a8ad63e77f28362b846c472dda9f6624d67eff1033",
+    "sysSha": "8b21884096a00f3286c6e03273b9a5950117d23d8a6995f0ae18f38b66d6c16f",
     "prompt": "PROJECT: (none)\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: discord-golden)\n\nKanban:\n(no project linked)\n\nUser said: \"hello golden\"\n\nReply on the gateway thread. Use tools as needed per your system prompt: if the user asks a simple question (criteria, status, specific employer), call the appropriate query tools and answer; if the user asks for work to be done, run the workflow; if they're just saying hi, reply briefly without tools. Don't ask 'which card?' unless their message is genuinely ambiguous."
   },
   "runjob": {
@@ -362,7 +362,7 @@ const GOLDENS = {
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
-    "sysSha": "4879b6ac85e332a20a22abb5a489897698602a229c64df514929c7bc0e1e1c78",
+    "sysSha": "08737ec734926d87d7318656382bda62ae1c431f263059160af8c7413b0e7f87",
     "prompt": "You are running a BACKGROUND job for the user — no one is waiting on this exact\nreply in real time, so do the work thoroughly before answering. Use your tools\nas needed to accomplish the goal.\n\nGOAL:\ndo the golden job\n\nWhen finished, reply with a concise summary of the outcome (what you did and the\nresult). If a result is meant to be read back to the user, make the summary\nself-contained."
   }
 };
