@@ -147,7 +147,7 @@ test("weather is ignored when prefs.weather is false", () => {
 
 test("early slot with yoga liked picks yoga; reasons carry slot:early, liked:yoga, easy_day", () => {
   const lib = [YOGA_POSE, PUSHUP, BAND];
-  const prefs = { ...BASE_PREFS, kinds: ["yoga"] };
+  const prefs = { ...BASE_PREFS, kinds: ["yoga", "bodyweight", "band"] }; // all three stay candidates
   let yogaPick = null;
   const counts = {};
   for (const day of days(60)) {
@@ -270,4 +270,20 @@ test("reasons are fact codes, never prose", () => {
     assert.equal(r.reasons[0], "slot:" + slotFor(hourLocal));
     for (const reason of r.reasons) assert.match(reason, shape, reason);
   }
+});
+
+test("no weather reason without the weather rule applying", () => {
+  const lib = [YOGA_POSE, PUSHUP, BAND];
+  for (const weather of [null, { rain: 10, temp: 20, code: 1 }, { rain: 59, temp: 2, code: 1 }, { rain: 0, temp: 34, code: 0 }]) {
+    for (const day of days(30)) {
+      const r = pick({ day, library: lib, weather });
+      assert.ok(!r.reasons.some((x) => x === "rain_later" || x === "cold" || x === "hot"), JSON.stringify(weather) + " " + r.reasons.join(","));
+    }
+  }
+});
+
+test("an entry with no level is never picked; junk kinds are ignored, not a filter-everything", () => {
+  const { level, ...noLevel } = PUSHUP;
+  assert.equal(pick({ day: "2026-11-02", library: [noLevel] }), null);
+  assert.ok(pick({ day: "2026-11-02", library: [PUSHUP], prefs: { ...BASE_PREFS, kinds: ["not-a-kind"] } }));
 });

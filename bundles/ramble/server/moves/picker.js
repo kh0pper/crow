@@ -15,7 +15,7 @@
  *   "learning_flow"                             the pick is a flow the user is learning
  *   "easy_day"                                  the picked entry is level 1
  */
-import { LIMIT_TAGS } from "./library.js";
+import { LIMIT_TAGS, ACTIVITY_KINDS } from "./library.js";
 
 /** early is before 9, evening is from 17, day otherwise. */
 export function slotFor(hourLocal) {
@@ -78,12 +78,11 @@ export function pickChallenge({
   day, hourLocal = 12, weather = null, prefs = {}, history = {}, library = [], swap = 0,
 } = {}) {
   const slot = slotFor(hourLocal);
-  const kinds = Array.isArray(prefs.kinds) ? prefs.kinds : [];
+  const kinds = (Array.isArray(prefs.kinds) ? prefs.kinds : []).filter((k) => ACTIVITY_KINDS.includes(k));
   const equipment = Array.isArray(prefs.equipment) ? prefs.equipment : [];
   // Stated limits always win; only the fixed vocabulary (library.js) counts.
   const limits = (Array.isArray(prefs.limits) ? prefs.limits : []).filter((t) => LIMIT_TAGS.includes(t));
   const level = [1, 2, 3].includes(prefs.level) ? prefs.level : 3;
-  const liked = kinds;
   const skipped = history.skipped && typeof history.skipped === "object" ? history.skipped : {};
   const learning = Array.isArray(history.learning) ? history.learning : [];
 
@@ -102,7 +101,7 @@ export function pickChallenge({
     if (!e || typeof e !== "object" || e.reviewed !== true) continue;
     if ((Array.isArray(e.skipIf) ? e.skipIf : []).some((t) => limits.includes(t))) continue;
     if (kinds.length > 0 && !kinds.includes(e.activity)) continue;
-    if (e.level > level) continue;
+    if (!(e.level <= level)) continue; // a missing or odd level never passes
     if (!(Array.isArray(e.equipment) ? e.equipment : []).every((x) => x === "none" || equipment.includes(x))) continue;
     if (indoorOnly && e.indoor !== true) continue;
     let weight = 1;
@@ -130,7 +129,7 @@ export function pickChallenge({
   if (rain) reasons.push("rain_later");
   if (cold) reasons.push("cold");
   if (hot) reasons.push("hot");
-  if (liked.includes(chosen.activity)) reasons.push("liked:" + chosen.activity);
+  if (kinds.includes(chosen.activity)) reasons.push("liked:" + chosen.activity);
   if (chosen.kind === "flow" && learning.includes(chosen.id)) reasons.push("learning_flow");
   if (chosen.level === 1) reasons.push("easy_day");
   return { entryId: chosen.id, reasons };
