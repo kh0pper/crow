@@ -7,8 +7,8 @@
  * real-world action only ever counts once per period (a place per ISO week,
  * a check-in per local day, a persona-meeting per ISO week; marks are
  * one-shot events with no natural repeat key and are always credited).
- * `chore`/`quiet_tick` are pet-only events (Task 14's feed()) and never
- * touch the egg or the ledger.
+ * `quiet_tick` is a pet-only event (Task 14's feed()) and never touches the
+ * egg or the ledger.
  *
  * When warmth reaches `hatch_at` the egg hatches into a bird (species rolled
  * from bird-svg's ROSTER, seed a uint32 from crypto.randomInt — never
@@ -108,8 +108,8 @@ export function localDay(ms) {
 
 /**
  * The credit ledger key for an event, or null (mark_left/unlock_mark: always
- * credited, no repeat key), { skip: true } (chore/quiet_tick: pet-only,
- * never touches the ledger or the egg), or { invalid: true } (a keyed type
+ * credited, no repeat key), { skip: true } (quiet_tick: pet-only, never
+ * touches the ledger or the egg), or { invalid: true } (a keyed type
  * missing the field its key is built from — `visit_place` without `cell`,
  * `meet_crow` without `persona` — which must NOT fall back to "always
  * credited": that's the `null` sentinel's meaning, reserved for the
@@ -130,7 +130,6 @@ export function creditKey(event, { now }) {
     case "mark_left":
     case "unlock_mark":
       return null;
-    case "chore":
     case "quiet_tick":
       return { skip: true };
     default:
@@ -374,7 +373,7 @@ export async function hatchIfReady(db, { now, emit } = {}) {
  * already credited, so the call is a no-op that reports the egg's current
  * warmth. Only after a successful insert does the egg's warmth get bumped.
  *
- * The not-credited path (unknown type, `chore`/`quiet_tick`, or a keyed type
+ * The not-credited path (unknown type, `quiet_tick`, or a keyed type
  * missing its key field) is a PURE READ: it must never create an egg or
  * emit, so a stream of malformed/pet-only events against a fresh instance
  * leaves `ramble_eggs` untouched.
@@ -530,7 +529,7 @@ export async function layProgress(db) {
  * ⚠ delta is the literal 1. See applyRambleWallet's MAX(delta) rule.
  *
  * ⚠ Called ONLY from the write paths (`feed` — which geo events, the daily
- * check-in, `doChore` and the moves ledger all reach through it) — never from
+ * check-in and the moves ledger all reach through it) — never from
  * `petState`. `pet.js:18` records the invariant: "petState's
  * decay-on-read write never emits, because a GET must never queue a sync op",
  * and `petState` has no `emit` in scope to pass. A day is therefore earned by
@@ -539,11 +538,11 @@ export async function layProgress(db) {
  *
  * ⚠ Laying REQUIRES real movement, and that is a design consequence, not an
  * oversight. Decay is 10 per 6 h (-40/day); the most a player who never posts
- * a location fix can earn is check-in 5 + indoor moves and chores 24 = 29/day
- * — ONE combined indoor budget (moves/indoor-cap.js INDOOR_DAILY_CAP, the old
- * 3 x 8 chores purse, now shared by the chores, an indoor challenge Done and
- * an indoor "something else" log), plus the check-in, which is the only indoor
- * earner outside it. From the default 60 they bank three happy days and then
+ * a location fix can earn is check-in 5 + indoor moves 24 = 29/day — ONE
+ * combined indoor budget (moves/indoor-cap.js INDOOR_DAILY_CAP, the old
+ * 3 x 8 purse, now shared by an indoor challenge Done and an indoor
+ * "something else" log), plus the check-in, which is the only indoor earner
+ * outside it. From the default 60 they bank three happy days and then
  * fall below the 60 threshold for good. Do NOT write, in a comment or a doc,
  * that indoor moves, chores and the check-in alone can reach `lay.days`. They
  * cannot. tests/ramble-moves-ledger.test.js simulates the fortnight.

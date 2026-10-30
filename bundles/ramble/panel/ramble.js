@@ -1,10 +1,10 @@
 /**
  * Crow's Nest Panel — Ramble.
  *
- * World-first: the map IS the home screen. Four views (world | egg | pet |
- * flock) live in one element and are switched by `data-view` on `#ramble`; the
- * privacy grid moved out of the page flow into `#rb-grid-sheet`, reached from
- * the "Visible" chip on the map. Visual direction C — chunky display type,
+ * World-first: the map IS the home screen. Five views (world | egg | pet |
+ * flock | learn) live in one element and are switched by `data-view` on
+ * `#ramble`; the privacy grid moved out of the page flow into
+ * `#rb-grid-sheet`, reached from the "Visible" chip on the map. Visual direction C — chunky display type,
  * 2.5px outlines, hard offset shadows, amber/indigo/pink — all of it in
  * `static/ramble.css`, which is why this file no longer carries a <style>.
  *
@@ -26,6 +26,15 @@
  * is DRAWN in the browser by `/ramble/static/bird-svg.js` (the same engine the
  * server renders portraits with), so the panel still renders when the bundle's
  * server modules or the db are unavailable.
+ *
+ * The moves screens (spec 2026-10-30 §6) live in the pet view's Today card and
+ * in a fifth view, `learn`: the challenge and its Done, the step goal and the
+ * streak, "I did something else", Customize, the library and its entry pages,
+ * and the flow player. They are wired by `static/moves.js`; the poses are
+ * drawn by `static/figure.js`, which serves the SAME `server/moves/figure.cjs`
+ * the figure builder tests against. Every new string is rendered here from
+ * STRINGS via the dashboard's `lang` (en/es); the client's runtime strings are
+ * its own small table, keyed off `data-lang`.
  */
 
 const OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors";
@@ -37,6 +46,198 @@ const CHANNELS = ["ble", "lan", "geo"];
 // fonts.googleapis.com, font-src fonts.gstatic.com); the stylesheet gives
 // every family a system fallback, so a blocked/offline load is a shrug.
 const FONTS_HREF = "https://fonts.googleapis.com/css2?family=Baloo+2:wght@700;800&family=Nunito:wght@600;700;800&display=swap";
+
+/**
+ * Every user-facing string this file renders, in the dashboard's two
+ * languages. `lang` comes from the panel context (Settings → Language), the
+ * same seam the built-in panels use.
+ *
+ * Spanish is a translation of the English, kept in the same order so a missing
+ * key is obvious. Library content (entry titles, steps) is English-only until
+ * the content carries its own translations.
+ */
+const STRINGS = {
+  en: {
+    health: "Health",
+    today: "Today",
+    challengeLoading: "Getting today's challenge\u2026",
+    start: "Start",
+    done: "Done",
+    doneToday: "Done today",
+    swap: "Swap",
+    steps: "Steps",
+    somethingElse: "I did something else",
+    learn: "Learn",
+    customize: "Customize",
+    learnTitle: "Moves for anywhere",
+    learnIntro: "Short, reviewed movements, with the sources behind them.",
+    learnEmpty: "The exercise library is being written. Check back soon.",
+    backToList: "Back to the list",
+    backToBird: "Back to my bird",
+    pause: "Pause",
+    resume: "Keep going",
+    half: "\u00bd speed",
+    step: "Step",
+    howWasIt: "How did it go?",
+    smooth: "Smooth",
+    neededHelp: "Needed help",
+    close: "Close",
+    elseLabel: "What did you do?",
+    elsePlaceholder: "A bike ride with a friend, about 40 minutes\u2026",
+    sayItInstead: "Say it instead",
+    readIt: "Crow reads it as\u2026",
+    activity: "Activity",
+    minutes: "Minutes",
+    effort: "Effort",
+    saveIt: "Save it",
+    noTextStored: "Only the activity, minutes and effort are saved. Your words are not stored.",
+    toggleOn: "Daily challenge",
+    kinds: "Kinds",
+    equipment: "Equipment",
+    limits: "Limitations",
+    level: "Level",
+    weather: "Use the weather",
+    calendar: "Calendar",
+    later: "Later",
+    beforeYouStart: "Before you start",
+    safety: "This is general wellness, not medical advice. Stop if anything hurts, and check with a clinician about injuries or health conditions.",
+    gotIt: "Got it",
+    effortEasy: "Easy",
+    effortModerate: "Moderate",
+    effortHard: "Hard",
+    kindPose: "Pose",
+    kindExercise: "Exercise",
+    kindFlow: "Flow",
+    kindWalk: "Walk",
+    groupPose: "Poses",
+    groupExercise: "Exercises",
+    groupFlow: "Flows",
+    groupWalk: "Walks",
+    eqNone: "No equipment",
+    eqMat: "Mat",
+    eqBand: "Band",
+    eqChair: "Chair",
+    eqWall: "Wall",
+    limitKnee: "Knee",
+    limitLowerBack: "Lower back",
+    limitNeck: "Neck",
+    limitShoulder: "Shoulder",
+    limitWrist: "Wrist",
+    limitHip: "Hip",
+    limitAnkle: "Ankle",
+    limitBalance: "Balance",
+    limitPregnancy: "Pregnancy",
+    limitHighBloodPressure: "High blood pressure",
+  },
+  es: {
+    health: "Salud",
+    today: "Hoy",
+    challengeLoading: "Preparando el reto de hoy\u2026",
+    start: "Empezar",
+    done: "Hecho",
+    doneToday: "Hecho hoy",
+    swap: "Cambiar",
+    steps: "Pasos",
+    somethingElse: "Hice otra cosa",
+    learn: "Aprender",
+    customize: "Personalizar",
+    learnTitle: "Movimientos para cualquier lugar",
+    learnIntro: "Movimientos cortos y revisados, con las fuentes detr\u00e1s.",
+    learnEmpty: "La biblioteca de ejercicios se est\u00e1 escribiendo. Vuelve pronto.",
+    backToList: "Volver a la lista",
+    backToBird: "Volver a mi p\u00e1jaro",
+    pause: "Pausa",
+    resume: "Seguir",
+    half: "\u00bd velocidad",
+    step: "Paso",
+    howWasIt: "\u00bfC\u00f3mo te fue?",
+    smooth: "Bien",
+    neededHelp: "Necesit\u00e9 ayuda",
+    close: "Cerrar",
+    elseLabel: "\u00bfQu\u00e9 hiciste?",
+    elsePlaceholder: "Un paseo en bici con una amiga, unos 40 minutos\u2026",
+    sayItInstead: "Dilo en voz alta",
+    readIt: "Crow lo lee como\u2026",
+    activity: "Actividad",
+    minutes: "Minutos",
+    effort: "Esfuerzo",
+    saveIt: "Guardar",
+    noTextStored: "Solo se guardan la actividad, los minutos y el esfuerzo. Tus palabras no se guardan.",
+    toggleOn: "Reto diario",
+    kinds: "Tipos",
+    equipment: "Equipo",
+    limits: "Limitaciones",
+    level: "Nivel",
+    weather: "Usar el tiempo",
+    calendar: "Calendario",
+    later: "M\u00e1s adelante",
+    beforeYouStart: "Antes de empezar",
+    safety: "Esto es bienestar general, no consejo m\u00e9dico. Detente si algo duele y consulta a un profesional de salud sobre lesiones o condiciones de salud.",
+    gotIt: "Entendido",
+    effortEasy: "F\u00e1cil",
+    effortModerate: "Moderado",
+    effortHard: "Intenso",
+    kindPose: "Postura",
+    kindExercise: "Ejercicio",
+    kindFlow: "Flujo",
+    kindWalk: "Paseo",
+    groupPose: "Posturas",
+    groupExercise: "Ejercicios",
+    groupFlow: "Flujos",
+    groupWalk: "Paseos",
+    eqNone: "Sin equipo",
+    eqMat: "Colchoneta",
+    eqBand: "Banda el\u00e1stica",
+    eqChair: "Silla",
+    eqWall: "Pared",
+    limitKnee: "Rodilla",
+    limitLowerBack: "Espalda baja",
+    limitNeck: "Cuello",
+    limitShoulder: "Hombro",
+    limitWrist: "Mu\u00f1eca",
+    limitHip: "Cadera",
+    limitAnkle: "Tobillo",
+    limitBalance: "Equilibrio",
+    limitPregnancy: "Embarazo",
+    limitHighBloodPressure: "Presi\u00f3n alta",
+  },
+};
+
+/** The fixed vocabularies, mirrored from server/moves/library.js (they are the wire contract). */
+const ACTIVITY_CHOICES = [
+  { value: "yoga" }, { value: "walk" }, { value: "jog" }, { value: "run" },
+  { value: "cycle" }, { value: "band" }, { value: "bodyweight" }, { value: "swim" },
+  { value: "sport" }, { value: "other" },
+];
+const EQUIPMENT_CHOICES = [
+  { value: "none", label: "eqNone" }, { value: "mat", label: "eqMat" },
+  { value: "band", label: "eqBand" }, { value: "chair", label: "eqChair" },
+  { value: "wall", label: "eqWall" },
+];
+const LIMIT_CHOICES = [
+  { value: "knee", label: "limitKnee" }, { value: "lower_back", label: "limitLowerBack" },
+  { value: "neck", label: "limitNeck" }, { value: "shoulder", label: "limitShoulder" },
+  { value: "wrist", label: "limitWrist" }, { value: "hip", label: "limitHip" },
+  { value: "ankle", label: "limitAnkle" }, { value: "balance", label: "limitBalance" },
+  { value: "pregnancy", label: "limitPregnancy" },
+  { value: "high_blood_pressure", label: "limitHighBloodPressure" },
+];
+const MINUTE_CHOICES = [5, 10, 15, 20, 30, 40, 45, 60];
+const EFFORT_CHOICES = [
+  { value: "easy", label: "effortEasy" }, { value: "moderate", label: "effortModerate" },
+  { value: "hard", label: "effortHard" },
+];
+
+/* The fixed activity names are not translatable ids in the vocabulary, so the
+ * per-language labels live here as one table rather than ten keys each. */
+const ACTIVITY_LABELS = {
+  en: { yoga: "Yoga", walk: "Walking", jog: "Jogging", run: "Running", cycle: "Cycling", band: "Band", bodyweight: "Bodyweight", swim: "Swimming", sport: "Sport", other: "Something else" },
+  es: { yoga: "Yoga", walk: "Caminar", jog: "Trote", run: "Correr", cycle: "Bicicleta", band: "Banda", bodyweight: "Peso corporal", swim: "Nadar", sport: "Deporte", other: "Otra cosa" },
+};
+
+function textFor(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"];
+}
 
 /** Inline SVG only — never emoji: emoji render as someone else's art direction. */
 const ICONS = {
@@ -75,7 +276,9 @@ export default {
   navOrder: 120,
   category: "social",
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
+    const S = textFor(lang);
+    const L = lang === "es" ? "es" : "en";
     // Spec §11: OpenStreetMap public tiles are the phase-1 default, with the
     // tile URL configurable in settings. The URL itself is NOT rendered here:
     // the dashboard CSP is img-src 'self', so the client always draws from the
@@ -104,6 +307,17 @@ export default {
               <tr><th scope="row">${esc(audience)}</th>${cells}</tr>`;
     }).join("");
 
+    // Moves: the fixed vocabularies as plain-named controls. The labels come
+    // from STRINGS so the pickers are localized; the VALUES are the wire
+    // contract with POST /api/ramble/moves/* (library.js owns the lists).
+    const activityOptions = ACTIVITY_CHOICES.map((c) =>
+      `<option value="${esc(c.value)}">${esc(ACTIVITY_LABELS[L][c.value])}</option>`).join("");
+    const minuteOptions = MINUTE_CHOICES.map((n) => `<option value="${n}">${n}</option>`).join("");
+    const effortOptions = EFFORT_CHOICES.map((c) => `<option value="${esc(c.value)}">${esc(S[c.label])}</option>`).join("");
+    const kindChecks = ACTIVITY_CHOICES.map((c) => `<label class="rb-check"><input type="checkbox" class="rb-pref-kind" data-value="${esc(c.value)}"><span>${esc(ACTIVITY_LABELS[L][c.value])}</span></label>`).join("");
+    const equipmentChecks = EQUIPMENT_CHOICES.map((c) => `<label class="rb-check"><input type="checkbox" class="rb-pref-equipment" data-value="${esc(c.value)}"><span>${esc(S[c.label])}</span></label>`).join("");
+    const limitChecks = LIMIT_CHOICES.map((c) => `<label class="rb-check"><input type="checkbox" class="rb-pref-limit" data-value="${esc(c.value)}"><span>${esc(S[c.label])}</span></label>`).join("");
+
     const content = `
       <link rel="stylesheet" href="/ramble/static/leaflet/leaflet.css">
       <link rel="stylesheet" href="/ramble/static/ramble.css">
@@ -111,7 +325,7 @@ export default {
       <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
       <link rel="stylesheet" href="${esc(FONTS_HREF)}">
 
-      <div id="ramble" data-view="world">
+      <div id="ramble" data-view="world" data-lang="${esc(L)}">
 
         <!-- ─────────────────────────────────────────────── world (the home) -->
         <section class="rb-view" data-for="world">
@@ -249,7 +463,7 @@ export default {
 
           <section class="rb-card">
             <div class="rb-meter">
-              <strong class="rb-meter-label">Energy</strong>
+              <strong class="rb-meter-label">${esc(S.health)}</strong>
               <span class="rb-meter-bar"><i id="rb-energy-fill"></i></span>
               <strong id="rb-energy-num">&mdash;</strong><span class="rb-meter-of">/ <span id="rb-energy-max">100</span></span>
             </div>
@@ -257,15 +471,31 @@ export default {
             <p class="rb-muted rb-fine" id="rb-mood-line">Checking on it&hellip;</p>
           </section>
 
-          <section class="rb-card">
-            <p class="rb-eyebrow">Today</p>
-            <div class="rb-chores">
-              <button class="rb-chore" data-kind="feed" type="button">${icon("feed")}Feed</button>
-              <button class="rb-chore" data-kind="preen" type="button">${icon("preen")}Preen</button>
-              <button class="rb-chore" data-kind="play" type="button">${icon("play")}Play</button>
+          <section class="rb-card" id="rb-today">
+            <p class="rb-eyebrow">${esc(S.today)}</p>
+            <h3 class="rb-h" id="rb-challenge-title">${esc(S.challengeLoading)}</h3>
+            <p class="rb-muted rb-fine" id="rb-challenge-why" hidden></p>
+            <p class="rb-muted rb-fine" id="rb-challenge-meta"></p>
+            <div class="rb-row rb-actions">
+              <button class="rb-btn" id="rb-challenge-start" type="button">${esc(S.start)}</button>
+              <button class="rb-btn rb-btn-ghost" id="rb-challenge-done" type="button">${esc(S.done)}</button>
+              <button class="rb-btn rb-btn-ghost" id="rb-challenge-swap" type="button">${esc(S.swap)}</button>
             </div>
-            <p class="rb-muted rb-fine">Three taps a day. Miss a few and it gets droopy, never worse than that.</p>
-            <p class="rb-muted rb-fine" id="rb-pet-status"></p>
+            <p class="rb-muted rb-fine" id="rb-today-status"></p>
+
+            <div class="rb-meter" id="rb-goal-meter">
+              <strong class="rb-meter-label">${esc(S.steps)}</strong>
+              <span class="rb-meter-bar"><i id="rb-goal-fill"></i></span>
+              <strong id="rb-goal-num">0</strong><span class="rb-meter-of">/ <span id="rb-goal-max">6,000</span></span>
+            </div>
+            <p class="rb-muted rb-fine" id="rb-goal-line"></p>
+            <p class="rb-muted rb-fine" id="rb-streak-line"></p>
+
+            <div class="rb-row rb-actions">
+              <button class="rb-btn rb-btn-ghost rb-grow" id="rb-something-else" type="button">${esc(S.somethingElse)}</button>
+              <button class="rb-btn rb-btn-ghost" id="rb-customize" type="button">${esc(S.customize)}</button>
+              <button class="rb-btn rb-btn-ghost" id="rb-learn-btn" type="button">${esc(S.learn)}</button>
+            </div>
           </section>
 
           <section class="rb-card" id="rb-walk">
@@ -315,8 +545,8 @@ export default {
                 <div class="rb-step-txt"><strong>Unlock a mark</strong><span class="rb-muted rb-fine">open something someone left behind</span></div>
               </div>
               <div class="rb-step">
-                <span class="rb-step-n">+8</span>
-                <div class="rb-step-txt"><strong>A daily chore</strong><span class="rb-muted rb-fine">feed, preen or play, once a day each</span></div>
+                <span class="rb-step-n">+24</span>
+                <div class="rb-step-txt"><strong>Today's challenge</strong><span class="rb-muted rb-fine">up to +24 a day indoors</span></div>
               </div>
               <div class="rb-step">
                 <span class="rb-step-n">+5</span>
@@ -365,6 +595,53 @@ export default {
           <button class="rb-btn rb-btn-ghost" id="rb-open-wardrobe" type="button">Wardrobe</button>
           <button class="rb-btn" id="rb-my-flock" type="button">${icon("flock")}My flock</button>
           <button class="rb-btn rb-btn-ghost" id="rb-back-world" type="button">${icon("back")}Back to the world</button>
+        </section>
+
+        <!-- ──────────────────────────────────────────────────── learn (moves) -->
+        <section class="rb-view" data-for="learn">
+          <section class="rb-card" id="rb-learn-list-card">
+            <p class="rb-eyebrow">${esc(S.learn)}</p>
+            <h3 class="rb-h">${esc(S.learnTitle)}</h3>
+            <p class="rb-muted rb-fine">${esc(S.learnIntro)}</p>
+            <div class="rb-steps" id="rb-learn-list"></div>
+            <p class="rb-muted rb-fine" id="rb-learn-empty" hidden>${esc(S.learnEmpty)}</p>
+            <p class="rb-muted rb-fine" id="rb-learn-status"></p>
+          </section>
+
+          <section class="rb-card" id="rb-learn-entry-card" hidden>
+            <button class="rb-btn rb-btn-ghost" id="rb-learn-back" type="button">${icon("back")}${esc(S.backToList)}</button>
+            <h3 class="rb-h" id="rb-entry-title"></h3>
+            <p class="rb-muted rb-fine" id="rb-entry-meta"></p>
+            <div class="rb-entry-figure" id="rb-entry-figure"></div>
+            <div class="rb-steps" id="rb-entry-body"></div>
+            <div class="rb-row rb-actions" id="rb-entry-links"></div>
+
+            <!-- The flow player. Poses are drawn by static/figure.js; the
+                 player itself is static/moves.js. -->
+            <div id="rb-flow" hidden>
+              <div class="rb-entry-figure rb-crossfade" id="rb-flow-figure"></div>
+              <p class="rb-h" id="rb-flow-name"></p>
+              <p class="rb-muted rb-fine" id="rb-flow-cues"></p>
+              <p class="rb-muted rb-fine" id="rb-flow-progress"></p>
+              <div class="rb-row rb-actions">
+                <button class="rb-btn rb-btn-ghost" id="rb-flow-pause" type="button">${esc(S.pause)}</button>
+                <button class="rb-btn rb-btn-ghost" id="rb-flow-half" type="button">${esc(S.half)}</button>
+                <button class="rb-btn rb-btn-ghost" id="rb-flow-step" type="button">${esc(S.step)}</button>
+              </div>
+              <div id="rb-flow-ask" hidden>
+                <p class="rb-h" id="rb-flow-ask-title">${esc(S.howWasIt)}</p>
+                <div class="rb-row rb-actions">
+                  <button class="rb-btn" id="rb-flow-smooth" type="button">${esc(S.smooth)}</button>
+                  <button class="rb-btn rb-btn-ghost" id="rb-flow-help" type="button">${esc(S.neededHelp)}</button>
+                </div>
+              </div>
+              <p class="rb-muted rb-fine" id="rb-flow-status"></p>
+            </div>
+          </section>
+
+          <div class="rb-row rb-actions">
+            <button class="rb-btn rb-btn-ghost rb-grow" id="rb-learn-back-pet" type="button">${icon("back")}${esc(S.backToBird)}</button>
+          </div>
         </section>
 
         <!-- ─────────────────────────────────────────────────────── the flock -->
@@ -539,12 +816,87 @@ export default {
             </div>
           </div>
         </div>
+
+        <!-- ─────────────────────────────── moves: something else, customize, safety -->
+        <div class="rb-sheet" id="rb-else-sheet" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-else-title">
+            <div class="rb-sheet-head">
+              <h3 class="rb-h" id="rb-else-title">${esc(S.somethingElse)}</h3>
+              <button class="rb-icon-btn" id="rb-else-close" type="button" aria-label="${esc(S.close)}">${icon("close")}</button>
+            </div>
+            <label class="rb-fine" for="rb-else-text">${esc(S.elseLabel)}</label>
+            <textarea id="rb-else-text" maxlength="500" placeholder="${esc(S.elsePlaceholder)}"></textarea>
+            <div class="rb-row rb-actions">
+              <!-- Shown only when the dashboard's dictation hook is on the
+                   page (static/moves.js feature-detects it); never new speech code. -->
+              <button class="rb-btn rb-btn-ghost" id="rb-else-say" type="button" hidden>${esc(S.sayItInstead)}</button>
+              <button class="rb-btn" id="rb-else-read" type="button">${esc(S.readIt)}</button>
+            </div>
+            <p class="rb-fine" id="rb-else-reading" hidden></p>
+            <p class="rb-muted rb-fine" id="rb-else-status"></p>
+            <div id="rb-else-pickers" hidden>
+              <div class="rb-row">
+                <label class="rb-label" for="rb-else-activity">${esc(S.activity)}</label>
+                <select id="rb-else-activity">${activityOptions}</select>
+              </div>
+              <div class="rb-row">
+                <label class="rb-label" for="rb-else-minutes">${esc(S.minutes)}</label>
+                <select id="rb-else-minutes">${minuteOptions}</select>
+              </div>
+              <div class="rb-row">
+                <label class="rb-label" for="rb-else-effort">${esc(S.effort)}</label>
+                <select id="rb-else-effort">${effortOptions}</select>
+              </div>
+              <button class="rb-btn" id="rb-else-log" type="button">${esc(S.saveIt)}</button>
+            </div>
+            <p class="rb-muted rb-fine">${esc(S.noTextStored)}</p>
+          </div>
+        </div>
+
+        <div class="rb-sheet" id="rb-customize-sheet" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-customize-title">
+            <div class="rb-sheet-head">
+              <h3 class="rb-h" id="rb-customize-title">${esc(S.customize)}</h3>
+              <button class="rb-icon-btn" id="rb-customize-close" type="button" aria-label="${esc(S.close)}">${icon("close")}</button>
+            </div>
+            <label class="rb-switch"><input type="checkbox" id="rb-pref-on"><span>${esc(S.toggleOn)}</span></label>
+            <p class="rb-label">${esc(S.kinds)}</p>
+            <div class="rb-checks">${kindChecks}</div>
+            <p class="rb-label">${esc(S.equipment)}</p>
+            <div class="rb-checks">${equipmentChecks}</div>
+            <p class="rb-label">${esc(S.limits)}</p>
+            <div class="rb-checks">${limitChecks}</div>
+            <div class="rb-row">
+              <label class="rb-label" for="rb-pref-level">${esc(S.level)}</label>
+              <input type="range" id="rb-pref-level" min="1" max="3" step="1" value="2">
+              <strong id="rb-pref-level-val">2</strong>
+            </div>
+            <label class="rb-switch"><input type="checkbox" id="rb-pref-weather"><span>${esc(S.weather)}</span></label>
+            <div class="rb-row">
+              <span class="rb-label">${esc(S.calendar)}</span>
+              <button class="rb-btn rb-btn-ghost" id="rb-pref-calendar" type="button" disabled>${esc(S.later)}</button>
+            </div>
+            <p class="rb-muted rb-fine" id="rb-customize-status"></p>
+          </div>
+        </div>
+
+        <div class="rb-sheet" id="rb-safety-sheet" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-safety-title">
+            <div class="rb-sheet-head">
+              <h3 class="rb-h" id="rb-safety-title">${esc(S.beforeYouStart)}</h3>
+            </div>
+            <p id="rb-safety-text">${esc(S.safety)}</p>
+            <button class="rb-btn" id="rb-safety-gotit" type="button">${esc(S.gotIt)}</button>
+          </div>
+        </div>
       </div>
 
       <script src="/ramble/static/leaflet/leaflet.js"></script>
       <script src="/ramble/static/bird-svg.js"></script>
+      <script src="/ramble/static/figure.js"></script>
       <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>
+      <script src="/ramble/static/moves.js"></script>
     `;
 
     res.send(layout({ title: "Ramble", content }));

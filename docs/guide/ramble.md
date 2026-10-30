@@ -120,7 +120,7 @@ When warmth reaches the hatch threshold, a species and a seed are rolled server-
 
 Your active bird rides on your **public** caws and marks — the wire JSON carries `bird: { species, seed }` so other people see it on your pins. Contacts and "Just me" marks never reach the Nostr wire (see below), so the bird is omitted from the **wire** only: those rows still store `bird_species` / `bird_seed` locally and replicate, bird and all, to your own linked instances.
 
-Once a bird has hatched, the Nest header crow becomes it: its face reflects the pet's energy (see Chores), while the "!" alert badge is unrelated and still means host health, not pet mood.
+Once a bird has hatched, the Nest header crow becomes it: its face reflects the pet's energy (see Daily challenges), while the "!" alert badge is unrelated and still means host health, not pet mood.
 
 Render any bird from its species and seed with:
 
@@ -130,11 +130,23 @@ GET /api/ramble/bird/:species/:seed.svg?mood=happy|tired|alarmed
 
 Dashboard-authenticated, returns `image/svg+xml`, cached privately for a day. An unknown species or a malformed/unknown seed answers `400`.
 
-## Chores
+## Daily challenges
 
-Three chores — **feed**, **preen**, **play** — are yours to do once each per local day. Each completion gives the pet +8 energy; none of them touch the egg's warmth.
+One movement challenge a day, picked for you from the reviewed library: a pose, an exercise, a flow or a walk. **Start** opens it, **Done** marks it finished, and **Swap** re-rolls it (three swaps a day). The picker weighs your Customize preferences, the time of day and, if you have a place set in For You, the weather — and none of it needs a model.
 
-`POST /api/ramble/pet/chore { kind: "feed" | "preen" | "play" }` completes one. A repeat for a kind already done today is a no-op (`done: false`); either way the response carries the pet's current state.
+The pet page's **Today** card also carries your step goal (it checks itself from the step counter, so it needs no tap) and the streak line. Any local day counts toward the streak when you finish the challenge, reach the step goal, or log at least ten minutes of movement. A pause day (challenges switched off) neither counts nor breaks it. Every seventh day in a row earns a heart container.
+
+**Health, not seed.** A challenge pays the bird's Health. Indoor movement (a challenge Done or an indoor "something else" log) is capped at **24 per local day**, and outdoor self-reported activity at **20 per local day** — the outdoor budget is the tighter one because a step counter can corroborate it. The step goal keeps its own 3-seed bonus, and nothing here pays seed.
+
+**"I did something else."** Write a line ("a bike ride with a friend, about 40 minutes") and Crow reads it as an activity, a number of minutes and an effort. Only those three fixed-vocabulary values are stored — never the words you used. A parse that fails or times out (or a box with no local model) falls back to three manual pickers. The activity, minutes and effort pickers are the same fields the model would fill; nothing is logged until you save.
+
+API: `GET /api/ramble/moves/today`, `POST /api/ramble/moves/done { day? }`, `POST /api/ramble/moves/swap`, `POST /api/ramble/moves/parse { text }`, `POST /api/ramble/moves/log { activity, minutes, effort }`, `GET/POST /api/ramble/moves/prefs`, `GET /api/ramble/moves/library`, `GET /api/ramble/moves/library/:id`, `POST /api/ramble/moves/flow-run { flowId, outcome, fromMemory? }`.
+
+## Learn and the flow player
+
+The **Learn** screen lists the reviewed library by kind (poses, exercises, flows, walks); the library is empty until its content is reviewed, and says so. An entry page shows the figure, the steps, what it works and stretches, common mistakes, a **Skip if** line built from the fixed limitation tags, easier and harder links, and its sources with their licenses.
+
+A **flow** opens in the player: it holds each pose for its own count, tweens between poses over about 1.2 seconds, and offers pause, half speed and step. Guidance fades as you learn it — **full** shows the figure, the pose name and its cues; **names** shows the figure and the name; **first** shows only the first pose and then asks whether you did the rest from memory; **memory** shows the figure alone. When the flow ends the player asks **How did it go?** — *smooth* counts one run toward less guidance, *needed help* writes nothing (nothing ever demotes). A note before your first challenge says this is general wellness, not medical advice, and is shown once.
 
 ## Walking
 
@@ -169,7 +181,7 @@ Bird seed buys things to wear: hats (bow, leaf, beanie), scarves (knitted, strip
 
 What you wear shows on your bird's page, your flock, your marker on the map, the AR view, the bird in the dashboard header, and your **profile picture** if you use your bird as one — which is how contacts see it. **Strangers never do:** public marks always carry the plain bird you hatched, because a chosen outfit would tie your rotating map identities together.
 
-Your profile picture also shows how you are doing. A bird left without walks or chores looks tired, then rattled, to your contacts — nothing worse than that ever happens. Changes to the picture are gathered up and sent once things settle (about twenty seconds after your last change), and a quiet stretch is noticed within half an hour, so trying on four hats sends your contacts one picture, not four.
+Your profile picture also shows how you are doing. A bird left without walks or a daily challenge looks tired, then rattled, to your contacts — nothing worse than that ever happens. Changes to the picture are gathered up and sent once things settle (about twenty seconds after your last change), and a quiet stretch is noticed within half an hour, so trying on four hats sends your contacts one picture, not four.
 
 Purchases are recorded the same way seed pickups are, as a ledger on each of your Crows that syncs between them. If two of your Crows buy while out of touch with each other, both purchases stand once they reconnect, and your balance can briefly read below zero; it climbs back as you collect seed, and nothing can be bought until it does. A Crow still running a Ramble older than 0.13 does not know about purchases and shows the balance as it was before them until it is updated.
 
@@ -297,7 +309,9 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `ramble_pet_state` | The companion pet's mood, energy, weekly counters, active bird, and egg progress. |
 | `ramble_egg_state` | The incubating egg's warmth progress and hatch checklist. |
 | `ramble_checkin` | Record today's check-in, crediting warmth toward the egg. |
-| `ramble_chore` | Complete a daily chore (`feed`, `preen`, or `play`) for the companion pet. |
+| `ramble_moves_today` | Today's movement challenge (or that challenges are paused), plus the bird's Health, today's steps and the streak. |
+| `ramble_moves_log` | Log a self-reported activity by fixed vocabulary (`activity`, `minutes`, `effort`) — never the words used to describe it. |
+| `ramble_moves_prefs` | Read or change the movement preferences (`on`, `kinds`, `equipment`, `limits`, `level`, `weather`). |
 | `ramble_block` | Block a persona by x-only pubkey and purge its stored marks. |
 | `ramble_unblock` | Remove a persona from the block list. |
 | `ramble_flock` | Your flock: birds, the shelf, the incubating egg, species found. |

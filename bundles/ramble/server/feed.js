@@ -17,7 +17,7 @@ const ACCEPTED_TYPES = new Set(["visit_place", "mark_left", "unlock_mark", "meet
 /**
  * The pet as `petFeed()` would have returned it, without feeding — so both
  * branches below hand the caller the SAME shape. Reading the raw row instead
- * leaked `lamport_ts`/`chores_json` out of every not-credited response.
+ * leaked `lamport_ts` out of every not-credited response.
  */
 async function readPet(db) {
   const { rows } = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });

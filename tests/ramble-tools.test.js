@@ -150,16 +150,8 @@ test("ramble_checkin credits once per local day; a second same-day call is not c
   assert.equal(second.credited, false);
 });
 
-test("ramble_chore completes once per local day per kind; a second same-day call for the same kind is a no-op", async () => {
-  const first = JSON.parse((await h.ramble_chore({ kind: "feed" })).content[0].text);
-  assert.equal(first.done, true);
-  const second = JSON.parse((await h.ramble_chore({ kind: "feed" })).content[0].text);
-  assert.equal(second.done, false);
-});
-
-test("ramble_chore with an unknown kind returns isError", async () => {
-  const r = await h.ramble_chore({ kind: "nap" });
-  assert.ok(r.isError);
+test("the chore tool is gone with the chore screen (moves replaced it)", () => {
+  assert.equal(h.ramble_chore, undefined, "ramble_chore must not be registered any more");
 });
 
 test("ramble_leave_mark feeds mark_left warmth into the egg (delta, not absolute)", async () => {

@@ -648,6 +648,22 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     return res.sendFile(target);
   });
 
+  /**
+   * The moves figure engine, served to the browser under the static prefix
+   * but read from `server/moves/` — one file, so the panel's poses and the
+   * server's own tests can never drift. Same route discipline as bird-svg.js:
+   * a resolved-prefix check, private caching, and registration ABOVE the
+   * `/ramble/static/:file` catch-all (which only looks under panel/static).
+   */
+  router.get("/ramble/static/figure.js", (req, res) => {
+    const target = resolve(normalize(join(SERVER_DIR, "moves", "figure.cjs")));
+    if (!target.startsWith(SERVER_DIR + sep)) return res.status(400).type("text/plain").send("Bad path");
+    if (!existsSync(target)) return res.status(404).type("text/plain").send("Not found");
+    res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    return res.sendFile(target);
+  });
+
   router.get("/ramble/static/:file", (req, res) => sendStatic(res, [req.params.file]));
 
   // --- marks ----------------------------------------------------------------
@@ -949,7 +965,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   // --- pet --------------------------------------------------------------
   router.get("/api/ramble/pet", handle(async (req, res) => {
     const now = Date.now();
-    // One read for the whole companion strip: mood/energy/chores, the bird
+    // One read for the whole companion strip: mood/energy, the bird
     // that hatched (null until the first one does), and the incubating egg
     // (null if none exists) — the panel's full egg card reads /api/ramble/egg.
     const pet = await mods.petMod.petState(db, { now });
@@ -978,14 +994,6 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       // Spec 2026-10-04 §8: the pet page draws the "walked today" badge.
       walked_today: await mods.stepsMod.walkedToday(db, { now }),
     });
-  }));
-
-  router.post("/api/ramble/pet/chore", handle(async (req, res) => {
-    const kind = (req.body || {}).kind;
-    // doChore throws a plain Error on an unknown kind, which handle() would
-    // turn into a 500 — validate here so a bad kind is the 400 it is.
-    if (!mods.petMod.CHORES.includes(kind)) bad(`kind must be one of: ${mods.petMod.CHORES.join(", ")}`);
-    res.json(await mods.petMod.doChore(db, kind, { now: Date.now(), emit }));
   }));
 
   // --- egg ----------------------------------------------------------------
@@ -1437,6 +1445,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (typeof id !== "string" || !/^[a-z0-9-]{1,80}$/.test(id)) bad("invalid entry id");
     const entry = movesMods.libraryMod.entryById(servedMoves(), id);
     if (!entry) return res.status(404).json({ error: "not found" });
+    // A flow's guidance level is the SERVER's (learning.js), never the
+    // client's: the player shows what the ladder says the reader still needs.
+    if (entry.kind === "flow") {
+      // A library id that does not fit the learning vocabulary still has to
+      // render: its page simply starts at full guidance.
+      let level = "full";
+      try { level = await movesMods.learningMod.flowLevel(db, entry.id); }
+      catch { level = "full"; }
+      return res.json({ entry, level });
+    }
     res.json({ entry });
   }));
 

@@ -5597,7 +5597,7 @@
     {
       "id": "ramble",
       "name": "Ramble",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "type": "mcp-server",
       "author": "Crow",
       "category": "social",
@@ -5609,7 +5609,7 @@
         "geo"
       ],
       "icon": "🐦",
-      "description": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a bird companion: eggs, nests, an egg shelf, a flock, gifts and swaps with contacts, and an AR view that labels what is around you.",
+      "description": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a bird companion: eggs, nests, an egg shelf, a flock, gifts and swaps with contacts, daily movement challenges that pay Health, an exercise library with a guided flow player, and an AR view that labels what is around you.",
       "server": {
         "command": "node",
         "args": [

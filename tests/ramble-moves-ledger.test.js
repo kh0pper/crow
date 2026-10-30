@@ -3,8 +3,8 @@
  *
  * What is pinned here:
  *   - the points table (pure, so it converges on every device),
- *   - the two daily budgets, and the ONE indoor budget shared by chores,
- *     indoor challenge Dones and indoor logs,
+ *   - the two daily budgets, and the ONE indoor budget shared by an indoor
+ *     challenge Done and an indoor log,
  *   - idempotence: Done twice pays once, the same log twice in a minute pays
  *     once, on the button and under Promise.all,
  *   - midnight: the day the caller passes is the day that is credited,
@@ -12,15 +12,15 @@
  *   - and the egg rule: a fortnight of maxed indoor days, no steps and no geo,
  *     never reaches `lay.days` (eggs.js `recordHappyDay`).
  *
- * Chores are NOT deleted by this task — they keep their screen until the moves
- * UI replaces it — but their +8 now comes out of the same indoor budget, so
- * both orderings (chores first, moves first) are tested here.
+ * The old daily chores are gone (their purse survives as INDOOR_DAILY_CAP);
+ * these tests cover the moves earners that took their place. The egg
+ * simulations keep their meaning using recordChallengeDone/recordLog only.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { feed, petState, doChore, FEED_DELTAS, MOVE_FEED_MAX } from "../bundles/ramble/server/pet.js";
+import { feed, petState, MOVE_FEED_MAX } from "../bundles/ramble/server/pet.js";
 import { feedAll } from "../bundles/ramble/server/feed.js";
 import { layProgress, LAY_DAYS_DEFAULT, localDay } from "../bundles/ramble/server/eggs.js";
 import { rowDelta } from "../bundles/ramble/server/steps.js";
@@ -134,7 +134,7 @@ test("Done twice at the SAME INSTANT pays once (two thumbs, one promise each)", 
 
 /* --------------------------------------------------------------- budgets */
 
-test("indoor pays stop at 24 for the day, across a challenge Done, logs AND chores", async () => {
+test("indoor pays stop at 24 for the day, across a challenge Done and logs", async () => {
   const db = await freshDb();
   const done = await recordChallengeDone(db, { day: DAY0, entry: entry({ minutes: 10 }), now: T0 });
   assert.equal(done.paid, 8);
@@ -148,10 +148,6 @@ test("indoor pays stop at 24 for the day, across a challenge Done, logs AND chor
   const log2 = await recordLog(db, { activity: "bodyweight", minutes: 20, effort: "moderate", now: T0 + 120000 });
   assert.equal(log2.paid, 0, "the budget is gone");
   assert.equal(log2.already, false, "but the log itself is still recorded");
-
-  const chore = await doChore(db, "feed", { now: T0 + 180000 });
-  assert.equal(chore.done, true, "a capped chore is still ticked off");
-  assert.equal(chore.pet.energy, 60 + INDOOR_DAILY_CAP, "but it pays nothing: the budget is gone");
 
   assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), INDOOR_DAILY_CAP);
   const day = await movesDay(db, { day: DAY0 });
@@ -233,47 +229,35 @@ test("a log the budget could not pay leaves an honest 0 in the ledger", async ()
 
 /* ----------------------------------------------------------------- chores */
 
-test("chores still exist, still pay 8 first, and together are exactly the indoor budget", async () => {
-  assert.equal(FEED_DELTAS.chore, 8, "a chore is nominally 8 ...");
-  assert.equal(3 * FEED_DELTAS.chore, INDOOR_DAILY_CAP, "... and three of them are the whole indoor budget");
-
+test("the old chore purse is gone: no chore event pays, and Done + logs still cap at 24", async () => {
   const db = await freshDb();
-  const a = await doChore(db, "feed", { now: T0 });
-  assert.equal(a.done, true);
-  assert.equal(a.pet.energy, 60 + FEED_DELTAS.chore);
-  assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), 8);
+  await assert.rejects(() => feed(db, { type: "chore" }, { now: T0 }));
 
-  const repeat = await doChore(db, "feed", { now: T0 + 1000 });
-  assert.equal(repeat.done, false);
-  assert.equal(repeat.pet.energy, 68, "a repeat neither pays nor re-ticks");
-  assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), 8);
-
-  assert.equal((await doChore(db, "preen", { now: T0 + 2000 })).pet.energy, 76);
-  assert.equal((await doChore(db, "play", { now: T0 + 3000 })).pet.energy, 84);
+  const done = await recordChallengeDone(db, { day: DAY0, entry: entry({ minutes: 10 }), now: T0 });
+  assert.equal(done.paid, 8);
+  const log = await recordLog(db, { activity: "yoga", minutes: 30, effort: "hard", now: T0 + 1000 });
+  assert.equal(log.paid, INDOOR_DAILY_CAP - done.paid, "the rest of the shared budget");
+  const again = await recordLog(db, { activity: "band", minutes: 30, effort: "hard", now: T0 + 2000 });
+  assert.equal(again.paid, 0, "the purse is empty");
   assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), INDOOR_DAILY_CAP);
-
-  const log = await recordLog(db, { activity: "yoga", minutes: 30, effort: "hard", now: T0 + 4000 });
-  assert.equal(log.paid, 0, "three chores are the whole indoor budget, exactly as they always were");
-  const s = await petState(db, { now: T0 + 4000 });
-  assert.equal(s.energy, 84);
-  assert.deepEqual(Object.keys(s.chores).sort(), ["day", "feed", "play", "preen"]);
+  const s = await petState(db, { now: T0 + 2000 });
+  assert.equal(s.energy, 60 + INDOOR_DAILY_CAP);
 });
 
-test("a day spent on indoor moves leaves the chores the remainder — and still marks them done", async () => {
+test("a day spent on indoor moves leaves the challenge the remainder — and the Done still counts", async () => {
   const db = await freshDb();
   const log = await recordLog(db, { activity: "yoga", minutes: 60, effort: "hard", now: T0 });
   assert.equal(log.paid, 20);
 
-  const a = await doChore(db, "feed", { now: T0 + 1000 });
-  assert.equal(a.done, true);
-  assert.equal(a.pet.energy, 80 + (INDOOR_DAILY_CAP - 20), "the remainder of the shared budget");
+  const done = await recordChallengeDone(db, { day: DAY0, entry: entry({ minutes: 10 }), now: T0 + 1000 });
+  assert.equal(done.already, false);
+  assert.equal(done.paid, INDOOR_DAILY_CAP - 20, "the remainder of the shared budget");
+  assert.equal((await petState(db, { now: T0 + 1000 })).energy, 80 + (INDOOR_DAILY_CAP - 20));
   assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), INDOOR_DAILY_CAP);
 
-  const b = await doChore(db, "preen", { now: T0 + 2000 });
-  assert.equal(b.done, true, "never a punishment: the chore is done, the pay is what was left");
-  assert.equal(b.chores.preen, true);
-  assert.equal(b.pet.energy, 84, "nothing left to pay");
-  assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), INDOOR_DAILY_CAP, "and the budget never goes over");
+  const day = await movesDay(db, { day: DAY0 });
+  assert.equal(day.done, true, "never a punishment: the Done is still a Done");
+  assert.equal(day.indoorPaid, INDOOR_DAILY_CAP, "and the budget never goes over");
 });
 
 /* --------------------------------------------------------------- midnight */
@@ -391,13 +375,13 @@ test("no ramble_wallet row written here ever shrinks", async () => {
   const emit = collector(seen);
 
   await feedAll(db, { type: "checkin" }, { now: T0, emit });
-  await doChore(db, "feed", { now: T0 + 1000, emit });
-  await doChore(db, "preen", { now: T0 + 2000, emit });
+  await recordLog(db, { activity: "yoga", minutes: 10, effort: "easy", now: T0 + 1000, emit });
+  await recordLog(db, { activity: "band", minutes: 10, effort: "easy", now: T0 + 1500, emit });
   await recordChallengeDone(db, { day: DAY0, entry: entry({ minutes: 20 }), now: T0 + 3000, emit });
   await recordLog(db, { activity: "band", minutes: 15, effort: "moderate", now: T0 + 4000, emit });
   await recordLog(db, { activity: "band", minutes: 15, effort: "moderate", now: T0 + 4000, emit });
   await recordLog(db, { activity: "walk", minutes: 45, effort: "hard", now: T0 + 5000, emit });
-  await doChore(db, "play", { now: T0 + 6000, emit });
+  await recordLog(db, { activity: "bodyweight", minutes: 12, effort: "moderate", now: T0 + 6000, emit });
   await recordChallengeDone(db, { day: DAY0, entry: entry({ minutes: 20 }), now: T0 + 7000, emit });
   await recordLog(db, { activity: "swim", minutes: 30, effort: "easy", now: T0 + 8000, emit });
 
@@ -478,10 +462,6 @@ test("EGG SIMULATION: a fortnight of maxed indoor days, no steps and no geo, nev
     await petState(db, { now: t });
     // eslint-disable-next-line no-await-in-loop
     await feedAll(db, { type: "checkin" }, { now: t, emit });            // the 5-point check-in
-    for (const kind of ["feed", "preen", "play"]) {
-      // eslint-disable-next-line no-await-in-loop
-      await doChore(db, kind, { now: t, emit });                          // 3 x 8, the old budget
-    }
     // Max indoor moves on top: four 60-minute hard logs and a challenge Done,
     // all competing for the same 24.
     for (const m of [1, 2, 3, 4]) {
@@ -520,14 +500,16 @@ test("EGG SIMULATION, adversarial timing: indoor feeds spaced just under 6 h sti
   const end = t + 21 * 24 * HOUR;
   let n = 0;
   while (t < end) {
-    // Rotate the indoor earners: the check-in, a chore, and a 1-minute easy log (the cheapest clock-poke).
-    const k = n % 3;
+    // Rotate the indoor earners: the check-in, a cheap log, another log and a challenge.
+    const k = n % 4;
     // eslint-disable-next-line no-await-in-loop
     if (k === 0) await feedAll(db, { type: "checkin" }, { now: t, emit });
     // eslint-disable-next-line no-await-in-loop
-    else if (k === 1) await doChore(db, ["feed", "preen", "play"][Math.floor(n / 3) % 3], { now: t, emit });
+    else if (k === 1) await recordLog(db, { activity: "yoga", minutes: 1, effort: "easy", now: t, emit });
     // eslint-disable-next-line no-await-in-loop
-    else await recordLog(db, { activity: "yoga", minutes: 1, effort: "easy", now: t, emit });
+    else if (k === 2) await recordLog(db, { activity: "band", minutes: 1, effort: "easy", now: t, emit });
+    // eslint-disable-next-line no-await-in-loop
+    else await recordChallengeDone(db, { day: localDay(t), entry: entry({ id: "timed-" + n, minutes: 1 }), now: t, emit });
     t += STEP; n += 1;
   }
   const { days } = await layProgress(db);

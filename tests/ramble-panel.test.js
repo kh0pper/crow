@@ -282,11 +282,12 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /id="rb-world-name"[^>]*maxlength="24"/);
   assert.ok(sent.includes("Contacts see the name they saved for you, or your Crow name."));
 
-  // The pet page must name what actually feeds the bird, not just the three
-  // chore buttons: walking is worth more than tapping and the page hid that.
+  // The pet page must name what actually feeds the bird: walking is worth
+  // more than tapping and the page hid that. The old chore row is now the
+  // daily challenge, paid out of the indoor budget.
   assert.ok(sent.includes("What your bird runs on"), "the energy-sources card is on the pet page");
-  // "A daily chore", not "A chore below": the chores moved ABOVE this panel.
-  for (const src of ["Meet another crow", "Somewhere new", "Unlock a mark", "A daily chore", "Check in", "A quiet stretch"]) {
+  // "Today's challenge", not "A chore below": the challenge card is above this panel.
+  for (const src of ["Meet another crow", "Somewhere new", "Unlock a mark", "Today's challenge", "Check in", "A quiet stretch"]) {
     assert.ok(sent.includes(src), `pet page names the energy source: ${src}`);
   }
   assert.ok(sent.includes("Getting out is worth more than tapping."), "the page says walking beats tapping");
@@ -336,17 +337,18 @@ test("panel handler renders the world-first shell, its three views and every ass
 
   // The pet page puts the thing you ACT on above the thing you read once.
   // Asserting the ORDER, not just presence: both cards existed before and the
-  // complaint was that the reference panel pushed the chores below the fold.
-  const chores = sent.indexOf('class="rb-chores"');
+  // complaint was that the reference panel pushed the old chore buttons below
+  // the fold. The Today card took their place.
+  const todayCard = sent.indexOf('id="rb-today"');
   const runsOn = sent.indexOf('id="rb-runs-on"');
-  assert.ok(chores > -1 && runsOn > -1, "both the chores and the reference panel are on the pet page");
-  assert.ok(chores < runsOn, "the chore buttons come BEFORE what your bird runs on");
+  assert.ok(todayCard > -1 && runsOn > -1, "both the Today card and the reference panel are on the pet page");
+  assert.ok(todayCard < runsOn, "the Today card comes BEFORE what your bird runs on");
   assert.ok(sent.includes('<details class="rb-card rb-fold" id="rb-runs-on" open>'),
     "the reference panel folds, and ships open for a player who has not read it yet");
   assert.ok(sent.includes('<summary class="rb-eyebrow rb-fold-sum">'), "with a real summary, so it toggles without script");
-  // The list used to point DOWN at the chores. They are above it now.
-  assert.ok(!sent.includes("A chore below"), "the copy must not still point below at chores that moved above it");
-  assert.ok(sent.includes("A daily chore"), "it names the chore without a direction");
+  // The list used to point DOWN at the chores. The challenge card is above it now.
+  assert.ok(!sent.includes("A chore below"), "the copy must not still point below at chores that are gone");
+  assert.ok(sent.includes("Today's challenge"), "it names the challenge without a direction");
   assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
 
   assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
@@ -649,32 +651,14 @@ test("POST /api/ramble/egg/checkin reports whether an egg is incubating, indepen
   assert.equal(withEgg.egg, true, "an incubating egg exists after the mint above");
 });
 
-test("POST /api/ramble/pet/chore completes each kind once a day and 400s an unknown kind", async () => {
-  const first = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
-  assert.equal(first.status, 200);
-  const one = await first.json();
-  assert.equal(one.done, true);
-  assert.equal(one.chores.preen, true);
-  assert.equal(typeof one.pet.energy, "number");
-
-  const second = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
-  assert.equal(second.status, 200);
-  const two = await second.json();
-  assert.equal(two.done, false, "the same chore twice in a day is a no-op");
-  assert.equal(two.chores.preen, true);
-
-  const unknown = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "polish" } });
-  assert.equal(unknown.status, 400);
-  const missing = await req("/api/ramble/pet/chore", { method: "POST", body: {} });
-  assert.equal(missing.status, 400);
+test("the chores route is gone with the chore screen: POST /api/ramble/pet/chore 404s", async () => {
+  const res = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
+  assert.equal(res.status, 404, "the route was removed with the chores (moves replaced them)");
 });
 
-test("GET /api/ramble/pet carries the daily chores, the active bird slot and the egg percent", async () => {
+test("GET /api/ramble/pet no longer carries a chores block", async () => {
   const body = await (await req("/api/ramble/pet")).json();
-  assert.equal(typeof body.chores, "object");
-  assert.equal(typeof body.chores.day, "string");
-  assert.equal(body.chores.preen, true, "set by the chore test above");
-  assert.equal(body.chores.feed, false);
+  assert.equal(Object.hasOwn(body, "chores"), false, "chores_json stays synced but is never read");
   assert.ok("bird" in body, "the pet state must carry an active-bird slot (null until the first hatch)");
   assert.ok(body.bird === null || typeof body.bird.species === "string");
   assert.equal(typeof body.egg.percent, "number");
