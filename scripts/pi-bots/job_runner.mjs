@@ -42,7 +42,8 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors } from "./actor-sig.mjs";
-import { withSkillTools } from "./bot-world.mjs";
+import { withSkillTools, botGrantsServer } from "./bot-world.mjs";
+import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
@@ -329,6 +330,8 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   try {
     const sysFile = join(sessionDir, "job-sys.md");
     writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });
+    // Crow defaults, as on a channel turn (bot-world.mjs prepareSpawn).
+    appendFileSync(sysFile, "\n\n" + crowDefaultsBlock({ writingRules: readWritingRules(), boardOn: botGrantsServer(def, "board") }));
     const { sections } = resolveSkills(def.skills || [], { crowHome });
     for (const s of sections) appendFileSync(sysFile, "\n\n" + s.text);
 

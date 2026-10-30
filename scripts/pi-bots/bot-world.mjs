@@ -48,6 +48,8 @@ import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { piProviderIdHere } from "./pi_provider_id.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { addSkillToolsGuarded } from "./skill-tools.mjs";
+import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
+import { isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
@@ -476,6 +478,12 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
 
   const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-")), "sys.md");
   writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });
+  // Crow defaults (crow-defaults.mjs): the operator's writing rules, the board
+  // habits when this turn has the board, and honesty about actions. Not for
+  // the voice bot, whose prompt is shaped for speech.
+  if (!isVoiceBotDef(def)) {
+    appendFileSync(sysFile, "\n\n" + crowDefaultsBlock({ writingRules: readWritingRules(), boardOn: botGrantsServer(def, "board") }));
+  }
 
   // Append the content of each configured skill file to the system prompt.
   // def.skills[] is saved by the Bot Builder but was never consumed here —
