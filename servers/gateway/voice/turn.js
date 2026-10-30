@@ -531,6 +531,28 @@ export function createVoiceTurnRunner(deps) {
     return { reason: "cold_timeout" };
   }
 
+  // A primary the box will not serve for its own reasons is retried on the everyday role's own fallback
+  // roles (voice-keys.js escalateFallbacks, in order). A cold start, an abort or every fallback failing
+  // keeps the primary's result: the turn degrades exactly as before.
+  const ESCALATION_FALLBACK_REASONS = new Set(["box_reserved", "serving_class", "acquire_failed", "unresolved"]);
+  async function readyEscalationChain(keys, primaryKey, db, signal) {
+    const primary = await readyEscalation(primaryKey, db, signal);
+    if (primary.adapter) return { ...primary, key: primaryKey };
+    if (!ESCALATION_FALLBACK_REASONS.has(primary.reason)) return primary;
+    const list = Array.isArray(keys?.escalateFallbacks) ? keys.escalateFallbacks : [];
+    for (const key of list) {
+      if (typeof key !== "string" || !key || key === primaryKey) continue;
+      const ready = await readyEscalation(key, db, signal);
+      if (ready.adapter) return { ...ready, key, fellBackFrom: primary.reason };
+    }
+    return primary;
+  }
+
+  /** The kiosk metrics line's mark that a fallback (not the primary escalation key) served the turn. */
+  const noteEscalationFallback = (timings, ready) => {
+    if (ready?.fellBackFrom) timings.escalation_fallback = String(ready.key).split("/")[0];
+  };
+
   /** STT only (the kiosk's early transcription, lever D). The WAV is handed to the adapter and dropped. */
   async function transcribe({ db, device, audio, signal, sttModel, sttPrompt, sttHotwords }) {
     const sttProfile = await deps.getSttProfile(db, device);
@@ -1030,6 +1052,7 @@ export function createVoiceTurnRunner(deps) {
       // A quick-model turn that will end on the no-tool can't-do below makes no adapter at all (no model is touched).
       const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !displayTool(t.name));
       let chat = noToolAhead ? null : await deps.createChatAdapter(fastKey, db);
+      let escalationKeyUsed = null;   // the escalation model that really served this turn (primary or a fallback)
       result.route = "fast";
       if (decision.route === "escalate") {
         // The filler runs alongside the (real-timer) readiness wait. A handler is attached NOW
@@ -1037,13 +1060,19 @@ export function createVoiceTurnRunner(deps) {
         // gateway); the error is kept, logged below, and the turn carries on without the filler.
         let fillerErr = null;
         const filler = say.filler().catch((err) => { fillerErr = err; });
-        const ready = await readyEscalation(decision.key, db, llmSignal);
+        const ready = await readyEscalationChain(keys, decision.key, db, llmSignal);
         await filler;
         if (fillerErr && !aborted() && !mute.signal.aborted) {
           console.warn(`[voice-turn] filler TTS failed: ${fillerErr.message}`);
           timings.filler_error = String(fillerErr.message || fillerErr);
         }
-        if (ready.adapter) { chat = ready.adapter; result.route = "escalate"; result.escalated = true; }
+        if (ready.adapter) {
+          chat = ready.adapter;
+          result.route = "escalate";
+          result.escalated = true;
+          escalationKeyUsed = ready.key || decision.key;
+          noteEscalationFallback(timings, ready);
+        }
         // Qwen chat templates reject a system message anywhere but first (review C1):
         // the note joins the leading system message.
         else if (budgetHit) result.degraded = "budget";   // cut by the first-audio budget, not a barge-in
@@ -1103,7 +1132,7 @@ export function createVoiceTurnRunner(deps) {
       // 4b. Prompt fit, against the model this turn really uses. A bound bot's skills are inlined
       // in the system message; a general assistant with many skills was ~41k tokens against the
       // 4B's 8,192 and every turn failed. Full prompt → the one without skill bodies → no call.
-      const modelKey = result.escalated ? decision.key : fastKey;
+      const modelKey = result.escalated ? (escalationKeyUsed || decision.key) : fastKey;
       // Decided on allTools (every extra counted, as the panel does), so an extra tool that is
       // hidden this turn never flips the level — and the system message — between turns.
       const fit = await promptFit({ db, bot, tools: allTools, promptSuffix: opts.promptSuffix, key: modelKey, full: withSuffix(system, opts.promptSuffix) });
@@ -1442,7 +1471,7 @@ export function createVoiceTurnRunner(deps) {
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });
-          const ready = await readyEscalation(keys.escalate ?? decision.key, db, llmSignal);
+          const ready = await readyEscalationChain(keys, keys.escalate ?? decision.key, db, llmSignal);
           await filler;
           if (fillerErr && !aborted() && !mute.signal.aborted) {
             log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
@@ -1452,6 +1481,7 @@ export function createVoiceTurnRunner(deps) {
           chat = ready.adapter;
           result.route = "escalate";
           result.escalated = true;
+          noteEscalationFallback(timings, ready);
           timings.claim_retry = "step_up";
         } else forcing = rf;
         retryMode = mode;
@@ -1843,7 +1873,7 @@ export function createVoiceTurnRunner(deps) {
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });
-          const ready = await readyEscalation(keys.escalate ?? decision.key, db, llmSignal);
+          const ready = await readyEscalationChain(keys, keys.escalate ?? decision.key, db, llmSignal);
           await filler;
           if (fillerErr && !aborted() && !mute.signal.aborted) {
             log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
@@ -1854,6 +1884,7 @@ export function createVoiceTurnRunner(deps) {
             chat = ready.adapter;
             result.route = "escalate";
             result.escalated = true;
+            noteEscalationFallback(timings, ready);
             timings.step_up = "own_tool";
             tools = baseTools;
             if (fam) famAll = true;

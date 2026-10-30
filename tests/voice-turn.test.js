@@ -88,6 +88,40 @@ test("box reserved → immediate fallback, no 8 s wait", async () => {
   assert.ok(h.calls.sleeps <= 1);
 });
 
+test("escalation fallback: the everyday role's fallback serves a box_reserved primary", async () => {
+  const h = harness({ route: "escalate", probe: () => true,
+    acquire: async (p) => { if (p === "crow-chat") throw Object.assign(new Error("reserved"), { code: "box_reserved" }); return null; } });
+  h.deps.resolveVoiceKeys = async () => ({ fast: "crow-voice/qwen3.5-4b", escalate: "crow-chat/qwen3.6-35b-a3b", escalateFallbacks: ["raven/flash"] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "play a random album", sink: h.sink });
+  assert.equal(r.route, "escalate");
+  assert.equal(r.escalated, true);
+  assert.equal(r.degraded, null);
+  assert.deepEqual(h.calls.acquired, ["crow-chat", "raven"], "the primary first, then the fallback");
+  assert.deepEqual(h.calls.chatKeys, ["crow-voice/qwen3.5-4b", "raven/flash"], "the fallback's adapter answers the turn");
+  assert.equal(r.timings.escalation_fallback, "raven", "the metrics line names the provider that served it");
+});
+
+test("escalation fallback: with no fallbacks a box_reserved primary degrades exactly as before", async () => {
+  const h = harness({ route: "escalate", acquire: async () => { throw Object.assign(new Error("reserved"), { code: "box_reserved" }); } });
+  h.deps.resolveVoiceKeys = async () => ({ fast: "crow-voice/qwen3.5-4b", escalate: "crow-chat/qwen3.6-35b-a3b", escalateFallbacks: [] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "play a random album", sink: h.sink });
+  assert.equal(r.degraded, "box_reserved");
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.chatKeys, ["crow-voice/qwen3.5-4b"]);
+  assert.equal(r.timings.escalation_fallback, undefined);
+});
+
+test("escalation fallback: a cold primary does not try the fallbacks", async () => {
+  const h = harness({ route: "escalate", probe: () => false });
+  h.deps.resolveVoiceKeys = async () => ({ fast: "crow-voice/qwen3.5-4b", escalate: "crow-chat/qwen3.6-35b-a3b", escalateFallbacks: ["raven/flash"] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "play a random album", sink: h.sink });
+  assert.equal(r.degraded, "cold_timeout");
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.acquired, ["crow-chat"], "only the primary was asked for");
+  assert.deepEqual(h.calls.chatKeys, ["crow-voice/qwen3.5-4b"]);
+  assert.equal(r.timings.escalation_fallback, undefined);
+});
+
 test("destructive tool: two-turn spoken confirmation", async () => {
   const del = { type: "tool_call", id: "d1", name: "crow_delete_post", arguments: { id: 7 } };
   const h = harness({ chatTools: ["crow_blog"], rounds: [[del, { type: "done" }], [{ type: "content_delta", text: "Are you sure?" }, { type: "done" }], [del, { type: "done" }], [{ type: "content_delta", text: "Deleted." }, { type: "done" }]] });
