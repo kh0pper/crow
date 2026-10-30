@@ -1,0 +1,24 @@
+{
+  "id": "pose-mountain",
+  "kind": "pose",
+  "title": "Mountain pose",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["none"],
+  "tags": ["standing"],
+  "steps": [
+    "Stand with your feet together.",
+    "Lengthen up through the crown of your head."
+  ],
+  "works": ["Legs"],
+  "stretches": [],
+  "mistakes": ["Locking the knees."],
+  "skipIf": [],
+  "easier": null,
+  "harder": "pose-tree",
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": true,
+  "pose": {}
+}

@@ -1,0 +1,24 @@
+{
+  "id": "pose-child",
+  "kind": "pose",
+  "title": "Child pose",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["mat"],
+  "tags": ["resting"],
+  "steps": [
+    "Kneel on the mat with your big toes touching.",
+    "Sit your hips back toward your heels and walk your hands forward."
+  ],
+  "works": [],
+  "stretches": ["Lower back"],
+  "mistakes": [],
+  "skipIf": ["knee"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": true,
+  "pose": {}
+}

@@ -1,0 +1,24 @@
+{
+  "id": "pose-tree",
+  "kind": "pose",
+  "title": "Tree pose",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["none"],
+  "tags": ["standing", "balance"],
+  "steps": [
+    "From standing, place one foot against the other calf or inner thigh.",
+    "Find a steady point to look at."
+  ],
+  "works": ["Legs", "Balance"],
+  "stretches": [],
+  "mistakes": ["Pressing the foot into the side of the knee."],
+  "skipIf": ["balance"],
+  "easier": "pose-mountain",
+  "harder": null,
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": true,
+  "pose": {}
+}

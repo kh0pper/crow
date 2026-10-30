@@ -1,0 +1,23 @@
+{
+  "id": "exercise-squat",
+  "kind": "exercise",
+  "title": "Bodyweight squat",
+  "minutes": 5,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": ["none"],
+  "tags": ["strength"],
+  "steps": [
+    "Stand with your feet about shoulder-width apart.",
+    "Sit your hips back and down, then stand up again."
+  ],
+  "works": ["Legs", "Glutes"],
+  "stretches": [],
+  "mistakes": ["Letting the knees cave inward."],
+  "skipIf": ["knee"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": true
+}

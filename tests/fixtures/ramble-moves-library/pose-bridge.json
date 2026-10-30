@@ -1,0 +1,24 @@
+{
+  "id": "pose-bridge",
+  "kind": "pose",
+  "title": "Bridge pose",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["mat"],
+  "tags": ["floor"],
+  "steps": [
+    "Lie on your back with your knees bent and feet flat on the mat.",
+    "Press through your feet to lift your hips."
+  ],
+  "works": ["Glutes", "Lower back"],
+  "stretches": [],
+  "mistakes": ["Pushing the hips higher than the shoulders can hold."],
+  "skipIf": ["lower_back"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Ramble test fixture", "url": "", "license": "CC0" }],
+  "reviewed": false,
+  "pose": {}
+}
