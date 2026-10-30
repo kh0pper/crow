@@ -132,6 +132,24 @@ test("morning: needs you, due by today, finished by bots in the last day, and wh
   } finally { delete process.env.CROW_SESSION_BRIEFING; }
 });
 
+test("morning: 250 done past-due cards never crowd out the one that is really overdue", async () => {
+  const now = Date.now();
+  const path = join(dir, "tasks-mature.db");
+  const src = new Database(TASKS);
+  src.exec(`VACUUM INTO '${path}'`);
+  src.close();
+  const tw = new Database(path);
+  tw.exec("DELETE FROM tasks_items; DELETE FROM board_results;");
+  const add = tw.prepare("INSERT INTO tasks_items (title, project_id, status, due_date) VALUES (?,?,?,?)");
+  // Older due dates than the open card's, so a scan ordered by due date meets them first.
+  tw.transaction(() => { for (let i = 0; i < 250; i++) add.run(`Done ${i}`, i % 2 ? P.garden : null, "done", ymd(now - (20 + i) * 86400000)); })();
+  const open = Number(add.run("Still open", P.other, "pending", ymd(now - 2 * 86400000)).lastInsertRowid);
+  tw.close();
+  const m = await withDb((db) => M.loadMorning(db, { projects: PROJECTS(), tz: "UTC", now, tasksDbPath: path }));
+  assert.equal(m.due.total, 1);
+  assert.deepEqual(m.due.items.map((d) => [d.title, d.overdue, d.href]), [["Still open", true, `/dashboard/bot-board?card=${open}`]]);
+});
+
 test("morning: no tasks.db is an empty morning, never an error", async () => {
   const m = await withDb((db) => M.loadMorning(db, { projects: PROJECTS(), tz: "UTC", tasksDbPath: join(dir, "absent.db") }));
   assert.deepEqual([m.needs.total, m.due.total, m.finished.total], [0, 0, 0]);

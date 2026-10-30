@@ -21,7 +21,6 @@ import { TASKS_DB, lockMapFor } from "../dashboard/panels/bot-board/data-queries
 import { laneRows, defsFor, cardsByIds, threadsByCard, cardHref } from "../dashboard/panels/board.js";
 import { groupByLane } from "../dashboard/panels/board/lanes.js";
 import { kindOf } from "../dashboard/panels/board/needs-you.js";
-import { isTerminal } from "../routes/board-defs.js";
 import { drawerHrefs } from "../board/card-link.js";
 import { buildBriefing, briefingEnabled } from "../perch/briefing.js";
 import { localYmd } from "../../shared/relative-dates.js";
@@ -30,7 +29,6 @@ export const NEEDS_LINES = 3;
 export const DUE_LINES = 2;
 export const FINISHED_LINES = 2;
 export const FINISHED_HOURS = 24;
-const DUE_SCAN = 200;
 const ABSENT_RE = /no such (table|column)/i;
 
 const oneLine = (s) => String(s ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
@@ -120,19 +118,30 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
       const top = await cardsByIds(tdb, needs.slice(0, NEEDS_LINES).map((r) => r.id));
       const needCards = needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean);
 
-      // Due today or earlier, not done on its own board.
+      // Due today or earlier, not done on its own board. The terminal statuses of every board
+      // the due cards sit on are excluded IN the query (done cards are never archived on their
+      // own, so a filter after a LIMIT would starve on a mature board), and the total is a COUNT.
       const { y, m, d } = localYmd(now, tz);
       const today = `${y}-${pad(m)}-${pad(d)}`;
-      const dueRows = (await rowsOrEmpty(tdb, {
-        sql: `SELECT id, title, status, project_id, due_date FROM tasks_items
-               WHERE board_id IS NULL AND parent_id IS NULL AND archived_at IS NULL
-                 AND due_date IS NOT NULL AND trim(due_date) != '' AND substr(due_date, 1, 10) <= ?
+      const DUE_WHERE = `board_id IS NULL AND parent_id IS NULL AND archived_at IS NULL
+                 AND due_date IS NOT NULL AND trim(due_date) != '' AND substr(due_date, 1, 10) <= ?`;
+      const duePids = (await rowsOrEmpty(tdb, { sql: `SELECT DISTINCT project_id FROM tasks_items WHERE ${DUE_WHERE}`, args: [today] }))
+        .map((r) => ({ project_id: r.project_id == null ? null : Number(r.project_id) }));
+      const dueDefs = await defsFor(tdb, duePids);
+      const terminal = [];
+      for (const { project_id: pid } of [...duePids, { project_id: null }]) {
+        const def = dueDefs.get(pid) || dueDefs.get(null);
+        for (const st of def.terminal_values) terminal.push({ p: pid, s: String(st) });
+      }
+      const NOT_DONE = `AND NOT EXISTS (SELECT 1 FROM json_each(?) j
+                 WHERE json_extract(j.value, '$.p') IS tasks_items.project_id AND json_extract(j.value, '$.s') = tasks_items.status)`;
+      const dueArgs = [today, JSON.stringify(terminal)];
+      out.due.total = Number((await rowsOrEmpty(tdb, { sql: `SELECT COUNT(*) AS n FROM tasks_items WHERE ${DUE_WHERE} ${NOT_DONE}`, args: dueArgs }))[0]?.n || 0);
+      const due = (await rowsOrEmpty(tdb, {
+        sql: `SELECT id, title, status, project_id, due_date FROM tasks_items WHERE ${DUE_WHERE} ${NOT_DONE}
                ORDER BY substr(due_date, 1, 10), priority, id LIMIT ?`,
-        args: [today, DUE_SCAN],
+        args: [...dueArgs, DUE_LINES + NEEDS_LINES],
       })).map((r) => ({ ...r, id: Number(r.id), project_id: r.project_id == null ? null : Number(r.project_id) }));
-      const dueDefs = await defsFor(tdb, dueRows);
-      const due = dueRows.filter((r) => !isTerminal(dueDefs.get(r.project_id) || dueDefs.get(null), r.status));
-      out.due.total = due.length;
 
       // Finished by bots since yesterday: one line per card, newest first.
       const fin = await rowsOrEmpty(tdb, {
