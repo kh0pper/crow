@@ -312,7 +312,7 @@ const ORIGIN = "https://crow.example.ts.net";
 async function revealRig({
   path = "/dashboard/perch", hash = "", search = "", view = "list", selection = "", kiosk = false, overlay = false,
   draft = "", width = 390, link = true, reduce = false, fetchHtml = null, fetchOk = true, styles = null, prevPath = null,
-  href = "/dashboard/for-you", referrer = "",
+  href = "/dashboard/for-you", referrer = "", talk = false, talkOpen = false,
 } = {}) {
   const { shellClientJs } = await import("../servers/gateway/dashboard/shell/client.js");
   const js = shellClientJs();
@@ -335,6 +335,7 @@ async function revealRig({
     </div>
     <dialog id="shell-drawer">${link ? '<a href="' + href + '" class="shell-more-item" data-for-you-entry>For You</a>' : ""}</dialog>
     ${overlay ? "<dialog open></dialog>" : ""}
+    ${talk ? '<div id="crow-talk-overlay" class="crow-talk-overlay' + (talkOpen ? " active" : "") + '" role="dialog" aria-modal="true"></div>' : ""}
   </body></html>`);
   if (draft) document.querySelector(".draft").value = draft;
   Object.defineProperty(document, "referrer", { value: referrer });
@@ -366,7 +367,8 @@ async function revealRig({
   };
   const ctx = vm.createContext({
     window, document, location, Date: { now: () => clock.t }, String, Math, Array, Promise, DOMParser, URL, AbortController, fetch: fetchStub,
-    getComputedStyle: styles || (() => ({ overflowX: "visible" })),
+    // Crow Talk's overlay is display:none until .active (crow-talk.js css).
+    getComputedStyle: styles || ((el) => ({ overflowX: "visible", display: el && el.id === "crow-talk-overlay" && !String(el.className).includes("active") ? "none" : "block", visibility: "visible" })),
     requestAnimationFrame: (fn) => { rafCalls++; frames.push(fn); return frames.length; },
     cancelAnimationFrame: () => { frames = []; },
     setTimeout: (fn, ms) => { const h = { fn, at: clock.t + ms }; timers.push(h); return h; },
@@ -828,4 +830,11 @@ test("the landing marker is cleared by any other navigation, and a late landing 
   forged.store.set(MARK, JSON.stringify({ from: "https://elsewhere.example/", to: "/dashboard/for-you", at: forged.clock.t, landed: true }));
   forged.drag(330, 100, { pause: 200 });
   assert.deepEqual([forged.backs, forged.visits], [[], ["/dashboard/perch"]]);
+});
+
+test("the drag starts on every real page: Crow Talk's always-present, CSS-hidden modal layer is not an open overlay (operator report 2026-10-30)", async () => {
+  // crow-talk.js renders <div id="crow-talk-overlay" role="dialog" aria-modal="true"> into every
+  // layout, hidden by CSS until .active. The old guard matched it, so the drag never began.
+  assert.equal((await revealRig({ path: "/dashboard/project/garden", talk: true })).drag(60, 300), 1, "hidden Talk overlay: the drag lands");
+  assert.equal((await revealRig({ path: "/dashboard/project/garden", talk: true, talkOpen: true })).drag(60, 300), 0, "Talk actually open: no drag");
 });

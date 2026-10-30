@@ -315,8 +315,18 @@ export function shellClientJs() {
         var link = entry(), h = link ? String(link.getAttribute('href') || '') : '';
         return /^\\/dashboard\\//.test(h) && !/[\\s\\\\]/.test(h) ? h : null;
       }
+      // An open dialog, or a modal layer that is actually on screen. Some modal
+      // layers live in every page, hidden by CSS until opened (Crow Talk's
+      // overlay is display:none until .active): those must not count, or the
+      // drag never starts anywhere.
       function overlayOpen() {
-        return !!document.querySelector('dialog[open], [aria-modal="true"]:not([hidden])');
+        if (document.querySelector('dialog[open]')) return true;
+        var mods = document.querySelectorAll('[aria-modal="true"]:not([hidden]):not([aria-hidden="true"])');
+        for (var i = 0; i < mods.length; i++) {
+          var cs = typeof getComputedStyle === 'function' ? getComputedStyle(mods[i]) : null;
+          if (!cs || (cs.display !== 'none' && cs.visibility !== 'hidden')) return true;
+        }
+        return false;
       }
       function hasDraft() {
         var fields = document.querySelectorAll('.content-body textarea, .content-body input[type="text"], .content-body input[type="search"], .content-body input:not([type]), .content-body [contenteditable="true"]');
