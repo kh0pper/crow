@@ -9,7 +9,7 @@ import { shellClientJs } from "../servers/gateway/dashboard/shell/client.js";
 function block() {
   const src = shellClientJs();
   const start = src.indexOf("// ─── The Chat tab returns to the open chat");
-  const end = src.indexOf("// ─── The apps launcher");
+  const end = src.indexOf("// ─── For You: the drag reveal");
   assert.ok(start > 0 && end > start, "block present");
   return src.slice(start, end);
 }

@@ -359,6 +359,25 @@ export function shellCss() {
   body.shell .shell-app:focus-visible,
   body.shell .shell-apps-goto:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
 
+  /* ─── For You's drag reveal (shell/client.js) ───
+     The inert panel beside the page while a drag is on: a copy of For You
+     (main + tab bar, laid out as .dashboard) or its skeleton, or on the way
+     back a plain panel. Above the tab bar (the reduced-motion cross-fade
+     covers the page), below the sheets. */
+  body.shell .fy-reveal {
+    position: fixed; top: 0; left: 0; z-index: 950;
+    width: 100vw; height: 100vh; height: 100dvh; min-height: 0;
+    overflow: hidden; pointer-events: none;
+    background: var(--crow-bg-deep);
+  }
+  body.shell .fy-reveal .content-body { overflow: hidden; }
+  body.shell .fy-reveal-title { margin: 0 0 16px; font-size: 1.5rem; font-weight: 700; line-height: 1.2; color: var(--crow-text-primary); }
+  body.shell .fy-reveal-card {
+    height: 120px; margin-bottom: 16px;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 16px);
+    background: var(--crow-bg-surface);
+  }
+
   /* ─── Phones: the header row is the chip and the mascot only ───
      (phone review 2026-10-29). The page title leaves the row: on a page
      with its own tab (Chat, Board, Make) the chip and the lit tab already

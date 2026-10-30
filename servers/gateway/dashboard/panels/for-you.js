@@ -12,7 +12,7 @@
  * The GET only reads (Turbo prefetches it). POST is the customize form's save, behind the
  * dashboard's CSRF check (csrfMiddleware runs before every /dashboard route) and the gates above.
  *
- * Hidden from the classic sidebar; the shell's drawer, the mascot sheet and the phone swipe reach
+ * Hidden from the classic sidebar; the shell's drawer, the mascot sheet and the phone drag reveal reach
  * it (shell/chrome.js, shell/client.js) while the flag is on.
  */
 import { t } from "../shared/i18n.js";
@@ -86,7 +86,7 @@ export default {
   route: "/dashboard/for-you",
   navOrder: 15.7,
   category: "ai",
-  hidden: true, // reached from the new shell's drawer, mascot sheet and phone swipe
+  hidden: true, // reached from the new shell's drawer, mascot sheet and phone drag reveal
 
   async handler(req, res, { db, layout, lang, enabled = forYouEnabled }) {
     if (!enabled() || !(await isLocalPasswordSessionOn(db, req))) {

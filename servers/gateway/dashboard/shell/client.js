@@ -247,35 +247,65 @@ export function shellClientJs() {
       }
     })();
 
-    // ─── For You: the phone swipe (For You v1) ───
-    // A left-to-right swipe opens For You, only where it can't fight anything
-    // else: the Chat list (/dashboard/perch with no chat open) and a project's
-    // home, at phone width (the bottom-bar layout), never on a chat or a
-    // canvas. It must start at least EDGE px in from the left edge, which
-    // Android's system back gesture owns, and never on a field, in a box that
-    // scrolls sideways, or while a drawer, sheet or dialog is open. It is
-    // dropped when text is selected, when a text field on the page holds a
-    // draft (leaving would lose it), and on a paired kiosk display (a shared
-    // screen: its browser holds the kiosk's pairing token). A tap or a
-    // vertical scroll is untouched (passive listeners; nothing is prevented).
-    // It exists only while the flag is on: the drawer's For You link
+    // ─── For You: the drag reveal (For You v1; drag reveal 2026-10-30) ───
+    // A left-to-right drag pulls For You in from the left, like the Pixel's
+    // Discover feed: the page and a For You panel beside it follow the finger
+    // 1:1. On release it lands on For You (past COMMIT of the width, or a
+    // flick) or springs back. On For You the mirror drag (right to left)
+    // pushes it back out to the page you came from.
+    //
+    // Where: the Chat list (/dashboard/perch with no chat open) and a
+    // project's home (For You itself for the way back), at phone width (the
+    // bottom-bar layout), never on a chat or a canvas. It must not feel like
+    // the system Back gesture (a swipe in from either edge with a small
+    // chevron): it starts at least EDGE px in from the edge it moves away
+    // from, only after a deliberate sideways move (the axis lock: past SLOP
+    // px and AXIS times more sideways than up or down), the whole page moves,
+    // and the forward drag never calls history.back(). Never from a field, a
+    // box that scrolls sideways or a canvas/video/[data-no-swipe], or while a
+    // drawer, sheet or dialog is open; dropped when text is selected, when a
+    // text field on the page holds a draft (leaving would lose it), and on a
+    // paired kiosk display (its browser holds the kiosk's pairing token).
+    // Vertical scrolling is untouched: .content-body is touch-action pan-y,
+    // touchstart/end are passive, and the one non-passive touchmove listener
+    // sits on an eligible page's .main-content and cancels moves only once a
+    // drag has locked. It exists only while the flag is on: the For You link
     // (data-for-you-entry, rendered only then) is its target.
+    //
+    // The panel: For You's HTML is fetched once per page view on the first
+    // eligible touch and parsed with DOMParser (nothing in it runs); scripts,
+    // frames, media and dialogs are dropped, then ids, event attributes and
+    // off-site URLs, and the copy goes into an inert panel. Until it arrives
+    // the panel is a skeleton. On commit the page stays where the animation
+    // left it until Turbo renders For You, so nothing flashes. Transforms only,
+    // will-change while dragging, one rAF per frame; turbo:before-render tidies
+    // anything a cached snapshot carried. With prefers-reduced-motion nothing
+    // slides: the panel cross-fades in over the page instead.
     (function () {
-      if (window.__crowForYouSwipeBound) return;
-      window.__crowForYouSwipeBound = true;
-      var EDGE = 32, MIN_DX = 80, MAX_MS = 700;
-      var start = null;
+      if (typeof window.__crowForYouReveal === 'function') { window.__crowForYouReveal(); return; }
+      var EDGE = 48, SLOP = 12, AXIS = 1.5, COMMIT = 0.35, FLICK = 0.5;
+      var SETTLE_MS = 230, MIN_MS = 120, FADE_MS = 150, GIVE_UP_MS = 10000;
+      var EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
+      var FY = '/dashboard/for-you', CHAT = '/dashboard/perch';
+      var PROJECT = /^\\/dashboard\\/project\\/[^\\/]+$/;
+      var DROP = 'script,iframe,frame,frameset,object,embed,link,meta,base,template,noscript,audio,video,source,track,dialog';
+      var start = null, drag = null, busy = null, raf = 0;
+      var gen = 0, preview = null, fetching = false, here = null, prev = null;
+
       function kiosk() {
         try { return !!window.localStorage.getItem('crow.kiosk.token'); } catch (e) { return false; }
       }
+      function media(q) { return !!(window.matchMedia && window.matchMedia(q).matches); }
       function surface() {
         var p = location.pathname;
-        if (p === '/dashboard/perch') {
+        if (p === CHAT) {
           if (/^#perchlive-/.test(location.hash)) return false;
           return !document.body || document.body.getAttribute('data-view') !== 'chat';
         }
-        return /^\\/dashboard\\/project\\/[^\\/]+$/.test(p);
+        return PROJECT.test(p);
       }
+      function onForYou() { return location.pathname === FY && !/[?&]view=/.test(location.search || ''); }
+      function entry() { return document.querySelector('a[data-for-you-entry]'); }
       function overlayOpen() {
         return !!document.querySelector('dialog[open], [aria-modal="true"]:not([hidden])');
       }
@@ -306,29 +336,283 @@ export function shellClientJs() {
         }
         return false;
       }
-      document.addEventListener('touchstart', function (e) {
-        start = null;
-        if (!e.touches || e.touches.length !== 1 || !surface() || kiosk()) return;
-        if (!window.matchMedia || !window.matchMedia('(max-width: 1023px)').matches) return;
-        if (overlayOpen()) return;
-        var t = e.touches[0];
-        if (t.clientX < EDGE || blocked(e.target)) return;
-        start = { x: t.clientX, y: t.clientY, at: Date.now() };
-      }, { passive: true });
-      document.addEventListener('touchend', function (e) {
-        var s = start;
-        start = null;
-        if (!s || !e.changedTouches || !e.changedTouches.length) return;
-        var t = e.changedTouches[0];
-        var dx = t.clientX - s.x, dy = t.clientY - s.y;
-        if (dx < MIN_DX || Math.abs(dy) > dx / 2 || Date.now() - s.at > MAX_MS) return;
-        if (!surface() || overlayOpen() || selecting() || hasDraft()) return;
-        var link = document.querySelector('a[data-for-you-entry]');
-        if (!link) return;
-        var href = link.getAttribute('href');
+      function go(href) {
         if (window.Turbo && typeof window.Turbo.visit === 'function') window.Turbo.visit(href); else location.href = href;
-      }, { passive: true });
-      document.addEventListener('touchcancel', function () { start = null; }, { passive: true });
+      }
+      function shift(x) { return 'translate3d(' + x + 'px,0,0)'; }
+
+      // ── The preview: structure only, nothing fetched may run ──
+      function scrub(root) {
+        var drop = root.querySelectorAll(DROP);
+        for (var i = 0; i < drop.length; i++) if (drop[i].parentNode) drop[i].parentNode.removeChild(drop[i]);
+        var all = [root].concat(Array.prototype.slice.call(root.querySelectorAll('*')));
+        for (var j = 0; j < all.length; j++) {
+          var at = all[j].attributes;
+          for (var k = at.length - 1; k >= 0; k--) {
+            var name = String(at[k].name).toLowerCase(), val = String(at[k].value || '');
+            var url = name === 'href' || name === 'src' || name === 'xlink:href' || name === 'poster';
+            // A URL stays only as a same-site path ("/x", never "//x", "/\\x" or one with spaces).
+            var bad = /^on/.test(name) || name === 'id' || name === 'srcset' || name === 'srcdoc' ||
+              name === 'action' || name === 'formaction' || name === 'autofocus' || name === 'data-turbo-permanent' ||
+              (url && (!/^\\/(?![\\/\\\\])/.test(val) || /[\\s\\\\]/.test(val)));
+            if (bad) all[j].removeAttribute(at[k].name);
+          }
+        }
+      }
+      function copyOf(doc) {
+        var main = doc.querySelector('.main-content');
+        if (!main || !main.querySelector('[data-fy]')) return null; // not For You (a sign-in page, an error)
+        var parts = [main, doc.querySelector('.shell-tabs')];
+        var box = document.createElement('div');
+        for (var i = 0; i < parts.length; i++) {
+          if (!parts[i]) continue;
+          scrub(parts[i]);
+          box.appendChild(document.importNode(parts[i], true));
+        }
+        return box;
+      }
+      function prefetch() {
+        var link = entry();
+        if (preview || fetching || !link || typeof fetch !== 'function' || typeof DOMParser !== 'function') return;
+        var g = gen;
+        fetching = true;
+        fetch(link.getAttribute('href'), { credentials: 'same-origin', headers: { accept: 'text/html' } })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+          .then(function (html) { if (g === gen) preview = copyOf(new DOMParser().parseFromString(html, 'text/html')); })
+          .catch(function () {})
+          .then(function () { if (g === gen) fetching = false; });
+      }
+      // Until the copy arrives: this page's own header and tab bar (no tab
+      // lit), the For You title and three grey cards.
+      function chrome(sel) {
+        var el = document.querySelector(sel);
+        if (!el) return null;
+        var c = el.cloneNode(true);
+        scrub(c);
+        var lit = c.querySelectorAll('[aria-current]');
+        for (var i = 0; i < lit.length; i++) lit[i].removeAttribute('aria-current');
+        return c;
+      }
+      function skeleton() {
+        var box = document.createElement('div');
+        var main = document.createElement('main');
+        main.className = 'main-content';
+        var link = entry();
+        var name = (link && String(link.textContent).trim()) || 'For You';
+        // For You has no tab, so its title shows on a line of its own.
+        var head = chrome('.main-content > .content-header');
+        if (head) {
+          if (head.classList) head.classList.remove('shell-header--tab');
+          var h2 = head.querySelector('h2');
+          if (h2) h2.textContent = name;
+          main.appendChild(head);
+        }
+        var body = document.createElement('div');
+        body.className = 'content-body';
+        var title = document.createElement('p');
+        title.className = 'fy-reveal-title';
+        title.textContent = name;
+        body.appendChild(title);
+        for (var i = 0; i < 3; i++) {
+          var card = document.createElement('div');
+          card.className = 'fy-reveal-card';
+          body.appendChild(card);
+        }
+        main.appendChild(body);
+        box.appendChild(main);
+        var tabs = chrome('.shell-tabs');
+        if (tabs) box.appendChild(tabs);
+        return box;
+      }
+      // dir 1: For You comes in from the left; -1: a plain panel from the right
+      // (history.back() restores the page itself from Turbo's cache).
+      function makePanel(dir, w, fade) {
+        var p = document.createElement('div');
+        p.className = dir > 0 ? 'fy-reveal dashboard' : 'fy-reveal';
+        p.setAttribute('data-fy-reveal', '');
+        p.setAttribute('aria-hidden', 'true');
+        p.setAttribute('inert', '');
+        if (dir > 0) {
+          var src = preview ? preview.cloneNode(true) : skeleton();
+          while (src.firstChild) p.appendChild(src.firstChild);
+        }
+        if (fade) p.style.opacity = '0'; else p.style.transform = shift(-dir * w);
+        p.style.willChange = fade ? 'opacity' : 'transform';
+        document.body.appendChild(p);
+        return p;
+      }
+
+      // ── Moving ──
+      function unstyle(el) {
+        el.style.transition = '';
+        el.style.transform = '';
+        el.style.willChange = '';
+      }
+      function tidy(root) {
+        if (!root || !root.querySelectorAll) return;
+        var old = root.querySelectorAll('[data-fy-reveal]');
+        for (var i = 0; i < old.length; i++) if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+        var moved = root.querySelectorAll('[data-fy-moved]');
+        for (var j = 0; j < moved.length; j++) { unstyle(moved[j]); moved[j].removeAttribute('data-fy-moved'); }
+        document.documentElement.style.overflowX = '';
+      }
+      // Late guards, checked when the drag would start to show.
+      function ready() {
+        if (overlayOpen() || selecting() || hasDraft()) return false;
+        if (start.dir < 0) return onForYou();
+        var link = entry();
+        if (!surface() || !link) return false;
+        start.href = link.getAttribute('href');
+        return true;
+      }
+      function lock(t) {
+        var w = window.innerWidth || 0;
+        if (w <= 0) return false;
+        var fade = media('(prefers-reduced-motion: reduce)');
+        var movers = [];
+        if (!fade) {
+          var sel = ['.main-content', '.shell-tabs'];
+          for (var i = 0; i < sel.length; i++) {
+            var el = document.querySelector(sel[i]);
+            if (el) movers.push(el);
+          }
+          if (!movers.length) return false;
+          for (var m = 0; m < movers.length; m++) {
+            movers[m].setAttribute('data-fy-moved', '');
+            movers[m].style.willChange = 'transform';
+          }
+          document.documentElement.style.overflowX = 'clip';
+        }
+        drag = { dir: start.dir, href: start.href, w: w, x: 0, x0: t.clientX, fade: fade, movers: movers, panel: makePanel(start.dir, w, fade), samples: [] };
+        return true;
+      }
+      function place(d, x) {
+        if (d.fade) { d.panel.style.opacity = String(Math.abs(x) / d.w); return; }
+        for (var i = 0; i < d.movers.length; i++) d.movers[i].style.transform = shift(x);
+        d.panel.style.transform = shift(x - d.dir * d.w);
+      }
+      function paint() {
+        raf = 0;
+        if (drag) place(drag, drag.x);
+      }
+      function undo(d) {
+        if (busy === d) busy = null;
+        clearTimeout(d.timer);
+        if (d.panel.parentNode) d.panel.parentNode.removeChild(d.panel);
+        for (var i = 0; i < d.movers.length; i++) { unstyle(d.movers[i]); d.movers[i].removeAttribute('data-fy-moved'); }
+        document.documentElement.style.overflowX = '';
+      }
+      // Arrived: navigate, and keep the page where it is until the new one
+      // renders. If it never does, put the page back.
+      function land(d) {
+        if (d.dir > 0) go(d.href);
+        else if (prev && prev.indexOf('/dashboard/') === 0 && prev.indexOf(FY) !== 0 && window.history && window.history.length > 1) window.history.back();
+        else go(CHAT);
+        d.timer = setTimeout(function () { if (document.body.contains(d.panel)) undo(d); }, GIVE_UP_MS);
+      }
+      function settle(d, commit) {
+        drag = null;
+        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        busy = d;
+        var to = commit ? d.dir * d.w : 0;
+        var ms = d.fade ? FADE_MS : Math.round(MIN_MS + (SETTLE_MS - MIN_MS) * Math.abs(to - d.x) / d.w);
+        var how = (d.fade ? 'opacity ' : 'transform ') + ms + 'ms ' + EASE;
+        d.panel.style.transition = how;
+        for (var i = 0; i < d.movers.length; i++) d.movers[i].style.transition = how;
+        place(d, to);
+        d.timer = setTimeout(function () { if (commit) land(d); else undo(d); }, ms + 20);
+      }
+      // px per ms toward where the drag goes, over the last 100 ms of moves;
+      // a finger that stopped before lifting has none.
+      function speed(d) {
+        var s = d.samples, a = s[0], b = s[s.length - 1];
+        if (s.length < 2 || Date.now() - b.t > 100 || b.t <= a.t) return 0;
+        return (b.x - a.x) / (b.t - a.t) * d.dir;
+      }
+
+      function begin(e) {
+        start = null;
+        if (busy || drag || !e.touches || e.touches.length !== 1 || kiosk() || !media('(max-width: 1023px)') || overlayOpen()) return;
+        var dir = surface() ? 1 : onForYou() ? -1 : 0;
+        if (!dir) return;
+        var t = e.touches[0], w = window.innerWidth || 0;
+        if (dir > 0 ? t.clientX < EDGE : t.clientX > w - EDGE) return;
+        var tgt = e.target;
+        if (!tgt || !tgt.closest || !tgt.closest('.main-content') || blocked(tgt)) return;
+        start = { x: t.clientX, y: t.clientY, dir: dir };
+        if (dir > 0) prefetch();
+      }
+      function move(e) {
+        if (!start) return;
+        if (!e.touches || e.touches.length !== 1) { cancel(); return; }
+        var t = e.touches[0];
+        if (!drag) {
+          var dx = t.clientX - start.x, dy = t.clientY - start.y;
+          var ax = Math.abs(dx), ay = Math.abs(dy);
+          if (ax > SLOP && ax > ay * AXIS) {
+            if (dx * start.dir < 0 || !ready() || !lock(t)) { start = null; return; }
+          } else {
+            if (ay > SLOP) start = null; // a scroll: hands off
+            return;
+          }
+        }
+        if (e.cancelable) e.preventDefault();
+        var x = t.clientX - drag.x0;
+        drag.x = drag.dir > 0 ? Math.max(0, Math.min(drag.w, x)) : Math.max(-drag.w, Math.min(0, x));
+        var now = Date.now(), s = drag.samples;
+        s.push({ x: drag.x, t: now });
+        while (s.length > 2 && now - s[0].t > 100) s.shift();
+        if (!raf) raf = requestAnimationFrame(paint);
+      }
+      function end() {
+        var d = drag;
+        start = null;
+        if (!d) return;
+        var v = speed(d);
+        settle(d, v >= FLICK || (Math.abs(d.x) >= d.w * COMMIT && v > -FLICK));
+      }
+      function cancel() {
+        var d = drag;
+        start = null;
+        if (d) settle(d, false);
+      }
+      // Per page view (this script re-runs on every Turbo render): a fresh
+      // preview, the page we came from, and the touch wiring for this body.
+      function setTouch() {
+        var cb = document.querySelector('.content-body');
+        if (cb) cb.style.touchAction = entry() && (surface() || onForYou()) ? 'pan-y pinch-zoom' : '';
+      }
+      function visit() {
+        gen++;
+        preview = null; fetching = false; start = null;
+        tidy(document.body);
+        var at = location.pathname + (location.search || '');
+        if (at !== here) { prev = here; here = at; }
+        var p = location.pathname, main = document.querySelector('.main-content');
+        if (main && !main.__crowFyMove && entry() && (p === CHAT || p === FY || PROJECT.test(p))) {
+          main.__crowFyMove = true;
+          main.addEventListener('touchmove', move, { passive: false });
+        }
+        setTouch();
+      }
+      window.__crowForYouReveal = visit;
+      document.addEventListener('touchstart', begin, { passive: true });
+      document.addEventListener('touchend', end, { passive: true });
+      document.addEventListener('touchcancel', cancel, { passive: true });
+      // The body Turbo is about to show may be a cached snapshot taken
+      // mid-reveal: tidy it before it paints. The old body is left as it is
+      // (it is going away, and moving it back would flash).
+      document.addEventListener('turbo:before-render', function (e) {
+        if (busy) clearTimeout(busy.timer);
+        start = null; drag = null; busy = null;
+        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        tidy(e && e.detail && e.detail.newBody);
+      });
+      if (typeof window.addEventListener === 'function') {
+        window.addEventListener('hashchange', setTouch);
+        window.addEventListener('pageshow', function (e) { if (e && e.persisted) { busy = null; tidy(document.body); } });
+      }
+      visit();
     })();
 
     // ─── The apps launcher (R1.2 PR 5): the drawer's Apps grid ───
