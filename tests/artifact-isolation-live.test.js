@@ -409,7 +409,7 @@ test("comment mode: a click inside a scripted page becomes ONE validated element
   } finally { await t.close(); }
 });
 
-test("script-free: showBlock mounts a fresh frame (no load is ever excused), and a link clicked afterwards still trips", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+test("script-free: showBlock mounts a fresh frame (no load is ever excused), and a link clicked afterwards is proposed, never followed", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
   const t = await tab();
   try {
     const E = `http://evil.test:${P}`;
@@ -424,8 +424,14 @@ test("script-free: showBlock mounts a fresh frame (no load is ever excused), and
     assert.equal(st.loads, 1, "each jump is a fresh frame's first load");
     assert.equal(st.tripped, false);
     for (const type of ["mousePressed", "mouseReleased"]) await t.send("Input.dispatchMouseEvent", { type, x: 20, y: 20, button: "left", clickCount: 1 });
-    const trips = await waitFor(async () => { const x = await t.evalIn("__r.trips"); return x && x.length ? x : null; });
-    assert.deepEqual(trips, ["second-load"], "a navigation after a jump is still caught");
+    // Links open only through the viewer's trusted sheet now (2026-10-30): the helper
+    // stops the navigation, so the frame never loads a second time and nothing trips.
+    const sheet = await waitFor(() => t.evalIn("!!document.querySelector('.cv-linksheet')"));
+    assert.equal(sheet, true, "the click became a trusted link sheet");
+    await sleep(500);
+    const after = await t.evalIn("__v.state()");
+    assert.equal(after.loads, 1, "the frame was never navigated");
+    assert.deepEqual(await t.evalIn("__r.trips"), [], "no second load, so no trip");
   } finally { await t.close(); }
 });
 

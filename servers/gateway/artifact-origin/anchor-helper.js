@@ -31,13 +31,24 @@
  *      "Comment on …" button. Posted ONLY on a real selected→collapsed
  *      transition (taps and caret moves on a collapsed selection post
  *      nothing), at most once per 250 ms (trailing).
+ *   5. links (2026-10-30): outside comment mode, a click on an http(s) <a>
+ *      is preventDefault()ed and proposed to the viewer as {kind:"open-link"}.
+ *      The content never opens a window or navigates itself (the sandbox has
+ *      no allow-popups/allow-top-navigation); the viewer validates the URL,
+ *      asks the owner in a trusted sheet and then opens it in the owner's
+ *      own browser. javascript:/data:/blob: links are prevented and never
+ *      posted; mailto:/tel:/same-document #fragments are left alone.
+ *      Sealed types (no script) run no helper, so their links stay as they
+ *      are: the sandbox still stops anything but the viewer's own frame-src
+ *      from loading.
  * The viewer never posts anything sensitive in: only {kind:"comment-mode"}
  * and {kind:"pins"} (owner anchors the content itself proposed).
  *
  * MESSAGE BUDGET: the viewer trips its wire at more than 20 messages a
  * second, so this helper stays at or under 10: hello (once) + anchor-rect
  * (at most 4/s) + proposals (at most 2.5/s: one per 400 ms) + selection-
- * cleared (at most 4/s). Anything new must fit in what is left.
+ * cleared (at most 4/s). open-link is only sent on a real click (one per
+ * gesture; the viewer keeps at most one sheet per 1.5 s).
  */
 export function anchorHelperSource(nonce) {
   const n = JSON.stringify(String(nonce));
@@ -187,6 +198,30 @@ export function anchorHelperSource(nonce) {
     const sel = getSelection && getSelection();
     if (sel && !sel.isCollapsed && sel.toString().trim()) return;
     post({ kind: "anchor", anchor: { kind: "element", selector: selectorOf(el), text: clip(el.textContent, 200), block: blockOf(el) } });
+  }, true);
+  /* Links: propose an http(s) destination to the viewer, which confirms it
+     in trusted UI and opens it in the owner's own browser. Comment mode is
+     a proposal mode, so a click there is left to the comment handler above.
+     Always intercept (middle/modified clicks too): the artifact has no
+     allow-popups and no top navigation, and the only way out is the
+     viewer's confirmed link. Same-document #fragments stay in the frame. */
+  document.addEventListener("click", (e) => {
+    if (on) return;
+    const t = e.target;
+    const a = t && t.nodeType === 1 && t.closest ? t.closest("a[href]") : null;
+    if (!a) return;
+    /* The ATTRIBUTE string, trimmed, is the only reliable source: an SVG <a>'s
+       .href is an SVGAnimatedString, so a.href would stringify to
+       "[object SVGAnimatedString]" and resolve to nothing useful. */
+    const s = (a.getAttribute("href") || "").trim();
+    if (!s || s.charAt(0) === "#") return;
+    let u = null;
+    try { u = new URL(s, document.baseURI || location.href); } catch (err) { return; }
+    const p = u.protocol;
+    if (p === "javascript:" || p === "data:" || p === "blob:") { e.preventDefault(); return; }
+    if (p !== "http:" && p !== "https:") return;   // mailto:, tel:, ...: the page's own business
+    e.preventDefault();
+    post({ kind: "open-link", url: u.href });
   }, true);
   function proposeSelection() {
     selTimer = 0;

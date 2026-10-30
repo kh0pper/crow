@@ -13,9 +13,15 @@
  *    design: the first request has already left when this fires;
  *  - every frame message is an untrusted PROPOSAL: source, origin, shape,
  *    size, rate and nonce checked; nothing acts without a user gesture in the
- *    rail. The kinds: hello, anchor (a proposal), anchor-rect (pin rects) and
+ *    rail. The kinds: hello, anchor (a proposal), anchor-rect (pin rects),
  *    selection-cleared (S6: hides the trusted "Comment on …" button, nothing
- *    else); all but hello are ignored before the hello;
+ *    else) and open-link (2026-10-30: the helper proposes an http(s) link
+ *    after the owner's click; this file validates it and asks in a TRUSTED
+ *    sheet before anything leaves the viewer). All but hello are ignored
+ *    before the hello; an open-link is never navigated to automatically, a
+ *    proposal for the artifact's or the viewer's own origin is dropped, an
+ *    open sheet is never replaced by a later proposal, and the sheet's way
+ *    out is inert for its first 600 ms (tapjacking).
  *  - the parent never posts anything sensitive in: only {kind:"comment-mode"}
  *    and {kind:"pins"} — the numbered anchors of the OWNER's threads on this
  *    version (element selectors / text quotes the content itself proposed;
@@ -64,6 +70,7 @@
 (function () {
   "use strict";
   var MAX_MSG = 8192, MAX_ANCHOR = 4096, RATE_N = 20, RATE_MS = 1000, HELLO_MS = 6000, LOAD_MS = 20000;
+  var MAX_LINK = 2048, LINK_GAP_MS = 1500, LINK_GUARD_MS = 600, LINK_COOLDOWN_MS = 3000;
   var URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/v\/[A-Za-z0-9_-]{43}\/$/;
 
   function validAnchor(a) {
@@ -142,6 +149,134 @@
     return out;
   }
 
+  /** The only link proposals the viewer will offer: http(s), no credentials,
+   *  at most 2048 characters. The PARSED form (u.href) is returned, and the
+   *  sheet shows and opens that — never the raw proposal: a raw string can
+   *  hide where it really goes ("https://evil.example\\@good.example/" reads
+   *  like good.example but is evil.example), while URL.href is the browser's
+   *  own canonical form. textContent still renders it literally. */
+  function validLink(url) {
+    if (typeof url !== "string" || url.length > MAX_LINK) return null;
+    if (/[\u0000-\u001f\u007f]/.test(url)) return null;          // no controls/newlines in an href
+    var u; try { u = new URL(url); } catch (e) { return null; }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.username || u.password) return null;                  // never a credential-bearing URL
+    if (!u.host) return null;
+    return { url: u.href, host: u.host };                       // host: punycode form, look-alike letters visible
+  }
+
+  /** A proposal may never point at the artifact's own origin (a relative href
+   *  inside the frame resolves there) or at the viewer page's origin (the
+   *  dashboard): in the owner's browser those are exactly the two places a
+   *  link out of an artifact must not lead. Dropped, whatever opts.onLink is. */
+  function ownOriginLink(url, g) {
+    var u; try { u = new URL(url); } catch (e) { return true; }
+    var origins = [];
+    try { if (g && typeof g.url === "string") origins.push(new URL(g.url).origin); } catch (e) {}
+    try { if (typeof location !== "undefined" && location.origin) origins.push(location.origin); } catch (e) {}
+    return origins.indexOf(u.origin) >= 0;
+  }
+
+  /** The viewer page's own strings (viewer-page.js's table, via data-strings). */
+  function pageStrings() {
+    try {
+      var r = document.getElementById("crow-artifact-viewer");
+      return JSON.parse((r && r.getAttribute("data-strings")) || "{}");
+    } catch (e) { return {}; }
+  }
+
+  // How many link sheets are mounted anywhere (there is at most one per
+  // viewer, but a page can hold more than one viewer). The full-screen Escape
+  // handler reads it: an open sheet owns Escape.
+  var linkSheetOpen = 0;
+
+  function closeLinkSheet(state) {
+    if (!state) return;
+    if (state.linkSheet) {
+      if (state.linkSheet.parentNode) state.linkSheet.parentNode.removeChild(state.linkSheet);
+      linkSheetOpen = Math.max(0, linkSheetOpen - 1);
+    }
+    state.linkSheet = null;
+    state.linkShownAt = 0;
+    if (state.linkKey) { document.removeEventListener("keydown", state.linkKey); state.linkKey = null; }
+  }
+
+  /** A TRUSTED sheet in the viewer page, outside the frame: host large, the
+   *  full URL small and selectable, and one explicit "Open in your browser".
+   *  Every value is placed with textContent / setAttribute: never innerHTML.
+   *  An open sheet is NEVER replaced — a later proposal is dropped, not swapped
+   *  in under the owner's finger (before the rate check, so the rule holds even
+   *  after the gap). The way out is inert for LINK_GUARD_MS after the sheet
+   *  appears (a tap landing there was aimed at whatever was under it a moment
+   *  ago), and Cancel leaves a short cooldown before another sheet may open. */
+  function openLinkSheet(state, link) {
+    var now = Date.now();
+    if (state.linkSheet) return;                                          // one sheet at a time: never replaced
+    if (state.linkCooldownUntil && now < state.linkCooldownUntil) return;  // Cancel: reopen only after the cooldown
+    if (state.linkAt && now - state.linkAt < LINK_GAP_MS) return;         // one sheet per 1.5 s; extras are dropped
+    state.linkAt = now;
+    var shownAt = now;
+    state.linkShownAt = now;
+    var T = pageStrings();
+    var titleText = T.open_link || "Open this link?";
+    var goText = T.open_link_go || "Open in your browser";
+    var cancelText = T.cancel || "Cancel";
+    var parent = document.getElementById("crow-artifact-viewer") || document.body || document.documentElement;
+    if (!parent) return;
+    var sheet = document.createElement("div");
+    sheet.className = "cv-linksheet";
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("aria-label", titleText);
+    var card = document.createElement("div");
+    card.className = "cv-linksheet-card";
+    var title = document.createElement("h2");
+    title.className = "cv-linksheet-title";
+    title.textContent = titleText;
+    var host = document.createElement("p");
+    host.className = "cv-linksheet-host";
+    host.textContent = link.host;
+    var full = document.createElement("p");
+    full.className = "cv-linksheet-url";
+    full.textContent = link.url;
+    var actions = document.createElement("div");
+    actions.className = "cv-linksheet-actions";
+    var go = document.createElement("a");
+    go.className = "cv-linksheet-go cv-linksheet-wait";                   // pointer-events:none while it settles
+    go.setAttribute("href", link.url);
+    go.setAttribute("target", "_blank");
+    go.setAttribute("rel", "noopener noreferrer");
+    go.textContent = goText;
+    go.addEventListener("click", function (e) {
+      // Tapjacking: a click that lands before the owner could have read the
+      // sheet (and could have been aimed at the page under it) is refused.
+      if (Date.now() - shownAt < LINK_GUARD_MS) { if (e && e.preventDefault) e.preventDefault(); return; }
+      closeLinkSheet(state);
+    });
+    var cancel = document.createElement("button");
+    cancel.setAttribute("type", "button");
+    cancel.className = "cv-linksheet-cancel";
+    cancel.textContent = cancelText;
+    cancel.addEventListener("click", function () {
+      if (state.linkSheet === sheet) state.linkCooldownUntil = Date.now() + LINK_COOLDOWN_MS;
+      closeLinkSheet(state);
+    });
+    actions.appendChild(go);
+    actions.appendChild(cancel);
+    card.appendChild(title);
+    card.appendChild(host);
+    card.appendChild(full);
+    card.appendChild(actions);
+    sheet.appendChild(card);
+    parent.appendChild(sheet);
+    state.linkSheet = sheet;
+    linkSheetOpen++;
+    state.linkKey = function (e) { if (e.key === "Escape") closeLinkSheet(state); };
+    document.addEventListener("keydown", state.linkKey);
+    setTimeout(function () { if (go.classList) go.classList.remove("cv-linksheet-wait"); }, LINK_GUARD_MS);
+    try { if (cancel.focus) cancel.focus(); } catch (e) {}
+  }
+
   /** The only grants the viewer will frame. */
   function validGrant(g) {
     if (!g || typeof g !== "object") return false;
@@ -183,7 +318,7 @@
    * grant: { url, nonce, sandbox, scripted, type }
    */
   function mount(opts) {
-    var state = { iframe: null, loads: 0, hello: false, tripped: false, pending: false, grant: null, helloTimer: null, stamps: [], commentMode: false, pins: [], gen: 0 };
+    var state = { iframe: null, loads: 0, hello: false, tripped: false, pending: false, grant: null, helloTimer: null, stamps: [], commentMode: false, pins: [], gen: 0, linkSheet: null, linkKey: null, linkAt: 0, linkShownAt: 0, linkCooldownUntil: 0 };
     var helloMs = typeof opts.helloMs === "number" && opts.helloMs > 0 ? opts.helloMs : HELLO_MS;
     var loadMs = typeof opts.loadMs === "number" && opts.loadMs > 0 ? opts.loadMs : LOAD_MS;
 
@@ -192,6 +327,7 @@
       if (!opts.loadEvidence) { trip("no-hello"); return; }
       state.pending = true;
       clearTimeout(state.helloTimer);
+      closeLinkSheet(state);            // the frame that proposed it is gone
       if (state.iframe) { state.iframe.remove(); state.iframe = null; }
       var settle = function (r) {
         if (gen !== state.gen || state.tripped || !state.pending) return;      // stale, destroyed or tripped meanwhile
@@ -209,6 +345,7 @@
       state.tripped = true;
       state.pending = false;
       clearTimeout(state.helloTimer);
+      closeLinkSheet(state);            // a trip tears down everything this mount showed
       if (state.iframe) { state.iframe.remove(); state.iframe = null; }
       try { opts.onTrip && opts.onTrip(reason); } catch (e) {}
     }
@@ -249,6 +386,19 @@
       if (d.kind === "anchor" && state.hello) {
         var a = validAnchor(d.anchor);
         if (a) try { opts.onProposal && opts.onProposal(a); } catch (x) {}
+        return;
+      }
+      // Links (2026-10-30): the helper intercepted a click; this is only a
+      // proposal. Validated like every other kind (live frame, opaque origin,
+      // nonce, hello, size, rate), then shown in trusted UI. Never navigated
+      // automatically. A malformed/unsafe proposal is dropped silently.
+      if (d.kind === "open-link") {
+        if (!state.hello) return;
+        if (state.linkSheet) return;                                     // never replace an open sheet
+        var l = validLink(d.url);
+        if (!l) return;
+        if (ownOriginLink(l.url, g)) return;                             // never the artifact's or the viewer's origin
+        try { if (opts.onLink) opts.onLink(l); else openLinkSheet(state, l); } catch (x) {}
       }
     }
 
@@ -282,6 +432,7 @@
           try { opts.onRefuse && opts.onRefuse("bad-grant"); } catch (x) {}
           throw new Error("bad-grant");
         }
+        closeLinkSheet(state);          // a fresh grant/frame replaces everything the old one showed
         if (state.iframe) { state.iframe.remove(); state.iframe = null; }
         clearTimeout(state.helloTimer);
         state.grant = g; state.loads = 0; state.hello = false; state.stamps = [];
@@ -327,9 +478,68 @@
         return load(id);
       },
       state: function () { return { loads: state.loads, hello: state.hello, tripped: state.tripped, pending: state.pending, framed: !!state.iframe }; },
-      destroy: function () { window.removeEventListener("message", onMessage); clearTimeout(state.helloTimer); if (state.iframe) state.iframe.remove(); state.iframe = null; state.tripped = true; },
+      destroy: function () { window.removeEventListener("message", onMessage); clearTimeout(state.helloTimer); closeLinkSheet(state); if (state.iframe) state.iframe.remove(); state.iframe = null; state.tripped = true; },
     };
   }
 
-  window.CrowArtifactViewer = { mount: mount, validAnchor: validAnchor, validGrant: validGrant, validRects: validRects, pinOut: pinOut };
+  /** Full screen (2026-10-30): a <body> class, not the Fullscreen API — the
+   *  Android app's WebView has no meaningful Fullscreen API. The API is only
+   *  an optional extra on a real button press, and its failure is ignored.
+   *  The server renders both buttons; this moves them into the page's toolbar
+   *  (or the root when there is no toolbar) and wires Escape and "#full". */
+  function initFullScreen() {
+    if (!document || typeof document.getElementById !== "function") return;
+    var root = document.getElementById("crow-artifact-viewer");
+    var open = document.getElementById("cv-full-screen");
+    var exit = document.getElementById("cv-exit-full-screen");
+    if (open) {
+      var tools = typeof document.querySelector === "function" ? document.querySelector(".cv-headtools") : null;
+      if (tools && tools.appendChild) tools.appendChild(open);
+      else if (root && root.appendChild) root.appendChild(open);
+    }
+    if (exit) {
+      if (root && root.appendChild) root.appendChild(exit);
+      exit.removeAttribute("hidden");
+    }
+    function isOn() { return !!(document.body && document.body.classList && document.body.classList.contains("cv-fullscreen")); }
+    function setFull(on, request) {
+      if (!document.body || !document.body.classList) return;
+      if (on) document.body.classList.add("cv-fullscreen"); else document.body.classList.remove("cv-fullscreen");
+      if (on && request) {
+        try {
+          if (document.documentElement && typeof document.documentElement.requestFullscreen === "function") {
+            var p = document.documentElement.requestFullscreen();
+            if (p && p.catch) p.catch(function () {});
+          }
+        } catch (e) {}
+      } else if (!on) {
+        try {
+          if (document.fullscreenElement && typeof document.exitFullscreen === "function") {
+            var x = document.exitFullscreen();
+            if (x && x.catch) x.catch(function () {});
+          }
+        } catch (e) {}
+      }
+    }
+    if (open) open.addEventListener("click", function () { setFull(true, true); });
+    if (exit) exit.addEventListener("click", function () { setFull(false, false); });
+    document.addEventListener("keydown", function (e) {
+      // An open link sheet owns Escape: its own handler closes only the sheet,
+      // so Escape never tears down full screen at the same time.
+      if (e.key === "Escape" && isOn() && !linkSheetOpen) setFull(false, false);
+    });
+    // The optional Fullscreen API may consume Escape itself: when the browser
+    // leaves fullscreen, drop the class too (Android has no API and never
+    // fires this; the keydown above is the mechanism there).
+    document.addEventListener("fullscreenchange", function () {
+      if (!document.fullscreenElement && isOn()) setFull(false, false);
+    });
+    if (typeof location !== "undefined" && location.hash === "#full") setFull(true, false);
+  }
+  if (document && typeof document.getElementById === "function") {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initFullScreen);
+    else initFullScreen();
+  }
+
+  window.CrowArtifactViewer = { mount: mount, validAnchor: validAnchor, validGrant: validGrant, validRects: validRects, pinOut: pinOut, validLink: validLink };
 })();
