@@ -52,6 +52,7 @@
  * The bridge is imported LAZILY (via `loadBridge()`, used by the tool
  * envelope) so gateway boot stays light.
  */
+import { readFirstUserMessage } from "../perch/session-summary.js";
 import { NARROWING_LOCK, isSentinel, mentionsLock } from "../../../scripts/pi-bots/narrowing-lock.mjs";
 import { Router } from "express";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
@@ -391,6 +392,20 @@ function transcriptActivity(row, listings = null) {
     const found = resolveTranscriptFile(row.pi_session_dir, row.pi_session_id, listings);
     if (!found.file) return null;
     return statSync(found.file).mtime.toISOString().slice(0, 19).replace("T", " ");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The session's first operator message (session-summary.js readFirstUserMessage), the
+ * card's title until it has a name; null on any miss. Same per-request listing cache.
+ */
+function transcriptFirstMessage(row, listings = null) {
+  try {
+    if (!row) return null;
+    const found = resolveTranscriptFile(row.pi_session_dir, row.pi_session_id, listings);
+    return found.file ? readFirstUserMessage(found.file) : null;
   } catch {
     return null;
   }
@@ -792,6 +807,8 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             // (UTC "YYYY-MM-DD HH:MM:SS"), null when there is no file yet.
             // bot_sessions.updated_at would lie: renames bump it, messages don't.
             lastActivityAt: transcriptActivity(dbRow, dirListings),
+            // The card's title until the session has a name (session-cards.js). Read only then.
+            firstMessage: (s.label != null ? s.label : (dbRow && dbRow.label)) ? null : transcriptFirstMessage(dbRow, dirListings),
           };
         });
         // spec §3.2 priority fold: waiting-on-you > working > hibernating >

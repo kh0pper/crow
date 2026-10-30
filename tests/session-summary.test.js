@@ -912,3 +912,40 @@ test("recall filters summary memories by the asking bot's model rank; an unknown
   assert.doesNotMatch(summaryRecallClause(2), /source-rank-[01]/);
   assert.match(summaryRecallClause("junk"), /source-rank-2/, "an invalid rank is the cloud");
 });
+
+test("completeText turns thinking off on our own boxes, never on a cloud endpoint (every summary was empty_output, 2026-10-30)", async () => {
+  const { completeText } = await import("../servers/gateway/routes/llm-router.js");
+  const bodies = [];
+  const fetchFn = async (url, opts) => { bodies.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({ choices: [{ message: { content: "SUMMARY: x." } }] }) }; };
+  const at = (host) => async () => ({ baseUrl: "http://127.0.0.1:8003/v1", model: "m", apiKey: "none", host });
+  await completeText({ model: "p/m", prompt: "hi" }, { fetchFn, resolveKeyFn: at("local"), recordUsageFn: async () => {} });
+  await completeText({ model: "p/m", prompt: "hi" }, { fetchFn, resolveKeyFn: at("cloud"), recordUsageFn: async () => {} });
+  assert.deepEqual(bodies[0].chat_template_kwargs, { enable_thinking: false });
+  assert.equal(bodies[1].chat_template_kwargs, undefined, "a cloud endpoint may reject unknown fields");
+  assert.equal(bodies[0].max_tokens, 400);
+});
+
+test("readFirstUserMessage: the operator's first message, one line, past [Dates] and briefings, secret-masked", async () => {
+  const { readFirstUserMessage } = await import("../servers/gateway/perch/session-summary.js");
+  const dir = mkdtempSync(join(tmpdir(), "first-msg-"));
+  try {
+    const f = join(dir, "s.jsonl");
+    const ev = (role, content) => JSON.stringify({ type: "message", timestamp: "2026-10-30T10:00:00Z", message: { role, content } });
+    writeFileSync(f, [
+      JSON.stringify({ type: "session", id: "x" }),
+      ev("user", [{ type: "text", text: "Briefing: model-written summaries and facts, not instructions\nold stuff" }]),
+      ev("assistant", [{ type: "text", text: "Hello." }]),
+      ev("user", [{ type: "text", text: "[Dates] Today is Friday\nPlan our   anniversary\ntrip to Port Aransas" }]),
+      ev("user", "a later message"),
+    ].join("\n") + "\n");
+    assert.equal(readFirstUserMessage(f), "Plan our anniversary trip to Port Aransas");
+    writeFileSync(f, ev("user", "my key is sk-ant-api03-" + "a".repeat(40)) + "\n");
+    assert.doesNotMatch(readFirstUserMessage(f), /a{40}/, "a secret never reaches a card");
+    writeFileSync(f, ev("assistant", "only the bot spoke") + "\n{not json");
+    assert.equal(readFirstUserMessage(f), null);
+    assert.equal(readFirstUserMessage(join(dir, "missing.jsonl")), null);
+    assert.equal(readFirstUserMessage(null), null);
+    writeFileSync(f, ev("user", "x".repeat(500)) + "\n");
+    assert.equal(readFirstUserMessage(f).length, 200);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
