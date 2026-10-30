@@ -5,12 +5,15 @@
  * position; `place` is what Open-Meteo's geocoder made of it, cached with the setting so the page
  * never geocodes on a GET.
  *
- *   { sections: { morning, listen, news, weather }, city: "", place: null | { name, admin1, country, lat, lon, unit } }
+ *   { sections: { morning, moves, listen, news, weather }, city: "", place: null | { name, admin1, country, lat, lon, unit } }
+ *
+ * "moves" is Ramble's card (today's challenge, Done/Swap, Health, steps and streak). It is on by
+ * default like the rest, and hides itself when Ramble is not installed (for-you/moves.js).
  */
 import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
 
 export const SETTINGS_KEY = "for_you_settings";
-export const SECTIONS = Object.freeze(["morning", "listen", "news", "weather"]);
+export const SECTIONS = Object.freeze(["morning", "moves", "listen", "news", "weather"]);
 export const CITY_MAX = 80;
 
 const text = (v, max) => String(v ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);

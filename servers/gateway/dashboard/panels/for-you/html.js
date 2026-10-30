@@ -125,6 +125,63 @@ export function minutesText(sec, lang = "en") {
   return n > 0 ? fill(t("forYou.minutes", lang), { n: Math.max(1, Math.round(n / 60)) }) : "";
 }
 
+/**
+ * Move: Ramble's card (today's challenge, Done and Swap, the bird's Health, today's steps and the
+ * streak). A missing, outdated or failing Ramble returns "" — the section is hidden entirely, and
+ * the rest of the page is untouched. When challenges are off, one quiet line says so, with the
+ * way to turn them back on. Nothing here is model-written; the title and the why line are
+ * escaped like every other row.
+ */
+export function movesHtml(mv, lang = "en") {
+  if (!mv || mv.ramble !== "ok" || !mv.moves) return "";
+  const m = mv.moves;
+  const health = m.health || {};
+  const steps = m.steps || {};
+  const energy = Math.max(0, Number(health.energy) || 0);
+  const max = Math.max(0, Number(health.max) || 0);
+  const bar = max > 0 ? Math.max(0, Math.min(100, Math.round((energy / max) * 100))) : 0;
+  const head = `<h2 class="fy-kicker" id="fy-moves-h">${e(t("forYou.moves", lang))}</h2>`;
+  if (m.off) {
+    return `<section class="fy-moves" aria-labelledby="fy-moves-h">${head}
+      <p class="fy-note">${e(t("forYou.movesOff", lang))} <a class="fy-quiet" href="/dashboard/ramble?moves=prefs">${e(t("forYou.movesPrefs", lang))}</a></p>
+    </section>`;
+  }
+  const stats = `<p class="fy-tile-meta fy-move-stats">
+        <span class="fy-move-bar" role="img" aria-label="${e(fill(t("forYou.movesHealth", lang), { n: energy, max }))}" style="display:inline-block;width:72px;height:8px;border-radius:4px;overflow:hidden;background:var(--crow-border);vertical-align:middle"><span data-fy-move-energy-bar style="display:block;height:100%;width:${bar}%;background:var(--crow-accent)"></span></span>
+        <span data-fy-move-energy>${e(fill(t("forYou.movesHealth", lang), { n: energy, max }))}</span>
+        <span aria-hidden="true">·</span>
+        <span data-fy-move-steps>${e(fill(t("forYou.movesSteps", lang), { n: Number(steps.today) || 0, goal: Number(steps.goal) || 0 }))}</span>
+        <span aria-hidden="true">·</span>
+        <span data-fy-move-streak>${e(plural("forYou.movesStreak", Number((m.streak || {}).days) || 0, lang))}</span>
+      </p>`;
+  const c = m.challenge;
+  if (!c) {
+    return `<section class="fy-moves" aria-labelledby="fy-moves-h">${head}
+      <div class="fy-card fy-tile fy-move" data-fy-move-card>
+        <p class="fy-note">${e(t("forYou.movesNone", lang))}</p>
+        <a class="fy-more-link" href="/dashboard/ramble?moves=start">${e(t("forYou.movesOpen", lang))}</a>
+        ${stats}
+      </div>
+    </section>`;
+  }
+  const done = !!c.done;
+  return `<section class="fy-moves" aria-labelledby="fy-moves-h">${head}
+      <div class="fy-card fy-tile fy-move" data-fy-move-card data-fy-minutes-fmt="${e(t("forYou.minutes", lang))}" data-fy-health-fmt="${e(t("forYou.movesHealth", lang))}" data-fy-steps-fmt="${e(t("forYou.movesSteps", lang))}" data-fy-streak-fmt="${e(t("forYou.movesStreak.other", lang))}" data-fy-done-label="${e(t("forYou.movesDone", lang))}" data-fy-done-state="${e(t("forYou.movesDoneToday", lang))}" data-fy-refused="${e(t("forYou.movesSwapRefused", lang))}">
+        <p class="fy-tile-title" data-fy-move-title>${e(c.title)}</p>
+        <p class="fy-tile-meta" data-fy-move-minutes>${e(fill(t("forYou.minutes", lang), { n: Number(c.minutes) || 0 }))}</p>
+        <p class="fy-tile-meta" data-fy-move-why${c.why ? "" : " hidden"}>${e(c.why || "")}</p>
+        <div class="fy-acts">
+          <a class="fy-btn fy-btn--primary" href="/dashboard/ramble?moves=start">${e(t("forYou.movesStart", lang))}</a>
+          <button type="button" class="fy-btn" data-fy-move="done" data-day="${e(c.day)}"${done ? " disabled" : ""}>${e(t(done ? "forYou.movesDoneToday" : "forYou.movesDone", lang))}</button>
+          <button type="button" class="fy-btn" data-fy-move="swap">${e(t("forYou.movesSwap", lang))}</button>
+        </div>
+        <a class="fy-more-link" href="/dashboard/ramble?moves=log">${e(t("forYou.movesSomethingElse", lang))}</a>
+        ${stats}
+        <p class="fy-status" role="status" data-fy-move-status></p>
+      </div>
+    </section>`;
+}
+
 /** When the next briefing is due: "8:00 AM", or "Friday 8:00 AM" when that is not today (in its zone). */
 export function nextBriefingText(next, lang = "en", now = Date.now()) {
   const at = Date.parse(next && next.at);
@@ -219,7 +276,7 @@ export function weatherHtml(w, lang = "en") {
 }
 
 /**
- * The page. `data`: { settings, dateText, morning|null, listen|null, news|null, weather|null }.
+ * The page. `data`: { settings, dateText, morning|null, moves|null, listen|null, news|null, weather|null }.
  * A section that is off is absent; with every one off, one line says where to turn them on.
  */
 export function forYouPageHtml(data, lang = "en", now = Date.now()) {
@@ -245,6 +302,7 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
     ${wx.detail}${addCity}
     ${anyOn ? "" : `<p class="fy-note">${e(t("forYou.allOff", lang))}</p>`}
     ${settings.sections.morning && data.morning ? morningHtml(data.morning, lang) : ""}
+    ${settings.sections.moves && data.moves ? movesHtml(data.moves, lang) : ""}
     ${settings.sections.listen && data.listen ? listenHtml(data.listen, lang, now) : ""}
     ${settings.sections.news && data.news ? newsHtml(data.news, lang, now) : ""}
   </div>`;

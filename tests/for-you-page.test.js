@@ -185,7 +185,7 @@ test("customize save: CSRF required; local scope only; a changed city is geocode
     const s = stored();
     assert.equal(s.global, null, "never the synced table");
     assert.deepEqual(JSON.parse(s.local), {
-      sections: { morning: true, listen: false, news: false, weather: true }, city: "Exampleton",
+      sections: { morning: true, moves: false, listen: false, news: false, weather: true }, city: "Exampleton",
       place: { name: "Exampleton", admin1: "State", country: "Country", lat: 39.8, lon: -89.6, unit: "celsius" },
     });
 
@@ -220,7 +220,7 @@ test("a city the geocoder can't find, or can't reach, is saved with no place: no
     assert.equal(JSON.parse(stored().local).city, "Offline");
     // Clearing the city clears the place.
     await save({ city: "", section_weather: "1" });
-    assert.deepEqual(JSON.parse(stored().local), { sections: { morning: false, listen: false, news: false, weather: true }, city: "", place: null });
+    assert.deepEqual(JSON.parse(stored().local), { sections: { morning: false, moves: false, listen: false, news: false, weather: true }, city: "", place: null });
   });
 });
 

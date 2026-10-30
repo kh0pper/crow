@@ -6,6 +6,8 @@
  *   Hide <source>   -> POST /api/media/sources/:id/hidden {hidden:true}, its stories leave the list
  *   Read at <source> -> ... {action:"mark_read"} (fire and forget), so a read story isn't picked again
  *   Show again (customize) -> POST /api/media/sources/:id/hidden {hidden:false}
+ *   Done / Swap (Move) -> POST /api/ramble/moves/done {day} and /api/ramble/moves/swap, then the
+ *     card is repainted from the JSON those routes return (textContent only, never HTML).
  *   Play (Listen) -> the shared player bar (window.crowPlayer.load; a briefing with ready shows is queued
  *     with them, crowPlayer.queue), as Media Hub plays; without the bar,
  *     the tile's own <audio> element (Play / Pause, one at a time). A podcast episode that starts
@@ -38,6 +40,50 @@ export function forYouClientJs() {
   function removeStories(match) {
     var cards = root.querySelectorAll('[data-fy-story]');
     for (var i = 0; i < cards.length; i++) if (match(cards[i])) cards[i].remove();
+  }
+
+  // Ramble's Move card: repaint its text from the JSON a Done or a Swap returned. Only
+  // textContent (and the bar's width) is written, so nothing from the bundle can become markup.
+  function paintMoves(card, json) {
+    var c = json && json.challenge;
+    if (!card || !c) return;
+    var entry = c.entry || {};
+    function put(sel, text) {
+      var el = card.querySelector(sel);
+      if (el) el.textContent = text;
+    }
+    function tpl(attr, n) {
+      return String(card.getAttribute(attr) || '{n}').replace('{n}', String(n));
+    }
+    put('[data-fy-move-title]', entry.title || '');
+    put('[data-fy-move-minutes]', entry.minutes ? tpl('data-fy-minutes-fmt', entry.minutes) : '');
+    put('[data-fy-move-why]', c.why || '');
+    var why = card.querySelector('[data-fy-move-why]');
+    if (why) {
+      if (c.why) why.removeAttribute('hidden');
+      else why.setAttribute('hidden', '');
+    }
+    var health = json.health || {};
+    var energy = Number(health.energy) || 0;
+    var max = Number(health.max) || 0;
+    var healthText = tpl('data-fy-health-fmt', energy).replace('{max}', String(max));
+    put('[data-fy-move-energy]', healthText);
+    var bar = card.querySelector('[data-fy-move-energy-bar]');
+    if (bar) {
+      bar.style.width = (max > 0 ? Math.max(0, Math.min(100, Math.round((energy / max) * 100))) : 0) + '%';
+      if (bar.parentNode && bar.parentNode.setAttribute) bar.parentNode.setAttribute('aria-label', healthText);
+    }
+    var steps = json.steps || {};
+    put('[data-fy-move-steps]', tpl('data-fy-steps-fmt', Number(steps.steps) || 0).replace('{goal}', String(Number(steps.goal) || 0)));
+    put('[data-fy-move-streak]', tpl('data-fy-streak-fmt', Number((json.streak || {}).days) || 0));
+    var doneBtn = card.querySelector('[data-fy-move="done"]');
+    if (doneBtn) {
+      doneBtn.textContent = c.done
+        ? (card.getAttribute('data-fy-done-state') || doneBtn.textContent)
+        : (card.getAttribute('data-fy-done-label') || doneBtn.textContent);
+      doneBtn.disabled = !!c.done;
+      if (c.day) doneBtn.setAttribute('data-day', String(c.day));
+    }
   }
 
   root.addEventListener('click', function (e) {
@@ -131,6 +177,31 @@ export function forYouClientJs() {
           unhide.disabled = false;
           unhide.textContent = root.getAttribute('data-fy-failed') || unhide.textContent;
         });
+      return;
+    }
+    var mv = t.closest('[data-fy-move]');
+    if (mv) {
+      var mcard = mv.closest('[data-fy-move-card]');
+      if (!mcard) return;
+      var mverb = mv.getAttribute('data-fy-move');
+      var mstatus = mcard.querySelector('[data-fy-move-status]');
+      var mbtns = mcard.querySelectorAll('[data-fy-move]');
+      for (var mi = 0; mi < mbtns.length; mi++) mbtns[mi].disabled = true;
+      post('/api/ramble/moves/' + (mverb === 'done' ? 'done' : 'swap'),
+        mverb === 'done' ? { day: mv.getAttribute('data-day') || '' } : {})
+        .then(function (r) { return r.json(); })
+        .then(function (json) {
+          paintMoves(mcard, json);
+          if (mstatus) mstatus.textContent = json && json.refused ? (mcard.getAttribute('data-fy-refused') || '') : '';
+          for (var mj = 0; mj < mbtns.length; mj++) {
+            var isDone = mbtns[mj].getAttribute('data-fy-move') === 'done' && json && json.challenge && json.challenge.done;
+            mbtns[mj].disabled = !!isDone;
+          }
+        }, function () {
+          if (mstatus) mstatus.textContent = root.getAttribute('data-fy-failed') || '';
+          for (var mk = 0; mk < mbtns.length; mk++) mbtns[mk].disabled = false;
+        });
+      return;
     }
   });
 

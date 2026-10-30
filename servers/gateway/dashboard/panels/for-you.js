@@ -1,9 +1,10 @@
 /**
  * For You (v1): /dashboard/for-you, the operator's morning page beside the Crow home. Your morning
- * (Board facts, for-you/morning.js), Listen (today's spoken briefing, podcasts and the Music app,
- * for-you/listen.js), Your news (Media Hub's picks, for-you/news.js) and a weather
- * chip (Open-Meteo, for-you/weather.js); ?view=customize turns sections on or off and sets the
- * weather city.
+ * (Board facts, for-you/morning.js), Move (today's Ramble challenge with Done and Swap, the bird's
+ * Health, steps and streak, for-you/moves.js, which reads the installed bundle's own module),
+ * Listen (today's spoken briefing, podcasts and the Music app, for-you/listen.js), Your news
+ * (Media Hub's picks, for-you/news.js) and a weather chip (Open-Meteo, for-you/weather.js);
+ * ?view=customize turns sections on or off and sets the weather city.
  *
  * Gates, in this order, on every method:
  *   - CROW_FOR_YOU must be "1" (forYouEnabled), else 404;
@@ -23,6 +24,7 @@ import { geocodeCity, weatherFor } from "../../for-you/weather.js";
 import { loadMorning } from "../../for-you/morning.js";
 import { loadNews } from "../../for-you/news.js";
 import { loadListen } from "../../for-you/listen.js";
+import { loadMoves } from "../../for-you/moves.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { activeProjects } from "../../../shared/shell-items.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
@@ -124,9 +126,14 @@ export default {
       settings.sections.news ? loadNews(db, { crowHome, now }).catch(failed("news", { state: "error", stories: [], hidden: [] })) : null,
       settings.sections.weather && settings.place ? weather(settings.place).catch(failed("weather", null)) : null,
     ]);
+    // Ramble's card weighs the weather the chip already loaded, so it reads after it (the picker
+    // takes { rain, temp, code }); a missing or failing Ramble hides only this section.
+    const moves = settings.sections.moves
+      ? await loadMoves(db, { crowHome, now, weather: wx }).catch(failed("moves", null))
+      : null;
     return layout({
       title: t("forYou.title", lang),
-      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), morning, listen, news, weather: wx }, lang, now) + forYouClientJs(),
+      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), morning, moves, listen, news, weather: wx }, lang, now) + forYouClientJs(),
     });
   },
 };
