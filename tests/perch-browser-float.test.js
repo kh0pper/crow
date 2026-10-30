@@ -51,7 +51,7 @@ function byClass(n, cls) { const o = []; walk(n, (x) => { if (String(x.className
 const one = (n, cls) => byClass(n, cls)[0];
 const tick = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
-function mount({ innerWidth = 390, innerHeight = 800, stored, storageThrows = false } = {}) {
+function mount({ innerWidth = 390, innerHeight = 800, stored, storageThrows = false, composerRect, tabsRect, shellTabsRect } = {}) {
   const ios = [];
   class FakeIO {
     constructor(cb) { this.cb = cb; this.nodes = new Set(); ios.push(this); }
@@ -80,7 +80,12 @@ function mount({ innerWidth = 390, innerHeight = 800, stored, storageThrows = fa
   const transcript = makeEl("div", doc);
   const input = makeEl("textarea", doc);
   const composer = makeEl("div", doc);
-  composer.getBoundingClientRect = () => ({ top: 700, left: 0, width: innerWidth, height: 100 });
+  composer.getBoundingClientRect = () => composerRect || { top: 700, left: 0, width: innerWidth, height: 100 };
+  const tabs = makeEl("nav", doc);
+  tabs.getBoundingClientRect = () => tabsRect || { top: 0, left: 0, width: 0, height: 0 };
+  const shellTabs = makeEl("nav", doc);
+  shellTabs.getBoundingClientRect = () => shellTabsRect || { top: 0, left: 0, width: 0, height: 0 };
+  doc.querySelector = (sel) => (sel === ".shell-tabs" ? shellTabs : null);
   root.appendChild(transcript); root.appendChild(composer); composer.appendChild(input);
   doc.body = root;
   const store = new Map();
@@ -89,7 +94,7 @@ function mount({ innerWidth = 390, innerHeight = 800, stored, storageThrows = fa
     ? { getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); } }
     : { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => { store.set(k, String(v)); } };
   const HUB = { streams: {} };
-  const ids = { "perch-transcript": transcript, "perch-hub-root": root, "perch-composer": composer, "perch-input": input };
+  const ids = { "perch-transcript": transcript, "perch-hub-root": root, "perch-composer": composer, "perch-input": input, "perch-tabs": tabs };
   const sandbox = {
     console, document: doc, window: { innerWidth, innerHeight, localStorage }, API, HUB,
     current: { sid: SID },
@@ -383,6 +388,28 @@ test("B1: a rotation while full screen: Exit puts the mini player back inside th
 // ---------------------------------------------------------------------------
 // drag and position
 // ---------------------------------------------------------------------------
+test("F1: with the composer hidden (another tab), the default spot sits above the visible bottom bar", async () => {
+  const hidden = { top: 0, left: 0, width: 0, height: 0 };
+  // Perch's tab strip at the bottom
+  const h = mount({ composerRect: hidden, tabsRect: { top: 740, left: 0, width: 390, height: 60 } });
+  await h.show(await liveTile(h, "call_1"), false);
+  assert.equal(h.float().style.top, (740 - 140 - 12) + "px");
+  // the shell's bottom tabs (new mode)
+  const h2 = mount({ composerRect: hidden, shellTabsRect: { top: 730, left: 0, width: 390, height: 70 } });
+  await h2.show(await liveTile(h2, "call_1"), false);
+  assert.equal(h2.float().style.top, (730 - 140 - 12) + "px");
+  // composer on screen above the tabs: the composer wins (the higher one)
+  const h3 = mount({ tabsRect: { top: 740, left: 0, width: 390, height: 60 } });
+  await h3.show(await liveTile(h3, "call_1"), false);
+  assert.equal(h3.float().style.top, (700 - 140 - 12) + "px");
+  // nothing visible: the window bottom
+  const h4 = mount({ composerRect: hidden });
+  await h4.show(await liveTile(h4, "call_1"), false);
+  assert.equal(h4.float().style.top, (800 - 140 - 12) + "px");
+  // switchTab re-places it, so the default follows the tab change
+  assert.match(perchHubJs("en"), /function switchTab\(name\)\{[\s\S]*?bfResize\(\);[^\n]*\n  \}/);
+});
+
 test("bfClamp keeps the box inside the viewport", () => {
   const h = mount();
   const c = h.api.bfClamp;

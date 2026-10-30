@@ -3542,6 +3542,7 @@ export function perchHubJs(lang = "en") {
     /* Files fetches on ACTIVATION, never on session open (D3) — the chat
        fast path stays one less round trip. */
     if(name==='files'){ loadCwd(cwdPath); loadFiles(); }
+    bfResize();                   /* the floating browser preview's default spot follows the bottom bars */
   }
   TAB_NAMES.forEach(function(nm){
     var btn=el('perch-tab-btn-'+nm);

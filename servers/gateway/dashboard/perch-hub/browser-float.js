@@ -66,10 +66,18 @@ export function perchBrowserFloatJs(lang = "en") {
     return null;
   }
   function bfSave(p){ try{ window.localStorage.setItem('crow-perch-bfloat-pos',JSON.stringify({ x:p.x, y:p.y })); }catch(e){} }
-  /* Bottom right, above the composer (and so above the phone's tab bar). */
+  /* Bottom right, above whichever of the composer, Perch's tab strip and the
+     shell's bottom tabs is on screen (on the Session or Files tab the
+     composer is hidden, and the tab bars are what is left at the bottom). */
   function bfDefault(){
-    var v=bfViewport(), s=bfSize(), c=el('perch-composer'), top=v.h;
-    if(c&&c.getBoundingClientRect){ var r=c.getBoundingClientRect(); if(r&&r.top>0&&r.top<v.h) top=r.top; }
+    var v=bfViewport(), s=bfSize(), top=v.h;
+    var bars=[el('perch-composer'),el('perch-tabs')];
+    try{ if(document.querySelector) bars.push(document.querySelector('.shell-tabs')); }catch(e){}
+    for(var i=0;i<bars.length;i++){
+      var b=bars[i]; if(!b||!b.getBoundingClientRect) continue;
+      var r=b.getBoundingClientRect();
+      if(r&&r.height>0&&r.top>0&&r.top<top) top=r.top;
+    }
     return { x:v.w-s.w-BF_GAP, y:top-s.h-BF_GAP };
   }
   function bfPlace(p){
