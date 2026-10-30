@@ -168,7 +168,7 @@ body.cv-fullscreen #crow-artifact-viewer > .cv-note{position:fixed;left:calc(12p
 /* The trusted link sheet (2026-10-30): drawn in the viewer page, never inside
    the artifact frame. Host large (punycode, so look-alike letters show), the
    full URL small and selectable, one explicit way out. */
-.cv-linksheet{position:fixed;inset:0;z-index:200;display:flex;align-items:flex-end;justify-content:center;
+.cv-linksheet{position:fixed;inset:0;z-index:1200;display:flex;align-items:flex-end;justify-content:center;
   padding:16px;background:rgba(0,0,0,.45)}
 @media (min-width:640px){.cv-linksheet{align-items:center}}
 .cv-linksheet-card{width:100%;max-width:min(560px,calc(100vw - 32px));display:flex;flex-direction:column;gap:8px;
