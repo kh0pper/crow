@@ -4409,6 +4409,7 @@ export const translations = {
   "forYou.sum.due.other": { en: "{n} cards are due by today", es: "{n} tarjetas vencen hoy o antes" },
   "forYou.sum.finished.one": { en: "your bots finished {n} thing since yesterday", es: "tus bots terminaron {n} cosa desde ayer" },
   "forYou.sum.finished.other": { en: "your bots finished {n} things since yesterday", es: "tus bots terminaron {n} cosas desde ayer" },
+  "forYou.morningError": { en: "Your morning couldn't load just now.", es: "Tu mañana no se pudo cargar ahora." },
   "forYou.sum.none": { en: "Nothing needs you this morning.", es: "Nada te necesita esta mañana." },
   "forYou.tag.needs": { en: "Needs you", es: "Te necesita" },
   "forYou.tag.due": { en: "Due today", es: "Vence hoy" },

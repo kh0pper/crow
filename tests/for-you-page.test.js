@@ -230,6 +230,38 @@ test("every section off: one line says where to turn them back on", async () => 
   });
 });
 
+test("a failing project lookup costs the morning one line; the rest of the page renders", async () => {
+  await withFlag(async () => {
+    await save({ city: "Exampleton", section_morning: "1", section_news: "1", section_weather: "1" });
+    panelMod._setForYouSeamsForTest({
+      geocode: async () => null,
+      weather: async () => ({ temp: 21, code: 0, high: 25, low: 12, rain: 30, unit: "celsius" }),
+      projects: async () => { throw new Error("database is locked"); },
+    });
+    const r = await get("/dashboard/for-you");
+    assert.equal(r.status, 200);
+    assert.match(r.body, /Your morning couldn't load just now\./);
+    assert.match(r.body, /<span class="fy-chip">21° · Clear<\/span>/, "weather still renders");
+    assert.match(r.body, /Install Media Hub/, "news still renders");
+  });
+});
+
+test("a signed peer request (crossHostAuth) never reaches the page", async () => {
+  await withFlag(async () => {
+    const { isLocalPasswordSessionOn } = await import("../servers/gateway/dashboard/local-session.js");
+    const { createDbClient } = await import("../servers/db.js");
+    const db = createDbClient();
+    try {
+      assert.equal(await isLocalPasswordSessionOn(db, { dashboardSession: "owner-sess" }), true);
+      let status = 0;
+      const res = { status(n) { status = n; return this; }, type() { return this; }, send() { return this; } };
+      const out = await panelMod.default.handler({ method: "GET", query: {}, dashboardSession: "owner-sess", crossHostAuth: { ok: true } }, res, { db, lang: "en", layout: () => "page" });
+      assert.equal(out, null);
+      assert.equal(status, 404);
+    } finally { db.close(); }
+  });
+});
+
 test("the page's client JS carries no backtick (it is emitted inside a template literal)", async () => {
   const { forYouClientJs } = await import("../servers/gateway/dashboard/panels/for-you/client.js");
   assert.ok(!forYouClientJs().includes("`"));

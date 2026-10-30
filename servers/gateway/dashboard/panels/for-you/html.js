@@ -43,6 +43,13 @@ function finishedTag(item, lang) {
 }
 
 export function morningHtml(m, lang = "en") {
+  if (m.error) {
+    return `<section class="fy-card fy-morning" aria-labelledby="fy-morning-h">
+      <h2 class="fy-kicker" id="fy-morning-h">${e(t("forYou.morning", lang))}</h2>
+      <p class="fy-sum">${e(t("forYou.morningError", lang))}</p>
+      <a class="fy-more-link" href="/dashboard/board">${e(t("forYou.seeBoard", lang))}</a>
+    </section>`;
+  }
   const lines = [
     ...m.needs.items.map((c) => line({ tag: t("forYou.tag.needs", lang), tone: "needs", ...c }, lang)),
     ...m.due.items.map((c) => line({ tag: t(c.overdue ? "forYou.tag.overdue" : "forYou.tag.due", lang), tone: "due", ...c }, lang)),

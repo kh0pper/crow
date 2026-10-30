@@ -31,10 +31,13 @@ import { forYouClientJs } from "./for-you/client.js";
 
 const FLASHES = new Set(["saved", "notfound", "failed"]);
 
-/** Test seams: the geocoder and the weather fetch. null restores each. */
+/** Test seams: the geocoder, the weather fetch and the project list. null restores each. */
 let geocode = geocodeCity;
 let weather = weatherFor;
-export function _setForYouSeamsForTest({ geocode: g, weather: w } = {}) { geocode = g || geocodeCity; weather = w || weatherFor; }
+let listProjects = activeProjects;
+export function _setForYouSeamsForTest({ geocode: g, weather: w, projects: p } = {}) {
+  geocode = g || geocodeCity; weather = w || weatherFor; listProjects = p || activeProjects;
+}
 
 /**
  * The customize form's save. Sections are the checked boxes; the city is trimmed text. A city that
@@ -109,10 +112,14 @@ export default {
     const now = Date.now();
     let tz;
     try { tz = await instanceZone(db); } catch { tz = undefined; }
+    // Each section degrades alone: a failed read costs its section one line, never the page.
+    const failed = (what, fallback) => (err) => { console.warn(`[for-you] ${what} failed: ${err && err.message}`); return fallback; };
     const [morning, news, wx] = await Promise.all([
-      settings.sections.morning ? activeProjects(db).then((projects) => loadMorning(db, { projects, tz, now })) : null,
-      settings.sections.news ? loadNews(db, { crowHome, now }) : null,
-      settings.sections.weather && settings.place ? weather(settings.place).catch(() => null) : null,
+      settings.sections.morning
+        ? listProjects(db).then((projects) => loadMorning(db, { projects, tz, now })).catch(failed("morning", { error: true }))
+        : null,
+      settings.sections.news ? loadNews(db, { crowHome, now }).catch(failed("news", { state: "error", stories: [], hidden: [] })) : null,
+      settings.sections.weather && settings.place ? weather(settings.place).catch(failed("weather", null)) : null,
     ]);
     return layout({
       title: t("forYou.title", lang),
