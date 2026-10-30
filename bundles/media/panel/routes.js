@@ -48,6 +48,17 @@ const appRoot = process.env.CROW_APP_ROOT || join(import.meta.dirname, "..", "..
 const { csrfMiddleware } = await import(
   pathToFileURL(join(appRoot, "servers", "gateway", "dashboard", "shared", "csrf.js")).href
 );
+// The owner check (a local password session only: never a paired instance's SSO session or a
+// signed peer request), from the same app root.
+const { isLocalPasswordSession } = await import(
+  pathToFileURL(join(appRoot, "servers", "gateway", "dashboard", "local-session.js")).href
+);
+
+/** Owner-only routes: anyone else gets the same 404 as an unknown path. */
+async function ownerOnly(req, res, next) {
+  if (await isLocalPasswordSession(req)) return next();
+  res.status(404).json({ error: "Not found" });
+}
 
 /** Escape a value for HTML text and quoted-attribute contexts. */
 function escapeHtml(value) {
@@ -377,7 +388,8 @@ export default function mediaRouter(authMiddleware) {
 
   // --- Hide a source from the For You picks, or show it again (For You v1) ---
   // The source keeps fetching and stays in this feed; only server/for-you.js leaves it out.
-  router.post("/api/media/sources/:id/hidden", authMiddleware, csrfMiddleware, async (req, res) => {
+  // It shapes the operator's own For You page, so only the owner may change it.
+  router.post("/api/media/sources/:id/hidden", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
