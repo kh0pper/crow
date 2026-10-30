@@ -193,6 +193,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   let emit = null;
   let bus = null;
 
+  // The moves group (library, picker, ledger, today, streak, learning, parse)
+  // is its own lazy group: a broken moves module must fail only
+  // /api/ramble/moves/*, never the whole panel that ensureLoaded gates.
+  let movesMods = null;
+  let movesLibrary = null;
+  // Test-only seam, like `emit`: a fixed library, so a route test need not
+  // depend on the shipped moves content (empty until its content task lands).
+  const injectedMovesLibrary = Array.isArray(options.movesLibrary) ? options.movesLibrary : null;
+
   async function ensureLoaded(res) {
     if (!mods) {
       const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod, stepsMod] = await Promise.all([
@@ -254,6 +263,138 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       catch { bus = { emit() {} }; }
     }
     return true;
+  }
+
+  /* ------------------------------------------------------------ moves modules */
+
+  async function ensureMovesMods(res) {
+    if (movesMods) return true;
+    try {
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod] = await Promise.all([
+        bundleImport("server/moves/library.js"),
+        bundleImport("server/moves/picker.js"),
+        bundleImport("server/moves/ledger.js"),
+        bundleImport("server/moves/today.js"),
+        bundleImport("server/moves/streak.js"),
+        bundleImport("server/moves/learning.js"),
+        bundleImport("server/moves/parse.js"),
+      ]);
+      movesMods = { libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod };
+      return true;
+    } catch (err) {
+      console.warn(`[ramble routes] moves modules unavailable: ${err.message}`);
+      res.status(500).json({ error: "ramble moves modules not available" });
+      return false;
+    }
+  }
+
+  /** The served (reviewed, licensed) library. */
+  function servedMoves() {
+    if (!movesLibrary) {
+      movesLibrary = injectedMovesLibrary ? injectedMovesLibrary.slice() : movesMods.libraryMod.servedLibrary();
+    }
+    return movesLibrary;
+  }
+
+  /**
+   * An entry as the panel card / list reads it: everything but the joint-angle
+   * `pose` object, which only the detail view (library/:id) needs.
+   */
+  function withoutPose(entry) {
+    if (!entry || typeof entry !== "object") return null;
+    const { pose, ...rest } = entry;
+    return rest;
+  }
+
+  /**
+   * The quick role's model key, only when it is proven to run on this box or
+   * another of the user's own boxes. Same walk as perch/session-summary.js:
+   * resolve the role, then classify its final hop with whereItRuns. Anything
+   * unproven or missing ranks as cloud, so the user's free text (health data)
+   * never reaches one.
+   */
+  async function quickModel() {
+    try {
+      const [rolesStore, modelRoles, locality] = await Promise.all([
+        mods.appImport("servers/shared/model-roles-store.js"),
+        mods.appImport("servers/shared/model-roles.js"),
+        mods.appImport("servers/shared/locality.js"),
+      ]);
+      const resolved = await rolesStore.resolveRole(db, "role:quick", { need: "chat" });
+      const key = resolved && typeof resolved.key === "string" && resolved.key ? resolved.key : null;
+      if (!key) return null;
+      const ctx = await rolesStore.loadRoleContext(db);
+      const where = modelRoles.whereItRuns(key, {
+        providers: ctx.providers,
+        ownAddrs: locality.getOwnAddresses(),
+      });
+      return where === "here" || where === "other_box" ? key : null;
+    } catch (err) {
+      // No role store, no providers table: treat it as no model, never as local.
+      console.warn(`[ramble routes] moves model unavailable: ${err?.message ?? err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Today's weather for the picker, or null. For You owns the place (a name the
+   * owner typed, geocoded once and cached with the setting), and `weather:false`
+   * in the moves prefs turns it off. With no place or any failure the picker
+   * simply has no weather to weigh.
+   */
+  async function movesWeather(prefs) {
+    if (!prefs || prefs.weather === false) return null;
+    try {
+      const [settingsMod, weatherMod] = await Promise.all([
+        mods.appImport("servers/gateway/for-you/settings.js"),
+        mods.appImport("servers/gateway/for-you/weather.js"),
+      ]);
+      const settings = await settingsMod.readForYouSettings(db);
+      const place = settings && settings.place ? settings.place : null;
+      if (!place) return null;
+      const w = await weatherMod.weatherFor(place);
+      return w ? { rain: w.rain, temp: w.temp, code: w.code } : null;
+    } catch (err) {
+      console.warn(`[ramble routes] moves weather unavailable: ${err?.message ?? err}`);
+      return null;
+    }
+  }
+
+  /** Today's pick, made with the weather, prefs and learned flows the panel shows. */
+  async function todayCard(now) {
+    const library = servedMoves();
+    const prefs = await movesMods.todayMod.readPrefs(db);
+    const weather = await movesWeather(prefs);
+    const learning = await movesMods.learningMod.learningFlows(db, library);
+    return movesMods.todayMod.todayChallenge(db, { now, weather, emit, library, learning });
+  }
+
+  /** The whole moves strip: today's card, the bird's Health, steps and the streak. */
+  async function movesSnapshot(now) {
+    const today = await todayCard(now);
+    const pet = await mods.petMod.petState(db, { now });
+    const steps = await mods.stepsMod.stepsState(db, { now });
+    const streak = await movesMods.streakMod.streakState(db, { now });
+    return {
+      challenge: today ? {
+        day: today.day,
+        entry: withoutPose(today.entry),
+        reasons: Array.isArray(today.reasons) ? today.reasons : [],
+        why: typeof today.why === "string" ? today.why : "",
+        done: !!today.done,
+        off: !!today.off,
+        swap: Number.isInteger(today.swap) ? today.swap : 0,
+      } : null,
+      health: { energy: pet.energy, max: pet.energy_max, mood: pet.mood },
+      steps: {
+        day: steps.day,
+        goal: steps.goal,
+        steps: steps.steps,
+        goal_met: steps.goal_met,
+        walked: steps.walked,
+      },
+      streak: { days: streak.days, nextHeartAt: streak.nextHeartAt, todayGood: streak.todayGood },
+    };
   }
 
   /**
@@ -1159,6 +1300,163 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (out.settled && out.settled.walkedNew) poke("ramble:walked-changed", { day: out.settled.day });
     const { settled, ...state } = out;
     res.json(state);
+  }));
+
+  // --- moves (moves design, spec 2026-10-30) -------------------------------
+  //
+  // The challenge itself needs no model: picking, Done, Swap and the library
+  // are all fixed-vocabulary arithmetic. Only the "something else" parse asks a
+  // model, and only the user's own local `quick` model — the text is never
+  // stored, logged or echoed, and only the parsed triple leaves this router.
+
+  /** A moves module's validation error is a 400, not a 500. */
+  function movesInput(err) {
+    if (err && (err.name === "MovesInputError" || err.name === "MovesPrefsError" || err.name === "LearningInputError")) {
+      bad(err.message);
+    }
+    throw err;
+  }
+
+  router.get("/api/ramble/moves/today", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    res.json(await movesSnapshot(Date.now()));
+  }));
+
+  router.post("/api/ramble/moves/done", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    let day = null;
+    if (b.day != null) {
+      day = requireText(b.day, 10, "day");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) bad("day must look like 2026-10-30");
+    }
+    // The entry is the card that is actually on screen; the client never names
+    // it, so a Done can only ever complete the day's own pick.
+    const today = await todayCard(now);
+    if (!today) bad("there is no challenge to complete");
+    if (today.off) bad("challenges are paused");
+    let done;
+    try {
+      done = await movesMods.ledgerMod.recordChallengeDone(db, {
+        day: day ?? today.day, entry: today.entry, now, emit,
+      });
+    } catch (err) { movesInput(err); }
+    await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+    res.json({ ...(await movesSnapshot(now)), done });
+  }));
+
+  router.post("/api/ramble/moves/swap", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const library = servedMoves();
+    const prefs = await movesMods.todayMod.readPrefs(db);
+    const weather = await movesWeather(prefs);
+    const learning = await movesMods.learningMod.learningFlows(db, library);
+    const out = await movesMods.todayMod.swapChallenge(db, { now, weather, emit, library, learning });
+    res.json({ ...(await movesSnapshot(now)), refused: !!out?.refused });
+  }));
+
+  router.post("/api/ramble/moves/parse", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const text = requireText((req.body || {}).text, 2000, "text");
+    if (text.trim() === "") bad("text is required");
+
+    const key = await quickModel();
+    if (!key) return res.json({ ok: false, reason: "no_model" });
+
+    const { completeText } = await mods.appImport("servers/gateway/routes/llm-router.js");
+    // A box hold or a lazy loader means the model is simply not available right
+    // now — the same answer the panel wants for "no model" (manual pickers).
+    let noModel = false;
+    const complete = async ({ prompt, maxTokens }) => {
+      try {
+        // A short leash: the panel has manual pickers to fall back to, so a slow
+        // or wedged model must not hold the answer for a minute.
+        return await completeText({ model: key, prompt, maxTokens, timeoutMs: 15_000 });
+      } catch (err) {
+        if (err && (err.reason === "box_reserved" || err.reason === "lazy_loader")) noModel = true;
+        throw err;
+      }
+    };
+    const parsed = await movesMods.parseMod.parseActivity(text, { complete });
+    if (!parsed) return res.json({ ok: false, reason: noModel ? "no_model" : "unclear" });
+    res.json({ ok: true, ...parsed, points: movesMods.ledgerMod.pointsFor(parsed) });
+  }));
+
+  router.post("/api/ramble/moves/log", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    let logged;
+    try {
+      logged = await movesMods.ledgerMod.recordLog(db, {
+        activity: b.activity, minutes: b.minutes, effort: b.effort, now, emit,
+      });
+    } catch (err) { movesInput(err); }
+    await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+    res.json({
+      log: {
+        paid: logged.paid, points: logged.points, already: logged.already, day: logged.day, capped: !!logged.capped,
+      },
+      ...(await movesSnapshot(now)),
+      moves: await movesMods.ledgerMod.movesDay(db, { day: logged.day, now }),
+    });
+  }));
+
+  router.get("/api/ramble/moves/prefs", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    res.json({ prefs: await movesMods.todayMod.readPrefs(db) });
+  }));
+
+  router.post("/api/ramble/moves/prefs", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const b = req.body || {};
+    // Accept a `patch` wrapper (the MCP tool's shape) or the fields directly.
+    const patch = b.patch && typeof b.patch === "object" && !Array.isArray(b.patch) ? b.patch : b;
+    let prefs;
+    try { prefs = await movesMods.todayMod.writePrefs(db, patch, { emit }); }
+    catch (err) { movesInput(err); }
+    res.json({ prefs });
+  }));
+
+  // Only reviewed, licensed entries are served, and the joint-angle data is a
+  // detail-view payload — the list carries everything else.
+  router.get("/api/ramble/moves/library", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    res.json({ entries: servedMoves().map(withoutPose) });
+  }));
+
+  router.get("/api/ramble/moves/library/:id", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const id = req.params.id;
+    if (typeof id !== "string" || !/^[a-z0-9-]{1,80}$/.test(id)) bad("invalid entry id");
+    const entry = movesMods.libraryMod.entryById(servedMoves(), id);
+    if (!entry) return res.status(404).json({ error: "not found" });
+    res.json({ entry });
+  }));
+
+  router.post("/api/ramble/moves/flow-run", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const flowId = b.flowId ?? b.flow_id;
+    if (typeof flowId !== "string" || !/^[a-z0-9-]{1,80}$/.test(flowId)) bad("flowId is required");
+    const entry = movesMods.libraryMod.entryById(servedMoves(), flowId);
+    if (!entry || entry.kind !== "flow") bad("flowId must name a flow");
+    // The level is the SERVER's (flowLevel), never the client's: a client
+    // claiming "first" + fromMemory could otherwise jump a new flow straight
+    // to "memory". A flow already at "memory" has nothing left to count.
+    if (b.outcome !== "smooth" && b.outcome !== "needed_help") bad("outcome must be smooth or needed_help");
+    const level = await movesMods.learningMod.flowLevel(db, flowId);
+    if (level === "memory") { res.json({ counted: false, memory: true, level }); return; }
+    let out;
+    try {
+      out = await movesMods.learningMod.recordFlowRun(db, {
+        flowId, level, outcome: b.outcome, fromMemory: b.fromMemory === true, now, emit,
+      });
+    } catch (err) { movesInput(err); }
+    res.json(out);
   }));
 
   // --- phase 3: contacts wire -------------------------------------------------

@@ -33,6 +33,14 @@ import { flockState, listNests, claimNest } from "./flock.js";
 import { resolveContact, resolveAudience, enqueueMark, contactsByPubkey, CROW_ID_RE, ID_RE } from "./delivery.js";
 import { labelFor } from "./labels.js";
 import { giftEgg, proposeSwap } from "./trades.js";
+import { servedLibrary, ACTIVITY_KINDS } from "./moves/library.js";
+import { readPrefs, writePrefs, todayChallenge } from "./moves/today.js";
+import {
+  recordLog, movesDay, pointsFor, EFFORTS, LOG_MINUTES_MAX,
+} from "./moves/ledger.js";
+import { streakState, awardStreakHeart } from "./moves/streak.js";
+import { learningFlows } from "./moves/learning.js";
+import { stepsState } from "./steps.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -484,6 +492,139 @@ export function createRambleServer(db, options = {}) {
       } catch (err) {
         return errorText(err.message);
       }
+    },
+  );
+
+  /* ------------------------------------------------------------------ moves */
+
+  // The SERVED library only (reviewed, licensed). Cached for this process: the
+  // set changes only when the bundle is reinstalled.
+  let servedMovesCache = null;
+  const servedMoves = () => (servedMovesCache ??= servedLibrary());
+
+  /** An entry without its joint-angle `pose` object (a chat answer needs no drawing data). */
+  function withoutPose(entry) {
+    if (!entry || typeof entry !== "object") return null;
+    const { pose, ...rest } = entry;
+    return rest;
+  }
+
+  /**
+   * For You's place, read here too so a challenge picked from chat weighs the
+   * same weather the panel would. No place, `weather:false`, or any failure is
+   * simply no weather; the picker treats that as neutral.
+   */
+  async function movesWeather(prefs) {
+    if (!prefs || prefs.weather === false) return null;
+    try {
+      const [{ readForYouSettings }, { weatherFor }] = await Promise.all([
+        appImport("servers/gateway/for-you/settings.js"),
+        appImport("servers/gateway/for-you/weather.js"),
+      ]);
+      const settings = await readForYouSettings(db);
+      if (!settings || !settings.place) return null;
+      const w = await weatherFor(settings.place);
+      return w ? { rain: w.rain, temp: w.temp, code: w.code } : null;
+    } catch { return null; }
+  }
+
+  /** Today's card, made exactly as the panel makes it (same picker, same prefs). */
+  async function movesToday() {
+    const now = Date.now();
+    const library = servedMoves();
+    const prefs = await readPrefs(db);
+    const weather = await movesWeather(prefs);
+    const learning = await learningFlows(db, library);
+    const emit = await getEmit();
+    const today = await todayChallenge(db, { now, weather, emit, library, learning });
+    const pet = await petState(db, { now });
+    const steps = await stepsState(db, { now });
+    const streak = await streakState(db, { now });
+    return {
+      challenge: today ? {
+        day: today.day,
+        // No joint-angle data on a chat answer: that belongs to the panel view.
+        entry: withoutPose(today.entry),
+        reasons: Array.isArray(today.reasons) ? today.reasons : [],
+        why: typeof today.why === "string" ? today.why : "",
+        done: !!today.done,
+        off: !!today.off,
+        swap: Number.isInteger(today.swap) ? today.swap : 0,
+      } : null,
+      health: { energy: pet.energy, max: pet.energy_max, mood: pet.mood },
+      steps: { day: steps.day, goal: steps.goal, steps: steps.steps, goal_met: steps.goal_met, walked: steps.walked },
+      streak: { days: streak.days, nextHeartAt: streak.nextHeartAt, todayGood: streak.todayGood },
+    };
+  }
+
+  register(
+    "ramble_moves_today",
+    "Today's movement challenge (or that challenges are paused), plus the bird's Health, today's steps and the current streak. It never pays Health — Done and Swap live on the Ramble panel.",
+    {},
+    async () => {
+      try { return text(JSON.stringify(await movesToday())); }
+      catch (err) { return errorText(err.message); }
+    },
+  );
+
+  register(
+    "ramble_moves_log",
+    "Log a self-reported activity (a walk, a bike ride, a swim, ...) so it counts toward the bird's Health. Only the fixed vocabulary is stored — activity, minutes and effort — never the words the user used to describe it. For 'tell my AI about my ride', parse the sentence into those three fields here.",
+    {
+      activity: z.enum(ACTIVITY_KINDS),
+      minutes: z.number().int().min(1).max(LOG_MINUTES_MAX),
+      effort: z.enum(EFFORTS),
+    },
+    async ({ activity, minutes, effort }) => {
+      try {
+        // Validated here too, not only by the zod shape: an in-process caller
+        // (the panel tests, another tool) bypasses the MCP schema validation.
+        if (!ACTIVITY_KINDS.includes(activity)) {
+          return errorText("activity must be one of " + ACTIVITY_KINDS.join(", "));
+        }
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > LOG_MINUTES_MAX) {
+          return errorText(`minutes must be a whole number from 1 to ${LOG_MINUTES_MAX}`);
+        }
+        if (!EFFORTS.includes(effort)) return errorText("effort must be one of " + EFFORTS.join(", "));
+        const emit = await getEmit();
+        const now = Date.now();
+        const out = await recordLog(db, { activity, minutes, effort, now, emit });
+        await awardStreakHeart(db, { now, emit });
+        return text(JSON.stringify({
+          paid: out.paid,
+          points: out.points,
+          already: out.already,
+          day: out.day,
+          capped: !!out.capped,
+          points_for: pointsFor({ activity, minutes, effort }),
+          ...(await movesDay(db, { day: out.day, now })),
+          streak: await streakState(db, { now }),
+        }));
+      } catch (err) { return errorText(err.message); }
+    },
+  );
+
+  register(
+    "ramble_moves_prefs",
+    "Read the movement preferences, or change a few fields (on, kinds, equipment, limits, level, weather). With no arguments this only reads.",
+    {
+      patch: z.object({
+        on: z.boolean().optional(),
+        weather: z.boolean().optional(),
+        level: z.number().int().min(1).max(3).optional(),
+        kinds: z.array(z.string().max(32)).max(16).optional(),
+        equipment: z.array(z.string().max(16)).max(8).optional(),
+        limits: z.array(z.string().max(32)).max(16).optional(),
+      }).optional(),
+    },
+    async (args = {}) => {
+      try {
+        // No patch is a read, never a write of the defaults over the row.
+        const patch = args && typeof args.patch === "object" && !Array.isArray(args.patch) ? args.patch : null;
+        if (!patch) return text(JSON.stringify({ prefs: await readPrefs(db) }));
+        const emit = await getEmit();
+        return text(JSON.stringify({ prefs: await writePrefs(db, patch, { emit }) }));
+      } catch (err) { return errorText(err.message); }
     },
   );
 
