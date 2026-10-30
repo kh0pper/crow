@@ -838,3 +838,51 @@ test("the drag starts on every real page: Crow Talk's always-present, CSS-hidden
   assert.equal((await revealRig({ path: "/dashboard/project/garden", talk: true })).drag(60, 300), 1, "hidden Talk overlay: the drag lands");
   assert.equal((await revealRig({ path: "/dashboard/project/garden", talk: true, talkOpen: true })).drag(60, 300), 0, "Talk actually open: no drag");
 });
+
+// Play hands the audio to the shared player bar (window.crowPlayer), as Media Hub does: an inline
+// <audio> stayed silent in the Android app. Without the bar, the inline element still plays.
+function listenRig({ withBar }) {
+  const { document, window } = parseHTML(`<!doctype html><html><body><main data-fy data-fy-play-failed="Couldn't play">
+    <p id="fy-listen-b5"> Morning briefing, Friday </p>
+    <button type="button" data-fy-play="fy-audio-b5" aria-describedby="fy-listen-b5">Play</button>
+    <audio id="fy-audio-b5" preload="none" src="/api/media/briefings/5/audio"></audio>
+    <span id="fy-listen-p7">Ep 7</span>
+    <button type="button" data-fy-play="fy-audio-p7" aria-describedby="fy-listen-p7">Play</button>
+    <audio id="fy-audio-p7" preload="none" src="https://cdn.example.invalid/7.mp3" data-fy-played="7"></audio>
+  </main></body></html>`);
+  Object.defineProperty(document, "cookie", { value: "crow_csrf=t", configurable: true });
+  const loads = [], posts = [], inline = [];
+  for (const a of document.querySelectorAll("audio")) {
+    Object.defineProperty(a, "paused", { value: true, writable: true });
+    a.play = () => { inline.push(a.id); return Promise.resolve(); };
+    a.pause = () => {};
+  }
+  // A plain object: linkedom's window is shared between parses, so a stub set on it would leak.
+  const win = withBar ? { crowPlayer: { load: (src, title, sub) => loads.push({ src, title, sub }) } } : {};
+  const fetchStub = (url, opts) => { posts.push({ url, body: JSON.parse(opts.body) }); return Promise.resolve({ ok: true, status: 200 }); };
+  const ctx = vm.createContext({ window: win, document, fetch: fetchStub, JSON, encodeURIComponent, decodeURIComponent });
+  const { forYouClientJs } = forYouClientMod;
+  vm.runInContext(forYouClientJs().replace(/^<script>|<\/script>\s*$/g, ""), ctx);
+  const click = (key) => document.querySelector(`[data-fy-play="fy-audio-${key}"]`).dispatchEvent(new window.Event("click", { bubbles: true }));
+  return { loads, posts, inline, click };
+}
+let forYouClientMod;
+test("For You Play hands the briefing to the shared player bar, and marks an episode read once", async () => {
+  forYouClientMod = await import("../servers/gateway/dashboard/panels/for-you/client.js");
+  const r = listenRig({ withBar: true });
+  r.click("b5");
+  assert.deepEqual(r.loads, [{ src: "/api/media/briefings/5/audio", title: "Morning briefing, Friday", sub: "" }]);
+  assert.deepEqual(r.inline, [], "the inline element does not play when the bar is there");
+  assert.equal(r.posts.length, 0, "a briefing is not an article: nothing to mark");
+  r.click("p7"); r.click("p7");
+  assert.equal(r.loads.length, 3);
+  assert.equal(r.loads[1].src, "https://cdn.example.invalid/7.mp3");
+  assert.deepEqual(r.posts, [{ url: "/api/media/articles/7/action", body: { action: "mark_read" } }]);
+});
+test("For You Play falls back to the tile's own audio without the player bar", async () => {
+  forYouClientMod = await import("../servers/gateway/dashboard/panels/for-you/client.js");
+  const r = listenRig({ withBar: false });
+  r.click("b5");
+  assert.deepEqual(r.inline, ["fy-audio-b5"]);
+  assert.deepEqual(r.loads, []);
+});
