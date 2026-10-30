@@ -533,7 +533,7 @@ export async function layProgress(db) {
  * `petState`. `pet.js:18` records the invariant: "petState's
  * decay-on-read write never emits, because a GET must never queue a sync op",
  * and `petState` has no `emit` in scope to pass. A day is therefore earned by
- * DOING something — a walk, a chore, a check-in — not by opening the app,
+ * DOING something — a walk, a challenge, a check-in — not by opening the app,
  * which is also the truer reading of §4.3's "sustained care".
  *
  * ⚠ Laying REQUIRES real movement, and that is a design consequence, not an
@@ -544,7 +544,7 @@ export async function layProgress(db) {
  * "something else" log), plus the check-in, which is the only indoor earner
  * outside it. From the default 60 they bank three happy days and then
  * fall below the 60 threshold for good. Do NOT write, in a comment or a doc,
- * that indoor moves, chores and the check-in alone can reach `lay.days`. They
+ * that indoor moves and the check-in alone can reach `lay.days`. They
  * cannot. tests/ramble-moves-ledger.test.js simulates the fortnight.
  */
 export async function recordHappyDay(db, { now = Date.now(), mood, emit } = {}) {

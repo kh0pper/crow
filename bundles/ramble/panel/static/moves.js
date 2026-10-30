@@ -28,6 +28,15 @@
 
   var STR = {
     en: {
+      doneToday: "Done today",
+      yes: "Yes",
+      notYet: "Not yet",
+      smooth: "Smooth",
+      neededHelp: "Needed help",
+      levelFull: "Fully guided",
+      levelNames: "Pose names only",
+      levelFirst: "First pose only",
+      levelMemory: "From memory",
       saving: "Saving\u2026",
       reading: "Reading it\u2026",
       logged: "Saved.",
@@ -105,6 +114,15 @@
       limitHighBloodPressure: "high blood pressure"
     },
     es: {
+      doneToday: "Hecho hoy",
+      yes: "S\u00ed",
+      notYet: "Todav\u00eda no",
+      smooth: "Bien",
+      neededHelp: "Necesit\u00e9 ayuda",
+      levelFull: "Con gu\u00eda completa",
+      levelNames: "Solo nombres de posturas",
+      levelFirst: "Solo la primera postura",
+      levelMemory: "De memoria",
       saving: "Guardando\u2026",
       reading: "Ley\u00e9ndolo\u2026",
       logged: "Guardado.",
@@ -552,7 +570,8 @@
     setSelect("rb-else-effort", parsed.effort);
     var name = (ACTIVITY_NAME[lang] && ACTIVITY_NAME[lang][parsed.activity]) || parsed.activity;
     var effort = t(EFFORT_NAME[parsed.effort] || "");
-    setText($("rb-else-reading"), t("readIt") + ": " + name + " \u00b7 " + parsed.minutes + " " + t("minShort") + " \u00b7 " + effort);
+    var pts = Number(parsed.points) > 0 ? " \u00b7 +" + Number(parsed.points) + t("loggedHealth") : "";
+    setText($("rb-else-reading"), t("readIt") + ": " + name + " \u00b7 " + parsed.minutes + " " + t("minShort") + " \u00b7 " + effort + pts);
     setHidden($("rb-else-reading"), false);
     setText($("rb-else-status"), "");
   }
@@ -784,7 +803,8 @@
 
   function paintEntry(entry, level, autoplay) {
     setText($("rb-entry-title"), entry.title || entry.id);
-    setText($("rb-entry-meta"), challengeMeta(entry));
+    var levelKey = { full: "levelFull", names: "levelNames", first: "levelFirst", memory: "levelMemory" }[level];
+    setText($("rb-entry-meta"), challengeMeta(entry) + (entry.kind === "flow" && levelKey ? " \u00b7 " + t(levelKey) : ""));
 
     var fig = $("rb-entry-figure");
     var body = $("rb-entry-body");
@@ -880,6 +900,9 @@
   function shownAsk(flags) {
     setHidden($("rb-flow-ask"), false);
     setText($("rb-flow-ask-title"), flags.memoryPrompt ? t("doneFromMemory") : t("howWasIt"));
+    // At the first-pose level the question is yes/no, not smooth/needed help.
+    setText($("rb-flow-smooth"), t(flags.memoryPrompt ? "yes" : "smooth"));
+    setText($("rb-flow-help"), t(flags.memoryPrompt ? "notYet" : "neededHelp"));
   }
 
   /**

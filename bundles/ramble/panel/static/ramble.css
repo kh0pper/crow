@@ -230,7 +230,6 @@
 #ramble .rb-btn[disabled] { opacity: .45; cursor: default; }
 #ramble .rb-btn:focus-visible,
 #ramble .rb-chip:focus-visible,
-#ramble .rb-chore:focus-visible,
 #ramble .rb-seg button:focus-visible,
 #ramble .rb-icon-btn:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
 
@@ -555,26 +554,6 @@
 #ramble .rb-heart-row { display: inline-flex; gap: 0.15rem; }
 #ramble .rb-heart-one { width: 16px; height: 16px; display: block; }
 
-#ramble .rb-chores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-#ramble .rb-chore {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 86px;
-  padding: 12px 6px;
-  border: var(--rb-line-w) solid var(--rb-line);
-  border-radius: var(--rb-radius-sm);
-  background: var(--rb-surface-2);
-  box-shadow: var(--rb-pop-sm);
-  color: var(--rb-text);
-  font: 800 14px var(--rb-font-display);
-  cursor: pointer;
-}
-#ramble .rb-chore svg.rb-i { width: 26px; height: 26px; }
-#ramble .rb-chore.done { background: color-mix(in oklab, var(--rb-accent) 45%, var(--rb-surface-2)); }
-#ramble .rb-chore:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--rb-shadow-col); }
 
 #ramble .rb-stats { display: flex; gap: 20px; }
 #ramble .rb-stats div { display: flex; flex-direction: column; }
