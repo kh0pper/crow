@@ -11,28 +11,28 @@ const Figure = require("../bundles/ramble/server/moves/figure.cjs");
  * so a held hip/shoulder keeps the limb fixed while the trunk rotates.
  * Task 10 extends the support check to the shipped library. */
 const STANDING = { support: "feet" };
-const FOLD = { // standing forward fold: trunk past horizontal, legs vertical, arms dangle
+const FOLD = { // standing forward fold: trunk past horizontal, legs vertical, arms hang short of the floor
   rootAngle: 100, spine: 20, neck: 25,
-  shoulderL: 120, elbowL: 5, shoulderR: 120, elbowR: 5,
+  shoulderL: 90, elbowL: 5, shoulderR: 90, elbowR: 5,
   hipL: 100, kneeL: 5, ankleL: 5, hipR: 100, kneeR: 5, ankleR: 5,
   support: "feet",
 };
-const LUNGE = { // low lunge: front foot flat, back knee down with a pointed toe
-  rootAngle: 5, spine: 5,
+const LUNGE = { // low lunge: back knee down (toes tucked), front foot flat, hip sunk below the front knee
+  rootAngle: 0, spine: 5,
   shoulderL: 15, elbowL: 10, shoulderR: 30, elbowR: 20,
-  hipL: 95, kneeL: 95, ankleL: 5, hipR: 5, kneeR: 90, ankleR: -50,
-  support: "feet",
+  hipL: 101, kneeL: 118, ankleL: 20, hipR: -20, kneeR: 90, ankleR: 4,
+  support: "knees",
 };
-const DOWNDOG = { // inverted V on hands and feet
-  rootAngle: 125, spine: 10, neck: 25,
-  shoulderL: 145, wristL: 80, shoulderR: 145, wristR: 80,
-  hipL: 110, kneeL: 10, ankleL: -40, hipR: 110, kneeR: 10, ankleR: -40,
+const DOWNDOG = { // inverted V on hands and feet, arms in line with the trunk, heels a little up
+  rootAngle: 140, spine: 5, neck: 20,
+  shoulderL: 180, wristL: 60, shoulderR: 180, wristR: 60,
+  hipL: 115, kneeL: 5, ankleL: 15, hipR: 115, kneeR: 5, ankleR: 15,
   support: "hands_feet",
 };
-const SEATED = { // seated twist: legs forward, one arm sweeps back, head turns
-  spine: 10, neck: -25,
-  shoulderL: 60, elbowL: 40, wristL: 20, shoulderR: -25,
-  hipL: 85, kneeL: 15, ankleL: 5, hipR: 80, kneeR: 10, ankleR: 10,
+const SEATED = { // seated twist: legs out along the floor, one hand down beside the hip
+  rootAngle: -5, spine: 15, neck: -25,
+  shoulderL: 60, elbowL: 40, wristL: 20, shoulderR: 9, elbowR: 55,
+  hipL: 87, kneeL: 0, ankleL: 0, hipR: 87, kneeR: 0, ankleR: 0,
   support: "seat",
 };
 const TREE = { // tree pose: one leg standing, arms overhead
@@ -80,18 +80,40 @@ test("clampPose clamps to the limits, defaults junk, never mutates", () => {
   assert.doesNotThrow(() => Figure.clampPose(null));
 });
 
-test("solve grounds the lowest support point at y=0 and returns no NaN", () => {
+/* The named contact must be ON the floor (within 1 px at 100 px tall), and
+ * nothing may go through it (y > 0.5). Seated, the hip rides 0.05H above the
+ * floor on the buttock. Task 10 runs this same check over the shipped library. */
+const FEET = ["heelL", "toeL", "heelR", "toeR"];
+const ON = (j, names, at = 0) => names.some((k) => Math.abs(j[k].y - at) <= 1);
+const CONTACT = {
+  feet: (j) => ON(j, FEET),
+  hands_feet: (j) => ON(j, ["handL", "handR"]) && ON(j, FEET),
+  seat: (j) => ON(j, ["hip"], -5),
+  back: (j) => ON(j, ["hip", "shoulder"]),
+  knees: (j) => ON(j, ["kneeL", "kneeR"]),
+};
+test("every fixture pose: no NaN, nothing through the floor, the named contact on the floor", () => {
   for (const [name, pose] of POSES) {
-    const { joints } = Figure.solve(pose, 250);
-    const support = Figure.SUPPORT_POINTS[Figure.clampPose(pose).support];
-    assert.ok(Array.isArray(support) && support.length > 0, name + ": support set");
-    let lowest = -Infinity;
+    const { joints } = Figure.solve(pose, 100);
     for (const [jn, p] of Object.entries(joints)) {
       assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), name + ": " + jn + " is finite");
-      if (support.includes(jn)) lowest = Math.max(lowest, p.y);
+      assert.ok(p.y <= 0.5, name + ": " + jn + " is through the floor at y=" + p.y.toFixed(2));
     }
-    assert.ok(Math.abs(lowest) <= 0.5, name + ": lowest support point at y=0, got " + lowest);
+    const support = Figure.clampPose(pose).support;
+    assert.ok(CONTACT[support](joints), name + ": its " + support + " contact is on the floor");
   }
+});
+
+test("a standing figure is about 1.0H tall, head included", () => {
+  const { joints } = Figure.solve(STANDING, 100);
+  const crown = joints.head.y - Figure.SEGMENTS.head * 100 / 2;
+  assert.ok(crown > -101 && crown < -99, "crown at " + crown.toFixed(2));
+});
+
+test("a pose that sinks a non-contact part through the floor is caught", () => {
+  const sunk = { ...SEATED, kneeL: 0, hipL: 70, hipR: 70 }; // legs angled down: heels go under
+  const { joints } = Figure.solve(sunk, 100);
+  assert.ok(Object.values(joints).some((p) => p.y > 0.5), "the check above would reject this pose");
 });
 
 test("solve scales with heightPx", () => {

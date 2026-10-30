@@ -37,8 +37,9 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.RambleFigure = api;
 })(this, function () {
-  /* Segment lengths as a fraction of height — Winter 4th ed., Table 1.1. */
+  /* Segment lengths as a fraction of height — Drillis & Contini via Winter (see header). */
   var SEGMENTS = {
+    neck: 0.0520,     // shoulder 0.818H to chin 0.870H // VERIFY
     head: 0.1300,     // chin 0.870H to crown 1.000H // VERIFY
     trunk: 0.2880,    // hip 0.530H to shoulder 0.818H // VERIFY
     upperArm: 0.1860, // VERIFY
@@ -46,7 +47,8 @@
     hand: 0.1080,     // VERIFY
     thigh: 0.2450,    // hip 0.530H to knee 0.285H // VERIFY
     shank: 0.2460,    // knee 0.285H to ankle 0.039H // VERIFY
-    foot: 0.1520      // foot length; foot height 0.039H is unused in 2D // VERIFY
+    foot: 0.1520,     // foot length // VERIFY
+    footHeight: 0.0390 // ankle 0.039H above the sole // VERIFY
   };
   /* Sagittal-plane normal ROM — AAOS "Joint Motion". Flexion positive. */
   var JOINT_LIMITS = {
@@ -63,22 +65,27 @@
    * engine safety bounds (supine ≈ -90, a deep fold past horizontal ≈ +160). */
   var ROOT_LIMIT = { min: -120, max: 170 };
   var SUPPORTS = ["feet", "hands_feet", "seat", "back", "knees"];
-  /* Which joints can touch the ground per support mode. solve() drops the
-   * figure until the LOWEST of these sits at y=0. */
+  /* The NAMED contacts per support mode. solve() drops the figure until the
+   * lowest of these sits at y=0; anything else lower than that would be
+   * through the floor, which is the pose's fault (tests reject it), not
+   * something the engine hides by grounding on a part the pose doesn't claim. */
   var SUPPORT_POINTS = {
     feet: ["heelL", "toeL", "heelR", "toeR"],
     hands_feet: ["handL", "handR", "heelL", "toeL", "heelR", "toeR"],
-    seat: ["hip", "heelL", "toeL", "heelR", "toeR"],
-    back: ["head", "shoulder", "hip", "heelL", "heelR"],
-    knees: ["kneeL", "kneeR", "toeL", "toeR"]
+    seat: ["hip"],
+    back: ["hip", "shoulder"],
+    knees: ["kneeL", "kneeR"]
   };
   var ANGLE_KEYS = ["neck", "spine",
     "shoulderL", "elbowL", "wristL", "shoulderR", "elbowR", "wristR",
     "hipL", "kneeL", "ankleL", "hipR", "kneeR", "ankleR", "rootAngle"];
-  /* Drawing constants: the ankle sits ~35% along the foot from the heel, and
-   * the head circle leaves a visible neck stub (0.32 + 2×0.34 = 1.00 of the
-   * head segment from shoulder to crown). */
-  var HEEL_FRAC = 0.35, HEAD_R_FRAC = 0.34, NECK_FRAC = 0.32;
+  /* The ankle sits ~35% along the foot from the heel (a drawing constant).
+   * Wrist angles in this 2D side view are DRAWN angles: a flat hand on the
+   * floor in downward dog is shown, not a claim about anatomical wrist motion. */
+  var HEEL_FRAC = 0.35;
+  /* Seated, the hip joint centre sits above the floor by the buttock (ischial
+   * tuberosity and soft tissue), about 0.05H. A drawing approximation. // VERIFY */
+  var SEAT_HEIGHT_FRAC = 0.05;
 
   function isNum(v) { return typeof v === "number" && isFinite(v); }
   function rad(d) { return d * Math.PI / 180; }
@@ -115,11 +122,13 @@
     var shinA = thighA - kneeAng;                 // knee flexion swings the shank backward
     var ankle = add(knee, down(shinA, seg.shank));
     var footA = shinA + ankleAng;                 // from forward-horizontal, positive = toes up
-    var fr = rad(footA), dx = Math.cos(fr) * seg.foot, dy = -Math.sin(fr) * seg.foot;
+    var fr = rad(footA), fx = Math.cos(fr), fy = -Math.sin(fr);
+    /* The sole sits footHeight below the ankle, square to the foot. */
+    var sole = pt(ankle.x + Math.sin(fr) * seg.footHeight, ankle.y + Math.cos(fr) * seg.footHeight);
     joints["knee" + side] = knee;
     joints["ankle" + side] = ankle;
-    joints["toe" + side] = pt(ankle.x + dx * (1 - HEEL_FRAC), ankle.y + dy * (1 - HEEL_FRAC));
-    joints["heel" + side] = pt(ankle.x - dx * HEEL_FRAC, ankle.y - dy * HEEL_FRAC);
+    joints["toe" + side] = pt(sole.x + fx * seg.foot * (1 - HEEL_FRAC), sole.y + fy * seg.foot * (1 - HEEL_FRAC));
+    joints["heel" + side] = pt(sole.x - fx * seg.foot * HEEL_FRAC, sole.y - fy * seg.foot * HEEL_FRAC);
   }
   /* Forward kinematics: joints in px, ground at y=0 (up negative), x centered.
    * Defensive: the pose is clamped first, so no angle can produce NaN. */
@@ -133,7 +142,8 @@
     joints.hip = pt(0, 0);
     joints.mid = add(joints.hip, up(p.rootAngle, seg.trunk / 2));
     joints.shoulder = add(joints.mid, up(trunkU, seg.trunk / 2));
-    joints.head = add(joints.shoulder, up(trunkU + p.neck, seg.head * 0.5));
+    joints.chin = add(joints.shoulder, up(trunkU + p.neck, seg.neck));
+    joints.head = add(joints.chin, up(trunkU + p.neck, seg.head * 0.5));
     armChain(joints, "L", joints.shoulder, trunkU, p.shoulderL, p.elbowL, p.wristL, seg);
     armChain(joints, "R", joints.shoulder, trunkU, p.shoulderR, p.elbowR, p.wristR, seg);
     legChain(joints, "L", joints.hip, p.rootAngle, p.hipL, p.kneeL, p.ankleL, seg);
@@ -142,6 +152,7 @@
     var names = SUPPORT_POINTS[p.support] || SUPPORT_POINTS.feet;
     var lowest = -Infinity, i;
     for (i = 0; i < names.length; i++) lowest = Math.max(lowest, joints[names[i]].y);
+    if (p.support === "seat") lowest += SEAT_HEIGHT_FRAC * H;   // the hip rides above the floor
     var minX = Infinity, maxX = -Infinity;
     for (k in joints) {
       if (!Object.prototype.hasOwnProperty.call(joints, k)) continue;
@@ -184,7 +195,7 @@
     opts = (opts && typeof opts === "object") ? opts : {};
     var size = isNum(opts.size) && opts.size > 0 ? opts.size : 240;
     var H = 100, j = solve(pose, H).joints;
-    var headR = SEGMENTS.head * H * HEAD_R_FRAC, pad = headR + 4;
+    var headR = SEGMENTS.head * H / 2, pad = headR + 4;
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, k;
     for (k in j) {
       if (!Object.prototype.hasOwnProperty.call(j, k)) continue;
@@ -192,19 +203,15 @@
       minY = Math.min(minY, j[k].y); maxY = Math.max(maxY, j[k].y);
     }
     var vb = n(minX - pad) + " " + n(minY - pad) + " " + n(maxX - minX + pad * 2) + " " + n(maxY - minY + pad * 2);
-    /* Neck stub: stop the line at the head circle's edge. */
-    var dx = j.head.x - j.shoulder.x, dy = j.head.y - j.shoulder.y;
-    var dl = Math.sqrt(dx * dx + dy * dy) || 1;
-    var neckEnd = pt(j.head.x - dx / dl * headR, j.head.y - dy / dl * headR);
     var farSide = line(j.shoulder, j.elbowR) + line(j.elbowR, j.wristR) + line(j.wristR, j.handR) +
       line(j.hip, j.kneeR) + line(j.kneeR, j.ankleR) + line(j.heelR, j.toeR);
-    var nearSide = line(j.hip, j.mid) + line(j.mid, j.shoulder) + line(j.shoulder, neckEnd) +
+    var nearSide = line(j.hip, j.mid) + line(j.mid, j.shoulder) + line(j.shoulder, j.chin) +
       line(j.shoulder, j.elbowL) + line(j.elbowL, j.wristL) + line(j.wristL, j.handL) +
       line(j.hip, j.kneeL) + line(j.kneeL, j.ankleL) + line(j.heelL, j.toeL) +
       '<circle cx="' + n(j.head.x) + '" cy="' + n(j.head.y) + '" r="' + n(headR) + '"/>';
     /* No xmlns: the panel embeds this inline (like bird-svg's mounts), and the
      * namespace URI is the one URL-shaped string the engine must not carry. */
-    return '<svg viewBox="' + vb + '" width="' + size + '" height="' + size +
+    return '<svg viewBox="' + vb + '" width="' + n(size) + '" height="' + n(size) +
       '" aria-hidden="true" focusable="false">' +
       '<g fill="none" stroke-linecap="round" stroke-linejoin="round">' +
       '<g stroke="#b6bac7" stroke-width="3.4">' + farSide + '</g>' +
