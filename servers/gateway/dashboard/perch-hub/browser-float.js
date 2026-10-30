@@ -129,6 +129,7 @@ export function perchBrowserFloatJs(lang = "en") {
     exit.onclick=bfCollapse;
     close.onclick=function(){ var t=bf.t; if(!t) return; t.noFloat=true; bfSync(); };
     take.onclick=function(){ var t=bf.t; if(!t) return; bfCollapse(); btTakeOver(t); };
+    node.onkeydown=bfTrap;
     node.onpointerdown=bfDown; node.onpointermove=bfMove; node.onpointerup=bfUp; node.onpointercancel=bfUp;
     (el('perch-hub-root')||document.body).appendChild(node);
   }
@@ -217,6 +218,16 @@ export function perchBrowserFloatJs(lang = "en") {
     /* a rotation while full screen (bfResize waits for the mini player): back inside the viewport */
     bfPlace(bf.choice||bfDefault());
     if(bf.frame.focus) bf.frame.focus();
+  }
+  /* aria-modal: Tab stays on the full-screen controls (Take over, Exit). */
+  function bfTrap(ev){
+    if(!bf.expanded||!ev||ev.key!=='Tab') return;
+    var list=[bf.take,bf.exit].filter(function(b){ return !b.hidden; });
+    if(!list.length) return;
+    if(ev.preventDefault) ev.preventDefault();
+    var i=list.indexOf(document.activeElement);
+    var next=i<0?0:(i+(ev.shiftKey?list.length-1:1))%list.length;
+    if(list[next].focus) list[next].focus();
   }
   bindOnce(document,'keydown','bfKey',function(ev){
     if(!live()||!bf.expanded||!ev||ev.key!=='Escape') return;

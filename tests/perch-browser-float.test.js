@@ -403,6 +403,16 @@ test("tap expands to full screen; Escape and Exit return focus to the mini playe
   assert.equal(one(f, "bf-take").hidden, false);
   assert.equal(one(f, "bf-exit").hidden, false);
   assert.equal(one(f, "bf-close").hidden, true);
+  // F4: Tab cycles between Take over and Exit, both ways; the mini player ignores it
+  const tab = (shiftKey) => { let p = false; f.onkeydown({ key: "Tab", shiftKey, preventDefault() { p = true; } }); return p; };
+  assert.ok(tab(false), "Tab is kept in full screen");
+  assert.equal(h.doc.activeElement, one(f, "bf-take"));
+  tab(false);
+  assert.equal(h.doc.activeElement, one(f, "bf-exit"));
+  tab(true);
+  assert.equal(h.doc.activeElement, one(f, "bf-take"));
+  tab(true);
+  assert.equal(h.doc.activeElement, one(f, "bf-exit"));
   // the tile scrolling into view behind it does not yank full screen away
   await h.show(t, true);
   assert.equal(f.getAttribute("data-expanded"), "1");
@@ -411,6 +421,7 @@ test("tap expands to full screen; Escape and Exit return focus to the mini playe
   assert.equal(f.getAttribute("data-expanded"), null);
   assert.equal(f.getAttribute("role"), "group");
   assert.equal(h.doc.activeElement, frame, "focus back on the mini player");
+  assert.equal(tab(false), false, "the mini player leaves Tab alone");
   assert.equal(h.floating(), true);
   // the grow button, then Exit
   one(f, "bf-grow").onclick();
