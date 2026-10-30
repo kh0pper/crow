@@ -52,11 +52,14 @@ export async function strictVoiceCloud(dbc, key, consumer = "voice") {
 /**
  * The voice route's keys for THIS request. Per side: the env var (read now), else the CHOSEN role binding
  * (role:voice for fast, role:everyday for escalate; a seeded or missing binding is not chosen), else the raw
- * constant. A chosen role that resolves to nothing (its model not configured; voice has no fallback chain) falls
- * to the raw constant, never to another role's model. Never throws.
- * → { fast, escalate, fastRole, escalateRole, fastCloud, escalateCloud }
+ * constant. A chosen role that resolves to nothing (its model not configured) falls to the raw constant, never
+ * to another role's model. `escalateFallbacks` is the one explicit chain: the everyday binding's own `fallback`
+ * role ids, resolved in order, which voice may try when the everyday model cannot be readied; it is empty when
+ * the env var pins the escalation model, and no failure ever makes it anything but []. Never throws.
+ * → { fast, escalate, escalateFallbacks, fastRole, escalateRole, fastCloud, escalateCloud }
  *   *Role   the role id when the role gave the key, else null
  *   *Cloud  the key is not proven local (strictVoiceCloud), whatever gave it: env, role or raw constant
+ *   escalateFallbacks  raw keys, in order, de-duplicated, without the fast/escalate keys
  */
 export async function resolveVoiceKeys(dbc, { env = process.env, resolveRoleFn = defaultResolveRole } = {}) {
   const side = async (envName, roleId, raw) => {
@@ -75,6 +78,36 @@ export async function resolveVoiceKeys(dbc, { env = process.env, resolveRoleFn =
     side("COMPANION_FAST_MODEL", "voice", FAST_KEY),
     side("COMPANION_ESCALATION_MODEL", "everyday", ESC_KEY),
   ]);
-  const [fastCloud, escalateCloud] = await Promise.all([strictVoiceCloud(dbc, f.key), strictVoiceCloud(dbc, e.key)]);
-  return { fast: f.key, escalate: e.key, fastRole: f.role, escalateRole: e.role, fastCloud, escalateCloud };
+  const [fastCloud, escalateCloud, escalateFallbacks] = await Promise.all([
+    strictVoiceCloud(dbc, f.key), strictVoiceCloud(dbc, e.key), escalationFallbackKeys(dbc, env, resolveRoleFn, f.key, e.key),
+  ]);
+  return { fast: f.key, escalate: e.key, escalateFallbacks, fastRole: f.role, escalateRole: e.role, fastCloud, escalateCloud };
+}
+
+/**
+ * The escalation model's fallback chain: the everyday binding's `fallback` role ids, each resolved with
+ * resolveRoleFn (role:<id>, need chat) in order. Excludes the escalate and fast keys, duplicates dropped.
+ * [] when the escalation env var is set (a pinned key has no chain) and on any failure: this never throws.
+ */
+async function escalationFallbackKeys(dbc, env, resolveRoleFn, fastKey, escalateKey) {
+  const pinned = env?.COMPANION_ESCALATION_MODEL;
+  if (typeof pinned === "string" && pinned) return [];
+  try {
+    const { readBindings } = await import("./model-roles-store.js");
+    const bindings = await readBindings(dbc);
+    const ids = Array.isArray(bindings?.everyday?.fallback) ? bindings.everyday.fallback : [];
+    const out = [];
+    for (const id of ids) {
+      if (typeof id !== "string" || !id) continue;
+      try {
+        const r = await resolveRoleFn(dbc, `role:${id}`, { need: "chat" });
+        const key = r && typeof r.key === "string" ? r.key : null;
+        if (!key || key === escalateKey || key === fastKey || out.includes(key)) continue;
+        out.push(key);
+      } catch { /* one bad fallback does not drop the others */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }

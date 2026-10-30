@@ -64,7 +64,7 @@ test("unedited: no binding gives the raw constants and no roles", async () => {
   try {
     await baseProviders(db);
     // The raw constants have no provider rows here, so neither is proven local (strict, Task 20).
-    assert.deepEqual(await resolveVoiceKeys(db, { env: NO_ENV }), { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true });
+    assert.deepEqual(await resolveVoiceKeys(db, { env: NO_ENV }), { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true, escalateFallbacks: [] });
   } finally { cleanup(); }
 });
 
@@ -97,7 +97,7 @@ test("env beats role", async () => {
     assert.equal(k.escalateRole, null);
     // Positive control: without the env the chosen bindings win.
     const c = await resolveVoiceKeys(db, { env: NO_ENV });
-    assert.deepEqual(c, { fast: "local-voice/m2", escalate: "local-chat/m1", fastRole: "voice", escalateRole: "everyday", fastCloud: false, escalateCloud: false });
+    assert.deepEqual(c, { fast: "local-voice/m2", escalate: "local-chat/m1", fastRole: "voice", escalateRole: "everyday", fastCloud: false, escalateCloud: false, escalateFallbacks: [] });
   } finally { cleanup(); }
 });
 
@@ -126,7 +126,7 @@ test("resolveVoiceKeys never throws: a failing resolver gives the raw constants"
   try { k = await resolveVoiceKeys({}, { env: NO_ENV, resolveRoleFn: async () => { throw new Error("boom"); } }); }
   finally { console.warn = warn; }
   // No role context could be read: nothing is proven local.
-  assert.deepEqual(k, { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true });
+  assert.deepEqual(k, { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null, fastCloud: true, escalateCloud: true, escalateFallbacks: [] });
   assert.deepEqual(warns.sort(), [
     "[llm-router] role everyday: boom; using the consumer default",
     "[llm-router] role voice: boom; using the consumer default",
