@@ -24,10 +24,11 @@
  * WHY A FILE OF ITS OWN. pet.js's `doChore` draws from this budget and
  * ledger.js imports pet.js, so a top-level `pet.js -> ledger.js` import would
  * be a cycle through the module that pays the pet. This file depends only on
- * steps.js's ledger helpers and eggs.js's `localDay`, neither of which reaches
- * back into it, so pet.js can import it safely.
+ * steps.js's ledger helpers and eggs.js's day helpers. steps.js itself imports
+ * pet.js, so a module cycle exists (pet -> indoor-cap -> steps -> pet); it is
+ * safe only because every binding is used at call time, never at load.
  */
-import { localDay } from "../eggs.js";
+import { localDay, startOfLocalDay } from "../eggs.js";
 import { casDelta, rowDelta } from "../steps.js";
 
 /** Indoor Health from moves AND chores, per local day (the old 3 x 8 chores budget). */
@@ -37,24 +38,23 @@ export const MOVE_INDOOR_KIND = "moveindoor";
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/**
- * The day a cap row is filed under. A caller-supplied `YYYY-MM-DD` wins — that
- * is what makes a challenge picked at 23:58 and marked Done at 00:02 credit
- * the day it was PICKED for — and anything else falls back to the local day of
- * `now` rather than throwing, so a junk day can never file Health nowhere.
- */
-/** A day key for READING: any well-formed date, else today. */
+/** A day key for READING: any well-formed date, else today (never throws). */
 export function dayKey(day, now) {
   return typeof day === "string" && DAY_RE.test(day) ? day : localDay(now);
 }
 
-/** A day key for WRITING (paying): today or yesterday only. */
+/**
+ * A day key for WRITING (paying): the caller's day when it is today or
+ * yesterday (a challenge picked at 23:58 and Done at 00:02 credits the day it
+ * was picked for), else today. Yesterday is the day before today's local
+ * midnight, which is right across a DST change (a 23 h or 25 h day).
+ */
 export function capDayKey(day, now) {
   // Only today or yesterday (a challenge picked at 23:58 and done at 00:02).
   // Any other date would open a fresh budget per date and let Health be farmed.
   const today = localDay(now);
   if (typeof day !== "string" || !DAY_RE.test(day)) return today;
-  return day === today || day === localDay(now - 24 * 60 * 60 * 1000) ? day : today;
+  return day === today || day === localDay(startOfLocalDay(now) - 1) ? day : today;
 }
 
 /**
