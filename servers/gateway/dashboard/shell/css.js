@@ -365,8 +365,10 @@ export function shellCss() {
      back a plain panel. Above the tab bar (the reduced-motion cross-fade
      covers the page), below the sheets. */
   body.shell .fy-reveal {
-    position: fixed; top: 0; left: 0; z-index: 950;
-    width: 100vw; height: 100vh; height: 100dvh; min-height: 0;
+    /* Ends at the music player bar (the overlay z-index rule): the bar stays
+       visible and tappable while For You slides in. */
+    position: fixed; top: 0; left: 0; bottom: var(--crow-player-h, 0px); z-index: 950;
+    width: 100vw; min-height: 0;
     overflow: hidden; pointer-events: none;
     background: var(--crow-bg-deep);
   }
