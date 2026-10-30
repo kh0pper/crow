@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import vm from "node:vm";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 actAsServe();
 
@@ -269,4 +270,57 @@ test("the page's client JS carries no backtick (it is emitted inside a template 
   const js = shellClientJs();
   assert.ok(js.includes("__crowForYouSwipeBound"), "the swipe ships with the shell");
   assert.match(js, /a\[data-for-you-entry\]/, "and targets the flag-gated link only");
+});
+
+/** The swipe block alone, run against a stub page: which gestures navigate and which don't. */
+async function swipeRig({ path = "/dashboard/perch", hash = "", view = "list", selection = "", kiosk = false, overlay = false, draft = "", width = 390, link = true } = {}) {
+  const { shellClientJs } = await import("../servers/gateway/dashboard/shell/client.js");
+  const js = shellClientJs();
+  const a = js.indexOf("// ─── For You: the phone swipe");
+  const block = js.slice(a, js.indexOf("// ─── The apps launcher", a));
+  const listeners = {};
+  const visits = [];
+  const body = { getAttribute: (k) => (k === "data-view" ? view : null) };
+  const field = { value: draft, isContentEditable: false };
+  const document = {
+    body,
+    addEventListener: (type, fn) => { listeners[type] = fn; },
+    querySelector: (sel) => {
+      if (sel.startsWith("dialog[open]")) return overlay ? {} : null;
+      if (sel === "a[data-for-you-entry]") return link ? { getAttribute: () => "/dashboard/for-you" } : null;
+      return null;
+    },
+    querySelectorAll: () => (draft ? [field] : []),
+  };
+  const window = {
+    localStorage: { getItem: (k) => (kiosk && k === "crow.kiosk.token" ? "tok" : null) },
+    matchMedia: (q) => ({ matches: /max-width: 1023px/.test(q) && width <= 1023 }),
+    getSelection: () => ({ isCollapsed: !selection, toString: () => selection }),
+    Turbo: { visit: (href) => visits.push(href) },
+  };
+  vm.runInNewContext(block, { window, document, location: { pathname: path, hash }, getComputedStyle: () => ({ overflowX: "visible" }), Date, String });
+  const target = { parentElement: null, matches: () => false, scrollWidth: 0, clientWidth: 0 };
+  return (x0, x1, dy = 0) => {
+    listeners.touchstart({ touches: [{ clientX: x0, clientY: 300 }], target });
+    listeners.touchend({ changedTouches: [{ clientX: x1, clientY: 300 + dy }] });
+    return visits.length;
+  };
+}
+
+test("the phone swipe: a clear left-to-right swipe on the Chat list or a project home opens For You, and nothing else does", async () => {
+  assert.equal((await swipeRig())(60, 220), 1, "the Chat list");
+  assert.equal((await swipeRig({ path: "/dashboard/project/garden" }))(60, 220), 1, "a project home");
+  assert.equal((await swipeRig())(10, 220), 0, "from the edge: Android's back gesture owns it");
+  assert.equal((await swipeRig())(60, 120), 0, "too short");
+  assert.equal((await swipeRig())(60, 220, 150), 0, "mostly vertical: a scroll");
+  assert.equal((await swipeRig())(220, 60), 0, "right to left");
+  assert.equal((await swipeRig({ hash: "#perchlive-0000000a" }))(60, 220), 0, "an open chat");
+  assert.equal((await swipeRig({ view: "chat" }))(60, 220), 0, "the chat view");
+  assert.equal((await swipeRig({ path: "/dashboard/board" }))(60, 220), 0, "any other page");
+  assert.equal((await swipeRig({ selection: "some text" }))(60, 220), 0, "text is selected");
+  assert.equal((await swipeRig({ overlay: true }))(60, 220), 0, "a drawer, sheet or dialog is open");
+  assert.equal((await swipeRig({ draft: "half a thought" }))(60, 220), 0, "a draft would be lost");
+  assert.equal((await swipeRig({ kiosk: true }))(60, 220), 0, "a paired kiosk display");
+  assert.equal((await swipeRig({ width: 1280 }))(60, 220), 0, "desktop");
+  assert.equal((await swipeRig({ link: false }))(60, 220), 0, "flag off: no link, no target");
 });
