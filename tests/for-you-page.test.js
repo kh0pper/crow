@@ -348,6 +348,7 @@ async function revealRig({
   const clock = { t: 1000 };
   let frames = [], rafCalls = 0, timers = [];
   const visits = [], backs = [], fetched = [];
+  const store = new Map();
   const location = { origin: ORIGIN, pathname: path, hash, search };
   const window = {
     innerWidth: width,
@@ -356,6 +357,7 @@ async function revealRig({
     getSelection: () => ({ isCollapsed: !selection, toString: () => selection }),
     Turbo: { visit: (href) => visits.push(href) },
     history: { length: 3, back: () => backs.push(location.pathname) },
+    sessionStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
     addEventListener: (type, fn) => { listeners["window:" + type] = fn; },
   };
   const fetchStub = fetchHtml == null ? undefined : (url, opts) => {
@@ -381,7 +383,12 @@ async function revealRig({
 
   const at = (sel) => document.querySelector(sel);
   const r = {
-    document, main, tabs, visits, backs, fetched, listeners, clock,
+    document, main, tabs, visits, backs, fetched, listeners, clock, store,
+    // A Turbo render of another page: the block runs again (its visit()).
+    visitTo(pathname, search = "") {
+      Object.assign(location, { pathname, search, hash: "" });
+      vm.runInContext(block, ctx);
+    },
     get moveOpts() { return moveOpts; },
     get rafCalls() { return rafCalls; },
     panel: () => document.querySelector("[data-fy-reveal]"),
@@ -768,4 +775,57 @@ test("the drag reveal fetches at most once per page view, even on failure; a new
     assert.equal(r.fetched.length, 0, `no fetch of ${href}`);
     assert.ok(!r.panel());
   }
+});
+
+test("the way back after a forward drag: a one-time marker, then the referrer rule, then the Chat list", async () => {
+  const MARK = "crow.forYou.dragFrom";
+  // 1. The app opens Crow fresh (no referrer): forward drag, land, reverse drag -> Back, marker consumed.
+  const r = await revealRig({ path: "/dashboard/project/garden" });
+  r.drag(60, 300, { pause: 200 });
+  assert.deepEqual(r.visits, ["/dashboard/for-you"]);
+  assert.equal(JSON.parse(r.store.get(MARK)).landed, false, "set on landing, not yet rendered");
+  assert.equal(JSON.parse(r.store.get(MARK)).from, "/dashboard/project/garden");
+  r.listeners["turbo:before-render"]({ detail: { newBody: r.document.body.cloneNode(true) } });
+  r.visitTo("/dashboard/for-you");
+  assert.equal(JSON.parse(r.store.get(MARK)).landed, true, "For You's render marks it landed");
+  r.drag(330, 100, { pause: 200 });
+  assert.deepEqual(r.backs, ["/dashboard/for-you"], "Back, with no referrer at all");
+  assert.equal(r.visits.length, 1, "no Chat list visit");
+  assert.equal(r.store.has(MARK), false, "consumed");
+
+  // 2. No marker, a same-origin referrer and a Crow page before: Back.
+  const ref = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch", referrer: ORIGIN + "/dashboard/perch" });
+  ref.drag(330, 100, { pause: 200 });
+  assert.deepEqual([ref.backs, ref.visits], [["/dashboard/for-you"], []]);
+
+  // 3. Neither: the Chat list.
+  const none = await revealRig({ path: "/dashboard/for-you", prevPath: "/dashboard/perch" });
+  none.drag(330, 100, { pause: 200 });
+  assert.deepEqual([none.backs, none.visits], [[], ["/dashboard/perch"]]);
+});
+
+test("the landing marker is cleared by any other navigation, and a late landing does not count", async () => {
+  const MARK = "crow.forYou.dragFrom";
+  const away = await revealRig();
+  away.drag(60, 300, { pause: 200 });
+  away.listeners["turbo:before-render"]({ detail: { newBody: away.document.body.cloneNode(true) } });
+  away.visitTo("/dashboard/for-you");
+  away.visitTo("/dashboard/for-you", "?view=customize");
+  assert.equal(away.store.has(MARK), false, "Customize is away from For You: cleared");
+  away.visitTo("/dashboard/for-you");
+  away.drag(330, 100, { pause: 200 });
+  assert.deepEqual([away.backs, away.visits.slice(1)], [[], ["/dashboard/perch"]], "came in another way: the Chat list");
+
+  const late = await revealRig();
+  late.drag(60, 300, { pause: 200 });
+  late.listeners["turbo:before-render"]({ detail: { newBody: late.document.body.cloneNode(true) } });
+  late.clock.t += 60000;
+  late.visitTo("/dashboard/for-you");
+  assert.equal(late.store.has(MARK), false, "a landing long after the drag is not this drag's");
+
+  // A forged or foreign marker is never followed.
+  const forged = await revealRig({ path: "/dashboard/for-you" });
+  forged.store.set(MARK, JSON.stringify({ from: "https://elsewhere.example/", to: "/dashboard/for-you", at: forged.clock.t, landed: true }));
+  forged.drag(330, 100, { pause: 200 });
+  assert.deepEqual([forged.backs, forged.visits], [[], ["/dashboard/perch"]]);
 });

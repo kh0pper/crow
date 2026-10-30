@@ -252,7 +252,8 @@ export function shellClientJs() {
     // Discover feed: the page and a For You panel beside it follow the finger
     // 1:1. On release it lands on For You (past COMMIT of the width, or a
     // flick) or springs back. On For You the mirror drag (right to left)
-    // pushes it back out: Back when the page before was a Crow page and the
+    // pushes it back out: Back after a forward drag landed here (a one-time
+    // sessionStorage marker) or when the page before was a Crow page and the
     // document came from this origin, else the Chat list.
     //
     // Where: the Chat list (/dashboard/perch with no chat open) and a
@@ -523,6 +524,25 @@ export function shellClientJs() {
       // Back only to a Crow page: the page before was one (a /dashboard/ page
       // other than For You, seen in this window) and the document came from
       // this origin. Anything else goes to the Chat list.
+      // The way back after a forward drag. The app usually opens Crow fresh
+      // (no referrer), so the forward landing leaves a one-time marker in
+      // sessionStorage: { from, to, at, landed }. For You's render marks it
+      // landed (if it arrived within GIVE_UP_MS); any other page clears it;
+      // the reverse drag consumes it and goes Back.
+      var MARK = 'crow.forYou.dragFrom';
+      function crowPath(v) { return typeof v === 'string' && /^\\/dashboard\\//.test(v) && v.indexOf(FY) !== 0 && !/[\\s\\\\]/.test(v); }
+      function readMark() {
+        try { var m = JSON.parse(window.sessionStorage.getItem(MARK) || 'null'); return m && typeof m === 'object' ? m : null; } catch (e) { return null; }
+      }
+      function writeMark(m) {
+        try { if (m) window.sessionStorage.setItem(MARK, JSON.stringify(m)); else window.sessionStorage.removeItem(MARK); } catch (e) {}
+      }
+      function noteLanding(at) {
+        var m = readMark();
+        if (!m) return;
+        if (at === m.to && !m.landed && Date.now() - m.at < GIVE_UP_MS) { m.landed = true; writeMark(m); }
+        else if (at !== m.to || !m.landed) writeMark(null);
+      }
       function cameFromCrow() {
         var ref = '';
         try { ref = document.referrer ? new URL(document.referrer).origin : ''; } catch (e) { ref = ''; }
@@ -532,8 +552,14 @@ export function shellClientJs() {
       // Arrived: navigate, and keep the page where it is until the new one
       // renders. If it never does, put the page back.
       function land(d) {
-        if (d.dir > 0) go(d.href);
-        else if (cameFromCrow()) window.history.back();
+        var m = d.dir < 0 ? readMark() : null;
+        if (d.dir > 0) {
+          if (crowPath(here)) writeMark({ from: here, to: d.href, at: Date.now(), landed: false });
+          go(d.href);
+        } else if (m && m.landed && m.to === here && crowPath(m.from)) {
+          writeMark(null);
+          window.history.back();
+        } else if (cameFromCrow()) window.history.back();
         else go(CHAT);
         d.timer = setTimeout(function () { if (document.body.contains(d.panel)) undo(d); }, GIVE_UP_MS);
       }
@@ -617,6 +643,7 @@ export function shellClientJs() {
         tidy(document.body);
         var at = location.pathname + (location.search || '');
         if (at !== here) { prev = here; here = at; }
+        noteLanding(at);
         var p = location.pathname, main = document.querySelector('.main-content');
         if (main && !main.__crowFyMove && entry() && (p === CHAT || p === FY || PROJECT.test(p))) {
           main.__crowFyMove = true;
