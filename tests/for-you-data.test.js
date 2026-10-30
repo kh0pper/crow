@@ -100,6 +100,10 @@ test("morning: needs you, due by today, finished by bots in the last day, and wh
   res.run(C.soil, "bot", "ivy", "success", "-2 hours");
   res.run(C.human, "human", null, "success", "-1 hours");
   res.run(C.stale, "bot", "ivy", "success", "-30 hours");
+  // Not bots: the operator's own session (board MCP) and the decision-expiry job.
+  C.mine = Number(tw.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('Mine', ?, 'pending')").run(P.other).lastInsertRowid);
+  res.run(C.mine, "session", null, "success", "-1 hours");
+  res.run(C.mine, "session", "decision-expiry", "partial", "-1 hours");
   tw.close();
 
   const m = await withDb((db) => M.loadMorning(db, { projects: PROJECTS(), tz: "UTC", now, tasksDbPath: TASKS }));
@@ -111,7 +115,7 @@ test("morning: needs you, due by today, finished by bots in the last day, and wh
     ["Old chore", true, `/dashboard/bot-board?bot=ivy#open=${C.late}`],
     ["Water plan", false, `/dashboard/bot-board?bot=ivy#open=${C.today}`],
   ]);
-  assert.equal(m.finished.total, 1, "a bot's result in the last day; never a person's, never an older one");
+  assert.equal(m.finished.total, 1, "a bot's result in the last day; never a person's, a session's or the expiry job's, never an older one");
   assert.deepEqual(m.finished.items, [{ title: "Soil test", project: "Other", outcome: "success", bot: "Ivy", href: `/dashboard/bot-board?card=${C.soil}` }]);
   assert.deepEqual(m.leftOff, { title: "Seed order", project: "Garden", href: "/dashboard/perch?project=garden#perchlive-00000001" });
   assert.ok(!JSON.stringify(m).includes("model-written"), "the session's summary text is never shown");

@@ -6,11 +6,12 @@
  *             Board's own rule and order), total and the first NEEDS_LINES cards.
  *   due       open cards (not terminal on their own board) due today or earlier in the instance's
  *             time zone, earliest first, not already listed under needs.
- *   finished  results bots (not people) reported in the last FINISHED_HOURS, newest first, one
+ *   finished  results bots reported in the last FINISHED_HOURS (actor_kind 'bot' only: never a
+ *             person, the operator's own sessions or the decision-expiry job), newest first, one
  *             per card, with the bot's name.
- *   leftOff   "where you left off": perch/briefing.js's newest summarized session, on the project
- *             that has it; null when CROW_SESSION_BRIEFING=0 or no session has a summary. Only the
- *             session's label (or bot name) is shown, never its model-written summary.
+ *   leftOff   "where you left off": the newest summarized Perch session on a live project (the
+ *             briefing's own rule, read as one row); null when CROW_SESSION_BRIEFING=0 or no session
+ *             has a summary. Only the session's label (or bot name) is shown, never its summary.
  *
  * Cards live in the instance-global tasks.db; a project with its own store is not read (as on the
  * Board). A missing tasks.db is an empty morning; an unreadable one costs its lines, never the page.
@@ -22,13 +23,15 @@ import { laneRows, defsFor, cardsByIds, threadsByCard, cardHref } from "../dashb
 import { groupByLane } from "../dashboard/panels/board/lanes.js";
 import { kindOf } from "../dashboard/panels/board/needs-you.js";
 import { drawerHrefs } from "../board/card-link.js";
-import { buildBriefing, briefingEnabled } from "../perch/briefing.js";
+import { briefingEnabled } from "../perch/briefing.js";
 import { localYmd } from "../../shared/relative-dates.js";
 
 export const NEEDS_LINES = 3;
 export const DUE_LINES = 2;
 export const FINISHED_LINES = 2;
 export const FINISHED_HOURS = 24;
+/** Summarized sessions read to find one on a live project. */
+const LEFT_OFF_SCAN = 20;
 const ABSENT_RE = /no such (table|column)/i;
 
 const oneLine = (s) => String(s ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
@@ -62,32 +65,35 @@ async function botNames(db, ids) {
   return out;
 }
 
-/** The project holding the newest summarized Perch session, or null. */
-async function newestSummaryProject(db) {
+/**
+ * "Where you left off": the newest summarized Perch session filed to a live project, read as the
+ * one row the line needs (the rule perch/briefing.js's project summaries use: a kind='perch-live'
+ * thread filed in shell_items, with a summary). No briefing is built, so no board facts and no
+ * memory search run on a page load or a Turbo prefetch. Only the label (or the bot's name) shows.
+ */
+async function leftOffLine(db, projectsById) {
+  if (!briefingEnabled()) return null;
   const rows = await rowsOrEmpty(db, {
-    sql: `SELECT s.project_id FROM bot_sessions b
+    sql: `SELECT b.gateway_thread_id AS thread_id, b.label, b.status, b.bot_id, d.display_name, s.project_id
+            FROM bot_sessions b
             JOIN shell_items s ON s.item_kind = 'perch_thread' AND s.item_ref = b.gateway_thread_id
+            LEFT JOIN pi_bot_defs d ON d.bot_id = b.bot_id
            WHERE b.kind = 'perch-live' AND s.project_id IS NOT NULL
              AND b.summary IS NOT NULL AND trim(b.summary) != '' AND b.summary_at IS NOT NULL
-           ORDER BY b.summary_at DESC, b.id DESC LIMIT 1`,
-    args: [],
+           ORDER BY b.summary_at DESC, b.id DESC LIMIT ?`,
+    args: [LEFT_OFF_SCAN],
   });
-  return rows[0] ? Number(rows[0].project_id) : null;
-}
-
-async function leftOffLine(db, projectsById, opts) {
-  if (!briefingEnabled()) return null;
-  const pid = await newestSummaryProject(db);
-  if (pid == null || !projectsById.has(pid)) return null;
-  const b = await buildBriefing(db, pid, opts);
-  const s = b.summaries[0];
-  if (!s || !b.project) return null;
-  const slug = b.project.slug;
+  const r = rows.find((x) => projectsById.has(Number(x.project_id)));
+  if (!r) return null;
+  const p = projectsById.get(Number(r.project_id));
+  const slug = String(p.slug);
+  const label = r.label != null && String(r.label).trim() !== "" ? oneLine(r.label) : oneLine(r.display_name || r.bot_id || "");
   return {
-    title: s.label || s.botName || "",
-    project: b.project.name,
-    href: s.openable
-      ? `/dashboard/perch?project=${encodeURIComponent(slug)}#${encodeURIComponent(s.threadId)}`
+    title: label,
+    project: String(p.name),
+    // Perch opens only a session that is not stopped (the project home's rule).
+    href: String(r.status) !== "stopped"
+      ? `/dashboard/perch?project=${encodeURIComponent(slug)}#${encodeURIComponent(String(r.thread_id))}`
       : `/dashboard/project/${encodeURIComponent(slug)}`,
   };
 }
@@ -147,7 +153,7 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
       const fin = await rowsOrEmpty(tdb, {
         sql: `SELECT r.item_id, r.actor_id, r.outcome, r.created_at, t.title, t.project_id
                 FROM board_results r JOIN tasks_items t ON t.id = r.item_id
-               WHERE r.actor_kind != 'human' AND r.created_at > ? AND t.board_id IS NULL AND t.archived_at IS NULL
+               WHERE r.actor_kind = 'bot' AND r.created_at > ? AND t.board_id IS NULL AND t.archived_at IS NULL
                ORDER BY r.created_at DESC, r.id DESC LIMIT 100`,
         args: [sqliteTime(now - FINISHED_HOURS * 3600000)],
       });
@@ -174,7 +180,7 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
     }
   }
 
-  try { out.leftOff = await leftOffLine(db, projectsById, { tasksDbPath }); }
+  try { out.leftOff = await leftOffLine(db, projectsById); }
   catch (err) { console.warn("[for-you] where you left off failed:", err && err.message); }
   return out;
 }
