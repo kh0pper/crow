@@ -1,0 +1,37 @@
+{
+  "id": "yoga-mountain",
+  "kind": "pose",
+  "title": "Mountain pose",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["none"],
+  "tags": ["standing", "beginner", "breath"],
+  "steps": [
+    "Stand with your feet hip-width apart and your weight even on both feet.",
+    "Let your arms hang by your sides with your palms facing in.",
+    "Lift your chest a little and let your shoulders soften down.",
+    "Look straight ahead and take slow, steady breaths."
+  ],
+  "works": ["Legs", "Feet"],
+  "stretches": [],
+  "mistakes": [
+    "Locking the knees.",
+    "Lifting the shoulders up toward the ears."
+  ],
+  "skipIf": [],
+  "easier": null,
+  "harder": "yoga-tree",
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false,
+  "pose": {
+    "neck": 0, "spine": 0,
+    "shoulderL": 0, "elbowL": 0, "wristL": 0,
+    "shoulderR": 0, "elbowR": 0, "wristR": 0,
+    "hipL": 0, "kneeL": 0, "ankleL": 0,
+    "hipR": 0, "kneeR": 0, "ankleR": 0,
+    "rootAngle": 0,
+    "support": "feet"
+  }
+}

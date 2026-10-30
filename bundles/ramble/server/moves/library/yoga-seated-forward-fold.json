@@ -1,0 +1,68 @@
+{
+  "id": "yoga-seated-forward-fold",
+  "kind": "pose",
+  "title": "Seated forward fold",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "floor",
+    "seated",
+    "fold"
+  ],
+  "steps": [
+    "Sit on the mat with your legs straight in front of you.",
+    "Bend your knees a little and sit up tall on your sitting bones.",
+    "Fold forward from your hips and rest your hands wherever they reach.",
+    "Keep your neck long and breathe slowly.",
+    "Come up slowly, one bit at a time."
+  ],
+  "works": [
+    "Back"
+  ],
+  "stretches": [
+    "Hamstrings",
+    "Calves",
+    "Lower back"
+  ],
+  "mistakes": [
+    "Rounding the back to reach the feet.",
+    "Bouncing to get deeper."
+  ],
+  "skipIf": [
+    "lower_back",
+    "hip"
+  ],
+  "easier": "yoga-forward-fold",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": false,
+  "pose": {
+    "neck": 15,
+    "elbowL": 0,
+    "wristL": 0,
+    "kneeL": 0,
+    "ankleL": 20,
+    "support": "seat",
+    "rootAngle": 30,
+    "spine": 36,
+    "hipL": 120,
+    "shoulderL": 124,
+    "elbowR": 0,
+    "wristR": 0,
+    "kneeR": 0,
+    "ankleR": 20,
+    "hipR": 120,
+    "shoulderR": 124
+  }
+}

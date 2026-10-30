@@ -1,0 +1,66 @@
+{
+  "id": "yoga-plank",
+  "kind": "pose",
+  "title": "Plank",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "strength",
+    "core",
+    "weight-on-hands"
+  ],
+  "steps": [
+    "Start on your hands and knees, then step your feet back one at a time.",
+    "Line your shoulders up over your hands and stretch your legs out behind you.",
+    "Draw your belly in and keep one long line from your head to your heels.",
+    "Hold while breathing steadily, then lower your knees to the mat."
+  ],
+  "works": [
+    "Core",
+    "Shoulders",
+    "Arms"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Letting the hips sag toward the floor.",
+    "Holding your breath."
+  ],
+  "skipIf": [
+    "wrist",
+    "shoulder",
+    "lower_back"
+  ],
+  "easier": "yoga-cat",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": false,
+  "pose": {
+    "neck": -10,
+    "spine": 0,
+    "elbowL": 0,
+    "wristL": 80,
+    "hipL": 0,
+    "kneeL": 0,
+    "support": "hands_feet",
+    "rootAngle": 70,
+    "shoulderL": 58,
+    "ankleL": -20,
+    "elbowR": 0,
+    "wristR": 80,
+    "hipR": 0,
+    "kneeR": 0,
+    "shoulderR": 58,
+    "ankleR": -20
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "id": "yoga-warrior-two",
+  "kind": "pose",
+  "title": "Warrior two",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["none"],
+  "tags": ["standing", "strength", "hips"],
+  "steps": [
+    "Stand with your feet wide apart.",
+    "Turn the front foot out and bend that knee over the ankle.",
+    "Stretch your arms out at shoulder height.",
+    "Keep your torso upright and look over the front hand.",
+    "Hold for a few breaths, then straighten the leg and change sides."
+  ],
+  "works": ["Legs", "Glutes", "Shoulders"],
+  "stretches": ["Hips", "Inner thighs"],
+  "mistakes": [
+    "Letting the front knee cave inward.",
+    "Leaning the torso over the front leg."
+  ],
+  "skipIf": ["knee", "hip"],
+  "easier": "yoga-mountain",
+  "harder": "yoga-triangle",
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false,
+  "pose": {
+    "neck": 0, "spine": 0,
+    "shoulderL": 85, "elbowL": 3, "wristL": 0,
+    "shoulderR": 95, "elbowR": 3, "wristR": 0,
+    "hipL": 30, "kneeL": 25, "ankleL": -5,
+    "hipR": -20, "kneeR": 0, "ankleR": 20,
+    "rootAngle": 0,
+    "support": "feet"
+  }
+}

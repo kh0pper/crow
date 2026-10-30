@@ -1,0 +1,67 @@
+{
+  "id": "yoga-cat",
+  "kind": "pose",
+  "title": "Cat",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "kneeling",
+    "back",
+    "warm-up"
+  ],
+  "steps": [
+    "Start on your hands and knees with your wrists under your shoulders.",
+    "Round your back up toward the ceiling and tuck your chin a little.",
+    "Press the mat away and hold for one slow breath.",
+    "Release slowly back to a flat back."
+  ],
+  "works": [
+    "Back",
+    "Core"
+  ],
+  "stretches": [
+    "Back",
+    "Neck"
+  ],
+  "mistakes": [
+    "Pushing the hips back instead of rounding the spine.",
+    "Locking the elbows."
+  ],
+  "skipIf": [
+    "knee",
+    "wrist"
+  ],
+  "easier": "yoga-child",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": false,
+  "pose": {
+    "neck": 25,
+    "spine": 15,
+    "elbowL": 0,
+    "kneeL": 90,
+    "ankleL": -50,
+    "support": "knees",
+    "rootAngle": 64,
+    "shoulderL": 98,
+    "wristL": 60,
+    "elbowR": 0,
+    "kneeR": 90,
+    "ankleR": -50,
+    "shoulderR": 98,
+    "wristR": 60,
+    "hipR": 59,
+    "hipL": 59
+  }
+}

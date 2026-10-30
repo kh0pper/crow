@@ -1,0 +1,38 @@
+{
+  "id": "yoga-downward-dog",
+  "kind": "pose",
+  "title": "Downward-facing dog",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["mat"],
+  "tags": ["inversion", "shoulders", "hamstrings"],
+  "steps": [
+    "Start on your hands and knees with your hands slightly ahead of your shoulders.",
+    "Lift your hips up and back and straighten your arms.",
+    "Bend your knees as much as you need and let your heels lift.",
+    "Press the mat away and keep your neck long.",
+    "Hold for a few breaths, then lower your knees down."
+  ],
+  "works": ["Shoulders", "Arms", "Core"],
+  "stretches": ["Hamstrings", "Calves", "Back"],
+  "mistakes": [
+    "Letting the shoulders creep up toward the ears.",
+    "Locking the knees to force the heels down."
+  ],
+  "skipIf": ["wrist", "shoulder", "high_blood_pressure"],
+  "easier": "yoga-halfway-lift",
+  "harder": "yoga-plank",
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false,
+  "pose": {
+    "neck": 20, "spine": 5,
+    "shoulderL": 180, "elbowL": 0, "wristL": 60,
+    "shoulderR": 180, "elbowR": 0, "wristR": 60,
+    "hipL": 115, "kneeL": 5, "ankleL": 15,
+    "hipR": 115, "kneeR": 5, "ankleR": 15,
+    "rootAngle": 140,
+    "support": "hands_feet"
+  }
+}

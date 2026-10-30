@@ -1,0 +1,36 @@
+{
+  "id": "yoga-flow-desk-break",
+  "kind": "flow",
+  "title": "Desk break flow",
+  "minutes": 5,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["mat"],
+  "tags": ["desk", "short", "standing"],
+  "steps": [
+    "Move through the poses in the order listed, keeping each one small and easy.",
+    "Hold each pose for the time given and breathe slowly.",
+    "Finish standing tall for a few breaths before you sit down again."
+  ],
+  "works": ["Legs", "Back"],
+  "stretches": ["Hamstrings", "Hips", "Back"],
+  "mistakes": [
+    "Going deeper than your body is warm for.",
+    "Skipping the last rest instead of standing still."
+  ],
+  "skipIf": ["knee", "wrist", "lower_back", "high_blood_pressure"],
+  "easier": null,
+  "harder": null,
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false,
+  "flow": [
+    { "id": "yoga-mountain", "holdSeconds": 30 },
+    { "id": "yoga-halfway-lift", "holdSeconds": 30 },
+    { "id": "yoga-forward-fold", "holdSeconds": 40 },
+    { "id": "yoga-low-lunge", "holdSeconds": 45 },
+    { "id": "yoga-cat", "holdSeconds": 30 },
+    { "id": "yoga-cow", "holdSeconds": 30 },
+    { "id": "yoga-mountain", "holdSeconds": 30 }
+  ]
+}

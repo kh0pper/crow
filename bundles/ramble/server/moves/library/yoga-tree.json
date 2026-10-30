@@ -1,0 +1,38 @@
+{
+  "id": "yoga-tree",
+  "kind": "pose",
+  "title": "Tree pose",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": ["none"],
+  "tags": ["standing", "balance"],
+  "steps": [
+    "Stand tall with your feet together.",
+    "Rest one foot against your other calf or inner thigh, not on the knee.",
+    "Bring your hands together at your chest, or reach them overhead.",
+    "Find a steady point to look at and take a few slow breaths.",
+    "Lower the foot and change sides."
+  ],
+  "works": ["Legs", "Core"],
+  "stretches": ["Hips"],
+  "mistakes": [
+    "Pressing the raised foot into the side of the knee.",
+    "Letting the standing knee lock."
+  ],
+  "skipIf": ["balance", "knee", "ankle"],
+  "easier": "yoga-mountain",
+  "harder": null,
+  "sources": [{ "title": "Written for Crow Ramble Moves", "url": "", "license": "MIT (this repository)" }],
+  "reviewed": false,
+  "pose": {
+    "neck": 0, "spine": 2,
+    "shoulderL": 172, "elbowL": 4, "wristL": 0,
+    "shoulderR": 172, "elbowR": 4, "wristR": 0,
+    "hipL": -2, "kneeL": 3, "ankleL": 0,
+    "hipR": 50, "kneeR": 115, "ankleR": -25,
+    "rootAngle": -3,
+    "support": "feet"
+  }
+}
