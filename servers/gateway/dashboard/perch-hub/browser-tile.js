@@ -28,7 +28,7 @@ import { tJs } from "../shared/i18n.js";
  *
  * Polling (GET …/interactive/:sid/browser/frame?after=<seq>&vw=<px>): one
  * poller per tile, only while an IntersectionObserver says the tile is on
- * screen AND document.visibilityState is "visible". Never more than one
+ * screen (or it floats: browser-float.js) AND document.visibilityState is "visible". Never more than one
  * request in flight. Each poller sits in HUB.streams (closed by HUB.retire on
  * turbo:before-render) and aborts its fetch through an AbortController.
  *   200 → show the frame, poll again after its seq    204 → poll again
@@ -160,7 +160,10 @@ export function perchBrowserTileJs(lang = "en") {
     /* the live picture is the Take over control too: name it so */
     if(t.phase==='live') t.frame.setAttribute('aria-label',BT_TAKE_OVER+' \u00b7 '+btHost(t.domain));
   }
-  function btDim(t,on){ if(on) t.node.setAttribute('data-dim','1'); else t.node.removeAttribute('data-dim'); }
+  function btDim(t,on){
+    if(on) t.node.setAttribute('data-dim','1'); else t.node.removeAttribute('data-dim');
+    if(typeof bfSync==='function') bfSync();      /* a new frame or a dim: the mini player mirrors it */
+  }
   function btDrop(t){
     btStop(t); btUnobserve(t);
     if(t.node.parentNode) t.node.parentNode.removeChild(t.node);
@@ -170,6 +173,7 @@ export function perchBrowserTileJs(lang = "en") {
 
   /* The thread header's status line. */
   function btHeader(){
+    if(typeof bfSync==='function') bfSync();      /* browser-float.js: the mini player follows the live tile */
     var e=el('perch-browser-status'); if(!e) return;
     var t=btLiveKey?btTiles[btLiveKey]:null;
     var text=(!t||t.phase!=='live')?'':t.operator?BT_WAITING
@@ -184,7 +188,9 @@ export function perchBrowserTileJs(lang = "en") {
   function btVisible(){ return !document.visibilityState||document.visibilityState==='visible'; }
   function btVw(){ var w=Math.round(Number(window.innerWidth)||0); return w>0?w:0; }
   function btCanPoll(t){
-    return live()&&btTiles[t.key]===t&&t.phase==='live'&&!t.halted&&!t.operator&&t.onScreen&&btVisible();
+    /* a floating tile (browser-float.js) counts as on screen */
+    var seen=t.onScreen||(typeof bfShowing==='function'&&bfShowing(t));
+    return live()&&btTiles[t.key]===t&&t.phase==='live'&&!t.halted&&!t.operator&&seen&&btVisible();
   }
   function btMaybeStart(t){
     if(t.poller||t.retryTimer||!btCanPoll(t)) return;
@@ -281,7 +287,8 @@ export function perchBrowserTileJs(lang = "en") {
         for(var i=0;i<entries.length;i++){
           var t2=btByNode(entries[i].target); if(!t2) continue;
           t2.onScreen=!!entries[i].isIntersecting;
-          if(t2.onScreen) btMaybeStart(t2); else btStopPoll(t2);
+          if(typeof bfSeen==='function') bfSeen(t2);   /* off screen and live: it may float */
+          if(btCanPoll(t2)) btMaybeStart(t2); else btStopPoll(t2);
         }
       });
     }
@@ -415,6 +422,8 @@ export function perchBrowserTileJs(lang = "en") {
   function retireBrowserTiles(){
     for(var k in btTiles) btStop(btTiles[k]);
     if(btIO){ try{ btIO.disconnect(); }catch(e){} btIO=null; }
+    /* a retired instance's mini player goes at once; a reset's btHeader hides it */
+    if(!live()&&typeof bfRemove==='function') bfRemove();
   }
   /* A new transcript: none of the old tiles, their pollers or the header line. */
   function resetBrowserTiles(){

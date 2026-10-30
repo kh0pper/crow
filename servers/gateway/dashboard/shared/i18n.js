@@ -4168,6 +4168,10 @@ export const translations = {
   "perch.browserNotWaiting": { en: "The bot is no longer waiting for you.", es: "El bot ya no te está esperando." },
   "perch.youHaveBrowser": { en: "You have the browser", es: "Tienes tú el navegador" },
   "browser.botUsing": { en: "A bot is using the browser", es: "Un bot está usando el navegador" },
+  "perch.browserFloatLabel": { en: "Browser preview", es: "Vista previa del navegador" },
+  "perch.browserFloatExpand": { en: "Full screen", es: "Pantalla completa" },
+  "perch.browserFloatClose": { en: "Close preview", es: "Cerrar vista previa" },
+  "perch.browserFloatExit": { en: "Exit full screen", es: "Salir de pantalla completa" },
 
   // ─── Voice hand-off: the phone confirm page (a kiosk's hand-off, confirmed on your phone) ───
   "voiceHandoff.pageTitle": { en: "Hand-off from Crow", es: "Encargo de Crow" },
