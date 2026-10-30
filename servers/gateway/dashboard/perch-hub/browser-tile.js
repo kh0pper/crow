@@ -422,7 +422,8 @@ export function perchBrowserTileJs(lang = "en") {
   function retireBrowserTiles(){
     for(var k in btTiles) btStop(btTiles[k]);
     if(btIO){ try{ btIO.disconnect(); }catch(e){} btIO=null; }
-    if(typeof bfSync==='function') bfSync();
+    /* a retired instance's mini player goes at once; a reset's btHeader hides it */
+    if(!live()&&typeof bfRemove==='function') bfRemove();
   }
   /* A new transcript: none of the old tiles, their pollers or the header line. */
   function resetBrowserTiles(){

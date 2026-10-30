@@ -7,10 +7,11 @@ import { tJs } from "../shared/i18n.js";
  * Spliced INSIDE perchHubJs()'s IIFE (client.js) right after browser-tile.js,
  * so it shares that scope: el / live / bindOnce and the tile's btTiles /
  * btLiveKey / btHost / btTakeOver / btCanPoll / btMaybeStart / btStopPoll.
- * The tile calls in through four guarded hooks (typeof checks, so a harness
+ * The tile calls in through guarded hooks (typeof checks, so a harness
  * that splices the tile alone runs without this file):
  *   bfSeen(t)    the IntersectionObserver reported t (on screen or not)
- *   bfSync()     the live tile changed (btHeader, btDim, retireBrowserTiles)
+ *   bfSync()     the live tile changed (btHeader, btDim)
+ *   bfRemove()   retireBrowserTiles on a retired instance
  *   bfShowing(t) btCanPoll: a floating tile counts as on screen (unless a
  *                modal dialog covers it)
  *   bfResize()   the hub's window resize listener, applyVV (the keyboard) and
@@ -145,7 +146,8 @@ export function perchBrowserFloatJs(lang = "en") {
     var host=btHost(t.domain);
     if(bf.host.textContent!==host) bf.host.textContent=host;
     bf.img.alt=host;
-    bf.node.setAttribute('aria-label',BF_LABEL+' \\u00b7 '+host);
+    /* the dot is the only visible Live in the mini player: say it */
+    bf.node.setAttribute('aria-label',BF_LABEL+' \\u00b7 '+BT_LIVE+' \\u00b7 '+host);
     if(t.operator||t.node.getAttribute('data-dim')==='1') bf.node.setAttribute('data-dim','1');
     else bf.node.removeAttribute('data-dim');
   }

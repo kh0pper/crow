@@ -275,7 +275,7 @@ test("live + off screen floats; back on screen goes home; done fades back; never
   const f = h.float();
   assert.equal(f.parentNode, h.root, "in #perch-hub-root");
   assert.equal(one(f, "bf-host").textContent, "<b>shop</b>.example", "textContent");
-  assert.equal(f.getAttribute("aria-label"), "Browser preview · <b>shop</b>.example");
+  assert.equal(f.getAttribute("aria-label"), "Browser preview · Live · <b>shop</b>.example", "Live is said, not only shown as a dot");
   assert.ok(one(f, "bf-dot"));
   assert.equal(f.style.left, (390 - 156 - 12) + "px", "bottom right");
   assert.equal(f.style.top, (700 - 140 - 12) + "px", "above the composer");
@@ -334,9 +334,12 @@ test("one mini player per session: the newest live tile", async () => {
   await h.show(t1, false);
   assert.equal(byClass(h.root, "ph-bfloat").length, 1, "one node");
   assert.equal(one(h.float(), "bf-host").textContent, "two.example", "the newest");
-  // a new transcript: gone
+  // a new transcript: gone, and no frame request for the discarded tiles
+  const n = h.frames().length;
   h.api.resetBrowserTiles(); await tick();
   assert.equal(h.floating(), false);
+  assert.equal(h.frames().length, n, "a reset starts no fetch");
+  assert.equal(h.pending().length, 0);
 });
 
 test("the picture mirrors the tile's frames and dims with it", async () => {
