@@ -247,6 +247,85 @@ export function shellClientJs() {
       }
     })();
 
+    // ─── For You: the phone swipe (For You v1) ───
+    // A left-to-right swipe opens For You, only where it can't fight anything
+    // else: the Chat list (/dashboard/perch with no chat open) and a project's
+    // home, at phone width (the bottom-bar layout), never on a chat or a
+    // canvas. It must start at least EDGE px in from the left edge, which
+    // Android's system back gesture owns, and never on a field, in a box that
+    // scrolls sideways, or while a drawer, sheet or dialog is open. It is
+    // dropped when text is selected, when a text field on the page holds a
+    // draft (leaving would lose it), and on a paired kiosk display (a shared
+    // screen: its browser holds the kiosk's pairing token). A tap or a
+    // vertical scroll is untouched (passive listeners; nothing is prevented).
+    // It exists only while the flag is on: the drawer's For You link
+    // (data-for-you-entry, rendered only then) is its target.
+    (function () {
+      if (window.__crowForYouSwipeBound) return;
+      window.__crowForYouSwipeBound = true;
+      var EDGE = 32, MIN_DX = 80, MAX_MS = 700;
+      var start = null;
+      function kiosk() {
+        try { return !!window.localStorage.getItem('crow.kiosk.token'); } catch (e) { return false; }
+      }
+      function surface() {
+        var p = location.pathname;
+        if (p === '/dashboard/perch') {
+          if (/^#perchlive-/.test(location.hash)) return false;
+          return !document.body || document.body.getAttribute('data-view') !== 'chat';
+        }
+        return /^\\/dashboard\\/project\\/[^\\/]+$/.test(p);
+      }
+      function overlayOpen() {
+        return !!document.querySelector('dialog[open], [aria-modal="true"]:not([hidden])');
+      }
+      function hasDraft() {
+        var fields = document.querySelectorAll('.content-body textarea, .content-body input[type="text"], .content-body input[type="search"], .content-body input:not([type]), .content-body [contenteditable="true"]');
+        for (var i = 0; i < fields.length; i++) {
+          var v = fields[i].isContentEditable ? fields[i].textContent : fields[i].value;
+          if (v && String(v).trim() !== '') return true;
+        }
+        return false;
+      }
+      function selecting() {
+        var sel = window.getSelection ? window.getSelection() : null;
+        return !!(sel && !sel.isCollapsed && String(sel).trim() !== '');
+      }
+      function blocked(el) {
+        for (var n = el; n && n !== document.body; n = n.parentElement) {
+          if (n.matches && n.matches('input,textarea,select,[contenteditable],dialog,canvas,video,[data-no-swipe]')) return true;
+          if (n.scrollWidth > n.clientWidth + 1) {
+            var ox = getComputedStyle(n).overflowX;
+            if (ox === 'auto' || ox === 'scroll') return true;
+          }
+        }
+        return false;
+      }
+      document.addEventListener('touchstart', function (e) {
+        start = null;
+        if (!e.touches || e.touches.length !== 1 || !surface() || kiosk()) return;
+        if (!window.matchMedia || !window.matchMedia('(max-width: 1023px)').matches) return;
+        if (overlayOpen()) return;
+        var t = e.touches[0];
+        if (t.clientX < EDGE || blocked(e.target)) return;
+        start = { x: t.clientX, y: t.clientY, at: Date.now() };
+      }, { passive: true });
+      document.addEventListener('touchend', function (e) {
+        var s = start;
+        start = null;
+        if (!s || !e.changedTouches || !e.changedTouches.length) return;
+        var t = e.changedTouches[0];
+        var dx = t.clientX - s.x, dy = t.clientY - s.y;
+        if (dx < MIN_DX || Math.abs(dy) > dx / 2 || Date.now() - s.at > MAX_MS) return;
+        if (!surface() || overlayOpen() || selecting() || hasDraft()) return;
+        var link = document.querySelector('a[data-for-you-entry]');
+        if (!link) return;
+        var href = link.getAttribute('href');
+        if (window.Turbo && typeof window.Turbo.visit === 'function') window.Turbo.visit(href); else location.href = href;
+      }, { passive: true });
+      document.addEventListener('touchcancel', function () { start = null; }, { passive: true });
+    })();
+
     // ─── The apps launcher (R1.2 PR 5): the drawer's Apps grid ───
     // window.CrowApps is shared with the Perch session's apps sheet
     // (perch-hub/client.js): one tile renderer, one open rule.

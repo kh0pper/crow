@@ -18,6 +18,7 @@ import { t } from "../shared/i18n.js";
 import { crowMarkSvg } from "../shared/crow-mark.js";
 import { getPanel as registryGetPanel } from "../panel-registry.js";
 import { needsYouLabel } from "../panels/board/needs-you-label.js";
+import { forYouEnabled } from "../../for-you/flag.js";
 
 // Inline 24px stroke icons, decorative (the label carries the meaning).
 const ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
@@ -32,9 +33,12 @@ const CHEVRON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
 
 /**
  * The "More of Crow" grid. An entry renders only when its panel is
- * registered on this gateway, so the drawer never links to a 404.
+ * registered on this gateway (and its `when`, if any, holds), so the drawer
+ * never links to a 404.
  */
 const MORE_ENTRIES = [
+  // For You v1: only while CROW_FOR_YOU=1 (the page 404s otherwise).
+  { id: "for-you", fallback: "For You", when: forYouEnabled },
   { id: "messages", fallback: "Messages" },
   { id: "bot-builder", fallback: "Bots" },
   { id: "schedule", fallback: "Schedules" },
@@ -167,11 +171,11 @@ function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" 
 function moreDetails({ lang, getPanel }) {
   // Labels follow the classic sidebar's rule: the nav.<id> translation, else
   // the panel's own manifest name, else a plain fallback.
-  const entries = MORE_ENTRIES.map((e) => ({ e, panel: getPanel(e.id) })).filter((x) => x.panel)
+  const entries = MORE_ENTRIES.map((e) => ({ e, panel: getPanel(e.id) })).filter((x) => x.panel && (!x.e.when || x.e.when()))
     .map(({ e, panel }) => ({ e, text: label(e.key, panel.name || e.fallback, lang) }));
   if (!entries.length) return "";
   const sub = entries.slice(0, 4).map((x) => x.text).join(", ") + "…";
-  const grid = entries.map(({ e, text }) => `<a href="${e.route}" class="shell-more-item">${escapeHtml(text)}</a>`).join("");
+  const grid = entries.map(({ e, text }) => `<a href="${e.route}" class="shell-more-item"${e.id === "for-you" ? " data-for-you-entry" : ""}>${escapeHtml(text)}</a>`).join("");
   return `<details class="shell-more-row"><summary class="shell-project"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(t("shell.more", lang))}</span><span class="shell-project-sub">${escapeHtml(sub)}</span></span></summary><div class="shell-more">${grid}</div></details>`;
 }
 
@@ -277,12 +281,12 @@ export function shellDrawer({ scope, projects, lang, counts, homeSlug, apps, get
 
 /**
  * The account sheet: Settings, Models, What Crow can reach, and the classic
- * switch. With `tray` (the header bird's or bell's notifications tray,
+ * switch (and For You first, while CROW_FOR_YOU=1). With `tray` (the header bird's or bell's notifications tray,
  * notifications.js, trusted server markup) it is the ONE "Notifications and
  * settings" sheet the mascot opens (phone review 2026-10-29): the tray first,
  * then the settings links, and no separate avatar button exists.
  */
-export function shellAvatarSheet({ lang, tray }) {
+export function shellAvatarSheet({ lang, tray, getPanel = registryGetPanel }) {
   const settings = label("nav.settings", "Settings", lang);
   const merged = typeof tray === "string" && tray !== "";
   const name = escapeHtml(t(merged ? "shell.notifSettings" : "shell.account", lang));
@@ -293,6 +297,7 @@ export function shellAvatarSheet({ lang, tray }) {
       <h3 class="shell-heading shell-crow-heading">${escapeHtml(t("notif.notifications", lang))}</h3>
       <div class="shell-crow-tray">${tray}</div>
       <hr class="shell-crow-sep">` : ""}
+      ${forYouEnabled() && getPanel("for-you") ? `<a href="/dashboard/for-you" class="shell-sheet-link" data-for-you-entry>${escapeHtml(label("nav.for-you", "For You", lang))}</a>` : ""}
       <a href="/dashboard/settings" class="shell-sheet-link">${escapeHtml(settings)}</a>
       <a href="/dashboard/settings?section=models" class="shell-sheet-link">${escapeHtml(t("settings.section.models", lang))}</a>
       <a href="/dashboard/settings?section=integrations" class="shell-sheet-link">${escapeHtml(t("shell.reach", lang))}</a>
