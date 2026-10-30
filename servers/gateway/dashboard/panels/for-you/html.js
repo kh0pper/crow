@@ -67,7 +67,7 @@ export function morningHtml(m, lang = "en") {
 function storyCard(s, lang, now) {
   const age = ageText(s.publishedAt, lang, now);
   const meta = [s.sourceName, age, whyText(s.why, lang)].filter(Boolean).map(e).join(" · ");
-  return `<li class="fy-story" data-fy-story="${s.id}" data-fy-source="${s.sourceId}">
+  return `<li class="fy-story" data-fy-story="${e(s.id)}" data-fy-source="${e(s.sourceId)}">
       <button type="button" class="fy-story-open" aria-haspopup="dialog" aria-controls="fy-sheet-${s.id}" data-fy-open="fy-sheet-${s.id}">
         <span class="fy-story-title">${e(s.title)}</span>
         ${s.summary ? `<span class="fy-story-sum">${e(s.summary)}</span>` : ""}
@@ -166,7 +166,7 @@ export function customizeHtml({ settings, hidden, mediaInstalled, flash, csrf },
   const note = FLASH[flash] ? `<p class="fy-banner" role="status">${e(fill(t(FLASH[flash], lang), { city: settings.city }))}</p>` : "";
   const toggles = SECTIONS.map((k) => `<label class="fy-toggle"><span>${e(t(`forYou.${k}`, lang))}</span><input type="checkbox" name="section_${k}" value="1"${settings.sections[k] ? " checked" : ""}></label>`).join("");
   const place = settings.place ? [settings.place.name, settings.place.admin1, settings.place.country].filter(Boolean).join(", ") : "";
-  const hiddenRows = (hidden || []).map((h) => `<li class="fy-hidden-row"><span>${e(h.name)}</span><button type="button" class="fy-btn" data-fy-unhide="${h.id}">${e(t("forYou.showAgain", lang))}</button></li>`).join("");
+  const hiddenRows = (hidden || []).map((h) => `<li class="fy-hidden-row"><span>${e(h.name)}</span><button type="button" class="fy-btn" data-fy-unhide="${e(h.id)}">${e(t("forYou.showAgain", lang))}</button></li>`).join("");
   const hiddenBlock = mediaInstalled ? `<section class="fy-card" aria-labelledby="fy-hidden-h">
         <h2 class="fy-kicker" id="fy-hidden-h">${e(t("forYou.hiddenSources", lang))}</h2>
         ${hiddenRows ? `<ul class="fy-hidden">${hiddenRows}</ul>` : `<p class="fy-note">${e(t("forYou.hiddenNone", lang))}</p>`}
