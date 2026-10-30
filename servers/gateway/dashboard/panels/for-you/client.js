@@ -6,8 +6,9 @@
  *   Hide <source>   -> POST /api/media/sources/:id/hidden {hidden:true}, its stories leave the list
  *   Read at <source> -> ... {action:"mark_read"} (fire and forget), so a read story isn't picked again
  *   Show again (customize) -> POST /api/media/sources/:id/hidden {hidden:false}
- *   Play / Pause (Listen) -> the tile's own <audio> element; one plays at a time. A podcast
- *     episode that starts playing is marked read ({action:"mark_read"}), so it leaves the list.
+ *   Play (Listen) -> the shared player bar (window.crowPlayer.load), as Media Hub plays; without the bar,
+ *     the tile's own <audio> element (Play / Pause, one at a time). A podcast episode that starts
+ *     playing is marked read ({action:"mark_read"}), so it leaves the list.
  * Messages come from the page's data-fy-* attributes (server-translated).
  *
  * Emitted inside a template literal: this source must contain NO backticks. It re-runs on every
@@ -45,8 +46,22 @@ export function forYouClientJs() {
     if (play) {
       var audio = document.getElementById(play.getAttribute('data-fy-play'));
       if (!audio) return;
-      if (!audio.paused) { audio.pause(); return; }
       var all = root.querySelectorAll('audio');
+      // The shared player bar plays it, as Media Hub does: it keeps playing in the background and on the lock
+      // screen, and a bare inline element stayed silent in the Android app. The inline element is the fallback.
+      var bar = window.crowPlayer;
+      if (bar && typeof bar.load === 'function') {
+        for (var q = 0; q < all.length; q++) if (!all[q].paused) all[q].pause();
+        var named = document.getElementById(play.getAttribute('aria-describedby') || '');
+        bar.load(audio.getAttribute('src'), named ? named.textContent.trim() : '', '');
+        var playedId = audio.getAttribute('data-fy-played');
+        if (playedId && !audio.__fyMarked) {
+          audio.__fyMarked = true;
+          post('/api/media/articles/' + encodeURIComponent(playedId) + '/action', { action: 'mark_read' }, true).catch(function () {});
+        }
+        return;
+      }
+      if (!audio.paused) { audio.pause(); return; }
       for (var n = 0; n < all.length; n++) if (all[n] !== audio && !all[n].paused) all[n].pause();
       var started = audio.play();
       if (started && typeof started.catch === 'function') {
