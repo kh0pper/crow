@@ -410,6 +410,22 @@ test("F1: with the composer hidden (another tab), the default spot sits above th
   assert.match(perchHubJs("en"), /function switchTab\(name\)\{[\s\S]*?bfResize\(\);[^\n]*\n  \}/);
 });
 
+test("F2: an on-screen keyboard (visual viewport only) lifts it; applyVV re-places it", async () => {
+  const h = mount();
+  await h.show(await liveTile(h, "call_1"), false);
+  const f = h.float();
+  assert.equal(f.style.top, (700 - 140 - 12) + "px");
+  // the keyboard: 800 → 450 visible, no window resize
+  h.sandbox.window.visualViewport = { height: 450, offsetTop: 0, scale: 1 };
+  h.api.bfResize();
+  assert.ok(parseInt(f.style.top, 10) <= 450 - 140 - 8, "above the keyboard: " + f.style.top);
+  // pinch-zoom is not a keyboard: the layout viewport stays the bound
+  h.sandbox.window.visualViewport = { height: 300, offsetTop: 200, scale: 2 };
+  h.api.bfResize();
+  assert.equal(f.style.top, (700 - 140 - 12) + "px");
+  assert.match(perchHubJs("en"), /var applyVV=function\(\)\{[\s\S]*?bfResize\(\);[^\n]*\n    \};/, "applyVV calls it");
+});
+
 test("bfClamp keeps the box inside the viewport", () => {
   const h = mount();
   const c = h.api.bfClamp;

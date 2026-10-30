@@ -4375,6 +4375,7 @@ ${perchTakeOverJs(lang)}
         else body.removeAttribute('data-perch-kb');
       }
       el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
+      bfResize();                 /* the floating browser preview stays above the keyboard */
     };
     bindOnce(vv,'resize','vvResize',applyVV);
     bindOnce(vv,'scroll','vvScroll',applyVV);

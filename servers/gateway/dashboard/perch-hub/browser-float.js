@@ -12,7 +12,8 @@ import { tJs } from "../shared/i18n.js";
  *   bfSeen(t)    the IntersectionObserver reported t (on screen or not)
  *   bfSync()     the live tile changed (btHeader, btDim, retireBrowserTiles)
  *   bfShowing(t) btCanPoll: a floating tile counts as on screen
- *   bfResize()   the hub's one window resize listener (clamp the position)
+ *   bfResize()   the hub's window resize listener, applyVV (the keyboard) and
+ *                switchTab (clamp or re-place the position)
  *
  * Rules:
  *  - Emitted inside a template literal: no backtick and no dollar-brace in the
@@ -56,7 +57,16 @@ export function perchBrowserFloatJs(lang = "en") {
     var maxX=Math.max(BF_MARGIN,vw-w-BF_MARGIN), maxY=Math.max(BF_MARGIN,vh-h-BF_MARGIN);
     return { x:Math.round(Math.min(Math.max(x,BF_MARGIN),maxX)), y:Math.round(Math.min(Math.max(y,BF_MARGIN),maxY)) };
   }
-  function bfViewport(){ return { w:Number(window.innerWidth)||0, h:Number(window.innerHeight)||0 }; }
+  /* The visible area. An on-screen keyboard shrinks only the visual viewport
+     (no window resize): its bottom edge is the floor, unless pinch-zoomed. */
+  function bfViewport(){
+    var w=Number(window.innerWidth)||0, h=Number(window.innerHeight)||0, vv=window.visualViewport;
+    if(vv&&!(vv.scale>1.01)){
+      var bottom=(Number(vv.height)||0)+(Number(vv.offsetTop)||0);
+      if(bottom>0&&bottom<h) h=bottom;
+    }
+    return { w:w, h:h };
+  }
   function bfSize(){ var n=bf.node; return { w:(n&&n.offsetWidth)||160, h:(n&&n.offsetHeight)||130 }; }
   function bfLoad(){
     try{
