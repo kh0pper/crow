@@ -151,6 +151,42 @@ export function readTranscriptTail(file, { maxBytes = TAIL_BYTES, maxTurns = TAI
   return out.slice(-maxTurns);
 }
 
+/** How much of a transcript's head is read for its first message. */
+export const FIRST_MESSAGE_BYTES = 65536;
+
+/**
+ * The operator's first message in a transcript, one line, secret-masked, or null: the
+ * session card's title until the session has a name (session-cards.js caps it at 80).
+ * Reads only the file's first FIRST_MESSAGE_BYTES; the [Dates] line and briefing blocks
+ * are skipped. Never throws.
+ */
+export function readFirstUserMessage(file, { maxBytes = FIRST_MESSAGE_BYTES } = {}) {
+  if (!file) return null;
+  let text;
+  try {
+    const fd = openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const n = readSync(fd, buf, 0, maxBytes, 0);
+      text = buf.toString("utf8", 0, n);
+    } finally { try { closeSync(fd); } catch { /* gone */ } }
+  } catch { return null; }
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }   // a cut last line, or junk
+    const m = ev && ev.type === "message" ? ev.message : null;
+    if (!m || m.role !== "user") continue;
+    const parts = Array.isArray(m.content)
+      ? m.content.filter((b) => b && typeof b.text === "string" && b.type !== "thinking").map((b) => stripDates(b.text))
+      : [stripDates(messageText(m))];
+    const kept = parts.filter((t) => t.trim() && !isBriefing(t)).join(" ");
+    const one = maskSecrets(kept).replace(/\s+/g, " ").trim();
+    if (one) return one.slice(0, 200);
+  }
+  return null;
+}
+
 // ---- prompt and sanitising --------------------------------------------------
 
 export function buildPrompt(turns, { wantTitle }) {

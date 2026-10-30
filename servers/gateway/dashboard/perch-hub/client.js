@@ -759,7 +759,7 @@ export function perchHubJs(lang = "en") {
   function cardModelOf(r){
     var p=projectOfRow(r,PROJECTS);
     var here=!!p&&SCOPE!=null&&/^[1-9][0-9]*$/.test(String(SCOPE))&&Number(SCOPE)===Number(r.projectId);
-    return sessionCardModel({sessionId:r.sessionId,label:r.label,botName:r.botName||r.botId,state:r.state,
+    return sessionCardModel({sessionId:r.sessionId,label:r.label,firstMessage:r.firstMessage,botName:r.botName||r.botId,state:r.state,
       pendingUi:r.pendingUi,lastAt:r.lastActivityAt},
       {projectName:(p&&!here)?p.name:null,projectSlug:sessionHref(r,PROJECTS,SCOPE)?p.slug:null});
   }

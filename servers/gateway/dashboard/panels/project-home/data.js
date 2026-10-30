@@ -27,6 +27,7 @@
  *            CROW_SESSION_BRIEFING=0 (read per request).
  */
 
+import { readFirstUserMessage, resolveTranscriptPath } from "../../../perch/session-summary.js";
 import { CROW_VOICE_BOT_ID } from "../../../../shared/voice-bot.js";
 import { perchAttached } from "../../../shared/perch-attached.js";
 import { drawerHrefs } from "../../../board/card-link.js";
@@ -149,10 +150,13 @@ export function startData(bots, wantId = null) {
   return { lead, bots: lead ? [lead, ...list.filter((b) => b !== lead)] : list };
 }
 
-/** The project's filed perch-live threads, newest first: [{ threadId, label, botName, lastAt }]. */
+/**
+ * The project's filed perch-live threads, newest first: [{ threadId, label, firstMessage, botName, lastAt }].
+ * firstMessage (the card's title until the session has a name) is read only for an unnamed session.
+ */
 export async function earlierSessions(db, projectId, { limit = SESSION_LIMIT } = {}) {
   const query = (archived) => `
-    SELECT b.gateway_thread_id AS thread_id, b.label, d.display_name, b.bot_id,
+    SELECT b.gateway_thread_id AS thread_id, b.label, d.display_name, b.bot_id, b.pi_session_dir, b.pi_session_id,
            MAX(COALESCE(b.updated_at, b.created_at)) AS last_at
       FROM bot_sessions b
       JOIN shell_items s ON s.item_kind = 'perch_thread' AND s.item_ref = b.gateway_thread_id
@@ -175,12 +179,16 @@ export async function earlierSessions(db, projectId, { limit = SESSION_LIMIT } =
     try { rows = (await db.execute({ sql: query(false), args })).rows || []; }
     catch (err2) { if (!ABSENT_RE.test(String(err2 && err2.message))) throw err2; rows = []; }
   }
-  return rows.map((r) => ({
+  return rows.map((r) => {
+    const label = r.label != null && String(r.label).trim() !== "" ? String(r.label) : null;
+    return {
     threadId: String(r.thread_id),
-    label: r.label != null && String(r.label).trim() !== "" ? String(r.label) : null,
+    label,
+    firstMessage: label ? null : readFirstUserMessage(resolveTranscriptPath(r.pi_session_dir, r.pi_session_id)),
     botName: String(r.display_name || r.bot_id || ""),
     lastAt: r.last_at == null ? null : String(r.last_at),
-  }));
+    };
+  });
 }
 
 /** Map<threadId, label> for the given perch-live threads (the newest row's label; none when unset). */

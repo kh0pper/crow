@@ -316,6 +316,32 @@ test("earlier sessions follow the shell_items filing", async () => {
   } finally { db.close(); }
 });
 
+test("an unnamed earlier session reads as its first message; a named one keeps its name (operator report 2026-10-30)", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  const dir = mkdtempSync(join(tmpdir(), "ph-first-"));
+  try {
+    writeFileSync(join(dir, "2026-10-29T19-13-11-292Z_pi-first-1.jsonl"),
+      JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "Book the dolphin tour\nfor Saturday" }] } }) + "\n");
+    for (const [sid, label, piId] of [["perchlive-1f1f1f1f", null, "pi-first-1"], ["perchlive-2f2f2f2f", "Named one", "pi-first-1"], ["perchlive-3f3f3f3f", null, "pi-no-file"]]) {
+      await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, kind, status, gateway_thread_id, label, pi_session_dir, pi_session_id, created_at, updated_at) VALUES ('amy','perch-live','active',?,?,?,?,'2026-10-07 00:00:00','2026-10-07 00:00:00')", args: [sid, label, dir, piId] });
+      await db.execute({ sql: "INSERT INTO shell_items (item_kind, item_ref, project_id, set_by) VALUES ('perch_thread', ?, ?, 'origin')", args: [sid, P.named] });
+    }
+    const by = new Map((await data.earlierSessions(db, P.named)).map((s) => [s.threadId, s]));
+    assert.equal(by.get("perchlive-1f1f1f1f").firstMessage, "Book the dolphin tour for Saturday");
+    assert.equal(by.get("perchlive-2f2f2f2f").firstMessage, null, "a named session is never read");
+    assert.equal(by.get("perchlive-3f3f3f3f").firstMessage, null, "no transcript yet");
+    const home = await get("/dashboard/project/named", jarNew());
+    assert.match(home.body, /<span class="ph-row-title">Book the dolphin tour for Saturday<\/span>/);
+    assert.match(home.body, /<span class="ph-row-title">Named one<\/span>/);
+  } finally {
+    await db.execute("DELETE FROM shell_items WHERE item_ref IN ('perchlive-1f1f1f1f','perchlive-2f2f2f2f','perchlive-3f3f3f3f')");
+    await db.execute("DELETE FROM bot_sessions WHERE gateway_thread_id IN ('perchlive-1f1f1f1f','perchlive-2f2f2f2f','perchlive-3f3f3f3f')");
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("unknown slug 404s without a cookie", async () => {
   for (const slug of ["nope", "attic", "unassigned", "all", String(P.garden), String(P.kitchen)]) {
     const r = await get("/dashboard/project/" + slug, jarNew());

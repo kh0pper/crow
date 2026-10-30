@@ -156,7 +156,7 @@ function sessionsSection(data, project, lang, now) {
     return `<section class="ph-section ph-earlier">${head}<p class="ph-line">${escapeHtml(t("shell.noSessions", lang))}</p></section>`;
   }
   const rows = data.sessions.map((s) =>
-    sessionCardHtml(sessionCardModel({ sessionId: s.threadId, label: s.label, botName: s.botName, lastAt: s.lastAt }, { projectSlug: project.slug }), lang, { now })).join("");
+    sessionCardHtml(sessionCardModel({ sessionId: s.threadId, label: s.label, firstMessage: s.firstMessage, botName: s.botName, lastAt: s.lastAt }, { projectSlug: project.slug }), lang, { now })).join("");
   return `<section class="ph-section ph-earlier">${head}<ul class="ph-list">${rows}</ul></section>`;
 }
 

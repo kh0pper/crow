@@ -531,10 +531,15 @@ export async function completeText({ model, prompt, maxTokens = 400, timeoutMs =
   // row, or a co-hosted peer's) is that instance's to start, not ours.
   if (isDoorUrl(up.baseUrl)) throw new Error("completeText: refused, the model is behind a door");
   if (isForeignInstanceHost(up.host, ownInstanceIdFn)) throw new Error("completeText: refused, another instance's model");
+  const body = { model: up.model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, stream: false };
+  // A reasoning model (qwen3.x) spent the whole max_tokens thinking and answered "" (every session
+  // summary ended empty_output, 2026-10-30). This is short structured writing: no thinking. Only a
+  // provider on our own boxes gets the llama.cpp/vLLM flag; a cloud endpoint may reject unknown fields.
+  if (up.host !== "cloud") body.chat_template_kwargs = { enable_thinking: false };
   const res = await fetchFn(`${up.baseUrl}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(up.apiKey) },
-    body: JSON.stringify({ model: up.model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, stream: false }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`completeText: upstream status ${res.status}`);
