@@ -6,7 +6,8 @@
  *   Hide <source>   -> POST /api/media/sources/:id/hidden {hidden:true}, its stories leave the list
  *   Read at <source> -> ... {action:"mark_read"} (fire and forget), so a read story isn't picked again
  *   Show again (customize) -> POST /api/media/sources/:id/hidden {hidden:false}
- *   Play (Listen) -> the shared player bar (window.crowPlayer.load), as Media Hub plays; without the bar,
+ *   Play (Listen) -> the shared player bar (window.crowPlayer.load; a briefing with ready shows is queued
+ *     with them, crowPlayer.queue), as Media Hub plays; without the bar,
  *     the tile's own <audio> element (Play / Pause, one at a time). A podcast episode that starts
  *     playing is marked read ({action:"mark_read"}), so it leaves the list.
  * Messages come from the page's data-fy-* attributes (server-translated).
@@ -53,7 +54,16 @@ export function forYouClientJs() {
       if (bar && typeof bar.load === 'function') {
         for (var q = 0; q < all.length; q++) if (!all[q].paused) all[q].pause();
         var named = document.getElementById(play.getAttribute('aria-describedby') || '');
-        bar.load(audio.getAttribute('src'), named ? named.textContent.trim() : '', '');
+        var first = { src: audio.getAttribute('src'), title: named ? named.textContent.trim() : '', subtitle: '' };
+        // A briefing's shows (Democracy Now!, ...) follow it, as Media Hub's own Play queues them.
+        var then = root.querySelectorAll('[data-fy-then="' + audio.id + '"]');
+        if (then.length && typeof bar.queue === 'function') {
+          var items = [first];
+          for (var s = 0; s < then.length; s++) items.push({ src: then[s].getAttribute('data-src'), title: then[s].getAttribute('data-title') || '', subtitle: then[s].getAttribute('data-sub') || '' });
+          bar.queue(items);
+        } else {
+          bar.load(first.src, first.title, first.subtitle);
+        }
         var playedId = audio.getAttribute('data-fy-played');
         if (playedId && !audio.__fyMarked) {
           audio.__fyMarked = true;

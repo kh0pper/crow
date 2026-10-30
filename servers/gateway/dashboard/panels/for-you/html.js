@@ -160,6 +160,7 @@ function briefingTileHtml(b, lang, now) {
       <p class="fy-tile-title" id="fy-listen-b${Number(it.id)}">${e(it.title || t("forYou.briefing", lang))}</p>
       ${meta ? `<p class="fy-tile-meta">${meta}</p>` : ""}
       ${player({ key: `b${Number(it.id)}`, audioUrl: it.audioUrl, labelId: `fy-listen-b${Number(it.id)}`, primary: true }, lang)}
+      ${(Array.isArray(it.shows) ? it.shows : []).map((s) => `<span hidden data-fy-then="fy-audio-b${Number(it.id)}" data-src="${e(s.audioUrl)}" data-title="${e(s.title)}" data-sub="${e(s.episode)}"></span>`).join("")}
     </div>`;
 }
 

@@ -6,7 +6,7 @@
  *   forYouStories(db, opts)        -> [{ id, title, url, summary, sourceId, sourceName, publishedAt, score, why }]
  *   hiddenSources(db)              -> [{ id, name }]   (sources hidden from the picks)
  *   setSourceHidden(db, id, flag)  -> true when a source row matched
- *   forYouBriefing(db, opts)       -> { briefing: { id, title, durationSec, createdAt, audioUrl } | null,
+ *   forYouBriefing(db, opts)       -> { briefing: { id, title, durationSec, createdAt, audioUrl, shows } | null,
  *                                       next: { at, tz } | null }   (For You's Listen section, 1.2.3)
  *   forYouEpisodes(db, opts)       -> { shows, episodes: [{ id, title, show, sourceId, publishedAt, audioUrl }] }
  *
@@ -206,13 +206,29 @@ export function httpsUrl(v) {
  * The newest finished daily briefing with audio, made in the last BRIEFING_MAX_AGE_HOURS, and when
  * the next one is due when the schedule is on (`next.at` is UTC ISO, `next.tz` the schedule's zone).
  */
+/**
+ * The shows that play after a briefing (1.2.5): its ready attachments with an https address, in order,
+ * as { title, episode, audioUrl }. Media Hub's own Play queues them the same way; a pending one is left out.
+ */
+export function readyShows(raw) {
+  let list;
+  try { list = JSON.parse(raw || "[]"); } catch { return []; }
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const a of list) {
+    if (!a || a.status !== "ready" || typeof a.url !== "string" || !/^https:\/\//i.test(a.url)) continue;
+    out.push({ title: String(a.title || ""), episode: String(a.episode_title || ""), audioUrl: a.url });
+  }
+  return out.slice(0, 4);
+}
+
 export async function forYouBriefing(db, { now = Date.now() } = {}) {
   const { getLatestBriefing } = await import("./briefing.js");
   const b = await getLatestBriefing(db, { withAudio: true, maxAgeHours: BRIEFING_MAX_AGE_HOURS, kind: "daily", now });
   const id = b ? Number(b.id) : 0;
   const secs = b && b.duration_sec != null ? Number(b.duration_sec) : NaN;
   const briefing = b && Number.isInteger(id) && id > 0 && b.audio_url === `/api/media/briefings/${id}/audio`
-    ? { id, title: String(b.title || ""), durationSec: secs > 0 ? secs : null, createdAt: b.created_at || null, audioUrl: b.audio_url }
+    ? { id, title: String(b.title || ""), durationSec: secs > 0 ? secs : null, createdAt: b.created_at || null, audioUrl: b.audio_url, shows: readyShows(b.attachments) }
     : null;
   let next = null;
   if (!briefing) {

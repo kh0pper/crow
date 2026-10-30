@@ -42,7 +42,12 @@ async function briefingTile(mod, db, now) {
   const r = await mod.forYouBriefing(db, { now });
   const b = r && r.briefing;
   const audioUrl = b ? listenAudioUrl(b.audioUrl) : "";
-  const item = b && audioUrl ? { id: Number(b.id), title: String(b.title || ""), durationSec: Number(b.durationSec) > 0 ? Number(b.durationSec) : null, createdAt: b.createdAt || null, audioUrl } : null;
+  const shows = [];
+  for (const s of b && Array.isArray(b.shows) ? b.shows : []) {
+    const url = listenAudioUrl(s && s.audioUrl);
+    if (url && !url.startsWith("/") && shows.length < 4) shows.push({ title: String(s.title || ""), episode: String(s.episode || ""), audioUrl: url });
+  }
+  const item = b && audioUrl ? { id: Number(b.id), title: String(b.title || ""), durationSec: Number(b.durationSec) > 0 ? Number(b.durationSec) : null, createdAt: b.createdAt || null, audioUrl, shows } : null;
   const at = r && r.next ? Date.parse(r.next.at) : NaN;
   return { item, next: !item && Number.isFinite(at) ? { at: new Date(at).toISOString(), tz: r.next.tz || null } : null };
 }

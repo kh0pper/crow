@@ -197,7 +197,7 @@ test("Listen briefing: the newest daily briefing with audio from the last 36 h; 
   await briefing({ h: 1, title: "Voice failed", audio: false });
   const r = await forYouBriefing(db, { now: NOW });
   assert.deepEqual(r, {
-    briefing: { id: today, title: "Morning briefing, Wednesday", durationSec: 312.4, createdAt: new Date(NOW - 4 * 3600000).toISOString(), audioUrl: `/api/media/briefings/${today}/audio` },
+    briefing: { id: today, title: "Morning briefing, Wednesday", durationSec: 312.4, createdAt: new Date(NOW - 4 * 3600000).toISOString(), audioUrl: `/api/media/briefings/${today}/audio`, shows: [] },
     next: null,
   });
 
@@ -246,4 +246,19 @@ test("story titles and source names are plain text: feed entities are decoded (o
   const [p] = await forYouStories(db, { now: NOW });
   assert.equal(p.title, "Showers & downpours for San Antonio again today");
   assert.equal(p.sourceName, "Al Jazeera – Breaking News");
+});
+
+test("readyShows: a briefing's ready https shows, in order; pending, non-https and junk are left out", async () => {
+  const { readyShows } = await import("../bundles/media/server/for-you.js");
+  const raw = JSON.stringify([
+    { title: "Democracy Now! Audio", status: "ready", url: "https://cdn.example.invalid/dn.mp3", episode_title: "Ep 30" },
+    { title: "Pending show", status: "pending", url: "https://cdn.example.invalid/p.mp3" },
+    { title: "Plain http", status: "ready", url: "http://cdn.example.invalid/h.mp3" },
+    { title: "Script", status: "ready", url: "javascript:alert(1)" },
+    null,
+  ]);
+  assert.deepEqual(readyShows(raw), [{ title: "Democracy Now! Audio", episode: "Ep 30", audioUrl: "https://cdn.example.invalid/dn.mp3" }]);
+  assert.deepEqual(readyShows("not json"), []);
+  assert.deepEqual(readyShows(null), []);
+  assert.deepEqual(readyShows('{"a":1}'), []);
 });
