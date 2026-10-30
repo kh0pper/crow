@@ -2,8 +2,12 @@
  * Ramble MCP server. Milestone 1 (M1) tools — local core, no network/UI:
  *   ramble_leave_mark, ramble_caw, ramble_query_world, ramble_unlock,
  *   ramble_pet_state, ramble_block, ramble_unblock, ramble_egg_state,
- *   ramble_checkin, ramble_chore, ramble_flock, ramble_nests, ramble_claim_nest,
+ *   ramble_checkin, ramble_flock, ramble_nests, ramble_claim_nest,
  *   ramble_gift_egg, ramble_propose_swap.
+ *
+ * Moves (moves design, spec 2026-10-30): ramble_moves_today,
+ * ramble_moves_log and ramble_moves_prefs. Done, Swap, "something else" and
+ * the library live on the panel; the chores are gone.
  *
  * Phase 3: contacts/group marks, gifts and swaps are queued into
  * `ramble_outbox` here and SENT by the gateway transport on its next tick
@@ -25,7 +29,7 @@ import { resolvePersona } from "./persona.js";
 import { createMark, listMarks, unlockMark, blockPersona, unblockPersona } from "./marks.js";
 import { encodeGeohash } from "./anchors.js";
 import { getGrid } from "./grid.js";
-import { petState, doChore } from "./pet.js";
+import { petState } from "./pet.js";
 import { heartsBalance } from "./hearts.js";
 import { eggState, activeBird, isoWeek, layProgress, nextPromotable } from "./eggs.js";
 import { feedAll } from "./feed.js";
@@ -350,20 +354,6 @@ export function createRambleServer(db, options = {}) {
       try {
         const emit = await getEmit();
         return text(JSON.stringify(await feedAll(db, { type: "checkin" }, { emit })));
-      } catch (err) {
-        return errorText(err.message);
-      }
-    },
-  );
-
-  register(
-    "ramble_chore",
-    "Complete a daily chore (feed, preen, or play) for the companion pet. Each kind completes once per local day.",
-    { kind: z.enum(["feed", "preen", "play"]) },
-    async ({ kind }) => {
-      try {
-        const emit = await getEmit();
-        return text(JSON.stringify(await doChore(db, kind, { emit })));
       } catch (err) {
         return errorText(err.message);
       }

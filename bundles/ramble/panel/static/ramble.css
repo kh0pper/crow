@@ -116,18 +116,55 @@
    "hidden" element stays visible. */
 #ramble [hidden] { display: none !important; }
 
-/* Four views, one state attribute. The world is home. */
+/* Five views, one state attribute. The world is home. */
 #ramble .rb-view { display: none; flex-direction: column; gap: 14px; }
 #ramble[data-view="world"] .rb-view[data-for="world"],
 #ramble[data-view="egg"] .rb-view[data-for="egg"],
 #ramble[data-view="pet"] .rb-view[data-for="pet"],
-#ramble[data-view="flock"] .rb-view[data-for="flock"] { display: flex; }
+#ramble[data-view="flock"] .rb-view[data-for="flock"],
+#ramble[data-view="learn"] .rb-view[data-for="learn"] { display: flex; }
 
 #ramble .rb-row { display: flex; align-items: center; gap: 10px; }
 #ramble .rb-grow { flex: 1; }
 #ramble .rb-actions { gap: 10px; }
 #ramble .rb-center { text-align: center; }
 #ramble .rb-label { width: 66px; font-weight: 800; color: var(--rb-muted); flex: 0 0 auto; }
+
+/* ---------------------------------------------------------------- moves */
+
+/* The flow figure and a library pose share one frame, so the player does not
+ * jump in height as poses change size. */
+#ramble .rb-entry-figure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 170px;
+}
+#ramble .rb-entry-figure > svg { width: min(240px, 72vw); height: auto; }
+
+/* Reduced motion is a crossfade between poses, never a tween. */
+#ramble .rb-crossfade > svg { transition: opacity .2s ease; }
+@media (prefers-reduced-motion: reduce) {
+  #ramble .rb-crossfade > svg { transition: none; }
+}
+
+/* Equipment and limitation checkboxes: one tap target each, two a row. */
+#ramble .rb-checks { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+#ramble .rb-check {
+  display: flex; align-items: center; gap: 8px;
+  min-height: var(--rb-tap); min-width: 44%;
+  font-size: 13px; cursor: pointer;
+}
+#ramble .rb-check input { width: 20px; height: 20px; accent-color: var(--rb-accent-2); }
+
+#ramble #rb-else-text {
+  width: 100%; min-height: 84px; padding: 10px 12px;
+  border: var(--rb-line-w) solid var(--rb-line); border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface); color: var(--rb-text);
+  font: 600 15px/1.4 var(--rb-font-body); resize: vertical;
+}
+#ramble #rb-else-text:focus-visible { outline: 2px solid var(--rb-accent-2); outline-offset: 2px; }
+#ramble #rb-pref-level { flex: 1; min-width: 90px; accent-color: var(--rb-accent-2); }
 
 /* The reference panel folds away. <details> is native, so the toggle, the
    keyboard handling and the screen-reader semantics all come for free — and if
@@ -193,7 +230,6 @@
 #ramble .rb-btn[disabled] { opacity: .45; cursor: default; }
 #ramble .rb-btn:focus-visible,
 #ramble .rb-chip:focus-visible,
-#ramble .rb-chore:focus-visible,
 #ramble .rb-seg button:focus-visible,
 #ramble .rb-icon-btn:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
 
@@ -518,26 +554,6 @@
 #ramble .rb-heart-row { display: inline-flex; gap: 0.15rem; }
 #ramble .rb-heart-one { width: 16px; height: 16px; display: block; }
 
-#ramble .rb-chores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-#ramble .rb-chore {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 86px;
-  padding: 12px 6px;
-  border: var(--rb-line-w) solid var(--rb-line);
-  border-radius: var(--rb-radius-sm);
-  background: var(--rb-surface-2);
-  box-shadow: var(--rb-pop-sm);
-  color: var(--rb-text);
-  font: 800 14px var(--rb-font-display);
-  cursor: pointer;
-}
-#ramble .rb-chore svg.rb-i { width: 26px; height: 26px; }
-#ramble .rb-chore.done { background: color-mix(in oklab, var(--rb-accent) 45%, var(--rb-surface-2)); }
-#ramble .rb-chore:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--rb-shadow-col); }
 
 #ramble .rb-stats { display: flex; gap: 20px; }
 #ramble .rb-stats div { display: flex; flex-direction: column; }

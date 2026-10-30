@@ -3,10 +3,10 @@
  * day of self-reported movement pays in Health, and the two daily budgets that
  * bound it.
  *
- * THREE EARNERS, TWO BUDGETS. An indoor challenge Done, an indoor "something
- * else" log and the daily chores all draw from ONE indoor budget
- * (INDOOR_DAILY_CAP, moves/indoor-cap.js — 24/day, the old 3 x 8 chores
- * purse); outdoor logs draw from their own (OUTDOOR_DAILY_CAP, 20/day). Which
+ * TWO EARNERS, TWO BUDGETS. An indoor challenge Done and an indoor
+ * "something else" log draw from ONE indoor budget (INDOOR_DAILY_CAP,
+ * moves/indoor-cap.js — 24/day, the old 3 x 8 purse); outdoor logs draw from
+ * their own (OUTDOOR_DAILY_CAP, 20/day). Which
  * budget an activity belongs to is the fixed-vocabulary question
  * `isOutdoorActivity` answers, so no model is ever in the loop.
  *
@@ -40,7 +40,8 @@ import { ACTIVITY_KINDS } from "./library.js";
 import { claimCapped, claimIndoor, capDayKey, dayKey, INDOOR_DAILY_CAP, MOVE_INDOOR_KIND } from "./indoor-cap.js";
 
 // ledger.js is the moves surface the routes and the panel import; the indoor
-// budget lives in its own module only so pet.js's chores can share it.
+// budget lives in its own module so the cap is bookkeeping only, with no
+// dependency on the pet-payment path.
 export { claimCapped, claimIndoor, capDayKey, INDOOR_DAILY_CAP, MOVE_INDOOR_KIND } from "./indoor-cap.js";
 
 /** Wallet kind: key `<day>`, delta 1 — today's challenge was marked Done. */

@@ -1,0 +1,49 @@
+{
+  "id": "band-row",
+  "kind": "exercise",
+  "title": "Band row",
+  "minutes": 4,
+  "level": 1,
+  "indoor": true,
+  "activity": "band",
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "upper-body",
+    "pull",
+    "strength"
+  ],
+  "steps": [
+    "Loop the band around a sturdy anchor at waist height, or around both feet while seated.",
+    "Hold one end in each hand and sit or stand tall with your arms long.",
+    "Pull both hands toward your ribs and squeeze your shoulder blades together.",
+    "Pause for a breath, then return slowly.",
+    "Do 2 sets of 10."
+  ],
+  "works": [
+    "Upper back",
+    "Arms"
+  ],
+  "stretches": [
+    "Chest"
+  ],
+  "mistakes": [
+    "Shrugging your shoulders up toward your ears.",
+    "Letting the band snap back instead of returning slowly."
+  ],
+  "skipIf": [
+    "shoulder"
+  ],
+  "easier": "band-pull-apart",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}

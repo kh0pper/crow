@@ -1,0 +1,76 @@
+{
+  "id": "yoga-flow-hips",
+  "kind": "flow",
+  "title": "Hips flow",
+  "minutes": 12,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "hips",
+    "standing",
+    "floor"
+  ],
+  "steps": [
+    "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
+    "Hold each pose for the time given and keep your breathing even.",
+    "Finish in child's pose for a few slow breaths."
+  ],
+  "works": [
+    "Legs",
+    "Glutes"
+  ],
+  "stretches": [
+    "Hips",
+    "Hamstrings",
+    "Front of the thigh"
+  ],
+  "mistakes": [
+    "Forcing the hips lower than they want to go.",
+    "Skipping the resting pose at the end."
+  ],
+  "skipIf": [
+    "knee",
+    "hip",
+    "lower_back"
+  ],
+  "easier": null,
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
+  "flow": [
+    {
+      "id": "yoga-low-lunge",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-high-lunge",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-warrior-two",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-triangle",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-seated-forward-fold",
+      "holdSeconds": 90
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 60
+    }
+  ]
+}

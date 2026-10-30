@@ -1,0 +1,43 @@
+{
+  "id": "band-bicep-curl",
+  "kind": "exercise",
+  "title": "Band bicep curl",
+  "minutes": 3,
+  "level": 1,
+  "indoor": true,
+  "activity": "band",
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "arms",
+    "strength"
+  ],
+  "steps": [
+    "Stand on the middle of the band with your feet hip-width apart.",
+    "Hold one end in each hand with your arms long and your palms facing forward.",
+    "Bend your elbows and bring your hands toward your shoulders.",
+    "Lower slowly until your arms are long again.",
+    "Do 2 sets of 12."
+  ],
+  "works": [
+    "Arms"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Swinging your elbows forward to lift the band.",
+    "Leaning back to help the curl."
+  ],
+  "skipIf": [],
+  "easier": "band-row",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}

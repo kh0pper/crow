@@ -1,0 +1,64 @@
+{
+  "id": "yoga-child",
+  "kind": "pose",
+  "title": "Child's pose",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "rest",
+    "kneeling",
+    "floor"
+  ],
+  "steps": [
+    "Kneel on the mat with your knees a little apart and your big toes together.",
+    "Sit your hips back toward your heels.",
+    "Walk your hands forward and rest your forehead on the mat.",
+    "Breathe slowly and let your shoulders relax."
+  ],
+  "works": [],
+  "stretches": [
+    "Lower back",
+    "Hips",
+    "Shoulders"
+  ],
+  "mistakes": [
+    "Lifting the hips off the heels to reach further.",
+    "Pressing the forehead into the mat hard."
+  ],
+  "skipIf": [
+    "knee"
+  ],
+  "easier": "yoga-mountain",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
+  "pose": {
+    "neck": 30,
+    "spine": 10,
+    "elbowL": 0,
+    "wristL": 0,
+    "kneeL": 130,
+    "ankleL": -50,
+    "support": "knees",
+    "rootAngle": 92,
+    "hipL": 120,
+    "shoulderL": 168,
+    "elbowR": 0,
+    "wristR": 0,
+    "kneeR": 130,
+    "ankleR": -50,
+    "hipR": 120,
+    "shoulderR": 168
+  }
+}

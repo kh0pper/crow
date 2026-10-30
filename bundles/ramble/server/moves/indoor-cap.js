@@ -1,11 +1,10 @@
 /**
  * The indoor daily budget (moves design Task 4; private engineering notes).
  *
- * ONE combined cap per local day, shared by every indoor earner: the three
- * daily chores (pet.js `doChore`), an indoor challenge Done and an indoor
- * "something else" log (moves/ledger.js). It is the old chores budget — 3 x 8
- * = 24 — with moves added to the same purse rather than given a second one, so
- * the ceiling on indoor Health did not move when moves arrived.
+ * ONE combined cap per local day, shared by every indoor earner: an indoor
+ * challenge Done and an indoor "something else" log (moves/ledger.js). It is
+ * the old 3 x 8 daily-tap purse (24), kept as the ceiling on indoor Health so
+ * the number did not move when moves arrived.
  *
  * ⚠ WHY 24 IS LOAD-BEARING. With the 5-point daily check-in that is 29/day
  * against 40/day of decay (10 per 6 h), so indoor-only activity can never
@@ -21,17 +20,17 @@
  * their own cap can sum above it after a merge; readers clamp
  * (`ledger.js movesDay`, exactly like `stepsToday`).
  *
- * WHY A FILE OF ITS OWN. pet.js's `doChore` draws from this budget and
- * ledger.js imports pet.js, so a top-level `pet.js -> ledger.js` import would
- * be a cycle through the module that pays the pet. This file depends only on
- * steps.js's ledger helpers and eggs.js's day helpers. steps.js itself imports
- * pet.js, so a module cycle exists (pet -> indoor-cap -> steps -> pet); it is
- * safe only because every binding is used at call time, never at load.
+ * WHY A FILE OF ITS OWN. The cap is bookkeeping over `ramble_wallet` only, so
+ * the ledger can import it without dragging the pet-payment path into a
+ * module cycle. This file depends only on steps.js's ledger helpers and
+ * eggs.js's day helpers. steps.js itself imports pet.js, so a module cycle
+ * exists (indoor-cap -> steps -> pet); it is safe only because every binding
+ * is used at call time, never at load.
  */
 import { localDay, startOfLocalDay } from "../eggs.js";
 import { casDelta, rowDelta } from "../steps.js";
 
-/** Indoor Health from moves AND chores, per local day (the old 3 x 8 chores budget). */
+/** Indoor Health from moves, per local day (the old 3 x 8 purse). */
 export const INDOOR_DAILY_CAP = 24;
 /** Wallet kind: key `<day>`, delta = indoor Health paid that day. Grows, <= cap. */
 export const MOVE_INDOOR_KIND = "moveindoor";

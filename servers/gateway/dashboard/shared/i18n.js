@@ -4491,6 +4491,22 @@ export const translations = {
   "forYou.openMusic": { en: "Open your music", es: "Abrir tu música" },
   "forYou.listenMissing": { en: "Media Hub reads you a short news briefing each morning and brings your podcasts here.", es: "Media Hub te lee un breve resumen de noticias cada mañana y trae tus pódcasts aquí." },
   "forYou.listenUpdate": { en: "Media Hub needs an update before your briefing and podcasts can show here.", es: "Media Hub necesita una actualización antes de que tu resumen y tus pódcasts aparezcan aquí." },
+  // For You: Move (Ramble's card; panels/for-you/html.js movesHtml)
+  "forYou.moves": { en: "Move", es: "Movimiento" },
+  "forYou.movesOff": { en: "Daily challenges are off.", es: "Los retos diarios están desactivados." },
+  "forYou.movesPrefs": { en: "Turn them on", es: "Actívalos" },
+  "forYou.movesNone": { en: "No challenge today.", es: "Hoy no hay reto." },
+  "forYou.movesOpen": { en: "Open Ramble", es: "Abrir Ramble" },
+  "forYou.movesStart": { en: "Start", es: "Empezar" },
+  "forYou.movesDone": { en: "Done", es: "Hecho" },
+  "forYou.movesDoneToday": { en: "Done today", es: "Hecho hoy" },
+  "forYou.movesSwap": { en: "Swap", es: "Cambiar" },
+  "forYou.movesSomethingElse": { en: "I did something else", es: "Hice otra cosa" },
+  "forYou.movesHealth": { en: "{n} of {max} health", es: "{n} de {max} de salud" },
+  "forYou.movesSteps": { en: "{n} of {goal} steps", es: "{n} de {goal} pasos" },
+  "forYou.movesStreak.one": { en: "{n}-day streak", es: "{n} día seguido" },
+  "forYou.movesStreak.other": { en: "{n}-day streak", es: "{n} días seguidos" },
+  "forYou.movesSwapRefused": { en: "That's all the swaps for today.", es: "No quedan más cambios hoy." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

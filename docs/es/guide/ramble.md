@@ -121,7 +121,7 @@ Cuando el calor alcanza el umbral de eclosión, se sortean una especie y una sem
 
 Tu pájaro activo viaja en tus caws y marcas **públicas** — el JSON del cable lleva `bird: { species, seed }`, así que otras personas lo ven en tus pines. Las marcas de contactos y "solo para mí" nunca llegan al cable de Nostr (ver abajo), así que el pájaro se omite solo del **cable**: esas filas siguen guardando `bird_species` / `bird_seed` localmente y se replican, con pájaro incluido, a tus propias instancias enlazadas.
 
-Una vez que un pájaro ha eclosionado, el crow de la cabecera del Nest se convierte en él: su cara refleja la energía de la mascota (ver Tareas), mientras que la insignia de alerta "!" es independiente y sigue significando la salud del host, no el ánimo de la mascota.
+Una vez que un pájaro ha eclosionado, el crow de la cabecera del Nest se convierte en él: su cara refleja la energía de la mascota (ver Retos diarios), mientras que la insignia de alerta "!" es independiente y sigue significando la salud del host, no el ánimo de la mascota.
 
 Renderiza cualquier pájaro a partir de su especie y semilla con:
 
@@ -131,11 +131,23 @@ GET /api/ramble/bird/:species/:seed.svg?mood=happy|tired|alarmed
 
 Autenticada por el dashboard, devuelve `image/svg+xml`, cacheada de forma privada durante un día. Una especie desconocida o una semilla malformada/desconocida responde `400`.
 
-## Tareas
+## Retos diarios
 
-Tres tareas — **alimentar** (`feed`), **acicalar** (`preen`), **jugar** (`play`) — son tuyas para hacer una vez cada una por día local. Cada una completada da +8 de energía a la mascota; ninguna toca el calor del huevo.
+Un reto de movimiento al día, elegido para ti de la biblioteca revisada: una postura, un ejercicio, un flujo o un paseo. **Empezar** lo abre, **Hecho** lo marca terminado y **Cambiar** lo vuelve a tirar (tres cambios al día). El selector pesa tus preferencias de Personalizar, la hora del día y, si tienes un lugar configurado en For You, el tiempo — y nada de eso necesita un modelo.
 
-`POST /api/ramble/pet/chore { kind: "feed" | "preen" | "play" }` completa una. Repetir un tipo ya hecho hoy es un no-op (`done: false`); en ambos casos la respuesta trae el estado actual de la mascota.
+La tarjeta **Hoy** de la página del pájaro también lleva tu meta de pasos (se comprueba sola desde el contador de pasos, así que no necesita ningún toque) y la línea de la racha. Un día local cuenta para la racha cuando terminas el reto, alcanzas la meta de pasos o registras al menos diez minutos de movimiento. Un día en pausa (retos desactivados) ni cuenta ni la rompe. Cada séptimo día seguido da un contenedor de corazón.
+
+**Salud, no alpiste.** Un reto paga la Salud del pájaro. El movimiento indoor (un reto hecho o un registro indoor de "otra cosa") tiene un tope de **24 por día local**, y la actividad outdoor autodeclarada de **20 por día local** — el presupuesto outdoor es el más ajustado porque un contador de pasos puede corroborarlo. La meta de pasos conserva su propio bono de 3 de alpiste, y nada de esto paga alpiste.
+
+**"Hice otra cosa".** Escribe una línea ("un paseo en bici con una amiga, unos 40 minutos") y Crow la lee como una actividad, unos minutos y un esfuerzo. Solo se guardan esos tres valores del vocabulario fijo — nunca tus palabras. Un análisis que falla o tarda demasiado (o una caja sin modelo local) recurre a tres selectores manuales. Los selectores de actividad, minutos y esfuerzo son los mismos campos que llenaría el modelo; no se registra nada hasta que guardas.
+
+API: `GET /api/ramble/moves/today`, `POST /api/ramble/moves/done { day? }`, `POST /api/ramble/moves/swap`, `POST /api/ramble/moves/parse { text }`, `POST /api/ramble/moves/log { activity, minutes, effort }`, `GET/POST /api/ramble/moves/prefs`, `GET /api/ramble/moves/library`, `GET /api/ramble/moves/library/:id`, `POST /api/ramble/moves/flow-run { flowId, outcome, fromMemory? }`.
+
+## Aprender y el reproductor de flujos
+
+La pantalla **Aprender** lista la biblioteca revisada por tipo (posturas, ejercicios, flujos, paseos); la biblioteca está vacía hasta que se revise su contenido, y lo dice. La página de una entrada muestra la figura, los pasos, lo que trabaja y estira, errores comunes, una línea **Saltar si** construida con las etiquetas fijas de limitación, enlaces a más fácil y más difícil, y sus fuentes con sus licencias.
+
+Un **flujo** se abre en el reproductor: mantiene cada postura su propio tiempo, interpola entre posturas durante unos 1,2 segundos y ofrece pausa, media velocidad y paso. La guía se desvanece a medida que lo aprendes — **completa** muestra la figura, el nombre de la postura y sus indicaciones; **nombres** muestra la figura y el nombre; **primera** muestra solo la primera postura y luego pregunta si hiciste el resto de memoria; **memoria** muestra solo la figura. Al terminar, el reproductor pregunta **¿Cómo te fue?** — *bien* cuenta una repetición hacia menos guía, *necesité ayuda* no escribe nada (nada baja nunca de nivel). Una nota antes de tu primer reto dice que esto es bienestar general, no consejo médico, y se muestra una sola vez.
 
 ## Caminar
 
@@ -170,7 +182,7 @@ El alpiste compra cosas para ponerte: sombreros (lazo, hoja, gorro), bufandas (d
 
 Lo que llevas se ve en la página de tu pájaro, tu bandada, tu marcador en el mapa, la vista AR, el pájaro de la cabecera del panel y tu **foto de perfil** si usas tu pájaro como foto — así es como lo ven tus contactos. **Los desconocidos nunca lo ven:** las marcas públicas siempre llevan el pájaro tal como nació, porque un atuendo elegido uniría tus identidades rotativas del mapa.
 
-Tu foto de perfil también muestra cómo estás. Un pájaro sin paseos ni tareas se ve cansado y luego agitado ante tus contactos — nunca pasa nada peor. Los cambios de la foto se agrupan y se envían cuando todo se calma (unos veinte segundos después del último cambio), y un rato de inactividad se nota en menos de media hora, así que probarte cuatro sombreros envía a tus contactos una sola foto, no cuatro.
+Tu foto de perfil también muestra cómo estás. Un pájaro sin paseos ni un reto diario se ve cansado y luego agitado ante tus contactos — nunca pasa nada peor. Los cambios de la foto se agrupan y se envían cuando todo se calma (unos veinte segundos después del último cambio), y un rato de inactividad se nota en menos de media hora, así que probarte cuatro sombreros envía a tus contactos una sola foto, no cuatro.
 
 Las compras se registran igual que el alpiste recogido, como un libro de cuentas en cada uno de tus Crows que se sincroniza entre ellos. Si dos de tus Crows compran mientras están desconectados entre sí, ambas compras cuentan al reconectarse y tu saldo puede quedar por un momento por debajo de cero; vuelve a subir al recoger alpiste, y no se puede comprar nada hasta entonces. Un Crow que todavía tenga un Ramble anterior a 0.13 no conoce las compras y muestra el saldo de antes de ellas hasta que se actualice.
 
@@ -298,7 +310,9 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 | `ramble_pet_state` | Ánimo, energía, contadores semanales, pájaro activo y progreso del huevo de la mascota compañera. |
 | `ramble_egg_state` | El progreso de calor del huevo incubando y la lista de comprobación hacia la eclosión. |
 | `ramble_checkin` | Registrar el check-in de hoy, acreditando calor hacia el huevo. |
-| `ramble_chore` | Completar una tarea diaria (`feed`, `preen` o `play`) para la mascota compañera. |
+| `ramble_moves_today` | El reto de movimiento de hoy (o que los retos están en pausa), más la Salud del pájaro, los pasos de hoy y la racha. |
+| `ramble_moves_log` | Registrar una actividad autodeclarada del vocabulario fijo (`activity`, `minutes`, `effort`) — nunca las palabras usadas para describirla. |
+| `ramble_moves_prefs` | Leer o cambiar las preferencias de movimiento (`on`, `kinds`, `equipment`, `limits`, `level`, `weather`). |
 | `ramble_block` | Bloquear una persona por su pubkey x-only y purgar sus marcas guardadas. |
 | `ramble_unblock` | Quitar una persona de la lista de bloqueo. |
 | `ramble_flock` | Tu bandada: pájaros, el estante, el huevo incubando, especies encontradas. |

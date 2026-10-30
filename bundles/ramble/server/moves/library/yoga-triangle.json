@@ -1,0 +1,69 @@
+{
+  "id": "yoga-triangle",
+  "kind": "pose",
+  "title": "Triangle",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "standing",
+    "hips",
+    "side-body"
+  ],
+  "steps": [
+    "Stand with your feet wide apart and turn the front foot out.",
+    "Reach both arms out at shoulder height.",
+    "Tip your torso over the front leg and rest your lower hand on your shin.",
+    "Reach the top arm up and keep both legs straight.",
+    "Hold for a few breaths, then come up slowly and change sides."
+  ],
+  "works": [
+    "Legs",
+    "Core"
+  ],
+  "stretches": [
+    "Hamstrings",
+    "Side of the body",
+    "Hips"
+  ],
+  "mistakes": [
+    "Locking the front knee.",
+    "Collapsing the chest toward the floor."
+  ],
+  "skipIf": [
+    "hip",
+    "lower_back"
+  ],
+  "easier": "yoga-warrior-two",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
+  "pose": {
+    "neck": -10,
+    "spine": 10,
+    "shoulderL": 45,
+    "elbowL": 10,
+    "wristL": 0,
+    "shoulderR": 180,
+    "elbowR": 5,
+    "wristR": 0,
+    "hipL": 85,
+    "kneeL": 0,
+    "ankleL": -20,
+    "hipR": 45,
+    "kneeR": 0,
+    "ankleR": 20,
+    "rootAngle": 65,
+    "support": "feet"
+  }
+}

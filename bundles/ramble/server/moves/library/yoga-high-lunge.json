@@ -1,0 +1,69 @@
+{
+  "id": "yoga-high-lunge",
+  "kind": "pose",
+  "title": "High lunge",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "lunge",
+    "standing",
+    "balance"
+  ],
+  "steps": [
+    "From a low lunge, tuck your back toes and lift the back knee off the mat.",
+    "Keep the front knee above the ankle and press through the back foot.",
+    "Reach both arms up and lengthen through the whole body.",
+    "Hold for a few breaths, then lower the back knee and change sides."
+  ],
+  "works": [
+    "Legs",
+    "Glutes",
+    "Core"
+  ],
+  "stretches": [
+    "Hips",
+    "Front of the thigh"
+  ],
+  "mistakes": [
+    "Letting the front knee drift past the toes.",
+    "Arching the lower back to reach higher."
+  ],
+  "skipIf": [
+    "knee",
+    "balance",
+    "ankle"
+  ],
+  "easier": "yoga-low-lunge",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
+  "pose": {
+    "neck": 0,
+    "spine": 5,
+    "shoulderL": 180,
+    "elbowL": 5,
+    "wristL": 0,
+    "shoulderR": 180,
+    "elbowR": 5,
+    "wristR": 0,
+    "hipL": 50,
+    "kneeL": 40,
+    "ankleL": 0,
+    "hipR": -20,
+    "kneeR": 0,
+    "ankleR": 20,
+    "rootAngle": 10,
+    "support": "feet"
+  }
+}

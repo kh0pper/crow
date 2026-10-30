@@ -224,3 +224,33 @@ test("a missing directory loads as an empty library rather than throwing", () =>
   const [lib] = captureWarnings(() => loadLibrary(join(FIXTURES, "no-such-dir")));
   assert.deepEqual(lib, []);
 });
+
+// Task 10: every entry that ships in the bundle validates, and every pose
+// solves with nothing through the floor and its named contact on the floor.
+test("the shipped library: every entry valid, every pose grounded on its own contact", async () => {
+  const { createRequire } = await import("node:module");
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const require = createRequire(import.meta.url);
+  const Figure = require("../bundles/ramble/server/moves/figure.cjs");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "bundles", "ramble", "server", "moves", "library");
+  const raw = readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")));
+  assert.ok(raw.length >= 40, "the starter library is there");
+  for (const e of raw) {
+    const v = validateEntry(e, raw);
+    assert.ok(v.ok, e.id + ": " + v.errors.join("; "));
+  }
+  const FEET = ["heelL", "toeL", "heelR", "toeR"];
+  const ON = (j, names, at = 0) => names.some((k) => Math.abs(j[k].y - at) <= 1);
+  const CONTACT = {
+    feet: (j) => ON(j, FEET),
+    hands_feet: (j) => ON(j, ["handL", "handR"]) && ON(j, FEET),
+    seat: (j) => ON(j, ["hip"], -Figure.SEAT_HEIGHT_FRAC * 100),
+    back: (j) => ON(j, ["hip", "shoulder"]),
+    knees: (j) => ON(j, ["kneeL", "kneeR"]),
+  };
+  for (const e of raw.filter((x) => x.kind === "pose")) {
+    const { joints } = Figure.solve(e.pose, 100);
+    for (const [jn, p] of Object.entries(joints)) assert.ok(p.y <= 0.5, e.id + ": " + jn + " through the floor");
+    assert.ok(CONTACT[Figure.clampPose(e.pose).support](joints), e.id + ": contact on the floor");
+  }
+});

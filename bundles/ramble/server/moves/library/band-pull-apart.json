@@ -1,0 +1,49 @@
+{
+  "id": "band-pull-apart",
+  "kind": "exercise",
+  "title": "Band pull-apart",
+  "minutes": 4,
+  "level": 1,
+  "indoor": true,
+  "activity": "band",
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "upper-body",
+    "pull",
+    "posture"
+  ],
+  "steps": [
+    "Hold the band in front of you with both hands and your arms straight at chest height.",
+    "Set your hands about shoulder-width apart so the band is slightly tight.",
+    "Pull the band apart until your arms open wide, keeping your shoulders down.",
+    "Return slowly to the start.",
+    "Do 2 sets of 12."
+  ],
+  "works": [
+    "Upper back",
+    "Shoulders"
+  ],
+  "stretches": [
+    "Chest"
+  ],
+  "mistakes": [
+    "Bending your elbows to get more range.",
+    "Leaning back as you pull."
+  ],
+  "skipIf": [
+    "shoulder"
+  ],
+  "easier": null,
+  "harder": "band-row",
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}

@@ -41,6 +41,7 @@ import {
   servedLibrary, entryById, ACTIVITY_KINDS, EQUIPMENT, LIMIT_TAGS,
 } from "./library.js";
 import { pickChallenge } from "./picker.js";
+import { learningFlows } from "./learning.js";
 
 /** Synced setting: JSON prefs. */
 export const PREFS_KEY = "moves.prefs";
@@ -279,6 +280,30 @@ async function offState(db, day, at, emit) {
 }
 
 /**
+ * Today's challenge, assembled the one way EVERY surface shows it.
+ *
+ * Ramble's own panel and Crow's For You page each gathered these inputs on
+ * their own (For You passed the raw forecast and no learned flows). Two copies
+ * of one assembly drift, and a mismatch means one day has two different cards.
+ * This is the single assembly both call:
+ *   - the live prefs, and `weather` dropped to null when `prefs.weather` is
+ *     false (turning weather off must mean the picker never sees a forecast),
+ *   - the library (`library` seam, else the served set),
+ *   - the learned flows over that library (moves/learning.js).
+ * Then it hands them to todayChallenge, which owns the storing and reuse.
+ */
+export async function todayForSurface(db, {
+  now, weather = null, lang = "en", emit, library,
+} = {}) {
+  const prefs = await readPrefs(db);
+  const lib = libraryOf(library);
+  const learning = await learningFlows(db, lib);
+  return todayChallenge(db, {
+    now, weather: prefs.weather === false ? null : weather, lang, emit, library: lib, learning,
+  });
+}
+
+/**
  * Today's challenge.
  *
  * Returns `{ day, entry, reasons, why, done, off, swap }`, or null when the
@@ -294,8 +319,9 @@ async function offState(db, day, at, emit) {
  * When prefs.on is false it writes the day's `moveoff` fact and returns
  * `{ off: true }` — the pause neither counts nor breaks the streak.
  *
- * `library` and `learning` are injectable seams: production passes neither
- * (servedLibrary(), and later Task 6's learned flows); tests pass both.
+ * `library` and `learning` are injectable seams: production surfaces go
+ * through todayForSurface (which reads the served library and the learned
+ * flows); tests pass both directly.
  */
 export async function todayChallenge(db, {
   now = Date.now(), weather = null, emit, library, learning = [], lang = "en",

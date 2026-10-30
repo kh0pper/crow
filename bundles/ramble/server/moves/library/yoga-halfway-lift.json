@@ -1,0 +1,65 @@
+{
+  "id": "yoga-halfway-lift",
+  "kind": "pose",
+  "title": "Halfway lift",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "standing",
+    "fold",
+    "beginner"
+  ],
+  "steps": [
+    "Fold forward from your hips with a soft bend in your knees.",
+    "Rest your hands on your shins and lengthen your back.",
+    "Draw your shoulders away from your ears and look slightly ahead.",
+    "Hold for a couple of breaths, then fold down or stand up slowly."
+  ],
+  "works": [
+    "Back"
+  ],
+  "stretches": [
+    "Hamstrings",
+    "Calves"
+  ],
+  "mistakes": [
+    "Rounding the back instead of lengthening it.",
+    "Pulling hard on the shins."
+  ],
+  "skipIf": [
+    "lower_back"
+  ],
+  "easier": "yoga-mountain",
+  "harder": "yoga-forward-fold",
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
+  "pose": {
+    "neck": -15,
+    "spine": 5,
+    "shoulderL": 90,
+    "elbowL": 15,
+    "wristL": 10,
+    "shoulderR": 90,
+    "elbowR": 15,
+    "wristR": 10,
+    "hipL": 85,
+    "kneeL": 10,
+    "ankleL": 10,
+    "hipR": 85,
+    "kneeR": 10,
+    "ankleR": 10,
+    "rootAngle": 85,
+    "support": "feet"
+  }
+}

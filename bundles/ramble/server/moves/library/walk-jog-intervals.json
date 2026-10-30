@@ -1,0 +1,55 @@
+{
+  "id": "walk-jog-intervals",
+  "kind": "walk",
+  "title": "Walk and jog intervals 20 minutes",
+  "minutes": 20,
+  "level": 2,
+  "indoor": false,
+  "activity": "jog",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "jogging",
+    "intervals",
+    "outdoors",
+    "starter"
+  ],
+  "steps": [
+    "Walk easily for 3 minutes to warm up.",
+    "Alternate 2 minutes of walking with 1 minute of easy jogging.",
+    "Keep the jog slow enough that you can still say a few words.",
+    "Repeat the pair 5 times.",
+    "Finish with 2 minutes of easy walking."
+  ],
+  "works": [
+    "Legs",
+    "Glutes",
+    "Heart and lungs"
+  ],
+  "stretches": [
+    "Calves",
+    "Quads",
+    "Hips"
+  ],
+  "mistakes": [
+    "Jogging faster than you can hold for the whole minute.",
+    "Skipping the walk breaks to catch your breath."
+  ],
+  "skipIf": [
+    "knee",
+    "ankle",
+    "hip",
+    "high_blood_pressure"
+  ],
+  "easier": "walk-brisk-30",
+  "harder": "jog-20",
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}

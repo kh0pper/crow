@@ -15,8 +15,8 @@ search result.
 
 | Source | License | URL checked | Date checked | Used for | Status |
 |---|---|---|---|---|---|
-| free-exercise-db (yuhonas) | UNVERIFIED | | | Exercise entry data: instructions, variations | UNVERIFIED |
-| alexcumplido/yoga-api | CC0 — **images only** | | | Yoga pose images only; no text or data taken | UNVERIFIED |
+| free-exercise-db (yuhonas) | Unlicense (repository LICENSE.md); the README states no license for the images | github.com/yuhonas/free-exercise-db (README + LICENSE badge) | 2026-10-30 | Exercise entry data (names, instructions) as a starting point; NOT its images | CHECKED (data); images UNVERIFIED, not used |
+| alexcumplido/yoga-api | MIT (code); red image set CC0 per README; pink and green sets are Flaticon (attribution, no sublicensing, no AI style-generation) | github.com/alexcumplido/yoga-api (README) | 2026-10-30 | Red (CC0) pose images only; no pink/green images, no text or data taken | CHECKED (red set only) |
 | NIA "Exercise & Physical Activity: Your Everyday Guide" | UNVERIFIED (US government work) | | | Plain-language exercise guidance, older-adult framing | UNVERIFIED |
 | NCCIH "Yoga for Health" | UNVERIFIED (US government work) | | | Safety framing and evidence context for yoga entries | UNVERIFIED |
 | US Physical Activity Guidelines (HHS) | UNVERIFIED (US government work) | | | Activity vocabulary and minutes guidance | UNVERIFIED |

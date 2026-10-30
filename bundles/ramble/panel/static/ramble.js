@@ -1572,8 +1572,8 @@
 
   /* Remember whether the reference panel is folded. Ships open, because a new
    * player needs it; once you know the numbers it is just height above the
-   * chores. Storage can throw outright (private mode, blocked site data), and a
-   * remembered preference is never worth breaking the panel for. */
+   * Today card. Storage can throw outright (private mode, blocked site data),
+   * and a remembered preference is never worth breaking the panel for. */
   var runsOn = $("rb-runs-on");
   if (runsOn) {
     try { if (window.localStorage.getItem("rb.runsOn") === "0") runsOn.open = false; } catch (e) { /* stays open */ }
@@ -1589,8 +1589,8 @@
 
   var MOOD_LINE = {
     happy: "Perky. Whatever you have been doing, keep at it.",
-    tired: "A bit droopy. A walk and a chore would sort it out.",
-    alarmed: "Rattled and low. Three taps and some fresh air.",
+    tired: "A bit droopy. A walk would sort it out.",
+    alarmed: "Rattled and low. A little movement and some fresh air.",
   };
 
   var lastPet = null;
@@ -1654,18 +1654,9 @@
     paintHeartRow(hearts, max, pet.energy_max_cap);
     /* The map bar too, not only this page: the area response carries a wallet
      * ONLY when it carried a position fix, so a player who denies geolocation
-     * would otherwise read 0 hearts on the map forever. paintSeed is called
-     * from here for exactly this reason. */
+     * would otherwise read 0 hearts on the map forever. */
     paintHearts(hearts);
     setText($("rb-mood-line"), MOOD_LINE[pet.mood] || MOOD_LINE.happy);
-
-    var chores = pet.chores || {};
-    Array.prototype.slice.call(document.querySelectorAll(".rb-chore")).forEach(function (btn) {
-      var kind = btn.getAttribute("data-kind");
-      var done = !!chores[kind];
-      btn.classList.toggle("done", done);
-      btn.setAttribute("aria-pressed", done ? "true" : "false");
-    });
 
     setText($("rb-stat-places"), String(pet.places_week || 0));
     setText($("rb-stat-unlocks"), String(pet.unlocks_week || 0));
@@ -1735,18 +1726,9 @@
     return jsonFetch("/api/ramble/pet").then(paintPet).catch(function () { /* pet is cosmetic */ });
   }
 
-  Array.prototype.slice.call(document.querySelectorAll(".rb-chore")).forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      btn.disabled = true;
-      jsonFetch("/api/ramble/pet/chore", { method: "POST", body: { kind: btn.getAttribute("data-kind") } })
-        .then(function (out) {
-          setText($("rb-pet-status"), (out && out.done) ? "Done for today." : "Already done today.");
-          return refreshPet();
-        })
-        .catch(function (err) { setText($("rb-pet-status"), err.message); })
-        .then(function () { btn.disabled = false; });
-    });
-  });
+  /* The daily chores are gone (moves design, spec 2026-10-30): their screen is
+   * the Today card, wired by static/moves.js. feed/preen/play no longer exist
+   * as events, routes or tools, so there is nothing to listen for here. */
 
   /* ------------------------------------------------------------- wardrobe */
 

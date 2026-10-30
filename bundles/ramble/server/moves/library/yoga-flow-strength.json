@@ -1,0 +1,84 @@
+{
+  "id": "yoga-flow-strength",
+  "kind": "flow",
+  "title": "Strength flow",
+  "minutes": 15,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "strength",
+    "full-body",
+    "standing"
+  ],
+  "steps": [
+    "Move through the poses in the order listed and hold each for the time given.",
+    "Keep your breathing steady and rest in child's pose whenever you need to.",
+    "Finish lying still for a few breaths before you get up."
+  ],
+  "works": [
+    "Core",
+    "Legs",
+    "Glutes",
+    "Shoulders"
+  ],
+  "stretches": [
+    "Chest",
+    "Hamstrings",
+    "Hips"
+  ],
+  "mistakes": [
+    "Letting the hips sag in plank.",
+    "Pushing through a sore wrist or shoulder instead of resting."
+  ],
+  "skipIf": [
+    "wrist",
+    "shoulder",
+    "lower_back",
+    "knee",
+    "neck"
+  ],
+  "easier": null,
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true,
+  "flow": [
+    {
+      "id": "yoga-plank",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-cobra",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-downward-dog",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-high-lunge",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-warrior-two",
+      "holdSeconds": 90
+    },
+    {
+      "id": "yoga-bridge",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 60
+    }
+  ]
+}

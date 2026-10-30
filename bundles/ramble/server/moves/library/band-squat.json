@@ -1,0 +1,53 @@
+{
+  "id": "band-squat",
+  "kind": "exercise",
+  "title": "Band squat",
+  "minutes": 5,
+  "level": 2,
+  "indoor": true,
+  "activity": "band",
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "band",
+    "lower-body",
+    "strength",
+    "squat"
+  ],
+  "steps": [
+    "Stand on the middle of the band with your feet hip-width apart.",
+    "Hold one end in each hand at your shoulders.",
+    "Bend your knees and sit your hips back, keeping your chest up.",
+    "Stand back up and squeeze your glutes.",
+    "Do 2 sets of 10, resting between sets.",
+    "Keep a chair behind you if you want something to aim for."
+  ],
+  "works": [
+    "Legs",
+    "Glutes",
+    "Hips"
+  ],
+  "stretches": [
+    "Quads",
+    "Calves"
+  ],
+  "mistakes": [
+    "Letting your knees roll inward.",
+    "Lifting your heels off the floor."
+  ],
+  "skipIf": [
+    "knee",
+    "hip"
+  ],
+  "easier": "body-chair-squat",
+  "harder": null,
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}
