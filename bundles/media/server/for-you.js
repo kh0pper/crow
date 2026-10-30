@@ -80,6 +80,42 @@ export function scoreStory(a, prof, now) {
  * The picks, best first. Reads at most CANDIDATES articles (newest first, within FRESH_HOURS) and
  * the interest profiles; no model, no network.
  */
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
+
+/** Feed HTML to plain text: tags dropped, the common entities decoded, spaces collapsed. */
+export function htmlToText(html) {
+  return String(html ?? "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (m, n) => {
+      const k = n.toLowerCase();
+      if (k.startsWith("#")) {
+        // Feed text is untrusted: an out-of-range code point would throw.
+        const cp = k.startsWith("#x") ? parseInt(k.slice(2), 16) : Number(k.slice(1));
+        return Number.isInteger(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : " ";
+      }
+      return ENTITIES[k] ?? m;
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * A story's summary and publisher, from the feed's summary field. Google News
+ * feeds put "<a href>Title</a>&nbsp;&nbsp;<font>Publisher</font>" there: the
+ * publisher is lifted out and the rest dropped (it is only the title again).
+ * A summary that just repeats the title is no summary.
+ */
+export function storySummary(summary, title) {
+  const raw = String(summary ?? "");
+  const pub = raw.match(/<font\b[^>]*>([^<]{1,120})<\/font>/i);
+  const publisher = pub ? htmlToText(pub[1]) || null : null;
+  let text = htmlToText(pub ? raw.replace(pub[0], " ") : raw);
+  const t = htmlToText(title).toLowerCase();
+  const lower = text.toLowerCase();
+  if (t && (lower === t || (lower.startsWith(t) && lower.length - t.length < 20))) text = "";
+  return { summary: text || null, publisher };
+}
+
 export async function forYouStories(db, { limit = PICK_MAX, now = Date.now() } = {}) {
   const cap = Math.max(0, Math.min(PICK_MAX, Number(limit) || 0));
   if (!cap) return [];
@@ -107,10 +143,12 @@ export async function forYouStories(db, { limit = PICK_MAX, now = Date.now() } =
     if (!url || !title) continue;
     const { score, why } = scoreStory(a, prof, now);
     if (score < MIN_SCORE) continue;
+    let summary = null, publisher = null;
+    try { ({ summary, publisher } = storySummary(a.summary, title)); } catch { /* one bad item never sinks the list */ }
     scored.push({
-      id: Number(a.id), title, url,
-      summary: a.summary == null ? null : String(a.summary).trim() || null,
-      sourceId: Number(a.source_id), sourceName: String(a.source_name || ""),
+      id: Number(a.id), title, url, summary,
+      sourceId: Number(a.source_id),
+      sourceName: publisher || String(a.source_name || ""),
       publishedAt: String(a.pub_date || a.created_at || ""),
       score: Math.round(score * 1000) / 1000, why,
     });

@@ -150,3 +150,15 @@ test("POST /api/media/sources/:id/hidden: a session, the owner only, CSRF, then 
   await post(`/api/media/sources/${s}/hidden`, { hidden: false }, H);
   assert.deepEqual(await hiddenSources(db), []);
 });
+
+test("story summaries: feed HTML becomes text, Google News items show their publisher and no repeated title", async () => {
+  const { storySummary, htmlToText } = await import("../bundles/media/server/for-you.js");
+  const g = '<a href="https://news.google.com/rss/articles/X?oc=5" target="_blank">More rain likely for South Texas Friday.</a>&nbsp;&nbsp;<font color="#6f6f6f">San Antonio Express-News</font>';
+  assert.deepEqual(storySummary(g, "More rain likely for South Texas Friday."), { summary: null, publisher: "San Antonio Express-News" });
+  assert.deepEqual(storySummary("<p>Rates rose <b>0.25%</b> &amp; markets fell.</p>", "Fed raises rates"), { summary: "Rates rose 0.25% & markets fell.", publisher: null });
+  assert.deepEqual(storySummary("Fed raises rates", "Fed raises rates"), { summary: null, publisher: null });
+  assert.deepEqual(storySummary(null, "x"), { summary: null, publisher: null });
+  assert.equal(htmlToText("a&#39;b &#x41; &nbsp;c"), "a'b A c");
+  assert.equal(htmlToText("x&#99999999;y&#x110000;z&#0;w"), "x y z w", "out-of-range code points never throw");
+  assert.doesNotMatch(String(storySummary("<script>x</script>hi", "t").summary), /</);
+});
