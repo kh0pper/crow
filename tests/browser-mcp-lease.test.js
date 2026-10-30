@@ -255,9 +255,9 @@ test("the guard's texts are the exact constraint texts", () => {
   assert.deepEqual(TEXTS, { busy: BUSY, held: HELD, handedBack: HANDED_BACK, genChanged: GEN_CHANGED, taken: TAKEN });
 });
 
-test("manifest is 1.3.11 and the registry is in sync", () => {
+test("manifest is 1.3.12 and the registry is in sync", () => {
   const mf = JSON.parse(readFileSync(join(ROOT, "bundles/browser/manifest.json"), "utf8"));
-  assert.equal(mf.version, "1.3.11");
+  assert.equal(mf.version, "1.3.12");
   execFileSync(process.execPath, ["scripts/build-registry.mjs", "--check"], { cwd: ROOT, stdio: "pipe" });
 });
 

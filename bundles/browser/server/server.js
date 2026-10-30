@@ -22,6 +22,7 @@ import { articleTurndown } from "./article-markdown.js";
 import { fileInDir, writeFileNoFollow, readFileNoFollow, MAX_FILE_NAME } from "./safe-file.js";
 import { installLeaseGuard } from "./lease-guard.js";
 import { waitingForUserResult } from "./wait-for-user.js";
+import { BLOCKED_URL_PATTERNS, isBlockedUrl, blockedResult } from "./blocked-hosts.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -85,6 +86,11 @@ export function createBrowserServer(options = {}) {
     const pages = context.pages();
     page = pages[0] || await context.newPage();
     cdpSession = await page.context().newCDPSession(page);
+    // Blocked hosts, enforced in the page too (links, scripts, redirects).
+    try {
+      await cdpSession.send("Network.enable");
+      await cdpSession.send("Network.setBlockedURLs", { urls: [...BLOCKED_URL_PATTERNS] });
+    } catch (e) { console.error("[browser] could not set blocked hosts:", e?.message || e); }
 
     // Inject stealth script on every new document
     await cdpSession.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -260,6 +266,10 @@ export function createBrowserServer(options = {}) {
         .describe("When to consider navigation complete (default: domcontentloaded)"),
     },
     async ({ url, wait_until }) => {
+      if (isBlockedUrl(url)) {
+        console.error("[browser] blocked navigation to " + new URL(url).hostname);
+        return blockedResult(url);
+      }
       try {
         const p = await getPage();
         const response = await p.goto(url, {
@@ -1222,6 +1232,7 @@ export function createBrowserServer(options = {}) {
 
         for (const m of order) {
           try {
+            if (isBlockedUrl(candidateUrl(m))) { attempts.push(`${m}: blocked host`); continue; }
             await p.goto(candidateUrl(m), { waitUntil: "domcontentloaded", timeout: 30000 });
             await delay(800, 1600);
             const html = await p.content();
@@ -1282,6 +1293,7 @@ export function createBrowserServer(options = {}) {
       try {
         let data;
         if (/^https?:\/\//i.test(url_or_path)) {
+          if (isBlockedUrl(url_or_path)) return blockedResult(url_or_path);
           const res = await fetch(url_or_path);
           if (!res.ok) return { content: [{ type: "text", text: `Fetch failed: HTTP ${res.status}` }], isError: true };
           data = new Uint8Array(await res.arrayBuffer());
