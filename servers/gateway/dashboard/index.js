@@ -88,6 +88,7 @@ import perchHubPanel from "./panels/perch-hub.js";
 import makePanel, { openMakeItem } from "./panels/make.js";
 import projectHomePanel from "./panels/project-home.js";
 import projectServicesPanel from "./panels/project-services.js";
+import forYouPanel from "./panels/for-you.js";
 import { servicesUiEnabled } from "../services/ui-flag.js";
 import "../services/launcher-tile.js"; // registers the "Add a service" launcher tile
 import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
@@ -138,6 +139,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(makePanel);
   registerPanel(projectHomePanel);
   registerPanel(projectServicesPanel);
+  registerPanel(forYouPanel); // 404s unless CROW_FOR_YOU=1 (the panel checks per request)
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
