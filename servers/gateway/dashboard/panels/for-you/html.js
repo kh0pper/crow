@@ -166,7 +166,7 @@ export function movesHtml(mv, lang = "en") {
   }
   const done = !!c.done;
   return `<section class="fy-moves" aria-labelledby="fy-moves-h">${head}
-      <div class="fy-card fy-tile fy-move" data-fy-move-card data-fy-minutes-fmt="${e(t("forYou.minutes", lang))}" data-fy-health-fmt="${e(t("forYou.movesHealth", lang))}" data-fy-steps-fmt="${e(t("forYou.movesSteps", lang))}" data-fy-streak-fmt="${e(t("forYou.movesStreak.other", lang))}" data-fy-done-label="${e(t("forYou.movesDone", lang))}" data-fy-done-state="${e(t("forYou.movesDoneToday", lang))}" data-fy-refused="${e(t("forYou.movesSwapRefused", lang))}">
+      <div class="fy-card fy-tile fy-move" data-fy-move-card data-fy-minutes-fmt="${e(t("forYou.minutes", lang))}" data-fy-health-fmt="${e(t("forYou.movesHealth", lang))}" data-fy-steps-fmt="${e(t("forYou.movesSteps", lang))}" data-fy-streak-one-fmt="${e(t("forYou.movesStreak.one", lang))}" data-fy-streak-other-fmt="${e(t("forYou.movesStreak.other", lang))}" data-fy-done-label="${e(t("forYou.movesDone", lang))}" data-fy-done-state="${e(t("forYou.movesDoneToday", lang))}" data-fy-refused="${e(t("forYou.movesSwapRefused", lang))}">
         <p class="fy-tile-title" data-fy-move-title>${e(c.title)}</p>
         <p class="fy-tile-meta" data-fy-move-minutes>${e(fill(t("forYou.minutes", lang), { n: Number(c.minutes) || 0 }))}</p>
         <p class="fy-tile-meta" data-fy-move-why${c.why ? "" : " hidden"}>${e(c.why || "")}</p>

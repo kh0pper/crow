@@ -6,11 +6,12 @@
  * (an installed copy that predates the module), `"error"` (the read threw) — the page renders
  * nothing for all three.
  *
- *   loadMoves(db, { crowHome, now, weather }) -> { ramble: "missing" | "update" | "error" | "ok", moves? }
+ *   loadMoves(db, { crowHome, now, weather, lang }) -> { ramble: "missing" | "update" | "error" | "ok", moves? }
  *
  * `weather` is the forecast the page already loaded for its chip ({ temp, code, rain, ... });
- * `moveWeather` narrows it to the picker's shape. The bundle fetches nothing and reaches no
- * gateway file — this loader is the whole seam.
+ * `moveWeather` narrows it to the picker's shape. `lang` is the page's language, so the why line
+ * comes back in it. The bundle fetches nothing and reaches no gateway file — this loader is the
+ * whole seam.
  *
  * The bundle's writes (today's card, the day's pause fact) go through the same emit hook Ramble's
  * own routes build: pass-through with the gateway's live manager, a durable queue without one, so
@@ -65,7 +66,9 @@ async function bundleEmit(db) {
   } catch { return undefined; }
 }
 
-export async function loadMoves(db, { crowHome = resolveCrowHome(), now = Date.now(), weather = null } = {}) {
+export async function loadMoves(db, {
+  crowHome = resolveCrowHome(), now = Date.now(), weather = null, lang = "en",
+} = {}) {
   if (!rambleInstalled(crowHome)) return { ramble: "missing" };
   let mod;
   try {
@@ -76,7 +79,9 @@ export async function loadMoves(db, { crowHome = resolveCrowHome(), now = Date.n
   }
   if (!mod || typeof mod.forYouMoves !== "function") return { ramble: "update" };
   try {
-    const moves = await mod.forYouMoves(db, { now, weather: moveWeather(weather), emit: await bundleEmit(db) });
+    const moves = await mod.forYouMoves(db, {
+      now, weather: moveWeather(weather), lang, emit: await bundleEmit(db),
+    });
     return { ramble: "ok", moves: moves && typeof moves === "object" ? moves : null };
   } catch (err) {
     console.warn("[for-you] Ramble moves failed:", err && err.message);

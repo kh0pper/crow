@@ -107,8 +107,11 @@ test("loader: the page's weather reaches Ramble as { rain, temp, code }, and not
     assert.equal(ok.moves.challenge.title, "Morning stretch");
     assert.deepEqual(seen[0].weather, { rain: 30, temp: 21, code: 0 });
     assert.equal(seen[0].now, 1_000);
+    assert.equal(seen[0].lang, "en", "the page's language defaults to English");
     await M.loadMoves(db, { crowHome: HOME, now: 2_000, weather: null });
     assert.equal(seen[1].weather, null);
+    await M.loadMoves(db, { crowHome: HOME, now: 3_000, weather: null, lang: "es" });
+    assert.equal(seen[2].lang, "es", "the page's language reaches the bundle, so the why line is Spanish");
     assert.deepEqual(M.moveWeather({ temp: 21 }), { temp: 21 });
     for (const junk of [{}, { temp: "warm" }, null, "hot", 4]) assert.equal(M.moveWeather(junk), null, String(junk));
   } finally { M._setMovesModuleForTest(null); db.close(); }
@@ -166,6 +169,10 @@ test("Ramble's module: today's challenge, the bird's Health, today's steps and t
     assert.equal(first.health.max >= first.health.energy, true);
     assert.deepEqual(first.steps, { today: 0, goal: 6000 });
     assert.equal(first.streak.days, 0);
+
+    // The why line follows the page's language, from the same stored reason codes.
+    const es = await B.forYouMoves(db, { now, weather: null, library: lib, lang: "es" });
+    assert.equal(es.challenge.why, "Una buena forma de cortar el día.");
 
     const { recordChallengeDone } = await import("../bundles/ramble/server/moves/ledger.js");
     await recordChallengeDone(db, { day: first.challenge.day, entry: entry(), now });
@@ -332,6 +339,30 @@ test("the client: Done posts the challenge's own day, and the card is repainted 
   assert.equal(done.disabled, true);
   assert.equal(r.document.querySelector("[data-fy-move-why]").hasAttribute("hidden"), true, "an empty why line is hidden");
   assert.equal(r.document.querySelector("[data-fy-move-energy]").textContent, "18 of 30 health");
+});
+
+test("the client: the streak line is singular at one day", async () => {
+  const r = await movesRig();
+  r.reply(routeSnapshot({ streak: { days: 1 } }));
+  r.click("done");
+  await r.settle();
+  assert.equal(r.document.querySelector("[data-fy-move-streak]").textContent, "1-day streak");
+
+  const plural = await movesRig();
+  plural.click("done");
+  await plural.settle();
+  assert.equal(plural.document.querySelector("[data-fy-move-streak]").textContent, "4-day streak");
+});
+
+test("the client: a repaint that throws never leaves the Done/Swap buttons stuck", async () => {
+  const r = await movesRig();
+  r.reply({ challenge: { day: DAY, done: false, get entry() { throw new Error("paint failed"); } } });
+  r.click("done");
+  await r.settle();
+  assert.equal(r.document.querySelector("[data-fy-move-status]").textContent, "That didn't save");
+  for (const verb of ["done", "swap"]) {
+    assert.equal(r.document.querySelector('[data-fy-move="' + verb + '"]').disabled, false, verb);
+  }
 });
 
 test("the client: Swap posts to Ramble's swap route; a refusal is said in the card, a failure leaves it usable", async () => {

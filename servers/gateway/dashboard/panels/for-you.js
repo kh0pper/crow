@@ -127,9 +127,10 @@ export default {
       settings.sections.weather && settings.place ? weather(settings.place).catch(failed("weather", null)) : null,
     ]);
     // Ramble's card weighs the weather the chip already loaded, so it reads after it (the picker
-    // takes { rain, temp, code }); a missing or failing Ramble hides only this section.
+    // takes { rain, temp, code }); a missing or failing Ramble hides only this section. `lang` goes
+    // along so the why line is written in the page's language.
     const moves = settings.sections.moves
-      ? await loadMoves(db, { crowHome, now, weather: wx }).catch(failed("moves", null))
+      ? await loadMoves(db, { crowHome, now, weather: wx, lang }).catch(failed("moves", null))
       : null;
     return layout({
       title: t("forYou.title", lang),

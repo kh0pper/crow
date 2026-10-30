@@ -30,8 +30,9 @@ import { pickChallenge } from "../bundles/ramble/server/moves/picker.js";
 import { applyRambleSetting, applyRambleWallet } from "../servers/sharing/instance-sync.js";
 import {
   DEFAULT_PREFS, MAX_SWAPS, MOVE_OFF_KIND, PREFS_KEY, TODAY_KEY,
-  MovesPrefsError, readPrefs, writePrefs, todayChallenge, swapChallenge, whyLine,
+  MovesPrefsError, readPrefs, writePrefs, todayChallenge, todayForSurface, swapChallenge, whyLine,
 } from "../bundles/ramble/server/moves/today.js";
+import { forYouMoves } from "../bundles/ramble/server/for-you.js";
 
 /** Local noon on a fixed local day, so the whole file is timezone-independent. */
 const T0 = new Date(2026, 9, 5, 12, 0, 0).getTime();
@@ -483,6 +484,51 @@ test("TWO DEVICES: picks converge under the settings LWW, and Done pays once acr
     // eslint-disable-next-line no-await-in-loop
     assert.equal((await todayChallenge(db, { now: at + 180_000, library: lib })).done, true);
   }
+});
+
+/* ------------------------------------------------------------- one assembly */
+
+test("ONE ASSEMBLY: weather the user turned off never reaches the picker, on either surface", async () => {
+  // An outdoor-only library: if the rainy forecast were weighed, the picker's
+  // indoor-only rule would leave nothing and the card would be null.
+  const OUTDOOR = entry({ id: "out-1", kind: "walk", activity: "walk", indoor: false });
+  const rainy = { rain: 90, temp: 12, code: 61 };
+
+  const onDb = await freshDb();
+  await writePrefs(onDb, PREFS);
+  assert.equal(
+    await todayForSurface(onDb, { now: T0, weather: rainy, library: [OUTDOOR] }), null,
+    "with weather on, the fixture really is rained out",
+  );
+
+  const offDb = await freshDb();
+  await writePrefs(offDb, { ...PREFS, weather: false });
+  const shown = await todayForSurface(offDb, { now: T0, weather: rainy, library: [OUTDOOR] });
+  assert.ok(shown, "with weather off the picker is never told it rains");
+  assert.equal(shown.entry.id, "out-1");
+  assert.equal(shown.reasons.includes("rain_later"), false);
+  assert.equal(shown.reasons.includes("cold"), false);
+});
+
+test("ONE ASSEMBLY: the panel's helper and For You's module pick the same entry for one day", async () => {
+  const panelDb = await freshDb();
+  const forYouDb = await freshDb();
+  await writePrefs(panelDb, PREFS);
+  await writePrefs(forYouDb, PREFS);
+  const lib = [entry({ id: "a-1" }), entry({ id: "b-2", kind: "pose", activity: "yoga" })];
+
+  const panel = await todayForSurface(panelDb, { now: T0, weather: { rain: 80 }, library: lib });
+  const forYou = await forYouMoves(forYouDb, { now: T0, weather: { rain: 80 }, library: lib });
+  assert.ok(panel && forYou.challenge);
+  assert.equal(forYou.challenge.entryId, panel.entry.id, "one assembly, one pick");
+  assert.equal(forYou.challenge.why, panel.why);
+
+  // The language rides through the same function, so For You is not stuck in English.
+  const esDb = await freshDb();
+  await writePrefs(esDb, PREFS);
+  const es = await todayForSurface(esDb, { now: T0, weather: null, lang: "es", library: lib });
+  assert.equal(es.why, whyLine(es.reasons, "es"));
+  assert.notEqual(es.why, whyLine(es.reasons, "en"));
 });
 
 /* ------------------------------------------------------------------ off */

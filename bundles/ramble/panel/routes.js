@@ -361,13 +361,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     }
   }
 
-  /** Today's pick, made with the weather, prefs and learned flows the panel shows. */
-  async function todayCard(now) {
-    const library = servedMoves();
-    const prefs = await movesMods.todayMod.readPrefs(db);
-    const weather = await movesWeather(prefs);
-    const learning = await movesMods.learningMod.learningFlows(db, library);
-    return movesMods.todayMod.todayChallenge(db, { now, weather, emit, library, learning });
+  /**
+   * Today's pick, assembled by the ONE shared function both surfaces call
+   * (moves/today.js todayForSurface): prefs, the weather the user still wants
+   * weighed, the served library and the learned flows.
+   */
+  async function todayCard(now, lang) {
+    return movesMods.todayMod.todayForSurface(db, {
+      now, weather: await movesWeather(await movesMods.todayMod.readPrefs(db)), emit,
+      library: servedMoves(), lang,
+    });
   }
 
   /** The whole moves strip: today's card, the bird's Health, steps and the streak. */

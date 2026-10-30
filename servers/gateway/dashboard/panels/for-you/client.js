@@ -75,7 +75,8 @@ export function forYouClientJs() {
     }
     var steps = json.steps || {};
     put('[data-fy-move-steps]', tpl('data-fy-steps-fmt', Number(steps.steps) || 0).replace('{goal}', String(Number(steps.goal) || 0)));
-    put('[data-fy-move-streak]', tpl('data-fy-streak-fmt', Number((json.streak || {}).days) || 0));
+    var days = Number((json.streak || {}).days) || 0;
+    put('[data-fy-move-streak]', tpl(days === 1 ? 'data-fy-streak-one-fmt' : 'data-fy-streak-other-fmt', days));
     var doneBtn = card.querySelector('[data-fy-move="done"]');
     if (doneBtn) {
       doneBtn.textContent = c.done
@@ -200,6 +201,11 @@ export function forYouClientJs() {
         }, function () {
           if (mstatus) mstatus.textContent = root.getAttribute('data-fy-failed') || '';
           for (var mk = 0; mk < mbtns.length; mk++) mbtns[mk].disabled = false;
+        })
+        .catch(function () {
+          // Painting threw after a successful save: the buttons must not stay stuck disabled.
+          if (mstatus) mstatus.textContent = root.getAttribute('data-fy-failed') || '';
+          for (var mz = 0; mz < mbtns.length; mz++) mbtns[mz].disabled = false;
         });
       return;
     }
