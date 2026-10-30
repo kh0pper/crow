@@ -58,6 +58,8 @@ export async function initMediaTables(db) {
 
   // Add auth_config for paywalled sources
   await addColumnIfMissing(db, "media_sources", "auth_config", "TEXT");
+  // For You v1: "Hide this source" leaves a source out of the For You picks (server/for-you.js) only.
+  await addColumnIfMissing(db, "media_sources", "curation_hidden", "INTEGER DEFAULT 0");
 
   // --- Media Articles ---
 

@@ -375,6 +375,24 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
+  // --- Hide a source from the For You picks, or show it again (For You v1) ---
+  // The source keeps fetching and stays in this feed; only server/for-you.js leaves it out.
+  router.post("/api/media/sources/:id/hidden", authMiddleware, csrfMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const hidden = req.body?.hidden;
+      if (typeof hidden !== "boolean") return res.status(400).json({ error: "hidden must be true or false" });
+      const { setSourceHidden } = await importBundleModule("for-you.js");
+      if (!(await setSourceHidden(db, id, hidden))) return res.status(404).json({ error: "Not found" });
+      res.json({ ok: true, hidden });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
   // --- Refresh source ---
   router.post("/api/media/sources/:id/refresh", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();

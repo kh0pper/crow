@@ -217,7 +217,7 @@ test("every state-changing /api/media route in the router is CSRF-gated", () => 
     .filter((l) => l.route && l.route.path.startsWith("/api/media/"))
     .flatMap((l) => Object.keys(l.route.methods).filter((m) => m !== "get" && m !== "head")
       .map((m) => ({ method: m, path: l.route.path, names: l.route.stack.map((s) => s.name) })));
-  assert.equal(mutating.length, 12, "the route inventory this test covers");
+  assert.equal(mutating.length, 13, "the route inventory this test covers");
   for (const r of mutating) {
     assert.ok(r.names.includes("csrfMiddleware"), `${r.method.toUpperCase()} ${r.path} lacks csrfMiddleware`);
   }
