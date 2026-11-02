@@ -69,7 +69,7 @@ let trackerItemId; // an id-space guard fixture (board_id NOT NULL): a "wrong ki
   const c = new Database(process.env.CROW_DB_PATH);
   markPriorDone(c);
   c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT,
-      workspace_dir TEXT, tasks_db_uri TEXT, archived_at TEXT, repo_path TEXT);
+      workspace_dir TEXT, tasks_db_uri TEXT, archived_at TEXT, repo_path TEXT, status TEXT DEFAULT 'active', type TEXT DEFAULT 'general');
     CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
       definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER);
     CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL,

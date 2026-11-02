@@ -81,7 +81,7 @@ function fixture() {
 
   const c = new Database(dbPath);
   markPriorDone(c);
-  c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT);
+  c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT, status TEXT DEFAULT 'active', type TEXT DEFAULT 'general');
     CREATE TABLE bot_jobs (job_id TEXT PRIMARY KEY, bot_id TEXT, card_id INTEGER, card_action TEXT,
       status TEXT, worker_pid INTEGER, started_at TEXT);
     CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, card_id INTEGER, status TEXT,
@@ -889,4 +889,22 @@ test("bot write scope: a bot with no linked project creates an unassigned card, 
   await bot.close();
   const row = (await state.tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [made.id] })).rows[0];
   assert.equal(row.project_id, null);
+});
+
+test("board_list_boards hides a status-archived project and a deleted one, keeps a live one", async () => {
+  // Both archive markers hide a project's board (activeProjectWhere): status 'archived' with
+  // archived_at NULL, and archived_at set (deleted). Project 1 is the live fixture project.
+  await state.cdb.execute("INSERT INTO project_spaces (id, name, slug, archived_at, status) VALUES (901, 'Archived', 'tp-archived', NULL, 'archived')");
+  await state.cdb.execute("INSERT INTO project_spaces (id, name, slug, archived_at, status) VALUES (902, 'Deleted', 'tp-deleted', '2026-10-01 00:00:00', 'active')");
+  const client = await connectClient("/board/mcp", state.localToken);
+  try {
+    const ids = payload(await client.callTool({ name: "board_list_boards", arguments: {} }))
+      .boards.filter((b) => b.kind === "project").map((b) => b.project_id);
+    assert.ok(ids.includes(1), "the live project's board is listed");
+    assert.ok(!ids.includes(901), "a status-archived project is not a board");
+    assert.ok(!ids.includes(902), "a deleted project is not a board");
+  } finally {
+    await client.close();
+    await state.cdb.execute("DELETE FROM project_spaces WHERE id IN (901, 902)");
+  }
 });

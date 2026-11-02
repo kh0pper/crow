@@ -21,6 +21,7 @@ import { giveTaskScript } from "./give-task.js";
 import { voiceAbilityScript } from "./voice-use.js";
 import { voiceBotCardHtml } from "./voice-bot-card.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
+import { activeProjectWhere } from "../../../../shared/shell-items.js";
 import { loadUnassigned } from "../bot-board/data-queries.js";
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
@@ -186,7 +187,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req, ki
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];
-  try { createProjects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
+  try { createProjects = (await db.execute({ sql: `SELECT id, name, slug FROM project_spaces WHERE ${activeProjectWhere()} ORDER BY id`, args: [] })).rows; } catch {}
   const projCreateOpts = createProjects.map((p) => `<option value="${p.id}">#${p.id} &mdash; ${escapeHtml(p.name || "")} (${escapeHtml(p.slug || "")})</option>`).join("");
   const { opts: createModelOpts, error: createModelErr } = await loadModelOptions(db);
   const createByProv = {};
