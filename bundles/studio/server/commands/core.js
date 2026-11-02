@@ -21,6 +21,7 @@ import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   BEATS_PER_BAR,
   LIMITS,
+  STEP_GUARDS,
   TRACK_COLORS,
   cloneJson,
   clipMap,
@@ -131,6 +132,19 @@ function clipRef(id) {
 /** @returns {number} "1 bar" vs "8 bars" without the plural bug. */
 function barsText(bars) {
   return bars === 1 ? "1 bar" : `${bars} bars`;
+}
+
+/**
+ * The sibling a restored track or scene should follow, for the `_after`
+ * position hint doc.js reads beside `_index`. A recorded index goes stale as
+ * soon as an object in front of it is removed, so a restore prefers the
+ * neighbour it knew.
+ * @param {Y.Map<any>|null} previous - the sibling that came before it
+ * @returns {string|null}
+ */
+function siblingBefore(previous) {
+  const id = previous?.get?.("id");
+  return typeof id === "string" ? id : ABSENT;
 }
 
 /** @returns {string} "1 clip" vs "3 clips". */
@@ -320,10 +334,17 @@ defineCommand({
       pan: args.pan ?? 0,
       locked: false,
     };
+    const previous = index > 0 ? tracks.get(index - 1) : null;
     tracks.push([objectMap(track)]);
     return {
       before: { [fieldKey(trackRef(track.id), "*")]: ABSENT },
-      after: { [fieldKey(trackRef(track.id), "*")]: { ...cloneJson(track), _index: index } },
+      after: {
+        [fieldKey(trackRef(track.id), "*")]: {
+          ...cloneJson(track),
+          _index: index,
+          _after: siblingBefore(previous),
+        },
+      },
     };
   },
 });
@@ -350,9 +371,14 @@ defineCommand({
     if (index < 0) throw new StudioError("not_found", `There is no track "${args.track_id}" in this song.`);
     const track = getTrack(doc, args.track_id);
     const clips = clipEntries(doc).filter(({ clip }) => clip.get("track_id") === args.track_id);
+    const previous = index > 0 ? trackList(doc).get(index - 1) : null;
 
     const before = {
-      [fieldKey(trackRef(args.track_id), "*")]: { ...cloneJson(toPlain(track)), _index: index },
+      [fieldKey(trackRef(args.track_id), "*")]: {
+        ...cloneJson(toPlain(track)),
+        _index: index,
+        _after: siblingBefore(previous),
+      },
     };
     const after = { [fieldKey(trackRef(args.track_id), "*")]: ABSENT };
     for (const { id, clip } of clips) {
@@ -450,10 +476,17 @@ defineCommand({
     if (before === ABSENT && Object.keys(params).length >= LIMITS.params) {
       refuseLimit(`A device can have at most ${LIMITS.params} parameters.`);
     }
+    const deviceType = typeof device.type === "string" ? device.type : ABSENT;
     params[args.name] = args.value;
     track.set("device", { ...device, params });
     const field = fieldKey(ref, `${PARAM_FIELD_PREFIX}${args.name}`);
-    return { before: { [field]: before }, after: { [field]: args.value } };
+    const after = { [field]: args.value };
+    // A controller value only means what it meant inside the device it was set
+    // on, so the step guards on the device type: undoing it after a device swap
+    // is a reported conflict instead of a write into the new module. A guard is
+    // compared by the history, never restored.
+    after[STEP_GUARDS] = { [fieldKey(ref, "device.type")]: deviceType };
+    return { before: { [field]: before }, after };
   },
 });
 
@@ -562,10 +595,17 @@ defineCommand({
     }
     const index = scenes.length;
     const scene = { id: args.id, name: args.name };
+    const previous = index > 0 ? scenes.get(index - 1) : null;
     scenes.push([objectMap(scene)]);
     return {
       before: { [fieldKey(sceneRef(scene.id), "*")]: ABSENT },
-      after: { [fieldKey(sceneRef(scene.id), "*")]: { ...cloneJson(scene), _index: index } },
+      after: {
+        [fieldKey(sceneRef(scene.id), "*")]: {
+          ...cloneJson(scene),
+          _index: index,
+          _after: siblingBefore(previous),
+        },
+      },
     };
   },
 });
@@ -613,9 +653,14 @@ defineCommand({
     if (index < 0) throw new StudioError("not_found", `There is no scene "${args.scene_id}" in this song.`);
     const scene = getScene(doc, args.scene_id);
     const clips = clipEntries(doc).filter(({ clip }) => clip.get("scene_id") === args.scene_id);
+    const previous = index > 0 ? sceneList(doc).get(index - 1) : null;
 
     const before = {
-      [fieldKey(sceneRef(args.scene_id), "*")]: { ...cloneJson(toPlain(scene)), _index: index },
+      [fieldKey(sceneRef(args.scene_id), "*")]: {
+        ...cloneJson(toPlain(scene)),
+        _index: index,
+        _after: siblingBefore(previous),
+      },
     };
     const after = { [fieldKey(sceneRef(args.scene_id), "*")]: ABSENT };
     for (const { id, clip } of clips) {

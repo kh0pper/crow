@@ -4,14 +4,22 @@
  * Every scenario builds a song in memory and records its steps the way the
  * session hub will — one real registry command inside one `doc.transact(...)`
  * per step. Nothing here touches a database or a running instance.
+ *
+ * The undo plan is dry-run on a clone of the document before it is offered, so
+ * several tests below are about what an undo *refuses*: a step whose target is
+ * gone, a step that would leave a clip without its track or scene, and a step
+ * that would put notes past the end of a clip. A refused plan comes back with
+ * an empty `apply` and the reasons in `blocked`.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { encodeDocState } from "../bundles/studio/server/doc.js";
 import { newSongDoc, snapshot } from "../bundles/studio/server/doc.js";
 import { StudioError, runCommand } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
 import {
+  OBJECT_GONE,
   REDO_COMMAND,
   UNDO_COMMAND,
   applyPlan,
@@ -19,6 +27,7 @@ import {
   makeUndoEntry,
   planRedo,
   planUndo,
+  readField,
 } from "../bundles/studio/server/history.js";
 
 /** The song every entry in a test belongs to. */
@@ -38,6 +47,16 @@ function note(t, d, p, v) {
 /** @returns {string[]} the track names in song order. */
 function trackNames(doc) {
   return snapshot(doc).tracks.map((track) => track.name);
+}
+
+/**
+ * The document's whole Yjs state, base64 — a byte-for-byte comparison a
+ * refused undo must not change.
+ * @param {import("yjs").Doc} doc
+ * @returns {string}
+ */
+function docBytes(doc) {
+  return Buffer.from(encodeDocState(doc)).toString("base64");
 }
 
 /**
@@ -512,4 +531,246 @@ test("same controller changed later keeps the later value and reports one confli
   assert.deepEqual(newerUndo.plan.conflicts, []);
   assert.equal(newerUndo.plan.apply.get("track:bass|device.params.Cutoff"), 40);
   assert.equal(snapshot(s.doc).tracks[0].device.params.Cutoff, 40);
+});
+
+test("undo of track.add refused while a clip still uses the track", (t) => {
+  const s = studio(t);
+  const added = s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+
+  // The step's own field is untouched, so nothing is in conflict — but taking
+  // it back would delete the track the clip still plays on.
+  const plan = planUndo(s.doc, added.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its track/);
+
+  assert.deepEqual(trackNames(s.doc), ["Bass"]);
+  assert.deepEqual(Object.keys(snapshot(s.doc).clips), ["bass-verse"]);
+});
+
+test("undo of scene.add refused while a clip still uses the scene", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const added = s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+
+  const plan = planUndo(s.doc, added.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its scene/);
+
+  assert.deepEqual(snapshot(s.doc).scenes.map((scene) => scene.id), ["verse"]);
+  assert.deepEqual(Object.keys(snapshot(s.doc).clips), ["bass-verse"]);
+});
+
+test("undo of track.remove refused when the clip's scene is gone", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  const removed = s.run("track.remove", { track_id: "bass" });
+  s.run("scene.remove", { scene_id: "verse" });
+
+  // The removal step still matches the document exactly (track and clip are
+  // both gone), so the plan would restore the clip into a scene that no longer
+  // exists. It comes back empty instead.
+  const plan = planUndo(s.doc, removed.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its scene/);
+
+  assert.deepEqual(trackNames(s.doc), []);
+  assert.deepEqual(snapshot(s.doc).clips, {});
+});
+
+test("redo after the track was removed reports the track gone and changes nothing", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const param = s.run("track.set_param", { track_id: "bass", name: "Cutoff", value: 40 });
+  const undone = s.undo(param.entry);
+  s.run("track.remove", { track_id: "bass" });
+
+  // A single field of an object that is no longer there is not "a field that
+  // is null": the redo would have nothing to write into.
+  assert.strictEqual(readField(s.doc, "track:bass|device.params.Cutoff"), OBJECT_GONE);
+
+  const before = docBytes(s.doc);
+  const plan = planRedo(s.doc, undone.entry);
+  assert.equal(plan.apply.size, 0);
+  assert.deepEqual(plan.blocked, []);
+  assert.equal(plan.conflicts.length, 1);
+  const conflict = plan.conflicts[0];
+  assert.equal(conflict.ref, "track:bass");
+  assert.equal(conflict.field, "device.params.Cutoff");
+  assert.equal(conflict.expected, null);
+  assert.equal(conflict.actual, null);
+  assert.equal(conflict.gone, true);
+
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.equal(docBytes(s.doc), before);
+});
+
+test("partial undo can never leave notes past the clip end", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  const long = [note(0, 32, 36, 100)];
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 8,
+    notes: long,
+  });
+  const shortened = s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 2,
+    notes: [note(0, 1, 36, 100)],
+  });
+  s.run("clip.set_length", { clip_id: "bass-verse", length_bars: 3 });
+
+  // The name and the notes have not been touched since, but the length has: a
+  // per-field undo would take the notes back and leave them running past the
+  // three bars the clip has now.
+  const plan = planUndo(s.doc, shortened.entry);
+  assert.deepEqual(plan.conflicts.map((conflict) => conflict.field), ["length_bars"]);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /past its 3 bars/);
+
+  const clip = snapshot(s.doc).clips["bass-verse"];
+  assert.deepEqual(clip.notes, [note(0, 1, 36, 100)]);
+  assert.equal(clip.length_bars, 3);
+});
+
+test("undo of track.add is not a conflict just because an earlier track was removed", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Keys", id: "keys" });
+  const added = s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("track.remove", { track_id: "keys" });
+
+  // The track was recorded at index 1 and now sits at index 0. Where it sits is
+  // not part of what the step wrote, so the undo still applies.
+  const plan = planUndo(s.doc, added.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual([...plan.apply.keys()], ["track:bass|*"]);
+  assert.strictEqual(plan.apply.get("track:bass|*"), null);
+});
+
+test("undoing two removals restores the original order", (t) => {
+  const s = studio(t);
+  for (const id of ["a", "b", "c"]) s.run("track.add", { name: id.toUpperCase(), id });
+  const removedA = s.run("track.remove", { track_id: "a" });
+  const removedC = s.run("track.remove", { track_id: "c" });
+  assert.deepEqual(trackNames(s.doc), ["B"]);
+
+  // C was removed while it sat at index 1, so its recorded index alone would
+  // put it back in front of B; the neighbour it recorded keeps it behind B,
+  // where it was.
+  s.undo(removedA.entry);
+  assert.deepEqual(trackNames(s.doc), ["A", "B"]);
+  s.undo(removedC.entry);
+  assert.deepEqual(snapshot(s.doc).tracks.map((track) => track.id), ["a", "b", "c"]);
+});
+
+test("undo of set_param conflicts after the device was swapped", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const cutoff = s.run("track.set_param", { track_id: "bass", name: "Cutoff", value: 40 });
+
+  // The step guards on the device type, and the guard survives the JSON round
+  // trip the store puts an entry through.
+  assert.deepEqual(cutoff.entry.inverse.guards, { "track:bass|device.type": "Analog generator" });
+  const stored = JSON.parse(JSON.stringify(cutoff.entry));
+  assert.deepEqual(stored.inverse.guards, { "track:bass|device.type": "Analog generator" });
+
+  // The FM module happens to have the same Cutoff value, so comparing the
+  // controller alone would have matched and deleted it from the new device.
+  s.run("track.set_device", { track_id: "bass", type: "FM", params: { Cutoff: 40 } });
+
+  const plan = planUndo(s.doc, stored);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.conflicts.length, 1);
+  const conflict = plan.conflicts[0];
+  assert.equal(conflict.ref, "track:bass");
+  assert.equal(conflict.field, "device.type");
+  assert.equal(conflict.expected, "Analog generator");
+  assert.equal(conflict.actual, "FM");
+
+  // A guard is compared, never restored: the FM device is left as it is.
+  const device = snapshot(s.doc).tracks[0].device;
+  assert.equal(device.type, "FM");
+  assert.equal(device.params.Cutoff, 40);
+});
+
+test("a blocked undo leaves the doc byte-identical", (t) => {
+  const s = studio(t);
+  const added = s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+
+  const before = docBytes(s.doc);
+  const plan = planUndo(s.doc, added.entry);
+  assert.ok(plan.blocked.length > 0);
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.equal(docBytes(s.doc), before);
+  assert.deepEqual(trackNames(s.doc), ["Bass"]);
+});
+
+test("redo of an already-redone undo is refused", (t) => {
+  const s = studio(t);
+  const set = s.run("song.set_meta", { bpm: 96 });
+  const undone = s.undo(set.entry);
+  const redone = s.redo(undone.entry);
+
+  // Undo of E created U, redo of E created R out of U. E stays undone by U:
+  // taking the change out again is undoing R, never redoing U twice.
+  assert.equal(set.entry.undone_by, undone.entry.id);
+  assert.equal(undone.entry.undone_by, redone.entry.id);
+  assert.equal(snapshot(s.doc).meta.bpm, 96);
+
+  const error = refuses(() => planRedo(s.doc, undone.entry), "conflict");
+  assert.match(error.message, /already undone/);
+
+  const { plan } = s.undo(redone.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(snapshot(s.doc).meta.bpm, 120);
 });

@@ -80,6 +80,18 @@ const FIELD_SEPARATOR = "|";
 const PARAM_FIELD_PREFIX = "device.params.";
 
 /**
+ * The key a command's `apply` hangs its history *guards* on.
+ *
+ * A guard is a field that must still hold the value it held when the step was
+ * recorded for a later undo to mean anything, but which the undo never writes
+ * back: a controller value only means what it meant inside the device it was
+ * set on. A Symbol rather than a `"<ref>|<field>"` key, so it can never be
+ * mistaken for history content; `makeEntry` (history.js) moves it into
+ * `inverse.guards` when the step is recorded.
+ */
+export const STEP_GUARDS = Symbol("studio.step-guards");
+
+/**
  * The ref a command, a lock or a history entry names one object by.
  * @param {"song"|"track"|"scene"|"clip"} kind
  * @param {string} id
@@ -377,6 +389,91 @@ export function snapshot(doc) {
 }
 
 /**
+ * What is wrong with a song document, in plain English.
+ *
+ * The rules every command keeps, checked over a whole document at once:
+ *   - a song holds at most `LIMITS.tracks` tracks and `LIMITS.scenes` scenes;
+ *   - no two tracks, scenes or clips share an id;
+ *   - every clip sits on a track and in a scene the song still has;
+ *   - a clip's notes end inside its own length, the rule `clip.write`,
+ *     `clip.edit_notes` and `clip.set_length` enforce on their own edits (four
+ *     beats to the bar, see `BEATS_PER_BAR`).
+ *
+ * The history dry-runs an undo's plan on a clone of the document and calls
+ * this, so a plan that would leave the song in one of these states is refused
+ * whole instead of leaving a clip pointing at a track that is gone.
+ * @param {Y.Doc} doc
+ * @returns {string[]} one plain-English reason per problem; empty when the
+ *   document is consistent
+ */
+export function checkInvariants(doc) {
+  const song = snapshot(doc);
+  const reasons = [];
+
+  if (song.tracks.length > LIMITS.tracks) {
+    reasons.push(`The song would have ${song.tracks.length} tracks; a song can have at most ${LIMITS.tracks} tracks.`);
+  }
+  if (song.scenes.length > LIMITS.scenes) {
+    reasons.push(`The song would have ${song.scenes.length} scenes; a song can have at most ${LIMITS.scenes} scenes.`);
+  }
+
+  reasons.push(...duplicateIdReasons(song.tracks, "track"));
+  reasons.push(...duplicateIdReasons(song.scenes, "scene"));
+  reasons.push(...duplicateIdReasons(Object.values(song.clips), "clip"));
+
+  const trackIds = new Set(song.tracks.map((track) => track.id));
+  const sceneIds = new Set(song.scenes.map((scene) => scene.id));
+
+  for (const clip of Object.values(song.clips)) {
+    const label = clip.name === "" ? `clip "${clip.id}"` : `clip "${clip.name}"`;
+    if (!trackIds.has(clip.track_id)) {
+      reasons.push(`The ${label} would be left without its track: there is no track "${clip.track_id}" in the song.`);
+    }
+    if (!sceneIds.has(clip.scene_id)) {
+      reasons.push(`The ${label} would be left without its scene: there is no scene "${clip.scene_id}" in the song.`);
+    }
+    const limit = clip.length_bars * BEATS_PER_BAR;
+    for (let index = 0; index < clip.notes.length; index += 1) {
+      const note = clip.notes[index];
+      if (note.t + note.d > limit) {
+        reasons.push(
+          `Note ${index + 1} in the ${label} would end at beat ${beatText(note.t + note.d)}, past its ${barsText(clip.length_bars)}.`,
+        );
+        break;
+      }
+    }
+  }
+
+  return reasons;
+}
+
+/** @returns {string[]} one reason per id that two objects of this list share. */
+function duplicateIdReasons(items, label) {
+  const seen = new Set();
+  const reported = new Set();
+  const reasons = [];
+  for (const item of items) {
+    const id = typeof item?.id === "string" ? item.id : "";
+    if (seen.has(id) && !reported.has(id)) {
+      reported.add(id);
+      reasons.push(`The song would have two ${label}s with the id "${id}".`);
+    }
+    seen.add(id);
+  }
+  return reasons;
+}
+
+/** @returns {string} a beat position without float noise. */
+function beatText(beats) {
+  return String(Math.round(beats * 1000) / 1000);
+}
+
+/** @returns {string} "1 bar" vs "8 bars" without the plural bug. */
+function barsText(bars) {
+  return bars === 1 ? "1 bar" : `${bars} bars`;
+}
+
+/**
  * Write a before/after map back onto a document — the second half of an undo
  * or a redo.
  *
@@ -387,12 +484,17 @@ export function snapshot(doc) {
  *   - `"clip:abc|*"` with an object (re)creates the whole clip, and with
  *     `null` deletes it;
  *   - `"track:abc|*"` and `"scene:abc|*"` do the same at the object's original
- *     position, carried inside the object JSON as `_index` (stripped again on
- *     the way in and out, so it never shows up in a snapshot).
+ *     position, carried inside the object JSON as `_index` and `_after`
+ *     (stripped again on the way in and out, so they never show up in a
+ *     snapshot).
  *
- * `_index` is a position hint, not song data: `snapshot()` drops it and
- * `readField()` reports it beside the current object, so a stored creation
- * value compares cleanly with the document.
+ * `_index` and `_after` are position hints, not song data: `snapshot()` drops
+ * them, and `readField()` reports where the object sits now, so a stored
+ * creation value compares cleanly with the document. `_after` is the id of the
+ * sibling the object followed when it was recorded and wins on restore when
+ * that sibling is still there; `_index` is the fallback, clamped to the list,
+ * so restoring a track after an unrelated one was removed does not push it to
+ * the wrong place.
  *
  * Runs inside the caller's transaction, like every other edit.
  * @param {Y.Doc} doc
@@ -437,7 +539,8 @@ export function applyBeforeAfter(doc, plan) {
  *   field name, or a controller path like `"device.params.Cutoff"`
  * @returns {any} the value as the document holds it, or `null` when the object
  *   or the field is not there. A whole track or scene carries its current
- *   `_index`, matching the JSON a creating command wrote.
+ *   `_index` and `_after` (the id of the sibling before it), matching the JSON
+ *   a creating command wrote.
  */
 export function readField(doc, ref, field = "*") {
   const target = parseObjectRef(ref);
@@ -463,7 +566,15 @@ export function readField(doc, ref, field = "*") {
     const index = items.findIndex((item) => item instanceof Y.Map && item.get("id") === target.id);
     if (index < 0) return ABSENT;
     const object = items[index];
-    if (field === "*") return { ...toPlain(object), _index: index };
+    if (field === "*") {
+      const { _index, _after, ...plain } = toPlain(object) ?? {};
+      const previous = index > 0 ? items[index - 1] : null;
+      return {
+        ...plain,
+        _index: index,
+        _after: typeof previous?.get?.("id") === "string" ? previous.get("id") : ABSENT,
+      };
+    }
     return readPath(object, fieldPath(field));
   }
 
@@ -483,6 +594,8 @@ function fieldPath(field) {
   if (field.startsWith(PARAM_FIELD_PREFIX) && field.length > PARAM_FIELD_PREFIX.length) {
     return ["device", "params", field.slice(PARAM_FIELD_PREFIX.length)];
   }
+  // The device-type guard a set_param entry carries (read-only, never restored).
+  if (field === "device.type") return ["device", "type"];
   return [field];
 }
 
@@ -569,21 +682,39 @@ function writeListObject(doc, containerKey, id, field, value, label) {
       return;
     }
     const object = cloneJson(value) ?? {};
-    const wanted = Number.isInteger(object._index)
-      ? object._index
-      : index >= 0
-        ? index
-        : list.length;
+    const afterId = typeof object._after === "string" ? object._after : null;
+    const wanted = Number.isInteger(object._index) ? object._index : null;
+    delete object._after;
     delete object._index;
     const created = objectMap(object);
     if (index >= 0) list.delete(index, 1);
-    const at = Math.max(0, Math.min(wanted, list.length));
-    list.insert(at, [created]);
+    list.insert(positionFor(list, afterId, wanted), [created]);
     return;
   }
 
   if (index < 0) throw new Error(`Studio: there is no ${label} "${id}" to write to`);
   writeField(items[index], field, value);
+}
+
+/**
+ * Where a (re)stored track or scene goes: right after the sibling it followed
+ * when it was recorded, else at its recorded index, clamped to the list.
+ *
+ * The sibling wins because a recorded index goes stale as soon as an object in
+ * front of it is removed: restoring it then would put it back in the wrong
+ * place even though its old neighbour is still there to anchor it.
+ * @param {Y.Array<any>} list - the list after the object itself was removed
+ * @param {string|null} afterId - the sibling to follow, when there was one
+ * @param {number|null} wanted - the recorded index, when there was one
+ * @returns {number}
+ */
+function positionFor(list, afterId, wanted) {
+  if (afterId !== null) {
+    const at = list.toArray().findIndex((item) => item instanceof Y.Map && item.get("id") === afterId);
+    if (at >= 0) return at + 1;
+  }
+  const fallback = wanted === null ? list.length : wanted;
+  return Math.max(0, Math.min(fallback, list.length));
 }
 
 /** Write one field of a clip, or (re)create/delete the whole clip. */
@@ -604,11 +735,11 @@ function writeClip(doc, id, field, value) {
   writeField(clip, field, value);
 }
 
-/** @returns {any} the value without its internal `_index` hint. */
-function stripIndex(value) {
+/** @returns {any} the value without its internal `_index`/`_after` hints. */
+function stripHints(value) {
   const object = toPlain(value) ?? {};
-  if (object && typeof object === "object" && "_index" in object) {
-    const { _index, ...rest } = object;
+  if (object && typeof object === "object" && ("_index" in object || "_after" in object)) {
+    const { _index, _after, ...rest } = object;
     return rest;
   }
   return object;
@@ -626,7 +757,7 @@ function integerOr(value, fallback) {
 
 /** A track as a snapshot carries it: every field present, nothing extra. */
 function normalizeTrack(value) {
-  const plain = stripIndex(value);
+  const plain = stripHints(value);
   const device = plain.device && typeof plain.device === "object" ? plain.device : {};
   return {
     id: typeof plain.id === "string" ? plain.id : "",
@@ -647,7 +778,7 @@ function normalizeTrack(value) {
 
 /** A scene as a snapshot carries it. */
 function normalizeScene(value) {
-  const plain = stripIndex(value);
+  const plain = stripHints(value);
   return {
     id: typeof plain.id === "string" ? plain.id : "",
     name: typeof plain.name === "string" ? plain.name : "",
@@ -656,7 +787,7 @@ function normalizeScene(value) {
 
 /** A clip as a snapshot carries it, with its notes as plain {t, d, p, v}. */
 function normalizeClip(id, value) {
-  const plain = stripIndex(value);
+  const plain = stripHints(value);
   const notes = Array.isArray(plain.notes) ? plain.notes : [];
   return {
     id: typeof plain.id === "string" ? plain.id : id,
@@ -674,4 +805,12 @@ function normalizeClip(id, value) {
       };
     }),
   };
+}
+/**
+ * The document's full Yjs state as bytes (for persistence and byte-level comparisons).
+ * @param {Y.Doc} doc
+ * @returns {Uint8Array}
+ */
+export function encodeDocState(doc) {
+  return Y.encodeStateAsUpdate(doc);
 }
