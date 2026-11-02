@@ -43,7 +43,7 @@ import { join } from "node:path";
 import { hasActorKey, presignActors, scopeRefFor, signScopeActor } from "./actor-sig.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
-import { splitEntry } from "./skill-tools.mjs";
+import { effectiveCrowMcp, splitEntry } from "./skill-tools.mjs";
 import { crowServerCatalog } from "./crow-server-catalog.mjs";
 import { readCanonicalMcp } from "./mcp_writer.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
@@ -96,33 +96,41 @@ export function turnScopeFor({ gatewayType, sessionRowId = null, jobId = null, p
 }
 
 /**
- * The project's active connections a bot may be offered, as connectionsFor reads them
- * (service-connections.js: status 'active', the local owner's only, a non-archived project, ordered
- * by service, slug, id), on a better-sqlite3 handle. `[]` for no project or any read failure.
- * @returns {Array<{uuid, serviceId, bundleId, accountLabel, labelSlug, blockName}>}
+ * The project's connections a bot may be offered: the active rows (the local owner's only, in a
+ * non-archived project, ordered by service, slug, id) PLUS an 'error' row whose last_error is
+ * child_unavailable — the class ensureChild retries on its own after its cooldown, the same rule
+ * children.js listableConnection applies on the gateway (fix round 1). Leaving that row out made
+ * it disappear from the blocks, so nothing ever called ensureChild and the retry never ran.
+ * `[]` for no project or any read failure.
+ * @returns {Array<{uuid, serviceId, bundleId, accountLabel, labelSlug, blockName, status, lastError}>}
  */
 export function readProjectConnectionsSync(conn, projectId) {
   if (projectId == null || !conn) return [];
   try {
     return conn.prepare(
-      "SELECT uuid, service_id, bundle_id, account_label, label_slug FROM service_connections " +
-      "WHERE project_id = ? AND status = 'active' AND owner_contact_id IS NULL " +
+      "SELECT uuid, service_id, bundle_id, account_label, label_slug, status, last_error FROM service_connections " +
+      "WHERE project_id = ? AND (status = 'active' OR (status = 'error' AND last_error = 'child_unavailable')) " +
+      "AND owner_contact_id IS NULL " +
       "AND project_id IN (SELECT id FROM project_spaces WHERE status != 'archived' AND archived_at IS NULL) " +
       "ORDER BY service_id, label_slug, id",
     ).all(Number(projectId)).map((r) => ({
       uuid: r.uuid, serviceId: r.service_id, bundleId: r.bundle_id ?? null, accountLabel: r.account_label,
       labelSlug: r.label_slug, blockName: `${r.service_id}-${r.label_slug}`,
+      status: r.status, lastError: r.last_error ?? null,
     }));
   } catch {
     return [];
   }
 }
 
-/** What a crow_mcp list selects of one service: null, `{tools: null}` (bare: every tool) or `{tools: [...]}`. */
-function selectionOf(def, serviceId) {
-  const list = (def && def.tools && Array.isArray(def.tools.crow_mcp)) ? def.tools.crow_mcp : [];
+/**
+ * What one crow_mcp list selects of a service: null, `{tools: null}` (bare: every tool) or
+ * `{tools: [...]}`. The list passed in is always effectiveCrowMcp's (never the def's stored one),
+ * so a block and the services mount's check 5 read the same selection (fix round 1).
+ */
+function selectionOf(list, serviceId) {
   const tools = [];
-  for (const e of list) {
+  for (const e of Array.isArray(list) ? list : []) {
     if (typeof e !== "string") continue;
     if (e === serviceId) return { tools: null };
     const x = splitEntry(e);
@@ -131,16 +139,19 @@ function selectionOf(def, serviceId) {
   return tools.length ? { tools } : null;
 }
 
-/** The connected service ids the def's (effective) crow_mcp names, bare or per tool (C4). */
-export function selectedServiceIds(def, connections) {
+/** The connected service ids the def's crow_mcp names, bare or per tool (C4).
+ *  Reads effectiveCrowMcp — the stored list plus its repo skills' granted tools, minus the
+ *  declines — because that is the list the services mount selects from (mount.js check 5). */
+export function selectedServiceIds(def, connections, { crowHome, repoSkillsDir } = {}) {
+  const list = effectiveCrowMcp(def, { crowHome, repoSkillsDir });
   const out = new Set();
-  for (const c of connections || []) if (c && !out.has(c.serviceId) && selectionOf(def, c.serviceId)) out.add(c.serviceId);
+  for (const c of connections || []) if (c && !out.has(c.serviceId) && selectionOf(list, c.serviceId)) out.add(c.serviceId);
   return out;
 }
 
 /** The connections that may be offered at all: selected, bound as the owner connected them, not sensitive. */
-export function offerableConnections(def, connections, { crowHome } = {}) {
-  const selected = selectedServiceIds(def, connections);
+export function offerableConnections(def, connections, { crowHome, repoSkillsDir } = {}) {
+  const selected = selectedServiceIds(def, connections, { crowHome, repoSkillsDir });
   return (connections || []).filter((c) => selected.has(c.serviceId)
     && connectionBindingOk(c, { crowHome }) && !isSensitiveConnection(c, { crowHome }));
 }
@@ -192,10 +203,12 @@ export function reservedBlockNames(crowHome) {
  * spawn and the Perch envelope (routes/perch.js) share, so both count the same tools.
  * @returns {{names: Array<{conn, name}>, byService: Object<string,string[]>, skippedTools: string[], warnings: string[]}}
  */
-export function serviceBlockNames({ def, connections, existingNames = new Set(), toolsFor = () => null }) {
+export function serviceBlockNames({ def, connections, existingNames = new Set(), toolsFor = () => null, crowHome, repoSkillsDir } = {}) {
   const taken = existingNames instanceof Set ? existingNames : new Set(existingNames || []);
   const emitted = new Set();
   const names = [], byService = {}, skippedTools = [], warnings = [];
+  // The same selection the services mount reads (see selectedServiceIds).
+  const selected = effectiveCrowMcp(def, { crowHome, repoSkillsDir });
   for (const conn of connections || []) {
     const name = conn.blockName;
     if (typeof name !== "string" || !name) continue;
@@ -205,7 +218,7 @@ export function serviceBlockNames({ def, connections, existingNames = new Set(),
     emitted.add(name);
     names.push({ conn, name });
     (byService[conn.serviceId] ||= []).push(name);
-    const sel = selectionOf(def, conn.serviceId);
+    const sel = selectionOf(selected, conn.serviceId);
     const cached = toolsFor(conn.serviceId);
     const toolNames = new Set([...(sel && sel.tools ? sel.tools : []), ...(Array.isArray(cached) ? cached.map((t) => t && t.name).filter((n) => typeof n === "string") : [])]);
     for (const t of toolNames) {
@@ -245,7 +258,7 @@ export function serviceBlocksFor({ def, connections, actor = {}, scopeRef, owner
     const sig = signScopeActor(tuple);
     const bearer = typeof token === "string" ? token.trim() : "";
     if (!sig || !bearer) { out.warnings.push(WARN_UNSIGNED); return out; }
-    const named = serviceBlockNames({ def, connections: offer, existingNames, toolsFor });
+    const named = serviceBlockNames({ def, connections: offer, existingNames, toolsFor, crowHome });
     out.warnings.push(...named.warnings);
     const headers = {
       Authorization: "Bearer " + bearer,

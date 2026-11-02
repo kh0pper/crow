@@ -133,6 +133,22 @@ test("onlyUuids restricts: two cached connections, one named → only its tools"
   assert.equal(only.tools.find((t) => t.name === "mcp__github-work__whoami").description, "whoami tool");
 });
 
+test("fix round 1: an 'error' row ensureChild retries keeps its chat tools and route; a failed live test's row contributes nothing", async () => {
+  await withDb((d) => d.execute({ sql: "UPDATE service_connections SET status = 'error', last_error = 'child_unavailable' WHERE uuid = ?", args: [U.work] }));
+  try {
+    const retryable = await withDb((d) => PT.listProjectServiceTools(d, { projectId: P.spring, crowHome: HOME, onlyUuids: new Set([U.work]) }));
+    assert.ok(retryable.tools.length > 0, "the retryable row's tools are still listed");
+    assert.ok([...retryable.route.values()].every((r) => r.uuid === U.work), "every route entry names that connection");
+
+    await withDb((d) => d.execute({ sql: "UPDATE service_connections SET last_error = 'auth_failed' WHERE uuid = ?", args: [U.work] }));
+    const dead = await withDb((d) => PT.listProjectServiceTools(d, { projectId: P.spring, crowHome: HOME, onlyUuids: new Set([U.work]) }));
+    assert.deepEqual(dead.tools, [], "a row in error for another reason lists nothing");
+    assert.equal(dead.route.size, 0);
+  } finally {
+    await withDb((d) => d.execute({ sql: "UPDATE service_connections SET status = 'active', last_error = NULL WHERE uuid = ?", args: [U.work] }));
+  }
+});
+
 test("listing starts nothing: eight cached connections → zero children; one call starts exactly one", async () => {
   await C.stopAllChildren();
   assert.deepEqual(C.listChildren(), []);

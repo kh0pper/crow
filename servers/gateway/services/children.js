@@ -598,15 +598,22 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
   } catch {
     clearTimeout(timer);
     ac.abort();
+    // A start that failed or timed out still leaves a launcher chain behind (npm exec → sh →
+    // node): snapshot the tree BEFORE the close and reap it, as stopCurrent/closeRetired do —
+    // the transport's close signals only the first process.
+    const tree = transport.pid ? processTree(transport.pid) : [];
     try { await transport.close(); } catch { /* gone */ }
+    reapTree(tree);
     console.warn(`[services] child did not start (${r.stderr.length} stderr lines)`);
     if (r.generation !== generation) throw new ChildError("child_unavailable");
     throw await failStart(db, r);
   }
   clearTimeout(timer);
   if (r.generation !== generation) {
-    // Stopped (disconnect, uninstall) while it was starting.
+    // Stopped (disconnect, uninstall) while it was starting: same tree reap as above.
+    const tree = transport.pid ? processTree(transport.pid) : [];
     try { await transport.close(); } catch { /* gone */ }
+    reapTree(tree);
     throw new ChildError("child_unavailable");
   }
   r.transport = transport;

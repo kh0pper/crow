@@ -212,6 +212,36 @@ test("selection (C4) and sensitivity (Task 16c): only selected, bound, non-sensi
   assert.ok(!SB.offerableConnections(hankDef(), tampered, { crowHome: CROW_HOME }).some((c) => c.uuid === U.notion));
 });
 
+test("fix round 1 (finding 5): a service entry the effective selection drops gets no block, and the mount does not select it either", async () => {
+  AS._resetActorKeyForTest(); AS.initGatewayActorKey();
+  // `github/crow_fetch_source` used to classify as read; a Read-only-era def stored it, and
+  // effectiveCrowMcp drops it (dropLegacyRead) — a decline in the same def names it too. The
+  // stored list still says github, so a block built from the stored list would hand the bot an
+  // account the mount refuses.
+  const base = defOf(["github/crow_fetch_source"]);
+  const def = { ...base, tools: { ...base.tools, skill_tools_declined: ["github/crow_fetch_source"] } };
+  assert.deepEqual([...SB.selectedServiceIds(def, conns(), { crowHome: CROW_HOME })], [], "not selected by the blocks' rule");
+  assert.deepEqual(SB.offerableConnections(def, conns(), { crowHome: CROW_HOME }), []);
+  const r = SB.serviceBlocksFor({ def, connections: conns(), actor: jobActorOf("job-legacy"), scopeRef: AS.scopeRefFor({ jobId: "job-legacy" }),
+    ownerTurn: true, crowHome: CROW_HOME, delivery: "fd", token: SERVICES_TOKEN_VALUE });
+  assert.deepEqual(r.blocks, {});
+
+  // The same def at the mount: check 5 selects from effectiveCrowMcp, so the account is refused too.
+  const stored = q("SELECT definition FROM pi_bot_defs WHERE bot_id = 'hank'")[0].definition;
+  run("UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'hank'", JSON.stringify(def));
+  try {
+    const { authorizeServiceCall } = await import("../servers/gateway/services/mount.js");
+    const { createDbClient } = await import("../servers/db.js");
+    const db = createDbClient(DB_FILE);
+    try {
+      const out = await authorizeServiceCall(db, { scope: "job", botId: "hank", defProjectId: HOME_P }, U.work, { crowHome: CROW_HOME });
+      assert.deepEqual(out, { ok: false, code: "not_selected" });
+    } finally { db.close(); }
+  } finally {
+    run("UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'hank'", stored);
+  }
+});
+
 test("two accounts two blocks: one block each, the csv names both, never the bare service", () => {
   AS._resetActorKeyForTest(); AS.initGatewayActorKey();
   const a = jobActorOf("job-two-1");
@@ -420,6 +450,32 @@ test("job scope: runJob for an owner generic job signs j:<job_id>@<pid> over job
   assert.deepEqual(serviceUrls(other.cap.cfg), []);
   assert.ok(other.logs.includes(SB.WARN_NOT_CLAIMER), other.logs.join("|"));
   run("UPDATE bot_jobs SET status='done' WHERE job_id LIKE 'job-gen-%'");
+});
+
+test("fix round 1: a retryable error row keeps its block on an owner job; a row in error for another reason gets none", { timeout: 60_000 }, async () => {
+  AS._resetActorKeyForTest(); AS.initGatewayActorKey();
+  run("UPDATE service_connections SET status = 'error', last_error = 'child_unavailable' WHERE uuid = ?", U.personal);
+  try {
+    const list = conns();
+    const retryable = list.find((c) => c.uuid === U.personal);
+    assert.equal(retryable.status, "error");
+    assert.equal(retryable.lastError, "child_unavailable");
+    assert.ok(SB.offerableConnections(hankDef(), list, { crowHome: CROW_HOME }).some((c) => c.uuid === U.personal),
+      "the row ensureChild retries is still offered");
+    const own = await job(addJob("job-retry-own", "hank", { principal: "owner" }));
+    assert.deepEqual(serviceUrls(own.cap.cfg).map(([k]) => k).sort(), ["github-personal", "github-work"], own.logs.join("|"));
+
+    // Another error (a failed live test) is not retried by ensureChild: no block, no listing.
+    run("UPDATE service_connections SET last_error = 'auth_failed' WHERE uuid = ?", U.personal);
+    const after = conns();
+    assert.ok(!after.some((c) => c.uuid === U.personal), "a non-retryable error row is not read");
+    assert.ok(!SB.offerableConnections(hankDef(), after, { crowHome: CROW_HOME }).some((c) => c.uuid === U.personal));
+    const again = await job(addJob("job-retry-auth", "hank", { principal: "owner" }));
+    assert.deepEqual(serviceUrls(again.cap.cfg).map(([k]) => k), ["github-work"], again.logs.join("|"));
+  } finally {
+    run("UPDATE service_connections SET status = 'active', last_error = NULL WHERE uuid = ?", U.personal);
+    run("UPDATE bot_jobs SET status = 'done' WHERE job_id IN ('job-retry-own','job-retry-auth')");
+  }
 });
 
 test("M4: file-mode delivery gets no /services-tools/ url, and the warning", { timeout: 60_000 }, async () => {
@@ -663,4 +719,32 @@ test("the owner-message cycle-back is cheap: no restart when the bot selects non
   assert.equal(h.state.instances.length, 2, "respawned for the owner");
   assert.equal(serviceUrls(h.state.instances[1].opts.mcpConfig).length, 2);
   await h.engine.stop(r2.sessionId);
+});
+
+test("fix round 1: a retryable error row is in the blocks AND in the fingerprint, so the next owner turn does not cycle", { timeout: 30_000 }, async () => {
+  AS._resetActorKeyForTest(); AS.initGatewayActorKey();
+  const mod = await import("../servers/gateway/perch-interactive.js");
+  run("UPDATE service_connections SET status = 'error', last_error = 'child_unavailable' WHERE uuid = ?", U.personal);
+  try {
+    const { engine, state } = makeEngine(mod.createInteractiveEngine);
+    const r = await engine.spawn({ botId: "hank", principal: "owner" });
+    await tick();
+    assert.equal(serviceUrls(state.instances[0].opts.mcpConfig).length, 2, "the retryable row's block is offered");
+    await engine.message(r.sessionId, "one", [], { principal: "owner" });
+    await tick();
+    assert.equal(state.instances.length, 1, "the same connections: no cycle");
+    state.instances[0].turns[0].resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+    await tick(40);   // let onTurnEnd release the turn before the next message
+
+    // A failed live test is not retried by ensureChild: it leaves the blocks and the fingerprint,
+    // so the owner's next turn cycles once, onto the remaining account.
+    run("UPDATE service_connections SET last_error = 'auth_failed' WHERE uuid = ?", U.personal);
+    await engine.message(r.sessionId, "two", [], { principal: "owner" });
+    await tick();
+    assert.equal(state.instances.length, 2, "one cycle");
+    assert.equal(serviceUrls(state.instances[1].opts.mcpConfig).length, 1);
+    await engine.stop(r.sessionId);
+  } finally {
+    run("UPDATE service_connections SET status = 'active', last_error = NULL WHERE uuid = ?", U.personal);
+  }
 });

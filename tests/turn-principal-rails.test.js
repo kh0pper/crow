@@ -46,17 +46,20 @@ let createToolExecutor, runScheduleNow, tickBotSchedules, give, setStatus;
 let server, port, perchServer, perchBase;
 
 // Dashboard sessions (fix round 1, I1): the owner's local password session, a session a peer
-// sign-in minted (SSO), and the local token on a signed peer request. The auth stub below sets
-// req.dashboardSession / req.crossHostAuth from a test header, as dashboardAuth would.
-const SESSIONS = { local: "tok-local-owner", sso: "tok-sso-peer" };
+// sign-in minted (SSO), a session minted by a login from this machine ('dashboard onhost'), and
+// the local token on a signed peer request. The auth stub below sets req.dashboardSession /
+// req.crossHostAuth from a test header, as dashboardAuth would.
+const SESSIONS = { local: "tok-local-owner", sso: "tok-sso-peer", onhost: "tok-onhost-login" };
 const sessionHeaders = (who) => (who === "none" ? {} : { "x-test-session": who });
 function stubAuth(req, res, next) {
   const who = req.get("x-test-session");
-  if (who === "local" || who === "peer") req.dashboardSession = SESSIONS.local;
+  if (who === "local" || who === "peer" || who === "samebox") req.dashboardSession = SESSIONS.local;
   if (who === "sso") req.dashboardSession = SESSIONS.sso;
+  if (who === "onhost") req.dashboardSession = SESSIONS.onhost;
   if (who === "peer") req.crossHostAuth = true;
   // The owner's laptop, not this machine: a request from the box is never the owner's (Task 16b).
-  if (req.dashboardSession) markFromLaptop(req);
+  // 'samebox' keeps the loopback origin, so it is this machine even with the owner's own session.
+  if (req.dashboardSession && who !== "samebox") markFromLaptop(req);
   next();
 }
 
@@ -203,6 +206,8 @@ before(async () => {
   const exp = new Date(Date.now() + 86_400_000).toISOString();
   run("INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)", hash(SESSIONS.local), exp);
   run("INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard sso src:peer-1', ?)", hash(SESSIONS.sso), exp);
+  // A login made from this machine: signed in, never the owner's turn wherever it is replayed from.
+  run("INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard onhost', ?)", hash(SESSIONS.onhost), exp);
   const def = JSON.stringify({ gateways: [{ type: "perch" }], tracker_config: { type: "kanban" } });
   run("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)", BOT, "Helper", def, PROJECT);
   const t = new Database(TASKS);
@@ -276,8 +281,8 @@ const recEngine = {
   async checkCardFree() {},
   async spawn(a) { rec.push(["spawn", a.principal]); return { sessionId: "perchlive-rec", threadId: "perchlive-rec", state: "awake" }; },
   async message(...a) { rec.push(["message", a.length > 3 ? a[3] : "(no options)"]); return { turnId: "t1" }; },
-  async steer(...a) { rec.push(["steer", a.length]); return { ok: true }; },
-  async answer(...a) { rec.push(["answer", a.length]); return { ok: true }; },
+  async steer(...a) { rec.push(["steer", a[2] && a[2].principal]); return { ok: true }; },
+  async answer(...a) { rec.push(["answer", a[3] && a[3].principal]); return { ok: true }; },
 };
 const perchPost = async (path, body, who) => {
   const r = await fetch(perchBase + path, { method: "POST", headers: { "content-type": "application/json", ...sessionHeaders(who) }, body: JSON.stringify(body) });
@@ -583,7 +588,7 @@ test("card Execute is the owner's only on a local password session (I1)", async 
   }
 });
 
-test("the five Perch dashboard routes pass owner only for a local session; steer and answer pass no principal (I1, M2)", async () => {
+test("the five Perch dashboard routes pass owner only for a local session; steer and answer carry the same principal (I1, M2, fix round 1)", async () => {
   setStatus({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
   try {
     const newCard = () => {
@@ -611,8 +616,8 @@ test("the five Perch dashboard routes pass owner only for a local session; steer
       const messages = rec.filter((c) => c[0] === "message").map((c) => c[1]);
       assert.deepEqual(spawns, [want, want, want, want], who + ": spawn, dispatch, give, new task");
       assert.deepEqual(messages, [{ principal: want }, { principal: want }, { principal: want }, { principal: want }], who + ": composer + turn 1 of each start");
-      assert.deepEqual(rec.filter((c) => c[0] === "steer"), [["steer", 2]], "steer carries no principal");
-      assert.deepEqual(rec.filter((c) => c[0] === "answer"), [["answer", 3]], "answer carries no principal");
+      assert.deepEqual(rec.filter((c) => c[0] === "steer"), [["steer", want]], who + ": steer carries the turn's principal");
+      assert.deepEqual(rec.filter((c) => c[0] === "answer"), [["answer", want]], who + ": answer carries the turn's principal");
     }
   } finally { setStatus(null); }
 });
@@ -642,6 +647,72 @@ test("an SSO session's Perch message reaches the real engine as other: a child h
     assert.equal(engine.sessionServicesLive(row.id), true);
     await endTurn(live(state)[0]);
   } finally { recEngine.message = saved; }
+  await engine.stop(r.sessionId);
+});
+
+test("steer and answer are the owner's alone while the child holds service blocks (fix round 1)", async () => {
+  addConnection();   // the project has an account to offer, so the owner's child holds a block
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  const pi = state.instances[0];
+  assert.ok(pi.blockNames().length >= 1, "the child holds the project's blocks");
+  // A live turn and a pending card: a steer and an answer WOULD reach the child.
+  await engine.message(r.sessionId, "work on it", [], { principal: "owner" });
+  await tick();
+  pi.emit({ type: "extension_ui_request", id: "q1", method: "confirm", title: "Go?", message: "Go?" });
+  await tick();
+  const saved = { steer: recEngine.steer, answer: recEngine.answer };
+  recEngine.steer = (...a) => engine.steer(...a);
+  recEngine.answer = (...a) => engine.answer(...a);
+  try {
+    for (const who of ["sso", "onhost", "samebox"]) {
+      let res = await perchPost(`/interactive/${r.sessionId}/steer`, { message: "this way" }, who);
+      assert.equal(res.status, 403, who + " steer: " + JSON.stringify(res.body));
+      assert.equal(res.body.error, "Only the owner can steer this chat while it uses connected services.", who);
+      assert.deepEqual(pi.sent, [], who + ": nothing reached pi.send");
+      res = await perchPost(`/interactive/${r.sessionId}/answer`, { requestId: "q1", value: "yes" }, who);
+      assert.equal(res.status, 403, who + " answer: " + JSON.stringify(res.body));
+      assert.deepEqual(pi.sent, [], who + ": nothing reached pi.send");
+    }
+    // The owner from the laptop still steers and answers the same chat.
+    assert.equal((await perchPost(`/interactive/${r.sessionId}/steer`, { message: "this way" }, "local")).status, 200);
+    assert.deepEqual(pi.sent, [{ type: "steer", message: "this way" }]);
+    assert.equal((await perchPost(`/interactive/${r.sessionId}/answer`, { requestId: "q1", value: "yes" }, "local")).status, 200);
+    assert.equal(pi.sent.length, 2);
+    assert.equal(pi.sent[1].type, "extension_ui_response");
+    assert.equal(pi.sent[1].id, "q1");
+    await endTurn(pi);
+  } finally {
+    recEngine.steer = saved.steer;
+    recEngine.answer = saved.answer;
+  }
+  await engine.stop(r.sessionId);
+});
+
+test("a child holding no blocks still lets a non-owner steer and answer (fix round 1)", async () => {
+  const { engine, state } = makeEngine({ blocks: false });
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  const pi = state.instances[0];
+  assert.deepEqual(pi.blockNames(), [], "no blocks to protect");
+  await engine.message(r.sessionId, "work on it", [], { principal: "owner" });
+  await tick();
+  pi.emit({ type: "extension_ui_request", id: "q1", method: "confirm", title: "Go?", message: "Go?" });
+  await tick();
+  const saved = { steer: recEngine.steer, answer: recEngine.answer };
+  recEngine.steer = (...a) => engine.steer(...a);
+  recEngine.answer = (...a) => engine.answer(...a);
+  try {
+    assert.equal((await perchPost(`/interactive/${r.sessionId}/steer`, { message: "this way" }, "sso")).status, 200);
+    assert.deepEqual(pi.sent, [{ type: "steer", message: "this way" }]);
+    assert.equal((await perchPost(`/interactive/${r.sessionId}/answer`, { requestId: "q1", value: "yes" }, "sso")).status, 200);
+    assert.equal(pi.sent.length, 2);
+    await endTurn(pi);
+  } finally {
+    recEngine.steer = saved.steer;
+    recEngine.answer = saved.answer;
+  }
   await engine.stop(r.sessionId);
 });
 

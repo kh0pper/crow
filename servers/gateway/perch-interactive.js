@@ -151,7 +151,8 @@ import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
-import { connectionsFor } from "../shared/service-connections.js";
+import { listConnections } from "../shared/service-connections.js";
+import { listableConnection } from "./services/children.js";
 import { scopeRefFor } from "../../scripts/pi-bots/actor-sig.mjs";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
 import { applyBriefing, briefingEnabled, briefingPromptFile, removeBriefingPromptFile, sessionBriefing, recordBriefing, reconcileBriefing, pruneBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
@@ -2500,16 +2501,23 @@ export function createInteractiveEngine({
   // isOwnerTurnScope in servers/shared/turn-principal.js) on every call.
 
   /**
-   * The project's active connection uuids, sorted and joined (M12). "" for no project. With the
-   * seams' offerableConnections and the child's def (Task 18), only the connections this bot could
-   * be offered count (selected by it, bound as connected, not sensitive): an owner message to a
-   * bot that selects none of them is "" both ways and never cycles the child.
+   * The project's connection uuids a bot could be offered, sorted and joined (M12). "" for no
+   * project. With the seams' offerableConnections and the child's def (Task 18), only the
+   * connections this bot could be offered count (selected by it, bound as connected, not
+   * sensitive): an owner message to a bot that selects none of them is "" both ways and never
+   * cycles the child.
+   *
+   * Fix round 1: the rows are the ones the blocks and the mount offer — active, plus an 'error'
+   * row ensureChild still retries on its own (listableConnection). A retryable row that counted
+   * in the blocks but not here would make every owner message look like a change and cycle the
+   * child for nothing.
    */
   async function connectionsFingerprintOf(projectId, S = null, def = null) {
     if (projectId == null) return "";
     const db = createDbClient();
     try {
-      let list = await connectionsFor(db, { projectId: Number(projectId) });
+      let list = (await listConnections(db, { projectId: Number(projectId), ownerContactId: null }))
+        .filter((c) => c.status === "active" || listableConnection(c));
       if (S && typeof S.offerableConnections === "function" && def) list = S.offerableConnections(def, list, { crowHome });
       return list.map((c) => String(c.uuid)).sort().join(",");
     } finally { try { db.close(); } catch { /* closed */ } }
@@ -2538,6 +2546,17 @@ export function createInteractiveEngine({
   /** True while the session's live child is the one that was spawned holding service blocks. */
   function childHoldsServices(s) {
     return s.servicesChild != null && s.pi === s.servicesChild;
+  }
+
+  /**
+   * Project services (fix round 1): steer() and answer() drive the child that may be holding the
+   * owner's connected accounts, so a turn from anyone but the owner is refused here — BEFORE
+   * anything reaches pi.send, exactly as message() refuses to deliver text into such a child. A
+   * child holding no blocks keeps the old behaviour for every principal.
+   */
+  function refuseIfNotOwnerTurn(s, opts) {
+    const principal = opts && typeof opts === "object" ? opts.principal : undefined;
+    if (principal !== "owner" && childHoldsServices(s)) throw engineError("not_owner_turn");
   }
 
   /**
@@ -4037,14 +4056,17 @@ export function createInteractiveEngine({
    * claims a turn slot and never touches promptTurn: it sends a `steer`
    * frame at the child pi is already running, which queues it into the
    * live loop on its own. Refused honestly rather than silently dropped:
-   * `session_stopped` when the session is parked for good, `no_turn` when
-   * there is nothing running to steer, `pi_gone` when the child that WAS
+   * `session_stopped` when the session is parked for good, `not_owner_turn`
+   * when a non-owner tries to steer a child holding the owner's service
+   * blocks (fix round 1: the same rule message() applies to text), `no_turn`
+   * when there is nothing running to steer, `pi_gone` when the child that WAS
    * running the turn has since exited out from under it.
    */
-  async function steer(sessionId, text) {
+  async function steer(sessionId, text, opts) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
+    refuseIfNotOwnerTurn(s, opts);
     // Acceptance F3: a blank steer is a client bug (the drawer's composer
     // sent nothing), never a silent no-op — refused BEFORE the no_turn/
     // pi_gone checks so it is reported even when no turn is running.
@@ -4418,9 +4440,10 @@ export function createInteractiveEngine({
     return sessions.get(id) || (await adopt(id));
   }
 
-  async function answer(sessionId, requestId, value) {
+  async function answer(sessionId, requestId, value, opts) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
+    refuseIfNotOwnerTurn(s, opts);
     const card = s.pendingUi;
     // 2026-10-20: a late answer to a question that expired (pi's dialog timed
     // out, or pi-lab parked the turn) must run nothing and say why: pi no

@@ -927,6 +927,45 @@ test("fix round 2 (a): an expired child is never handed out, even busy: a fresh 
   }
 });
 
+test("fix round 3: a start that times out reaps the launcher's whole tree, not only the first process", async () => {
+  const PID_FILE = join(HOME, "hang-grandchild.pid");
+  const HANG = join(HOME, "hang-initialize.mjs");
+  try { unlinkSync(PID_FILE); } catch { /* not there */ }
+  // Never answers initialize (the connect timeout is the only way out) and starts a grandchild
+  // first, the shape of an npx launcher chain (npm exec → sh → node).
+  writeFileSync(HANG, [
+    'import { writeFileSync } from "node:fs";',
+    'import { spawn } from "node:child_process";',
+    'const c = spawn(process.execPath, ["-e", "process.stdin.resume(); setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"] });',
+    `writeFileSync(${JSON.stringify(PID_FILE)}, String(c.pid));`,
+    'process.stdin.resume();',
+    'setInterval(() => {}, 1000);',
+  ].join("\n"));
+  writeFileSync(join(HOME, "mcp-addons.json"), JSON.stringify({
+    github: { command: "node", args: [HANG], env: {} },
+    notion: { command: "node", args: [FIXTURE], env: {} },
+    obsidian: { command: "node", args: [FIXTURE], env: {} },
+  }), { mode: 0o600 });
+  C._setChildrenForTest({ connectTimeoutMs: 2500 });
+  try {
+    const conn = await github();
+    assert.equal(await codeOf(withDb((d) => C.ensureChild(d, conn.uuid, { crowHome: HOME }))), "child_unavailable");
+    assert.ok(existsSync(PID_FILE), "the launcher started its grandchild before hanging");
+    const pid = Number(readFileSync(PID_FILE, "utf8"));
+    assert.ok(Number.isInteger(pid) && pid > 0);
+    const t0 = Date.now();
+    let alive = true;
+    while (alive && Date.now() - t0 < 4000) {
+      try { process.kill(pid, 0); await sleep(50); } catch { alive = false; }
+    }
+    assert.equal(alive, false, "the connect timeout took the whole tree");
+  } finally {
+    C._setChildrenForTest({ connectTimeoutMs: 60_000 });
+    writeAddons();
+    await C.stopAllChildren();
+  }
+});
+
 test("fix round 2 (b): a long in-flight call is cut at lifetime + grace and rejects with child_unavailable", async () => {
   let offset = 0;
   C._setChildrenForTest({ clock: () => Date.now() + offset });
