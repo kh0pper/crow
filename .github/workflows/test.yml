@@ -109,6 +109,7 @@ jobs:
         run: |
           sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2 || { sudo apt-get update -qq && { sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2; }; }
           npm ci --prefix bundles/sunvox-studio --omit=optional --ignore-scripts --no-audit --no-fund
+          npm ci --prefix bundles/studio --omit=optional --ignore-scripts --no-audit --no-fund
       - name: Collect the downloaded apt packages for the cache
         if: always()
         run: mkdir -p ~/apt-debs && cp /var/cache/apt/archives/*.deb ~/apt-debs/ 2>/dev/null; echo "$(ls ~/apt-debs/*.deb 2>/dev/null | wc -l) packages to cache"
