@@ -41,7 +41,7 @@ import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, exists
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
-import { hasActorKey, presignActors } from "./actor-sig.mjs";
+import { hasActorKey, presignActors, scopeRefFor } from "./actor-sig.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
@@ -248,7 +248,7 @@ async function writeWorldMcp(a, sessionId) {
     // child would be pinned with tools its config no longer carries. Only a blocks result whose
     // scope still names this turn: a job scope (it binds no session), or this very session.
     const sb = a.serviceBlocks;
-    if (mcpConfig && sb && sb.blocks && (String(sb.scopeRef).startsWith("j:") || (sid != null && sb.scopeRef === "s:" + sid))) {
+    if (mcpConfig && sb && sb.blocks && ((a.jobId != null && sb.scopeRef === scopeRefFor({ jobId: a.jobId })) || (sid != null && sb.scopeRef === "s:" + sid))) {
       mcpConfig = applyServiceBlocks(mcpConfig, sb);
     }
     if (w.warnings.length) a.log("mcp.json warnings: " + w.warnings.join("; "));

@@ -520,6 +520,40 @@ test("bindWorldSession rebuild keeps the blocks (R6 vs PR-B)", async () => {
   run("UPDATE bot_jobs SET status='done' WHERE job_id='job-rebind'");
 });
 
+test("a rebuild re-applies a job's blocks only for that job, and a reused world drops an earlier turn's blocks", async () => {
+  AS._resetActorKeyForTest(); AS.initGatewayActorKey();
+  const { buildBotWorld, bindWorldSession } = await import("../scripts/pi-bots/bot-world.mjs");
+  addJob("job-reuse", "hank", { principal: "owner", cardId: 47 });
+  const world = await buildBotWorld({ botId: "hank", threadId: "board-card-47", gatewayType: "board", jobId: "job-reuse", log: () => {} });
+  const prep = { piRpcOpts: { def: world.def, mcpDelivery: world.mcpDelivery, mcpConfig: world.mcpConfig } };
+  const turn = SB.turnScopeFor({ gatewayType: "board", jobId: "job-reuse", principal: "owner", workerPid: process.pid });
+  await SB.withServiceBlocks(world, prep, { scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn });
+  assert.ok(world._mcpArgs.serviceBlocks, "the owner turn stored its blocks");
+  // Another job's rebuild of the same world never re-applies job-reuse's blocks.
+  const saved = world._mcpArgs.jobId;
+  world._mcpArgs.jobId = "job-someone-else";
+  world.mcpConfig = null;
+  run("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status) VALUES ('hank','board','board-card-47','active')");
+  const sid = q("SELECT id FROM bot_sessions WHERE gateway_thread_id='board-card-47'")[0].id;
+  await bindWorldSession(world, { id: sid });
+  assert.deepEqual(serviceUrls(world.mcpConfig), [], "blocks signed for job-reuse are not re-applied for another job");
+  world._mcpArgs.jobId = saved;
+  // A later turn on the same world with nothing offerable clears the stored blocks.
+  const projectId = world.projectId;
+  world.projectId = null;
+  try {
+    await SB.withServiceBlocks(world, { piRpcOpts: {} }, { scopeRef: null, ownerTurn: false });
+    assert.equal(world._mcpArgs.serviceBlocks, null);
+  } finally { world.projectId = projectId; }
+  run("UPDATE bot_jobs SET status='done' WHERE job_id='job-reuse'");
+});
+
+test("reservedBlockNames holds every catalog service id, installed or not", async () => {
+  const { serviceCatalog } = await import("../servers/shared/service-catalog.js");
+  const reserved = SB.reservedBlockNames(CROW_HOME);
+  for (const s of serviceCatalog()) assert.ok(reserved.has(s.id), s.id);
+});
+
 test("the Perch envelope lists the labelled names the spawn csv uses", async () => {
   const { default: perchRouter } = await import("../servers/gateway/routes/perch.js").catch(() => ({ default: null }));
   assert.ok(perchRouter !== undefined);

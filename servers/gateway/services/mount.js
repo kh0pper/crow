@@ -62,7 +62,7 @@ export const SERVICES_CALL_TIMEOUT_MS = 60_000;
 export const SERVICES_MAX_IN_FLIGHT = 4;
 
 const refuse = (code) => ({ ok: false, code });
-/** Check 7's refusal: the helper's fixed not_active, with the real reason for direct callers. */
+/** Check 7's refusal: the helper's private_unavailable (403). */
 const privateUnavailable = () => ({ ok: false, code: "private_unavailable" });
 /** Check 3's binding refusal: the row's service_id is not the one the owner connected. */
 const bindingMismatch = () => ({ ok: false, code: "not_active", reason: "binding_mismatch" });

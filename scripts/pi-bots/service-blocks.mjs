@@ -51,7 +51,7 @@ import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
 // (tests/pibot-model-resolver-roles.test.js). servicesTokenPath() mirrors SERVICES_TOKEN.path() (a test pins it).
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { readToolCache } from "../../servers/gateway/services/tool-cache.js";
-import { serviceById } from "../../servers/shared/service-catalog.js";
+import { serviceById, serviceCatalog } from "../../servers/shared/service-catalog.js";
 import { connectionBindingOk, isSensitiveConnection } from "../../servers/shared/service-sensitivity.js";
 import { NEVER_OWNER_GATEWAYS } from "../../servers/shared/turn-principal.js";
 import { isVoiceBotDef, isVoiceBotId } from "../../servers/shared/voice-bot.js";
@@ -181,6 +181,8 @@ export function reservedBlockNames(crowHome) {
     const c = crowServerCatalog(crowHome);
     for (const n of [...Object.keys(c?.servers || {}), ...Object.keys(c?.unconfigured || {})]) out.add(n);
   } catch { /* nothing to add */ }
+  // Every catalog service id, installed or not: applyServiceBlocks disables a block named after a service.
+  try { for (const s of serviceCatalog()) out.add(s.id); } catch { /* none */ }
   try { for (const n of Object.keys(readCanonicalMcp()?.mcpServers || {})) out.add(n); } catch { /* none */ }
   return out;
 }
@@ -311,6 +313,8 @@ export async function withServiceBlocks(world, spawnPrep, { scopeRef = null, own
   const po = (spawnPrep && spawnPrep.piRpcOpts) || {};
   const base = po.mcpConfig === undefined ? (world && world.mcpConfig) || null : po.mcpConfig;
   const none = { mcpConfig: base, serviceBlocks: {}, result: empty() };
+  // A world reused for another turn never carries an earlier turn's blocks into a rebuild.
+  if (world && world._mcpArgs) world._mcpArgs.serviceBlocks = null;
   try {
     if (!world || world.projectId == null) return none;
     const a = world._mcpArgs || {};
