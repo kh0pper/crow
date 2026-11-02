@@ -230,7 +230,7 @@ export function createMorningSweep({ wm, hub, media, now = Date.now, isSessionDi
       if (!spec) return false;
       if (!mayOpen()) return false;   // the screen changed while the view was read
       const { window, evicted } = wm.put(id, spec);
-      for (const e of evicted) hub.sendTo(id, { type: "wm", action: "close", id: e.id });
+      for (const e of evicted) hub.sendTo(id, { type: "wm", action: "close", id: e.id });   // defensive: the re-check needs an empty screen
       if (hub.sendTo(id, { type: "wm", action: "open", window }) === true) { openedAt.set(id, today); return true; }
       wm.close(id, window.id);   // the page never got it: leave nothing behind for the next try
       return false;

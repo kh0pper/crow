@@ -196,9 +196,9 @@ test("the morning item is offered to crow_open only while For You is on; now pla
     process.env.CROW_FOR_YOU = "1";
     assert.deepEqual(displayItems({ lang: "en", sources: ["radio"] }).map((i) => i.id), ["now_playing", "morning"]);
     const en = displayItems({ lang: "en", sources: ["radio"] })[1];
-    assert.deepEqual(en, { id: "morning", title: STRINGS.en.morning_title, aliases: ["my morning"] });
+    assert.deepEqual(en, { id: "morning", title: STRINGS.en.morning_title, aliases: ["my morning"], tail: true });
     const es = displayItems({ lang: "es", sources: [] })[0];
-    assert.deepEqual(es, { id: "morning", title: "Tu mañana", aliases: ["mi mañana"] });
+    assert.deepEqual(es, { id: "morning", title: "Tu mañana", aliases: ["mi mañana"], tail: true });
     assert.equal(STRINGS.en.now_playing_title, "Now playing");
     assert.equal(STRINGS.es.now_playing_title, "Sonando ahora");
   } finally {
@@ -313,6 +313,12 @@ test("only \"my morning\" / \"mi mañana\" name the window: an ordinary morning 
     assert.equal(mentionsOpen(said, es), false, said);
   }
   assert.equal(asksCard("make me a list for Monday morning", en), asksCard("make me a list for Monday morning", []), "a card request is unchanged by the item");
+  for (const said of ["Can you move my morning alarm to 7?", "please remind me about my morning meds", "¿Puedes cambiar mi mañana libre?"]) {
+    const items = /[¿ñ]/.test(said) ? es : en;
+    assert.equal(asksOpen(said, items), false, said);
+    assert.equal(mentionsOpen(said, items), false, said);
+  }
+  assert.equal(asksOpen("can you open my morning please", en), true, "a polite word after the name still names it");
   assert.equal(asksOpen("can you open my morning", en), true);
   assert.equal(asksOpen("¿puedes abrir mi mañana?", es), true, "the Spanish alias still opens it when asked");
 });

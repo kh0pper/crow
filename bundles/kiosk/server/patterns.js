@@ -200,8 +200,18 @@ const plain = (transcript) => spokenWords(transcript);
 const norm = (s) => (spokenWords(String(s ?? "").slice(0, 80)) || []).join(" ");
 const itemNames = (i) => [i?.title, ...(Array.isArray(i?.aliases) ? i.aliases : [])].map(norm).filter(Boolean);
 /** Does the transcript contain the whole title (or an alias) of one of this display's items? */
+// An item with tail: true is named only when its name ENDS the sentence (polite words after it aside):
+// "can you open my morning" names it, "can you move my morning alarm" does not.
+const TAIL_FILLER = new Set(["please", "now", "por", "favor", "ahora"]);
+function endsWithName(w, run) {
+  let end = w.length;
+  while (end > 0 && TAIL_FILLER.has(w[end - 1])) end -= 1;
+  return end >= run.length && run.every((x, k) => w[end - run.length + k] === x);
+}
 function namesItem(w, items) {
-  for (const i of Array.isArray(items) ? items.slice(0, 64) : []) for (const n of itemNames(i)) if (hasRun(w, n.split(" "))) return true;
+  for (const i of Array.isArray(items) ? items.slice(0, 64) : []) {
+    for (const n of itemNames(i)) if (i.tail === true ? endsWithName(w, n.split(" ")) : hasRun(w, n.split(" "))) return true;
+  }
   return false;
 }
 

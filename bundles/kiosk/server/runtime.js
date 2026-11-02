@@ -359,7 +359,7 @@ export function displayItems({ lang = "en", sources = [], forYou = forYouEnabled
   const S = STRINGS[L];
   const items = [];
   if (Array.isArray(sources) && sources.length) items.push({ id: "now_playing", title: S.now_playing_title, aliases: L === "es" ? ["lo que suena"] : ["whats playing"] });
-  if (forYou === true) items.push({ id: "morning", title: S.morning_title, aliases: L === "es" ? ["mi mañana"] : ["my morning"] });
+  if (forYou === true) items.push({ id: "morning", title: S.morning_title, aliases: L === "es" ? ["mi mañana"] : ["my morning"], tail: true });
   return items;
 }
 
