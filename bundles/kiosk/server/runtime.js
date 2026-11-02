@@ -585,7 +585,7 @@ export function createKioskRuntime(deps) {
     warm(d);
   };
   /**
-   * The morning window opens itself once per morning on an idle kiosk (Kevin's ruling, 11-02). The
+   * The morning window opens itself once per morning on an idle kiosk (the operator's ruling, 2026-11-02). The
    * decision, the once-a-day date per display and the open itself are morning-view.js's sweep; the view
    * is read here, in the display's language. Never thrown out of the sweep (the caller catches and logs).
    */

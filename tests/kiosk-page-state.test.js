@@ -42,7 +42,7 @@ test("mic denied → mic_blocked; no device → no_mic; suspended context → ne
   assert.equal(micDecision(null, "running"), "ok");
 });
 
-test("night window wraps midnight (default 22:30–06:30, Kevin Q4)", () => {
+test("night window wraps midnight (default 22:30–06:30, operator Q4)", () => {
   const at = (h, m) => new Date(2026, 9, 3, h, m);
   assert.equal(isNight(at(22, 29)), false); assert.equal(isNight(at(22, 30)), true);
   assert.equal(isNight(at(3, 0)), true); assert.equal(isNight(at(6, 30)), false);

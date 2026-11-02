@@ -9,7 +9,7 @@ function mk() {
   const s = P.createPairingStore({ now: () => t, randomInt: () => codes[n++ % codes.length] });
   return { s, adv: (ms) => { t += ms; } };
 }
-const start = (s, ip = "100.64.0.9") => s.start({ ip, ua: "Mozilla/5.0 Phone", login: "kevin@example.com", nameHint: "Phone" });
+const start = (s, ip = "100.64.0.9") => s.start({ ip, ua: "Mozilla/5.0 Phone", login: "alex@example.com", nameHint: "Phone" });
 
 test("start → 6-digit code, 64-hex poll secret; the listing never shows the code or the secret", () => {
   const { s } = mk();
@@ -19,7 +19,7 @@ test("start → 6-digit code, 64-hex poll secret; the listing never shows the co
   assert.match(r.pair_id, /^[0-9a-f]{32}$/);
   const l = s.listPending();
   assert.equal(l.length, 1);
-  assert.equal(l[0].ip, "100.64.0.9"); assert.equal(l[0].login, "kevin@example.com");
+  assert.equal(l[0].ip, "100.64.0.9"); assert.equal(l[0].login, "alex@example.com");
   assert.ok(!JSON.stringify(l).includes(r.code)); assert.ok(!JSON.stringify(l).includes(r.poll_secret));
 });
 
@@ -88,8 +88,8 @@ test("pending cap 3, then rate limit 5 starts/min (keyed on the Tailscale login)
 
 test("rate limit keys on the Tailscale login first: same login from a different IP is still limited", () => {
   const { s } = mk();
-  for (let i = 0; i < 5; i++) s.start({ ip: "100.64.0.1", ua: "x", login: "kevin@example.com" });
-  assert.deepEqual(s.start({ ip: "100.64.0.77", ua: "x", login: "kevin@example.com" }), { error: "rate_limited", status: 429 });
+  for (let i = 0; i < 5; i++) s.start({ ip: "100.64.0.1", ua: "x", login: "alex@example.com" });
+  assert.deepEqual(s.start({ ip: "100.64.0.77", ua: "x", login: "alex@example.com" }), { error: "rate_limited", status: 429 });
 });
 
 test("rate limit with no login falls back to per-IP; different IPs are independent", () => {
