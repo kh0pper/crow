@@ -6,6 +6,7 @@ import { t, fill } from "../../shared/i18n.js";
 import { segGroup, card } from "./ui.js";
 import { confirmView } from "./def-adapter.js";
 import { selectedWriteTools, loadSources, sourceDisplay } from "./sources.js";
+import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { sourceLabel } from "./tool-access.js";
 
 export async function renderSafety(ctx) {
@@ -40,15 +41,17 @@ export async function renderSafety(ctx) {
     `<textarea id="sf-write" name="pp_write_paths" rows="3" class="btb-textarea">${escapeHtml(writePaths.join("\n"))}</textarea>` +
     `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>`);
 
+  const crowHome = ctx.crowHome || resolveCrowHome();
+  // One probe for this page: the same sources the tool names and their labels come from.
+  let sources = null;
+  try { sources = (await loadSources({ db, projectId: def.project_id ?? null, crowHome })).sources; } catch { sources = null; }
   let catalog = null;
-  try {
-    const { sources } = await loadSources();
+  if (sources) {
     catalog = {};
     for (const src of sources) if (src.ok) catalog[src.server] = src.catalog;
-  } catch { catalog = null; }
+  }
   const tools = selectedWriteTools(def, catalog);
-  const srcLabel = new Map();
-  try { for (const src of (await loadSources()).sources) srcLabel.set(src.server, src); } catch { /* names only */ }
+  const srcLabel = new Map((sources || []).map((src) => [src.server, src]));
   const view = confirmView(pp.confirm, tools);
   const checked = new Set(view.checked);
   const boxes = tools.length

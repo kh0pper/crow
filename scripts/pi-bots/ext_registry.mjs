@@ -29,6 +29,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { probeServerTools, readCanonicalMcp, CANONICAL_MCP_PATH } from "./mcp_writer.mjs";
 import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
+import { serviceById } from "../../servers/shared/service-catalog.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/pi-bots -> repo root (~/crow) -> bundles
@@ -232,6 +233,12 @@ export async function extensionTools(ext, opts = {}) {
   const cap =
     entry.capabilities || (capabilityIndex().get(sid) || {}).capabilities || null;
   const group = entry.group || (cap && cap.group) || sid;
+  // A service bundle's tools come from its project connections, never from a blind probe of an
+  // add-on entry that carries no credentials. serviceById has no gateway dependencies (this
+  // module also runs on bot hosts).
+  if (serviceById(sid)) {
+    return { ok: false, serverId: sid, group, error: "service bundle: tools come from its connections" };
+  }
   const block = entry.block || serverBlockFor(sid, crowHome);
   if (!block) {
     return { ok: false, serverId: sid, group, error: "not installed on this instance" };

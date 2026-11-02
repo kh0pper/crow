@@ -100,6 +100,24 @@ function sourceRow(src, selected, lang, { memory = false } = {}) {
   return `<div class="btb-src" data-src="${escapeHtml(key)}">${head}${group}${custom}</div>`;
 }
 
+/**
+ * A connected service's row: the normal row when it has tools, otherwise a note. A private
+ * connection offers nothing at all (never a disabled input).
+ */
+function connectedRow(src, selected, lang) {
+  const name = escapeHtml(src.name || src.server);
+  const head = `<div class="btb-src-head"><span class="btb-src-name">${name}</span></div>`;
+  if (src.privateOnly) {
+    return `<div class="btb-src btb-src-private" data-src="${escapeHtml(src.server)}">${head}` +
+      `<p class="btb-hint">${escapeHtml(t("botbuilder.abConnectedPrivate", lang))}</p></div>`;
+  }
+  if (!src.ok) {
+    return `<div class="btb-src" data-src="${escapeHtml(src.server)}">${head}` +
+      `<p class="btb-hint">${escapeHtml(t("botbuilder.abConnectedNoTools", lang))}</p></div>`;
+  }
+  return sourceRow(src, selected, lang);
+}
+
 export async function renderAbilities(ctx) {
   const { def, lang, hidden, db, req, bot, botId } = ctx;
   const tools = def.tools || {};
@@ -155,9 +173,10 @@ export async function renderAbilities(ctx) {
     name: "cmd_mode", legend: t("botbuilder.abCmd", lang), current: cMode, options: cmdOpts, hintHtml: cmdHint,
   }) + (cMode === "auto" ? await classifierStatusHtml(db, lang) : "");
 
-  const { error: probeErr, sources } = await loadSources();
+  const { error: probeErr, sources } = await loadSources({ db, projectId: def.project_id ?? null, crowHome });
   const memSrc = sources.find((s) => s.server === MEMORY_SOURCE);
-  const others = sources.filter((s) => s.server !== MEMORY_SOURCE);
+  const connected = sources.filter((s) => s.connected === true);
+  const others = sources.filter((s) => s.server !== MEMORY_SOURCE && s.connected !== true);
   const memRow = memSrc ? sourceRow(memSrc, selected, lang, { memory: true }) : "";
 
   const computer = card(t("botbuilder.abComputerTitle", lang), filesCtl + cmdCtl + memRow);
@@ -170,12 +189,16 @@ export async function renderAbilities(ctx) {
     (others.length ? others.map((s) => sourceRow(s, selected, lang)).join("") : `<p class="btb-hint">${escapeHtml(t("botbuilder.abNoSources", lang))}</p>`) +
     `<input type="hidden" name="src_catalog" value="${escapeHtml(JSON.stringify(catalog))}">`;
   const services = card(t("botbuilder.abServicesTitle", lang), servicesBody, t("botbuilder.abServicesLead", lang));
+  // This project's connections get their own card, only when it has any.
+  const connectedCard = def.project_id != null && connected.length
+    ? card(t("botbuilder.abConnectedTitle", lang), connected.map((s) => connectedRow(s, selected, lang)).join(""))
+    : "";
 
   // ---- skills (def.skills is the one store) ----
   const skills = renderSkillsCard({ def, lang, crowHome, repoSkillsDir: ctx.repoSkillsDir });
 
   return `<form method="POST" class="btb-form" id="btb-abilities-form">${hidden("abilities")}` +
-    computer + services + skills +
+    computer + services + connectedCard + skills +
     actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.abSave", lang))}</button>`) +
     `</form>` + sandboxOfferForm({ def, req, bot, botId, lang }) + abilitiesScript();
 }
