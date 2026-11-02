@@ -706,7 +706,7 @@ export class PiRpc {
         // A UI-forwarding bug must never kill a turn: exceptions from onEvent
         // are swallowed, not left to escape into this stdout 'data' handler.
         if (this.onEvent) { try { this.onEvent(m); } catch {} }
-        for (const w of this._w.slice()) if (w.p(m)) { this._w.splice(this._w.indexOf(w), 1); w.r(m); }
+        for (const w of this._w.slice()) if (w.p(m)) { this._w.splice(this._w.indexOf(w), 1); if (w.t) clearTimeout(w.t); w.r(m); }
       }
     });
     // [pi-lab/...] diagnostics (MCP start failures, auto-bash decisions)
@@ -720,7 +720,7 @@ export class PiRpc {
       // them to time out cryptically (a fresh install resolving to a model
       // no provider serves makes pi print "Unknown provider" and exit — the
       // Gmail/Discord user must see that, fast, not a 60s "timeout:prompt-ack").
-      for (const w of this._w.splice(0)) if (w.j) w.j(this._exitError(w.label));
+      for (const w of this._w.splice(0)) { if (w.t) clearTimeout(w.t); if (w.j) w.j(this._exitError(w.label)); }
       res(this._exitCode);
     }));
   }
@@ -743,11 +743,12 @@ export class PiRpc {
       // C-12: ms === 0 means "no timeout" — the interactive engine's own
       // agent_end wait, which relies on ITS OWN stall watchdog instead. The
       // exit handler above still rejects this waiter if the child dies, so it
-      // cannot leak past the child's lifetime. (Existing defect, not touched
-      // here: on the ms>0 path this setTimeout is never cleared on success —
-      // ledgered separately.)
+      // cannot leak past the child's lifetime. On the ms>0 path the timer is
+      // cleared wherever the waiter settles (a match or the child's exit), so
+      // a finished wait never holds a ref'd timer (a 10-min prompt timeout
+      // kept test processes and short-lived runners alive).
       if (ms === 0) return;
-      setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + maskSecrets(this.stderr.slice(-200)) + ")")); } }, ms);
+      w.t = setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + maskSecrets(this.stderr.slice(-200)) + ")")); } }, ms);
     });
   }
   async prompt(message, ms, images) {

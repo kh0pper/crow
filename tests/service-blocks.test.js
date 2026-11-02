@@ -442,7 +442,9 @@ test("M4: file-mode delivery gets no /services-tools/ url, and the warning", { t
 
 test("unsigned host: no key and no presigned service signature -> no blocks, the warning, csv byte-identical to today's", { timeout: 60_000 }, async () => {
   AS._resetActorKeyForTest(); AS._resetPresignedForTest();
-  const today = bridge.buildToolsCsv(hankDef(), { resolved: RESOLVED }).csv;
+  // Today's csv for a job turn: the board verbs ride in on a job's world (bot-world withBoardTools, #658).
+  const { withBoardTools } = await import("../scripts/pi-bots/bot-world.mjs");
+  const today = bridge.buildToolsCsv(await withBoardTools(hankDef(), { wanted: true }), { resolved: RESOLVED }).csv;
   const own = await job(addJob("job-unsigned", "hank", { principal: "owner", cardId: 43 })); // CROW_GATEWAY_PORT=1: the relay is unreachable
   assert.deepEqual(serviceUrls(own.cap.cfg), []);
   assert.ok(own.logs.includes(SB.WARN_UNSIGNED), own.logs.join("|"));
