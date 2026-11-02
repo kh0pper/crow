@@ -117,24 +117,30 @@ async function capture(fn) {
 const connectGh = (s, label = "Main", token = "test-token-1") =>
   call(s, "POST", "/dashboard/services/api/project/spring/connect", { body: { serviceId: "github", accountLabel: label, values: { [GH]: token } }, headers: AUTH });
 
-test("servicesUiEnabled: on only for CROW_SERVICES_UI=1", () => {
-  assert.equal(servicesUiEnabled({}), false);
+test("servicesUiEnabled: on unless CROW_SERVICES_UI is exactly \"0\"", () => {
+  assert.equal(servicesUiEnabled({}), true);
   assert.equal(servicesUiEnabled({ CROW_SERVICES_UI: "0" }), false);
-  assert.equal(servicesUiEnabled({ CROW_SERVICES_UI: "true" }), false);
+  assert.equal(servicesUiEnabled({ CROW_SERVICES_UI: "true" }), true);
   assert.equal(servicesUiEnabled({ CROW_SERVICES_UI: "1" }), true);
 });
 
-test("flag off hides it: every route 404s (the default flag reads CROW_SERVICES_UI, unset here)", async () => {
+test("flag off hides it: every route 404s (the route's default reads CROW_SERVICES_UI=0)", async () => {
   const ctx = { ...(await freshDb()), test: fakeTest() };
-  for (const opts of [{ uiEnabled: () => false }, { uiEnabled: undefined }]) {
-    await withApp(ctx, async (s) => {
-      const uuid = "00000000-0000-4000-8000-000000000001";
-      for (const [m, p] of [["GET", "/dashboard/services/api/project/spring"], ["POST", "/dashboard/services/api/project/spring/connect"],
-        ["POST", `/dashboard/services/api/connection/${uuid}/test`], ["POST", `/dashboard/services/api/connection/${uuid}/disconnect`]]) {
-        const r = await call(s, m, p, { body: m === "POST" ? { serviceId: "github" } : undefined, headers: AUTH });
-        assert.equal(r.status, 404, `${m} ${p}`);
-      }
-    }, opts);
+  const prev = process.env.CROW_SERVICES_UI;
+  process.env.CROW_SERVICES_UI = "0";
+  try {
+    for (const opts of [{ uiEnabled: () => false }, { uiEnabled: undefined }]) {
+      await withApp(ctx, async (s) => {
+        const uuid = "00000000-0000-4000-8000-000000000001";
+        for (const [m, p] of [["GET", "/dashboard/services/api/project/spring"], ["POST", "/dashboard/services/api/project/spring/connect"],
+          ["POST", `/dashboard/services/api/connection/${uuid}/test`], ["POST", `/dashboard/services/api/connection/${uuid}/disconnect`]]) {
+          const r = await call(s, m, p, { body: m === "POST" ? { serviceId: "github" } : undefined, headers: AUTH });
+          assert.equal(r.status, 404, `${m} ${p}`);
+        }
+      }, opts);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.CROW_SERVICES_UI; else process.env.CROW_SERVICES_UI = prev;
   }
   assert.equal(ctx.test.calls.length, 0);
 });
@@ -280,7 +286,7 @@ test("views say set/unset; retest updates status; disconnect is idempotent and h
     const g = await call(s, "GET", "/dashboard/services/api/project/spring", { headers: AUTH });
     assert.deepEqual(g.json.connections.map((x) => x.fields), [{ [GH]: "set" }]);
     assert.deepEqual(g.json.project, { slug: "spring", name: "Spring" });
-    assert.equal(g.json.botsLive, false);
+    assert.equal(g.json.botsLive, true, "bots use connections now, so the connect copy says so");
 
     ctx.test.result = { ok: false, error: "auth_failed" };
     const { result: t, out } = await capture(() => call(s, "POST", `/dashboard/services/api/connection/${conn.uuid}/test`, { headers: AUTH }));

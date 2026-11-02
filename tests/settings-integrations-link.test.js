@@ -29,7 +29,7 @@ const SECRET = "ghp_SHOULD_NEVER_APPEAR_1234567890";
 const ENV_BEFORE = { ...process.env };
 after(() => { for (const k of ["CROW_SERVICES_UI", "GITHUB_PERSONAL_ACCESS_TOKEN"]) { if (k in ENV_BEFORE) process.env[k] = ENV_BEFORE[k]; else delete process.env[k]; } });
 
-const flag = (on) => { if (on) process.env.CROW_SERVICES_UI = "1"; else delete process.env.CROW_SERVICES_UI; };
+const flag = (on) => { process.env.CROW_SERVICES_UI = on ? "1" : "0"; };
 
 async function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "crow-t13-db-"));

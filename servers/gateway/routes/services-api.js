@@ -197,7 +197,7 @@ export async function loadServicesPage(db, slug, { installedIds = new Set(), lan
     hasMembers: members.rows.length > 0,
     alsoOnCrow,
     groups,
-    botsLive: false,
+    botsLive: true,
   };
 }
 
