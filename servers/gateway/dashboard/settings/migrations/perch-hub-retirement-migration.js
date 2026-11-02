@@ -22,10 +22,11 @@
  * or entirely absent, and safe to run twice.
  */
 
-import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { readSetting, upsertSetting } from "../registry.js";
 import { CROW_HOME } from "../../../bundles-config.js";
+import { atomicWrite } from "../../../bundle-skill-sync.js";
 
 const FLAG_KEY = "perch_hub_retirement_migration_v1_done";
 
@@ -75,7 +76,7 @@ export async function migratePerchHubRetirement(db, crowHome = CROW_HOME) {
       const installed = Array.isArray(raw) ? raw : Object.entries(raw).map(([id, v]) => ({ id, ...v }));
       const filtered = installed.filter((i) => i?.id !== "perch-hub");
       if (filtered.length !== installed.length) {
-        writeFileSync(installedPath, JSON.stringify(filtered, null, 2));
+        atomicWrite(installedPath, JSON.stringify(filtered, null, 2));
         removedInstalledEntry = true;
       }
     } catch {
