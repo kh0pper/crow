@@ -54,7 +54,12 @@ const { isLocalPasswordSession } = await import(
   pathToFileURL(join(appRoot, "servers", "gateway", "dashboard", "local-session.js")).href
 );
 
-/** Owner-only routes: anyone else gets the same 404 as an unknown path. */
+/**
+ * Owner-only routes: anyone else gets the same 404 as an unknown path. Every Media Hub API
+ * route is the owner's (the feed, sources, playlists, briefings and their settings are the
+ * operator's own); only streaming an article's or a briefing's audio by id stays open to any
+ * signed-in session (Kevin, 2026-11-02), so the player bar keeps working on other devices.
+ */
 async function ownerOnly(req, res, next) {
   if (await isLocalPasswordSession(req)) return next();
   res.status(404).json({ error: "Not found" });
@@ -137,7 +142,7 @@ export default function mediaRouter(authMiddleware) {
   }
 
   // --- Feed (paginated) ---
-  router.get("/api/media/feed", authMiddleware, async (req, res) => {
+  router.get("/api/media/feed", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const limit = Math.min(parseInt(req.query.limit || "20", 10), 50);
@@ -198,7 +203,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Single article ---
-  router.get("/api/media/articles/:id", authMiddleware, async (req, res) => {
+  router.get("/api/media/articles/:id", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -233,7 +238,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Article action (star/save/read/feedback) ---
-  router.post("/api/media/articles/:id/action", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/articles/:id/action", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -280,7 +285,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Search ---
-  router.get("/api/media/search", authMiddleware, async (req, res) => {
+  router.get("/api/media/search", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const query = req.query.q;
@@ -311,7 +316,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Sources CRUD ---
-  router.get("/api/media/sources", authMiddleware, async (req, res) => {
+  router.get("/api/media/sources", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const result = await db.execute("SELECT * FROM media_sources ORDER BY name ASC");
@@ -323,7 +328,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.post("/api/media/sources", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/sources", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const { url, name, category } = req.body;
@@ -368,7 +373,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.delete("/api/media/sources/:id", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.delete("/api/media/sources/:id", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -406,7 +411,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Refresh source ---
-  router.post("/api/media/sources/:id/refresh", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/sources/:id/refresh", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -464,7 +469,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Article audio, made on demand by the local voice ---
-  router.post("/api/media/articles/:id/listen", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/articles/:id/listen", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -480,7 +485,7 @@ export default function mediaRouter(authMiddleware) {
 
   // --- Briefings: the latest one (the stable answer other parts of Crow use) ---
   // ?audio=0 drops the "has audio" rule; ?max_age_hours=N and ?kind=daily narrow it. 404 when none qualifies.
-  router.get("/api/media/briefings/latest", authMiddleware, async (req, res) => {
+  router.get("/api/media/briefings/latest", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const { getLatestBriefing } = await importBundleModule("briefing.js");
@@ -497,7 +502,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Briefings: the daily schedule ---
-  router.get("/api/media/briefings/schedule", authMiddleware, async (req, res) => {
+  router.get("/api/media/briefings/schedule", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const { readSchedule, scheduleView } = await importBundleModule("schedule.js");
@@ -510,7 +515,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.post("/api/media/briefings/schedule", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/briefings/schedule", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const { saveSchedule } = await importBundleModule("schedule.js");
@@ -533,7 +538,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Briefings: one, by id ---
-  router.get("/api/media/briefings/:id", authMiddleware, async (req, res, next) => {
+  router.get("/api/media/briefings/:id", authMiddleware, ownerOnly, async (req, res, next) => {
     if (!/^\d{1,12}$/.test(req.params.id)) return next();
     const db = createDbClient();
     try {
@@ -564,7 +569,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Playlists ---
-  router.get("/api/media/playlists", authMiddleware, async (req, res) => {
+  router.get("/api/media/playlists", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const { rows } = await db.execute(
@@ -578,7 +583,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.get("/api/media/playlists/:id", authMiddleware, async (req, res) => {
+  router.get("/api/media/playlists/:id", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -606,7 +611,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.post("/api/media/playlists", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/playlists", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const { name, description } = req.body;
@@ -624,7 +629,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Playlist items ---
-  router.post("/api/media/playlists/:id/items", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/playlists/:id/items", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const playlistId = parseInt(req.params.id, 10);
@@ -654,7 +659,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.delete("/api/media/playlists/:id/items/:itemId", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.delete("/api/media/playlists/:id/items/:itemId", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const playlistId = parseInt(req.params.id, 10);
@@ -675,7 +680,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.delete("/api/media/playlists/:id", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.delete("/api/media/playlists/:id", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -691,7 +696,7 @@ export default function mediaRouter(authMiddleware) {
   // --- Make a briefing now ---
   // Answers at once with the new briefing's id; the feeds are refreshed, the script written and the
   // local voice run in the background. The tab polls GET /api/media/briefings/:id until it is ready.
-  router.post("/api/media/briefings", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.post("/api/media/briefings", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const { createBriefing, makeBriefing, failBriefing, getBriefing } = await importBundleModule("briefing.js");
@@ -719,7 +724,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Briefings ---
-  router.get("/api/media/briefings", authMiddleware, async (req, res) => {
+  router.get("/api/media/briefings", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const { listBriefings } = await importBundleModule("briefing.js");
@@ -732,7 +737,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Stats ---
-  router.get("/api/media/stats", authMiddleware, async (req, res) => {
+  router.get("/api/media/stats", authMiddleware, ownerOnly, async (req, res) => {
     const db = createDbClient();
     try {
       const [sources, articles, unread, starred] = await Promise.all([
@@ -755,7 +760,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Playlist visibility ---
-  router.patch("/api/media/playlists/:id", authMiddleware, csrfMiddleware, async (req, res) => {
+  router.patch("/api/media/playlists/:id", authMiddleware, ownerOnly, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
