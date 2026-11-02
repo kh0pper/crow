@@ -16,23 +16,31 @@
  * JSON, so `snapshot()` is a round trip away from the wire, storage or a
  * command's before/after map.
  *
- * Nothing in this module opens a transaction for an edit: commands run inside
- * the caller's `doc.transact(...)` (the session hub owns that), so one command
- * is one Yjs update and one history step.
+ * Nothing in this module opens a transaction for an edit: commands and history
+ * entries run inside the caller's `doc.transact(...)` (the session hub owns
+ * that), so one command is one Yjs update and one history step. `newSongDoc()`
+ * is the one exception — it creates a song inside a transaction of its own.
+ *
+ * "The object or field was not there" is spelled `null` everywhere, never
+ * `undefined`: a history entry is persisted with `JSON.stringify`, which drops
+ * `undefined` keys, and a dropped key would turn "delete this object" into "do
+ * nothing".
  */
 
 import * as Y from "yjs";
 
 /**
- * What one song may hold (spec §1, phase 1a). Commands refuse past these with
- * a plain-English message naming the limit.
- * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number}}
+ * What one song may hold (spec §1, phase 1a), plus the per-device controller
+ * cap. Commands refuse past these with a plain-English message naming the
+ * limit.
+ * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number, params: number}}
  */
 export const LIMITS = Object.freeze({
   tracks: 16,
   notesPerClip: 4096,
   scenes: 64,
   clipBars: 64,
+  params: 64,
 });
 
 /** 1a is four beats to the bar, in every scene. */
@@ -53,11 +61,23 @@ export const TRACK_COLORS = Object.freeze([
   "#A9C7A3",
 ]);
 
-/** A field a command never wrote: the object or field did not exist. */
-const ABSENT = undefined;
+/**
+ * A field a command never wrote: the object or field did not exist, or the
+ * value deletes it. `null` rather than `undefined`, so the marker survives the
+ * JSON round trip through storage (see the header).
+ */
+const ABSENT = null;
 
 /** Key separator between an object ref ("clip:abc") and one of its fields. */
 const FIELD_SEPARATOR = "|";
+
+/**
+ * Prefix of a field path that reaches one controller inside a track's device,
+ * e.g. `"device.params.Cutoff"`. The controller name is everything after the
+ * prefix, taken verbatim, so a name containing a dot still names one
+ * controller.
+ */
+const PARAM_FIELD_PREFIX = "device.params.";
 
 /**
  * The ref a command, a lock or a history entry names one object by.
@@ -101,7 +121,7 @@ export function splitRefField(key) {
  * @returns {T}
  */
 export function cloneJson(value) {
-  if (value === ABSENT) return ABSENT;
+  if (value === undefined || value === null) return ABSENT;
   return JSON.parse(JSON.stringify(value));
 }
 
@@ -362,8 +382,10 @@ export function snapshot(doc) {
  *
  * Keys are `"<ref>|<field>"`:
  *   - `"track:abc|gain_db"` sets one field of that track;
+ *   - `"track:abc|device.params.Cutoff"` sets one controller value inside the
+ *     track's device and leaves its other controllers alone;
  *   - `"clip:abc|*"` with an object (re)creates the whole clip, and with
- *     `undefined` deletes it;
+ *     `null` deletes it;
  *   - `"track:abc|*"` and `"scene:abc|*"` do the same at the object's original
  *     position, carried inside the object JSON as `_index` (stripped again on
  *     the way in and out, so it never shows up in a snapshot).
@@ -411,44 +433,74 @@ export function applyBeforeAfter(doc, plan) {
  * against what the document holds now, key by key.
  * @param {Y.Doc} doc
  * @param {string} ref - e.g. `"clip:abc"` or `"song:meta"`
- * @param {string} [field] - "*" for the whole object (the default)
- * @returns {any} the value as the document holds it, or `undefined` when the
- *   object or the field is not there. A whole track or scene carries its
- *   current `_index`, matching the JSON a creating command wrote.
+ * @param {string} [field] - "*" for the whole object (the default), a plain
+ *   field name, or a controller path like `"device.params.Cutoff"`
+ * @returns {any} the value as the document holds it, or `null` when the object
+ *   or the field is not there. A whole track or scene carries its current
+ *   `_index`, matching the JSON a creating command wrote.
  */
 export function readField(doc, ref, field = "*") {
   const target = parseObjectRef(ref);
-  if (!target) return undefined;
+  if (!target) return ABSENT;
 
   if (target.kind === "song") {
-    const meta = toPlain(songMap(doc).get("meta"));
-    if (meta === undefined) return undefined;
-    return field === "*" ? meta : meta[field];
+    const meta = songMap(doc).get("meta");
+    if (meta === undefined) return ABSENT;
+    return field === "*" ? toPlain(meta) : readPath(meta, fieldPath(field));
   }
 
   if (target.kind === "clip") {
     const clip = getClip(doc, target.id);
-    if (!clip) return undefined;
+    if (!clip) return ABSENT;
     if (field === "*") return toPlain(clip);
-    const value = clip.get(field);
-    return value === undefined ? undefined : toPlain(value);
+    return readPath(clip, fieldPath(field));
   }
 
   if (target.kind === "track" || target.kind === "scene") {
     const list = readContainer(doc, target.kind === "track" ? "tracks" : "scenes");
-    if (!(list instanceof Y.Array)) return undefined;
+    if (!(list instanceof Y.Array)) return ABSENT;
     const items = list.toArray();
     const index = items.findIndex((item) => item instanceof Y.Map && item.get("id") === target.id);
-    if (index < 0) return undefined;
+    if (index < 0) return ABSENT;
     const object = items[index];
-    if (field !== "*") {
-      const value = object.get(field);
-      return value === undefined ? undefined : toPlain(value);
-    }
-    return { ...toPlain(object), _index: index };
+    if (field === "*") return { ...toPlain(object), _index: index };
+    return readPath(object, fieldPath(field));
   }
 
-  return undefined;
+  return ABSENT;
+}
+
+/**
+ * The keys a history field path names, outermost first.
+ *
+ * `"device.params.Cutoff"` is `["device", "params", "Cutoff"]`; anything else
+ * is one field of the object, so a plain field name can never be mistaken for
+ * a path.
+ * @param {string} field
+ * @returns {string[]}
+ */
+function fieldPath(field) {
+  if (field.startsWith(PARAM_FIELD_PREFIX) && field.length > PARAM_FIELD_PREFIX.length) {
+    return ["device", "params", field.slice(PARAM_FIELD_PREFIX.length)];
+  }
+  return [field];
+}
+
+/**
+ * Follow a field path down a Y.Map (or plain object) and return the value as
+ * plain JSON.
+ * @param {any} source
+ * @param {string[]} path
+ * @returns {any} the value, or `null` when the path is not there
+ */
+function readPath(source, path) {
+  let value = source;
+  for (const key of path) {
+    if (value instanceof Y.Map) value = value.get(key);
+    else if (value !== null && typeof value === "object") value = value[key];
+    else return ABSENT;
+  }
+  return value === undefined ? ABSENT : toPlain(value);
 }
 
 /** Write one field (or the whole value) of the song's meta. */
@@ -463,6 +515,46 @@ function writeMeta(doc, field, value) {
   if (value === ABSENT) delete next[field];
   else next[field] = cloneJson(value);
   song.set("meta", next);
+}
+
+/**
+ * Write one field of a live object: a plain field (`"gain_db"`), or one entry
+ * of a nested object field (`"device.params.Cutoff"`). A `null` value deletes
+ * the field, or the named entry of the nested object.
+ * @param {Y.Map<any>} item
+ * @param {string} field
+ * @param {any} value
+ */
+function writeField(item, field, value) {
+  const path = fieldPath(field);
+  if (path.length === 1) {
+    if (value === ABSENT) item.delete(field);
+    else item.set(field, cloneJson(value));
+    return;
+  }
+  const [outer, ...inner] = path;
+  const next = cloneJson(toPlain(item.get(outer))) ?? {};
+  assignPath(next, inner, value);
+  item.set(outer, next);
+}
+
+/**
+ * Set (or with `null`, delete) the value a nested path names, creating the
+ * objects on the way when they are missing.
+ * @param {object} target
+ * @param {string[]} path
+ * @param {any} value
+ */
+function assignPath(target, path, value) {
+  let node = target;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const key = path[index];
+    if (node[key] === null || typeof node[key] !== "object") node[key] = {};
+    node = node[key];
+  }
+  const last = path[path.length - 1];
+  if (value === ABSENT) delete node[last];
+  else node[last] = cloneJson(value);
 }
 
 /** Write one field of a track/scene, or (re)create/delete the whole object. */
@@ -491,9 +583,7 @@ function writeListObject(doc, containerKey, id, field, value, label) {
   }
 
   if (index < 0) throw new Error(`Studio: there is no ${label} "${id}" to write to`);
-  const item = items[index];
-  if (value === ABSENT) item.delete(field);
-  else item.set(field, cloneJson(value));
+  writeField(items[index], field, value);
 }
 
 /** Write one field of a clip, or (re)create/delete the whole clip. */
@@ -511,8 +601,7 @@ function writeClip(doc, id, field, value) {
   }
   const clip = clips.get(id);
   if (!(clip instanceof Y.Map)) throw new Error(`Studio: there is no clip "${id}" to write to`);
-  if (value === ABSENT) clip.delete(field);
-  else clip.set(field, cloneJson(value));
+  writeField(clip, field, value);
 }
 
 /** @returns {any} the value without its internal `_index` hint. */

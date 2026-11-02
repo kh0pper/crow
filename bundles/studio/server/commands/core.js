@@ -17,7 +17,7 @@
  */
 
 import { z } from "zod";
-import { defineCommand, StudioError } from "./registry.js";
+import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   BEATS_PER_BAR,
   LIMITS,
@@ -25,6 +25,7 @@ import {
   cloneJson,
   clipMap,
   clipEntries,
+  colorForIndex,
   findSceneIndex,
   findTrackIndex,
   getClip,
@@ -47,6 +48,17 @@ const DEFAULT_DEVICE_TYPE = "Analog generator";
 /** Names (tracks, scenes, clips, params, keys) are 1-80 characters. */
 const MAX_NAME = 80;
 
+/**
+ * The value a before/after entry carries when the object or field did not
+ * exist. `null`, not `undefined`: a history entry is stored as JSON, which
+ * drops `undefined` keys, and a dropped key would turn a deletion into a
+ * no-op. See doc.js.
+ */
+const ABSENT = null;
+
+/** The field prefix `track.set_param` records one controller under. */
+const PARAM_FIELD_PREFIX = "device.params.";
+
 /** The song's own object ref: meta is the one part of the song not in a container. */
 const META_REF = objectRef("song", "meta");
 
@@ -58,6 +70,11 @@ const nameSchema = z.string().min(1).max(MAX_NAME);
 
 const paramsSchema = z
   .record(z.string().min(1).max(MAX_NAME), z.number().finite())
+  .superRefine((params, ctx) => {
+    if (Object.keys(params).length > LIMITS.params) {
+      addLimitIssue(ctx, `A device can have at most ${LIMITS.params} parameters.`);
+    }
+  })
   .describe("SunVox controller name → value");
 
 const noteSchema = z
@@ -72,6 +89,18 @@ const noteSchema = z
 /** @returns {string} the key a before/after map files one field under. */
 function fieldKey(ref, field) {
   return `${ref}|${field}`;
+}
+
+/**
+ * One field of a live object as a before/after value: deep-cloned JSON, or
+ * `null` when the document does not hold it.
+ * @param {Y.Map<any>|null} object
+ * @param {string} field
+ * @returns {any}
+ */
+function fieldValue(object, field) {
+  const value = object?.get?.(field);
+  return value === undefined ? ABSENT : cloneJson(toPlain(value));
 }
 
 /** @returns {string} the ref of a track. */
@@ -115,6 +144,19 @@ function lengthForNotes(notes) {
   let end = 0;
   for (const note of notes) end = Math.max(end, note.t + note.d);
   return Math.max(1, Math.ceil(end / BEATS));
+}
+
+/** @returns {string} the first palette colour no existing track uses, wrapping once they all are. */
+function nextTrackColor(doc) {
+  const used = new Set();
+  for (const item of trackList(doc).toArray()) {
+    const color = item?.get?.("color");
+    if (typeof color === "string") used.add(color.toLowerCase());
+  }
+  for (const color of TRACK_COLORS) {
+    if (!used.has(color.toLowerCase())) return color;
+  }
+  return colorForIndex(trackList(doc).length);
 }
 
 /** @returns {Y.Map<any>} the live track, or a "not_found" refusal. */
@@ -199,7 +241,7 @@ defineCommand({
     const after = {};
     for (const field of ["title", "bpm", "key"]) {
       if (args[field] === undefined) continue;
-      before[fieldKey(META_REF, field)] = current[field];
+      before[fieldKey(META_REF, field)] = current[field] ?? ABSENT;
       after[fieldKey(META_REF, field)] = args[field];
       next[field] = args[field];
     }
@@ -256,7 +298,7 @@ defineCommand({
     const track = {
       id: args.id,
       name: args.name,
-      color: args.color ?? TRACK_COLORS[index % TRACK_COLORS.length],
+      color: args.color ?? nextTrackColor(doc),
       device: {
         engine: "sunvox",
         type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
@@ -270,7 +312,7 @@ defineCommand({
     };
     tracks.push([objectMap(track)]);
     return {
-      before: { [fieldKey(trackRef(track.id), "*")]: undefined },
+      before: { [fieldKey(trackRef(track.id), "*")]: ABSENT },
       after: { [fieldKey(trackRef(track.id), "*")]: { ...cloneJson(track), _index: index } },
     };
   },
@@ -302,10 +344,10 @@ defineCommand({
     const before = {
       [fieldKey(trackRef(args.track_id), "*")]: { ...cloneJson(toPlain(track)), _index: index },
     };
-    const after = { [fieldKey(trackRef(args.track_id), "*")]: undefined };
+    const after = { [fieldKey(trackRef(args.track_id), "*")]: ABSENT };
     for (const { id, clip } of clips) {
       before[fieldKey(clipRef(id), "*")] = cloneJson(toPlain(clip));
-      after[fieldKey(clipRef(id), "*")] = undefined;
+      after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
 
     const clipsMap = clipMap(doc);
@@ -328,7 +370,7 @@ defineCommand({
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
     const ref = trackRef(args.track_id);
-    const before = track.get("name");
+    const before = fieldValue(track, "name");
     track.set("name", args.name);
     return { before: { [fieldKey(ref, "name")]: before }, after: { [fieldKey(ref, "name")]: args.name } };
   },
@@ -353,7 +395,7 @@ defineCommand({
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
     const ref = trackRef(args.track_id);
-    const before = track.get("device") === undefined ? undefined : toPlain(track.get("device"));
+    const before = fieldValue(track, "device");
     const device = { engine: "sunvox", type: args.type, params: { ...paramsDefaults(args.params) } };
     track.set("device", device);
     return {
@@ -379,16 +421,26 @@ defineCommand({
   touches(args) {
     return [trackRef(args.track_id)];
   },
+  /**
+   * Only the controller this call changed is recorded, under
+   * `device.params.<name>`: two later edits of different controllers on the
+   * same track then undo independently instead of conflicting over the whole
+   * device object.
+   */
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
     const ref = trackRef(args.track_id);
-    const before = toPlain(track.get("device")) ?? { engine: "sunvox", type: DEFAULT_DEVICE_TYPE, params: {} };
-    const device = { ...before, params: { ...(before.params ?? {}), [args.name]: args.value } };
-    track.set("device", device);
-    return {
-      before: { [fieldKey(ref, "device")]: cloneJson(before) },
-      after: { [fieldKey(ref, "device")]: cloneJson(device) },
+    const device = toPlain(track.get("device")) ?? {
+      engine: "sunvox",
+      type: DEFAULT_DEVICE_TYPE,
+      params: {},
     };
+    const params = { ...(device.params ?? {}) };
+    const before = Object.hasOwn(params, args.name) ? cloneJson(params[args.name]) : ABSENT;
+    params[args.name] = args.value;
+    track.set("device", { ...device, params });
+    const field = fieldKey(ref, `${PARAM_FIELD_PREFIX}${args.name}`);
+    return { before: { [field]: before }, after: { [field]: args.value } };
   },
 });
 
@@ -426,7 +478,7 @@ defineCommand({
     const after = {};
     for (const field of ["gain_db", "pan", "mute", "solo"]) {
       if (args[field] === undefined) continue;
-      before[fieldKey(ref, field)] = track.get(field);
+      before[fieldKey(ref, field)] = fieldValue(track, field);
       after[fieldKey(ref, field)] = args[field];
       track.set(field, args[field]);
     }
@@ -499,7 +551,7 @@ defineCommand({
     const scene = { id: args.id, name: args.name };
     scenes.push([objectMap(scene)]);
     return {
-      before: { [fieldKey(sceneRef(scene.id), "*")]: undefined },
+      before: { [fieldKey(sceneRef(scene.id), "*")]: ABSENT },
       after: { [fieldKey(sceneRef(scene.id), "*")]: { ...cloneJson(scene), _index: index } },
     };
   },
@@ -518,7 +570,7 @@ defineCommand({
   apply(doc, args) {
     const scene = requireScene(doc, args.scene_id);
     const ref = sceneRef(args.scene_id);
-    const before = scene.get("name");
+    const before = fieldValue(scene, "name");
     scene.set("name", args.name);
     return { before: { [fieldKey(ref, "name")]: before }, after: { [fieldKey(ref, "name")]: args.name } };
   },
@@ -552,10 +604,10 @@ defineCommand({
     const before = {
       [fieldKey(sceneRef(args.scene_id), "*")]: { ...cloneJson(toPlain(scene)), _index: index },
     };
-    const after = { [fieldKey(sceneRef(args.scene_id), "*")]: undefined };
+    const after = { [fieldKey(sceneRef(args.scene_id), "*")]: ABSENT };
     for (const { id, clip } of clips) {
       before[fieldKey(clipRef(id), "*")] = cloneJson(toPlain(clip));
-      after[fieldKey(clipRef(id), "*")] = undefined;
+      after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
 
     const clipsMap = clipMap(doc);
@@ -611,9 +663,9 @@ defineCommand({
         );
       }
       const before = {
-        [fieldKey(ref, "name")]: existing.get("name"),
-        [fieldKey(ref, "length_bars")]: existing.get("length_bars"),
-        [fieldKey(ref, "notes")]: toPlain(existing.get("notes")) ?? [],
+        [fieldKey(ref, "name")]: fieldValue(existing, "name"),
+        [fieldKey(ref, "length_bars")]: fieldValue(existing, "length_bars"),
+        [fieldKey(ref, "notes")]: fieldValue(existing, "notes"),
       };
       const notes = cloneJson(args.notes);
       existing.set("name", args.name);
@@ -639,7 +691,7 @@ defineCommand({
     };
     clipMap(doc).set(clip.id, objectMap(clip));
     return {
-      before: { [fieldKey(ref, "*")]: undefined },
+      before: { [fieldKey(ref, "*")]: ABSENT },
       after: { [fieldKey(ref, "*")]: cloneJson(clip) },
     };
   },
@@ -763,7 +815,7 @@ defineCommand({
         refuseInvalid(`Clip "${name}" has notes past ${barsText(args.length_bars)}; move or remove them first.`);
       }
     }
-    const before = clip.get("length_bars");
+    const before = fieldValue(clip, "length_bars");
     clip.set("length_bars", args.length_bars);
     return {
       before: { [fieldKey(clipRef(args.clip_id), "length_bars")]: before },
@@ -787,7 +839,7 @@ defineCommand({
   },
   apply(doc, args) {
     const clip = requireClip(doc, args.clip_id);
-    const before = clip.get("name");
+    const before = fieldValue(clip, "name");
     clip.set("name", args.name);
     return {
       before: { [fieldKey(clipRef(args.clip_id), "name")]: before },
@@ -816,7 +868,7 @@ defineCommand({
     const ref = clipRef(args.clip_id);
     const before = cloneJson(toPlain(clip));
     clipMap(doc).delete(args.clip_id);
-    return { before: { [fieldKey(ref, "*")]: before }, after: { [fieldKey(ref, "*")]: undefined } };
+    return { before: { [fieldKey(ref, "*")]: before }, after: { [fieldKey(ref, "*")]: ABSENT } };
   },
 });
 

@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   LIMITS,
+  TRACK_COLORS,
   applyBeforeAfter,
   newSongDoc,
   readField,
@@ -97,6 +98,29 @@ function refOf(key) {
 /** @returns {{t: number, d: number, p: number, v: number}} a note. */
 function note(t, d, p, v) {
   return { t, d, p, v };
+}
+
+/**
+ * Overwrite every value inside `value` in place, recursively — used to show
+ * that a command's before/after/args are copies rather than references into
+ * the document.
+ * @param {any} value
+ */
+function scribble(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) scribble(item);
+    value.push("scribbled");
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const key of Object.keys(value)) {
+    const item = value[key];
+    if (typeof item === "string") value[key] = `${item} scribbled`;
+    else if (typeof item === "number") value[key] = item + 1000;
+    else if (typeof item === "boolean") value[key] = !item;
+    else scribble(item);
+  }
+  value.scribbled = true;
 }
 
 /** Assert that `fn` throws a StudioError with this code, and return it. */
@@ -232,12 +256,12 @@ test("track.remove also removes its clips and before/after captures them", (t) =
   assert.equal(goneTrack.name, "Bass");
   assert.equal(goneTrack.gain_db, -3);
   assert.equal(goneTrack._index, 0);
-  assert.equal(removed.after[`track:${track}|*`], undefined);
+  assert.strictEqual(removed.after[`track:${track}|*`], null);
 
   assert.deepEqual(removed.before[`clip:${first.args.clip_id}|*`].notes, firstNotes);
   assert.equal(removed.before[`clip:${first.args.clip_id}|*`].length_bars, 1);
-  assert.equal(removed.after[`clip:${first.args.clip_id}|*`], undefined);
-  assert.equal(removed.after[`clip:${second.args.clip_id}|*`], undefined);
+  assert.strictEqual(removed.after[`clip:${first.args.clip_id}|*`], null);
+  assert.strictEqual(removed.after[`clip:${second.args.clip_id}|*`], null);
   assert.ok(`clip:${second.args.clip_id}|*` in removed.before);
   assert.deepEqual(
     [...removed.touched].sort(),
@@ -263,41 +287,86 @@ test("apply returns before/after for every touched field", (t) => {
   const clipId = clip.args.clip_id;
   const chorus = addScene(doc, "Chorus");
 
-  const results = [
-    runCommand(doc, "song.set_meta", { bpm: 96 }),
-    runCommand(doc, "track.add", { name: "Drums", id: "drums" }),
-    runCommand(doc, "track.rename", { track_id: track, name: "Bass DI" }),
-    runCommand(doc, "track.set_mix", { track_id: track, gain_db: -3, pan: -0.5 }),
-    runCommand(doc, "track.set_device", { track_id: track, type: "FM" }),
-    runCommand(doc, "track.set_param", { track_id: track, name: "Cutoff", value: 40 }),
-    runCommand(doc, "track.lock", { track_id: track }),
-    runCommand(doc, "track.unlock", { track_id: track }),
-    runCommand(doc, "scene.rename", { scene_id: scene, name: "Intro" }),
-    clip,
-    runCommand(doc, "clip.set_length", { clip_id: clipId, length_bars: 8 }),
-    runCommand(doc, "clip.rename", { clip_id: clipId, name: "Verse bass 2" }),
-    runCommand(doc, "clip.edit_notes", { clip_id: clipId, add: [note(2, 1, 43, 90)] }),
-    runCommand(doc, "clip.remove", { clip_id: clipId }),
-    runCommand(doc, "scene.remove", { scene_id: chorus }),
-    runCommand(doc, "track.remove", { track_id: "drums" }),
+  const tr = `track:${track}`;
+  const cl = `clip:${clipId}`;
+
+  // Every 1a command, in the order they can run, with the exact key set its
+  // before and after maps must carry.
+  const cases = [
+    { id: "song.set_meta", args: { bpm: 96 }, keys: ["song:meta|bpm"] },
+    { id: "track.add", args: { name: "Drums", id: "drums" }, keys: ["track:drums|*"] },
+    { id: "track.rename", args: { track_id: track, name: "Bass DI" }, keys: [`${tr}|name`] },
+    {
+      id: "track.set_mix",
+      args: { track_id: track, gain_db: -3, pan: -0.5 },
+      keys: [`${tr}|gain_db`, `${tr}|pan`],
+    },
+    { id: "track.set_device", args: { track_id: track, type: "FM" }, keys: [`${tr}|device`] },
+    {
+      id: "track.set_param",
+      args: { track_id: track, name: "Cutoff", value: 40 },
+      keys: [`${tr}|device.params.Cutoff`],
+    },
+    { id: "track.lock", args: { track_id: track }, keys: [`${tr}|locked`] },
+    { id: "track.unlock", args: { track_id: track }, keys: [`${tr}|locked`] },
+    { id: "scene.add", args: { name: "Bridge", id: "bridge" }, keys: ["scene:bridge|*"] },
+    { id: "scene.rename", args: { scene_id: scene, name: "Intro" }, keys: [`scene:${scene}|name`] },
+    {
+      id: "clip.write",
+      args: {
+        clip_id: clipId,
+        track_id: track,
+        scene_id: scene,
+        name: "Verse bass",
+        length_bars: 2,
+        notes: [note(0, 1, 36, 100)],
+      },
+      keys: [`${cl}|name`, `${cl}|length_bars`, `${cl}|notes`],
+    },
+    { id: "clip.set_length", args: { clip_id: clipId, length_bars: 8 }, keys: [`${cl}|length_bars`] },
+    { id: "clip.rename", args: { clip_id: clipId, name: "Verse bass 2" }, keys: [`${cl}|name`] },
+    { id: "clip.edit_notes", args: { clip_id: clipId, add: [note(2, 1, 43, 90)] }, keys: [`${cl}|notes`] },
+    { id: "clip.remove", args: { clip_id: clipId }, keys: [`${cl}|*`] },
+    { id: "scene.remove", args: { scene_id: chorus }, keys: [`scene:${chorus}|*`] },
+    { id: "track.remove", args: { track_id: "drums" }, keys: ["track:drums|*"] },
   ];
 
-  for (const result of results) {
+  // The list covers the whole 1a contract: a new command cannot slip in
+  // without the expected key set being written down.
+  assert.deepEqual([...new Set(cases.map((entry) => entry.id))].sort(), COMMAND_IDS);
+
+  for (const { id, args, keys } of cases) {
+    const result = runCommand(doc, id, args);
+    assert.equal(result.id, id);
+
+    assert.deepEqual(Object.keys(result.before).sort(), [...keys].sort(), `${id} before keys`);
+    assert.deepEqual(Object.keys(result.after).sort(), [...keys].sort(), `${id} after keys`);
+
+    // `undefined` would be dropped when the history stores the entry, and the
+    // undo would silently do nothing.
+    for (const map of [result.before, result.after]) {
+      for (const [key, value] of Object.entries(map)) {
+        assert.notStrictEqual(value, undefined, `${id}: "${key}" recorded undefined`);
+      }
+    }
+
     const touched = new Set(result.touched);
-    const beforeKeys = Object.keys(result.before);
-    const afterKeys = Object.keys(result.after);
-
-    assert.deepEqual(beforeKeys.sort(), afterKeys.sort(), `${result.id} before/after disagree on the fields`);
-    assert.ok(afterKeys.length > 0, `${result.id} reported no changed field`);
-
-    for (const key of afterKeys) {
-      assert.ok(touched.has(refOf(key)), `${result.id}: "${key}" is not one of its touched objects`);
+    for (const key of keys) {
+      assert.ok(touched.has(refOf(key)), `${id}: "${key}" is not one of its touched objects`);
     }
     // The command's own target always carries the change. (A clip command
     // also names its track, which it reads for the lock check but does not
     // edit, so that ref may legitimately have no field.)
     const target = result.touched[0];
-    assert.ok(afterKeys.some((key) => refOf(key) === target), `${result.id} has no after entry for ${target}`);
+    assert.ok(keys.some((key) => refOf(key) === target), `${id} has no after entry for ${target}`);
+
+    // What the command handed back is a copy: scribbling over it afterwards
+    // must leave the document exactly as the command left it.
+    const settled = snapshot(doc);
+    scribble(result.before);
+    scribble(result.after);
+    scribble(result.args);
+    assert.deepEqual(snapshot(doc), settled, `${id} returned a live reference into the document`);
   }
 });
 
@@ -433,7 +502,7 @@ test("applyBeforeAfter restores a created object at its index", (t) => {
   // Undo: before holds the ref with no value, so the object goes away.
   doc.transact(() => applyBeforeAfter(doc, added.before));
   assert.deepEqual(snapshot(doc).tracks.map((track) => track.name), ["Bass", "Keys"]);
-  assert.equal(readField(doc, "track:drums", "*"), undefined);
+  assert.strictEqual(readField(doc, "track:drums", "*"), null);
   assert.equal(readField(doc, "song:meta", "bpm"), 120);
 
   // Redo: after carries the original position inside the object JSON.
@@ -476,4 +545,55 @@ test("a note past the clip's end is refused", (t) => {
   );
   assert.match(error.message, /1 bar/);
   assert.deepEqual(snapshot(doc), before);
+});
+
+test("set_device with 65 params is refused", (t) => {
+  const doc = scratchDoc(t);
+  const track = addTrack(doc, "Bass");
+  const before = snapshot(doc);
+  const params = Object.fromEntries(
+    Array.from({ length: LIMITS.params + 1 }, (_, index) => [`Param ${index + 1}`, index]),
+  );
+
+  const over = refuses(
+    () => runCommand(doc, "track.set_device", { track_id: track, type: "FM", params }),
+    "limit",
+  );
+  assert.equal(over.message, "A device can have at most 64 parameters.");
+  assert.deepEqual(snapshot(doc), before);
+
+  // track.add caps the same record, and refuses before it creates anything.
+  const added = refuses(
+    () => runCommand(doc, "track.add", { id: "strings", name: "Strings", device: { type: "FM", params } }),
+    "limit",
+  );
+  assert.equal(added.message, "A device can have at most 64 parameters.");
+  assert.deepEqual(snapshot(doc), before);
+
+  // Exactly 64 is allowed.
+  const allowed = Object.fromEntries(Object.entries(params).slice(0, LIMITS.params));
+  const set = runCommand(doc, "track.set_device", { track_id: track, type: "FM", params: allowed });
+  assert.deepEqual(Object.keys(set.after), [`track:${track}|device`]);
+  assert.deepEqual(snapshot(doc).tracks[0].device.params, allowed);
+});
+
+test("after removing a track the next added track does not repeat an existing colour", (t) => {
+  const doc = scratchDoc(t);
+  const bass = addTrack(doc, "Bass");
+  addTrack(doc, "Drums");
+  assert.deepEqual(snapshot(doc).tracks.map((track) => track.color), [TRACK_COLORS[0], TRACK_COLORS[1]]);
+
+  runCommand(doc, "track.remove", { track_id: bass });
+  addTrack(doc, "Keys");
+  const colors = snapshot(doc).tracks.map((track) => track.color);
+  assert.deepEqual(colors, [TRACK_COLORS[1], TRACK_COLORS[0]]);
+  assert.equal(new Set(colors).size, colors.length);
+
+  // Once every palette colour is taken the sequence repeats rather than
+  // failing to find one.
+  const wide = scratchDoc(t);
+  for (let index = 0; index < TRACK_COLORS.length; index += 1) addTrack(wide, `Track ${index + 1}`);
+  assert.deepEqual(snapshot(wide).tracks.map((track) => track.color), [...TRACK_COLORS]);
+  addTrack(wide, "Next");
+  assert.equal(snapshot(wide).tracks[TRACK_COLORS.length].color, TRACK_COLORS[0]);
 });

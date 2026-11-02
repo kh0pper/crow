@@ -17,7 +17,9 @@
  *
  * `before` and `after` are plain objects keyed `"<ref>|<field>"` (see
  * doc.js `applyBeforeAfter`) holding deep-cloned JSON: one entry per field the
- * command changed, `"*"` for a whole created or deleted object.
+ * command changed, `"*"` for a whole created or deleted object. A `null` value
+ * means "that object or field did not exist" — never `undefined`, which JSON
+ * would drop when the history stores the entry.
  *
  * Order of work in a call, which the hub relies on:
  *
@@ -158,19 +160,37 @@ export function listCommands() {
 
 /**
  * Validate one command's arguments.
+ *
+ * A schema refinement that hits a song limit tags its issue with
+ * `addLimitIssue()`, and is reported with code "limit" rather than "invalid"
+ * so a caller can tell "too much of an allowed thing" from "malformed".
  * @param {Readonly<object>} command
  * @param {unknown} args
  * @returns {object} the parsed arguments, with defaults filled in
- * @throws {StudioError} code "invalid", naming each rejected field
+ * @throws {StudioError} code "limit" for an over-the-limit value, code
+ *   "invalid" naming each rejected field otherwise
  */
 export function validateArgs(command, args) {
   const result = command.schema.safeParse(args ?? {});
   if (result.success) return result.data;
+  const overLimit = result.error.issues.find((issue) => issue.params?.refusal === "limit");
+  if (overLimit) throw new StudioError("limit", overLimit.message);
   const details = result.error.issues.map((issue) => {
     const path = issue.path.join(".");
     return path ? `${path}: ${issue.message}` : issue.message;
   });
   throw new StudioError("invalid", `Invalid arguments for ${command.id}: ${details.join("; ")}`);
+}
+
+/**
+ * Report a schema refinement's failure as a limit refusal rather than a plain
+ * argument error. Use it from a zod `.superRefine((value, ctx) => ...)`.
+ * @param {{addIssue: Function}} ctx - the refinement context
+ * @param {string} message - plain English, naming the limit
+ * @returns {void}
+ */
+export function addLimitIssue(ctx, message) {
+  ctx.addIssue({ code: "custom", message, params: { refusal: "limit" } });
 }
 
 /**

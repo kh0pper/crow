@@ -265,7 +265,7 @@ test("undo of track.add removes track and clips created by it", (t) => {
   const { plan, entry } = s.undo(added.entry);
   assert.deepEqual(plan.conflicts, []);
   assert.deepEqual([...plan.apply.keys()], ["track:bass|*"]);
-  assert.equal(plan.apply.get("track:bass|*"), undefined);
+  assert.strictEqual(plan.apply.get("track:bass|*"), null);
   assert.equal(entry.undo_of, added.entry.id);
   assert.equal(entry.command, UNDO_COMMAND);
 
@@ -402,7 +402,7 @@ test("a whole-object restore is skipped when one of its fields is in conflict", 
     author: HUMAN,
     summary: "Hand-made step",
     touched: ["clip:bass-verse"],
-    before: { "clip:bass-verse|*": undefined },
+    before: { "clip:bass-verse|*": null },
     after: { "clip:bass-verse|name": "A name the agent wrote", "clip:bass-verse|*": whole },
   });
 
@@ -412,4 +412,104 @@ test("a whole-object restore is skipped when one of its fields is in conflict", 
   assert.equal(plan.conflicts[0].field, "name");
   assert.equal(plan.apply.has("clip:bass-verse|*"), false);
   assert.equal(snapshot(s.doc).clips["bass-verse"].name, "Verse bass");
+});
+
+test("entry survives a JSON round trip and still undoes a track.add and a clip.remove", (t) => {
+  const s = studio(t);
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  const added = s.run("track.add", { name: "Bass", id: "bass" });
+
+  // The store keeps an entry as JSON text, and JSON drops `undefined` keys —
+  // so "the object did not exist" has to be stored as `null` to survive at
+  // all. A dropped key would make the undo below do nothing.
+  const storedAdd = JSON.parse(JSON.stringify(added.entry));
+  assert.deepEqual(Object.keys(storedAdd.inverse.before), ["track:bass|*"]);
+  assert.strictEqual(storedAdd.inverse.before["track:bass|*"], null);
+
+  const addUndo = planUndo(s.doc, storedAdd);
+  assert.deepEqual(addUndo.conflicts, []);
+  assert.strictEqual(addUndo.apply.get("track:bass|*"), null);
+  s.doc.transact(() => applyPlan(s.doc, addUndo));
+  assert.deepEqual(trackNames(s.doc), []);
+
+  // The undo entry round trips the same way, so redoing it puts the track back
+  // at the index it was created at.
+  const undoEntry = makeUndoEntry({ entry: storedAdd, plan: addUndo, song_id: SONG_ID, seq: 10 });
+  const addRedo = planRedo(s.doc, JSON.parse(JSON.stringify(undoEntry)));
+  assert.deepEqual(addRedo.conflicts, []);
+  s.doc.transact(() => applyPlan(s.doc, addRedo));
+  assert.deepEqual(trackNames(s.doc), ["Bass"]);
+  assert.equal(snapshot(s.doc).tracks[0].id, "bass");
+
+  // A clip removal carries the same marker in its after map.
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  const removal = s.run("clip.remove", { clip_id: "bass-verse" });
+  const storedRemove = JSON.parse(JSON.stringify(removal.entry));
+  assert.strictEqual(storedRemove.inverse.after["clip:bass-verse|*"], null);
+  assert.equal(snapshot(s.doc).clips["bass-verse"], undefined);
+
+  const removeUndo = planUndo(s.doc, storedRemove);
+  assert.deepEqual(removeUndo.conflicts, []);
+  s.doc.transact(() => applyPlan(s.doc, removeUndo));
+  assert.equal(snapshot(s.doc).clips["bass-verse"].name, "Verse bass");
+  assert.deepEqual(snapshot(s.doc).clips["bass-verse"].notes, [note(0, 1, 36, 100)]);
+});
+
+test("undo of one set_param keeps a later set_param on another controller and reports no conflict", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const cutoff = s.run("track.set_param", { track_id: "bass", name: "Cutoff", value: 40 });
+  s.run("track.set_param", { track_id: "bass", name: "Resonance", value: 10 });
+
+  // Only the controller the step changed is recorded, so a later change to a
+  // different controller is not in its way.
+  assert.deepEqual(Object.keys(cutoff.entry.inverse.before), ["track:bass|device.params.Cutoff"]);
+  assert.strictEqual(cutoff.entry.inverse.before["track:bass|device.params.Cutoff"], null);
+  assert.equal(cutoff.entry.inverse.after["track:bass|device.params.Cutoff"], 40);
+
+  const undone = s.undo(cutoff.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual([...undone.plan.apply.keys()], ["track:bass|device.params.Cutoff"]);
+  assert.strictEqual(undone.plan.apply.get("track:bass|device.params.Cutoff"), null);
+
+  const device = snapshot(s.doc).tracks[0].device;
+  assert.equal(Object.hasOwn(device.params, "Cutoff"), false);
+  assert.equal(device.params.Resonance, 10);
+  assert.equal(device.type, "Analog generator");
+
+  // The undo is a step of its own, and redoing it restores the controller.
+  const redone = s.redo(undone.entry);
+  assert.deepEqual(redone.plan.conflicts, []);
+  assert.equal(snapshot(s.doc).tracks[0].device.params.Cutoff, 40);
+  assert.equal(snapshot(s.doc).tracks[0].device.params.Resonance, 10);
+});
+
+test("same controller changed later keeps the later value and reports one conflict", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const older = s.run("track.set_param", { track_id: "bass", name: "Cutoff", value: 40 });
+  const newer = s.run("track.set_param", { track_id: "bass", name: "Cutoff", value: 70 });
+
+  const olderUndo = s.undo(older.entry);
+  assert.equal(olderUndo.plan.apply.size, 0);
+  assert.equal(olderUndo.plan.conflicts.length, 1);
+  const conflict = olderUndo.plan.conflicts[0];
+  assert.equal(conflict.ref, "track:bass");
+  assert.equal(conflict.field, "device.params.Cutoff");
+  assert.equal(conflict.expected, 40);
+  assert.equal(conflict.actual, 70);
+  assert.equal(snapshot(s.doc).tracks[0].device.params.Cutoff, 70);
+
+  // The newer step still undoes, back to the value the older one set.
+  const newerUndo = s.undo(newer.entry);
+  assert.deepEqual(newerUndo.plan.conflicts, []);
+  assert.equal(newerUndo.plan.apply.get("track:bass|device.params.Cutoff"), 40);
+  assert.equal(snapshot(s.doc).tracks[0].device.params.Cutoff, 40);
 });

@@ -10,7 +10,9 @@
  * `inverse.before` is what the fields held before the command, `inverse.after`
  * is what the command wrote. Both are keyed the way doc.js writes them —
  * `"<ref>|<field>"`, with `"*"` for a whole created or deleted object (see
- * `applyBeforeAfter` in doc.js).
+ * `applyBeforeAfter` in doc.js). A value of `null` means "the object or field
+ * did not exist": `null` survives the JSON round trip through the store, while
+ * `undefined` would be dropped and turn a deletion into a no-op.
  *
  * Undo is selective, not chronological (spec §5.3). Each key of
  * `inverse.after` is compared with what the document holds now:
@@ -51,11 +53,18 @@ export const REDO_COMMAND = "history.redo";
 const REF_ORDER = Object.freeze({ song: 0, track: 1, scene: 2, clip: 3 });
 
 /**
+ * The value a history map carries when the object or field did not exist.
+ * `null`, so it survives `JSON.stringify` (which drops `undefined` keys).
+ */
+const ABSENT = null;
+
+/**
  * Read one value out of the document by a history key.
  * @param {import("yjs").Doc} doc
- * @param {string} key - e.g. `"clip:abc|notes"` or `"track:abc|*"`
- * @returns {any} the value as the document holds it now, or `undefined` when
- *   the object or the field is not there
+ * @param {string} key - e.g. `"clip:abc|notes"`, `"track:abc|*"` or
+ *   `"track:abc|device.params.Cutoff"`
+ * @returns {any} the value as the document holds it now, or `null` when the
+ *   object or the field is not there
  * @throws {StudioError} code "invalid" when `key` is not a `"<ref>|<field>"` key
  */
 export function readField(doc, key) {
@@ -66,17 +75,17 @@ export function readField(doc, key) {
   return readDocField(doc, split.ref, split.field);
 }
 
-/** @returns {Map<string, any>} a before/after map as a Map, undefined values kept. */
+/** @returns {Map<string, any>} a before/after map as a Map, absent values as `null`. */
 function fieldMap(map) {
   if (!map) return new Map();
   if (map instanceof Map) return new Map(map);
   return new Map(Object.entries(map));
 }
 
-/** @returns {object} a deep copy of a before/after map, `undefined` values kept. */
+/** @returns {object} a deep copy of a before/after map, absent values as `null`. */
 function copyFieldMap(map) {
   const out = {};
-  for (const [key, value] of fieldMap(map)) out[key] = cloneJson(value);
+  for (const [key, value] of fieldMap(map)) out[key] = cloneJson(value ?? ABSENT);
   return out;
 }
 
@@ -156,10 +165,11 @@ export function makeEntry({
  * longer be taken back because someone changed them since.
  *
  * A field whose current value is exactly what the step wrote is restored to
- * what it held before. A field that has changed since is reported in
- * `conflicts` and left alone. A `"*"` key compares (and restores) the whole
- * object, and is skipped when another field of the same object is already in
- * conflict — the object is no longer the one the step made.
+ * what it held before — a `before` of `null` deletes it again, because that is
+ * how "it did not exist" is spelled. A field that has changed since is
+ * reported in `conflicts` and left alone. A `"*"` key compares (and restores)
+ * the whole object, and is skipped when another field of the same object is
+ * already in conflict — the object is no longer the one the step made.
  *
  * Reads the document; changes nothing. Apply the result with `applyPlan`.
  * @param {import("yjs").Doc} doc
@@ -193,10 +203,10 @@ export function planUndo(doc, entry) {
     const expected = after.get(key);
     const actual = readField(doc, key);
     if (isDeepStrictEqual(actual, expected)) {
-      planned.set(key, cloneJson(before.get(key)));
+      planned.set(key, cloneJson(before.get(key) ?? ABSENT));
       continue;
     }
-    conflicts.push({ ref: split.ref, field: split.field, expected: cloneJson(expected), actual });
+    conflicts.push({ ref: split.ref, field: split.field, expected: cloneJson(expected ?? ABSENT), actual });
     refsInConflict.add(split.ref);
   }
 
@@ -210,10 +220,10 @@ export function planUndo(doc, entry) {
     const expected = after.get(key);
     const actual = readField(doc, key);
     if (isDeepStrictEqual(actual, expected)) {
-      planned.set(key, cloneJson(before.get(key)));
+      planned.set(key, cloneJson(before.get(key) ?? ABSENT));
       continue;
     }
-    conflicts.push({ ref: split.ref, field: "*", expected: cloneJson(expected), actual });
+    conflicts.push({ ref: split.ref, field: "*", expected: cloneJson(expected ?? ABSENT), actual });
   }
 
   return { apply: orderPlan(planned), conflicts };
@@ -282,8 +292,8 @@ export function makeUndoEntry({
   const before = {};
   const after = {};
   for (const [key, value] of planned) {
-    before[key] = cloneJson(originalAfter.get(key));
-    after[key] = cloneJson(value);
+    before[key] = cloneJson(originalAfter.get(key) ?? ABSENT);
+    after[key] = cloneJson(value ?? ABSENT);
   }
 
   const refs = [...new Set([...planned.keys()].map((key) => splitRefField(key)?.ref).filter(Boolean))];
