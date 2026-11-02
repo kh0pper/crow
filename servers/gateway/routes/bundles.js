@@ -57,7 +57,7 @@ import {
   _setAppBundlesForTest,
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
-import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
+import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode, atomicWrite } from "../bundle-skill-sync.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
 import { projectsUsingBundle } from "../../shared/service-connections.js";
@@ -1174,10 +1174,10 @@ function getInstalled() {
   return [];
 }
 
-/** Write installed.json */
-function saveInstalled(arr) {
-  mkdirSync(dirname(INSTALLED_PATH), { recursive: true });
-  writeFileSync(INSTALLED_PATH, JSON.stringify(arr, null, 2));
+/** Write installed.json: temp file + rename, so a reader never sees a torn file (a torn read
+ *  parses as "nothing installed", and the next save would then write that back, wiping every entry). */
+export function saveInstalled(arr, path = INSTALLED_PATH) {
+  atomicWrite(path, JSON.stringify(arr, null, 2));
   invalidateAppCatalog(); // every install/remove path writes through here
 }
 
