@@ -31,7 +31,10 @@ export default function setupCompanionProxy(app, server) {
   const httpProxy = createProxyMiddleware({
     target: COMPANION_TARGET,
     changeOrigin: true,
-    ws: true,
+    ws: false,   // NEVER true: http-proxy-middleware 3 then subscribes its OWN catch-all
+    //   server "upgrade" listener on the first proxied HTTP request, which proxies every later
+    //   upgrade (any path, no cookie) before our own auth checks run. Upgrades go only through
+    //   the explicit .upgrade() call after those checks (proxy.ws does not need this option).
     pathRewrite: { "^/companion": "" },
     on: {
       proxyRes: (proxyRes) => {
