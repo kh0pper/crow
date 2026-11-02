@@ -153,7 +153,7 @@ export function resolveActor(extra, verifyActor, verifyThread) {
 // that binds its injected verifier.
 const resolveActorWith = resolveActor;
 
-// ---- bot write scope (2026-10-29) ----
+// ---- bot board scope: writes (2026-10-29), reads (2026-10-30) ----
 //
 // A bot changes only cards on its own project's board, or cards assigned to it
 // (a card given to it from another project). It never approves a plan or
@@ -161,12 +161,51 @@ const resolveActorWith = resolveActor;
 // nothing if the bot could approve its own work). Tracker items (board_id set)
 // keep their earlier rules. An unattributed bot (no verified signature) has no
 // project and no assignments, so it can only create unassigned-project cards.
+//
+// READS follow the SAME rule: a card on another project's board that is not
+// assigned to the bot does not exist for it — a single-card read answers
+// exactly like a missing id, and a listing omits it — so another project's
+// cards never leak into a bot's context.
 
 /** The linked project of a bot (pi_bot_defs.project_id), or null. */
 export async function botProjectOf(cdb, botId) {
   if (!cdb || !botId) return null;
   const r = (await cdb.execute({ sql: "SELECT project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
   return r && r.project_id != null ? Number(r.project_id) : null;
+}
+
+/** Whether a bot actor may READ `row` (a tasks_items row, or null for an id
+ *  that does not exist). PURE — the write scope's rule, reused. Non-bot actors
+ *  and tracker items always pass; a missing row passes so the caller's own 404
+ *  answers unchanged. */
+export function botMayReadCard(row, actor, botProject) {
+  if (!actor || actor.kind !== "bot") return true;
+  if (!row || row.board_id != null) return true;
+  if (actor.id && row.assigned_bot === actor.id) return true;
+  return actor.id != null && botProject != null && row.project_id != null && Number(row.project_id) === botProject;
+}
+
+/** Throws the tool's own not_found 404 unless a bot actor may read card `id`,
+ *  so a hidden card answers exactly like a card that does not exist. */
+export async function assertBotMayReadCard(tdb, cdb, actor, id) {
+  if (!actor || actor.kind !== "bot" || !Number.isInteger(id)) return;
+  const row = (await tdb.execute({ sql: "SELECT project_id, assigned_bot, board_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+  if (!row || row.board_id != null) return; // missing → the caller's 404; tracker items unchanged
+  if (actor.id && row.assigned_bot === actor.id) return;
+  if (botMayReadCard(row, actor, await botProjectOf(cdb, actor.id))) return;
+  throw fail(`not found: ${id}`, "not_found", 404);
+}
+
+/** The card-listing restriction for a bot actor (botMayReadCard in SQL):
+ *  `{empty:true}` when the request names another project (that board is an
+ *  empty list, never an error), else the clause + args to AND into the query.
+ *  Null for a non-bot actor, whose listing is unchanged. */
+function botCardScope(f, actor, botProject) {
+  if (!actor || actor.kind !== "bot") return null;
+  if (f.project_id != null && (botProject == null || Number(f.project_id) !== botProject)) return { empty: true };
+  if (actor.id == null) return { clauses: ["1=0"], args: [] }; // unattributed: no project, no cards
+  if (botProject == null) return { clauses: ["assigned_bot = ?"], args: [String(actor.id)] };
+  return { clauses: ["(project_id = ? OR assigned_bot = ?)"], args: [botProject, String(actor.id)] };
 }
 
 /** Throws 403 unless a bot actor may change card `id`. Non-bot actors pass. */
@@ -289,7 +328,7 @@ async function listBoardsImpl(tdb, cdb, includeArchived) {
   return boards;
 }
 
-async function listItemsImpl(tdb, f) {
+async function listItemsImpl(tdb, f, actor = null, botProject = null) {
   const clauses = [];
   const args = [];
   let boardId = null;
@@ -305,6 +344,11 @@ async function listItemsImpl(tdb, f) {
   } else {
     clauses.push("board_id IS NULL");
     if (f.project_id != null) { clauses.push("project_id = ?"); args.push(Number(f.project_id)); }
+    // A bot lists only cards it may read — filtered here, in SQL, so a
+    // limit/filter can never be applied to a wider set first.
+    const scope = botCardScope(f, actor, botProject);
+    if (scope && scope.empty) return { count: 0, items: [] };
+    if (scope) { clauses.push(...scope.clauses); args.push(...scope.args); }
   }
   if (f.status) { clauses.push("status = ?"); args.push(String(f.status)); }
   if (f.tag) { clauses.push("tags LIKE ?"); args.push(`%${String(f.tag)}%`); }
@@ -393,12 +437,19 @@ export function createBoardMcpServer(options = {}) {
       include_archived: z.boolean().optional(),
       limit: z.number().int().min(1).max(500).optional(),
     },
-    (args) => listItemsImpl(tdb, args || {}));
+    async (args, extra) => {
+      const actor = resolveActor(extra);
+      const botProject = actor.kind === "bot" ? await botProjectOf(cdb, actor.id) : null;
+      return listItemsImpl(tdb, args || {}, actor, botProject);
+    });
 
   tool(server, "board_get_item",
     "Get one card or tracker item by id, including its current plan head, latest results (with plan version + superseded flag), and the last 10 mutations.",
     { id: z.number().int() },
-    ({ id }) => getItemFullImpl(tdb, id));
+    async ({ id }, extra) => {
+      await assertBotMayReadCard(tdb, cdb, resolveActor(extra), id);
+      return getItemFullImpl(tdb, id);
+    });
 
   tool(server, "board_create_item",
     "Create a card (default) or a tracker item (pass board_id or slug). parent_id creates a subtask that inherits the parent card's project.",
@@ -501,7 +552,10 @@ export function createBoardMcpServer(options = {}) {
   tool(server, "board_get_plan",
     "Get an item's current plan (latest approved, else latest draft) plus every version.",
     { item_id: z.number().int() },
-    async ({ item_id }) => {
+    async ({ item_id }, extra) => {
+      // A card the bot may not read is answered as a missing one, before any
+      // plan row is looked at.
+      await assertBotMayReadCard(tdb, cdb, resolveActor(extra), item_id);
       if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
       return { current: await getCurrentPlan(tdb, item_id), versions: await listPlans(tdb, item_id) };
     });

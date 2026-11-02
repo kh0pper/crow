@@ -230,11 +230,12 @@ async function writeWorldMcp(a, sessionId) {
   try {
     // acceptance F2: a card-bound session (or a job turn) must be able to
     // call board_report_result — ensure the board entry is minted. A bot
-    // linked to a project that shows it its cards gets the board in free chat
-    // too: asked to "put this on the board", a bot without board verbs wrote
-    // project notes instead and reported the board organized. Perch only (the
-    // operator's own chat): the board server does not scope a bot to its own
-    // project yet, so channel turns (mail, Discord) keep the def's selection.
+    // linked to a project that shows it its cards gets the board on EVERY
+    // channel too: asked to "put this on the board", a bot without board
+    // verbs wrote project notes instead and reported the board organized.
+    // The board server scopes a bot to its own project's cards (board-mcp.js),
+    // so a mail or Discord turn can be handed it without exposing any other
+    // project. The voice bot never gets it (its turn loop has no board).
     const w = writeBotMcp(a.def, {
       sessionDir: a.sessionDir, crowHome: a.crowHome, remoteEnabled: a.remoteEnabled, peerGatewayUrls: a.peerGatewayUrls,
       botId: a.botId, jobId: a.jobId, threadId: a.threadId, gatewayType: a.gatewayType, sessionId: sid,
@@ -325,9 +326,11 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // if present (legacy fixtures may still carry it; new bots don't write it).
   const projectId = bot.project_id == null ? null : Number(bot.project_id);
   // Whether this turn mounts the board server (writeWorldMcp's ensureServers):
-  // a job turn, a card-bound session, or a Perch turn of a project bot that
-  // is shown its cards. The same turns get the board verbs in the allowlist.
-  const projectBoard = gatewayType === "perch" && projectShowsCards(projectId, bot.def);
+  // a job turn, a card-bound session, or a turn of a project bot that is shown
+  // its cards — on every channel, because the board server itself scopes what
+  // a bot may read and write to its own project (board-mcp.js). The voice bot
+  // stays out: it answers as speech, and its turn loop has no board.
+  const projectBoard = !isVoiceBotDef(bot.def) && projectShowsCards(projectId, bot.def);
   const def = await withBoardTools(await withSkillTools(bot.def, { crowHome, log, repoSkillsDir }),
     { wanted: !!(jobId || cardBound || projectBoard), log });
   const projectSpace = B.loadProjectSpace(projectId);

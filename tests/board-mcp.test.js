@@ -891,6 +891,87 @@ test("bot write scope: a bot with no linked project creates an unassigned card, 
   assert.equal(row.project_id, null);
 });
 
+// ---- bot read scope (2026-10-30) ----
+//
+// Reads follow the write scope: a bot sees its own project's cards and cards
+// assigned to it, and any other card answers exactly like a missing one.
+
+test("bot read scope: a bot lists and reads only its own project's cards or cards assigned to it", async () => {
+  await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,?)", args: ["read-bot", "read-bot", 1] });
+  const op = await connectClient("/board/mcp", state.localToken);
+  const own = payload(await op.callTool({ name: "board_create_item", arguments: { title: "read scope: own project", project_id: 1 } }));
+  const foreign = payload(await op.callTool({ name: "board_create_item", arguments: { title: "read scope: other project", project_id: 2 } }));
+  const given = payload(await op.callTool({ name: "board_create_item", arguments: { title: "read scope: given", project_id: 2, assigned_bot: "read-bot" } }));
+  const tracker = payload(await op.callTool({ name: "board_create_item", arguments: { title: "read scope: tracker", slug: "intake" } }));
+  // A plan on the other project's card: a plan read must not become a side channel.
+  payload(await op.callTool({ name: "board_save_plan", arguments: { item_id: foreign.id, body_md: "# other project's plan" } }));
+  await op.close();
+
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("read-bot"));
+  const call = (name, args) => bot.callTool({ name, arguments: args });
+
+  // Listing: its own project's cards plus cards assigned to it, never the rest.
+  const listed = payload(await call("board_list_items", {}));
+  const ids = listed.items.map((r) => r.id);
+  assert.ok(ids.includes(own.id), "its own project's card is listed");
+  assert.ok(ids.includes(given.id), "a card assigned to it from another project is listed");
+  assert.ok(!ids.includes(foreign.id), "another project's card is never listed");
+  for (const row of listed.items) {
+    assert.ok(Number(row.project_id) === 1 || row.assigned_bot === "read-bot", "unexpected card " + row.id + " in the bot's listing");
+  }
+  // Scoping the listing to its own project keeps the same rule.
+  const ownList = payload(await call("board_list_items", { project_id: 1 }));
+  assert.ok(ownList.items.some((r) => r.id === own.id));
+  assert.ok(!ownList.items.some((r) => r.id === foreign.id));
+  // A request naming another project is an empty list, never that project's board.
+  assert.deepEqual(payload(await call("board_list_items", { project_id: 2 })), { count: 0, items: [] });
+
+  // A single-card read of a hidden card answers exactly like a missing id.
+  for (const [name, key] of [["board_get_item", "id"], ["board_get_plan", "item_id"]]) {
+    const hidden = await call(name, { [key]: foreign.id });
+    assert.equal(hidden.isError, true, name + " on another project's card");
+    assert.equal(hidden.content[0].text, "[404 not_found] not found: " + foreign.id, name + " reads as a missing card");
+    const missing = await call(name, { [key]: 999999 });
+    assert.equal(missing.content[0].text, "[404 not_found] not found: 999999", name + " keeps its own 404 for a missing id");
+  }
+
+  // What it may read, it reads — including a card assigned from another project.
+  assert.equal(payload(await call("board_get_item", { id: own.id })).kind, "card");
+  assert.equal(payload(await call("board_get_item", { id: given.id })).item.assigned_bot, "read-bot");
+  assert.equal(payload(await call("board_get_plan", { item_id: own.id })).current, null);
+  // Tracker items keep their current rules (an id read, a slug listing).
+  assert.equal(payload(await call("board_get_item", { id: tracker.id })).kind, "item");
+  assert.ok(payload(await call("board_list_items", { slug: "intake" })).items.some((r) => r.id === tracker.id));
+  await bot.close();
+
+  // The operator (a session actor) is unchanged: everything, everywhere.
+  const session = await connectClient("/board/mcp", state.localToken);
+  const opList = payload(await session.callTool({ name: "board_list_items", arguments: { project_id: 2 } }));
+  assert.ok(opList.items.some((r) => r.id === foreign.id), "the operator still lists another project's cards");
+  assert.equal(payload(await session.callTool({ name: "board_get_item", arguments: { id: foreign.id } })).kind, "card");
+  assert.equal(payload(await session.callTool({ name: "board_get_plan", arguments: { item_id: foreign.id } })).current.body_md, "# other project's plan");
+  await session.close();
+});
+
+test("bot read scope: an unattributed bot (no project, no assignments) sees no cards at all", async () => {
+  const op = await connectClient("/board/mcp", state.localToken);
+  const card = payload(await op.callTool({ name: "board_create_item", arguments: { title: "unattributed probe", project_id: 1 } }));
+  payload(await op.callTool({ name: "board_save_plan", arguments: { item_id: card.id, body_md: "# not for an unattributed bot" } }));
+  await op.close();
+
+  const anon = await connectClient("/board/mcp", state.boardToken);
+  try {
+    assert.deepEqual(payload(await anon.callTool({ name: "board_list_items", arguments: {} })), { count: 0, items: [] });
+    for (const [name, key] of [["board_get_item", "id"], ["board_get_plan", "item_id"]]) {
+      const r = await anon.callTool({ name, arguments: { [key]: card.id } });
+      assert.equal(r.isError, true, name);
+      assert.equal(r.content[0].text, "[404 not_found] not found: " + card.id);
+    }
+  } finally {
+    await anon.close();
+  }
+});
+
 test("board_list_boards hides a status-archived project and a deleted one, keeps a live one", async () => {
   // Both archive markers hide a project's board (activeProjectWhere): status 'archived' with
   // archived_at NULL, and archived_at set (deleted). Project 1 is the live fixture project.
