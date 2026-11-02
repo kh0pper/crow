@@ -185,6 +185,7 @@ test("Task 15 pieces this task consumes exist: v3 service kind, scope signing, o
   assert.ok(ACTOR_SIGN_KINDS.includes("service"));
   const { SERVICES_TOKEN } = await import("../servers/gateway/local-token.js");
   assert.equal(SERVICES_TOKEN.path(), join(CROW_HOME, "secrets", "services-token"));
+  assert.equal(SB.servicesTokenPath(), SERVICES_TOKEN.path(), "the host-side reader opens the file the gateway rotates");
 });
 
 // ---------------------------------------------------------------------------

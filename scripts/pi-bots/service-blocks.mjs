@@ -47,7 +47,9 @@ import { splitEntry } from "./skill-tools.mjs";
 import { crowServerCatalog } from "./crow-server-catalog.mjs";
 import { readCanonicalMcp } from "./mcp_writer.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
-import { SERVICES_TOKEN } from "../../servers/gateway/local-token.js";
+// Not local-token.js: it pulls in the dashboard settings registry, which bridge.mjs must never load
+// (tests/pibot-model-resolver-roles.test.js). servicesTokenPath() mirrors SERVICES_TOKEN.path() (a test pins it).
+import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { readToolCache } from "../../servers/gateway/services/tool-cache.js";
 import { serviceById } from "../../servers/shared/service-catalog.js";
 import { connectionBindingOk, isSensitiveConnection } from "../../servers/shared/service-sensitivity.js";
@@ -277,8 +279,11 @@ export function applyServiceBlocks(mcpConfig, result) {
   return { ...mcpConfig, mcpServers: servers };
 }
 
+/** <crowHome>/secrets/services-token, the same file local-token.js SERVICES_TOKEN rotates. */
+export function servicesTokenPath() { return join(resolveCrowHome(), "secrets", "services-token"); }
+
 function readServicesToken() {
-  try { return readFileSync(SERVICES_TOKEN.path(), "utf8").trim() || null; } catch { return null; }
+  try { return readFileSync(servicesTokenPath(), "utf8").trim() || null; } catch { return null; }
 }
 
 function openCrowDb() {
