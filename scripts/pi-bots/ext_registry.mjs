@@ -182,6 +182,7 @@ function capabilityIndex(bundlesDir = APP_BUNDLES) {
  */
 /** A bundle's manifest name: the repo copy, else the installed copy under <crowHome>/bundles; "" when neither has one. */
 function manifestName(bundlesDir, crowHome, id) {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(id)) || String(id).includes("..")) return "";
   for (const dir of [bundlesDir, join(crowHome, "bundles")]) {
     const m = readJsonSafe(join(dir, String(id), "manifest.json"), null);
     if (m && typeof m.name === "string" && m.name.trim()) return m.name.trim().slice(0, 80);

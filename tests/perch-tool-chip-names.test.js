@@ -175,3 +175,11 @@ test("the chip renderer has no markup sink at all", () => {
   assert.doesNotMatch(body, /innerHTML|outerHTML|insertAdjacentHTML/,
     "textContent only: the raw id is child-adjacent bytes");
 });
+
+test("a server or tool id that is an Object.prototype name reads as words, never as function source", () => {
+  const name = displayName("en");
+  for (const raw of ["mcp__constructor__x", "mcp__toString__y", "constructor"]) {
+    const out = name(raw);
+    assert.doesNotMatch(out, /function|native code|\{/, raw);
+  }
+});

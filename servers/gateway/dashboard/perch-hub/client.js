@@ -4060,7 +4060,7 @@ export function perchHubJs(lang = "en") {
   }
   function toolServerName(id){
     var known=TOOL_SERVERS[id];
-    if(known) return known;
+    if(typeof known==='string') return known;
     return toolWords(String(id).replace(/-/g,' ').replace(/_/g,' '));
   }
   /* "brave_web_search" under server "brave-search" reads "Web search": the
