@@ -318,7 +318,7 @@ export async function bindWorldSession(world, session) {
  *          sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
  *          narrowedTools, gatewayType, kitInstalled, houseStyle}>}
  */
-export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
+export async function buildBotWorld({ botId, threadId, gatewayType = null, log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
   const B = await loadBridge();
   const bot = B.loadBot(botId);
   // Active Crow instance home (CROW_HOME env -> ~/.crow-mpa on MPA, else

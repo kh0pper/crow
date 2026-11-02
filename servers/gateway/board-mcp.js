@@ -742,7 +742,11 @@ export function createBoardMcpServer(options = {}) {
   tool(server, "board_briefing_snapshot",
     "Compute a summary of current board state without storing it: card counts by status, due-within-7-days count, and awaiting-review results count.",
     {},
-    () => briefingSnapshotImpl(tdb));
+    (_args, extra) => {
+      // Instance-wide counts across every project: the operator's, like the briefings.
+      assertNotBot(resolveActor(extra), "read the instance's briefing snapshot");
+      return briefingSnapshotImpl(tdb);
+    });
 
   // Redesign P5: a card OFFER, never a card. Only a bot's own signed Perch thread can offer
   // (Task 5.1's actor.thread); the offer names the bot's own board project and waits in the chat
