@@ -13,6 +13,7 @@ import { serviceSecretKeys } from "../../../keychain/store.js";
 import { childState, childStderr } from "../../../services/children.js";
 import { serviceById } from "../../../../shared/service-catalog.js";
 import { connectionSensitivity, readConnectionBindings, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
+import { isLocalPasswordSessionOn } from "../../local-session.js";
 
 const CHILD_STATES = ["running", "stopped", "starting", "error", "cooling"];
 
@@ -102,15 +103,18 @@ function privateSwitch(c, lang, overrides, bindings) {
       <span class="int-note" data-int-private-note role="status">${escapeHtml(note)}</span>`;
 }
 
-/** One connection's Advanced row: names and status only, the child's state, Restart, the Private switch, its redacted stderr. */
-function connectionRow(c, keys, lang, overrides, bindings) {
+/** One connection's Advanced row: names and status only, the child's state, Restart, the Private switch, its redacted stderr (the owner only, `owner`). */
+function connectionRow(c, keys, lang, overrides, bindings, owner) {
   const status = t(`services.status.${c.status}`, lang);
   const state = childState(c.uuid);
   const name = serviceById(c.serviceId)?.name || c.serviceId;
   const labels = Object.fromEntries(CHILD_STATES.map((s) => [s, t(`services.child.${s}`, lang)]));
   labels.child_unavailable = fill(t("services.error.child_unavailable", lang), { service: name });
   labels.busy = t("services.error.busy", lang);
-  const lines = childStderr(c.uuid);
+  // A child's stderr can name the owner's accounts, hosts and addresses, so it is never rendered for
+  // a shared-project member, a paired instance's session or this box's own console: only the owner's
+  // own local password session from another machine reads it (local-session.js).
+  const lines = owner ? childStderr(c.uuid) : [];
   const stderr = lines.length
     ? `<details class="int-stderr"><summary>stderr (${lines.length})</summary><pre>${lines.map((l) => escapeHtml(l)).join("\n")}</pre></details>`
     : "";
@@ -120,8 +124,8 @@ function connectionRow(c, keys, lang, overrides, bindings) {
       <span class="int-note" data-int-restart-msg role="status"></span>${privateSwitch(c, lang, overrides, bindings)}${stderr}</li>`;
 }
 
-/** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). */
-async function movedHtml({ scope, db, lang }) {
+/** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). `owner` gates the child stderr. */
+async function movedHtml({ scope, db, lang, owner = false }) {
   let href = "/dashboard/projects";
   let label = t("settings.integrations.openProjects", lang);
   if (scope && scope.projectId != null && scope.slug && db) {
@@ -143,7 +147,7 @@ async function movedHtml({ scope, db, lang }) {
       const bindings = readConnectionBindings();
       for (const c of await listConnections(db, {})) {
         const keys = [...(await serviceSecretKeys(db, c.uuid))].sort();
-        conns += connectionRow(c, keys, lang, overrides, bindings);
+        conns += connectionRow(c, keys, lang, overrides, bindings, owner);
       }
     } catch (err) { console.warn("[settings] connections listing failed:", err.message); }
   }
@@ -170,7 +174,11 @@ export default {
 
   async render({ req, db, lang } = {}) {
     // With CROW_SERVICES_UI on, services live in each project; this page only points there.
-    if (servicesUiEnabled()) return movedHtml({ scope: req && req.crowScope, db, lang });
+    if (servicesUiEnabled()) {
+      // The owner's turn, checked once for the section: only a child's stderr needs it.
+      const owner = req && db ? await isLocalPasswordSessionOn(db, req) : false;
+      return movedHtml({ scope: req && req.crowScope, db, lang, owner });
+    }
     const proxyStatus = getProxyStatus();
     const allIntegrations = legacyIntegrationsView();
     const categories = { productivity: [], communication: [], development: [] };

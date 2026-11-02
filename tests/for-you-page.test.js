@@ -22,6 +22,7 @@ import Database from "better-sqlite3";
 import vm from "node:vm";
 import { parseHTML, DOMParser } from "linkedom";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { fromLaptop } from "./helpers/off-box.js";
 actAsServe();
 
 const dir = mkdtempSync(join(tmpdir(), "for-you-page-"));
@@ -282,10 +283,12 @@ test("a signed peer request (crossHostAuth) never reaches the page", async () =>
     const { createDbClient } = await import("../servers/db.js");
     const db = createDbClient();
     try {
-      assert.equal(await isLocalPasswordSessionOn(db, { dashboardSession: "owner-sess" }), true);
+      // The owner's own session is a local password login from ANOTHER machine: a bare object with no
+      // client address is this machine itself and never the owner's (servers/shared/self-origin.js).
+      assert.equal(await isLocalPasswordSessionOn(db, fromLaptop({ dashboardSession: "owner-sess" })), true);
       let status = 0;
       const res = { status(n) { status = n; return this; }, type() { return this; }, send() { return this; } };
-      const out = await panelMod.default.handler({ method: "GET", query: {}, dashboardSession: "owner-sess", crossHostAuth: { ok: true } }, res, { db, lang: "en", layout: () => "page" });
+      const out = await panelMod.default.handler(fromLaptop({ method: "GET", query: {}, dashboardSession: "owner-sess", crossHostAuth: { ok: true } }), res, { db, lang: "en", layout: () => "page" });
       assert.equal(out, null);
       assert.equal(status, 404);
     } finally { db.close(); }

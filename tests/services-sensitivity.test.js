@@ -13,7 +13,13 @@ import { rmScratch } from "./helpers/safe-rm.js";
 const HOME = mkdtempSync(join(tmpdir(), "crow-svcsens-home-"));
 const saved = process.env.CROW_HOME;
 process.env.CROW_HOME = HOME;
-after(() => { if (saved === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = saved; rmScratch(HOME); });
+// The temp dir is deleted from the constant captured above (never re-read from process.env, which
+// code under test can repoint), and that line is kept apart from the env restore.
+after(() => {
+  rmScratch(HOME);
+  if (saved === undefined) delete process.env.CROW_HOME;
+  else process.env.CROW_HOME = saved;
+});
 
 const SENS = await import("../servers/shared/service-sensitivity.js");
 const { serviceCatalog } = await import("../servers/shared/service-catalog.js");

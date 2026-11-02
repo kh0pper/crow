@@ -57,38 +57,63 @@ test("panel identity: id / route / hidden", () => {
 });
 
 test("renders every step with the stepper and step-specific deep links", async () => {
-  // Keyed by stem (not index) so a future step insertion doesn't re-break this.
-  const deepLinkPerStem = {
-    welcome: null,
-    // button() renders hrefs through escapeHtml, so & appears as &amp; in HTML.
-    ai: "/dashboard/settings?section=models",
-    integrations: "/dashboard/settings?section=integrations",
-    bot: "/dashboard/bot-builder",
-    starter: "/dashboard/extensions#collections",
-    connect: "/dashboard/connect",
-    meet: null,
-    done: null,
-  };
-  // integrations, connect, done each render a callout unconditionally.
-  // (The ai and meet steps' callouts are db-dependent; tests/onboarding-steps.test.js
-  // and tests/onboarding-meet.test.js cover those.)
-  const calloutStems = ["integrations", "connect", "done"];
-  for (let step = 0; step < STEP_KEYS.length; step++) {
-    const stem = STEP_KEYS[step];
-    const html = await render({ step: String(step) });
-    assert.ok(html.includes("stepper"), `step ${stem} renders the stepper`);
-    assert.ok(html.includes("step-active"), `step ${stem} marks the active step`);
-    if (deepLinkPerStem[stem]) {
-      assert.ok(html.includes(deepLinkPerStem[stem]), `step ${stem} links to ${deepLinkPerStem[stem]}`);
-      assert.ok(html.includes('target="_blank"'), `step ${stem} deep-link opens in a new tab`);
-      assert.ok(html.includes('rel="noopener"'), `step ${stem} deep-link sets rel=noopener`);
+  // Written before the Services UI (project services PR 3) moved the Integrations settings section to
+  // each project's Services page: the deep links below are the FLAG-OFF ones, asserted with the flag
+  // explicitly off. The flag-on integrations link has its own test below.
+  const before = process.env.CROW_SERVICES_UI;
+  process.env.CROW_SERVICES_UI = "0";
+  try {
+    // Keyed by stem (not index) so a future step insertion doesn't re-break this.
+    const deepLinkPerStem = {
+      welcome: null,
+      // button() renders hrefs through escapeHtml, so & appears as &amp; in HTML.
+      ai: "/dashboard/settings?section=models",
+      integrations: "/dashboard/settings?section=integrations",
+      bot: "/dashboard/bot-builder",
+      starter: "/dashboard/extensions#collections",
+      connect: "/dashboard/connect",
+      meet: null,
+      done: null,
+    };
+    // integrations, connect, done each render a callout unconditionally.
+    // (The ai and meet steps' callouts are db-dependent; tests/onboarding-steps.test.js
+    // and tests/onboarding-meet.test.js cover those.)
+    const calloutStems = ["integrations", "connect", "done"];
+    for (let step = 0; step < STEP_KEYS.length; step++) {
+      const stem = STEP_KEYS[step];
+      const html = await render({ step: String(step) });
+      assert.ok(html.includes("stepper"), `step ${stem} renders the stepper`);
+      assert.ok(html.includes("step-active"), `step ${stem} marks the active step`);
+      if (deepLinkPerStem[stem]) {
+        assert.ok(html.includes(deepLinkPerStem[stem]), `step ${stem} links to ${deepLinkPerStem[stem]}`);
+        assert.ok(html.includes('target="_blank"'), `step ${stem} deep-link opens in a new tab`);
+        assert.ok(html.includes('rel="noopener"'), `step ${stem} deep-link sets rel=noopener`);
+      }
+      if (calloutStems.includes(stem)) {
+        assert.ok(html.includes("callout"), `step ${stem} renders a callout`);
+      }
     }
-    if (calloutStems.includes(stem)) {
-      assert.ok(html.includes("callout"), `step ${stem} renders a callout`);
-    }
+    const done = await render({ step: DONE_STEP });
+    assert.ok(done.includes('href="/dashboard"'), "last step links to the dashboard");
+  } finally {
+    if (before === undefined) delete process.env.CROW_SERVICES_UI;
+    else process.env.CROW_SERVICES_UI = before;
   }
-  const done = await render({ step: DONE_STEP });
-  assert.ok(done.includes('href="/dashboard"'), "last step links to the dashboard");
+});
+
+// The Services UI is on by default (project services decision 5): the integrations step then routes
+// to the Services entry point, never to the retired settings section.
+test("with the Services UI on, the integrations step links to Services", async () => {
+  const before = process.env.CROW_SERVICES_UI;
+  delete process.env.CROW_SERVICES_UI;
+  try {
+    const html = await render({ step: String(STEP_KEYS.indexOf("integrations")) });
+    assert.ok(html.includes('href="/dashboard/projects"'), "the Services entry point");
+    assert.ok(!html.includes("section=integrations"), "not the retired settings section");
+  } finally {
+    if (before === undefined) delete process.env.CROW_SERVICES_UI;
+    else process.env.CROW_SERVICES_UI = before;
+  }
 });
 
 test("clamps out-of-range / non-numeric step to a valid page without throwing", async () => {
