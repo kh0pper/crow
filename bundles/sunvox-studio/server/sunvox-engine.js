@@ -483,6 +483,7 @@ export function compose(spec, { name = "crow-compose" } = {}) {
 
       // --- modules ---
       const ids = new Map(); // spec id -> module number
+      const pending = []; // params set, to confirm once the engine has applied them
       const seenTypes = new Set();
       for (const m of spec.modules) {
         if (!m || typeof m.id !== "string" || !m.id) throw new Error("every module needs a string id");
@@ -505,6 +506,21 @@ export function compose(spec, { name = "crow-compose" } = {}) {
           if (v < lo || v > hi) throw new Error(`param "${pname}" on "${m.id}" must be from ${lo} to ${hi} (see sunvox_module_types), got ${JSON.stringify(pval)}`);
           const rc = a.sv_set_module_ctl_value(SLOT, mod, c, v, 0);
           if (rc < 0) throw new Error(`set param "${pname}" on "${m.id}" failed (rc=${rc})`);
+          pending.push({ id: m.id, pname, mod, c, v });
+        }
+      }
+      // sv_set_module_ctl_value only QUEUES an event; the engine applies it while it processes
+      // audio. The project is saved (and re-loaded for render) before any processing happens,
+      // so every module kept its defaults (Volume 0 and Volume 200 rendered the same). Process a
+      // few short silent chunks so the events land, then read each value back.
+      if (pending.length) {
+        const buf = Buffer.alloc(CHUNK_FRAMES * 2 * 2);
+        for (let i = 0; i < 4 && pending.some((p) => a.sv_get_module_ctl_value(SLOT, p.mod, p.c, 0) !== p.v); i++) {
+          a.sv_audio_callback(buf, CHUNK_FRAMES, 0, a.sv_get_ticks());
+        }
+        for (const p of pending) {
+          const got = a.sv_get_module_ctl_value(SLOT, p.mod, p.c, 0);
+          if (got !== p.v) throw new Error(`param "${p.pname}" on "${p.id}" did not take effect (asked ${p.v}, engine has ${got})`);
         }
       }
 

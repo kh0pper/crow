@@ -602,3 +602,23 @@ test("sunvox tools: a render that used up most of the 60 s tool call skips the F
     assert.deepEqual([calls.length, tokens.length], [0, 0]);
   } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
 });
+
+test("sunvox: module params take effect (Volume 0 is silent, louder volumes render louder)", { skip: !engine && SKIP_REASON }, async () => {
+  // sv_set_module_ctl_value only queues an event; compose used to save before the engine
+  // applied it, so every module kept its defaults and Volume 0 / 200 rendered identically.
+  const peakFor = async (vol) => {
+    const composed = await engine.compose({
+      bpm: 120, tpl: 6,
+      modules: [{ id: "g", type: "Analog generator", params: { Volume: vol } }],
+      connections: [["g", "out"]],
+      patterns: [{ name: "p", tracks: 3, lines: 16, x: 0, y: 0, events: [{ track: 0, line: 0, note: "C4", velocity: 128, module: "g" }] }],
+    }, { name: "params-test" });
+    const { wav } = await engine.render(composed.project);
+    let peak = 0;
+    for (let i = 44; i < wav.length - 1; i += 2) peak = Math.max(peak, Math.abs(wav.readInt16LE(i)));
+    return peak;
+  };
+  const [p0, p100, p200] = [await peakFor(0), await peakFor(100), await peakFor(200)];
+  assert.equal(p0, 0, "Volume 0 renders silence");
+  assert.ok(p100 > 0 && p200 > p100 * 1.5, `louder Volume renders louder (100 → ${p100}, 200 → ${p200})`);
+});
