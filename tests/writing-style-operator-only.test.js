@@ -271,10 +271,11 @@ test("a relay one-shot's executor marks its calls as a peer's; an ordinary execu
   assert.match(execSrc, /opts\.peerActor === true \? \{ _meta: \{ "crow\/actor": \{ kind: "peer" \} \} \}/);
 });
 
-test("a bot config can't reach the memory mount or the root /mcp mount over HTTP", async () => {
+test("a bot config can't reach the memory mount over HTTP; a third-party /mcp server is left alone", async () => {
   const { isOwnerProjectUrl } = await import("../scripts/pi-bots/mcp_writer.mjs");
-  for (const u of ["http://127.0.0.1:3001/memory/mcp", "http://127.0.0.1:3001/mcp", "http://127.0.0.1:3001/router/mcp", "http://127.0.0.1:3001/projects/mcp"]) {
+  for (const u of ["http://127.0.0.1:3001/memory/mcp", "http://127.0.0.1:3001/router/mcp", "http://127.0.0.1:3001/projects/mcp"]) {
     assert.equal(isOwnerProjectUrl(u), true, u);
   }
   assert.equal(isOwnerProjectUrl("http://127.0.0.1:3001/board/mcp"), false);
+  assert.equal(isOwnerProjectUrl("https://mcp.example.com/mcp"), false);
 });
