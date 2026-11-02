@@ -1202,3 +1202,21 @@ test("listedTools (review I2): null for a sensitive connection (notion by defaul
   SENS.setSensitivityOverride(gh, false, { crowHome: HOME });
   assert.ok(await withDb((d) => C.listedTools(d, gh.uuid, { crowHome: HOME })));
 });
+
+test("offerableProjectConnections: active rows plus retryable child_unavailable rows, in connectionsFor order; other errors, disconnected and another owner's rows are left out", async () => {
+  const pid = await project();
+  const a = await github("test-token-71", { projectId: pid, label: "a" });
+  const b = await github("test-token-72", { projectId: pid, label: "b" });
+  const c = await github("test-token-73", { projectId: pid, label: "c" });
+  const d = await github("test-token-74", { projectId: pid, label: "d" });
+  const e = await github("test-token-75", { projectId: pid, label: "e" });
+  await withDb(async (db) => {
+    await db.execute({ sql: "UPDATE service_connections SET status = 'error', last_error = 'child_unavailable' WHERE uuid = ?", args: [b.uuid] });
+    await db.execute({ sql: "UPDATE service_connections SET status = 'error', last_error = 'not_a_vault' WHERE uuid = ?", args: [c.uuid] });
+    await db.execute({ sql: "UPDATE service_connections SET owner_contact_id = 1 WHERE uuid = ?", args: [e.uuid] });
+  });
+  await withDb((db) => SC.disconnectConnection(db, d.uuid));
+  const got = await withDb((db) => C.offerableProjectConnections(db, pid));
+  assert.deepEqual(got.map((x) => x.uuid), [a.uuid, b.uuid]);
+  assert.deepEqual(await withDb((db) => C.offerableProjectConnections(db, null)), []);
+});

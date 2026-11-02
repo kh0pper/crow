@@ -669,7 +669,7 @@ test("steer and answer are the owner's alone while the child holds service block
     for (const who of ["sso", "onhost", "samebox"]) {
       let res = await perchPost(`/interactive/${r.sessionId}/steer`, { message: "this way" }, who);
       assert.equal(res.status, 403, who + " steer: " + JSON.stringify(res.body));
-      assert.equal(res.body.error, "Only the owner can steer this chat while it uses connected services.", who);
+      assert.equal(res.body.error, "Only the owner can do that in this chat while it uses connected services.", who);
       assert.deepEqual(pi.sent, [], who + ": nothing reached pi.send");
       res = await perchPost(`/interactive/${r.sessionId}/answer`, { requestId: "q1", value: "yes" }, who);
       assert.equal(res.status, 403, who + " answer: " + JSON.stringify(res.body));
@@ -686,6 +686,29 @@ test("steer and answer are the owner's alone while the child holds service block
   } finally {
     recEngine.steer = saved.steer;
     recEngine.answer = saved.answer;
+  }
+  await engine.stop(r.sessionId);
+});
+
+test("model, permission mode and cwd are the owner's alone on an owner session that holds service blocks", async () => {
+  addConnection();
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  assert.ok(state.instances[0].blockNames().length >= 1, "the child holds the project's blocks");
+  const saved = recEngine.control;
+  recEngine.control = (...a) => engine.control(...a);
+  try {
+    for (const who of ["sso", "onhost", "samebox"]) {
+      for (const body of [{ permission_mode: "bypass" }, { cwd: "/tmp" }, { model: null }]) {
+        const res = await perchPost(`/interactive/${r.sessionId}/control`, body, who);
+        assert.equal(res.status, 403, who + " " + JSON.stringify(body) + ": " + JSON.stringify(res.body));
+      }
+    }
+    // The owner from the laptop still changes the mode.
+    { const o = await perchPost(`/interactive/${r.sessionId}/control`, { permission_mode: "ask" }, "local"); assert.equal(o.status, 200, JSON.stringify(o.body)); }
+  } finally {
+    recEngine.control = saved;
   }
   await engine.stop(r.sessionId);
 });

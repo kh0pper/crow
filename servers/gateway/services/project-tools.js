@@ -25,12 +25,12 @@
  */
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { blockNameFor } from "../../shared/service-catalog.js";
-import { listConnections, servableConnection } from "../../shared/service-connections.js";
+import { servableConnection } from "../../shared/service-connections.js";
 import { connectionBindingOk, isSensitiveConnection } from "../../shared/service-sensitivity.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { loopbackErrorText } from "../loopback-tool-mount.js";
 import {
-  ChildError, childSecretValues, ensureChild, listableConnection, listedTools, shapeServiceResult,
+  ChildError, childSecretValues, ensureChild, listableConnection, listedTools, offerableProjectConnections, shapeServiceResult,
 } from "./children.js";
 
 /** The longest tool name a model accepts (I10, the same cap Task 18 applies to its blocks). */
@@ -65,10 +65,9 @@ export async function listProjectServiceTools(db, { projectId = null, crowHome =
   // The same rows the mount offers (fix round 1): active, plus an 'error' row ensureChild still
   // retries on its own (listableConnection, last_error child_unavailable). Leaving such a row out
   // of the chat's listing meant nothing called ensureChild and its cooldown retry never ran.
-  // listConnections carries the active rows and the error ones in connectionsFor's own order
+  // offerableProjectConnections carries the active rows and the error ones in connectionsFor's order
   // (service_id, label_slug, id), so "first wins" is unchanged.
-  const connections = (await listConnections(db, { projectId, ownerContactId: null }))
-    .filter((c) => c.status === "active" || listableConnection(c));
+  const connections = await offerableProjectConnections(db, projectId);
   for (const conn of connections) {
     if (onlyUuids && !onlyUuids.has(conn.uuid)) continue;
     // Same two gates as children.js listedTools, checked before it so a refused connection costs

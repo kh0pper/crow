@@ -54,7 +54,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { serviceById, renderDerivedEnv } from "../../shared/service-catalog.js";
-import { recordChildFailure, recordChildRecovered, servableConnection } from "../../shared/service-connections.js";
+import { listConnections, recordChildFailure, recordChildRecovered, servableConnection } from "../../shared/service-connections.js";
 import { connectionBindingOk, isSensitiveConnection, verifyConnectionFingerprints } from "../../shared/service-sensitivity.js";
 import { redactAcross, redactSecrets, redactThenTruncate, MIN_SECRET_LENGTH } from "../../shared/redact-secrets.js";
 import { resolveAddonCommand, checkLauncherArgs } from "../../shared/resolve-command.js";
@@ -795,6 +795,18 @@ export function childSecretValues(uuid) {
 export function listableConnection(conn) {
   if (!conn || typeof conn !== "object") return false;
   return conn.status === "active" || (conn.status === "error" && conn.lastError === "child_unavailable");
+}
+
+/**
+ * A project's owner connections a bot or chat may be offered: active rows plus an 'error' row
+ * ensureChild still retries on its own (listableConnection), in connectionsFor's order
+ * (service_id, label_slug, id). The pi blocks (service-blocks.mjs, its own SQL on bot hosts), the
+ * mount, the chat listing, the Perch envelope and the Perch fingerprint all offer this same set.
+ */
+export async function offerableProjectConnections(db, projectId) {
+  if (projectId == null) return [];
+  return (await listConnections(db, { projectId: Number(projectId), ownerContactId: null }))
+    .filter((c) => c.status === "active" || listableConnection(c));
 }
 
 /**

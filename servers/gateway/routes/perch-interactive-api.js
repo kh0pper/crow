@@ -207,7 +207,7 @@ const ERROR_MAP = {
   // Project services (fix round 1): a turn from anyone but the owner may not steer or answer a
   // chat whose child holds the owner's service blocks (plan decision 1). 403 — the caller is
   // signed in, but this is not their turn.
-  not_owner_turn: [403, "Only the owner can steer this chat while it uses connected services."],
+  not_owner_turn: [403, "Only the owner can do that in this chat while it uses connected services."],
 };
 
 function mapEngineError(res, err) {
@@ -1274,12 +1274,19 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // an awake child so the next message wakes in the new dir. Keyed on
     // presence, like plan_mode, so a body without cwd leaves it untouched.
     if (Object.prototype.hasOwnProperty.call(body, "cwd")) opts.cwd = body.cwd;
+    let pdb = null;
     try {
+      // Project services: model, permission mode and cwd are owner-only on an owner session.
+      let principal = "other";
+      try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
+      opts.principal = principal;
       const eng = resolveEngine();
       const result = await eng.control(sid, opts);
       res.json(result);
     } catch (err) {
       mapEngineError(res, err);
+    } finally {
+      if (pdb) { try { pdb.close(); } catch { /* already closed */ } }
     }
   });
 

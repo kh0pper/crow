@@ -151,8 +151,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
-import { listConnections } from "../shared/service-connections.js";
-import { listableConnection } from "./services/children.js";
+import { offerableProjectConnections } from "./services/children.js";
 import { scopeRefFor } from "../../scripts/pi-bots/actor-sig.mjs";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
 import { applyBriefing, briefingEnabled, briefingPromptFile, removeBriefingPromptFile, sessionBriefing, recordBriefing, reconcileBriefing, pruneBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
@@ -2516,8 +2515,7 @@ export function createInteractiveEngine({
     if (projectId == null) return "";
     const db = createDbClient();
     try {
-      let list = (await listConnections(db, { projectId: Number(projectId), ownerContactId: null }))
-        .filter((c) => c.status === "active" || listableConnection(c));
+      let list = await offerableProjectConnections(db, projectId);
       if (S && typeof S.offerableConnections === "function" && def) list = S.offerableConnections(def, list, { crowHome });
       return list.map((c) => String(c.uuid)).sort().join(",");
     } finally { try { db.close(); } catch { /* closed */ } }
@@ -4188,6 +4186,12 @@ export function createInteractiveEngine({
     // (undefined = "not in this request"), so a caller can send cwd without
     // disturbing the other controls.
     const hasCwd = opts.cwd !== undefined;
+
+    // Project services: the model, permission mode and working folder decide what an owner
+    // turn's service tools run under, so only the owner changes them on an owner session or a
+    // child that holds service blocks (the route passes the request's principal).
+    if ((hasModel || hasPermissionMode || hasCwd) && opts.principal !== "owner"
+      && (s.servicesPrincipal === "owner" || childHoldsServices(s))) throw engineError("not_owner_turn");
 
     // Model/thinking/planMode switches share the one child clock a turn
     // already owns (commandSince/promptAckOnly ride the SAME correlated

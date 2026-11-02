@@ -72,7 +72,7 @@ import { stripOfferNotes } from "../board/offer-service.js";
 import { stripContextEcho } from "../voice/context-echo.js";
 import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 import { maskDeep } from "../../shared/secret-mask.js";
-import { connectionsFor } from "../../shared/service-connections.js";
+import { offerableProjectConnections } from "../services/children.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { activeProjects, parseScope, projectOfItems } from "../../shared/shell-items.js";
 
@@ -232,7 +232,7 @@ async function envelopeServiceBlocks(db, def, projectId) {
   try {
     const sb = await import("../../../scripts/pi-bots/service-blocks.mjs");
     const crowHome = resolveCrowHome();
-    const offer = sb.offerableConnections(def, await connectionsFor(db, { projectId: Number(projectId) }), { crowHome });
+    const offer = sb.offerableConnections(def, await offerableProjectConnections(db, projectId), { crowHome });
     if (!offer.length) return { byService: null, skippedTools: [] };
     const r = sb.serviceBlockNames({ def, connections: offer, existingNames: sb.reservedBlockNames(crowHome),
       toolsFor: (sid) => sb.cachedServiceTools(sid, { crowHome }) });

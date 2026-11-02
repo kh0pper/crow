@@ -856,13 +856,14 @@ test("POST /interactive/:sid/control maps model {provider,id}->modelId, thinking
       thinking: "high",
       permissionMode: "guarded",
       planMode: true,
+      principal: "other",   // the route stamps the request's principal (no local password session here)
     },
   }]);
 });
 
 test("POST /interactive/:sid/control forwards plan_mode:false — a present falsy value, not an omitted field", async () => {
   await postJson("/interactive/sess-1/control", { plan_mode: false });
-  assert.deepEqual(engineCalls.control[0].opts, { planMode: false });
+  assert.deepEqual(engineCalls.control[0].opts, { planMode: false, principal: "other" });
 });
 
 test("POST /interactive/:sid/control forwards model:null as a revocation — present-but-null, not an omitted field", async () => {
@@ -873,12 +874,12 @@ test("POST /interactive/:sid/control forwards model:null as a revocation — pre
   // own comment documents.
   const { status } = await postJson("/interactive/sess-1/control", { model: null });
   assert.equal(status, 200);
-  assert.deepEqual(engineCalls.control[0].opts, { model: null });
+  assert.deepEqual(engineCalls.control[0].opts, { model: null, principal: "other" });
 });
 
 test("POST /interactive/:sid/control sends an empty opts object when the body carries no recognized fields", async () => {
   await postJson("/interactive/sess-1/control", {});
-  assert.deepEqual(engineCalls.control[0].opts, {});
+  assert.deepEqual(engineCalls.control[0].opts, { principal: "other" });
 });
 
 test("POST /interactive/:sid/control maps bad_request, turn_in_progress, session_stopped, no_such_session, and not_awake", async () => {
@@ -2088,7 +2089,7 @@ test("POST /interactive/:sid/control forwards an explicit cwd to the engine", as
   mkdirSync(chosen, { recursive: true });
   const { status } = await postJson("/interactive/sess-1/control", { cwd: chosen });
   assert.equal(status, 200);
-  assert.deepEqual(engineCalls.control[0], { sid: "sess-1", opts: { cwd: chosen } });
+  assert.deepEqual(engineCalls.control[0], { sid: "sess-1", opts: { cwd: chosen, principal: "other" } });
 });
 
 test("POST /interactive/:sid/control without cwd does not add the key (presence-keyed)", async () => {
