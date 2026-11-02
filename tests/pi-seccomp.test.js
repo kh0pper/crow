@@ -116,10 +116,13 @@ test("integration: under the filter the denied syscalls fail with EPERM and ordi
     assert.equal(o.getpid, "ok");
     // ordinary programs, with a fresh fd per sandbox
     const fd2 = openSync((() => { const g = join(dir, "f2"); writeFileSync(g, buildSeccompProgram(process.arch)); return g; })(), "r");
-    const prog = 'const {execFileSync}=require("child_process");const os=require("os");' +
-      'const fs=require("fs");fs.writeFileSync(os.tmpdir()+"/x","1");' +
+    // A file of this test's own (the sandbox sees the host's /: a shared name like /tmp/x
+    // could already be someone's directory).
+    const probe = JSON.stringify(join(dir, "probe.txt"));
+    const prog = 'const {execFileSync}=require("child_process");' +
+      'const fs=require("fs");fs.writeFileSync(' + probe + ',"1");' +
       'console.log(JSON.stringify({sh:execFileSync("sh",["-c","echo hi"]).toString().trim(),' +
-      'threads:require("worker_threads")?1:0, read:fs.readFileSync(os.tmpdir()+"/x","utf8")}))';
+      'threads:require("worker_threads")?1:0, read:fs.readFileSync(' + probe + ',"utf8")}))';
     const r2 = spawnSync(bwrap, [...base.slice(0, -2), "--seccomp", "3", "--", process.execPath, "-e", prog],
       { stdio: ["ignore", "pipe", "pipe", fd2], encoding: "utf8", timeout: 30000 });
     assert.equal(r2.status, 0, r2.stderr);
