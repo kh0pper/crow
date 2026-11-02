@@ -20,6 +20,29 @@ import { getPanel as registryGetPanel } from "../panel-registry.js";
 import { needsYouLabel } from "../panels/board/needs-you-label.js";
 import { forYouEnabled } from "../../for-you/flag.js";
 
+/**
+ * For You's entry points are the OWNER's alone: the page 404s for every other session (an SSO
+ * session, a plain-scope one), so a link to it from the drawer or the mascot sheet would only
+ * offer a dead end. dashboard/index.js computes isLocalPasswordSessionOn once per request (and
+ * only while the flag is on) and renders the page inside withForYouOwner: the render is a
+ * synchronous string build, so the flag can never leak into another request's page.
+ *
+ * shellDrawer / shellTabsNav / shellAvatarSheet also take it as an explicit `forYouOwner` option
+ * (default false: never the owner) for a caller that has the flag in hand.
+ */
+let renderForYouOwner = false;
+
+export function withForYouOwner(value, render) {
+  const prev = renderForYouOwner;
+  renderForYouOwner = value === true;
+  try { return render(); } finally { renderForYouOwner = prev; }
+}
+
+/** The owner flag for this render: an explicit boolean wins, else the request's render context. */
+function ownerFor(explicit) {
+  return typeof explicit === "boolean" ? explicit : renderForYouOwner;
+}
+
 // Inline 24px stroke icons, decorative (the label carries the meaning).
 const ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
 const TAB_ICONS = {
@@ -37,8 +60,9 @@ const CHEVRON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
  * never links to a 404.
  */
 const MORE_ENTRIES = [
-  // For You v1: only while CROW_FOR_YOU=1 (the page 404s otherwise).
-  { id: "for-you", fallback: "For You", when: forYouEnabled },
+  // For You v1: only while CROW_FOR_YOU=1 AND this is the owner's own local password session
+  // (the page 404s for every other session). `when` gets this render's { forYouOwner }.
+  { id: "for-you", fallback: "For You", when: (opts = {}) => forYouEnabled() && ownerFor(opts.forYouOwner) },
   { id: "messages", fallback: "Messages" },
   { id: "bot-builder", fallback: "Bots" },
   { id: "schedule", fallback: "Schedules" },
@@ -168,10 +192,11 @@ function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" 
 }
 
 /** The "More of Crow" row: a details whose summary names the first four entries. */
-function moreDetails({ lang, getPanel }) {
+function moreDetails({ lang, getPanel, forYouOwner }) {
+  const owner = ownerFor(forYouOwner);
   // Labels follow the classic sidebar's rule: the nav.<id> translation, else
   // the panel's own manifest name, else a plain fallback.
-  const entries = MORE_ENTRIES.map((e) => ({ e, panel: getPanel(e.id) })).filter((x) => x.panel && (!x.e.when || x.e.when()))
+  const entries = MORE_ENTRIES.map((e) => ({ e, panel: getPanel(e.id) })).filter((x) => x.panel && (!x.e.when || x.e.when({ forYouOwner: owner })))
     .map(({ e, panel }) => ({ e, text: label(e.key, panel.name || e.fallback, lang) }));
   if (!entries.length) return "";
   const sub = entries.slice(0, 4).map((x) => x.text).join(", ") + "…";
@@ -185,7 +210,7 @@ function archivedLink(lang) {
 }
 
 /** The Chat / Board / Make nav, rendered right after </main>. */
-export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, getPanel = registryGetPanel }) {
+export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, forYouOwner, getPanel = registryGetPanel }) {
   const sp = scopedProject(scope, projects);
   // "Board · N" counts the scoped project's cards needing you, so it matches
   // the Board; "Chat · N" its chats waiting on you (the counts Map's `.parts`).
@@ -206,7 +231,7 @@ export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, get
       <div class="shell-rail-projects">
         <h3 class="shell-heading">${escapeHtml(t("shell.projects", lang))}</h3>
         ${projectForm({ scope, projects, lang, counts, homeSlug, extraClass: " shell-projects--rail" })}
-        ${moreDetails({ lang, getPanel })}
+        ${moreDetails({ lang, getPanel, forYouOwner })}
         ${archivedLink(lang)}
       </div>
     </nav>`;
@@ -266,14 +291,14 @@ function appsSection({ apps, lang }) {
 }
 
 /** The drawer: projects, the Apps launcher (new mode), then the "More of Crow" grid. */
-export function shellDrawer({ scope, projects, lang, counts, homeSlug, apps, getPanel = registryGetPanel }) {
+export function shellDrawer({ scope, projects, lang, counts, homeSlug, apps, forYouOwner, getPanel = registryGetPanel }) {
   return `<dialog id="shell-drawer" class="shell-sheet shell-drawer" aria-labelledby="shell-drawer-title">
     <div class="shell-sheet-inner">
       ${closeButton(lang)}
       <h3 class="shell-heading" id="shell-drawer-title">${escapeHtml(t("shell.projects", lang))}</h3>
       ${projectForm({ scope, projects, lang, counts, homeSlug })}
       ${appsSection({ apps, lang })}
-      ${moreDetails({ lang, getPanel })}
+      ${moreDetails({ lang, getPanel, forYouOwner })}
       ${archivedLink(lang)}
     </div>
   </dialog>`;
@@ -281,12 +306,13 @@ export function shellDrawer({ scope, projects, lang, counts, homeSlug, apps, get
 
 /**
  * The account sheet: Settings, Models, What Crow can reach, and the classic
- * switch (and For You first, while CROW_FOR_YOU=1). With `tray` (the header bird's or bell's notifications tray,
+ * switch (and For You first, while CROW_FOR_YOU=1 and the request is the owner's own local
+ * password session). With `tray` (the header bird's or bell's notifications tray,
  * notifications.js, trusted server markup) it is the ONE "Notifications and
  * settings" sheet the mascot opens (phone review 2026-10-29): the tray first,
  * then the settings links, and no separate avatar button exists.
  */
-export function shellAvatarSheet({ lang, tray, getPanel = registryGetPanel }) {
+export function shellAvatarSheet({ lang, tray, forYouOwner, getPanel = registryGetPanel }) {
   const settings = label("nav.settings", "Settings", lang);
   const merged = typeof tray === "string" && tray !== "";
   const name = escapeHtml(t(merged ? "shell.notifSettings" : "shell.account", lang));
@@ -297,7 +323,7 @@ export function shellAvatarSheet({ lang, tray, getPanel = registryGetPanel }) {
       <h3 class="shell-heading shell-crow-heading">${escapeHtml(t("notif.notifications", lang))}</h3>
       <div class="shell-crow-tray">${tray}</div>
       <hr class="shell-crow-sep">` : ""}
-      ${forYouEnabled() && getPanel("for-you") ? `<a href="/dashboard/for-you" class="shell-sheet-link" data-for-you-entry>${escapeHtml(label("nav.for-you", "For You", lang))}</a>` : ""}
+      ${forYouEnabled() && ownerFor(forYouOwner) && getPanel("for-you") ? `<a href="/dashboard/for-you" class="shell-sheet-link" data-for-you-entry>${escapeHtml(label("nav.for-you", "For You", lang))}</a>` : ""}
       <a href="/dashboard/settings" class="shell-sheet-link">${escapeHtml(settings)}</a>
       <a href="/dashboard/settings?section=models" class="shell-sheet-link">${escapeHtml(t("settings.section.models", lang))}</a>
       <a href="/dashboard/settings?section=integrations" class="shell-sheet-link">${escapeHtml(t("shell.reach", lang))}</a>

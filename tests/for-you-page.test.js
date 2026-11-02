@@ -3,12 +3,15 @@
  * csrfMiddleware, the panel dispatch, the shell) over a scratch CROW_DATA_DIR and CROW_HOME:
  *   - CROW_FOR_YOU off: /dashboard/for-you is a 404 for everyone, and no entry point renders;
  *   - on: only the owner's own local password session gets the page; a session without the
- *     password scope or one a paired instance's sign-in minted (SSO) gets 404, GET and POST alike;
+ *     password scope, one a paired instance's sign-in minted (SSO), or a peer-signed
+ *     (crossHostAuth) request gets 404, GET and POST alike;
  *   - the customize save needs the CSRF token, writes LOCAL scope only (never the synced table),
- *     geocodes a changed city once, and a city it can't find is saved with no place (no chip);
+ *     geocodes a changed city once (the normalized string it stores, whatever was typed), and a
+ *     city it can't find is saved with no place (no chip);
  *   - no city: no weather chip, and the quiet "Add your city" link; with one, the chip and the
  *     Open-Meteo attribution;
- *   - the drawer and the mascot sheet carry the For You link only while the flag is on;
+ *   - the drawer, the mascot sheet and the drag reveal's target carry the For You link only while
+ *     the flag is on AND the request is the owner's own session;
  *   - Listen is on by default, sits between Your morning and Your news, and has its own switch.
  * The geocoder and the weather fetch are test seams: nothing here reaches the network.
  */
@@ -65,7 +68,13 @@ before(async () => {
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
   const { default: express } = await import("express");
   const app = express();
-  app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
+  // `x-test-crosshost: 1` stands in for the gateway's cross-host verifier, which marks a request
+  // carrying a peer's signature with req.crossHostAuth before the dashboard router.
+  app.use((req, res, next) => {
+    res.redirectAfterPost = (url) => res.redirect(303, url);
+    if (req.headers["x-test-crosshost"] === "1") req.crossHostAuth = { ok: true };
+    next();
+  });
   app.use(express.json({ limit: "1mb" }));
   app.use(dashboardRouter((req, res, next) => next()));
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
@@ -163,6 +172,22 @@ test("flag on: the drawer's More of Crow and the mascot sheet link For You", asy
   });
 });
 
+test("flag on: the For You entry points belong to the owner's own session alone", async () => {
+  await withFlag(async () => {
+    // The owner's local password session: the drawer's card, the rail's and the mascot sheet's link.
+    const owner = await get("/dashboard/project/garden");
+    assert.equal(owner.status, 200);
+    assert.match(owner.body, /<a [^>]*data-for-you-entry/, "the owner's chrome carries it");
+    // Every other session gets a page like any other, with no link to a page that 404s for it.
+    for (const sess of ["plain-sess", "sso-sess"]) {
+      const r = await get("/dashboard/project/garden", sess);
+      assert.equal(r.status, 200, sess);
+      assert.doesNotMatch(r.body, /<a [^>]*data-for-you-entry/, sess);
+      assert.doesNotMatch(r.body, /href="\/dashboard\/for-you"/, sess);
+    }
+  });
+});
+
 test("no city: no weather chip and a quiet link to add one; Media Hub missing: the install offer", async () => {
   await withFlag(async () => {
     const r = await get("/dashboard/for-you");
@@ -205,6 +230,26 @@ test("customize save: CSRF required; local scope only; a changed city is geocode
     assert.match(cz.body, /<input type="checkbox" name="section_weather" value="1" checked>/);
     assert.match(cz.body, /<input type="checkbox" name="section_news" value="1">/);
     assert.match(cz.body, /role="status">Saved\.</);
+  });
+});
+
+test("a city with a control character is geocoded once, as the normalized string it is stored as", async () => {
+  await withFlag(async () => {
+    // text() in for-you/settings.js strips control characters and collapses whitespace; the
+    // geocoder and the "unchanged city" comparison must both see that same string, or every save
+    // would geocode again.
+    const typed = "Example\u0001ton";
+    const r = await save({ city: typed, section_weather: "1" });
+    assert.equal(r.location, "/dashboard/for-you?view=customize&flash=saved");
+    assert.deepEqual(geocoded, ["Example ton"], "the geocoder got the normalized city");
+    assert.equal(JSON.parse(stored().local).city, "Example ton");
+
+    const again = await save({ city: typed, section_weather: "1" });
+    assert.equal(again.location, "/dashboard/for-you?view=customize&flash=saved");
+    assert.deepEqual(geocoded, ["Example ton"], "untouched city: no second lookup");
+    assert.equal(JSON.parse(stored().local).place.name, "Exampleton", "the place is kept");
+    const cz = await get("/dashboard/for-you?view=customize&flash=saved");
+    assert.match(cz.body, /Weather for Exampleton, State, Country/);
   });
 });
 
@@ -292,6 +337,23 @@ test("a signed peer request (crossHostAuth) never reaches the page", async () =>
       assert.equal(out, null);
       assert.equal(status, 404);
     } finally { db.close(); }
+  });
+});
+
+test("a cross-host (peer-signed) request to the page is a 404, and its chrome offers no way in", async () => {
+  await withFlag(async () => {
+    const headers = { ...NET, cookie: jar("owner-sess"), "x-test-crosshost": "1" };
+    const r = await fetch(base + "/dashboard/for-you", { redirect: "manual", headers });
+    assert.equal(r.status, 404, "the owner's own session, but not the owner's turn");
+    const body = await r.text();
+    assert.equal(body, "Not found");
+    assert.doesNotMatch(body, /data-fy/);
+    // And the same request on another page draws no entry point either.
+    const home = await fetch(base + "/dashboard/project/garden", { redirect: "manual", headers });
+    assert.equal(home.status, 200);
+    const html = await home.text();
+    assert.doesNotMatch(html, /<a [^>]*data-for-you-entry/);
+    assert.doesNotMatch(html, /href="\/dashboard\/for-you"/);
   });
 });
 

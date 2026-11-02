@@ -14,12 +14,13 @@
  * dashboard's CSRF check (csrfMiddleware runs before every /dashboard route) and the gates above.
  *
  * Hidden from the classic sidebar; the shell's drawer, the mascot sheet and the phone drag reveal reach
- * it (shell/chrome.js, shell/client.js) while the flag is on.
+ * it (shell/chrome.js, shell/client.js) only while the flag is on AND the request is the owner's own
+ * local password session (the same check as the gate below, made once per page in dispatchPanel).
  */
 import { t } from "../shared/i18n.js";
 import { isLocalPasswordSessionOn } from "../local-session.js";
 import { forYouEnabled } from "../../for-you/flag.js";
-import { readForYouSettings, writeForYouSettings, CITY_MAX, SECTIONS } from "../../for-you/settings.js";
+import { readForYouSettings, writeForYouSettings, normalizeSettings, CITY_MAX, SECTIONS } from "../../for-you/settings.js";
 import { geocodeCity, weatherFor } from "../../for-you/weather.js";
 import { loadMorning } from "../../for-you/morning.js";
 import { loadNews } from "../../for-you/news.js";
@@ -47,17 +48,20 @@ export function _setForYouSeamsForTest({ geocode: g, weather: w, projects: p } =
  * The customize form's save. Sections are the checked boxes; the city is trimmed text. A city that
  * changed (or has no place yet) is geocoded now, once, so the page GET never has to; a city it
  * can't find, or a lookup that fails, is saved without a place (no chip) and the screen says so.
+ * The geocoder gets the SAME string the setting stores (normalizeSettings: control characters
+ * stripped, whitespace collapsed, cut to CITY_MAX), so "unchanged" really means unchanged and a
+ * save that changed nothing never geocodes again.
  */
 export async function saveForYouSettings(req, res, db, { lang = "en" } = {}) {
   const body = req.body || {};
   const cur = await readForYouSettings(db);
   const next = {
     sections: Object.fromEntries(SECTIONS.map((k) => [k, body[`section_${k}`] === "1"])),
-    city: String(body.city ?? "").slice(0, CITY_MAX * 2),
+    city: normalizeSettings({ city: String(body.city ?? "").slice(0, CITY_MAX * 2) }).city,
     place: null,
   };
   let flash = "saved";
-  const city = next.city.replace(/\s+/g, " ").trim();
+  const city = next.city;
   if (city && city === cur.city && cur.place) {
     next.place = cur.place;
   } else if (city) {
