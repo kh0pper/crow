@@ -3,10 +3,13 @@
  * double-submit CSRF check, and every in-dashboard caller of those routes
  * sends the token.
  *
- * Server side: the REAL media router is mounted behind a pass-through auth
- * stub with a session cookie present. Each POST/DELETE/PATCH route must
- * answer 403 (and change nothing) without a matching X-Crow-Csrf header, and
- * reach its handler with one.
+ * Server side: the REAL media router is mounted behind an auth stub that reads
+ * the session cookie, and every request is marked as coming from another
+ * machine (the owner's laptop), so the router's owner-only check — a local
+ * password session used from off this box — lets them through. Each
+ * POST/DELETE/PATCH route must then answer 403 (and change nothing) without a
+ * matching X-Crow-Csrf header, and reach its handler with one: the refusal
+ * under test is the CSRF one, never the owner one.
  *
  * Client side: the panel's script calls those routes with a bare fetch(); the
  * dashboard layout's fetch wrapper is what attaches the header. The REAL
@@ -53,6 +56,7 @@ const { initMediaTables } = await import("../bundles/media/server/init-tables.js
 const { default: mediaRouter } = await import("../bundles/media/panel/routes.js");
 const { default: panel } = await import("../bundles/media/panel/media.js");
 const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+const { markFromLaptop, fromLaptop } = await import("./helpers/off-box.js");
 
 const db = createDbClient();
 await initMediaTables(db);
@@ -74,14 +78,38 @@ const articleId = await insert(
   "INSERT INTO media_articles (source_id, guid, title) VALUES (?, 'g1', 'Article')", [sourceId]);
 
 // ---------------------------------------------------------------------------
-// Server: the real router, a pass-through auth stub, a session cookie.
+// Server: the real router, an auth stub that reads the session cookie, and a
+// session that is the owner's (a local password login, from another machine).
 // ---------------------------------------------------------------------------
+const SESSION = "session-test-value";
 const TOKEN = "csrf-test-token-0123456789abcdef";
-const COOKIE = `crow_session=session-test-value; crow_csrf=${TOKEN}`;
+const COOKIE = `crow_session=${SESSION}; crow_csrf=${TOKEN}`;
+
+// The owner's session row, as dashboard/auth.js writes one: a local password login, scopes
+// 'dashboard' alone. The router's owner check (dashboard/local-session.js) reads it.
+{
+  const { createHash } = await import("node:crypto");
+  await db.execute({
+    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', datetime('now', '+1 day'))",
+    args: [createHash("sha256").update(SESSION).digest("hex")],
+  });
+}
+
+// The dashboard's auth, as far as these routes can tell: the session token from the cookie, which
+// is what the owner check reads. (Dashboard auth verifies the token; this stub trusts the caller.)
+const auth = (req, _res, next) => {
+  const m = /crow_session=([^;]+)/.exec(String(req.headers.cookie || ""));
+  if (m) req.dashboardSession = m[1];
+  next();
+};
 
 const app = express();
 app.use(express.json());
-app.use(mediaRouter((req, res, next) => next()));
+// The owner's turn is only ever granted to a request from another machine
+// (servers/shared/self-origin.js), and this file's own client is loopback: plant the peer-class
+// memo a direct TCP peer would produce, so these requests read as the owner's laptop's.
+app.use((req, _res, next) => { markFromLaptop(req); next(); });
+app.use(mediaRouter(auth));
 const server = app.listen(0, "127.0.0.1");
 await once(server, "listening");
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -233,7 +261,9 @@ test("read-only routes still answer without a token", async () => {
 // ---------------------------------------------------------------------------
 async function panelScripts() {
   let captured = null;
-  await panel.handler({ method: "GET", query: { tab: "feed" }, body: {} }, {
+  // The panel page is the owner's: the session row above (scopes 'dashboard') and a request from
+  // another machine, as every request in this file is.
+  await panel.handler(fromLaptop({ method: "GET", query: { tab: "feed" }, body: {}, dashboardSession: SESSION }), {
     redirectAfterPost() { throw new Error("unexpected redirect on a GET"); },
   }, { db, appRoot: REPO_ROOT, layout: (opts) => { captured = opts; return ""; } });
   assert.ok(captured, "the panel renders through layout(), so the layout's scripts run first");

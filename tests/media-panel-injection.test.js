@@ -29,6 +29,8 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+// Reads no environment: safe to import before the env writes below.
+import { fromLaptop } from "./helpers/off-box.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
@@ -51,6 +53,20 @@ const { mediaPublicRouter } = await import("../bundles/media/panel/routes.js");
 
 const db = createDbClient();
 await initMediaTables(db);
+// The panel page is the owner's, so every render below is the owner's request: a local password
+// session ('dashboard' alone in its oauth_tokens row) used from another machine. Core's
+// oauth_tokens is not a media table, so this file creates just the columns the owner check reads.
+const OWNER_SESSION = "media-panel-injection-owner";
+await db.execute(`CREATE TABLE IF NOT EXISTS oauth_tokens (
+  token TEXT PRIMARY KEY, token_type TEXT, client_id TEXT, scopes TEXT,
+  expires_at TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+{
+  const { createHash } = await import("node:crypto");
+  await db.execute({
+    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', datetime('now', '+1 day'))",
+    args: [createHash("sha256").update(OWNER_SESSION).digest("hex")],
+  });
+}
 // The Podcasts tab also lists the standalone podcast bundle's subscriptions.
 await db.execute(`CREATE TABLE IF NOT EXISTS podcast_subscriptions (
   id INTEGER PRIMARY KEY AUTOINCREMENT, feed_url TEXT NOT NULL UNIQUE,
@@ -166,7 +182,7 @@ await insert("INSERT INTO media_smart_folders (name, query_json) VALUES (?, ?)",
 // ---------------------------------------------------------------------------
 async function renderTab(query) {
   let captured = null;
-  const req = { method: "GET", query, body: {} };
+  const req = fromLaptop({ method: "GET", query, body: {}, dashboardSession: OWNER_SESSION });
   const res = { redirectAfterPost() { throw new Error("unexpected redirect on a GET"); } };
   await panel.handler(req, res, {
     db,

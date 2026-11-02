@@ -2,7 +2,8 @@
  * The media panel's HTTP routes that Phase 0 adds or rewrites (bundles/media/panel/routes.js),
  * served by a real Express app over real HTTP: the latest-briefing contract, making a briefing,
  * the schedule, audio with byte ranges and path confinement, auth on every route, the gateway's
- * real CSRF check and its real Funnel guard.
+ * real CSRF check and its real Funnel guard. The requests are the owner's: a local password
+ * session used from another machine, which is the only session the owner-only check admits.
  */
 import "./helpers/media-isolate.js";   // first: this file's own home, data dir and database
 import { test, before, after } from "node:test";
@@ -12,13 +13,20 @@ import { readFileSync, writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import express from "express";
 import { startFakeVoice, setVoiceProfiles, CLOUD_DEFAULT, localVoice, seedSource, seedArticle, fakeMp3, REPO, FRAME_BYTES } from "./helpers/media-fixtures.js";
+import { markFromLaptop } from "./helpers/off-box.js";
 import { createDbClient } from "../servers/db.js";
 import { rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 import { resolveAudioDir } from "../bundles/media/server/speech.js";
 
 let db, voice, server, base, publicBase, mediaRouter, routesModule;
 const AUTH_HEADER = { Cookie: "crow_session=s1; crow_csrf=tok123" };
-const auth = (req, res, next) => (String(req.headers.cookie || "").includes("crow_session=s1") ? next() : res.status(401).json({ error: "login required" }));
+// The dashboard's auth, as far as these routes can tell: the session token from the cookie, which
+// is what the router's owner check reads (servers/gateway/dashboard/local-session.js).
+const auth = (req, res, next) => {
+  if (!String(req.headers.cookie || "").includes("crow_session=s1")) return res.status(401).json({ error: "login required" });
+  req.dashboardSession = "s1";
+  next();
+};
 
 before(async () => {
   // The routes open the instance database themselves: this file's own one (helpers/media-isolate.js).
@@ -27,11 +35,22 @@ before(async () => {
   try { routesModule = await import("../bundles/media/panel/routes.js"); } finally { console.error = quiet; }
   mediaRouter = routesModule.default;
   db = createDbClient();
+  // Session "s1" is the owner's: a local password login (scopes 'dashboard' alone), the row
+  // dashboard/auth.js writes. Every request below is marked as coming from the owner's laptop.
+  const { createHash } = await import("node:crypto");
+  await db.execute({
+    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', datetime('now', '+1 day'))",
+    args: [createHash("sha256").update("s1").digest("hex")],
+  });
   voice = await startFakeVoice();
   await setVoiceProfiles(db, [CLOUD_DEFAULT, localVoice(voice.url)]);
   const app = express();
   app.use(rejectFunneledMiddleware());
   app.use(express.json());
+  // The owner's turn is only ever granted to a request from another machine
+  // (servers/shared/self-origin.js), and this file's own client is loopback: plant the
+  // peer-class memo a direct TCP peer would produce.
+  app.use((req, _res, next) => { markFromLaptop(req); next(); });
   app.use(mediaRouter(auth));
   server = app.listen(0, "127.0.0.1");
   await new Promise((ok) => server.once("listening", ok));

@@ -65,6 +65,18 @@ export default {
     const { existsSync, readFileSync } = await import("node:fs");
     const { homedir } = await import("node:os");
 
+    // The Media Hub is the operator's (item 55): its page shows the feed and its forms change
+    // sources, playlists and digests, so anyone but the owner (a local password session from
+    // another machine) gets the same 404 as an unknown page, like the For You panel.
+    {
+      const sessionMod = join(appRoot || join(import.meta.dirname, "..", "..", ".."), "servers", "gateway", "dashboard", "local-session.js");
+      const { isLocalPasswordSessionOn } = await import(pathToFileURL(sessionMod).href);
+      if (!(await isLocalPasswordSessionOn(db, req))) {
+        res.status(404).type("text").send("Not found");
+        return null;
+      }
+    }
+
     /** Check ~/.crow/installed.json for installed bundle IDs */
     function getInstalledBundles() {
       const installedPath = join(homedir(), ".crow", "installed.json");
