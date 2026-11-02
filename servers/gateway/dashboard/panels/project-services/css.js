@@ -45,6 +45,11 @@ export function projectServicesCss() {
   body.shell .svc-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
   body.shell .svc-name { font-weight: 600; overflow-wrap: anywhere; }
   body.shell .svc-sub { font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  body.shell .svc-private { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.5rem; margin-top: 0.25rem; font-size: 0.85rem; }
+  body.shell .svc-private-switch { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 44px; cursor: pointer; }
+  body.shell .svc-private-switch input[disabled] { cursor: not-allowed; }
+  body.shell .svc-private-switch input:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  body.shell .svc-private-note { color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   body.shell .svc-pill {
     flex: none; padding: 4px 8px; border-radius: var(--crow-radius-pill, 999px);
     font-size: 0.75rem; font-weight: 600; max-width: 6.5rem; text-align: center; overflow-wrap: anywhere;

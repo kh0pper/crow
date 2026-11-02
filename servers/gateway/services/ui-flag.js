@@ -1,8 +1,8 @@
 /**
- * The project Services UI flag (project services, decision 5: each PR is safe to deploy alone).
- * Until the PR that makes bots use connections, every Services entry point, the Services pages
- * and their JSON API stay hidden unless CROW_SERVICES_UI is exactly "1".
+ * The project Services UI flag (project services, decision 5). Bots use connections, so the
+ * Services pages, their JSON API and every entry point are ON by default; CROW_SERVICES_UI=0 is
+ * the operator's kill switch that hides them all again.
  */
 export function servicesUiEnabled(env = process.env) {
-  return env.CROW_SERVICES_UI === "1";
+  return env.CROW_SERVICES_UI !== "0";
 }

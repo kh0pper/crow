@@ -43,6 +43,7 @@ import { getPeerCreds } from "../../shared/peer-credentials.js";
 import { peerTrust, rowIsTrusted } from "../../shared/peer-trust.js";
 import { signTicket, verifyTicket, isSafeDestPath } from "../../shared/sso-ticket.js";
 import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
+import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { resolve } from "node:path";
@@ -104,12 +105,22 @@ import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
 
+/** A retried 2FA step's pending token keeps the SSO context and the on-host flag (auth.js). */
+function retryPendingCtx(ssoCtx, onHost) {
+  const ctx = {};
+  if (ssoCtx) ctx.sso = ssoCtx;
+  if (onHost) ctx.onhost = true;
+  return Object.keys(ctx).length ? ctx : null;
+}
+
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
  * @returns {Router}
  */
 export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: renderPage = renderLayout } = {}) {
   const router = Router();
+  // Once at start: a bridge subnet over the LAN makes some LAN clients "this machine" (self-origin.js).
+  warnBridgeOverlap();
 
   // URL-encoded body parsing for form submissions
   router.use("/dashboard", express.urlencoded({ extended: false }));
@@ -188,7 +199,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
     const deviceTrustToken = cookies.crow_2fa_trusted || null;
     const userAgent = req.headers["user-agent"] || null;
-    const result = await attemptLogin(password, req.ip, deviceTrustToken, userAgent);
+    // A login from this machine itself (its console, the shared browser, a local script) is
+    // stored as 'dashboard onhost': signed in, never the owner's turn (local-session.js).
+    const result = await attemptLogin(password, req.ip, deviceTrustToken, userAgent, { onHost: isSelfOrigin(req) });
     if (result.error) {
       let lockoutHelp = "";
       if (result.locked) {
@@ -254,7 +267,10 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const pendingToken = cookies.crow_pending_2fa;
 
     // Read any SSO context bound to this pending token BEFORE it is consumed.
-    const ssoCtx = (await getPending2faContext(pendingToken))?.sso || null;
+    const pendingCtx = await getPending2faContext(pendingToken);
+    const ssoCtx = pendingCtx?.sso || null;
+    // On-host if the password step or this step came from this machine (auth.js passwordSessionScopes).
+    const onHost = pendingCtx?.onhost === true || isSelfOrigin(req);
 
     // Verify pending token
     const validPending = await verifyPending2faToken(pendingToken);
@@ -266,7 +282,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const secret = await getTotpSecret();
     if (!secret || !verifyTotp(totp_code, secret)) {
       // Re-create pending token for retry, preserving any SSO context.
-      const newToken = await createPending2faToken(ssoCtx ? { sso: ssoCtx } : null);
+      const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost));
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
       res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
@@ -282,7 +298,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // or paused since the ticket arrived); the pending token is already spent.
     let result;
     try {
-      result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+      result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip, { onHost });
     } catch (err) {
       if (err?.code !== "sso_refused") throw err;
       res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
@@ -324,7 +340,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const pendingToken = cookies.crow_pending_2fa;
 
     // Read SSO context bound to the pending token before it is consumed.
-    const ssoCtx = (await getPending2faContext(pendingToken))?.sso || null;
+    const pendingCtx = await getPending2faContext(pendingToken);
+    const ssoCtx = pendingCtx?.sso || null;
+    const onHost = pendingCtx?.onhost === true || isSelfOrigin(req);
 
     const validPending = await verifyPending2faToken(pendingToken);
     if (!validPending) {
@@ -335,7 +353,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const valid = await verifyRecoveryCode(recovery_code);
     if (!valid) {
       // Re-create pending token for retry, preserving any SSO context.
-      const newToken = await createPending2faToken(ssoCtx ? { sso: ssoCtx } : null);
+      const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost));
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
       res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
@@ -350,7 +368,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // or paused since the ticket arrived); the pending token is already spent.
     let result;
     try {
-      result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+      result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip, { onHost });
     } catch (err) {
       if (err?.code !== "sso_refused") throw err;
       res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);

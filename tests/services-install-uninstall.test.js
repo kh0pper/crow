@@ -68,8 +68,9 @@ test("form unchanged with the flag off: HA keeps HA_URL/HA_TOKEN off and drops t
   assert.deepEqual(names(visibleEnvVars(ha, { servicesUi: true })).filter((n) => n === "HA_URL" || n === "HA_TOKEN"), []);
   // The browser shape (Install button data attribute and the registry blob Configure reads).
   assert.deepEqual(formEnvVars(ha, { servicesUi: false }), ha.env_vars.filter((e) => !e.generate).map((e) => formEnvVars({ env_vars: [e] }, { servicesUi: false })[0]));
-  // The default reads CROW_SERVICES_UI.
-  assert.ok(names(visibleEnvVars(ha)).includes("HA_TOKEN"), "flag unset: unchanged");
+  // The default reads CROW_SERVICES_UI; the kill switch is exactly "0" (unset means on).
+  process.env.CROW_SERVICES_UI = "0";
+  try { assert.ok(names(visibleEnvVars(ha)).includes("HA_TOKEN"), "flag 0: unchanged"); } finally { delete process.env.CROW_SERVICES_UI; }
   process.env.CROW_SERVICES_UI = "1";
   try { assert.ok(!names(visibleEnvVars(ha)).includes("HA_TOKEN")); } finally { delete process.env.CROW_SERVICES_UI; }
   // A manifest with no connect block (a plain extension) is identical either way.
@@ -105,7 +106,7 @@ test("both forms, flag off and on: Install drops the account fields only with th
   assert.ok(envNames(visibleEnvVars(ha, { servicesUi: true, keepAccountFields: true })).includes("HA_TOKEN"));
   for (const flag of [false, true]) {
     const prev = process.env.CROW_SERVICES_UI;
-    if (flag) process.env.CROW_SERVICES_UI = "1"; else delete process.env.CROW_SERVICES_UI;
+    process.env.CROW_SERVICES_UI = flag ? "1" : "0";
     try {
       // Install form (not installed): the Install button's data-envvars and the detail blob.
       const fresh = render();
@@ -143,7 +144,7 @@ test("configuredAccountFields and needs_config: a legacy Crow-wide HA keeps its 
     assert.deepEqual(BC.configuredAccountFields("home-assistant"), []);
     const on = BC.needsConfigKeys("home-assistant");
     assert.ok(!on.includes("HA_URL") && !on.includes("HA_TOKEN"), "flag on: connections hold them");
-    delete process.env.CROW_SERVICES_UI;
+    process.env.CROW_SERVICES_UI = "0";
     const off = BC.needsConfigKeys("home-assistant");
     assert.ok(off.includes("HA_URL") && off.includes("HA_TOKEN"), "flag off: unchanged");
   } finally {

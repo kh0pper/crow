@@ -210,11 +210,29 @@ function resolveToolCategory(action) {
  * @param {object} [opts.defaultDeliverTo] deliver_to spec to use when crow_delegate
  *                                        is called without one (e.g. the current
  *                                        gateway turn's thread). Falls back to poll.
+ * @param {"owner"} [opts.principal]      who started the turn: exactly "owner" only
+ *                                        for the owner's own dashboard chat (the
+ *                                        route sets it). Anything else is not the
+ *                                        owner's (plan decision 1).
+ * @param {Map<string, object>} [opts.serviceRoute]  the conversation's pinned-project
+ *                                        service tools (Task 20: listProjectServiceTools).
+ *                                        Checked before every other route, since those
+ *                                        names (mcp__<block>__<tool>) are disjoint from
+ *                                        the crow_* surface.
+ * @param {function} [opts.serviceCall]   (name, args) → {result, isError} for a name in
+ *                                        serviceRoute (callProjectServiceTool).
  */
 export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
   const defaultDeliverTo = opts.defaultDeliverTo || null;
+  // Project services: only the dashboard chat passes these, and only for the conversation's
+  // pinned project. Unset everywhere else (voice, one-shot, a bound bot).
+  const serviceRoute = opts.serviceRoute instanceof Map ? opts.serviceRoute : null;
+  const serviceCall = typeof opts.serviceCall === "function" ? opts.serviceCall : null;
+  // Project services: a job crow_delegate enqueues is the owner's own turn only when this executor serves
+  // the owner's dashboard chat. Every other executor (voice, one-shot, a bound bot) leaves it NULL.
+  const jobPrincipal = opts.principal === "owner" ? "owner" : null;
   const remote = opts.remote || null; // cross-instance voice routing (null = off)
   // Who is calling: taken ONLY from the bound bot (never from tool arguments or model output).
   // Unbound executors (the operator's own chat) send no _meta at all.
@@ -255,6 +273,14 @@ export function createToolExecutor(opts = {}) {
    */
   async function executeTool(name, args) {
     try {
+      // Project services first: an mcp__<block>__<tool> name belongs to the conversation's
+      // pinned project's connections and to nothing else. A route without a caller is a
+      // listing bug, not a fall-through (no category or add-on can own that name).
+      if (serviceRoute && serviceRoute.has(name)) {
+        if (!serviceCall) return { result: `Unknown tool: ${name}`, isError: true };
+        return await serviceCall(name, args);
+      }
+
       // Cross-instance routing (voice). Unwrap the crow_tools proxy so a remote
       // tool hidden behind it still routes remotely. Only names a selected remote
       // capability owns (routeMap) are routed; everything else falls through to
@@ -412,9 +438,9 @@ export function createToolExecutor(opts = {}) {
         : (typeof deliverTo === "string" ? deliverTo : JSON.stringify(deliverTo));
       const escalate = args && (args.escalate === true || args.escalate === 1) ? 1 : 0;
       await db.execute({
-        sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, escalate) "
-           + "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-        args: [jobId, botId, goal, deliverJson, "chat", escalate],
+        sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, escalate, principal) "
+           + "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
+        args: [jobId, botId, goal, deliverJson, "chat", escalate, jobPrincipal],
       });
       const kind = (deliverTo && deliverTo.kind) || "poll";
       return {

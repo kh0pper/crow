@@ -458,7 +458,7 @@ test("control() model switch (awake): warmModel is called BEFORE commandSince (a
   const s = await spawned(engine);
   state.callOrder.length = 0;   // clear the spawn's own warm call
 
-  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
 
   assert.deepEqual(state.callOrder, ["warm:crow-chat", "command:set_model"],
     "warmModel(provider) must complete before the set_model commandSince — pi-lab's local-models starter self-disables in bots");
@@ -469,7 +469,7 @@ test("control() model switch (awake): warmModel is called BEFORE commandSince (a
 test("control() model switch (awake): updates currentModel/resolved so snapshot() and the audit both report the new model", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal((await engine.get(s.sessionId)).model, "crow-chat/big-model");
 
   await engine.message(s.sessionId, "go");
@@ -492,7 +492,7 @@ test("launch path: a control() between spawn and the first message serves turn 1
   assert.equal((await engine.get(s.sessionId)).model, "crow-local/qwen3.6-35b-a3b", "the bot's own default, as spawned");
   const spawnWarms = state.warm.length;
 
-  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal(r.applied.model, "crow-chat/big-model");
   assert.equal(state.warm[spawnWarms], "crow-chat",
     "the picked provider is warmed before the switch, so the first turn does not race a cold endpoint");
@@ -516,7 +516,7 @@ test("control() model switch while hibernating: nothing live to command — trac
   await tick();
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 
-  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.deepEqual(r.applied, {}, "no live child — nothing applied");
   assert.equal(r.bindsAtWake.model, "crow-chat/big-model");
   assert.equal(state.instances[0].commands.length, 0, "no commandSince on a dead child");
@@ -565,7 +565,7 @@ test("hibernate -> message (wake): a model tracked via control() while hibernati
   clock.advance(600_001);
   await tick();
 
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   await engine.message(s.sessionId, "wake");
   await tick();
 
@@ -587,7 +587,7 @@ test("final F3b/F4: a session switched to another row wakes on THAT row's provid
   const s = await spawned(engine);
   clock.advance(600_001);
   await tick();
-  await engine.control(s.sessionId, { model: { provider: "cloud-b", modelId: "m-b" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "cloud-b", modelId: "m-b" } });
   await engine.message(s.sessionId, "wake");
   await tick();
   const wakePi = state.instances[1];
@@ -607,7 +607,7 @@ test("final F4: a wake onto a row the bot engine cannot run (a bare pi built-in)
   const s = await spawned(engine);
   clock.advance(600_001);
   await tick();
-  await engine.control(s.sessionId, { model: { provider: "openai", modelId: "gpt-x" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "openai", modelId: "gpt-x" } });
   writeFileSync(file, JSON.stringify({ providers: {} }));
   await assert.rejects(engine.message(s.sessionId, "wake"), /bad_request/);
   await tick();
@@ -623,7 +623,7 @@ test("control({permissionMode:'bypass'}) while awake: returned under bindsAtWake
   const s = await spawned(engine);
   const sink = await collect(engine, s.sessionId);
 
-  const r = await engine.control(s.sessionId, { permissionMode: "bypass" });
+  const r = await engine.control(s.sessionId, { principal: "owner", permissionMode: "bypass" });
   assert.deepEqual(r.applied, {}, "permission mode NEVER applies live — pi's policy is fixed via env at spawn time");
   assert.equal(r.bindsAtWake.permissionMode, "bypass");
   assert.equal((await engine.get(s.sessionId)).permissionMode, "bypass", "the session record reflects it immediately");
@@ -637,7 +637,7 @@ test("control({permissionMode:'bypass'}) while awake: returned under bindsAtWake
 test("permissionMode binds at the NEXT wake's PiRpc opts (not applied to the currently-awake child)", async () => {
   const { engine, clock, state } = makeEngine();
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { permissionMode: "bypass" });
+  await engine.control(s.sessionId, { principal: "owner", permissionMode: "bypass" });
 
   clock.advance(600_001);
   await tick();
@@ -652,7 +652,7 @@ test("permissionMode binds at the NEXT wake's PiRpc opts (not applied to the cur
 test("adopt (fresh engine over the same row): snapshot reports permissionMode 'guarded' — reset on restart (spec §5.3)", async () => {
   const { engine: engineA, state } = makeEngine();
   const s = await spawned(engineA);
-  await engineA.control(s.sessionId, { permissionMode: "bypass" });
+  await engineA.control(s.sessionId, { principal: "owner", permissionMode: "bypass" });
   assert.equal((await engineA.get(s.sessionId)).permissionMode, "bypass");
   await engineA.stopAll();
 
@@ -674,11 +674,11 @@ test("control(): model/thinking switches are refused with turn_in_progress while
   await engine.message(s.sessionId, "long one");
 
   await assert.rejects(
-    () => engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } }),
+    () => engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } }),
     (e) => e.code === "turn_in_progress"
   );
   await assert.rejects(
-    () => engine.control(s.sessionId, { thinking: "high" }),
+    () => engine.control(s.sessionId, { principal: "owner", thinking: "high" }),
     (e) => e.code === "turn_in_progress"
   );
   assert.equal(state.instances[0].commands.length, 0, "neither switch reached the child mid-turn");
@@ -688,7 +688,7 @@ test("control(): permissionMode is NOT refused mid-turn (it never touches the li
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
   await engine.message(s.sessionId, "long one");
-  const r = await engine.control(s.sessionId, { permissionMode: "ask" });
+  const r = await engine.control(s.sessionId, { principal: "owner", permissionMode: "ask" });
   assert.equal(r.bindsAtWake.permissionMode, "ask");
 });
 
@@ -696,7 +696,7 @@ test("control(): unknown permissionMode value is refused with bad_request", asyn
   const { engine } = makeEngine();
   const s = await spawned(engine);
   await assert.rejects(
-    () => engine.control(s.sessionId, { permissionMode: "yolo" }),
+    () => engine.control(s.sessionId, { principal: "owner", permissionMode: "yolo" }),
     (e) => e.code === "bad_request"
   );
 });
@@ -705,11 +705,11 @@ test("control(): unknown thinking level and a model missing modelId are both ref
   const { engine } = makeEngine();
   const s = await spawned(engine);
   await assert.rejects(
-    () => engine.control(s.sessionId, { thinking: "ultra-mega" }),
+    () => engine.control(s.sessionId, { principal: "owner", thinking: "ultra-mega" }),
     (e) => e.code === "bad_request"
   );
   await assert.rejects(
-    () => engine.control(s.sessionId, { model: { provider: "crow-chat" } }),
+    () => engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat" } }),
     (e) => e.code === "bad_request"
   );
 });
@@ -717,13 +717,13 @@ test("control(): unknown thinking level and a model missing modelId are both ref
 test("control(): no_such_session and session_stopped refusals", async () => {
   const { engine } = makeEngine();
   await assert.rejects(
-    () => engine.control("perchlive-nope", { permissionMode: "ask" }),
+    () => engine.control("perchlive-nope", { principal: "owner", permissionMode: "ask" }),
     (e) => e.code === "no_such_session"
   );
   const s = await spawned(engine);
   await engine.stop(s.sessionId);
   await assert.rejects(
-    () => engine.control(s.sessionId, { permissionMode: "ask" }),
+    () => engine.control(s.sessionId, { principal: "owner", permissionMode: "ask" }),
     (e) => e.code === "session_stopped"
   );
 });
@@ -735,7 +735,7 @@ test("control(): no_such_session and session_stopped refusals", async () => {
 test("control({thinking}) while awake: sent live via commandSince set_thinking_level, applied reported", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  const r = await engine.control(s.sessionId, { thinking: "high" });
+  const r = await engine.control(s.sessionId, { principal: "owner", thinking: "high" });
   assert.equal(r.applied.thinking, "high");
   const pi = state.instances[0];
   assert.deepEqual(pi.commands[0], { type: "set_thinking_level", level: "high" });
@@ -746,7 +746,7 @@ test("control({thinking}) while hibernating: a no-op — no persistence field ex
   const s = await spawned(engine);
   clock.advance(600_001);
   await new Promise((r) => setImmediate(r));
-  const r = await engine.control(s.sessionId, { thinking: "high" });
+  const r = await engine.control(s.sessionId, { principal: "owner", thinking: "high" });
   assert.deepEqual(r.applied, {});
   assert.deepEqual(r.bindsAtWake, {}, "thinking level is never persisted by this engine");
 });
@@ -814,7 +814,7 @@ test("options(): a LIVE child stays authoritative — the catalogue is not even 
 test("options(): `current` follows a model switch, in both the live and the hibernating answer", async () => {
   const { engine, clock, state } = makeEngine({ providerModels: () => CATALOGUE });
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal((await engine.options(s.sessionId)).current, "crow-chat/big-model",
     "a live session reports the model control() moved it to, not the spawn-resolved one");
 
@@ -1015,7 +1015,7 @@ test("N2: a session adopted after a restart reports the model its ROW carries", 
   const s = await spawned(engine);
   // Deliberately NOT the spawn model, and deliberately not first in the
   // fixture catalogue — option 0 must not be able to pass by accident.
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   clock.advance(600_001);
   await tick();
   assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: the row carries it");
@@ -1042,7 +1042,7 @@ test("N2: the report and the next WAKE agree — turn 1 runs on the adopted mode
   // adopted value is what actually serves.
   const { engine, clock } = makeEngine();
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   clock.advance(600_001);
   await tick();
 
@@ -1082,7 +1082,7 @@ test("N2: a switch made while HIBERNATING also survives the restart", async () =
   const s = await spawned(engine);
   clock.advance(600_001);
   await tick();
-  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal(r.bindsAtWake.model, "crow-chat/big-model", "precondition: the hibernating path, not the live one");
   assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
     "and it reaches the row, or a restart before the next turn loses it");
@@ -1185,10 +1185,10 @@ test("R1: control({model:null}) revokes the choice — row NULLed, next wake re-
   // UI (the drawer's "the bot's own model" option POSTs model:null).
   const { engine, clock } = makeEngine();
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: an explicit choice is stamped");
 
-  const r = await engine.control(s.sessionId, { model: null });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: null });
   assert.equal(r.applied.model, null, "the engine speaks the revocation back");
   assert.equal(rowModelOf(s.sessionId), null, "and it reaches the row");
 
@@ -1242,7 +1242,7 @@ test("R2a: control() refuses a model the catalogue does not carry, and changes n
   const { engine } = makeEngine({ providerModels: () => CATALOGUE });   // crow-local/qwen, raven-flash/flash-next
   const s = await spawned(engine);
   await assert.rejects(
-    engine.control(s.sessionId, { model: { provider: "ghost", modelId: "nope" } }),
+    engine.control(s.sessionId, { principal: "owner", model: { provider: "ghost", modelId: "nope" } }),
     /bad_request/,
     "an arbitrary pair the instance cannot serve is rejected, not persisted",
   );
@@ -1254,7 +1254,7 @@ test("R2a: control() refuses a model the catalogue does not carry, and changes n
 test("R2a: control() accepts a catalogue model even under an injected partial list (the switch's real target)", async () => {
   const { engine } = makeEngine({ providerModels: () => CATALOGUE });
   const s = await spawned(engine);
-  const r = await engine.control(s.sessionId, { model: { provider: "raven-flash", modelId: "flash-next" } });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "raven-flash", modelId: "flash-next" } });
   assert.equal(r.applied.model, "raven-flash/flash-next", "a listed pair switches normally");
   assert.equal(rowModelOf(s.sessionId), "raven-flash/flash-next");
 });
@@ -1264,7 +1264,7 @@ test("R2a: an EMPTY catalogue fails open — a registry hiccup must not lock out
   const s = await spawned(engine);
   clock.advance(600_001);
   await tick();
-  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal(r.bindsAtWake.model, "crow-chat/big-model",
     "with nothing to check against, the operator's choice is honored, not refused");
 });
@@ -1276,7 +1276,7 @@ test("R2b: an adopted session whose recorded model died falls open to the def, w
   // the operator rather than spawning a child on a provider that cannot answer.
   const { engine, clock } = makeEngine();
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: the durable choice is in the row");
   clock.advance(600_001);
   await tick();
@@ -1359,7 +1359,7 @@ test("B4: control({cwd}) while hibernating binds at the next wake — the fresh 
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 
   const chosen = workDir("b4-control-hib");
-  const r = await engine.control(s.sessionId, { cwd: chosen });
+  const r = await engine.control(s.sessionId, { principal: "owner", cwd: chosen });
   assert.equal(r.bindsAtWake.cwd, chosen, "reported under bindsAtWake like permissionMode");
   assert.equal((await engine.get(s.sessionId)).cwd, chosen, "snapshot reflects the new cwd immediately");
 
@@ -1378,7 +1378,7 @@ test("B4: control({cwd}) while awake hibernates the live child (no live chdir) a
   assert.equal((await engine.get(s.sessionId)).state, "awake", "a healthy spawn is awake");
   const sub = await collect(engine, s.sessionId);
   const chosen = workDir("b4-control-awake");
-  await engine.control(s.sessionId, { cwd: chosen });
+  await engine.control(s.sessionId, { principal: "owner", cwd: chosen });
   assert.equal((await engine.get(s.sessionId)).state, "hibernating", "pi's cwd is fixed at spawn, so the child hibernates");
   assert.equal(state.instances[0].closed, 1, "the live child was closed");
   assert.ok(sub.ofType("log").some((e) => /working directory/.test(e.text || "")),
@@ -1391,7 +1391,7 @@ test("B4: control({cwd}) is refused turn_in_progress while a turn is in flight",
   const s = await spawned(engine);
   await engine.message(s.sessionId, "long one");
   const chosen = workDir("b4-midturn");
-  await assert.rejects(() => engine.control(s.sessionId, { cwd: chosen }), (e) => e.code === "turn_in_progress");
+  await assert.rejects(() => engine.control(s.sessionId, { principal: "owner", cwd: chosen }), (e) => e.code === "turn_in_progress");
   state.instances[0].lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
   await tick();
 });
@@ -1399,11 +1399,11 @@ test("B4: control({cwd}) is refused turn_in_progress while a turn is in flight",
 test("B4: control({cwd}) refuses a relative path, a nonexistent path, and a file — all bad_request", async () => {
   const { engine } = makeEngine();
   const s = await spawned(engine);
-  await assert.rejects(() => engine.control(s.sessionId, { cwd: "relative/path" }), (e) => e.code === "bad_request", "relative refused");
-  await assert.rejects(() => engine.control(s.sessionId, { cwd: join(dir, "does-not-exist") }), (e) => e.code === "bad_request", "nonexistent refused");
+  await assert.rejects(() => engine.control(s.sessionId, { principal: "owner", cwd: "relative/path" }), (e) => e.code === "bad_request", "relative refused");
+  await assert.rejects(() => engine.control(s.sessionId, { principal: "owner", cwd: join(dir, "does-not-exist") }), (e) => e.code === "bad_request", "nonexistent refused");
   const filePath = join(dir, "b4-a-file.txt");
   writeFileSync(filePath, "not a dir");
-  await assert.rejects(() => engine.control(s.sessionId, { cwd: filePath }), (e) => e.code === "bad_request", "a file is not a directory");
+  await assert.rejects(() => engine.control(s.sessionId, { principal: "owner", cwd: filePath }), (e) => e.code === "bad_request", "a file is not a directory");
 });
 
 // ---------------------------------------------------------------------------
@@ -1533,7 +1533,7 @@ test("strand 2: switching this session to a model without that cap lets the next
   const { engine, state } = budgetEngine((r) => (r.provider === "crow-local" ? 2 : null));
   const s = await spawned(engine);
   await assert.rejects(() => engine.message(s.sessionId, "hi"), (e) => e.code === "tool_budget");
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   const r = await engine.message(s.sessionId, "hi again");
   assert.ok(r.turnId);
   assert.equal(state.instances[0].turns.length, 1);
@@ -1553,7 +1553,7 @@ test("strand 2: a child started on a model its surface exceeds says so ONCE on t
   const { engine } = budgetEngine((r) => (r.provider === "crow-chat" ? 2 : null));
   const s = await spawned(engine);
   const sink = await collect(engine, s.sessionId);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   await engine.cycle(s.sessionId);
   await tick();
   await engine.cycle(s.sessionId);
@@ -1582,7 +1582,7 @@ test("strand 2 (review): a refusing cap is not cached — raising the model's li
 test("strand 2 (re-review): after a live switch to a model that fits, a late subscriber is NOT told turns will be refused", async () => {
   const { engine } = budgetEngine((r) => (r.provider === "crow-local" ? 2 : null));
   const s = await spawned(engine);
-  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-chat", modelId: "big-model" } });
   const sink = await collect(engine, s.sessionId);
   assert.ok(!sink.events.some((e) => e.type === "log" && /at most 2 tools/.test(e.text)), JSON.stringify(sink.events));
 });
@@ -1608,7 +1608,7 @@ test("Task 17: an awake switch to a consented cloud row sends pi its crow-c-* id
     state.availableModels = [{ provider: "crow-c-cloud-a", id: "c1" }, { provider: "crow-local", id: "qwen3.6-35b-a3b" }];
     const s = await spawned(engine);
     const pi = state.instances[0];
-    const r = await engine.control(s.sessionId, { model: { provider: "cloud-a", modelId: "c1" } });
+    const r = await engine.control(s.sessionId, { principal: "owner", model: { provider: "cloud-a", modelId: "c1" } });
     const sent = pi.commands.find((c) => c.type === "set_model");
     assert.equal(sent.provider, "crow-c-cloud-a", "pi is told the door entry");
     assert.equal(r.applied.model, "cloud-a/c1", "the session records the row");
@@ -1617,7 +1617,7 @@ test("Task 17: an awake switch to a consented cloud row sends pi its crow-c-* id
     assert.equal((await engine.get(s.sessionId)).model, "cloud-a/c1", "the child's own echo maps back too");
     const opts = await engine.options(s.sessionId);
     assert.deepEqual(opts.models.map((m) => m.provider + "/" + m.id), ["cloud-a/c1", "crow-local/qwen3.6-35b-a3b"], "the live list is in row ids, like the catalogue control() checks");
-    await assert.rejects(engine.control(s.sessionId, { model: { provider: "openai", modelId: "gpt-x" } }), (e) => e.code === "bad_request",
+    await assert.rejects(engine.control(s.sessionId, { principal: "owner", model: { provider: "openai", modelId: "gpt-x" } }), (e) => e.code === "bad_request",
       "a bare built-in PiRpc would refuse is refused here too");
   } finally {
     if (prev.HOME === undefined) delete process.env.HOME; else process.env.HOME = prev.HOME;

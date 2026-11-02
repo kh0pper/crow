@@ -73,6 +73,16 @@ import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
 import { randomBytes } from "node:crypto";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
+
+/**
+ * Project services (plan decision 1; Task 16 fix round 1, I1): who started a turn from this
+ * router. "owner" only for the owner's LOCAL password session on this machine; a session a peer
+ * sign-in minted (SSO) or a signed peer request is "other". Read per request, never cached.
+ */
+async function turnPrincipal(db, req) {
+  return (await isLocalPasswordSessionOn(db, req)) ? "owner" : "other";
+}
 import {
   loadBotRow, loadGiveTarget, getOffer, listOffers, claimOffer, renewLease, releaseClaim,
   settleOffer, findOfferCard, recoverThread, claimOfferNotes, unclaimOfferNotes, offerTag,
@@ -194,6 +204,10 @@ const ERROR_MAP = {
   // not 409 — nothing is busy or gone; the request can't be served as is.
   // `detail` names the model, both numbers and the ways out.
   tool_budget: [422, "tool_budget"],
+  // Project services (fix round 1): a turn from anyone but the owner may not steer or answer a
+  // chat whose child holds the owner's service blocks (plan decision 1). 403 — the caller is
+  // signed in, but this is not their turn.
+  not_owner_turn: [403, "Only the owner can do that in this chat while it uses connected services."],
 };
 
 function mapEngineError(res, err) {
@@ -508,7 +522,11 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       }
 
       const eng = resolveEngine();
-      const result = await eng.spawn(briefing ? { botId, cwd, briefing, briefingRank, briefingRefs: refs } : { botId, cwd });
+      // The owner's own dashboard: the one place a Perch spawn can be the
+      // owner's turn (project services, plan decision 1; the engine has no
+      // default), and only from a local password session (turnPrincipal).
+      const principal = await turnPrincipal(db, req);
+      const result = await eng.spawn(briefing ? { botId, cwd, briefing, briefingRank, briefingRefs: refs, principal } : { botId, cwd, principal });
       if (result && result.threadId) {
         // The session is already running: a filing failure must not fail the spawn.
         try { await ensureItem(db, "perch_thread", result.threadId, { projectId, setBy: given ? "operator" : "origin" }); }
@@ -606,10 +624,15 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         console.warn("[perch-interactive-api] offer note claim failed:", e.message);
       }
     }
+    let pdb = null;
     try {
+      // The owner typed it here when this is their local session (the offer lines are fixed
+      // gateway text); an SSO or peer session is "other". A failed read is "other" (fail closed).
+      let principal = "other";
+      try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
       const text = notes.lines.length ? notes.lines.join("\n") + "\n\n" + message : message;
-      const result = await eng.message(sid, text, images);
+      const result = await eng.message(sid, text, images, { principal });
       res.status(202).json({ turnId: result.turnId });
     } catch (err) {
       if (notes.claims.length) {
@@ -618,6 +641,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       mapEngineError(res, err);
     } finally {
       if (ndb) { try { ndb.close(); } catch { /* already closed */ } }
+      if (pdb) { try { pdb.close(); } catch { /* already closed */ } }
     }
   });
 
@@ -630,12 +654,19 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+    let pdb = null;
     try {
+      // Project services (fix round 1): a steer drives the child's live turn, so the turn's
+      // principal rides along exactly as it does for message(). A failed read is "other".
+      let principal = "other";
+      try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
-      const result = await eng.steer(sid, message);
+      const result = await eng.steer(sid, message, { principal });
       res.json(result);
     } catch (err) {
       mapEngineError(res, err);
+    } finally {
+      if (pdb) { try { pdb.close(); } catch { /* already closed */ } }
     }
   });
 
@@ -730,15 +761,22 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const requestId = body.requestId == null ? "" : String(body.requestId);
+    let pdb = null;
     try {
+      // Project services (fix round 1): an answer resolves a dialog the child holding the
+      // owner's service blocks is waiting on, so it carries the turn's principal too.
+      let principal = "other";
+      try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
-      const result = await eng.answer(sid, requestId, body);
+      const result = await eng.answer(sid, requestId, body, { principal });
       res.json(result);
     } catch (err) {
       // S4: a dead child must yield a 409-shaped no_such_request, never a raw
       // 500 — engine.answer() already enforces liveness before it ever calls
       // pi.send(), so every throw here is a real ERROR_MAP code.
       mapEngineError(res, err);
+    } finally {
+      if (pdb) { try { pdb.close(); } catch { /* already closed */ } }
     }
   });
 
@@ -781,7 +819,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const ctx = { db, tdb: null };
     try {
       const row = await loadBotRow(db, botId);
-      const result = await dispatchCard(ctx, { row, getEng: resolveEngine, botId, cardId, note });
+      const result = await dispatchCard(ctx, { row, getEng: resolveEngine, botId, cardId, note, principal: await turnPrincipal(db, req) });
       res.status(201).json(result);
     } catch (err) {
       mapEngineError(res, err);
@@ -832,7 +870,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       await updateCard(ctx.tdb, cardId, { project_id: projectId, assigned_bot: botId }, DASHBOARD_ACTOR);
       const children = await moveDescendants(ctx.tdb, cardId, projectId);
       await giveAudit(db, row, cardId, { start: body.start === true, ...(children ? { children } : {}) });
-      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note })));
+      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note, principal: await turnPrincipal(db, req) })));
     } catch (err) {
       mapEngineError(res, err);
     } finally {
@@ -858,7 +896,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     try {
       const { cardId, row } = await createTaskForBot(db, () => (ctx.tdb = createDbClient(TASKS_DB)), botId,
         { title, audit: { start: body.start === true } });
-      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note })));
+      res.json(giveResponse(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note, principal: await turnPrincipal(db, req) })));
     } catch (err) {
       mapEngineError(res, err);
     } finally {
@@ -1236,12 +1274,19 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // an awake child so the next message wakes in the new dir. Keyed on
     // presence, like plan_mode, so a body without cwd leaves it untouched.
     if (Object.prototype.hasOwnProperty.call(body, "cwd")) opts.cwd = body.cwd;
+    let pdb = null;
     try {
+      // Project services: model, permission mode and cwd are owner-only on an owner session.
+      let principal = "other";
+      try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
+      opts.principal = principal;
       const eng = resolveEngine();
       const result = await eng.control(sid, opts);
       res.json(result);
     } catch (err) {
       mapEngineError(res, err);
+    } finally {
+      if (pdb) { try { pdb.close(); } catch { /* already closed */ } }
     }
   });
 

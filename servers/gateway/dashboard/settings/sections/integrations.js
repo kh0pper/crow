@@ -10,9 +10,122 @@ import { isSupervised } from "../../../../shared/supervisor.js";
 import { servicesUiEnabled } from "../../../services/ui-flag.js";
 import { listConnections } from "../../../../shared/service-connections.js";
 import { serviceSecretKeys } from "../../../keychain/store.js";
+import { childState, childStderr } from "../../../services/children.js";
+import { serviceById } from "../../../../shared/service-catalog.js";
+import { connectionSensitivity, readConnectionBindings, readSensitivityOverrides } from "../../../../shared/service-sensitivity.js";
+import { isLocalPasswordSessionOn } from "../../local-session.js";
 
-/** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). */
-async function movedHtml({ scope, db, lang }) {
+const CHILD_STATES = ["running", "stopped", "starting", "error", "cooling"];
+
+/** Restart (Task 14, R8): POSTs the restart route (the layout's fetch wrapper adds CSRF) and shows
+ * the child's new state or the fixed error line. No backticks: this is inside a template literal. */
+function restartScript() {
+  return `<script>
+(function () {
+  if (window.__crowIntRestartBound) return;
+  window.__crowIntRestartBound = true;
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('[data-int-restart]') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    var row = btn.closest('[data-int-conn]');
+    var stateEl = row ? row.querySelector('[data-int-child-state]') : null;
+    var msgEl = row ? row.querySelector('[data-int-restart-msg]') : null;
+    var labels = {};
+    try { labels = JSON.parse(btn.getAttribute('data-labels') || '{}'); } catch (e) { labels = {}; }
+    btn.disabled = true;
+    if (stateEl && labels.starting) stateEl.textContent = labels.starting;
+    if (msgEl) msgEl.textContent = '';
+    fetch('/dashboard/services/api/connection/' + encodeURIComponent(btn.getAttribute('data-int-restart')) + '/restart', { method: 'POST', credentials: 'same-origin' })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (res) {
+        var b = res.body || {};
+        var st = b.childState || (res.status === 200 ? 'running' : 'error');
+        if (stateEl && labels[st]) stateEl.textContent = labels[st];
+        if (res.status !== 200 && msgEl) msgEl.textContent = labels[b.error === 'busy' ? 'busy' : 'child_unavailable'] || '';
+      })
+      .catch(function () { if (msgEl) msgEl.textContent = labels.child_unavailable || ''; })
+      .then(function () { btn.disabled = false; });
+  });
+  // Task 16c: the owner's Private switch (owner only; the route refuses anyone else with 403).
+  document.addEventListener('change', function (ev) {
+    var box = ev.target;
+    if (!box || !box.hasAttribute || !box.hasAttribute('data-int-private') || box.disabled) return;
+    var row = box.closest('[data-int-conn]');
+    var note = row ? row.querySelector('[data-int-private-note]') : null;
+    var labels = {};
+    try { labels = JSON.parse(box.getAttribute('data-labels') || '{}'); } catch (e) { labels = {}; }
+    var want = !!box.checked;
+    box.disabled = true;
+    var csrf = '';
+    var parts = document.cookie.split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].trim().split('=');
+      if (kv[0] === 'crow_csrf') csrf = decodeURIComponent(kv.slice(1).join('='));
+    }
+    fetch('/dashboard/services/api/connection/' + encodeURIComponent(box.getAttribute('data-int-private')) + '/sensitive', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf },
+      body: JSON.stringify({ sensitive: want })
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (res) {
+        var p = res.body && res.body.private;
+        if (res.status === 200 && p && typeof p.on === 'boolean') {
+          box.checked = p.on;
+          box.disabled = p.locked === true;
+          if (note) note.textContent = p.locked ? (labels.locked || '') : (p.on ? (labels.on || '') : '');
+          return;
+        }
+        box.checked = !want;
+        box.disabled = false;
+        if (note) note.textContent = res.status === 403 ? (labels.notOwner || '') : (labels.generic || '');
+      })
+      .catch(function () { box.checked = !want; box.disabled = false; if (note) note.textContent = labels.generic || ''; });
+  });
+})();
+<\/script>`;
+}
+
+/** The Private switch (Task 16c): checked = private; disabled for a locked service. Fail closed: on. */
+function privateSwitch(c, lang, overrides, bindings) {
+  let on = true;
+  let locked = true;   // a row that isn't the service the owner connected stays private and locked
+  try {
+    const s = connectionSensitivity(c, { overrides, bindings }); on = s.sensitive !== false; locked = s.locked === true;
+  } catch { on = true; locked = true; }
+  const labels = {
+    on: t("services.private.on", lang), locked: t("services.private.locked", lang),
+    notOwner: t("services.private.notOwner", lang), generic: t("services.error.generic", lang),
+  };
+  const note = locked ? labels.locked : on ? labels.on : "";
+  return ` · <label class="int-note"><input type="checkbox" data-int-private="${escapeHtml(c.uuid)}" data-labels="${escapeHtml(JSON.stringify(labels))}"${on ? " checked" : ""}${locked ? " disabled" : ""}> ${escapeHtml(t("services.private.label", lang))}</label>
+      <span class="int-note" data-int-private-note role="status">${escapeHtml(note)}</span>`;
+}
+
+/** One connection's Advanced row: names and status only, the child's state, Restart, the Private switch, its redacted stderr (the owner only, `owner`). */
+function connectionRow(c, keys, lang, overrides, bindings, owner) {
+  const status = t(`services.status.${c.status}`, lang);
+  const state = childState(c.uuid);
+  const name = serviceById(c.serviceId)?.name || c.serviceId;
+  const labels = Object.fromEntries(CHILD_STATES.map((s) => [s, t(`services.child.${s}`, lang)]));
+  labels.child_unavailable = fill(t("services.error.child_unavailable", lang), { service: name });
+  labels.busy = t("services.error.busy", lang);
+  // A child's stderr can name the owner's accounts, hosts and addresses, so it is never rendered for
+  // a shared-project member, a paired instance's session or this box's own console: only the owner's
+  // own local password session from another machine reads it (local-session.js).
+  const lines = owner ? childStderr(c.uuid) : [];
+  const stderr = lines.length
+    ? `<details class="int-stderr"><summary>stderr (${lines.length})</summary><pre>${lines.map((l) => escapeHtml(l)).join("\n")}</pre></details>`
+    : "";
+  return `<li data-int-conn="${escapeHtml(c.uuid)}"><strong>${escapeHtml(c.serviceId)}</strong> ${escapeHtml(c.accountLabel)} <span class="int-note">${escapeHtml(status)}${c.lastError ? ` <code>${escapeHtml(c.lastError)}</code>` : ""}${keys.length ? ` · ${keys.map((k) => escapeHtml(k)).join(", ")}` : ""}</span>
+      · <span class="int-note" data-int-child-state>${escapeHtml(t(`services.child.${state}`, lang))}</span>
+      <button type="button" class="btn btn-sm" data-int-restart="${escapeHtml(c.uuid)}" data-labels="${escapeHtml(JSON.stringify(labels))}">${escapeHtml(t("settings.integrations.restartChild", lang))}</button>
+      <span class="int-note" data-int-restart-msg role="status"></span>${privateSwitch(c, lang, overrides, bindings)}${stderr}</li>`;
+}
+
+/** Flag on: the "moved" note, a link to the current scope's Services page, and Advanced (names and status only, never a value). `owner` gates the child stderr. */
+async function movedHtml({ scope, db, lang, owner = false }) {
   let href = "/dashboard/projects";
   let label = t("settings.integrations.openProjects", lang);
   if (scope && scope.projectId != null && scope.slug && db) {
@@ -30,10 +143,11 @@ async function movedHtml({ scope, db, lang }) {
   let conns = "";
   if (db) {
     try {
+      const overrides = readSensitivityOverrides();
+      const bindings = readConnectionBindings();
       for (const c of await listConnections(db, {})) {
         const keys = [...(await serviceSecretKeys(db, c.uuid))].sort();
-        const status = t(`services.status.${c.status}`, lang);
-        conns += `<li><strong>${escapeHtml(c.serviceId)}</strong> ${escapeHtml(c.accountLabel)} <span class="int-note">${escapeHtml(status)}${c.lastError ? ` <code>${escapeHtml(c.lastError)}</code>` : ""}${keys.length ? ` · ${keys.map((k) => escapeHtml(k)).join(", ")}` : ""}</span></li>`;
+        conns += connectionRow(c, keys, lang, overrides, bindings, owner);
       }
     } catch (err) { console.warn("[settings] connections listing failed:", err.message); }
   }
@@ -42,7 +156,7 @@ async function movedHtml({ scope, db, lang }) {
     <details class="int-advanced" data-int-advanced><summary>${escapeHtml(t("settings.integrations.advanced", lang))}</summary>
       <h4 class="int-cat-label">${escapeHtml(t("settings.integrations.sources", lang))}</h4><ul>${sources || none}</ul>
       <h4 class="int-cat-label">${escapeHtml(t("settings.integrations.connections", lang))}</h4><ul>${conns || none}</ul>
-    </details>`;
+    </details>${conns ? restartScript() : ""}`;
 }
 
 export default {
@@ -60,7 +174,11 @@ export default {
 
   async render({ req, db, lang } = {}) {
     // With CROW_SERVICES_UI on, services live in each project; this page only points there.
-    if (servicesUiEnabled()) return movedHtml({ scope: req && req.crowScope, db, lang });
+    if (servicesUiEnabled()) {
+      // The owner's turn, checked once for the section: only a child's stderr needs it.
+      const owner = req && db ? await isLocalPasswordSessionOn(db, req) : false;
+      return movedHtml({ scope: req && req.crowScope, db, lang, owner });
+    }
     const proxyStatus = getProxyStatus();
     const allIntegrations = legacyIntegrationsView();
     const categories = { productivity: [], communication: [], development: [] };

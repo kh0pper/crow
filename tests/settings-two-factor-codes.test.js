@@ -20,6 +20,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as OTPAuth from "otpauth";
+import { createHash } from "node:crypto";
+import { fromLaptop } from "./helpers/off-box.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 
@@ -62,6 +64,15 @@ async function enable2faWithSecret() {
   return { totp, secret };
 }
 
+// Changing 2FA is the owner's turn (Task 16b): a local password session from another machine.
+const OWNER_TOK = "owner-session";
+async function ownerDb() {
+  const db = (await import("../servers/db.js")).createDbClient();
+  await db.execute({ sql: "INSERT OR REPLACE INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)", args: [createHash("sha256").update(OWNER_TOK).digest("hex"), "dashboard", new Date(Date.now() + 3_600_000).toISOString()] });
+  return db;
+}
+const ownerReq = (body, extra = {}) => fromLaptop({ body, dashboardSession: OWNER_TOK, ...extra });
+
 const CODE_RE = /\b[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}\b/g;
 
 test("regenerate: codes are rendered in the POST response, never put in a URL, served no-store", async () => {
@@ -71,8 +82,8 @@ test("regenerate: codes are rendered in the POST response, never put in a URL, s
     const panel = (await import("../servers/gateway/dashboard/panels/settings.js")).default;
     const res = recordingRes();
     let content = null;
-    const req = { method: "POST", query: { section: "two-factor" }, body: { action: "regenerate_recovery_codes" }, csrfToken: "tok" };
-    const db = (await import("../servers/db.js")).createDbClient();
+    const req = ownerReq({ action: "regenerate_recovery_codes" }, { method: "POST", query: { section: "two-factor" }, csrfToken: "tok" });
+    const db = await ownerDb();
     try {
       await panel.handler(req, res, { db, lang: "en", layout: ({ content: c }) => { content = c; return c; } });
     } finally { db.close(); }
@@ -129,18 +140,19 @@ test("enable_2fa with a wrong code while 2FA is on leaves the live secret alone"
   const dir = freshDb();
   try {
     const { totp, secret } = await enable2faWithSecret();
+    const odb = await ownerDb();
     const section = (await import("../servers/gateway/dashboard/settings/sections/two-factor.js")).default;
     const other = totp.generateTotpSecret().secret;
     const res = recordingRes();
     await section.handleAction({
-      req: { body: { action: "enable_2fa", secret: other, totp_code: "000000", recovery_codes: encodeURIComponent(JSON.stringify(totp.generateRecoveryCodes())) } },
-      res, db: null, action: "enable_2fa",
+      req: ownerReq({ action: "enable_2fa", secret: other, totp_code: "000000", recovery_codes: encodeURIComponent(JSON.stringify(totp.generateRecoveryCodes())) }),
+      res, db: odb, action: "enable_2fa",
     });
     assert.equal(await totp.getTotpSecret(), secret);
     // Even a CORRECT code for a new secret can't replace it while 2FA is on.
     await section.handleAction({
-      req: { body: { action: "enable_2fa", secret: other, totp_code: codeFor(other), recovery_codes: encodeURIComponent(JSON.stringify(totp.generateRecoveryCodes())) } },
-      res, db: null, action: "enable_2fa",
+      req: ownerReq({ action: "enable_2fa", secret: other, totp_code: codeFor(other), recovery_codes: encodeURIComponent(JSON.stringify(totp.generateRecoveryCodes())) }),
+      res, db: odb, action: "enable_2fa",
     });
     assert.equal(await totp.getTotpSecret(), secret);
   } finally {
@@ -152,27 +164,28 @@ test("enable_2fa: a wrong code saves nothing; a right code enables; malformed co
   const dir = freshDb();
   try {
     const totp = await import("../servers/gateway/dashboard/totp.js");
+    const odb = await ownerDb();
     const section = (await import("../servers/gateway/dashboard/settings/sections/two-factor.js")).default;
     const { secret } = totp.generateTotpSecret();
     const codes = totp.generateRecoveryCodes();
     const body = (over) => ({ action: "enable_2fa", secret, recovery_codes: encodeURIComponent(JSON.stringify(codes)), ...over });
 
     const r1 = recordingRes();
-    await section.handleAction({ req: { body: body({ totp_code: "000000" }) }, res: r1, db: null, action: "enable_2fa" });
+    await section.handleAction({ req: ownerReq(body({ totp_code: "000000" })), res: r1, db: odb, action: "enable_2fa" });
     assert.equal(await totp.getTotpSecret(), null, "nothing saved on a wrong code");
     assert.match(r1.urls[0], /error=invalid-code/);
 
     const r2 = recordingRes();
-    await section.handleAction({ req: { body: body({ totp_code: codeFor(secret), recovery_codes: "%%%not-json" }) }, res: r2, db: null, action: "enable_2fa" });
+    await section.handleAction({ req: ownerReq(body({ totp_code: codeFor(secret), recovery_codes: "%%%not-json" })), res: r2, db: odb, action: "enable_2fa" });
     assert.equal(await totp.is2faEnabled(), false);
     assert.equal(await totp.getTotpSecret(), null);
 
     const r3 = recordingRes();
-    await section.handleAction({ req: { body: body({ totp_code: codeFor(secret), recovery_codes: encodeURIComponent(JSON.stringify(["<b>x</b>"])) }) }, res: r3, db: null, action: "enable_2fa" });
+    await section.handleAction({ req: ownerReq(body({ totp_code: codeFor(secret), recovery_codes: encodeURIComponent(JSON.stringify(["<b>x</b>"])) })), res: r3, db: odb, action: "enable_2fa" });
     assert.equal(await totp.is2faEnabled(), false, "codes in the wrong shape are refused");
 
     const r4 = recordingRes();
-    await section.handleAction({ req: { body: body({ totp_code: codeFor(secret) }) }, res: r4, db: null, action: "enable_2fa" });
+    await section.handleAction({ req: ownerReq(body({ totp_code: codeFor(secret) })), res: r4, db: odb, action: "enable_2fa" });
     assert.equal(await totp.is2faEnabled(), true);
     assert.equal(await totp.getTotpSecret(), secret);
     assert.equal(await totp.verifyRecoveryCode(codes[0]), true);

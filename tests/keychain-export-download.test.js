@@ -41,7 +41,7 @@ async function setup() {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use((req, _res, next) => { req.dashboardSession = req.headers["x-test-session"] || null; next(); });
-  app.use(keychainApiRouter({ openDb: () => createDbClient(), crowHome, gate, notify: async () => {}, tickets: createExportTickets({ now: () => clock.t }) }));
+  app.use(keychainApiRouter({ openDb: () => createDbClient(), crowHome, gate, notify: async () => {}, tickets: createExportTickets({ now: () => clock.t }), isOwner: async () => true }));
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   const origin = `http://127.0.0.1:${server.address().port}`;

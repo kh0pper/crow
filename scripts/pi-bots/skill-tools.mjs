@@ -50,8 +50,10 @@ export const GRANTABLE_SERVERS = Object.freeze(["crow-projects"]);
 /** The one read/write rule, shared with Bot Builder's Read-only mode (servers/shared/tool-classify.js). */
 export const isReadTool = (tool) => classifyTool({ name: tool }) === "read";
 
-/** Split a crow_mcp entry ("server/tool" or "server__tool") into [server, tool]; null for a bare server. */
-function splitEntry(e) {
+/** Split a crow_mcp entry ("server/tool" or "server__tool") into [server, tool]; null for a bare server.
+ *  Exported for the services mount (servers/gateway/services/mount.js), so the spellings that
+ *  grant cannot drift between the bridge and the door. */
+export function splitEntry(e) {
   if (typeof e !== "string") return null;
   const i = e.indexOf("/"), j = e.indexOf("__");
   if (i > 0) return [e.slice(0, i), e.slice(i + 1)];

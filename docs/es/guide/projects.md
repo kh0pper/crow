@@ -140,6 +140,16 @@ El **proyecto** de un bot se define en la columna `pi_bot_defs.project_id`. Cuan
 
 Edita el proyecto de un bot en la sección **Avanzado › Tablero y proyecto** del Bot Builder.
 
+## Servicios
+
+Una conexión de servicio es una cuenta de un servicio conectada a un proyecto: dos cuentas de GitHub en el mismo proyecto pasan a ser `work` y `personal`, cada una con su propio token, y los tokens de un proyecto nunca son los de otro. Conecta una cuenta desde la página **Servicios** del proyecto, la misma página donde puedes probarla de nuevo, marcarla como privada o desconectarla.
+
+Los bots usan las conexiones de un proyecto solo en tus propios turnos: cuando hablas con el bot en ese proyecto o cuando le das una tarjeta para trabajar. Un bot que responde en mensajes de Crow, Discord, Gmail, Telegram o Slack nunca las recibe, escriba quien escriba, y la voz todavía no las tiene. Además, un bot solo ve los servicios que seleccionas para él en el Bot Builder; conectar GitHub a un proyecto no se lo entrega a todos los bots del proyecto.
+
+Algunas conexiones son privadas y nunca se le dan a un bot: Obsidian siempre, Notion y Discord por defecto, y cualquier otro servicio en cuanto lo marcas como privado en su fila. Una conexión privada sigue siendo solo tuya.
+
+El chat del dashboard en un proyecto usa las conexiones de ese proyecto, pero solo en tu propia sesión iniciada desde otro dispositivo. El chat en la propia máquina de Crow no recibe ninguna.
+
 ## Registro de auditoría
 
 Cada mutación significativa agrega una entrada a `project_audit_log`:

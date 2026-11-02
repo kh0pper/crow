@@ -390,6 +390,8 @@ test("rejectFunneled middleware: the Services API is never funnel-exposed", asyn
   const paths = ["/dashboard/services/api/project/home", "/dashboard/services/api/project/home/connect",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/test",
     "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/disconnect",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/restart",
+    "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive",
     "/dashboard/services/api/uninstall-preflight/github"];
   const server = await startTestApp();
   try {
@@ -428,6 +430,22 @@ test("the Services API's own gate: Funnel and off-network refused, no session 40
     let preNoSession;
     try { preNoSession = await request(port, "/dashboard/services/api/uninstall-preflight/github"); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
     assert.equal(preNoSession.status, 401, "the preflight needs a dashboard session");
+    // Task 14 (R8): the child restart sits behind the same gate.
+    const restartPath = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/restart";
+    const reFunnel = await request(port, restartPath, { "tailscale-funnel-request": "?1" });
+    assert.equal(reFunnel.status, 403, "restart is never served over the Funnel");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let reNoSession;
+    try { reNoSession = await request(port, restartPath); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(reNoSession.status, 401, "restart needs a dashboard session");
+    // Task 16c: the owner's Private switch sits behind the same gate.
+    const sensPath = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive";
+    const seFunnel = await request(port, sensPath, { "tailscale-funnel-request": "?1" });
+    assert.equal(seFunnel.status, 403, "the Private switch is never served over the Funnel");
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let seNoSession;
+    try { seNoSession = await request(port, sensPath); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.equal(seNoSession.status, 401, "the Private switch needs a dashboard session");
     assert.equal(opened, 0, "no request reached a handler");
   } finally {
     server.close();
@@ -464,6 +482,27 @@ for (const PAGE of ["/dashboard/project/x", "/dashboard/project/x/services"]) te
   } finally {
     delete process.env.CROW_SERVICES_UI;
     server.close();
+  }
+});
+
+// Project services Task 17: the bots' loopback door to connected accounts is never public.
+test("rejectFunneled middleware: /services-tools/<uuid>/mcp is never funnel-exposed and is not a public path", async () => {
+  const paths = ["/services-tools/00000000-0000-4000-8000-000000000001/mcp", "/services-tools/x/mcp"];
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { isFunnelPublicPath, PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  assert.equal(isFunnelPublicPath("/services-tools/x/mcp"), false);
+  for (const path of paths) {
+    assert.equal(isFunnelPublicPath(path), false, path);
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
   }
 });
 
@@ -1015,4 +1054,59 @@ test("dashboard login limiter key: a rotated Tailscale-User-Login on a direct pe
   const key = (login) => { const r = mkReq({ ip: "10.0.0.5", headers: { "tailscale-user-login": login } }); r.ip = "10.0.0.5"; r.crowPeer = classifyPeer(r); return dashboardLoginKey(r); };
   assert.equal(key("a@example.com"), key("b@example.com"));
   assert.equal(key("a@example.com"), "10.0.0.5:");
+});
+
+// Project services Task 16c: the Private switch is the OWNER's alone. With a signed-in session
+// past the gate and CSRF, the real owner rule (isLocalPasswordSessionOn) still refuses a peer SSO
+// session, a session minted by a login on this machine, and any request from this machine.
+test("auth-network: the Services Private switch refuses SSO, onhost and this-machine sessions (403 not_owner)", async () => {
+  const { servicesApiRouter } = await import("../servers/gateway/routes/services-api.js");
+  const { markFromLaptop } = await import("./helpers/off-box.js");
+  let scopes = "dashboard";
+  let wrote = 0;
+  const fakeDb = () => ({
+    execute: async ({ sql }) => {
+      if (/FROM oauth_tokens/.test(sql)) return { rows: [{ scopes }] };
+      wrote++;
+      return { rows: [] };
+    },
+    close() {},
+  });
+  const gate = (req, res, next) => {
+    req.dashboardSession = "s1";
+    if (req.headers["x-test-from"] === "laptop") markFromLaptop(req);
+    next();
+  };
+  const app = express();
+  app.use(servicesApiRouter({ uiEnabled: () => true, sessionGate: gate, dbFactory: fakeDb }));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  const SENS_PATH = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive";
+  const post = (headers, path = SENS_PATH) => new Promise((resolve, reject) => {
+    const body = JSON.stringify({ sensitive: false });
+    const r = http.request({ host: "127.0.0.1", port: server.address().port, method: "POST",
+      path,
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), cookie: "crow_session=s1; crow_csrf=c1", "x-crow-csrf": "c1", ...headers } },
+    (res) => { let t = ""; res.on("data", (c) => (t += c)); res.on("end", () => resolve({ status: res.statusCode, text: t })); });
+    r.on("error", reject);
+    r.end(body);
+  });
+  try {
+    // Review I1: connect, test, disconnect and restart are the owner's too.
+    const u = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001";
+    const paths = [SENS_PATH, "/dashboard/services/api/project/home/connect", `${u}/test`, `${u}/disconnect`, `${u}/restart`];
+    for (const [label, sc, from] of [["sso", "dashboard sso src:peer-1", "laptop"], ["onhost", "dashboard onhost", "laptop"], ["this machine", "dashboard", null]]) {
+      scopes = sc;
+      for (const path of paths) {
+        const r = await post(from ? { "x-test-from": from } : {}, path);
+        assert.equal(r.status, 403, `${label} ${path}: ${r.status} ${r.text}`);
+        assert.deepEqual(JSON.parse(r.text), { error: "not_owner" }, `${label} ${path}`);
+      }
+    }
+    assert.equal(wrote, 0, "a refused request never looks up the connection");
+    scopes = "dashboard";
+    const owner = await post({ "x-test-from": "laptop" });
+    assert.equal(owner.status, 404, "the owner gets past the rule (to the connection lookup: none here)");
+  } finally {
+    server.close();
+  }
 });

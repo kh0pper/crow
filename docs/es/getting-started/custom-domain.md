@@ -129,6 +129,10 @@ Sin esto, el gateway rechaza esas peticiones y registra una vez `[net] WARN forw
 Si `CROW_TRUSTED_PROXIES` incluye una dirección de loopback (`loopback`, `127.0.0.1`, `::1`), toda conexión desde la misma máquina cuenta como ese proxy, también las de tus propios bots. Las puertas que solo pueden usar los bots de la misma máquina (la puerta de nube para modelos en la nube, el relay de firmas y los montajes de herramientas de loopback) rechazan entonces todas las peticiones, así que los bots de este host pierden los modelos en la nube y sus conexiones de herramientas. El gateway registra una vez al arrancar `[net] WARN CROW_TRUSTED_PROXIES covers a loopback address` cuando esto ocurre. Si tus bots necesitan esas puertas, deja loopback fuera de `CROW_TRUSTED_PROXIES` y entra al Crow's Nest de otra forma (por ejemplo con Tailscale Serve).
 :::
 
+::: info Un proxy en la misma máquina no puede responder por ti
+Un proxy en la misma máquina que Crow (loopback, una de las direcciones propias de la máquina o un bridge de contenedores) no se distingue de cualquier programa local que escriba el mismo `X-Forwarded-For`, así que Crow trata cada petición que pasa por él como venida de la propia máquina. Esas peticiones nunca son tu propio turno: los servicios conectados y la aprobación de llamadas del teléfono necesitan que entres a Crow directamente, por Tailscale Serve o desde otra máquina de tu LAN. Todo lo demás funciona igual. Consulta [Peticiones desde esta máquina](../architecture/dashboard.md#peticiones-desde-esta-maquina).
+:::
+
 En Linux, Crow respeta los encabezados de Tailscale Serve solo en conexiones abiertas por el usuario de tailscaled (`CROW_SERVE_PEER_UIDS`, por defecto `0`, leído de `/proc/net/tcp`). En un host sin `/proc` (macOS, Windows nativo) esa verificación no puede correr, así que falla en cerrado y se rechaza a los usuarios de la tailnet que llegan por Serve. Para aceptarlos de todos modos, configura `CROW_SERVE_PEER_UIDS=off` (queda registrado como advertencia: cualquier proceso local podría falsificar una identidad de la tailnet).
 
 ## Paso 4: Configura la URL Pública

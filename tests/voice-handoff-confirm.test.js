@@ -128,7 +128,7 @@ function clock(start = T0) {
  */
 function fakeEngine(notifications) {
   const sessions = new Map();
-  const calls = { spawn: [], message: [], stop: [], watched: [] };
+  const calls = { spawn: [], message: [], messageOpts: [], stop: [], watched: [] };
   let k = 0;
   const eng = {
     calls, sessions, hold: null, spawnResult: null,
@@ -140,7 +140,7 @@ function fakeEngine(notifications) {
       if (eng.hold) await eng.hold.promise;
       return eng.spawnResult ? eng.spawnResult(sessionId) : { sessionId, threadId: "t-" + sessionId, state: "starting" };
     },
-    async message(sid, note) { calls.message.push([sid, note]); },
+    async message(sid, note, _images, opts) { calls.message.push([sid, note]); calls.messageOpts.push(opts); },
     watchTurns(sid, fn, { first = false } = {}) {
       const s = sessions.get(sid);
       if (!s) throw noSession();
@@ -255,6 +255,9 @@ test("yes with an up model creates one card, starts it, then says on it", async 
   assert.equal(card.title, TASK);
   assert.deepEqual(s.eng.calls.spawn.map((c) => [c.botId, c.cardId]), [["writer", card.id]]);
   assert.deepEqual(s.eng.calls.message, [["s1", ""]], "turn 1 fires with an empty note");
+  // Project services (rev 4 H3): a hand-off is never the owner's own turn until roadmap PR 10.
+  assert.deepEqual(s.eng.calls.spawn.map((c) => c.principal), ["other"], "the hand-off spawns as other");
+  assert.deepEqual(s.eng.calls.messageOpts, [{ principal: "other" }], "and turn 1 is other");
   assert.deepEqual(s.eng.calls.watched, ["s1"], "the first turn is watched");
   const audit = (await s.db.execute({ sql: "SELECT payload FROM project_audit_log WHERE action='card_given' AND target=?", args: [`card:${card.id}`] })).rows;
   assert.deepEqual(JSON.parse(audit[0].payload), { bot_id: "writer", via: "voice", surface: "phone", handoff_id: id, created: true });

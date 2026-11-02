@@ -44,6 +44,18 @@ function actionCardsSlice(html) {
   return html.slice(start);
 }
 
+/** Run fn with the project-Services UI flag set as asked, restoring the previous value after. The
+ *  integrations step's deep link follows that flag (servers/gateway/services/ui-flag.js). */
+async function withServicesUi(value, fn) {
+  const before = process.env.CROW_SERVICES_UI;
+  if (value === undefined) delete process.env.CROW_SERVICES_UI;
+  else process.env.CROW_SERVICES_UI = value;
+  try { return await fn(); } finally {
+    if (before === undefined) delete process.env.CROW_SERVICES_UI;
+    else process.env.CROW_SERVICES_UI = before;
+  }
+}
+
 const CARD_HREFS = [
   "/dashboard/memory",
   "/dashboard/bot-builder",
@@ -55,21 +67,38 @@ const CARD_HREFS = [
 // so the wizard stays alive behind it. If 1b's change bleeds into deepLink, this
 // goes red.
 test("mid-tour deep links still open in a new tab (deepLink is out of scope)", async () => {
-  // Keyed by stem, positions derived from STEP_KEYS: a future step insertion
-  // must not re-break this test. hrefs are as-rendered (button() escapes & to &amp;).
-  const midTour = [
-    [STEP_KEYS.indexOf("ai"), "/dashboard/settings?section=models"],
-    [STEP_KEYS.indexOf("integrations"), "/dashboard/settings?section=integrations"],
-    // Item 5 PR1: the bot step deep-links into the guided creation wizard.
-    [STEP_KEYS.indexOf("bot"), "/dashboard/bot-builder?new=1"],
-    [STEP_KEYS.indexOf("starter"), "/dashboard/extensions#collections"],
-    [STEP_KEYS.indexOf("connect"), "/dashboard/connect"],
-  ];
-  for (const [step, href] of midTour) {
-    const a = anchorFor(await render(step), href);
-    assert.match(a, /target="_blank"/, `mid-tour step ${step} (${href}) must keep target=_blank`);
-    assert.match(a, /rel="noopener"/, `mid-tour step ${step} (${href}) must keep rel=noopener`);
-  }
+  // Written before the Services UI (project services PR 3) moved the Integrations settings section
+  // to each project's Services page, so these are the FLAG-OFF links; the flag-on link is the next
+  // test. Keyed by stem, positions derived from STEP_KEYS: a future step insertion must not re-break
+  // this test. hrefs are as-rendered (button() escapes & to &amp;).
+  await withServicesUi("0", async () => {
+    const midTour = [
+      [STEP_KEYS.indexOf("ai"), "/dashboard/settings?section=models"],
+      [STEP_KEYS.indexOf("integrations"), "/dashboard/settings?section=integrations"],
+      // Item 5 PR1: the bot step deep-links into the guided creation wizard.
+      [STEP_KEYS.indexOf("bot"), "/dashboard/bot-builder?new=1"],
+      [STEP_KEYS.indexOf("starter"), "/dashboard/extensions#collections"],
+      [STEP_KEYS.indexOf("connect"), "/dashboard/connect"],
+    ];
+    for (const [step, href] of midTour) {
+      const a = anchorFor(await render(step), href);
+      assert.match(a, /target="_blank"/, `mid-tour step ${step} (${href}) must keep target=_blank`);
+      assert.match(a, /rel="noopener"/, `mid-tour step ${step} (${href}) must keep rel=noopener`);
+    }
+  });
+});
+
+// The Services UI is on by default (project services decision 5): the integrations step then points
+// at the Services entry point, and never at the retired settings section.
+test("with the Services UI on, the integrations step deep-links Services instead", async () => {
+  await withServicesUi(undefined, async () => {
+    const html = await render(STEP_KEYS.indexOf("integrations"));
+    assert.ok(html.includes('href="/dashboard/projects"'), "the Services entry point");
+    assert.ok(!html.includes("section=integrations"), "not the retired settings section");
+    const a = anchorFor(html, "/dashboard/projects");
+    assert.match(a, /target="_blank"/);
+    assert.match(a, /rel="noopener"/);
+  });
 });
 
 // The Bot Builder "no model" links go straight to Add a provider.

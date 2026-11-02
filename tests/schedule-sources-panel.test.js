@@ -12,6 +12,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { fromLaptop } from "./helpers/off-box.js";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "crow-sched-src-"));
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: tmpDir }, stdio: "pipe" });
@@ -101,7 +102,7 @@ beforeEach(async () => {
 
 async function call({ method = "GET", query = {}, body = {}, lang = "en", session = "sess-local" } = {}) {
   const out = { status: 200, html: null, location: null };
-  const req = { method, query, body, csrfToken: "tok123", dashboardSession: session };
+  const req = fromLaptop({ method, query, body, csrfToken: "tok123", dashboardSession: session });
   const res = {
     headersSent: false,
     status(n) { out.status = n; return this; },

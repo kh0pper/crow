@@ -103,6 +103,7 @@ import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { decideOption } from "../board/decision-service.js";
 import { assertAssignableBot, isEnabledBot } from "../board/bot-lookup.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { parseCookies } from "../dashboard/auth.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { documentsForCard } from "../make/card-docs.js";
@@ -164,13 +165,16 @@ async function ensureBotJobs(cdb) {
  * earlier attempt set {kind:"card"} here, which inverted exactly that
  * ownership and was reverted.)
  */
-async function enqueueCardJob(cdb, { botId, cardId, action, goal }) {
+async function enqueueCardJob(cdb, { botId, cardId, action, goal, principal = null }) {
   await ensureBotJobs(cdb);
   const jobId = "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  // principal 'owner' only when the dispatch route saw the owner's LOCAL password session (plan
+  // decision 1, rev 4 H2: a job is the owner's exactly when principal = 'owner'; Task 16 fix round 1, I1:
+  // an SSO or peer session is not). Anything else is NULL, not the owner's.
   await cdb.execute({
-    sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id, card_action) "
-       + "VALUES (?, ?, ?, 'queued', NULL, 'card', ?, ?)",
-    args: [jobId, botId, goal, cardId, action],
+    sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id, card_action, principal) "
+       + "VALUES (?, ?, ?, 'queued', NULL, 'card', ?, ?, ?)",
+    args: [jobId, botId, goal, cardId, action, principal === "owner" ? "owner" : null],
   });
   return jobId;
 }
@@ -921,6 +925,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const jobId = await enqueueCardJob(cdb, {
         botId: bot, cardId: id, action: "execute",
         goal: "Execute board card #" + id,
+        principal: (await isLocalPasswordSessionOn(cdb, req)) ? "owner" : null,
       });
       return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {

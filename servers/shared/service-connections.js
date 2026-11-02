@@ -283,6 +283,18 @@ async function undoCreate(db, uuid, deleteServiceSecrets) {
   } catch { /* the original error wins; never log */ }
 }
 
+/**
+ * Undo a connection the connect route just made, when a step after createConnection failed (Task
+ * 16c: its binding could not be written). The same order as undoCreate (secrets first, then the
+ * row), but for the row that did go active. Only the creating route calls this, for the uuid it
+ * just got back. Throws on failure (the caller answers 500 either way).
+ */
+export async function rollbackNewConnection(db, uuid, { deleteServiceSecrets = defaultDeleteServiceSecrets } = {}) {
+  if (typeof uuid !== "string" || !uuid) return;
+  await deleteServiceSecrets(db, uuid);
+  await db.execute({ sql: "DELETE FROM service_connections WHERE uuid = ?", args: [uuid] });
+}
+
 /** @returns {Promise<Connection|null>} */
 export async function getConnection(db, uuid) {
   if (typeof uuid !== "string" || !uuid) return null;
@@ -355,14 +367,56 @@ export async function recordTest(db, uuid, { ok, error = null, now } = {}) {
   return getConnection(db, uuid);
 }
 
-/** A child failed to start or exited early (Task 14's cooldown): error / child_unavailable. */
-export async function recordChildFailure(db, uuid) {
+/** The classes a child start may record: its own failure, or a folder refused at spawn (Task 14). */
+export const CHILD_FAILURE_CLASSES = Object.freeze(new Set(["child_unavailable", "forbidden_target", "not_found", "not_a_vault"]));
+
+/**
+ * A child failed to start or exited early (Task 14's cooldown): error / child_unavailable. A
+ * folder refused at spawn passes its own class (`error`, one of CHILD_FAILURE_CLASSES; anything
+ * else is stored as child_unavailable).
+ */
+export async function recordChildFailure(db, uuid, { error = "child_unavailable" } = {}) {
+  const cls = CHILD_FAILURE_CLASSES.has(error) ? error : "child_unavailable";
   await db.execute({
-    sql: `UPDATE service_connections SET status = 'error', last_error = 'child_unavailable', updated_at = datetime('now')
+    sql: `UPDATE service_connections SET status = 'error', last_error = ?, updated_at = datetime('now')
           WHERE uuid = ? AND status IN ('active', 'error', 'needs_reauth')`,
-    args: [uuid],
+    args: [cls, uuid],
   });
   return getConnection(db, uuid);
+}
+
+/**
+ * A repair start (Settings → Advanced → Restart) succeeded: an 'error' row whose last_error is
+ * one of `classes` (the child failures that start just disproved) goes back to active. Any other
+ * error (a failed live test) is left for Test again. @returns {Promise<boolean>} whether it changed.
+ */
+export async function recordChildRecovered(db, uuid, { classes = ["child_unavailable"] } = {}) {
+  const list = [...classes].filter((c) => CHILD_FAILURE_CLASSES.has(c));
+  if (list.length === 0) return false;
+  const r = await db.execute({
+    sql: `UPDATE service_connections SET status = 'active', last_error = NULL, updated_at = datetime('now')
+          WHERE uuid = ? AND status = 'error' AND last_error IN (${list.map(() => "?").join(", ")})`,
+    args: [uuid, ...list],
+  });
+  return r.rowsAffected > 0;
+}
+
+/**
+ * The connection a child may be started for, or null: the local owner's row (owner_contact_id IS
+ * NULL), status 'active', in a project that is not archived — the predicate connectionsFor
+ * applies, by uuid (m8: status alone is not enough). `allowError` (the owner's Restart only) also
+ * returns an 'error' row; the caller decides whether that error is one a start can repair.
+ * Disconnected, needs_install and needs_reauth rows are never returned.
+ */
+export async function servableConnection(db, uuid, { allowError = false } = {}) {
+  if (typeof uuid !== "string" || !uuid) return null;
+  const statuses = allowError ? "('active', 'error')" : "('active')";
+  const r = (await db.execute({
+    sql: `SELECT ${COLS} FROM service_connections
+          WHERE uuid = ? AND owner_contact_id IS NULL AND status IN ${statuses} AND ${NOT_ARCHIVED}`,
+    args: [uuid],
+  })).rows[0];
+  return r ? toConnection(r) : null;
 }
 
 /**
@@ -394,6 +448,11 @@ export async function disconnectConnection(db, uuid, { actor = "local", disconne
  * project_spaces row: service_connections.project_id cascades, and without it the keychain rows
  * would be left 'active' with no connection (once disconnected they stay masked, never served).
  * Safe to repeat. @returns {Promise<{disconnected:number}>} connections that changed state.
+ *
+ * Running children are not stopped here (this shared store can't reach the gateway's child
+ * registry): every call to them is refused at once (servableConnection → not_active) and the
+ * idle stop reaps them (servers/gateway/services/children.js). A caller in the gateway may also
+ * call stopChild(uuid) per connection.
  */
 export async function disconnectProjectConnections(db, projectId, { actor = "local" } = {}) {
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");

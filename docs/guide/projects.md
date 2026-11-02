@@ -140,6 +140,16 @@ A bot's **project** is set on the `pi_bot_defs.project_id` column. When the brid
 
 Edit a bot's project via the Bot Builder's **Advanced › Board and project** section.
 
+## Services
+
+A service connection is one account of a service connected to one project: two GitHub accounts in the same project become `work` and `personal`, each with its own token, and one project's tokens are never another project's. Connect an account from the project's **Services** page, the same page where you can test it again, turn it private, or disconnect it.
+
+Bots use a project's connections only on your own turns: when you chat with the bot in that project, or when you give it a card to work. A bot answering Crow messages, Discord, Gmail, Telegram or Slack never gets them, whoever wrote in, and voice does not have them yet. A bot also sees only the services you select for it in Bot Builder; connecting GitHub to a project does not hand it to every bot in that project.
+
+Some connections are private and are never given to a bot: Obsidian always, Notion and Discord by default, and any other service once you switch it private on its row. A private connection stays yours alone.
+
+Dashboard chat in a project uses that project's connections, but only on your own signed-in session from another device. Chat on the Crow box itself gets none.
+
 ## Audit log
 
 Every meaningful mutation appends to `project_audit_log`:

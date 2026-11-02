@@ -129,6 +129,10 @@ Without it, the gateway refuses those requests and logs `[net] WARN forwarding h
 With `CROW_TRUSTED_PROXIES` covering a loopback address (`loopback`, `127.0.0.1`, `::1`), every connection from the same machine counts as that proxy, including your bots' own. The doors that only same-box bots may use (the cloud door for cloud models, the signing relay, and the loopback tool mounts) then refuse every request, so bots on this host lose cloud models and their tool connections. The gateway logs `[net] WARN CROW_TRUSTED_PROXIES covers a loopback address` once at boot when this applies. If your bots need those doors, leave loopback out of `CROW_TRUSTED_PROXIES` and reach the Crow's Nest another way (for example Tailscale Serve).
 :::
 
+::: info A same-box proxy can't vouch for you
+A proxy on the same machine as Crow (loopback, one of the machine's own addresses, or a container bridge) can't be told apart from any local program writing the same `X-Forwarded-For`, so Crow treats every request through it as coming from the machine itself. Those requests are never your own turn: connected services and phone call approvals need you to reach Crow directly, through Tailscale Serve or from another machine on your LAN. Everything else works as usual. See [Requests from this machine](../architecture/dashboard.md#requests-from-this-machine).
+:::
+
 On Linux, Crow honours Tailscale Serve's headers only on connections opened by tailscaled's user (`CROW_SERVE_PEER_UIDS`, default `0`, read from `/proc/net/tcp`). On a host without `/proc` (macOS, Windows native) that check cannot run, so it fails closed and tailnet users through Serve are refused. To accept them anyway, set `CROW_SERVE_PEER_UIDS=off` (logged as a warning: any local process could then forge a tailnet identity).
 
 ## Step 4: Set the Public URL

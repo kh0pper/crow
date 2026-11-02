@@ -151,6 +151,8 @@ import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
+import { offerableProjectConnections } from "./services/children.js";
+import { scopeRefFor } from "../../scripts/pi-bots/actor-sig.mjs";
 import { summarizeSessionByThread, summariesEnabled } from "./perch/session-summary.js";
 import { applyBriefing, briefingEnabled, briefingPromptFile, removeBriefingPromptFile, sessionBriefing, recordBriefing, reconcileBriefing, pruneBriefing, targetRankOf, RANK_HERE } from "./perch/briefing.js";
 
@@ -774,6 +776,11 @@ export function createInteractiveEngine({
     seams = {
       buildBotWorld: world.buildBotWorld,
       prepareSpawn: world.prepareSpawn,
+      // Project services (Task 18): the one blocks seam (service-blocks.mjs, re-exported by
+      // bot-world.mjs), and the filter the cycle-back fingerprint uses so a bot that selects
+      // none of the project's offerable connections never restarts for them.
+      withServiceBlocks: world.withServiceBlocks,
+      offerableConnections: world.offerableConnections,
       // Strand 2: a model's tool cap, from provider data (null = none).
       capFor: budget.capFor,
       PiRpc: br.PiRpc,
@@ -944,6 +951,19 @@ export function createInteractiveEngine({
       // a concurrent message() both check this and refuse rather than racing
       // the in-flight hibernate()/startChild() pair — see cycle()'s header.
       cycling: false,
+      // Project services (the owner's rule "only my own turns", plan decision 1): who
+      // started the turn this session is serving. "owner" only for the
+      // owner's own dashboard (the Perch routes pass it explicitly); anything
+      // else, and a missing value, is "other" (fail closed). startChild reads
+      // it: only an "owner" child may be given the project's service blocks.
+      servicesPrincipal: "other",
+      // The principal the CURRENT child was spawned for, the live child
+      // object when it was spawned holding service blocks (null otherwise),
+      // and the sorted active connection uuids of the project at that spawn
+      // (owner children only; M12 compares them on every owner message).
+      childPrincipal: null,
+      servicesChild: null,
+      connectionsFingerprint: null,
     };
   }
 
@@ -2460,6 +2480,150 @@ export function createInteractiveEngine({
     return JSON.stringify([...new Set([...(a ? parse(a) : []), ...parse(b)])]);
   }
 
+  // ---- project services: who started the turn (Task 16) --------------------
+  //
+  // The owner's rule (plan decision 1): only the owner's own turns may use the
+  // owner's connected accounts. A Perch child is started for ONE principal
+  // (s.servicesPrincipal at startChild) and only an "owner" child is offered
+  // the project's service blocks. The blocks themselves come from the
+  // `withServiceBlocks(world, prep, {scopeRef, ownerTurn, log})` seam, which
+  // Task 18 adds to loadSeams(); until it exists no child holds blocks and
+  // nothing below ever cycles. The seam's contract, as this engine uses it:
+  //   - called only for an owner child, with ownerTurn:true and the
+  //     session's scope ref (`s:<bot_sessions.id>`, null while the row does
+  //     not exist yet; Task 18 inserts the row first);
+  //   - it works on the shallow copy of prep.piRpcOpts it is handed and
+  //     returns { mcpConfig, serviceBlocks }; the engine adopts mcpConfig and
+  //     counts the child as holding blocks only when serviceBlocks names at
+  //     least one service. A throw drops the copy: the child starts without.
+  // The loopback mount asks sessionServicesLive(rowId) (through
+  // isOwnerTurnScope in servers/shared/turn-principal.js) on every call.
+
+  /**
+   * The project's connection uuids a bot could be offered, sorted and joined (M12). "" for no
+   * project. With the seams' offerableConnections and the child's def (Task 18), only the
+   * connections this bot could be offered count (selected by it, bound as connected, not
+   * sensitive): an owner message to a bot that selects none of them is "" both ways and never
+   * cycles the child.
+   *
+   * Fix round 1: the rows are the ones the blocks and the mount offer — active, plus an 'error'
+   * row ensureChild still retries on its own (listableConnection). A retryable row that counted
+   * in the blocks but not here would make every owner message look like a change and cycle the
+   * child for nothing.
+   */
+  async function connectionsFingerprintOf(projectId, S = null, def = null) {
+    if (projectId == null) return "";
+    const db = createDbClient();
+    try {
+      let list = await offerableProjectConnections(db, projectId);
+      if (S && typeof S.offerableConnections === "function" && def) list = S.offerableConnections(def, list, { crowHome });
+      return list.map((c) => String(c.uuid)).sort().join(",");
+    } finally { try { db.close(); } catch { /* closed */ } }
+  }
+
+  /** startChild's services half, for an owner child only. True when the child gets blocks. */
+  async function serviceBlocksForChild(S, s, world, prep, slog) {
+    // No seam, no blocks, and no read at all (fix round 1, M1).
+    if (typeof S.withServiceBlocks !== "function") return false;
+    try { s.connectionsFingerprint = await connectionsFingerprintOf(world.projectId, S, world.def); }
+    catch { s.connectionsFingerprint = null; slog("services: project connections unreadable"); }
+    const saved = prep.piRpcOpts;
+    prep.piRpcOpts = Object.assign({}, saved);
+    try {
+      const r = await S.withServiceBlocks(world, prep, { scopeRef: scopeRefFor({ sessionId: s.rowId }), ownerTurn: true, log: slog });
+      if (r && r.mcpConfig) prep.piRpcOpts.mcpConfig = r.mcpConfig;
+      const blocks = r && r.serviceBlocks;
+      return !!(blocks && typeof blocks === "object" && Object.keys(blocks).length > 0);
+    } catch (e) {
+      prep.piRpcOpts = saved;
+      slog("services: blocks skipped (" + (e && typeof e.code === "string" ? e.code : "error") + ")");
+      return false;
+    }
+  }
+
+  /** True while the session's live child is the one that was spawned holding service blocks. */
+  function childHoldsServices(s) {
+    return s.servicesChild != null && s.pi === s.servicesChild;
+  }
+
+  /**
+   * Project services (fix round 1): steer() and answer() drive the child that may be holding the
+   * owner's connected accounts, so a turn from anyone but the owner is refused here — BEFORE
+   * anything reaches pi.send, exactly as message() refuses to deliver text into such a child. A
+   * child holding no blocks keeps the old behaviour for every principal.
+   */
+  /**
+   * Project services: a session whose bot belongs to a project can, sooner or later, run the
+   * owner's turn with service blocks, and that turn inherits the session's model, permission
+   * mode, folder and plan mode. So on such a session (or one already serving the owner, or a
+   * child holding blocks) only the owner changes them, and a non-owner's text may not open with
+   * a slash command (pi's session commands, e.g. /plan or /model, change the same state).
+   */
+  function projectControlLocked(s) {
+    return s.projectId != null || s.servicesPrincipal === "owner" || childHoldsServices(s);
+  }
+  function refuseNonOwnerSlash(s, text, principal) {
+    if (principal === "owner" || !projectControlLocked(s)) return;
+    if (/^\s*\//.test(String(text == null ? "" : text))) throw engineError("not_owner_turn");
+  }
+
+  function refuseIfNotOwnerTurn(s, opts) {
+    const principal = opts && typeof opts === "object" ? opts.principal : undefined;
+    if (principal !== "owner" && childHoldsServices(s)) throw engineError("not_owner_turn");
+  }
+
+  /**
+   * message()'s services pre-step, run BEFORE the turn is claimed (cycle()
+   * refuses once one is). A turn from anyone but the owner, reaching a child
+   * that holds blocks, first cycles it without them. An owner turn cycles
+   * back when the child was started for someone else, or (M12) when the
+   * project's active connections changed since this child started; both only
+   * once the blocks seam exists. A failed cycle is logged here and decided
+   * by message()'s synchronous guard: a non-owner turn is never delivered
+   * into a child that still holds blocks, an owner turn is delivered anyway.
+   */
+  async function alignServicesChild(S, s, asOwner) {
+    if (!s.pi || s.turn || s.cycling || s.state === "stopped") return;
+    if (!asOwner) {
+      if (!childHoldsServices(s)) return;
+      s.servicesPrincipal = "other";
+    } else {
+      if (typeof S.withServiceBlocks !== "function") return;
+      let fp;
+      try { fp = await connectionsFingerprintOf(s.projectId, S, s.servicesDef || null); } catch { sessionLog(s)("services: project connections unreadable"); return; }
+      if (!s.pi || s.turn || s.cycling || s.state === "stopped") return;
+      const stale = s.childPrincipal === "owner" ? fp !== s.connectionsFingerprint : fp !== "";
+      if (!stale) return;
+      s.servicesPrincipal = "owner";
+    }
+    try { await cycle(s.sessionId); }
+    catch (e) { sessionLog(s)("services: cycle refused (" + ((e && e.code) || "error") + ")"); }
+  }
+
+  /**
+   * For the loopback mount (isOwnerTurnScope): true only while the session
+   * with this bot_sessions id serves the owner's turn AND its live child is
+   * the one spawned holding service blocks. Synchronous, never throws; an
+   * unknown, ambiguous or dead session is false.
+   */
+  function sessionServicesLive(rowId) {
+    try {
+      const id = Number(rowId);
+      if (!Number.isSafeInteger(id) || id <= 0) return false;
+      let hit = null;
+      for (const s of sessions.values()) {
+        if (s.rowId !== id) continue;
+        if (hit) return false;
+        hit = s;
+      }
+      if (!hit || hit.state === "stopped") return false;
+      if (hit.servicesPrincipal !== "owner" || !childHoldsServices(hit)) return false;
+      return hit.pi._exitCode == null;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Build the world FRESH, warm the model, construct the child, attach the exit
    * handler, and stamp the row. Shared by spawn (piSessionId null) and wake
@@ -2468,6 +2632,10 @@ export function createInteractiveEngine({
    */
   async function startChild(S, s) {
     const slog = sessionLog(s);
+    // Project services: nothing about the previous child carries over.
+    s.servicesChild = null;
+    s.childPrincipal = null;
+    s.connectionsFingerprint = null;
     // Track 3 Task 6: serialized per-bot — see buildWorldSerialized's comment.
     // acceptance F2: a card-bound session must be able to call
     // board_report_result — cardBound makes the world builder mint the
@@ -2507,6 +2675,9 @@ export function createInteractiveEngine({
     s.thirdPartyExtensions = ((world.def && world.def.tools && world.def.tools.pi_extensions) || []).length > 0;
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
+    // Project services (Task 18): the def this child is pinned from, for the cycle-back's
+    // selection-aware fingerprint (connectionsFingerprintOf).
+    s.servicesDef = world.def || null;
     // Track 3 Task 6: refreshed on EVERY startChild (spawn and wake alike),
     // so a dispatch brief composed after a wake reflects the current world.
     s.tasksDbPath = world.tasksDbPath;
@@ -2638,6 +2809,12 @@ export function createInteractiveEngine({
         slog("briefing skipped: " + (e && typeof e.code === "string" ? e.code : "error"));
       }
     }
+    // Project services (plan decision 1, Task 16): only a child started for
+    // the owner's own turn may hold the project's service blocks. The
+    // principal is fixed for this child's life; message() cycles the child
+    // when a turn from someone else reaches one that holds blocks.
+    const servicesFor = s.servicesPrincipal === "owner" ? "owner" : "other";
+    const withBlocks = servicesFor === "owner" ? await serviceBlocksForChild(S, s, world, prep, slog) : false;
     const pi = new S.PiRpc(Object.assign({}, prep.piRpcOpts, {
       piSessionId: resume,
       // Open-anywhere B3/B4: pi's process cwd is the operator's chosen dir.
@@ -2676,6 +2853,8 @@ export function createInteractiveEngine({
     }));
     s.pi = pi;
     s.piSessionId = resume;
+    s.childPrincipal = servicesFor;
+    s.servicesChild = withBlocks ? pi : null;
     // Wave 2: facts for the Session tab — the child's start time (uptime is
     // per-CHILD, never per-session) and the effective tool count straight
     // from the pinned --tools csv the PiRpc just computed.
@@ -3557,7 +3736,7 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null, briefing = null, briefingRank = null, briefingRefs = [] }) {
+  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null, briefing = null, briefingRank = null, briefingRefs = [], principal } = {}) {
     if (!botId) throw engineError("bad_request");
     // Artifacts (untrusted rounds, spec §7.3): a session that must start
     // NARROWED. A JSON array of tool ids to disable — the same contract as
@@ -3604,6 +3783,9 @@ export function createInteractiveEngine({
     const threadId = "perchlive-" + randomUUID().slice(0, 8);
     const s = newSession(String(botId), threadId);
     s.forcedNarrowing = forced;
+    // Project services: no default. Only an explicit "owner" (the owner's
+    // dashboard routes) is the owner's; a missing or unknown value is not.
+    s.servicesPrincipal = principal === "owner" ? "owner" : "other";
     // Open-anywhere B4: store the operator's chosen working directory before
     // startChild so the world builder resolves it (buildBotWorld validates it
     // hard and throws bad_cwd on a non-directory; the route maps that to 400).
@@ -3724,10 +3906,17 @@ export function createInteractiveEngine({
     return { sessionId: s.sessionId, threadId: s.threadId, state: s.state };
   }
 
-  async function message(sessionId, text, images) {
+  async function message(sessionId, text, images, opts) {
+    // A null or non-object options argument is "no principal" (fix round 1, M8), never a throw.
+    const principal = opts && typeof opts === "object" ? opts.principal : undefined;
     const S = await loadSeams();
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
+    // Project services: only an explicit "owner" is the owner's turn (no
+    // default; injected text from a bundle or a hand-off is "other").
+    const asOwner = principal === "owner";
+    refuseNonOwnerSlash(s, text, principal);
+    await alignServicesChild(S, s, asOwner);
     // ---- one synchronous block: guards + reservation, no await between ----
     // (Voice hand-off: a refusal thrown in here has no turn to report, so
     // refusedBeforeTurn records it as the first outcome instead.)
@@ -3743,6 +3932,11 @@ export function createInteractiveEngine({
       // startChild() the same way two concurrent cycle()s used to. Refuse with
       // the same typed code cycle() itself uses for "busy right now".
       if (s.cycling) throw engineError("cycle_busy");
+      // Project services, fail closed: a turn from anyone but the owner is
+      // never delivered into a child that still holds service blocks (the
+      // pre-step's cycle failed or raced). The caller sees cycle_busy and
+      // retries, as for any cycle in flight.
+      if (!asOwner && childHoldsServices(s)) throw engineError("cycle_busy");
       // r1 C8: the wake path re-gates. Track 3 Task 7: reserveWithEviction is
       // itself synchronous up to its own handover — a synchronous throw here
       // (interactive_capacity with no eligible victim, pi_capacity,
@@ -3764,6 +3958,9 @@ export function createInteractiveEngine({
     // suppressed), `ended` (its outcome record).
     const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now(), errorShown: false, watched: false, noPush: false, ended: null };
     s.turn = turn;
+    // The turn's principal, set in the same synchronous block as the claim:
+    // a wake below starts its child for it, and sessionServicesLive reads it.
+    s.servicesPrincipal = asOwner ? "owner" : "other";
     // 2026-10-20: the operator wrote again, so an expired question is dealt
     // with: the session is no longer waiting on it.
     if (s.expiredAsk) settleAsk(s);
@@ -3873,14 +4070,18 @@ export function createInteractiveEngine({
    * claims a turn slot and never touches promptTurn: it sends a `steer`
    * frame at the child pi is already running, which queues it into the
    * live loop on its own. Refused honestly rather than silently dropped:
-   * `session_stopped` when the session is parked for good, `no_turn` when
-   * there is nothing running to steer, `pi_gone` when the child that WAS
+   * `session_stopped` when the session is parked for good, `not_owner_turn`
+   * when a non-owner tries to steer a child holding the owner's service
+   * blocks (fix round 1: the same rule message() applies to text), `no_turn`
+   * when there is nothing running to steer, `pi_gone` when the child that WAS
    * running the turn has since exited out from under it.
    */
-  async function steer(sessionId, text) {
+  async function steer(sessionId, text, opts) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
+    refuseIfNotOwnerTurn(s, opts);
+    refuseNonOwnerSlash(s, text, opts && typeof opts === "object" ? opts.principal : undefined);
     // Acceptance F3: a blank steer is a client bug (the drawer's composer
     // sent nothing), never a silent no-op — refused BEFORE the no_turn/
     // pi_gone checks so it is reported even when no turn is running.
@@ -4002,6 +4203,18 @@ export function createInteractiveEngine({
     // (undefined = "not in this request"), so a caller can send cwd without
     // disturbing the other controls.
     const hasCwd = opts.cwd !== undefined;
+
+    // Project services: the model, permission mode, working folder and plan mode decide what an
+    // owner turn's service tools run under. A setting a non-owner chooses now would carry into
+    // the owner's next turn (the session keeps it, and the owner's message cycles a child WITH
+    // blocks), so on a session whose project has any connection the owner's turn could be
+    // offered, only the owner changes them, whoever the session serves at this moment. An
+    // unreadable project counts as having connections (fail closed). The route passes the
+    // request's principal.
+    const hasPlanOff = hasPlanMode && opts.planMode === false;
+    if ((hasModel || hasPermissionMode || hasCwd || hasPlanOff) && opts.principal !== "owner" && projectControlLocked(s)) {
+      throw engineError("not_owner_turn");
+    }
 
     // Model/thinking/planMode switches share the one child clock a turn
     // already owns (commandSince/promptAckOnly ride the SAME correlated
@@ -4254,9 +4467,10 @@ export function createInteractiveEngine({
     return sessions.get(id) || (await adopt(id));
   }
 
-  async function answer(sessionId, requestId, value) {
+  async function answer(sessionId, requestId, value, opts) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
+    refuseIfNotOwnerTurn(s, opts);
     const card = s.pendingUi;
     // 2026-10-20: a late answer to a question that expired (pi's dialog timed
     // out, or pi-lab parked the turn) must run nothing and say why: pi no
@@ -4876,6 +5090,8 @@ export function createInteractiveEngine({
     message,
     steer,
     cycle,
+    // Project services (Task 16): the loopback mount's owner-turn check.
+    sessionServicesLive,
     control,
     options,
     commands,

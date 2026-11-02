@@ -29,6 +29,8 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { probeServerTools, readCanonicalMcp, CANONICAL_MCP_PATH } from "./mcp_writer.mjs";
 import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
+import { serviceById } from "../../servers/shared/service-catalog.js";
+import { isLegacyConfiguredAddon } from "../../servers/gateway/services/legacy-sources.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/pi-bots -> repo root (~/crow) -> bundles
@@ -216,6 +218,21 @@ export function listAvailableExtensions(crowHome = resolveCrowHome()) {
 }
 
 /**
+ * A connection-based service: its tools come from a project's connections, so a blind probe of
+ * its add-on entry would spawn it with no credentials. Two kinds of service are NOT connection
+ * based and probe as ordinary extensions: a Crow-wide toggle service (service.crowWide, e.g.
+ * arxiv) and a service add-on still configured the legacy way (every field set in the entry's
+ * env or in `env`, the child inherits the environment). `entry` may be a
+ * listInstalledExtensions() entry, whose `.block` is the env the probe would use, or a bare block.
+ */
+export function isConnectionService(id, entry, env = process.env) {
+  const service = serviceById(id);
+  if (!service || service.crowWide) return false;
+  const addonEntry = entry && typeof entry === "object" ? (entry.block || entry) : null;
+  return !isLegacyConfiguredAddon(id, addonEntry, undefined, env);
+}
+
+/**
  * LIVE tools for an extension on this instance. `ext` may be an entry from
  * listInstalledExtensions() (has .id/.block/.capabilities) or a bare server-id
  * string. Spawns the MCP server, runs tools/list (mcp_writer.probeServerTools),
@@ -232,6 +249,11 @@ export async function extensionTools(ext, opts = {}) {
   const cap =
     entry.capabilities || (capabilityIndex().get(sid) || {}).capabilities || null;
   const group = entry.group || (cap && cap.group) || sid;
+  // A connection-based service's tools come from its project connections, never from a blind
+  // probe of an add-on entry that carries no credentials.
+  if (isConnectionService(sid, entry)) {
+    return { ok: false, serverId: sid, group, error: "service bundle: tools come from its connections" };
+  }
   const block = entry.block || serverBlockFor(sid, crowHome);
   if (!block) {
     return { ok: false, serverId: sid, group, error: "not installed on this instance" };

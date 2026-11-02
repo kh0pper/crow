@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import express from "express";
 import { seedSource, seedArticle, REPO } from "./helpers/media-fixtures.js";
+import { markFromLaptop } from "./helpers/off-box.js";
 import { createDbClient } from "../servers/db.js";
 import { initMediaTables } from "../bundles/media/server/init-tables.js";
 import { forYouStories, hiddenSources, setSourceHidden, scoreStory, PICK_MAX, LIKED } from "../bundles/media/server/for-you.js";
@@ -47,6 +48,10 @@ before(async () => {
     const { default: mediaRouter } = await import("../bundles/media/panel/routes.js");
     const app = express();
     app.use(express.json());
+    // The owner's turn is only ever granted to a request from another machine (servers/shared/
+    // self-origin.js), and this file's own client is loopback. Plant the peer-class memo a direct
+    // TCP peer would produce, so these requests read as coming from the owner's laptop.
+    app.use((req, _res, next) => { markFromLaptop(req); next(); });
     app.use(mediaRouter(auth));
     server = app.listen(0, "127.0.0.1");
     await new Promise((ok) => server.once("listening", ok));
@@ -135,7 +140,7 @@ test("POST /api/media/sources/:id/hidden: a session, the owner only, CSRF, then 
   const s = await seedSource(db, { name: "Loud", url: "https://loud.example.invalid/feed" });
   const post = (path, body, headers = AUTH) => fetch(base + path, { method: "POST", headers, body: JSON.stringify(body) });
   assert.equal((await post(`/api/media/sources/${s}/hidden`, { hidden: true }, { "Content-Type": "application/json" })).status, 401);
-  assert.equal((await post(`/api/media/sources/${s}/hidden`, { hidden: true })).status, 403, "no CSRF header");
+  assert.equal((await post(`/api/media/sources/${s}/hidden`, { hidden: true })).status, 403, "no CSRF header: the owner's request without the token is refused");
   const H = { ...AUTH, "X-Crow-Csrf": "tok" };
   // Only the owner: a session without the password scope, or a paired instance's SSO session,
   // gets 404 and changes nothing.

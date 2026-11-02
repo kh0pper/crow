@@ -1,9 +1,11 @@
 /**
  * Bot Builder — the tool sources a bot can draw from, for the Abilities and
  * Safety tabs: every probed MCP server (core Crow servers, canonical extras,
- * installed extensions) with a read/write-classified tool catalog.
+ * installed extensions) with a read/write-classified tool catalog, plus the
+ * bot project's connected services (their tools come from the cache, never a
+ * blind probe of the bundle).
  */
-import { probeAll, probeExtensions } from "./data-queries.js";
+import { probeAll, probeExtensions, connectedServiceSources } from "./data-queries.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { readCanonicalMcp } from "../../../../../scripts/pi-bots/mcp_writer.mjs";
 import { catalogFromProbe, classifyTool, sourceLabel } from "./tool-access.js";
@@ -16,10 +18,15 @@ let _override = null;
 export function _setSourcesForTest(v) { _override = v; }
 
 /**
- * @returns {Promise<{error:string|null, sources:Array<{server:string, name:string, account:string, ok:boolean, error?:string, catalog:Array<{name:string,access:string,label:string}>}>}>}
+ * The tool sources of a bot: probed MCP servers, installed extensions, and — for a bot in a
+ * project — that project's connected services (one row per service, tools from the cache or a
+ * single start).
+ * @param {{db?:object, projectId?:number|null, crowHome?:string}} [opts]
+ * @returns {Promise<{error:string|null, sources:Array<object>}>}
  */
-export async function loadSources() {
+export async function loadSources({ db = null, projectId = null, crowHome = null } = {}) {
   if (_override) return typeof _override === "function" ? _override() : _override;
+  const home = crowHome || resolveCrowHome();
   const out = [];
   let error = null;
   const probe = await probeAll();
@@ -43,7 +50,7 @@ export async function loadSources() {
     }
   }
   try {
-    for (const { ext, probe: ep } of await probeExtensions(resolveCrowHome())) {
+    for (const { ext, probe: ep } of await probeExtensions(home)) {
       const accountLabel = accountOf(ext.block) || accountOf(canonical[ext.id]);
       const lbl = sourceLabel(ext.id, "en", { account: accountLabel });
       out.push({
@@ -53,6 +60,19 @@ export async function loadSources() {
       });
     }
   } catch { /* extensions are optional */ }
+  if (db != null && projectId != null) {
+    try {
+      // One start budget for the whole page: a service's child starts at most once.
+      const connected = await connectedServiceSources({ db, projectId, crowHome: home, started: new Set() });
+      for (const src of connected) {
+        out.push({
+          server: src.server, name: src.name, group: src.group, connected: true,
+          ok: src.ok, error: undefined, privateOnly: src.privateOnly,
+          catalog: catalogFromProbe(src.tools), accountLabel: "",
+        });
+      }
+    } catch { /* services are optional */ }
+  }
   return { error, sources: out };
 }
 
@@ -68,7 +88,9 @@ export async function loadSources() {
 /** A source's name and account for the viewer's language. */
 export function sourceDisplay(src, lang) {
   const lbl = sourceLabel(src.server, lang, { account: src.accountLabel || "" });
-  return { name: lbl.known ? lbl.name : (src.group || src.name || src.server), account: src.account || lbl.account };
+  // A source's own name wins: an extension's name already falls back to its group, and a
+  // connected service's name is its catalog name (not the "services" grouping).
+  return { name: lbl.known ? lbl.name : (src.name || src.group || src.server), account: src.account || lbl.account };
 }
 
 export function selectedWriteTools(def, catalog = null) {

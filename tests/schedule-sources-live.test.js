@@ -10,6 +10,7 @@ import { join } from "node:path";
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
+import { markFromLaptop } from "./helpers/off-box.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "schedule-src-live-"));
 process.env.CROW_HOME = join(scratch, "home");
@@ -74,7 +75,7 @@ before(async () => {
   app.use(express.static(fileURLToPath(new URL("../servers/gateway/public", import.meta.url))));
   app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
   app.use("/dashboard", express.urlencoded({ extended: false }));
-  app.use("/dashboard", (req, res, next) => { if (/crow_session=good/.test(req.headers.cookie || "")) req.dashboardSession = "good"; next(); });
+  app.use("/dashboard", (req, res, next) => { if (/crow_session=good/.test(req.headers.cookie || "")) { req.dashboardSession = "good"; markFromLaptop(req); } next(); });
   app.use("/dashboard", csrfMiddleware);
   app.get("/login", (req, res) => { res.setHeader("set-cookie", ["crow_session=good; Path=/", "crow_csrf=tok123; Path=/"]); res.end("ok"); });
   app.all("/dashboard/schedule", async (req, res, next) => {

@@ -22,13 +22,14 @@ const onboardingPanel = (await import("../servers/gateway/dashboard/panels/onboa
 const { STEP_KEYS } = await import("../servers/gateway/dashboard/panels/onboarding.js");
 const tiles = await import("../servers/gateway/apps/extra-tiles.js");
 const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+const SENS = await import("../servers/shared/service-sensitivity.js");
 const { isAppIconKey } = await import("../servers/gateway/dashboard/shared/app-icons.js");
 
 const SECRET = "ghp_SHOULD_NEVER_APPEAR_1234567890";
 const ENV_BEFORE = { ...process.env };
 after(() => { for (const k of ["CROW_SERVICES_UI", "GITHUB_PERSONAL_ACCESS_TOKEN"]) { if (k in ENV_BEFORE) process.env[k] = ENV_BEFORE[k]; else delete process.env[k]; } });
 
-const flag = (on) => { if (on) process.env.CROW_SERVICES_UI = "1"; else delete process.env.CROW_SERVICES_UI; };
+const flag = (on) => { process.env.CROW_SERVICES_UI = on ? "1" : "0"; };
 
 async function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "crow-t13-db-"));
@@ -100,6 +101,32 @@ test("flag on: Advanced lists a connection's status and error class, no secret",
     VALUES ('u-1', ?, 'github', 'paste_key', 'Main', 'main', 'error', 'auth_failed')`, args: [projectId] });
   const html = await section.render({ req: { crowScope: { all: true } }, db, lang: "en" });
   assert.ok(html.includes("Main") && html.includes("Not working") && html.includes("<code>auth_failed</code>"));
+});
+
+test("flag on (Task 16c): Advanced shows each connection's Private switch: its default, locked for obsidian, posting to the owner route", async () => {
+  flag(true);
+  const { db, projectId } = await freshDb();
+  for (const [uuid, svc, label] of [["00000000-0000-4000-8000-0000000000a1", "github", "gh"], ["00000000-0000-4000-8000-0000000000a2", "notion", "nt"], ["00000000-0000-4000-8000-0000000000a3", "obsidian", "ob"]]) {
+    await db.execute({ sql: `INSERT INTO service_connections (uuid, project_id, service_id, method, account_label, label_slug, status)
+      VALUES (?, ?, ?, 'paste_key', ?, ?, 'active')`, args: [uuid, projectId, svc, label, label] });
+    if (svc !== "github" || label === "gh") SENS.recordConnectionBinding({ uuid, serviceId: svc });
+  }
+  // A row whose service_id isn't the one bound (a bot rewrote it): shown private and locked.
+  await db.execute({ sql: `INSERT INTO service_connections (uuid, project_id, service_id, method, account_label, label_slug, status)
+    VALUES ('00000000-0000-4000-8000-0000000000a4', ?, 'github', 'paste_key', 'flip', 'flip', 'active')`, args: [projectId] });
+  SENS.recordConnectionBinding({ uuid: "00000000-0000-4000-8000-0000000000a4", serviceId: "obsidian" });
+  const html = await section.render({ req: { crowScope: { all: true } }, db, lang: "en" });
+  const box = (uuid) => (html.match(new RegExp(`<input type="checkbox" data-int-private="${uuid}"[^>]*>`)) || [""])[0];
+  assert.ok(box("00000000-0000-4000-8000-0000000000a1") && !/ checked/.test(box("00000000-0000-4000-8000-0000000000a1")), "github: not private");
+  assert.match(box("00000000-0000-4000-8000-0000000000a2"), / checked/, "notion: private by default");
+  assert.doesNotMatch(box("00000000-0000-4000-8000-0000000000a2"), / disabled/, "and the owner may turn it off");
+  assert.match(box("00000000-0000-4000-8000-0000000000a3"), / checked disabled/, "obsidian: locked");
+  assert.match(box("00000000-0000-4000-8000-0000000000a4"), / checked disabled/, "a flipped row: private and locked");
+  assert.ok(html.includes(t("services.private.locked", "en")) && html.includes(t("services.private.label", "en")));
+  assert.ok(html.includes("'/sensitive'") && html.includes("'X-Crow-Csrf': csrf"), "posts the owner route with CSRF");
+  const script = html.slice(html.indexOf("<script>"));
+  assert.ok(!script.includes("`") && !script.includes("innerHTML"), "no backtick, textContent only");
+  assert.match(await section.render({ req: { crowScope: { all: true } }, db, lang: "es" }), /Tratar como privado/);
 });
 
 test("flag on: the project home and onboarding link to Services", async () => {

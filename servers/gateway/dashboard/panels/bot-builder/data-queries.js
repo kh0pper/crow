@@ -21,6 +21,7 @@ import {
   resolveCrowHome,
   listInstalledExtensions,
   extensionTools,
+  isConnectionService,
   serversForProbe,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
@@ -28,6 +29,10 @@ import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposa
 import { piModelsFileKeys } from "../../../../../scripts/pi-bots/pi-model-catalog.mjs";
 import { piSpawnTarget, readPiModelsJson } from "../../../../../scripts/pi-bots/pi_provider_id.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
+import { serviceCatalog } from "../../../../shared/service-catalog.js";
+import { connectionsFor, listConnections } from "../../../../shared/service-connections.js";
+import { connectionBindingOk, isSensitiveConnection } from "../../../../shared/service-sensitivity.js";
+import { ensureChild, listableConnection, serviceTools } from "../../../services/children.js";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
 import { readCustomRoleDefs } from "../../../../shared/model-roles-store.js";
 import { roleRefLabel } from "../../shared/bot-display.js";
@@ -95,7 +100,10 @@ let _extAt = 0;
 let _extHome = null;
 export async function probeExtensions(crowHome) {
   if (_extCache && _extHome === crowHome && Date.now() - _extAt < 300000) return _extCache;
-  const exts = listInstalledExtensions(crowHome).filter((e) => e.needsMint);
+  // A connection-based service's add-on entry carries no credentials (they live per connection),
+  // so a probe would spawn it blind. Its tools come from serviceToolsForBuilder instead. A
+  // Crow-wide toggle service or a legacy-configured service add-on is an ordinary extension.
+  const exts = listInstalledExtensions(crowHome).filter((e) => e.needsMint && !isConnectionService(e.id, e));
   const out = [];
   for (const ext of exts) {
     out.push({ ext, probe: await extensionTools(ext, { crowHome }) });
@@ -103,6 +111,83 @@ export async function probeExtensions(crowHome) {
   _extCache = out;
   _extAt = Date.now();
   _extHome = crowHome;
+  return out;
+}
+
+/** The name/description pair `catalogFromProbe` accepts, and nothing else. */
+function toolPairs(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((t) => t && typeof t.name === "string" && t.name)
+    .map((t) => ({ name: t.name, description: typeof t.description === "string" ? t.description : "" }));
+}
+
+/**
+ * A service's tools for Bot Builder: the tool cache first (starting nothing), else at most one
+ * child start per (service, project) per page load, from the first active bound connection.
+ * A connection whose values are private to the owner, or whose row is not bound to its service,
+ * is never handed to a bot.
+ * @param {object} db
+ * @param {{serviceId:string, projectId:number|null, crowHome?:string, ensure?:Function, started?:Set<string>}} opts
+ * @returns {Promise<{tools:{name:string, description:string}[], source:"cache"|"connection"|"none", privateOnly?:boolean}>}
+ */
+export async function serviceToolsForBuilder(db, {
+  serviceId, projectId, crowHome = resolveCrowHome(), ensure = ensureChild, started = new Set(),
+} = {}) {
+  // connectionsFor lists active rows only, but the mount also serves an 'error' row whose class a
+  // start retries (listableConnection): its cached tools must stay visible here too.
+  const active = await connectionsFor(db, { projectId, serviceId });
+  const rows = active.slice();
+  const seen = new Set(active.map((c) => c.uuid));
+  if (projectId != null) {
+    for (const c of await listConnections(db, { projectId, serviceId, ownerContactId: null })) {
+      if (!seen.has(c.uuid) && c.status === "error" && listableConnection(c)) rows.push(c);
+    }
+  }
+  if (rows.length === 0) return { tools: [], source: "none" };
+  const bound = rows.filter((c) => connectionBindingOk(c, { crowHome }));
+  // Every connection unbound (a missing or mismatched binding): like a private one, never offered.
+  if (bound.length === 0) return { tools: [], source: "none", privateOnly: true };
+  if (bound.every((c) => isSensitiveConnection(c, { crowHome }))) {
+    return { tools: [], source: "none", privateOnly: true };
+  }
+  const usable = bound.filter((c) => !isSensitiveConnection(c, { crowHome }));
+  if (usable.length === 0) return { tools: [], source: "none" };
+
+  const cached = serviceTools(serviceId, { crowHome });
+  if (cached && cached.length > 0) return { tools: toolPairs(cached), source: "cache" };
+
+  const first = usable.find((c) => c.status === "active");
+  const key = `${serviceId}|${projectId}`;
+  if (!first || started.has(key)) return { tools: [], source: "none" };
+  started.add(key);
+  try {
+    const got = await ensure(db, first.uuid, { crowHome });
+    const tools = serviceTools(serviceId, { crowHome });
+    return { tools: toolPairs(tools && tools.length ? tools : got && got.tools), source: "connection" };
+  } catch (err) {
+    // The class only: an error message can carry paths.
+    console.warn("[bot-builder] service tools unavailable: " + serviceId + " (" + (err && err.code ? err.code : "error") + ")");
+    return { tools: [], source: "none" };
+  }
+}
+
+/** Every service with a connection the mount can serve in this project, one builder source each. */
+export async function connectedServiceSources({ db, projectId, crowHome, started }) {
+  if (db == null || projectId == null) return [];
+  // The mount serves an active row, or an 'error' row a start retries (listableConnection).
+  // connectionsFor sees only active rows, so read the project's and keep both kinds.
+  const conns = (await listConnections(db, { projectId, ownerContactId: null })).filter((c) => listableConnection(c));
+  const present = new Set(conns.map((c) => c.serviceId));
+  const out = [];
+  for (const service of serviceCatalog()) {
+    if (!present.has(service.id)) continue;
+    const r = await serviceToolsForBuilder(db, { serviceId: service.id, projectId, crowHome, started });
+    out.push({
+      server: service.id, name: service.name, group: "services", connected: true,
+      ok: r.tools.length > 0, error: undefined, privateOnly: !!r.privateOnly,
+      tools: r.tools, accountLabel: "",
+    });
+  }
   return out;
 }
 

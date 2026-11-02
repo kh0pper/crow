@@ -98,13 +98,19 @@ const OWNER_ONLY = "Bots use these only when you start the conversation. Message
 const MEMBERS = "Each person connects their own accounts, on their own Crow. Their bots never use yours.";
 
 test("flag off: the page is a 404, and so is the panel's own route", async () => {
-  assert.equal(process.env.CROW_SERVICES_UI, undefined);
-  const r = await get("/dashboard/project/spring/services");
-  assert.equal(r.status, 404);
-  assert.doesNotMatch(r.body, /data-svc/);
-  const own = await get("/dashboard/project-services");
-  assert.equal(own.status, 404);
-  assert.doesNotMatch(own.body, /data-svc/);
+  // The kill switch is explicit now: servicesUiEnabled is false only for CROW_SERVICES_UI=0.
+  process.env.CROW_SERVICES_UI = "0";
+  try {
+    assert.equal(process.env.CROW_SERVICES_UI, "0");
+    const r = await get("/dashboard/project/spring/services");
+    assert.equal(r.status, 404);
+    assert.doesNotMatch(r.body, /data-svc/);
+    const own = await get("/dashboard/project-services");
+    assert.equal(own.status, 404);
+    assert.doesNotMatch(own.body, /data-svc/);
+  } finally {
+    delete process.env.CROW_SERVICES_UI;
+  }
 });
 
 test("a GitHub connection shows its service, account name, On and when it was tested, with Test again and Disconnect", async () => {
@@ -128,14 +134,14 @@ test("a GitHub connection shows its service, account name, On and when it was te
     // The drawer marks Spring as the scope, not as this page (that is the project home's link).
     assert.match(r.body, /<a href="\/dashboard\/project\/spring" class="shell-project is-current" aria-current="true">/);
     assert.match(r.body, /data-shell-tab="chat" aria-current="page"/, "Chat's tab is lit, as on the project home");
-    // No copy claims bots use a connection yet (botsLive is false).
-    assert.doesNotMatch(r.body, /Your bots can use it/);
+    // The connect sheet's success copy now says bots can use it (botsLive is true).
+    assert.match(r.body, /Your bots can use it/);
     // The Add / Connect sheets' data block (Task 11): catalog cards and copy, never a value.
     const block = (r.body.match(/<script type="application\/json" data-svc-data>([^<]*)<\/script>/) || [])[1];
     assert.ok(block, "the page carries the sheets' data block");
     const data = JSON.parse(block);
     assert.equal(data.project.slug, "spring");
-    assert.equal(data.botsLive, false);
+    assert.equal(data.botsLive, true);
     assert.ok(data.groups.paste.some((c) => c.serviceId === "github" && c.installed === true));
     assert.ok(!r.body.includes(TOKEN), "no stored value anywhere on the page");
   });
@@ -244,7 +250,7 @@ test("phone first: no fixed width above 360 px; every control at least 44 px; th
     const px = Number(m[1]) * (m[2] === "px" ? 1 : 16);
     assert.ok(px <= 360, `min-width ${m[0]}`);
   }
-  for (const sel of [".svc-project", ".svc-add", ".svc-menu > summary", ".svc-menu-item", ".svc-inline"]) {
+  for (const sel of [".svc-project", ".svc-add", ".svc-menu > summary", ".svc-menu-item", ".svc-inline", ".svc-private-switch"]) {
     const rule = css.slice(css.indexOf(`body.shell ${sel} {`));
     assert.match(rule.slice(0, rule.indexOf("}")), /min-height:\s*44px/, `${sel} is a 44 px target`);
   }
