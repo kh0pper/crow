@@ -489,14 +489,15 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_list_projects",
-    "List all projects with their status, type, and source counts.",
+    "List projects with their status, type, and source counts. Archived projects are left out unless include_archived is true or status is \"archived\".",
     {
       status: z.enum(["active", "paused", "completed", "archived"]).optional().describe("Filter by status"),
+      include_archived: z.boolean().optional().describe("Also list archived projects (default false)"),
       type: z.string().max(100).optional().describe("Filter by project type (research, data_connector, etc.)"),
       limit: z.number().max(100).default(20).describe("Maximum results to return"),
       offset: z.number().default(0).describe("Number of results to skip"),
     },
-    async ({ status, type, limit, offset }) => {
+    async ({ status, include_archived, type, limit, offset }) => {
       let sql = `
         SELECT p.*, COUNT(s.id) as source_count,
                (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id${liveNote("n")}) as note_count
@@ -509,6 +510,9 @@ export function createProjectServer(dbPath, options = {}) {
       if (status) {
         conditions.push("p.status = ?");
         params.push(status);
+      } else if (include_archived !== true) {
+        // Archived projects are out of the AI's default list (operator ruling 2026-11-02); ask for them by name.
+        conditions.push("(p.status IS NULL OR p.status != 'archived')");
       }
       if (type) {
         conditions.push("p.type = ?");
@@ -1804,7 +1808,7 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.resource("projects", "projects://list", async (uri) => {
     const { rows: projects } = await db.execute(
-      "SELECT id, name, type, status, description FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL ORDER BY updated_at DESC"
+      "SELECT id, name, type, status, description FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL AND (status IS NULL OR status != 'archived') ORDER BY updated_at DESC"
     );
     return {
       contents: [
