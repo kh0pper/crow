@@ -38,8 +38,9 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { chmodSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { capFor, checkToolBudget, channelBudgetMessage, operatorBudgetMessage } from "./tool-budget.mjs";
@@ -47,8 +48,13 @@ import { resolveModel, escalateRequested, stripEscalateToken } from "./model_res
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
-import { wrapPiSpawn } from "./pi_sandbox.mjs";
-import { piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
+import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
+import { containSelected, prepareAgentShadow, sweepStaleContainDirs } from "./pi_contain.mjs";
+import { containedCloudTokenPath } from "./pi_contain_agent.mjs";
+import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
+import { providerRowToObject } from "../../servers/shared/provider-row.js";
+import { CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY } from "../../servers/shared/cloud-consent.js";
+import { findPiLabDir, piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
 import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
@@ -92,6 +98,110 @@ import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
 import { roleSnapshotPath } from "../../servers/shared/model-roles-env.js";
 
 const HOME = process.env.HOME || homedir();
+const BRIDGE_APP_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+let containSwept = false;
+
+/**
+ * The providers rows and the cloud-door consent a contained spawn's generated
+ * agent dir is built from, read once per contained spawn. Only the providers
+ * this spawn NEEDS are carried (the turn's row, plus the pi provider id it
+ * resolved to, which is the crow-c-* door id for a consented cloud row); a
+ * provider with no door is reported by buildContainedAgentDir and the spawn is
+ * refused.
+ */
+function containModelInputs(resolved, piProvider) {
+  const providerIds = [];
+  for (const id of [resolved && resolved.provider, piProvider]) {
+    if (typeof id === "string" && id && !providerIds.includes(id)) providerIds.push(id);
+  }
+  const rows = [];
+  let consent = {};
+  let consentSalt = null;
+  let conn = null;
+  try {
+    // Read-only and only if the file is there: a spawn must never create the
+    // instance's crow.db, and a missing one just means no provider has a door.
+    conn = new Database(resolveSqlitePath(CROW_DB), { readonly: true, fileMustExist: true });
+    conn.pragma("busy_timeout = 10000");
+    for (const r of conn.prepare("SELECT * FROM providers").all()) rows.push(providerRowToObject(r));
+    const setting = (k) => {
+      try { const row = conn.prepare("SELECT value FROM dashboard_settings WHERE key = ?").get(k); return row ? row.value : null; } catch { return null; }
+    };
+    try {
+      const parsed = JSON.parse(setting(CLOUD_CONSENT_KEY) || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) consent = parsed;
+    } catch { consent = {}; }
+    consentSalt = setting(CLOUD_CONSENT_SALT_KEY);
+  } catch { /* no DB read: every needed provider is reported as having no door */ }
+  finally { try { if (conn) conn.close(); } catch { /* closed */ } }
+  return { providerIds, rows, consent, consentSalt };
+}
+
+/**
+ * Mount inputs for the contain tier (pi_contain.mjs buildContainPlan): the
+ * engine, this spawn's own paths and policy, the instance data dir, the
+ * cloud-door token file, and the MCP servers pi will start (the
+ * spawner-built closed-world config). Creates the per-instance bot cache and
+ * the per-spawn GENERATED agent dir (pi_contain_agent.mjs).
+ */
+function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes }) {
+  const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
+  const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
+  const botCacheDir = join(crowHome, "bot-cache");
+  try { mkdirSync(botCacheDir, { recursive: true, mode: 0o700 }); } catch {}
+  const servers = [];
+  const addServers = (cfg) => { for (const b of Object.values((cfg && cfg.mcpServers) || {})) if (b && typeof b === "object" && !b.disabled) servers.push(b); };
+  // Only the bot's OWN servers (the spawner-built closed-world config, which
+  // already carries each selected canonical block). The operator's other
+  // canonical servers are not bound: pi still tries to start them and they
+  // fail closed inside the sandbox, without their files or ports.
+  // Only the spawner-built config (fd delivery). The session dir's .mcp.json is
+  // bot-writable, so it never decides what gets bound (a server it names that
+  // is not bound fails closed inside the sandbox).
+  if (opts.mcpConfig) addServers(opts.mcpConfig);
+  // A bot with the sharing server needs the instance identity (messages, invites).
+  const unmaskIdentity = servers.some((b) => [b.command, ...(b.args || []), b.cwd].some((x) => /servers\/sharing\b/.test(String(x || ""))))
+    || ((def && def.tools && def.tools.crow_mcp) || []).some((t) => /^crow-sharing\b|^sharing\b/.test(String(t)));
+  const dataDir = dirname(CROW_DB);
+  // Per-spawn agent dirs (pi writes lock dirs and session state into them, and
+  // nothing here holds a provider key) live in the instance's own 0700 run
+  // dir, not the shared /tmp, and are never bound out of a sandbox.
+  const runDir = join(crowHome, "contain-run");
+  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); chmodSync(runDir, 0o700); } catch {}
+  if (!containSwept) { containSwept = true; sweepStaleContainDirs({ parent: runDir }); sweepStaleContainDirs(); }
+  const shadow = prepareAgentShadow(piAgentDir, {
+    parent: runDir,
+    ...containModelInputs(resolved, piProvider),
+    gatewayPort: gatewayListenPort(),
+    cloudTokenPath: containedCloudTokenPath(),
+    modelRolesFile: roleSnapshotPath(),
+  });
+  const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
+  return {
+    home: HOME, uid: process.getuid(), nodeBin, cliPath,
+    appRoot: BRIDGE_APP_ROOT,
+    piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
+    crowHome, dataDir, botCacheDir, unmaskIdentity,
+    dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
+    sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
+    writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
+    mcpServers: servers,
+    // Co-hosted Crow homes, RESOLVED (the secrets-dir scan's homes, including
+    // the ones declared in units/env files): the plan refuses a bind under,
+    // equal to, or over any of them, so a symlinked home and one outside $HOME
+    // are covered too.
+    otherHomes,
+    // The cloud-door token file, read-only, at the RESOLVED path the generated
+    // models.json's `!cat` apiKey names — and only when one of those `/llm/c`
+    // entries was generated. The providers this spawn needs with no door are
+    // reported too (wrapPiSpawn refuses the spawn while any is listed).
+    cloudTokenPath: shadow.cloudTokenPath,
+    missing: shadow.missing,
+    modelRolesEnv: shadow.env,
+    _cleanups: [shadow.cleanup],
+  };
+}
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.82.0 verified).
 // node = the process running the bridge; pi cli via the pi_resolver ladder
@@ -117,13 +227,18 @@ export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
   for (const k of Object.keys((def && def.spawn_env) || {})) {
-    // CROW_PI_SANDBOX is the operator's switch for the pi sandbox; a bot def must
+    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS / _DATA_KEEP) is the operator's switch for the pi sandbox; a bot def must
     // not be able to turn the sandbox off for itself.
     // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
     // must not point pi at a file of its choosing.
     // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
     // peer credential store.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
+    // Loader hooks run code before pi starts (and a bot can edit its own def
+    // through its DB-touching tools): never from a def. A NODE_OPTIONS made
+    // only of heap-size flags is kept.
+    if (/^LD_|^DYLD_/.test(k) || ["NODE_PATH", "NODE_V8_COVERAGE", "NODE_REPL_EXTERNAL_MODULE"].includes(k)
+      || (k === "NODE_OPTIONS" && !/^(\s*--max-old-space-size=\d+\s*)+$/.test(String(def.spawn_env[k])))) { stripped.push(k); continue; }
     spawnEnv[k] = def.spawn_env[k];
   }
   return { spawnEnv, stripped };
@@ -577,23 +692,67 @@ export class PiRpc {
     // dir, whatever it is called) is a co-hosted instance under the same uid:
     // its secrets dir is hidden too.
     const others = checkedInstanceSecretsDirs();      // throws (refusing the spawn) when a home cannot be checked or a remembered one is gone
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...others] });
+    // The co-hosts' HOMES (the scan returns their secrets dirs, real paths):
+    // the contain plan refuses a bind by resolved home path, not by name.
+    const otherHomes = others.map((d) => (basename(d) === "secrets" ? dirname(d) : d));
+    // Queue item 19 step 2a: the contain tier, when the spawner's env selects
+    // it for this bot. The mount inputs come from this spawn's own policy copy;
+    // the pi agent dir is a per-spawn GENERATED dir (a door-only models.json, no
+    // provider key, no auth.json) removed when pi exits. Under contain the
+    // secrets dirs are not bound at all: wrapPiSpawn reports each one either
+    // over-mounted (a bound path really contains it) or absent from the empty
+    // root (no bind covers it), and the `hidden` check below reads that report.
+    const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
+    let contain = null;
+    // Per-spawn contain resources (agent shadow, ...), removed exactly once:
+    // on any failure before pi runs, or once pi's whole process group is gone
+    // (the outer bwrap can exit while pi still drains inside its namespace).
+    this._containCleanups = [];
+    let launch;
+    try {
+      if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
+        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes });
+        this._containCleanups.push(...contain._cleanups);
+        // The generated agent dir carries a 0600 copy of the instance's role
+        // snapshot; the spawn env names that copy. <CROW_HOME> itself is never
+        // bound in the contain tier, so the real snapshot path would be a file
+        // pi cannot open.
+        if (contain.modelRolesEnv) Object.assign(env, contain.modelRolesEnv);
+      }
+      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, hideDirs: [secretsHere, ...others] });
+    } catch (e) {
+      this._runContainCleanup();
+      throw e;
+    }
     // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
-    // dir it cannot stat): otherwise refuse, never run with one visible.
-    if (launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
+    // dir it cannot stat): otherwise refuse, never run with one visible. In the
+    // contain tier a dir is unreachable either way: over-mounted read-only when
+    // a bound path really contains it, or absent from the empty root when none
+    // does. Both are reported by wrapPiSpawn, and a dir that a bound path
+    // contains and cannot be masked refuses the spawn there. Nothing is
+    // assumed hidden: a contain spawn with no report for a dir is not trusted.
+    if (launch.tier !== "contain" && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
+      this._runContainCleanup();
       throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
     }
     // Never hide fewer than were found: past a cap no real host reaches (bwrap
-    // takes a few thousand args), the spawn is refused instead.
-    if (launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
+    // takes a few thousand args), the spawn is refused instead. The cap is
+    // about mask arguments, which the contain tier does not use.
+    if (launch.tier !== "contain" && launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
+      this._runContainCleanup();
       throw new Error("pi sandbox: " + others.length + " Crow instance secrets dirs to hide (more than " + MAX_HIDDEN_INSTANCE_DIRS + "); refusing to start pi with any of them visible");
     }
     // Only now, with every one hidden, are they remembered (a refused spawn records nothing).
     if (launch.wrapper === "bwrap") { try { rememberInstanceSecretsDirs(others); } catch { /* next spawn */ } }
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     // Fail closed: the values file is written and card values trusted only
-    // when this instance's AND every other instance's secrets dir is masked.
-    const hidden = launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) => launch.masked.includes(d));
+    // when this instance's AND every other instance's secrets dir is out of
+    // reach of the child. That is the launcher's own report, in both tiers:
+    // masked by a tmpfs in the default tier, and under contain either masked
+    // the same way or not bound at all (a dir no bind covers does not exist
+    // inside the empty root).
+    const hidden = launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) =>
+      launch.masked.includes(d) || (launch.tier === "contain" && (launch.unreachable || []).includes(d)));
     // Not hidden: the bot could read the keychain key and add its own hash to
     // the card list, so no value may hide text on cards (cardTrusted:false).
     const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });
@@ -641,7 +800,14 @@ export class PiRpc {
       stdio.push("pipe");
     }
     this.mcpDelivery = fdMode ? "fd" : "file";
-    this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
+    try {
+      this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
+    } catch (e) {
+      this._runContainCleanup();
+      throw e;
+    }
+    // A spawn that fails asynchronously (ENOENT) emits 'error' and no 'exit'.
+    this.proc.on("error", () => this._runContainCleanup());
     if (fdMode) {
       // Write the config and CLOSE our end: pi-lab reads the fd to EOF once.
       // A config that could not be built (writeBotMcp failed — logged by the
@@ -715,6 +881,7 @@ export class PiRpc {
       : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: (l) => (opts.diagLog || ((x) => console.error(x)))(maskSecrets(l)) });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
     this.exited = new Promise((res) => this.proc.on("exit", (c) => {
+      if (this._containCleanups.length) this._scheduleContainCleanup();
       this._exitCode = c == null ? -1 : c;
       // Fail any pending waiters NOW with the real cause instead of leaving
       // them to time out cryptically (a fresh install resolving to a model
@@ -724,6 +891,21 @@ export class PiRpc {
       res(this._exitCode);
     }));
   }
+  /** Run every per-spawn contain cleanup once. */
+  _runContainCleanup() {
+    const list = this._containCleanups || [];
+    this._containCleanups = [];
+    for (const f of list) { try { f(); } catch {} }
+  }
+
+  /** Clean up once pi's process group is gone (bounded: 15 s). */
+  _scheduleContainCleanup(tries = 0) {
+    const pgid = this.proc && this.proc.pid;
+    if (!pgid || tries >= 75 || !processGroupAlive(pgid)) { this._runContainCleanup(); return; }
+    const t = setTimeout(() => this._scheduleContainCleanup(tries + 1), 200);
+    if (t.unref) t.unref();
+  }
+
   _exitError(label) {
     const key = this.resolved && this.resolved.key;
     return new Error("pi exited (code " + this._exitCode + ") before " + (label || "responding") +

@@ -74,6 +74,11 @@
  * Without bubblewrap (e.g. black-swan), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.
  *
+ * Contain tier (opt-in, queue item 19 step 2a): pi_contain.mjs. With
+ * CROW_PI_SANDBOX=contain (every pi) or CROW_PI_CONTAIN_BOTS=<id,...> (listed
+ * bots) a bot spawn gets an EMPTY root with only its engine, its own paths
+ * and its instance data bound, instead of the whole host filesystem.
+ *
  * Modes, from the GATEWAY's env only (process.env; a bot def's spawn_env
  * cannot change it): CROW_PI_SANDBOX = "auto" (default: bwrap, else the
  * setpriv fallback, else plain, with a one-time warning), "required" (refuse
@@ -83,6 +88,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -108,7 +114,7 @@ export function _resetPiSandboxForTest() { probeCache = null; warnedFor = null; 
 
 export function piSandboxMode(env = process.env) {
   const v = String(env.CROW_PI_SANDBOX || "auto").trim().toLowerCase();
-  return v === "off" || v === "required" ? v : "auto";
+  return v === "off" || v === "required" || v === "contain" ? v : "auto";
 }
 
 function isSocket(p) {
@@ -177,7 +183,7 @@ export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
 }
 
 const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX"]);
+  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP"]);
 
 /** Copy of env without user-session IPC pointers (and the sandbox switch). */
 export function scrubSandboxEnv(env) {
@@ -254,8 +260,61 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const plain = (reason) => ({ cmd, args, env, tier: "none", sandboxed: false, wrapper: null, pidNamespace: false, reason, masked: [] });
   if (mode === "off") return plain("CROW_PI_SANDBOX=off");
   const probe = opts.probe || probePiSandbox();
+  // Contain tier (pi_contain.mjs): selected for this bot by the spawner's env
+  // (CROW_PI_SANDBOX=contain, or CROW_PI_CONTAIN_BOTS listing the bot) and
+  // possible only when the caller passed the bot's mount inputs. An opted-in
+  // spawn never silently downgrades: no bubblewrap, or a policy that cannot
+  // be contained (bypass), is an error the caller surfaces as a failed turn.
+  if (opts.contain && containSelected(process.env, opts.botId)) {
+    if (!probe.ok) throw new Error("pi contain tier selected but bubblewrap is unavailable: " + probe.reason);
+    if (probe.pidns === false) {
+      throw new Error("pi contain tier selected but bwrap cannot make a PID namespace here (" + (probe.pidnsReason || "unavailable") + ")");
+    }
+    const plan = buildContainPlan(opts.contain);
+    // A provider the bot needs whose row has no door (a literal-key cloud row
+    // this box never consented to, a LAN/tailnet row /llm/p does not serve):
+    // the turn would run with no way to its model. Refused, never downgraded.
+    const missing = Array.isArray(opts.contain && opts.contain.missing) ? opts.contain.missing : [];
+    if (missing.length) {
+      const m = missing[0] || {};
+      throw new ContainRefused("contain refused: " + (m.reason || "provider " + m.provider + " has no door"));
+    }
+    for (const r of plan.refused) console.error("[pi-sandbox] contain: not bound: " + r.path + " (" + r.reason + ")");
+    const pre = [...plan.args];
+    // Instance secrets dirs (hideDirs). Contain binds none of them: the plan
+    // refuses every read-write bind on the Crow home or an ancestor, and the
+    // rest of the home is not bound. Each dir is matched against the plan's
+    // bind DESTINATIONS at its RESOLVED path (a secrets dir reached through a
+    // symlink is hidden at its target): one that a bound path really contains
+    // is over-mounted read-only here, and one that no bind covers does not
+    // exist inside the empty root at all. Both are reported, and a dir that is
+    // inside a bound path and cannot be masked refuses the spawn.
+    const hideDirs = (opts.hideDirs || [])
+      .filter((d) => typeof d === "string" && d.startsWith("/"))
+      .map((d) => { try { return realpathSync(d); } catch { return d; } });
+    const boundSrc = [];
+    for (let i = 0; i < pre.length; i++) {
+      if (pre[i] !== "--bind" && pre[i] !== "--ro-bind") continue;
+      const dest = pre[i + 2];
+      if (!dest) continue;
+      boundSrc.push(dest);
+      try { const r = realpathSync(dest); if (r !== dest) boundSrc.push(r); } catch { /* not a host path */ }
+    }
+    const masked = [];
+    const unreachable = [];
+    for (const d of hideDirs) {
+      const insideBind = boundSrc.some((b) => d === b || d.startsWith(b + "/"));
+      if (!insideBind) { if (isDir(d)) unreachable.push(d); continue; } // no bind covers it: absent inside
+      if (!isDir(d)) throw new ContainRefused("contain refused: the secrets dir " + d + " is inside a bound path and cannot be masked");
+      pre.push("--tmpfs", d, "--remount-ro", d);
+      masked.push(d);
+    }
+    if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
+    return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: { ...scrubSandboxEnv(env), ...plan.env },
+      sandboxed: true, wrapper: "bwrap", tier: "contain", pidNamespace: true, reason: null, masked, unreachable, refused: plan.refused };
+  }
   if (!probe.ok) {
-    if (mode === "required") {
+    if (mode === "required" || mode === "contain") {
       throw new Error("pi sandbox required (CROW_PI_SANDBOX=required) but unavailable: " + probe.reason);
     }
     const key = probe.reason + "|" + !!probe.setpriv;
