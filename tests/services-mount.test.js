@@ -258,7 +258,7 @@ test("refusals never start the child: every refused initialize leaves the child 
     ["disconnected", U.old, {}, 409, "This connection is turned off.", "not_active"],
     ["archived project", U.attic, { actor: sessActor("b2") }, 409, "This connection is turned off.", "not_active"],
     ["owner_contact_id = 1", U.contact, {}, 403, "Not available on this turn.", "owner_mismatch"],
-    ["a sensitive connection (Task 16c: notion is private by default)", U.notion, {}, 409, "This connection is turned off.", "not_active"],
+    ["a sensitive connection (Task 16c: notion is private by default)", U.notion, {}, 403, "This connection is private. Bots can't read it yet.", "private_unavailable"],
     ["unknown uuid", "00000000-0000-4000-8000-00000000dead", {}, 404, null, "not_found"],
   ];
   for (const [label, uuid, o, status, message, outcome] of cases) {
@@ -485,18 +485,18 @@ test("init failure: no cached list and a child that cannot start → 502 child_u
 
 // ---- Task 16c: sensitive connections never reach a bot ----------------------------------------------
 
-test("Task 16c: a sensitive connection is refused for initialize, list and call (private_unavailable as not_active), before and after the owner switches it", async () => {
+test("Task 16c: a sensitive connection is refused for initialize, list and call (private_unavailable, 403), before and after the owner switches it", async () => {
   const privateCode = (uuid) => withDb(async (d) => {
     const a = { scope: "session", botId: "b1", defProjectId: P.spring, sessionProjectId: P.spring };
     return M.authorizeServiceCall(d, a, uuid, { crowHome: HOME, repoSkillsDir: SKILLS });
   });
   const refused = (r, label) => {
-    assert.equal(r.status, 409, `${label}: ${r.status} ${r.text}`);
-    assert.equal(errMsg(r), "This connection is turned off.", label);
-    assert.equal(lastOutcome(), "refused:not_active", label);
+    assert.equal(r.status, 403, `${label}: ${r.status} ${r.text}`);
+    assert.equal(errMsg(r), "This connection is private. Bots can't read it yet.", label);
+    assert.equal(lastOutcome(), "refused:private_unavailable", label);
   };
   // Before: notion is private by default; nothing it is asked starts it.
-  assert.deepEqual(await privateCode(U.notion), { ok: false, code: "not_active", reason: "private_unavailable" });
+  assert.deepEqual(await privateCode(U.notion), { ok: false, code: "private_unavailable" });
   const ghSid = await open(U.gh);
   const spawns = spawnCount();
   for (const [label, run] of [
@@ -519,7 +519,7 @@ test("Task 16c: a sensitive connection is refused for initialize, list and call 
   // After: the owner switches github to private. The live session's next list and call are refused.
   SENS.setSensitivityOverride({ uuid: U.gh, serviceId: "github" }, true, { crowHome: HOME });
   try {
-    assert.equal((await privateCode(U.gh)).reason, "private_unavailable");
+    assert.equal((await privateCode(U.gh)).code, "private_unavailable");
     audit.length = 0;
     refused(await listTools(U.gh, ghSid), "github tools/list after the switch");
     audit.length = 0;
@@ -541,8 +541,8 @@ test("Task 16c: a corrupt override file never opens a private-by-default connect
   try {
     audit.length = 0;
     const r = await init(U.notion);
-    assert.equal(r.status, 409);
-    assert.equal(lastOutcome(), "refused:not_active");
+    assert.equal(r.status, 403);
+    assert.equal(lastOutcome(), "refused:private_unavailable");
     assert.equal((await init(U.gh)).status, 200, "github's default (not private) still serves");
   } finally {
     if (saved !== null) writeFileSync(file, saved, { mode: 0o600 });
@@ -557,7 +557,7 @@ test("Task 16c: a corrupt override file never opens a private-by-default connect
     // Even bound to it (an unknown service the owner somehow connected): private and locked.
     SENS.recordConnectionBinding({ uuid: U.home, serviceId: "mystery" }, { crowHome: HOME });
     const r = await withDb((d) => M.authorizeServiceCall(d, { scope: "job", botId: "b5", defProjectId: P.home }, U.home, { crowHome: HOME }));
-    assert.deepEqual(r, { ok: false, code: "not_active", reason: "private_unavailable" });
+    assert.deepEqual(r, { ok: false, code: "private_unavailable" });
   } finally {
     SENS.recordConnectionBinding({ uuid: U.home, serviceId: "github" }, { crowHome: HOME });
     setDef("b5", ["github"]);

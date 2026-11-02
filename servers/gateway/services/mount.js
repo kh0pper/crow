@@ -30,10 +30,8 @@
  *     owner's override from the hidden secrets dir); any doubt is sensitive. It is checked on
  *     EVERY request, so a listing, a call and an initialize are all refused, and a connection
  *     the owner switches to private mid-session is refused from its next request on. The
- *     refusal is private_unavailable in spirit; the shared helper's authorize codes are a fixed
- *     table (loopback-tool-mount.js AUTHZ_STATUS) with no custom code, so it answers not_active
- *     (409, the helper's fixed "This connection is turned off.") and carries
- *     `reason: "private_unavailable"` for callers of authorizeServiceCall (the helper ignores it).
+ *     refusal is the helper's private_unavailable code (403, "This connection is private. Bots
+ *     can't read it yet.").
  * authorizeServiceCall takes the VERIFIED actor, never the request, so the satellite channel
  * (services PR 9) can call it with an actor it verified itself.
  *
@@ -65,7 +63,7 @@ export const SERVICES_MAX_IN_FLIGHT = 4;
 
 const refuse = (code) => ({ ok: false, code });
 /** Check 7's refusal: the helper's fixed not_active, with the real reason for direct callers. */
-const privateUnavailable = () => ({ ok: false, code: "not_active", reason: "private_unavailable" });
+const privateUnavailable = () => ({ ok: false, code: "private_unavailable" });
 /** Check 3's binding refusal: the row's service_id is not the one the owner connected. */
 const bindingMismatch = () => ({ ok: false, code: "not_active", reason: "binding_mismatch" });
 
