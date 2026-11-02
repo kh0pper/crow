@@ -68,8 +68,18 @@ const idSchema = z
 
 const nameSchema = z.string().min(1).max(MAX_NAME);
 
+// A controller name becomes part of a history key ("track:<id>|device.params.<name>"),
+// so it may not contain the key separators, and it may not shadow Object.prototype.
+const RESERVED_PARAM_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+const paramNameSchema = z
+  .string()
+  .min(1)
+  .max(MAX_NAME)
+  .refine((n) => !/[.|]/.test(n) && !RESERVED_PARAM_NAMES.has(n), {
+    message: 'A controller name cannot contain "." or "|" or be a reserved word.',
+  });
 const paramsSchema = z
-  .record(z.string().min(1).max(MAX_NAME), z.number().finite())
+  .record(paramNameSchema, z.number().finite())
   .superRefine((params, ctx) => {
     if (Object.keys(params).length > LIMITS.params) {
       addLimitIssue(ctx, `A device can have at most ${LIMITS.params} parameters.`);
@@ -411,7 +421,7 @@ defineCommand({
   schema: z
     .object({
       track_id: idSchema,
-      name: z.string().min(1).max(MAX_NAME).describe('the controller name, e.g. "Cutoff"'),
+      name: paramNameSchema.describe('the controller name, e.g. "Cutoff"'),
       value: z.number().finite().describe("the controller value, within the module's own range"),
     })
     .strict(),
@@ -437,6 +447,9 @@ defineCommand({
     };
     const params = { ...(device.params ?? {}) };
     const before = Object.hasOwn(params, args.name) ? cloneJson(params[args.name]) : ABSENT;
+    if (before === ABSENT && Object.keys(params).length >= LIMITS.params) {
+      refuseLimit(`A device can have at most ${LIMITS.params} parameters.`);
+    }
     params[args.name] = args.value;
     track.set("device", { ...device, params });
     const field = fieldKey(ref, `${PARAM_FIELD_PREFIX}${args.name}`);

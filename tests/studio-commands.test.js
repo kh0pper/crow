@@ -597,3 +597,17 @@ test("after removing a track the next added track does not repeat an existing co
   addTrack(wide, "Next");
   assert.equal(snapshot(wide).tracks[TRACK_COLORS.length].color, TRACK_COLORS[0]);
 });
+test("set_param cannot add a 65th controller and rejects reserved or dotted names", async () => {
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
+  const reg = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/core.js");
+  const doc = newSongDoc({ title: "caps" });
+  const run = (command, args) => doc.transact(() => reg.runCommand(doc, command, args));
+  run("track.add", { id: "t1", name: "Lead", device: { engine: "sunvox", type: "Analog generator", params: {} } });
+  for (let i = 0; i < 64; i++) run("track.set_param", { track_id: "t1", name: "p" + i, value: i });
+  assert.throws(() => run("track.set_param", { track_id: "t1", name: "p64", value: 1 }), /at most 64 parameters/);
+  run("track.set_param", { track_id: "t1", name: "p3", value: 99 }); // changing an existing one is fine
+  for (const bad of ["__proto__", "a.b", "a|b"]) {
+    assert.throws(() => run("track.set_param", { track_id: "t1", name: bad, value: 1 }));
+  }
+});
