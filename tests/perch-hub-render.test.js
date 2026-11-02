@@ -1110,7 +1110,8 @@ for (const [w, h] of [[412, 730]]) {
       assert.equal(seen.botRows.some((r) => r.includes("#####") || r.includes("126126")), false,
         "the tool result must not be drawn as a bot message: " + JSON.stringify(seen.botRows));
       assert.equal(seen.chips, 1, "it is a tool chip, as on the live stream");
-      assert.match(seen.chipText, /crow_browser_extract_article/);
+      assert.match(seen.chipText, /Extract article/,
+        "the chip reads in words (the raw id is on its title): " + seen.chipText);
       assert.equal(seen.detailsHidden, true, "collapsed until tapped");
       assert.equal(seen.resultLen, 2001, "the engine's 2000-char cap plus the ellipsis");
       assert.deepEqual(seen.h5, ["Findings"]);

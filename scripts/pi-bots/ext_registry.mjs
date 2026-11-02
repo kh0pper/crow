@@ -178,9 +178,20 @@ function capabilityIndex(bundlesDir = APP_BUNDLES) {
  *               needed; the palette already shows it under the canonical groups)
  *   needsMint   !inCanonical — A5 must mint a per-bot pi block for these
  *   group       capability group, else the server id
- *   name        capability bundle name, else the server id
+ *   name        capability bundle name, else the bundle manifest's name (a bundle with no
+ *               capabilities block, e.g. knowledge-base), else the server id
  *   capabilities the overlay block, or null
  */
+/** A bundle's manifest name: the repo copy, else the installed copy under <crowHome>/bundles; "" when neither has one. */
+function manifestName(bundlesDir, crowHome, id) {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(id)) || String(id).includes("..")) return "";
+  for (const dir of [bundlesDir, join(crowHome, "bundles")]) {
+    const m = readJsonSafe(join(dir, String(id), "manifest.json"), null);
+    if (m && typeof m.name === "string" && m.name.trim()) return m.name.trim().slice(0, 80);
+  }
+  return "";
+}
+
 export function listInstalledExtensions(crowHome = resolveCrowHome(), bundlesDir = APP_BUNDLES) {
   const addons = readJsonSafe(mcpAddonsPath(crowHome), {});
   const canonical = readCanonicalSafe().mcpServers || {};
@@ -195,7 +206,7 @@ export function listInstalledExtensions(crowHome = resolveCrowHome(), bundlesDir
       inCanonical,
       needsMint: !inCanonical,
       group: (cap && cap.capabilities.group) || id,
-      name: (cap && cap.name) || id,
+      name: (cap && cap.name) || manifestName(bundlesDir, crowHome, id) || id,
       capabilities: cap ? cap.capabilities : null,
     });
   }

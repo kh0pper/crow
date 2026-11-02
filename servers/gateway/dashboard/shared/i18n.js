@@ -3775,8 +3775,18 @@ export const translations = {
   "perch.toolRunning": { en: "running", es: "ejecutando" },
   "perch.toolDone": { en: "done", es: "listo" },
   "perch.toolFailed": { en: "failed", es: "falló" },
+  // The chips' own names: an operator reads what happened, not an engine id.
+  "perch.toolNameBash": { en: "Shell command", es: "Comando de terminal" },
+  "perch.toolNameRead": { en: "Read a file", es: "Leer un archivo" },
+  "perch.toolNameEdit": { en: "Edit a file", es: "Editar un archivo" },
+  "perch.toolNameWrite": { en: "Write a file", es: "Escribir un archivo" },
+  "perch.toolNameGrep": { en: "Search in files", es: "Buscar en archivos" },
+  "perch.toolNameFind": { en: "Find files", es: "Buscar archivos" },
+  "perch.toolNameLs": { en: "List a folder", es: "Listar una carpeta" },
   // R1.2 PR 2: a turn's tool chips fold into one "See what happened" line (new mode).
   "perch.toolGroupSee": { en: "See what happened", es: "Ver qué pasó" },
+  // Every step is done, but the model is still writing its reply.
+  "perch.toolGroupFinishing": { en: "finishing up", es: "terminando" },
   "perch.toolGroupStep": { en: "1 step", es: "1 paso" },
   "perch.toolGroupSteps": { en: "{n} steps", es: "{n} pasos" },
   "perch.toolGroupFailedOne": { en: "1 failed", es: "1 falló" },

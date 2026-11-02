@@ -233,8 +233,9 @@ test("live: a running group is expanded; it collapses at turn end; a failed grou
     await s.waitFor(`JSON.parse(${GROUPS}).length===2&&JSON.parse(${GROUPS})[1].err`, "the second group");
     g = await s.json(GROUPS);
     assert.equal(g[0].expanded, "true", "finished but the turn is still going: still open");
-    assert.equal(g[0].label, "See what happened · running", "every chip done, the model still working: running");
-    assert.equal(g[1].label, "See what happened · running · 1 failed", "running never hides a failure");
+    assert.equal(g[0].label, "See what happened · finishing up",
+      "every chip done, the model still working: finishing up, not running");
+    assert.equal(g[1].label, "See what happened · finishing up · 1 failed", "finishing up never hides a failure");
 
     emit("text", { text: "Done", turnId: "tg1" });
     emit("reply", { text: "One more thingDone", turnId: "tg1" });

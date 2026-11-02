@@ -54,7 +54,7 @@ export async function loadSources({ db = null, projectId = null, crowHome = null
       const accountLabel = accountOf(ext.block) || accountOf(canonical[ext.id]);
       const lbl = sourceLabel(ext.id, "en", { account: accountLabel });
       out.push({
-        server: ext.id, name: lbl.known ? lbl.name : (ext.group || ext.id), group: ext.group || "", account: lbl.account, accountLabel,
+        server: ext.id, name: lbl.known ? lbl.name : (ext.group && ext.group !== ext.id ? ext.group : (ext.name || ext.id)), group: ext.group && ext.group !== ext.id ? ext.group : (ext.name || ""), account: lbl.account, accountLabel,
         ok: !!(ep && ep.ok), error: ep && !ep.ok ? String(ep.error || "") : undefined,
         catalog: ep && ep.ok ? catalogFromProbe(ep.tools) : [],
       });
