@@ -236,9 +236,11 @@ export function createToolExecutor(opts = {}) {
   const remote = opts.remote || null; // cross-instance voice routing (null = off)
   // Who is calling: taken ONLY from the bound bot (never from tool arguments or model output).
   // Unbound executors (the operator's own chat) send no _meta at all.
+  // A paired instance's task (bot relay, one-shot) runs as that peer: every tool call says so,
+  // and the servers treat it as a non-owner (e.g. crow.md's writing rules refuse it).
   const actorMeta = boundBotId
     ? { _meta: { "crow/actor": { kind: "bot", id: boundBotId, name: sanitizeActorName(opts.botDef.display_name ?? boundBotId, boundBotId) } } }
-    : {};
+    : opts.peerActor === true ? { _meta: { "crow/actor": { kind: "peer" } } } : {};
 
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);

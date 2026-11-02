@@ -19,12 +19,13 @@ import { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } from "./tool-execut
  * @returns {string} The AI's final text response
  * @throws {Error} with code "not_configured" if no AI provider is set
  */
-export async function runOneShot(systemPrompt, userMessage) {
+export async function runOneShot(systemPrompt, userMessage, { peer = false } = {}) {
   // createProviderAdapter returns { adapter, config } — destructure so
   // `adapter.chatStream(...)` below calls the real method rather than
   // throwing "chatStream is not a function" on the wrapper object.
   const { adapter } = await createProviderAdapter();
-  const toolExecutor = createToolExecutor();
+  // A task a paired instance sent (bot relay) runs as that peer, never as the operator.
+  const toolExecutor = createToolExecutor(peer ? { peerActor: true } : {});
   const tools = getChatTools();
 
   try {

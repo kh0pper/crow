@@ -873,6 +873,57 @@ export function createMemoryServer(dbPath, options = {}) {
     }
   );
 
+  // --- The operator's writing rules are the operator's alone ---
+  // Every bot turn applies the `writing_style` section of crow.md by default, so a
+  // bot that could rewrite it would change how every bot writes for the operator —
+  // and a prompt-injected bot could plant instructions there that outlive the turn.
+  // The dashboard editor (panels/skills.js) writes the row directly, not through
+  // MCP, so it stays the operator's way in. A call from a paired instance is
+  // refused too: it carries no proof that the operator made it on the peer.
+  //
+  // KNOWN LIMIT: an unsigned caller that simply hides its identity (no bot base
+  // actor in the process env, no crow/actor in _meta) still resolves to unknown and
+  // is allowed — the operator's own MCP clients run that way. Signed actors, once
+  // they cover the memory server, are what closes that gap; this containment closes
+  // the bot-shell path today.
+  const WRITING_STYLE_KEY = "writing_style";
+  const WRITING_STYLE_REFUSAL = "The writing rules can only be changed by the operator, from the dashboard (Skills, Writing rules).";
+  const writingStyleRefusal = () => ({ content: [{ type: "text", text: WRITING_STYLE_REFUSAL }] });
+
+  // A paired instance is refused explicitly: resolveCallActor maps it to unknown
+  // (never widened to the owner), so the resolved actor alone cannot tell a peer
+  // apart from the operator's own unsigned client. Both shapes count — the bearer
+  // token the gateway mounts record in authInfo (actor.js isPeer), and the
+  // {kind:"peer"} a forwarding router passes in _meta (peerActorMeta,
+  // servers/shared/peer-label.js).
+  function fromPairedInstance(extra) {
+    if (extra && extra.authInfo && extra.authInfo.token === "peer-instance") return true;
+    const meta = extra && extra._meta;
+    const claimed = meta && typeof meta === "object" ? meta["crow/actor"] : undefined;
+    return !!(claimed && typeof claimed === "object" && claimed.kind === "peer");
+  }
+
+  // Fail closed: any actor signal on the call that is not the owner refuses, whether or not
+  // it resolves cleanly (a bot claim with no or a malformed id, an "unknown" a router forwarded
+  // for one, a header). Only a call carrying no actor signal at all, or this process's own
+  // owner base actor, may change the rules.
+  function presentNonOwnerSignal(extra) {
+    const meta = extra && extra._meta;
+    const claimed = meta && typeof meta === "object" ? meta["crow/actor"] : undefined;
+    if (claimed !== undefined && claimed !== null && !(typeof claimed === "object" && claimed.kind === "owner")) return true;
+    const headers = extra && extra.requestInfo && extra.requestInfo.headers;
+    const raw = headers && typeof headers === "object" ? headers["x-crow-actor-kind"] : undefined;
+    const kind = Array.isArray(raw) ? raw[0] : raw;
+    return typeof kind === "string" && kind !== "" && kind.toLowerCase() !== "owner";
+  }
+
+  function refusesWritingStyle(sectionKey, extra) {
+    if (sectionKey !== WRITING_STYLE_KEY) return false;
+    if (baseActor && baseActor.kind === "bot") return true;
+    const caller = resolveCallActor(baseActor, extra);
+    return !!(caller && caller.kind === "bot") || fromPairedInstance(extra) || presentNonOwnerSignal(extra);
+  }
+
   // --- Cross-Platform Context (crow.md) Tools ---
 
   server.tool(
@@ -902,7 +953,11 @@ export function createMemoryServer(dbPath, options = {}) {
       device_id: z.string().max(200).optional().describe("Device ID to update a device-specific override. Omit for global section."),
       project_id: z.number().optional().describe("Project ID to update a project-specific override. Omit for global section."),
     },
-    async ({ section_key, content, section_title, enabled, sort_order, device_id, project_id }) => {
+    async ({ section_key, content, section_title, enabled, sort_order, device_id, project_id }, extra) => {
+      // Refused before any read: a bot (or a peer) changes nothing here, and no
+      // sync entry is emitted for a writing_style write it may not make.
+      if (refusesWritingStyle(section_key, extra)) return writingStyleRefusal();
+
       // Build WHERE clause based on device_id and project_id
       const whereParts = ["section_key = ?"];
       const whereArgs = [section_key];
@@ -981,7 +1036,9 @@ export function createMemoryServer(dbPath, options = {}) {
       device_id: z.string().max(200).optional().describe("Device ID to create a device-specific override. Omit for global section."),
       project_id: z.number().optional().describe("Project ID to create a project-specific override. Omit for global section."),
     },
-    async ({ section_key, section_title, content, sort_order, device_id, project_id }) => {
+    async ({ section_key, section_title, content, sort_order, device_id, project_id }, extra) => {
+      if (refusesWritingStyle(section_key, extra)) return writingStyleRefusal();
+
       // Protected sections can have scoped overrides but not new global entries
       if (PROTECTED_SECTIONS.includes(section_key) && !device_id && !project_id) {
         return { content: [{ type: "text", text: `Cannot create section with protected key "${section_key}". Use crow_update_context_section to modify it.` }] };
@@ -1069,7 +1126,9 @@ export function createMemoryServer(dbPath, options = {}) {
       device_id: z.string().max(200).optional().describe("Device ID to delete only the device-specific override. Omit for global."),
       project_id: z.number().optional().describe("Project ID to delete only the project-specific override. Omit for global."),
     },
-    async ({ section_key, device_id, project_id }) => {
+    async ({ section_key, device_id, project_id }, extra) => {
+      if (refusesWritingStyle(section_key, extra)) return writingStyleRefusal();
+
       // Protected global sections cannot be deleted, but scoped overrides can
       if (PROTECTED_SECTIONS.includes(section_key) && !device_id && !project_id) {
         return {
