@@ -301,7 +301,7 @@ Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_S
 
 In the `pidns` tier:
 
-- **No host process is visible.** Inside, `/proc` lists only the sandbox's own processes. The gateway's and other bots' `/proc/<pid>/{root,environ,mem}` do not exist there, and a same-uid host process cannot be signalled (`kill -0 <host pid>` fails with ESRCH). This is structural, not a ptrace-policy outcome.
+- **No host process is visible.** Inside, `/proc` lists only the sandbox's own processes. The gateway's and other bots' `/proc/<pid>/{root,environ,mem}` do not exist there, and a same-uid host process cannot be signalled by pid (`kill -0 <host pid>` fails with ESRCH). One exception: `kill(0, sig)` reaches the caller's process group, which includes the sandbox's own outer bwrap, so a bot can end its own wrapper (never the gateway, which is in another group). This is structural, not a ptrace-policy outcome.
 - **The SIGTERM drain still runs.** `--die-with-parent` is deliberately not used: `close()`'s group SIGTERM ends the outer bwrap at once, and a parent-death SIGKILL would cut pi's own drain and MCP shutdown short. A wrapper orphaned by a dead gateway is caught by the reaper's orphan rule (ppid 1).
 - **The 5 s SIGKILL bound holds.** `close()` returns once the outer bwrap exits, but its SIGKILL timer stays armed in the background until the whole process group is gone, so a pi that ignores SIGTERM is still killed.
 - **What bots see differently:**

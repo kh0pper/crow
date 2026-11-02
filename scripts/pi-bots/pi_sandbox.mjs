@@ -35,8 +35,11 @@
  *  - Its own PID namespace with a fresh /proc (--unshare-pid --proc /proc;
  *    not --die-with-parent, see BWRAP_BASE): no host process is even
  *    visible, so the gateway's and other bots' /proc/<pid>/{root,environ,mem}
- *    do not exist inside, and a same-uid host process cannot be signalled
- *    (kill -0 fails, ESRCH). This is structural, not a ptrace-policy outcome
+ *    do not exist inside, and a same-uid host process cannot be signalled by
+ *    pid (kill -0 fails, ESRCH). One exception: kill(0, sig) reaches the
+ *    caller's process group, which includes the sandbox's own outer bwrap,
+ *    so a bot can end its own wrapper (never the gateway, which is in
+ *    another group). This is structural, not a ptrace-policy outcome
  *    (in its own user namespace those reads were already refused). The
  *    parent side keeps using outer PIDs: proc.pid is the outer bwrap, bwrap's
  *    --info-fd child-pid is the namespace's init (an inner bwrap, kept as

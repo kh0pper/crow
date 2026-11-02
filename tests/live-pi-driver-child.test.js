@@ -353,7 +353,7 @@ for (const variant of [{ name: "child dies with its parent", knobs: {} }, { name
     const cap = await until(() => captured(ctx)[0], 20000);
     assert.ok(cap, `the stub pi got the prompt (stderr: ${stderr(ctx)})`);
     assert.equal(cap.runMarker, ctx.runId, "pi carries the run marker");
-    const stubPid = (await until(() => stubHostPids(ctx.runId, ctx.sinceBootSec), 5000))[0];
+    const stubPid = await until(() => stubHostPids(ctx.runId, ctx.sinceBootSec)[0], 5000);
     assert.ok(stubPid, "the marker scan sees the stub pi");
     t.after(() => { try { process.kill(stubPid, "SIGKILL"); } catch {} });
     assert.ok(alive(stubPid) && alive(childPid));
