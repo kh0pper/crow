@@ -294,6 +294,14 @@ function sourceOf(source) {
 export async function askDecision(tdb, cdb, { projectId, title, tags, decision, source } = {}, actor, { now } = {}) {
   const ms = toMs(now);
   const v = validateDecision(decision, { now: ms });
+  // A bot's decision may only hand its follow-up card to itself: assigning it to another bot
+  // would pass the bot's (possibly injected) text on to that bot once the operator taps.
+  if (actor && actor.kind === "bot") {
+    for (const o of v.options || []) {
+      const to = o && o.then && o.then.create_card && o.then.create_card.assign_bot;
+      if (to && to !== actor.id) throw bad("a bot's decision can assign its follow-up card only to itself");
+    }
+  }
   const src = sourceOf(source);
   await expireDecisions(tdb, cdb, ms);
 

@@ -92,6 +92,11 @@ export const BOARD_BOT_TOOLS = Object.freeze([
   "board/board_get_plan", "board/board_save_plan", "board/board_report_result",
   "board/board_ask_decision", "board/board_notify_decisions", "board/board_offer_card",
 ]);
+/** The read verbs only: a channel turn (mail, Discord, Crow messages) reads its project's
+ *  cards but changes none (Kevin, 2026-11-02; board-mcp.js enforces it too). */
+export const BOARD_BOT_READ_TOOLS = Object.freeze([
+  "board/board_list_boards", "board/board_list_items", "board/board_get_item", "board/board_get_plan",
+]);
 
 /**
  * When the world mounts the board server for a def that never selected it,
@@ -100,10 +105,11 @@ export const BOARD_BOT_TOOLS = Object.freeze([
  * the allowlist drops is invisible to the model. Never past the model's tool
  * cap (the same budget skill tools use); a refusal is logged.
  */
-export async function withBoardTools(def, { wanted, log = () => {}, budget = null } = {}) {
+export async function withBoardTools(def, { wanted, readOnly = false, log = () => {}, budget = null } = {}) {
   if (!wanted || !def || typeof def !== "object" || botGrantsServer(def, "board")) return def;
   const stored = (def.tools && def.tools.crow_mcp) || [];
-  const candidate = { ...def, tools: { ...(def.tools || {}), crow_mcp: [...stored, ...BOARD_BOT_TOOLS] } };
+  const verbs = readOnly ? BOARD_BOT_READ_TOOLS : BOARD_BOT_TOOLS;
+  const candidate = { ...def, tools: { ...(def.tools || {}), crow_mcp: [...stored, ...verbs] } };
   try {
     const b = budget || (await (await import("./artifacts-companions.mjs")).defaultCompanionBudget(def));
     if (Number.isInteger(b.cap) && b.cap > 0 && b.countFor(candidate) > b.cap) {
@@ -113,7 +119,7 @@ export async function withBoardTools(def, { wanted, log = () => {}, budget = nul
   } catch (e) {
     log("board tool budget check failed; adding board tools anyway: " + ((e && e.message) || e));
   }
-  log("board tools added: " + BOARD_BOT_TOOLS.length);
+  log("board tools added: " + verbs.length + (readOnly ? " (read only on this channel)" : ""));
   return candidate;
 }
 
@@ -230,11 +236,12 @@ async function writeWorldMcp(a, sessionId) {
   try {
     // acceptance F2: a card-bound session (or a job turn) must be able to
     // call board_report_result — ensure the board entry is minted. A bot
-    // linked to a project that shows it its cards gets the board in free chat
-    // too: asked to "put this on the board", a bot without board verbs wrote
-    // project notes instead and reported the board organized. Perch only (the
-    // operator's own chat): the board server does not scope a bot to its own
-    // project yet, so channel turns (mail, Discord) keep the def's selection.
+    // linked to a project that shows it its cards gets the board on EVERY
+    // channel too: asked to "put this on the board", a bot without board
+    // verbs wrote project notes instead and reported the board organized.
+    // The board server scopes a bot to its own project's cards (board-mcp.js),
+    // so a mail or Discord turn can be handed it without exposing any other
+    // project. The voice bot never gets it (its turn loop has no board).
     const w = writeBotMcp(a.def, {
       sessionDir: a.sessionDir, crowHome: a.crowHome, remoteEnabled: a.remoteEnabled, peerGatewayUrls: a.peerGatewayUrls,
       botId: a.botId, jobId: a.jobId, threadId: a.threadId, gatewayType: a.gatewayType, sessionId: sid,
@@ -311,7 +318,7 @@ export async function bindWorldSession(world, session) {
  *          sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
  *          narrowedTools, gatewayType, kitInstalled, houseStyle}>}
  */
-export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
+export async function buildBotWorld({ botId, threadId, gatewayType = null, log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
   const B = await loadBridge();
   const bot = B.loadBot(botId);
   // Active Crow instance home (CROW_HOME env -> ~/.crow-mpa on MPA, else
@@ -325,11 +332,16 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // if present (legacy fixtures may still carry it; new bots don't write it).
   const projectId = bot.project_id == null ? null : Number(bot.project_id);
   // Whether this turn mounts the board server (writeWorldMcp's ensureServers):
-  // a job turn, a card-bound session, or a Perch turn of a project bot that
-  // is shown its cards. The same turns get the board verbs in the allowlist.
-  const projectBoard = gatewayType === "perch" && projectShowsCards(projectId, bot.def);
+  // a job turn, a card-bound session, or a turn of a project bot that is shown
+  // its cards — on every channel, because the board server itself scopes what
+  // a bot may read and write to its own project (board-mcp.js). The voice bot
+  // stays out: it answers as speech, and its turn loop has no board.
+  const projectBoard = !isVoiceBotDef(bot.def) && projectShowsCards(projectId, bot.def);
+  // Writes come from a Perch chat, a card-bound session or a job; any other channel turn gets
+  // the read verbs only (board-mcp.js refuses its card writes as well).
+  const boardReadOnly = !jobId && !cardBound && gatewayType !== "perch";
   const def = await withBoardTools(await withSkillTools(bot.def, { crowHome, log, repoSkillsDir }),
-    { wanted: !!(jobId || cardBound || projectBoard), log });
+    { wanted: !!(jobId || cardBound || projectBoard), readOnly: boardReadOnly, log });
   const projectSpace = B.loadProjectSpace(projectId);
   const projectMembers = B.loadProjectMembers(projectId);
   // session_dir resolution: prefer the project workspace when available

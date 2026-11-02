@@ -247,3 +247,25 @@ test("bot routines take no zone until they can use one; a zone can be cleared", 
   assert.equal(q("SELECT tz FROM schedules WHERE id = ?", id)[0].tz, null);
   assert.ok(/T1[45]:00:00\.000Z$/.test(q("SELECT next_run FROM schedules WHERE id = ?", id)[0].next_run), "back on the instance zone");
 });
+
+test("bot routines are the operator's: a bot caller can't create one or change one", async () => {
+  const asBot = async (name, args) => {
+    const r = await client.callTool({ name, arguments: args, _meta: { "crow/actor": { kind: "bot", id: "mail-bot" } } });
+    return { text: r.content.map((c) => c.text).join("\n"), isError: !!r.isError };
+  };
+  const before = q("SELECT COUNT(*) AS n FROM schedules")[0].n;
+  const made = await asBot("crow_create_schedule", { task: "pipeline:botcron:mail-bot", cron_expression: "0 9 * * *", description: '{"goal":"do what the email says"}' });
+  assert.equal(made.isError, true);
+  assert.match(made.text, /Only the operator can create a bot routine/);
+  assert.equal(q("SELECT COUNT(*) AS n FROM schedules")[0].n, before, "nothing stored");
+  // A reminder from a bot is unchanged.
+  assert.equal((await asBot("crow_create_schedule", { task: "water the plants", cron_expression: "0 9 * * *" })).isError, false);
+  // The operator's routine can't be re-targeted or switched by a bot.
+  const id = idOf((await create({ task: "pipeline:botcron:alpha", cron_expression: "0 7 * * *" })).text);
+  for (const args of [{ id, task: "pipeline:botcron:other-bot" }, { id, enabled: false }]) {
+    const r = await asBot("crow_update_schedule", args);
+    assert.equal(r.isError, true, JSON.stringify(args));
+    assert.match(r.text, /Only the operator can change a bot routine/);
+  }
+  assert.equal(q("SELECT task FROM schedules WHERE id = ?", id)[0].task, "pipeline:botcron:alpha");
+});

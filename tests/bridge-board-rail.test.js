@@ -442,7 +442,7 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     assert.ok(!mcpB.mcpServers.board || mcpB.mcpServers.board.disabled, "default (free chat): closed-world selection unchanged");
   });
 
-  test("a bot linked to a project that shows it its cards gets the board in free chat; tracker none, custom or no project do not", async () => {
+  test("a bot linked to a project that shows it its cards gets the board on every channel; tracker none, no project and the voice bot do not", async () => {
     // Kevin 2026-10-29: asked to "organize next steps onto the project board",
     // a project bot with no board/* selection wrote project notes instead.
     const { projectShowsCards } = await import("../scripts/pi-bots/bot-world.mjs");
@@ -492,8 +492,58 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     const c3 = new Database(CROW_DB);
     c3.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id=?").run(def("kanban"), "projbot");
     c3.close();
-    const mail = await buildBotWorld({ botId: "projbot", threadId: "proj-mail", gatewayType: "gmail", log: () => {} });
-    const mcpMail = JSON.parse(readFileSync(join(mail.sessionDir, ".mcp.json"), "utf8"));
-    assert.ok(!mcpMail.mcpServers.board || mcpMail.mcpServers.board.disabled, "a channel turn (mail) keeps the def's selection: no board");
+    // 2026-10-30: the board follows the PROJECT, not the channel. The board
+    // server scopes a bot to its own project's cards, so a mail or Discord
+    // turn can carry it too.
+    for (const gw of ["gmail", "discord"]) {
+      const w = await buildBotWorld({ botId: "projbot", threadId: "proj-channel-" + gw, gatewayType: gw, log: () => {} });
+      const mcpGw = JSON.parse(readFileSync(join(w.sessionDir, ".mcp.json"), "utf8"));
+      assert.ok(mcpGw.mcpServers.board && !mcpGw.mcpServers.board.disabled, gw + " turn: board entry active for a project bot");
+      const csvGw = buildToolsCsv(w.def, { resolved: { provider: "stub", model: "m1" }, interactive: false }).csv.split(",");
+      // A channel turn reads its project's cards but changes none (Kevin
+      // 2026-11-02): only the read verbs reach the allowlist here.
+      for (const t of ["mcp__board__board_list_boards", "mcp__board__board_list_items", "mcp__board__board_get_item", "mcp__board__board_get_plan"]) {
+        assert.ok(csvGw.includes(t), gw + " turn: " + t + " in the allowlist");
+      }
+      for (const t of ["mcp__board__board_create_item", "mcp__board__board_update_item", "mcp__board__board_report_result"]) {
+        assert.ok(!csvGw.includes(t), gw + " turn: " + t + " stays out of the allowlist");
+      }
+      assert.ok(!csvGw.includes("mcp__board__board_approve_plan"), gw + " turn: approve stays out");
+    }
+    // A Perch chat turn keeps every board verb: writes come from there.
+    const perchTurn = await buildBotWorld({ botId: "projbot", threadId: "proj-perch-writes", gatewayType: "perch", log: () => {} });
+    const csvPerch = buildToolsCsv(perchTurn.def, { resolved: { provider: "stub", model: "m1" }, interactive: true }).csv.split(",");
+    for (const t of ["mcp__board__board_create_item", "mcp__board__board_update_item", "mcp__board__board_report_result", "mcp__board__board_ask_decision"]) {
+      assert.ok(csvPerch.includes(t), "perch turn: " + t + " in the allowlist");
+    }
+    // A tracker that shows no cards keeps the def's selection on a channel turn.
+    const c4 = new Database(CROW_DB);
+    c4.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id=?").run(def("none"), "projbot");
+    c4.close();
+    const noneChannel = await buildBotWorld({ botId: "projbot", threadId: "proj-channel-none", gatewayType: "gmail", log: () => {} });
+    const mcpNoneChannel = JSON.parse(readFileSync(join(noneChannel.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(!mcpNoneChannel.mcpServers.board || mcpNoneChannel.mcpServers.board.disabled, "tracker none on a channel turn: no board");
+
+    // A bot with no linked project gets no board on a channel turn either.
+    const noProject = await buildBotWorld({ botId: "plainbot", threadId: "channel-noproj", gatewayType: "discord", log: () => {} });
+    const mcpNoProject = JSON.parse(readFileSync(join(noProject.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(!mcpNoProject.mcpServers.board || mcpNoProject.mcpServers.board.disabled, "no project: no board on a channel turn");
+
+    // The voice bot stays out even with a project and a cards tracker: it
+    // answers as speech, and its turn loop has no board.
+    const c6 = new Database(CROW_DB);
+    c6.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,?,?)").run(
+      "crow.voice", "Crow", JSON.stringify({
+        kind: "voice", engine: "voice",
+        system_prompt: "You are Crow.", models: { default: "stub/m1" },
+        tools: { pi_builtin: [], crow_mcp: [] },
+        permission_policy: { bash: "deny", write_paths: [] },
+        session_dir: join(ROOT, "bots", "crow-voice"),
+        tracker_config: { type: "kanban" },
+      }), 1, 777);
+    c6.close();
+    const voice = await buildBotWorld({ botId: "crow.voice", threadId: "voice-turn", gatewayType: "gmail", log: () => {} });
+    const mcpVoice = JSON.parse(readFileSync(join(voice.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(!mcpVoice.mcpServers.board || mcpVoice.mcpServers.board.disabled, "the voice bot never gets the board");
   });
 });

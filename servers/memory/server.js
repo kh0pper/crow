@@ -917,11 +917,17 @@ export function createMemoryServer(dbPath, options = {}) {
     return typeof kind === "string" && kind !== "" && kind.toLowerCase() !== "owner";
   }
 
-  function refusesWritingStyle(sectionKey, extra) {
-    if (sectionKey !== WRITING_STYLE_KEY) return false;
+  /** A call that is not the operator's own: a bot (base or per call), a paired instance, or
+   *  any actor signal that isn't the owner (fail closed). */
+  function notOperatorCall(extra) {
     if (baseActor && baseActor.kind === "bot") return true;
     const caller = resolveCallActor(baseActor, extra);
     return !!(caller && caller.kind === "bot") || fromPairedInstance(extra) || presentNonOwnerSignal(extra);
+  }
+
+  function refusesWritingStyle(sectionKey, extra) {
+    if (sectionKey !== WRITING_STYLE_KEY) return false;
+    return notOperatorCall(extra);
   }
 
   // --- Cross-Platform Context (crow.md) Tools ---
@@ -1202,9 +1208,15 @@ export function createMemoryServer(dbPath, options = {}) {
       type: z.enum(["reminder", "bot_routine", "briefing"]).optional().describe("Schedule type; default: reminder (or bot_routine for a pipeline:botcron: task)"),
       description: z.string().max(500).optional().describe("Optional description of the schedule"),
     },
-    async ({ task, cron_expression, at, when, tz, type, description }) => {
+    async ({ task, cron_expression, at, when, tz, type, description }, extra) => {
       const t = String(task).trim();
       const derived = scheduleKind(t);
+      // A bot routine starts a signed bot job with the goal its description gives, and a job
+      // may write its project's cards; a bot (steered by mail it read) must not mint one for
+      // itself or another bot. Bot routines are the operator's (Bot Builder or their own client).
+      if ((type === "bot_routine" || derived === "bot_routine") && notOperatorCall(extra)) {
+        return scheduleError("Only the operator can create a bot routine (in Bot Builder).");
+      }
       if (type === "briefing" || derived === "briefing") return briefingError();
       if (derived === "system") return scheduleError("Tasks starting with \"pipeline:\" are reserved for bot routines (pipeline:botcron:<bot_id>).");
       const kind = type || derived;
@@ -1322,8 +1334,12 @@ export function createMemoryServer(dbPath, options = {}) {
       run_now: z.boolean().optional().describe("If true, run this reminder now (within a minute)"),
       delete: z.boolean().optional().describe("If true, delete the schedule and its run history"),
     },
-    async ({ id, enabled, task, cron_expression, tz, run_now, delete: doDelete }) => {
+    async ({ id, enabled, task, cron_expression, tz, run_now, delete: doDelete }, extra) => {
       const { rows } = await db.execute({ sql: "SELECT * FROM schedules WHERE id = ?", args: [id] });
+      // Changing a bot routine (re-targeting its bot, switching it on) is the operator's too.
+      if (rows[0] && scheduleKind(rows[0].task) === "bot_routine" && notOperatorCall(extra)) {
+        return scheduleError("Only the operator can change a bot routine (in Bot Builder).");
+      }
       if (rows.length === 0) {
         return { content: [{ type: "text", text: `Schedule #${id} not found.` }] };
       }

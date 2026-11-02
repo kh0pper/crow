@@ -345,7 +345,8 @@ for (const [name, bot, owner, expectOwner] of [
 ]) {
   test(`decideOption: a ${name} assign_bot leaves assigned_bot null and sets owner`, async () => {
     await withStore(async ({ tdb, cdb }) => {
-      const a = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp({ assign_bot: bot, owner }) }, BOT);
+      // Asked by the operator: a bot may assign a follow-up only to itself.
+      const a = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp({ assign_bot: bot, owner }) }, HUMAN);
       const r = await decideOption(tdb, cdb, a.id, { index: 0 }, HUMAN, { isEnabledBot: (id) => isEnabledBot(cdb, id) });
       const follow = await getCard(tdb, r.created_card_id);
       assert.equal(follow.assigned_bot, null);
@@ -795,10 +796,21 @@ test("decideOption: if the follow-up card cannot be created, the decision is sti
 test("a follow-up card inherits the decision card's tags unchanged; an untagged decision gives none", async () => {
   await withStore(async ({ tdb, cdb }) => {
     const tagged = await askDecision(tdb, cdb, { projectId: 1, tags: "scope-a,extra", decision: withFollowUp() }, BOT);
-    const plain = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp({ title: "Other follow-up" }) }, BOT2);
+    const plain = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp({ title: "Other follow-up", assign_bot: "bot-2" }) }, BOT2);
     const r1 = await decideOption(tdb, cdb, tagged.id, { index: 0 }, HUMAN, { isEnabledBot: yes });
     const r2 = await decideOption(tdb, cdb, plain.id, { index: 0 }, HUMAN, { isEnabledBot: yes });
     assert.equal((await getCard(tdb, r1.created_card_id)).tags, "scope-a,extra");
     assert.equal((await getCard(tdb, r2.created_card_id)).tags, null);
+  });
+});
+
+test("a bot's decision may assign its follow-up card only to itself", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await assert.rejects(
+      askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp({ assign_bot: "bot-2" }) }, BOT),
+      /follow-up card only to itself/,
+    );
+    const own = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp() }, BOT); // bot-1 assigns bot-1
+    assert.ok(own.id);
   });
 });
