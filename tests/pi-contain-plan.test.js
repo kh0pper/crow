@@ -294,8 +294,8 @@ test("scan cap: a policy path too large to scan is not bound; an engine dir too 
   assert.throws(() => buildContainPlan(base({ envScanMaxEntries: 3 })), ContainRefused, "the engine/checkout cannot be bound unscanned");
 });
 
-// ---- Kevin's ruling (2026-11-02): a data folder that IS the Crow home, and
-// rw binds over the Crow home, are refused (never masked over) ----
+// ---- The operator's ruling (2026-11-02): a data folder that IS the Crow
+// home, and rw binds over the Crow home, are refused (never masked over) ----
 
 const bindSources = (args) => pairs(args).filter((p) => p[0] === "--bind" && p.length >= 3).map((p) => p[1]);
 
@@ -327,5 +327,39 @@ test("the Crow home is never a read-write bind, and a data folder that is the Cr
   for (const dataDir of [CH, T]) {
     assert.throws(() => buildContainPlan({ ...withHome, dataDir }),
       (e) => e instanceof ContainRefused && e.message === "contain refused: the data folder is the Crow home", String(dataDir));
+  }
+});
+
+// ---- fix round 1 (F1): co-hosted Crow homes are matched by RESOLVED path ----
+
+test("a co-hosted home is never bound: a symlinked one inside $HOME or a declared one outside it", () => {
+  // A co-host reached through a `$HOME/.crow-*` symlink: the NAME is inside
+  // $HOME, the home itself is not. The scan resolves it.
+  const realCo = mk(T, "co-house");
+  mk(realCo, "secrets");
+  const linkCo = join(H, ".crow-r4");
+  symlinkSync(realCo, linkCo);
+  // A co-host home declared outside $HOME (a unit/env-file declaration),
+  // resolved on the spawner's side before it reaches the plan.
+  const declared = mk(T, "srv", "crow-r5");
+  mk(declared, "secrets");
+
+  const cases = [
+    [linkCo, {}],                        // the link path
+    [realCo, {}],                        // its real path
+    [declared, { otherHomes: [declared] }],
+    [dirname(declared), { otherHomes: [declared] }], // an ancestor of it
+  ];
+  for (const [p, over] of cases) {
+    for (const list of ["readPaths", "writePaths"]) {
+      const { args, refused } = buildContainPlan(base({ [list]: [p], ...over }));
+      for (const src of [linkCo, realCo, declared]) {
+        assert.ok(!has(args, "--ro-bind", src), list + " " + p + ": " + src + " is not bound read-only");
+        assert.ok(!has(args, "--bind", src), list + " " + p + ": " + src + " is not bound writable");
+      }
+      const hit = refused.find((r) => r.path === p);
+      assert.ok(hit, list + " " + p + " is refused");
+      assert.equal(hit.reason, "another Crow instance's home", "the reason names only the co-host rule");
+    }
   }
 });

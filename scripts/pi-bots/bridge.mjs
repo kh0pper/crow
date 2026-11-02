@@ -145,7 +145,7 @@ function containModelInputs(resolved, piProvider) {
  * spawner-built closed-world config). Creates the per-instance bot cache and
  * the per-spawn GENERATED agent dir (pi_contain_agent.mjs).
  */
-function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider }) {
+function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes }) {
   const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
   const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
   const botCacheDir = join(crowHome, "bot-cache");
@@ -187,9 +187,16 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
     writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
     mcpServers: servers,
-    // The cloud-door token file (read-only) and the providers this spawn needs
-    // with no door (wrapPiSpawn refuses the spawn while any is listed).
-    cloudTokenPath: containedCloudTokenPath(),
+    // Co-hosted Crow homes, RESOLVED (the secrets-dir scan's homes, including
+    // the ones declared in units/env files): the plan refuses a bind under,
+    // equal to, or over any of them, so a symlinked home and one outside $HOME
+    // are covered too.
+    otherHomes,
+    // The cloud-door token file, read-only, at the RESOLVED path the generated
+    // models.json's `!cat` apiKey names — and only when one of those `/llm/c`
+    // entries was generated. The providers this spawn needs with no door are
+    // reported too (wrapPiSpawn refuses the spawn while any is listed).
+    cloudTokenPath: shadow.cloudTokenPath,
     missing: shadow.missing,
     modelRolesEnv: shadow.env,
     _cleanups: [shadow.cleanup],
@@ -685,12 +692,16 @@ export class PiRpc {
     // dir, whatever it is called) is a co-hosted instance under the same uid:
     // its secrets dir is hidden too.
     const others = checkedInstanceSecretsDirs();      // throws (refusing the spawn) when a home cannot be checked or a remembered one is gone
+    // The co-hosts' HOMES (the scan returns their secrets dirs, real paths):
+    // the contain plan refuses a bind by resolved home path, not by name.
+    const otherHomes = others.map((d) => (basename(d) === "secrets" ? dirname(d) : d));
     // Queue item 19 step 2a: the contain tier, when the spawner's env selects
     // it for this bot. The mount inputs come from this spawn's own policy copy;
     // the pi agent dir is a per-spawn GENERATED dir (a door-only models.json, no
     // provider key, no auth.json) removed when pi exits. Under contain the
-    // secrets dirs are not bound at all; one that a bound dir really contains is
-    // over-mounted, and only the dirs really masked are reported.
+    // secrets dirs are not bound at all: wrapPiSpawn reports each one either
+    // over-mounted (a bound path really contains it) or absent from the empty
+    // root (no bind covers it), and the `hidden` check below reads that report.
     const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
     let contain = null;
     // Per-spawn contain resources (agent shadow, ...), removed exactly once:
@@ -700,7 +711,7 @@ export class PiRpc {
     let launch;
     try {
       if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
-        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider });
+        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes });
         this._containCleanups.push(...contain._cleanups);
         // The generated agent dir carries a 0600 copy of the instance's role
         // snapshot; the spawn env names that copy. <CROW_HOME> itself is never
@@ -715,9 +726,11 @@ export class PiRpc {
     }
     // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
     // dir it cannot stat): otherwise refuse, never run with one visible. In the
-    // contain tier nothing of the Crow home but the data dir and the bot cache
-    // is bound at all, so a secrets dir needs no mask; wrapPiSpawn refuses any
-    // that a bound dir really contains and cannot mask.
+    // contain tier a dir is unreachable either way: over-mounted read-only when
+    // a bound path really contains it, or absent from the empty root when none
+    // does. Both are reported by wrapPiSpawn, and a dir that a bound path
+    // contains and cannot be masked refuses the spawn there. Nothing is
+    // assumed hidden: a contain spawn with no report for a dir is not trusted.
     if (launch.tier !== "contain" && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
       this._runContainCleanup();
       throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
@@ -733,13 +746,13 @@ export class PiRpc {
     if (launch.wrapper === "bwrap") { try { rememberInstanceSecretsDirs(others); } catch { /* next spawn */ } }
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     // Fail closed: the values file is written and card values trusted only
-    // when this instance's AND every other instance's secrets dir is masked.
-    // Under contain the whole home is a tmpfs, so every secrets dir is out of
-    // reach by construction (the data dir and the cloud-door token file are the
-    // only things bound under it).
-    const hidden = launch.tier === "contain"
-      ? true
-      : launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) => launch.masked.includes(d));
+    // when this instance's AND every other instance's secrets dir is out of
+    // reach of the child. That is the launcher's own report, in both tiers:
+    // masked by a tmpfs in the default tier, and under contain either masked
+    // the same way or not bound at all (a dir no bind covers does not exist
+    // inside the empty root).
+    const hidden = launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) =>
+      launch.masked.includes(d) || (launch.tier === "contain" && (launch.unreachable || []).includes(d)));
     // Not hidden: the bot could read the keychain key and add its own hash to
     // the card list, so no value may hide text on cards (cardTrusted:false).
     const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });

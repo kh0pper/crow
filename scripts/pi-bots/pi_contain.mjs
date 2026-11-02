@@ -21,9 +21,11 @@
  *               pi). Its subdirs with code (pkg, agents, prompts, bin) are
  *               bound read-only on top. The operator's own pi sessions are
  *               not visible.
- *   door token  <CROW_HOME>/llm-cloud-token, read-only, the ONE file under
- *               the Crow home a contained bot reads (`!cat` apiKey of a
- *               consented cloud door entry).
+ *   door token  <CROW_HOME>/llm-cloud-token, read-only, and bound only when
+ *               the generated models.json carries a consented `/llm/c` entry;
+ *               bound at its RESOLVED path, which is exactly the path that
+ *               entry's `!cat` apiKey names. The ONE file under the Crow home
+ *               a contained bot reads.
  *   instance    the data dir read-write (the bot's stdio MCP servers open
  *               crow.db directly; documented residual), identity.json masked
  *               unless a sharing tool needs it; CROW_HOME itself, its tokens,
@@ -48,7 +50,13 @@
  * A data folder that IS the Crow home (or an ancestor of it) is refused: the
  * instance's tokens, secrets/ and env/ live there, so it can never be a
  * read-write bind. Nothing of the Crow home is a read-write bind except the
- * data dir and the bot cache below it.
+ * data dir and the bot cache below it. A read_paths entry naming a NON-secret
+ * entry of the home (a bundle dir, say) is bound read-only, with its .env files
+ * masked; token files, secrets/ and env/ are never bound, whatever the policy.
+ *
+ * Co-hosted instances are matched by RESOLVED path: a home reached through a
+ * symlink, or declared outside $HOME, is protected the same way as a
+ * `$HOME/.crow-*` sibling.
  */
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -114,12 +122,16 @@ export function neverBound(home) {
     join(home, ".local", "share", "systemd"), "/etc/crow", "/run/credentials", "/run/user", "/run/docker.sock", "/var/run/docker.sock"];
 }
 
-function otherInstanceHomes(home, crowHome) {
+/** Co-hosted homes named `$HOME/.crow*`, at their REAL paths (a home is often
+ *  a symlink into a data disk), minus this instance's own. */
+function otherInstanceHomes(home, crowHome, exists) {
   const out = [];
   try {
     for (const e of readdirSync(home)) {
       const p = join(home, e);
-      if (/^\.crow(-|$)/.test(e) && p !== crowHome) out.push(p);
+      if (!/^\.crow(-|$)/.test(e)) continue;
+      const r = real(p, exists) || p;
+      if (r !== crowHome) out.push(r);
     }
   } catch {}
   return out;
@@ -128,6 +140,12 @@ function otherInstanceHomes(home, crowHome) {
 /**
  * Build the bwrap argv (everything before "--") for one contained pi spawn.
  * Pure apart from realpath/stat; nothing is created.
+ *
+ * `otherHomes` is the co-hosted Crow homes the spawner already found (its
+ * instance-secrets scan's homes, including declared ones, each RESOLVED with
+ * realpath). They are refused as bind sources by resolved path, so a symlinked
+ * home or one declared outside $HOME is covered as well as a `$HOME/.crow-*`
+ * sibling.
  * @returns {{args: string[], env: object, refused: {path, reason}[]}}
  */
 export function buildContainPlan(o) {
@@ -135,8 +153,8 @@ export function buildContainPlan(o) {
   const home = o.home;
   _home = home;
   const crowHomeReal = o.crowHome ? (real(o.crowHome, exists) || resolve(String(o.crowHome))) : null;
-  // Kevin's ruling (2026-11-02): a data folder that IS the Crow home, or an
-  // ancestor of it, is refused rather than masked over. Binding it read-write
+  // The operator's ruling (2026-11-02): a data folder that IS the Crow home,
+  // or an ancestor of it, is refused rather than masked over. Binding it read-write
   // would put the instance's tokens, secrets/ and env/ inside the sandbox, and
   // an ancestor would put every instance home on the box there.
   if (crowHomeReal && o.dataDir && under(crowHomeReal, real(o.dataDir, exists) || resolve(String(o.dataDir)))) {
@@ -171,7 +189,17 @@ export function buildContainPlan(o) {
   // of either: any of those puts the instance's tokens, secrets/ and env/
   // inside the sandbox. (A write path INSIDE secrets/ is caught by `never`.)
   const closedRw = crowHomeReal ? [crowHomeReal, join(crowHomeReal, "secrets")] : [];
-  const others = otherInstanceHomes(home, o.crowHome);
+  // Co-hosted homes: the ones the spawner already found (secrets dirs and
+  // declared homes, resolved with realpath on its side) plus the `.crow*`
+  // siblings of $HOME, each resolved here. Self and anything that CONTAINS the
+  // home are dropped: this instance's own home is refused by its own rules, and
+  // an entry that covered the home would refuse every bind.
+  const declaredHomes = (Array.isArray(o.otherHomes) ? o.otherHomes : [])
+    .filter((p) => typeof p === "string" && isAbsolute(p));
+  const others = [...new Set([
+    ...declaredHomes.map((p) => real(p, exists) || resolve(p)),
+    ...otherInstanceHomes(home, crowHomeReal, exists),
+  ])].filter((p) => p !== home && p !== crowHomeReal && !under(home, p) && !(crowHomeReal && under(crowHomeReal, p)));
   const homesRoot = dirname(home);
   const codeRoots = [o.appRoot, o.nodeBin && dirname(dirname(o.nodeBin)), o.piLabDir].filter(Boolean)
     .map((p) => real(p, exists) || p);
@@ -183,7 +211,9 @@ export function buildContainPlan(o) {
     if (under(home, p)) return "an ancestor of the home";
     if (write) for (const c of closedRw) if (under(c, p)) return "the Crow home (" + c + ") is never writable, and neither is an ancestor of it";
     for (const n of never) if (under(p, n) || under(n, p)) return "a protected path (" + n + ")";
-    for (const x of others) if (under(p, x)) return "another Crow instance's home";
+    // Under, equal to, or an ANCESTOR of a co-hosted home: binding a parent
+    // would put that instance's home (and its secrets) inside the sandbox.
+    for (const x of others) if (under(p, x) || under(x, p)) return "another Crow instance's home";
     if (under(p, homesRoot) && !under(p, home)) return "another user's home";
     if (write) for (const c of codeRoots) if (under(p, c) || under(c, p)) return "code (the checkout or the engine) is never writable";
     if (write && policy && under(p, home)) {
@@ -291,7 +321,7 @@ export function buildContainPlan(o) {
   // bot paths
   for (const p of [o.sessionDir, o.cwd, o.workspaceDir]) if (p) add(rw, p, { write: true });
   for (const p of o.writePaths || []) {
-    // Kevin's ruling: a policy write path that is the Crow home (or an ancestor
+    // The operator's ruling: a policy write path that is the Crow home (or an ancestor
     // of it) refuses the SPAWN, with the reason named — the turn does not run
     // with the path silently dropped.
     const r = real(String(p), exists);
@@ -419,9 +449,11 @@ export function buildContainPlan(o) {
  * (never inside a path a bot can write); cleanup() removes it with every write
  * pi made to it.
  *
- * @returns {{dir: string, missing: Array<{provider: string, reason: string}>, env: object, cleanup: Function}}
+ * @returns {{dir: string, missing: Array<{provider: string, reason: string}>, env: object, cloudTokenPath: string|null, cleanup: Function}}
  *   `missing` is the providers this spawn needs with no door: wrapPiSpawn
- *   refuses the spawn while it is non-empty.
+ *   refuses the spawn while it is non-empty. `cloudTokenPath` is the RESOLVED
+ *   cloud-door token file to bind read-only, or null when the generated
+ *   models.json has no `/llm/c` entry (then nothing reads it).
  */
 export function prepareAgentShadow(piAgentDir, {
   parent = tmpdir(), providerIds = [], rows = [], consent = null, consentSalt = null,
@@ -434,6 +466,7 @@ export function prepareAgentShadow(piAgentDir, {
     dir,
     missing: generated.missing,
     env: generated.env,
+    cloudTokenPath: generated.cloudTokenPath,
     cleanup: () => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {} },
   };
 }

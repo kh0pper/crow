@@ -338,10 +338,10 @@ The contain tier is `scripts/pi-bots/pi_contain.mjs` (mount plan) plus `scripts/
 - the engine read-only: the node install, the pi package, the checkout, pi-lab, `<CROW_HOME>/skills`, and every pi package `settings.json` names;
 - the instance data dir read-write (the bot's stdio MCP servers open `crow.db` directly — the documented residual), with every other entry masked, plus the bot cache;
 - the bot's own paths: its session dir, cwd, project workspace, `write_paths` (read-write) and `read_paths` (read-only);
-- `<CROW_HOME>/llm-cloud-token`, read-only: the one file under the Crow home a contained bot reads, the `!cat` key of a consented cloud model;
+- `<CROW_HOME>/llm-cloud-token`, read-only: the one file under the Crow home a contained bot reads, the `!cat` key of a consented cloud model. It is bound only when the generated `models.json` really carries a `/llm/c` entry, and always at its **resolved** path — the same path that entry's `!cat` names, so a home reached through a symlink still hands pi one file;
 - the generated agent dir described below.
 
-Never bound, whatever a policy says: `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.config/systemd`, `/etc/crow`, `/run/credentials`, `/run/user`, docker sockets, other Crow instances' homes, the operator's pi sessions — and no other part of `<CROW_HOME>` (its tokens, `secrets/`, `env/`, bundles).
+Never bound, whatever a policy says: `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.config/systemd`, `/etc/crow`, `/run/credentials`, `/run/user`, docker sockets, other Crow instances' homes, the operator's pi sessions, and the instance's own token files, `<CROW_HOME>/secrets` and `<CROW_HOME>/env`. Other Crow instances' homes are matched by **resolved** path, so a co-hosted home reached through a symlink, or declared outside `$HOME`, is refused exactly like a `$HOME/.crow-*` sibling. A `read_paths` entry that names a NON-secret entry of `<CROW_HOME>` (a bundle directory, say) is bound read-only, with its `.env` files masked like any other bound dir's; the tokens and `secrets/` above are never bound.
 
 ### The generated agent dir
 
@@ -351,7 +351,7 @@ A contained spawn does not copy the operator's `~/.pi/agent`; it gets a fresh di
 |---|---|
 | `models.json` | **door-only**: `/llm/p/<row>/v1` for a row the provider door serves (native, external engine, bundle, `door_forward` opt-in), the consented `/llm/c/<row>` entry for a cloud row — key `!cat <cloud-door token>`, never the provider key. No literal key and no LAN/tailnet base URL exists in it. |
 | `mcp.json` | exactly `{"mcpServers":{}}`: the bot's servers arrive on the MCP config fd, never from this file. |
-| `settings.json`, `keybindings.json` | copied from the operator's agent dir (pi reads its `packages[]` from `settings.json`; those package paths stay bound read-only, as above). |
+| `settings.json`, `keybindings.json` | copied from the operator's agent dir (pi reads its `packages[]` from `settings.json`; those package paths stay bound read-only, as above). A source file that is itself a symlink is copied by **content**: the generated dir gets a regular 0600 file, never a link out of itself, so the `packages[]` gate still loads. |
 | `model-roles.json` | a 0600 copy of the instance's role snapshot; the spawn's `CROW_MODEL_ROLES_FILE` names that copy, never `<CROW_HOME>` (which is not bound). |
 | `pkg/`, `agents/`, `prompts/`, `bin/`, … | empty mount points for the read-only subdirs bound on top. |
 

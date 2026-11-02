@@ -44,7 +44,7 @@ writeFileSync(join(piAgentDir, "keybindings.json"), JSON.stringify({ "ctrl+k": "
 writeFileSync(join(piAgentDir, "auth.json"), JSON.stringify({ openai: { key: "operator-login" } }));
 writeFileSync(join(piAgentDir, "models-store.json"), JSON.stringify({ providers: {} }));
 writeFileSync(join(piAgentDir, "models.json"), JSON.stringify({
-  providers: { hand: { baseUrl: "http://10.0.0.9:1/v1", apiKey: "hand-written-literal", models: [{ id: "m" }] } },
+  providers: { hand: { baseUrl: "http://192.168.200.9:1/v1", apiKey: "hand-written-literal", models: [{ id: "m" }] } },
 }));
 writeFileSync(join(piAgentDir, "mcp.json"), JSON.stringify({
   mcpServers: { board: { url: "http://127.0.0.1:3001/board/mcp", headers: { Authorization: "Bearer board-literal" } } },
@@ -123,7 +123,7 @@ test("no auth.json, no models-store.json, and mcp.json is exactly an empty serve
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")), { mcpServers: {} },
     "the bot's servers arrive on the MCP config fd, not from this file");
   const models = readFileSync(join(dir, "models.json"), "utf8");
-  assert.ok(!models.includes("10.0.0.9"), "the operator's own models.json entries are not copied");
+  assert.ok(!models.includes("192.168.200.9"), "the operator's own models.json entries are not copied");
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).packages, ["pkg/pi-lab"],
     "settings.json is copied: pi loads its packages[] gate from it");
   assert.match(readFileSync(join(dir, "keybindings.json"), "utf8"), /ctrl\+k/);
@@ -156,7 +156,7 @@ test("a needed provider with no door is reported, and wrapPiSpawn refuses the co
   // a LAN row /llm/p does not serve
   const lan = build({ providerIds: ["lan-plain"] }).res;
   assert.deepEqual(lan.missing, [{ provider: "lan-plain", reason: "provider lan-plain has no door" }]);
-  // a row that exists but has no model list for pi
+  // a provider id no row matches (not "a row with no model list")
   assert.equal(build({ providerIds: ["unknown-provider"] }).res.missing[0].reason, "provider unknown-provider has no door");
 
   process.env.CROW_PI_CONTAIN_BOTS = "contain-door-bot";
@@ -199,4 +199,84 @@ test("the contain plan binds the cloud-door token file alone, read-only", () => 
 
 test("the cloud-door token path matches the gateway's own llmCloudTokenPath()", () => {
   assert.equal(containedCloudTokenPath(), llmCloudTokenPath());
+});
+
+test("a source settings.json that is itself a symlink is copied by content, never as a link out", () => {
+  const dotfiles = mk(T, "dotfiles");
+  writeFileSync(join(dotfiles, "settings.json"), JSON.stringify({ packages: ["pkg/pi-lab"], theme: "linked" }));
+  const agent2 = mk(T, "agent-linked");
+  symlinkSync(join(dotfiles, "settings.json"), join(agent2, "settings.json"));
+  const dir = mkdtempSync(join(T, "dir-linked-"));
+  buildContainedAgentDir({ piAgentDir: agent2, dir, providerIds: ["local-chat"], rows, gatewayPort: PORT,
+    cloudTokenPath, modelRolesFile: rolesFile });
+
+  const out = join(dir, "settings.json");
+  assert.equal(lstatSync(out).isSymbolicLink(), false, "copied as a regular file, not as a link");
+  assert.equal(readFileSync(out, "utf8"), readFileSync(join(dotfiles, "settings.json"), "utf8"), "the target's content");
+  assert.equal(statSync(out).mode & 0o777, 0o600);
+  // The same invariant as the walk above: nothing in the dir links out.
+  const offenders = [];
+  for (const e of readdirSync(dir)) {
+    const p = join(dir, e);
+    if (!lstatSync(p).isSymbolicLink()) continue;
+    let target = null;
+    try { target = realpathSync(p); } catch { target = null; }
+    if (!target || (target !== dir && !target.startsWith(dir + sep))) offenders.push(p);
+  }
+  assert.deepEqual(offenders, [], "no symlink leaves the generated dir");
+});
+
+test("the cloud-door token is bound only when a consented /llm/c entry was generated", () => {
+  // No cloud model in the generated models.json: no token, no bind.
+  const plain = build({ providerIds: ["local-chat"] }).res;
+  assert.equal(plain.cloudTokenPath, null, "nothing reads a token without a /llm/c entry");
+  const noToken = buildContainPlan({ home: T, crowHome, dataDir, cloudTokenPath: plain.cloudTokenPath,
+    sessionDir: mk(T, "session-plain"), cwd: join(T, "session-plain") }).args;
+  assert.ok(!noToken.includes(cloudTokenPath), "the token file is not bound");
+
+  // A consented cloud row: the resolved token path comes back for the bind.
+  const withCloud = build().res;
+  assert.equal(withCloud.cloudTokenPath, realpathSync(cloudTokenPath));
+  const bound = buildContainPlan({ home: T, crowHome, dataDir, cloudTokenPath: withCloud.cloudTokenPath,
+    sessionDir: mk(T, "session-cloud"), cwd: join(T, "session-cloud") }).args;
+  const i = bound.indexOf(withCloud.cloudTokenPath);
+  assert.ok(i > 0 && bound[i - 1] === "--ro-bind" && bound[i + 1] === withCloud.cloudTokenPath, "bound read-only, same path");
+});
+
+test("a symlinked CROW_HOME: the bound token and the !cat path are the same resolved file", () => {
+  const realHome = mk(T, "tokenhome-real");
+  const token = join(realHome, "llm-cloud-token");
+  writeFileSync(token, "cloud-door-token-value", { mode: 0o600 });
+  const linkHome = join(T, "tokenhome-link");
+  symlinkSync(realHome, linkHome);
+
+  const { dir, res } = build({ cloudTokenPath: join(linkHome, "llm-cloud-token") });
+  const models = JSON.parse(readFileSync(join(dir, "models.json"), "utf8"));
+  const entry = models.providers["crow-c-Cloud Max"];
+  assert.ok(entry, "the consented cloud row is present");
+  assert.ok(entry.apiKey.includes(token), "the !cat apiKey names the RESOLVED file: " + entry.apiKey);
+  assert.ok(!entry.apiKey.includes(linkHome), "never the link the caller passed");
+  assert.equal(res.cloudTokenPath, token);
+
+  const session = mk(T, "session-link");
+  const args = buildContainPlan({ home: T, crowHome, dataDir, cloudTokenPath: res.cloudTokenPath,
+    sessionDir: session, cwd: session }).args;
+  const i = args.indexOf(res.cloudTokenPath);
+  assert.ok(i > 0 && args[i - 1] === "--ro-bind", "the bound source is that same resolved file");
+});
+test("a cloud token swapped for a symlink is never bound (it would expose whatever it points at)", async () => {
+  const { cloudTokenFile } = await import("../scripts/pi-bots/pi_contain_agent.mjs");
+  const { mkdtempSync, writeFileSync, symlinkSync, mkdirSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const D = realpathSync(mkdtempSync(join(tmpdir(), "contain-token-")));
+  mkdirSync(join(D, "home")); mkdirSync(join(D, "elsewhere"));
+  writeFileSync(join(D, "elsewhere", "id_key"), "secret");
+  symlinkSync(join(D, "elsewhere", "id_key"), join(D, "home", "llm-cloud-token"));
+  assert.equal(cloudTokenFile(join(D, "home", "llm-cloud-token")), null, "a symlinked token file is refused");
+  writeFileSync(join(D, "home", "real-token"), "t");
+  assert.equal(cloudTokenFile(join(D, "home", "real-token")), join(D, "home", "real-token"));
+  symlinkSync(join(D, "home"), join(D, "home-link"));
+  assert.equal(cloudTokenFile(join(D, "home-link", "real-token")), join(D, "home", "real-token"), "a symlinked Crow home still resolves to the real file");
+  assert.equal(cloudTokenFile(join(D, "home", "missing")), null);
 });

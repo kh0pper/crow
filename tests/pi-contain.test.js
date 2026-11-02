@@ -4,10 +4,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync, readdirSync, renameSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { probePiSandbox, _resetPiSandboxForTest } from "../scripts/pi-bots/pi_sandbox.mjs";
+import { resolvePiCli } from "../scripts/pi-bots/pi_resolver.mjs";
 
 const REPO = resolve(import.meta.dirname, "..");
 _resetPiSandboxForTest();
@@ -28,6 +29,8 @@ mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 
 // One local row (bundle shape) stands in for the bot's provider.
 const DOOR_ROW = "contain-test-local";
+// A plain LAN endpoint nothing forwards for: the provider door does not serve it.
+const LAN_ROW = "contain-test-lan";
 async function openDoorRow() {
   const [{ CROW_DB }, { default: Database }] = await Promise.all([
     import("../scripts/pi-bots/bridge.mjs"), import("better-sqlite3"),
@@ -36,6 +39,16 @@ async function openDoorRow() {
   try {
     conn.prepare("INSERT OR REPLACE INTO providers (id, base_url, models, host, disabled, bundle_id) VALUES (?, ?, ?, 'local', 0, ?)")
       .run(DOOR_ROW, "http://127.0.0.1:18299/v1", JSON.stringify([{ id: "m" }]), "contain-test-bundle");
+  } finally { conn.close(); }
+}
+async function openLanRow() {
+  const [{ CROW_DB }, { default: Database }] = await Promise.all([
+    import("../scripts/pi-bots/bridge.mjs"), import("better-sqlite3"),
+  ]);
+  const conn = new Database(CROW_DB);
+  try {
+    conn.prepare("INSERT OR REPLACE INTO providers (id, base_url, models, host, disabled, bundle_id) VALUES (?, ?, ?, 'local', 0, NULL)")
+      .run(LAN_ROW, "http://192.168.1.50:8099/v1", JSON.stringify([{ id: "m" }]));
   } finally { conn.close(); }
 }
 before(async () => {
@@ -163,6 +176,42 @@ test("integration: bypass mode cannot be contained: the spawn throws and leaves 
   assert.deepEqual(after_, [], "the agent shadow was removed");
 });
 
+// ---- fix round 1 (F2): the no-door refusal, end to end through the bridge ----
+
+test("integration: a provider row with no door fails the contain spawn with the exact reason", { skip, timeout: 30000 }, async () => {
+  const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+  const { ContainRefused } = await import("../scripts/pi-bots/pi_contain.mjs");
+  process.env.CROW_PI_CONTAIN_BOTS = "contain-nodoor-bot";
+  await openLanRow();
+  const session = join(scratch, "session-nodoor"); mkdirSync(join(session, "sessions"), { recursive: true });
+  assert.throws(() => new PiRpc({
+    def: { bot_id: "contain-nodoor-bot", permission_policy: { bash: "deny", write_paths: [] } },
+    sessionDir: session, resolved: { provider: LAN_ROW, model: "m", key: LAN_ROW + "/m" },
+    nodeBin: process.execPath, cliPath: process.execPath,
+  }), (e) => e instanceof ContainRefused && e.message === "contain refused: provider " + LAN_ROW + " has no door",
+  "exactly the no-door refusal, naming the provider");
+});
+
+test("integration: with crow.db missing a contained spawn is refused (fail closed)", { skip, timeout: 30000 }, async () => {
+  const { PiRpc, CROW_DB } = await import("../scripts/pi-bots/bridge.mjs");
+  const { ContainRefused } = await import("../scripts/pi-bots/pi_contain.mjs");
+  process.env.CROW_PI_CONTAIN_BOTS = "contain-nodb-bot";
+  const aside = CROW_DB + ".away";
+  rmSync(aside, { force: true });
+  renameSync(CROW_DB, aside);   // no rows at all: no provider can have a door
+  try {
+    const session = join(scratch, "session-nodb"); mkdirSync(join(session, "sessions"), { recursive: true });
+    assert.throws(() => new PiRpc({
+      def: { bot_id: "contain-nodb-bot", permission_policy: { bash: "deny", write_paths: [] } },
+      sessionDir: session, resolved: { provider: DOOR_ROW, model: "m", key: DOOR_ROW + "/m" },
+      nodeBin: process.execPath, cliPath: process.execPath,
+    }), (e) => e instanceof ContainRefused && e.message === "contain refused: provider " + DOOR_ROW + " has no door",
+    "an unreadable instance database never widens the spawn");
+  } finally {
+    renameSync(aside, CROW_DB);
+  }
+});
+
 const myShadows = () => { try { return readdirSync(join(process.env.CROW_HOME, "contain-run")).filter((e) => e.startsWith("crow-pi-agent-" + process.pid + "-")); } catch { return []; } };
 async function waitGone(ms = 20000) {
   const end = Date.now() + ms;
@@ -187,6 +236,85 @@ test("integration: the agent shadow (now a generated, key-free agent dir) is rem
   const bad = new PiRpc({ def, sessionDir: session, resolved: { provider: DOOR_ROW, model: "m", key: DOOR_ROW + "/m" }, nodeBin: join(scratch, "no-such-node"), cliPath: stub });
   await bad.exited;
   assert.equal(await waitGone(), true, "removed after a failed start");
+});
+
+// ---- fix round 1 (F3): one REAL pi turn through a /llm/p stub door ----
+// This branch has no fake-model harness that drives a contained real pi, so
+// this is the one place pi itself runs: it is skipped unless a real pi binary
+// and bubblewrap are both available, and nothing about the pi side is stubbed.
+// The door is a loopback HTTP stub; the generated models.json is what the
+// bridge writes (door-only, $crowManaged, apiKey "none").
+const realPiSkip = (() => resolvePiCli() ? null
+  : "the real pi binary is not installed on this box (bot-engine bundle, repo dependency or global npm root)")();
+
+test("integration: one real pi turn answers through a /llm/p stub door", { skip: skip || realPiSkip || false, timeout: 180000 }, async () => {
+  const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+  const { createServer } = await import("node:http");
+  const REPLY = "containment-ok";
+
+  // A free loopback port: containInputs reads the spawner's gateway port, and
+  // the generated models.json points pi at /llm/p/<row>/v1 on it.
+  const probe = createServer();
+  await new Promise((r) => probe.listen(0, "127.0.0.1", r));
+  const port = probe.address().port;
+  await new Promise((r) => probe.close(r));
+  const savedPort = process.env.PORT;
+  process.env.PORT = String(port);
+
+  let doorHits = 0;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      const url = String(req.url || "");
+      if (req.method === "GET" && /\/models\/?$/.test(url)) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: "list", data: [{ id: "m", object: "model" }] }));
+        return;
+      }
+      if (!/^\/llm\/p\/[^/]+\/v1\/chat\/completions$/.test(url)) { res.writeHead(404, { "content-type": "application/json" }); res.end("{}"); return; }
+      doorHits++;
+      let stream = false;
+      try { stream = JSON.parse(body || "{}").stream === true; } catch { /* not JSON */ }
+      const base = { id: "chatcmpl-stub", created: 0, model: "m" };
+      if (!stream) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ...base, object: "chat.completion",
+          choices: [{ index: 0, message: { role: "assistant", content: REPLY }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      const chunk = (delta, finish) => "data: " + JSON.stringify({ ...base, object: "chat.completion.chunk",
+        choices: [{ index: 0, delta, finish_reason: finish }] }) + "\n\n";
+      res.write(chunk({ role: "assistant", content: REPLY }, null));
+      res.write(chunk({}, "stop"));
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  await new Promise((r) => server.listen(port, "127.0.0.1", r));
+
+  process.env.CROW_PI_CONTAIN_BOTS = "contain-real-bot";
+  await openDoorRow();
+  const session = join(scratch, "session-real"); mkdirSync(join(session, "sessions"), { recursive: true });
+  let pi = null;
+  try {
+    pi = new PiRpc({
+      def: { bot_id: "contain-real-bot", permission_policy: { bash: "deny", write_paths: [] } },
+      sessionDir: session, resolved: { provider: DOOR_ROW, model: "m", key: DOOR_ROW + "/m" },
+    });
+    assert.equal(pi.sandboxTier, "contain");
+    await pi.promptTurn("Reply with a short acknowledgement.", 120000);
+    assert.match(pi.assistantText(), new RegExp(REPLY), "the reply came from the stub door");
+    assert.ok(doorHits >= 1, "the door really served the turn (pi is not faked)");
+  } finally {
+    if (pi) await pi.close();
+    // A keep-alive socket pi left behind must not hold the stub server open.
+    try { server.closeAllConnections?.(); } catch { /* none */ }
+    await new Promise((r) => server.close(r));
+    if (savedPort === undefined) delete process.env.PORT; else process.env.PORT = savedPort;
+  }
 });
 
 test("sweepStaleContainDirs removes dirs of dead spawners only", async () => {

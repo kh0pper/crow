@@ -21,11 +21,21 @@
  *   settings.json, keybindings.json   copied from the operator's agent dir
  *                 (pi reads its packages[] from settings.json; those package
  *                 paths stay bound read-only by pi_contain.mjs, as before).
+ *                 A source file that is itself a symlink is copied by
+ *                 CONTENT: the generated dir gets a regular 0600 file, never a
+ *                 link out of itself (the packages[] gate must still load).
  *   everything else absent: no auth.json (the operator's pi logins are not a
  *                 bot's), no models-store.json, no skills/ entry, no symlink.
  *   model-roles.json   a 0600 copy of the instance's role snapshot, so the
  *                 spawned CROW_MODEL_ROLES_FILE names a file inside the dir
  *                 instead of <CROW_HOME> (which is not bound).
+ *
+ * The cloud-door token path this module is given is RESOLVED here, and that
+ * resolved path is both what a `/llm/c` entry's `!cat` apiKey names and what
+ * the caller binds (pi_contain.mjs): one file, whichever way the home is
+ * reached. `cloudTokenPath` comes back non-null only when the generated
+ * models.json really carries a `/llm/c` entry, so a spawn with no cloud model
+ * binds no token at all.
  *
  * Why not buildManagedEntries (servers/shared/pi-models-sync.js): it keeps a
  * bundle/external row's OWN baseUrl, and that file's import graph reaches the
@@ -34,8 +44,8 @@
  * same ones that module writes, built from the same door helpers
  * (providerDoorUrl/cloudDoorUrl, doorKindOf, consentVerdict, piCompatFor).
  */
-import { chmodSync, copyFileSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { providerDoorUrl, cloudDoorUrl } from "../../servers/gateway/models/door.js";
 import { doorKindOf, isLocalClassTarget, isForbiddenTarget } from "../../servers/gateway/models/door-resolve.js";
@@ -52,6 +62,23 @@ export const CONTAINED_ROLES_FILE = "model-roles.json";
  *  rotates every boot (llmCloudTokenPath). Not imported from there: that
  *  module loads the dashboard settings registry, which the bridge must never
  *  load; this is the servicesTokenPath pattern (service-blocks.mjs). */
+/**
+ * The cloud-door token file to bind, or null. Only the real token itself: the path, once its
+ * PARENT is resolved (a symlinked Crow home is fine), must name a regular file that is not a
+ * symlink. A token swapped for a link to some other file (a key, another instance's secret)
+ * would otherwise be bound into the sandbox under the token's name.
+ */
+export function cloudTokenFile(p) {
+  if (typeof p !== "string" || !p) return null;
+  try {
+    const parent = realpathSync(dirname(p));
+    const at = join(parent, basename(p));
+    const st = lstatSync(at);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
+    return realpathSync(at) === at ? at : null;
+  } catch { return null; }
+}
+
 export function containedCloudTokenPath() { return join(resolveCrowHome(), "llm-cloud-token"); }
 
 const OPENAI_TYPES = new Set([null, undefined, "", "openai-compat", "openai"]);
@@ -91,6 +118,19 @@ function modelEntries(models) {
 /** A path as one /bin/sh single-quoted word (pi runs the `!cat` apiKey under
  *  /bin/sh on every auth resolve): each ' becomes '\''. */
 function shellQuote(path) { return "'" + String(path).replace(/'/g, "'\\''") + "'"; }
+
+
+/** Copy a source file's CONTENT (a symlinked source is followed, so the copy is
+ *  a regular file inside `dir`, never a link out of it). False when there is
+ *  nothing regular to copy. */
+function copyRegular(src, dst) {
+  try {
+    if (!statSync(src).isFile()) return false;
+    copyFileSync(src, dst);
+    chmodSync(dst, 0o600);
+    return true;
+  } catch { return false; }
+}
 
 const doorBaseFor = (gatewayPort) => `http://127.0.0.1:${gatewayPort}/llm/v1`;
 
@@ -153,11 +193,13 @@ function cloudDoorEntry(r, { gatewayPort, cloudTokenPath, consent, consentSalt }
  * @param {object|null} [a.consent]   dashboard_settings.llm_cloud_door_rows
  * @param {string|null} [a.consentSalt]
  * @param {number} a.gatewayPort      the spawner's own gateway port
- * @param {string|null} [a.cloudTokenPath]  <CROW_HOME>/llm-cloud-token
+ * @param {string|null} [a.cloudTokenPath]  <CROW_HOME>/llm-cloud-token (resolved here)
  * @param {string|null} [a.modelRolesFile]  the instance's role snapshot
- * @returns {{dir: string, missing: Array<{provider: string, reason: string}>, env: object, roleSnapshotPath: string|null}}
+ * @returns {{dir: string, missing: Array<{provider: string, reason: string}>, env: object, roleSnapshotPath: string|null, cloudTokenPath: string|null}}
  *   `missing` names every needed provider no door serves; `env` is the spawn
- *   env this dir needs (CROW_MODEL_ROLES_FILE inside the dir).
+ *   env this dir needs (CROW_MODEL_ROLES_FILE inside the dir);
+ *   `cloudTokenPath` is the resolved token file to bind, or null when no
+ *   `/llm/c` entry was generated (nothing to read it then).
  */
 export function buildContainedAgentDir({
   piAgentDir, dir, providerIds = [], rows = [], consent = null, consentSalt = null,
@@ -168,6 +210,10 @@ export function buildContainedAgentDir({
   chmodSync(dir, 0o700);
 
   const doorBase = doorBaseFor(gatewayPort);
+  // Resolved once: the `!cat` apiKey and the caller's read-only bind must name
+  // the same file, whether <CROW_HOME> (or the token) is reached through a
+  // symlink or not.
+  const tokenPath = cloudTokenFile(cloudTokenPath);
   const providers = {};
   const missing = [];
   const seen = new Set();
@@ -181,7 +227,7 @@ export function buildContainedAgentDir({
     let key = null;
     if (asCloudEntry) {
       // pi was spawned as crow-c-<row>: only that id, and only as a door entry.
-      if (row) { entry = cloudDoorEntry(row, { gatewayPort, cloudTokenPath, consent, consentSalt }); key = raw; }
+      if (row) { entry = cloudDoorEntry(row, { gatewayPort, cloudTokenPath: tokenPath, consent, consentSalt }); key = raw; }
     } else if (doorRow(row)) {
       const models = modelEntries(row.models);
       if (OPENAI_TYPES.has(row.provider_type) && models.length) {
@@ -193,7 +239,7 @@ export function buildContainedAgentDir({
       // A cloud row reaches a bot only as its consented crow-c-* entry, and pi
       // must then be spawned with that id.
       const doorId = doorEntryId(row.id);
-      const cloud = cloudDoorEntry(row, { gatewayPort, cloudTokenPath, consent, consentSalt });
+      const cloud = cloudDoorEntry(row, { gatewayPort, cloudTokenPath: tokenPath, consent, consentSalt });
       if (cloud) { entry = cloud; key = doorId; }
     }
     if (!entry || !isContainedDoorUrl(entry.baseUrl, gatewayPort)) {
@@ -213,12 +259,10 @@ export function buildContainedAgentDir({
   write("mcp.json", JSON.stringify({ mcpServers: {} }) + "\n");
 
   for (const f of AGENT_COPIED_FILES) {
-    const src = join(piAgentDir || "", f);
-    try {
-      if (!lstatSync(src).isFile()) continue; // never follow a symlink out of the agent dir
-      copyFileSync(src, join(dir, f));
-      chmodSync(join(dir, f), 0o600);
-    } catch { /* absent: pi uses its defaults */ }
+    // statSync (follows), not lstatSync: a settings.json that is itself a
+    // symlink is copied as its regular TARGET's content, so the generated dir
+    // never holds a link out of itself and pi still loads the packages[] gate.
+    copyRegular(join(piAgentDir || "", f), join(dir, f));
   }
   // Mount points only: pi_contain.mjs binds the operator's real subdirs (code,
   // prompts, pkg) read-only on top of them. No skills/ entry is created.
@@ -229,14 +273,10 @@ export function buildContainedAgentDir({
   // The role snapshot lives under <CROW_HOME>, which a contained spawn never
   // binds: the spawn env names a copy inside this dir instead.
   const roleSnapshotPath = join(dir, CONTAINED_ROLES_FILE);
-  let copied = null;
-  try {
-    if (modelRolesFile && lstatSync(modelRolesFile).isFile()) {
-      copyFileSync(modelRolesFile, roleSnapshotPath);
-      chmodSync(roleSnapshotPath, 0o600);
-      copied = roleSnapshotPath;
-    }
-  } catch { copied = null; }
+  const copied = modelRolesFile && copyRegular(modelRolesFile, roleSnapshotPath) ? roleSnapshotPath : null;
 
-  return { dir, missing, env: { CROW_MODEL_ROLES_FILE: roleSnapshotPath }, roleSnapshotPath: copied };
+  // Bind the cloud-door token only when a `/llm/c` entry really needs it.
+  const usesCloudDoor = Object.values(providers).some((e) => typeof e.baseUrl === "string" && e.baseUrl.includes("/llm/c/"));
+  return { dir, missing, env: { CROW_MODEL_ROLES_FILE: roleSnapshotPath }, roleSnapshotPath: copied,
+    cloudTokenPath: usesCloudDoor ? tokenPath : null };
 }

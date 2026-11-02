@@ -283,24 +283,35 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     const pre = [...plan.args];
     // Instance secrets dirs (hideDirs). Contain binds none of them: the plan
     // refuses every read-write bind on the Crow home or an ancestor, and the
-    // rest of the home is not bound. One a BOUND dir happens to contain is
-    // over-mounted read-only here; only dirs really masked are reported, and
-    // one that cannot be masked refuses the spawn. Co-hosted instances' dirs
-    // used to be reported masked unconditionally, which made the bridge's
-    // masked-check pass for dirs nobody had masked.
-    const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/"));
+    // rest of the home is not bound. Each dir is matched against the plan's
+    // bind DESTINATIONS at its RESOLVED path (a secrets dir reached through a
+    // symlink is hidden at its target): one that a bound path really contains
+    // is over-mounted read-only here, and one that no bind covers does not
+    // exist inside the empty root at all. Both are reported, and a dir that is
+    // inside a bound path and cannot be masked refuses the spawn.
+    const hideDirs = (opts.hideDirs || [])
+      .filter((d) => typeof d === "string" && d.startsWith("/"))
+      .map((d) => { try { return realpathSync(d); } catch { return d; } });
     const boundSrc = [];
-    for (let i = 0; i < pre.length; i++) if (pre[i] === "--bind" || pre[i] === "--ro-bind") boundSrc.push(pre[i + 2]);
+    for (let i = 0; i < pre.length; i++) {
+      if (pre[i] !== "--bind" && pre[i] !== "--ro-bind") continue;
+      const dest = pre[i + 2];
+      if (!dest) continue;
+      boundSrc.push(dest);
+      try { const r = realpathSync(dest); if (r !== dest) boundSrc.push(r); } catch { /* not a host path */ }
+    }
     const masked = [];
+    const unreachable = [];
     for (const d of hideDirs) {
-      if (!boundSrc.some((b) => b && (d === b || d.startsWith(b + "/")))) continue; // not bound at all
+      const insideBind = boundSrc.some((b) => d === b || d.startsWith(b + "/"));
+      if (!insideBind) { if (isDir(d)) unreachable.push(d); continue; } // no bind covers it: absent inside
       if (!isDir(d)) throw new ContainRefused("contain refused: the secrets dir " + d + " is inside a bound path and cannot be masked");
       pre.push("--tmpfs", d, "--remount-ro", d);
       masked.push(d);
     }
     if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
     return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: { ...scrubSandboxEnv(env), ...plan.env },
-      sandboxed: true, wrapper: "bwrap", tier: "contain", pidNamespace: true, reason: null, masked, refused: plan.refused };
+      sandboxed: true, wrapper: "bwrap", tier: "contain", pidNamespace: true, reason: null, masked, unreachable, refused: plan.refused };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {
