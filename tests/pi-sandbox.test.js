@@ -17,6 +17,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   wrapPiSpawn, piSandboxMode, probePiSandbox, dockerSocketPaths, isSandboxWrapperArgs,
   scrubSandboxEnv, userRuntimeDirs, PROBE_RETRY_MS, _resetPiSandboxForTest,
+  BWRAP_BASE, BWRAP_BASE_NO_PIDNS, piSandboxStatus,
 } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { listBridgePi, reapStalePi } from "../scripts/pi-bots/pi_lifecycle.mjs";
 
@@ -46,6 +47,7 @@ const SOCKS = dockerSocketPaths();
 _resetPiSandboxForTest();
 const SANDBOX = probePiSandbox({ force: true });
 const noSandbox = SANDBOX.ok ? false : "pi sandbox unavailable here: " + SANDBOX.reason;
+const noPidns = SANDBOX.ok && SANDBOX.pidns ? false : "no PID-namespace sandbox here: " + (SANDBOX.pidnsReason || SANDBOX.reason);
 const RUN_USER = `/run/user/${UID}`;
 const sdRun = (env) => spawnSync("systemd-run", ["--user", "--pipe", "--quiet", "true"],
   { env: { ...env, XDG_RUNTIME_DIR: RUN_USER }, timeout: 15000, encoding: "utf8" });
@@ -53,7 +55,7 @@ const PARENT_SYSTEMD_USER = existsSync(RUN_USER) && sdRun(process.env).status ==
 const TMUX_SOCK = `/tmp/tmux-${UID}/default`;
 const PARENT_TMUX = existsSync(TMUX_SOCK) && await canConnect(TMUX_SOCK);
 
-test("integration: a PiRpc child loses the casual docker, user-session and sudo routes; its parent keeps them", { skip: noSandbox }, async (t) => {
+test("integration: a PiRpc child loses the casual docker, user-session and sudo routes; its parent keeps them", { skip: noPidns }, async (t) => {
   t.diagnostic(`preconditions: docker=${PARENT_HAS_DOCKER && SOCKS.length > 0} systemd-user=${PARENT_SYSTEMD_USER} tmux=${PARENT_TMUX}`);
   if (PARENT_HAS_DOCKER && SOCKS.length) {
     assert.equal(await canConnect(SOCKS[0]), true, "precondition: the parent reaches the docker socket");
@@ -105,8 +107,15 @@ test("integration: a PiRpc child loses the casual docker, user-session and sudo 
     assert.deepEqual(r.keys, [], "user-session IPC pointers and the sandbox switch are scrubbed from the child env");
     assert.notEqual(r.unitWrite, "ok", "~/.config/systemd/user is read-only inside (" + r.unitWrite + ")");
     assert.ok(!existsSync(unitProbe));
-    assert.equal(pi.piPid, r.pid, "bwrap reports pi's own pid");
-    assert.notEqual(pi.proc.pid, r.pid, "proc.pid is the wrapper");
+    // PID namespace: inside, pi sees its own pid (2, under the namespace's
+    // init); outside, PiRpc resolved pi's OUTER pid, whose NSpid ends in it.
+    assert.equal(pi.sandboxTier, "pidns");
+    for (let i = 0; i < 50 && pi.piPid == null; i++) await new Promise((res) => setTimeout(res, 20));
+    assert.ok(pi.sandboxInitPid && pi.sandboxInitPid !== pi.proc.pid, "the namespace's init is its own (outer) pid");
+    assert.ok(pi.piPid && pi.piPid !== pi.proc.pid && pi.piPid !== pi.sandboxInitPid, "piPid is pi, not a wrapper");
+    const nspid = (readFileSync("/proc/" + pi.piPid + "/status", "utf8").match(/^NSpid:\s*(.*)$/m) || [])[1].trim().split(/\s+/).map(Number);
+    assert.deepEqual([nspid[0], nspid[nspid.length - 1]], [pi.piPid, r.pid], "outer pid " + pi.piPid + " is the inner pid " + r.pid);
+    assert.equal(r.pid, 2, "pi runs under the namespace's init");
     if (PARENT_SYSTEMD_USER) {
       assert.notEqual(r.sdStatus, 0, "C1: systemd-run --user (the escape to an unsandboxed user-manager process) FAILS inside");
     }
@@ -151,14 +160,14 @@ test("integration (M7, no docker needed): a masked socket is unreachable inside,
 test("wrapPiSpawn: off / auto-unavailable / required / available argv", () => {
   _resetPiSandboxForTest();
   const off = wrapPiSpawn("node", ["cli.js"], { mode: "off", env: { SSH_AUTH_SOCK: "x" } });
-  assert.deepEqual([off.cmd, off.args, off.sandboxed, off.wrapper], ["node", ["cli.js"], false, null]);
+  assert.deepEqual([off.cmd, off.args, off.sandboxed, off.wrapper, off.tier], ["node", ["cli.js"], false, null, "none"]);
   assert.equal(off.env.SSH_AUTH_SOCK, "x", "off leaves the env alone");
 
   const bad = { ok: false, bwrap: null, setpriv: null, reason: "bubblewrap (bwrap) is not installed" };
   const origErr = console.error; const msgs = []; console.error = (m) => msgs.push(String(m));
   try {
     const a = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe: bad });
-    assert.deepEqual([a.cmd, a.sandboxed, a.wrapper], ["node", false, null]);
+    assert.deepEqual([a.cmd, a.sandboxed, a.wrapper, a.tier], ["node", false, null, "none"]);
     wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe: bad });
     assert.equal(msgs.filter((m) => m.includes("[pi-sandbox] WARNING")).length, 1, "warns once per reason");
   } finally { console.error = origErr; }
@@ -170,8 +179,9 @@ test("wrapPiSpawn: off / auto-unavailable / required / available argv", () => {
     sockets: ["/run/docker.sock", "/run/user/1000/docker.sock"],
     runtimeDirs: ["/run/user/1000", "/tmp/tmux-1000"], roDirs: ["/h/.config/systemd"],
   });
-  assert.deepEqual([w.sandboxed, w.wrapper, w.cmd], [true, "bwrap", "/usr/bin/bwrap"]);
-  assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user",
+  assert.deepEqual([w.sandboxed, w.wrapper, w.cmd, w.tier, w.pidNamespace], [true, "bwrap", "/usr/bin/bwrap", "pidns", true],
+    "a probe without a pidns field means the full tier");
+  assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc",
     "--tmpfs", "/run/user/1000", "--tmpfs", "/tmp/tmux-1000",
     "--ro-bind", "/dev/null", "/run/docker.sock",
     "--ro-bind", "/h/.config/systemd", "/h/.config/systemd",
@@ -234,7 +244,7 @@ test("M3: without bwrap, setpriv --no-new-privs is the fallback (stubbed binary)
     assert.deepEqual([p.ok, p.setpriv], [false, stub]);
     assert.equal(readFileSync(log, "utf8").trim(), "--no-new-privs /bin/true", "the probe ran the stub");
     const w = wrapPiSpawn("/n/node", ["/x/cli.js", "--mode", "rpc"], { mode: "auto", env: { A: "1", SSH_AUTH_SOCK: "s" } });
-    assert.deepEqual([w.cmd, w.args, w.wrapper, w.sandboxed], [stub, ["--no-new-privs", "/n/node", "/x/cli.js", "--mode", "rpc"], "setpriv", false]);
+    assert.deepEqual([w.cmd, w.args, w.wrapper, w.sandboxed, w.tier], [stub, ["--no-new-privs", "/n/node", "/x/cli.js", "--mode", "rpc"], "setpriv", false, "nnp"]);
     assert.deepEqual(w.env, { A: "1" });
     assert.ok(msgs.some((m) => m.includes("setpriv --no-new-privs")));
     assert.throws(() => wrapPiSpawn("n", [], { mode: "required" }), /required/, "required still demands bwrap");
@@ -351,6 +361,25 @@ test("I1: an OLD-style reaper (no wrapper folding) respects the dual lease on pi
     const r = reapStalePi({ _procs: oldStyle, _kill: (pid, sig) => killed.push([pid, sig]), leaseFiles: [leaseFile], now });
     assert.deepEqual(r.reaped, [], "neither the wrapper nor the inner pi is reaped past hardAgeSec");
     assert.deepEqual(killed, []);
+    // PID-namespace topology (outer bwrap 800 -> inner bwrap 801 -> pi 802)
+    // as a ONE-level fold (an older pi_lifecycle during a rollout) lists it:
+    // the inner bwrap carries pi's RSS and innerPid, the outer one stands
+    // alone. perch leases all three (wrapper, sandboxInitPid, piPid).
+    writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: {
+      "800": { sessionId: "s2", expiresAt: now + 60_000 },
+      "801": { sessionId: "s2", expiresAt: now + 60_000 },
+      "802": { sessionId: "s2", expiresAt: now + 60_000 },
+    } }));
+    const oneLevel = [
+      { pid: 801, ppid: 800, etimes: 4000, rssKb: 250000, args: `/usr/bin/bwrap -- /n/node ${CLI} --mode rpc`, innerPid: 802 },
+      { pid: 800, ppid: 50, etimes: 4000, rssKb: 3000, args: `/usr/bin/bwrap -- /n/node ${CLI} --mode rpc` },
+    ];
+    const r3 = reapStalePi({ _procs: oneLevel, _kill: () => {}, leaseFiles: [leaseFile], now });
+    assert.deepEqual(r3.reaped, [], "the one-level reaper leaves a leased nested sandbox alone");
+    writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: {
+      "800": { sessionId: "s2", expiresAt: now + 60_000 }, "802": { sessionId: "s2", expiresAt: now + 60_000 } } }));
+    const r4 = reapStalePi({ _procs: oneLevel, _kill: () => {}, leaseFiles: [leaseFile], now });
+    assert.deepEqual(r4.reaped.map((v) => v.pid), [801], "control: without the init lease the one-level reaper kills the session");
     // Control: with only the wrapper leased (pre-fix lease file) the old reaper kills pi.
     writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: { "700": { sessionId: "s1", expiresAt: now + 60_000 } } }));
     const r2 = reapStalePi({ _procs: oldStyle, _kill: () => {}, leaseFiles: [leaseFile], now });
@@ -390,4 +419,226 @@ test("wrapPiSpawn pins EVERY ancestor below the stop, even past a parent the bot
     assert.ok(l.pinned.includes(join(home, ".crow")), "pinned although its parent is not writable right now");
     assert.ok(l.pinned.includes(home));
   } finally { chmodSync(home, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- PID namespace sandbox ----
+
+test("integration: PID namespace + fresh /proc: no host process is visible; the parent's root and environ do not exist inside", { skip: noPidns }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pidns-"));
+  const secret = join(dir, "secret");
+  writeFileSync(secret, "test-only-value", { mode: 0o600 });
+  try {
+    const script = [
+      'const fs = require("fs"); const { execFileSync } = require("child_process");',
+      'const ppid = process.argv[1], secret = process.argv[2];',
+      'const tryRead = (p) => { try { fs.readFileSync(p); return "READ"; } catch (e) { return e.code; } };',
+      'const pids = fs.readdirSync("/proc").filter((x) => /^\\d+$/.test(x)).map(Number);',
+      'const sub = execFileSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" }).trim();',
+      'fs.writeFileSync("written-inside.txt", "ok");',
+      'console.log(JSON.stringify({ root: tryRead("/proc/" + ppid + "/root" + secret), environ: tryRead("/proc/" + ppid + "/environ"), pids, self: process.pid, sub, cwdRead: fs.readFileSync("written-inside.txt", "utf8") }));',
+    ].join("\n");
+    const launch = wrapPiSpawn(process.execPath, ["-e", script, String(process.pid), secret], { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [] });
+    assert.equal(launch.tier, "pidns");
+    assert.ok(launch.args.includes("--unshare-pid") && !launch.args.includes("--die-with-parent"));
+    const res = await new Promise((resolve) => {
+      const c = spawn(launch.cmd, launch.args, { env: launch.env, cwd: dir });
+      let o = "", e = ""; c.stdout.on("data", (d) => (o += d)); c.stderr.on("data", (d) => (e += d));
+      c.on("exit", (code) => resolve({ code, o: o.trim(), e }));
+    });
+    assert.equal(res.code, 0, "the sandboxed child (with its own subprocess) exits 0: " + res.e);
+    const r = JSON.parse(res.o.split("\n").pop());
+    assert.notEqual(r.root, "READ", "the parent's /proc/<pid>/root is not reachable");
+    assert.notEqual(r.environ, "READ", "the parent's /proc/<pid>/environ is not reachable");
+    assert.ok(!r.pids.includes(process.pid), "the parent's pid is not even listed");
+    assert.ok(r.pids.length <= 4 && r.pids.every((p) => p <= 10), "only the sandbox's own pids: " + r.pids.join(","));
+    assert.ok(Number(r.sub) > r.self, "the child spawned its own subprocess");
+    assert.equal(r.cwdRead, "ok", "reads and writes its cwd");
+    assert.equal(readFileSync(join(dir, "written-inside.txt"), "utf8"), "ok", "the write is visible outside");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("integration: a same-uid sentinel outside the sandbox cannot even be signalled (kill -0 fails) from inside", { skip: noPidns }, async () => {
+  // Same uid, outside the sandbox: the parent can signal it, the child cannot see it.
+  const sentinel = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    await new Promise((r) => sentinel.once("spawn", r));
+    process.kill(sentinel.pid, 0); // precondition: the parent reaches it
+    const script = 'try { process.kill(Number(process.argv[1]), 0); console.log("ALIVE"); } catch (e) { console.log(e.code); }';
+    const launch = wrapPiSpawn(process.execPath, ["-e", script, String(sentinel.pid)], { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [] });
+    assert.equal(launch.tier, "pidns");
+    const out = spawnSync(launch.cmd, launch.args, { env: launch.env, encoding: "utf8", timeout: 15000 });
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(out.stdout.trim(), "ESRCH", "kill -0 on a host pid fails inside the PID namespace");
+    // Control: the same check outside the sandbox succeeds.
+    const plain = spawnSync(process.execPath, ["-e", script, String(sentinel.pid)], { encoding: "utf8" });
+    assert.equal(plain.stdout.trim(), "ALIVE");
+  } finally { try { sentinel.kill("SIGKILL"); } catch { /* gone */ } }
+});
+
+test("integration: close()'s group SIGTERM lets a sandboxed pi finish its SIGTERM drain", { skip: noPidns }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pi-drain-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const marker = join(dir, "drained");
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { writeFileSync } from "node:fs";',
+    `process.on("SIGTERM", () => setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, "ok"); process.exit(0); }, 800));`,
+    'process.stdout.write(JSON.stringify({ type: "up" }) + "\\n");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub });
+    assert.equal(pi.sandboxed, true);
+    assert.equal(pi.sandboxTier, "pidns");
+    await pi.waitFor((m) => m.type === "up", 20000, "up");
+    await pi.close();
+    for (let i = 0; i < 40 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(existsSync(marker), true, "pi's SIGTERM handler ran to completion (no PDEATHSIG kill)");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("integration: a sandboxed pi that IGNORES SIGTERM is still gone within ~6 s of close()", { skip: noPidns }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pi-stubborn-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'process.on("SIGTERM", () => {});',
+    'process.stdout.write(JSON.stringify({ type: "up" }) + "\\n");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  let pgidForCleanup = null;
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub });
+    assert.equal(pi.sandboxed, true);
+    await pi.waitFor((m) => m.type === "up", 20000, "up");
+    for (let i = 0; i < 50 && pi.piPid == null; i++) await new Promise((r) => setTimeout(r, 20));
+    const piPid = pi.piPid, pgid = pi.proc.pid;
+    pgidForCleanup = pgid;
+    const alive = (p) => { try { process.kill(p, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+    const t0 = Date.now();
+    await pi.close();
+    assert.ok(Date.now() - t0 < 2000, "close() itself does not wait for the drain");
+    assert.equal(alive(piPid), true, "pi ignored SIGTERM and is still alive right after close()");
+    for (let i = 0; i < 70 && alive(piPid); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(piPid), false, "SIGKILLed by the kept 5 s timer");
+    assert.throws(() => process.kill(-pgid, 0), "the process group is gone");
+    pgidForCleanup = null; // never SIGKILL a pgid that may since have been reused
+  } finally {
+    try { if (pgidForCleanup) process.kill(-pgidForCleanup, "SIGKILL"); } catch { /* gone */ }
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("countLivePi's scan counts a sandboxed pi ONCE in the nested topology", () => {
+  const W = `/usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --info-fd 3 -- /n/node ${CLI} --mode rpc`;
+  const ps = [`  700    50   400   3000 ${W}`, `  701   700   400   1000 ${W}`, `  702   701   399 250000 /n/node ${CLI} --mode rpc`,
+    `  200    50    10 120000 /n/node ${CLI} --mode rpc`].join("\n");
+  assert.equal(listBridgePi({ _psOutput: ps }).length, 2, "one sandboxed + one plain pi");
+  const src = readFileSync(new URL("../scripts/pi-bots/pi_lifecycle.mjs", import.meta.url), "utf8");
+  assert.match(src, /export function countLivePi\(\) \{\n  return listBridgePi\(\)\.length;/);
+});
+
+test("listBridgePi folds a PID-namespace sandbox (outer bwrap -> inner bwrap -> pi) into ONE entry", () => {
+  const W = `/usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --info-fd 3 -- /n/node ${CLI} --mode rpc`;
+  const ps = [
+    `  700    50   400   3000 ${W}`,
+    `  701   700   400   1000 ${W}`,
+    `  702   701   399 250000 /n/node ${CLI} --mode rpc`,
+    // orphaned nested sandbox
+    `  800     1   500   3000 ${W}`,
+    `  801   800   500   1000 ${W}`,
+    `  802   801   499 999999 /n/node ${CLI} --mode rpc`,
+    // nested wrapper whose pi has not started
+    `  900    50     0   2000 ${W}`,
+    `  901   900     0   1000 ${W}`,
+  ].join("\n");
+  const procs = listBridgePi({ _psOutput: ps });
+  const byPid = Object.fromEntries(procs.map((p) => [p.pid, p]));
+  assert.equal(procs.length, 3, JSON.stringify(procs));
+  assert.deepEqual([byPid[700].ppid, byPid[700].rssKb, byPid[700].innerPid], [50, 250000, 702]);
+  assert.deepEqual([byPid[800].ppid, byPid[800].innerPid], [1, 802]);
+  assert.ok(byPid[900] && !byPid[901]);
+  const killed = [];
+  const r = reapStalePi({ _procs: procs, _kill: (pid, sig) => killed.push([pid, sig]), leaseFiles: [], now: Date.now() });
+  assert.deepEqual(r.reaped.map((v) => v.pid), [800]);
+  assert.ok(killed.some(([p, s2]) => p === -800 && s2 === "SIGTERM"), "the outer wrapper's group (inner bwrap, pi, its children) is signalled");
+});
+
+test("two-tier probe: full flags first, then user-namespace only ('active-no-pidns'), setpriv only when both fail", () => {
+  const calls = [];
+  const stub = (results) => (bin, args) => { calls.push([bin, args.join(" ")]); return results.shift(); };
+  const prevMode = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  try {
+    // tier 1 works
+    _resetPiSandboxForTest();
+    let p = probePiSandbox({ force: true, bwrap: "/b", setpriv: "/s", runProbe: stub([null]) });
+    assert.deepEqual([p.ok, p.pidns, p.bwrap], [true, true, "/b"]);
+    assert.equal(piSandboxStatus(), "active");
+    assert.equal(calls.length, 1);
+    assert.match(calls[0][1], /--unshare-pid --proc \/proc -- \/bin\/true$/);
+    // tier 1 fails, tier 2 works
+    calls.length = 0;
+    _resetPiSandboxForTest();
+    p = probePiSandbox({ force: true, bwrap: "/b", setpriv: "/s", runProbe: stub(["no pidns", null]) });
+    assert.deepEqual([p.ok, p.pidns, p.setpriv], [true, false, null]);
+    assert.match(p.pidnsReason, /--unshare-pid \/ --proc.*no pidns/);
+    assert.equal(piSandboxStatus(), "active-no-pidns");
+    assert.deepEqual(calls.map((c) => c[1]), [[...BWRAP_BASE, "--", "/bin/true"].join(" "), [...BWRAP_BASE_NO_PIDNS, "--", "/bin/true"].join(" ")]);
+    const msgs = []; const orig = console.error; console.error = (m) => msgs.push(String(m));
+    try {
+      const w = wrapPiSpawn("/n/node", ["cli.js"], { mode: "auto", probe: p, env: {}, sockets: [], runtimeDirs: [], roDirs: [] });
+      assert.deepEqual([w.sandboxed, w.pidNamespace, w.tier], [true, false, "userns"]);
+      assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user", "--", "/n/node", "cli.js"]);
+      wrapPiSpawn("/n/node", ["cli.js"], { mode: "auto", probe: p, env: {}, sockets: [], runtimeDirs: [], roDirs: [] });
+    } finally { console.error = orig; }
+    assert.equal(msgs.filter((m) => m.includes("WITHOUT a private PID namespace")).length, 1, "warns once");
+    // both bwrap tiers fail: setpriv
+    calls.length = 0;
+    _resetPiSandboxForTest();
+    p = probePiSandbox({ force: true, bwrap: "/b", setpriv: "/s", runProbe: stub(["e1", "e2", null]) });
+    assert.deepEqual([p.ok, p.setpriv], [false, "/s"]);
+    assert.match(p.reason, /--unshare-user\): e2/);
+    assert.match(piSandboxStatus(), /^nnp-only: /);
+    assert.equal(calls[2][0], "/s");
+  } finally {
+    if (prevMode === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prevMode;
+    _resetPiSandboxForTest();
+  }
+});
+
+test("a tier-2 (user-namespace-only) success is re-probed after PROBE_RETRY_MS and upgrades to the full tier", () => {
+  const prevMode = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  const results = ["probe timeout", null, null];
+  const calls = [];
+  const runProbe = (bin, args) => { calls.push(args.join(" ")); return results.shift(); };
+  try {
+    _resetPiSandboxForTest();
+    const t0 = 1_000_000;
+    let p = probePiSandbox({ now: t0, bwrap: "/b", setpriv: "/s", runProbe });
+    assert.deepEqual([p.ok, p.pidns], [true, false], "transient tier-1 failure: tier 2");
+    p = probePiSandbox({ now: t0 + PROBE_RETRY_MS - 1, bwrap: "/b", setpriv: "/s", runProbe });
+    assert.equal(calls.length, 2, "cached within the retry interval");
+    assert.equal(p.pidns, false);
+    p = probePiSandbox({ now: t0 + PROBE_RETRY_MS, bwrap: "/b", setpriv: "/s", runProbe });
+    assert.deepEqual([p.ok, p.pidns], [true, true], "upgraded");
+    assert.equal(calls.length, 3);
+    assert.match(calls[2], /--unshare-pid --proc \/proc/);
+    assert.equal(piSandboxStatus(), "active", "status follows the cache");
+    const w = wrapPiSpawn("/n/node", ["cli.js"], { mode: "auto", probe: probePiSandbox({ now: t0 + 10 * PROBE_RETRY_MS, runProbe }), env: {}, sockets: [], runtimeDirs: [], roDirs: [] });
+    assert.equal(w.tier, "pidns", "later spawns use the full tier");
+    assert.equal(calls.length, 3, "a full-tier success is kept for good");
+  } finally {
+    if (prevMode === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prevMode;
+    _resetPiSandboxForTest();
+  }
 });

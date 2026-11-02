@@ -1246,6 +1246,13 @@ test("S3 I1: a sandboxed child leases BOTH the bwrap wrapper pid and pi's own pi
   assert.ok(l[String(pi.piPid)], "pi's own pid is leased (old reapers see only it)");
   assert.equal(l[String(pi.piPid)].sessionId, s.sessionId);
   assert.equal(l[String(pi.piPid)].expiresAt, l[String(pi.proc.pid)].expiresAt);
+  // PID-namespace sandbox: the namespace's init (inner bwrap) is leased too.
+  pi.sandboxInitPid = pi.proc.pid + 50_000;
+  clock.advance(60_000);
+  await tick();
+  const l2 = JSON.parse(readFileSync(LEASE_PATH, "utf8")).leases;
+  assert.equal(l2[String(pi.sandboxInitPid)].sessionId, s.sessionId, "the inner bwrap is leased (one-level-fold reapers see it)");
+  assert.equal(l2[String(pi.sandboxInitPid)].expiresAt, l2[String(pi.proc.pid)].expiresAt);
   await engine.stop(s.sessionId);
   assert.deepEqual(JSON.parse(readFileSync(LEASE_PATH, "utf8")).leases, {});
 });

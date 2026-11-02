@@ -38,6 +38,18 @@ const botDef = (over = {}) => ({
 const alive = (pid) => {
   try { return readFileSync(`/proc/${pid}/stat`, "utf8").replace(/^.*\) /, "")[0] !== "Z"; } catch { return false; }
 };
+/**
+ * The stub pi's HOST pid. Its own process.pid (in the capture file) is namespace-internal when
+ * the bot sandbox gives pi a PID namespace, so it names some unrelated host process. Resolve it
+ * from the host side instead: the marked process running the stub that is not a bwrap wrapper
+ * (the wrappers carry the marker and the stub path in their argv too).
+ */
+const stubHostPids = (runId, sinceBootSec) => survivorsByMarker(runId, { sinceBootSec }).filter((pid) => {
+  try {
+    if (readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "bwrap") return false;
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").some((a) => a.endsWith("stub-pi.mjs"));
+  } catch { return false; }
+});
 const until = async (fn, ms) => {
   const end = Date.now() + ms;
   for (;;) {
@@ -340,17 +352,18 @@ for (const variant of [{ name: "child dies with its parent", knobs: {} }, { name
     t.after(() => { try { process.kill(childPid, "SIGKILL"); } catch {} });
     const cap = await until(() => captured(ctx)[0], 20000);
     assert.ok(cap, `the stub pi got the prompt (stderr: ${stderr(ctx)})`);
-    t.after(() => { try { process.kill(cap.pid, "SIGKILL"); } catch {} });
-    assert.ok(alive(cap.pid) && alive(childPid));
     assert.equal(cap.runMarker, ctx.runId, "pi carries the run marker");
-    assert.ok(survivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec }).includes(cap.pid), "the marker scan sees the stub pi");
+    const stubPid = await until(() => stubHostPids(ctx.runId, ctx.sinceBootSec)[0], 5000);
+    assert.ok(stubPid, "the marker scan sees the stub pi");
+    t.after(() => { try { process.kill(stubPid, "SIGKILL"); } catch {} });
+    assert.ok(alive(stubPid) && alive(childPid));
     assert.equal(cap.ignoresTerm, !!variant.knobs.PIBOT_TEST_IGNORE_TERM, "the variant knob reached the stub pi");
     const killedAt = Date.now();
     mid.kill("SIGKILL");
     // The child notices within 1 s; a SIGTERM-ignoring pi costs the full kill grace on top.
     const budget = 5000 + (variant.knobs.PIBOT_TEST_IGNORE_TERM ? KILL_GRACE_MS : 0);
-    const clear = await until(() => !survivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec }).length && !alive(cap.pid) && !alive(childPid), budget);
-    assert.ok(clear, `survivors: ${survivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec })}, stub alive ${alive(cap.pid)}, child alive ${alive(childPid)}`);
+    const clear = await until(() => !survivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec }).length && !alive(stubPid) && !alive(childPid), budget);
+    assert.ok(clear, `survivors: ${survivorsByMarker(ctx.runId, { sinceBootSec: ctx.sinceBootSec })}, stub alive ${alive(stubPid)}, child alive ${alive(childPid)}`);
     assert.match(stderr(ctx), /parent died/);
     // Only a SIGKILL after the grace can stop a SIGTERM-ignoring stub (nothing signals the child itself).
     if (variant.knobs.PIBOT_TEST_IGNORE_TERM) assert.ok(Date.now() - killedAt >= KILL_GRACE_MS - 500, "the stub outlived SIGTERM");

@@ -42,6 +42,18 @@ const models = (baseUrl = "http://127.0.0.1:9/v1") => ({
 const alive = (pid) => {
   try { return readFileSync(`/proc/${pid}/stat`, "utf8").replace(/^.*\) /, "")[0] !== "Z"; } catch { return false; }
 };
+/**
+ * The stub pi's HOST pid. Its own process.pid (in the capture file) is namespace-internal when
+ * the bot sandbox gives pi a PID namespace, so it names some unrelated host process. Resolve it
+ * from the host side instead: the marked process running the stub that is not a bwrap wrapper
+ * (the wrappers carry the marker and the stub path in their argv too).
+ */
+const stubHostPids = (runId, sinceBootSec) => survivorsByMarker(runId, { sinceBootSec }).filter((pid) => {
+  try {
+    if (readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "bwrap") return false;
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").some((a) => a.endsWith("stub-pi.mjs"));
+  } catch { return false; }
+});
 /** What a survivor is, for the failure message: its cmdline and whether its environ is readable. */
 const describePid = (pid) => {
   let cmd = "?"; let env = "readable";
@@ -163,7 +175,12 @@ test("hung turn is killed with its whole tree", async (t) => {
   const ctx = await setup(t, { knobs: { PIBOT_TEST_HANG: "1" }, over: { turnTimeoutMs: 600_000, turnSlackMs: 5000 - 600_000 } });
   // The capture file's appearance time, polled while the run is in flight.
   let capturedAt = null;
-  const poll = setInterval(() => { if (capturedAt === null && existsSync(ctx.capture)) capturedAt = Date.now(); }, 20);
+  let stubSeen = false; // the stub's host pid was found while the turn was in flight
+  const poll = setInterval(() => {
+    if (capturedAt === null && existsSync(ctx.capture)) capturedAt = Date.now();
+    const id = ctx.runIdOf();
+    if (!stubSeen && id && stubHostPids(id, ctx.sinceBootSec).length) stubSeen = true;
+  }, 20);
   let r;
   try { r = await runConversation(ctx.opts); } finally { clearInterval(poll); }
   assert.equal(r.ok, false);
@@ -172,8 +189,9 @@ test("hung turn is killed with its whole tree", async (t) => {
   assert.ok(kill, "the parent ran killTree");
   assert.ok(capturedAt !== null && capturedAt < kill.at, `pi had the prompt before the kill (captured ${capturedAt}, kill ${kill.at})`);
   const cap = readLines(ctx.capture)[0];
-  assert.ok(cap && cap.pid);
-  assert.equal(alive(cap.pid), false, "the stub pi is gone");
+  assert.ok(cap, "the stub pi got the prompt");
+  assert.ok(stubSeen, "the marker scan saw the stub pi while the turn ran");
+  assert.deepEqual(stubHostPids(ctx.runIdOf(), ctx.sinceBootSec), [], "the stub pi is gone");
   assert.equal(r.threads.length, 1);
   await ctx.noSurvivors();
 });
