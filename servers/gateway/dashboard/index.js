@@ -104,6 +104,9 @@ import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
+import { isLocalPasswordSessionOn } from "./local-session.js";
+import { withForYouOwner } from "./shell/chrome.js";
+import { forYouEnabled } from "../for-you/flag.js";
 
 /** A retried 2FA step's pending token keeps the SSO context and the on-host flag (auth.js). */
 function retryPendingCtx(ssoCtx, onHost) {
@@ -1082,13 +1085,23 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
         shellOpts.shell = { ...shellOpts.shell, tray };
       }
 
+      // For You's entry points (the drawer's card, the mascot sheet's link and, through the
+      // drawer, the phone drag reveal's target) are the OWNER's alone: the page itself 404s for
+      // every other session, so linking it would only offer dead ends. One check per page, and
+      // only while the flag is on. The chrome takes it as `forYouOwner`; the card, sheet and
+      // swipe all follow that one attribute.
+      let forYouOwner = false;
+      if (forYouEnabled()) {
+        try { forYouOwner = await isLocalPasswordSessionOn(db, req); } catch (err) { forYouOwner = false; console.warn("[for-you] owner check failed:", err && err.message); }
+      }
+
       const result = await panel.handler(req, res, {
         db,
         appRoot: resolve(import.meta.dirname, "../../.."),
         lang,
         // Bot Builder's "Use for voice…" binds through the Kiosk's own endpoints: offered only when it is there.
         kioskAvailable: talkAvailable,
-        layout: (opts) => renderPage({
+        layout: (opts) => withForYouOwner(forYouOwner, () => renderPage({
           ...opts,
           ...shellOpts,
           activePanel: panelId,
@@ -1098,7 +1111,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
           headerIcons: activeHeaderHtml,
           afterContent: playerBarHtml(lang),
           scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs,
-        }),
+        })),
       });
 
       // Handler may have already sent response

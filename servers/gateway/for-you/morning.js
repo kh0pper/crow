@@ -3,7 +3,9 @@
  * reads or writes anything here, and nothing is written (the page GET is prefetched by Turbo).
  *
  *   needs     the Board's Needs-you lane across Everything (laneRows {all} + groupByLane, the
- *             Board's own rule and order), total and the first NEEDS_LINES cards.
+ *             Board's own rule and order), total and the first NEEDS_LINES cards. Cached per
+ *             process for NEEDS_CACHE_MS: the read is the Board's own cost, and Turbo prefetches
+ *             this page, so every GET used to pay it again.
  *   due       open cards (not terminal on their own board) due today or earlier in the instance's
  *             time zone, earliest first, not already listed under needs.
  *   finished  results bots reported in the last FINISHED_HOURS (actor_kind 'bot' only: never a
@@ -33,6 +35,23 @@ export const FINISHED_HOURS = 24;
 /** Summarized sessions read to find one on a live project. */
 const LEFT_OFF_SCAN = 20;
 const ABSENT_RE = /no such (table|column)/i;
+/** How long one process keeps the Needs-you lane (one Board read, not one per GET/prefetch). */
+export const NEEDS_CACHE_MS = 45000;
+/** Bound on cached keys: a key changes only with the store or the live projects. */
+const NEEDS_CACHE_MAX = 32;
+
+const needsCache = new Map();
+let needsCacheClock = () => Date.now();
+
+/**
+ * Test seams: the cache's own clock (ms), and a reset that empties it. The clock is separate from
+ * the `now` loadMorning takes (that one is the page's date, which tests pin). Passing null/undefined
+ * to the clock restores Date.now.
+ */
+export function _setNeedsCacheClockForTest(fn) {
+  needsCacheClock = typeof fn === "function" ? fn : () => Date.now();
+}
+export function _resetNeedsCacheForTest() { needsCache.clear(); }
 
 const oneLine = (s) => String(s ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
 const sqliteTime = (ms) => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
@@ -99,6 +118,32 @@ async function leftOffLine(db, projectsById) {
 }
 
 /**
+ * The Board's Needs-you lane — total plus the first NEEDS_LINES cards — cached per process for
+ * NEEDS_CACHE_MS. The key carries what the result depends on: the cards' store, and the live
+ * project ids (the lane is Everything, so the ids only decide when an entry stops applying). The
+ * lock map is read from this process's crow.db, one database file per process (as
+ * shared/cross-host-auth.js assumes), so it needs no key of its own. An entry expires by time
+ * alone; nothing else invalidates it.
+ */
+async function needsLane(db, tdb, key) {
+  const at = needsCacheClock();
+  const hit = needsCache.get(key);
+  if (hit && at - hit.at < NEEDS_CACHE_MS) return hit.value;
+  const rows = await laneRows(tdb, { all: true });
+  const defs = await defsFor(tdb, rows);
+  const lockMap = await lockMapFor(db, rows.map((r) => r.id));
+  const needs = groupByLane(rows, defs, lockMap).needs_you;
+  const top = await cardsByIds(tdb, needs.slice(0, NEEDS_LINES).map((r) => r.id));
+  const value = {
+    total: needs.length,
+    cards: needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean),
+  };
+  if (!needsCache.has(key) && needsCache.size >= NEEDS_CACHE_MAX) needsCache.delete(needsCache.keys().next().value);
+  needsCache.set(key, { at, value });
+  return value;
+}
+
+/**
  * Everything the card draws.
  * @param db crow.db client
  * @param opts.projects activeProjects rows ({ id, slug, name }); names and links come from these
@@ -109,20 +154,17 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
   const slugByProject = new Map(projects.map((p) => [Number(p.id), String(p.slug)]));
   const nameOf = (pid) => (pid != null && projectsById.has(Number(pid)) ? String(projectsById.get(Number(pid)).name) : null);
   const out = { needs: { total: 0, items: [] }, due: { total: 0, items: [] }, finished: { total: 0, items: [] }, leftOff: null };
+  const needsKey = `${tasksDbPath}|${[...new Set(projects.map((p) => Number(p.id)))].sort((a, b) => a - b).join(",")}`;
 
   if (existsSync(tasksDbPath)) {
     let tdb;
     try {
       tdb = createDbClient(tasksDbPath);
-      // Needs you: the Board's Everything lane.
-      const rows = await laneRows(tdb, { all: true });
-      const defs = await defsFor(tdb, rows);
-      const lockMap = await lockMapFor(db, rows.map((r) => r.id));
-      const needs = groupByLane(rows, defs, lockMap).needs_you;
-      out.needs.total = needs.length;
+      // Needs you: the Board's Everything lane (cached; see needsLane).
+      const lane = await needsLane(db, tdb, needsKey);
+      out.needs.total = lane.total;
       const listed = new Set();
-      const top = await cardsByIds(tdb, needs.slice(0, NEEDS_LINES).map((r) => r.id));
-      const needCards = needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean);
+      const needCards = lane.cards;
 
       // Due today or earlier, not done on its own board. The terminal statuses of every board
       // the due cards sit on are excluded IN the query (done cards are never archived on their

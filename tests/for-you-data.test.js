@@ -1,10 +1,11 @@
 /**
  * For You v1, the data under the page:
  *   - the morning card (for-you/morning.js) from a scratch crow.db (init-db) and a scratch tasks.db
- *     (migrations 0001-0004): the Board's Needs-you lane, cards due by today (not done), results
- *     bots reported in the last day, and "where you left off" from perch/briefing.js;
+ *     (migrations 0001-0004): the Board's Needs-you lane (and its 45 s per-process cache), cards due
+ *     by today (not done), results bots reported in the last day, and "where you left off" from
+ *     perch/briefing.js;
  *   - the news "why" words (for-you/news.js) for each kind of Media Hub evidence, and the news
- *     states (no Media Hub, an old Media Hub, a working one);
+ *     states (no Media Hub, an old Media Hub, one whose column never landed, a working one);
  *   - Listen (for-you/listen.js): the audio-address check, its states, the Music tile only when
  *     Music is installed, one failing tile costing only itself, and the escaped markup;
  *   - the weather (for-you/weather.js) over a fake fetch: fixed https hosts only, a timeout,
@@ -162,6 +163,48 @@ test("morning: no tasks.db is an empty morning, never an error", async () => {
   assert.equal(H.morningSentence({ ...m, leftOff: null }, "en"), "Nothing needs you this morning.");
 });
 
+test("morning: the Needs-you lane is read once per process for 45 s, then read again", async () => {
+  // The lane and its lock map are the Board's own cost, and Turbo prefetches the page. The cache
+  // clock is separate from the page's `now`, so a test can move it without moving the date.
+  M._resetNeedsCacheForTest();
+  let clock = 1_000_000;
+  M._setNeedsCacheClockForTest(() => clock);
+  const reads = { n: 0 };
+  // laneRows itself runs on a store the test cannot wrap; the lock map it needs does (one
+  // bot_jobs query per uncached lane read), so that is the read counter.
+  const counted = (db) => ({
+    execute(q) {
+      if (String(q && q.sql).includes("bot_jobs")) reads.n++;
+      return db.execute(q);
+    },
+  });
+  try {
+    const tw = new Database(TASKS);
+    try {
+      tw.prepare("INSERT INTO tasks_items (title, project_id, status, action_needed) VALUES ('Cache me', ?, 'pending', 'Pick one')").run(P.garden);
+    } finally { tw.close(); }
+    const opts = { projects: PROJECTS(), tz: "UTC", now: Date.now(), tasksDbPath: TASKS };
+    const first = await withDb((db) => M.loadMorning(counted(db), opts));
+    const again = await withDb((db) => M.loadMorning(counted(db), opts));
+    assert.equal(reads.n, 1, "a second load inside 45 s costs no Board read");
+    assert.ok(first.needs.total >= 1, "there is a card needing the operator");
+    assert.ok(first.needs.items[0] && first.needs.items[0].href, "the first load really linked its lines (else the cached-equality check is vacuous)");
+    assert.equal(again.needs.total, first.needs.total, "the cached count is the same count");
+    assert.deepEqual(again.needs.items, first.needs.items, "and the cached lane still draws its lines, named and linked");
+
+    clock += M.NEEDS_CACHE_MS - 1;
+    await withDb((db) => M.loadMorning(counted(db), opts));
+    assert.equal(reads.n, 1, "one millisecond short of 45 s: still the cached lane");
+
+    clock += 2;
+    await withDb((db) => M.loadMorning(counted(db), opts));
+    assert.equal(reads.n, 2, "past 45 s: the lane is read again");
+  } finally {
+    M._setNeedsCacheClockForTest(null);
+    M._resetNeedsCacheForTest();
+  }
+});
+
 test("news why: each kind of Media Hub evidence has its own words, and nothing else is ever claimed", () => {
   assert.equal(N.whyText({ kind: "topic", label: "local ai", affinity: 0.8 }, "en"), "You like stories about local ai");
   assert.equal(N.whyText({ kind: "source", label: "Example Wire" }, "en"), "You often like stories from Example Wire");
@@ -205,6 +248,44 @@ test("news states: no Media Hub offers the install, an old copy asks for an upda
     assert.match(out, /1 story, picked for you/);
     assert.match(H.newsHtml({ state: "ok", stories: [], hidden: [] }, "en"), /Nothing good in your news right now/);
   } finally { N._setNewsModuleForTest(null); }
+});
+
+test("news: an installed copy whose column never landed is the error state, never a throw", async () => {
+  // A real CROW_HOME copy of Media Hub's own server/for-you.js, querying a column this database
+  // does not have: a half-migrated install (the bundle's addColumnIfMissing has not run yet).
+  const bundle = join(HOME, "bundles", "media", "server");
+  mkdirSync(bundle, { recursive: true });
+  writeFileSync(join(bundle, "for-you.js"), `export async function forYouStories(db, { limit }) {
+    const r = await db.execute({ sql: "SELECT id, title, curation_hidden FROM media_sources LIMIT ?", args: [limit] });
+    return r.rows;
+  }
+export async function hiddenSources(db) {
+    const r = await db.execute({ sql: "SELECT id, name FROM media_sources WHERE curation_hidden = 1", args: [] });
+    return r.rows;
+  }`);
+  writeFileSync(join(HOME, "installed.json"), JSON.stringify([{ id: "media" }]));
+  const quiet = console.warn; console.warn = () => {};
+  try {
+    const news = await withDb(async (db) => {
+      await db.execute({ sql: "DROP TABLE IF EXISTS media_sources", args: [] });
+      await db.execute({ sql: "CREATE TABLE media_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)", args: [] });
+      return N.loadNews(db, { crowHome: HOME });
+    });
+    assert.deepEqual(news, { state: "error", stories: [], hidden: [] });
+    assert.match(H.newsHtml(news, "en"), /Your news couldn't load just now\./);
+  } finally {
+    console.warn = quiet;
+    rmSync(join(HOME, "bundles"), { recursive: true, force: true });
+    writeFileSync(join(HOME, "installed.json"), "[]");
+  }
+});
+
+test("story and hidden-source ids are escaped in the attributes they land in", () => {
+  const story = { id: '7"', sourceId: 3, title: "A story", url: "https://news.example.invalid/7", summary: null, sourceName: "Wire", publishedAt: "", why: null };
+  const html = H.newsHtml({ state: "ok", stories: [story], hidden: [] }, "en");
+  assert.ok(html.includes('data-fy-story="7&quot;"'), "the story id cannot close its attribute");
+  const cz = H.customizeHtml({ settings: { sections: {}, city: "", place: null }, hidden: [{ id: '4"', name: "Loud" }], mediaInstalled: true, flash: null, csrf: "t" }, "en");
+  assert.ok(cz.includes('data-fy-unhide="4&quot;"'), "and neither can the hidden source's");
 });
 
 // ---- listen ------------------------------------------------------------------
