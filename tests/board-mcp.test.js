@@ -527,7 +527,7 @@ test("S5: the job-rail lock exemption needs the job's SIGNED headers", async () 
   // bot write scope refuses it before the job lock is even consulted.
   const refused = await report({ "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "job-lock-a" }, a.id);
   assert.equal(refused.isError, true);
-  assert.match(refused.content[0].text, /locked|forbidden_project/);
+  assert.match(refused.content[0].text, /locked|forbidden_project|not_found/);
   // Signed for the job that holds the lock: auto-closes.
   const okRes = await report(signedBoard("hank", "job-lock-b"), b.id);
   assert.ok(!okRes.isError, okRes.content?.[0]?.text);
@@ -755,7 +755,7 @@ test("board_create_item keeps action_needed on a card", async () => {
 
 // ---- assigned_bot on board_create_item ----
 
-test("board_create_item assigned_bot: enabled bot assigns the card; refusals are 400 and nothing is created", async () => {
+test("board_create_item assigned_bot: the operator assigns an enabled bot; a bot assigns only itself; refusals create nothing", async () => {
   await state.cdb.execute(`CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
     definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
@@ -765,9 +765,17 @@ test("board_create_item assigned_bot: enabled bot assigns the card; refusals are
       args: [id, id, enabled],
     });
   }
-  const client = await connectClient("/board/mcp", state.boardToken, signedBoard("alex-bot", "job-assign-1"));
   const count = async () => Number((await state.tdb.execute("SELECT COUNT(*) AS n FROM tasks_items")).rows[0].n);
+  // A bot can't hand a card (and its text) to another bot: that is the operator's call.
+  const botClient = await connectClient("/board/mcp", state.boardToken, signedBoard("alex-bot", "job-assign-1"));
+  const n0 = await count();
+  const handOff = await botClient.callTool({ name: "board_create_item", arguments: { title: "for another bot", project_id: 1, assigned_bot: "bot-1" } });
+  assert.equal(handOff.isError, true);
+  assert.match(handOff.content[0].text, /forbidden_assign/);
+  assert.equal(await count(), n0, "nothing created");
+  await botClient.close();
 
+  const client = await connectClient("/board/mcp", state.localToken);
   const created = payload(await client.callTool({
     name: "board_create_item", arguments: { title: "assigned card", project_id: 1, assigned_bot: "bot-1" },
   }));
@@ -777,8 +785,7 @@ test("board_create_item assigned_bot: enabled bot assigns the card; refusals are
   const mut = (await state.tdb.execute({
     sql: "SELECT actor_kind, actor_id FROM board_mutations WHERE item_id=? AND verb='create'", args: [created.id],
   })).rows[0];
-  assert.equal(mut.actor_kind, "bot");
-  assert.equal(mut.actor_id, "alex-bot");
+  assert.notEqual(mut.actor_kind, "bot", "the operator made it");
 
   const before = await count();
   for (const [args, re] of [
@@ -829,7 +836,8 @@ test("bot write scope: a bot changes only its own project's cards or cards assig
   ]) {
     const r = await call(name, args);
     assert.equal(r.isError, true, name + " on another project's card must be refused");
-    assert.match(r.content[0].text, /forbidden_project/, name);
+    // A card the bot may not read answers like a missing card, on writes too.
+    assert.match(r.content[0].text, /not_found/, name);
   }
   const otherRow = (await state.tdb.execute({ sql: "SELECT title, status, archived_at FROM tasks_items WHERE id=?", args: [other.id] })).rows[0];
   assert.equal(otherRow.title, "other project card");

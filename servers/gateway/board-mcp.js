@@ -216,6 +216,8 @@ export async function assertBotMayWriteCard(tdb, cdb, actor, id) {
   if (actor.id && row.assigned_bot === actor.id) return;
   const pid = await botProjectOf(cdb, actor.id);
   if (pid != null && row.project_id != null && Number(row.project_id) === pid) return;
+  // Hidden reads like missing: a card the bot may not read answers 404, as on the read tools.
+  if (!botMayReadCard(row, actor, pid)) throw fail(`not found: ${id}`, "not_found", 404);
   throw fail("a bot can only change cards on its own project's board, or cards assigned to it", "forbidden_project", 403);
 }
 
@@ -287,7 +289,7 @@ async function dispatchUnarchive(tdb, id, actor) {
 
 // ---- reads / listings ----
 
-async function listBoardsImpl(tdb, cdb, includeArchived) {
+async function listBoardsImpl(tdb, cdb, includeArchived, { onlyProject } = {}) {
   const archivedClause = includeArchived ? "" : " AND archived_at IS NULL";
   const boards = [];
   let projects = [];
@@ -298,6 +300,8 @@ async function listBoardsImpl(tdb, cdb, includeArchived) {
     })).rows || [];
   } catch { projects = []; }
   for (const p of projects) {
+    // A bot sees only its own project's board (another project's name and counts are not its).
+    if (onlyProject !== undefined && Number(p.id) !== onlyProject) continue;
     const def = await resolveBoardDef(tdb, { projectId: p.id });
     const counts = (await tdb.execute({
       sql: `SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id IS NULL AND project_id=?${archivedClause} GROUP BY status`,
@@ -423,7 +427,11 @@ export function createBoardMcpServer(options = {}) {
   tool(server, "board_list_boards",
     "List all boards (the project cards board(s) plus every slug/tracker board) with per-status item counts.",
     { include_archived: z.boolean().optional().describe("Include archived items in the counts") },
-    async ({ include_archived }) => ({ boards: await listBoardsImpl(tdb, cdb, !!include_archived) }));
+    async ({ include_archived }, extra) => {
+      const actor = resolveActor(extra);
+      const onlyProject = actor.kind === "bot" ? ((await botProjectOf(cdb, actor.id)) ?? -1) : undefined;
+      return { boards: await listBoardsImpl(tdb, cdb, !!include_archived, { onlyProject }) };
+    });
 
   tool(server, "board_list_items",
     "List cards or tracker items with optional filters. Pass board_id or slug to list a tracker board's items; otherwise lists the project cards board (optionally scoped by project_id). Excludes archived items unless include_archived is true.",
@@ -477,6 +485,9 @@ export function createBoardMcpServer(options = {}) {
       const isTracker = fields.board_id != null || !!fields.slug;
       if (fields.assigned_bot != null && fields.assigned_bot !== "") {
         if (isTracker) throw fail("assigned_bot applies to cards only, not tracker items", "bad_field", 400);
+        // A bot assigns a new card to itself only: handing work (and its text) to another bot
+        // is the operator's call.
+        if (actor.kind === "bot" && fields.assigned_bot !== actor.id) throw fail("a bot can assign a card only to itself", "forbidden_assign", 403);
         await assertAssignableBot(cdb, fields.assigned_bot);
       }
       if (isTracker) {
@@ -564,9 +575,9 @@ export function createBoardMcpServer(options = {}) {
     "Save a new plan draft version for an item.",
     { item_id: z.number().int(), body_md: z.string().min(1) },
     async ({ item_id, body_md }, extra) => {
-      if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
       const actor = resolveActor(extra);
       await assertBotMayWriteCard(tdb, cdb, actor, item_id);
+      if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
       return savePlan(tdb, item_id, body_md, actor);
     });
 
@@ -664,7 +675,8 @@ export function createBoardMcpServer(options = {}) {
   tool(server, "board_store_briefing",
     "Persist a briefing snapshot. UNIQUE on briefing_date — re-runs for the same day overwrite the prior content.",
     { briefing_date: z.string(), content: z.string().min(1).max(100000) },
-    async ({ briefing_date, content }) => {
+    async ({ briefing_date, content }, extra) => {
+      assertNotBot(resolveActor(extra), "store the operator's briefings");
       await tdb.execute({
         sql: `INSERT INTO tasks_briefings (briefing_date, content) VALUES (?, ?)
               ON CONFLICT(briefing_date) DO UPDATE SET content = excluded.content, created_at = datetime('now')`,
@@ -680,7 +692,8 @@ export function createBoardMcpServer(options = {}) {
   tool(server, "board_list_briefings",
     "List stored briefings newest-first (id, briefing_date, created_at, and a content preview).",
     { limit: z.number().int().min(1).max(365).optional() },
-    async ({ limit }) => {
+    async ({ limit }, extra) => {
+      assertNotBot(resolveActor(extra), "read the operator's briefings");
       const rows = (await tdb.execute({
         sql: `SELECT id, briefing_date, substr(content, 1, 200) AS preview, created_at
               FROM tasks_briefings ORDER BY briefing_date DESC LIMIT ?`,
@@ -692,7 +705,8 @@ export function createBoardMcpServer(options = {}) {
   tool(server, "board_get_briefing",
     "Fetch one stored briefing by briefing_date, or the most recent one when briefing_date is omitted.",
     { briefing_date: z.string().optional() },
-    async ({ briefing_date }) => {
+    async ({ briefing_date }, extra) => {
+      assertNotBot(resolveActor(extra), "read the operator's briefings");
       const row = (await tdb.execute(
         briefing_date
           ? { sql: "SELECT id, briefing_date, content, created_at FROM tasks_briefings WHERE briefing_date = ?", args: [briefing_date] }
