@@ -33,7 +33,7 @@ export function normalizeStoredBashPolicy(v) {
   if (isValidBashPolicy(v)) return { value: v, migratedFrom: null, offerAuto: false };
   if (v == null || v === "") return { value: "deny", migratedFrom: null, offerAuto: false };
   // The retired "sandbox" (exactly that string) stays DENY until the owner
-  // confirms the switch to auto once in Bot Builder (Kevin's ruling, rev c:
+  // confirms the switch to auto once in Bot Builder (the operator's ruling, rev c:
   // a legacy value must not silently become a shell). Unknown stays deny.
   if (v === "sandbox") return { value: "deny", migratedFrom: "sandbox", offerAuto: true };
   return { value: "deny", migratedFrom: typeof v === "string" ? v : JSON.stringify(v), offerAuto: false };

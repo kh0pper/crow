@@ -443,7 +443,7 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
   });
 
   test("a bot linked to a project that shows it its cards gets the board on every channel; tracker none, no project and the voice bot do not", async () => {
-    // Kevin 2026-10-29: asked to "organize next steps onto the project board",
+    // the operator, 2026-10-29: asked to "organize next steps onto the project board",
     // a project bot with no board/* selection wrote project notes instead.
     const { projectShowsCards } = await import("../scripts/pi-bots/bot-world.mjs");
     assert.equal(projectShowsCards(21, { tracker_config: { type: "kanban" } }), true);
@@ -500,7 +500,7 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
       const mcpGw = JSON.parse(readFileSync(join(w.sessionDir, ".mcp.json"), "utf8"));
       assert.ok(mcpGw.mcpServers.board && !mcpGw.mcpServers.board.disabled, gw + " turn: board entry active for a project bot");
       const csvGw = buildToolsCsv(w.def, { resolved: { provider: "stub", model: "m1" }, interactive: false }).csv.split(",");
-      // A channel turn reads its project's cards but changes none (Kevin
+      // A channel turn reads its project's cards but changes none (the operator's ruling,
       // 2026-11-02): only the read verbs reach the allowlist here.
       for (const t of ["mcp__board__board_list_boards", "mcp__board__board_list_items", "mcp__board__board_get_item", "mcp__board__board_get_plan"]) {
         assert.ok(csvGw.includes(t), gw + " turn: " + t + " in the allowlist");

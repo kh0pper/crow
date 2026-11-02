@@ -46,7 +46,7 @@ function plant(path, text, mode = 0o600) {
   chmodSync(path, mode);
 }
 
-test("the code-declared defaults (Kevin 2026-10-29): obsidian locked private; notion and discord private by default; the rest open", () => {
+test("the code-declared defaults (the operator, 2026-10-29): obsidian locked private; notion and discord private by default; the rest open", () => {
   const expect = {
     obsidian: { default: true, locked: true },
     notion: { default: true, locked: false },

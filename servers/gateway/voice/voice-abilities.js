@@ -4,7 +4,7 @@
  *
  * One source of truth: the voice turn's own classification (tool-families.js classifyTools), asked
  * with a fixed request per ability (its probe, en and es). There is no second list of "fast" tools.
- * The rule (review 2026-10-19, Kevin's answers): the line may UNDERSTATE, never overstate.
+ * The rule (review 2026-10-19, the operator's answers): the line may UNDERSTATE, never overstate.
  *  - quick:   the turn would offer a tool backing the ability to the quick model;
  *  - slower:  only when the turn would escalate (classifyTools' actionWithheld, the display not
  *             backing the request) AND escalation is on AND the larger model's key resolves;

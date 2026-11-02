@@ -154,7 +154,7 @@ export async function renderAbilities(ctx) {
     hint: t("botbuilder.abFilesHint", lang),
   });
   const cMode = storedToBashUi(pp);
-  // Ask me / Auto are Perch-only (Kevin's ruling 2026-10-08): a bot that also
+  // Ask me / Auto are Perch-only (the operator's ruling 2026-10-08): a bot that also
   // answers on Gmail, Discord, … cannot pick them, and the page says why.
   const otherChannels = nonPerchChannels(def);
   const perchOnly = (v) => (v === "ask" || v === "auto") && otherChannels.length > 0;

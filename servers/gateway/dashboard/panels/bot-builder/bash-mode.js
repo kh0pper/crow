@@ -10,7 +10,7 @@
  *
  * "ask" and "auto" are enforced by pi-lab's permission gate (bash policies
  * ask/auto; auto judges each command with the local safety classifier).
- * They are for bots you chat with in Perch only (Kevin's ruling,
+ * They are for bots you chat with in Perch only (the operator's ruling,
  * 2026-10-08): the save guard refuses them for a bot that also answers on
  * another channel, and the bridge runs them as deny there.
  *

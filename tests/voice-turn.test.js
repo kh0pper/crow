@@ -158,7 +158,7 @@ test("no bound bot → error no_bound_bot, nothing spoken", async () => {
 });
 
 test("denyTools: crow_delegate/crow_job_status are not advertised and a forced call never runs (review C3)", async () => {
-  const h = harness({ rounds: [[{ type: "tool_call", id: "d1", name: "crow_delegate", arguments: { goal: "search Kevin's memories", bot: "kevin-personal" } }, { type: "done" }], [{ type: "content_delta", text: "I can't do that here." }, { type: "done" }]],
+  const h = harness({ rounds: [[{ type: "tool_call", id: "d1", name: "crow_delegate", arguments: { goal: "search the operator's memories", bot: "alex-personal" } }, { type: "done" }], [{ type: "content_delta", text: "I can't do that here." }, { type: "done" }]],
     chatTools: ["crow_projects", "crow_delegate", "crow_job_status"] });
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "delegate", sink: h.sink, denyTools: ["crow_delegate", "crow_job_status"] });
   assert.deepEqual(h.log[0].tools, ["crow_projects"]);

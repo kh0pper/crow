@@ -235,7 +235,7 @@ test("operator setting beats role", async () => {
   assert.equal(gw.source, "setting"); assert.equal(gw.providerId, "local-cls");
 });
 
-// Kevin's ruling: safety's fallback is []. A broken chosen classifier falls to
+// the operator's ruling: safety's fallback is []. A broken chosen classifier falls to
 // the automatic pick, never to everyday. `everyday` is bound to a model the
 // classifier WOULD accept (local-cls2), so any leak through it shows up.
 const PEER = "b".repeat(32);

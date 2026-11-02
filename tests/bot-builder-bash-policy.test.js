@@ -4,7 +4,7 @@
  *
  *   - Ask me / Auto are live and save through the one owner-save funnel,
  *     which runs the shared validator (policy-guard → validatePermissionPolicy);
- *   - Perch-only (Kevin's ruling 2026-10-08): a bot that also answers on
+ *   - Perch-only (the operator's ruling 2026-10-08): a bot that also answers on
  *     another channel cannot pick them — the page says why, and the guard
  *     refuses them even for a crafted post or a stored value;
  *   - the env-scrub switch refuses a shell on the owner save path;
