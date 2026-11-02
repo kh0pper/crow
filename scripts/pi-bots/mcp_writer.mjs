@@ -87,9 +87,10 @@ export function serversForBot(def) {
 // host, any scheme: loopback, LAN, a Serve HTTPS front); legitimate peer access goes through stdio
 // crow-remote-proxy blocks. Board/phone/artifacts mounts carry signed actor headers instead.
 // /memory too: a bot reaching it with the gateway token would run as an unknown caller (e.g.
-// able to change the operator's writing rules). The gateway's root /mcp is NOT matched here:
-// this pattern applies to every host, and `/mcp` is the ordinary path of third-party remote
-// MCP servers (known limit; bot containment keeps the gateway token from bots).
+// able to change the operator's writing rules). The gateway's root /mcp is matched only on a
+// loopback host (isOwnerProjectUrl): `/mcp` is the ordinary path of third-party remote MCP
+// servers. The gateway reached by a tailnet or LAN name at its root is a known limit until bot
+// containment keeps the gateway token from bots.
 const OWNER_MOUNT_PATH = /^\/(router|projects|research|memory|tools(-[a-z0-9-]+)?)\/(mcp|sse|messages)$/;
 
 /** True if a url block reaches a Crow gateway's owner-capable mounts. */
@@ -99,7 +100,12 @@ export function isOwnerProjectUrl(rawUrl) {
   let path;
   try { path = decodeURIComponent(u.pathname); } catch { return true; } // undecodable: refuse it
   path = path.toLowerCase().replace(/\/+$/, "");
-  return OWNER_MOUNT_PATH.test(path);
+  if (OWNER_MOUNT_PATH.test(path)) return true;
+  // The gateway's root mount (/mcp, /sse, /messages) on THIS box: a loopback host can only be
+  // the local gateway or something the operator runs here, never a third-party remote server.
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const loopback = host === "localhost" || host === "::1" || /^127\./.test(host) || host === "0.0.0.0";
+  return loopback && /^\/(mcp|sse|messages)$/.test(path);
 }
 
 /** True if a server block touches crow.db (so the journal guard applies). */

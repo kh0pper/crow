@@ -278,4 +278,5 @@ test("a bot config can't reach the memory mount over HTTP; a third-party /mcp se
   }
   assert.equal(isOwnerProjectUrl("http://127.0.0.1:3001/board/mcp"), false);
   assert.equal(isOwnerProjectUrl("https://mcp.example.com/mcp"), false);
+  for (const u of ["http://127.0.0.1:3001/mcp", "http://localhost:3002/mcp", "http://[::1]:3001/sse"]) assert.equal(isOwnerProjectUrl(u), true, u);
 });
