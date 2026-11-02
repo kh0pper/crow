@@ -128,7 +128,8 @@ export async function handleIncomingBotRelay(payload, db, identity, nostrManager
     const runOneShot = opts.runOneShot || (await import("../gateway/ai/one-shot.js")).runOneShot;
     resultText = await runOneShot(
       "You are a helpful assistant. Execute the requested task using available tools. Reply with a brief result (1-2 sentences).",
-      task
+      task,
+      { peer: true }, // a sibling instance's task: its tool calls carry the peer marker
     );
   } catch (err) {
     if (err.code === "not_configured") {

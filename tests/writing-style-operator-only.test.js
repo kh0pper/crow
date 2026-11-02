@@ -243,3 +243,38 @@ test("a bot actor can still add and update another section", async () => {
     await close();
   }
 });
+test("fail closed: a forwarded {kind:'unknown'} or a bot claim with no id is refused, and no signal still works", async () => {
+  const { db, file } = await freshDb("fail-closed");
+  const before = await sectionRow(db);
+  const { client, close } = await openMemoryServer(file, { actor: { kind: "unknown" } });
+  try {
+    for (const meta of [{ "crow/actor": { kind: "unknown" } }, { "crow/actor": { kind: "bot" } }, { "crow/actor": { kind: "bot", id: "bad id!" } }, { "crow/actor": "x" }]) {
+      const r = await callTool(client, "crow_update_context_section", { section_key: "writing_style", content: "planted" }, meta);
+      assert.equal(r.text, REFUSAL, JSON.stringify(meta));
+      assert.equal((await sectionRow(db)).content, before.content);
+    }
+    const ok = await callTool(client, "crow_update_context_section", { section_key: "writing_style", content: "the operator's own edit" });
+    assert.notEqual(ok.text, REFUSAL);
+    assert.equal((await sectionRow(db)).content, "the operator's own edit");
+  } finally {
+    await close();
+  }
+});
+
+test("a relay one-shot's executor marks its calls as a peer's; an ordinary executor sends no actor", async () => {
+  // Source-level checks: the executor's _meta is internal, and a real relay needs a provider.
+  const src = (await import("node:fs")).readFileSync(new URL("../servers/gateway/ai/one-shot.js", import.meta.url), "utf8");
+  assert.match(src, /createToolExecutor\(peer \? \{ peerActor: true \} : \{\}\)/, "one-shot passes the peer marker through");
+  const relay = (await import("node:fs")).readFileSync(new URL("../servers/sharing/bot-relay.js", import.meta.url), "utf8");
+  assert.match(relay, /\{ peer: true \}/, "the bot relay runs its one-shot as the peer");
+  const execSrc = (await import("node:fs")).readFileSync(new URL("../servers/gateway/ai/tool-executor.js", import.meta.url), "utf8");
+  assert.match(execSrc, /opts\.peerActor === true \? \{ _meta: \{ "crow\/actor": \{ kind: "peer" \} \} \}/);
+});
+
+test("a bot config can't reach the memory mount or the root /mcp mount over HTTP", async () => {
+  const { isOwnerProjectUrl } = await import("../scripts/pi-bots/mcp_writer.mjs");
+  for (const u of ["http://127.0.0.1:3001/memory/mcp", "http://127.0.0.1:3001/mcp", "http://127.0.0.1:3001/router/mcp", "http://127.0.0.1:3001/projects/mcp"]) {
+    assert.equal(isOwnerProjectUrl(u), true, u);
+  }
+  assert.equal(isOwnerProjectUrl("http://127.0.0.1:3001/board/mcp"), false);
+});

@@ -903,10 +903,25 @@ export function createMemoryServer(dbPath, options = {}) {
     return !!(claimed && typeof claimed === "object" && claimed.kind === "peer");
   }
 
+  // Fail closed: any actor signal on the call that is not the owner refuses, whether or not
+  // it resolves cleanly (a bot claim with no or a malformed id, an "unknown" a router forwarded
+  // for one, a header). Only a call carrying no actor signal at all, or this process's own
+  // owner base actor, may change the rules.
+  function presentNonOwnerSignal(extra) {
+    const meta = extra && extra._meta;
+    const claimed = meta && typeof meta === "object" ? meta["crow/actor"] : undefined;
+    if (claimed !== undefined && claimed !== null && !(typeof claimed === "object" && claimed.kind === "owner")) return true;
+    const headers = extra && extra.requestInfo && extra.requestInfo.headers;
+    const raw = headers && typeof headers === "object" ? headers["x-crow-actor-kind"] : undefined;
+    const kind = Array.isArray(raw) ? raw[0] : raw;
+    return typeof kind === "string" && kind !== "" && kind.toLowerCase() !== "owner";
+  }
+
   function refusesWritingStyle(sectionKey, extra) {
     if (sectionKey !== WRITING_STYLE_KEY) return false;
+    if (baseActor && baseActor.kind === "bot") return true;
     const caller = resolveCallActor(baseActor, extra);
-    return !!(caller && caller.kind === "bot") || fromPairedInstance(extra);
+    return !!(caller && caller.kind === "bot") || fromPairedInstance(extra) || presentNonOwnerSignal(extra);
   }
 
   // --- Cross-Platform Context (crow.md) Tools ---
