@@ -57,6 +57,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { createDbClient } from "../db.js";
+import { isVoiceBotId } from "../shared/voice-bot.js";
 import { activeProjectWhere } from "../shared/shell-items.js";
 import { tasksDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
 import {
@@ -167,6 +168,19 @@ const resolveActorWith = resolveActor;
 // exactly like a missing id, and a listing omits it — so another project's
 // cards never leak into a bot's context.
 
+/**
+ * Card writes from a bot come from its Perch chat or a job, never from a channel turn
+ * (Kevin, 2026-11-02): on mail, Discord and Crow messages the bot reads text from anyone,
+ * so those turns read their project's cards but change none. The thread is the signed one
+ * (resolveActor), so a turn can't claim Perch. Tracker items keep their own rules.
+ */
+export function assertBotCardWriteChannel(actor) {
+  if (!actor || actor.kind !== "bot") return;
+  if (actor.jobId) return;
+  if (actor.thread && actor.thread.gateway === "perch") return;
+  throw fail("on this channel a bot can read its project's cards but not change them; ask in its Perch chat or give it a card", "channel_read_only", 403);
+}
+
 /** The linked project of a bot (pi_bot_defs.project_id), or null. */
 export async function botProjectOf(cdb, botId) {
   if (!cdb || !botId) return null;
@@ -180,6 +194,9 @@ export async function botProjectOf(cdb, botId) {
  *  answers unchanged. */
 export function botMayReadCard(row, actor, botProject) {
   if (!actor || actor.kind !== "bot") return true;
+  // Crow's voice reads every board (read only): it hands work to the right project's bots
+  // (Kevin, 2026-11-02). Its writes keep the bot rules (it has no project of its own).
+  if (isVoiceBotId(actor.id)) return true;
   if (!row || row.board_id != null) return true;
   if (actor.id && row.assigned_bot === actor.id) return true;
   return actor.id != null && botProject != null && row.project_id != null && Number(row.project_id) === botProject;
@@ -202,6 +219,7 @@ export async function assertBotMayReadCard(tdb, cdb, actor, id) {
  *  Null for a non-bot actor, whose listing is unchanged. */
 function botCardScope(f, actor, botProject) {
   if (!actor || actor.kind !== "bot") return null;
+  if (isVoiceBotId(actor.id)) return null; // Crow's voice lists every board (read only)
   if (f.project_id != null && (botProject == null || Number(f.project_id) !== botProject)) return { empty: true };
   if (actor.id == null) return { clauses: ["1=0"], args: [] }; // unattributed: no project, no cards
   if (botProject == null) return { clauses: ["assigned_bot = ?"], args: [String(actor.id)] };
@@ -213,11 +231,12 @@ export async function assertBotMayWriteCard(tdb, cdb, actor, id) {
   if (!actor || actor.kind !== "bot" || !Number.isInteger(id)) return;
   const row = (await tdb.execute({ sql: "SELECT project_id, assigned_bot, board_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
   if (!row || row.board_id != null) return; // missing → the caller's 404; tracker items unchanged
-  if (actor.id && row.assigned_bot === actor.id) return;
   const pid = await botProjectOf(cdb, actor.id);
-  if (pid != null && row.project_id != null && Number(row.project_id) === pid) return;
   // Hidden reads like missing: a card the bot may not read answers 404, as on the read tools.
   if (!botMayReadCard(row, actor, pid)) throw fail(`not found: ${id}`, "not_found", 404);
+  assertBotCardWriteChannel(actor);
+  if (actor.id && row.assigned_bot === actor.id) return;
+  if (pid != null && row.project_id != null && Number(row.project_id) === pid) return;
   throw fail("a bot can only change cards on its own project's board, or cards assigned to it", "forbidden_project", 403);
 }
 
@@ -239,6 +258,7 @@ export async function assertBotMayParentUnder(tdb, cdb, actor, parentId) {
 /** The project a bot may create a card in: its own (filled in when omitted). */
 export async function botCreateProject(cdb, actor, requested) {
   if (!actor || actor.kind !== "bot") return requested;
+  assertBotCardWriteChannel(actor);
   const pid = await botProjectOf(cdb, actor.id);
   if (requested == null) return pid == null ? undefined : pid;
   if (pid != null && Number(requested) === pid) return pid;
@@ -429,7 +449,7 @@ export function createBoardMcpServer(options = {}) {
     { include_archived: z.boolean().optional().describe("Include archived items in the counts") },
     async ({ include_archived }, extra) => {
       const actor = resolveActor(extra);
-      const onlyProject = actor.kind === "bot" ? ((await botProjectOf(cdb, actor.id)) ?? -1) : undefined;
+      const onlyProject = actor.kind === "bot" && !isVoiceBotId(actor.id) ? ((await botProjectOf(cdb, actor.id)) ?? -1) : undefined;
       return { boards: await listBoardsImpl(tdb, cdb, !!include_archived, { onlyProject }) };
     });
 
@@ -500,6 +520,7 @@ export function createBoardMcpServer(options = {}) {
         return createItem(tdb, boardId, fields, actor);
       }
       if (fields.autonomy != null) assertNotBot(actor, "set a card's autonomy");
+      assertBotCardWriteChannel(actor);
       if (fields.parent_id != null) await assertBotMayParentUnder(tdb, cdb, actor, Number(fields.parent_id));
       else fields = { ...fields, project_id: await botCreateProject(cdb, actor, fields.project_id) };
       // A bot's card never falls back to "the instance's only project": a bot
@@ -669,7 +690,9 @@ export function createBoardMcpServer(options = {}) {
       // notifications.js fails open on every downstream sender; cdb (crow.db)
       // holds the shared notifications table (same import as result-service).
       const { createNotification } = await import("../shared/notifications.js");
-      return notifyBatch(tdb, cdb, batch, { createNotification, actor: resolveActor(extra) });
+      const actor = resolveActor(extra);
+      assertBotCardWriteChannel(actor);
+      return notifyBatch(tdb, cdb, batch, { createNotification, actor });
     });
 
   tool(server, "board_store_briefing",

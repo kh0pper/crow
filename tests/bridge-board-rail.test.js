@@ -500,10 +500,21 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
       const mcpGw = JSON.parse(readFileSync(join(w.sessionDir, ".mcp.json"), "utf8"));
       assert.ok(mcpGw.mcpServers.board && !mcpGw.mcpServers.board.disabled, gw + " turn: board entry active for a project bot");
       const csvGw = buildToolsCsv(w.def, { resolved: { provider: "stub", model: "m1" }, interactive: false }).csv.split(",");
-      for (const t of ["mcp__board__board_list_items", "mcp__board__board_get_item", "mcp__board__board_create_item", "mcp__board__board_report_result"]) {
+      // A channel turn reads its project's cards but changes none (Kevin
+      // 2026-11-02): only the read verbs reach the allowlist here.
+      for (const t of ["mcp__board__board_list_boards", "mcp__board__board_list_items", "mcp__board__board_get_item", "mcp__board__board_get_plan"]) {
         assert.ok(csvGw.includes(t), gw + " turn: " + t + " in the allowlist");
       }
+      for (const t of ["mcp__board__board_create_item", "mcp__board__board_update_item", "mcp__board__board_report_result"]) {
+        assert.ok(!csvGw.includes(t), gw + " turn: " + t + " stays out of the allowlist");
+      }
       assert.ok(!csvGw.includes("mcp__board__board_approve_plan"), gw + " turn: approve stays out");
+    }
+    // A Perch chat turn keeps every board verb: writes come from there.
+    const perchTurn = await buildBotWorld({ botId: "projbot", threadId: "proj-perch-writes", gatewayType: "perch", log: () => {} });
+    const csvPerch = buildToolsCsv(perchTurn.def, { resolved: { provider: "stub", model: "m1" }, interactive: true }).csv.split(",");
+    for (const t of ["mcp__board__board_create_item", "mcp__board__board_update_item", "mcp__board__board_report_result", "mcp__board__board_ask_decision"]) {
+      assert.ok(csvPerch.includes(t), "perch turn: " + t + " in the allowlist");
     }
     // A tracker that shows no cards keeps the def's selection on a channel turn.
     const c4 = new Database(CROW_DB);

@@ -38,6 +38,7 @@ import { isSyncable } from "../servers/gateway/dashboard/settings/registry.js";
 import { createBoardMcpServer, resolveActor } from "../servers/gateway/board-mcp.js";
 import {
   initGatewayActorKey, signBoardActor, signActor, verifyBoardActorSig,
+  signBoardThreadActor, verifyBoardThreadActorSig,
 } from "../scripts/pi-bots/actor-sig.mjs";
 import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
 import { jobActor } from "../scripts/pi-bots/job_runner.mjs";
@@ -169,7 +170,7 @@ before(async () => {
   const sessionManager = new SessionManager();
   // S5: the real gateway mounts with verifyBoardActorSig and a per-boot key.
   initGatewayActorKey();
-  mountMcpServer(app, "/board", () => createBoardMcpServer({ tdb, cdb, verifyActor: verifyBoardActorSig }), sessionManager, noAuth);
+  mountMcpServer(app, "/board", () => createBoardMcpServer({ tdb, cdb, verifyActor: verifyBoardActorSig, verifyThread: verifyBoardThreadActorSig }), sessionManager, noAuth);
   // Stub /memory mount: only the auth boundary is under test here, not the
   // real memory server (which pulls in embeddings/providers machinery this
   // file has no reason to load).
@@ -412,12 +413,33 @@ const signedBoard = (botId, jobId) => {
   return h;
 };
 
-async function createVia(token, headers, title) {
+/** The same signed bot headers, plus the P5 thread binding (bot, thread,
+ *  gateway) under its own signature kind — how a channel turn names the chat
+ *  it is answering in. */
+const signedThread = (botId, { jobId = null, threadId, gateway }) => ({
+  ...signedBoard(botId, jobId),
+  "X-Crow-Actor-Thread": threadId,
+  "X-Crow-Actor-Gateway": gateway,
+  "X-Crow-Actor-Thread-Sig": signBoardThreadActor({ botId, threadId, gatewayType: gateway }),
+});
+
+async function countCards() {
+  return Number((await state.tdb.execute("SELECT COUNT(*) AS n FROM tasks_items")).rows[0].n);
+}
+
+/** One board_create_item over the wire, the raw MCP result (a refused write is
+ *  an isError result, not a card). */
+async function createRaw(token, headers, title) {
   const client = await connectClient("/board/mcp", token, headers);
   // No project_id: a signed bot's card lands on its own project, an
   // unattributed one's stays unassigned, a session's stays unassigned.
-  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title } }));
+  const r = await client.callTool({ name: "board_create_item", arguments: { title } });
   await client.close();
+  return r;
+}
+
+async function createVia(token, headers, title) {
+  const created = payload(await createRaw(token, headers, title));
   return (await state.tdb.execute({
     sql: "SELECT actor_kind, actor_id, job_id FROM board_mutations WHERE item_id=? AND verb='create'",
     args: [created.id],
@@ -455,39 +477,44 @@ test("a headerless call on the operator's full local token records actor_kind 's
   assert.equal(row.job_id, null);
 });
 
-test("S5: a headerless call on the BOARD token is an unattributed bot, never 'session'", async () => {
-  const row = await createVia(state.boardToken, {}, "stripped-headers card");
-  assert.equal(row.actor_kind, "bot");
-  assert.equal(row.actor_id, null);
-  assert.equal(row.job_id, null);
+test("S5: a headerless call on the BOARD token is an unattributed bot that may not create a card", async () => {
+  const before = await countCards();
+  const r = await createRaw(state.boardToken, {}, "stripped-headers card");
+  assert.equal(r.isError, true, "an unattributed bot can no longer create cards");
+  assert.match(r.content[0].text, /channel_read_only/);
+  assert.equal(await countCards(), before, "nothing was created");
 });
 
-test("S5: unsigned, forged, re-bound and cross-protocol signatures are unattributed", async () => {
-  const unattributed = (row, why) => {
-    assert.equal(row.actor_kind, "bot", why);
-    assert.equal(row.actor_id, null, why);
-    assert.equal(row.job_id, null, why);
+test("S5: unsigned, forged, re-bound and cross-protocol signatures are refused as unattributed", async () => {
+  // An unattributed bot (no verified signature) has no id, no job and no
+  // thread, so its card write is refused and leaves no row behind.
+  const refused = async (token, headers, why) => {
+    const before = await countCards();
+    const r = await createRaw(token, headers, "unattributed " + why);
+    assert.equal(r.isError, true, why);
+    assert.match(r.content[0].text, /channel_read_only/, why);
+    assert.equal(await countCards(), before, why + ": nothing created");
   };
   // No signature at all (both tokens).
   for (const tok of [state.boardToken, state.localToken]) {
-    unattributed(await createVia(tok, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "j-1" }, "unsigned"), "unsigned");
+    await refused(tok, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "j-1" }, "unsigned");
   }
   // Another bot's signature with this bot's id.
-  unattributed(await createVia(state.boardToken, { ...signedBoard("crow-home", "j-1"), "X-Crow-Actor-Id": "hank" }, "forged id"), "forged id");
+  await refused(state.boardToken, { ...signedBoard("crow-home", "j-1"), "X-Crow-Actor-Id": "hank" }, "forged id");
   // A no-job signature paired with a job id afterwards (the lock-exemption grab).
-  unattributed(await createVia(state.boardToken, { ...signedBoard("hank"), "X-Crow-Job-Id": "j-9" }, "rebound job"), "rebound job");
+  await refused(state.boardToken, { ...signedBoard("hank"), "X-Crow-Job-Id": "j-9" }, "rebound job");
   // A job signature with a different job id.
-  unattributed(await createVia(state.boardToken, { ...signedBoard("hank", "j-1"), "X-Crow-Job-Id": "j-2" }, "other job"), "other job");
+  await refused(state.boardToken, { ...signedBoard("hank", "j-1"), "X-Crow-Job-Id": "j-2" }, "other job");
   // A PHONE signature for the same bot is not a board signature.
   const phoneSig = signActor({ kind: "bot", botId: "hank", threadId: "j-1", gatewayType: null });
-  unattributed(await createVia(state.boardToken, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "j-1", "X-Crow-Actor-Sig": phoneSig }, "phone sig"), "phone sig");
+  await refused(state.boardToken, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "j-1", "X-Crow-Actor-Sig": phoneSig }, "phone sig");
   // Garbage signature.
-  unattributed(await createVia(state.boardToken, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Actor-Sig": "zz" }, "garbage"), "garbage");
-  // And the genuine article still attributes (no job).
-  const good = await createVia(state.boardToken, signedBoard("hank"), "signed no job");
+  await refused(state.boardToken, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Actor-Sig": "zz" }, "garbage");
+  // And the genuine article still attributes and creates: a signed job actor.
+  const good = await createVia(state.boardToken, signedBoard("hank", "j-genuine"), "signed job");
   assert.equal(good.actor_kind, "bot");
   assert.equal(good.actor_id, "hank");
-  assert.equal(good.job_id, null);
+  assert.equal(good.job_id, "j-genuine");
 });
 
 test("S5: resolveActor fails closed without a verifier; OAuth callers stay 'session'", () => {
@@ -701,10 +728,14 @@ test("board_notify_decisions pushes once per batch; the second call pushes nothi
 });
 
 test("board_notify_decisions: batches are per caller; another bot or the session never pushes your cards", async () => {
-  const owner = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-owner"));
-  const other = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-other"));
+  // A bot's card writes come from a job or its Perch chat, so the asking bots
+  // sign a job id (board-mcp's channel rule, 2026-11-02); the namespaces are
+  // still per caller (kind:id), which is what this test is about.
+  const owner = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-owner", "job-owner-1"));
+  const other = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-other", "job-other-1"));
   const session = await connectClient("/board/mcp", state.localToken);
-  const unattributed = await connectClient("/board/mcp", state.boardToken);
+  // A caller with no cards of its own: its batch name is its own namespace.
+  const third = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-third", "job-third-1"));
   try {
     // both bots use the same batch name; neither is refused
     const o = payload(await owner.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-own") }));
@@ -712,7 +743,7 @@ test("board_notify_decisions: batches are per caller; another bot or the session
     assert.equal(o.deduped, false);
     assert.equal(x.deduped, false);
 
-    for (const c of [session, unattributed]) {
+    for (const c of [session, third]) {
       assert.deepEqual(payload(await c.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: false, count: 0 });
     }
     assert.deepEqual(payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: true, count: 1 });
@@ -721,16 +752,16 @@ test("board_notify_decisions: batches are per caller; another bot or the session
     assert.equal((await cardOf(x.id)).notified_at, undefined, "the other bot's card was not pushed");
     assert.deepEqual(payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: false, count: 0, reason: "already_notified" });
 
-    // an unattributed bot has its own namespace
-    await unattributed.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-anon") });
-    assert.deepEqual(payload(await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-anon" } })), { pushed: true, count: 1 });
+    // a caller's batch namespace is its own
+    await third.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-anon") });
+    assert.deepEqual(payload(await third.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-anon" } })), { pushed: true, count: 1 });
   } finally {
-    for (const c of [owner, other, session, unattributed]) await c.close();
+    for (const c of [owner, other, session, third]) await c.close();
   }
 });
 
 test("board_notify_decisions: the 4th push of the day by one caller is 429 push_limit", async () => {
-  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-capped"));
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-capped", "job-capped-1"));
   try {
     for (let i = 1; i <= 3; i++) {
       await bot.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, `mcp-cap-${i}`) });
@@ -813,7 +844,7 @@ test("bot write scope: a bot changes only its own project's cards or cards assig
   const given = payload(await op.callTool({ name: "board_create_item", arguments: { title: "given card", project_id: 2, assigned_bot: "scope-bot" } }).catch((e) => ({ id: null, e })));
   await op.close();
 
-  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("scope-bot"));
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("scope-bot", "job-scope-1"));
   const call = (name, args) => bot.callTool({ name, arguments: args });
 
   // Create: defaults to the bot's own project; another project is refused.
@@ -892,7 +923,7 @@ test("bot write scope: a bot changes only its own project's cards or cards assig
 
 test("bot write scope: a bot with no linked project creates an unassigned card, never the instance's only project", async () => {
   await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,NULL)", args: ["loose-bot", "loose-bot"] });
-  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("loose-bot"));
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("loose-bot", "job-loose-1"));
   const made = payload(await bot.callTool({ name: "board_create_item", arguments: { title: "loose card" } }));
   await bot.close();
   const row = (await state.tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [made.id] })).rows[0];
@@ -995,5 +1026,114 @@ test("board_list_boards hides a status-archived project and a deleted one, keeps
   } finally {
     await client.close();
     await state.cdb.execute("DELETE FROM project_spaces WHERE id IN (901, 902)");
+  }
+});
+
+// ---- channel turns are read-only on the board (2026-11-02) ----
+//
+// A bot reads text from anyone on mail, Discord and Crow messages, so a turn
+// that is neither a job nor its signed Perch chat reads its project's cards
+// and changes none. Crow's voice reads every project's cards and boards (it
+// hands work to the right project's bots) and writes none from a voice turn.
+
+test("channel turn: a gmail-thread bot reads its own project's cards, changes no card, and tracker items keep their rules", async () => {
+  await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,?)", args: ["channel-bot", "channel-bot", 1] });
+  const op = await connectClient("/board/mcp", state.localToken);
+  const own = payload(await op.callTool({ name: "board_create_item", arguments: { title: "channel: own project", project_id: 1 } }));
+  const foreign = payload(await op.callTool({ name: "board_create_item", arguments: { title: "channel: other project", project_id: 2 } }));
+  const tracker = payload(await op.callTool({ name: "board_create_item", arguments: { title: "channel: tracker", slug: "intake" } }));
+  await op.close();
+
+  const bot = await connectClient("/board/mcp", state.boardToken, signedThread("channel-bot", { threadId: "gmail-thread-1", gateway: "gmail" }));
+  const call = (name, args) => bot.callTool({ name, arguments: args });
+  try {
+    // Reads on its own project work; another project's card stays hidden.
+    const listed = payload(await call("board_list_items", {}));
+    assert.ok(listed.items.some((r) => r.id === own.id), "its own project's card is listed");
+    assert.ok(!listed.items.some((r) => r.id === foreign.id), "another project's card is not listed");
+    assert.equal(payload(await call("board_get_item", { id: own.id })).kind, "card");
+
+    // Every card write on this channel is refused, and changes nothing.
+    const before = await countCards();
+    const created = await call("board_create_item", { title: "made on a mail turn" });
+    assert.equal(created.isError, true);
+    assert.match(created.content[0].text, /^\[403 channel_read_only\]/);
+    const updated = await call("board_update_item", { id: own.id, title: "renamed on a mail turn" });
+    assert.equal(updated.isError, true);
+    assert.match(updated.content[0].text, /^\[403 channel_read_only\]/);
+    const reported = await call("board_report_result", { item_id: own.id, outcome: "success" });
+    assert.equal(reported.isError, true);
+    assert.match(reported.content[0].text, /^\[403 channel_read_only\]/);
+    const asked = await call("board_ask_decision", decisionArgs(1, "mcp-channel-batch"));
+    assert.equal(asked.isError, true);
+    assert.match(asked.content[0].text, /^\[403 channel_read_only\]/);
+    assert.equal(await countCards(), before, "no card was created by a refused write");
+    assert.equal((await state.tdb.execute({ sql: "SELECT title FROM tasks_items WHERE id=?", args: [own.id] })).rows[0].title,
+      "channel: own project", "the refused update changed nothing");
+    assert.equal(Number((await state.tdb.execute({ sql: "SELECT COUNT(*) AS n FROM board_results WHERE item_id=?", args: [own.id] })).rows[0].n),
+      0, "the refused report recorded nothing");
+
+    // Tracker items keep their old rules: they are not cards.
+    assert.equal(payload(await call("board_update_item", { id: tracker.id, title: "channel: tracker renamed" })).changed, true);
+    const madeTracker = payload(await call("board_create_item", { title: "channel: tracker add", slug: "intake" }));
+    assert.ok(Number.isInteger(madeTracker.id));
+  } finally {
+    await bot.close();
+  }
+});
+
+test("perch turn: the same bot's card writes work when its thread is the signed Perch chat", async () => {
+  await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,?)", args: ["channel-bot", "channel-bot", 1] });
+  const bot = await connectClient("/board/mcp", state.boardToken, signedThread("channel-bot", { threadId: "perch-thread-1", gateway: "perch" }));
+  const call = (name, args) => bot.callTool({ name, arguments: args });
+  try {
+    const made = payload(await call("board_create_item", { title: "perch turn card" }));
+    const row = (await state.tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [made.id] })).rows[0];
+    assert.equal(Number(row.project_id), 1, "the card lands on the bot's own project");
+    assert.equal(payload(await call("board_update_item", { id: made.id, title: "perch turn card, renamed" })).changed, true);
+    assert.equal(payload(await call("board_report_result", { item_id: made.id, outcome: "success" })).status, "recorded");
+  } finally {
+    await bot.close();
+  }
+});
+
+test("Crow's voice reads every project's cards and boards; a voice turn writes none", async () => {
+  await state.cdb.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled, project_id) VALUES (?,?,1,NULL)", args: ["crow.voice", "Crow"] });
+  await state.cdb.execute("INSERT OR IGNORE INTO project_spaces (id, name, slug, archived_at) VALUES (2, 'Other Project', 'other-project', NULL)");
+  const op = await connectClient("/board/mcp", state.localToken);
+  const mine = payload(await op.callTool({ name: "board_create_item", arguments: { title: "voice: project one", project_id: 1 } }));
+  const theirs = payload(await op.callTool({ name: "board_create_item", arguments: { title: "voice: project two", project_id: 2 } }));
+  payload(await op.callTool({ name: "board_save_plan", arguments: { item_id: theirs.id, body_md: "# the other project's plan" } }));
+  await op.close();
+
+  const voice = await connectClient("/board/mcp", state.boardToken, signedBoard("crow.voice"));
+  const call = (name, args) => voice.callTool({ name, arguments: args });
+  try {
+    // Another project's cards are readable: the listing and both single reads.
+    const listed = payload(await call("board_list_items", { project_id: 2 }));
+    assert.ok(listed.items.some((r) => r.id === theirs.id), "another project's cards are listed");
+    assert.equal(payload(await call("board_get_item", { id: theirs.id })).item.title, "voice: project two");
+    assert.equal(payload(await call("board_get_item", { id: mine.id })).kind, "card");
+    assert.equal(payload(await call("board_get_plan", { item_id: theirs.id })).current.body_md, "# the other project's plan");
+
+    // Every project's board is listed.
+    const boards = payload(await call("board_list_boards", {})).boards
+      .filter((b) => b.kind === "project").map((b) => b.project_id);
+    assert.ok(boards.includes(1) && boards.includes(2), "both projects' boards are listed");
+
+    // Writes are still refused: a voice turn changes no card.
+    const before = await countCards();
+    const created = await call("board_create_item", { title: "made by a voice turn" });
+    assert.equal(created.isError, true);
+    assert.match(created.content[0].text, /^\[403 channel_read_only\]/);
+    const updated = await call("board_update_item", { id: theirs.id, title: "renamed by a voice turn" });
+    assert.equal(updated.isError, true);
+    assert.match(updated.content[0].text, /^\[403 channel_read_only\]/);
+    assert.equal(await countCards(), before, "nothing was created");
+    assert.equal((await state.tdb.execute({ sql: "SELECT title FROM tasks_items WHERE id=?", args: [theirs.id] })).rows[0].title,
+      "voice: project two", "the refused update changed nothing");
+  } finally {
+    await voice.close();
+    await state.cdb.execute("DELETE FROM project_spaces WHERE id = 2");
   }
 });
