@@ -56,7 +56,7 @@ const { initMediaTables } = await import("../bundles/media/server/init-tables.js
 const { default: mediaRouter } = await import("../bundles/media/panel/routes.js");
 const { default: panel } = await import("../bundles/media/panel/media.js");
 const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
-const { markFromLaptop } = await import("./helpers/off-box.js");
+const { markFromLaptop, fromLaptop } = await import("./helpers/off-box.js");
 
 const db = createDbClient();
 await initMediaTables(db);
@@ -261,7 +261,9 @@ test("read-only routes still answer without a token", async () => {
 // ---------------------------------------------------------------------------
 async function panelScripts() {
   let captured = null;
-  await panel.handler({ method: "GET", query: { tab: "feed" }, body: {} }, {
+  // The panel page is the owner's: the session row above (scopes 'dashboard') and a request from
+  // another machine, as every request in this file is.
+  await panel.handler(fromLaptop({ method: "GET", query: { tab: "feed" }, body: {}, dashboardSession: SESSION }), {
     redirectAfterPost() { throw new Error("unexpected redirect on a GET"); },
   }, { db, appRoot: REPO_ROOT, layout: (opts) => { captured = opts; return ""; } });
   assert.ok(captured, "the panel renders through layout(), so the layout's scripts run first");

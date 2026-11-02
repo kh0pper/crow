@@ -3,15 +3,20 @@
  * the dashboard's real shared components: the Briefings tab, and the places where feed-controlled
  * text meets HTML. Hostile feed values must come out as inert data: escaped, never inside an
  * inline event handler, and never as a non-http(s) address.
+ *
+ * The page is the owner's, so every request here is the owner's: a local password session (its
+ * oauth_tokens row says 'dashboard') used from another machine (tests/helpers/off-box.js).
  */
 import "./helpers/media-isolate.js";   // first: this file's own home, data dir and database
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseHTML } from "linkedom";
 import { seedSource, seedArticle, fakeMp3, REPO } from "./helpers/media-fixtures.js";
+import { fromLaptop } from "./helpers/off-box.js";
 import { createDbClient } from "../servers/db.js";
 import { initMediaTables } from "../bundles/media/server/init-tables.js";
 import { resolveAudioDir } from "../bundles/media/server/speech.js";
@@ -21,12 +26,19 @@ import { STRINGS } from "../bundles/media/server/strings.js";
 import panel from "../bundles/media/panel/media.js";
 
 let db, show, ids;
+const OWNER_SESSION = "media-panel-owner-session";
 const HOSTILE_URL = "https://media.example.invalid/a.mp3');alert(document.cookie);//";
 const HOSTILE_TITLE = `Rates "rise" </script><img src=x onerror=alert(1)> it's \\ here`;
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { cwd: REPO, stdio: "pipe" });
   db = createDbClient();
+  // The owner's session: a local password login, scopes 'dashboard' alone, as dashboard/auth.js
+  // writes one. The panel's owner check reads this row.
+  await db.execute({
+    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', datetime('now', '+1 day'))",
+    args: [createHash("sha256").update(OWNER_SESSION).digest("hex")],
+  });
   const quiet = console.error; console.error = () => {};
   try { await initMediaTables(db); } finally { console.error = quiet; }
   const site = await seedSource(db, { name: "Example <b>Wire</b>", url: "https://wire.example.invalid/feed" });
@@ -58,7 +70,10 @@ before(async () => {
 after(() => { try { db?.close(); } catch {} });
 
 async function render(query, lang = "en") {
-  const out = await panel.handler({ method: "GET", query, body: {} }, {}, { db, appRoot: REPO, lang, layout: (opts) => opts });
+  // The owner's page, asked for from the owner's laptop: the panel answers anyone else (and the
+  // owner's own session replayed from this box) with a 404 instead of rendering.
+  const req = fromLaptop({ method: "GET", query, body: {}, dashboardSession: OWNER_SESSION });
+  const out = await panel.handler(req, {}, { db, appRoot: REPO, lang, layout: (opts) => opts });
   const { document } = parseHTML(`<!doctype html><html><body>${out.content}</body></html>`);
   return { html: out.content, scripts: out.scripts, document };
 }
