@@ -26,7 +26,7 @@ import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs
 import { worldRootFor, planCarryOver, applyCarryOver, undoCarryOver } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
-import { applyTrackerChoice, applyShowCards } from "./tracker-choice.js";
+import { applyTrackerChoice, applyShowCards, trackerIsCustom } from "./tracker-choice.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
 import { guardPolicyForSave } from "./policy-guard.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
@@ -542,7 +542,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // An old page posts no switch at all (neither show_cards nor show_cards__was): leave the tracker alone and move
         // only the link, keeping the JSON copy in step with the column (M3b).
         def.project_id = next;
-        if (def.tracker_config && typeof def.tracker_config === "object") delete def.tracker_config.project_id;
+        if (!trackerIsCustom(def) && def.tracker_config && typeof def.tracker_config === "object") delete def.tracker_config.project_id;
       }
     } else if (tab === "skills") {
       const rawSkills = [].concat(b.skills || []).filter(Boolean);

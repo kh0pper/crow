@@ -185,6 +185,10 @@ test("custom bot untouched by a save", async () => {
   await post({ action: "save_tracker", bot_id: "leg-k", project_id: "", show_cards__was: "on" });
   assert.equal((await row("leg-k")).def.tracker_config.type, "none", "the legacy branch is reached (posted switch = Off)");
   await post({ action: "save_tracker", bot_id: "cust", show_cards: "off", tracker_type: "none", project_id: "" });
+  // An old page posting no switch fields at all leaves a custom tracker byte-for-byte alone too.
+  await putBot("cust-pid", { ...BASE, tracker_config: { ...CUSTOM, project_id: 7 } });
+  await post({ action: "save_tracker", bot_id: "cust-pid", project_id: "" });
+  assert.deepEqual((await row("cust-pid")).def.tracker_config, { ...CUSTOM, project_id: 7 }, "no-switch legacy save never edits a custom tracker");
   assert.deepEqual((await row("cust")).def.tracker_config, CUSTOM);
   assert.equal((await row("cust")).def.tracker_config.type, "custom");
   void before;
