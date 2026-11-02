@@ -196,7 +196,10 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
     const proxyMiddleware = createProxy({
       target,
       changeOrigin: true,
-      ws: true,
+      ws: false,   // NEVER true: http-proxy-middleware 3 then subscribes its OWN catch-all
+      //   server "upgrade" listener on the first proxied HTTP request, which proxies every later
+      //   upgrade (any path, no cookie) before our own auth checks run. Upgrades go only through
+      //   the explicit .upgrade() call after those checks (proxy.ws does not need this option).
       pathRewrite: { [`^/proxy/${ext.id}`]: "" },
       logLevel: "warn",
       // Strip headers that block iframe embedding and fix cookies
