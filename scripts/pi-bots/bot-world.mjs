@@ -93,7 +93,7 @@ export const BOARD_BOT_TOOLS = Object.freeze([
   "board/board_ask_decision", "board/board_notify_decisions", "board/board_offer_card",
 ]);
 /** The read verbs only: a channel turn (mail, Discord, Crow messages) reads its project's
- *  cards but changes none (Kevin, 2026-11-02; board-mcp.js enforces it too). */
+ *  cards but changes none (the operator's ruling, 2026-11-02; board-mcp.js enforces it too). */
 export const BOARD_BOT_READ_TOOLS = Object.freeze([
   "board/board_list_boards", "board/board_list_items", "board/board_get_item", "board/board_get_plan",
 ]);

@@ -58,7 +58,7 @@ const { isLocalPasswordSession } = await import(
  * Owner-only routes: anyone else gets the same 404 as an unknown path. Every Media Hub API
  * route is the owner's (the feed, sources, playlists, briefings and their settings are the
  * operator's own); only streaming an article's or a briefing's audio by id stays open to any
- * signed-in session (Kevin, 2026-11-02), so the player bar keeps working on other devices.
+ * signed-in session (the operator's ruling, 2026-11-02), so the player bar keeps working on other devices.
  */
 async function ownerOnly(req, res, next) {
   if (await isLocalPasswordSession(req)) return next();

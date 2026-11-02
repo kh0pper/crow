@@ -221,7 +221,7 @@ test("the real login route: a login from the box is 'dashboard onhost', still si
     assert.equal(await probe(boxTok, fromLaptop), false, "the box's session replayed from the laptop is still not the owner");
     assert.equal(await probe(boxTok, fromBox), false);
 
-    // ...but it is a working dashboard session (Kevin's ruling 2: it may sign in, never as the owner).
+    // ...but it is a working dashboard session (the operator's ruling 2: it may sign in, never as the owner).
     const page = await request(port, { path: "/dashboard/schedule", headers: { ...fromLaptop, cookie: `crow_session=${boxTok}` } });
     assert.equal(page.status, 200, `an onhost session loads a dashboard page (got ${page.status} ${page.headers.location || ""})`);
     const pageFromBox = await request(port, { path: "/dashboard/schedule", headers: { ...fromBox, cookie: `crow_session=${boxTok}` } });

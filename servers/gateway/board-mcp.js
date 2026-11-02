@@ -170,7 +170,7 @@ const resolveActorWith = resolveActor;
 
 /**
  * Card writes from a bot come from its Perch chat or a job, never from a channel turn
- * (Kevin, 2026-11-02): on mail, Discord and Crow messages the bot reads text from anyone,
+ * (the operator's ruling, 2026-11-02): on mail, Discord and Crow messages the bot reads text from anyone,
  * so those turns read their project's cards but change none. The thread is the signed one
  * (resolveActor), so a turn can't claim Perch. Tracker items keep their own rules.
  */
@@ -195,7 +195,7 @@ export async function botProjectOf(cdb, botId) {
 export function botMayReadCard(row, actor, botProject) {
   if (!actor || actor.kind !== "bot") return true;
   // Crow's voice reads every board (read only): it hands work to the right project's bots
-  // (Kevin, 2026-11-02). Its writes keep the bot rules (it has no project of its own).
+  // (the operator's ruling, 2026-11-02). Its writes keep the bot rules (it has no project of its own).
   if (isVoiceBotId(actor.id)) return true;
   if (!row || row.board_id != null) return true;
   if (actor.id && row.assigned_bot === actor.id) return true;

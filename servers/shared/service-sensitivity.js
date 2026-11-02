@@ -1,6 +1,6 @@
 /**
  * Which project-service connections are SENSITIVE (project services Task 16c; roles spec §11,
- * Kevin 2026-10-29). A sensitive connection's content is never given to a bot until the Private
+ * the operator, 2026-10-29). A sensitive connection's content is never given to a bot until the Private
  * role and bot containment ship (roles spec §11.6): the services mount answers every list and
  * call on it with a refusal (mount.js), and every other path that offers a connection to a bot
  * (the pi blocks, the dashboard chat) must skip it through isSensitiveConnection below. The
@@ -52,7 +52,7 @@ import { anchoredPath, readSecretValuesFile, writeSecretValuesFile } from "./sec
 const S = (isDefault, locked) => Object.freeze({ default: isDefault, locked });
 
 /**
- * Kevin 2026-10-29 ("let the user decide, with sensible defaults"): obsidian reads local files
+ * the operator, 2026-10-29 ("let the user decide, with sensible defaults"): obsidian reads local files
  * (§11.2), so it is always private; notion and discord hold private writing and messages, so
  * they start private and the owner may turn that off; the rest start open and the owner may
  * turn private on.

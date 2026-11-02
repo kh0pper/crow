@@ -52,7 +52,7 @@ import {
 } from "./children.js";
 
 export const SERVICES_FAMILY = "services-tools";
-/** Kevin 2026-10-29 (Q1): 256 KiB, text and images; base64 images count. */
+/** the operator, 2026-10-29 (Q1): 256 KiB, text and images; base64 images count. */
 export const SERVICES_RESULT_CAP = Object.freeze({ maxBytes: 262144, contentTypes: Object.freeze(["text", "image"]) });
 /**
  * 60 s per call (lane A, PR 3): the same as a child's connect timeout. The helper's in-flight
@@ -68,7 +68,7 @@ const privateUnavailable = () => ({ ok: false, code: "private_unavailable" });
 const bindingMismatch = () => ({ ok: false, code: "not_active", reason: "binding_mismatch" });
 
 /**
- * For You's morning job (For You spec §11, Kevin 2026-10-29): ONE named exception to "only my
+ * For You's morning job (For You spec §11, the operator, 2026-10-29): ONE named exception to "only my
  * own turns" (services §6.6). Its prepare job may make READ-ONLY calendar and mail reads on the
  * operator's own connections with no turn, nothing else may use the path, and its output is shown
  * only to the operator. It is to be an explicit, tested authority on this mount, never a
