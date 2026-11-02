@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # browser-profile-to-volume.sh — ONE-TIME move of a crow-browser container's
 # Chromium profile (cookies, saved logins) from the container's own layer onto
-# the named volume the browser bundle's compose declares since 1.3.12.
+# the named volume the browser bundle's compose declares since 1.4.0.
 #
 # NEVER run automatically. An operator runs it once per instance, inside tmux
 # or screen (it refuses otherwise, unless --no-tty-guard), in a registered
@@ -112,7 +112,7 @@ for f in docker-compose.yml entrypoint.sh Dockerfile; do
   [ -f "$SOURCE/$f" ] || fail "--source has no $f (point it at a checkout's bundles/browser)"
 done
 grep -q "${VOLUME_KEY}:${PROFILE_DIR}" "$SOURCE/docker-compose.yml" \
-  || fail "--source's compose has no ${VOLUME_KEY} volume on ${PROFILE_DIR}: not the 1.3.12+ browser bundle"
+  || fail "--source's compose has no ${VOLUME_KEY} volume on ${PROFILE_DIR}: not the 1.4.0+ browser bundle"
 
 # configs `content:` (the token file) needs Docker Compose 2.23.1+.
 CV="$("$DOCKER" compose version --short 2>/dev/null | sed 's/^v//')"

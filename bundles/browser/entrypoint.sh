@@ -183,7 +183,7 @@ if ! kill -0 "$XVFB_PID" 2>/dev/null; then
   die "Xvfb on :${DISP_NUM} died — another container is already using that display. Set CROW_BROWSER_DISPLAY to a number no other Crow instance uses."
 fi
 if grep -q "@/tmp/.X11-unix/X${DISP_NUM}\$" /proc/net/unix 2>/dev/null; then
-  die "an abstract X socket for :${DISP_NUM} exists on this host (another Crow browser from before 1.3.12 on the same display number?). Refusing to run: it is reachable by every process on the machine."
+  die "an abstract X socket for :${DISP_NUM} exists on this host (another Crow browser from before 1.4.0 on the same display number?). Refusing to run: it is reachable by every process on the machine."
 fi
 log "Xvfb ready (pid ${XVFB_PID}), cookie required, no TCP or abstract socket."
 

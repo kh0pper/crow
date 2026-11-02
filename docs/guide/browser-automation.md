@@ -166,7 +166,7 @@ docker compose stop       # stop
 docker compose logs -f    # view logs
 ```
 
-The browser's profile (its cookies and saved logins) lives on a named Docker volume, one per instance (`browser_chromium-profile` on the main instance), so stopping, restarting, rebuilding or re-creating the container keeps it. Only `docker compose down -v` (or `docker volume rm`) deletes it. The bundle needs Docker Compose 2.23.1 or newer (it hands the viewer key to the container as a compose `configs` file). An install from before 1.3.12 keeps its profile inside the old container until an operator moves it once with `scripts/ops/browser-profile-to-volume.sh` (run `--dry-run` first); until then, avoid anything that re-creates that container.
+The browser's profile (its cookies and saved logins) lives on a named Docker volume, one per instance (`browser_chromium-profile` on the main instance), so stopping, restarting, rebuilding or re-creating the container keeps it. Only `docker compose down -v` (or `docker volume rm`) deletes it. The bundle needs Docker Compose 2.23.1 or newer (it hands the viewer key to the container as a compose `configs` file). An install from before 1.4.0 keeps its profile inside the old container until an operator moves it once with `scripts/ops/browser-profile-to-volume.sh` (run `--dry-run` first); until then, avoid anything that re-creates that container.
 
 ## FFFF Filing Skill
 

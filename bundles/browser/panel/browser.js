@@ -37,7 +37,7 @@ export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-
  * (WebUtil.writeSetting), shared by every viewer on this origin, so the
  * interactive ones pin view_only=false; otherwise watching once would leave
  * the Take over sheet's viewer unable to type or click. There is no VNC
- * password (1.3.12: loopback VNC behind the Crow sign-in), so every link
+ * password (1.4.0: loopback VNC behind the Crow sign-in), so every link
  * autoconnects; none ever carries a password parameter.
  */
 export const VNC_VIEW_ONLY = "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale";

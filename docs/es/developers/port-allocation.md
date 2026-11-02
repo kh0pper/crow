@@ -67,7 +67,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 5335 | 127.0.0.1 | adguard-home (DNS, TCP+UDP) | MVP PR 3 |
 | 5336 | — | pi-hole (DNS) | reservado (DNS, Fase 2) |
 | 5337 | — | technitium (DNS) | reservado (DNS, Fase 2) |
-| 6080 | 127.0.0.1 | browser (noVNC, existente; desde 1.3.12 noVNC escucha solo en 127.0.0.1 y necesita el `CROW_BROWSER_VNC_TOKEN` por instancia que añade el `/proxy/browser/` del gateway; RFB es un socket unix dentro del contenedor, sin puerto TCP) | existente |
+| 6080 | 127.0.0.1 | browser (noVNC, existente; desde 1.4.0 noVNC escucha solo en 127.0.0.1 y necesita el `CROW_BROWSER_VNC_TOKEN` por instancia que añade el `/proxy/browser/` del gateway; RFB es un socket unix dentro del contenedor, sin puerto TCP) | existente |
 | 6875 | 127.0.0.1 | bookstack (existente) | existente |
 | 8000 | 127.0.0.1 | paperless (existente) | existente |
 | 8003 | IP de tailscale | llamacpp-vulkan-qwen36-35b-a3b (crow-chat) | existente |

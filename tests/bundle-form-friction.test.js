@@ -105,7 +105,7 @@ const EXEMPT = {
 /**
  * Survey §1.3 F1 table (31 keys) + MINIO_ROOT_PASSWORD (§1.3 note), less
  * browser:CROW_BROWSER_VNC_PASSWORD: the browser's viewer has no password any
- * more (loopback VNC behind the dashboard sign-in, browser 1.3.12).
+ * more (loopback VNC behind the dashboard sign-in, browser 1.4.0).
  */
 const SURVEY_F1 = [
   "bookstack:BOOKSTACK_DB_PASSWORD", "campaigns:CROW_CAMPAIGNS_ENCRYPTION_KEY",

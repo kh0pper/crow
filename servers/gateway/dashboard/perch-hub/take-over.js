@@ -11,7 +11,7 @@ import { tJs } from "../shared/i18n.js";
  *  - Emitted inside a template literal: no backtick and no dollar-brace in the
  *    client code; only the tJs interpolations below.
  *  - textContent only; the iframe src is a fixed same-origin path.
- *  - No VNC password (browser 1.3.12, "Crow's own apps use loopback VNC gated
+ *  - No VNC password (browser 1.4.0, "Crow's own apps use loopback VNC gated
  *    by sign-in"): the container's VNC listens on 127.0.0.1 only and the
  *    viewer is reached only through the signed-in /proxy/browser/ route, so
  *    the sheet has no password row, never asks the keychain, and the viewer

@@ -151,7 +151,7 @@ export function createBrowserServer(options = {}) {
         if (changingProxy) {
           // Proxy is a container-launch flag, so a new proxy needs a recreate (not just restart).
           if (browser) { await browser.close().catch(() => {}); browser = null; context = null; page = null; cdpSession = null; }
-          // No VNC password to carry over (1.3.12: loopback VNC behind the Crow
+          // No VNC password to carry over (1.4.0: loopback VNC behind the Crow
           // sign-in). An older compose file that still demands one reads it from
           // its own .env, next to that file.
           let composeFile = "";
