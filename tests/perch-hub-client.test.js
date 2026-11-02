@@ -4111,7 +4111,9 @@ test("W3: a tool call grows a chip that spins, expands, and settles to done/fail
   assert.ok(wrap, "the chip lives in the transcript, where the operator is looking");
   const chip = wrap.children[0], details = wrap.children[1];
   assert.equal(chip.children.length, 3, "spinner + name + status");
-  assert.equal(chip.children[1].textContent, "bash");
+  assert.equal(chip.children[1].textContent, "Shell command",
+    "the chip reads in words (toolDisplayName); the raw id is on its title");
+  assert.equal(chip.getAttribute("title"), "bash", "…as the title attribute");
   assert.equal(chip.children[2].textContent, "running");
   assert.equal(details.hidden, true);
   assert.equal(details.children[1].textContent, '{"command":"ls"}', "args are there before the result");
@@ -5509,7 +5511,8 @@ test("back without a project goes to the list", async () => {
 async function tgStrings(lang) {
   const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
   const t = (k) => translations[k][lang];
-  return { see: t("perch.toolGroupSee"), running: t("perch.toolRunning"), step: t("perch.toolGroupStep"),
+  return { see: t("perch.toolGroupSee"), running: t("perch.toolRunning"),
+    finishing: t("perch.toolGroupFinishing"), step: t("perch.toolGroupStep"),
     steps: t("perch.toolGroupSteps"), failedOne: t("perch.toolGroupFailedOne"), failed: t("perch.toolGroupFailed") };
 }
 
@@ -5530,11 +5533,11 @@ test("groupLabel: running / agents / steps / failed / never all ok", async () =>
   assert.equal(groupLabel({ total: 3, failed: 1, running: 0, others: 2, agents: ["scout"] }, en),
     "See what happened · scout · 3 steps, 1 failed");
   assert.equal(groupLabel({ total: 3, failed: 2, running: 0, agents: [] }, es), "Ver qué pasó · 3 pasos, 2 fallaron");
-  assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, true), "See what happened · running",
-    "chips all done but the turn still running: running");
+  assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, true), "See what happened · finishing up",
+    "chips all done but the turn still running: finishing up, not running");
   assert.equal(groupLabel({ total: 2, failed: 0, running: 0, agents: [] }, en, false), "See what happened · 2 steps");
-  assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: [] }, en, true), "See what happened · running · 1 failed",
-    "a running group says its failure in words");
+  assert.equal(groupLabel({ total: 2, failed: 1, running: 0, agents: [] }, en, true), "See what happened · finishing up · 1 failed",
+    "a finishing group says its failure in words");
   assert.equal(groupLabel({ total: 3, failed: 2, running: 1, agents: [] }, es), "Ver qué pasó · " +
     es.running + " · 2 fallaron");
   for (const c of [{ total: 2, failed: 0, running: 0, agents: [] }, { total: 0, failed: 0, running: 0 }]) {
@@ -5574,13 +5577,18 @@ test("subagentNames: single, parallel, chain, truncated JSON → []", async () =
   assert.deepEqual(subagentNames('{"task":"x"}'), []);
 });
 
-/** The transcript as rows: a group reads "group[<label>|<expanded>|<chip names>]". */
+/** The transcript as rows: a group reads "group[<label>|<expanded>|<chip raw ids>]".
+ *  The ids come off the chip's title attribute — the label itself is
+ *  operator-facing words now, pinned in perch-tool-chip-names.test.js. */
 function rowShape(hub) {
   return hub.els["perch-transcript"].children.filter((c) => !String(c.className).includes("entry note")).map((c) => {
     const cls = String(c.className);
     if (cls.split(" ").includes("tool-group")) {
       const [lineBtn, body] = c.children;
-      const names = body.children.map((w) => w.children[0].children.find((x) => x.className === "tn").textContent);
+      /* The chip's LABEL is operator-facing words now (toolDisplayName), and
+         what this field is about is WHICH call sits in the group: the raw id
+         rides the chip's title. */
+      const names = body.children.map((w) => w.children[0].getAttribute("title"));
       return "group[" + lineBtn.textContent + "|" + lineBtn.getAttribute("aria-expanded") + "|" + names.join(",") +
         (lineBtn.className.includes("err") ? "|err" : "") + "]";
     }
@@ -5637,7 +5645,7 @@ test("history groups match live groups", async () => {
   assert.deepEqual(histRows, liveRows, "a reloaded turn looks like the live one");
 });
 
-test("a reload mid-turn reads running and folds at the reply", async () => {
+test("a reload mid-turn reads finishing up and folds at the reply", async () => {
   const events = [
     { type: "message", message: { role: "user", content: "go" } },
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "m1", name: "bash", arguments: {} }] } },
@@ -5653,15 +5661,15 @@ test("a reload mid-turn reads running and folds at the reply", async () => {
   release();
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · running|true|bash]"],
-    "the running turn's history group reads running and stays open");
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · finishing up|true|bash]"],
+    "the running turn's history group reads finishing up and stays open");
   es._serverFrame("reply", { text: "done", turnId: "t1" });
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(rowShape(hub).filter((r) => r.startsWith("group")), ["group[See what happened · 1 step|false|bash]"],
     "the turn's end folds it");
 });
 
-test("a reload mid-turn whose state frame arrives AFTER the history reads running and folds at the reply", async () => {
+test("a reload mid-turn whose state frame arrives AFTER the history reads finishing up and folds at the reply", async () => {
   const events = [
     { type: "message", message: { role: "user", content: "go" } },
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "m1", name: "bash", arguments: {} }] } },
@@ -5674,7 +5682,7 @@ test("a reload mid-turn whose state frame arrives AFTER the history reads runnin
   const es = FakeEventSource.instances[0];
   es._serverFrame("state", { state: "awake", turnInFlight: true });   // the late replay
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · running · 1 failed|true|bash|err]"],
+  assert.deepEqual(rowShape(hub), ["user", "group[See what happened · finishing up · 1 failed|true|bash|err]"],
     "the batch's last turn is the running one: live again, its failure still in words");
   es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "m2" });
   es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "m2", resultText: "ok", isError: false });
@@ -5781,7 +5789,8 @@ test("an end without a start counts in new mode only", async () => {
     es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "r1", resultText: "y", isError: false });
     await new Promise((r) => setTimeout(r, 0));
     const rows = rowShape(hub).filter((r) => r !== "entry note");
-    if (sheet) assert.deepEqual(rows, ["group[See what happened · running|true|bash,read]"], "the turn still runs");
+    if (sheet) assert.deepEqual(rows, ["group[See what happened · finishing up|true|bash,read]"],
+      "every chip finished but the turn still runs");
     else assert.deepEqual(rows, ["chip"], "classic: no chip is minted for a call nobody watched begin");
   }
 });
@@ -5796,8 +5805,8 @@ test("a running group is expanded, collapses at turn end; text closes a group; a
   assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"]);
   es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "a1", resultText: "ok", isError: false });
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(rowShape(hub), ["group[See what happened · running|true|bash]"],
-    "every chip finished but the model still works: running, and open until the turn ends");
+  assert.deepEqual(rowShape(hub), ["group[See what happened · finishing up|true|bash]"],
+    "every chip finished but the model still works: finishing up, and open until the turn ends");
   es._serverFrame("file", { name: "r.txt", stored: "r.txt", servable: true, size: 3, mime: "text/plain" });
   es._serverFrame("tool", { phase: "start", name: "read", toolCallId: "a2" });
   es._serverFrame("tool", { phase: "end", name: "read", toolCallId: "a2", resultText: "ok", isError: false });

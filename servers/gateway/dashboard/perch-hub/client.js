@@ -525,8 +525,14 @@ export function perchHubJs(lang = "en") {
   var TOOL_RUNNING='${tJs("perch.toolRunning", lang)}';
   var TOOL_DONE='${tJs("perch.toolDone", lang)}';
   var TOOL_FAILED='${tJs("perch.toolFailed", lang)}';
+  /* The chips' own names for pi's built-in tools (toolDisplayName). */
+  var TOOL_N={ bash:'${tJs("perch.toolNameBash", lang)}', read:'${tJs("perch.toolNameRead", lang)}',
+    edit:'${tJs("perch.toolNameEdit", lang)}', write:'${tJs("perch.toolNameWrite", lang)}',
+    grep:'${tJs("perch.toolNameGrep", lang)}', find:'${tJs("perch.toolNameFind", lang)}',
+    ls:'${tJs("perch.toolNameLs", lang)}' };
   /* R1.2 PR 2: the "See what happened" line (new mode only). */
   var TG_S={ see:'${tJs("perch.toolGroupSee", lang)}', running:TOOL_RUNNING,
+    finishing:'${tJs("perch.toolGroupFinishing", lang)}',
     step:'${tJs("perch.toolGroupStep", lang)}', steps:'${tJs("perch.toolGroupSteps", lang)}',
     failedOne:'${tJs("perch.toolGroupFailedOne", lang)}', failed:'${tJs("perch.toolGroupFailed", lang)}' };
   var COMMANDS_HIBERNATING='${tJs("perch.commandsHibernating", lang)}';
@@ -4026,6 +4032,61 @@ export function perchHubJs(lang = "en") {
      without args, and the Activity rail keeps the durable record. Args/results
      arrive pre-truncated by the engine (600/2000 chars) and land via
      textContent only — child-controlled bytes never reach a markup sink. */
+  /* ---- Friendly chip names ---------------------------------------------
+     The chip printed the engine's id verbatim, which on a phone reads
+     "mcp__brave-search__brave_web_search". The operator gets words; the raw
+     id rides the chip's title, so it is still there to hover or long-press.
+     The Activity rail keeps the durable record either way. */
+  /* MCP servers with a name of their own. Anything else is spelled out from
+     its id, so a new add-on reads sensibly without a code change. */
+  var TOOL_SERVERS={
+    'brave-search':'Brave Search', 'google-workspace':'Google Workspace',
+    'crow-memory':'Memory', 'crow-projects':'Projects', 'crow-sharing':'Sharing',
+    'crow-storage':'Files', 'crow-blog':'Blog', 'crow-tasks':'Tasks',
+    'browser':'Browser', 'crow-browser':'Browser', 'monday':'monday.com',
+    'trello':'Trello'
+  };
+  /* A chip is one pill in a 390px transcript: never a paragraph. */
+  var TOOL_NAME_MAX=60;
+  function toolCap(s){
+    var t=String(s==null?'':s);
+    return t.length>TOOL_NAME_MAX?t.slice(0,TOOL_NAME_MAX):t;
+  }
+  /* The id's word break is "_"; raise the first letter and nothing else, so
+     "web_search" reads "Web search", not "Web Search". */
+  function toolWords(s){
+    var t=String(s==null?'':s).replace(/_/g,' ');
+    return t?t.charAt(0).toUpperCase()+t.slice(1):t;
+  }
+  function toolServerName(id){
+    var known=TOOL_SERVERS[id];
+    if(known) return known;
+    return toolWords(String(id).replace(/-/g,' ').replace(/_/g,' '));
+  }
+  /* "brave_web_search" under server "brave-search" reads "Web search": the
+     server is already named on the left, so repeating its own prefix is noise.
+     crow_ and the server's first dash-segment are the two prefixes pi's tool
+     ids arrive with. */
+  function toolToolName(part,server){
+    var t=String(part==null?'':part);
+    if(t.indexOf('crow_')===0) t=t.slice(5);
+    var head=String(server||'').split('-')[0];
+    if(head&&t.indexOf(head+'_')===0) t=t.slice(head.length+1);
+    return toolWords(t);
+  }
+  function toolDisplayName(raw){
+    var id=String(raw==null?'':raw);
+    if(!id) return '?';
+    var builtin=TOOL_N[id];
+    /* typeof, not truthiness: TOOL_N is a plain object, so "constructor" would
+       otherwise resolve to a function and print its source into the chip. */
+    if(typeof builtin==='string') return toolCap(builtin);
+    /* No backslash escapes here: this file is emitted inside a template
+       literal, which would eat them, and a tool id carries no newlines. */
+    var m=/^mcp__(.+?)__(.+)$/.exec(id);
+    if(m) return toolCap(toolServerName(m[1])+' \u00b7 '+toolToolName(m[2],m[1]));
+    return toolCap(toolWords(id.indexOf('crow_')===0?id.slice(5):id));
+  }
   var toolChips={};
   function appendToolChip(d){
     var tr=el('perch-transcript'); if(!tr) return;
@@ -4039,7 +4100,11 @@ export function perchHubJs(lang = "en") {
     }
     var chip=document.createElement('button'); chip.type='button'; chip.className='tool-chip';
     var spin=document.createElement('span'); spin.className='spin';
-    var name=document.createElement('span'); name.className='tn'; name.textContent=(d&&d.name)||'?';
+    var name=document.createElement('span'); name.className='tn';
+    /* Friendly text, raw id on the title: textContent only, as everywhere else
+       in this transcript. */
+    name.textContent=(typeof toolDisplayName==='function')?toolDisplayName(d&&d.name):String((d&&d.name)||'?');
+    chip.setAttribute('title',String((d&&d.name)||''));
     var status=document.createElement('span'); status.textContent=TOOL_RUNNING;
     chip.appendChild(spin); chip.appendChild(name); chip.appendChild(status);
     var details=document.createElement('div'); details.className='tool-details'; details.hidden=true;
@@ -4148,14 +4213,17 @@ export function perchHubJs(lang = "en") {
   function isSubagentTool(name){ return /(^|__)subagent$/.test(String(name||'')); }
   /* s: the language's strings (TG_S). Never "all ok": a finished line says
      what ran, and a failure is counted. turnRunning: the group's turn is
-     still going (the model is working), so even with every chip finished
-     the line says "running" until the turn ends. */
+     still going (the model is working); with every chip finished but the
+     turn not over the line says "finishing up", not "running". */
   function groupLabel(c,s,turnRunning){
     var head=s.see+' \\u00b7 ';
     var failed=Number(c&&c.failed)||0;
     var tail=failed>0?', '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'';
-    /* Running never hides a failure: "running · 1 failed" until the turn ends. */
-    if(Number(c&&c.running)>0||turnRunning) return head+s.running+(failed>0?' \\u00b7 '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'');
+    /* "running" is a step actually in flight. Every step finished while the
+       model is still writing its reply is "finishing up": the line must not
+       claim work it can see is done. Neither hides a failure. */
+    var inFlight=Number(c&&c.running)>0;
+    if(inFlight||turnRunning) return head+(inFlight?s.running:s.finishing)+(failed>0?' \\u00b7 '+(failed===1?s.failedOne:s.failed.replace('{n}',String(failed))):'');
     var names=[];
     ((c&&c.agents)||[]).forEach(function(a){ if(a&&names.indexOf(a)<0) names.push(a); });
     var n=Number(c&&c.total)||0;

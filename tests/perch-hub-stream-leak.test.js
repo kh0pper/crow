@@ -564,7 +564,7 @@ test("W2/W3 live: facts, plan bar, and a tool chip that spins then settles", asy
     assert.equal(mid.planfill, "50%");
     assert.equal(mid.steps, 2);
     assert.equal(mid.chipSpin, true, "the chip spins while the tool runs");
-    assert.equal(mid.chipName, "bash");
+    assert.equal(mid.chipName, "Shell command", "the chip reads in words (toolDisplayName), not 'bash'");
     assert.equal(mid.spinAnim, "perch-spin");
 
     broadcast("tool", { phase: "end", name: "bash", toolCallId: "tc-live", resultText: "total 8", isError: false });
@@ -607,7 +607,7 @@ test("seam live: a tool that finishes while history loads is ONE chip, and one s
     await sleep(300);
     const seen = await s.json(`JSON.stringify(Array.from(document.querySelectorAll('#perch-transcript .tool-chip')).map(function(c){
       return { name: c.querySelector('.tn').textContent, spin: !!c.querySelector('.spin'), status: c.lastElementChild.textContent }; }))`);
-    assert.deepEqual(seen.map((c) => c.name), ["bash", "grep"],
+    assert.deepEqual(seen.map((c) => c.name), ["Shell command", "Search in files"],
       "one chip per call — the seam must not draw tc-seam twice: " + JSON.stringify(seen));
     assert.equal(seen[1].spin, false, "the call still running at flush time settles when its end arrives");
     assert.equal(seen[1].status, "done");
