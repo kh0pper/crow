@@ -4187,11 +4187,22 @@ export function createInteractiveEngine({
     // disturbing the other controls.
     const hasCwd = opts.cwd !== undefined;
 
-    // Project services: the model, permission mode and working folder decide what an owner
-    // turn's service tools run under, so only the owner changes them on an owner session or a
-    // child that holds service blocks (the route passes the request's principal).
-    if ((hasModel || hasPermissionMode || hasCwd) && opts.principal !== "owner"
-      && (s.servicesPrincipal === "owner" || childHoldsServices(s))) throw engineError("not_owner_turn");
+    // Project services: the model, permission mode, working folder and plan mode decide what an
+    // owner turn's service tools run under. A setting a non-owner chooses now would carry into
+    // the owner's next turn (the session keeps it, and the owner's message cycles a child WITH
+    // blocks), so on a session whose project has any connection the owner's turn could be
+    // offered, only the owner changes them, whoever the session serves at this moment. An
+    // unreadable project counts as having connections (fail closed). The route passes the
+    // request's principal.
+    const hasPlanOff = hasPlanMode && opts.planMode === false;
+    if ((hasModel || hasPermissionMode || hasCwd || hasPlanOff) && opts.principal !== "owner") {
+      let offered = true;
+      if (s.projectId == null) offered = false;
+      else {
+        try { offered = (await connectionsFingerprintOf(s.projectId)) !== ""; } catch { offered = true; }
+      }
+      if (offered || s.servicesPrincipal === "owner" || childHoldsServices(s)) throw engineError("not_owner_turn");
+    }
 
     // Model/thinking/planMode switches share the one child clock a turn
     // already owns (commandSince/promptAckOnly ride the SAME correlated

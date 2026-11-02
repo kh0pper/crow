@@ -713,6 +713,30 @@ test("model, permission mode and cwd are the owner's alone on an owner session t
   await engine.stop(r.sessionId);
 });
 
+test("a non-owner can't pre-set the owner's next service turn: after a non-owner message the session serves 'other', and /control is still the owner's", async () => {
+  addConnection();
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  // A non-owner message cycles the child off its blocks; the session now serves "other".
+  await engine.message(r.sessionId, "from a peer", [], { principal: "other" });
+  await tick();
+  const live = state.instances[state.instances.length - 1];
+  assert.deepEqual(live.blockNames(), [], "the peer's turn runs without blocks");
+  await endTurn(live);
+  const saved = recEngine.control;
+  recEngine.control = (...a) => engine.control(...a);
+  try {
+    for (const body of [{ permission_mode: "bypass" }, { cwd: "/tmp" }, { model: null }, { plan_mode: false }]) {
+      const res = await perchPost(`/interactive/${r.sessionId}/control`, body, "sso");
+      assert.equal(res.status, 403, JSON.stringify(body) + ": " + JSON.stringify(res.body));
+    }
+  } finally {
+    recEngine.control = saved;
+  }
+  await engine.stop(r.sessionId);
+});
+
 test("a child holding no blocks still lets a non-owner steer and answer (fix round 1)", async () => {
   const { engine, state } = makeEngine({ blocks: false });
   const r = await engine.spawn({ botId: BOT, principal: "owner" });
