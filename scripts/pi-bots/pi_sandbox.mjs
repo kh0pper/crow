@@ -88,7 +88,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { containSelected, buildContainPlan } from "./pi_contain.mjs";
+import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -271,18 +271,36 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
       throw new Error("pi contain tier selected but bwrap cannot make a PID namespace here (" + (probe.pidnsReason || "unavailable") + ")");
     }
     const plan = buildContainPlan(opts.contain);
+    // A provider the bot needs whose row has no door (a literal-key cloud row
+    // this box never consented to, a LAN/tailnet row /llm/p does not serve):
+    // the turn would run with no way to its model. Refused, never downgraded.
+    const missing = Array.isArray(opts.contain && opts.contain.missing) ? opts.contain.missing : [];
+    if (missing.length) {
+      const m = missing[0] || {};
+      throw new ContainRefused("contain refused: " + (m.reason || "provider " + m.provider + " has no door"));
+    }
     for (const r of plan.refused) console.error("[pi-sandbox] contain: not bound: " + r.path + " (" + r.reason + ")");
     const pre = [...plan.args];
-    // Instance secrets dirs (hideDirs): contain binds none of them; one that a
-    // bound dir happens to contain is over-mounted read-only, so every one is
-    // really hidden and reported masked (the bridge refuses otherwise).
+    // Instance secrets dirs (hideDirs). Contain binds none of them: the plan
+    // refuses every read-write bind on the Crow home or an ancestor, and the
+    // rest of the home is not bound. One a BOUND dir happens to contain is
+    // over-mounted read-only here; only dirs really masked are reported, and
+    // one that cannot be masked refuses the spawn. Co-hosted instances' dirs
+    // used to be reported masked unconditionally, which made the bridge's
+    // masked-check pass for dirs nobody had masked.
     const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/"));
     const boundSrc = [];
     for (let i = 0; i < pre.length; i++) if (pre[i] === "--bind" || pre[i] === "--ro-bind") boundSrc.push(pre[i + 2]);
-    for (const d of hideDirs) if (isDir(d) && boundSrc.some((b) => b && (d === b || d.startsWith(b + "/")))) pre.push("--tmpfs", d, "--remount-ro", d);
+    const masked = [];
+    for (const d of hideDirs) {
+      if (!boundSrc.some((b) => b && (d === b || d.startsWith(b + "/")))) continue; // not bound at all
+      if (!isDir(d)) throw new ContainRefused("contain refused: the secrets dir " + d + " is inside a bound path and cannot be masked");
+      pre.push("--tmpfs", d, "--remount-ro", d);
+      masked.push(d);
+    }
     if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
     return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: { ...scrubSandboxEnv(env), ...plan.env },
-      sandboxed: true, wrapper: "bwrap", tier: "contain", pidNamespace: true, reason: null, masked: hideDirs, refused: plan.refused };
+      sandboxed: true, wrapper: "bwrap", tier: "contain", pidNamespace: true, reason: null, masked, refused: plan.refused };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {

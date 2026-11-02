@@ -4,7 +4,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { buildContainPlan, containSelected, ContainRefused } from "../scripts/pi-bots/pi_contain.mjs";
 
@@ -124,13 +124,16 @@ test("bot paths: session and cwd rw, workspace rw, write_paths rw, read_paths ro
 
 test("never bound, whatever the policy says: key dirs, assistant config, other instances, the whole home", () => {
   const { args, refused } = buildContainPlan(base({
-    writePaths: [join(H, ".ssh"), H, otherInst], readPaths: [join(H, ".claude"), join(H, ".gnupg", "x")],
+    writePaths: [join(H, ".ssh"), otherInst], readPaths: [join(H, ".claude"), join(H, ".gnupg", "x")],
   }));
-  for (const p of [join(H, ".ssh"), H, otherInst, join(H, ".claude")]) {
+  for (const p of [join(H, ".ssh"), otherInst, join(H, ".claude")]) {
     assert.ok(!pairs(args).some((q) => (q[0] === "--bind" || q[0] === "--ro-bind") && q[1] === p), p + " not bound");
   }
   const reasons = refused.map((r) => r.path);
-  for (const p of [join(H, ".ssh"), H, otherInst, join(H, ".claude")]) assert.ok(reasons.includes(p), p + " refused");
+  for (const p of [join(H, ".ssh"), otherInst, join(H, ".claude")]) assert.ok(reasons.includes(p), p + " refused");
+  // The whole home is an ancestor of <CROW_HOME>: a write path on it now
+  // refuses the spawn (the Crow-home ruling), not just the bind.
+  assert.throws(() => buildContainPlan(base({ writePaths: [H] })), ContainRefused);
 });
 
 test("a write path covering the checkout or the engine is refused (code stays read-only)", () => {
@@ -289,4 +292,40 @@ test("scan cap: a policy path too large to scan is not bound; an engine dir too 
   const r2 = buildContainPlan(base({ readPaths: [join(T, "deep2")], envScanMaxDepth: 2 }));
   assert.ok(!has(r2.args, "--ro-bind", join(T, "deep2")), "depth cap also fails closed");
   assert.throws(() => buildContainPlan(base({ envScanMaxEntries: 3 })), ContainRefused, "the engine/checkout cannot be bound unscanned");
+});
+
+// ---- Kevin's ruling (2026-11-02): a data folder that IS the Crow home, and
+// rw binds over the Crow home, are refused (never masked over) ----
+
+const bindSources = (args) => pairs(args).filter((p) => p[0] === "--bind" && p.length >= 3).map((p) => p[1]);
+
+test("the Crow home is never a read-write bind, and a data folder that is the Crow home is refused", () => {
+  const CH = mk(T, "chome");            // stands in for <CROW_HOME>
+  const chData = mk(CH, "data");
+  writeFileSync(join(chData, "crow.db"), "");
+  mk(CH, "secrets");
+  const withHome = base({ crowHome: CH, dataDir: chData, botCacheDir: mk(CH, "bot-cache") });
+
+  const { args } = buildContainPlan(withHome);
+  const ancestors = [];
+  for (let a = CH; a && a !== "/"; a = dirname(a)) ancestors.push(a);
+  for (const src of bindSources(args)) {
+    assert.notEqual(src, CH, "the Crow home is not a rw bind source");
+    assert.notEqual(src, join(CH, "secrets"), "its secrets dir is not a rw bind source");
+    assert.ok(!ancestors.includes(src), src + " is an ancestor of the Crow home and is not a rw bind source");
+  }
+  assert.ok(bindSources(args).includes(chData), "the data dir itself stays writable");
+
+  // the Crow home, an ancestor of it, or its secrets dir as a policy write path
+  // refuses the spawn, with the reason named
+  for (const entry of [CH, dirname(CH), join(CH, "secrets")]) {
+    assert.throws(() => buildContainPlan({ ...withHome, writePaths: [entry] }),
+      (e) => e instanceof ContainRefused && /write_paths names .*Crow home/.test(e.message), String(entry));
+  }
+  assert.throws(() => buildContainPlan({ ...withHome, writePaths: ["/"] }), ContainRefused, "bypass mode stays refused");
+
+  for (const dataDir of [CH, T]) {
+    assert.throws(() => buildContainPlan({ ...withHome, dataDir }),
+      (e) => e instanceof ContainRefused && e.message === "contain refused: the data folder is the Crow home", String(dataDir));
+  }
 });

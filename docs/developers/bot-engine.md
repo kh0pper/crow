@@ -326,6 +326,51 @@ Actor signing does not change: in-gateway spawns sign with the per-boot key, and
 - Jobs whose `worker_pid` is dead are re-queued and rerun with a `.mcp.json` signed by the new per-boot key.
 - The supervised Discord child receives the new key over stdin.
 
+## Contained bots
+
+Above the sandbox tiers there is an opt-in **contain** tier for the bots that need a real boundary, not just defense in depth. It is selected from the spawner's own environment only — `CROW_PI_SANDBOX=contain` for every pi, or `CROW_PI_CONTAIN_BOTS=<bot id, …>` for the listed bots — and the mode and the bot list are stripped from a bot def's `spawn_env` like every other `PI_BOT_*`/`CROW_*` engine switch. An opted-in spawn that cannot be contained is **refused with the reason**; it is never silently downgraded to a weaker tier.
+
+The contain tier is `scripts/pi-bots/pi_contain.mjs` (mount plan) plus `scripts/pi-bots/pi_contain_agent.mjs` (the generated agent dir).
+
+**What is inside the sandbox:**
+
+- an empty root (`--tmpfs /`), with `/usr`, `/etc` (a fresh `/etc/crow`) and `/opt` read-only, fresh `/dev`, `/tmp`, `/run`, the resolver stub, and an empty `$HOME`;
+- the engine read-only: the node install, the pi package, the checkout, pi-lab, `<CROW_HOME>/skills`, and every pi package `settings.json` names;
+- the instance data dir read-write (the bot's stdio MCP servers open `crow.db` directly — the documented residual), with every other entry masked, plus the bot cache;
+- the bot's own paths: its session dir, cwd, project workspace, `write_paths` (read-write) and `read_paths` (read-only);
+- `<CROW_HOME>/llm-cloud-token`, read-only: the one file under the Crow home a contained bot reads, the `!cat` key of a consented cloud model;
+- the generated agent dir described below.
+
+Never bound, whatever a policy says: `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.config/systemd`, `/etc/crow`, `/run/credentials`, `/run/user`, docker sockets, other Crow instances' homes, the operator's pi sessions — and no other part of `<CROW_HOME>` (its tokens, `secrets/`, `env/`, bundles).
+
+### The generated agent dir
+
+A contained spawn does not copy the operator's `~/.pi/agent`; it gets a fresh directory built per spawn (`prepareAgentShadow` → `buildContainedAgentDir`) and discarded after the turn:
+
+| File | Content |
+|---|---|
+| `models.json` | **door-only**: `/llm/p/<row>/v1` for a row the provider door serves (native, external engine, bundle, `door_forward` opt-in), the consented `/llm/c/<row>` entry for a cloud row — key `!cat <cloud-door token>`, never the provider key. No literal key and no LAN/tailnet base URL exists in it. |
+| `mcp.json` | exactly `{"mcpServers":{}}`: the bot's servers arrive on the MCP config fd, never from this file. |
+| `settings.json`, `keybindings.json` | copied from the operator's agent dir (pi reads its `packages[]` from `settings.json`; those package paths stay bound read-only, as above). |
+| `model-roles.json` | a 0600 copy of the instance's role snapshot; the spawn's `CROW_MODEL_ROLES_FILE` names that copy, never `<CROW_HOME>` (which is not bound). |
+| `pkg/`, `agents/`, `prompts/`, `bin/`, … | empty mount points for the read-only subdirs bound on top. |
+
+Absent on purpose: `auth.json` (the operator's pi logins are not a bot's), `models-store.json`, any `skills/` entry, and any symlink — nothing in the directory resolves outside it.
+
+The providers carried are the ones the spawn needs: the turn's provider row, and the pi provider id it resolved to (for a consented cloud row, its `crow-c-*` door entry).
+
+### A provider with no door refuses the spawn
+
+A bot whose provider row has no door — a literal-key cloud row this box never consented to, a LAN/tailnet endpoint nothing forwards for, a disabled row, a provider with no chat models — cannot run contained: the turn would have no way to its model. The spawn fails with `contain refused: provider <id> has no door` (the failure surfaces as a failed turn, and the reason names the provider). The fix is a door on that row: the per-box "Let bots use this provider" consent for a cloud row, a local/engine row the provider door serves, or a different model for the bot.
+
+### The data folder is never the Crow home
+
+A data folder that IS the Crow home (or an ancestor of it) is refused under contain with `contain refused: the data folder is the Crow home`. The reasoning is the instance's own boundary: binding the Crow home read-write would put its tokens, `secrets/` and `env/` inside the sandbox, and masking over that is not built. For the same reason no read-write bind may be the Crow home itself, its `secrets/` dir, or an ancestor of either: a bot policy's `write_paths` entry that names one refuses the spawn with `contain refused: write_paths names …`, and an internal bind that would (the data dir, the bot cache, a session dir) is refused and named in the `[pi-sandbox] contain: not bound: …` log line.
+
+### What a contained bot still reaches
+
+`crow.db`/`tasks.db` are bound read-write (so provider keys, OAuth tokens and bot definitions are readable, and a bot can widen its own next spawn's policy); credentialed add-on MCP servers in the bot's config run inside the sandbox with their secrets; the door routes accept whatever headers the bot sends (trust rests on the signed actor and per-route tokens); an in-session model switch to a provider the spawn was not built for fails, because the agent dir carries only the spawn's providers. Uncontained bots (not opted in, or refused) are exactly as they are without the contain tier.
+
 ## See also
 
 - [Self-Hosted Bundles](./bundles) — the general bundle contract this bundle follows.

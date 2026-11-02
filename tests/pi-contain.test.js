@@ -1,8 +1,9 @@
 // Queue item 19, step 2a: a PiRpc child in the contain tier. A stub pi
 // reports what it can see and write; every probe is existence / open / write
 // of a test-owned marker, never a read of a real file's contents.
-import { test, after } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -12,6 +13,36 @@ const REPO = resolve(import.meta.dirname, "..");
 _resetPiSandboxForTest();
 const SANDBOX = probePiSandbox({ force: true });
 const skip = SANDBOX.ok ? false : "bubblewrap unavailable: " + SANDBOX.reason;
+
+// This file runs against its own scratch instance. The contain tier's agent
+// dir is DOOR-ONLY (scripts/pi-bots/pi_contain_agent.mjs), so a contained
+// spawn needs a providers row with a door, and the rows/consent come from this
+// instance's crow.db — init-db in before() creates its schema. Only CROW_HOME
+// and CROW_DATA_DIR move; the suite's other scratch paths are untouched.
+const INST = mkdtempSync(join(tmpdir(), "crow-pi-contain-inst-"));
+process.env.CROW_HOME = join(INST, "home");
+process.env.CROW_DATA_DIR = join(INST, "data");
+delete process.env.CROW_DB_PATH;
+mkdirSync(process.env.CROW_HOME, { recursive: true });
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
+
+// One local row (bundle shape) stands in for the bot's provider.
+const DOOR_ROW = "contain-test-local";
+async function openDoorRow() {
+  const [{ CROW_DB }, { default: Database }] = await Promise.all([
+    import("../scripts/pi-bots/bridge.mjs"), import("better-sqlite3"),
+  ]);
+  const conn = new Database(CROW_DB);
+  try {
+    conn.prepare("INSERT OR REPLACE INTO providers (id, base_url, models, host, disabled, bundle_id) VALUES (?, ?, ?, 'local', 0, ?)")
+      .run(DOOR_ROW, "http://127.0.0.1:18299/v1", JSON.stringify([{ id: "m" }]), "contain-test-bundle");
+  } finally { conn.close(); }
+}
+before(async () => {
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env }, stdio: "pipe", cwd: REPO });
+  await openDoorRow();
+});
+after(() => rmSync(INST, { recursive: true, force: true }));
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-pi-contain-")));
 const saved = { bots: process.env.CROW_PI_CONTAIN_BOTS, agent: process.env.PI_CODING_AGENT_DIR, sb: process.env.CROW_PI_SANDBOX };
@@ -27,8 +58,8 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   const dataDir = dirname(CROW_DB);
   assert.ok(dataDir.startsWith(tmpdir()) || dataDir.includes("crow-suite"), "suite scratch data dir: " + dataDir);
   mkdirSync(dataDir, { recursive: true });
-  // Probe files with unique names: the suite's scratch data dir is shared by
-  // test files running in parallel (never overwrite identity.json there).
+  // Probe files with unique names: this file's instance data dir is its own,
+  // but the names keep a parallel run from ever colliding with a leftover.
   const probeData = join(dataDir, `contain-probe-${process.pid}.json`);
   writeFileSync(probeData, "FAKE-IDENTITY");
   const crowHome = process.env.CROW_HOME;
@@ -78,10 +109,11 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   const { spawn: spawnSentinel } = await import("node:child_process");
   const sentinel = spawnSentinel("sleep", ["60"], { stdio: "ignore" });
   testPaths.sentinel = sentinel.pid;
+  await openDoorRow();
   const pi = new PiRpc({
     def: { bot_id: "contain-test-bot", permission_policy: { bash: "deny", write_paths: [out], read_paths: [notes] },
       spawn_env: { CROW_TEST_PATHS: JSON.stringify(testPaths) } },
-    sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub,
+    sessionDir: session, resolved: { provider: DOOR_ROW, model: "m", key: DOOR_ROW + "/m" }, nodeBin: process.execPath, cliPath: stub,
   });
   try {
     assert.equal(pi.sandboxTier, "contain");
@@ -138,20 +170,21 @@ async function waitGone(ms = 20000) {
   return false;
 }
 
-test("integration: the agent shadow (it holds a copy of the provider keys) is removed after close and after a pi that fails to start", { skip, timeout: 60000 }, async () => {
+test("integration: the agent shadow (now a generated, key-free agent dir) is removed after close and after a pi that fails to start", { skip, timeout: 60000 }, async () => {
   const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
   process.env.CROW_PI_CONTAIN_BOTS = "contain-clean-bot";
+  await openDoorRow();
   const agent = join(scratch, "agent-c"); mkdirSync(agent, { recursive: true }); writeFileSync(join(agent, "settings.json"), "{}");
   process.env.PI_CODING_AGENT_DIR = agent;
   const session = join(scratch, "session-c"); mkdirSync(join(session, "sessions"), { recursive: true });
   const stub = join(scratch, "stub-ok.mjs"); writeFileSync(stub, 'process.stdout.write(JSON.stringify({type:"report"})+"\\n"); process.stdin.resume();');
   const def = { bot_id: "contain-clean-bot", permission_policy: { bash: "deny", write_paths: [] } };
-  const pi = new PiRpc({ def, sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub });
+  const pi = new PiRpc({ def, sessionDir: session, resolved: { provider: DOOR_ROW, model: "m", key: DOOR_ROW + "/m" }, nodeBin: process.execPath, cliPath: stub });
   await pi.waitFor((m) => m.type === "report", 20000, "report");
   assert.ok(myShadows().length >= 1, "a shadow exists while pi runs");
   await pi.close();
   assert.equal(await waitGone(), true, "removed after close");
-  const bad = new PiRpc({ def, sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: join(scratch, "no-such-node"), cliPath: stub });
+  const bad = new PiRpc({ def, sessionDir: session, resolved: { provider: DOOR_ROW, model: "m", key: DOOR_ROW + "/m" }, nodeBin: join(scratch, "no-such-node"), cliPath: stub });
   await bad.exited;
   assert.equal(await waitGone(), true, "removed after a failed start");
 });

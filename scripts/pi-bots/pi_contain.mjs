@@ -11,12 +11,19 @@
  *   system      /usr /etc (+/opt, usr-merge symlinks, DNS stub) read-only;
  *               /etc/crow masked; fresh /dev, /tmp, /run, $HOME (tmpfs)
  *   engine      node install, pi package, the checkout, pi-lab: read-only
- *   pi state    ~/.pi/agent = a per-spawn SHADOW copy (writable, discarded):
- *               pi creates lock dirs beside auth.json/settings.json, and a
- *               bot must not be able to edit the real settings (packages[]
- *               loads extensions into every later pi). Its subdirs with
- *               code (pkg, agents, prompts, bin) are bound read-only on top.
- *               The operator's own pi sessions are not visible.
+ *   pi state    ~/.pi/agent = a per-spawn GENERATED dir (writable, discarded;
+ *               pi_contain_agent.mjs): a door-only models.json, an empty
+ *               mcp.json, the operator's settings.json/keybindings.json, and
+ *               a 0600 copy of the role snapshot. No auth.json, no
+ *               models-store.json, no provider key. pi creates lock dirs
+ *               beside those files, and a bot must not be able to edit the
+ *               real settings (packages[] loads extensions into every later
+ *               pi). Its subdirs with code (pkg, agents, prompts, bin) are
+ *               bound read-only on top. The operator's own pi sessions are
+ *               not visible.
+ *   door token  <CROW_HOME>/llm-cloud-token, read-only, the ONE file under
+ *               the Crow home a contained bot reads (`!cat` apiKey of a
+ *               consented cloud door entry).
  *   instance    the data dir read-write (the bot's stdio MCP servers open
  *               crow.db directly; documented residual), identity.json masked
  *               unless a sharing tool needs it; CROW_HOME itself, its tokens,
@@ -37,10 +44,16 @@
  * Selection comes from the SPAWNER's env only (a bot def's spawn_env is
  * stripped of these names): CROW_PI_SANDBOX=contain for every pi, or
  * CROW_PI_CONTAIN_BOTS=<id,id> for listed bots.
+ *
+ * A data folder that IS the Crow home (or an ancestor of it) is refused: the
+ * instance's tokens, secrets/ and env/ live there, so it can never be a
+ * read-write bind. Nothing of the Crow home is a read-write bind except the
+ * data dir and the bot cache below it.
  */
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { buildContainedAgentDir } from "./pi_contain_agent.mjs";
 
 export class ContainRefused extends Error {
   constructor(msg) { super(msg); this.name = "ContainRefused"; }
@@ -56,8 +69,11 @@ export function containSelected(env, botId) {
 
 /** Subdirs of the pi agent dir that hold code or config pi only reads. */
 export const AGENT_RO_SUBDIRS = Object.freeze(["pkg", "agents", "prompts", "bin", "extensions", "themes"]);
-/** Top-level agent files copied into the shadow (small config; pi writes locks beside them). */
-export const AGENT_SHADOW_FILES = Object.freeze(["auth.json", "models.json", "models-store.json", "settings.json", "mcp.json", "keybindings.json"]);
+/** Top-level agent files a contained spawn's generated dir carries: the two
+ *  copied config files and the two this engine writes. auth.json,
+ *  models-store.json and the operator's own models.json are NEVER part of it
+ *  (pi_contain_agent.mjs). */
+export const AGENT_SHADOW_FILES = Object.freeze(["settings.json", "keybindings.json", "models.json", "mcp.json"]);
 /** .env scan (masking): names, skipped dirs, caps. */
 export const ENV_NAME_RE = /^\.env(\..*)?$/;
 export const ENV_SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "__pycache__"]);
@@ -118,6 +134,14 @@ export function buildContainPlan(o) {
   const exists = o.exists || existsSync;
   const home = o.home;
   _home = home;
+  const crowHomeReal = o.crowHome ? (real(o.crowHome, exists) || resolve(String(o.crowHome))) : null;
+  // Kevin's ruling (2026-11-02): a data folder that IS the Crow home, or an
+  // ancestor of it, is refused rather than masked over. Binding it read-write
+  // would put the instance's tokens, secrets/ and env/ inside the sandbox, and
+  // an ancestor would put every instance home on the box there.
+  if (crowHomeReal && o.dataDir && under(crowHomeReal, real(o.dataDir, exists) || resolve(String(o.dataDir)))) {
+    throw new ContainRefused("contain refused: the data folder is the Crow home");
+  }
   const refused = [];
   const ro = new Map(); // dest -> src
   const rw = new Map();
@@ -143,6 +167,10 @@ export function buildContainPlan(o) {
     try { for (const e of readdirSync(o.crowHome)) if (/-token$/.test(e)) instanceSecrets.push(join(o.crowHome, e)); } catch {}
   }
   const never = [...neverBound(home), ...instanceSecrets].map((p) => (exists(p) ? (() => { try { return realpathSync(p); } catch { return p; } })() : p));
+  // No read-write bind may BE the Crow home or its secrets dir, or an ancestor
+  // of either: any of those puts the instance's tokens, secrets/ and env/
+  // inside the sandbox. (A write path INSIDE secrets/ is caught by `never`.)
+  const closedRw = crowHomeReal ? [crowHomeReal, join(crowHomeReal, "secrets")] : [];
   const others = otherInstanceHomes(home, o.crowHome);
   const homesRoot = dirname(home);
   const codeRoots = [o.appRoot, o.nodeBin && dirname(dirname(o.nodeBin)), o.piLabDir].filter(Boolean)
@@ -153,6 +181,7 @@ export function buildContainPlan(o) {
     if (SHARED_ROOTS.includes(p)) return "a shared system directory (" + p + ")";
     if (p === home || p === homesRoot) return "the whole home";
     if (under(home, p)) return "an ancestor of the home";
+    if (write) for (const c of closedRw) if (under(c, p)) return "the Crow home (" + c + ") is never writable, and neither is an ancestor of it";
     for (const n of never) if (under(p, n) || under(n, p)) return "a protected path (" + n + ")";
     for (const x of others) if (under(p, x)) return "another Crow instance's home";
     if (under(p, homesRoot) && !under(p, home)) return "another user's home";
@@ -217,6 +246,16 @@ export function buildContainPlan(o) {
     }
   }
 
+  // The cloud-door token is the ONE file under the Crow home a contained bot
+  // reads: a consented cloud row's models.json key is `!cat <path>`, which pi
+  // runs itself on every auth resolve. Bound alone, read-only; nothing around
+  // it is bound. Not via add(): `never` holds every *-token file in the home.
+  if (o.cloudTokenPath) {
+    const t = real(o.cloudTokenPath, exists);
+    if (t) ro.set(t, t);
+    else refused.push({ path: o.cloudTokenPath, reason: "the cloud door token does not exist; a consented cloud model would fail every request" });
+  }
+
   // instance data (read-write) + masks
   if (o.dataDir) {
     add(rw, o.dataDir, { write: true, label: "data dir" });
@@ -251,7 +290,16 @@ export function buildContainPlan(o) {
 
   // bot paths
   for (const p of [o.sessionDir, o.cwd, o.workspaceDir]) if (p) add(rw, p, { write: true });
-  for (const p of o.writePaths || []) add(rw, String(p), { write: true, label: "write_paths", policy: true });
+  for (const p of o.writePaths || []) {
+    // Kevin's ruling: a policy write path that is the Crow home (or an ancestor
+    // of it) refuses the SPAWN, with the reason named — the turn does not run
+    // with the path silently dropped.
+    const r = real(String(p), exists);
+    if (r) for (const c of closedRw) {
+      if (under(c, r)) throw new ContainRefused("contain refused: write_paths names " + r + ", which covers the Crow home (" + c + ") and is never writable under contain");
+    }
+    add(rw, String(p), { write: true, label: "write_paths", policy: true });
+  }
   for (const p of o.readPaths || []) add(ro, String(p), { label: "read_paths" });
   // read-only when also writable: writable wins
   for (const k of rw.keys()) ro.delete(k);
@@ -363,26 +411,31 @@ export function buildContainPlan(o) {
 }
 
 /**
- * A per-spawn shadow of the pi agent dir: a fresh 0700 dir with copies of the
- * small config files (AGENT_SHADOW_FILES, mode 0600) and empty mount points
- * for AGENT_RO_SUBDIRS. Created on the SPAWNER's side (never inside a path a
- * bot can write); cleanup() removes it with every write pi made to it.
+ * A per-spawn pi agent dir: a fresh 0700 dir filled by buildContainedAgentDir
+ * (pi_contain_agent.mjs) — a door-only models.json, an empty mcp.json, the
+ * operator's settings.json/keybindings.json and a 0600 role-snapshot copy, and
+ * empty mount points for AGENT_RO_SUBDIRS. Nothing else: no auth.json, no
+ * provider key, no models-store.json, no skills. Created on the SPAWNER's side
+ * (never inside a path a bot can write); cleanup() removes it with every write
+ * pi made to it.
+ *
+ * @returns {{dir: string, missing: Array<{provider: string, reason: string}>, env: object, cleanup: Function}}
+ *   `missing` is the providers this spawn needs with no door: wrapPiSpawn
+ *   refuses the spawn while it is non-empty.
  */
-export function prepareAgentShadow(piAgentDir, { parent = tmpdir() } = {}) {
+export function prepareAgentShadow(piAgentDir, {
+  parent = tmpdir(), providerIds = [], rows = [], consent = null, consentSalt = null,
+  gatewayPort = null, cloudTokenPath = null, modelRolesFile = null,
+} = {}) {
   const dir = mkdtempSync(join(parent, "crow-pi-agent-" + process.pid + "-"));
   chmodSync(dir, 0o700);
-  for (const f of AGENT_SHADOW_FILES) {
-    const src = join(piAgentDir, f);
-    try {
-      if (!lstatSync(src).isFile()) continue; // never follow a symlink out of the agent dir
-      copyFileSync(src, join(dir, f));
-      chmodSync(join(dir, f), 0o600);
-    } catch { /* absent: pi uses its defaults */ }
-  }
-  for (const d of AGENT_RO_SUBDIRS) {
-    if (existsSync(join(piAgentDir, d))) mkdirSync(join(dir, d), { mode: 0o700 });
-  }
-  return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {} } };
+  const generated = buildContainedAgentDir({ piAgentDir, dir, providerIds, rows, consent, consentSalt, gatewayPort, cloudTokenPath, modelRolesFile });
+  return {
+    dir,
+    missing: generated.missing,
+    env: generated.env,
+    cleanup: () => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {} },
+  };
 }
 
 /**
