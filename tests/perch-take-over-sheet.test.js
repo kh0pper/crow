@@ -63,7 +63,8 @@ function lift(src, name) {
 
 /**
  * `server(call)` answers each request: { status, body } (or a Promise of it).
- * Default: take-over/heartbeat held, hand-back idle, the keychain has the entry.
+ * Default: take-over/heartbeat held, hand-back idle; the keychain still answers
+ * with an old install's VNC entry, which the sheet must never ask for.
  */
 function mount({ server, clipboard = "ok", search = "", lang = "en" } = {}) {
   const hub = perchHubJs(lang);
@@ -156,8 +157,6 @@ test("the snippet has no backtick or stray ${, is spliced into the hub, parses, 
 test("the strings are exact (en + es) in the Browser tile block", () => {
   const want = {
     "perch.handBack": ["Hand back", "Devolver"],
-    "perch.copyPassword": ["Copy password", "Copiar contraseña"],
-    "perch.noPassword": ["No saved browser password", "No hay contraseña guardada del navegador"],
     "perch.botFinishing": ["The bot is finishing its step…", "El bot está terminando su paso…"],
     "browser.botUsing": ["A bot is using the browser", "Un bot está usando el navegador"],
   };
@@ -168,6 +167,9 @@ test("the strings are exact (en + es) in the Browser tile block", () => {
     assert.equal(translations[k].es, es, k);
     assert.ok(block.includes('"' + k + '"'), k + " sits in the Browser tile block");
   }
+  // The viewer has no password of its own any more (loopback VNC behind sign-in).
+  assert.equal(translations["perch.copyPassword"], undefined);
+  assert.equal(translations["perch.noPassword"], undefined);
 });
 
 test("Take over (the tile's button or a tap on the picture) opens a full-screen sheet with the noVNC viewer, the domain and Hand back; Hand back closes it", async () => {
@@ -272,100 +274,26 @@ test("browser busy (503): the sheet says so and stays; Hand back still works", a
   assert.equal(h.sheet(), null);
 });
 
-test("copy password finds the browser entry, hides with a hint when none, falls back to showing it when the clipboard write fails", async () => {
-  // found → copy; re-auth first (the passwords.js pattern), then the copy
-  let granted = false;
-  const reauthBodies = [];
-  const h = mount({ server: (c) => {
-    if (c.path.endsWith("/take-over")) return { status: 200, body: { state: "held" } };
-    if (c.path.endsWith("/keychain/api/entries")) {
-      return { status: 200, body: { entries: [{ id: 3, bundle_id: "browser", env_key: "CROW_BROWSER_CDP_PORT" }, { id: 5, bundle_id: "other", env_key: "CROW_BROWSER_VNC_PASSWORD" }, ENTRY], reauth_method: "password" } };
-    }
-    if (c.path.endsWith("/keychain/api/reveal")) return granted ? { status: 200, body: { secret: SECRET } } : { status: 403, body: { code: "reauth_required", error: "Confirm it's you first." } };
-    if (c.path.endsWith("/keychain/api/reauth")) { reauthBodies.push(c.body); granted = true; return { status: 200, body: { ok: true } }; }
-    return { status: 404, body: {} };
-  } });
+test("no VNC password: the sheet has no Copy row or re-auth, never asks the keychain, and its viewer URL carries no password", async () => {
+  // The keychain may still hold an entry from an older install: it is never read.
+  const h = mount({ clipboard: "reject" });
   await h.open();
   const s = h.sheet();
-  const copy = one(s, "to-copy");
-  assert.equal(copy.hidden, false);
-  assert.equal(copy.textContent, "Copy password");
-  await h.click(copy);
-  const reveal = h.posts("/keychain/api/reveal");
-  assert.deepEqual(reveal[0].body, { id: 41, purpose: "copy" }, "the browser's VNC entry, purpose copy");
-  assert.equal(reveal[0].headers["X-Crow-Csrf"], "tok-9");
-  const ra = one(s, "to-reauth");
-  assert.equal(ra.hidden, false, "asks to confirm it's you");
-  const input = one(s, "to-reauth-input");
-  assert.equal(input.type, "password");
-  input.value = "hunter2";
-  await h.click(one(s, "to-reauth-go"));
-  assert.deepEqual(reauthBodies, [{ password: "hunter2" }]);
-  assert.equal(input.value, "", "the typed password is wiped");
-  assert.equal(ra.hidden, true);
-  assert.equal(h.posts("/keychain/api/reveal").length, 2, "retried after re-auth");
-  assert.deepEqual(h.written, [SECRET], "copied to the clipboard");
-  assert.equal(copy.textContent, "Copied");
-  const pw = one(s, "to-pw");
-  assert.equal(pw.textContent, "", "never shown when the copy worked");
-  assert.equal(pw.hidden, true);
-  assert.equal(h.logs.length, 0, "nothing logged");
-
-  // none → hidden with the hint
-  const none = mount({ server: (c) => (c.path.endsWith("/entries") ? { status: 200, body: { entries: [{ id: 2, bundle_id: "browser", env_key: "CROW_BROWSER_VNC_PASSWORD", readable: false }] } } : { status: 200, body: { state: "held" } }) });
-  await none.open();
-  assert.equal(one(none.sheet(), "to-copy").hidden, true);
-  const hint = one(none.sheet(), "to-hint");
-  assert.equal(hint.hidden, false);
-  assert.equal(hint.textContent, "No saved browser password");
-
-  // the clipboard refuses (iOS gesture loss) → shown 15 s, then gone
-  const ios = mount({ clipboard: "reject" });
-  await ios.open();
-  await ios.click(one(ios.sheet(), "to-copy"));
-  const shown = one(ios.sheet(), "to-pw");
-  assert.equal(shown.textContent, SECRET, "shown instead");
-  assert.equal(shown.hidden, false);
-  assert.equal([...ios.timers.values()].filter((t) => t.ms === 15000).length >= 1, true);
-  // fire only the 15 s password timer (the heartbeat is also 15 s; both run)
-  await ios.fire(15000);
-  assert.equal(shown.textContent, "", "wiped from the DOM");
-  assert.equal(shown.hidden, true);
-
-  // no clipboard API at all → shown; closing the sheet wipes it at once
-  const old = mount({ clipboard: "none" });
-  await old.open();
-  await old.click(one(old.sheet(), "to-copy"));
-  const pw2 = one(old.sheet(), "to-pw");
-  assert.equal(pw2.textContent, SECRET);
-  const node = old.sheet();
-  old.api.closeTakeOver();
-  assert.equal(pw2.textContent, "", "closing wipes it");
-  assert.equal(node.parentNode, null);
-});
-
-test("a TOTP re-auth sends totp_code; a failed one shows the server's error and keeps the panel", async () => {
-  let n = 0;
-  const h = mount({ server: (c) => {
-    if (c.path.endsWith("/take-over")) return { status: 200, body: { state: "held" } };
-    if (c.path.endsWith("/entries")) return { status: 200, body: { entries: [ENTRY], reauth_method: "totp" } };
-    if (c.path.endsWith("/reveal")) return { status: 403, body: { code: "reauth_required" } };
-    if (c.path.endsWith("/reauth")) { n++; return { status: 401, body: { error: "That code did not match." } }; }
-    return { status: 404, body: {} };
-  } });
-  await h.open();
-  await h.click(one(h.sheet(), "to-copy"));
-  const input = one(h.sheet(), "to-reauth-input");
-  assert.equal(input.type, "text");
-  assert.equal(input.getAttribute("placeholder"), translations["passwords.reauthTotp"].en);
-  input.value = "123456";
-  await h.click(one(h.sheet(), "to-reauth-go"));
-  assert.deepEqual(h.posts("/reauth")[0].body, { totp_code: "123456" });
-  assert.equal(one(h.sheet(), "to-reauth-error").textContent, "That code did not match.");
-  assert.equal(one(h.sheet(), "to-reauth").hidden, false);
-  await h.click(one(h.sheet(), "to-reauth-cancel"));
-  assert.equal(one(h.sheet(), "to-reauth").hidden, true);
-  assert.equal(n, 1);
+  assert.ok(one(s, "to-vnc"), "the viewer loads");
+  for (const cls of ["to-pw-row", "to-copy", "to-hint", "to-pw", "to-reauth", "to-reauth-input"]) {
+    assert.equal(byClass(s, cls).length, 0, "no " + cls);
+  }
+  assert.equal(h.calls.filter((c) => c.url.includes("/keychain/")).length, 0, "no keychain request");
+  const src = one(s, "to-vnc").getAttribute("src");
+  assert.equal(src, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false", "autoconnects through the proxy");
+  assert.doesNotMatch(src, /password/i);
+  assert.deepEqual(h.written, [], "nothing goes to the clipboard");
+  h.api.closeTakeOver();
+  assert.equal(h.sheet(), null);
+  for (const lang of ["en", "es"]) {
+    const js = perchTakeOverJs(lang);
+    assert.doesNotMatch(js, /VNC_PASSWORD|keychain|\/reveal|password=/i, lang + ": no password plumbing left");
+  }
 });
 
 test("a ?take-over=1 link (the wait_for_user attention item) opens the sheet once and drops the flag", async () => {
@@ -514,7 +442,6 @@ test("Spanish sheet strings", async () => {
   await h.open();
   assert.equal(one(h.sheet(), "to-back").textContent, "Devolver");
   assert.equal(one(h.sheet(), "to-status").textContent, "El bot está terminando su paso…");
-  assert.equal(one(h.sheet(), "to-hint").textContent, "No hay contraseña guardada del navegador");
 });
 
 test("the sheet's CSS: full screen, 44 px targets, Perch tokens only", () => {

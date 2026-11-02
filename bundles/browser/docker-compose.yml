@@ -4,10 +4,11 @@
 # CROW_BROWSER_CONTAINER_NAME (see container_name below), so the project follows
 # it; the primary keeps "browser". COMPOSE_PROJECT_NAME / `-p` still override.
 # The value must be a valid project name: lowercase letters, digits, - and _.
-# Upgrading an instance that set CROW_BROWSER_CONTAINER_NAME but NOT
-# COMPOSE_PROJECT_NAME: its running container is labelled project "browser",
-# so stop it under the old name first (`docker compose -p browser down`) or the
-# next `up` fails with "container name already in use".
+# Never run this file with another instance's `-p`: the project decides which
+# container is replaced. (The profile volume's explicit name below follows
+# CROW_BROWSER_CONTAINER_NAME from THIS bundle's .env, and the profile carries
+# an instance marker the entrypoint checks, so a wrong -p cannot open another
+# instance's logins; it would still replace that instance's container.)
 name: ${CROW_BROWSER_CONTAINER_NAME:-browser}
 services:
   crow-browser:
@@ -17,26 +18,67 @@ services:
     # Overridable so a second Crow instance on the same host (distinct
     # CROW_HOME) can run its own browser container side-by-side. With
     # network_mode: host the ports must be overridden too — set
-    # CROW_BROWSER_{VNC,RFB,CDP}_PORT in this bundle's .env alongside the name.
+    # CROW_BROWSER_{VNC,CDP}_PORT in this bundle's .env alongside the name.
     container_name: ${CROW_BROWSER_CONTAINER_NAME:-crow-browser}
     network_mode: host
     environment:
-      # Abstract X sockets (@/tmp/.X11-unix/XNN) are scoped to the NETWORK
-      # namespace, which network_mode:host shares — so a second instance left on
-      # :99 collides with the first, its Xvfb dies with "Cannot establish any
-      # listening sockets", and x11vnc silently attaches to the FIRST instance's
-      # display. Give each co-hosted instance its own number. Proven 2026-08-09.
+      # Since 1.4.0 Xvfb listens on no abstract socket (those are scoped to the
+      # network namespace, the host's here) and needs a per-start cookie, so
+      # co-hosted instances no longer collide on a display number. Distinct
+      # numbers are still the safe default while an older instance runs.
       - DISPLAY_NUM=${CROW_BROWSER_DISPLAY:-99}
-      - VNC_PASSWORD=${CROW_BROWSER_VNC_PASSWORD:?VNC password is required}
+      # Which Crow instance this container and its profile belong to (the
+      # entrypoint checks the profile's marker against it).
+      - CROW_INSTANCE=${CROW_HOME:?CROW_HOME is required}
       - CDP_PORT=${CROW_BROWSER_CDP_PORT:-9222}
       - NOVNC_PORT=${CROW_BROWSER_VNC_PORT:-6080}
-      - RFB_PORT=${CROW_BROWSER_RFB_PORT:-5900}
       - CHROME_PROXY=${CROW_BROWSER_PROXY:-}
     volumes:
       # No default: a second instance whose CROW_HOME is unset must fail here rather
       # than silently mount the primary's downloads directory into its container.
       - ${CROW_HOME:?CROW_HOME is required so each instance writes downloads to its own directory}/browser-downloads:/downloads
+      # The Chromium profile (cookies, saved logins) on a NAMED volume, so a
+      # rebuild or a recreate (Configure → Restart, a proxy_url relaunch,
+      # `compose down`/`up`) keeps it. Its name is explicit and per instance
+      # (`browser_chromium-profile` on the primary,
+      # `<CROW_BROWSER_CONTAINER_NAME>_chromium-profile` on a co-hosted one),
+      # from this bundle's .env, not from `-p`. The "_" matters: bundle ids
+      # have no "_", so no other bundle's project can claim this name (the
+      # compose guard also refuses a volume another project created). An install from before 1.4.0 keeps its profile inside
+      # the old container until it is moved, once, with
+      # scripts/ops/browser-profile-to-volume.sh (never run automatically).
+      # `docker compose down -v` deletes the volume, and with it every login.
+      - chromium-profile:/root/.config/chromium-crow
+    # No VNC password prompt (browser 1.4.0). RFB is a unix socket inside the
+    # container; noVNC (127.0.0.1 only) reaches it only with the per-instance
+    # token, which the Crow gateway adds server-side behind the dashboard
+    # sign-in. Compose copies it in as a 0400 root-only file (not an env var,
+    # so not in `docker inspect`). An old .env's VNC password line is harmless:
+    # it is simply not passed any more. After changing the token in .env,
+    # recreate the container (the gateway reads the new one on every upgrade).
+    # `configs: content:` needs Docker Compose 2.23.1 or newer; an older Compose
+    # refuses this file (it fails closed).
+    configs:
+      - source: vnc_token
+        target: /run/secrets/crow-vnc-token
+        mode: 0400
     init: true
+    # Chromium gets SIGTERM (the entrypoint forwards it) and time to flush
+    # cookies and logins to the profile before anything is killed.
+    stop_grace_period: 30s
     mem_limit: 2g
     shm_size: 1g
     restart: unless-stopped
+
+volumes:
+  chromium-profile:
+    name: ${CROW_BROWSER_CONTAINER_NAME:-browser}_chromium-profile
+    # Who owns it: the compose guard refuses any other bundle id a volume with this
+    # label (a name or project prefix alone cannot prove ownership). Compose never
+    # relabels an existing volume, so the label cannot be forged afterwards.
+    labels:
+      crow.bundle: browser
+
+configs:
+  vnc_token:
+    content: ${CROW_BROWSER_VNC_TOKEN:?CROW_BROWSER_VNC_TOKEN is required (Crow generates it at install)}

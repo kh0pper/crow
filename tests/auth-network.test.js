@@ -993,6 +993,43 @@ test("WebSocket upgrade (extension proxy): the network gate answers on the raw I
   } finally { setProcNetReaderForTests(null); }
 });
 
+test("the browser's noVNC viewer has no password of its own, so /proxy/browser/ is session-gated on HTTP and on the WebSocket upgrade", async () => {
+  // Loopback VNC gated by sign-in: the dashboard session is the ONLY credential.
+  const { readFileSync } = await import("node:fs");
+  const proxySrc = readFileSync(new URL("../servers/gateway/routes/extension-proxy.js", import.meta.url), "utf8");
+  assert.match(proxySrc, /router\.use\(proxyPath, authMiddleware, proxyMiddleware\)/, "every proxied path runs the auth middleware first");
+  assert.match(proxySrc, /const target = `http:\/\/127\.0\.0\.1:\$\{ext\.port\}`/, "the upstream is loopback");
+  const late = readFileSync(new URL("../servers/gateway/boot/late-mounts.js", import.meta.url), "utf8");
+  assert.match(late, /extensionProxyRouter\(dashboardAuth\)/, "the auth middleware is the dashboard session check");
+
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  const run = (req) => new Promise((resolve) => {
+    let nexted = false;
+    const out = { status: null, redirected: null };
+    const res = {
+      status(c) { out.status = c; return this; },
+      type() { return this; }, set() { return this; },
+      send() { resolve({ nexted, ...out }); return this; },
+      json() { resolve({ nexted, ...out }); return this; },
+      redirect(url) { out.redirected = url; resolve({ nexted, ...out }); },
+      redirectAfterPost(url) { out.redirected = url; resolve({ nexted, ...out }); },
+    };
+    dashboardAuth(req, res, () => { nexted = true; resolve({ nexted, ...out }); });
+  });
+  for (const path of ["/proxy/browser/vnc.html", "/proxy/browser/websockify"]) {
+    const r = await run({ ...mkReq({ ip: "10.0.0.5", headers: { host: "x" } }), path, originalUrl: path, url: path, method: "GET" });
+    assert.equal(r.nexted, false, path + ": no session never reaches the viewer");
+    assert.equal(r.redirected, "/dashboard/login", path);
+  }
+  const w = console.warn; console.warn = () => {};
+  try {
+    const lan = { remoteAddress: "10.0.0.5", remotePort: 41000 };
+    assert.equal(isAllowedNetwork(rawReq({}, lan)), true, "the LAN peer passes the network layer");
+    assert.equal(await authorizeExtensionUpgrade(rawReq({}, lan)), false, "no session cookie: the upgrade is refused");
+    assert.equal(await authorizeExtensionUpgrade(rawReq({ cookie: "crow_session=not-a-session" }, lan)), false, "a made-up session: refused");
+  } finally { console.warn = w; }
+});
+
 test("token-only upgrade paths (calls signaling, companion) are never Funnel-public by default", () => {
   for (const p of ["/calls/ws", "/companion/client-ws", "/client-ws"]) {
     assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((x) => (x.endsWith("/") ? p.startsWith(x) : p === x)), p);

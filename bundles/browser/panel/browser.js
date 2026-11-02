@@ -36,11 +36,12 @@ export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-
  * reads view_only from the query string and then KEEPS it in localStorage
  * (WebUtil.writeSetting), shared by every viewer on this origin, so the
  * interactive ones pin view_only=false; otherwise watching once would leave
- * the Take over sheet's viewer unable to type or click.
+ * the Take over sheet's viewer unable to type or click. There is no VNC
+ * password (1.4.0: loopback VNC behind the Crow sign-in), so every link
+ * autoconnects; none ever carries a password parameter.
  */
 export const VNC_VIEW_ONLY = "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale";
 export const VNC_INTERACTIVE = "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false";
-const VNC_INTERACTIVE_POPOUT = "/proxy/browser/vnc.html?view_only=false";
 
 export default {
   id: "browser",
@@ -198,7 +199,7 @@ export default {
           <input type="hidden" name="action" value="restart">
           <button type="submit" class="btn btn-sm">Restart</button>
         </form>
-        ${containerRunning && !botUsing ? `<a href="${VNC_INTERACTIVE_POPOUT}" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
+        ${containerRunning && !botUsing ? `<a href="${VNC_INTERACTIVE}" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
       </div>
 
       ${operatorNotice}

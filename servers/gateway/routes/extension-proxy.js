@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
+import { isLocalPasswordSession } from "../dashboard/local-session.js";
 
 // Respect CROW_HOME so a secondary instance (systemd unit with its own
 // CROW_HOME) proxies ITS extensions — not the primary's. Hardcoding ~/.crow
@@ -102,6 +103,9 @@ export function getProxiedExtensions(home = CROW_HOME) {
           // backend. Never a path the manifest can point outside CROW_HOME
           // — see readAuthToken().
           authTokenFile: manifest.webUI.authTokenFile || null,
+          // A key in this bundle's own .env holding a WebSocket token the
+          // backend requires as its Host header (websockify --host-token).
+          wsHostTokenEnv: WS_TOKEN_ENV_RE.test(String(manifest.webUI.wsHostTokenEnv || "")) ? manifest.webUI.wsHostTokenEnv : null,
         });
       }
     }
@@ -109,6 +113,52 @@ export function getProxiedExtensions(home = CROW_HOME) {
   } catch {
     return [];
   }
+}
+
+const WS_TOKEN_ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const WS_TOKEN_RE = /^[A-Za-z0-9_-]{32,256}$/;
+
+/**
+ * The WebSocket token a bundle's backend requires, from that bundle's own
+ * `.env` (`webUI.wsHostTokenEnv` names the key), or null.
+ *
+ * The browser bundle's noVNC (websockify --host-token) connects a WebSocket
+ * to RFB only when the upgrade's Host header is this per-instance token, so
+ * a local process or a web page that reaches 127.0.0.1:<noVNC port> directly
+ * gets nothing. The gateway adds it server-side (proxyReqWs below), after
+ * the session check: no page, script or URL ever carries it. Read FRESH on
+ * every upgrade (never cached), so the gateway always sends the .env's current
+ * token and needs no restart. The container holds the copy compose handed it
+ * at create: after changing the token in the .env, recreate the container.
+ * Until then the two differ and the viewer is refused; the browser bundle's
+ * websockify token lookup (QuietTokenFile) never logs the token it was sent,
+ * so a mismatch prints neither copy. A value that is not a plain token is
+ * refused, never sent.
+ */
+export function readWsHostToken(bundleId, envKey, home = CROW_HOME) {
+  if (!envKey || !WS_TOKEN_ENV_RE.test(envKey)) return null;
+  const v = String(readBundleEnv(bundleId, home)[envKey] || "").trim();
+  return WS_TOKEN_RE.test(v) ? v : null;
+}
+
+/**
+ * Defence in depth for a token-carrying upgrade: it must come from a page on
+ * the dashboard's own origin. The Origin header (always sent by browsers on a
+ * WebSocket) must name the host the request was sent to: Host, or the
+ * X-Forwarded-Host a same-box proxy (Tailscale Serve) adds. A missing or
+ * foreign Origin is refused. The session check still runs after this.
+ */
+export function upgradeFromOwnOrigin(req) {
+  const h = req?.headers || {};
+  const raw = Array.isArray(h.origin) ? h.origin[0] : h.origin;
+  if (typeof raw !== "string" || !raw) return false;
+  let origin;
+  try { origin = new URL(raw); } catch { return false; }
+  if (origin.protocol !== "https:" && origin.protocol !== "http:") return false;
+  const asked = [h.host, ...String(h["x-forwarded-host"] || "").split(",")]
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter(Boolean);
+  return asked.includes(origin.host.toLowerCase());
 }
 
 /**
@@ -168,6 +218,29 @@ export async function authorizeExtensionUpgrade(req) {
   } catch {
     return false;
   }
+}
+
+/**
+ * The viewer page for a token-carrying extension (the browser's noVNC) is the
+ * OWNER's own sign-in only: the WebSocket token gives full control of the
+ * logged-in Chromium, and verifySession accepts any live dashboard session —
+ * one a paired peer's single sign-on minted (scopes 'dashboard sso …'), one
+ * from a login on this machine ('dashboard onhost'), or a request from this
+ * machine itself. isLocalPasswordSession is the same gate keychain saves,
+ * Media Hub and Services use for anything that reaches operator credentials.
+ *
+ * Mounted AFTER authMiddleware (which set req.dashboardSession from the
+ * crow_session cookie) and BEFORE the proxy, so the page is not served either.
+ * Extensions without a token never get this middleware.
+ */
+async function ownerOnlyViewer(req, res, next) {
+  // owner's own sign-in only: the token gives full control of the logged-in browser.
+  const owner = await isLocalPasswordSession(req).catch(() => false);
+  if (!owner) {
+    res.status(403).type("text/plain").send("Forbidden: the browser viewer is the owner's own sign-in only.\n");
+    return;
+  }
+  next();
 }
 
 /**
@@ -254,9 +327,17 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         },
         // Same injection for the websocket upgrade, which never passes
         // through the `proxyReq` hook — http-proxy emits `proxyReqWs` for it.
+        // ONE handler (a second `proxyReqWs` key would silently replace this).
         proxyReqWs: (proxyReq) => {
           const token = readAuthToken(ext.authTokenFile);
           if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
+          // The WebSocket token (readWsHostToken): the upstream Host on the
+          // upgrade only, after setupWebSocket's origin and session checks.
+          // Without one the backend refuses the WebSocket (an honest failure).
+          if (ext.wsHostTokenEnv) {
+            const wsToken = readWsHostToken(ext.id, ext.wsHostTokenEnv);
+            if (wsToken) proxyReq.setHeader("Host", wsToken);
+          }
         },
         proxyRes: (proxyRes) => {
           // Allow embedding in iframes (needed for VNC, MinIO console)
@@ -283,8 +364,10 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
       },
     });
 
-    // Mount behind auth for HTTP requests
-    router.use(proxyPath, authMiddleware, proxyMiddleware);
+    // Mount behind auth for HTTP requests. A token-carrying viewer adds the
+    // owner gate (see ownerOnlyViewer) between the session check and the proxy.
+    if (ext.wsHostTokenEnv) router.use(proxyPath, authMiddleware, ownerOnlyViewer, proxyMiddleware);
+    else router.use(proxyPath, authMiddleware, proxyMiddleware);
     proxyInstances.push({ ext, proxyPath, proxyMiddleware });
 
     console.log(`  [proxy] Extension UI: ${ext.label} → ${proxyPath}/ → ${target}`);
@@ -315,14 +398,36 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
     if (proxyInstances.length === 0) return;
 
     server.on("upgrade", (req, socket, head) => {
-      for (const { proxyPath, proxyMiddleware } of proxyInstances) {
-        if (req.url?.startsWith(proxyPath)) {
+      for (const { ext, proxyPath, proxyMiddleware } of proxyInstances) {
+        // A path BOUNDARY: /proxy/browser-x/… is not /proxy/browser.
+        const url = String(req.url || "");
+        if (url === proxyPath || url.startsWith(proxyPath + "/") || url.startsWith(proxyPath + "?")) {
+          // A token-carrying upgrade only from a page on the dashboard's own origin.
+          if (ext.wsHostTokenEnv && !upgradeFromOwnOrigin(req)) {
+            socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+            socket.destroy();
+            return;
+          }
           // W2-1: upgrades bypass Express, so enforce dashboard auth here.
-          authorizeExtensionUpgrade(req).then((ok) => {
+          authorizeExtensionUpgrade(req).then(async (ok) => {
             if (!ok) {
               socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
               socket.destroy();
               return;
+            }
+            // A token-carrying upgrade is the owner's own sign-in only: the token gives
+            // full control of the logged-in browser, and verifySession alone would also
+            // accept a peer's SSO session, an on-host login, or a request from this
+            // machine. authMiddleware never ran here, so set the session ourselves.
+            if (ext.wsHostTokenEnv) {
+              req.dashboardSession = parseCookies(req)["crow_session"];
+              // owner's own sign-in only: the token gives full control of the logged-in browser.
+              const owner = await isLocalPasswordSession(req).catch(() => false);
+              if (!owner) {
+                socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+                socket.destroy();
+                return;
+              }
             }
             proxyMiddleware.upgrade(req, socket, head);
           }).catch(() => {

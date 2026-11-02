@@ -13,11 +13,11 @@ import { z } from "zod";
 import { chromium } from "playwright";
 import { buildStealthScript, getContextOptions, humanType, humanClick, delay } from "./stealth.js";
 import { getRandomProfile } from "./profiles.js";
-import { readFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { stateDir, stateRoot, containerName, cdpPort, vncPort } from "./instance.js";
+import { stateDir, stateRoot, containerName, cdpPort } from "./instance.js";
 import { articleTurndown } from "./article-markdown.js";
 import { fileInDir, writeFileNoFollow, readFileNoFollow, MAX_FILE_NAME } from "./safe-file.js";
 import { installLeaseGuard } from "./lease-guard.js";
@@ -33,11 +33,20 @@ import { BLOCKED_URL_PATTERNS, isBlockedUrl, blockedResult } from "./blocked-hos
  * @param {string} [options.instructions] - MCP server instructions
  * @returns {McpServer}
  */
+/** { CROW_HOME: <realpath> } when CROW_HOME is set (else {}), for compose runs. */
+export function canonicalCrowHome(env = process.env) {
+  if (!env.CROW_HOME) return {};
+  try { return { CROW_HOME: realpathSync(env.CROW_HOME) }; } catch { return { CROW_HOME: resolvePath(env.CROW_HOME) }; }
+}
+
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
     `http://127.0.0.1:${cdpPort()}`;
   const sessionDir = options.sessionDir || stateDir("browser-sessions");
-  const resolvedVncPort = vncPort();
+  // The viewer's address on the Crow dashboard (same origin, signed in). The
+  // container's own noVNC port listens on 127.0.0.1 only, so a raw
+  // http://localhost:<port> URL never works from the operator's device.
+  const vncUrl = "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false";
   const container = containerName();
 
   const server = new McpServer(
@@ -133,7 +142,7 @@ export function createBrowserServer(options = {}) {
     "Start/restart the browser and connect via CDP. Returns the VNC URL. Pass proxy_url to route through a proxy (recreates the container — set BEFORE navigating; save sessions first).",
     {
       restart: z.boolean().optional().describe("Force restart the container"),
-      proxy_url: z.string().optional().describe("Proxy to route through, e.g. http://host:port or socks5://host:port. Empty string clears it. Recreates the container (loses the current page/session — save_session first)."),
+      proxy_url: z.string().optional().describe("Proxy to route through, e.g. http://host:port or socks5://host:port. Empty string clears it. Recreates the container: the open page is lost; the profile (cookies, logins) is kept on its volume."),
     },
     async ({ restart, proxy_url }) => {
       try {
@@ -142,20 +151,22 @@ export function createBrowserServer(options = {}) {
         if (changingProxy) {
           // Proxy is a container-launch flag, so a new proxy needs a recreate (not just restart).
           if (browser) { await browser.close().catch(() => {}); browser = null; context = null; page = null; cdpSession = null; }
-          let vncpw = "", composeFile = "";
+          // No VNC password to carry over (1.4.0: loopback VNC behind the Crow
+          // sign-in). An older compose file that still demands one reads it from
+          // its own .env, next to that file.
+          let composeFile = "";
           try {
-            const env = execFileSync("docker", ["inspect", container, "--format", "{{range .Config.Env}}{{println .}}{{end}}"], { timeout: 10000 }).toString();
-            vncpw = (env.split("\n").find((l) => l.startsWith("VNC_PASSWORD=")) || "").slice("VNC_PASSWORD=".length);
             composeFile = execFileSync("docker", ["inspect", container, "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
-          } catch { /* fall through to error */ }
-          if (!vncpw) return { content: [{ type: "text", text: "Could not read VNC password from the running container — set CROW_BROWSER_PROXY in the environment and recreate the container manually." }], isError: true };
+          } catch { /* no running container: the fallback below */ }
           // Fallback: this bundle's own compose file, derived from our location
           // (never an assumed checkout path).
           if (!composeFile) composeFile = fileURLToPath(new URL("../docker-compose.yml", import.meta.url));
           try {
             execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--force-recreate"], {
               timeout: 90000,
-              env: { ...process.env, CROW_BROWSER_VNC_PASSWORD: vncpw, CROW_BROWSER_PROXY: proxy_url },
+              // A canonical CROW_HOME (symlinks resolved): the container stamps its
+              // profile with it and refuses a different spelling on the next start.
+              env: { ...process.env, ...canonicalCrowHome(), CROW_BROWSER_PROXY: proxy_url },
             });
           } catch (e) {
             return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${e.message}` }], isError: true };
@@ -192,7 +203,7 @@ export function createBrowserServer(options = {}) {
             type: "text",
             text: JSON.stringify({
               status: "connected",
-              vnc_url: `http://localhost:${resolvedVncPort}/vnc.html`,
+              vnc_url: vncUrl,
               cdp_url: cdpUrl,
               user_agent: profile.ua,
               page_url: page.url(),
@@ -247,7 +258,7 @@ export function createBrowserServer(options = {}) {
             cdp_connected: cdpConnected,
             state_root: stateRoot(),
             current_url: currentUrl,
-            vnc_url: containerRunning ? `http://localhost:${resolvedVncPort}/vnc.html` : null, // truthy "unknown…" keeps the url
+            vnc_url: containerRunning ? vncUrl : null, // truthy "unknown…" keeps the url
           }, null, 2),
         }],
       };

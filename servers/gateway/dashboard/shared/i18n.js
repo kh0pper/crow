@@ -4167,8 +4167,6 @@ export const translations = {
   "perch.appTileUnavailable": { en: "This app can't be shown here.", es: "Esta app no se puede mostrar aquí." },
   "perch.appTileOpen": { en: "Open", es: "Abrir" },
   "perch.handBack": { en: "Hand back", es: "Devolver" },
-  "perch.copyPassword": { en: "Copy password", es: "Copiar contraseña" },
-  "perch.noPassword": { en: "No saved browser password", es: "No hay contraseña guardada del navegador" },
   "perch.botFinishing": { en: "The bot is finishing its step…", es: "El bot está terminando su paso…" },
   "perch.browserNotWaiting": { en: "The bot is no longer waiting for you.", es: "El bot ya no te está esperando." },
   "perch.youHaveBrowser": { en: "You have the browser", es: "Tienes tú el navegador" },

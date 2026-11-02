@@ -19,9 +19,10 @@ Stealth browser automation with VNC viewing — navigate websites, fill forms, e
 
 1. Open the **Extensions** page in your Crow's Nest dashboard
 2. Find **Browser Automation** and click **Install**
-3. Enter a VNC password when prompted
-4. Docker builds the container (takes a few minutes on first install)
-5. The gateway restarts — the Browser panel appears in the sidebar
+3. Docker builds the container (takes a few minutes on first install)
+4. The gateway restarts — the Browser panel appears in the sidebar
+
+There is no VNC password to set or enter: the viewer is reached only through your signed-in Crow dashboard.
 
 ## Dashboard Panel
 
@@ -46,7 +47,7 @@ The Browser panel has three tabs:
 
 | Tool | Description |
 |------|-------------|
-| `crow_browser_launch` | Connect to browser via CDP, returns VNC URL |
+| `crow_browser_launch` | Connect to browser via CDP, returns the viewer's dashboard path |
 | `crow_browser_status` | Container and CDP health check |
 | `crow_browser_navigate` | Go to URL with stealth scripts |
 | `crow_browser_screenshot` | Capture page or element as PNG |
@@ -128,19 +129,18 @@ The browser includes anti-detection measures:
 For CAPTCHA, 2FA, security questions, or any action requiring human judgment:
 
 1. The AI calls `crow_browser_wait_for_user` with a message
-2. You see the message and open the VNC viewer
+2. You see the message and tap **Take over** in the chat (or open the Browser panel)
 3. Complete the action manually in the browser
 4. Tell the AI to continue (it calls `wait_for_user` with `resume: true`)
 
 ## VNC Access
 
-The VNC viewer is accessible through the Crow gateway:
+The VNC viewer is reached only through the Crow gateway, behind your dashboard sign-in:
 
-- **Embedded**: In the Browser panel's Status tab (iframe)
-- **Full view**: `/proxy/browser/vnc.html?view_only=false` (same HTTPS as your dashboard)
-- **Direct**: `http://localhost:6080/vnc.html` (local access only)
+- **Embedded**: In the Browser panel's Status tab (iframe), the live browser tile, and the **Take over** sheet in a chat
+- **Full view**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (same HTTPS as your dashboard)
 
-No firewall ports need to be opened — VNC is proxied through the gateway.
+The viewer connects on its own: there is no separate VNC password. The screen (x11vnc, and the X display under it) is on no network port: x11vnc listens only on a root-only unix socket inside the container, and the X display needs a per-start cookie and has no TCP or host-wide socket. noVNC (port 6080) listens on `127.0.0.1` only, and connects a viewer only with a per-instance key that Crow generates at install (`CROW_BROWSER_VNC_TOKEN` in the bundle's `.env`, handed to the container as a root-only file). The Crow gateway adds the key on its side, after checking your sign-in and that the request comes from the dashboard's own page; no page or link contains it, and a wrong key is refused without being logged. This keeps **web pages and other machines** away from the screen. It does **not** keep out programs already running on this machine as any user: Chrome DevTools (CDP, `127.0.0.1:9222`) has no authentication, so a local program can drive the browser and read its cookies through it. Gating CDP is tracked separately. The container stops at startup if the screen is on any TCP port, an X socket is reachable host-wide, or noVNC is reachable on a non-loopback address. After changing the key in `.env`, recreate the container.
 
 ## Docker Container
 
@@ -162,9 +162,11 @@ From the command line:
 ```bash
 cd ~/.crow/bundles/browser
 docker compose up -d      # start
-docker compose down       # stop
+docker compose stop       # stop
 docker compose logs -f    # view logs
 ```
+
+The browser's profile (its cookies and saved logins) lives on a named Docker volume, one per instance (`browser_chromium-profile` on the main instance), so stopping, restarting, rebuilding or re-creating the container keeps it. Only `docker compose down -v` (or `docker volume rm`) deletes it. The bundle needs Docker Compose 2.23.1 or newer (it hands the viewer key to the container as a compose `configs` file). An install from before 1.4.0 keeps its profile inside the old container until an operator moves it once with `scripts/ops/browser-profile-to-volume.sh` (run `--dry-run` first); until then, avoid anything that re-creates that container.
 
 ## FFFF Filing Skill
 
@@ -172,7 +174,7 @@ The Browser Automation extension includes a skill for filing taxes via IRS Free 
 
 ## Security
 
-- **CDP port (9222)** binds to `127.0.0.1` only
-- **VNC** is proxied through the gateway with session authentication
+- **CDP port (9222)** binds to `127.0.0.1` only, but has **no authentication**: any program running on this machine, as any user, can drive the browser and read its cookies through it (gating it is tracked separately)
+- **VNC**: x11vnc is on a unix socket inside the container (no TCP port); the X display needs a per-start cookie and has no TCP or host-wide socket; noVNC (6080) binds to `127.0.0.1` only and needs the per-instance key that the gateway adds, after the session and same-origin checks
 - **No ports exposed** to the network — everything goes through the gateway's HTTPS
-- VNC password is required (set during installation)
+- No VNC password: for web pages and other machines, the dashboard sign-in is the gate (programs on this machine: see CDP above). A page served by another app under the dashboard's `/proxy/` shares the dashboard's origin, so a flaw in such an app reaches what the dashboard reaches. An older install's `CROW_BROWSER_VNC_PASSWORD` in the bundle's `.env` is ignored

@@ -36,7 +36,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { createPipeCdp } from "./cdp-pipe.js";
-import { loadComposeModel, checkComposeModel, composeEnv } from "../compose-guard.js";
+import { loadComposeModel, checkComposeModel, composeEnv, guardCtx } from "../compose-guard.js";
 import { readSetting, upsertSetting } from "../dashboard/settings/registry.js";
 import { artifactOriginInfo } from "../artifact-origin/runtime.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
@@ -206,7 +206,7 @@ export function createPreviewRenderer({
     if (loaded.error) return loaded.error;
     const verdict = checkComposeModel(loaded.model, {
       bundleDir: containerDir, manifest: PREVIEW_MANIFEST, coreAllowance: "preview-renderer",
-      ctx: { crowHome, dataDir: resolveDataDir(), appRoot: APP_ROOT, home: process.env.HOME || homedir() },
+      ctx: guardCtx({ crowHome, dataDir: resolveDataDir(), appRoot: APP_ROOT, home: process.env.HOME || homedir() }),
     });
     return verdict.valid ? null : verdict.reason;
   }

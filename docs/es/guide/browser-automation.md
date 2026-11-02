@@ -19,9 +19,10 @@ Automatización sigilosa de navegador con visualización por VNC — navega siti
 
 1. Abre la página de **Extensiones** en tu dashboard del Crow's Nest
 2. Busca **Browser Automation** y haz clic en **Install**
-3. Ingresa una contraseña de VNC cuando se te pida
-4. Docker construye el contenedor (toma unos minutos en la primera instalación)
-5. El gateway se reinicia — el panel Browser aparece en la barra lateral
+3. Docker construye el contenedor (toma unos minutos en la primera instalación)
+4. El gateway se reinicia — el panel Browser aparece en la barra lateral
+
+No hay contraseña de VNC que configurar ni escribir: al visor solo se llega a través de tu dashboard de Crow con la sesión iniciada.
 
 ## Panel del dashboard
 
@@ -46,7 +47,7 @@ El panel Browser tiene tres pestañas:
 
 | Herramienta | Descripción |
 |------|-------------|
-| `crow_browser_launch` | Conecta al navegador vía CDP, devuelve la URL de VNC |
+| `crow_browser_launch` | Conecta al navegador vía CDP, devuelve la ruta del visor en el dashboard |
 | `crow_browser_status` | Comprobación de salud del contenedor y de CDP |
 | `crow_browser_navigate` | Va a una URL con scripts de sigilo |
 | `crow_browser_screenshot` | Captura la página o un elemento como PNG |
@@ -128,19 +129,18 @@ El navegador incluye medidas anti-detección:
 Para CAPTCHA, 2FA, preguntas de seguridad o cualquier acción que requiera juicio humano:
 
 1. La IA llama a `crow_browser_wait_for_user` con un mensaje
-2. Ves el mensaje y abres el visor VNC
+2. Ves el mensaje y tocas **Tomar el control** en el chat (o abres el panel Browser)
 3. Completas la acción manualmente en el navegador
 4. Le dices a la IA que continúe (llama a `wait_for_user` con `resume: true`)
 
 ## Acceso VNC
 
-El visor VNC es accesible a través del gateway de Crow:
+Al visor VNC solo se llega a través del gateway de Crow, con tu sesión del dashboard iniciada:
 
-- **Embebido**: en la pestaña Status del panel Browser (iframe)
-- **Vista completa**: `/proxy/browser/vnc.html?view_only=false` (mismo HTTPS que tu dashboard)
-- **Directo**: `http://localhost:6080/vnc.html` (solo acceso local)
+- **Embebido**: en la pestaña Status del panel Browser (iframe), en el recuadro del navegador en vivo y en la hoja **Tomar el control** de un chat
+- **Vista completa**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (mismo HTTPS que tu dashboard)
 
-No hace falta abrir puertos en el firewall — el VNC se sirve mediante proxy a través del gateway.
+El visor se conecta solo: no hay una contraseña de VNC aparte. La pantalla (x11vnc y la pantalla X debajo) no está en ningún puerto de red: x11vnc escucha solo en un socket unix, accesible solo para root, dentro del contenedor, y la pantalla X necesita una cookie nueva en cada arranque y no tiene socket TCP ni visible en toda la máquina. noVNC (puerto 6080) escucha solo en `127.0.0.1` y solo conecta un visor con una clave por instancia que Crow genera al instalar (`CROW_BROWSER_VNC_TOKEN` en el `.env` del bundle, entregada al contenedor como un archivo solo para root). El gateway de Crow añade la clave de su lado, después de comprobar tu sesión y que la petición viene de la propia página del dashboard; ninguna página ni enlace la contiene, y una clave equivocada se rechaza sin registrarla. Esto deja **las páginas web y otras máquinas** fuera de la pantalla. **No** deja fuera a los programas que ya se ejecutan en esta máquina con cualquier usuario: Chrome DevTools (CDP, `127.0.0.1:9222`) no tiene autenticación, así que un programa local puede manejar el navegador y leer sus cookies por ahí. Proteger CDP es una tarea aparte. El contenedor se detiene al arrancar si la pantalla está en algún puerto TCP, si hay un socket X visible en toda la máquina o si noVNC se puede alcanzar en una dirección que no sea loopback. Después de cambiar la clave en `.env`, recrea el contenedor.
 
 ## Contenedor Docker
 
@@ -162,9 +162,11 @@ Desde la línea de comandos:
 ```bash
 cd ~/.crow/bundles/browser
 docker compose up -d      # iniciar
-docker compose down       # detener
+docker compose stop       # detener
 docker compose logs -f    # ver registros
 ```
+
+El perfil del navegador (sus cookies y sesiones iniciadas) vive en un volumen de Docker con nombre, uno por instancia (`browser_chromium-profile` en la instancia principal), así que detener, reiniciar, reconstruir o recrear el contenedor lo conserva. Solo `docker compose down -v` (o `docker volume rm`) lo borra. El bundle necesita Docker Compose 2.23.1 o posterior (entrega la clave del visor al contenedor como un archivo `configs` de compose). Una instalación anterior a 1.4.0 mantiene su perfil dentro del contenedor antiguo hasta que un operador lo mueve una vez con `scripts/ops/browser-profile-to-volume.sh` (primero con `--dry-run`); hasta entonces, evita todo lo que recree ese contenedor.
 
 ## Skill de declaración FFFF
 
@@ -172,7 +174,7 @@ La extensión Browser Automation incluye una skill para declarar impuestos vía 
 
 ## Seguridad
 
-- El **puerto CDP (9222)** se vincula solo a `127.0.0.1`
-- El **VNC** se sirve mediante proxy a través del gateway con autenticación de sesión
+- El **puerto CDP (9222)** se vincula solo a `127.0.0.1`, pero **no tiene autenticación**: cualquier programa que se ejecute en esta máquina, con cualquier usuario, puede manejar el navegador y leer sus cookies por ahí (protegerlo es una tarea aparte)
+- **VNC**: x11vnc está en un socket unix dentro del contenedor (sin puerto TCP); la pantalla X necesita una cookie nueva en cada arranque y no tiene socket TCP ni visible en toda la máquina; noVNC (6080) se vincula solo a `127.0.0.1` y necesita la clave por instancia que añade el gateway, tras comprobar la sesión y el mismo origen
 - **Ningún puerto expuesto** a la red — todo pasa por el HTTPS del gateway
-- Se requiere contraseña de VNC (se establece durante la instalación)
+- Sin contraseña de VNC: para las páginas web y otras máquinas, el inicio de sesión del dashboard es la puerta (programas de esta máquina: ver CDP arriba). Una página que sirve otra app bajo `/proxy/` del dashboard comparte el origen del dashboard, así que un fallo en esa app alcanza lo mismo que el dashboard. Si una instalación anterior tiene `CROW_BROWSER_VNC_PASSWORD` en el `.env` del bundle, se ignora

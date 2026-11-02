@@ -888,7 +888,7 @@ test("the Browser panel: while a bot holds the lease, a VIEW-ONLY viewer under t
     let html = await render();
     assert.ok(html.includes(INTERACTIVE), "free: the interactive viewer, view_only pinned off (noVNC keeps the setting in localStorage)");
     assert.ok(!html.includes("view_only=true"));
-    assert.match(html, /href="\/proxy\/browser\/vnc\.html\?view_only=false"[^>]*>Open VNC Viewer/);
+    assert.match(html, /href="\/proxy\/browser\/vnc\.html\?autoconnect=true&resize=scale&view_only=false"[^>]*>Open VNC Viewer/, "the pop-out autoconnects (no password prompt, no Connect click)");
     const sid = "perchlive-0123abcd";
     await lease.acquire(leaseDirP, { kind: "bot", sessionId: sid, botId: "botty" }, { now: Date.now() });
     html = await render();
