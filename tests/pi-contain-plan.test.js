@@ -80,7 +80,10 @@ test("an empty root: tmpfs /, system dirs read-only, private /tmp and /run, a fr
   assert.ok(args.includes("--unshare-user") && args.includes("--unshare-ipc") && args.includes("--unshare-uts"));
   assert.ok(args.includes("--cap-drop"));
   assert.ok(!args.includes("--die-with-parent") && !args.includes("--new-session"));
-  assert.ok(has(args, "--tmpfs", "/etc/crow"), "operator env files masked");
+  // The operator's env files are masked where they exist (a tmpfs needs a mount point; a CI
+  // runner has no /etc/crow).
+  if (existsSync("/etc/crow")) assert.ok(has(args, "--tmpfs", "/etc/crow"), "operator env files masked");
+  else assert.ok(!has(args, "--tmpfs", "/etc/crow"), "nothing to mask where /etc/crow is absent");
 });
 
 test("engine paths read-only: node install, pi package, checkout, pi-lab", () => {
