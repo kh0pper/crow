@@ -3769,8 +3769,10 @@ export default function bundlesRouter() {
     }
 
     // Create job for async tracking
-    const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+    // Keychain saves (and a vault login) are the owner's: the same local-password,
+    // off-box check as every other owner action, not merely "a session exists".
     const owner = await isLocalOwner(req);
+    const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: owner });
     if (!owner && env_vars && typeof env_vars === "object") {
       // The same rule as Configure: a non-owner (a peer sign-in session) can't point a setting
       // the compose file uses at a host path, at install either.
@@ -4412,7 +4414,8 @@ export default function bundlesRouter() {
         }
       }
       keyWarnings.push(...folderWarnings);
-      const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+      // The owner check made at the top of this route (local password session, off-box).
+      const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: owner });
       // keychain_configure:false fields (Workspace admin password): setup applied the stored value
       // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
       const noConfigureKc = new Set((getInstalledFirstManifest(bundle_id)?.env_vars || []).filter((v) => v && v.keychain_configure === false).map((v) => v.name));

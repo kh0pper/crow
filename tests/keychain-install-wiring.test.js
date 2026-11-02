@@ -135,7 +135,7 @@ test("reinstall reuses the generated token: no new plaintext, no first view, ent
   } finally { d.close(); }
 });
 
-test("Configure: a local session saves a checked human field; a peer-signed request never does", async () => {
+test("Configure: the owner's local session saves a checked human field; a peer-signed request or a non-owner session (e.g. one made on this box) never does", async () => {
   const id = "demo-kc-d"; const manifest = MANIFEST(id);
   const dir = join(CROW_HOME, "bundles", id);
   mkdirSync(dir, { recursive: true });
@@ -148,6 +148,9 @@ test("Configure: a local session saves a checked human field; a peer-signed requ
     next();
   });
   app.use(B.default());
+  // The route's owner rule (isLocalOwner: a local password session from another machine); a
+  // session that merely exists (here one marked as made on this box) is not the owner.
+  B._setOwnerCheckForTest((req) => !!req.dashboardSession && !req.crossHostAuth && !req.headers["x-test-onhost"]);
   const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const post = (body, headers = {}) => fetch(`${base}/bundles/api/env`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json() }));
@@ -156,6 +159,10 @@ test("Configure: a local session saves a checked human field; a peer-signed requ
     assert.equal(peer.status, 200, JSON.stringify(peer.body));
     const d = db();
     try { assert.equal((await K.listEntries(d, { keyId: ID().id })).filter((e) => e.bundle_id === id).length, 0, "peer request saved nothing"); } finally { d.close(); }
+    const onhost = await post({ bundle_id: id, env_vars: { DEMO_PASSWORD: "Onhost-Typed-1" }, keychain: { save: ["DEMO_PASSWORD"] } }, { "x-test-onhost": "1" });
+    assert.equal(onhost.status, 200, JSON.stringify(onhost.body));
+    const dh = db();
+    try { assert.equal((await K.listEntries(dh, { keyId: ID().id })).filter((e) => e.bundle_id === id).length, 0, "a non-owner session saved nothing"); } finally { dh.close(); }
     const local = await post({ bundle_id: id, env_vars: { DEMO_PASSWORD: "Local-Typed-1" }, keychain: { save: ["DEMO_PASSWORD"] } });
     assert.equal(local.status, 200, JSON.stringify(local.body));
     assert.equal(local.body.keychain.saved, 1);
@@ -164,7 +171,7 @@ test("Configure: a local session saves a checked human field; a peer-signed requ
       const e = (await K.listEntries(d2, { keyId: ID().id })).find((x) => x.bundle_id === id);
       assert.equal(await K.openEntrySecret(d2, ID(), e.id), "Local-Typed-1");
     } finally { d2.close(); }
-  } finally { server.close(); }
+  } finally { server.close(); B._setOwnerCheckForTest(null); }
 });
 
 test("C5 — if the generated token cannot be saved, the install fails with NOTHING persisted; a retry mints a new token", async () => {
@@ -238,6 +245,7 @@ test("F1 — Configure never saves a keychain_configure:false field over the sto
   const app = express(); app.use(express.json());
   app.use((req, _res, next) => { req.dashboardSession = "S"; next(); });
   app.use(B.default());
+  B._setOwnerCheckForTest(() => true); // the owner: the refusal below is keychain_configure's, not the session's
   const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
@@ -249,7 +257,7 @@ test("F1 — Configure never saves a keychain_configure:false field over the sto
       assert.equal(rows.length, 1);
       assert.equal(await K.openEntrySecret(d, ID(), rows[0].id), "Real-Original-Pw-1");
     } finally { d.close(); }
-  } finally { server.close(); }
+  } finally { server.close(); B._setOwnerCheckForTest(null); }
 });
 
 test("config-friction: a keychain:true value KEPT from an earlier install is saved when the keychain lacks it (once, never overwriting)", async () => {
