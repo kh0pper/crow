@@ -9,7 +9,8 @@
  *     and a Done on each still credits the day once after the wallet merges,
  *   - a card picked at 23:58 and marked Done at 00:02 is filed under the day
  *     it was picked for, and the new day is untouched,
- *   - swap refuses the fourth re-roll,
+ *   - swap refuses the fourth re-roll, and never re-lands on an entry already
+ *     shown today (the stored `seen` list; a one-entry day refuses),
  *   - challenges off writes the day's `moveoff` fact and shows no card,
  *   - prefs are read defensively and written strictly (an unknown limit tag
  *     is refused), and `whyLine` only ever says what the reason codes say.
@@ -257,12 +258,12 @@ test("a stated limit always wins — even over a card stored before the limit wa
   for (let s = 0; s < MAX_SWAPS; s += 1) {
     // eslint-disable-next-line no-await-in-loop
     const swapped = await swapChallenge(db, { now: found + (s + 1) * 1000, library: lib });
-    assert.equal(swapped.refused, false);
     assert.notEqual(swapped.entry.id, "knee-1", "swap must never re-offer a ruled-out entry");
   }
   const refused = await swapChallenge(db, { now: found + 10_000, library: lib });
   assert.equal(refused.refused, true);
   assert.notEqual(refused.entry.id, "knee-1");
+  assert.equal(refused.entry.id, "safe-1", "one eligible entry: the card on screen stays");
 });
 
 /* ----------------------------------------------------------------- swap */
@@ -270,11 +271,14 @@ test("a stated limit always wins — even over a card stored before the limit wa
 test("swap re-rolls the stored card, counts up to 3, and the fourth refuses", async () => {
   const db = await freshDb();
   await writePrefs(db, PREFS);
-  const lib = [entry({ id: "a-1" }), entry({ id: "b-2" })];
+  // Four entries: a full day shows one card and at most three swaps, and no
+  // swap may repeat one, so four is exactly enough for every swap to land.
+  const lib = ["a-1", "b-2", "c-3", "d-4"].map((id) => entry({ id }));
   const c = collector();
 
   const first = await todayChallenge(db, { now: T0, library: lib, emit: c.emit });
   assert.equal(first.swap, 0);
+  const shown = [first.entry.id];
 
   let last = first;
   for (const want of [1, 2, 3]) {
@@ -285,10 +289,13 @@ test("swap re-rolls the stored card, counts up to 3, and the fourth refuses", as
     assert.equal(last.off, false);
     assert.equal(last.done, false);
     assert.equal(last.why, whyLine(last.reasons));
+    assert.equal(shown.includes(last.entry.id), false, "a swap never re-lands on a shown entry");
+    shown.push(last.entry.id);
     // eslint-disable-next-line no-await-in-loop
     const stored = JSON.parse(await readSetting(db, TODAY_KEY));
     assert.equal(stored.swap, want);
     assert.equal(stored.entryId, last.entry.id);
+    assert.deepEqual(stored.seen, shown, "the day's shown ids travel in the same synced row");
   }
 
   const emitsBefore = rowsOf(c, "ramble_settings", TODAY_KEY).length;
@@ -307,19 +314,35 @@ test("the swap cap cannot be reopened by a same-day re-pick", async () => {
     entry({ id: "knee-a", skipIf: ["knee"] }),
     entry({ id: "knee-b", skipIf: ["knee"] }),
     entry({ id: "safe-1" }),
+    entry({ id: "safe-2" }),
   ];
 
-  // The picker is pure, so find a day whose THIRD swap lands on a knee-tagged
-  // card: only then does a later knee limit really rule the stored card out
-  // and force the same-day re-pick this test is about.
+  // The picker is pure, so replay the day's swaps in memory with the same
+  // exclude rule the module uses, and find a day whose THIRD swap lands on a
+  // knee-tagged card: only then does a later knee limit really rule the stored
+  // card out and force the same-day re-pick this test is about.
+  const replay = (t) => {
+    const day = localDay(t);
+    const seen = [];
+    let pick = pickChallenge({
+      day, hourLocal: 12, weather: null, prefs: PREFS,
+      history: { done: {}, skipped: {} }, library: lib, swap: 0,
+    });
+    if (pick) seen.push(pick.entryId);
+    for (let s = 1; s <= MAX_SWAPS; s += 1) {
+      pick = pickChallenge({
+        day, hourLocal: 12, weather: null, prefs: PREFS,
+        history: { done: {}, skipped: {} }, library: lib, swap: s, exclude: seen,
+      });
+      if (!pick) break;
+      seen.push(pick.entryId);
+    }
+    return pick;
+  };
   let found = null;
   for (let i = 0; i < 400 && found === null; i += 1) {
     const t = new Date(2026, 9, 5 + i, 12, 0, 0).getTime();
-    const pick = pickChallenge({
-      day: localDay(t), hourLocal: 12, weather: null, prefs: PREFS,
-      history: { done: {}, skipped: {} }, library: lib, swap: MAX_SWAPS,
-    });
-    if (pick && pick.entryId.startsWith("knee-")) found = t;
+    if (replay(t)?.entryId?.startsWith("knee-")) found = t;
   }
   assert.ok(found, "the fixture needs a day whose swap-3 card is knee-tagged");
 
@@ -336,14 +359,14 @@ test("the swap cap cannot be reopened by a same-day re-pick", async () => {
   // The new limit rules the stored card out, so today's card is re-picked.
   await writePrefs(db, { limits: ["knee"] });
   const rePicked = await todayChallenge(db, { now: found + 6000, library: lib });
-  assert.equal(rePicked.entry.id, "safe-1", "the ruled-out card is replaced");
+  assert.deepEqual(rePicked.entry.skipIf, [], "the ruled-out card is replaced");
   assert.equal(rePicked.swap, MAX_SWAPS, "a same-day re-pick keeps the day's swap count");
   assert.equal(JSON.parse(await readSetting(db, TODAY_KEY)).swap, MAX_SWAPS);
 
   const refused = await swapChallenge(db, { now: found + 7000, library: lib });
   assert.equal(refused.refused, true, "a re-pick must not hand out fresh swaps");
   assert.equal(refused.swap, MAX_SWAPS);
-  assert.equal(refused.entry.id, "safe-1");
+  assert.equal(refused.entry.id, rePicked.entry.id);
 });
 
 test("a stored swap beyond the cap is clamped, never reset to 0", async () => {
@@ -362,7 +385,7 @@ test("a stored swap beyond the cap is clamped, never reset to 0", async () => {
 test("swap on a brand-new day starts the count over", async () => {
   const db = await freshDb();
   await writePrefs(db, PREFS);
-  const lib = [entry({ id: "a-1" }), entry({ id: "b-2" })];
+  const lib = ["a-1", "b-2", "c-3", "d-4"].map((id) => entry({ id }));
   for (let s = 0; s < MAX_SWAPS; s += 1) {
     // eslint-disable-next-line no-await-in-loop
     await swapChallenge(db, { now: T0 + s * 1000, library: lib });
