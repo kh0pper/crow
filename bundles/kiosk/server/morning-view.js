@@ -6,10 +6,15 @@
  * display. for-you/morning.js (the private section) and for-you/listen.js are never imported.
  *
  *   loadMorningView({ db, lang, crowHome, now, importApp }) → the window's data, per the contract:
- *     { weather: null | { temp, high, low, unit: "F"|"C", label },
+ *     { weather: null | { temp, high, low, unit: "F"|"C", sky: string|null },
  *       headlines: [ { title, source } ],            // 0..3, title ≤ 140 chars, source ≤ 40
  *       move: null | { title, minutes: number|null },
  *       updated_at: <ms epoch> }
+ *
+ *   createMorningSweep({ wm, hub, media, now, isSessionDisplay, enabled, load, log }) → sweep(id):
+ *     the idle rule, the once-a-morning date per display, and the open itself (used by runtime.js).
+ *   `sky` is the conditions in the display's language (weather.js weatherKind → STRINGS.wx_<kind>); the
+ *   place name is never in the window.
  *
  * Every part degrades on its own: a section that is off in the For You settings, an add-on that is
  * not installed, or a read that failed gives null / [] and the rest of the window still fills. A
@@ -28,8 +33,8 @@ export const MORNING_HEADLINES = 3;
 /** The contract's length limits (plain characters). */
 export const HEADLINE_MAX = 140;
 export const SOURCE_MAX = 40;
-/** The place label's limit (the For You city's own width). */
-export const LABEL_MAX = 80;
+/** The weather kinds the window knows (weather.js weatherKind's own names). */
+export const SKY_KINDS = Object.freeze(["clear", "partly", "cloudy", "fog", "drizzle", "rain", "snow", "storm"]);
 /** The For You modules this window reads, through the app root (a bundle cannot import core by repo path). */
 export const MORNING_MODULES = Object.freeze({
   settings: "servers/gateway/for-you/settings.js",
@@ -47,22 +52,24 @@ const int = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Math.round
 
 /**
  * The weather chip's numbers (weather.js parseForecast) → the contract's weather, or null when there
- * is nothing to show. `label` is the place the operator typed, which is the weather module's own
- * input rather than one of its outputs; `unit` is the module's "fahrenheit"/"celsius" as "F"/"C".
+ * is nothing to show. `sky` is the code's conditions in the display's language (never the place, and
+ * never the module's own words); `unit` is the module's "fahrenheit"/"celsius" as "F"/"C".
  */
-function weatherView(w, place) {
+function weatherView(w, S, kindOf) {
   if (!w || typeof w !== "object") return null;
   const temp = int(w.temp), high = int(w.high), low = int(w.low);
   if (temp === null && high === null && low === null) return null;
-  return { temp, high, low, unit: w.unit === "fahrenheit" ? "F" : "C", label: plain(place?.name, LABEL_MAX) };
+  const kind = typeof kindOf === "function" ? kindOf(w.code) : null;
+  const sky = SKY_KINDS.includes(kind) ? S?.[`wx_${kind}`] : null;
+  return { temp, high, low, unit: w.unit === "fahrenheit" ? "F" : "C", sky: typeof sky === "string" ? sky : null };
 }
 
-/** Today's move (moves.js loadMoves → { ramble, moves }) → the contract's move, or null (missing, outdated, off, no challenge). */
+/** Today's move (moves.js loadMoves → { ramble, moves }) → the contract's move, or null (missing, outdated, off, no challenge, a finished one). */
 function moveView(mv) {
   const m = mv && typeof mv === "object" && mv.ramble === "ok" && mv.moves && typeof mv.moves === "object" ? mv.moves : null;
   if (!m || m.off === true) return null;
   const c = m.challenge;
-  if (!c || typeof c !== "object") return null;
+  if (!c || typeof c !== "object" || c.done === true) return null;
   const title = plain(c.title, HEADLINE_MAX);
   if (!title) return null;
   const n = Number(c.minutes);
@@ -103,6 +110,7 @@ async function moveOf(app, db, opts) {
  */
 export async function loadMorningView({ db, lang = "en", crowHome = null, now = Date.now, importApp = appImport } = {}) {
   const L = lang === "es" ? "es" : "en";
+  const S = STRINGS[L];
   const at = typeof now === "function" ? Number(now()) : Number(now);
   const stamp = Number.isFinite(at) ? at : Date.now();
   const app = typeof importApp === "function" ? importApp : appImport;
@@ -118,9 +126,11 @@ export async function loadMorningView({ db, lang = "en", crowHome = null, now = 
   const on = (k) => sections[k] !== false;
   let weather = null, forecast = null;
   if (on("weather") && settings.place) {
-    try { forecast = await (await app(MORNING_MODULES.weather)).weatherFor(settings.place, { now: () => stamp }); }
+    let mod = null;
+    try { mod = await app(MORNING_MODULES.weather); } catch { mod = null; }
+    try { forecast = mod ? await mod.weatherFor(settings.place, { now: () => stamp }) : null; }
     catch { forecast = null; }
-    weather = weatherView(forecast, settings.place);
+    weather = weatherView(forecast, S, mod?.weatherKind);
   }
   const [headlines, move] = await Promise.all([
     on("news") ? headlinesOf(app, db, { ...home, now: stamp }) : [],
@@ -188,4 +198,43 @@ export async function openMorningItem({ store, deviceId, caps, S, strict = false
   return result(true, had || updated ? "focused" : "opened", strings.say_morning, {
     events: [...evicted.map((e) => ({ type: "wm", action: "close", id: e.id })), { type: "wm", action: "open", window }],
   });
+}
+
+/**
+ * The idle sweep's per-display logic (runtime.js's minute timer builds one of these and calls it for
+ * each connected display): open the morning window once a morning on an idle kiosk, and only then.
+ * The date it remembers is kept here, one per display.
+ *   load(id, at) → the window spec (morningWindow) to put; a throw is logged and leaves nothing.
+ * A sweep already running for a display returns false at once; the display's state is read AGAIN after
+ * the load, so a window, a turn or media that arrived meanwhile cancels the open. Evicted windows are
+ * closed before the open, and an open the page did not get leaves nothing behind for the next minute.
+ */
+export function createMorningSweep({ wm, hub, media, now = Date.now, isSessionDisplay = () => false, enabled = () => true, load, log = () => {} } = {}) {
+  const openedAt = new Map();   // device id → the local date it was auto-opened
+  const inFlight = new Set();   // device ids whose sweep is running
+  const isOn = () => (typeof enabled === "function" ? enabled() === true : enabled === true);
+  async function sweep(id) {
+    if (inFlight.has(id)) return false;
+    inFlight.add(id);
+    try {
+      const today = localDate(now());
+      const mayOpen = () => shouldAutoOpenMorning({
+        hour: localHour(now()), sessionDisplay: isSessionDisplay(id) === true, enabled: isOn(),
+        kinds: hub?.capsOf?.(id)?.kinds, windows: wm.list(id), busy: hub?.isBusy?.(id) === true,
+        mediaActive: media?.active?.(id) === true, lastDate: openedAt.get(id) || null, today,
+      });
+      if (!mayOpen()) return false;
+      let spec = null;
+      try { spec = await load(id, now()); }
+      catch (err) { log(`[kiosk] morning view not read: ${err?.message}`); return false; }
+      if (!spec) return false;
+      if (!mayOpen()) return false;   // the screen changed while the view was read
+      const { window, evicted } = wm.put(id, spec);
+      for (const e of evicted) hub.sendTo(id, { type: "wm", action: "close", id: e.id });
+      if (hub.sendTo(id, { type: "wm", action: "open", window }) === true) { openedAt.set(id, today); return true; }
+      wm.close(id, window.id);   // the page never got it: leave nothing behind for the next try
+      return false;
+    } finally { inFlight.delete(id); }
+  }
+  return sweep;
 }

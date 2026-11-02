@@ -6,10 +6,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  loadMorningView, morningWindow, openMorningItem, shouldAutoOpenMorning,
+  loadMorningView, morningWindow, openMorningItem, shouldAutoOpenMorning, createMorningSweep,
   MORNING_HOURS, MORNING_HEADLINES, MORNING_MODULES, HEADLINE_MAX, SOURCE_MAX, localDate, localHour,
 } from "../bundles/kiosk/server/morning-view.js";
 import { displayItems } from "../bundles/kiosk/server/runtime.js";
+import { asksOpen, mentionsOpen, asksCard } from "../bundles/kiosk/server/patterns.js";
+import { weatherKind } from "../servers/gateway/for-you/weather.js";
 import { createWmStore } from "../bundles/kiosk/server/wm.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
 
@@ -22,7 +24,7 @@ const STORY = (n, extra = {}) => ({ id: `a${n}`, title: `Headline ${n}`, sourceN
 function fakes({ over = {}, settings = { sections: sections(), city: "Springfield", place: PLACE } } = {}) {
   const mods = {
     [MORNING_MODULES.settings]: { readForYouSettings: async () => settings },
-    [MORNING_MODULES.weather]: { weatherFor: async () => ({ temp: 12.4, code: 3, high: 15.6, low: 4.2, rain: 20, unit: "celsius" }) },
+    [MORNING_MODULES.weather]: { weatherFor: async () => ({ temp: 12.4, code: 3, high: 15.6, low: 4.2, rain: 20, unit: "celsius" }), weatherKind },
     [MORNING_MODULES.news]: { loadNews: async () => ({ state: "ok", stories: [STORY(1), STORY(2), STORY(3), STORY(4), STORY(5)], hidden: [] }) },
     [MORNING_MODULES.moves]: {
       loadMoves: async () => ({ ramble: "ok", moves: { off: false, challenge: { title: "Walk 20 min", minutes: 20, why: "sunny", day: "2026-11-03", done: false }, health: { energy: 3, max: 5 } } }),
@@ -50,9 +52,11 @@ test("loadMorningView maps the For You outputs onto exactly the contract's keys 
   const view = await loadMorningView({ db, lang: "en", now: NOW, importApp });
   assert.deepEqual(keysOf(view), ["headlines", "move", "updated_at", "weather"]);
   assert.equal(view.updated_at, NOW);
-  // Weather: numbers rounded, the module's unit as F/C, the label the place the operator typed.
-  assert.deepEqual(keysOf(view.weather), ["high", "label", "low", "temp", "unit"]);
-  assert.deepEqual(view.weather, { temp: 12, high: 16, low: 4, unit: "C", label: "Springfield" });
+  // Weather: numbers rounded, the module's unit as F/C, the sky from the code in the display's language.
+  assert.deepEqual(keysOf(view.weather), ["high", "low", "sky", "temp", "unit"]);
+  assert.deepEqual(view.weather, { temp: 12, high: 16, low: 4, unit: "C", sky: "Cloudy" });
+  assert.ok(!("label" in view.weather), "the window carries no label");
+  assert.ok(!JSON.stringify(morningWindow(view, STRINGS.en)).includes("Springfield"), "the place name is never in the window");
   // Headlines: three stories, title and source name only.
   assert.equal(view.headlines.length, MORNING_HEADLINES);
   for (const h of view.headlines) assert.deepEqual(keysOf(h), ["source", "title"]);
@@ -69,6 +73,7 @@ test("the window spec is the contract's object: kind, the display's title, then 
   assert.deepEqual(keysOf(w), ["headlines", "kind", "move", "title", "updated_at", "weather"]);
   assert.equal(w.kind, "morning");
   assert.equal(w.title, STRINGS.es.morning_title);
+  assert.equal(view.weather.sky, "Nublado", "the sky is in the display's language");
   assert.deepEqual(morningWindow(null, STRINGS.en), { kind: "morning", title: "Your morning" });
 });
 
@@ -169,7 +174,7 @@ test("the weather, the news and the moves are asked for the way the For You page
 test("the window JSON carries no private For You keys anywhere (a walk over every level)", () => {
   const forbidden = ["morning", "needs", "cards", "project", "bots", "mail", "calendar"];
   const view = {
-    weather: { temp: 12, high: 16, low: 4, unit: "C", label: "Springfield" },
+    weather: { temp: 12, high: 16, low: 4, unit: "C", sky: "Cloudy" },
     headlines: [{ title: "Headline 1", source: "Source 1" }, { title: "Headline 2", source: "Source 2" }],
     move: { title: "Walk 20 min", minutes: 20 },
     updated_at: NOW,
@@ -191,9 +196,9 @@ test("the morning item is offered to crow_open only while For You is on; now pla
     process.env.CROW_FOR_YOU = "1";
     assert.deepEqual(displayItems({ lang: "en", sources: ["radio"] }).map((i) => i.id), ["now_playing", "morning"]);
     const en = displayItems({ lang: "en", sources: ["radio"] })[1];
-    assert.deepEqual(en, { id: "morning", title: STRINGS.en.morning_title, aliases: ["my morning", "morning"] });
+    assert.deepEqual(en, { id: "morning", title: STRINGS.en.morning_title, aliases: ["my morning"] });
     const es = displayItems({ lang: "es", sources: [] })[0];
-    assert.deepEqual(es, { id: "morning", title: "Tu mañana", aliases: ["mi mañana", "mañana"] });
+    assert.deepEqual(es, { id: "morning", title: "Tu mañana", aliases: ["mi mañana"] });
     assert.equal(STRINGS.en.now_playing_title, "Now playing");
     assert.equal(STRINGS.es.now_playing_title, "Sonando ahora");
   } finally {
@@ -202,7 +207,7 @@ test("the morning item is offered to crow_open only while For You is on; now pla
 });
 
 test("openItem for the morning app: unavailable without the kind, an eviction-then-open with it, replaced never piled", async () => {
-  const store = createWmStore({ now: () => NOW, setTimer: () => ({}), clearTimer: () => {} });
+  const store = createWmStore({ now: () => MORNING_AT(), setTimer: () => ({}), clearTimer: () => {} });
   const S = STRINGS.en;
   const view = { weather: null, headlines: [{ title: "One", source: "Src" }], move: null, updated_at: NOW };
   const load = async () => view;
@@ -273,10 +278,113 @@ test("shouldAutoOpenMorning: every condition, the hour bounds, and 'already open
   assert.equal(localDate(sixAm), "2026-11-03");
   assert.equal(localHour(new Date(2026, 10, 3, 23, 59, 0, 0).getTime()), 23);
 });
+
+test("the weather's sky is the code's conditions in the display's language, and null for a code it does not know", async () => {
+  const wx = (code) => fakes({ over: { [MORNING_MODULES.weather]: { weatherFor: async () => ({ temp: 5, code, high: 8, low: 1, unit: "celsius" }), weatherKind } } });
+  for (const [code, en, es] of [
+    [0, "Clear", "Despejado"], [2, "Partly cloudy", "Parcialmente nublado"], [3, "Cloudy", "Nublado"], [45, "Fog", "Niebla"],
+    [53, "Drizzle", "Llovizna"], [63, "Rain", "Lluvia"], [73, "Snow", "Nieve"], [95, "Thunderstorms", "Tormentas"], [42, null, null],
+  ]) {
+    const e = await loadMorningView({ db, lang: "en", now: NOW, importApp: wx(code).importApp });
+    const s = await loadMorningView({ db, lang: "es", now: NOW, importApp: wx(code).importApp });
+    assert.equal(e.weather.sky, en, `en code ${code}`);
+    assert.equal(s.weather.sky, es, `es code ${code}`);
+    assert.ok(!("label" in e.weather), `code ${code} carries no label`);
+  }
+});
+
+test("a finished challenge is not today's move", async () => {
+  const moves = (challenge) => fakes({ over: { [MORNING_MODULES.moves]: { loadMoves: async () => ({ ramble: "ok", moves: { challenge } }) } } });
+  const done = await loadMorningView({ db, lang: "en", now: NOW, importApp: moves({ title: "Walk 20 min", minutes: 20, done: true }).importApp });
+  assert.equal(done.move, null, "a done move is not shown");
+  const open = await loadMorningView({ db, lang: "en", now: NOW, importApp: moves({ title: "Walk 20 min", minutes: 20, done: false }).importApp });
+  assert.deepEqual(open.move, { title: "Walk 20 min", minutes: 20 });
+});
+
+test("only \"my morning\" / \"mi mañana\" name the window: an ordinary morning turn is not an open", () => {
+  const en = displayItems({ lang: "en", sources: [], forYou: true });
+  const es = displayItems({ lang: "es", sources: [], forYou: true });
+  for (const said of ["Can you tell me the weather this morning?", "Please wake me up tomorrow morning"]) {
+    assert.equal(asksOpen(said, en), false, said);
+    assert.equal(mentionsOpen(said, en), false, said);
+  }
+  for (const said of ["¿Puedes poner una alarma para mañana?", "Pon una alarma mañana a las siete"]) {
+    assert.equal(asksOpen(said, es), false, said);
+    assert.equal(mentionsOpen(said, es), false, said);
+  }
+  assert.equal(asksCard("make me a list for Monday morning", en), asksCard("make me a list for Monday morning", []), "a card request is unchanged by the item");
+  assert.equal(asksOpen("can you open my morning", en), true);
+  assert.equal(asksOpen("¿puedes abrir mi mañana?", es), true, "the Spanish alias still opens it when asked");
+});
+
+// ── the idle sweep (morning-view.js createMorningSweep) ─────────────────────────────────────────
+const MORNING_AT = (h = 7, m = 0) => new Date(2026, 10, 3, h, m, 0, 0).getTime();
+const MORNING_SPEC = { kind: "morning", title: "Your morning", weather: null, headlines: [], move: null, updated_at: 0 };
+
+/** The real wm store, a fake hub and media, and a clock the test moves; each test overrides one thing. */
+function sweepRig({ now = () => MORNING_AT(), enabled = () => true, isSessionDisplay = () => false, hub = {}, media = {}, load = async () => MORNING_SPEC, store = null } = {}) {
+  const wm = store || createWmStore({ now, setTimer: () => ({}), clearTimer: () => {} });
+  const events = [];
+  const sweep = createMorningSweep({
+    wm, now, enabled, isSessionDisplay, load,
+    hub: { capsOf: () => ({ kinds: ["card", "morning"] }), isBusy: () => false, sendTo: (id, m) => { events.push(m); return true; }, ...hub },
+    media: { active: () => false, ...media },
+  });
+  return { wm, events, sweep };
+}
+
+test("the morning sweep opens once on the first idle minute in the window, and not again that morning", async () => {
+  let clock = MORNING_AT();
+  const rig = sweepRig({ now: () => clock });
+  assert.equal(await rig.sweep("k"), true);
+  assert.deepEqual(rig.wm.list("k").map((w) => w.kind), ["morning"]);
+  assert.deepEqual(rig.events.map((e) => e.action), ["open"]);
+  assert.equal(rig.events[0].window.title, "Your morning", "the loaded window is the one put up");
+  clock += 60_000;
+  assert.equal(await rig.sweep("k"), false, "already auto-opened today");
+  assert.equal(rig.wm.list("k").length, 1);
+  assert.equal(rig.events.length, 1, "no second open");
+});
+
+test("a sweep whose open the page never got leaves no window, and the next minute tries again", async () => {
+  let clock = MORNING_AT();
+  let deliver = false;
+  const rig = sweepRig({ now: () => clock, hub: { sendTo: (id, m) => (m.action === "open" ? deliver : true) } });
+  assert.equal(await rig.sweep("k"), false);
+  assert.deepEqual(rig.wm.list("k"), [], "nothing is left behind");
+  clock += 60_000;
+  deliver = true;
+  assert.equal(await rig.sweep("k"), true, "a failed send is retried on a later minute");
+  assert.equal(rig.wm.list("k").length, 1);
+});
+
+test("the phone overlay is never swept: a session display opens nothing", async () => {
+  const rig = sweepRig({ isSessionDisplay: (id) => id === "phone" });
+  assert.equal(await rig.sweep("phone"), false);
+  assert.deepEqual(rig.wm.list("phone"), []);
+  assert.equal(await rig.sweep("kiosk"), true, "a paired display still opens");
+});
+
+test("two sweeps for one display at once: a slow view read opens one window only", async () => {
+  const rig = sweepRig({ load: async () => { await new Promise((r) => setTimeout(r, 20)); return MORNING_SPEC; } });
+  const [a, b] = await Promise.all([rig.sweep("k"), rig.sweep("k")]);
+  assert.deepEqual([a, b].sort(), [false, true]);
+  assert.equal(rig.wm.list("k").length, 1);
+  assert.equal(rig.events.filter((e) => e.action === "open").length, 1);
+});
+
+test("a window that opens while the view is being read cancels the auto-open", async () => {
+  const store = createWmStore({ now: () => MORNING_AT(), setTimer: () => ({}), clearTimer: () => {} });
+  const rig = sweepRig({ store, load: async () => { store.put("k", { kind: "content", title: "Notes", blocks: [] }); return MORNING_SPEC; } });
+  assert.equal(await rig.sweep("k"), false);
+  assert.deepEqual(rig.wm.list("k").map((w) => w.kind), ["content"], "the morning window did not open over it");
+  assert.deepEqual(rig.events, []);
+});
+
 // T1: "show …" opens an item only when the rest is exactly its name or alias (Claude, lane A).
 test("T1: 'show my morning' opens the morning window; other show requests are left alone", async () => {
   const { matchT1, parseShowItem } = await import("../bundles/kiosk/server/patterns.js");
-  const items = [{ id: "morning", title: "Your morning", aliases: ["my morning", "morning"] }];
+  const items = [{ id: "morning", title: "Your morning", aliases: ["my morning"] }];
   const ctx = { items, sources: [], deviceId: "k1" };
   for (const said of ["Show my morning.", "show me my morning", "Show me your morning", "open my morning"]) {
     assert.deepEqual(matchT1(said, ctx), { verb: "open", app: "morning" }, said);
@@ -286,6 +394,10 @@ test("T1: 'show my morning' opens the morning window; other show requests are le
     const r = matchT1(said, ctx);
     assert.ok(!r || r.app !== "morning", said);
   }
+  // The real Spanish item: "abre mi mañana" / "muéstrame mi mañana" open it; "mi" is part of the alias.
+  const es = { items: displayItems({ lang: "es", sources: [], forYou: true }), sources: [], deviceId: "k1" };
+  for (const said of ["Abre mi mañana", "muéstrame mi mañana"]) assert.deepEqual(matchT1(said, es), { verb: "open", app: "morning" }, said);
+  assert.equal(matchT1("pon una alarma para mañana", es), null);
   // Without the item (For You off), "show my morning" is not an open at all.
   assert.equal(matchT1("show my morning", { items: [], sources: [], deviceId: "k1" }), null);
 });

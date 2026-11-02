@@ -32,7 +32,7 @@ import { createNewsSource, createMediaReader } from "./sources/news.js";
 import { createMusicSource, checkStorage, originOf } from "./sources/funkwhale.js";
 import { createEnvelopeHandler } from "./envelope.js";
 import { appImport } from "./app-root.js";
-import { loadMorningView, morningWindow, openMorningItem, shouldAutoOpenMorning, localDate, localHour } from "./morning-view.js";
+import { createMorningSweep, loadMorningView, morningWindow, openMorningItem } from "./morning-view.js";
 
 /** The music library's local setting: { api_origin, storage_origin } (both operator-entered; never synced). */
 export const MUSIC_SETTING = "kiosk_music";
@@ -359,7 +359,7 @@ export function displayItems({ lang = "en", sources = [], forYou = forYouEnabled
   const S = STRINGS[L];
   const items = [];
   if (Array.isArray(sources) && sources.length) items.push({ id: "now_playing", title: S.now_playing_title, aliases: L === "es" ? ["lo que suena"] : ["whats playing"] });
-  if (forYou === true) items.push({ id: "morning", title: S.morning_title, aliases: L === "es" ? ["mi mañana", "mañana"] : ["my morning", "morning"] });
+  if (forYou === true) items.push({ id: "morning", title: S.morning_title, aliases: L === "es" ? ["mi mañana"] : ["my morning"] });
   return items;
 }
 
@@ -586,28 +586,13 @@ export function createKioskRuntime(deps) {
   };
   /**
    * The morning window opens itself once per morning on an idle kiosk (Kevin's ruling, 11-02). The
-   * decision is the pure shouldAutoOpenMorning; the date is kept per display in memory and recorded
-   * only after the page really got the event, so a failed send leaves nothing behind and a later
-   * minute may still try. Never thrown out of the sweep (the caller catches and logs).
+   * decision, the once-a-day date per display and the open itself are morning-view.js's sweep; the view
+   * is read here, in the display's language. Never thrown out of the sweep (the caller catches and logs).
    */
-  const morningOpenedAt = new Map();   // device id → the local date it was auto-opened
-  async function sweepMorning(id) {
-    const at = now();
-    const today = localDate(at);
-    const caps = hub?.capsOf?.(id) || null;
-    const go = shouldAutoOpenMorning({
-      hour: localHour(at), sessionDisplay: isSessionDisplayId(id), enabled: forYouEnabled() === true, kinds: caps?.kinds,
-      windows: wm.list(id), busy: hub?.isBusy?.(id) === true, mediaActive: media.active(id) === true,
-      lastDate: morningOpenedAt.get(id) || null, today,
-    });
-    if (!go) return false;
-    const lang = langOf(id);
-    const view = await withDb((db) => loadMorningView({ db, lang, crowHome: deps.crowHome, now: at }));
-    const { window } = wm.put(id, morningWindow(view, STRINGS[lang]));
-    if (hub.sendTo(id, { type: "wm", action: "open", window }) === true) { morningOpenedAt.set(id, today); return true; }
-    wm.close(id, window.id);   // the page never got it: leave nothing behind for the next try
-    return false;
-  }
+  const sweepMorning = createMorningSweep({
+    wm, hub, media, now, isSessionDisplay: isSessionDisplayId, enabled: forYouEnabled, log,
+    load: (id, at) => withDb(async (db) => morningWindow(await loadMorningView({ db, lang: langOf(id), crowHome: deps.crowHome, now: at }), STRINGS[langOf(id)])),
+  });
   const sweep = (deps.setInterval || setInterval)(async () => {
     const mornings = [];
     for (const id of hub.connectedIds()) {

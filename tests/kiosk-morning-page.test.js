@@ -17,7 +17,7 @@ const t = (k) => STRINGS.en[k] ?? k;
 /** The contract's window object; a test overrides only the part it is about. */
 const WINDOW = {
   id: "morning-1", kind: "morning", title: "Morning",
-  weather: { temp: 18, high: 24, low: 12, unit: "F", label: "Mostly cloudy" },
+  weather: { temp: 18, high: 24, low: 12, unit: "F", sky: "Partly cloudy" },
   move: { title: "Walk the dog", minutes: 20 },
   headlines: [
     { title: "The ferry runs again", source: "Harbor News" },
@@ -38,14 +38,14 @@ function mount() {
 
 const texts = (root, sel) => [...root.querySelectorAll(sel)].map((e) => e.textContent);
 
-test("a full morning window: the temperature and its unit, the label, high/low, the move with its minutes, three headlines with their sources", () => {
+test("a full morning window: the temperature and its unit, the sky, high/low, the move with its minutes, three headlines with their sources", () => {
   const { root, open } = mount();
   open(WINDOW);
   const card = root.querySelector("article.k-win-morning");
   assert.ok(card, "the card carries the morning kind, so its CSS hook exists");
   assert.equal(card.querySelector(".k-win-title").textContent, "Morning", "the title sits above everything else");
   assert.equal(card.querySelector(".k-morning-temp").textContent, "18°F");
-  assert.equal(card.querySelector(".k-morning-sky").textContent, "Mostly cloudy");
+  assert.equal(card.querySelector(".k-morning-sky").textContent, "Partly cloudy");
   assert.equal(card.querySelector(".k-morning-hilo").textContent, "High 24° · Low 12°");
   assert.deepEqual(texts(root, ".k-win-morning .k-sub"), ["Today's move", "Headlines"], "the two sub-headings are the page's own strings");
   assert.equal(card.querySelector(".k-morning-move").textContent, "Walk the dog");
@@ -73,7 +73,7 @@ test("a headline title of <b>x</b> is literal text: the card gets no b child (ev
   const { root, open } = mount();
   open({
     ...WINDOW,
-    weather: { temp: null, high: null, low: null, unit: "C", label: "<b>gray</b>" },
+    weather: { temp: null, high: null, low: null, unit: "C", sky: "<b>gray</b>" },
     move: { title: "<img src=x onerror=alert(1)>", minutes: null },
     headlines: [{ title: "<b>x</b>", source: "<script>alert(1)</script>" }],
   });
@@ -90,15 +90,21 @@ test("a headline title of <b>x</b> is literal text: the card gets no b child (ev
 
 test("a partial weather row leaves only the missing part out; zero is a temperature, not a gap", () => {
   const { root, open } = mount();
-  open({ ...WINDOW, weather: { temp: null, high: 24, low: null, unit: "C", label: "Sunny" }, move: null, headlines: [] });
+  open({ ...WINDOW, weather: { temp: null, high: 24, low: null, unit: "C", sky: "Sunny" }, move: null, headlines: [] });
   assert.equal(root.querySelector(".k-morning-temp"), null);
   assert.equal(root.querySelector(".k-morning-sky").textContent, "Sunny");
   assert.equal(root.querySelector(".k-morning-hilo").textContent, "High 24°");
   assert.equal(root.querySelector(".k-morning-empty"), null, "a weather row is something to show");
-  open({ ...WINDOW, weather: { temp: 0, high: null, low: -3, unit: "C", label: "" }, move: null, headlines: [] });
+  open({ ...WINDOW, weather: { temp: 0, high: null, low: -3, unit: "C", sky: "" }, move: null, headlines: [] });
   assert.equal(root.querySelector(".k-morning-temp").textContent, "0°C");
   assert.equal(root.querySelector(".k-morning-hilo").textContent, "Low -3°");
-  assert.equal(root.querySelector(".k-morning-sky"), null, "no empty label line");
+  assert.equal(root.querySelector(".k-morning-sky"), null, "no empty sky line");
+  // An unknown code is sky: null; an old-style label is never drawn.
+  open({ ...WINDOW, weather: { temp: 4, high: null, low: null, unit: "C", sky: null, label: "Springfield" }, move: null, headlines: [] });
+  assert.equal(root.querySelector(".k-morning-sky"), null);
+  assert.ok(!root.textContent.includes("Springfield"), "the place name is not in the window");
+  open({ ...WINDOW, weather: { ...WINDOW.weather, sky: "Cloudy" }, move: null, headlines: [] });
+  assert.equal(root.querySelector(".k-morning-sky").textContent, "Cloudy");
   assert.equal(morningHighLow((k) => STRINGS.es[k] ?? k, { high: 1, low: 2 }), "Máx 1° · Mín 2°", "es fills the same template");
 });
 
@@ -119,11 +125,15 @@ test("kiosk.js reports the morning kind in CAPS.kinds (the server takes the less
   assert.match(lit, /kinds: \["card", "timer", "nowplaying", "morning"\]/);
 });
 
-test("en and es both carry the four morning strings, with the same placeholders in the high/low template", () => {
+test("en and es both carry the four morning strings and the eight sky words, with the same placeholders in the high/low template", () => {
   for (const L of ["en", "es"]) {
-    for (const k of ["morning_move", "morning_news", "morning_empty", "morning_hilo"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
+    for (const k of ["morning_move", "morning_news", "morning_empty", "morning_hilo", "wx_clear", "wx_partly", "wx_cloudy", "wx_fog", "wx_drizzle", "wx_rain", "wx_snow", "wx_storm"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
     assert.deepEqual((STRINGS[L].morning_hilo.match(/\{\w+\}/g) || []).sort(), ["{high}", "{low}"]);
   }
+  assert.equal(STRINGS.en.wx_cloudy, "Cloudy");
+  assert.equal(STRINGS.es.wx_cloudy, "Nublado");
+  assert.equal(STRINGS.en.wx_storm, "Thunderstorms");
+  assert.equal(STRINGS.es.wx_clear, "Despejado");
   assert.equal(STRINGS.en.morning_move, "Today's move");
   assert.equal(STRINGS.es.morning_move, "Movimiento de hoy");
   assert.equal(STRINGS.en.morning_news, "Headlines");

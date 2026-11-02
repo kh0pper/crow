@@ -99,7 +99,7 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
       if (w.weather) {
         const row = el("div", "k-morning-weather");
         if (w.weather.temp != null) row.append(el("p", "k-morning-temp", `${w.weather.temp}°${w.weather.unit || ""}`));
-        if (w.weather.label) row.append(el("p", "k-morning-sky", w.weather.label));
+        if (w.weather.sky) row.append(el("p", "k-morning-sky", w.weather.sky));
         const hilo = morningHighLow(t, w.weather);
         if (hilo) row.append(el("p", "k-morning-hilo", hilo));
         if (row.childNodes.length) { card.append(row); shown++; }
