@@ -357,7 +357,7 @@ test("control({planMode:true}) sends /plan on via promptAckOnly (ack-only, no ag
   const s = await spawned(engine);
   const pi = state.instances[0];
 
-  const r = await engine.control(s.sessionId, { planMode: true });
+  const r = await engine.control(s.sessionId, { principal: "owner", planMode: true });
 
   assert.deepEqual(pi.ackOnlyCalls.map((c) => c.message), ["/plan on"], "never bare /plan — that toggles");
   assert.equal(pi.turns.length, 0, "promptAckOnly must never leave an agent_end waiter behind");
@@ -369,7 +369,7 @@ test("control({planMode:false}) sends /plan off via promptAckOnly", async () => 
   const s = await spawned(engine);
   const pi = state.instances[0];
 
-  const r = await engine.control(s.sessionId, { planMode: false });
+  const r = await engine.control(s.sessionId, { principal: "owner", planMode: false });
 
   assert.deepEqual(pi.ackOnlyCalls.map((c) => c.message), ["/plan off"]);
   assert.equal(pi.turns.length, 0);
@@ -382,7 +382,7 @@ test("control({planMode}) is refused with turn_in_progress while a turn is in fl
   await engine.message(s.sessionId, "long one");
 
   await assert.rejects(
-    () => engine.control(s.sessionId, { planMode: true }),
+    () => engine.control(s.sessionId, { principal: "owner", planMode: true }),
     (e) => e.code === "turn_in_progress"
   );
   assert.equal(state.instances[0].ackOnlyCalls.length, 0, "the switch never reached the child mid-turn");
@@ -395,7 +395,7 @@ test("control({planMode}) is refused while hibernating — plan mode needs a liv
   await tick();
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 
-  await assert.rejects(() => engine.control(s.sessionId, { planMode: true }));
+  await assert.rejects(() => engine.control(s.sessionId, { principal: "owner", planMode: true }));
   assert.equal(state.instances[0].ackOnlyCalls.length, 0);
 });
 
@@ -405,7 +405,7 @@ test("control({planMode}) propagates prompt_refused when the child's ack fails (
   state.promptAckScript = async (_pi, message) => ({ success: false, error: "no plan-mode extension loaded" });
 
   await assert.rejects(
-    () => engine.control(s.sessionId, { planMode: true }),
+    () => engine.control(s.sessionId, { principal: "owner", planMode: true }),
     (e) => e.code === "prompt_refused"
   );
 });
@@ -414,7 +414,7 @@ test("control(): non-boolean planMode is refused with bad_request", async () => 
   const { engine } = makeEngine();
   const s = await spawned(engine);
   await assert.rejects(
-    () => engine.control(s.sessionId, { planMode: "on" }),
+    () => engine.control(s.sessionId, { principal: "owner", planMode: "on" }),
     (e) => e.code === "bad_request"
   );
 });

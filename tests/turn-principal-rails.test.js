@@ -737,6 +737,22 @@ test("a non-owner can't pre-set the owner's next service turn: after a non-owner
   await engine.stop(r.sessionId);
 });
 
+test("on a project session a non-owner's message or steer can't open with a slash command", async () => {
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: BOT, principal: "owner" });
+  await tick();
+  for (const text of ["/plan off", "  /model other"]) {
+    await assert.rejects(engine.message(r.sessionId, text, [], { principal: "other" }), (e) => e && e.code === "not_owner_turn", text);
+  }
+  const pi = state.instances[state.instances.length - 1];
+  assert.equal(pi.sent.filter((m) => m.type === "prompt").length, 0, "nothing reached the child");
+  // Ordinary text from a non-owner is unchanged.
+  await engine.message(r.sessionId, "hello there", [], { principal: "other" });
+  await tick();
+  await endTurn(state.instances[state.instances.length - 1]);
+  await engine.stop(r.sessionId);
+});
+
 test("a child holding no blocks still lets a non-owner steer and answer (fix round 1)", async () => {
   const { engine, state } = makeEngine({ blocks: false });
   const r = await engine.spawn({ botId: BOT, principal: "owner" });

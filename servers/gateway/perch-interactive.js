@@ -2552,6 +2552,21 @@ export function createInteractiveEngine({
    * anything reaches pi.send, exactly as message() refuses to deliver text into such a child. A
    * child holding no blocks keeps the old behaviour for every principal.
    */
+  /**
+   * Project services: a session whose bot belongs to a project can, sooner or later, run the
+   * owner's turn with service blocks, and that turn inherits the session's model, permission
+   * mode, folder and plan mode. So on such a session (or one already serving the owner, or a
+   * child holding blocks) only the owner changes them, and a non-owner's text may not open with
+   * a slash command (pi's session commands, e.g. /plan or /model, change the same state).
+   */
+  function projectControlLocked(s) {
+    return s.projectId != null || s.servicesPrincipal === "owner" || childHoldsServices(s);
+  }
+  function refuseNonOwnerSlash(s, text, principal) {
+    if (principal === "owner" || !projectControlLocked(s)) return;
+    if (/^\s*\//.test(String(text == null ? "" : text))) throw engineError("not_owner_turn");
+  }
+
   function refuseIfNotOwnerTurn(s, opts) {
     const principal = opts && typeof opts === "object" ? opts.principal : undefined;
     if (principal !== "owner" && childHoldsServices(s)) throw engineError("not_owner_turn");
@@ -3900,6 +3915,7 @@ export function createInteractiveEngine({
     // Project services: only an explicit "owner" is the owner's turn (no
     // default; injected text from a bundle or a hand-off is "other").
     const asOwner = principal === "owner";
+    refuseNonOwnerSlash(s, text, principal);
     await alignServicesChild(S, s, asOwner);
     // ---- one synchronous block: guards + reservation, no await between ----
     // (Voice hand-off: a refusal thrown in here has no turn to report, so
@@ -4065,6 +4081,7 @@ export function createInteractiveEngine({
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
     refuseIfNotOwnerTurn(s, opts);
+    refuseNonOwnerSlash(s, text, opts && typeof opts === "object" ? opts.principal : undefined);
     // Acceptance F3: a blank steer is a client bug (the drawer's composer
     // sent nothing), never a silent no-op — refused BEFORE the no_turn/
     // pi_gone checks so it is reported even when no turn is running.
@@ -4195,13 +4212,8 @@ export function createInteractiveEngine({
     // unreadable project counts as having connections (fail closed). The route passes the
     // request's principal.
     const hasPlanOff = hasPlanMode && opts.planMode === false;
-    if ((hasModel || hasPermissionMode || hasCwd || hasPlanOff) && opts.principal !== "owner") {
-      let offered = true;
-      if (s.projectId == null) offered = false;
-      else {
-        try { offered = (await connectionsFingerprintOf(s.projectId)) !== ""; } catch { offered = true; }
-      }
-      if (offered || s.servicesPrincipal === "owner" || childHoldsServices(s)) throw engineError("not_owner_turn");
+    if ((hasModel || hasPermissionMode || hasCwd || hasPlanOff) && opts.principal !== "owner" && projectControlLocked(s)) {
+      throw engineError("not_owner_turn");
     }
 
     // Model/thinking/planMode switches share the one child clock a turn
