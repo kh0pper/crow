@@ -345,3 +345,22 @@ test("a page for an extension WITHOUT a websocket token is unchanged: an SSO ses
     gw.server.close(); up.server.close();
   }
 });
+test("B2: after the owner has loaded the viewer page, an SSO upgrade and a cookieless one still never reach the backend", async () => {
+  const up = await startUpstream();
+  installBrowser(up.port);
+  const gw = await startGateway({ websocket: true });
+  try {
+    const before = gw.server.listenerCount("upgrade");
+    const page = await get(gw.port, "/proxy/browser/vnc.html", { cookie: `crow_session=${SESSION.owner}` });
+    assert.equal(page.status, 200, "the owner's page load is proxied");
+    assert.equal(gw.server.listenerCount("upgrade"), before, "the page load added no upgrade listener of its own");
+    for (const session of [SESSION.sso, null]) {
+      const status = await upgrade(gw.port, "/proxy/browser/websockify", session);
+      assert.notEqual(status, 101, `refused (${session ? "sso" : "no cookie"}, got ${status})`);
+    }
+    assert.notEqual(await upgrade(gw.port, "/websockify", null), 101, "an upgrade on another path is not proxied either");
+    assert.deepEqual(up.seen.ws, [], "the backend never saw an upgrade, so never the token");
+  } finally {
+    gw.server.closeAllConnections?.(); gw.server.close(); up.server.close();
+  }
+});

@@ -278,7 +278,7 @@ arm_deadman() {
     # Still alive after 120 s while compose recreates: starting the old container would race it.
     # The run's own TERM trap rolls back once its foreground command returns.
     echo "  if kill -0 \"\$pid\" 2>/dev/null && grep -qx recreate '$BACKUP/stage' 2>/dev/null; then"
-    echo "    echo \"deadman: the migration (pid \$pid) is still in its recreate step after 120 s: not starting the old container (its own rollback owns it)\" >&2"
+    echo "    echo \"deadman: the migration (pid \$pid) is still in its recreate step after 120 s: not starting the old container (its own rollback owns it). If it never finishes: kill $CONTAINER's migration (kill -TERM \$pid), then docker start $CONTAINER and echo resolved > $BACKUP/state\" >&2"
     echo "    exit 1"
     echo "  fi"
     echo "fi"
