@@ -37,8 +37,8 @@ import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { chmodSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -98,6 +98,19 @@ import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
 import { roleSnapshotPath } from "../../servers/shared/model-roles-env.js";
 
 const HOME = process.env.HOME || homedir();
+/** fd the contain tier's seccomp program reaches bwrap on (3 = --info-fd, 4 = MCP config, 5 = secret values). */
+/** "contain" and "contain-noseccomp" (an arch with no filter table) are both the contain tier. */
+const isContainTier = (tier) => typeof tier === "string" && tier.startsWith("contain");
+const SECCOMP_FD = 6; // 5 is SECRET_VALUES_FD: the two must never share a number
+function seccompFileFd(buf) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-seccomp-"));
+  const f = join(dir, "filter.bpf");
+  writeFileSync(f, buf, { mode: 0o600 });
+  const fd = openSync(f, "r");
+  unlinkSync(f);
+  rmdirSync(dir);
+  return fd;
+}
 const BRIDGE_APP_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 let containSwept = false;
@@ -719,7 +732,7 @@ export class PiRpc {
         // pi cannot open.
         if (contain.modelRolesEnv) Object.assign(env, contain.modelRolesEnv);
       }
-      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, hideDirs: [secretsHere, ...others] });
+      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, hideDirs: [secretsHere, ...others], seccompFd: contain ? SECCOMP_FD : null });
     } catch (e) {
       this._runContainCleanup();
       throw e;
@@ -731,14 +744,14 @@ export class PiRpc {
     // does. Both are reported by wrapPiSpawn, and a dir that a bound path
     // contains and cannot be masked refuses the spawn there. Nothing is
     // assumed hidden: a contain spawn with no report for a dir is not trusted.
-    if (launch.tier !== "contain" && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
+    if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
       this._runContainCleanup();
       throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
     }
     // Never hide fewer than were found: past a cap no real host reaches (bwrap
     // takes a few thousand args), the spawn is refused instead. The cap is
     // about mask arguments, which the contain tier does not use.
-    if (launch.tier !== "contain" && launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
+    if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
       this._runContainCleanup();
       throw new Error("pi sandbox: " + others.length + " Crow instance secrets dirs to hide (more than " + MAX_HIDDEN_INSTANCE_DIRS + "); refusing to start pi with any of them visible");
     }
@@ -752,7 +765,7 @@ export class PiRpc {
     // the same way or not bound at all (a dir no bind covers does not exist
     // inside the empty root).
     const hidden = launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) =>
-      launch.masked.includes(d) || (launch.tier === "contain" && (launch.unreachable || []).includes(d)));
+      launch.masked.includes(d) || (isContainTier(launch.tier) && (launch.unreachable || []).includes(d)));
     // Not hidden: the bot could read the keychain key and add its own hash to
     // the card list, so no value may hide text on cards (cardTrusted:false).
     const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });
@@ -800,11 +813,21 @@ export class PiRpc {
       stdio.push("pipe");
     }
     this.mcpDelivery = fdMode ? "fd" : "file";
+    // Contain tier: the seccomp program on fd SECCOMP_FD, from an already
+    // unlinked file (nothing to clean up, nothing a bot could find on disk).
+    let seccompFdHost = null;
     try {
+      if (launch.seccomp) {
+        seccompFdHost = seccompFileFd(launch.seccomp);
+        while (stdio.length < SECCOMP_FD) stdio.push("ignore");
+        stdio[SECCOMP_FD] = seccompFdHost;
+      }
       this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
     } catch (e) {
       this._runContainCleanup();
       throw e;
+    } finally {
+      if (seccompFdHost != null) { try { closeSync(seccompFdHost); } catch {} }
     }
     // A spawn that fails asynchronously (ENOENT) emits 'error' and no 'exit'.
     this.proc.on("error", () => this._runContainCleanup());
