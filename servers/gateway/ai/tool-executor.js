@@ -214,11 +214,22 @@ function resolveToolCategory(action) {
  *                                        for the owner's own dashboard chat (the
  *                                        route sets it). Anything else is not the
  *                                        owner's (plan decision 1).
+ * @param {Map<string, object>} [opts.serviceRoute]  the conversation's pinned-project
+ *                                        service tools (Task 20: listProjectServiceTools).
+ *                                        Checked before every other route, since those
+ *                                        names (mcp__<block>__<tool>) are disjoint from
+ *                                        the crow_* surface.
+ * @param {function} [opts.serviceCall]   (name, args) → {result, isError} for a name in
+ *                                        serviceRoute (callProjectServiceTool).
  */
 export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
   const defaultDeliverTo = opts.defaultDeliverTo || null;
+  // Project services: only the dashboard chat passes these, and only for the conversation's
+  // pinned project. Unset everywhere else (voice, one-shot, a bound bot).
+  const serviceRoute = opts.serviceRoute instanceof Map ? opts.serviceRoute : null;
+  const serviceCall = typeof opts.serviceCall === "function" ? opts.serviceCall : null;
   // Project services: a job crow_delegate enqueues is the owner's own turn only when this executor serves
   // the owner's dashboard chat. Every other executor (voice, one-shot, a bound bot) leaves it NULL.
   const jobPrincipal = opts.principal === "owner" ? "owner" : null;
@@ -262,6 +273,14 @@ export function createToolExecutor(opts = {}) {
    */
   async function executeTool(name, args) {
     try {
+      // Project services first: an mcp__<block>__<tool> name belongs to the conversation's
+      // pinned project's connections and to nothing else. A route without a caller is a
+      // listing bug, not a fall-through (no category or add-on can own that name).
+      if (serviceRoute && serviceRoute.has(name)) {
+        if (!serviceCall) return { result: `Unknown tool: ${name}`, isError: true };
+        return await serviceCall(name, args);
+      }
+
       // Cross-instance routing (voice). Unwrap the crow_tools proxy so a remote
       // tool hidden behind it still routes remotely. Only names a selected remote
       // capability owns (routeMap) are routed; everything else falls through to

@@ -30,8 +30,12 @@ import { fixedWindowLimit } from "../middleware/rate-limit.js";
 import { recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { parseCookies } from "../dashboard/auth.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
+import { resolveScope } from "../dashboard/shell/request.js";
+import { listProjectServiceTools, callProjectServiceTool } from "../services/project-tools.js";
 import { t, fill, SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { appendDates } from "../../shared/relative-dates.js";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 import { createContextEchoGate } from "../voice/context-echo.js";
 
 /** Sliding window: max messages to send to AI */
@@ -152,6 +156,69 @@ export function chatStreamOptionsFor(cfg, signal) {
     opts.chatTemplateKwargs = cfg.chatTemplateKwargs;
   }
   return opts;
+}
+
+/**
+ * The project a shell scope names, or null (Everything, Unassigned, anything unrecognised).
+ * Task 20 pins a conversation to ONE project; the other scopes store NULL.
+ */
+export function projectIdOfScope(scope) {
+  const id = Number(scope?.projectId);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/** A conversation's stored project_id (a legacy row without one: null). */
+function storedProjectId(conversation) {
+  const id = Number(conversation?.project_id);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * The project a NEW conversation is pinned to: the shell's scope when it names one project
+ * (resolveScope: ?project=, else the scope cookie, else Everything). A failed lookup leaves
+ * the thread unpinned rather than failing the create.
+ */
+async function conversationProjectId(db, req) {
+  try {
+    const { scope } = await resolveScope(req, db);
+    return projectIdOfScope(scope);
+  } catch (err) {
+    console.warn("[chat] scope lookup failed, conversation unpinned:", err.message);
+    return null;
+  }
+}
+
+/**
+ * Which project — and which project services — a dashboard chat turn may use (Task 20).
+ *
+ * The project comes ONLY from the conversation's stored row, so a cookie or ?project= change
+ * mid-thread never moves it and a legacy thread with NULL project_id gets no services. Even
+ * inside a project the tools are the owner's own: only a local, off-box password session
+ * (Task 16's isLocalPasswordSessionOn) gets them, and then the executor is created with
+ * principal "owner" (crow_delegate's jobs stamp owner too).
+ *
+ * deps are test seams: isLocalPasswordSessionOn, listTools, crowHome.
+ * @returns {Promise<{projectId: number|null, principal: "owner"|null,
+ *                    tools: object[], route: Map<string, {uuid: string, toolName: string}>}>}
+ */
+export async function chatServiceScope(db, req, conversation, deps = {}) {
+  const projectId = storedProjectId(conversation);
+  const none = { projectId, principal: null, tools: [], route: new Map() };
+  if (projectId == null) return none;
+
+  const isOwnerSession = deps.isLocalPasswordSessionOn || isLocalPasswordSessionOn;
+  let owner = false;
+  try { owner = (await isOwnerSession(db, req)) === true; } catch { owner = false; }
+  if (!owner) return none;
+
+  const list = deps.listTools || listProjectServiceTools;
+  const { tools, route } = await list(db, { projectId, crowHome: deps.crowHome });
+  return {
+    projectId,
+    principal: "owner",
+    tools: Array.isArray(tools) ? tools : [],
+    route: route instanceof Map ? route : new Map(),
+  };
 }
 
 export default function chatRouter(dashboardAuth) {
@@ -352,14 +419,15 @@ export default function chatRouter(dashboardAuth) {
       }
 
       const result = await db.execute({
-        sql: `INSERT INTO chat_conversations (title, provider, model, system_prompt, profile_id)
-              VALUES (?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO chat_conversations (title, provider, model, system_prompt, profile_id, project_id)
+              VALUES (?, ?, ?, ?, ?, ?)`,
         args: [
           title || "New conversation",
           provider,
           convModel,
           system_prompt || null,
           profileId,
+          await conversationProjectId(db, req),
         ],
       });
 
@@ -550,17 +618,19 @@ export default function chatRouter(dashboardAuth) {
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
 
     const db = createDbClient();
-    const toolExecutor = createToolExecutor();
+    const crowHome = resolveCrowHome();
+    // Created once the conversation is read: its stored project_id decides whether the executor
+    // carries the pinned project's service route (Task 20). Nothing else changes for it.
+    let toolExecutor = null;
+    let serviceTools = [];
 
     // Shared SSE primitive — handles heartbeats, keep-alive, EPIPE, and
     // idempotent close. See servers/gateway/streams/sse.js.
     const chatStream = openStream(res);
     if (!chatStream) {
-      // SSE cap exceeded — 503 already sent. db + toolExecutor were opened
-      // above (before the cap check); release them so a 503 retry storm at the
-      // cap doesn't leak an FD + a tool executor per rejected request.
+      // SSE cap exceeded — 503 already sent. Release the DB client opened above so a 503 retry
+      // storm at the cap doesn't leak an FD per rejected request.
       try { db.close(); } catch {}
-      try { await toolExecutor.close(); } catch {}
       return;
     }
     const { send: sendEvent, close: closeStream } = chatStream;
@@ -587,6 +657,19 @@ export default function chatRouter(dashboardAuth) {
         return;
       }
       const conversation = convRows[0];
+
+      // Project services (Task 20): the conversation's STORED project, and only for the owner's
+      // own local password session. The scope cookie is never consulted here, so changing it
+      // mid-thread cannot move the tools; a legacy row with NULL project_id gets none.
+      const serviceScope = await chatServiceScope(db, req, conversation, { lang, crowHome });
+      serviceTools = serviceScope.tools;
+      toolExecutor = createToolExecutor(serviceScope.principal === "owner"
+        ? {
+            principal: "owner",
+            serviceRoute: serviceScope.route,
+            serviceCall: (name, args) => callProjectServiceTool(db, serviceScope.route, name, args, { crowHome, lang }),
+          }
+        : {});
 
       // Save user message
       const { content, attachments, model: bodyModel, provider: bodyProvider } = req.body || {};
@@ -783,8 +866,10 @@ export default function chatRouter(dashboardAuth) {
         customPrompt: conversation.system_prompt || undefined,
       });
 
-      // Get MCP tools for AI
+      // Get MCP tools for AI. A pinned project's service tools are appended after the crow_*
+      // surface; their mcp__ names are disjoint from it.
       const tools = getChatTools();
+      if (serviceTools.length) tools.push(...serviceTools);
 
       // One `now` for the whole request: the stamped user message is byte-identical in every tool round.
       const turnNow = new Date();
@@ -999,7 +1084,7 @@ export default function chatRouter(dashboardAuth) {
       } catch {}
     } finally {
       activeGenerations.delete(convId);
-      await toolExecutor.close();
+      if (toolExecutor) await toolExecutor.close();
       db.close();
       closeStream();
     }
