@@ -15,7 +15,7 @@ export const PROFILES = Object.freeze({
 });
 /** How a display with NO stored profile is read (never stored as data). */
 export const DEFAULT_PROFILE = "pi3";
-export const PAGE_KINDS = Object.freeze(["card", "app", "media", "camera", "launcher", "timer", "nowplaying", "toast", "choices"]);
+export const PAGE_KINDS = Object.freeze(["card", "app", "media", "camera", "launcher", "timer", "nowplaying", "morning", "toast", "choices"]);
 /** The window store holds this many per display, whatever a profile allows. */
 const STORE_MAX_WINDOWS = 4;
 const int = (v, lo, hi, d) => (Number.isInteger(v) ? Math.min(hi, Math.max(lo, v)) : d);

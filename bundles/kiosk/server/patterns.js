@@ -58,6 +58,12 @@ export function parseOpen(transcript, { pull = true } = {}) {
   const name = slot(w, v.length);
   return name.length <= 6 ? { name: name.join(" ") } : null;
 }
+/** The words after an open verb, leading article kept ("open my morning" → "my morning"): an item may be named by its whole name. */
+function openRest(transcript) {
+  const w = words(transcript, OPEN_MAX_WORDS);
+  const v = w && [...OPEN_VERBS, ...PULL_VERBS].find((p) => startsWith(w, p));
+  return v ? w.slice(v.length).join(" ") : "";
+}
 
 // ── a spelled call sign (STT quality, first fix) ───────────────────────────────────────────────────
 // Letter names as speech-to-text writes them, en + es. Words that are also ordinary English words ("see", "you",
@@ -194,8 +200,18 @@ const plain = (transcript) => spokenWords(transcript);
 const norm = (s) => (spokenWords(String(s ?? "").slice(0, 80)) || []).join(" ");
 const itemNames = (i) => [i?.title, ...(Array.isArray(i?.aliases) ? i.aliases : [])].map(norm).filter(Boolean);
 /** Does the transcript contain the whole title (or an alias) of one of this display's items? */
+// An item with tail: true is named only when its name ENDS the sentence (polite words after it aside):
+// "can you open my morning" names it, "can you move my morning alarm" does not.
+const TAIL_FILLER = new Set(["please", "now", "por", "favor", "ahora"]);
+function endsWithName(w, run) {
+  let end = w.length;
+  while (end > 0 && TAIL_FILLER.has(w[end - 1])) end -= 1;
+  return end >= run.length && run.every((x, k) => w[end - run.length + k] === x);
+}
 function namesItem(w, items) {
-  for (const i of Array.isArray(items) ? items.slice(0, 64) : []) for (const n of itemNames(i)) if (hasRun(w, n.split(" "))) return true;
+  for (const i of Array.isArray(items) ? items.slice(0, 64) : []) {
+    for (const n of itemNames(i)) if (i.tail === true ? endsWithName(w, n.split(" ")) : hasRun(w, n.split(" "))) return true;
+  }
   return false;
 }
 
@@ -594,6 +610,22 @@ export function lookupItem(items, name) {
   return pre.length >= 2 && pre.length <= 4 ? { many: pre } : null;
 }
 
+/**
+ * "Show my morning" / "show me what's playing": a show verb whose rest is EXACTLY an item's name or alias opens that
+ * item at T1. Anything else that starts with "show" ("show me a recipe", "show my notes") is left to the card rules.
+ */
+const SHOW_VERBS = [["show", "me"], ["show"]];
+export function parseShowItem(transcript, items) {
+  const w = words(transcript, OPEN_MAX_WORDS);
+  if (!w) return null;
+  const v = SHOW_VERBS.find((p) => startsWith(w, p));
+  if (!v) return null;
+  const names = [norm(slot(w, v.length).join(" ")), norm(w.slice(v.length).join(" "))].filter(Boolean);
+  if (!names.length || !Array.isArray(items)) return null;
+  const hits = items.filter((i) => itemNames(i).some((n) => names.includes(n)));
+  return hits.length === 1 ? hits[0] : null;
+}
+
 /** A bare answer to "Which one?" is a few words: longer than this, it is a new sentence for the model. */
 export const CHOICE_MAX_WORDS = 8;
 
@@ -608,10 +640,13 @@ export function matchT1(transcript, ctx) {
   if (ctx.media?.active?.(ctx.deviceId) === true) { const verb = transportWords(transcript); if (verb) return { verb }; }
   const o = parseOpen(transcript);
   if (o) {
-    const hit = lookupItem(ctx.items || [], o.name);
+    const rest = openRest(transcript);
+    const hit = lookupItem(ctx.items || [], o.name) || (rest && rest !== o.name ? lookupItem(ctx.items || [], rest) : null);
     if (hit?.match) return { verb: "open", app: hit.match.id };
     if (hit?.many) return { verb: "choices", names: hit.many.map((i) => i.title) };
   }
+  const shown = parseShowItem(transcript, ctx.items);
+  if (shown) return { verb: "open", app: shown.id };
   if (!(ctx.sources || []).length) return null;
   const p = parsePlay(transcript);
   // callSign: the request was written as a call sign, so a near spelling of one may be asked about (never played).

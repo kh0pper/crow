@@ -95,3 +95,19 @@ html.k-ringing, html.k-ringing body { background: var(--k-teal-soft); }
 
 /* Review H3: the tap was heard; the microphone is opening. */
 #bird.is-starting { opacity: .7; transform: scale(.97); transition: transform .1s, opacity .1s; }
+
+/* Morning (For You §13): large type, text only. */
+.k-win-morning{display:grid;align-content:start;gap:6px}
+.k-morning-weather{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 16px}
+.k-morning-weather p,.k-morning-move,.k-morning-empty,.k-morning-minutes,.k-morning-news,.k-morning-news p{margin:0}
+.k-morning-temp{font-size:4rem;font-weight:800;line-height:1.05}
+.k-morning-sky,.k-morning-move,.k-morning-empty,.k-morning-news li{font-size:1.6rem}
+.k-morning-move{font-weight:700}
+.k-morning-empty,.k-morning-hilo,.k-morning-minutes,.k-morning-source{color:var(--k-dim)}
+.k-win-morning .k-sub{margin:6px 0 0}
+.k-morning-news{padding-left:1.2em}
+.k-morning-news li{overflow-wrap:anywhere;line-height:1.25}
+.k-morning-news li:nth-child(n+4){display:none}
+.k-morning-source{font-size:.6em}
+@media (max-width:599px){.k-morning-temp{font-size:3rem}.k-morning-sky,.k-morning-move,.k-morning-empty,.k-morning-news li{font-size:1.2rem}}
+@media (max-height:520px) and (min-width:600px){.k-win-morning{gap:2px}.k-morning-temp{font-size:3.2rem}.k-morning-sky,.k-morning-move,.k-morning-news li{font-size:1.3rem}}

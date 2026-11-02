@@ -13,6 +13,16 @@ export function formatRemaining(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+const MORNING_HEADLINES = 3;
+/** "High 24° · Low 12°" from the page's template, leaving out a half whose number is missing. */
+export function morningHighLow(t, wx) {
+  const vals = { high: wx?.high ?? null, low: wx?.low ?? null };
+  return t("morning_hilo").split(" · ")
+    .filter((part) => Object.entries(vals).every(([k, v]) => v != null || !part.includes(`{${k}}`)))
+    .map((part) => Object.entries(vals).reduce((s, [k, v]) => (v == null ? s : s.replaceAll(`{${k}}`, String(v))), part))
+    .join(" · ");
+}
+
 /** The now-playing window's buttons: [glyph, label key, verb] (the pause/play and mute pairs pick by state). */
 const NP_BUTTONS = [["⏮", "media_previous", "previous"], ["⏯", null, null], ["⏭", "media_next", "next"], ["−", "media_quieter", "volume_down"], ["+", "media_louder", "volume_up"], ["🔇", null, null]];
 
@@ -84,6 +94,35 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
       const ol = el("ol", "k-steps");
       w.steps.forEach((s, i) => ol.append(el("li", i === w.step ? "is-current" : null, s)));
       card.append(ol);
+    } else if (w.kind === "morning") {
+      let shown = 0;
+      if (w.weather) {
+        const row = el("div", "k-morning-weather");
+        if (w.weather.temp != null) row.append(el("p", "k-morning-temp", `${w.weather.temp}°${w.weather.unit || ""}`));
+        if (w.weather.sky) row.append(el("p", "k-morning-sky", w.weather.sky));
+        const hilo = morningHighLow(t, w.weather);
+        if (hilo) row.append(el("p", "k-morning-hilo", hilo));
+        if (row.childNodes.length) { card.append(row); shown++; }
+      }
+      if (w.move) {
+        card.append(el("h3", "k-sub", t("morning_move")));
+        card.append(el("p", "k-morning-move", w.move.title));
+        if (typeof w.move.minutes === "number") card.append(el("p", "k-morning-minutes", `${w.move.minutes} min`));
+        shown++;
+      }
+      if (w.headlines?.length) {
+        card.append(el("h3", "k-sub", t("morning_news")));
+        const ul = el("ul", "k-morning-news");
+        for (const h of w.headlines.slice(0, MORNING_HEADLINES)) {
+          const li = el("li");
+          li.append(el("p", "k-morning-headline", h.title));
+          if (h.source) li.append(el("p", "k-morning-source", h.source));
+          ul.append(li);
+        }
+        card.append(ul);
+        shown++;
+      }
+      if (!shown) card.append(el("p", "k-morning-empty", t("morning_empty")));
     } else {
       for (const b of w.blocks || []) {
         if (b.type === "text") card.append(el("p", null, b.text));
