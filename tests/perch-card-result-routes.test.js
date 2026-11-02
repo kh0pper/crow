@@ -135,9 +135,13 @@ const card = (id) => tq("SELECT * FROM tasks_items WHERE id=?", id)[0];
 const result = (id) => tq("SELECT * FROM board_results WHERE id=?", id)[0];
 const muts = (id, verb) => tq("SELECT * FROM board_mutations WHERE item_id=? AND verb=?", id, verb);
 
-/** The extra a bot's board call carries: signed bot headers, plus a signed Perch thread when given. */
+/** The extra a bot's board call carries: signed bot headers, plus a signed Perch thread when given.
+ *  Without a thread the call is a job's (a signed job id): a bot's card writes come from its
+ *  Perch chat or a job, never a bare channel turn. */
 function extra(botId, threadId) {
-  const headers = { "x-crow-actor-kind": "bot", "x-crow-actor-id": botId, "x-crow-actor-sig": sig.signBoardActor({ botId }) };
+  const jobId = threadId ? null : "job-" + botId;
+  const headers = { "x-crow-actor-kind": "bot", "x-crow-actor-id": botId, "x-crow-actor-sig": sig.signBoardActor({ botId, jobId }) };
+  if (jobId) headers["x-crow-job-id"] = jobId;
   if (threadId) {
     headers["x-crow-actor-thread"] = threadId;
     headers["x-crow-actor-gateway"] = "perch";

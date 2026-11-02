@@ -373,7 +373,10 @@ test("lane A: bot_jobs.worker_pid is the claiming process's pid (a move to child
 
 test("crow-messages, discord and gmail turns get no blocks (decision 1): config without a /services-tools/ url, the warning, csv without the service", { timeout: 60_000 }, async () => {
   AS._resetActorKeyForTest(); AS.initGatewayActorKey();
-  const today = bridge.buildToolsCsv(hankDef(), { resolved: RESOLVED }).csv;
+  // Today's channel-turn csv: a project bot whose tracker shows cards gets the board's READ
+  // verbs on a channel turn (bot-world withBoardTools readOnly), and no service names.
+  const { withBoardTools } = await import("../scripts/pi-bots/bot-world.mjs");
+  const today = bridge.buildToolsCsv(await withBoardTools(hankDef(), { wanted: true, readOnly: true }), { resolved: RESOLVED }).csv;
   for (const gateway of ["crow-messages", "discord", "gmail"]) {
     const { r, logs, cap } = await inbound("hank", { gateway });
     assert.equal(r.action, "asked", gateway + ": " + JSON.stringify(r));
