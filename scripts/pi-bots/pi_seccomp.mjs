@@ -43,7 +43,14 @@ export const DENY_EPERM = Object.freeze([
   "init_module", "finit_module", "delete_module", "mount", "umount2", "pivot_root", "move_mount", "open_tree",
   "fsopen", "fsconfig", "fsmount", "fspick", "mount_setattr", "unshare", "setns", "swapon", "swapoff", "reboot",
   "syslog", "acct", "quotactl", "open_by_handle_at", "name_to_handle_at", "iopl", "ioperm", "lookup_dcookie",
+  // Review additions: another process's fds, its memory advice, quota and mount listing by fd,
+  // the mount API's newer open_tree_attr, chroot, and two x86-only legacy calls.
+  "pidfd_getfd", "process_madvise", "quotactl_fd", "open_tree_attr", "listmount", "statmount", "chroot",
+  "modify_ldt", "uselib",
 ]);
+/** Calls newer than the build box's kernel headers (numbers from the upstream uapi table, which
+ *  numbers every call from 424 on the same on all arches). The header cross-check test skips them. */
+export const NEWER_THAN_HEADERS = Object.freeze(["open_tree_attr"]);
 
 export const SYSCALLS = Object.freeze({
   x64: Object.freeze({
@@ -54,7 +61,8 @@ export const SYSCALLS = Object.freeze({
     name_to_handle_at: 303, open_by_handle_at: 304, setns: 308, process_vm_readv: 310, process_vm_writev: 311,
     finit_module: 313, kexec_file_load: 320, bpf: 321, userfaultfd: 323, io_uring_setup: 425, io_uring_enter: 426,
     io_uring_register: 427, open_tree: 428, move_mount: 429, fsopen: 430, fsconfig: 431, fsmount: 432, fspick: 433,
-    clone3: 435, mount_setattr: 442,
+    clone3: 435, mount_setattr: 442, uselib: 134, modify_ldt: 154, chroot: 161, pidfd_getfd: 438,
+    process_madvise: 440, quotactl_fd: 443, statmount: 457, listmount: 458, open_tree_attr: 467,
   }),
   arm64: Object.freeze({
     lookup_dcookie: 18, ioctl: 29, umount2: 39, mount: 40, pivot_root: 41, openat: 56, quotactl: 60, read: 63,
@@ -64,7 +72,8 @@ export const SYSCALLS = Object.freeze({
     open_by_handle_at: 265, setns: 268, process_vm_readv: 270, process_vm_writev: 271, finit_module: 273,
     bpf: 280, userfaultfd: 282, kexec_file_load: 294, io_uring_setup: 425, io_uring_enter: 426,
     io_uring_register: 427, open_tree: 428, move_mount: 429, fsopen: 430, fsconfig: 431, fsmount: 432,
-    fspick: 433, clone3: 435, mount_setattr: 442,
+    fspick: 433, clone3: 435, mount_setattr: 442, chroot: 51, pidfd_getfd: 438, process_madvise: 440,
+    quotactl_fd: 443, statmount: 457, listmount: 458, open_tree_attr: 467,
   }),
 });
 

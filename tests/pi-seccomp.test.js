@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 import {
-  buildSeccompProgram, SYSCALLS, DENY_EPERM, SECCOMP, CLONE_NEW_MASK, seccompSupported,
+  buildSeccompProgram, SYSCALLS, DENY_EPERM, SECCOMP, CLONE_NEW_MASK, seccompSupported, NEWER_THAN_HEADERS,
 } from "../scripts/pi-bots/pi_seccomp.mjs";
 
 const decode = (buf) => {
@@ -68,6 +68,7 @@ test("CLONE_NEW_MASK covers every namespace flag", () => {
 test("the x86_64 table matches the kernel header where it exists", { skip: !existsSync("/usr/include/x86_64-linux-gnu/asm/unistd_64.h") && "no header" }, () => {
   const h = readFileSync("/usr/include/x86_64-linux-gnu/asm/unistd_64.h", "utf8");
   for (const [name, n] of Object.entries(SYSCALLS.x64)) {
+    if (NEWER_THAN_HEADERS.includes(name) && !h.includes("__NR_" + name)) continue;
     const m = h.match(new RegExp("#define __NR_" + name + "\\s+(\\d+)"));
     assert.ok(m, name + " in header");
     assert.equal(Number(m[1]), n, name);
@@ -77,6 +78,7 @@ test("the x86_64 table matches the kernel header where it exists", { skip: !exis
 test("the aarch64 table matches asm-generic where it exists", { skip: !existsSync("/usr/include/asm-generic/unistd.h") && "no header" }, () => {
   const h = readFileSync("/usr/include/asm-generic/unistd.h", "utf8");
   for (const [name, n] of Object.entries(SYSCALLS.arm64)) {
+    if (NEWER_THAN_HEADERS.includes(name) && !h.includes("_" + name)) continue;
     const m = h.match(new RegExp("#define __NR(3264)?_" + name + "\\s+(\\d+)"));
     assert.ok(m, name + " in header");
     assert.equal(Number(m[2]), n, name);
@@ -132,4 +134,21 @@ test("integration: under the filter the denied syscalls fail with EPERM and ordi
     closeSync(fd);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the seccomp fd never shares a number with the bridge's other child fds", () => {
+  const src = readFileSync(new URL("../scripts/pi-bots/bridge.mjs", import.meta.url), "utf8");
+  const num = (name) => Number((src.match(new RegExp("const " + name + " = (\\d+)")) || [])[1]);
+  const seccomp = num("SECCOMP_FD");
+  const values = num("SECRET_VALUES_FD");
+  assert.ok(Number.isInteger(seccomp) && Number.isInteger(values), "both constants are found");
+  for (const other of [0, 1, 2, 3, 4, values]) assert.notEqual(seccomp, other, "fd " + other);
+});
+
+test("the review's additional syscalls are denied on both arches where they exist", () => {
+  for (const name of ["pidfd_getfd", "process_madvise", "quotactl_fd", "open_tree_attr", "listmount", "statmount", "chroot"]) {
+    assert.ok(DENY_EPERM.includes(name), name);
+    for (const arch of ["x64", "arm64"]) assert.ok(Number.isInteger(SYSCALLS[arch][name]), arch + " " + name);
+  }
+  for (const name of ["modify_ldt", "uselib"]) assert.ok(Number.isInteger(SYSCALLS.x64[name]), name);
 });
