@@ -31,6 +31,8 @@ import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } 
 import { createNewsSource, createMediaReader } from "./sources/news.js";
 import { createMusicSource, checkStorage, originOf } from "./sources/funkwhale.js";
 import { createEnvelopeHandler } from "./envelope.js";
+import { appImport } from "./app-root.js";
+import { loadMorningView, morningWindow, openMorningItem, shouldAutoOpenMorning, localDate, localHour } from "./morning-view.js";
 
 /** The music library's local setting: { api_origin, storage_origin } (both operator-entered; never synced). */
 export const MUSIC_SETTING = "kiosk_music";
@@ -336,6 +338,31 @@ export const TURN_CHECK_DEVICE = "turn-check";
 export const TURN_CHECK_CARD_TRIES = 3;
 const KIOSK_VERSION = (() => { try { return JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8")).version; } catch { return null; } })();
 
+/**
+ * The For You flag, read from core: the morning window is offered to crow_open, and opens on its own,
+ * only while For You is on. Core's own one-line flag is the fallback for a build that cannot resolve
+ * the app root — then the environment decides, exactly as core does.
+ */
+let forYouEnabled = (env = process.env) => env?.CROW_FOR_YOU === "1";
+try {
+  const flag = await appImport("servers/gateway/for-you/flag.js");
+  if (typeof flag?.forYouEnabled === "function") forYouEnabled = flag.forYouEnabled;
+} catch (err) { console.warn(`[kiosk] For You flag not read (${err?.message || err}): the environment decides`); }
+
+/**
+ * What crow_open may open on a display (the crow_open enum, built from ctx.items): what is playing
+ * when this instance has a source (the rule is unchanged), and — with For You on — the morning
+ * window. The phone overlay gets the same list as a paired kiosk.
+ */
+export function displayItems({ lang = "en", sources = [], forYou = forYouEnabled() } = {}) {
+  const L = lang === "es" ? "es" : "en";
+  const S = STRINGS[L];
+  const items = [];
+  if (Array.isArray(sources) && sources.length) items.push({ id: "now_playing", title: S.now_playing_title, aliases: L === "es" ? ["lo que suena"] : ["whats playing"] });
+  if (forYou === true) items.push({ id: "morning", title: S.morning_title, aliases: L === "es" ? ["mi mañana", "mañana"] : ["my morning", "morning"] });
+  return items;
+}
+
 export function createKioskRuntime(deps) {
   const now = deps.now || Date.now;
   const log = deps.log || ((m) => console.log(m));
@@ -425,8 +452,9 @@ export function createKioskRuntime(deps) {
     .catch((err) => log(`[kiosk] music settings not read: ${err.message}`)) : Promise.resolve();
   /**
    * The executor's context for one display turn (display-tools.js, tiers.js, executor.js): the play
-   * sources this instance has right now, what crow_open may open (now playing, once a source exists),
-   * the media session and its verbs, and this display's volume cap.
+   * sources this instance has right now, what crow_open may open (now playing, once a source exists,
+   * and the morning window while For You is on), the media session and its verbs, and this display's
+   * volume cap.
    */
   const displayCtx = (device, caps, emit, hooks = {}) => {
     const lang = device.kiosk_settings?.lang === "es" ? "es" : "en";
@@ -435,9 +463,13 @@ export function createKioskRuntime(deps) {
       store: wm, deviceId: device.id, caps, lang, emit, sources,
       // The phone overlay (a session display) or a paired kiosk: what turn.js records and the voice rules key on.
       surface: isSessionDisplayId(device.id) ? "phone" : "kiosk",
-      items: sources.length ? [{ id: "now_playing", title: STRINGS[lang].now_playing_title, aliases: lang === "es" ? ["lo que suena"] : ["whats playing"] }] : [],
+      items: displayItems({ lang, sources, forYou: forYouEnabled() }),
       media, maxVolume: Number(device.kiosk_settings?.max_volume) || 100,
       ...verbs,
+      // "Open my morning" is not a media verb: the view is read on the way (each part degrades on its own).
+      openItem: (i, c, S) => (i?.app === "morning"
+        ? openMorningItem({ store: wm, deviceId: c.deviceId, caps: c.caps, S, strict: c.strict === true, load: () => withDb((db) => loadMorningView({ db, lang: c.lang, crowHome: deps.crowHome, now })) })
+        : verbs.openItem(i, c, S)),
       ...(typeof hooks.onModelVerb === "function" ? { onModelVerb: hooks.onModelVerb } : {}),
     };
   };
@@ -552,19 +584,46 @@ export function createKioskRuntime(deps) {
     sweepWarmAt.set(d.id, t);
     warm(d);
   };
+  /**
+   * The morning window opens itself once per morning on an idle kiosk (Kevin's ruling, 11-02). The
+   * decision is the pure shouldAutoOpenMorning; the date is kept per display in memory and recorded
+   * only after the page really got the event, so a failed send leaves nothing behind and a later
+   * minute may still try. Never thrown out of the sweep (the caller catches and logs).
+   */
+  const morningOpenedAt = new Map();   // device id → the local date it was auto-opened
+  async function sweepMorning(id) {
+    const at = now();
+    const today = localDate(at);
+    const caps = hub?.capsOf?.(id) || null;
+    const go = shouldAutoOpenMorning({
+      hour: localHour(at), sessionDisplay: isSessionDisplayId(id), enabled: forYouEnabled() === true, kinds: caps?.kinds,
+      windows: wm.list(id), busy: hub?.isBusy?.(id) === true, mediaActive: media.active(id) === true,
+      lastDate: morningOpenedAt.get(id) || null, today,
+    });
+    if (!go) return false;
+    const lang = langOf(id);
+    const view = await withDb((db) => loadMorningView({ db, lang, crowHome: deps.crowHome, now: at }));
+    const { window } = wm.put(id, morningWindow(view, STRINGS[lang]));
+    if (hub.sendTo(id, { type: "wm", action: "open", window }) === true) { morningOpenedAt.set(id, today); return true; }
+    wm.close(id, window.id);   // the page never got it: leave nothing behind for the next try
+    return false;
+  }
   const sweep = (deps.setInterval || setInterval)(async () => {
+    const mornings = [];
     for (const id of hub.connectedIds()) {
       for (const w of wm.sweepIdle(id)) hub.sendTo(id, { type: "wm", action: "close", id: w.id });
       // Keep STT warm for an idle connected display (throttled to 10 min inside sttWarmup).
       const d = hub.deviceOf(id);
       if (d && !hub.isBusy(id)) sweepWarm(d);
+      // An idle kiosk (never the phone overlay) shows its morning without being asked.
+      mornings.push(sweepMorning(id).catch((err) => log(`[kiosk] morning sweep: ${err?.message}`)));
     }
     // Session displays: a login that ended closes its display within a minute even when idle,
     // and a display closed for longer than the grace period leaves nothing behind.
     const open = hub.revalidateSessions().catch((err) => log(`[kiosk] session sweep: ${err.message}`));
     expireSessionDisplays();
     // B3: audio handed to the player bar outlives the overlay, so its login is re-checked here with no socket open.
-    await Promise.all([open, revalidateBarDisplays().catch((err) => log(`[kiosk] session sweep: ${err.message}`))]);
+    await Promise.all([open, revalidateBarDisplays().catch((err) => log(`[kiosk] session sweep: ${err.message}`)), ...mornings]);
   }, 60_000);
   sweep.unref?.();
 

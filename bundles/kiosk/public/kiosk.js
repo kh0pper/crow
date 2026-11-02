@@ -24,7 +24,7 @@ const SESSION = document.documentElement.dataset.mode === "session";
  * Caps v2: what THIS page build can draw and this browser has. The server takes the lesser of this and the display's profile.
  * mobile / pointer / platform only feed the server's guess of the display type for a display nobody has typed yet.
  */
-const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer", "nowplaying"],
+const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer", "nowplaying", "morning"],
   mobile: navigator.userAgentData ? navigator.userAgentData.mobile === true : /Mobi|Android/i.test(navigator.userAgent), pointer: matchMedia("(pointer: coarse)").matches ? "coarse" : "fine", platform: String(navigator.platform || "").slice(0, 40) };
 /*
  * B3 bar mode: inside the dashboard's Talk to Crow overlay, opened with ?bar=1 (the dashboard does that only when its
