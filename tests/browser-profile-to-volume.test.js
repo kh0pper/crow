@@ -468,3 +468,13 @@ test("F1/F5 and the deadman's own checks, in the script", () => {
   assert.match(src, /journalctl --user -u \$\{DEADMAN_UNIT\}\.service/, "F4: where its log is");
   assert.match(src, /loginctl enable-linger/, "F8: the lingering requirement is documented");
 });
+
+test("M1/M2 (round-4 re-review): the pid is written before the deadman is armed; a run still alive in its recreate step is left to its own rollback", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../scripts/ops/browser-profile-to-volume.sh", import.meta.url), "utf8");
+  const pidAt = src.indexOf('echo "$$" > "$BACKUP/pid"'), armAt = src.indexOf("\narm_deadman\n");
+  assert.ok(pidAt > 0 && armAt > 0 && pidAt < armAt, "pid file first, then arm_deadman");
+  assert.match(src, /STAGE=recreate\necho recreate > "\$BACKUP\/stage"/, "the recreate step is recorded for the deadman");
+  assert.match(src, /grep -qx recreate '\$BACKUP\/stage'/, "the deadman reads it");
+  assert.match(src, /not starting the old container \(its own rollback owns it\)/);
+});

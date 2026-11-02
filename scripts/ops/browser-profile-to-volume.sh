@@ -275,6 +275,12 @@ arm_deadman() {
     echo "  kill -TERM \"\$pid\""
     echo "  i=0; while kill -0 \"\$pid\" 2>/dev/null && [ \$i -lt 120 ]; do sleep 1; i=\$((i+1)); done"
     echo "  grep -qxE 'done|rolled-back|replaced' '$BACKUP/state' 2>/dev/null && exit 0"
+    # Still alive after 120 s while compose recreates: starting the old container would race it.
+    # The run's own TERM trap rolls back once its foreground command returns.
+    echo "  if kill -0 \"\$pid\" 2>/dev/null && grep -qx recreate '$BACKUP/stage' 2>/dev/null; then"
+    echo "    echo \"deadman: the migration (pid \$pid) is still in its recreate step after 120 s: not starting the old container (its own rollback owns it)\" >&2"
+    echo "    exit 1"
+    echo "  fi"
     echo "fi"
     echo "img=\"\$('$dockerbin' inspect '$CONTAINER' --format '{{.Image}}' 2>/dev/null)\""
     echo "run=\"\$('$dockerbin' inspect '$CONTAINER' --format '{{.State.Running}}' 2>/dev/null)\""
@@ -377,8 +383,8 @@ STAGE=deadman
 mkdir -p "$BACKUP"
 chmod 700 "$INSTANCE_HOME/browser-profile-backup" "$BACKUP"
 echo armed > "$BACKUP/state"
+echo "$$" > "$BACKUP/pid"   # before arming: the deadman's pid check never sees an empty file
 arm_deadman
-echo "$$" > "$BACKUP/pid"
 say "deadman armed: $DEADMAN_UNIT (${CROW_MIGRATE_DEADMAN_SECS:-900}s; its log: journalctl --user -u ${DEADMAN_UNIT}.service)"
 
 # ---- 4. a graceful stop: Chromium flushes cookies and logins first ------------
@@ -457,6 +463,7 @@ chmod 600 "$ENV_FILE"
 RETAGGED=1
 "$DOCKER" tag "$NEXT_TAG" "$BUILD_NAME"
 STAGE=recreate
+echo recreate > "$BACKUP/stage"   # the deadman leaves a live run alone from here on
 say "recreating $CONTAINER with the new compose (no rebuild)..."
 ( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" "$DOCKER" compose -p "$PROJECT" up -d --no-build --force-recreate )
 STAGE=done

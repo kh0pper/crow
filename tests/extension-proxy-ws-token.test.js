@@ -15,20 +15,43 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProxyMiddleware } from "http-proxy-middleware";
+import { createDbClient } from "../servers/db.js";
+import { markFromLaptop } from "./helpers/off-box.js";
 
 const CROW_HOME = mkdtempSync(join(tmpdir(), "crow-proxy-wstoken-"));
 process.env.CROW_HOME = CROW_HOME;
-after(() => { try { rmSync(CROW_HOME, { recursive: true, force: true }); } catch {} });
+// The token-carrying viewer's page is the owner's own sign-in only now, so this
+// file needs real oauth_tokens rows; the owner gate reads crow.db through this.
+const DB_PATH = join(CROW_HOME, "crow.db");
+process.env.CROW_DB_PATH = DB_PATH;
+after(() => {
+  try { db.close(); } catch { /* never opened */ }
+  try { rmSync(CROW_HOME, { recursive: true, force: true }); } catch {}
+});
 
 const { default: extensionProxyFactory, readWsHostToken, upgradeFromOwnOrigin } =
   await import("../servers/gateway/routes/extension-proxy.js");
 
 const TOKEN = "a".repeat(8) + "0123456789abcdef".repeat(3) + "b".repeat(8);   // 64 chars, test value
 const REPO_MANIFEST = JSON.parse(readFileSync(new URL("../bundles/browser/manifest.json", import.meta.url), "utf8"));
+
+/** The owner's own sign-in: a plain 'dashboard' session (all that one is used
+ * for here — see tests/extension-proxy-owner-only.test.js for the session tags). */
+const OWNER_SESSION = "test-owner-session";
+const db = createDbClient(DB_PATH);
+await db.execute({
+  sql: "CREATE TABLE IF NOT EXISTS oauth_tokens (token TEXT PRIMARY KEY, token_type TEXT, client_id TEXT, scopes TEXT, expires_at TEXT)",
+  args: [],
+});
+await db.execute({
+  sql: "INSERT OR REPLACE INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)",
+  args: [createHash("sha256").update(OWNER_SESSION).digest("hex"), new Date(Date.now() + 3_600_000).toISOString()],
+});
 
 function installBrowser(port, envText) {
   const dir = join(CROW_HOME, "bundles", "browser");
@@ -67,8 +90,17 @@ test("the real proxy sets the token as the upstream Host on the WebSocket upgrad
 
   // The real http-proxy-middleware, captured through the factory's seam; the
   // upgrade is driven directly (setupWebSocket's own checks are tested below).
+  // dashboardAuth is stood in for (it refuses a bare-loopback peer outright): the
+  // stub sets req.dashboardSession as the real one does, and marks the request as
+  // the owner's laptop — a test's own call is from this machine, never the owner.
   const mws = [];
-  const { router } = extensionProxyFactory((req, res, next) => next(), {
+  const auth = (req, _res, next) => {
+    const m = /(?:^|;\s*)crow_session=([^;]+)/.exec(req.headers.cookie || "");
+    req.dashboardSession = m ? m[1] : undefined;
+    markFromLaptop(req);
+    next();
+  };
+  const { router } = extensionProxyFactory(auth, {
     createProxy: (opts) => { const mw = createProxyMiddleware(opts); mws.push(mw); return mw; },
   });
   const app = express(); app.use(router);
@@ -92,7 +124,7 @@ test("the real proxy sets the token as the upstream Host on the WebSocket upgrad
     assert.equal(seen.ws[1], TOKEN, "added later, read per upgrade, sent as the upstream Host");
 
     const page = await new Promise((resolve, reject) => {
-      http.get({ host: "127.0.0.1", port: gw.address().port, path: "/proxy/browser/vnc.html" }, (res) => {
+      http.get({ host: "127.0.0.1", port: gw.address().port, path: "/proxy/browser/vnc.html", headers: { cookie: `crow_session=${OWNER_SESSION}` } }, (res) => {
         let b = ""; res.on("data", (c) => (b += c)); res.on("end", () => resolve(b));
       }).on("error", reject);
     });

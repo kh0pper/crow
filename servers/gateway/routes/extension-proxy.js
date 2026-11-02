@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
+import { isLocalPasswordSession } from "../dashboard/local-session.js";
 
 // Respect CROW_HOME so a secondary instance (systemd unit with its own
 // CROW_HOME) proxies ITS extensions — not the primary's. Hardcoding ~/.crow
@@ -220,6 +221,29 @@ export async function authorizeExtensionUpgrade(req) {
 }
 
 /**
+ * The viewer page for a token-carrying extension (the browser's noVNC) is the
+ * OWNER's own sign-in only: the WebSocket token gives full control of the
+ * logged-in Chromium, and verifySession accepts any live dashboard session —
+ * one a paired peer's single sign-on minted (scopes 'dashboard sso …'), one
+ * from a login on this machine ('dashboard onhost'), or a request from this
+ * machine itself. isLocalPasswordSession is the same gate keychain saves,
+ * Media Hub and Services use for anything that reaches operator credentials.
+ *
+ * Mounted AFTER authMiddleware (which set req.dashboardSession from the
+ * crow_session cookie) and BEFORE the proxy, so the page is not served either.
+ * Extensions without a token never get this middleware.
+ */
+async function ownerOnlyViewer(req, res, next) {
+  // owner's own sign-in only: the token gives full control of the logged-in browser.
+  const owner = await isLocalPasswordSession(req).catch(() => false);
+  if (!owner) {
+    res.status(403).type("text/plain").send("Forbidden: the browser viewer is the owner's own sign-in only.\n");
+    return;
+  }
+  next();
+}
+
+/**
  * Create the extension proxy router and WebSocket setup function.
  *
  * @param {Function} authMiddleware - Dashboard auth middleware
@@ -340,8 +364,10 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
       },
     });
 
-    // Mount behind auth for HTTP requests
-    router.use(proxyPath, authMiddleware, proxyMiddleware);
+    // Mount behind auth for HTTP requests. A token-carrying viewer adds the
+    // owner gate (see ownerOnlyViewer) between the session check and the proxy.
+    if (ext.wsHostTokenEnv) router.use(proxyPath, authMiddleware, ownerOnlyViewer, proxyMiddleware);
+    else router.use(proxyPath, authMiddleware, proxyMiddleware);
     proxyInstances.push({ ext, proxyPath, proxyMiddleware });
 
     console.log(`  [proxy] Extension UI: ${ext.label} → ${proxyPath}/ → ${target}`);
@@ -383,11 +409,25 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
             return;
           }
           // W2-1: upgrades bypass Express, so enforce dashboard auth here.
-          authorizeExtensionUpgrade(req).then((ok) => {
+          authorizeExtensionUpgrade(req).then(async (ok) => {
             if (!ok) {
               socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
               socket.destroy();
               return;
+            }
+            // A token-carrying upgrade is the owner's own sign-in only: the token gives
+            // full control of the logged-in browser, and verifySession alone would also
+            // accept a peer's SSO session, an on-host login, or a request from this
+            // machine. authMiddleware never ran here, so set the session ourselves.
+            if (ext.wsHostTokenEnv) {
+              req.dashboardSession = parseCookies(req)["crow_session"];
+              // owner's own sign-in only: the token gives full control of the logged-in browser.
+              const owner = await isLocalPasswordSession(req).catch(() => false);
+              if (!owner) {
+                socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+                socket.destroy();
+                return;
+              }
             }
             proxyMiddleware.upgrade(req, socket, head);
           }).catch(() => {
