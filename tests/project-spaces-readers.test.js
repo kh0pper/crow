@@ -353,3 +353,24 @@ test("7. export shape: maker_export_learner profile has explicit cols; no worksp
 
   db.close();
 });
+
+test("6. archived projects: out of the AI's default list and projects://list; shown when asked", async () => {
+  const db = makeDb();
+  for (const [slug, name, status] of [["ai-live-t6", "T6 Live Project", "active"], ["ai-arch-t6", "T6 Archived Project", "archived"]]) {
+    await db.execute({
+      sql: `INSERT INTO project_spaces (slug, name, type, status, created_at, updated_at) VALUES (?, ?, 'general', ?, datetime('now'), datetime('now'))`,
+      args: [slug, name, status],
+    });
+  }
+  const { client } = await makeResearchClient(db);
+  const list = async (args) => (await client.callTool({ name: "crow_list_projects", arguments: args })).content[0].text;
+  const plain = await list({ limit: 100 });
+  assert.ok(plain.includes("T6 Live Project"), "a live project is listed");
+  assert.ok(!plain.includes("T6 Archived Project"), "an archived project is not, by default");
+  assert.ok((await list({ include_archived: true, limit: 100 })).includes("T6 Archived Project"), "include_archived lists it");
+  const onlyArchived = await list({ status: "archived", limit: 100 });
+  assert.ok(onlyArchived.includes("T6 Archived Project") && !onlyArchived.includes("T6 Live Project"), "status: archived lists only archived");
+  const res = await client.readResource({ uri: "projects://list" });
+  const names = JSON.parse(res.contents[0].text).map((p) => p.name);
+  assert.ok(names.includes("T6 Live Project") && !names.includes("T6 Archived Project"), "projects://list leaves archived out");
+});

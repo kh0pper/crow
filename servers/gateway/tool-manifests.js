@@ -46,7 +46,7 @@ export const TOOL_MANIFESTS = {
     voiceIntent: { en: ["project", "projects", "source", "sources", "citation", "citations", "cite", "bibliography", "research", "note", "notes", "reference", "references", "backend", "backends"], es: ["proyecto", "proyectos", "fuente", "fuentes", "cita", "citas", "citar", "bibliografia", "investigacion", "nota", "notas", "referencia", "referencias"] },
     tools: {
       crow_create_project: { params: "name, description?, type?, tags?", desc: "Create project" },
-      crow_list_projects: { params: "status?, type?, limit?, offset?", desc: "List projects" },
+      crow_list_projects: { params: "status?, include_archived?, type?, limit?, offset?", desc: "List projects (archived ones only when asked)" },
       crow_update_project: { params: "id, name?, description?, status?, type?, tags?", desc: "Update project" },
       crow_add_source: { params: "title, source_type, project_id?, backend_id?, url?, authors?, publication_date?, publisher?, doi?, isbn?, abstract?, content_summary?, full_text?, citation_apa?, retrieval_method?, tags?, relevance_score?", desc: "Add a source; Crow fetches its URL first (only fetched sources are citable)" },
       crow_fetch_source: { params: "id, force?", desc: "Re-fetch a source's page (Crow opens it)" },
