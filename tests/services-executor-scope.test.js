@@ -43,7 +43,8 @@ const { serviceById } = await import("../servers/shared/service-catalog.js");
 const { createDbClient } = await import("../servers/db.js");
 const { ensureWriteKey } = await import("../servers/gateway/keychain/store.js");
 const { createToolExecutor, getChatTools } = await import("../servers/gateway/ai/tool-executor.js");
-const { chatServiceScope, projectIdOfScope } = await import("../servers/gateway/routes/chat.js");
+const { chatServiceScope, chatExecutorOptions, projectIdOfScope } = await import("../servers/gateway/routes/chat.js");
+const { loopbackErrorText } = await import("../servers/gateway/loopback-tool-mount.js");
 
 const GH = "GITHUB_PERSONAL_ACCESS_TOKEN";
 const GH_TOKEN = "test-token-1";
@@ -169,6 +170,23 @@ test("sensitive skipped: a private connection contributes no tools; switched pri
   }
 });
 
+test("a cached tool name a model rejects is not advertised, warned about once", async () => {
+  setGithubCache([TOOL("whoami"), TOOL("search.repos")]);
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(" ")); };
+  try {
+    const first = await withDb((d) => PT.listProjectServiceTools(d, { projectId: P.spring, crowHome: HOME, onlyUuids: new Set([U.work]) }));
+    const second = await withDb((d) => PT.listProjectServiceTools(d, { projectId: P.spring, crowHome: HOME, onlyUuids: new Set([U.work]) }));
+    assert.deepEqual(first.tools.map((t) => t.name), ["mcp__github-work__whoami"]);
+    assert.ok(second.tools.every((t) => !t.name.includes("search")));
+    assert.equal(warnings.filter((w) => w.includes("mcp__github-work__search.repos")).length, 1, "one warning for the name");
+  } finally {
+    console.warn = original;
+    setGithubCache(DEFAULT_GITHUB_CACHE);
+  }
+});
+
 test("long names not advertised: a name over 64 characters is absent, warned about once", async () => {
   const longTool = `tool-${"x".repeat(40)}`;   // mcp__ + github-averylongaccount (23) + __ = 30, + 45
   const expected = `mcp__github-averylongaccount__${longTool}`;
@@ -205,6 +223,48 @@ test("masking: a child result carrying the connection's token reaches the chat a
 test("an unknown name refuses without touching a child", async () => {
   const r = await withDb((d) => PT.callProjectServiceTool(d, new Map(), "mcp__nope__whoami", {}, { crowHome: HOME }));
   assert.deepEqual(r, { result: "Unknown tool", isError: true });
+});
+
+test("a call that never answers returns the timeout copy, not the generic failure", async () => {
+  const route = new Map([["mcp__github-work__whoami", { uuid: U.work, toolName: "whoami" }]]);
+  const never = { callTool: () => new Promise(() => {}) };
+  const r = await withDb((d) => PT.callProjectServiceTool(d, route, "mcp__github-work__whoami", {}, {
+    crowHome: HOME, timeoutMs: 20, ensure: async () => ({ client: never }),
+  }));
+  assert.deepEqual(r, { result: loopbackErrorText("timeout", { lang: "en", tool: "whoami" }), isError: true });
+  assert.match(r.result, /Timed out/);
+});
+
+test("a call hands the child its budget and the turn's abort signal", async () => {
+  const ac = new AbortController();
+  let seen = null;
+  const route = new Map([["mcp__github-work__whoami", { uuid: U.work, toolName: "whoami" }]]);
+  const client = {
+    callTool: async (_params, _schema, opts) => { seen = opts; return { content: [{ type: "text", text: "ok" }] }; },
+  };
+  const r = await withDb((d) => PT.callProjectServiceTool(d, route, "mcp__github-work__whoami", {}, {
+    crowHome: HOME, signal: ac.signal, timeoutMs: 5_000, ensure: async () => ({ client }),
+  }));
+  assert.equal(r.isError, false, r.result);
+  assert.equal(seen.signal, ac.signal);
+  assert.equal(seen.timeout, 5_000);
+});
+
+test("busy, child_unavailable and any other failure get fixed text, never the thrown message", async () => {
+  const route = new Map([["mcp__github-work__whoami", { uuid: U.work, toolName: "whoami" }]]);
+  const cases = [
+    [new C.ChildError("busy"), "Busy, try again in a moment."],
+    [new C.ChildError("child_unavailable"), "This service isn't running right now."],
+    [new Error("SECRET-PATH /home/alex/.crow/private"), "whoami failed."],
+  ];
+  for (const [err, text] of cases) {
+    const r = await withDb((d) => PT.callProjectServiceTool(d, route, "mcp__github-work__whoami", {}, {
+      crowHome: HOME, ensure: async () => { throw err; },
+    }));
+    assert.equal(r.isError, true);
+    assert.equal(r.result, text);
+    assert.doesNotMatch(r.result, /SECRET-PATH/);
+  }
 });
 
 // ---- the executor and the advertised surface --------------------------------------------------
@@ -298,11 +358,55 @@ test("existing thread has none: a NULL project_id gets no tools, owner or not", 
 });
 
 test("the stored project wins over a different scope cookie: the request's cookie is never consulted", async () => {
-  const req = { cookies: { crow_scope: "home" }, query: { project: "home" } };
-  const { deps, seen } = scopedDeps(P.spring);
-  const scope = await chatServiceScope({}, req, conversation(P.spring), deps);
-  assert.equal(scope.projectId, P.spring);
-  assert.deepEqual(seen, [P.spring]);
+  const seen = [];
+  const deps = {
+    isLocalPasswordSessionOn: async () => true,
+    listTools: async (_db, opts) => {
+      seen.push(opts.projectId);
+      const name = `mcp__svc-${opts.projectId}__whoami`;
+      return {
+        tools: [{ name, description: "", inputSchema: { type: "object", properties: {} } }],
+        route: new Map([[name, { uuid: "u", toolName: "whoami" }]]),
+      };
+    },
+  };
+  // A real request names ANOTHER project in its scope cookie; the conversation row says spring.
+  const first = await chatServiceScope({}, { headers: { cookie: "crow_scope=home; theme=dark" } }, conversation(P.spring), deps);
+  assert.equal(first.projectId, P.spring);
+  assert.deepEqual(first.tools.map((t) => t.name), [`mcp__svc-${P.spring}__whoami`]);
+
+  // Changing the cookie mid-thread changes nothing: the stored row is the only project.
+  const second = await chatServiceScope({}, { headers: { cookie: "crow_scope=eight" } }, conversation(P.spring), deps);
+  assert.equal(second.projectId, P.spring);
+  assert.deepEqual(second.tools.map((t) => t.name), [`mcp__svc-${P.spring}__whoami`]);
+  assert.deepEqual(seen, [P.spring, P.spring]);
+});
+
+test("a failed service listing leaves the turn with no services, not an error", async () => {
+  const deps = {
+    isLocalPasswordSessionOn: async () => true,
+    listTools: async () => { const err = new Error("boom"); err.code = "ECONNREFUSED"; throw err; },
+  };
+  const scope = await chatServiceScope({}, {}, conversation(P.spring), deps);
+  assert.deepEqual(scope, { projectId: P.spring, principal: null, tools: [], route: new Map() });
+});
+
+test("the executor gets the route only for an owner session in a pinned project", () => {
+  const route = new Map([["mcp__github-work__whoami", { uuid: "u", toolName: "whoami" }]]);
+  const owner = chatExecutorOptions({ projectId: P.spring, principal: "owner", route });
+  assert.equal(owner.principal, "owner");
+  assert.equal(owner.serviceRoute, route);
+
+  for (const scope of [
+    { projectId: P.spring, principal: null, route: new Map() },   // not the owner's own session
+    { projectId: null, principal: "owner", route },               // a thread with no project
+    { projectId: P.spring, principal: "owner" },                  // no route listed
+    {},                                                           // no scope at all
+  ]) {
+    const opts = chatExecutorOptions(scope);
+    assert.ok(!("principal" in opts), "no principal");
+    assert.ok(!("serviceRoute" in opts), "no route");
+  }
 });
 
 test("projectIdOfScope: only a single-project scope pins a new conversation", () => {

@@ -189,6 +189,18 @@ async function conversationProjectId(db, req) {
 }
 
 /**
+ * The tool-executor options a chat turn's service scope earns: the owner principal and the
+ * service route ONLY for the owner's own session in a pinned project. Anything else gets an
+ * empty object, so the executor is created exactly as before (no principal, no route).
+ * @param {{projectId?: number|null, principal?: "owner"|null, route?: Map<string, object>}} scope
+ * @returns {{principal?: "owner", serviceRoute?: Map<string, object>}}
+ */
+export function chatExecutorOptions(scope) {
+  if (!scope || scope.principal !== "owner" || scope.projectId == null || !(scope.route instanceof Map)) return {};
+  return { principal: "owner", serviceRoute: scope.route };
+}
+
+/**
  * Which project — and which project services — a dashboard chat turn may use (Task 20).
  *
  * The project comes ONLY from the conversation's stored row, so a cookie or ?project= change
@@ -212,7 +224,16 @@ export async function chatServiceScope(db, req, conversation, deps = {}) {
   if (!owner) return none;
 
   const list = deps.listTools || listProjectServiceTools;
-  const { tools, route } = await list(db, { projectId, crowHome: deps.crowHome });
+  let listed;
+  try {
+    listed = await list(db, { projectId, crowHome: deps.crowHome });
+  } catch (err) {
+    // A listing failure costs the turn its services, never the answer: the executor is created
+    // below without a route. Only the class is logged (a message can carry paths).
+    console.warn("[chat] project services unavailable (" + ((err && err.code) || "error") + ")");
+    return none;
+  }
+  const { tools, route } = listed || {};
   return {
     projectId,
     principal: "owner",
@@ -663,11 +684,13 @@ export default function chatRouter(dashboardAuth) {
       // mid-thread cannot move the tools; a legacy row with NULL project_id gets none.
       const serviceScope = await chatServiceScope(db, req, conversation, { lang, crowHome });
       serviceTools = serviceScope.tools;
-      toolExecutor = createToolExecutor(serviceScope.principal === "owner"
+      const execOpts = chatExecutorOptions(serviceScope);
+      toolExecutor = createToolExecutor(execOpts.serviceRoute
         ? {
-            principal: "owner",
-            serviceRoute: serviceScope.route,
-            serviceCall: (name, args) => callProjectServiceTool(db, serviceScope.route, name, args, { crowHome, lang }),
+            ...execOpts,
+            serviceCall: (name, args) => callProjectServiceTool(db, execOpts.serviceRoute, name, args, {
+              crowHome, lang, signal: abortController.signal,
+            }),
           }
         : {});
 

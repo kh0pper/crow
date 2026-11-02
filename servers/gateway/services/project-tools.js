@@ -17,9 +17,13 @@
  *  - EVERY result passes through shapeServiceResult with the connection's injected values before
  *    it becomes text: this path bypasses the mount's own shaping, so a token a child echoes back
  *    must still reach the chat as [redacted].
- *  - Tool names over 64 characters are not advertised (models reject them); each name is warned
- *    about once per process. A duplicate name keeps the first connection in connectionsFor order.
+ *  - Tool names over 64 characters, and names carrying characters a model rejects (anything
+ *    outside [A-Za-z0-9_-]), are not advertised; each name is warned about once per process. A
+ *    duplicate name keeps the first connection in connectionsFor order.
+ *  - A call has its own budget (60 s by default) and accepts the caller's abort signal, so a
+ *    stopped chat turn cancels it; hitting the budget answers with the mount's timeout copy.
  */
+import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { blockNameFor } from "../../shared/service-catalog.js";
 import { connectionsFor, servableConnection } from "../../shared/service-connections.js";
 import { connectionBindingOk, isSensitiveConnection } from "../../shared/service-sensitivity.js";
@@ -31,11 +35,16 @@ import {
 
 /** The longest tool name a model accepts (I10, the same cap Task 18 applies to its blocks). */
 export const SERVICE_TOOL_NAME_MAX = 64;
+/** A name a model will accept: the mount's tool names are mcp__<block>__<tool>, nothing else. */
+export const SERVICE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** The mount's per-call budget (SERVICES_CALL_TIMEOUT_MS in services/mount.js). */
 export const SERVICE_CALL_TIMEOUT_MS = 60_000;
 const DEFAULT_SCHEMA = Object.freeze({ type: "object", properties: {} });
 /** The names already warned about (one console line per process per name). */
 const warnedLongNames = new Set();
+const warnedBadNames = new Set();
+/** The rejection reason of a call that used up its budget. */
+const CALL_TIMED_OUT = Symbol("service-call-timeout");
 /** The ChildError codes with their own fixed copy; any other failure is "<tool> failed.". */
 const FIXED_ERRORS = new Set(["busy", "child_unavailable", "not_installed", "not_active"]);
 
@@ -73,6 +82,14 @@ export async function listProjectServiceTools(db, { projectId = null, crowHome =
         }
         continue;
       }
+      // A tool name with a character a model rejects (e.g. "search.repos") is skipped whole.
+      if (!SERVICE_TOOL_NAME_RE.test(name)) {
+        if (!warnedBadNames.has(name)) {
+          warnedBadNames.add(name);
+          console.warn(`[services] tool name a model rejects, not advertised: ${name}`);
+        }
+        continue;
+      }
       // First wins: connectionsFor order is service_id, label_slug, id.
       if (route.has(name)) continue;
       route.set(name, { uuid: conn.uuid, toolName: tool.name });
@@ -92,6 +109,32 @@ function shapeToText(shaped) {
 }
 
 /**
+ * Race a client call against its budget (and the caller's abort signal). The rejection reason is
+ * CALL_TIMED_OUT for the budget, so the caller can answer with the mount's timeout copy rather
+ * than the generic failure. Whatever wins, the timer and the abort listener are dropped.
+ */
+function withBudget(promise, timeoutMs, signal) {
+  if (!(timeoutMs > 0)) return promise;
+  let timer = null;
+  let onAbort = null;
+  const budget = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(CALL_TIMED_OUT), timeoutMs);
+    timer.unref?.();
+  });
+  const aborted = signal
+    ? new Promise((_, reject) => {
+        if (signal.aborted) return reject(new Error("aborted"));
+        onAbort = () => reject(new Error("aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      })
+    : null;
+  return Promise.race([promise, budget, ...(aborted ? [aborted] : [])]).finally(() => {
+    if (timer) clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  });
+}
+
+/**
  * Call one listed service tool. Starts the child if needed, then shapes the raw result with the
  * values injected into that child before turning it into text.
  *
@@ -99,10 +142,13 @@ function shapeToText(shaped) {
  * @param {Map<string, {uuid: string, toolName: string}>} route the listing's route
  * @param {string} name the chat tool name
  * @param {object} args
- * @param {{crowHome?: string, lang?: string}} opts
+ * @param {{crowHome?: string, lang?: string, signal?: AbortSignal, timeoutMs?: number,
+ *          ensure?: Function}} opts  ensure is a test seam (defaults to ensureChild)
  * @returns {Promise<{result: string, isError: boolean}>}
  */
-export async function callProjectServiceTool(db, route, name, args, { crowHome = resolveCrowHome(), lang = "en" } = {}) {
+export async function callProjectServiceTool(db, route, name, args, {
+  crowHome = resolveCrowHome(), lang = "en", signal, timeoutMs = SERVICE_CALL_TIMEOUT_MS, ensure = ensureChild,
+} = {}) {
   const entry = route instanceof Map ? route.get(name) : null;
   if (!entry) return { result: "Unknown tool", isError: true };
   const { uuid, toolName } = entry;
@@ -116,9 +162,16 @@ export async function callProjectServiceTool(db, route, name, args, { crowHome =
 
   let raw;
   try {
-    const { client } = await ensureChild(db, uuid, { crowHome });
-    raw = await client.callTool({ name: toolName, arguments: args }, undefined, { timeout: SERVICE_CALL_TIMEOUT_MS });
+    const { client } = await ensure(db, uuid, { crowHome });
+    // The budget rides on the SDK call too, so a child that answers late is cancelled there.
+    const callOpts = { timeout: timeoutMs };
+    if (signal) callOpts.signal = signal;
+    raw = await withBudget(client.callTool({ name: toolName, arguments: args }, undefined, callOpts), timeoutMs, signal);
   } catch (err) {
+    // A call that used up its budget gets the mount's timeout copy. The SDK's own timeout is the
+    // same answer; a caller's abort is not a timeout.
+    const sdkTimeout = err && err.code === ErrorCode.RequestTimeout && !(signal && signal.aborted);
+    if (err === CALL_TIMED_OUT || sdkTimeout) return fail("timeout");
     // The child's own error text never reaches the chat; its class gets the mount's copy.
     const code = err instanceof ChildError ? err.code : null;
     return fail(FIXED_ERRORS.has(code) ? code : "failed");

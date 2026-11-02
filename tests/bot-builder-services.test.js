@@ -7,7 +7,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,7 @@ const { serviceById } = await import("../servers/shared/service-catalog.js");
 const { serviceToolsForBuilder, probeExtensions } = await import("../servers/gateway/dashboard/panels/bot-builder/data-queries.js");
 const { loadSources } = await import("../servers/gateway/dashboard/panels/bot-builder/sources.js");
 const { renderAbilities } = await import("../servers/gateway/dashboard/panels/bot-builder/tab-abilities.js");
-const { extensionTools } = await import("../scripts/pi-bots/ext_registry.mjs");
+const { extensionTools, isConnectionService } = await import("../scripts/pi-bots/ext_registry.mjs");
 const { t, translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
 
 const GH = "GITHUB_PERSONAL_ACCESS_TOKEN";
@@ -51,7 +51,7 @@ after(() => rmScratch(SCRATCH));
 // ---- scratch install -------------------------------------------------------------------------
 
 function writeInstall() {
-  for (const id of ["github", "notion", PLAIN]) mkdirSync(join(HOME, "bundles", id), { recursive: true });
+  for (const id of ["github", "notion", PLAIN, "arxiv", "canvas-lms"]) mkdirSync(join(HOME, "bundles", id), { recursive: true });
   for (const id of ["github", "notion"]) {
     writeFileSync(join(HOME, "bundles", id, "echo-control.json"), JSON.stringify({ spawnLog: SPAWNS }));
   }
@@ -62,6 +62,13 @@ function writeInstall() {
     github: { command: "node", args: [FIXTURE], env: {} },
     notion: { command: "node", args: [FIXTURE], env: {} },
     [PLAIN]: { command: "node", args: [FIXTURE], env: {} },
+    // A Crow-wide toggle service: no account fields, so it starts as an ordinary extension.
+    arxiv: { command: "node", args: [FIXTURE], env: {} },
+    // A service add-on still configured the legacy way: every field is set in its own env.
+    "canvas-lms": {
+      command: "node", args: [FIXTURE],
+      env: { CANVAS_BASE_URL: "https://canvas.example.test", CANVAS_API_TOKEN: "test-token-9" },
+    },
   }), { mode: 0o600 });
 }
 writeInstall();
@@ -93,6 +100,14 @@ async function connect(serviceId, { projectId, label = "work", secrets = {} } = 
     const c = await SC.createConnection(d, { projectId, serviceId, accountLabel: label, secrets, config: {}, testedAt: new Date() }, { key });
     SENS.recordConnectionBinding(c, { crowHome: HOME, service: serviceById(serviceId), values: { config: c.config, secrets } });
     return c;
+  });
+}
+
+/** A row with no recorded binding (a pre-binding connection): the mount refuses it. */
+async function connectUnbound(serviceId, { projectId, label = "legacy", secrets = {} } = {}) {
+  return withDb(async (d) => {
+    const key = await ensureWriteKey(d, { crowHome: HOME });
+    return SC.createConnection(d, { projectId, serviceId, accountLabel: label, secrets, config: {}, testedAt: new Date() }, { key });
   });
 }
 
@@ -171,6 +186,68 @@ test("a connection in another project does not list the service here", async () 
   assert.ok(!out.sources.some((s) => s.server === "github"), "the other project's github is not listed");
 });
 
+test("an 'error' connection a start retries still lists its cached tools", async () => {
+  TC.writeToolCache(HOME, "github", "1.0.0", [{ name: "whoami", description: "who" }]);
+  const pid = await project();
+  const conn = await connect("github", { projectId: pid, secrets: { [GH]: "test-token-8" } });
+  await withDb((d) => d.execute({
+    sql: "UPDATE service_connections SET status = 'error', last_error = 'child_unavailable' WHERE uuid = ?",
+    args: [conn.uuid],
+  }));
+  const counter = { calls: 0 };
+  const r = await withDb((d) => serviceToolsForBuilder(d, { serviceId: "github", projectId: pid, crowHome: HOME, ensure: countingEnsure(counter) }));
+  assert.equal(r.source, "cache");
+  assert.deepEqual(namesOf(r.tools), ["whoami"]);
+  assert.equal(counter.calls, 0);
+
+  const out = await withDb((d) => loadSources({ db: d, projectId: pid, crowHome: HOME }));
+  const src = out.sources.find((s) => s.server === "github");
+  assert.ok(src, "the retryable 'error' connection still lists the service");
+  assert.equal(src.ok, true);
+  assert.deepEqual(src.catalog.map((x) => x.name), ["whoami"]);
+
+  // Any other error class is not served, so the service is not offered at all.
+  await withDb((d) => d.execute({
+    sql: "UPDATE service_connections SET last_error = 'auth_failed' WHERE uuid = ?",
+    args: [conn.uuid],
+  }));
+  const after = await withDb((d) => serviceToolsForBuilder(d, { serviceId: "github", projectId: pid, crowHome: HOME, ensure: countingEnsure(counter) }));
+  assert.equal(after.source, "none");
+  assert.equal(after.privateOnly, undefined);
+});
+
+test("a service whose connections are all unbound is private: no tools, no input, no start", async () => {
+  TC.writeToolCache(HOME, "github", "1.0.0", [{ name: "whoami", description: "who" }]);
+  const pid = await project();
+  await connectUnbound("github", { projectId: pid, secrets: { [GH]: "test-token-10" } });
+  const counter = { calls: 0 };
+  const r = await withDb((d) => serviceToolsForBuilder(d, { serviceId: "github", projectId: pid, crowHome: HOME, ensure: countingEnsure(counter) }));
+  assert.deepEqual(r, { tools: [], source: "none", privateOnly: true });
+  assert.equal(counter.calls, 0);
+
+  const out = await withDb((d) => loadSources({ db: d, projectId: pid, crowHome: HOME }));
+  const src = out.sources.find((s) => s.server === "github");
+  assert.ok(src, "the service is still listed, as private");
+  assert.equal(src.privateOnly, true);
+  assert.equal(src.ok, false);
+
+  const def = { project_id: pid, skills: [], tools: { crow_mcp: [], pi_builtin: [] }, permission_policy: { bash: "deny" } };
+  const html = await withDb((d) => renderAbilities(abilitiesCtx(d, def)));
+  const row = (html.match(/<div class="btb-src btb-src-private" data-src="github">[\s\S]*?<\/p><\/div>/) || [""])[0];
+  assert.match(row, /Private: bots can't use this connection\./);
+  assert.doesNotMatch(row, /<input/, "never offered");
+});
+
+test("isConnectionService: only a service that still needs a project connection", () => {
+  // A Crow-wide toggle service (arxiv) starts from its enable flag, not a project connection.
+  assert.equal(isConnectionService("arxiv", { env: {} }, {}), false);
+  // A service add-on with every field set in its own env is legacy-configured.
+  assert.equal(isConnectionService("github", { env: { [GH]: "t" } }, {}), false);
+  assert.equal(isConnectionService("github", { block: { env: { [GH]: "t" } } }, {}), false);
+  assert.equal(isConnectionService("github", { env: {} }, {}), true);
+  assert.equal(isConnectionService(PLAIN, { env: {} }, {}), false, "not a service at all");
+});
+
 test("extensionTools refuses a service bundle before any probe", async () => {
   const before = spawnCount();
   const r = await extensionTools({
@@ -189,11 +266,47 @@ test("extensionTools refuses a service bundle before any probe", async () => {
   assert.ok(namesOf(plain.tools || []).includes("whoami"));
 });
 
-test("probeExtensions lists no service bundle", async () => {
+test("probeExtensions lists no service bundle, and still probes a toggle service and a legacy-configured add-on", async () => {
   const exts = await probeExtensions(HOME);
   assert.ok(!exts.some(({ ext }) => ext.id === "github"));
   assert.ok(!exts.some(({ ext }) => ext.id === "notion"));
   assert.ok(exts.some(({ ext }) => ext.id === PLAIN), "an ordinary add-on still probes");
+  const arxiv = exts.find(({ ext }) => ext.id === "arxiv");
+  assert.ok(arxiv, "a Crow-wide toggle service is probed");
+  assert.equal(arxiv.probe.ok, true, arxiv.probe.error);
+  const canvas = exts.find(({ ext }) => ext.id === "canvas-lms");
+  assert.ok(canvas, "a legacy-configured service add-on is probed");
+  assert.equal(canvas.probe.ok, true, canvas.probe.error);
+});
+
+// ---- a Crow-wide toggle service and a legacy-configured add-on probe as before ----
+
+test("extensionTools probes a toggle service and a legacy-configured add-on; a bare service add-on is refused", async () => {
+  const arxiv = await extensionTools({
+    id: "arxiv", group: "arXiv", block: { command: "node", args: [FIXTURE], cwd: join(HOME, "bundles", "arxiv") },
+  }, { crowHome: HOME });
+  assert.notEqual(arxiv.error, "service bundle: tools come from its connections");
+  assert.equal(arxiv.ok, true, arxiv.error);
+
+  const canvas = await extensionTools({
+    id: "canvas-lms", group: "Canvas LMS",
+    block: {
+      command: "node", args: [FIXTURE], cwd: join(HOME, "bundles", "canvas-lms"),
+      env: { CANVAS_BASE_URL: "https://canvas.example.test", CANVAS_API_TOKEN: "test-token-9" },
+    },
+  }, { crowHome: HOME });
+  assert.notEqual(canvas.error, "service bundle: tools come from its connections");
+  assert.equal(canvas.ok, true, canvas.error);
+
+  // One field missing: still a connection-based service, so it is never probed blind.
+  const missing = await extensionTools({
+    id: "canvas-lms", group: "Canvas LMS",
+    block: {
+      command: "node", args: [FIXTURE], cwd: join(HOME, "bundles", "canvas-lms"),
+      env: { CANVAS_BASE_URL: "https://canvas.example.test" },
+    },
+  }, { crowHome: HOME });
+  assert.equal(missing.error, "service bundle: tools come from its connections");
 });
 
 // ---- render ----------------------------------------------------------------------------------
@@ -216,8 +329,9 @@ test("the Abilities tab shows a connected service in its own card, selectable as
   assert.match(html, /github\\?&quot;:\[\[/, "the connected source is in the hidden catalog");
 });
 
-test("a private connection renders its copy and no input at all", async () => {
-  clearCache("notion");
+test("a private connection renders its copy and no input at all, and its cached tools stay hidden", async () => {
+  // A cache with a recognisable name: a private connection must never leak its tools into the page.
+  TC.writeToolCache(HOME, "notion", "1.0.0", [{ name: "notion-secret-tool", description: "hidden" }]);
   const pid = await project();
   await connect("notion", { projectId: pid, secrets: { NOTION_TOKEN: "test-token-7" } });
   const def = { project_id: pid, skills: [], tools: { crow_mcp: [], pi_builtin: [] }, permission_policy: { bash: "deny" } };
@@ -225,6 +339,9 @@ test("a private connection renders its copy and no input at all", async () => {
   const row = (html.match(/<div class="btb-src btb-src-private" data-src="notion">[\s\S]*?<\/p><\/div>/) || [""])[0];
   assert.match(row, /Private: bots can't use this connection\./);
   assert.doesNotMatch(row, /<input/, "never offered");
+  const catalog = (html.match(/name="src_catalog" value="([^"]*)"/) || ["", ""])[1];
+  assert.doesNotMatch(catalog, /notion/, "the hidden source catalog never names it");
+  assert.doesNotMatch(html, /notion-secret-tool/, "its cached tools never reach the page");
 });
 
 test("a bot without a project gets no connected-services card", async () => {
