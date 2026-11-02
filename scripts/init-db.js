@@ -3353,9 +3353,11 @@ await initTable("crow_keychain service index", KEYCHAIN_SERVICE_INDEX_DDL);
 // Archived-project name cleanup (migration 0022): strip the old trailing " — archived" from projects
 // that are archived and not deleted. Data only, never writes archived_at, idempotent (a second run
 // matches nothing), so it runs on every init and a fresh or old install converges.
-{
+try {
   const r = await db.execute(ARCHIVED_NAME_CLEANUP_SQL);
   if (r.rowsAffected) console.log(`  ✓ Cleaned ${r.rowsAffected} archived project name(s)`);
+} catch (e) {
+  console.warn(`  ⚠ Archived project name cleanup skipped: ${e.message}`);
 }
 
 // Stamp the schema generation so the gateway boot gate can detect when an

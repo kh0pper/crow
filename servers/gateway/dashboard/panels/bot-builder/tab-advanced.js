@@ -121,7 +121,9 @@ async function renderBoard(ctx) {
     `<p class="btb-hint">${t("botbuilder.hintProjectDetermines", lang)}</p>` +
     `<hr class="btb-divider">` +
     (isCustom
-      ? `<p class="btb-hint">${escapeHtml(fill(t("botbuilder.trackerCustomReadonly", lang), { slug: tc.tracker_slug || "?" }))}</p>`
+      ? `<p class="btb-hint">${tc.tracker_slug
+          ? escapeHtml(fill(t("botbuilder.trackerCustomReadonly", lang), { slug: tc.tracker_slug }))
+          : escapeHtml(t("botbuilder.trackerCustomNoSlug", lang))}</p>`
       : `<label class="btb-checkbox btb-check-row"><input type="checkbox" name="show_cards"${cardsOn ? " checked" : ""}> ${escapeHtml(t("botbuilder.trackerShowCards", lang))}</label>` +
         `<input type="hidden" name="show_cards__was" value="${cardsOn ? "on" : "off"}">`) +
     snap +

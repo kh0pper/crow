@@ -192,7 +192,7 @@ export function botBuilderStyles() {
   .btb-group-builtin>summary .btb-group-h{margin:0}
   .btb-manage-skills{display:inline-flex;align-items:center;min-height:44px;color:var(--crow-accent);font-weight:600;text-decoration:none}
   .btb-check-list{display:grid;gap:.1rem}
-  .btb-check-row{display:flex;gap:.55rem;align-items:flex-start;padding:.35rem 0;font-size:.88rem;min-width:0}
+  .btb-check-row{display:flex;gap:.55rem;align-items:flex-start;padding:.35rem 0;font-size:.88rem;min-width:0;min-height:44px}
   .btb-check-row code{overflow-wrap:anywhere}
   .btb-inline-fields{display:flex;flex-wrap:wrap;gap:.5rem 1rem}
   .btb-inline-field{display:flex;flex-direction:column;gap:.2rem;font-size:.82rem;min-width:0}

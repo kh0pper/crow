@@ -178,12 +178,36 @@ test("custom bot untouched by a save", async () => {
   }
   // the legacy tracker tab post is guarded the same way
   await putBot("leg-k", { ...BASE, tracker_config: { type: "kanban" } });
+  // An old page posts no switch state at all: the tracker is left alone (F2).
   await post({ action: "save_tracker", bot_id: "leg-k", project_id: "" });
-  assert.equal((await row("leg-k")).def.tracker_config.type, "none", "the legacy branch is reached (absent switch = Off)");
+  assert.equal((await row("leg-k")).def.tracker_config.type, "kanban", "absent show_cards__was leaves the tracker unchanged");
+  // With the switch state posted, the legacy branch applies it.
+  await post({ action: "save_tracker", bot_id: "leg-k", project_id: "", show_cards__was: "on" });
+  assert.equal((await row("leg-k")).def.tracker_config.type, "none", "the legacy branch is reached (posted switch = Off)");
   await post({ action: "save_tracker", bot_id: "cust", show_cards: "off", tracker_type: "none", project_id: "" });
   assert.deepEqual((await row("cust")).def.tracker_config, CUSTOM);
   assert.equal((await row("cust")).def.tracker_config.type, "custom");
   void before;
+});
+
+test("the switch pins the unset cases (F4)", async () => {
+  // No tracker_config at all, switch turned On (was off): a kanban tracker, exactly.
+  await putBot("f4-none", { ...BASE }, null);
+  await post({ action: "save_advanced", bot_id: "f4-none", adv_section: "board", project_id: "", show_cards: "on", show_cards__was: "off", return_tab: "advanced" });
+  const none = await row("f4-none");
+  assert.strictEqual(none.def.tracker_config.type, "kanban");
+  assert.deepEqual(Object.keys(none.def.tracker_config), ["type"], "nothing else is written");
+
+  // An empty tracker_config with the switch left On (was on, still on) is not rewritten.
+  await putBot("f4-empty", { ...BASE, tracker_config: {} }, null);
+  const f = boardForm(await render("f4-empty"));
+  assert.ok(f.querySelector('input[name="show_cards"]').hasAttribute("checked"), "an empty tracker_config reads as On");
+  assert.equal(f.querySelector('[name="show_cards__was"]').getAttribute("value"), "on");
+  const before = await row("f4-empty");
+  await post({ action: "save_advanced", bot_id: "f4-empty", adv_section: "board", project_id: "", show_cards: "on", show_cards__was: "on", return_tab: "advanced" });
+  const after = await row("f4-empty");
+  assert.equal(after.raw, before.raw, "an untouched On switch writes nothing");
+  assert.deepEqual(after.def.tracker_config, {});
 });
 
 test("prompt context for an On bot is byte-identical to before", async () => {

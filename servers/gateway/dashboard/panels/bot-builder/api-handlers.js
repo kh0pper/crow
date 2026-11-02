@@ -535,8 +535,15 @@ export async function handleBotBuilderPost(req, res, { db }) {
       // M3b: project_id is owned by the column now.
       const next = b.project_id ? Number(b.project_id) : null;
       columnProjectIdUpdate = next;
-      // The "show cards" switch (a custom-tracker def is left untouched; see applyShowCards).
-      applyShowCards(def, { projectId: next, on: b.show_cards === "on" || b.show_cards === "true" });
+      if (b.show_cards !== undefined || b.show_cards__was !== undefined) {
+        // The "show cards" switch (a custom-tracker def is left untouched; see applyShowCards).
+        applyShowCards(def, { projectId: next, on: b.show_cards === "on" || b.show_cards === "true" });
+      } else {
+        // An old page posts no switch at all (neither show_cards nor show_cards__was): leave the tracker alone and move
+        // only the link, keeping the JSON copy in step with the column (M3b).
+        def.project_id = next;
+        if (def.tracker_config && typeof def.tracker_config === "object") delete def.tracker_config.project_id;
+      }
     } else if (tab === "skills") {
       const rawSkills = [].concat(b.skills || []).filter(Boolean);
       def.skills = rawSkills.map((s) => normalizeSkillName(s)).filter(Boolean);
