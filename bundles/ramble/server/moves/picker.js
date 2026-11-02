@@ -8,6 +8,14 @@
  * always give the same pick on any device (sync-safe: two devices that
  * compute the same day agree), and Swap re-rolls the day by bumping `swap`.
  *
+ * `exclude` is part of the INPUT, never a re-roll: entry ids the caller has
+ * already shown today (today's card and every earlier swap) are removed before
+ * the roll, so Swap can never land back on the card it replaced. Same day,
+ * same prefs, same history, same swap and the same exclude always give the
+ * same pick. When the exclude list removes every candidate the answer is null —
+ * the caller decides what to do, this module never quietly hands back an
+ * excluded entry.
+ *
  * `reasons` are fact codes, never prose:
  *   "slot:early" | "slot:day" | "slot:evening"  the local slot the pick was made for
  *   "rain_later" | "cold" | "hot"               weather pushed the pick indoors
@@ -73,9 +81,12 @@ const HOT_C = 34;    // temp > 34°C  -> indoor only
  *   history    { done: {id:count}, skipped: {id:count}, learning: [flowId] }
  *   library    array of entries (see library.js for the shape)
  *   swap       0 for the first pick of the day, +1 per Swap
+ *   exclude    entry ids that must NOT be picked (the day's `seen` list);
+ *              optional, and part of the deterministic input
  */
 export function pickChallenge({
   day, hourLocal = 12, weather = null, prefs = {}, history = {}, library = [], swap = 0,
+  exclude = [],
 } = {}) {
   const slot = slotFor(hourLocal);
   const kinds = (Array.isArray(prefs.kinds) ? prefs.kinds : []).filter((k) => ACTIVITY_KINDS.includes(k));
@@ -85,6 +96,11 @@ export function pickChallenge({
   const level = [1, 2, 3].includes(prefs.level) ? prefs.level : 3;
   const skipped = history.skipped && typeof history.skipped === "object" ? history.skipped : {};
   const learning = Array.isArray(history.learning) ? history.learning : [];
+  // Junk in the exclude list is dropped rather than turned into a filter that
+  // excludes everything: only non-empty string ids can match an entry.
+  const excluded = new Set(
+    (Array.isArray(exclude) ? exclude : []).filter((id) => typeof id === "string" && id !== ""),
+  );
 
   // Weather is a HARD indoor-only rule, unless the user turned it off
   // (prefs.weather === false).
@@ -99,6 +115,7 @@ export function pickChallenge({
   const candidates = [];
   for (const e of Array.isArray(library) ? library : []) {
     if (!e || typeof e !== "object" || e.reviewed !== true) continue;
+    if (excluded.has(e.id)) continue; // a swap must not re-land on a shown entry
     if ((Array.isArray(e.skipIf) ? e.skipIf : []).some((t) => limits.includes(t))) continue;
     if (kinds.length > 0 && !kinds.includes(e.activity)) continue;
     if (!(e.level <= level)) continue; // a missing or odd level never passes
@@ -110,7 +127,8 @@ export function pickChallenge({
     if (Number(skipped[e.id]) >= 3) weight *= 0.3;
     candidates.push({ entry: e, weight });
   }
-  // Rule 6: null when nothing survives.
+  // Rule 6: null when nothing survives — including when the caller's exclude
+  // list took the last candidate away (a swap with nothing else eligible).
   if (candidates.length === 0) return null;
 
   // Rule 5: a weighted pick by the seeded hash. Sort by id first so the

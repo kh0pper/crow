@@ -5,7 +5,10 @@
  * TWO SYNCED SETTINGS ROWS, plus the small history row that feeds the next
  * pick:
  *   moves.prefs   JSON { on, kinds, equipment, limits, level, weather }
- *   moves.today   JSON { day, entryId, swap, reasons, why }
+ *   moves.today   JSON { day, entryId, swap, seen, reasons, why }
+ *         seen = the entry ids already shown today (the first pick and each
+ *         swap), so a swap never re-lands on one; absent on rows written
+ *         before it existed, which still read as "just the card on screen".
  *   moves.history JSON { done: {id:count}, skipped: {id:count} }
  *         written when a stored pick rolls over to a new day.
  *
@@ -14,10 +17,13 @@
  * two devices agree on the day's challenge: each may pick locally, and after
  * one `moves.today` wins the LWW race both read the same entry back.
  *
- * ⚠ PICKS ARE PURE FUNCTIONS OF (day, hour, weather, prefs, history, swap).
- * pickChallenge (moves/picker.js) has no clock and no randomness beyond a hash
- * of `day + ":" + swap`, so a stored pick and a freshly computed one agree on
- * every device. Storing `moves.today` is what carries the REUSE across calls
+ * ⚠ PICKS ARE PURE FUNCTIONS OF (day, hour, weather, prefs, history, swap,
+ * exclude). pickChallenge (moves/picker.js) has no clock and no randomness
+ * beyond a hash of `day + ":" + swap`, so a stored pick and a freshly computed
+ * one agree on every device. A swap passes the ids already shown today as
+ * `exclude`, and that list is stored beside the pick (`seen`) in the same
+ * synced row, so the swap stays as reproducible as the first pick. Storing
+ * `moves.today` is what carries the REUSE across calls
  * and across midnight (the day a challenge was picked for is the day its Done
  * is filed under — recordChallengeDone takes that day from here), not what
  * makes the pick itself stable.
@@ -159,10 +165,24 @@ function checkList(field, value, vocab) {
   return [...new Set(value)];
 }
 
+/**
+ * The patch vocabulary IS the shape readPrefs returns: every field there, and
+ * nothing else. Derived from DEFAULT_PREFS so the two cannot drift apart.
+ */
+const PREF_FIELDS = Object.freeze(Object.keys(DEFAULT_PREFS));
+
 /** Strict validation for a write; junk never reaches the synced row. */
 function validatePrefsPatch(patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
     throw new MovesPrefsError("prefs must be an object");
+  }
+  // A key this build does not know used to be dropped silently, so a typo
+  // ("lvl", "limit") looked saved. Name it instead: the patch is a small fixed
+  // vocabulary and the caller is owed the field, not a shrug.
+  for (const field of Object.keys(patch)) {
+    if (!PREF_FIELDS.includes(field)) {
+      throw new MovesPrefsError(`unknown prefs field: ${field.slice(0, 40)}`);
+    }
   }
   const out = {};
   for (const field of ["on", "weather"]) {
@@ -190,6 +210,28 @@ export async function writePrefs(db, patch, { emit } = {}) {
   return prefs;
 }
 
+/**
+ * The entry ids shown today, oldest first: the first pick and every swap of
+ * the day. This is the `exclude` list a swap is made with, so Swap can never
+ * hand back a card the user has already seen.
+ *
+ * A stored row written before this list existed carries none; the card on
+ * screen is appended here, which is exactly what the old "do not repeat
+ * today's card" rule needs, so old settings keep working.
+ *
+ * The synced row carries at most one id per card a day can show (the pick and
+ * MAX_SWAPS swaps). A longer list can only be junk or a newer build, so the
+ * NEWEST ids are kept: they are the ones a swap is most likely to re-land on.
+ */
+function seenOf(entryId, rawSeen) {
+  const out = [];
+  for (const id of [...(Array.isArray(rawSeen) ? rawSeen : []), entryId]) {
+    if (typeof id !== "string" || id === "" || out.includes(id)) continue;
+    out.push(id);
+  }
+  return out.slice(-(MAX_SWAPS + 1));
+}
+
 /** The stored pick for today, or null when absent/junk. */
 function normalizeToday(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -203,7 +245,10 @@ function normalizeToday(raw) {
     : 0;
   const reasons = Array.isArray(raw.reasons) ? raw.reasons.filter((r) => typeof r === "string") : [];
   const why = typeof raw.why === "string" ? raw.why : whyLine(reasons);
-  return { day: raw.day, entryId: raw.entryId, swap, reasons, why };
+  // No `seen` (a row from before it existed, or a peer's junk) reads as the
+  // card on screen alone — see seenOf.
+  const seen = seenOf(raw.entryId, raw.seen);
+  return { day: raw.day, entryId: raw.entryId, swap, seen, reasons, why };
 }
 
 /** Non-negative integer counts only; a peer's junk entry is dropped. */
@@ -255,8 +300,11 @@ function libraryOf(library) {
   return Array.isArray(library) ? library : servedLibrary();
 }
 
-/** Run the pure picker and resolve the entry, or null when nothing survives. */
-function pickFor({ day, at, prefs, history, swap, weather, library, learning }) {
+/**
+ * Run the pure picker and resolve the entry, or null when nothing survives —
+ * no candidate, or none outside the caller's `exclude` list.
+ */
+function pickFor({ day, at, prefs, history, swap, weather, library, learning, exclude = [] }) {
   const picked = pickChallenge({
     day,
     hourLocal: new Date(at).getHours(),
@@ -265,6 +313,7 @@ function pickFor({ day, at, prefs, history, swap, weather, library, learning }) 
     history: { done: history.done, skipped: history.skipped, learning },
     library,
     swap,
+    exclude,
   });
   if (!picked) return null;
   const entry = entryById(library, picked.entryId);
@@ -276,7 +325,7 @@ async function offState(db, day, at, emit) {
   // A pause is a FACT, keyed by the local day, so the streak can step over it
   // instead of counting it as a miss. insertOnce makes it one row a day.
   await insertOnce(db, MOVE_OFF_KIND, day, 1, at, emit);
-  return { day, entry: null, reasons: [], why: "", done: false, off: true, swap: 0 };
+  return { day, entry: null, reasons: [], why: "", done: false, off: true, swap: 0, seen: [] };
 }
 
 /**
@@ -306,7 +355,7 @@ export async function todayForSurface(db, {
 /**
  * Today's challenge.
  *
- * Returns `{ day, entry, reasons, why, done, off, swap }`, or null when the
+ * Returns `{ day, entry, reasons, why, done, off, swap, seen }`, or null when the
  * filters leave nothing to pick (an empty/unreviewed library, or a limit set
  * that excludes every entry — the panel then offers the manual pickers).
  *
@@ -314,7 +363,8 @@ export async function todayForSurface(db, {
  * (barring a limit that has since ruled it out). Anything else is a new day
  * (or a first run): the previous pick is folded into history and a fresh pick
  * is stored. A same-day card the live limits rule out is re-picked carrying
- * the day's stored swap count, so a replacement never reopens the cap.
+ * the day's stored swap count, so a replacement never reopens the cap, and the
+ * day's `seen` list, so a replacement never forgets a card the user saw.
  *
  * When prefs.on is false it writes the day's `moveoff` fact and returns
  * `{ off: true }` — the pause neither counts nor breaks the streak.
@@ -345,6 +395,7 @@ export async function todayChallenge(db, {
         done: (await rowDelta(db, MOVE_DONE_KIND, day)) !== null,
         off: false,
         swap: stored.swap,
+        seen: stored.seen,
       };
     }
   }
@@ -352,9 +403,11 @@ export async function todayChallenge(db, {
   // A stored card for an earlier day is folded into history as part of the
   // pick below; a card for today that a new limit ruled out is simply
   // replaced (it was not declined by the user, so it is not a skip). The
-  // replacement keeps today's swap count: a re-pick must not reopen the cap.
+  // replacement keeps today's swap count and seen list: a re-pick must not
+  // reopen the cap, and must not forget a card the user already saw.
   const earlier = stored && stored.day !== day ? stored : null;
   const carriedSwap = stored && stored.day === day ? stored.swap : 0;
+  const carriedSeen = stored && stored.day === day ? stored.seen : [];
   const { history, changed } = await historyWithRollover(db, earlier);
   const picked = pickFor({
     day, at, prefs, history, swap: carriedSwap, weather, library: lib, learning,
@@ -363,8 +416,9 @@ export async function todayChallenge(db, {
 
   if (changed) await writeJson(db, HISTORY_KEY, history, emit);
   const why = whyLine(picked.reasons, lang);
+  const seen = seenOf(picked.entry.id, carriedSeen);
   await writeJson(db, TODAY_KEY, {
-    day, entryId: picked.entry.id, swap: carriedSwap, reasons: picked.reasons, why,
+    day, entryId: picked.entry.id, swap: carriedSwap, seen, reasons: picked.reasons, why,
   }, emit);
   return {
     day,
@@ -374,6 +428,7 @@ export async function todayChallenge(db, {
     done: (await rowDelta(db, MOVE_DONE_KIND, day)) !== null,
     off: false,
     swap: carriedSwap,
+    seen,
   };
 }
 
@@ -381,6 +436,14 @@ export async function todayChallenge(db, {
  * Swap today's challenge. Bumps the stored `swap`, re-rolls the seeded pick
  * and stores it. At most MAX_SWAPS re-rolls a day: swap 3 is the last one, and
  * the next call returns the same card with `refused: true` and writes nothing.
+ *
+ * A SWAP NEVER RE-LANDS ON A SHOWN ENTRY. The stored `seen` list (today's card
+ * plus every card an earlier swap showed, at most MAX_SWAPS + 1 ids) is handed
+ * to the picker as `exclude`, so each re-roll is a different card. When nothing
+ * outside that list is eligible — a one-entry library, or limits that leave a
+ * single card — the swap refuses the same way the day's last swap refuses: the
+ * card on screen stays and nothing is written. There is no separate reason code
+ * for it; the panel already treats a refusal as "no swaps left today".
  *
  * The day's `movedone` fact is untouched by a swap — Done is per day, not per
  * card — and a swap after a Done is allowed (the card changes, the pay does
@@ -407,16 +470,22 @@ export async function swapChallenge(db, {
 
   const swap = today.swap + 1;
   const history = await readHistory(db);
+  // The day's own list: the card on screen and every card an earlier swap
+  // already showed. A stored row from before `seen` existed carries only the
+  // card on screen, which is still the one a swap must not repeat.
+  const seen = seenOf(today.entry.id, today.seen);
   const picked = pickFor({
-    day, at, prefs, history, swap, weather, library: lib, learning,
+    day, at, prefs, history, swap, weather, library: lib, learning, exclude: seen,
   });
-  // The picker found something for swap 0 from the same library, so this can
-  // only be null if the library changed under us between the two calls.
+  // Nothing OUTSIDE the seen list is eligible: a one-entry library, or limits
+  // that leave a single card. Keep today's card and answer exactly the way a
+  // refused swap answers today — same shape, same `refused`, nothing written.
   if (!picked) return { ...today, refused: true };
 
   const why = whyLine(picked.reasons, lang);
+  const nextSeen = seenOf(picked.entry.id, seen);
   await writeJson(db, TODAY_KEY, {
-    day, entryId: picked.entry.id, swap, reasons: picked.reasons, why,
+    day, entryId: picked.entry.id, swap, seen: nextSeen, reasons: picked.reasons, why,
   }, emit);
   return {
     day,
@@ -426,6 +495,7 @@ export async function swapChallenge(db, {
     done: today.done,
     off: false,
     swap,
+    seen: nextSeen,
     refused: false,
   };
 }

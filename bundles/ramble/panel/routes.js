@@ -1426,9 +1426,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   router.post("/api/ramble/moves/prefs", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
-    const b = req.body || {};
+    const b = req.body ?? {};
     // Accept a `patch` wrapper (the MCP tool's shape) or the fields directly.
-    const patch = b.patch && typeof b.patch === "object" && !Array.isArray(b.patch) ? b.patch : b;
+    // A `patch` that is present but is not an object is a bad envelope, not a
+    // bare pref named "patch": writePrefs names the fields, this names this one.
+    let patch = b;
+    if (b && typeof b === "object" && !Array.isArray(b) && Object.hasOwn(b, "patch")) {
+      if (!b.patch || typeof b.patch !== "object" || Array.isArray(b.patch)) bad("patch must be an object");
+      patch = b.patch;
+    }
+    // Anything that is not an object at all (an array, a string) is refused by
+    // writePrefs with "prefs must be an object"; unknown keys and wrong types
+    // are named one by one there too. All of it is a 400 through movesInput.
     let prefs;
     try { prefs = await movesMods.todayMod.writePrefs(db, patch, { emit }); }
     catch (err) { movesInput(err); }
