@@ -1,5 +1,5 @@
 /**
- * Kevin ruling 2026-10-08 (revision b): a bot's pi process gets an explicit
+ * the operator's ruling 2026-10-08 (revision b): a bot's pi process gets an explicit
  * ALLOWLIST of environment variables — the gateway's .env secrets never reach
  * it, so a bot shell's `env` cannot show them. MCP servers still get what
  * they need through their own config blocks (core blocks carry explicit env).

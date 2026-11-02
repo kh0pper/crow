@@ -33,7 +33,7 @@ const strArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string"
 const ASKING_SHELLS = ["ask", "auto"];
 
 /**
- * The channels a bot talks on other than Perch (Kevin's ruling 2026-10-08:
+ * The channels a bot talks on other than Perch (the operator's ruling 2026-10-08:
  * Ask me / Auto are Perch-only for now). A gateway of type "perch" or
  * "none" is the dashboard chat; every other type (gmail, discord, telegram,
  * slack, crow-messages, …) carries attacker-reachable input.

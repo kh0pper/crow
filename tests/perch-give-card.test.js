@@ -10,7 +10,7 @@
  * REAL csrfMiddleware (as index.js does) and a session-checking auth stub.
  * A fake interactive engine stands in for pi: no child is ever spawned.
  *
- * "Start right away" defaults OFF (Kevin, 2026-10-16): a give without
+ * "Start right away" defaults OFF (the operator's ruling, 2026-10-16): a give without
  * start:true assigns and never calls spawn. With start:true the SAME dispatch
  * core as POST /bots/:id/dispatch runs; a start that fails leaves the card
  * given and says why (started:false + code). One board_mutations row and one
