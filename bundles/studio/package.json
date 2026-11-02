@@ -1,0 +1,14 @@
+{
+  "name": "studio",
+  "version": "0.1.0",
+  "description": "Crow Studio MCP server — a shared human + agent music studio over one live Yjs song document",
+  "type": "module",
+  "main": "server/index.js",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0",
+    "yjs": "^13.6.33",
+    "node-web-audio-api": "2.2.0"
+  }
+}
