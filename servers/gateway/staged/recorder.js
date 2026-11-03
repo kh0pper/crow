@@ -266,7 +266,10 @@ export async function recordDraft({ db, toolName, args = null, resultText = null
           draft = await createGmailClient({ credRef: ref, fetchImpl: context.fetchImpl, configPaths: context.configPaths }).getDraft(parsed.draftId);
           storedCredRef = ref;
           break;
-        } catch (e) { lastError = e; }
+        } catch (e) {
+          // Keep the most telling failure: a transient error on one account beats the other's 404.
+          if (!lastError || (lastError.code === "gone" && e && e.code !== "gone")) lastError = e;
+        }
       }
       if (!draft) throw lastError || Object.assign(new Error("unreadable"), { code: "unreadable" });
       if (draft.threadId) providerThreadId = draft.threadId;
