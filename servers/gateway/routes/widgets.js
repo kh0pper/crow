@@ -30,6 +30,7 @@
  * not_now: a four-hour snooze in the LOCAL-scope setting widgets_snoozed, stored as { [key]: untilMs }
  * (never synced to paired instances, and it never touches the card).
  */
+import { notifyWidgetsChanged } from "../widgets/changed.js";
 import { Router } from "express";
 
 import { createDbClient } from "../../db.js";
@@ -304,6 +305,7 @@ export function widgetsRouter(dashboardAuth, { core = getHandoffCore(), openDb =
 
       const refused = await act(db, item, action);
       if (refused) return jsonError(res, refused.http, refused.error, refused.code ? { code: refused.code } : undefined);
+      notifyWidgetsChanged(); // other devices' widgets re-read too
       return res.json({ ok: true, summary: await loadSummary(db, req, await readSnoozes(db), true) });
     } catch (err) {
       console.warn(`[widgets] act: ${err && err.message}`);

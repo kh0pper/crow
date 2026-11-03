@@ -7,6 +7,7 @@
 
 import bus from "./event-bus.js";
 import { maskSecrets, maskDeep } from "./secret-mask.js";
+import { notifyWidgetsChanged } from "../gateway/widgets/changed.js";
 
 const MAX_NOTIFICATIONS = 500;
 
@@ -121,6 +122,14 @@ async function broadcastUnread(db) {
 export async function deliverNotification(db, { title: rawTitle, body: rawBody = null, action_url = null, priority = "normal", type = "system" }) {
   const title = maskText(rawTitle);
   const body = maskText(rawBody);
+
+  // Widgets phase 1: a notification is a thing that may now wait on the owner
+  // (an unread thread, a bot asking, a result to accept), so the widgets are
+  // told to re-read. Content-free, debounced and fire-and-forget: the sender
+  // is loaded lazily inside the debounce, so this stays safe outside the
+  // gateway and never delays (or fails with) any channel below.
+  notifyWidgetsChanged();
+
   // Send web push notification (non-blocking, fails silently when not available)
   try {
     const { sendPushToAll } = await import("../gateway/push/web-push.js");
