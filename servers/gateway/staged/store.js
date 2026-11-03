@@ -304,6 +304,8 @@ export async function replaceWith(db, oldId, newFields = {}) {
     credRef: old.credRef,
     providerThreadId: old.providerThreadId,
     tainted: old.tainted,
+    // Reserved for the "sensitive source" flag: an edit or a bot's change must never wash it off.
+    sourceFlags: old.sourceFlags,
     ...newFields,
   }, oldId);
   const casAt = Date.now();

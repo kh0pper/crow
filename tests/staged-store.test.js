@@ -506,3 +506,13 @@ test("findStagedByDraftId matches the draft id plus the credential, in every sta
   await settle(db, primary, { state: "sent", providerMessageId: "m-1" });
   assert.equal((await findStagedByDraftId(db, { providerDraftId: "d-1", credRef: { server: "google-workspace", role: "primary" } })).id, primary);
 });
+test("replaceWith keeps the source flags, the credential and the taint", async () => {
+  const db = freshDb();
+  const id = await createStaged(db, { ...base(), tainted: true, sourceFlags: { sensitive: true } });
+  const before = await getStaged(db, id);
+  const newId = await replaceWith(db, id, { providerDraftId: before.providerDraftId, snapshot: { to: ["alex@example.com"], cc: [], bcc: [], subject: "New", body: "New body" } });
+  const row = await getStaged(db, newId);
+  assert.deepEqual(row.sourceFlags, { sensitive: true }, "a reserved flag is never washed off by a replace");
+  assert.equal(row.tainted, true);
+  assert.deepEqual(row.credRef, before.credRef);
+});
