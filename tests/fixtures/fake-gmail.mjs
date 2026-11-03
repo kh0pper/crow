@@ -7,9 +7,10 @@
  * way, not the stored draft — and records the raw it was asked to send in `fake.sent`, so a test can
  * prove that an edit made after approval did not ride along.
  *
- * It also serves `GET /gmail/v1/users/me/messages?q=in:sent to:<addr>&maxResults=1` for the client's
- * `hasSentTo` (the card's "new recipient" hint): an address in `fake.sentTo` answers one message,
- * anything else answers an empty list, and every query is recorded in `fake.sentQueries`.
+ * It also serves `GET /gmail/v1/users/me/messages?q=in:sent to:"<addr>"&maxResults=1` for the
+ * client's `hasSentTo` (the card's "new recipient" hint): the search term is quoted (one term, never
+ * search syntax), an address in `fake.sentTo` answers one message, anything else answers an empty
+ * list, and every query is recorded in `fake.sentQueries`.
  *
  * It is deliberately blunt about content: an error response's body repeats the request (a 404 says
  * the draft id, a failure carries whatever `failNext` was given) and every read of a failed
@@ -152,7 +153,8 @@ export function createFakeGmail({ drafts = {} } = {}) {
     if (isSentSearch) {
       const q = href.searchParams.get("q") || "";
       state.sentQueries.push(q);
-      const m = /^in:sent to:(.+)$/.exec(q);
+      // The client quotes the address: one search term, so nothing in it can be read as syntax.
+      const m = /^in:sent to:"(.+)"$/.exec(q);
       const address = m ? m[1].trim().toLowerCase() : null;
       if (!address) return reply(400, '{"error":"bad query"}');
       return state.sentTo.has(address)

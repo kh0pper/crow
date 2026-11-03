@@ -37,6 +37,8 @@ import { createFakeGmail, makeDraftRaw } from "./fixtures/fake-gmail.mjs";
 let h;
 let fake;
 let createStaged;
+let claimSend;
+let getStaged;
 let snapshotFromRaw;
 let realFetch;
 
@@ -65,7 +67,7 @@ before(async () => {
     return realFetch(url, init);
   };
 
-  ({ createStaged } = await import("../servers/gateway/staged/store.js"));
+  ({ createStaged, claimSend, getStaged } = await import("../servers/gateway/staged/store.js"));
   ({ snapshotFromRaw } = await import("../servers/gateway/staged/gmail-client.js"));
 });
 
@@ -190,6 +192,70 @@ test("no body or address in logs: a malformed edit body", async () => {
 
   // The row was never touched.
   assert.equal((await h.get(`/dashboard/perch-api/interactive/${s.sessionId}/staged`)).json.items[0].state, "staged");
+  assert.deepEqual(unexpected(await h.grepEverywhere(c)), []);
+});
+
+test("no body or address in logs: a Gmail error body carrying the canary is never read", async () => {
+  fake = createFakeGmail({ drafts: {} });
+  const c = makeCanary();
+  const s = await h.spawnSession("canary-bot-gmail-error");
+  const forSend = await stageDraft({ sessionId: s.sessionId, canary: c, draftId: "draft-error-send" });
+  const forEdit = await stageDraft({ sessionId: s.sessionId, canary: c, draftId: "draft-error-edit" });
+
+  const list = await h.get(`/dashboard/perch-api/interactive/${s.sessionId}/staged`);
+  assert.equal(list.status, 200, list.text);
+  const approved = list.json.items.find((i) => i.id === forSend.id);
+  assert.ok(approved && approved.sendable);
+
+  // A failed Gmail request echoes the draft. The client must not read a byte of the body: that is
+  // the only thing keeping the content out of its fixed error.
+  fake.failNext = { status: 502, on: "send", body: JSON.stringify({ error: c, request: c }) };
+  const sent = await h.post(`/dashboard/perch-api/staged/${forSend.id}/send`, { content_hash: approved.contentHash });
+  assert.equal(sent.status, 200, sent.text);
+  assert.deepEqual(sent.json, { ok: false, state: "failed", failReason: "Gmail could not send this draft" });
+  assert.ok(!sent.text.includes(c), "the failure answer carries no text");
+
+  fake.failNext = { status: 500, on: "update", body: JSON.stringify({ error: c, request: c }) };
+  const edited = await h.post(`/dashboard/perch-api/staged/${forEdit.id}/edit`, {
+    to: [c + "@example.com"],
+    cc: [],
+    bcc: [],
+    subject: c + " edited subject",
+    body: c + " edited body",
+  });
+  assert.equal(edited.status, 200, edited.text);
+  assert.deepEqual(edited.json, { ok: false, state: "failed", failReason: "Gmail could not send this draft" });
+  assert.ok(!edited.text.includes(c), "the edit answer carries no text");
+
+  assert.equal(fake.errorBodyReads, 0, "a failed response's body was never read");
+  assert.deepEqual(unexpected(await h.grepEverywhere(c)), []);
+});
+
+test("no body or address in logs: the sweeper over an interrupted send", async () => {
+  fake = createFakeGmail({ drafts: {} });
+  const c = makeCanary();
+  const s = await h.spawnSession("canary-bot-sweep");
+  const readable = await stageDraft({ sessionId: s.sessionId, canary: c, draftId: "draft-sweep-open" });
+  const gone = await stageDraft({ sessionId: s.sessionId, canary: c, draftId: "draft-sweep-gone" });
+
+  // A crash left both claims in `sending`; the card's next read re-reads each draft and settles it.
+  for (const row of [readable, gone]) {
+    assert.equal(await claimSend(h.db, row.id, (await getStaged(h.db, row.id)).contentHash), true);
+  }
+  fake.drafts.delete("draft-sweep-gone");
+  const stale = Date.now() - 15 * 60 * 1000;
+  await h.db.execute({
+    sql: "UPDATE staged_sends SET updated_at = ? WHERE id IN (?, ?)",
+    args: [stale, readable.id, gone.id],
+  });
+
+  const list = await h.get(`/dashboard/perch-api/interactive/${s.sessionId}/staged`);
+  assert.equal(list.status, 200, list.text);
+  assert.equal(list.json.items.find((i) => i.id === readable.id).state, "staged", "readable: back for review");
+  const sweptGone = list.json.items.find((i) => i.id === gone.id);
+  assert.equal(sweptGone.state, "failed");
+  assert.equal(sweptGone.failReason, "Sent or deleted in Gmail");
+
   assert.deepEqual(unexpected(await h.grepEverywhere(c)), []);
 });
 

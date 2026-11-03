@@ -214,12 +214,49 @@ export async function claimSend(db, id, hash) {
 }
 
 /**
+ * The edit's short claim: bump `updated_at` on a row that is still `staged`/`failed` and hand back
+ * the stamp, or null when the row has left those states (a send claimed it, it was discarded, it
+ * was replaced). The state does not change — an edit is not a send — but every write the edit makes
+ * afterwards is a CAS on this stamp, so an edit whose provider call failed can never reopen a row
+ * that a send took over while it was away.
+ */
+export async function claimEdit(db, id) {
+  const at = Date.now();
+  const r = await db.execute({
+    sql: "UPDATE staged_sends SET updated_at = ? WHERE id = ? AND state IN ('staged', 'failed')",
+    args: [at, String(id)],
+  });
+  return r.rowsAffected === 1 ? at : null;
+}
+
+/**
+ * Settle a FAILED edit: the provider refused the rewrite. Never `settle`'s `sending` -> `failed`
+ * transition (that is the send's own failure, and using it here is how a live send got reopened):
+ * this write only applies to a row still in `staged`/`failed` AND untouched since the edit took its
+ * claim. False means the row moved on (a send is in flight, or it already ended) and nothing was
+ * written — the caller answers "changed" and the card re-reads the row.
+ */
+export async function failEdit(db, id, { at, failReason = null } = {}) {
+  if (at == null) return false;
+  const r = await db.execute({
+    sql: `UPDATE staged_sends SET state = 'failed', fail_reason = ?, updated_at = ?
+           WHERE id = ? AND state IN ('staged', 'failed') AND updated_at = ?`,
+    args: [cap(failReason, FAIL_REASON_MAX), Date.now(), String(id), Number(at)],
+  });
+  return r.rowsAffected === 1;
+}
+
+/**
  * Record where the send ended: `sent` (with the provider's message id, and sent_at) or `failed`
  * (with the operator-facing reason). `replaced`/`discarded` end a row without a send. All are
  * compare-and-sets, so a row already `sent` never changes; false means the row was not in the state
  * this settle starts from.
+ *
+ * `expectedUpdatedAt` narrows the CAS to the row a caller READ: the sweeper passes the `sending`
+ * row's own stamp, so a row that was touched since (a claim settled, a retry claimed it again) is
+ * left alone. Put back into `staged` it would read as "ready to send" and could go out twice.
  */
-export async function settle(db, id, { state, providerMessageId = null, failReason = null } = {}) {
+export async function settle(db, id, { state, providerMessageId = null, failReason = null, expectedUpdatedAt = null } = {}) {
   const from = SETTLE_FROM[state];
   if (!from) throw bad(`staged_sends: cannot settle to ${JSON.stringify(state)}`, "bad_state");
   const t = Date.now();
@@ -229,9 +266,13 @@ export async function settle(db, id, { state, providerMessageId = null, failReas
   if (state !== "failed") sets.push("fail_reason = NULL");
   if (state === "failed") { sets.push("fail_reason = ?"); args.push(cap(failReason, FAIL_REASON_MAX)); }
   if (providerMessageId != null) { sets.push("provider_message_id = ?"); args.push(String(providerMessageId)); }
+  const unchanged = expectedUpdatedAt == null ? "" : " AND updated_at = ?";
   const r = await db.execute({
-    sql: `UPDATE staged_sends SET ${sets.join(", ")} WHERE id = ? AND state IN (${from.map(() => "?").join(",")})`,
-    args: [...args, String(id), ...from],
+    sql: `UPDATE staged_sends SET ${sets.join(", ")} WHERE id = ? AND state IN (${from.map(() => "?").join(",")})${unchanged}`,
+    args: [
+      ...args, String(id), ...from,
+      ...(expectedUpdatedAt == null ? [] : [Number(expectedUpdatedAt)]),
+    ],
   });
   return r.rowsAffected === 1;
 }
@@ -288,13 +329,16 @@ export async function discard(db, id) {
 
 /**
  * The `new_recipients` list (the addresses a reply adds, which the card calls out): canonicalised the
- * same way as the snapshot's lists, and replaced whole. True when the row exists.
+ * same way as the snapshot's lists, and replaced whole. `null` clears it back to "never asked" (the
+ * hint is computed again on the next read); an empty ARRAY is a real answer — "none of these is
+ * new" — and is stored as `"[]"` so it is read back as `[]` and never re-queried. True when the row
+ * exists.
  */
 export async function setNewRecipients(db, id, list) {
-  const addresses = parseAddressList(list ?? []);
+  const stored = list == null ? null : JSON.stringify(parseAddressList(list));
   const r = await db.execute({
     sql: "UPDATE staged_sends SET new_recipients = ?, updated_at = ? WHERE id = ?",
-    args: [addresses.length ? JSON.stringify(addresses) : null, Date.now(), String(id)],
+    args: [stored, Date.now(), String(id)],
   });
   return r.rowsAffected === 1;
 }
@@ -302,12 +346,15 @@ export async function setNewRecipients(db, id, list) {
 /**
  * Ids of rows stuck in `sending` for longer than `olderThanMs` (the gateway or the provider died
  * between the claim and the settle). This changes NOTHING: the caller re-reads each draft and settles
- * it. A draft it can no longer read (404) was either sent (Gmail deletes a draft once it is sent) or
- * deleted by the operator in Gmail, and there is no message id either way: the caller settles it with
- * "sent or deleted in Gmail" and leaves provider_message_id null. Retrying a send is never the
- * answer: the retry's read gets the 404, and a second `drafts.send` is never issued.
+ * it, and must settle it with `expectedUpdatedAt` = the stamp it read, so a row touched since is
+ * never reopened. The default is ten minutes, far above a send's whole timeout budget (three 20 s
+ * HTTP calls), because putting a LIVE send back to `staged` is a second send. A draft it can no
+ * longer read (404) was either sent (Gmail deletes a draft once it is sent) or deleted by the
+ * operator in Gmail, and there is no message id either way: the caller settles it with "sent or
+ * deleted in Gmail" and leaves provider_message_id null. Retrying a send is never the answer: the
+ * retry's read gets the 404, and a second `drafts.send` is never issued.
  */
-export async function reconcileStale(db, { olderThanMs = 120_000, now = Date.now() } = {}) {
+export async function reconcileStale(db, { olderThanMs = 600_000, now = Date.now() } = {}) {
   const age = Math.max(0, Math.floor(Number(olderThanMs)) || 0);
   const cutoff = Math.floor(Number(now)) - age;
   const { rows } = await db.execute({

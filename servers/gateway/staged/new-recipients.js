@@ -8,10 +8,12 @@
  *   - Gmail's `in:sent to:<addr>` search finds a message (the draft's own account, one result).
  * Everything else is a new recipient.
  *
- * It is a quiet hint, never a gate: a failed query answers `[]` (show nothing) rather than
- * guessing "new". The caller caches a non-empty answer on the row (store.setNewRecipients) and
- * leaves an empty one uncached, so a Gmail outage does not turn into a permanent "no new
- * recipients".
+ * It is a quiet hint, never a gate. The two "no answer" cases are kept apart, because the caller
+ * caches one and retries the other:
+ *   - `[]`  a real answer: every address is known, nothing is new. Cached as `"[]"` on the row.
+ *   - a non-empty list of the new addresses. Cached the same way.
+ *   - `null`  the answer cannot be told (no client, a failed search). Nothing is written, so the
+ *     next read asks again. Caching it would freeze a Gmail outage into "no new recipients".
  *
  * No address is ever logged: this module writes nothing anywhere.
  */
@@ -21,12 +23,14 @@ import { parseAddressList } from "./canonical.js";
 export const NEW_RECIPIENT_MAX = 20;
 
 /**
- * The addresses in `snapshot` that are new (lower-cased, sorted), or `[]` when that cannot be told.
- * `gmail` is a Gmail client (gmail-client.js's `createGmailClient`); without one there is nothing
- * to ask, so the answer is "no hint".
+ * The addresses in `snapshot` that are new (lower-cased, sorted), `[]` when none is new, or `null`
+ * when that cannot be told. `gmail` is a Gmail client (gmail-client.js's `createGmailClient`);
+ * without one there is nothing to ask, so the answer is "cannot tell".
+ *
+ * @returns {Promise<string[]|null>}
  */
 export async function newRecipients(db, snapshot, { gmail = null } = {}) {
-  if (!gmail || typeof gmail.hasSentTo !== "function") return [];
+  if (!gmail || typeof gmail.hasSentTo !== "function") return null;
   const addresses = [...new Set([
     ...parseAddressList(snapshot?.to),
     ...parseAddressList(snapshot?.cc),
@@ -42,7 +46,7 @@ export async function newRecipients(db, snapshot, { gmail = null } = {}) {
     } catch {
       // A failed search (auth, rate, network) is "cannot tell": answer with no hint at all rather
       // than mark half the list "new" because Gmail was busy.
-      return [];
+      return null;
     }
     if (!written) out.push(address);
   }

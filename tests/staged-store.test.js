@@ -14,8 +14,8 @@ import {
   placeholderSource, decodeEncodedWords, stripSubjectTags,
 } from "../servers/gateway/staged/canonical.js";
 import {
-  createStaged, getStaged, listStaged, findStagedByDraftId, claimSend, settle, replaceWith, discard,
-  setNewRecipients, reconcileStale,
+  createStaged, getStaged, listStaged, findStagedByDraftId, claimSend, claimEdit, failEdit, settle,
+  replaceWith, discard, setNewRecipients, reconcileStale,
 } from "../servers/gateway/staged/store.js";
 
 // The two-connection claim test needs WAL (a fresh temp DB per test, never a real one).
@@ -286,6 +286,83 @@ test("a claimed row can go back to staged", async () => {
   assert.equal(await claimSend(db, id, hash), false);
 });
 
+test("claimEdit and failEdit never touch a row claimed for send", async () => {
+  const db = freshDb();
+  const id = await createStaged(db, base());
+  const hash = (await getStaged(db, id)).contentHash;
+
+  // The edit's claim bumps the stamp and leaves the row where it was: an edit is not a send.
+  const before = await getStaged(db, id);
+  const at = await claimEdit(db, id);
+  assert.equal(typeof at, "number");
+  let row = await getStaged(db, id);
+  assert.equal(row.state, "staged");
+  assert.ok(row.updatedAt >= before.updatedAt);
+
+  // A failed edit while a send holds the row writes NOTHING: this is the transition that used to
+  // reopen a send in flight (the operator's next tap then sent a second time).
+  assert.equal(await claimSend(db, id, hash), true);
+  assert.equal(await failEdit(db, id, { at, failReason: "Gmail could not send this draft" }), false);
+  row = await getStaged(db, id);
+  assert.equal(row.state, "sending", "the claim still stands");
+  assert.equal(row.failReason, null);
+
+  // Nor may an edit start during a send.
+  assert.equal(await claimEdit(db, id), null);
+
+  // A failure with a stale stamp is refused too: the row was touched since the edit read it. (The
+  // +1 stands in for a later write: two writes in the same millisecond would share a stamp.)
+  assert.equal(await settle(db, id, { state: "failed", failReason: "This draft is gone from Gmail" }), true);
+  await db.execute({ sql: "UPDATE staged_sends SET updated_at = updated_at + 1 WHERE id = ?", args: [id] });
+  assert.equal(await failEdit(db, id, { at, failReason: "Gmail could not send this draft" }), false);
+  assert.equal((await getStaged(db, id)).failReason, "This draft is gone from Gmail");
+
+  // …and with the stamp it took, the failure lands (still editable, still claimable).
+  const again = await claimEdit(db, id);
+  assert.equal(await failEdit(db, id, { at: again, failReason: "Gmail could not send this draft" }), true);
+  row = await getStaged(db, id);
+  assert.equal(row.state, "failed");
+  assert.equal(row.failReason, "Gmail could not send this draft");
+  assert.equal(await claimSend(db, id, hash), true, "a failed edit stays retryable");
+});
+
+test("a settle is a CAS on the claim the sweeper read", async () => {
+  const db = freshDb();
+  const id = await createStaged(db, base());
+  const hash = (await getStaged(db, id)).contentHash;
+  assert.equal(await claimSend(db, id, hash), true);
+  const claim = await getStaged(db, id);
+
+  // Nothing touched it since the sweeper read it: the settle lands.
+  assert.equal(await settle(db, id, { state: "staged", expectedUpdatedAt: claim.updatedAt }), true);
+  assert.equal((await getStaged(db, id)).state, "staged");
+
+  // A row touched since (here: re-claimed, as a live send's retry would) is left ALONE. Settling it
+  // back to `staged` would put a send in flight back on the card, and the next tap would send twice.
+  // (The +1 stands in for the later write: two writes in the same millisecond share a stamp, which
+  // is why the state half of the predicate — never `sending` for the sweeper's reads — also holds.)
+  assert.equal(await claimSend(db, id, hash), true);
+  await db.execute({ sql: "UPDATE staged_sends SET updated_at = updated_at + 1 WHERE id = ?", args: [id] });
+  const touched = await getStaged(db, id);
+  assert.equal(await settle(db, id, { state: "failed", expectedUpdatedAt: claim.updatedAt }), false);
+  const row = await getStaged(db, id);
+  assert.equal(row.state, "sending");
+  assert.equal(row.updatedAt, touched.updatedAt);
+
+  // The stale default is ten minutes: a claim five minutes old is a send that is still going.
+  await db.execute({ sql: "UPDATE staged_sends SET updated_at = ? WHERE id = ?", args: [Date.now() - 5 * 60 * 1000, id] });
+  assert.deepEqual(await reconcileStale(db), [], "5 minutes is not stale");
+  await db.execute({ sql: "UPDATE staged_sends SET updated_at = ? WHERE id = ?", args: [Date.now() - 11 * 60 * 1000, id] });
+  assert.deepEqual(await reconcileStale(db), [id], "11 minutes is");
+});
+
+/**
+ * settle() used to allow `sending` -> `failed`, which is the send's own transition; an edit that
+ * failed while a send was in flight therefore flipped the row to `failed`, and the operator's retry
+ * claimed it again — two `drafts.send` calls for one approved draft. The edit has its own claim now;
+ * the store tests above prove it. The route-level probe lives in tests/staged-routes.test.js
+ * (`a failed edit during a send does not reopen it`).
+ */
 test("reconcileStale reports rows stuck in sending and changes nothing", async () => {
   const db = freshDb();
   const oldId = await createStaged(db, base());
@@ -381,10 +458,18 @@ test("setNewRecipients", async () => {
   assert.equal(await setNewRecipients(db, id, ["Bob <Bob@Example.com>", "alice@example.com", "ALICE@example.com"]), true);
   assert.deepEqual((await getStaged(db, id)).newRecipients, ["alice@example.com", "bob@example.com"]);
 
-  // Replaced whole, and an empty list clears it.
+  // Replaced whole.
   assert.equal(await setNewRecipients(db, id, ["carol@example.com"]), true);
   assert.deepEqual((await getStaged(db, id)).newRecipients, ["carol@example.com"]);
+
+  // An EMPTY list is a real answer ("none of these is new"): it is stored as "[]" and reads back
+  // as [] so the card never asks Gmail again. Only null means "cannot tell, ask again".
   assert.equal(await setNewRecipients(db, id, []), true);
+  const { rows } = await db.execute({ sql: "SELECT new_recipients FROM staged_sends WHERE id = ?", args: [id] });
+  assert.equal(String(rows[0].new_recipients), "[]");
+  assert.deepEqual((await getStaged(db, id)).newRecipients, []);
+
+  assert.equal(await setNewRecipients(db, id, null), true);
   assert.equal((await getStaged(db, id)).newRecipients, null);
 
   assert.equal(await setNewRecipients(db, "ss-missing", ["a@example.com"]), false);

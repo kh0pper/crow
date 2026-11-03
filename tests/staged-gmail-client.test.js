@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { credRefFromWorld, resolveTokenFile } from "../servers/gateway/staged/cred-ref.js";
 import { createGmailClient, faithful, GmailError, snapshotFromRaw } from "../servers/gateway/staged/gmail-client.js";
-import { contentHash, findPlaceholders, parseAddressList, parseAddressListDetailed } from "../servers/gateway/staged/canonical.js";
+import { canonicalSnapshot, contentHash, findPlaceholders, parseAddressList, parseAddressListDetailed } from "../servers/gateway/staged/canonical.js";
 import { createFakeGmail, makeDraftRaw } from "./fixtures/fake-gmail.mjs";
 
 const dirs = [];
@@ -431,6 +431,61 @@ test("a part's own charset is honoured", async () => {
   const odd = createFakeGmail({ drafts: { d1: { raw: part("x-bogus"), threadId: "t1" } } });
   const fallback = await createGmailClient({ credRef: CRED, fetchImpl: odd.fetchImpl, configPaths }).getDraft("d1");
   assert.match(fallback.snapshot.body, /au lait$/);
+});
+
+test("an edited subject with a newline round-trips to the same hash", async () => {
+  const dir = scratch();
+  const configPaths = credentials(dir).configPaths;
+  const fake = createFakeGmail({ drafts: { d1: { raw: makeDraftRaw({ subject: "Hello", body: "Body" }), threadId: "t1" } } });
+  const client = createGmailClient({ credRef: CRED, fetchImpl: fake.fetchImpl, configPaths });
+
+  // The operator pastes a subject with a line break in it. The header can only carry one line, so
+  // the provider will hold "One line Two lines"; if the hash kept the newline, every later send
+  // would read as "the draft changed" and the card could never be approved.
+  const edited = canonicalSnapshot({
+    to: ["alex@example.com"], cc: [], bcc: [], subject: "One line\r\nTwo lines", body: "Body",
+  });
+  assert.equal(edited.subject, "One line Two lines", "the newline collapses to one space, as the header writes it");
+
+  await client.updateDraft("d1", edited);
+  const reread = await client.getDraft("d1");
+  assert.equal(reread.snapshot.subject, "One line Two lines");
+  assert.equal(contentHash(reread.snapshot), contentHash(edited), "the re-read hashes the same");
+  assert.equal(reread.faithful, true);
+
+  // The same holds for a subject the row stored before this rule existed: canonicalising it again
+  // (which contentHash does) collapses the newline, so it matches what the provider holds.
+  const stored = { ...edited, subject: "One line\nTwo lines" };
+  assert.equal(contentHash(stored), contentHash(reread.snapshot));
+});
+
+test("an address with search syntax is always new and is never sent to Gmail search", async () => {
+  const dir = scratch();
+  const fake = createFakeGmail();
+  const client = clientAgainst(dir, fake);
+
+  // Anything that is not a plain address would be read by Gmail's search as syntax (a second term,
+  // a negation, a field) — the hint would then be about a different identity, so it is not asked.
+  for (const address of [
+    '"john doe"@example.com',
+    "alex@example.com OR from:ceo@example.com",
+    "alex@example.com -in:sent",
+    "bcc:alex@example.com",
+    "alex@example.com\r\nBcc: evil@example.net",
+    "alex@example.com;",
+    "",
+  ]) {
+    assert.equal(await client.hasSentTo(address), false, JSON.stringify(address));
+  }
+  assert.equal(fake.calls.sentTo, 0, "no search left the gateway");
+  assert.deepEqual(fake.sentQueries, []);
+
+  // A plain address is searched, lower-cased and QUOTED as one term.
+  assert.equal(await client.hasSentTo("Alex@Example.com"), false);
+  assert.equal(fake.calls.sentTo, 1);
+  assert.deepEqual(fake.sentQueries, ['in:sent to:"alex@example.com"']);
+  fake.sentTo.add("alex@example.com");
+  assert.equal(await client.hasSentTo("alex@example.com"), true);
 });
 
 test("404 → gone", async () => {

@@ -7,7 +7,8 @@
  * A snapshot is { to[], cc[], bcc[], subject, body }. Addresses are parsed out of the provider's
  * header strings ("Name <a@x>, b@y"), lower-cased, de-duplicated and sorted, so header order and
  * case cannot move the hash. The body's line endings and trailing whitespace are the only two
- * things Gmail is free to change under us; both are normalised away.
+ * things Gmail is free to change under us; both are normalised away. A subject's CR/LF runs collapse
+ * to one space too, which is exactly what the send writes into the header.
  *
  * The address parser is a real one (RFC 5322 address-list): quoted strings with backslash escapes,
  * nested comments, and groups. That matters for safety, not tidiness — what we hash is what we send,
@@ -293,6 +294,36 @@ export function parseAddressList(header) {
   return parseAddressListDetailed(header).addresses;
 }
 
+/** A group's "name:" syntax and the separators a header uses: neither may appear in one posted
+ *  address. Built from the ASCII controls plus the two characters that make a header a LIST. */
+const NOT_ONE_ADDRESS = /[:;\u0000-\u001f\u007f]/;
+
+/**
+ * The edit route's address rule, stricter than a header: a field is an ARRAY of strings and every
+ * entry must spell exactly one clean address — trimmed, and equal to what the strict parse reads
+ * back (lower-cased). So a display name, a group (`Team: a@x;`), a second address, a search
+ * operator, a lone `:` or a CR/LF is refused whole, and the caller writes nothing.
+ *
+ * A header is a list; the card posts one address per entry, and anything else it posts is a client
+ * we cannot trust to have shown the operator who the message goes to.
+ *
+ * @returns {string[]|null} the parsed entries, or null when any entry is not one clean address
+ */
+export function parseSingleAddressList(value) {
+  if (!Array.isArray(value)) return null;
+  const out = [];
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const trimmed = item.trim();
+    if (!trimmed || NOT_ONE_ADDRESS.test(trimmed)) return null;
+    const { addresses, invalid } = parseAddressListDetailed(trimmed);
+    if (invalid.length || addresses.length !== 1) return null;
+    if (addresses[0] !== trimmed.toLowerCase()) return null;
+    out.push(addresses[0]);
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------- text */
 
 /** `=XX` sequences (and the soft line break) as bytes; everything else is one byte per character. */
@@ -357,13 +388,20 @@ function canonicalBody(body) {
   return text.split("\n").map((line) => line.replace(/[ \t]+$/, "")).join("\n").trimEnd();
 }
 
-/** The stored/dispatched snapshot: the one shape contentHash, the card and the send all agree on. */
+/**
+ * The stored/dispatched snapshot: the one shape contentHash, the card and the send all agree on.
+ *
+ * A subject's CR/LF runs collapse to ONE SPACE here, because that is what `encodeHeader` writes to
+ * the provider: a subject the operator pasted with a newline in it would otherwise hash as
+ * "A\nB", come back from Gmail as "A B", and read as "the draft changed" on every send — a card
+ * that can never be approved. Collapsing on both sides is what makes the round trip hash equal.
+ */
 export function canonicalSnapshot({ to, cc, bcc, subject, body } = {}) {
   return {
     to: parseAddressList(to),
     cc: parseAddressList(cc),
     bcc: parseAddressList(bcc),
-    subject: String(subject ?? "").replace(/\r\n?/g, "\n").trim(),
+    subject: String(subject ?? "").replace(/[\r\n]+/g, " ").trim(),
     body: canonicalBody(body),
   };
 }

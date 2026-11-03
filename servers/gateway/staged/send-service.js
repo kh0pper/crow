@@ -13,32 +13,43 @@
  *   - unreadable (404) → `failed`, "This draft is gone from Gmail";
  *   - a shape we cannot rebuild (an attachment, a Reply-To, an unclean address) → `failed`,
  *     "This draft can only be sent from Gmail";
- *   - a different canonical hash → back to `staged` and the answer is `changed`; nothing is sent.
+ *   - a different canonical hash → nothing is sent; the card's row is REPLACED with the provider's
+ *     own snapshot and the answer is `changed` plus the new row's id and hash, so the operator
+ *     reviews the text Gmail actually holds (see sendStaged).
  * What actually leaves is rebuilt from the ROW's approved snapshot (gmail-client.js `sendDraft`),
  * never from the provider's stored draft, so even a bot edit that raced this read cannot ride along.
  * A row with no credential reference ("Open in Gmail to send") is never sent and never edited: Crow
  * cannot name the account, and guessing one would send from the wrong inbox.
  *
- * EDIT validates and canonicalises the posted { to, cc, bcc, subject, body } with the same parser the
- * recorder and the hash use, rewrites the provider draft, and only then replaces the row
- * (store.replaceWith: the old row becomes `replaced`, atomically). Any address that is not a clean
- * addr-spec refuses the whole edit with `bad_address` and changes nothing, provider included.
+ * EDIT validates and canonicalises the posted { to, cc, bcc, subject, body }, rewrites the provider
+ * draft, and only then replaces the row (store.replaceWith: the old row becomes `replaced`,
+ * atomically). Each posted address field is an ARRAY of single clean addresses (`parseSingleAddressList`):
+ * a display name, a group, a second address or a CR/LF refuses the whole edit with `bad_address` and
+ * changes nothing, provider included. An edit also refuses a draft the provider holds in a shape we
+ * cannot rebuild (`open_in_gmail`): rewriting that draft would silently drop an attachment.
+ *
+ * An edit takes a short claim of its own first (store.claimEdit bumps `updated_at`) and every write it
+ * makes afterwards is a CAS on that stamp. It is NOT a send: nothing it does may leave `sending`, and
+ * a send that claims the row while the edit is waiting on the provider wins — the edit then answers
+ * `changed` and writes nothing, so a failed `updateDraft` can never reopen a row whose send is in
+ * flight (which would let the operator's next tap send twice).
  *
  * The bot is told through a fixed line per session, queued here and claimed by the Perch /message
  * route after the card-offer and password lines (the same in-memory, taken-once queue as
  * secrets/request-store.js's notes). A bridge or job row has no chat to tell — its `sessionId` is
- * null — and its note is dropped in this task; the card (and its notification) is the record.
+ * null — and its note is dropped there (see queueNote: a known deviation, not an oversight).
  *
  * Nothing in this file puts a body, an address or a subject in a response, a log line, an audit row
  * or a note. The bot learns a recipient COUNT and the provider's message id; the audit row carries
  * the staged id, the channel and the state.
  */
 import { auditLog } from "../../db.js";
-import { canonicalSnapshot, contentHash, findPlaceholders, parseAddressList, parseAddressListDetailed } from "./canonical.js";
+import { canonicalSnapshot, contentHash, findPlaceholders, parseAddressList, parseSingleAddressList } from "./canonical.js";
 import { createGmailClient } from "./gmail-client.js";
 import { newRecipients } from "./new-recipients.js";
 import {
-  claimSend, discard, getStaged, listStaged, reconcileStale, replaceWith, setNewRecipients, settle,
+  claimEdit, claimSend, discard, failEdit, getStaged, listStaged, reconcileStale, replaceWith,
+  setNewRecipients, settle,
 } from "./store.js";
 
 /** The operator-facing reason a send failed, per provider outcome. Never derived from a provider body. */
@@ -53,8 +64,13 @@ export const SEND_FAILED = Object.freeze({
   sentOrDeleted: "Sent or deleted in Gmail",
 });
 
-/** A `sending` row older than this was interrupted (the gateway or the provider died mid-send). */
-export const STALE_SENDING_MS = 120_000;
+/**
+ * A `sending` row older than this was interrupted (the gateway or the provider died mid-send). Ten
+ * minutes, well above a whole send's timeout budget (three 20 s HTTP calls: token, read, send): a
+ * send that is merely slow is still a send, and putting it back on the card would let the operator
+ * tap Send a second time.
+ */
+export const STALE_SENDING_MS = 10 * 60 * 1000;
 
 /** At most this many interrupted sends are re-read per list request. */
 const RECONCILE_MAX = 20;
@@ -90,6 +106,13 @@ function recipientCount(snapshot) {
 const notes = new Map(); // sessionId -> [{ line, at }]
 let noteClock = () => Date.now();
 
+/** Store a session's queue, evicting the entry when nothing is left in it: a chat that had one note
+ *  and took it must not keep an empty array for the life of the process. */
+function setNotes(sid, list) {
+  if (list.length) notes.set(sid, list);
+  else notes.delete(sid);
+}
+
 /** Queue one fixed line for a session's next turn. */
 export function addStagedNote(sessionId, line) {
   const sid = sessionId == null ? "" : String(sessionId);
@@ -97,14 +120,14 @@ export function addStagedNote(sessionId, line) {
   const at = noteClock();
   const list = (notes.get(sid) || []).filter((n) => at - n.at <= STAGED_NOTE_TTL_MS);
   list.push({ line: String(line), at });
-  notes.set(sid, list);
+  setNotes(sid, list);
 }
 
 /** The session's queued lines, removed as they are taken: each goes out once. */
 export function claimStagedNotes(sessionId) {
   const sid = String(sessionId);
   const list = notes.get(sid) || [];
-  notes.delete(sid);
+  setNotes(sid, []);
   const at = noteClock();
   return list.filter((n) => at - n.at <= STAGED_NOTE_TTL_MS).map((n) => n.line);
 }
@@ -114,16 +137,25 @@ export function returnStagedNotes(sessionId, lines) {
   if (!Array.isArray(lines) || !lines.length) return;
   const sid = String(sessionId);
   const at = noteClock();
-  notes.set(sid, [...lines.map((line) => ({ line: String(line), at })), ...(notes.get(sid) || [])]);
+  setNotes(sid, [...lines.map((line) => ({ line: String(line), at })), ...(notes.get(sid) || [])]);
 }
 
 /** Test seams. */
 export function _setStagedNoteClockForTest(fn) { noteClock = typeof fn === "function" ? fn : () => Date.now(); }
 export function _resetStagedNotesForTest() { notes.clear(); noteClock = () => Date.now(); }
+/** The raw queue for a session (null when nothing is queued), so a test can prove eviction. */
+export function _stagedNotesForTest(sessionId) {
+  const list = notes.get(String(sessionId));
+  return list ? list.map((n) => ({ ...n })) : null;
+}
 
 /**
- * Queue a note for the row's own chat. A bridge/job row (`sessionId` null) has no chat: the line is
- * dropped here, by design, in this task.
+ * Queue a note for the row's own chat. A bridge or job row (`sessionId` null) has no chat here: its
+ * note is DROPPED, by design and knowingly — a known deviation from the spec, which wants the bot
+ * told on its next turn in that thread. Those runs live in another process (the pi bridge, or a
+ * job), and this queue is the gateway's memory, so nothing here could ever reach them; the card
+ * (and its notification) is the record for those rows. Closing the gap means a durable queue the
+ * bridge also reads, which is not this task.
  */
 function queueNote(row, line) {
   if (!row || row.sessionId == null) return;
@@ -157,6 +189,17 @@ async function audit(db, event, row, state, injected) {
 
 /* ------------------------------------------------------------------- send */
 
+/**
+ * `settle` is a compare-and-set: false means the row moved on under us (a second tap, a sweeper, a
+ * retry). It is never silent — the line is fixed (`[staged] settle lost <id>`) and carries nothing
+ * of the draft. The caller still answers what actually happened: a message that was sent WAS sent.
+ */
+async function settleRow(db, id, opts) {
+  const ok = await settle(db, id, opts);
+  if (!ok) console.warn("[staged] settle lost " + String(id));
+  return ok;
+}
+
 /** The fixed reason for a provider failure (a GmailError code, or "other" for anything else). */
 function reasonFor(err) {
   const code = err && typeof err.code === "string" ? err.code : "other";
@@ -165,7 +208,7 @@ function reasonFor(err) {
 
 /** Settle the claimed row `failed` with a fixed reason, audit it, and report it to the caller. */
 async function failSend(db, row, reason, auditFn, err = null) {
-  await settle(db, row.id, { state: "failed", failReason: reason });
+  await settleRow(db, row.id, { state: "failed", failReason: reason });
   if (err && err.name !== "GmailError") {
     // A non-provider error could carry anything; log its class only (never its message).
     console.warn("[staged] send failed: " + (err.name || "Error"));
@@ -180,11 +223,15 @@ async function failSend(db, row, reason, auditFn, err = null) {
  * Answers (all fixed strings, no draft content):
  *   { outcome: "sent", messageId, recipients }
  *   { outcome: "failed", failReason }
- *   { outcome: "changed" }        the provider's draft is not what the card showed (or the claim was
- *                                 lost to an older snapshot)
+ *   { outcome: "changed", id?, contentHash? }   the provider's draft is not what the card showed (or
+ *                                 the claim was lost to an older snapshot). When the draft is one we
+ *                                 can rebuild, the card's row is REPLACED with the provider's own
+ *                                 snapshot + hash and this answer carries the new row's id and hash,
+ *                                 so the operator reviews the new text.
  *   { outcome: "already_sent" }   the row is `sending`/`sent` already
  *   { outcome: "placeholders" }   unfilled `[brackets]` in the stored snapshot: refused server-side
  *   { outcome: "open_in_gmail" }  no credential reference: Crow cannot send it
+ *   { outcome: "unsupported_channel" }  the row is not a Gmail draft (nothing else ships yet)
  *   { outcome: "not_found" }
  *
  * `gmail` is the client factory seam (credRef → client); `audit` replaces auditLog.
@@ -192,6 +239,9 @@ async function failSend(db, row, reason, auditFn, err = null) {
 export async function sendStaged(db, id, postedHash, { gmail = null, audit: auditFn = null } = {}) {
   const row = await getStaged(db, id);
   if (!row) return { outcome: "not_found" };
+  // Gmail is the only channel this client can rebuild and send. A row of another channel is not a
+  // draft Crow knows how to claim; refusing it is the honest answer, not a guess.
+  if (row.channel !== "gmail") return { outcome: "unsupported_channel" };
   // "Open in Gmail to send": the recorder could not name the account (an unreadable credential, a
   // failed re-read, a draft we cannot rebuild). Nothing here may move such a row.
   if (row.credRef == null) return { outcome: "open_in_gmail" };
@@ -210,7 +260,7 @@ export async function sendStaged(db, id, postedHash, { gmail = null, audit: audi
   const client = gmailClientFor(row.credRef, gmail);
   if (!client) {
     // The claim was taken and nothing was sent: put the row back exactly where it was.
-    await settle(db, id, { state: "staged" });
+    await settleRow(db, id, { state: "staged" });
     return { outcome: "open_in_gmail" };
   }
 
@@ -220,15 +270,27 @@ export async function sendStaged(db, id, postedHash, { gmail = null, audit: audi
     if (draft.faithful === false) return await failSend(db, row, SEND_FAILED.unfaithful, auditFn);
     if (contentHash(draft.snapshot) !== row.contentHash) {
       // The bot (or the operator, in Gmail) changed it after the card was shown. Nothing was sent,
-      // and the card goes back to review: the operator has to approve the new text.
-      await settle(db, id, { state: "staged" });
-      return { outcome: "changed" };
+      // and the card goes back to review — but around the NEW text, not the stale one: the row is
+      // replaced with what Gmail holds now (replaceWith keeps the credential, the thread, the
+      // session and the card), and the answer names the new row so the client re-renders it. A
+      // replacement that loses the race (the row moved on) is simply "changed" with no new row.
+      await settleRow(db, id, { state: "staged" });
+      let newId = null;
+      try {
+        newId = await replaceWith(db, id, { providerDraftId: row.providerDraftId, snapshot: draft.snapshot });
+      } catch (err) {
+        if (!err || err.code !== "not_replaceable") throw err;
+      }
+      const fresh = newId ? await getStaged(db, newId) : null;
+      return { outcome: "changed", id: fresh ? fresh.id : null, contentHash: fresh ? fresh.contentHash : null };
     }
 
     // 4. Send the approved snapshot (the client rebuilds the message from the row, not from Gmail).
     const sent = await client.sendDraft(row.providerDraftId, { snapshot: row.snapshot, threadId: row.providerThreadId });
     const messageId = sent && sent.messageId != null ? String(sent.messageId) : null;
-    await settle(db, id, { state: "sent", providerMessageId: messageId });
+    // A lost settle does not unsend anything: the message left, so the answer is "sent" either way
+    // (the row it lost to is logged, and the note still reaches the bot).
+    await settleRow(db, id, { state: "sent", providerMessageId: messageId });
     queueNote(row, stagedSentNote(row.snapshot, messageId));
     await audit(db, "staged_send", row, "sent", auditFn);
     return { outcome: "sent", messageId, recipients: recipientCount(row.snapshot) };
@@ -247,15 +309,32 @@ export async function sendStaged(db, id, postedHash, { gmail = null, audit: audi
 const EDITABLE = Object.freeze(["staged", "failed"]);
 
 /**
+ * The edit's honest failure: write it only if the row is still the one this edit claimed, and audit
+ * it only if the write landed. A refused write means a send took the row while the edit was away —
+ * the edit is over, nothing was written, and the card must re-read the row (`changed`).
+ */
+async function failEdited(db, row, at, reason, auditFn) {
+  if (!(await failEdit(db, row.id, { at, failReason: reason }))) return { outcome: "changed" };
+  await audit(db, "staged_edit", row, "failed", auditFn);
+  return { outcome: "failed", failReason: reason };
+}
+
+/**
  * Rewrite the draft from the operator's edit, then replace the row.
  *
  * Answers:
  *   { outcome: "edited", id, contentHash, state }   the NEW row's id and hash
- *   { outcome: "failed", failReason }               the provider refused the update (row `failed`)
- *   { outcome: "bad_address" }                      an address is not a clean addr-spec (nothing written)
+ *   { outcome: "failed", failReason }               the provider refused the read or the update
+ *                                                   (the row is `failed`, still editable)
+ *   { outcome: "bad_address" }                      an address field is not an array of single clean
+ *                                                   addresses (nothing written, provider included)
  *   { outcome: "not_editable" }                     the row is sent, replaced or discarded
- *   { outcome: "changed" }                          the row was claimed for a send mid-edit
+ *   { outcome: "changed" }                          the row was claimed for a send mid-edit, so this
+ *                                                   edit wrote nothing
  *   { outcome: "open_in_gmail" } | { outcome: "not_found" }
+ *
+ * `open_in_gmail` also covers a current draft we cannot rebuild faithfully (an attachment, a
+ * Reply-To): rewriting it from an edit would drop what the operator never saw in the card.
  */
 export async function editStaged(db, id, posted = {}, { gmail = null, audit: auditFn = null } = {}) {
   const row = await getStaged(db, id);
@@ -265,18 +344,33 @@ export async function editStaged(db, id, posted = {}, { gmail = null, audit: aud
 
   const body = posted && typeof posted === "object" && !Array.isArray(posted) ? posted : {};
 
-  // Every address must be clean before anything is written: a display name carrying an address, a
-  // bare word or an address with a space is a header we cannot represent, so the whole edit is
-  // refused and neither Gmail nor the row changes.
-  for (const field of ["to", "cc", "bcc"]) {
-    if (body[field] == null) continue;
-    if (parseAddressListDetailed(body[field]).invalid.length) return { outcome: "bad_address" };
-  }
-  const snapshot = canonicalSnapshot({ to: body.to, cc: body.cc, bcc: body.bcc, subject: body.subject, body: body.body });
-  if (!snapshot.to.length) return { outcome: "bad_address" };
+  // Every address must be ONE clean addr-spec before anything is written: the card posts one entry
+  // per address, so a display name, a group (`Team: a@x;`), a second address, a CR/LF or any other
+  // control character is a client we cannot trust to have shown the operator who this goes to, and
+  // the whole edit is refused — Gmail and the row both unchanged.
+  const to = parseSingleAddressList(body.to);
+  const cc = body.cc == null ? [] : parseSingleAddressList(body.cc);
+  const bcc = body.bcc == null ? [] : parseSingleAddressList(body.bcc);
+  if (!to || !cc || !bcc || !to.length) return { outcome: "bad_address" };
+  const snapshot = canonicalSnapshot({ to, cc, bcc, subject: body.subject, body: body.body });
 
   const client = gmailClientFor(row.credRef, gmail);
   if (!client) return { outcome: "open_in_gmail" };
+
+  // The edit's own claim — NOT a send's (`claimEdit` never touches `state`). From here every write
+  // is a CAS on `editAt`, so a send that claims the row while the provider is answering wins.
+  const editAt = await claimEdit(db, id);
+  if (editAt == null) return { outcome: "changed" };
+
+  let current;
+  try {
+    current = await client.getDraft(row.providerDraftId);
+  } catch (err) {
+    return await failEdited(db, row, editAt, reasonFor(err), auditFn);
+  }
+  // An attachment (or a shape we cannot rebuild) is the operator's to keep: an edit rebuilds the
+  // whole message from the card's five fields, so rewriting this draft would silently drop it.
+  if (current.faithful === false) return { outcome: "open_in_gmail" };
 
   try {
     await client.updateDraft(row.providerDraftId, snapshot);
@@ -284,9 +378,7 @@ export async function editStaged(db, id, posted = {}, { gmail = null, audit: aud
     const reason = reasonFor(err);
     // The row keeps its old snapshot (the operator can retry the edit); `failed` is still editable
     // and still claimable, so nothing is lost either way.
-    await settle(db, id, { state: "failed", failReason: reason });
-    await audit(db, "staged_edit", row, "failed", auditFn);
-    return { outcome: "failed", failReason: reason };
+    return await failEdited(db, row, editAt, reason, auditFn);
   }
 
   let newId;
@@ -331,6 +423,11 @@ export async function discardStaged(db, id, { audit: auditFn = null } = {}) {
  * review; a 404 means the draft was sent (Gmail deletes a sent draft) or deleted by hand, and there
  * is no message id either way. A row we cannot read at all (auth, network) is left alone — its
  * `updated_at` is not touched, so the very next list read tries it again.
+ *
+ * Every settle here is a CAS on the stamp this function READ (`expectedUpdatedAt`): a row that was
+ * touched since — a claim settled, the operator's retry claimed it again — is left alone. Only a
+ * row nothing has touched for `STALE_SENDING_MS` is ever a candidate, so a send still in flight is
+ * never put back on the card (which is what would let it be sent a second time).
  */
 async function reconcileInterrupted(db, { gmail, now }) {
   let ids;
@@ -348,10 +445,12 @@ async function reconcileInterrupted(db, { gmail, now }) {
       try {
         await client.getDraft(row.providerDraftId);
       } catch (err) {
-        if (err && err.code === "gone") await settle(db, id, { state: "failed", failReason: SEND_FAILED.sentOrDeleted });
+        if (err && err.code === "gone") {
+          await settleRow(db, id, { state: "failed", failReason: SEND_FAILED.sentOrDeleted, expectedUpdatedAt: row.updatedAt });
+        }
         continue;
       }
-      await settle(db, id, { state: "staged" });
+      await settleRow(db, id, { state: "staged", expectedUpdatedAt: row.updatedAt });
     } catch { /* one row's problem never blocks the list */ }
   }
 }
@@ -361,8 +460,10 @@ async function reconcileInterrupted(db, { gmail, now }) {
  * `{ id, state, snapshot, contentHash, placeholders, newRecipients, sendable, failReason, tainted }`.
  * Never `raw`, never the credential reference, never a token path.
  *
- * The new-recipient hint is computed on the first read of a sendable row and cached on it; a
- * non-empty answer is stored, an empty one is not (so a Gmail outage is retried, not remembered).
+ * The new-recipient hint is computed on the first read of a sendable row and cached on it — the
+ * whole answer, `[]` included ("none of these is new" is an answer too, and asking Gmail again for
+ * it on every card read is what the cap exists to prevent). Only `null` (the search could not be
+ * made) is left uncached, so an outage is retried rather than remembered.
  */
 export async function listStagedForSession(db, sessionId, { gmail = null, now = Date.now() } = {}) {
   await reconcileInterrupted(db, { gmail, now });
@@ -370,10 +471,10 @@ export async function listStagedForSession(db, sessionId, { gmail = null, now = 
   const items = [];
   for (const row of rows) {
     let newOnes = Array.isArray(row.newRecipients) ? row.newRecipients : [];
-    if (row.credRef != null && !Array.isArray(row.newRecipients)) {
+    if (row.credRef != null && row.newRecipients == null) {
       const client = gmailClientFor(row.credRef, gmail);
-      const found = client ? await newRecipients(db, row.snapshot, { gmail: client }) : [];
-      if (found.length) {
+      const found = client ? await newRecipients(db, row.snapshot, { gmail: client }) : null;
+      if (found) {
         try { await setNewRecipients(db, row.id, found); } catch { /* the hint is not worth a failed read */ }
         newOnes = found;
       }

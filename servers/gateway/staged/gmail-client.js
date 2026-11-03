@@ -37,6 +37,9 @@ const HTTP_TIMEOUT_MS = 20_000;
 const DEFAULT_CHARSET = "utf-8";
 const SNIFFABLE_CHARS = /[\x80-\xFF]/;
 
+/** The only shape of address that is ever handed to Gmail as a search term (see `hasSentTo`). */
+const SEARCHABLE_ADDRESS = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+
 const MESSAGES = Object.freeze({
   gone: "This draft is gone from Gmail",
   auth: "Gmail did not accept the credential",
@@ -372,12 +375,14 @@ function fetchTransport({ credRef, fetchImpl, configPaths, baseUrl, tokenUrl }) 
       });
     },
     /**
-     * Whether this account has ever sent a message to `address`: Gmail's own `in:sent to:`
-     * search, one result is enough. The address goes in the query string only (encoded); the
-     * response is a message list, never a draft, so nothing here can echo the draft.
+     * Whether this account has ever sent a message to `address`: Gmail's own `in:sent to:` search,
+     * one result is enough. The address goes in the query string only (encoded and QUOTED, so it
+     * is one search term and can never be read as search syntax); the response is a message list,
+     * never a draft, so nothing here can echo the draft. The caller has already refused anything
+     * that is not a plain address, so the term is an addr-spec and nothing else.
      */
     async sentTo(address) {
-      const q = encodeURIComponent("in:sent to:" + String(address));
+      const q = encodeURIComponent('in:sent to:"' + String(address) + '"');
       const data = await call(`/gmail/v1/users/me/messages?q=${q}&maxResults=1`);
       return Array.isArray(data && data.messages) ? data.messages.length > 0 : false;
     },
@@ -425,17 +430,24 @@ export function createGmailClient({ credRef, fetchImpl, configPaths, baseUrl = G
     },
 
     /**
+     * True when this account has sent to `address` before (the "new recipient" hint).
+     *
+     * Only a plain address is ever put in a Gmail search. Anything else — a quoted local part, a
+     * space, `from:`/`OR`/`-`, a control character — would either search something else or search
+     * wider, and the hint would be a guess about the wrong identity; such an address is simply
+     * counted as new, and no request leaves the gateway.
+     */
+    async hasSentTo(address) {
+      const a = String(address ?? "").toLowerCase();
+      if (!SEARCHABLE_ADDRESS.test(a)) return false;
+      return transport.sentTo(a);
+    },
+
+    /**
      * Send the approved snapshot — never the stored draft. The provider draft is read only for its
      * threading headers and its thread; the bytes that go out are rebuilt from `snapshot`, so they
      * are exactly the bytes that were hashed. The route has already claimed the row for that hash.
      */
-    /** True when this account has sent to `address` before (the "new recipient" hint). */
-    async hasSentTo(address) {
-      const a = String(address ?? "");
-      if (!a) return false;
-      return transport.sentTo(a);
-    },
-
     async sendDraft(id, { snapshot, threadId } = {}) {
       if (!snapshot) {
         throw Object.assign(new Error("staged_sends: sendDraft needs the approved snapshot"), { code: "no_snapshot" });

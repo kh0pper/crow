@@ -1182,6 +1182,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   //  - Only `application/json` bodies are ours: a urlencoded post is refused before it is read.
   //  - `Cache-Control: no-store` on every answer.
   //
+  // The edit route's addresses: `{ to, cc, bcc }` are ARRAYS of single clean addresses (send-service
+  // `parseSingleAddressList`), and anything else — a display name, a group, a CR/LF — is refused
+  // whole. The send route refuses a row that is not a Gmail draft (`unsupported_channel`).
+  //
   // Every decision and every write is in staged/send-service.js; the answers below are fixed codes
   // plus the row id and its hash. A body, an address or a subject is never echoed — the LIST is the
   // card's own read, and it is the one route that returns a snapshot (the operator is looking at it).
@@ -1216,9 +1220,12 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       case "not_found": return jsonError(res, 404, "not_found");
       case "placeholders": return jsonError(res, 409, "placeholders");
       case "already_sent": return jsonError(res, 409, "already_sent");
-      case "changed": return jsonError(res, 409, "changed");
+      // A changed send answers the id and hash of the row the reporter replaced it with, so the
+      // card shows the text Gmail holds now and the operator reviews THAT (no row: nothing to name).
+      case "changed": return jsonError(res, 409, "changed", o.id ? { id: o.id, contentHash: o.contentHash ?? null } : undefined);
       case "not_editable": return jsonError(res, 409, "not_editable");
       case "open_in_gmail": return jsonError(res, 409, "open_in_gmail");
+      case "unsupported_channel": return jsonError(res, 409, "unsupported_channel");
       case "bad_address": return jsonError(res, 400, "bad_address");
       default: return jsonError(res, 500, "internal");
     }
