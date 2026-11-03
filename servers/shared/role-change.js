@@ -161,20 +161,23 @@ const resolvedKey = (roleId, c) => {
  * with `custom: true` when there is nothing safe to show.
  * `localMarks` (default ctx.localMarks) and `ownAddrs` pass through to the
  * cloud check; a safety change, the safety refusal and any chain walked via
- * safety never use marks (minor e).
+ * safety never use marks (minor e). `ownBoxMarks` (default ctx.ownBoxMarks)
+ * only shapes each side's `where`: a marked "my other box" row reads
+ * "other_box". The cloud warning is isCloudKey's, which never reads it.
  * @returns {Promise<RolePreview>}
  */
-export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, env = process.env, localMarks, ownAddrs, nextCustomDefs } = {}) {
+export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, env = process.env, localMarks, ownBoxMarks, ownAddrs, nextCustomDefs } = {}) {
   ctx ??= await loadRoleContext(db, { maxAgeMs: 0 });
   slots ??= await scanSlots(db, { withUnattended: true, includeSubagents: false, env });
   ownAddrs ??= getOwnAddresses(); // once per preview, not per candidate
   // The marks the Models page uses (the context's by default), so the sheet
   // and the page agree; never for a safety change (minor e).
   localMarks = roleId === "safety" ? undefined : localMarks ?? ctx.localMarks;
+  ownBoxMarks = roleId === "safety" ? undefined : ownBoxMarks ?? ctx.ownBoxMarks;
   const ctxX = hypothetical(ctx, roleId, change);
   // A custom-role edit: the same binding under the edited definitions.
   if (nextCustomDefs) ctxX.customDefs = nextCustomDefs;
-  const whereOpts = { providers: ctx.providers, localMarks, ownAddrs };
+  const whereOpts = { providers: ctx.providers, localMarks, ownBoxMarks, ownAddrs };
 
   const cur = resolveRoleKey(`role:${roleId}`, ctx);
   const nxt = resolveRoleKey(`role:${roleId}`, ctxX);
@@ -281,11 +284,11 @@ export async function previewRoleChange(db, roleId, change = {}, { ctx, slots, e
  */
 export async function applyRoleChange(db, roleId, change = {}, {
   actor, previewHash, ackUnattended = false, ackCloud = false, replacePin = false,
-  env = process.env, localMarks, ownAddrs,
+  env = process.env, localMarks, ownBoxMarks, ownAddrs,
 } = {}) {
   const ctx = await loadRoleContext(db, { maxAgeMs: 0 });
   ownAddrs ??= getOwnAddresses();
-  const preview = await previewRoleChange(db, roleId, change, { ctx, env, localMarks, ownAddrs });
+  const preview = await previewRoleChange(db, roleId, change, { ctx, env, localMarks, ownBoxMarks, ownAddrs });
   const fail = (reason) => ({ ok: false, reason, preview });
   if (typeof previewHash !== "string" || previewHash !== preview.previewHash) return fail("preview_changed");
   if (roleId === "safety") {

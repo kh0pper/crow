@@ -14,6 +14,12 @@
  *   box's mark (servers/shared/provider-local-marks.js), so voice and the
  *   phone's local slot may use the row; it lapses by itself when the row's
  *   hostname changes.
+ * - "This is my other box" (rows on a LAN or tailnet address, or a name for
+ *   one, that are another of the operator's own machines): the same module's
+ *   second mark, its OWN key (provider_own_box_marks). It only changes labels
+ *   and ranks — the row reads "Your other box" instead of "cloud" — and
+ *   never relaxes the strict local check, so it is never a substitute for
+ *   "This is local". Both boxes can be ticked on one row.
  *
  * Every POST redirects back to ?section=llm&tab=providers so Turbo Drive
  * keeps the user on this tab.
@@ -45,7 +51,8 @@ import {
   readCloudConsent, ensureCloudConsentSalt, grantCloudConsent, revokeCloudConsent, consentVerdict, isCloudRow, consentTokenFor,
   cloudDoorIneligibleReason,
 } from "../../../../../shared/cloud-consent.js";
-import { readLocalMarks, markLocal, unmarkLocal, isMarkableRow, isMarkCurrent, localMarkTokenFor } from "../../../../../shared/provider-local-marks.js";
+import { readLocalMarks, markLocal, unmarkLocal, isMarkableRow, isMarkCurrent, localMarkTokenFor, ownBoxMarkTokenFor } from "../../../../../shared/provider-local-marks.js";
+import { readOwnBoxMarks, markOwnBox, unmarkOwnBox, isOwnBoxMarkableRow, isOwnBoxMarkCurrent } from "../../../../../shared/provider-local-marks.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -198,6 +205,37 @@ export function localMarkSwitch(p, { localMarks, salt, ownAddrs, lang = "en" }) 
 /** markLocal refusals with their own line (?local=<reason>). */
 const LOCAL_REFUSALS = new Set(["ip_literal", "public_address", "flagged_cloud", "known_cloud"]);
 
+/** markOwnBox refusals with their own line (?ownbox=<reason>). */
+const OWN_BOX_REFUSALS = new Set(["public_address", "known_cloud", "here"]);
+
+/**
+ * The "This is my other box" checkbox for a row on another of the operator's
+ * machines (isOwnBoxMarkableRow); "" otherwise. Same page token as the local
+ * mark (the row's id and hostname), so a row whose host changed since the
+ * render is refused, not marked. Independent of the "This is local" box: both
+ * can be ticked on one row, and a lapsed mark shows unticked.
+ */
+export function ownBoxSwitch(p, { ownBoxMarks, salt, ownAddrs, lang = "en" }) {
+  if (!isOwnBoxMarkableRow(p, { ownAddrs })) return "";
+  const on = isOwnBoxMarkCurrent(p, ownBoxMarks);
+  const label = escapeHtml(t("providers.isOwnBox", lang));
+  if (!on && !salt) {
+    // The "not available yet" line once per row: the "This is local" box prints it when it shows.
+    const note = isMarkableRow(p, { ownAddrs }) ? "" : `
+            <div class="llm-bots-unavailable">${escapeHtml(t("providers.botsUnavailable", lang))}</div>`;
+    return `<div class="llm-bots-switch llm-own-box">
+            <button type="button" role="checkbox" aria-checked="false" disabled><span class="llm-local-box" aria-hidden="true"></span>${label}</button>${note}
+          </div>`;
+  }
+  const token = on ? "" : `
+            <input type="hidden" name="own_box_token" value="${escapeHtml(ownBoxMarkTokenFor(p, salt))}">`;
+  return `<form method="post" class="llm-bots-switch llm-own-box">
+            <input type="hidden" name="action" value="${on ? "llm_provider_unmark_own_box" : "llm_provider_mark_own_box"}">
+            <input type="hidden" name="id" value="${escapeHtml(p.id)}">${token}
+            <button type="submit" role="checkbox" aria-checked="${on ? "true" : "false"}"><span class="llm-local-box" aria-hidden="true"></span>${label}</button>
+          </form>`;
+}
+
 const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
 const USED_BY_MAX = 4;
 
@@ -299,12 +337,18 @@ export default {
     try { salt = await ensureCloudConsentSalt(db); } catch (err) { console.warn(`[llm-providers-tab] consent salt: ${err.message}`); }
     const consentCtx = { consent: await readCloudConsent(db), salt, lang };
     const localCtx = { localMarks: await readLocalMarks(db), salt, ownAddrs: hostCtx.ownAddrs, lang };
+    const ownBoxCtx = { ownBoxMarks: await readOwnBoxMarks(db), salt, ownAddrs: hostCtx.ownAddrs, lang };
     const localQ = typeof req?.query?.local === "string" ? req.query.local : "";
+    const ownBoxQ = typeof req?.query?.ownbox === "string" ? req.query.ownbox : "";
     const botsNote = req?.query?.bots === "changed" || localQ === "changed"
       ? `<p class="llm-bots-changed" role="status">${escapeHtml(t("providers.botsChanged", lang))}</p>`
       : LOCAL_REFUSALS.has(localQ)
         ? `<p class="llm-bots-changed" role="status">${escapeHtml(t(`providers.localRefused.${localQ}`, lang))}</p>`
-        : "";
+        : ownBoxQ === "changed"
+          ? `<p class="llm-bots-changed" role="status">${escapeHtml(t("providers.botsChanged", lang))}</p>`
+          : OWN_BOX_REFUSALS.has(ownBoxQ)
+            ? `<p class="llm-bots-changed" role="status">${escapeHtml(t(`providers.ownBoxRefused.${ownBoxQ}`, lang))}</p>`
+            : "";
     const buildRow = (p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const idEsc = escapeHtml(p.id);
@@ -316,7 +360,7 @@ export default {
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
-        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}${localMarkSwitch(p, localCtx)}</td>
+        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}${localMarkSwitch(p, localCtx)}${ownBoxSwitch(p, ownBoxCtx)}</td>
         <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
@@ -396,8 +440,8 @@ export default {
       .llm-bots-switch button[disabled] { cursor:not-allowed; opacity:0.6; }
       .llm-bots-unavailable { font-size:0.75rem; color:var(--crow-text-muted); }
       .llm-local-box { position:relative; flex:none; width:16px; height:16px; box-sizing:border-box; border:2px solid var(--crow-border); border-radius:3px; background:var(--crow-bg-surface); }
-      .llm-local-mark button[aria-checked="true"] .llm-local-box { background:var(--crow-accent); border-color:var(--crow-accent); }
-      .llm-local-mark button[aria-checked="true"] .llm-local-box::after { content:""; position:absolute; left:3px; top:0; width:4px; height:8px; border:solid var(--crow-bg-surface); border-width:0 2px 2px 0; transform:rotate(45deg); }
+      .llm-local-mark button[aria-checked="true"] .llm-local-box, .llm-own-box button[aria-checked="true"] .llm-local-box { background:var(--crow-accent); border-color:var(--crow-accent); }
+      .llm-local-mark button[aria-checked="true"] .llm-local-box::after, .llm-own-box button[aria-checked="true"] .llm-local-box::after { content:""; position:absolute; left:3px; top:0; width:4px; height:8px; border:solid var(--crow-bg-surface); border-width:0 2px 2px 0; transform:rotate(45deg); }
       .llm-bots-switch button:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
       .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {
@@ -588,6 +632,23 @@ export default {
         } else {
           await unmarkLocal(db, id);
           console.log(`[llm-providers-tab] ${id} no longer marked local (dashboard:${user})`);
+        }
+      }
+      res.redirectAfterPost(BACK);
+      return true;
+    }
+    if (action === "llm_provider_mark_own_box" || action === "llm_provider_unmark_own_box") {
+      const id = typeof req.body?.id === "string" ? req.body.id : "";
+      if (id) {
+        const user = typeof req.dashboardUser === "string" && req.dashboardUser ? req.dashboardUser : "owner";
+        if (action === "llm_provider_mark_own_box") {
+          const token = typeof req.body?.own_box_token === "string" ? req.body.own_box_token : "";
+          const r = await markOwnBox(db, id, { actor: `dashboard:${user}`, expect: { token } });
+          if (r.ok) console.log(`[llm-providers-tab] ${id} marked as the operator's other box (dashboard:${user})`);
+          else if (r.reason === "changed" || OWN_BOX_REFUSALS.has(r.reason)) { res.redirectAfterPost(`${BACK}&ownbox=${r.reason}`); return true; }
+        } else {
+          await unmarkOwnBox(db, id);
+          console.log(`[llm-providers-tab] ${id} no longer marked as the operator's other box (dashboard:${user})`);
         }
       }
       res.redirectAfterPost(BACK);

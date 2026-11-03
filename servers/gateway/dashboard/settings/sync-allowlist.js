@@ -162,6 +162,9 @@ export const INSTANCE_SCOPE_KEYS = {
   // rows sync, so a mark must not: each box vouches for itself, pinned to
   // the hostname it saw. The upgrade and notice flags are per box too.
   provider_local_marks:        "Provider rows marked local on this box, pinned to hostname (per install)",
+  // "This is my other box" marks (same module, its own key). Never synced: it
+  // says which of the operator's machines a row runs on, as seen from here.
+  provider_own_box_marks:      "Provider rows marked as the operator's other box, pinned to hostname (per install)",
   provider_local_marks_seeded: "One-time local-marks upgrade done (per install)",
   provider_local_notice_shown: "Not-proven-local notice sent or dismissed (per install)",
 };

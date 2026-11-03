@@ -228,17 +228,23 @@ async function speechRow(db, def, { whereOpts, voiceDef }) {
  * @param {string} [opts.lang]              accepted for the callers' symmetry; rows carry codes, not copy
  * @param {Set<string>} [opts.ownAddrs]     this box's addresses (default: probed)
  * @param {object} [opts.localMarks]        "This is local" marks (default: the role context's; never applied to safety)
+ * @param {object} [opts.ownBoxMarks]       "This is my other box" marks (default: the role context's; never applied to safety)
  * @param {() => string} [opts.localInstanceId]  test seam for the role context
  * @param {Function} [opts.classifierStatusFn]   test seam (default getClassifierStatus)
  * @param {Function} [opts.classifierLookup]     DNS lookup handed to the classifier status (the menu preview passes one that never touches the network)
  * @returns {Promise<Array<object>>} RoleRow[] in page order, each with its `group`
  */
-export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, localInstanceId, classifierStatusFn = getClassifierStatus, classifierLookup } = {}) {
+export async function buildRoleRows(db, { env = process.env, ownAddrs, localMarks, ownBoxMarks, localInstanceId, classifierStatusFn = getClassifierStatus, classifierLookup } = {}) {
   const ctx = await loadRoleContext(db, { maxAgeMs: 0, ...(localInstanceId ? { getOrCreateLocalInstanceId: localInstanceId } : {}) });
   // This box's addresses: probed once for all rows, not per model.
-  // Marks: the caller's, else the context's ("This is local"); never for safety (minor e).
+  // Marks: the caller's, else the context's ("This is local" and "This is my other box"); never for safety (minor e).
   localMarks ??= ctx.localMarks;
-  const whereOpts = { ownAddrs: ownAddrs || getOwnAddresses(), ...(localMarks ? { localMarks } : {}) };
+  ownBoxMarks ??= ctx.ownBoxMarks;
+  const whereOpts = {
+    ownAddrs: ownAddrs || getOwnAddresses(),
+    ...(localMarks ? { localMarks } : {}),
+    ...(ownBoxMarks ? { ownBoxMarks } : {}),
+  };
   const unmarkedWhere = { ownAddrs: whereOpts.ownAddrs };
   // Voice keys from the same context the rows use.
   const resolveRoleFn = async (_db, key, { need, chosenOnly } = {}) => (chosenOnly ? resolveChosenRoleKey : resolveRoleKey)(key, { ...ctx, need });

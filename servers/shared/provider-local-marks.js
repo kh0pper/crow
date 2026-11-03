@@ -24,20 +24,46 @@
  * page's "where" chip and the cloud warnings. Who never does: the bot safety
  * classifier and the `safety` role (role-picks.js, role-change.js,
  * bot-classifier.mjs, classifier-status.js) and the pi role snapshot.
+ *
+ * The second kind, "This is my other box", says a row runs on another of the
+ * operator's own machines (a LAN or tailnet address, or a name for one), so
+ * whereItRuns answers "other_box" instead of "cloud":
+ *
+ *   dashboard_settings.provider_own_box_marks = {[rowId]: {host, at, by}}
+ *
+ * It reuses the pattern (the same page token, the lapse on a hostname change,
+ * instance scope) but has its OWN key, so it can never tick "This is local"
+ * and never relaxes the strict check: cloudStatus, isCloudKey and
+ * isStrictCloud do not read it at all. Unlike a local mark it applies to a
+ * private-class IP literal (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7)
+ * and to a row whose stored `host` is "cloud" (that is the point: an
+ * external-engine row on the operator's second box). A public address, a
+ * public DNS name, a known cloud preset's hostname, and this box itself are
+ * refused.
+ *
+ * It is a label AND a privacy rank: "other_box" is rank 1 for session
+ * summaries (perch/session-summary.js). A bot whose model runs on a marked
+ * row is therefore an asker of rank 1, so summary recall
+ * (memory/summary-recall.js) and project briefings (perch/briefing.js) give it
+ * rank-1 summaries as well as rank-2 ones (card titles and project names still
+ * need rank 0). That is the operator's call, made by ticking the box. Nothing
+ * else is widened: the strict voice/phone checks, the speech cloud
+ * acknowledgement, the safety role and Ramble's health-text gate never read
+ * these marks.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import { promises as dnsPromises } from "node:dns";
-import { cloudStatus, isCloudKey, chainRows } from "./model-roles.js";
+import { cloudStatus, isCloudKey, chainRows, ownBoxHostEligible } from "./model-roles.js";
 import { hostnameOf } from "./provider-host.js";
 import { classifyIp, isLocalNetworkIp } from "./ip-classify.js";
 import { getOwnAddresses } from "./locality.js";
 import { providerRowToObject } from "./provider-row.js";
 import { invalidateRoleContext } from "./model-roles-store.js";
 import { presetHostFor } from "./provider-recommendations.js";
-import { LOCAL_MARKS_KEY, parseMarksMap as parseMap, readLocalMarks } from "./provider-local-marks-read.js";
+import { LOCAL_MARKS_KEY, OWN_BOX_MARKS_KEY, parseMarksMap as parseMap, readLocalMarks, readOwnBoxMarks } from "./provider-local-marks-read.js";
 
-export { LOCAL_MARKS_KEY, readLocalMarks };
+export { LOCAL_MARKS_KEY, OWN_BOX_MARKS_KEY, readLocalMarks, readOwnBoxMarks };
 export const LOCAL_MARKS_SEEDED_KEY = "provider_local_marks_seeded";
 export const LOCAL_NOTICE_SHOWN_KEY = "provider_local_notice_shown";
 /** The value LOCAL_NOTICE_SHOWN_KEY takes once the operator dismisses the Models page banner. */
@@ -103,6 +129,13 @@ async function providerRow(db, id) {
  * separated from the consent token. A click on a page rendered before the
  * row's host changed carries a token that no longer matches.
  */
+/** The "my other box" checkbox's token: its own domain, so a "This is local" token never marks a box. */
+export function ownBoxMarkTokenFor(row, salt) {
+  const id = typeof row?.id === "string" ? row.id : "";
+  const host = hostnameOf(row?.baseUrl ?? row?.base_url) || "";
+  return createHmac("sha256", Buffer.from(String(salt), "hex")).update(JSON.stringify(["own-box-mark-v1", id, host])).digest("hex").slice(0, 32);
+}
+
 export function localMarkTokenFor(row, salt) {
   const id = typeof row?.id === "string" ? row.id : "";
   const host = hostnameOf(row?.baseUrl ?? row?.base_url) || "";
@@ -181,6 +214,93 @@ export function isMarkCurrent(row, localMarks) {
   if (!row || !localMarks || typeof row.id !== "string" || !Object.hasOwn(localMarks, row.id)) return false;
   const h = hostnameOf(row.baseUrl);
   return !!h && localMarks[row.id]?.host === h;
+}
+
+// ---- "This is my other box" -----------------------------------------------
+
+/** Loopback, or one of this box's own addresses: the address itself says "here". */
+function isHere(host, ownAddrs) {
+  return ownAddrs.has(host) || isLoopback(host);
+}
+
+/**
+ * Mark row `rowId` "This is my other box" on this box, recording its current
+ * hostname. Refusals, in order: `not_found` (no row, or no hostname),
+ * `public_address` (an IP literal that is not on a local network: public,
+ * reserved or documentation), `known_cloud` (the base URL is on a known cloud
+ * preset's hostname, whatever `host` says), `here` (the address is this box's
+ * own or loopback), `changed` (the caller's expectation no longer holds).
+ *
+ * Allowed where "This is local" is not: a private-class IP literal, and a row
+ * whose stored `host` is "cloud" (an external-engine row on the operator's
+ * second machine).
+ *
+ * `expect` is `{token}` (what the page rendered, localMarkTokenFor) or
+ * `{host}`. Without `expect` the row is marked as it is now.
+ * @returns {Promise<{ok:true}|{ok:false, reason:string}>}
+ */
+export async function markOwnBox(db, rowId, { actor, expect, ownAddrs } = {}) {
+  if (typeof rowId !== "string" || !rowId) return { ok: false, reason: "not_found" };
+  return locked(async () => {
+    const row = await providerRow(db, rowId);
+    const host = row ? hostnameOf(row.baseUrl) : null;
+    if (!row || !host) return { ok: false, reason: "not_found" };
+    if (isIP(host) && !isLocalNetworkIp(host)) return { ok: false, reason: "public_address" };
+    if (presetHostFor(row) !== null) return { ok: false, reason: "known_cloud" };
+    if (isHere(host, ownAddrs || getOwnAddresses()) || host === "host.docker.internal") return { ok: false, reason: "here" };
+    if (!ownBoxHostEligible(host)) return { ok: false, reason: "public_address" };
+    if (expect !== undefined) {
+      let ok = false;
+      if (expect && typeof expect.token === "string") {
+        const { readCloudConsentSalt } = await import("./cloud-consent.js");
+        const salt = await readCloudConsentSalt(db);
+        ok = !!salt && sameHex(expect.token, ownBoxMarkTokenFor(row, salt));
+      } else if (expect && typeof expect.host === "string") {
+        ok = expect.host === host;
+      }
+      if (!ok) return { ok: false, reason: "changed" };
+    }
+    const all = parseMap(await readValue(db, OWN_BOX_MARKS_KEY));
+    all[rowId] = { host, at: new Date().toISOString(), by: String(actor || "unknown") };
+    await writeValue(db, OWN_BOX_MARKS_KEY, JSON.stringify(all));
+    invalidateRoleContext();
+    fireMarkListeners(rowId);
+    return { ok: true };
+  });
+}
+
+/** Remove row `rowId`'s "my other box" mark (a no-op when there was none). */
+export async function unmarkOwnBox(db, rowId) {
+  return locked(async () => {
+    const v = await readValue(db, OWN_BOX_MARKS_KEY);
+    if (v == null) return { ok: true };
+    const all = parseMap(v);
+    if (Object.hasOwn(all, rowId)) {
+      delete all[rowId];
+      await writeValue(db, OWN_BOX_MARKS_KEY, JSON.stringify(all));
+      invalidateRoleContext();
+      fireMarkListeners(rowId);
+    }
+    return { ok: true };
+  });
+}
+
+/** Is `row`'s "my other box" mark present and still for its current hostname? Pure. */
+export function isOwnBoxMarkCurrent(row, ownBoxMarks) {
+  return isMarkCurrent(row, ownBoxMarks);
+}
+
+/**
+ * Could this row take a "This is my other box" mark? An enabled row with a
+ * hostname that is a DNS name or a private-class IP literal, not on a known
+ * cloud preset's hostname, and not this box itself (markOwnBox's refusals).
+ */
+export function isOwnBoxMarkableRow(row, { ownAddrs } = {}) {
+  if (!row || row.disabled || presetHostFor(row) !== null) return false;
+  const h = hostnameOf(row.baseUrl);
+  if (!h) return false;
+  if (!ownBoxHostEligible(h)) return false;
+  return !isHere(h, ownAddrs || getOwnAddresses());
 }
 
 // ---- the strict predicate --------------------------------------------------------
