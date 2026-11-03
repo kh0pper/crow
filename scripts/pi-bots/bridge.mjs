@@ -51,7 +51,7 @@ import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs } from "./pi_contain.mjs";
-import { containedCloudTokenPath } from "./pi_contain_agent.mjs";
+import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
 import { providerRowToObject } from "../../servers/shared/provider-row.js";
 import { CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY } from "../../servers/shared/cloud-consent.js";
@@ -170,7 +170,7 @@ function containModelInputs(resolved, piProvider) {
  * spawner-built closed-world config). Creates the per-instance bot cache and
  * the per-spawn GENERATED agent dir (pi_contain_agent.mjs).
  */
-function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes }) {
+function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, modelInputs, otherHomes }) {
   const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
   const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
   const botCacheDir = join(crowHome, "bot-cache");
@@ -197,7 +197,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
   if (!containSwept) { containSwept = true; sweepStaleContainDirs({ parent: runDir }); sweepStaleContainDirs(); }
   const shadow = prepareAgentShadow(piAgentDir, {
     parent: runDir,
-    ...containModelInputs(resolved, piProvider),
+    ...modelInputs,
     gatewayPort: gatewayListenPort(),
     cloudTokenPath: containedCloudTokenPath(),
     modelRolesFile: roleSnapshotPath(),
@@ -615,8 +615,22 @@ export class PiRpc {
       console.error("[pi-bots] CROW_BOT_ENV_PASSTHROUGH=1: bot shell disabled (bash policy clamped to deny)");
       piPolicy.bash = "deny";
     }
+    // Containment is decided HERE, not at the wrapPiSpawn call below: the
+    // classifier block is built into the policy env and must already know
+    // whether this spawn is contained. The provider rows (and cloud consent) a
+    // contained spawn needs are read once, for both the classifier rewrite and
+    // the generated agent dir.
+    const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
+    const containedSpawn = piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId);
+    const containModels = containedSpawn ? containModelInputs(resolved, piProvider) : null;
     if (piPolicy.bash === "auto") {
-      const block = classifierPolicyBlock(opts.botClassifier);
+      let block = classifierPolicyBlock(opts.botClassifier);
+      // A contained bot reaches only its own gateway's doors, so the raw
+      // provider/endpoint URL would be refused by the relay; the classifier
+      // rides a door instead (or is dropped, and pi-lab fails closed).
+      if (block && containedSpawn) {
+        block = containedClassifierBlock(block, opts.botClassifier, { gatewayPort: gatewayListenPort(), rows: containModels.rows });
+      }
       if (block) piPolicy.classifier = block;
     }
     if (opts.permissionMode === "ask") {
@@ -763,13 +777,13 @@ export class PiRpc {
     // the contain plan refuses a bind by resolved home path, not by name.
     const otherHomes = others.map((d) => (basename(d) === "secrets" ? dirname(d) : d));
     // Queue item 19 step 2a: the contain tier, when the spawner's env selects
-    // it for this bot. The mount inputs come from this spawn's own policy copy;
+    // it for this bot (containedSpawn, decided before the policy above). The
+    // mount inputs come from this spawn's own policy copy;
     // the pi agent dir is a per-spawn GENERATED dir (a door-only models.json, no
     // provider key, no auth.json) removed when pi exits. Under contain the
     // secrets dirs are not bound at all: wrapPiSpawn reports each one either
     // over-mounted (a bound path really contains it) or absent from the empty
     // root (no bind covers it), and the `hidden` check below reads that report.
-    const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
     let contain = null;
     // Per-spawn contain resources (agent shadow, ...), removed exactly once:
     // on any failure before pi runs, or once pi's whole process group is gone
@@ -777,8 +791,8 @@ export class PiRpc {
     this._containCleanups = [];
     let launch;
     try {
-      if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
-        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes });
+      if (containedSpawn) {
+        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, modelInputs: containModels, otherHomes });
         this._containCleanups.push(...contain._cleanups);
         // The generated agent dir carries a 0600 copy of the instance's role
         // snapshot; the spawn env names that copy. <CROW_HOME> itself is never

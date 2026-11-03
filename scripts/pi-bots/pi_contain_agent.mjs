@@ -30,6 +30,10 @@
  *                 spawned CROW_MODEL_ROLES_FILE names a file inside the dir
  *                 instead of <CROW_HOME> (which is not bound).
  *
+ * It also owns the door a contained bot's bash `auto` safety classifier goes
+ * through (containedClassifierBlock): the classifier is a second model URL in
+ * the same spawn, and an endpoint the bot can reach only through a door.
+ *
  * The cloud-door token path this module is given is RESOLVED here, and that
  * resolved path is both what a `/llm/c` entry's `!cat` apiKey names and what
  * the caller binds (pi_contain.mjs): one file, whichever way the home is
@@ -52,6 +56,8 @@ import { doorKindOf, isLocalClassTarget, isForbiddenTarget } from "../../servers
 import { cloudDoorEligible, consentVerdict } from "../../servers/shared/cloud-consent.js";
 import { DOOR_ID_PREFIX, doorEntryId, piCompatFor } from "../../servers/shared/pi-compat.js";
 import { AGENT_RO_SUBDIRS } from "./pi_contain.mjs";
+import { doorProviderOf } from "../../servers/shared/bot-bash-policy.js";
+import { isDoorPath } from "../../servers/shared/bot-doors.js";
 
 /** Agent files copied from the operator's dir, unchanged. */
 export const AGENT_COPIED_FILES = Object.freeze(["settings.json", "keybindings.json"]);
@@ -153,11 +159,64 @@ function rowFor(rows, id) {
  *  or tailnet target Crow manages (native, external engine, bundle, opt-in).
  *  doorKindOf's "unmanaged" rows (a plain LAN/tailnet endpoint nothing routes
  *  for) are exactly the ones `/llm/p` refuses with NOT_FORWARDABLE. */
-function doorRow(r) {
+export function doorRow(r) {
   if (!r || typeof r.baseUrl !== "string" || !r.baseUrl) return null;
   if (isForbiddenTarget(r.baseUrl) || !isLocalClassTarget(r.baseUrl)) return null;
   if (doorKindOf(r) === "unmanaged") return null;
   return r;
+}
+
+/** The line one contained spawn logs when the bash `auto` classifier cannot be
+ *  put on a door. Fixed text: an operator greps for it. */
+export const CONTAINED_CLASSIFIER_NO_DOOR =
+  "[pi-bots] bash=auto: the safety classifier is not reachable from a contained bot (not a provider door), so commands will be asked (live chat) or refused (unattended)";
+
+/**
+ * The bash `auto` safety-classifier block for a CONTAINED spawn (bridge.mjs
+ * applies this only when the spawn is contained; an uncontained one keeps the
+ * raw endpoint). A contained bot reaches exactly one host port — its own
+ * gateway's — and there only the door paths, so the classifier must ride the
+ * same door the generated models.json uses:
+ *   - the selection names a provider row: `/llm/p/<row>/v1` on this gateway,
+ *     and only for a row that really has a provider door AND is OpenAI-shaped
+ *     (the door speaks chat-completions). The model is unchanged;
+ *   - the operator named an endpoint: rewritten only when its URL is already a
+ *     `/llm/p/<row>/v1` door. A bare `/llm/v1`, a `/llm/c/<row>` cloud door or
+ *     any plain endpoint is not something this spawn can reach.
+ * Anything else gives null (no classifier block) + the fixed log line, so
+ * pi-lab fails closed as it does with no classifier: ask in a live chat,
+ * refuse unattended. Never a `/llm/c/` URL: the classifier selection already
+ * refuses a cloud model, and this rewrite must not find a cloud door.
+ * The built URL must also still be a door PATH after normalisation: a row id
+ * need not be a plain slug, and what the relay would refuse is dropped here
+ * rather than handed to pi-lab as a dead URL.
+ */
+export function containedClassifierBlock(block, sel, { gatewayPort, rows = [], log = (l) => console.error(l) } = {}) {
+  if (!block) return null;
+  const providerId = sel && typeof sel.providerId === "string" && sel.providerId ? sel.providerId : null;
+  let named = null;
+  if (providerId) {
+    // Exact id: the selection named a real row, so a case-folded look-alike is never stood in.
+    const row = doorRow((Array.isArray(rows) ? rows : []).find((r) => r && r.id === providerId) || null);
+    named = row && OPENAI_TYPES.has(row.provider_type) ? row.id : null;
+  } else {
+    named = doorProviderOf(block.url);
+  }
+  if (named) {
+    const url = providerDoorUrl(doorBaseFor(gatewayPort), named);
+    try {
+      if (isDoorPath(new URL(url).pathname)) {
+        // An operator endpoint naming another host's door is moved to THIS gateway's door of that
+        // id: say so, since it changes the host the operator chose.
+        if (!providerId && new URL(block.url).host !== `127.0.0.1:${gatewayPort}`) {
+          log("[pi-bots] bash=auto: the safety classifier endpoint's host was moved to this gateway's provider door for a contained bot");
+        }
+        return { ...block, url };
+      }
+    } catch { /* not a URL */ }
+  }
+  log(CONTAINED_CLASSIFIER_NO_DOOR);
+  return null;
 }
 
 /** The consented cloud door entry for a row (the shape pi-models-sync writes),

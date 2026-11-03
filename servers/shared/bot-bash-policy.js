@@ -165,8 +165,10 @@ function doorIsCloud(isCloud, url, rowId, model) {
 }
 
 /** The provider a door URL names (/llm/p/<id>/v1), or null: the bare /llm/v1,
- *  or an id that decodes to something with a "/" (an encoded %2F). */
-function doorProviderOf(url) {
+ *  or an id that decodes to something with a "/" (an encoded %2F). Exported
+ *  for the contained spawn's door rewrite (pi_contain_agent.mjs), so the
+ *  "is this URL a provider door" question has one answer. */
+export function doorProviderOf(url) {
   try {
     const m = new URL(url).pathname.replace(/\/+$/, "").match(/\/llm\/p\/([^/]+)\/v1$/i);
     if (!m) return null;
