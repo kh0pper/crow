@@ -581,6 +581,37 @@ test("putChunk past the sample cap is refused", async () => {
   assert.equal(existsSync(join(staging, takeId, "000001.pcm")), false);
 });
 
+test("concurrent chunks cannot together pass the sample cap", async () => {
+  const { uploads, staging } = setup();
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+
+  // Staged audio one 2-frame chunk short of the cap: of several chunks sent
+  // at once, exactly one may land.
+  const cap = 115200000;
+  const chunk = pcm24(signal(2, 2)); // 2 frames x 2 channels x 3 bytes = 12 bytes
+  const first = join(staging, takeId, "000000.pcm");
+  writeFileSync(first, Buffer.alloc(0));
+  truncateSync(first, cap * 3 - chunk.byteLength);
+
+  const results = await Promise.allSettled([1, 2, 3, 4].map((index) => uploads.putChunk(takeId, index, chunk)));
+  const landed = results.filter((result) => result.status === "fulfilled").length;
+  const refused = results.filter((result) => result.status === "rejected" && result.reason.status === 413).length;
+  assert.equal(landed, 1, "exactly one chunk fits under the cap");
+  assert.equal(refused, 3, "the others are refused as too large");
+});
+
+test("a chunk index no take of this size could need is refused", async () => {
+  const { uploads } = setup();
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+  const lastIndex = Math.ceil((115200000 * 3) / 1048576);
+  await assert.rejects(
+    () => uploads.putChunk(takeId, lastIndex + 1, pcm24(signal(2, 2))),
+    (error) => error.status === 413,
+  );
+});
+
 test("finish with a missing chunk names it", async () => {
   const { uploads, storage, hub } = setup();
   const takeId = randomUUID();

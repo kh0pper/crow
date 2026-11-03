@@ -722,8 +722,27 @@ export function createTakeUploads({
    * @param {Buffer|Uint8Array} bytes
    * @returns {Promise<{sha256: string}>}
    */
+  /**
+   * One take's chunk writes, in arrival order. The cap check and the write
+   * are then one step per take: two chunks sent at once cannot both pass a
+   * check that only one of them fits under.
+   * @type {Map<string, Promise<unknown>>}
+   */
+  const chunkQueues = new Map();
+
   async function putChunk(takeId, index, bytes) {
     requireTakeId(takeId);
+    const before = chunkQueues.get(takeId) ?? Promise.resolve();
+    const run = before.catch(() => {}).then(() => putChunkNow(takeId, index, bytes));
+    chunkQueues.set(takeId, run);
+    try {
+      return await run;
+    } finally {
+      if (chunkQueues.get(takeId) === run) chunkQueues.delete(takeId);
+    }
+  }
+
+  async function putChunkNow(takeId, index, bytes) {
     const at = Number(index);
     if (!Number.isInteger(at) || at < 0 || at > MAX_CHUNK_INDEX) {
       throw badRequest(`A chunk index is a whole number from 0 to ${MAX_CHUNK_INDEX}.`);
@@ -749,6 +768,13 @@ export function createTakeUploads({
 
     const frameBytes = channelCount * BYTES_PER_SAMPLE;
     const maxBytes = CHUNK_BYTES + frameBytes;
+    // No take this size can need a chunk past this index.
+    const lastIndex = Math.ceil((sampleCap * BYTES_PER_SAMPLE) / CHUNK_BYTES);
+    if (at > lastIndex) {
+      throw tooLarge(
+        `A take can hold at most ${groupThousands(sampleCap)} samples (frames × channels), so it never needs chunk ${at}.`,
+      );
+    }
     if (bytes.byteLength > maxBytes) {
       throw tooLarge(
         `A chunk can be at most ${CHUNK_BYTES} bytes plus one frame: ${bytes.byteLength} bytes is too much.`,
