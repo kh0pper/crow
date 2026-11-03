@@ -5,7 +5,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, connect } from "node:net";
 import { createServer as createHttpServer } from "node:http";
-import { mkdtempSync, rmSync, realpathSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,32 +99,56 @@ test("own public address refused", async () => {
 
 test("local table from ip, fib_trie fallback", () => {
   const ip4 = [
-    { type: "local", dst: "127.0.0.1", dev: "lo" }, { type: "local", dst: "10.0.0.237", dev: "eno1" },
-    { type: "broadcast", dst: "10.0.0.255", dev: "eno1" }, { type: "local", dst: "10.0.0.0/8", dev: "lo" },
+    { type: "local", dst: "127.0.0.1", dev: "lo" }, { type: "local", dst: "10.20.30.40", dev: "eth0" },
+    { type: "broadcast", dst: "10.20.30.255", dev: "eth0" }, { type: "local", dst: "10.20.30.0/24", dev: "lo" },
   ];
-  const ip6 = [{ type: "local", dst: "::1", dev: "lo" }, { type: "local", dst: "fd00::5", dev: "eno1" }];
-  const t = readLocalTable({
-    run: (args) => (args.includes("-6") ? ip6 : ip4),
-    readFile: () => { throw new Error("ip(8) worked: no procfs fallback expected"); },
+  const ip6 = [{ type: "local", dst: "::1", dev: "lo" }, { type: "local", dst: "fd00::5", dev: "eth0" }];
+  // The MAIN table: one on-link network per family, plus a default route via a
+  // router (a gateway is not on-link and must not be counted).
+  const ip4Main = [
+    { dst: "default", gateway: "192.0.2.1", dev: "eth0" },
+    { dst: "192.0.2.0/24", dev: "eth0", scope: "link" },
+  ];
+  const ip6Main = [{ dst: "2001:db9:10:20::/64", dev: "eth0", protocol: "ra" }];
+  const run = (args) => {
+    const main = args.includes("main"), v6 = args.includes("-6");
+    if (main) return v6 ? ip6Main : ip4Main;
+    return v6 ? ip6 : ip4;
+  };
+  const t = readLocalTable({ run, readFile: () => { throw new Error("ip(8) worked: no procfs fallback expected"); } });
+  assert.deepEqual(t, {
+    v4: ["127.0.0.1", "10.20.30.40", "10.20.30.255", "10.20.30.0/24"], v6: ["::1", "fd00::5"],
+    onLink4: ["192.0.2.0/24"], onLink6: ["2001:db9:10:20::/64"],
+    v4Failed: false, v6Failed: false, onLinkFailed: false,
   });
-  assert.deepEqual(t, { v4: ["127.0.0.1", "10.0.0.237", "10.0.0.255", "10.0.0.0/8"], v6: ["::1", "fd00::5"], v4Failed: false, v6Failed: false });
 
   // ip(8) unusable: the procfs fallbacks, byte shapes as the kernel prints them.
   const trie = [
-    "Local:", "  +-- 0.0.0.0/0 3 0 2", "     |-- 10.0.0.237", "        /32 host LOCAL",
-    "     |-- 10.0.0.255", "        /32 host LOCAL", "     |-- 10.0.0.0", "        /8 host LOCAL",
-    "     |-- 10.0.0.255", "        /32 link BROADCAST",
+    "Local:", "  +-- 0.0.0.0/0 3 0 2", "     |-- 10.20.30.40", "        /32 host LOCAL",
+    "     |-- 10.20.30.255", "        /32 host LOCAL", "     |-- 10.20.30.0", "        /24 host LOCAL",
+    "     |-- 10.20.30.255", "        /32 link BROADCAST",
   ].join("\n");
   const v6route = [
     "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 00200200 lo",
     "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80200001 lo",
-    "20010db8000000000000000000000005 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80200001 eno1",
+    "20010db8000000000000000000000005 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80200001 eth0",
+  ].join("\n");
+  // /proc/net/route: little-endian hex destination and mask, gateway 00000000
+  // for an on-link network (the header line first, as the kernel prints it).
+  const procRoute = [
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+    "eth0\t000200C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0",
+    "eth0\t00000000\t010200C0\t0003\t0\t0\t0\t00000000\t0\t0\t0",
   ].join("\n");
   const fail = () => { throw new Error("ip: not found"); };
-  const t2 = readLocalTable({ run: fail, readFile: (p) => (p === "/proc/net/fib_trie" ? trie : v6route) });
-  assert.deepEqual(t2.v4, ["10.0.0.237", "10.0.0.255", "10.0.0.0/8"], "|-- addr followed by /NN host LOCAL");
+  const procfs = (p) => (p === "/proc/net/fib_trie" ? trie : p === "/proc/net/route" ? procRoute : v6route);
+  const t2 = readLocalTable({ run: fail, readFile: procfs });
+  assert.deepEqual(t2.v4, ["10.20.30.40", "10.20.30.255", "10.20.30.0/24"], "|-- addr followed by /NN host LOCAL");
   assert.deepEqual(t2.v6, ["::1", "2001:db8::5"], "rows with RTF_LOCAL (0x80000000) in column 9");
-  assert.deepEqual([t2.v4Failed, t2.v6Failed], [false, false]);
+  assert.deepEqual([t2.v4Failed, t2.v6Failed, t2.onLinkFailed], [false, false, false]);
+  // C0.00.02.00 little-endian is 192.0.2.0/24; the default route (zero mask) is not on-link.
+  assert.deepEqual(t2.onLink4, ["192.0.2.0/24"], JSON.stringify(t2.onLink4));
+  assert.deepEqual(t2.onLink6, [], "every ipv6_route row here is local, loopback or default");
 
   // A kernel booted without IPv6 (EAFNOSUPPORT, no ipv6_route) is NOT a failure.
   const eaf = () => { throw Object.assign(new Error("RTNETLINK answers: Address family not supported by protocol"), { stderr: "Address family not supported by protocol" }); };
@@ -132,6 +156,7 @@ test("local table from ip, fib_trie fallback", () => {
     readFile: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } });
   assert.deepEqual([t3.v6, t3.v6Failed], [[], false]);
   assert.equal(t3.v4Failed, false);
+  assert.equal(t3.onLinkFailed, false, "no IPv6 on this kernel: no on-link IPv6 rows to miss");
 });
 
 test("unreadable local table fails closed", async () => {
@@ -198,7 +223,7 @@ test("PROXY CONNECT: a rebinding name, a refused literal, a disallowed port and 
   const rebinding = await mk(async () => [{ address: PUB, family: 4 }, { address: "127.0.0.1", family: 4 }]);
   assert.match(await talk(rebinding.socketPath, "PROXY\nCONNECT a.example.com:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
   const lit = await mk(async () => { throw new Error("no lookup for literals"); });
-  for (const t of ["127.0.0.1:443", "[::1]:443", "10.0.0.237:443", "169.254.169.254:443", "[::ffff:127.0.0.1]:443", "100.64.20.5:443"]) {
+  for (const t of ["127.0.0.1:443", "[::1]:443", "10.20.30.40:443", "169.254.169.254:443", "[::ffff:127.0.0.1]:443", "100.64.20.5:443"]) {
     assert.match(await talk(lit.socketPath, `PROXY\nCONNECT ${t} HTTP/1.1\r\n\r\n`), /^HTTP\/1\.1 403/, t);
   }
   const pub = await mk(async () => [{ address: PUB, family: 4 }]);
@@ -338,10 +363,10 @@ test("metadata and host plumbing: all of 169.254/16, Azure WireServer, AWS fd00:
 
 test("address spellings: uppercase, expanded, zone ids all judged the same", () => {
   const o = { local: NO_LOCAL };
-  for (const a of ["::FFFF:127.0.0.1", "0:0:0:0:0:ffff:7f00:1", "FD7A:115C:A1E0:0:0:0:0:1", "::ffff:10.0.0.237", "2002:0a00:00ed::1", "64:ff9b::a00:ed"]) {
+  for (const a of ["::FFFF:127.0.0.1", "0:0:0:0:0:ffff:7f00:1", "FD7A:115C:A1E0:0:0:0:0:1", "::ffff:10.20.30.40", "2002:0a14:1e28::1", "64:ff9b::a14:1e28"]) {
     assert.notEqual(egressDenyReason(a, o), null, a);
   }
-  assert.match(String(egressDenyReason("fe80::1%eno1", o)), /link-local/, "link-local, with a zone id");
+  assert.match(String(egressDenyReason("fe80::1%eth0", o)), /link-local/, "link-local, with a zone id");
 });
 
 test("odd IPv4 spellings (octal, short) go through the real resolver and are refused once resolved", async () => {
@@ -391,7 +416,7 @@ test("operator-listed extra refused networks (e.g. Kubernetes ClusterIP ranges) 
 test("a local-table entry with an unrecognised dst shape makes the view fail closed", () => {
   const local = { v4: ["weird//x"], v6: [], v4Failed: false, v6Failed: false };
   assert.match(String(egressDenyReason(PUB, { local })), /own-host view unreadable/);
-  assert.match(String(egressDenyReason("10.0.0.50", { local })), /private network/, "a known range keeps its own reason");
+  assert.match(String(egressDenyReason("10.20.30.50", { local })), /private network/, "a known range keeps its own reason");
 });
 
 test("an unreadable operator deny entry refuses EVERY destination (public too), and a match says operator-denied", async () => {
@@ -426,4 +451,99 @@ test("ISATAP addresses are judged by their embedded IPv4; a deny entry with two 
   assert.match(String(egressDenyReason("2001:db8::5efe:10.9.1.1", o)), /operator-denied/);
   assert.match(String(egressDenyReason("2001:db8::200:5efe:a9fe:a9fe", o)), /metadata/);
   assert.match(String(egressDenyReason(PUB, { ...o, denyNets: ["10.9.0.0/16/1"] })), /unreadable entry/);
+});
+
+// ---- automated security review: networks this host is directly attached to ----
+// Every other machine on the LAN has a global address, and nothing in that
+// address says so: the MAIN table's on-link rows (and the /64 of an own global
+// IPv6 address) are what catches them.
+// The fixture is 2001:db9::/32 rather than RFC 3849's 2001:db8::/32 for the
+// CONTROL address only: 2001:db8::/32 is refused as a documentation range, so
+// a control inside it could not show "not on-link => allowed".
+const view = (v = {}) => ({ v4: [], v6: [], onLink4: [], onLink6: [], v4Failed: false, v6Failed: false, onLinkFailed: false, ...v });
+
+test("a LAN neighbour's global IPv6 address is refused (on-link /64)", async () => {
+  const local = view({ v6: ["2001:db9:10:20::5/128"], onLink6: ["2001:db9:10:20::/64"] });
+  assert.equal(egressDenyReason("2001:db9:10:20::f2b1", { local }), "this host's network", "the neighbour shares the on-link /64");
+  assert.equal(egressDenyReason("2001:db9:10:21::f2b1", { local }), null, "the neighbouring /64 is off-link and allowed");
+  assert.equal(egressDenyReason("2001:db9:10:20::5", { local }), "this host", "this host's own address keeps its own reason");
+  // The on-link rule is not a general documentation-range refusal in disguise:
+  // the same style of fixture on a documentation prefix is refused for the
+  // on-link reason, before the range checks.
+  const doc = view({ v6: ["2001:db8:10:20::5/128"], onLink6: ["2001:db8:10:20::/64"] });
+  assert.equal(egressDenyReason("2001:db8:10:20::f2b1", { local: doc }), "this host's network");
+  assert.match(String(egressDenyReason("2001:db8:99::1", { local: doc })), /documentation range/, "and nothing wider is swept in");
+  // Through the relay: a refused name opens nothing.
+  const { r, logs } = await relay({ local, lookup: async () => [{ address: "2001:db9:10:20::f2b1", family: 6 }] });
+  assert.match(await talk(r.socketPath, "PROXY\nCONNECT nas.example.com:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  assert.ok(logs.some((l) => /deny nas\.example\.com:443 \(this host's network\)/.test(l)), logs.join("\n"));
+});
+
+test("the /64 of an own global IPv6 address is refused even without a main-table row", () => {
+  const local = view({ v6: ["2001:db9:10:30::5/128"] });
+  assert.equal(egressDenyReason("2001:db9:10:30::7", { local }), "this host's network", "derived from the own address alone");
+  assert.equal(egressDenyReason("2001:db9:10:31::7", { local }), null, "a different /64 is not ours");
+  // A non-global own address adds nothing: the range checks keep their reason.
+  const ula = view({ v6: ["fd00:20::5/128"] });
+  assert.equal(egressDenyReason("fd00:20::7", { local: ula }), "private network");
+  const linkLocal = view({ v6: ["fe80::5/128"] });
+  assert.equal(egressDenyReason("fe80::7", { local: linkLocal }), "link-local");
+});
+
+test("on-link IPv4 from the main table is refused", () => {
+  // A public /24 this host sits on (RFC 5737), and the neighbouring /24 as the
+  // control: nothing but the on-link row can refuse a documentation-range
+  // neighbour here, and the relay checks the row before the range list.
+  const local = view({ v4: ["10.20.30.40/32"], onLink4: ["203.0.113.0/24"] });
+  assert.equal(egressDenyReason("203.0.113.7", { local }), "this host's network", "a public /24 this host sits on");
+  assert.equal(egressDenyReason("203.0.114.7", { local }), null, "the next /24 over: off-link and allowed");
+  assert.match(String(egressDenyReason("203.0.113.7", { local: NO_LOCAL })), /documentation range/, "without the on-link row it is only a range refusal");
+  // The fixture from the review, same rule.
+  const doc = view({ onLink4: ["198.51.100.0/24"] });
+  assert.equal(egressDenyReason("198.51.100.7", { local: doc }), "this host's network");
+});
+
+test("main table unreadable fails closed", () => {
+  const ip4 = [{ type: "local", dst: "127.0.0.1", dev: "lo" }];
+  const ip6 = [{ type: "local", dst: "::1", dev: "lo" }];
+  const t = readLocalTable({
+    run: (args) => { if (args.includes("main")) throw new Error("netlink down"); return args.includes("-6") ? ip6 : ip4; },
+    readFile: () => { throw new Error("no procfs here"); },
+  });
+  assert.equal(t.onLinkFailed, true);
+  assert.deepEqual([t.v4Failed, t.v6Failed], [true, true], "both families fail closed");
+  assert.match(String(egressDenyReason(PUB, { local: t })), /own-host view unreadable/);
+  assert.match(String(egressDenyReason("2606:4700:4700::1111", { local: t })), /own-host view unreadable/);
+  // Only the IPv4 on-link read failing leaves IPv6 usable, and vice versa.
+  const t4 = readLocalTable({
+    run: (args) => {
+      if (args.includes("main")) {
+        if (args.includes("-6")) return [{ dst: "2001:db9:10:20::/64", dev: "eth0" }];
+        throw new Error("v4 main down");
+      }
+      return args.includes("-6") ? ip6 : ip4;
+    },
+    readFile: () => { throw new Error("no procfs here"); },
+  });
+  assert.deepEqual([t4.v4Failed, t4.v6Failed, t4.onLinkFailed], [true, false, true]);
+  assert.match(String(egressDenyReason(PUB, { local: t4 })), /own-host view unreadable/, "the failed IPv4 view refuses every target (the rule above)");
+});
+
+test("the real kernel reader on this host", (t) => {
+  const ipPresent = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"].some((p) => { try { return statSync(p).isFile(); } catch { return false; } });
+  const triePresent = (() => { try { return statSync("/proc/net/fib_trie").isFile(); } catch { return false; } })();
+  if (!ipPresent && !triePresent) { t.skip("neither ip(8) nor /proc/net/fib_trie on this host"); return; }
+  const r = readLocalTable();
+  assert.equal(r.v4Failed, false, "the real reader works here: " + JSON.stringify(r));
+  assert.ok(r.v4.includes("127.0.0.1"), "loopback is always an own address: " + r.v4.join(","));
+  assert.ok(Array.isArray(r.onLink4) && Array.isArray(r.onLink6), "both on-link lists are reported");
+});
+
+// ---- S5: no gateway port, no PORT line ----
+test("with no gateway port every PORT line is refused", async () => {
+  const { r, logs } = await relay({});
+  for (const port of [0, 80, 443, 3001]) {
+    assert.equal(await talk(r.socketPath, `PORT ${port}\nGET /llm/v1/models HTTP/1.1\r\nHost: x\r\n\r\n`), "", `PORT ${port}: closed`);
+  }
+  assert.ok(logs.some((l) => /deny 127\.0\.0\.1:\d+ \(no gateway port\)/.test(l)), logs.join("\n"));
 });

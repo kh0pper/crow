@@ -11,6 +11,7 @@ import { resolveCrowHome } from "../shared/crow-home.js";
 import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { ensureSecretsDir, migrateLegacySecretFile } from "../shared/peer-credentials.js";
+import { isRelayedSocket } from "../shared/bot-doors.js";
 import {
   readSetting, writeSetting, deleteLocalSetting,
 } from "./dashboard/settings/registry.js";
@@ -553,7 +554,14 @@ export function localTokenAuthMiddleware(db) {
       const h = req.headers?.authorization;
       if (!h || !h.startsWith("Bearer ")) return next();
       const token = h.slice(7);
-      if (await validateLocalToken(db, token)) {
+      // A socket that came through the egress relay is never the operator. A
+      // contained bot has crow.db bound read-write (Phase 1), so it can write
+      // mcp_local_token_hash and then present its own value as the operator's
+      // full local token — on /board/mcp, which is a door. Only the
+      // path-scoped board, phone and artifacts tokens may authenticate a
+      // relayed request.
+      const relayed = isRelayedSocket(req.socket);
+      if (!relayed && await validateLocalToken(db, token)) {
         req.localTokenAuth = { token: "local-mcp" };
         return next();
       }

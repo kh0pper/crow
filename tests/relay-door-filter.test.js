@@ -37,7 +37,7 @@ before(async () => {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       res.flushHeaders();
       res.write("data: 1\n\n");
-      setTimeout(() => { res.write("data: 2\n\n"); res.end(); }, 150);
+      setTimeout(() => { res.write("data: 2\n\n"); res.end(); }, 400);
       return;
     }
     const body = JSON.stringify({ ok: true, path: req.url });
@@ -196,7 +196,7 @@ test("sse streams through", async () => {
   const first = c.events.find((e) => e.text.includes("data: 1"));
   const second = c.events.find((e) => e.text.includes("data: 2"));
   assert.ok(first && second, JSON.stringify(c.events));
-  assert.ok(second.at - first.at >= 100, "each event arrives on its own, not as one buffered body: " + (second.at - first.at) + "ms");
+  assert.ok(second.at - first.at >= 200, "each event arrives on its own, not as one buffered body: " + (second.at - first.at) + "ms");
   c.close();
 });
 
@@ -246,4 +246,210 @@ test("doorFilter: false still forwards through node:http, from the mark (the sea
   assert.equal(seen[0].mark, RELAY_SOURCE_V4, "the mark is still set: the gateway layer has something to refuse");
   assert.equal(seen[0].path, "/internal/actor-sign");
   c.close();
+});
+
+// ---- containment PR 6 review fixes ---------------------------------------
+
+/** An upstream that answers after `ms`, recording how many requests it holds at once. */
+async function slowUpstream(ms) {
+  const st = { concurrent: 0, peak: 0, paths: [] };
+  const srv = createHttpServer((req, res) => {
+    st.concurrent++;
+    st.peak = Math.max(st.peak, st.concurrent);
+    st.paths.push(req.url);
+    setTimeout(() => {
+      st.concurrent--;
+      const body = JSON.stringify({ path: req.url });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+      res.end(body);
+    }, ms);
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  st.port = srv.address().port;
+  st.close = () => new Promise((r) => srv.close(() => r()));
+  return st;
+}
+
+test("pipelined requests on one connection are served one at a time", async () => {
+  const up2 = await slowUpstream(15);
+  try {
+    const { r } = await relay({ gatewayPort: up2.port });
+    const c = doorClient(r.socketPath, up2.port);
+    await c.ready;
+    // 50 requests through ONE connection, sent in batches of four: every batch
+    // is pipelined (written without waiting for any response) while the relay's
+    // per-connection queue cap (8) is never exceeded.
+    const paths = Array.from({ length: 50 }, (_, i) => "/llm/v1/models?n=" + i);
+    const got = [];
+    for (let i = 0; i < paths.length; i += 4) {
+      const batch = paths.slice(i, i + 4);
+      for (const p of batch) c.write(GET(p));
+      for (let k = 0; k < batch.length; k++) got.push(await c.next(5000));
+    }
+    assert.deepEqual(got.map((g) => g.status), Array(50).fill(200), "every pipelined request is answered");
+    assert.deepEqual(got.map((g) => JSON.parse(g.body).path), paths, "in order");
+    assert.equal(up2.peak, 1, "one upstream request open at a time (was: one per pipelined request)");
+    c.close();
+  } finally { await up2.close(); }
+});
+
+test("a flood past the per-connection queue is refused with 503 and closes", async () => {
+  const up2 = await slowUpstream(60);
+  try {
+    const { r } = await relay({ gatewayPort: up2.port });
+    const c = doorClient(r.socketPath, up2.port);
+    await c.ready;
+    // 20 requests in ONE write: 1 in flight, 8 queued, the rest refused.
+    for (let i = 0; i < 20; i++) c.write(GET("/llm/v1/models?n=" + i));
+    const got = [];
+    for (let i = 0; i < 10; i++) got.push(await c.next(5000));
+    assert.deepEqual(got.slice(0, 9).map((g) => g.status), Array(9).fill(200), "one in flight + eight queued");
+    assert.equal(got[9].status, 503, "the ninth queued request is beyond the cap");
+    assert.match(got[9].head, /connection: close/i);
+    c.close();
+  } finally { await up2.close(); }
+});
+
+test("the relay-wide upstream cap answers 503", async () => {
+  const up2 = await slowUpstream(600);
+  try {
+    const { r, logs } = await relay({ gatewayPort: up2.port, maxUpstream: 2 });
+    const a = doorClient(r.socketPath, up2.port), b = doorClient(r.socketPath, up2.port);
+    await a.ready; await b.ready;
+    a.write(GET("/llm/v1/a"));
+    b.write(GET("/llm/v1/b"));
+    await until(() => up2.concurrent === 2);
+    const c = doorClient(r.socketPath, up2.port);
+    await c.ready;
+    c.write(GET("/llm/v1/c"));
+    assert.equal((await c.next()).status, 503, "the third connection's request is over the relay cap");
+    assert.equal((await a.next()).status, 200, "the two in flight still answer");
+    assert.equal((await b.next()).status, 200);
+    assert.ok(logs.some((l) => /relay upstream cap 2/.test(l)), logs.join("\n"));
+    a.close(); b.close(); c.close();
+  } finally { await up2.close(); }
+});
+
+// ---- a body on a bodiless method would be forwarded unframed ----------------
+
+test("a GET with a chunked body is refused, nothing upstream", async () => {
+  seen = [];
+  const { r, logs } = await relay();
+  const c = doorClient(r.socketPath, upPort);
+  await c.ready;
+  c.write("GET /llm/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+  const res = await c.next();
+  assert.equal(res.status, 400, "the relay refuses it itself");
+  assert.match(res.head, /connection: close/i);
+  assert.deepEqual(JSON.parse(res.body), { error: "bad request" });
+  assert.equal(seen.length, 0, "nothing was opened upstream");
+  assert.ok(logs.some((l) => /deny GET \/llm\/v1\/models \(body on a bodiless method\)/.test(l)), logs.join("\n"));
+  c.close();
+});
+
+test("a GET with Content-Length > 0 is refused", async () => {
+  seen = [];
+  const { r } = await relay();
+  const c = doorClient(r.socketPath, upPort);
+  await c.ready;
+  c.write("GET /llm/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\nhello");
+  const res = await c.next();
+  assert.equal(res.status, 400);
+  assert.match(res.head, /connection: close/i);
+  assert.equal(seen.length, 0, "the five bytes never reached the gateway as a second request");
+  c.close();
+});
+
+test("a chunked POST is forwarded framed", async () => {
+  const bodies = [];
+  const parsed = createHttpServer((req, res) => {
+    let b = "";
+    req.setEncoding("utf8");
+    req.on("data", (d) => { b += d; });
+    req.on("end", () => { bodies.push(b); res.writeHead(200, { "content-length": 2 }); res.end("ok"); });
+  });
+  await new Promise((r) => parsed.listen(0, "127.0.0.1", r));
+  // A raw TCP upstream: the head the relay wrote, byte for byte.
+  let head = "";
+  let answered = false;
+  const raw = createNetServer((sock) => {
+    sock.on("error", () => {});
+    sock.on("data", (d) => {
+      head += d.toString("latin1");
+      const end = head.indexOf("\r\n\r\n");
+      if (answered || end < 0) return;
+      if (head.slice(end + 4).includes("0\r\n\r\n")) {
+        answered = true;
+        sock.end("HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+      }
+    });
+  });
+  await new Promise((r) => raw.listen(0, "127.0.0.1", r));
+  const rawPort = raw.address().port;
+  try {
+    // 1. through a real HTTP parser upstream: the body arrives intact.
+    const one = await relay({ gatewayPort: parsed.address().port });
+    const c1 = doorClient(one.r.socketPath, parsed.address().port);
+    await c1.ready;
+    c1.write("POST /llm/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"a\":1}\r\n0\r\n\r\n");
+    assert.equal((await c1.next()).status, 200);
+    assert.deepEqual(bodies, ["{\"a\":1}"], "the gateway's parser reassembled the chunked body");
+    c1.close();
+    // 2. a raw TCP upstream sees the framing header on the relay's own hop.
+    const two = await relay({ gatewayPort: rawPort });
+    const c2 = doorClient(two.r.socketPath, rawPort);
+    await c2.ready;
+    c2.write("POST /llm/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"a\":1}\r\n0\r\n\r\n");
+    assert.equal((await c2.next()).status, 200);
+    const headText = head.slice(0, head.indexOf("\r\n\r\n"));
+    assert.match(headText, /\r\ntransfer-encoding: chunked\r\n/i, headText);
+    assert.equal(/content-length:/i.test(headText), false, "one framing per hop, never both");
+    assert.match(head.slice(head.indexOf("\r\n\r\n")), /7\r\n\{"a":1\}\r\n0\r\n\r\n/, "the body is chunk-framed, not raw");
+    c2.close();
+  } finally {
+    await new Promise((r) => parsed.close(() => r()));
+    await new Promise((r) => raw.close(() => r()));
+  }
+});
+
+// ---- an upstream that dies mid-body -----------------------------------------
+
+test("an upstream that dies mid-body closes the bot's connection", async () => {
+  const dying = createNetServer((sock) => {
+    sock.on("error", () => {});
+    sock.once("data", () => {
+      sock.write("HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\n1234567");
+      setTimeout(() => { try { sock.destroy(); } catch {} }, 20);
+    });
+  });
+  await new Promise((r) => dying.listen(0, "127.0.0.1", r));
+  const dyingPort = dying.address().port;
+  try {
+    const { r } = await relay({ gatewayPort: dyingPort });
+    const c = connect(r.socketPath);
+    c.on("error", () => {});
+    const closed = new Promise((resolve) => c.on("close", () => resolve(Date.now())));
+    const t0 = Date.now();
+    c.on("connect", () => c.write(`PORT ${dyingPort}\nGET /llm/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`));
+    c.on("data", () => {});
+    const at = await Promise.race([closed, sleep(2000).then(() => null)]);
+    assert.ok(at !== null, "a truncated upstream body must not leave the bot's connection half-answered");
+    assert.ok(at - t0 < 2000);
+  } finally { await new Promise((r) => dying.close(() => r())); }
+});
+
+// ---- the doors server's own timeout (it never listens) ----------------------
+
+test("a PORT line followed by a partial head is closed after headTimeoutMs", async () => {
+  const { r } = await relay({ headTimeoutMs: 300 });
+  const c = connect(r.socketPath);
+  c.on("error", () => {});
+  const closed = new Promise((resolve) => c.on("close", () => resolve(Date.now())));
+  const t0 = Date.now();
+  c.on("connect", () => c.write(`PORT ${upPort}\nGET /llm/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n`));
+  c.on("data", () => {});
+  const at = await Promise.race([closed, sleep(2000).then(() => null)]);
+  assert.ok(at !== null, "the socket is closed after headTimeoutMs, not left hanging");
+  assert.ok(at - t0 < 2000, "closed within 2 s (was: never, the server never listens)");
+  c.destroy();
 });

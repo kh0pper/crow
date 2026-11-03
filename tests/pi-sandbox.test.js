@@ -300,9 +300,10 @@ test("piSandboxMode parses CROW_PI_SANDBOX, defaulting to auto", () => {
   assert.equal(piSandboxMode({ CROW_PI_SANDBOX: "bogus" }), "auto");
 });
 
-test("isSandboxWrapperArgs recognises bwrap argv only", () => {
+test("isSandboxWrapperArgs recognises a bwrap wrapper and the network entry", () => {
   assert.equal(isSandboxWrapperArgs("/usr/bin/bwrap --dev-bind / / -- node cli.js"), true);
   assert.equal(isSandboxWrapperArgs("bwrap --unshare-user -- x"), true);
+  assert.equal(isSandboxWrapperArgs("/n/node /a/scripts/pi-bots/pi_netns_entry.mjs --sock /run/crow-net/relay.sock -- /n/node cli.js"), true);
   assert.equal(isSandboxWrapperArgs("/usr/bin/node /x/cli.js --mode rpc"), false);
 });
 

@@ -139,15 +139,16 @@ test("integration: inside a real sandbox the relay refuses /internal and a door 
   const stub = join(scratch, "stub-pi.mjs");
   writeFileSync(stub, `
 const P = JSON.parse(process.env.CROW_TEST_DOORS);
-const status = async (url, init) => { try { const r = await fetch(url, init); await r.text(); return r.status; } catch (e) { return "ERR:" + ((e && e.message) || e); } };
+const ask = async (url, init) => { try { const r = await fetch(url, init); const text = await r.text(); return { status: r.status, body: text }; } catch (e) { return { status: "ERR", body: String((e && e.message) || e) }; } };
 const base = "http://127.0.0.1:" + P.gw;
 const report = {
-  internal: await status(base + "/internal/actor-sign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(P.body) }),
-  board: await status(base + "/board/mcp"),
+  internal: await ask(base + "/internal/actor-sign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(P.body) }),
+  board: await ask(base + "/board/mcp"),
 };
 process.stdout.write(JSON.stringify({ type: "report", ...report }) + "\\n");
 process.stdin.resume();
 `);
+  const queriesBefore = dbQueries;
   const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
   const pi = new PiRpc({
     def: {
@@ -160,8 +161,13 @@ process.stdin.resume();
   try {
     assert.match(pi.sandboxTier, /^contain/);
     const r = await pi.waitFor((m) => m.type === "report", 30000, "report");
-    assert.equal(r.internal, 403, "the relay refuses /internal/actor-sign: nothing was opened upstream");
-    assert.equal(r.board, 200, "a door from the allowlist still works from inside the sandbox");
+    assert.equal(r.internal.status, 403, "the relay refuses /internal/actor-sign, from inside a real sandbox");
+    // The RELAY's own body, not the gateway's 404: this proves which layer
+    // answered, without which a relay that forwarded the request and a gateway
+    // that refused it look the same from in here.
+    assert.deepEqual(JSON.parse(r.internal.body), { error: "forbidden" }, "the relay's own refusal body");
+    assert.equal(dbQueries, queriesBefore, "the signing route's database was never queried");
+    assert.equal(r.board.status, 200, "a door from the allowlist still works from inside the sandbox");
   } finally {
     await pi.close();
   }

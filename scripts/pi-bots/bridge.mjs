@@ -49,6 +49,7 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
+import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs } from "./pi_contain.mjs";
 import { containedCloudTokenPath } from "./pi_contain_agent.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
@@ -94,7 +95,7 @@ function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
     // Contain's network tier runs pi under an entry process: step past it.
     let cmd = "";
     try { cmd = readFileSync("/proc/" + first + "/cmdline", "utf8"); } catch {}
-    if (cmd.includes("pi_netns_entry.mjs")) return resolveSandboxedPiPid(rpc, first, tries);
+    if (cmd.includes(ENTRY_MARK)) return resolveSandboxedPiPid(rpc, first, tries);
     rpc.piPid = first; return;
   }
   if (tries >= 100 || rpc._exitCode != null) { if (rpc.piPid == null) rpc.piPid = initPid; return; }
@@ -106,7 +107,8 @@ import { roleSnapshotPath } from "../../servers/shared/model-roles-env.js";
 
 const HOME = process.env.HOME || homedir();
 /** fd the contain tier's seccomp program reaches bwrap on (3 = --info-fd, 4 = MCP config, 5 = secret values). */
-/** "contain" and "contain-noseccomp" (an arch with no filter table) are both the contain tier. */
+/** "contain" and "contain-noseccomp" (an arch with no filter table) are both the contain tier, and so are
+ *  their "-hostnet" forms (CROW_PI_CONTAIN_NET=off keeps the host network, containment does not change). */
 const isContainTier = (tier) => typeof tier === "string" && tier.startsWith("contain");
 const SECCOMP_FD = 6; // 5 is SECRET_VALUES_FD: the two must never share a number
 function seccompFileFd(buf) {
@@ -165,22 +167,6 @@ function containModelInputs(resolved, piProvider) {
  * spawner-built closed-world config). Creates the per-instance bot cache and
  * the per-spawn GENERATED agent dir (pi_contain_agent.mjs).
  */
-/**
- * The contain tier's network inputs (spec §10, closed network): the only host
- * loopback port a contained spawn reaches is its own gateway's, and there only
- * the door paths (the relay's door filter); models go through the gateway's
- * /llm doors (the generated agent dir), so no provider port is opened. Other
- * hosts are reached only through the CONNECT proxy, on 443, never a private or
- * own-host address; the def's `egress` list narrows that further.
- * CROW_PI_CONTAIN_NET=off (operator env) keeps the host network.
- */
-function containNetInputs({ def }) {
-  if (String(process.env.CROW_PI_CONTAIN_NET || "").toLowerCase() === "off") return null;
-  const listed = def && def.permission_policy && Array.isArray(def.permission_policy.egress) ? def.permission_policy.egress.slice() : null;
-  const gatewayPort = gatewayListenPort();
-  return { gatewayPort, loopbackPorts: [gatewayPort], egressAllow: listed };
-}
-
 function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes }) {
   const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
   const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
@@ -223,7 +209,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     try {
       const botIdForLog = opts.botId || (def && (def.bot_id || def.id)) || null;
       relay = createEgressRelay({ dir: mkdtempSync(join(tmpdir(), "crow-pi-net-" + process.pid + "-")), botId: botIdForLog,
-        gatewayPort: netIn.gatewayPort, loopbackPorts: netIn.loopbackPorts, egressAllow: netIn.egressAllow });
+        gatewayPort: netIn.gatewayPort, egressAllow: netIn.egressAllow });
     } catch (e) {
       shadow.cleanup();
       throw e;
@@ -253,6 +239,24 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     modelRolesEnv: shadow.env,
     _cleanups: [shadow.cleanup, ...(relay ? [() => relay.close()] : [])],
   };
+}
+
+/**
+ * The contain tier's network inputs (spec §10, closed network): the only host
+ * loopback port a contained spawn reaches is its own gateway's, and there only
+ * the door paths (the relay's door filter); models go through the gateway's
+ * /llm doors (the generated agent dir), so no provider port is opened. Other
+ * hosts are reached only through the CONNECT proxy, on 443, never a private or
+ * own-host address; the def's `egress` list narrows that further.
+ * CROW_PI_CONTAIN_NET=off (operator env) keeps the host network: null, no relay
+ * and no network namespace (the tier then says so: `-hostnet`).
+ * Exported for the argv test that proves the off switch (tests/pi-contain-net).
+ */
+export function containNetInputs({ def }) {
+  if (String(process.env.CROW_PI_CONTAIN_NET || "").toLowerCase() === "off") return null;
+  const listed = def && def.permission_policy && Array.isArray(def.permission_policy.egress) ? def.permission_policy.egress.slice() : null;
+  const gatewayPort = gatewayListenPort();
+  return { gatewayPort, loopbackPorts: [gatewayPort], egressAllow: listed };
 }
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.82.0 verified).
@@ -771,7 +775,20 @@ export class PiRpc {
         // pi cannot open.
         if (contain.modelRolesEnv) Object.assign(env, contain.modelRolesEnv);
       }
-      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, hideDirs: [secretsHere, ...others], seccompFd: contain ? SECCOMP_FD : null });
+      // The pipes this spawn really wires, for the netns entry's --fds: stdio
+      // plus the MCP config fd (fd delivery) and the secret-values fd. A listed
+      // fd MUST be open in the child: an unopened slot inside the sandbox is
+      // where the entry's node puts its own epoll/io_uring fds, and the entry
+      // would hand those to pi. So a listed secret-values fd is always piped
+      // (closed empty when there is no card set; pi-lab is not told to read
+      // it then). The info and seccomp fds are bwrap's, dropped in wrapPiSpawn.
+      const passFds = [];
+      if (contain) {
+        if (fdMode) passFds.push(MCP_CONFIG_FD);
+        if (piLabSupportsSecretValuesFd()) { passFds.push(SECRET_VALUES_FD); this._passedSecretFd = true; }
+      }
+      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
+        hideDirs: [secretsHere, ...others], seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
       this._runContainCleanup();
       throw e;
@@ -847,7 +864,10 @@ export class PiRpc {
       while (stdio.length < MCP_CONFIG_FD) stdio.push("ignore");
       stdio.push("pipe");
     }
-    if (valuesPayload != null) {
+    // A contained spawn whose entry lists SECRET_VALUES_FD gets that pipe even
+    // with no card set (see passFds above): never an unopened listed fd.
+    const secretFdListed = this._passedSecretFd === true;
+    if (valuesPayload != null || secretFdListed) {
       while (stdio.length < SECRET_VALUES_FD) stdio.push("ignore");
       stdio.push("pipe");
     }
@@ -881,6 +901,10 @@ export class PiRpc {
         cfgPipe.on("error", () => {});
         cfgPipe.end(JSON.stringify(opts.mcpConfig || { mcpServers: {} }));
       }
+    }
+    if (valuesPayload == null && secretFdListed) {
+      const vp = this.proc.stdio[SECRET_VALUES_FD];
+      if (vp) { vp.on("error", () => {}); vp.end(); }
     }
     if (valuesPayload != null) {
       // The card set, then CLOSE our end (pi-lab reads to EOF once). Node

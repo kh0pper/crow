@@ -53,6 +53,12 @@ import { join } from "node:path";
 // business reaching. A bot that needs a lab service gets a door for it.
 // The own-host view is the kernel's LOCAL table only (readLocalTable): an
 // interface list can omit an address on a link with no carrier.
+// Networks this host is DIRECTLY attached to are refused too: every other
+// machine on a LAN has a global address of its own, and nothing in that address
+// says so. They come from the MAIN table (a row with a dst other than `default`
+// and no gateway, e.g. `192.0.2.0/24 dev eth0 scope link`), and the /64 of every
+// global IPv6 address this host owns is refused as well — even with no on-link
+// row, whatever prefix the router announces.
 // IPv4 embedded in IPv6 (v4-mapped, v4-compatible, SIIT, NAT64, 6to4, both
 // Teredo fields, ISATAP) is unwrapped and judged as the IPv4 address; the
 // discard prefix is refused. Zone ids are stripped (the CONNECT parser refuses
@@ -172,6 +178,96 @@ function parseIpv6Route(text) {
   return out;
 }
 
+/** Route types that are not a link this host sits on. */
+const NOT_A_LINK = new Set(["unreachable", "blackhole", "prohibit", "throw", "multicast"]);
+
+/**
+ * The dst of every MAIN-table row that is a network on a link this host sits
+ * on: a dst other than `default` and no gateway between, e.g.
+ * `192.0.2.0/24 dev eth0 scope link` or `2001:db8:10:20::/64 dev eth0 proto ra`.
+ */
+function parseOnLinkRows(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    const dst = String((r && r.dst) || "").split("%")[0];
+    if (!dst || dst === "default") continue;
+    if (r.gateway) continue; // a route THROUGH a router, not onto the link
+    if (r.type && NOT_A_LINK.has(String(r.type))) continue;
+    if (!isIP(dst.split("/")[0])) continue;
+    out.push(dst);
+  }
+  return out;
+}
+
+/** An 8-digit little-endian hex IPv4 field (/proc/net/route), as four octets. */
+function hex4le(h) {
+  const s = String(h || "");
+  if (!/^[0-9a-f]{8}$/i.test(s)) return null;
+  return [6, 4, 2, 0].map((i) => parseInt(s.slice(i, i + 2), 16));
+}
+
+/**
+ * /proc/net/route (the ip(8)-less fallback for the MAIN table): Destination and
+ * Mask are little-endian hex, and a Gateway of 00000000 means the network is
+ * on-link rather than behind a router.
+ */
+function parseProcRoute(text) {
+  const out = [];
+  for (const line of String(text || "").split("\n").slice(1)) {
+    const c = line.trim().split(/\s+/);
+    if (c.length < 8) continue;
+    if (!/^0{8}$/.test(c[2])) continue;
+    const d = hex4le(c[1]), m = hex4le(c[7]);
+    if (!d || !m) continue;
+    const plen = m.reduce((n, o) => n + (o.toString(2).split("1").length - 1), 0);
+    if (plen < 1) continue; // the default route is not a network of its own
+    out.push(d.map((o, i) => o & m[i]).join(".") + "/" + plen);
+  }
+  return out;
+}
+
+/**
+ * /proc/net/ipv6_route (the ip(8)-less fallback for the MAIN table): a next hop
+ * of all zeros with a prefix shorter than /128 is a network on a link. RTF_LOCAL
+ * rows are own addresses, not networks.
+ */
+function parseIpv6OnLink(text) {
+  const out = [];
+  for (const line of String(text || "").split("\n")) {
+    const c = line.trim().split(/\s+/);
+    if (c.length < 10) continue;
+    if (parseInt(c[8], 16) & 0x80000000) continue;
+    const plen = parseInt(c[1], 16);
+    if (!(plen > 0 && plen < 128)) continue;
+    if (!/^0{32}$/.test(c[4].toLowerCase())) continue; // a next hop: via a router
+    const g = hex6(c[0]);
+    if (g) out.push(fmt6(g) + "/" + plen);
+  }
+  return out;
+}
+
+/** Did this read fail because the kernel has no IPv6 at all (not a failure)? */
+function noV6Kernel(e) {
+  const t = String((e && (e.stderr || e.message)) || "");
+  return !!(e && (e.code === "ENOENT" || /address family not supported|EAFNOSUPPORT/i.test(t)));
+}
+
+/**
+ * Is the /64 of this own IPv6 address a global-unicast network? The non-global
+ * ranges are refused by their own reason anyway, and a neighbour on them should
+ * keep that reason rather than gain a vaguer one.
+ */
+function global6(h) {
+  if ((h[0] & 0xfe00) === 0xfc00) return false; // ULA
+  if ((h[0] & 0xffc0) === 0xfe80) return false; // link-local
+  if ((h[0] & 0xffc0) === 0xfec0) return false; // site-local
+  if ((h[0] & 0xff00) === 0xff00) return false; // multicast
+  if (h[0] === 0x100 && h.slice(1, 4).every((x) => x === 0)) return false; // discard-only
+  if (h[0] === 0x2001 && (h[1] === 2 || h[1] === 0x0db8)) return false; // benchmarking / documentation
+  if (h[0] === 0x3fff && (h[1] & 0xf000) === 0) return false; // documentation
+  return true;
+}
+
 /**
  * This host's own addresses and prefixes, from the kernel's LOCAL table ONLY:
  * `ip -j [-6] route show table local`, falling back to /proc/net/fib_trie and
@@ -179,15 +275,20 @@ function parseIpv6Route(text) {
  * omits an address on an interface with no carrier (a bridge that comes up
  * later), which is the hole the S2c review named.
  *
+ * The networks this host is directly attached to come from the MAIN table (see
+ * parseOnLinkRows), because every other machine on one of them has a global
+ * address that no range check would recognise.
+ *
  * A family that cannot be read is REPORTED, never hidden: the caller refuses
  * that family's targets (every target when IPv4 fails). A kernel with no IPv6
  * (EAFNOSUPPORT, or no /proc/net/ipv6_route) is not a failure. o.run/o.readFile
  * are test seams.
- * @returns {{v4: string[], v6: string[], v4Failed: boolean, v6Failed: boolean}}
+ * @returns {{v4: string[], v6: string[], onLink4: string[], onLink6: string[], v4Failed: boolean, v6Failed: boolean, onLinkFailed: boolean}}
  */
 export function readLocalTable(o = {}) {
   const run = o.run || ipJson;
   const readFile = o.readFile || ((p) => readFileSync(p, "utf8"));
+  let noV6 = false;
   let v4 = null;
   try { v4 = parseLocalRows(run(["route", "show", "table", "local"])); } catch { v4 = null; }
   // An empty successful read is a parse that failed, not a host without
@@ -198,7 +299,8 @@ export function readLocalTable(o = {}) {
   const v4Failed = !v4 || !v4.length;
   if (v4Failed) v4 = [];
   let v6 = null, v6Failed = false;
-  try { v6 = parseLocalRows(run(["-6", "route", "show", "table", "local"])); } catch { v6 = null; }
+  try { v6 = parseLocalRows(run(["-6", "route", "show", "table", "local"])); }
+  catch (e) { v6 = null; noV6 = noV6Kernel(e); }
   if (!v6 || !v6.length) {
     try {
       v6 = parseIpv6Route(readFile("/proc/net/ipv6_route"));
@@ -206,10 +308,31 @@ export function readLocalTable(o = {}) {
     } catch (e) {
       v6 = [];
       // A kernel booted without IPv6 has no ipv6_route file at all.
-      if (!(e && e.code === "ENOENT")) v6Failed = true;
+      if (e && e.code === "ENOENT") noV6 = true;
+      else v6Failed = true;
     }
   }
-  return { v4, v6, v4Failed, v6Failed };
+  // The networks on this host's links: the MAIN table, read the same two ways.
+  const mainTable = (args, proc, fromRows, fromProc) => {
+    let rows = null;
+    try { rows = fromRows(run(args)); } catch { rows = null; }
+    if (!rows) { try { rows = fromProc(readFile(proc)); } catch { rows = null; } }
+    return Array.isArray(rows) ? rows : null;
+  };
+  const onLink4 = mainTable(["route", "show", "table", "main"], "/proc/net/route", parseOnLinkRows, parseProcRoute);
+  const onLink6 = mainTable(["-6", "route", "show", "table", "main"], "/proc/net/ipv6_route", parseOnLinkRows, parseIpv6OnLink);
+  const onLink4Failed = !onLink4, onLink6Failed = !onLink6;
+  return {
+    v4, v6,
+    onLink4: onLink4 || [],
+    onLink6: onLink6 || [],
+    // A family whose on-link read failed fails closed like its own-host read: a
+    // view that cannot list the networks this host sits on cannot be trusted to
+    // let anything out. A kernel with no IPv6 has no on-link rows to miss.
+    v4Failed: v4Failed || onLink4Failed,
+    v6Failed: v6Failed || (onLink6Failed && !noV6),
+    onLinkFailed: onLink4Failed || (onLink6Failed && !noV6),
+  };
 }
 
 /** The local table is cached briefly (addresses come and go; a spawn makes many decisions). */
@@ -226,7 +349,7 @@ function cachedLocalTable() {
     let value = null;
     // A failure is cached AS a failure and is never remembered as a success.
     try { value = (localTableReader || readLocalTable)(); } catch { value = null; }
-    if (!value || typeof value !== "object") value = { v4: [], v6: [], v4Failed: true, v6Failed: true };
+    if (!value || typeof value !== "object") value = { v4: [], v6: [], onLink4: [], onLink6: [], v4Failed: true, v6Failed: true, onLinkFailed: true };
     localCache = { at: now, value };
   }
   return localCache.value;
@@ -236,14 +359,18 @@ function cachedLocalTable() {
  * This host's view: the addresses and prefixes the kernel's LOCAL table says
  * it owns (o.local, a readLocalTable result), plus o.hostAddrs (extra own
  * addresses, e.g. a router that hairpins the host's public address back to
- * it). There is no interface enumeration and no bridge/VM name or kind logic:
- * under the closed network every private range is refused anyway, and the
- * kernel table finds an address on an interface with no carrier.
+ * it), plus the networks it sits on (the MAIN table's on-link rows, and the
+ * /64 of every own global IPv6 address). There is no interface enumeration and
+ * no bridge/VM name or kind logic: under the closed network every private range
+ * is refused anyway, and the kernel table finds an address on an interface with
+ * no carrier.
  */
 function localView(o = {}) {
   const t = o.local || cachedLocalTable();
   const addrs = new Set();
+  const own6 = []; // bare own IPv6 addresses, for the /64 rule below
   const nets4 = new BlockList(), nets6 = new BlockList();
+  const onLink4 = new BlockList(), onLink6 = new BlockList();
   let failed = !!t.v4Failed, failed6 = !!t.v6Failed;
   const add = (x) => {
     const s = String(x || "").split("%")[0];
@@ -256,12 +383,34 @@ function localView(o = {}) {
     const max = fam === 4 ? 32 : 128;
     const plen = parts.length === 2 ? (/^\d+$/.test(parts[1]) ? Number(parts[1]) : NaN) : max;
     if (!(plen <= max)) { failed = failed6 = true; return; }
-    if (plen === max) addrs.add(fam === 6 ? key6(parts[0]) : parts[0]);
-    else { try { (fam === 4 ? nets4 : nets6).addSubnet(parts[0], plen, fam === 4 ? "ipv4" : "ipv6"); } catch { failed = failed6 = true; } }
+    if (plen === max) {
+      addrs.add(fam === 6 ? key6(parts[0]) : parts[0]);
+      if (fam === 6) own6.push(parts[0]);
+    } else { try { (fam === 4 ? nets4 : nets6).addSubnet(parts[0], plen, fam === 4 ? "ipv4" : "ipv6"); } catch { failed = failed6 = true; } }
   };
   for (const a of t.v4 || []) add(a);
   for (const a of t.v6 || []) add(a);
   for (const a of o.hostAddrs || []) add(a);
+  // The networks this host is directly attached to. Every other machine on one
+  // of them is a neighbour with an address of its own, and nothing in that
+  // address says which link it sits on: refused as this host's network.
+  const addNet = (x, fam) => {
+    const s = String(x || "").split("%")[0];
+    const parts = s.split("/");
+    const max = fam === 4 ? 32 : 128;
+    const plen = parts.length === 2 ? (/^\d+$/.test(parts[1]) ? Number(parts[1]) : NaN) : max;
+    if (!isIP(parts[0]) || !(plen <= max)) { failed = failed6 = true; return; }
+    try { (fam === 4 ? onLink4 : onLink6).addSubnet(parts[0], plen, fam === 4 ? "ipv4" : "ipv6"); }
+    catch { failed = failed6 = true; }
+  };
+  for (const n of t.onLink4 || []) addNet(n, 4);
+  for (const n of t.onLink6 || []) addNet(n, 6);
+  // The /64 of every global IPv6 address this host owns, announced by a router
+  // or not: a neighbour shares it, and only the local table knows about it.
+  for (const a of own6) {
+    const h = expand6(a);
+    if (global6(h)) onLink6.addSubnet(fmt6([h[0], h[1], h[2], h[3], 0, 0, 0, 0]), 64, "ipv6");
+  }
   // operator-listed networks that lead back into this host but are not
   // visible in its tables (Kubernetes ClusterIP ranges DNAT'd in nat
   // OUTPUT, a network-specific NAT64 prefix): refused like an own address.
@@ -284,14 +433,18 @@ function localView(o = {}) {
       }
     }
   }
-  return { addrs, nets4, nets6, failed, failed6, deny4, deny6, denyBroken };
+  return { addrs, nets4, nets6, onLink4, onLink6, failed, failed6, deny4, deny6, denyBroken };
 }
 
 function v4Reason(a, L) {
   // The operator deny list first, so every IPv4-in-IPv6 path gets it too.
   if (L.deny4 && L.deny4.check(a, "ipv4")) return "operator-denied network";
-  for (const [net, why] of SPECIAL_V4) if (net.check(a, "ipv4")) return why;
   if (L.addrs.has(a) || L.nets4.check(a, "ipv4")) return "this host";
+  // A network this host is directly attached to, BEFORE the range list: a lab
+  // numbered out of a documentation range is still the operator's LAN, and the
+  // neighbour's address is only recognisable by the network it sits on.
+  if (L.onLink4 && L.onLink4.check(a, "ipv4")) return "this host's network";
+  for (const [net, why] of SPECIAL_V4) if (net.check(a, "ipv4")) return why;
   if (L.failed) return "own-host view unreadable";
   return null;
 }
@@ -328,16 +481,22 @@ function v6Reason(a, L) {
   }
   else if ((h[4] === 0 || h[4] === 0x200) && h[5] === 0x5efe) embedded = v4Reason(v4From(h[6], h[7]), L);   // ISATAP ::0:5efe:a.b.c.d
   if (embedded) return embedded;
-  // Every remaining IPv6 range that is not global unicast.
+  // One of this host's own addresses, then a network this host is directly
+  // attached to (a LAN neighbour's global address shares this host's /64). Both
+  // are more specific than the ranges below, which cannot tell a neighbour from
+  // any other host on the internet.
+  if (L.addrs.has(key6(a)) || L.nets6.check(a, "ipv6")) return "this host";
+  if (L.onLink6 && L.onLink6.check(a, "ipv6")) return "this host's network";
+  // Address classes that say what the address IS, whatever link it is on.
   if ((h[0] & 0xfe00) === 0xfc00) return "private network";  // fc00::/7 ULA (the tailnet's fd7a:115c:a1e0::/48 is in it)
   if ((h[0] & 0xffc0) === 0xfe80) return "link-local";       // fe80::/10
   if ((h[0] & 0xffc0) === 0xfec0) return "site-local";       // fec0::/10 (deprecated)
   if ((h[0] & 0xff00) === 0xff00) return "not unicast";      // ff00::/8 multicast
+  // Every remaining IPv6 range that is not global unicast.
   if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix";
   if (h[0] === 0x2001 && h[1] === 2) return "benchmarking range";            // 2001:2::/48
   if (h[0] === 0x2001 && h[1] === 0x0db8) return "documentation range";       // 2001:db8::/32
   if (h[0] === 0x3fff && (h[1] & 0xf000) === 0) return "documentation range"; // 3fff::/20
-  if (L.addrs.has(key6(a)) || L.nets6.check(a, "ipv6")) return "this host";
   if (L.failed || L.failed6) return "own-host view unreadable";
   return null;
 }
@@ -382,7 +541,6 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
  * @param {string} o.dir            fresh dir for the socket (created 0700, removed on close)
  * @param {string} o.botId
  * @param {number} o.gatewayPort    the one loopback port served, over the doors only
- * @param {number[]} [o.loopbackPorts]  what the sandbox listens on (no policy here)
  * @param {boolean} [o.doorFilter=true]  test seam: false forwards without the door check
  * @param {string[]|null} o.egressAllow
  * @param {number[]} [o.egressPorts=[443]]
@@ -390,7 +548,9 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
  * @param {string[]} [o.hostAddrs]  extra own addresses
  * @param {string[]} [o.denyNets]   operator-denied networks (default CROW_PI_EGRESS_DENY_NETS)
  * @param {number} [o.maxConns=64]
+ * @param {number} [o.maxUpstream=maxConns]  requests in flight upstream, relay-wide
  * @param {number} [o.headTimeoutMs=10000]
+ * @param {number} [o.idleMs=120000]  idle keep-alive timeout on a door connection
  * @param {Function} [o.lookup]     async (host) => [{address, family}]
  * @param {Function} [o.log]
  * @returns {Promise<{dir, socketPath, close: () => Promise<void>}>}
@@ -412,9 +572,7 @@ export function createEgressRelay(o) {
   chmodSync(dir, 0o700);
   const socketPath = join(dir, "relay.sock");
   // The gateway port is the ONE loopback port a contained bot reaches, and
-  // only over the doors below. o.loopbackPorts is what the sandbox's entry
-  // process listens on (pi_contain.mjs); it is no longer policy here, so a
-  // bot cannot reach a second loopback port the sandbox happens to hold.
+  // only over the doors below: nothing else on loopback is policy here.
   const gatewayPort = Number(o.gatewayPort) || 0;
   // Test seam: false still forwards through node:http and still sets the mark,
   // but skips the door check — the way to prove the gateway-side guard alone.
@@ -438,7 +596,11 @@ export function createEgressRelay(o) {
     log(`[pi-egress] bot=${o.botId || "?"} own-host view unreadable: refusing every target`);
   };
   const maxConns = o.maxConns ?? 64;
+  // Relay-wide cap on requests in flight upstream: one bot connection holds at
+  // most one at a time (below), and every connection together no more than this.
+  const maxUpstream = o.maxUpstream ?? maxConns;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
+  const idleMs = o.idleMs ?? 120000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
   // One line per (decision, target), bounded: a bot that sprays distinct
   // hosts must not grow the spawner's memory (one summary line instead).
@@ -455,6 +617,7 @@ export function createEgressRelay(o) {
     log(`[pi-egress] bot=${o.botId || "?"} ${decision} ${target}${reason ? " (" + reason + ")" : ""}`);
   };
   let live = 0;
+  let upstreamLive = 0;
   const sockets = new Set();
 
   /**
@@ -465,29 +628,38 @@ export function createEgressRelay(o) {
    */
   const splice = (client, candidates, port, preface) => {
     let i = 0;
+    let up = null;
+    // The client's own listeners are registered ONCE, outside the retry loop:
+    // a second attempt must not stack another pair on the same socket.
+    const dropUp = () => { try { if (up && !up.destroyed) up.destroy(); } catch {} };
+    client.on("error", dropUp);
+    client.once("close", () => {
+      if (up && !up.destroyed) up.end();
+      const t = setTimeout(dropUp, 30000);
+      if (t.unref) t.unref();
+    });
     const tryNext = () => {
       if (client.destroyed) return;
       const addr = candidates[i++];
       const target = o._connectOverride ? o._connectOverride(addr, port) : { host: addr, port, allowHalfOpen: true };
-      const up = netConnect({ ...target, allowHalfOpen: true });
-      sockets.add(up);
-      up.once("close", () => sockets.delete(up));
+      up = netConnect({ ...target, allowHalfOpen: true });
+      const mine = up;
+      sockets.add(mine);
+      mine.once("close", () => sockets.delete(mine));
       let connected = false;
-      up.once("connect", () => {
+      mine.once("connect", () => {
         connected = true;
-        if (client.destroyed) { up.destroy(); return; }
+        if (client.destroyed) { mine.destroy(); return; }
         if (preface) client.write(preface);
-        client.pipe(up); up.pipe(client);
+        client.pipe(mine); mine.pipe(client);
       });
-      up.on("error", () => {
-        if (!connected && i < candidates.length && !client.destroyed) { up.destroy(); tryNext(); return; }
+      mine.on("error", () => {
+        if (!connected && i < candidates.length && !client.destroyed) { mine.destroy(); tryNext(); return; }
         if (!connected && preface) { try { client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"); } catch {} }
         else { try { client.destroy(); } catch {} }
-        up.destroy();
+        mine.destroy();
       });
-      client.on("error", () => { try { up.destroy(); } catch {} });
-      client.once("close", () => { if (!up.destroyed) up.end(); setTimeout(() => up.destroy(), 30000).unref(); });
-      up.once("close", () => { if (connected && !client.destroyed) { client.end(); setTimeout(() => client.destroy(), 30000).unref(); } });
+      mine.once("close", () => { if (connected && !client.destroyed) { client.end(); setTimeout(() => client.destroy(), 30000).unref(); } });
     };
     tryNext();
   };
@@ -507,6 +679,13 @@ export function createEgressRelay(o) {
   // server, not from createServer() options.
   const doors = createHttpServer({ requestTimeout: 0, headersTimeout: 60000 });
   doors.httpAllowHalfOpen = true;
+  // One connection may hold 1000 requests; beyond that the parser stops
+  // (a cheap bound on a bot that never stops asking on one socket).
+  doors.maxRequestsPerSocket = 1000;
+  // Per-connection pipeline bound: one request in flight, this many waiting.
+  const MAX_QUEUED = 8;
+  // Methods with no body: nothing here can frame one for the gateway's wire.
+  const BODILESS = new Set(["GET", "HEAD", "DELETE", "OPTIONS", "TRACE"]);
   // Hop-by-hop headers belong to the relay's own hop: passing them through
   // would let a body be framed twice (transfer-encoding) or a connection be
   // kept alive in a way the parser here has no say over.
@@ -529,16 +708,24 @@ export function createEgressRelay(o) {
     return out;
   };
 
-  /** A refusal the relay writes itself: nothing is opened upstream. */
-  function refuseDoor(req, res, reason) {
+  /** A refusal the relay writes itself: nothing is opened upstream, and the
+   *  connection does not survive it (`Connection: close`). */
+  function refuseWith(req, res, status, code, reason) {
     note("deny", targetOf(req), reason);
-    const body = JSON.stringify({ error: "forbidden" });
+    const body = JSON.stringify({ error: code });
     try {
       res.shouldKeepAlive = false;
-      res.writeHead(403, { "content-type": "application/json", "content-length": Buffer.byteLength(body), connection: "close" });
+      res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body), connection: "close" });
       res.end(body);
     } catch { try { req.socket.destroy(); } catch {} }
   }
+
+  /** A path/method the doors do not serve. */
+  function refuseDoor(req, res, reason) { refuseWith(req, res, 403, "forbidden", reason); }
+
+  /** More work than the relay will carry (a full pipeline queue, the upstream
+   *  cap): nothing is opened upstream. */
+  function refuseUnavailable(req, res, reason) { refuseWith(req, res, 503, "unavailable", reason); }
 
   /** A raw-socket refusal ('upgrade', 'connect'): no HTTP parser owns it yet. */
   function refuseRaw(req, socket, reason) {
@@ -560,38 +747,121 @@ export function createEgressRelay(o) {
     } catch { try { req.socket.destroy(); } catch {} }
   }
 
+  /** The headers sent upstream: end-to-end only, and a body is always framed. */
+  function upstreamHeaders(req) {
+    const out = endToEnd(req.headers, { request: true });
+    // The client's own framing is hop-by-hop and was stripped above. A decoded
+    // body written after headers with no framing is a SECOND request on the
+    // gateway's wire, so re-declare what the client already used.
+    if (req.headers["transfer-encoding"] !== undefined && req.headers["content-length"] === undefined) {
+      out["transfer-encoding"] = "chunked";
+    }
+    return out;
+  }
+
   function forwardDoor(req, res) {
+    // Relay-wide: a flood of bot connections must not become a flood of
+    // upstream sockets either.
+    if (upstreamLive >= maxUpstream) return refuseUnavailable(req, res, "relay upstream cap " + maxUpstream);
     let up;
     try {
       up = httpRequest({
         host: "127.0.0.1", port: gatewayPort, localAddress: RELAY_SOURCE_V4,
-        method: req.method, path: req.url, headers: endToEnd(req.headers, { request: true }),
+        method: req.method, path: req.url, headers: upstreamHeaders(req),
         // No pooling: the mark belongs to this request's socket, and a pooled
         // socket would outlive the request that earned it.
         agent: false,
       });
     } catch (e) { return failDoor(req, res, e); }
+    upstreamLive++;
+    let released = false;
+    const release = () => { if (!released) { released = true; upstreamLive--; } };
+    up.on("error", (e) => { release(); failDoor(req, res, e); });
+    up.on("close", release);
     up.on("response", (ur) => {
       try {
         res.writeHead(ur.statusCode || 502, endToEnd(ur.headers));
         // Streamed both ways: an SSE answer arrives chunk by chunk and no body
         // is ever held whole in this process.
         ur.pipe(res);
+        // An upstream that dies mid-body would leave the bot's connection
+        // half-answered for the rest of the spawn: destroy it, so the bot's
+        // own client sees a reset and not a body that never ends.
+        const cut = () => { if (!ur.complete) { try { res.destroy(); } catch {} } };
+        ur.on("error", cut);
+        ur.on("aborted", cut);
+        ur.on("close", cut);
       } catch (e) { try { ur.destroy(); } catch {} failDoor(req, res, e); }
     });
-    up.on("error", (e) => failDoor(req, res, e));
     // The bot hung up (or the socket died): stop the other leg too, so an SSE
     // stream nobody reads does not hold sockets for the rest of the spawn.
     res.on("close", () => { try { up.destroy(); } catch {} });
     req.pipe(up);
   }
 
-  doors.on("request", (req, res) => {
+  /**
+   * One request in flight per bot connection. Pipelining used to dial one
+   * upstream socket per request the moment it arrived (1,500 sockets from one
+   * connection in a probe). Node answers pipelined requests in order, so the
+   * extra ones wait here and each starts when the previous response has
+   * finished or closed; past MAX_QUEUED the rest is refused.
+   */
+  const perSocket = new WeakMap(); // socket -> { busy, queue }
+  const connState = (socket) => {
+    let st = perSocket.get(socket);
+    if (!st) {
+      st = { busy: false, queue: [] };
+      perSocket.set(socket, st);
+      socket.once("close", () => { st.busy = false; st.queue.length = 0; });
+    }
+    return st;
+  };
+
+  /** Judge one request and answer it: the whole decision lives here. */
+  function serveOne(req, res) {
     const upgrade = req.headers.upgrade !== undefined
       || /(?:^|,)\s*upgrade\s*(?:,|$)/i.test(String(req.headers.connection || ""));
     if (req.method === "CONNECT" || upgrade) return refuseDoor(req, res, "upgrade refused");
+    // A body on a bodiless method has no framing this hop may forward (the
+    // client's own is hop-by-hop), so it would land raw after the headers as a
+    // second request on the gateway's wire. Refused, nothing opened upstream.
+    if (BODILESS.has(req.method)
+      && (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] || 0) > 0)) {
+      return refuseWith(req, res, 400, "bad request", "body on a bodiless method");
+    }
     if (doorFilter && !isDoorPath(req.url)) return refuseDoor(req, res, "not a door");
     forwardDoor(req, res);
+  }
+
+  /** Start one request, and start the next queued one once its response is done. */
+  function startOne(req, res, st) {
+    if (req.socket.destroyed) { st.busy = false; return; }
+    st.busy = true;
+    // No timeout while a request is in flight: an SSE stream is long by design.
+    req.socket.setTimeout(0);
+    let done = false;
+    const next = () => {
+      if (done) return;
+      done = true;
+      st.busy = false;
+      const q = st.queue.shift();
+      if (q) return startOne(q.req, q.res, st);
+      // Keep-alive and nothing in flight: an idle connection is closed here.
+      req.socket.setTimeout(idleMs, () => { try { req.socket.destroy(); } catch {} });
+    };
+    res.on("finish", next);
+    res.on("close", next);
+    serveOne(req, res);
+  }
+
+  doors.on("request", (req, res) => {
+    const st = connState(req.socket);
+    if (st.busy) {
+      if (st.queue.length >= MAX_QUEUED) return refuseUnavailable(req, res, "too many pipelined requests");
+      st.queue.push({ req, res });
+      return;
+    }
+    startOne(req, res, st);
   });
   // Node hands these two off the request event; neither may reach the gateway.
   doors.on("upgrade", (req, socket) => refuseRaw(req, socket, "upgrade refused"));
@@ -604,6 +874,11 @@ export function createEgressRelay(o) {
   /** Hand the bot's connection to the HTTP parser once the PORT line is read. */
   const enterDoors = (c) => {
     doors.emit("connection", c);
+    // The doors server never listens, so node's own timeout checker never runs
+    // for it: the head timeout is armed HERE, and replaced by the idle timeout
+    // once the first request is answered (startOne). Cleared while a request is
+    // in flight, because an SSE answer is long by design.
+    c.setTimeout(headTimeoutMs, () => { try { c.destroy(); } catch {} });
     // The parser attaches its own readers; a socket paused for the PORT line
     // must be resumed explicitly (a 'data' listener alone does not unpause it).
     c.resume();
@@ -649,6 +924,8 @@ export function createEgressRelay(o) {
     let buf = Buffer.alloc(0);
     let verb = null;
     const timer = setTimeout(() => c.destroy(), headTimeoutMs);
+    if (timer.unref) timer.unref();
+    c.once("close", () => clearTimeout(timer));
     const onData = (d) => {
       buf = Buffer.concat([buf, d]);
       if (verb === null) {
@@ -660,9 +937,10 @@ export function createEgressRelay(o) {
         if (pm) {
           c.removeListener("data", onData); clearTimeout(timer);
           const port = Number(pm[1]);
-          if (port !== gatewayPort) {
+          if (!gatewayPort || port !== gatewayPort) {
             // No other loopback port is served at all: the one a contained bot
-            // reaches is its own gateway's, and there only the doors.
+            // reaches is its own gateway's, and there only the doors. With no
+            // gateway port there is no PORT line to serve, 0 included.
             note("deny", "127.0.0.1:" + port, gatewayPort ? "not the bot's gateway port" : "no gateway port");
             c.destroy();
             return;
