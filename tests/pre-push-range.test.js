@@ -33,16 +33,18 @@ function makeRepo() {
   const out = join(dir, "ranges.txt");
   const push = (localSha, remoteSha, { expectFail = false } = {}) => {
     writeFileSync(out, "");
+    let failure = null;
     try {
       execFileSync("bash", [join(dir, "scripts", "hooks", "pre-push")], {
         cwd: dir, input: `refs/heads/b ${localSha} refs/heads/b ${remoteSha}\n`,
         env: { ...process.env, RANGES_OUT: out }, stdio: ["pipe", "pipe", "pipe"],
       });
-      if (expectFail) throw new Error("the hook was expected to refuse");
     } catch (e) {
       if (!expectFail) throw e;
-      return { refused: true, ranges: readFileSync(out, "utf8").trim(), stderr: String(e.stderr || "") };
+      failure = e;
     }
+    if (expectFail && !failure) throw new Error("the hook was expected to refuse");
+    if (failure) return { refused: true, ranges: readFileSync(out, "utf8").trim(), stderr: String(failure.stderr || "") };
     return readFileSync(out, "utf8").trim();
   };
   return { dir, git, commit, push, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
