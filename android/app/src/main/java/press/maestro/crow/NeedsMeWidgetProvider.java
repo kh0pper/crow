@@ -1,6 +1,5 @@
 package press.maestro.crow;
 
-import android.app.KeyguardManager;
 import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;
 import android.appwidget.AppWidgetProvider;
@@ -179,13 +178,14 @@ public class NeedsMeWidgetProvider extends AppWidgetProvider {
 
     // ---- drawing --------------------------------------------------------------
 
-    /** Redraw every widget from the cache, with the keyguard as it is now. */
+    /**
+     * Redraw every widget from the cache. The widget lives on the home screen only
+     * (widgetCategory="home_screen"), and a home screen is never visible while the phone is locked, so
+     * a home-screen copy always draws the full view; it does not depend on screen-off / unlock
+     * broadcasts reaching a running service. A host that puts it on the keyguard anyway gets the
+     * count-only view, always.
+     */
     static void drawAll(Context context) {
-        drawAll(context, isLocked(context));
-    }
-
-    /** Redraw every widget from the cache with an explicit keyguard state (screen off / unlocked). */
-    static void drawAll(Context context, boolean locked) {
         AppWidgetManager manager;
         int[] ids;
         try {
@@ -200,15 +200,18 @@ public class NeedsMeWidgetProvider extends AppWidgetProvider {
 
         NeedsMeRenderer.Summary summary = NeedsMeJson.fromText(cachedJson(context));
         boolean signedOut = summary != null && NeedsMeJson.SIGN_IN_STATE.equals(summary.state);
-        NeedsMeRenderer.RenderModel defaultModel = NeedsMeRenderer.render(summary, locked, signedOut);
+        NeedsMeRenderer.RenderModel fullModel = NeedsMeRenderer.render(summary, false, signedOut);
 
         for (int id : ids) {
             try {
-                // Defence in depth: a host that still draws this widget on the keyguard gets the
-                // count-only view, whatever the keyguard is doing at the moment of the draw.
-                NeedsMeRenderer.RenderModel model = !locked && drawsOnKeyguard(manager, id)
+                // A host that draws this widget on the keyguard gets the count-only view, always.
+                boolean keyguardHost = drawsOnKeyguard(manager, id);
+                NeedsMeRenderer.RenderModel model = keyguardHost
                         ? NeedsMeRenderer.render(summary, true, signedOut)
-                        : defaultModel;
+                        : fullModel;
+                // Counts only, never item text: enough to tell a stale or wrong draw from the log.
+                Log.d(TAG, "draw id=" + id + " keyguardHost=" + keyguardHost + " kind=" + model.kind
+                        + " rows=" + (model.rows == null ? -1 : model.rows.size()));
                 manager.updateAppWidget(id, build(context, id, model));
             } catch (Exception e) {
                 // A launcher that refuses the update must not take the others down with it.
@@ -325,7 +328,7 @@ public class NeedsMeWidgetProvider extends AppWidgetProvider {
         return (widgetId * 31 + hash) & 0x7fffffff;
     }
 
-    // ---- cache and keyguard ---------------------------------------------------
+    // ---- cache ---------------------------------------------------------
 
     static String cachedJson(Context context) {
         return prefs(context).getString(CACHE_KEY, null);
@@ -344,14 +347,5 @@ public class NeedsMeWidgetProvider extends AppWidgetProvider {
 
     private static SharedPreferences prefs(Context context) {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-    }
-
-    private static boolean isLocked(Context context) {
-        try {
-            KeyguardManager keyguard = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
-            return keyguard != null && keyguard.isKeyguardLocked();
-        } catch (Exception e) {
-            return false;
-        }
     }
 }

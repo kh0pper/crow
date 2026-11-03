@@ -2,10 +2,8 @@ package press.maestro.crow;
 
 import android.app.Notification;
 import android.app.Service;
-import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.IBinder;
@@ -71,8 +69,6 @@ public class NtfyListenerService extends Service {
     private Thread streamThread;
     private int consecutiveFailures = 0;
     private boolean degradedShown = false;
-    /** Redraws the home-screen widget when the screen goes off and when it is unlocked. */
-    private BroadcastReceiver screenReceiver;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -99,50 +95,9 @@ public class NtfyListenerService extends Service {
             streamThread.start();
         }
 
-        // The widget follows the keyguard (locked: the count only). This service is long-lived, so
-        // it is the right home for the screen-off / unlocked receiver.
-        registerScreenReceiver();
-
         return START_STICKY;
     }
 
-    /**
-     * Locked shows the count only, unlocked shows the rows again; both are drawn from the cached
-     * summary, so neither touches the network.
-     */
-    private void registerScreenReceiver() {
-        if (screenReceiver != null) return;
-        screenReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                String action = intent == null ? null : intent.getAction();
-                if (Intent.ACTION_SCREEN_OFF.equals(action)) {
-                    NeedsMeWidgetProvider.drawAll(NtfyListenerService.this, true);
-                } else if (Intent.ACTION_USER_PRESENT.equals(action)) {
-                    NeedsMeWidgetProvider.drawAll(NtfyListenerService.this, false);
-                }
-            }
-        };
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(Intent.ACTION_SCREEN_OFF);
-        filter.addAction(Intent.ACTION_USER_PRESENT);
-        try {
-            ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
-        } catch (Exception e) {
-            Log.w(TAG, "screen receiver not registered: " + e.getMessage());
-            screenReceiver = null;
-        }
-    }
-
-    private void unregisterScreenReceiver() {
-        if (screenReceiver == null) return;
-        try {
-            unregisterReceiver(screenReceiver);
-        } catch (Exception ignored) {
-            // Already unregistered (the system drops receivers with a dying service).
-        }
-        screenReceiver = null;
-    }
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -176,7 +131,6 @@ public class NtfyListenerService extends Service {
         if (streamThread != null) {
             streamThread.interrupt();
         }
-        unregisterScreenReceiver();
         super.onDestroy();
     }
 
@@ -187,7 +141,6 @@ public class NtfyListenerService extends Service {
         if (streamThread != null) {
             streamThread.interrupt();
         }
-        unregisterScreenReceiver();
         super.onTaskRemoved(rootIntent);
     }
 
