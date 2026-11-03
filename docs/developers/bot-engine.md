@@ -359,6 +359,10 @@ Absent on purpose: `auth.json` (the operator's pi logins are not a bot's), `mode
 
 The providers carried are the ones the spawn needs: the turn's provider row, and the pi provider id it resolved to (for a consented cloud row, its `crow-c-*` door entry).
 
+### The bash `auto` classifier goes through a door too
+
+A bot whose bash policy is `auto` also calls a model of its own: pi-lab fetches the safety classifier's URL for every command. In a contained spawn that URL is rewritten to a door on the bot's own gateway (`containedClassifierBlock` in `scripts/pi-bots/pi_contain_agent.mjs`, applied by `bridge.mjs` only when the spawn is contained). A classifier that came from a provider row goes through that row's `/llm/p/<row>/v1` door — the same door and the same gating as the generated `models.json`, and only for a row the provider door serves as an OpenAI-shaped chat model; an operator-named endpoint is rewritten only when it is already a `/llm/p/<row>/v1` door. Anything else (a bare `/llm/v1`, a cloud door, a plain LAN or provider endpoint) is dropped from the policy, with one fixed log line (`bash=auto: the safety classifier is not reachable from a contained bot …`), which leaves pi-lab's own fail-closed behaviour: every command is asked in a live chat and refused unattended. The classifier model never changes, and this rewrite never builds a `/llm/c/` URL — the classifier selection already refuses a cloud model. An uncontained spawn is untouched.
+
 ### A provider with no door refuses the spawn
 
 A bot whose provider row has no door — a literal-key cloud row this box never consented to, a LAN/tailnet endpoint nothing forwards for, a disabled row, a provider with no chat models — cannot run contained: the turn would have no way to its model. The spawn fails with `contain refused: provider <id> has no door` (the failure surfaces as a failed turn, and the reason names the provider). The fix is a door on that row: the per-box "Let bots use this provider" consent for a cloud row, a local/engine row the provider door serves, or a different model for the bot.
