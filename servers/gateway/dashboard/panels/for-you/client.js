@@ -103,7 +103,8 @@ export function forYouClientJs() {
     li.setAttribute('data-fy-needs-item', needsText(item.key));
     var a = document.createElement('a');
     a.className = 'fy-line';
-    a.setAttribute('href', needsText(item.href) || '/dashboard/bot-board');
+    var href = needsText(item.href);
+    a.setAttribute('href', href.charAt(0) === '/' && href.charAt(1) !== '/' ? href : '/dashboard/bot-board');
     var text = document.createElement('span');
     text.className = 'fy-line-text';
     var tag = box.getAttribute('data-fy-needs-kind-' + needsText(item.kind));
@@ -134,6 +135,7 @@ export function forYouClientJs() {
         b.type = 'button';
         b.className = actions[i].style === 'primary' ? 'fy-btn fy-btn--primary' : 'fy-btn';
         b.textContent = needsText(actions[i].label);
+        b.setAttribute('aria-label', needsText(actions[i].label) + ': ' + needsText(item.title));
         b.setAttribute('data-fy-needs-act', needsText(actions[i].id));
         b.setAttribute('data-fy-needs-key', needsText(item.key));
         b.setAttribute('data-fy-needs-nonce', needsText(item.nonce));
@@ -151,7 +153,7 @@ export function forYouClientJs() {
   }
   // Repaint the widget from a summary (the act's own answer, or a fresh read after a stale tap).
   function paintNeeds(box, summary) {
-    if (!box || !summary) return false;
+    if (!box || !summary || !Array.isArray(summary.items)) return false;
     var head = box.querySelector('[data-fy-needs-headline]');
     if (head) {
       head.textContent = summary.state === 'error'
@@ -194,7 +196,11 @@ export function forYouClientJs() {
       action: btn.getAttribute('data-fy-needs-act') || '',
       nonce: btn.getAttribute('data-fy-needs-nonce') || ''
     };
+    if (box.getAttribute('data-fy-needs-busy')) return;
+    box.setAttribute('data-fy-needs-busy', '1');
+    if (status) status.textContent = '';
     for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+    function done() { box.removeAttribute('data-fy-needs-busy'); }
     function failed() {
       if (status) status.textContent = root.getAttribute('data-fy-failed') || '';
       for (var k = 0; k < btns.length; k++) btns[k].disabled = false;
@@ -206,12 +212,12 @@ export function forYouClientJs() {
     }).then(function (res) {
       if (res.status === 409) {
         return needsFetch('/dashboard/widgets-api/needs-me', { credentials: 'same-origin' }).then(function (fresh) {
-          if (!paintNeeds(box, fresh.json)) throw new Error('refresh failed');
+          if (!fresh.ok || !paintNeeds(box, fresh.json)) throw new Error('refresh failed');
         });
       }
       if (!res.ok || !res.json || !res.json.summary) throw new Error('act failed');
       if (!paintNeeds(box, res.json.summary)) throw new Error('act failed');
-    }).catch(failed);
+    }).catch(failed).then(done, done);
   }
 
   root.addEventListener('click', function (e) {

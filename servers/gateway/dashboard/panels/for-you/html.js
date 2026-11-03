@@ -290,7 +290,7 @@ function needsMeRow(item, lang) {
   const name = item.title ? e(item.title) : e(t("forYou.untitled", lang));
   const proj = item.project ? `<span class="fy-line-proj"> · ${e(item.project)}</span>` : "";
   const actions = Array.isArray(item.actions) ? item.actions : [];
-  const acts = actions.map((a) => `<button type="button" class="fy-btn${a.style === "primary" ? " fy-btn--primary" : ""}" data-fy-needs-act="${e(a.id)}" data-fy-needs-key="${e(key)}" data-fy-needs-nonce="${e(item.nonce || "")}">${e(a.label)}</button>`).join("");
+  const acts = actions.map((a) => `<button type="button" class="fy-btn${a.style === "primary" ? " fy-btn--primary" : ""}" data-fy-needs-act="${e(a.id)}" data-fy-needs-key="${e(key)}" data-fy-needs-nonce="${e(item.nonce || "")}" aria-label="${e(`${a.label}: ${item.title || ""}`)}">${e(a.label)}</button>`).join("");
   return `<li class="fy-needs-item" data-fy-needs-item="${e(key)}">
         <a class="fy-line" href="${e(item.href || "/dashboard/bot-board")}"><span class="fy-line-text">${tag ? `<span class="fy-line-tag">${e(tag)}</span>` : ""}<span class="fy-line-title">${name}${proj}</span></span></a>
         ${acts ? `<div class="fy-acts fy-needs-acts">${acts}</div>` : ""}

@@ -340,3 +340,48 @@ test("any other failure is the page's own action-failed line, and the buttons co
   assert.equal(r.widget.querySelector("[data-fy-needs-status]").textContent, "That action failed.");
   assert.equal(r.document.querySelector("[data-fy-needs-act]").disabled, false, "the tap can be tried again");
 });
+test("a 409 whose re-read fails keeps the rows and shows the failed line", async () => {
+  const r = rig([
+    { status: 409, json: { code: "stale" } },
+    { status: 500, json: { error: "The action failed", code: "error" } },
+  ]);
+  r.click(r.document.querySelector("[data-fy-needs-act]"));
+  await tick();
+  assert.equal(r.calls.length, 2);
+  assert.equal(r.widget.querySelectorAll("[data-fy-needs-item]").length, 1, "the old row stays");
+  assert.equal(r.widget.querySelector("[data-fy-needs-headline]").textContent, "1 waiting");
+  assert.equal(r.widget.querySelector("[data-fy-needs-status]").textContent, "That action failed.");
+});
+
+test("a later tap clears the failed line, and a second tap while one is in flight does nothing", async () => {
+  const r = rig([
+    { status: 400, json: { code: "bad_action" } },
+    { status: 200, json: { ok: true, summary: { state: "empty", headline: "All clear", items: [], doing: [], lock: { count: 0, label: "0 waiting" } } } },
+  ]);
+  const btn = r.document.querySelector("[data-fy-needs-act]");
+  r.click(btn);
+  await tick();
+  assert.equal(r.widget.querySelector("[data-fy-needs-status]").textContent, "That action failed.");
+  r.click(btn);
+  r.click(btn);
+  await tick();
+  assert.equal(r.calls.length, 2, "the in-flight second tap sent nothing");
+  assert.equal(r.widget.querySelector("[data-fy-needs-status]").textContent, "");
+  assert.equal(r.widget.querySelector("[data-fy-needs-headline]").textContent, "All clear");
+});
+
+test("a repainted row keeps only same-site links and names its buttons", async () => {
+  const r = rig([{
+    status: 200,
+    json: { ok: true, summary: { state: "ok", headline: "2 waiting", doing: [], lock: { count: 2, label: "2 waiting" }, items: [
+      { key: "handoff:3", kind: "decision", title: "Send it", project: null, href: "javascript:alert(1)", nonce: "n", actions: [{ id: "yes", label: "Yes", style: "primary" }] },
+      { key: "message:4", kind: "message", title: "Hi", project: null, href: "//evil.example/x", nonce: "m", actions: [] },
+    ] } },
+  }]);
+  r.click(r.document.querySelector("[data-fy-needs-act]"));
+  await tick();
+  const links = r.widget.querySelectorAll("[data-fy-needs-item] a");
+  assert.equal(links[0].getAttribute("href"), "/dashboard/bot-board");
+  assert.equal(links[1].getAttribute("href"), "/dashboard/bot-board");
+  assert.equal(r.widget.querySelector("[data-fy-needs-act]").getAttribute("aria-label"), "Yes: Send it");
+});
