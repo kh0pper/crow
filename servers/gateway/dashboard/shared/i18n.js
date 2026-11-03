@@ -4531,6 +4531,14 @@ export const translations = {
   "widgets.needsMe.yes": { en: "Yes", es: "Sí" },
   "widgets.needsMe.no": { en: "No", es: "No" },
   "widgets.needsMe.doing": { en: "Your bots are working on", es: "Tus bots están con" },
+  // The in-Crow widget on For You (panels/for-you/html.js) draws the summary above Your morning.
+  "widgets.needsMe.seeAll": { en: "See everything waiting", es: "Ver todo lo que espera" },
+  "widgets.needsMe.error": { en: "What needs me couldn't load just now.", es: "Lo que me espera no se pudo cargar ahora mismo." },
+  "widgets.needsMe.kindDecision": { en: "Decision", es: "Decisión" },
+  "widgets.needsMe.kindResult": { en: "Result to review", es: "Resultado por revisar" },
+  "widgets.needsMe.kindPlan": { en: "Plan to approve", es: "Plan por aprobar" },
+  "widgets.needsMe.kindHandoff": { en: "Waiting on your phone", es: "Esperando en tu teléfono" },
+  "widgets.needsMe.kindMessage": { en: "Unread message", es: "Mensaje sin leer" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
