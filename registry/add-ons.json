@@ -6346,7 +6346,7 @@
     {
       "id": "studio",
       "name": "Crow Studio",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6372,13 +6372,27 @@
       "panel": "panel/studio.js",
       "panelRoutes": "panel/routes.js",
       "skills": [
-        "skills/studio.md"
+        "skills/studio.md",
+        "skills/studio-preferences.md",
+        "skills/studio-counterpoint.md",
+        "skills/studio-harmony.md",
+        "skills/studio-rhythm-and-form.md",
+        "skills/studio-arranging-and-sound.md",
+        "skills/studio-mixing.md",
+        "skills/studio-modern.md"
       ],
       "capabilities": {
         "mcp_server_id": "studio",
         "group": "Studio",
         "skills": [
-          "studio"
+          "studio",
+          "studio-preferences",
+          "studio-counterpoint",
+          "studio-harmony",
+          "studio-rhythm-and-form",
+          "studio-arranging-and-sound",
+          "studio-mixing",
+          "studio-modern"
         ],
         "runtimes": {
           "pi": true
