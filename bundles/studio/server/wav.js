@@ -129,6 +129,9 @@ const FORMAT_EXTENSIBLE = 0xfffe;
 /** The bit depths a Studio take may hold: 16-bit material, or 24-bit takes. */
 const BITS = Object.freeze([16, 24]);
 
+/** How many channels a take can have; more is a file Studio cannot play. */
+const MAX_DECODE_CHANNELS = 8;
+
 /** The format codes worth naming in a refusal. */
 const FORMAT_NAMES = Object.freeze({
   [FORMAT_PCM]: "PCM",
@@ -274,7 +277,13 @@ function readFormat(view, start, available) {
   if (!BITS.includes(bits)) {
     throw new Error(`Unsupported WAV bit depth ${bits}; Studio reads 16-bit and 24-bit PCM.`);
   }
-  if (channels < 1) throw new Error("That WAV has no channels to read.");
+  if (channels < 1) throw new Error(`That WAV has ${channels} channels, so there is nothing to read.`);
+  if (channels > MAX_DECODE_CHANNELS) {
+    throw new Error(
+      `That WAV has ${channels} channels; Studio reads up to ${MAX_DECODE_CHANNELS}, and a take has 1 or 2.`,
+    );
+  }
+  if (rate <= 0) throw new Error(`That WAV's sample rate is ${rate}, and Studio needs a positive rate to place it.`);
   return { channels, rate, bits };
 }
 

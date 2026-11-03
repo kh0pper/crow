@@ -1,18 +1,25 @@
 /**
  * Take uploads: staging on disk, chunk idempotency, the streamed 24-bit WAV,
- * quota and the internal `take.add`.
+ * quota, the internal `take.add`, and the rules that keep a recorded take from
+ * being lost (spec §12).
  *
  * Everything here runs against a scratch staging directory, a fake storage
- * client, a fake database, a fake project ACL and a fake hub, so nothing
- * touches a real bucket, a real `crow.db` or a real `~/.crow`. The WAV check
- * uses the real `decodeWav`, so the bytes that would have gone to storage are
- * read back and compared sample by sample.
+ * client, a fake database, a fake project ACL, a fake hub and a fake song
+ * lookup, so nothing touches a real bucket, a real `crow.db` or a real `~/.crow`.
+ * The WAV check uses the real `decodeWav`, so the bytes that would have gone to
+ * storage are read back and compared sample by sample.
+ *
+ * The fakes enforce what the real ones do where these rules depend on it: the
+ * fake database holds `storage_files.s3_key` UNIQUE (and honours the insert's
+ * `ON CONFLICT ... DO NOTHING`), and the fake hub answers a repeated `cmd_id`
+ * with the result it gave the first time and refuses a take id that is already
+ * in the song.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
@@ -35,6 +42,9 @@ const FULL_SCALE = 8388607;
 /** A day in milliseconds, for the sweep checks. */
 const DAY = 24 * 60 * 60 * 1000;
 
+/** One megabyte, the unit `quotaMb` is in. */
+const MB = 1024 * 1024;
+
 /** The `KSDATAFORMAT_SUBTYPE_PCM` GUID an extensible WAV carries. */
 const PCM_GUID = Buffer.from([
   0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
@@ -48,9 +58,9 @@ function scratch() {
 /**
  * An object store that records every call and drains the stream it is handed,
  * so a test can decode exactly the bytes the upload would have written.
- * @param {{bucket?: string, usedBytes?: number}} [options]
+ * @param {{bucket?: string, usedBytes?: number, delayMs?: number}} [options]
  */
-function fakeStorage({ bucket = "crow-files", usedBytes = 0 } = {}) {
+function fakeStorage({ bucket = "crow-files", usedBytes = 0, delayMs = 0 } = {}) {
   const uploads = [];
   const deleted = [];
   const statsCalls = [];
@@ -63,6 +73,7 @@ function fakeStorage({ bucket = "crow-files", usedBytes = 0 } = {}) {
       // is that storage receives a stream, never one assembled buffer.
       const pieces = [];
       for await (const piece of stream) pieces.push(Buffer.from(piece));
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       uploads.push({ key, stream, size, options, bytes: Buffer.concat(pieces) });
     },
     async deleteObject(key, target) {
@@ -80,20 +91,37 @@ function fakeStorage({ bucket = "crow-files", usedBytes = 0 } = {}) {
 }
 
 /**
- * A database client that answers the prefix lookup and records every
- * statement. `failInsert` makes the `storage_files` insert throw, the way a
- * database out of space would.
+ * A database client that answers the prefix lookup, keeps `storage_files`
+ * rows under `s3_key` UNIQUE (as `scripts/init-db.js` declares it) and records
+ * every statement. `failInsert` makes the insert throw, the way a database out
+ * of space would.
  * @param {{prefix?: string, failInsert?: boolean}} [options]
  */
 function fakeDb({ prefix = PREFIX, failInsert = false } = {}) {
   const statements = [];
+  const rows = new Set();
   return {
     statements,
+    rows,
     async execute(statement) {
       const sql = typeof statement === "string" ? statement : statement.sql;
+      const args = statement && Array.isArray(statement.args) ? statement.args : [];
       statements.push(statement);
       if (/INSERT\s+INTO\s+storage_files/i.test(sql)) {
         if (failInsert) throw new Error("insert failed: no space left on device");
+        const key = args[0];
+        if (rows.has(key)) {
+          // The only duplicate this insert may survive is its own retry.
+          if (!/ON\s+CONFLICT\s*\(\s*s3_key\s*\)\s+DO\s+NOTHING/i.test(sql)) {
+            throw new Error("UNIQUE constraint failed: storage_files.s3_key");
+          }
+          return { rows: [] };
+        }
+        rows.add(key);
+        return { rows: [] };
+      }
+      if (/DELETE\s+FROM\s+storage_files/i.test(sql)) {
+        rows.delete(args[0]);
         return { rows: [] };
       }
       if (/storage_prefix/i.test(sql)) return { rows: [{ storage_prefix: prefix }] };
@@ -126,18 +154,23 @@ function fakeAcl({ deny = false } = {}) {
 }
 
 /**
- * A session hub: `openSong` answers with the song's takes and tempo, and
- * `runCommand` remembers what it was asked and (unless told to refuse) puts the
- * take into the snapshot.
- * @param {{takes?: object, bpm?: number, refuse?: {code: string, error: string}}} [options]
+ * A session hub: `openSong` answers with the song's takes and tempo,
+ * `runCommand` remembers what it was asked, answers a repeated `cmd_id` with
+ * the result it gave the first time, and refuses a take id the song already has.
+ *
+ * `unreadable` makes `openSong` throw, the way a database or a locked song can.
+ * @param {{takes?: object, bpm?: number, refuse?: {code: string, error: string},
+ *          unreadable?: boolean}} [options]
  */
-function fakeHub({ takes = {}, bpm = 124, refuse = null } = {}) {
+function fakeHub({ takes = {}, bpm = 124, refuse = null, unreadable = false } = {}) {
   const commands = [];
   const state = { takes: { ...takes } };
+  const answers = new Map();
   return {
     commands,
     state,
     async openSong() {
+      if (unreadable) throw new Error("the song's document could not be loaded");
       return {
         doc: null,
         snapshot: { meta: { title: "Test song", bpm }, takes: state.takes, clips: {} },
@@ -146,10 +179,40 @@ function fakeHub({ takes = {}, bpm = 124, refuse = null } = {}) {
     },
     async runCommand(request) {
       commands.push(request);
-      if (refuse) return { ok: false, code: refuse.code, error: refuse.error };
-      const take = { ...request.args.take, clip_id: request.args.clip_id, discarded: false };
-      state.takes[take.id] = take;
-      return { ok: true, entry: { command: request.command }, snapshot_version: 2 };
+      const seen = answers.get(request.cmd_id);
+      if (seen) return seen;
+      let result;
+      if (refuse) {
+        result = { ok: false, code: refuse.code, error: refuse.error };
+      } else if (state.takes[request.args.take.id]) {
+        result = {
+          ok: false,
+          code: "invalid",
+          error: `A take with id "${request.args.take.id}" already exists in this song.`,
+        };
+      } else {
+        state.takes[request.args.take.id] = {
+          ...request.args.take,
+          clip_id: request.args.clip_id,
+          discarded: false,
+        };
+        result = { ok: true, entry: { command: request.command }, snapshot_version: 2 };
+      }
+      answers.set(request.cmd_id, result);
+      return result;
+    },
+  };
+}
+
+/**
+ * The song table's lookup: a take's project is its song's. `songProject: null`
+ * means the song is not there.
+ * @param {number|null} project
+ */
+function fakeSongs(project = PROJECT) {
+  return {
+    async projectOf() {
+      return project;
     },
   };
 }
@@ -161,17 +224,20 @@ function setup(overrides = {}) {
   const db = fakeDb(overrides.db);
   const acl = fakeAcl(overrides.acl);
   const hub = fakeHub(overrides.hub);
+  const songs = fakeSongs(overrides.songProject === undefined ? PROJECT : overrides.songProject);
   const uploads = createTakeUploads({
     stagingDir: staging,
     storage,
     db,
     acl,
     hub,
+    songs,
     now: overrides.now ?? (() => Date.now()),
     quotaMb: overrides.quotaMb ?? 5120,
-    maxSamples: overrides.maxSamples ?? 115200000,
+    maxTakeSeconds: overrides.maxTakeSeconds ?? 1200,
+    ...(overrides.maxSamples === undefined ? {} : { maxSamples: overrides.maxSamples }),
   });
-  return { staging, storage, db, acl, hub, uploads };
+  return { staging, storage, db, acl, hub, songs, uploads };
 }
 
 /** @returns {object} the details a dashboard route would send with `begin`. */
@@ -267,6 +333,16 @@ async function stageChunks(uploads, takeId, chunks) {
     hashes.push(sha256);
   }
   return hashes;
+}
+
+/** @returns {string} the storage key a take is filed under. */
+function keyOf(takeId) {
+  return `${PREFIX}studio/${SONG}/takes/${takeId}.wav`;
+}
+
+/** @returns {string[]} the sorted names in a take's staging directory. */
+function stagedNames(staging, takeId) {
+  return readdirSync(join(staging, takeId)).sort();
 }
 
 /**
@@ -377,33 +453,51 @@ test("begin refuses a non-UUID id", async () => {
   assert.deepEqual(readdirSync(staging), []);
 });
 
-test("begin after chunks is accepted", async () => {
-  const { uploads } = setup();
-  const takeId = randomUUID();
-  const audio = signal(100, 2);
-  const chunks = [pcm24(audio, 0, 60), pcm24(audio, 60, 100)];
-
-  // Chunks first: the client was offline when it began recording, so nothing
-  // but the id is known yet.
-  for (let index = 0; index < chunks.length; index += 1) {
-    await uploads.putChunk(takeId, index, chunks[index]);
-  }
-  const before = await uploads.status(takeId);
-  assert.equal(before.begun, false);
-  assert.equal(before.frames, null);
-  assert.equal(before.received.length, 2);
-
-  const begun = await uploads.begin(takeId, beginRequest());
-  assert.deepEqual(begun, { chunk_bytes: 1048576 });
-
-  const after = await uploads.status(takeId);
-  assert.equal(after.begun, true);
-  assert.equal(after.frames, 100);
-  assert.deepEqual(
-    after.received.map((chunk) => chunk.index),
-    [0, 1],
+test("begin refuses a project that is not the song's", async () => {
+  // The song lives in project 9; the request claims project 7, where the
+  // caller may well have `write_files`.
+  const { uploads, staging, db } = setup({ songProject: 9 });
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), beginRequest()),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, "That song is not in project 7.");
+      return true;
+    },
   );
-  assert.equal(after.received[0].sha256, hashOf(chunks[0]));
+  assert.deepEqual(readdirSync(staging), []);
+  assert.equal(db.statements.length, 0);
+});
+
+test("begin refuses a caller without write_files", async () => {
+  const { uploads, staging, acl } = setup({ acl: { deny: true } });
+  const takeId = randomUUID();
+  await assert.rejects(
+    () => uploads.begin(takeId, beginRequest()),
+    (error) => {
+      assert.equal(error.status, 403);
+      assert.match(error.message, /cannot write files/);
+      return true;
+    },
+  );
+  // The project checked is the song's, never one the request named.
+  assert.deepEqual(acl.calls, [{ projectId: PROJECT, objectId: null, capability: "write_files" }]);
+  assert.deepEqual(readdirSync(staging), []);
+});
+
+test("chunk before begin is refused", async () => {
+  const { uploads, staging } = setup();
+  const takeId = randomUUID();
+  await assert.rejects(
+    () => uploads.putChunk(takeId, 0, pcm24(signal(16, 2))),
+    (error) => {
+      assert.equal(error.status, 404);
+      assert.equal(error.message, "Begin the take before sending its audio.");
+      return true;
+    },
+  );
+  // Nothing was staged: the kata is that the take has a song before it has audio.
+  assert.deepEqual(readdirSync(staging), []);
 });
 
 test("resent chunk is idempotent", async () => {
@@ -420,6 +514,26 @@ test("resent chunk is idempotent", async () => {
   const status = await uploads.status(takeId);
   assert.equal(status.received.length, 1);
   assert.equal(status.frames, 32);
+});
+
+test("concurrent identical putChunk calls all succeed", async () => {
+  const { uploads, staging } = setup();
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+  const bytes = pcm24(signal(64, 2));
+
+  const results = await Promise.all([
+    uploads.putChunk(takeId, 0, bytes),
+    uploads.putChunk(takeId, 0, bytes),
+    uploads.putChunk(takeId, 0, bytes),
+  ]);
+
+  for (const result of results) assert.equal(result.sha256, hashOf(bytes));
+  const status = await uploads.status(takeId);
+  assert.equal(status.received.length, 1);
+  assert.equal(status.frames, 64);
+  // One chunk, one sidecar, and no temporary files left behind.
+  assert.deepEqual(stagedNames(staging, takeId), ["000000.pcm", "000000.pcm.sha256", "meta.json"]);
 });
 
 test("same index different bytes is 409", async () => {
@@ -441,6 +555,30 @@ test("same index different bytes is 409", async () => {
   // The first bytes are untouched.
   const status = await uploads.status(takeId);
   assert.equal(status.frames, 16);
+});
+
+test("putChunk past the sample cap is refused", async () => {
+  const { uploads, staging } = setup();
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+
+  // A sparse staged file as heavy as the whole cap: the next chunk takes the
+  // take past it without this test writing hundreds of megabytes.
+  const cap = 115200000;
+  const first = join(staging, takeId, "000000.pcm");
+  writeFileSync(first, Buffer.alloc(0));
+  truncateSync(first, cap * 3 + 1);
+
+  await assert.rejects(
+    () => uploads.putChunk(takeId, 1, pcm24(signal(4, 2))),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.match(error.message, /115,200,000 samples/);
+      return true;
+    },
+  );
+  // Nothing new was staged.
+  assert.equal(existsSync(join(staging, takeId, "000001.pcm")), false);
 });
 
 test("finish with a missing chunk names it", async () => {
@@ -499,7 +637,7 @@ test("finish applies take.add once with the begin author", async () => {
   const hashes = await stageChunks(uploads, takeId, [pcm24(audio)]);
 
   const { take } = await uploads.finish(takeId, { chunk_hashes: hashes });
-  const key = `${PREFIX}studio/${SONG}/takes/${takeId}.wav`;
+  const key = keyOf(takeId);
 
   assert.equal(hub.commands.length, 1);
   const command = hub.commands[0];
@@ -521,8 +659,11 @@ test("finish applies take.add once with the begin author", async () => {
   assert.equal(command.args.take.discarded, false);
 
   assert.equal(storage.uploads[0].key, key);
-  const insert = db.statements.find((statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql));
+  const insert = db.statements.find(
+    (statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql),
+  );
   assert.ok(insert, "a storage_files row was written");
+  assert.match(insert.sql, /ON CONFLICT\(s3_key\) DO NOTHING/);
   assert.equal(insert.args[0], key);
   assert.equal(insert.args[5], "studio_take");
   assert.equal(insert.args[6], SONG);
@@ -542,8 +683,7 @@ test("finish applies take.add once with the begin author", async () => {
 
   // The audio is done with: its staging goes, the tiny meta stays so a retried
   // finish can still find its song.
-  const day = join(staging, takeId);
-  assert.deepEqual(readdirSync(day), ["meta.json"]);
+  assert.deepEqual(stagedNames(staging, takeId), ["meta.json"]);
   const status = await uploads.status(takeId);
   assert.equal(status.frames, 200);
   assert.deepEqual(status.received, []);
@@ -564,6 +704,98 @@ test("finish twice returns the same take once", async () => {
   assert.equal(acl.audits.length, 1);
 });
 
+test("two concurrent finish calls keep the take", async () => {
+  const { uploads, storage, hub, staging } = setup({ storage: { delayMs: 20 } });
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+  const hashes = await stageChunks(uploads, takeId, [pcm24(signal(64, 2))]);
+
+  const results = await Promise.all([
+    uploads.finish(takeId, { chunk_hashes: hashes }),
+    uploads.finish(takeId, { chunk_hashes: hashes }),
+  ]);
+
+  // Both callers get the one finish's answer; the take is uploaded and filed
+  // exactly once, and the staged audio is gone.
+  assert.deepEqual(results[1], results[0]);
+  assert.equal(results[0].take.id, takeId);
+  assert.ok(hub.state.takes[takeId], "the take is in the song");
+  assert.equal(storage.uploads.length, 1);
+  assert.equal(hub.commands.length, 1);
+  assert.deepEqual(stagedNames(staging, takeId), ["meta.json"]);
+});
+
+test("finish retried after the row exists completes the take", async () => {
+  // The row of a finish that was killed between the insert and `take.add`:
+  // the key is fixed per take, so this attempt must adopt it, not trip over it.
+  const { uploads, storage, db, hub, staging } = setup();
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+  const hashes = await stageChunks(uploads, takeId, [pcm24(signal(64, 2))]);
+  const key = keyOf(takeId);
+  db.rows.add(key);
+
+  const first = await uploads.finish(takeId, { chunk_hashes: hashes });
+  assert.equal(first.take.id, takeId);
+  assert.ok(hub.state.takes[takeId]);
+  assert.ok(db.rows.has(key));
+  assert.deepEqual(stagedNames(staging, takeId), ["meta.json"]);
+
+  const second = await uploads.finish(takeId, { chunk_hashes: hashes });
+  assert.deepEqual(second, first);
+  assert.equal(storage.uploads.length, 1);
+});
+
+test("take.add refused keeps the staging and removes the unreferenced object", async () => {
+  const refusal = { code: "limit", error: "A clip can have at most 64 takes." };
+  const { uploads, storage, db, hub, staging } = setup({ hub: { refuse: refusal } });
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+  const hashes = await stageChunks(uploads, takeId, [pcm24(signal(64, 2))]);
+  const key = keyOf(takeId);
+
+  await assert.rejects(
+    () => uploads.finish(takeId, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "A clip can have at most 64 takes.");
+      return true;
+    },
+  );
+
+  // The song does not point at the take, so the object and its row may go.
+  assert.deepEqual(storage.deleted, [{ key, bucket: "crow-files" }]);
+  assert.equal(db.rows.has(key), false);
+  assert.equal(hub.state.takes[takeId], undefined);
+  // The staged audio is the only copy of the recording: it stays, ready for
+  // the next finish (and the lock is not left behind).
+  assert.deepEqual(stagedNames(staging, takeId), ["000000.pcm", "000000.pcm.sha256", "meta.json"]);
+});
+
+test("finish fails closed when the song cannot be read", async () => {
+  const { uploads, storage, db, hub, staging } = setup({ hub: { unreadable: true } });
+  const takeId = randomUUID();
+  await uploads.begin(takeId, beginRequest());
+  const hashes = await stageChunks(uploads, takeId, [pcm24(signal(64, 2))]);
+
+  await assert.rejects(
+    () => uploads.finish(takeId, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 503);
+      assert.equal(error.message, "Studio could not read the song; the take is kept and will finish later.");
+      return true;
+    },
+  );
+
+  // Nothing was uploaded, nothing was filed, nothing was deleted.
+  assert.equal(storage.uploads.length, 0);
+  assert.deepEqual(storage.deleted, []);
+  assert.equal(db.rows.size, 0);
+  assert.equal(db.statements.length, 0);
+  assert.equal(hub.commands.length, 0);
+  assert.deepEqual(stagedNames(staging, takeId), ["000000.pcm", "000000.pcm.sha256", "meta.json"]);
+});
+
 test("storage insert failure deletes the object", async () => {
   const { uploads, storage, hub } = setup({ db: { failInsert: true } });
   const takeId = randomUUID();
@@ -572,14 +804,13 @@ test("storage insert failure deletes the object", async () => {
 
   await assert.rejects(() => uploads.finish(takeId, { chunk_hashes: hashes }), /insert failed/);
 
-  const key = `${PREFIX}studio/${SONG}/takes/${takeId}.wav`;
   assert.equal(storage.uploads.length, 1);
-  assert.deepEqual(storage.deleted, [{ key, bucket: "crow-files" }]);
+  assert.deepEqual(storage.deleted, [{ key: keyOf(takeId), bucket: "crow-files" }]);
   assert.equal(hub.commands.length, 0);
 });
 
 test("quota exceeded refuses before upload", async () => {
-  const { uploads, storage, hub } = setup({ quotaMb: 1, storage: { usedBytes: 1024 * 1024 } });
+  const { uploads, storage, hub } = setup({ quotaMb: 1, storage: { usedBytes: MB } });
   const takeId = randomUUID();
   await uploads.begin(takeId, beginRequest());
   const hashes = await stageChunks(uploads, takeId, [pcm24(signal(64, 2))]);
@@ -595,6 +826,36 @@ test("quota exceeded refuses before upload", async () => {
   assert.deepEqual(storage.statsCalls, ["crow-files"]);
   assert.equal(storage.uploads.length, 0);
   assert.equal(hub.commands.length, 0);
+});
+
+test("quota counts the incoming take", async () => {
+  // The take is 1000 stereo frames of 24-bit PCM: 6000 data bytes, 6044 with
+  // its header.
+  const size = 44 + 1000 * 2 * 3;
+  const audio = pcm24(signal(1000, 2));
+
+  // Under the quota on its own, but not with the incoming take: still refused.
+  const over = setup({ quotaMb: 1, storage: { usedBytes: MB - size + 1 } });
+  const overTake = randomUUID();
+  await over.uploads.begin(overTake, beginRequest());
+  const overHashes = await stageChunks(over.uploads, overTake, [audio]);
+  await assert.rejects(
+    () => over.uploads.finish(overTake, { chunk_hashes: overHashes }),
+    (error) => {
+      assert.equal(error.status, 507);
+      return true;
+    },
+  );
+  assert.equal(over.storage.uploads.length, 0);
+
+  // Exactly filling the quota is allowed: the rule is `used + size > quota`.
+  const exactly = setup({ quotaMb: 1, storage: { usedBytes: MB - size } });
+  const exactTake = randomUUID();
+  await exactly.uploads.begin(exactTake, beginRequest());
+  const exactHashes = await stageChunks(exactly.uploads, exactTake, [audio]);
+  const { take } = await exactly.uploads.finish(exactTake, { chunk_hashes: exactHashes });
+  assert.equal(take.id, exactTake);
+  assert.equal(exactly.storage.uploads.length, 1);
 });
 
 test("33rd open upload refused", async () => {
@@ -671,6 +932,29 @@ test("decodeWav reads 16-bit and 24-bit and refuses float", () => {
     (error) => {
       assert.match(error.message, /format code 3/);
       assert.match(error.message, /IEEE float/);
+      return true;
+    },
+  );
+});
+
+test("decodeWav refuses rate 0 and 9 channels", () => {
+  const audio = signal(10, 1);
+
+  const noRate = buildWav({ rate: 0, bits: 24, channels: audio });
+  assert.throws(
+    () => decodeWav(noRate),
+    (error) => {
+      assert.match(error.message, /sample rate is 0/);
+      return true;
+    },
+  );
+
+  const nineChannels = Array.from({ length: 9 }, () => audio[0]);
+  const tooMany = buildWav({ rate: 48000, bits: 24, channels: nineChannels });
+  assert.throws(
+    () => decodeWav(tooMany),
+    (error) => {
+      assert.match(error.message, /9 channels/);
       return true;
     },
   );
