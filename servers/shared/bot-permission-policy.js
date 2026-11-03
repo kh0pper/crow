@@ -22,7 +22,7 @@ export const POLICY_KEYS = Object.freeze([
 export const ENGINE_KEYS = Object.freeze(["classifier", "interactive_ask", "model_capable"]);
 
 const SKILL_LEARNING = ["off", "propose", "auto"];
-/** egress (contained bots, queue item 19 step 2c): host names or *.suffix. Absent = any public or private host (never loopback, the host itself or cloud metadata). */
+/** egress (contained bots, queue item 19 step 2c): host names or *.suffix. Absent = any host the closed network reaches (global unicast, never this host's own address, never an operator-denied network, never loopback, the LAN or the tailnet). */
 const EGRESS_RE = /^(\*\.)?(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 const EXTERNAL_SEND = ["draft_only", "allow"];
 

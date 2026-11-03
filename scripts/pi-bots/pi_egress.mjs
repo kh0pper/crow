@@ -19,12 +19,16 @@
  *               other instances, unused model servers, a browser's DevTools
  *               port, adb.
  *   PROXY\n     an HTTP CONNECT request follows (the bot's HTTPS_PROXY). Only
- *               CONNECT; ports from egressPorts (default 443); public AND
- *               private destinations are allowed (D4), but no address the
- *               host resolves to may be loopback, this host's own address, a
- *               cloud metadata endpoint or non-unicast (every address checked,
- *               the checked one connected: no DNS rebinding); IP literals the
- *               same; an `egress` list (exact or *.suffix) narrows further.
+ *               CONNECT, on ports from egressPorts (default 443), and the
+ *               network is CLOSED (the operator's ruling): a destination is
+ *               reachable only when EVERY address the name resolves to is
+ *               global unicast, is not one of this host's own addresses and is
+ *               not in the operator's deny list. Nothing on the LAN, the
+ *               tailnet, loopback, cloud metadata or this host is reachable; a
+ *               bot that needs a lab service gets a door for it. Every address
+ *               is checked and the checked one connected (no DNS rebinding);
+ *               IP literals the same; an `egress` list (exact or *.suffix)
+ *               narrows further.
  *
  * Every decision is logged once per (decision, host:port) per spawn,
  * `[pi-egress] bot=<id> allow|deny <host>:<port> (<reason>)`. A per-spawn
@@ -33,48 +37,44 @@
 import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { isDoorPath, RELAY_SOURCE_V4 } from "../../servers/shared/bot-doors.js";
-import { networkInterfaces } from "node:os";
 import { spawnSync } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-// Default egress (operator decision D4, 2026-10-26: "public and private"):
-// public and private (LAN, tailnet, ULA) destinations are allowed; a bot's
-// `egress` list narrows. Always refused, because each is a way around another
-// control rather than a destination class:
-//   - loopback (127/8, 0/8, ::, ::1): host loopback is governed by the PORT
-//     allowlist; reaching it through the proxy would skip that list;
-//   - this host: its own interface addresses (every service bound to
-//     0.0.0.0), the subnets of its virtual bridges (containers and VMs, which
-//     host-originated traffic reaches without passing DOCKER-USER), its subnet
-//     broadcasts, and tailscaled's local services (100.100.100.0/24,
-//     fd7a:115c:a1e0::53);
-//   - cloud metadata and host plumbing: all of 169.254.0.0/16, Azure's
-//     168.63.129.16, AWS fd00:ec2::/64, GCP fd20:ce::254;
-//   - multicast/reserved (not unicast).
-// The local view comes from the kernel route tables (local addresses and
-// broadcasts on every interface, up or down; connected subnets of virtual
-// bridges, including ones with no carrier), cached 5 s, plus
-// os.networkInterfaces() as an extra source. If either cannot be read, every
-// private target is refused (fail closed), docker0 and libvirt's default
-// subnets by name too.
-// IPv4 embedded in IPv6 (v4-mapped, v4-compatible, SIIT, NAT64 64:ff9b::/96,
-// 6to4 2002::/16, both Teredo fields, ISATAP) is unwrapped and judged as the IPv4
-// address; the NAT64 local-use /48 and the discard prefix are refused.
-// Zone ids are stripped (the CONNECT parser refuses '%' anyway).
+// The closed network (the operator's ruling, spec §10): a CONNECT reaches a
+// destination only when EVERY address its name resolves to is global unicast,
+// is not one of this host's own addresses and is not in the operator's deny
+// list. Every special-purpose range is refused, because each is a way around
+// another control rather than a destination class: the LAN and the tailnet
+// (100.64/10, fd7a:115c:a1e0::/48) are the operator's own network, loopback is
+// governed by the PORT door allowlist, cloud metadata is credentials, and
+// multicast/reserved/documentation ranges are not destinations a bot has any
+// business reaching. A bot that needs a lab service gets a door for it.
+// The own-host view is the kernel's LOCAL table only (readLocalTable): an
+// interface list can omit an address on a link with no carrier.
+// IPv4 embedded in IPv6 (v4-mapped, v4-compatible, SIIT, NAT64, 6to4, both
+// Teredo fields, ISATAP) is unwrapped and judged as the IPv4 address; the
+// discard prefix is refused. Zone ids are stripped (the CONNECT parser refuses
+// '%' anyway).
 // Not detectable from this host's tables, so an operator lists them in
 // CROW_PI_EGRESS_DENY_NETS (spawner env, comma-separated CIDRs): Kubernetes
 // service ranges, a network-specific NAT64 prefix, a router that hairpins the
 // host's public address back to it.
-const PLUMBING_V4 = new BlockList();
-for (const [a, p] of [["169.254.0.0", 16], ["168.63.129.16", 32], ["100.100.100.0", 24]]) PLUMBING_V4.addSubnet(a, p, "ipv4");
-const PRIVATE_V4 = new BlockList();
-for (const [a, p] of [["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], ["100.64.0.0", 10], ["198.18.0.0", 15]]) PRIVATE_V4.addSubnet(a, p, "ipv4");
-/** Interfaces whose subnets are containers/VMs on this host. */
-// Not tun*: a tun device is a VPN to other hosts (the tailnet is one), which
-// the public-and-private default allows; tap/vnet are VM devices.
-const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap|vboxnet|vmnet)/;
+/** [network, prefix length, reason] — every IPv4 range that is not global unicast. */
+const SPECIAL_V4 = [
+  // metadata and host plumbing first: 100.100.100.0/24 sits inside 100.64/10
+  ["169.254.0.0", 16, "cloud metadata"], ["168.63.129.16", 32, "cloud metadata"], ["100.100.100.0", 24, "cloud metadata"],
+  ["127.0.0.0", 8, "loopback"],
+  ["0.0.0.0", 8, "not unicast"],
+  ["10.0.0.0", 8, "private network"], ["172.16.0.0", 12, "private network"], ["192.168.0.0", 16, "private network"],
+  ["100.64.0.0", 10, "tailnet/CGNAT"],
+  ["192.0.0.0", 24, "reserved"], ["192.0.2.0", 24, "documentation range"],
+  ["192.31.196.0", 24, "reserved"], ["192.52.193.0", 24, "reserved"], ["192.88.99.0", 24, "reserved"],
+  ["192.175.48.0", 24, "reserved"], ["198.51.100.0", 24, "documentation range"], ["203.0.113.0", 24, "documentation range"],
+  ["198.18.0.0", 15, "benchmarking range"],
+  ["224.0.0.0", 4, "not unicast"], ["240.0.0.0", 4, "not unicast"],
+].map(([net, plen, why]) => { const b = new BlockList(); b.addSubnet(net, plen, "ipv4"); return [b, why]; });
 
 function expand6(a) {
   let s = String(a).toLowerCase().split("%")[0];
@@ -92,190 +92,179 @@ function expand6(a) {
 }
 const key6 = (a) => expand6(a).join(":");
 const v4From = (hi, lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
-const v4Int = (a) => a.split(".").reduce((n, o) => n * 256 + Number(o), 0);
-const intV4 = (n) => [24, 16, 8, 0].map((b) => (n >>> b) & 255).join(".");
 
 const IP_CANDIDATES = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"];
-/**
- * The kernel's view: the local table (every local and broadcast address, on
- * every interface, up or down) and the main table (directly connected
- * subnets, including bridges with no carrier, which os.networkInterfaces()
- * does not list). Throws when it cannot be read.
- */
-export function readKernelRoutes() {
+
+/** `ip -j <args>`, parsed; throws when ip(8) is missing or the read fails. */
+function ipJson(args) {
   const ip = IP_CANDIDATES.find((p) => existsSync(p));
   if (!ip) throw new Error("ip(8) not found");
-  const run = (args) => {
-    const r = spawnSync(ip, ["-j", ...args], { encoding: "utf8", timeout: 2000 });
-    if (r.status !== 0) throw Object.assign(new Error("ip " + args.join(" ") + ": exit " + r.status), { stderr: String(r.stderr || "") });
-    const v = JSON.parse(r.stdout || "null");
-    if (!Array.isArray(v)) throw new Error("ip " + args.join(" ") + ": not a list");
-    return v;
-  };
-  let links = null, linksFailed = false;
-  try { links = run(["-d", "link"]); } catch { linksFailed = true; }
-  const v6 = readV6Tables((which) => run(which === "local" ? ["-6", "route", "show", "table", "local"] : ["-6", "route", "show", "table", "all"]));
-  return parseKernelTables({
-    // every routing table (VRFs, policy tables), not only main
-    local4: run(["route", "show", "table", "local"]), main4: run(["route", "show", "table", "all"]), links, linksFailed, ...v6,
-  });
+  const r = spawnSync(ip, ["-j", ...args], { encoding: "utf8", timeout: 2000 });
+  if (r.status !== 0) throw Object.assign(new Error("ip " + args.join(" ") + ": exit " + r.status), { stderr: String(r.stderr || "") });
+  const v = JSON.parse(r.stdout || "null");
+  if (!Array.isArray(v)) throw new Error("ip " + args.join(" ") + ": not a list");
+  return v;
+}
+
+/** The dst of every local-table row: that table is about this host alone. */
+function parseLocalRows(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    const dst = String((r && r.dst) || "").split("%")[0];
+    if (dst && isIP(dst.split("/")[0])) out.push(dst);
+  }
+  return out;
+}
+
+/** /proc/net/fib_trie: a `|-- a.b.c.d` line followed by `/NN host LOCAL` (a /32 is an address, a shorter prefix a subnet this host owns). */
+function parseFibTrie(text) {
+  const out = [];
+  let cand = null;
+  for (const line of String(text || "").split("\n")) {
+    const m = /^\s*\|--\s+(\d{1,3}(?:\.\d{1,3}){3})\s*$/.exec(line);
+    if (m) { cand = m[1]; continue; }
+    const p = /^\s*\/(\d{1,2})\s+host\s+LOCAL\b/.exec(line);
+    if (p) {
+      const plen = Number(p[1]);
+      if (cand && plen <= 32) out.push(plen === 32 ? cand : cand + "/" + plen);
+      cand = null;
+      continue;
+    }
+    if (line.trim()) cand = null;
+  }
+  return out;
+}
+
+function hex6(h) {
+  const s = String(h || "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(s)) return null;
+  return s.match(/.{4}/g).map((x) => parseInt(x, 16));
+}
+
+/** RFC 5952 form: lowercase, no leading zeros, the longest (first) zero run as "::". */
+function fmt6(h) {
+  const g = h.map((x) => x.toString(16));
+  let best = -1, bestLen = 1;
+  for (let i = 0; i < 8;) {
+    if (h[i] !== 0) { i++; continue; }
+    let j = i;
+    while (j < 8 && h[j] === 0) j++;
+    if (j - i > bestLen) { best = i; bestLen = j - i; }
+    i = j;
+  }
+  if (best < 0) return g.join(":");
+  return g.slice(0, best).join(":") + "::" + g.slice(best + bestLen).join(":");
+}
+
+/** /proc/net/ipv6_route: rows whose flags carry RTF_LOCAL (0x80000000) are own addresses. */
+function parseIpv6Route(text) {
+  const out = [];
+  for (const line of String(text || "").split("\n")) {
+    const c = line.trim().split(/\s+/);
+    if (c.length < 10) continue;
+    if (!(parseInt(c[8], 16) & 0x80000000)) continue;
+    const g = hex6(c[0]);
+    const plen = parseInt(c[1], 16);
+    if (!g || !(plen >= 0 && plen <= 128)) continue;
+    const addr = fmt6(g);
+    out.push(plen === 128 ? addr : addr + "/" + plen);
+  }
+  return out;
 }
 
 /**
- * The IPv6 tables. Skipped (null, not a failure) only when the kernel says
- * the family is not supported (EAFNOSUPPORT: booted without IPv6). Any other
- * failure sets v6Failed:
- * private IPv6 targets are refused then (IPv4 decisions are unaffected).
- * `run(which)` with which = "local" | "main"; o.interfaces is a seam.
+ * This host's own addresses and prefixes, from the kernel's LOCAL table ONLY:
+ * `ip -j [-6] route show table local`, falling back to /proc/net/fib_trie and
+ * /proc/net/ipv6_route. The OS interface list is deliberately not a source: it
+ * omits an address on an interface with no carrier (a bridge that comes up
+ * later), which is the hole the S2c review named.
+ *
+ * A family that cannot be read is REPORTED, never hidden: the caller refuses
+ * that family's targets (every target when IPv4 fails). A kernel with no IPv6
+ * (EAFNOSUPPORT, or no /proc/net/ipv6_route) is not a failure. o.run/o.readFile
+ * are test seams.
+ * @returns {{v4: string[], v6: string[], v4Failed: boolean, v6Failed: boolean}}
  */
-export function readV6Tables(run, o = {}) {
-  try {
-    return { local6: run("local"), main6: run("main"), v6Failed: false };
-  } catch (e) {
-    const msg = String((e && (e.stderr || e.message)) || "");
-    if (/address family not supported|EAFNOSUPPORT/i.test(msg)) return { local6: null, main6: null, v6Failed: false };
-    // Anything else fails IPv6 closed: an interface list can miss an IPv6
-    // address that sits on a down interface.
-    return { local6: null, main6: null, v6Failed: true };
+export function readLocalTable(o = {}) {
+  const run = o.run || ipJson;
+  const readFile = o.readFile || ((p) => readFileSync(p, "utf8"));
+  let v4 = null;
+  try { v4 = parseLocalRows(run(["route", "show", "table", "local"])); } catch { v4 = null; }
+  // An empty successful read is a parse that failed, not a host without
+  // addresses: the LOCAL table always carries at least loopback.
+  if (!v4 || !v4.length) {
+    try { v4 = parseFibTrie(readFile("/proc/net/fib_trie")); } catch { v4 = null; }
   }
+  const v4Failed = !v4 || !v4.length;
+  if (v4Failed) v4 = [];
+  let v6 = null, v6Failed = false;
+  try { v6 = parseLocalRows(run(["-6", "route", "show", "table", "local"])); } catch { v6 = null; }
+  if (!v6 || !v6.length) {
+    try {
+      v6 = parseIpv6Route(readFile("/proc/net/ipv6_route"));
+      if (!v6.length) v6Failed = true;
+    } catch (e) {
+      v6 = [];
+      // A kernel booted without IPv6 has no ipv6_route file at all.
+      if (!(e && e.code === "ENOENT")) v6Failed = true;
+    }
+  }
+  return { v4, v6, v4Failed, v6Failed };
 }
 
-/** True when /sys/class/net/<if>/device exists (a hardware NIC). */
-function sysfsIsPhysical(ifname) {
-  return /^[A-Za-z0-9_.:@-]{1,32}$/.test(String(ifname || "")) && existsSync("/sys/class/net/" + ifname + "/device");
-}
-
-/** Device kinds that carry containers/VMs on this host. Not tun (VPNs such as the tailnet) or wireguard. */
-// openvswitch: OVS bridges carry VMs; an OVS bridge that carries the LAN is
-// refused too (fails safe: OVS physical ports are not visible as bridge ports).
-const VIRTUAL_KINDS = new Set(["bridge", "veth", "vxlan", "geneve", "macvlan", "ipvlan", "macvtap", "openvswitch"]);
-export function deviceKindIsVirtual(kind) { return VIRTUAL_KINDS.has(String(kind || "")); }
-
-/**
- * Combine the raw `ip -j` outputs. Throws when the IPv4 local table is not
- * plausible (no `lo` entry), so an empty successful read cannot pass for a
- * host with no addresses.
- */
-export function parseKernelTables({ local4, local6, main4, main6, links, linksFailed = false, v6Failed = false, isPhysical = sysfsIsPhysical }) {
-  if (!Array.isArray(local4) || !local4.some((r) => r && r.dev === "lo")) throw new Error("kernel local table has no lo entry");
-  // A bridge with a physical port (the LAN NIC enslaved to br0/vmbr0 on a VM
-  // host) carries the LAN, not containers: never counted as virtual.
-  // A port is physical only when positively identified as hardware: a
-  // parentbus in `ip -d link`, or /sys/class/net/<if>/device. A port of
-  // unknown type keeps its bridge virtual (fail safe).
-  const physicalBridges = new Set();
-  for (const l of links || []) {
-    const kind = l && l.linkinfo && l.linkinfo.info_kind;
-    if (l && l.master && !kind && l.ifname !== "lo" && (l.parentbus || isPhysical(l.ifname))) physicalBridges.add(l.master);
-  }
-  const virtualDevs = new Set();
-  for (const l of links || []) {
-    const kind = l && l.linkinfo && l.linkinfo.info_kind;
-    if (l && l.ifname && deviceKindIsVirtual(kind) && !physicalBridges.has(l.ifname)) virtualDevs.add(l.ifname);
-  }
-  return { local: [...local4, ...(local6 || [])], main: [...(main4 || []), ...(main6 || [])], virtualDevs, physicalBridges,
-    linksFailed: !!linksFailed || !Array.isArray(links), v6Failed: !!v6Failed };
-}
-
-/** Kernel tables are cached briefly (interfaces come and go; a spawn makes many decisions). */
-const ROUTES_TTL_MS = 5000;
-let routesCache = null; // { at, value } | { at, error }
-let kernelReader = null; // test seam
+/** The local table is cached briefly (addresses come and go; a spawn makes many decisions). */
+const LOCAL_TTL_MS = 5000;
+let localCache = null; // { at, value }
+let localTableReader = null; // test seam
 /** Test seam: replace the kernel reader (null restores it). */
-export function _setKernelReaderForTest(fn) { kernelReader = fn; }
-function cachedKernelRoutes() {
+export function _setLocalTableReaderForTest(fn) { localTableReader = fn; }
+/** Test seam: forget the cached read. */
+export function _resetLocalTableCacheForTest() { localCache = null; }
+function cachedLocalTable() {
   const now = Date.now();
-  if (!routesCache || now - routesCache.at > ROUTES_TTL_MS) {
-    try { routesCache = { at: now, value: (kernelReader || readKernelRoutes)() }; } catch (e) { routesCache = { at: now, error: e }; }
+  if (!localCache || now - localCache.at > LOCAL_TTL_MS) {
+    let value = null;
+    // A failure is cached AS a failure and is never remembered as a success.
+    try { value = (localTableReader || readLocalTable)(); } catch { value = null; }
+    if (!value || typeof value !== "object") value = { v4: [], v6: [], v4Failed: true, v6Failed: true };
+    localCache = { at: now, value };
   }
-  if (routesCache.error) throw routesCache.error;
-  return routesCache.value;
+  return localCache.value;
 }
-/** Test seam. */
-export function _resetRoutesCacheForTest() { routesCache = null; }
-
-/** Defaults refused by name when the kernel tables cannot be read (docker0, libvirt's default). */
-const FALLBACK_BRIDGES_V4 = [["172.17.0.0", 16], ["192.168.122.0", 24]];
 
 /**
- * This host's view: own addresses, virtual-bridge subnets, broadcasts.
- * Sources: the kernel route tables (o.routes seam), then
- * os.networkInterfaces() (o.interfaces seam) as an extra, then o.hostAddrs.
- * `failed` when either source cannot be read: the caller refuses every
- * private target then.
+ * This host's view: the addresses and prefixes the kernel's LOCAL table says
+ * it owns (o.local, a readLocalTable result), plus o.hostAddrs (extra own
+ * addresses, e.g. a router that hairpins the host's public address back to
+ * it). There is no interface enumeration and no bridge/VM name or kind logic:
+ * under the closed network every private range is refused anyway, and the
+ * kernel table finds an address on an interface with no carrier.
  */
 function localView(o = {}) {
-  const addrs = new Set(), bcast = new Set();
+  const t = o.local || cachedLocalTable();
+  const addrs = new Set();
   const nets4 = new BlockList(), nets6 = new BlockList();
-  let failed = false, failed6 = false;
-  let physicalBridges = new Set();
-  const addAddr = (a) => { const x = String(a || "").split("%")[0]; if (isIP(x)) addrs.add(isIP(x) === 6 ? key6(x) : x); };
-  // A dst is an address or address/prefix; `ip -j route` prints host routes
-  // without the /32 or /128. Returns false for a shape it does not know.
-  const addNet = (cidr) => {
-    const parts = String(cidr || "").split("/");
-    if (parts.length > 2) return false;
-    const [net, plen] = parts;
-    const fam = isIP(net);
-    if (!fam) return false;
-    if (plen !== undefined && !/^\d+$/.test(plen)) return false;
-    const len = plen === undefined ? (fam === 4 ? 32 : 128) : Number(plen);
-    if (len > (fam === 4 ? 32 : 128)) return false;
-    try { (fam === 4 ? nets4 : nets6).addSubnet(net, len, fam === 4 ? "ipv4" : "ipv6"); } catch { return false; }
-    return true;
+  let failed = !!t.v4Failed, failed6 = !!t.v6Failed;
+  const add = (x) => {
+    const s = String(x || "").split("%")[0];
+    const parts = s.split("/");
+    if (parts.length > 2) { failed = failed6 = true; return; }
+    const fam = isIP(parts[0]);
+    // An entry the relay cannot read fails the view closed: a source that
+    // emits garbage cannot be trusted to have listed every own address.
+    if (!fam) { failed = failed6 = true; return; }
+    const max = fam === 4 ? 32 : 128;
+    const plen = parts.length === 2 ? (/^\d+$/.test(parts[1]) ? Number(parts[1]) : NaN) : max;
+    if (!(plen <= max)) { failed = failed6 = true; return; }
+    if (plen === max) addrs.add(fam === 6 ? key6(parts[0]) : parts[0]);
+    else { try { (fam === 4 ? nets4 : nets6).addSubnet(parts[0], plen, fam === 4 ? "ipv4" : "ipv6"); } catch { failed = failed6 = true; } }
   };
-  // 1. kernel tables
-  try {
-    const t = (o.routes || cachedKernelRoutes)();
-    if (t.v6Failed) failed6 = true;
-    if (t.linksFailed) failed = true; // a custom-named bridge could be missed
-    if (t.physicalBridges) physicalBridges = t.physicalBridges;
-    for (const r of t.local || []) {
-      const dst = String(r.dst || "");
-      if (r.type === "local" || r.type === "anycast") {
-        // a CIDR here (local 10.0.0.0/8) is a whole subnet this host owns
-        if (dst.includes("/")) { if (!addNet(dst)) failed = true; }
-        else if (isIP(dst.split("%")[0])) addAddr(dst);
-        else failed = true;
-      } else if (r.type === "broadcast") {
-        if (isIP(dst) === 4) bcast.add(dst); else failed = true;
-      }
-    }
-    for (const r of t.main || []) {
-      if (r.type && r.type !== "unicast") continue; // local/broadcast/multicast come from the local table
-      const dev = String(r.dev || "");
-      // explicit virtual names (docker*, br-*, virbr*, ...) are never exempted;
-      // virtualDevs (by kind) already leaves out bridges with a physical port
-      const virtual = VIRTUAL_IF.test(dev) || !!(t.virtualDevs && t.virtualDevs.has(dev));
-      if (r.dst && r.dst !== "default" && virtual && !addNet(r.dst)) failed = true;
-    }
-  } catch {
-    failed = true;
-    for (const [a, p] of FALLBACK_BRIDGES_V4) nets4.addSubnet(a, p, "ipv4");
-  }
-  // 2. interfaces (extra source; also covers a kernel table read in a namespace that hides some)
-  try {
-    const ifs = (o.interfaces || networkInterfaces)();
-    for (const [name, list] of Object.entries(ifs || {})) {
-      for (const i of list || []) {
-        const addr = String(i.address || "").split("%")[0];
-        if (!isIP(addr)) continue;
-        addAddr(addr);
-        const plen = Number(String(i.cidr || "").split("/")[1]);
-        if (!Number.isInteger(plen)) continue;
-        if (VIRTUAL_IF.test(name)) addNet(addr + "/" + plen); // explicit names are never exempted
-        if (isIP(addr) === 4 && plen < 31) {
-          const mask = plen === 0 ? 0 : (0xffffffff << (32 - plen)) >>> 0;
-          bcast.add(intV4(((v4Int(addr) & mask) | (~mask >>> 0)) >>> 0));
-        }
-      }
-    }
-  } catch { failed = true; }
-  // 3. explicit own addresses, honoured on every path
-  for (const a of o.hostAddrs || []) addAddr(a);
-  // 4. operator-listed networks that lead back into this host but are not
-  //    visible in its tables (Kubernetes ClusterIP ranges DNAT'd in nat
-  //    OUTPUT, a network-specific NAT64 prefix): refused like a bridge.
+  for (const a of t.v4 || []) add(a);
+  for (const a of t.v6 || []) add(a);
+  for (const a of o.hostAddrs || []) add(a);
+  // operator-listed networks that lead back into this host but are not
+  // visible in its tables (Kubernetes ClusterIP ranges DNAT'd in nat
+  // OUTPUT, a network-specific NAT64 prefix): refused like an own address.
   const deny4 = new BlockList(), deny6 = new BlockList();
   let denyBroken = false;
   for (const n of o.denyNets || []) {
@@ -295,26 +284,70 @@ function localView(o = {}) {
       }
     }
   }
-  return { addrs, bcast, nets4, nets6, failed, failed6, deny4, deny6, denyBroken };
+  return { addrs, nets4, nets6, failed, failed6, deny4, deny6, denyBroken };
 }
 
 function v4Reason(a, L) {
-  const o = a.split(".").map(Number);
-  // the operator deny list, here so that every IPv4-in-IPv6 path gets it too
+  // The operator deny list first, so every IPv4-in-IPv6 path gets it too.
   if (L.deny4 && L.deny4.check(a, "ipv4")) return "operator-denied network";
-  if (o[0] === 127 || o[0] === 0) return "loopback (use the bot's loopback ports)";
-  if (PLUMBING_V4.check(a, "ipv4")) return "cloud metadata / host plumbing";
-  if (o[0] >= 224) return "not unicast";
-  if (L.addrs.has(a)) return "this host's own address";
-  if (L.nets4.check(a, "ipv4")) return "a container/VM bridge on this host";
-  if (L.bcast.has(a)) return "a local subnet broadcast";
-  if (L.failed && PRIVATE_V4.check(a, "ipv4")) return "private target refused: this host's addresses cannot be determined";
+  for (const [net, why] of SPECIAL_V4) if (net.check(a, "ipv4")) return why;
+  if (L.addrs.has(a) || L.nets4.check(a, "ipv4")) return "this host";
+  if (L.failed) return "own-host view unreadable";
+  return null;
+}
+
+function v6Reason(a, L) {
+  const h = expand6(a);
+  const zero = (x, y) => h.slice(x, y).every((v) => v === 0);
+  // Unspecified and loopback first: an embedded-IPv4 reading of ::1 would
+  // otherwise say "not unicast" and hide the real reason.
+  if (zero(0, 8)) return "not unicast";
+  if (zero(0, 7) && h[7] === 1) return "loopback";
+  // Cloud metadata and host plumbing: ULA endpoints, not peers.
+  if ((h[0] === 0xfd00 && h[1] === 0x0ec2 && zero(2, 4)) || key6(a) === key6("fd20:ce::254") || key6(a) === key6("fd7a:115c:a1e0::53")) {
+    return "cloud metadata";
+  }
+  // IPv4 inside IPv6: every prefix known to embed an IPv4 address is judged by
+  // that address (and, when that is clean, still by the checks below: this host
+  // may own a 6to4/Teredo/NAT64 address). Judged BEFORE the range checks so a
+  // wrapper around an operator-denied address keeps that specific reason.
+  let embedded = null;
+  if (zero(0, 5) && (h[5] === 0xffff || h[5] === 0)) embedded = v4Reason(v4From(h[6], h[7]), L);       // ::ffff:a.b.c.d, ::a.b.c.d
+  else if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) embedded = v4Reason(v4From(h[6], h[7]), L);   // SIIT ::ffff:0:a.b.c.d
+  else if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) embedded = v4Reason(v4From(h[6], h[7]), L); // NAT64 64:ff9b::/96
+  else if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) {
+    // NAT64 local-use /48 (RFC 6052): the u octet (bits 64-71) must be zero;
+    // then the IPv4 sits in bits 48-63 and 72-87. An unreadable layout is
+    // refused rather than guessed at.
+    if (h[4] >> 8) return "NAT64 local-use prefix (embedding unreadable)";
+    embedded = v4Reason(v4From(h[3], ((h[4] & 0xff) << 8) | (h[5] >> 8)), L);
+  }
+  else if (h[0] === 0x2002) embedded = v4Reason(v4From(h[1], h[2]), L);                                // 6to4
+  else if (h[0] === 0x2001 && h[1] === 0) {                                                            // Teredo: server, and client XOR ffff:ffff
+    embedded = v4Reason(v4From(h[2], h[3]), L) || v4Reason(v4From(h[6] ^ 0xffff, h[7] ^ 0xffff), L);
+  }
+  else if ((h[4] === 0 || h[4] === 0x200) && h[5] === 0x5efe) embedded = v4Reason(v4From(h[6], h[7]), L);   // ISATAP ::0:5efe:a.b.c.d
+  if (embedded) return embedded;
+  // Every remaining IPv6 range that is not global unicast.
+  if ((h[0] & 0xfe00) === 0xfc00) return "private network";  // fc00::/7 ULA (the tailnet's fd7a:115c:a1e0::/48 is in it)
+  if ((h[0] & 0xffc0) === 0xfe80) return "link-local";       // fe80::/10
+  if ((h[0] & 0xffc0) === 0xfec0) return "site-local";       // fec0::/10 (deprecated)
+  if ((h[0] & 0xff00) === 0xff00) return "not unicast";      // ff00::/8 multicast
+  if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix";
+  if (h[0] === 0x2001 && h[1] === 2) return "benchmarking range";            // 2001:2::/48
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return "documentation range";       // 2001:db8::/32
+  if (h[0] === 0x3fff && (h[1] & 0xf000) === 0) return "documentation range"; // 3fff::/20
+  if (L.addrs.has(key6(a)) || L.nets6.check(a, "ipv6")) return "this host";
+  if (L.failed || L.failed6) return "own-host view unreadable";
   return null;
 }
 
 /**
- * null when the relay may connect to `addr`, else the reason it may not.
- * o.interfaces: networkInterfaces-shaped seam; o.hostAddrs: extra own addresses.
+ * null when the relay may connect to `addr`, else the reason it may not. The
+ * network is closed: only a global-unicast address that is not this host's own
+ * and not in the operator's deny list passes. o.local is a readLocalTable
+ * result (default: the cached kernel read); o.hostAddrs adds own addresses;
+ * o.denyNets is the operator list.
  */
 export function egressDenyReason(addr, o = {}) {
   const a = String(addr || "").replace(/^\[|\]$/g, "").split("%")[0];
@@ -325,34 +358,7 @@ export function egressDenyReason(addr, o = {}) {
   // refuses everything rather than silently not refusing what it meant.
   if (L.denyBroken) return "operator deny list (CROW_PI_EGRESS_DENY_NETS) has an unreadable entry: refusing all targets";
   if (fam === 6 && L.deny6 && L.deny6.check(a, "ipv6")) return "operator-denied network";
-  if (fam === 4) return v4Reason(a, L);
-  const h = expand6(a);
-  const zero = (x, y) => h.slice(x, y).every((v) => v === 0);
-  if (zero(0, 8) || (zero(0, 7) && h[7] === 1)) return "loopback (use the bot's loopback ports)";
-  if (h[0] >= 0xff00) return "not unicast";
-  if ((h[0] === 0xfd00 && h[1] === 0xec2 && zero(2, 4)) || key6(a) === key6("fd20:ce::254") || key6(a) === key6("fd7a:115c:a1e0::53")) {
-    return "cloud metadata / host plumbing";
-  }
-  // IPv4 inside IPv6: every prefix known to embed an IPv4 address is judged
-  // by that address (and, when that is clean, still by the own-host checks
-  // below: this host may own a 6to4/Teredo/NAT64 address), or refused when
-  // the embedding cannot be read reliably.
-  let embedded = null;
-  if (zero(0, 5) && (h[5] === 0xffff || h[5] === 0)) embedded = v4Reason(v4From(h[6], h[7]), L);       // ::ffff:a.b.c.d, ::a.b.c.d
-  else if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) embedded = v4Reason(v4From(h[6], h[7]), L);   // SIIT ::ffff:0:a.b.c.d
-  else if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) embedded = v4Reason(v4From(h[6], h[7]), L); // NAT64 64:ff9b::/96
-  else if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return "NAT64 local-use prefix (embedded IPv4 not reliably readable)";
-  else if (h[0] === 0x2002) embedded = v4Reason(v4From(h[1], h[2]), L);                                // 6to4
-  else if (h[0] === 0x2001 && h[1] === 0) {                                                            // Teredo: server, and client XOR ffff:ffff
-    embedded = v4Reason(v4From(h[2], h[3]), L) || v4Reason(v4From(h[6] ^ 0xffff, h[7] ^ 0xffff), L);
-  } else if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix (100::/64)";
-  else if ((h[4] === 0 || h[4] === 0x200) && h[5] === 0x5efe) embedded = v4Reason(v4From(h[6], h[7]), L);   // ISATAP ::0:5efe:a.b.c.d
-  if (embedded) return embedded;
-  const isPrivate6 = (h[0] & 0xfe00) === 0xfc00 || (h[0] & 0xffc0) === 0xfe80;
-  if (L.addrs.has(key6(a))) return "this host's own address";
-  if (L.nets6.check(a, "ipv6")) return "a container/VM bridge on this host";
-  if ((L.failed || L.failed6) && isPrivate6) return "private target refused: this host's addresses cannot be determined";
-  return null;
+  return fam === 4 ? v4Reason(a, L) : v6Reason(a, L);
 }
 
 const norm = (h) => String(h || "").trim().toLowerCase().replace(/\.$/, "");
@@ -379,7 +385,10 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
  * @param {number[]} [o.loopbackPorts]  what the sandbox listens on (no policy here)
  * @param {boolean} [o.doorFilter=true]  test seam: false forwards without the door check
  * @param {string[]|null} o.egressAllow
- * @param {number[]} [o.egressPorts=[443,80]]
+ * @param {number[]} [o.egressPorts=[443]]
+ * @param {object} [o.local]        readLocalTable result (test seam); default: the cached kernel LOCAL table
+ * @param {string[]} [o.hostAddrs]  extra own addresses
+ * @param {string[]} [o.denyNets]   operator-denied networks (default CROW_PI_EGRESS_DENY_NETS)
  * @param {number} [o.maxConns=64]
  * @param {number} [o.headTimeoutMs=10000]
  * @param {Function} [o.lookup]     async (host) => [{address, family}]
@@ -415,11 +424,19 @@ export function createEgressRelay(o) {
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
   const log = o.log || ((l) => console.error(l));
-  const local = { interfaces: o.interfaces, routes: o.routes, hostAddrs: o.hostAddrs,
+  const local = { local: o.local, hostAddrs: o.hostAddrs,
     denyNets: o.denyNets || String(process.env.CROW_PI_EGRESS_DENY_NETS || "").split(",").map((x) => x.trim()).filter(Boolean) };
-  if (local.denyNets.length && localView({ interfaces: () => ({}), routes: () => ({ local: [], main: [] }), denyNets: local.denyNets }).denyBroken) {
+  if (local.denyNets.length && localView({ local: { v4: [], v6: [], v4Failed: false, v6Failed: false }, denyNets: local.denyNets }).denyBroken) {
     log(`[pi-egress] bot=${o.botId || "?"} CROW_PI_EGRESS_DENY_NETS has an unreadable entry: this relay refuses every target until it is fixed`);
   }
+  // One line per relay when this host's own addresses cannot be read: from
+  // then every target is refused, which the operator must see in the log.
+  let ownHostViewLogged = false;
+  const noteOwnHostView = (view) => {
+    if (!view.failed || ownHostViewLogged) return;
+    ownHostViewLogged = true;
+    log(`[pi-egress] bot=${o.botId || "?"} own-host view unreadable: refusing every target`);
+  };
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
@@ -610,6 +627,7 @@ export function createEgressRelay(o) {
       try { addrs = await lookup(host); } catch { note("deny", target, "does not resolve"); return refuse(c, 502, "Bad Gateway"); }
     }
     const view = localView(local); // one host view per CONNECT
+    noteOwnHostView(view);
     const why = addrs.length ? addrs.map((a) => egressDenyReason(a.address, { view })).find(Boolean) : "no address";
     if (why) {
       note("deny", target, why);
