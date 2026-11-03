@@ -91,6 +91,7 @@ import makePanel, { openMakeItem } from "./panels/make.js";
 import projectHomePanel from "./panels/project-home.js";
 import projectServicesPanel from "./panels/project-services.js";
 import forYouPanel from "./panels/for-you.js";
+import widgetsPanel from "./panels/widgets.js";
 import { servicesUiEnabled } from "../services/ui-flag.js";
 import "../services/launcher-tile.js"; // registers the "Add a service" launcher tile
 import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
@@ -157,6 +158,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(projectHomePanel);
   registerPanel(projectServicesPanel);
   registerPanel(forYouPanel); // 404s unless CROW_FOR_YOU=1 (the panel checks per request)
+  // The generic widget page (widgets phase 2, Task 3): the same gate and flag as For You, one swipe in.
+  registerPanel(widgetsPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {

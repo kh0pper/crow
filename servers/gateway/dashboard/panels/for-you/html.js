@@ -16,6 +16,7 @@ const ICON = 'width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="cur
 const SLIDERS = `<svg ${ICON}><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>`;
 const BACK = `<svg ${ICON}><path d="M15 18l-6-6 6-6"/></svg>`;
 const CLOSE = `<svg ${ICON}><path d="M18 6L6 18M6 6l12 12"/></svg>`;
+const GRID = `<svg ${ICON}><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>`;
 
 const e = escapeHtml;
 const upperFirst = (s) => (s ? s.charAt(0).toLocaleUpperCase() + s.slice(1) : s);
@@ -183,6 +184,56 @@ export function movesHtml(mv, lang = "en") {
       </div>
     </section>`;
 }
+
+/**
+ * "Today + Ramble" (widgets phase 2, Task 3): the next calendar event, today's move, and the bird's
+ * steps and mood, as one tappable card that opens Ramble (the whole card is the link: the widget is
+ * small, and its only action is "go to Ramble"). `data` is what for-you/today.js loaded (the calendar
+ * event already formatted, with its zone and the page's language); a line whose data is absent is
+ * simply left out, and with no lines at all there is no card. Every value — an event's summary from
+ * someone's calendar, a move's title from Ramble's library — is escaped here.
+ */
+export function todayHtml(data, lang = "en", now = Date.now()) {
+  if (!data || typeof data !== "object") return "";
+  const line = (kind, label, value) => `<span class="fy-today-line" data-fy-today="${e(kind)}">
+        <span class="fy-line-tag">${e(label)}</span>
+        <span class="fy-today-value">${e(value)}</span>
+      </span>`;
+  const lines = [];
+  const cal = data.calendar;
+  if (cal && cal.summary) {
+    // The loader already formatted "when" in the instance's zone and the page's language.
+    lines.push(line("calendar", t("widgets.today.nextUp", lang), cal.when ? `${cal.summary} · ${cal.when}` : String(cal.summary)));
+  }
+  const move = data.move;
+  if (move && move.title) {
+    const minutes = Number(move.minutes) > 0 ? minutesText(move.minutes, lang) : "";
+    lines.push(line("move", t("widgets.today.move", lang), minutes ? `${move.title} · ${minutes}` : String(move.title)));
+  }
+  const ramble = data.ramble;
+  if (ramble) {
+    const steps = ramble.steps || {};
+    const goal = Number(steps.goal) || 0;
+    if (goal > 0) {
+      lines.push(line("steps", t("widgets.today.stepsLabel", lang), fill(t("widgets.today.steps", lang), { n: Number(steps.today) || 0, goal })));
+    }
+    const mood = MOODS[String(ramble.mood || "")];
+    if (mood) lines.push(line("mood", t("widgets.today.moodLabel", lang), t(mood, lang)));
+  }
+  if (!lines.length) return "";
+  return `<a class="fy-card fy-today" href="/dashboard/ramble" data-fy-today-card>
+      <span class="fy-kicker">${e(t("widgets.today.title", lang))}</span>
+      ${lines.join("\n      ")}
+      <span class="fy-more-link">${e(t("widgets.today.open", lang))}</span>
+    </a>`;
+}
+
+/** Ramble's three moods (pet.js moodFor) in the page's language. */
+const MOODS = Object.freeze({
+  happy: "widgets.today.mood.happy",
+  tired: "widgets.today.mood.tired",
+  alarmed: "widgets.today.mood.alarmed",
+});
 
 /** When the next briefing is due: "8:00 AM", or "Friday 8:00 AM" when that is not today (in its zone). */
 export function nextBriefingText(next, lang = "en", now = Date.now()) {
@@ -374,6 +425,27 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
   const addCity = settings.sections.weather && !settings.place
     ? `<a class="fy-quiet" href="/dashboard/for-you?view=customize#fy-city">${e(t("forYou.addCity", lang))}</a>` : "";
   const anyOn = SECTIONS.some((k) => settings.sections[k]);
+  // The generic widget page sits one swipe (or one tap) further in: its link is what the shell's
+  // reveal uses as the swipe's forward target on this page (shell/client.js), so it is rendered on
+  // the page itself, not in the drawer.
+  const widgets = `<a class="fy-icon-btn" href="/dashboard/widgets" aria-label="${e(t("widgets.page.title", lang))}" data-widgets-entry>${GRID}</a>`;
+  return `<div class="fy" data-fy${fyMessageAttrs(lang)}>
+    <header class="fy-head">
+      <div class="fy-head-text"><p class="fy-date">${e(data.dateText)}</p><h1 class="fy-title">${e(t("forYou.title", lang))}</h1></div>
+      <div class="fy-head-actions">${wx.chip}${widgets}<a class="fy-icon-btn" href="/dashboard/for-you?view=customize" aria-label="${e(t("forYou.customize", lang))}">${SLIDERS}</a></div>
+    </header>
+    ${wx.detail}${addCity}
+    ${anyOn ? "" : `<p class="fy-note">${e(t("forYou.allOff", lang))}</p>`}
+    ${gridHtml("for-you", forYouCells(data), lang, { now })}
+  </div>`;
+}
+
+/**
+ * The client's server-translated messages, as attributes on the page's [data-fy] root. Both pages that
+ * draw For You's widgets carry them: for-you/client.js reads them off that root (data-fy-failed,
+ * data-fy-play-label, ...), and the cells it repaints live on either page.
+ */
+function fyMessageAttrs(lang) {
   const msgs = {
     "data-fy-failed": t("forYou.actionFailed", lang),
     "data-fy-done-more": t("forYou.done.more", lang),
@@ -382,15 +454,24 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
     "data-fy-pause-label": t("forYou.pause", lang),
     "data-fy-play-failed": t("forYou.playFailed", lang),
   };
-  const attrs = Object.entries(msgs).map(([k, v]) => ` ${k}="${e(v)}"`).join("");
-  return `<div class="fy" data-fy${attrs}>
+  return Object.entries(msgs).map(([k, v]) => ` ${k}="${e(v)}"`).join("");
+}
+
+/**
+ * The generic widget page (/dashboard/widgets, widgets phase 2 Task 3): one grid, every widget the
+ * registry offers that page, and nothing else. It carries `data-fy` like For You's root because the
+ * widgets are For You's own — the same markup, the same client (for-you/client.js repaints a story's
+ * sheet, a Move's Done, a What-needs-me answer), so the page needs the same message attributes and the
+ * same hook. Which cells this device really shows is the grid client's business (localStorage,
+ * `crow.widgets.layout.widgets`), never the server's.
+ */
+export function widgetsPageHtml(data, lang = "en", now = Date.now()) {
+  return `<div class="fy fy-widgets" data-fy${fyMessageAttrs(lang)}>
     <header class="fy-head">
-      <div class="fy-head-text"><p class="fy-date">${e(data.dateText)}</p><h1 class="fy-title">${e(t("forYou.title", lang))}</h1></div>
-      <div class="fy-head-actions">${wx.chip}<a class="fy-icon-btn" href="/dashboard/for-you?view=customize" aria-label="${e(t("forYou.customize", lang))}">${SLIDERS}</a></div>
+      <a class="fy-icon-btn" href="/dashboard/for-you" aria-label="${e(t("forYou.back", lang))}">${BACK}</a>
+      <h1 class="fy-title">${e(t("widgets.page.title", lang))}</h1>
     </header>
-    ${wx.detail}${addCity}
-    ${anyOn ? "" : `<p class="fy-note">${e(t("forYou.allOff", lang))}</p>`}
-    ${gridHtml("for-you", forYouCells(data), lang, { now })}
+    ${gridHtml("widgets", data.cells, lang, { now })}
   </div>`;
 }
 

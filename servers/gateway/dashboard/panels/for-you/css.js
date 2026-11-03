@@ -11,6 +11,7 @@ export function forYouCss() {
   .fy { max-width: 44rem; min-width: 0; display: flex; flex-direction: column; gap: 16px; color: var(--crow-text-primary); }
   .fy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .fy-custom .fy-head { justify-content: flex-start; }
+  .fy-widgets .fy-head { justify-content: flex-start; }
   .fy-head-text { min-width: 0; }
   .fy-date { margin: 0; font-size: 0.85rem; color: var(--crow-text-secondary); }
   .fy-title { margin: 0; font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
@@ -59,6 +60,11 @@ export function forYouCss() {
   .fy-dot--done { background: var(--crow-success); }
   .fy-dot--left { background: var(--crow-text-secondary); }
   .fy-more-link { display: inline-flex; align-items: center; min-height: 44px; font-size: 0.9rem; color: var(--crow-accent); }
+  /* Today + Ramble (widgets phase 2): the whole card is the tap target, so it is one link. */
+  .fy-today { display: flex; flex-direction: column; gap: 6px; text-decoration: none; color: var(--crow-text-primary); }
+  .fy-today-line { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .fy-today-value { font-size: 0.95rem; line-height: 1.35; overflow-wrap: anywhere; }
+  .fy-today .fy-more-link { margin-top: auto; }
   .fy-listen { display: flex; flex-direction: column; gap: 12px; }
   .fy-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 12px; }
   .fy-tile { display: flex; flex-direction: column; gap: 6px; padding: 12px; }

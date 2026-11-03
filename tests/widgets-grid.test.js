@@ -57,10 +57,10 @@ const NOW = Date.parse("2026-11-03T12:00:00Z");
 
 // ─── the registry ─────────────────────────────────────────────────────────────
 
-test("the registry: unique ids in For You's order, sizes that include the default, and no phase-3 page", () => {
+test("the registry: unique ids in For You's order, sizes that include the default, and both pages", () => {
   const ids = WIDGETS.map((w) => w.id);
   assert.equal(ids.length, new Set(ids).size, "every id is unique");
-  assert.deepEqual(ids, ["needs-me", "morning", "moves", "listen", "news", "weather"], "For You's default order, then the weather");
+  assert.deepEqual(ids, ["needs-me", "morning", "moves", "listen", "news", "today", "weather"], "For You's default order, then Today + Ramble, then the weather");
   for (const w of WIDGETS) {
     assert.ok(Array.isArray(w.sizes) && w.sizes.length > 0, `${w.id} lists its sizes`);
     assert.ok(Array.isArray(w.defaultSize) && w.defaultSize.length === 2, `${w.id} has a default size`);
@@ -73,8 +73,8 @@ test("the registry: unique ids in For You's order, sizes that include the defaul
     for (const lang of ["en", "es"]) {
       assert.notEqual(t(w.titleKey, lang), w.titleKey, `${w.id} has a ${lang} title`);
     }
-    // Task 3 (the generic /dashboard/widgets page) is not part of this PR.
-    assert.deepEqual(w.pages, ["for-you"], `${w.id} is offered on For You only`);
+    // The generic /dashboard/widgets page (widgets phase 2, Task 3) offers every one of them.
+    assert.deepEqual(w.pages, ["for-you", "widgets"], `${w.id} is offered on For You and on the widget page`);
   }
   assert.equal(widgetOf("morning").id, "morning");
   assert.equal(widgetOf("nope"), null);
@@ -82,8 +82,12 @@ test("the registry: unique ids in For You's order, sizes that include the defaul
 
 test("the offer: a section's customize switch off means not offered, and never changes the server setting", () => {
   const settings = { sections: { morning: true, moves: false, listen: false, news: false, weather: true } };
-  assert.deepEqual(widgetsForPage("for-you", { settings }).map((w) => w.id), ["needs-me", "morning", "weather"]);
-  assert.deepEqual(widgetsForPage("widgets", { settings }), [], "no page but For You exists yet");
+  // `today` carries no customize switch, so it is always offered — from "+ Add widget" on either page
+  // (it is only part of the generic page's DEFAULT layout; see the widget page's own test).
+  assert.deepEqual(widgetsForPage("for-you", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather"]);
+  // The generic page offers the same widgets (the customize switches are page-blind); `today` has no
+  // switch, so it is always offered there.
+  assert.deepEqual(widgetsForPage("widgets", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather"]);
   assert.deepEqual(widgetsForPage("for-you").map((w) => w.id), WIDGETS.map((w) => w.id), "no settings: everything is offered");
 });
 

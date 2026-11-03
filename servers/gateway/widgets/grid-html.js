@@ -12,6 +12,9 @@
  * Rules this file owns:
  *   - a widget whose `render` returns "" draws NO cell (the Move card without Ramble, Listen with
  *     nothing in it: For You v1 left those sections out, and so does the grid);
+ *   - a widget that is offered but not part of THIS page's default layout is drawn with `hidden`
+ *     (`defaultOnFor`): the weather on For You, Your morning on the generic page. It is the "+ Add
+ *     widget" entry until this device adds it;
  *   - a widget whose load failed draws its own one-line error instead of its content — its own card
  *     where it has one (`errorHtml`), so "What needs me" keeps its title and its way into the full
  *     list — and every other cell still renders;
@@ -30,10 +33,28 @@ export function widgetTitle(widget, lang = "en") {
   return widget && widget.titleKey ? t(widget.titleKey, lang) : "";
 }
 
-/** The size the server draws a widget at: its default, guarded by its own list. */
-export function defaultSizeOf(widget) {
+/**
+ * Whether the server draws this widget VISIBLE on `pageId`: part of that page's default layout.
+ * `defaultPages` (when a widget carries one) names the pages whose default holds it; otherwise
+ * `defaultOn` decides for every page (false = offered everywhere, drawn hidden). A cell drawn hidden
+ * is the "+ Add widget" entry on that device until someone adds it.
+ */
+export function defaultOnFor(widget, pageId = "") {
+  const pages = Array.isArray(widget && widget.defaultPages) ? widget.defaultPages : null;
+  if (pages) return pages.includes(String(pageId == null ? "" : pageId));
+  return !widget || widget.defaultOn !== false;
+}
+
+/**
+ * The size the server draws a widget at on `pageId`: the page's own default when the widget carries
+ * one (`pageSizes`, e.g. "What needs me" is 4 columns on For You and half the generic page), else the
+ * widget's default. Guarded by the widget's own list, so a page can never invent a size.
+ */
+export function defaultSizeOf(widget, pageId = "") {
   const list = Array.isArray(widget && widget.sizes) ? widget.sizes : [];
-  const want = Array.isArray(widget && widget.defaultSize) ? widget.defaultSize : null;
+  const perPage = widget && widget.pageSizes && typeof widget.pageSizes === "object"
+    ? widget.pageSizes[String(pageId == null ? "" : pageId)] : null;
+  const want = Array.isArray(perPage) ? perPage : Array.isArray(widget && widget.defaultSize) ? widget.defaultSize : null;
   if (want && list.some((s) => Number(s[0]) === Number(want[0]) && Number(s[1]) === Number(want[1]))) {
     return [Number(want[0]), Number(want[1])];
   }
@@ -58,15 +79,15 @@ function bodyHtml(entry, lang, now) {
 }
 
 /** One cell, or "" when the widget has nothing to show. */
-export function gridCellHtml(entry, lang = "en", now) {
+export function gridCellHtml(entry, lang = "en", now, pageId = "") {
   const widget = entry && entry.widget;
   if (!widget || !widget.id) return "";
   const body = bodyHtml(entry, lang, now);
   if (!body) return "";
   const title = widgetTitle(widget, lang);
-  const size = defaultSizeOf(widget);
+  const size = defaultSizeOf(widget, pageId);
   const sizes = JSON.stringify(Array.isArray(widget.sizes) ? widget.sizes : []);
-  const off = widget.defaultOn === false ? " hidden" : "";
+  const off = defaultOnFor(widget, pageId) ? "" : " hidden";
   return `<section class="wg-cell" data-widget="${e(widget.id)}" data-w="${size[0]}" data-h="${size[1]}" data-sizes="${e(sizes)}" data-def="${size[0]},${size[1]}"${off}>
       <div class="wg-cell-body">${body}</div>
       <button type="button" class="fy-btn wg-remove" data-wg-remove aria-label="${e(fill(t("widgets.grid.removeNamed", lang), { name: title }))}">${e(t("widgets.grid.remove", lang))}</button>
@@ -111,9 +132,10 @@ function pickerHtml(drawn, lang) {
  */
 export function gridHtml(pageId, cells, lang = "en", opts = {}) {
   const now = opts.now;
+  const page = String(pageId == null ? "" : pageId);
   const drawn = [];
   for (const entry of Array.isArray(cells) ? cells : []) {
-    const html = gridCellHtml(entry, lang, now);
+    const html = gridCellHtml(entry, lang, now, page);
     if (html) drawn.push({ entry, html });
   }
   const body = drawn.map((c) => c.html).join("\n    ");

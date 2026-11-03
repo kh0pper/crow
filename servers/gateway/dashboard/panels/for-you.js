@@ -62,8 +62,10 @@ export function _setForYouSeamsForTest({ geocode: g, weather: w, projects: p, ne
  * reads degrade here: an unknown project list costs the project names, a missing or unreadable tasks
  * store costs the Board's rows, a malformed snooze setting reads as none. The registry's loader
  * still catches: a throw is this widget's own error line, and every other cell renders as usual.
+ * Exported for the generic widget page (panels/widgets.js), whose first default card is this same
+ * widget: it must be read here, not by a second copy of these reads.
  */
-async function loadNeedsMeForPage(db, { now, lang }) {
+export async function loadNeedsMeForPage(db, { now, lang }) {
   let projects = [];
   try { projects = await listProjects(db); }
   catch (err) { console.warn(`[for-you] needs-me projects failed: ${err && err.message}`); }
@@ -134,8 +136,10 @@ function dateText(now, tz, lang) {
  * read at most once — the weather is both the header chip and the Move card's input, and the
  * project list feeds Your morning — and each keeps For You's own test seams. A read that fails is
  * that widget's own error line, never the page's: the caller's `loadWidgets` catches.
+ * context here, so "What needs me", the weather and the project list are read exactly as For You
+ * reads them, with the same seams and the same single-read caching.
  */
-function forYouContext(db, { settings, crowHome, now, tz, lang }) {
+export function forYouContext(db, { settings, crowHome, now, tz, lang }) {
   let wx = null;
   const weatherOf = () => {
     if (!wx) {

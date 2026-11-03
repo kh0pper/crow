@@ -4680,6 +4680,20 @@ export const translations = {
   "widgets.grid.saved": { en: "Layout saved on this device.", es: "Diseño guardado en este dispositivo." },
   "widgets.grid.none": { en: "Every widget is already on the page.", es: "Todos los widgets ya están en la página." },
   "widgets.grid.error": { en: "This widget couldn't load just now.", es: "Este widget no se pudo cargar ahora mismo." },
+  // Widgets phase 2, Task 3: the generic widget page (/dashboard/widgets) and its "Today + Ramble"
+  // card (panels/widgets.js, for-you/today.js, panels/for-you/html.js todayHtml).
+  "widgets.page.title": { en: "Widgets", es: "Tus widgets" },
+  "widgets.today.title": { en: "Today + Ramble", es: "Hoy + Ramble" },
+  "widgets.today.nextUp": { en: "Next up", es: "Lo próximo" },
+  "widgets.today.allDay": { en: "All day", es: "Todo el día" },
+  "widgets.today.move": { en: "Today's move", es: "El movimiento de hoy" },
+  "widgets.today.stepsLabel": { en: "Steps today", es: "Pasos de hoy" },
+  "widgets.today.steps": { en: "{n} of {goal} steps", es: "{n} de {goal} pasos" },
+  "widgets.today.moodLabel": { en: "Mood", es: "Ánimo" },
+  "widgets.today.mood.happy": { en: "Happy", es: "Contento" },
+  "widgets.today.mood.tired": { en: "Tired", es: "Cansado" },
+  "widgets.today.mood.alarmed": { en: "Alarmed", es: "Alarmado" },
+  "widgets.today.open": { en: "Open Ramble", es: "Abrir Ramble" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
