@@ -6,7 +6,9 @@
  * names (a proxy in front of a hosted service still sends the audio there).
  * A self-hosted adapter's endpoint goes through whereItRuns on a synthetic
  * provider row, so the same address rules apply as for chat models; an empty
- * endpoint means the adapter's own loopback default.
+ * endpoint means the adapter's own loopback default. The same marks the chat
+ * rows use (localMarks, ownBoxMarks) ride along, so a speech profile reads with
+ * the same words as a model on the same box.
  */
 import { whereItRuns } from "./model-roles.js";
 import { hostnameOf } from "./provider-host.js";
@@ -43,16 +45,16 @@ function endpointOf(profile) {
 
 /**
  * @param {{provider?:string, baseUrl?:string}} profile
- * @param {{ownAddrs?:Set<string>, localMarks?:object}} [opts]
+ * @param {{ownAddrs?:Set<string>, localMarks?:object, ownBoxMarks?:object}} [opts]
  * @returns {"here"|"other_box"|"cloud"|"unproven"|"missing"}
  */
-export function speechProfileWhere(profile, { ownAddrs, localMarks } = {}) {
+export function speechProfileWhere(profile, { ownAddrs, localMarks, ownBoxMarks } = {}) {
   if (!profile || typeof profile.provider !== "string") return "missing";
   if (isHosted(profile.provider)) return "cloud";
   const baseUrl = endpointOf(profile);
   if (!baseUrl) return "unproven";
   const row = { id: "speech-profile", baseUrl, models: [{ id: "speech" }] };
-  return whereItRuns("speech-profile/speech", { providers: [row], localMarks, ...(ownAddrs ? { ownAddrs } : {}) });
+  return whereItRuns("speech-profile/speech", { providers: [row], localMarks, ownBoxMarks, ...(ownAddrs ? { ownAddrs } : {}) });
 }
 
 /** The host a profile's audio goes to (null when it cannot be named). */

@@ -18,7 +18,7 @@ import { providerRowToObject } from "./provider-row.js";
 import { loadCatalog, wrapOwnId } from "./model-roles-env.js";
 import { writeSetting } from "../gateway/dashboard/settings/registry.js";
 import { getOrCreateLocalInstanceId as defaultGetOwnId } from "../gateway/instance-registry.js";
-import { readLocalMarks } from "./provider-local-marks-read.js";
+import { readLocalMarks, readOwnBoxMarks } from "./provider-local-marks-read.js";
 
 const CORE_IDS = new Set(CORE_ROLES.map((r) => r.id));
 
@@ -323,6 +323,7 @@ async function buildContext(db, getOwnId, catalog) {
   return {
     bindings,
     localMarks: await readLocalMarks(db),
+    ownBoxMarks: await readOwnBoxMarks(db),
     customDefs,
     providers,
     models: modelsFor(enabledRows),
@@ -332,9 +333,10 @@ async function buildContext(db, getOwnId, catalog) {
 }
 
 /**
- * {bindings, localMarks, customDefs, providers, models, catalog, ownInstanceId}, memoized
+ * {bindings, localMarks, ownBoxMarks, customDefs, providers, models, catalog, ownInstanceId}, memoized
  * per db for maxAgeMs (`localMarks`: provider-local-marks.js, "This is local";
- * a marks write invalidates the cache like a binding write). An injected
+ * `ownBoxMarks`: the same module's "This is my other box"; a marks write
+ * invalidates the cache like a binding write). An injected
  * getOrCreateLocalInstanceId (a test seam) bypasses the cache.
  */
 export async function loadRoleContext(db, { maxAgeMs = 1000, getOrCreateLocalInstanceId, catalog } = {}) {

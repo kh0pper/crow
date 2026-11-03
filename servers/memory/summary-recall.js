@@ -70,7 +70,7 @@ export async function askerRank(db, actor, { threadId = null, where = null, reso
       if (!whereFn) {
         const ctx = await loadRoleContext(db);
         const ownAddrs = getOwnAddresses();
-        whereFn = (k) => whereItRuns(k, { providers: ctx.providers, ownAddrs });
+        whereFn = (k) => whereItRuns(k, { providers: ctx.providers, ownAddrs, ownBoxMarks: ctx.ownBoxMarks });
       }
     }
     if (key.startsWith("role:")) {

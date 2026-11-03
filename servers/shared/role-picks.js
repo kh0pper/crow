@@ -101,14 +101,19 @@ function safetyReachesCloud(ctxX, ownAddrs) {
  *   from different providers stay apart); null for "Same as" picks.
  * @param {string} roleId
  * @param {{ctx:object, lang?:string, recommendedFn?:(roleId:string)=>string[], ownAddrs?:Set<string>, localMarks?:object,
- *   pickChecks?:object, now?:Date, recOpts?:object}} opts
+ *   ownBoxMarks?:object, pickChecks?:object, now?:Date, recOpts?:object}} opts
  *   localMarks only shapes `where` (default: ctx.localMarks, the marks the
  *   Models page uses); safety's picks and the safety check never use them. Without
  *   `recommendedFn`, a pick is recommended by recommendedKeysFor (a listed
  *   preset pick whose stored check passed; `pickChecks` from readPickChecks).
+ * `ownBoxMarks` (default: ctx.ownBoxMarks) only shapes `where` too: a marked
+ *   "my other box" row reads "other_box"; safety never uses it either. Here
+ *   both mark kinds rank but never grant: a pick's `allowed` is unchanged (the
+ *   own-box mark does widen summary recall and briefings elsewhere; see
+ *   provider-local-marks.js).
  * @returns {Pick[]}
  */
-export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddrs, localMarks, pickChecks, now, recOpts } = {}) {
+export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddrs, localMarks, ownBoxMarks, pickChecks, now, recOpts } = {}) {
   if (!ctx) return [];
   const capability = capabilityOf(roleId, ctx.customDefs);
   if (!capability || MEDIA_CAPABILITIES.includes(capability)) return [];
@@ -116,8 +121,14 @@ export function listRolePicks(roleId, { ctx, lang = "en", recommendedFn, ownAddr
   ownAddrs ??= getOwnAddresses(); // once per list, not per candidate
   const own = { ownAddrs };
   // The marks the Models page chip uses (the context's by default); safety never uses marks (minor e).
-  localMarks = roleId === "safety" ? undefined : localMarks ?? ctx.localMarks;
-  const where = (key) => (key ? whereItRuns(key, { providers, localMarks, ...own }) : "missing");
+  if (roleId === "safety") {
+    localMarks = undefined;
+    ownBoxMarks = undefined;
+  } else {
+    localMarks ??= ctx.localMarks;
+    ownBoxMarks ??= ctx.ownBoxMarks;
+  }
+  const where = (key) => (key ? whereItRuns(key, { providers, localMarks, ownBoxMarks, ...own }) : "missing");
 
   recommendedFn ??= (id) => recommendedKeysFor(id, { ctx, pickChecks, now, recOpts });
   let rec;

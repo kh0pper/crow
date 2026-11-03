@@ -168,6 +168,30 @@ function markedLocal(row, h, localMarks) {
   return !!m && typeof m.host === "string" && m.host === h;
 }
 
+/**
+ * Can this hostname be "my other box"? A LAN or tailnet address only (spec §4): a local-network IP
+ * literal, or a DNS name that is dotless or on a local-network suffix. host.docker.internal is this
+ * box seen from a container, never another box. One definition: provider-local-marks.js uses it for
+ * the checkbox and markOwnBox, and whereItRuns for the hops in front of a marked row.
+ */
+const OWN_BOX_DNS_SUFFIXES = Object.freeze([".local", ".lan", ".home.arpa", ".internal", ".ts.net"]);
+export function ownBoxHostEligible(h) {
+  if (!h) return false;
+  if (isIP(h)) return isLocalHop(h) && addressClass(h) !== "loopback";
+  const name = String(h).toLowerCase().replace(/\.$/, "");
+  if (name === "host.docker.internal" || name === "localhost") return false;
+  return !name.includes(".") || OWN_BOX_DNS_SUFFIXES.some((sfx) => name.endsWith(sfx));
+}
+
+/** Is a current "This is my other box" mark on this row? (lapses on a hostname change, like a local mark) */
+function markedOtherBox(row, ownBoxMarks) {
+  if (!ownBoxMarks || typeof ownBoxMarks !== "object" || typeof row?.id !== "string") return false;
+  if (!Object.hasOwn(ownBoxMarks, row.id)) return false;
+  const m = ownBoxMarks[row.id];
+  const h = hostnameOf(row.baseUrl);
+  return !!m && typeof m.host === "string" && !!h && m.host === h;
+}
+
 export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
   const { provider, model } = splitKey(key);
   let row = providerById(providers, provider);
@@ -234,13 +258,39 @@ export const ROLE_JOB_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r)
  * address (the owner's ruling for the Models page: the chip matches what voice
  * and the phone call it). This only shapes the chip; cloudStatus and
  * isCloudKey do not read `host`.
+ *
+ * `ownBoxMarks` ({[rowId]: {host}}, provider-local-marks.js: the operator's
+ * "This is my other box", instance scope) answers "other_box" for a key whose
+ * FINAL hop row carries a current mark, unless some hop in the walk is a known
+ * cloud preset's hostname or a public IP literal. It is checked before the
+ * `host === "cloud"` rule, so a marked external-engine row reads "other_box",
+ * and it never reaches cloudStatus: the strict voice and phone checks are
+ * unchanged by it.
  */
-export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultResolveDoor, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks } = {}) {
+export function whereItRuns(key, { providers, ownAddrs, resolveDoor = defaultResolveDoor, localSuffixes = DEFAULT_LOCAL_SUFFIXES, localMarks, ownBoxMarks } = {}) {
   if (isRoleRef(key)) return "missing";
   const { provider, model } = splitKey(key);
   const first = providerById(providers, provider);
   if (!first || !model) return "missing";
-  if (chainRows(key, { providers, resolveDoor }).some((r) => r.host === "cloud")) return "cloud";
+  const chain = chainRows(key, { providers, resolveDoor });
+  if (ownBoxMarks && typeof ownBoxMarks === "object") {
+    const finalRow = finalHopRow(key, { providers, resolveDoor });
+    const own = ownAddrs || getOwnAddresses();
+    // Every hop in front of the marked row must stay home or on the LAN: a preset host, a public
+    // literal, or a hop that is neither this box nor LAN-eligible (a relay or peer gateway on a public
+    // name, typically stored host "cloud") still carries the traffic, so the mark cannot hide it.
+    const blocked = chain.some((r) => {
+      if (presetHostFor(r) !== null) return true;
+      const h = hostnameOf(r.baseUrl);
+      if (!h) return true;
+      if (isIP(h) && isDirectPublic(h)) return true;
+      if (r === finalRow) return false;
+      if (own.has(h) || addressClass(h) === "loopback") return false;
+      return r.host === "cloud" || !ownBoxHostEligible(h);
+    });
+    if (finalRow && !blocked && markedOtherBox(finalRow, ownBoxMarks)) return "other_box";
+  }
+  if (chain.some((r) => r.host === "cloud")) return "cloud";
   const own = ownAddrs || getOwnAddresses();
   const status = cloudStatus(key, { providers, resolveDoor, ownAddrs: own, localSuffixes, localMarks });
   if (status === "unknown") return "unproven";

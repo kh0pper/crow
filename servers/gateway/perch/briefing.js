@@ -266,7 +266,7 @@ async function defaultWhere(db) {
   ]);
   const ctx = await loadRoleContext(db);
   const ownAddrs = getOwnAddresses();
-  return (key) => { try { return whereItRuns(key, { providers: ctx.providers, ownAddrs }); } catch { return "missing"; } };
+  return (key) => { try { return whereItRuns(key, { providers: ctx.providers, ownAddrs, ownBoxMarks: ctx.ownBoxMarks }); } catch { return "missing"; } };
 }
 
 async function concreteKey(db, key, resolveRole) {
