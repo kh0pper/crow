@@ -22,6 +22,7 @@
  * the fixture throw instead.
  */
 
+import { readFileSync } from "node:fs";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -135,6 +136,24 @@ before(async () => {
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
+  // The gateway's own Content-Security-Policy for the Studio page and its
+  // assets (servers/gateway/index.js): without it a live test cannot see a
+  // worklet or WebAssembly the dashboard would refuse.
+  app.use((req, res, next) => {
+    if (req.path === "/dashboard/studio" || req.path.startsWith("/dashboard/studio/")) {
+      res.setHeader("Content-Security-Policy", [
+        "default-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src https://fonts.gstatic.com",
+        "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+        "img-src 'self' data: blob:",
+        "media-src 'self' https: blob:",
+        "connect-src 'self'",
+        "frame-src 'self' https:",
+      ].join("; "));
+    }
+    next();
+  });
   /** The dashboard session check; the page's cookie decides. */
   const dashboardAuth = (req, res, next) => {
     if (!cookieOf(req.headers.cookie, "crow_session")) return res.status(401).json({ error: "unauthorized" });
@@ -149,7 +168,9 @@ before(async () => {
     }
   });
 
-  chrome = await startHeadlessChrome();
+  // Audio contexts start without a user gesture in the test browser, so Play
+  // can be pressed from a script.
+  chrome = await startHeadlessChrome({ extraArgs: ["--autoplay-policy=no-user-gesture-required"] });
 
   server = createServer(app);
   upgrades = web.attachUpgrade(server);
@@ -546,4 +567,23 @@ test("after a Turbo-style teardown and re-run the page reconnects and shows agen
     await waitFor(page, "!!document.querySelector('[data-clip-id=c-restored]')", 5000),
     "the reconnected page shows the agent's edit",
   );
+});
+test("Play starts the engine under the dashboard's Content-Security-Policy", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const page = await openPage(studioUrl());
+  t.after(() => page.close());
+  await waitForStudio(page);
+  await page.evaluate("document.querySelector('[data-act=play]').click(), true");
+  const moved = await waitFor(
+    page,
+    "document.querySelector('[data-role=position]') && document.querySelector('[data-role=position]').textContent !== '001.1.1'",
+    15000,
+  );
+  assert.ok(moved, "the transport never moved: the engine did not start (a blocked worklet or WebAssembly compile)");
+});
+
+test("the gateway gives the Studio page (and only it) the WebAssembly allowance", () => {
+  const source = readFileSync(new URL("../servers/gateway/index.js", import.meta.url), "utf8");
+  const line = source.split("\n").find((l) => l.includes("const wasmEval ="));
+  assert.ok(line && line.includes('req.path === "/dashboard/studio"') && line.includes('"/dashboard/studio/"'), line);
 });

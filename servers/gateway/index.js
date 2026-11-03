@@ -374,7 +374,11 @@ app.use(async (req, res, next) => {
   // player compiles a pinned WASM engine (bundles/songbook/web/sunvox/). This is
   // narrower than 'unsafe-eval': it permits WebAssembly compilation only, never
   // eval()/new Function(). Scoped to /blog/songbook so no other surface gains it.
-  const wasmEval = req.path.startsWith("/blog/songbook") ? " 'wasm-unsafe-eval'" : "";
+  // Crow Studio's page gets it too, for the same reason: its audio worklet runs
+  // the same SunVox WASM engine (bundles/studio/engine/). Scoped to that page and
+  // its assets only.
+  const wasmEval = req.path.startsWith("/blog/songbook") || req.path === "/dashboard/studio" || req.path.startsWith("/dashboard/studio/")
+    ? " 'wasm-unsafe-eval'" : "";
   const storageOrigin = await resolveCspStorageOrigin();
   const imgSrc = storageOrigin
     ? `img-src 'self' data: blob: ${storageOrigin}`

@@ -42,7 +42,8 @@
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { encodeDocState } from "./doc.js";
@@ -1010,6 +1011,33 @@ export function createStudioWeb({
         project_id: Number.isInteger(projectId) ? projectId : null,
       });
     }));
+
+    // The engine's worklet module, composed here from the same source files a
+    // Node render composes (engine-client's SOURCE_FILES and
+    // composeEngineModule). A browser page under the dashboard's CSP cannot
+    // load a worklet from a blob: URL; a same-origin script it can.
+    // Cached per set of source-file modification times, so a bundle refresh
+    // without a gateway restart never serves a stale module next to fresh assets.
+    let engineModule = null;
+    let engineModuleKey = "";
+    r.get("/dashboard/studio/assets/engine-module.js", dashboardAuth, (req, res) => {
+      if (!bundleDir) return res.status(404).json({ error: "not_found" });
+      try {
+        const engine = createRequire(import.meta.url)(join(bundleDir, "engine", "engine-client.js"));
+        const paths = engine.SOURCE_FILES.map((name) => join(bundleDir, ASSET_FILES.get(name)));
+        const key = paths.map((path) => statSync(path).mtimeMs).join(":");
+        if (engineModule == null || key !== engineModuleKey) {
+          engineModule = engine.composeEngineModule(paths.map((path) => readFileSync(path, "utf8")));
+          engineModuleKey = key;
+        }
+      } catch (error) {
+        console.warn("[studio] could not compose the engine module:", error?.message || error);
+        return res.status(500).json({ error: "internal" });
+      }
+      res.type("text/javascript");
+      res.setHeader("Cache-Control", "private, no-cache");
+      return res.send(engineModule);
+    });
 
     // The engine assets the panel loads. The whitelist is the whole contract:
     // a name that is not in it never touches the filesystem.

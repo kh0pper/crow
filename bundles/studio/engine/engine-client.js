@@ -269,15 +269,32 @@
    *                    throwForTest: function(): void,
    *                    dispose: function(): void}>}
    */
+  /**
+   * The worklet module: the source files joined in order. One blank line and a
+   * semicolon between files: every one of them is a classic script that relies
+   * on its own final expression, and the SunVox glue ends without a trailing
+   * semicolon.
+   * @param {string[]} texts - the SOURCE_FILES contents, in order
+   * @returns {string}
+   */
+  function composeEngineModule(texts) {
+    return texts.join("\n;\n");
+  }
+
   async function createStudioEngine(context, options) {
     if (!context || !context.audioWorklet) throw new Error("StudioEngine: a context with audioWorklet is required");
     const opts = options || {};
 
     if (ENGINE_CONTEXTS.has(context)) throw new Error(ONE_ENGINE_ERROR);
 
+    // A browser page under a Content-Security-Policy cannot load a worklet
+    // from a blob: URL, so it passes `moduleUrl`: the same composed module,
+    // served same-origin by the gateway (bundles/studio/server/web.js).
     const texts = [];
-    for (const name of SOURCE_FILES) {
-      texts.push(await readText(name, opts));
+    if (!opts.moduleUrl) {
+      for (const name of SOURCE_FILES) {
+        texts.push(await readText(name, opts));
+      }
     }
     const wasmBinary = await readWasm(opts);
 
@@ -292,7 +309,8 @@
       // One blank line and a semicolon between files: every one of them is a
       // classic script that relies on its own final expression, and the SunVox
       // glue in particular ends without a trailing semicolon.
-      await addEngineModule(context, texts.join("\n;\n"));
+      if (opts.moduleUrl) await context.audioWorklet.addModule(opts.moduleUrl);
+      else await addEngineModule(context, composeEngineModule(texts));
     } catch (error) {
       // Nothing was registered, so a retry on this context is honest.
       ENGINE_CONTEXTS.delete(context);
@@ -484,6 +502,7 @@
     create: createStudioEngine,
     createStudioEngine: createStudioEngine,
     SOURCE_FILES: SOURCE_FILES,
+    composeEngineModule: composeEngineModule,
     PROCESSOR_NAME: PROCESSOR_NAME,
   };
 
