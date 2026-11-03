@@ -18,7 +18,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
+import vm from "node:vm";
 import Database from "better-sqlite3";
+import { parseHTML } from "linkedom";
 import { mountHub, openChatSession, findByClass, stdFetch, makeResponse, FakeEventSource } from "./fixtures/perch-hub-vm.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "staged-card-"));
@@ -55,11 +57,11 @@ before(async () => {
       outcome TEXT NOT NULL DEFAULT 'success', status TEXT NOT NULL DEFAULT 'recorded');
     CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE, project_id INTEGER UNIQUE,
       display_name TEXT NOT NULL, status_values TEXT NOT NULL, terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]')`);
-  createCard = (title, projectId, ask = null) => {
+  createCard = (title, projectId, ask = null, priority = 3) => {
     const t = new Database(TASKS);
     try {
       return Number(t.prepare(
-        "INSERT INTO tasks_items (title, project_id, status, action_needed) VALUES (?, ?, 'pending', ?)").run(title, projectId, ask).lastInsertRowid);
+        "INSERT INTO tasks_items (title, project_id, status, action_needed, priority) VALUES (?, ?, 'pending', ?, ?)").run(title, projectId, ask, priority).lastInsertRowid);
     } finally { t.close(); }
   };
   t.close();
@@ -543,4 +545,323 @@ test("en and es", async () => {
   } finally {
     await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = 'language'" });
   }
+});
+
+/* ------------------------------------------------------------------ M1 + L7 */
+
+/** A row for `cardId`, in the shape the recorder writes. */
+const stagedRow = (cardId, over = {}) => store.createStaged(db, {
+  sessionId: null, cardId, botId: "draft-bot", channel: "gmail",
+  credRef: { server: "google-workspace", role: "primary" },
+  providerDraftId: "draft-" + Math.random().toString(36).slice(2, 10),
+  snapshot: { to: ["alex@example.com"], cc: [], bcc: [], subject: "Hello", body: "Body text" },
+  newRecipients: [],
+  ...over,
+});
+
+/** The Board tab's rendered page for one scope (the panel's own handler, no server). */
+async function boardPage(scope) {
+  const { default: boardPanel } = await import("../servers/gateway/dashboard/panels/board.js");
+  const page = await boardPanel.handler(
+    { crowScope: scope, crowMode: { mode: "shell" } },
+    {},
+    { db, layout: (o) => o, lang: "en", engine: null },
+  );
+  return String(page.content);
+}
+
+/** The lane section's own markup (id="sb-lane-<lane>"), so a card is never read off another lane. */
+const laneSection = (html, lane) => {
+  const parts = html.split(`id="sb-lane-${lane}"`);
+  return parts.length > 1 ? parts[1].split("</section>")[0] : "";
+};
+
+/** The widget's summary (the one server read both the widget and the phone draw). */
+async function widgetSummary(project) {
+  const { createDbClient } = await import("../servers/db.js");
+  const { loadNeedsMe } = await import("../servers/gateway/widgets/needs-me.js");
+  const tdb = createDbClient(TASKS);
+  try {
+    return await loadNeedsMe(db, tdb, {
+      now: Date.now(), tasksDbPath: TASKS,
+      projects: [{ id: project, slug: "draft-home", name: "Draft home" }],
+    });
+  } finally { tdb.close(); }
+}
+
+/** The morning card's needs section. */
+async function morningNeeds(project) {
+  const M = await import("../servers/gateway/for-you/morning.js");
+  M._resetNeedsCacheForTest();
+  const out = await M.loadMorning(db, {
+    projects: [{ id: project, slug: "draft-home", name: "Draft home" }],
+    now: Date.now(), tasksDbPath: TASKS,
+  });
+  return out.needs;
+}
+
+test("a card with an open draft is Needs you on the Board, in the widget and in the morning brief", async () => {
+  clearNeedsYouCache();
+  const project = (await createProjectSpace(db, { name: "Draft surfaces" })).id;
+  // Priority 0: the widget's and the morning's lanes are the WHOLE store, and both cap the list.
+  const cardId = createCard("Waiting on a draft", project, null, 0);
+  const rowId = await stagedRow(cardId);
+
+  // The Board tab: the card is in the Needs-you lane and the chip counts it there.
+  const html = await boardPage({ projectId: project });
+  const needs = laneSection(html, "needs_you");
+  assert.ok(needs.includes(`data-card="${cardId}"`), "the Board draws it in Needs you");
+  assert.match(needs, /sb-lane-count">1</, "and its chip counts one");
+  assert.equal(laneSection(html, "up_next").includes(`data-card="${cardId}"`), false, "not in Up next");
+
+  // The widget: an item, of the draft kind, leading to the draft.
+  const summary = await widgetSummary(project);
+  const item = summary.items.find((it) => it.key === `card:${cardId}:draft:${rowId}`);
+  assert.ok(item, `the widget lists the draft: ${JSON.stringify(summary.items)}`);
+  assert.equal(item.kind, "draft");
+  assert.equal(item.href, `/dashboard/staged/${rowId}`);
+  assert.deepEqual(item.actions, [], "a draft is opened, not answered inline");
+
+  // The morning brief: the same item, with the same link.
+  const needs2 = await morningNeeds(project);
+  const line = needs2.items.find((it) => it.title === "Waiting on a draft");
+  assert.ok(line, `the morning brief lists it: ${JSON.stringify(needs2.items)}`);
+  assert.equal(line.kind, "draft");
+  assert.equal(line.href, `/dashboard/staged/${rowId}`);
+  clearNeedsYouCache();
+});
+
+test("a draft item links to its draft", async () => {
+  clearNeedsYouCache();
+  const project = (await createProjectSpace(db, { name: "Draft link" })).id;
+  const cardId = createCard("Two drafts, one card", project, null, 0);
+  // The recorder replaced the first draft with a second one for the same card.
+  const older = await stagedRow(cardId, { providerDraftId: "draft-older" });
+  const newer = await stagedRow(cardId, { providerDraftId: "draft-newer" });
+  const map = await (await import("../servers/gateway/staged/card-index.js")).stagedCardIds(db, { tasksDbPath: TASKS });
+  assert.equal(map.get(cardId), newer, "the newest open row is the card's draft");
+  assert.notEqual(map.get(cardId), older);
+
+  const { needsYouCards } = await import("../servers/gateway/dashboard/panels/board/needs-you.js");
+  const cards = await needsYouCards(db, { id: project });
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].kind, "draft");
+  assert.equal(cards[0].stagedId, newer, "the item carries the draft it leads to");
+
+  const needs = await morningNeeds(project);
+  const line = needs.items.find((it) => it.title === "Two drafts, one card");
+  assert.ok(line, `the brief lists the card: ${JSON.stringify(needs.items)}`);
+  assert.equal(line.href, `/dashboard/staged/${newer}`, "the brief links to the newest draft");
+  clearNeedsYouCache();
+});
+
+test("a draft on another project's card with the same number is not this card's", async () => {
+  clearNeedsYouCache();
+  const { ensureItem } = await import("../servers/shared/shell-items.js");
+  const shared = (await createProjectSpace(db, { name: "Shared store cards" })).id;
+  const own = (await createProjectSpace(db, { name: "Own store cards" })).id;
+  await db.execute({ sql: "UPDATE project_spaces SET tasks_db_uri = ? WHERE id = ?", args: ["file:" + join(dir, "own-store.db"), own] });
+  const cardId = createCard("Same number here", shared);
+
+  // A draft recorded while working in the OTHER project, whose store has its own card with this
+  // number: the chat the draft came from is filed under that project.
+  await ensureItem(db, "perch_thread", "thread-own-store", { projectId: own, setBy: "operator" });
+  await stagedRow(cardId, { sessionId: "thread-own-store", threadId: "thread-own-store", providerDraftId: "draft-own-store" });
+  const before = await (await import("../servers/gateway/dashboard/panels/board/needs-you.js")).needsYouCounts(db, [{ id: shared }], { cacheMs: 0 });
+  assert.equal(before.get(shared), 0, "another store's card with that number is not this card");
+
+  // The same card with a draft from its OWN store (no provenance: a channel draft) does count.
+  await stagedRow(cardId, { providerDraftId: "draft-shared-store" });
+  const after = await (await import("../servers/gateway/dashboard/panels/board/needs-you.js")).needsYouCounts(db, [{ id: shared }], { cacheMs: 0 });
+  assert.equal(after.get(shared), 1, "and a draft in this store does");
+  clearNeedsYouCache();
+});
+
+/* -------------------------------------------------------------------- L4 */
+
+test("a draft deleted in Gmail settles on the next list after an hour", async () => {
+  const S = await import("../servers/gateway/staged/send-service.js");
+  S._resetDraftChecksForTest();
+  const sid = "perchlive-l4-gone";
+  const id = await stagedRow(null, { sessionId: sid, providerDraftId: "draft-deleted-in-gmail" });
+  let reads = 0;
+  // The provider's 404, as gmail-client.js raises it (code "gone", fixed message).
+  const gone = () => { reads += 1; throw Object.assign(new Error("Gmail request failed"), { name: "GmailError", code: "gone" }); };
+  const gmail = () => ({ getDraft: async () => gone(), hasSentTo: async () => false });
+  const t0 = Date.now();
+
+  // A fresh row is not re-read at all (one Gmail call per row per hour, at most).
+  let items = await S.listStagedForSession(db, sid, { gmail, now: t0 });
+  assert.equal(reads, 0, "a draft staged a moment ago is not re-read");
+  assert.equal(items[0].state, "staged");
+
+  // An hour later the list re-reads it, gets the 404 and settles it `failed`.
+  items = await S.listStagedForSession(db, sid, { gmail, now: t0 + 60 * 60 * 1000 + 1 });
+  assert.equal(reads, 1, "one re-read");
+  assert.equal(items[0].state, "failed");
+  assert.equal(items[0].failReason, "Sent or deleted in Gmail");
+  assert.equal((await store.getStaged(db, id)).state, "failed", "and the row itself moved");
+
+  // Once per hour per row: a second list a moment later reads nothing.
+  await S.listStagedForSession(db, sid, { gmail, now: t0 + 60 * 60 * 1000 + 5000 });
+  assert.equal(reads, 1, "no second read inside the hour");
+
+  // The single-row read (the standalone page) settles it the same way.
+  S._resetDraftChecksForTest();
+  const singleId = await stagedRow(null, { sessionId: "perchlive-l4-single", providerDraftId: "draft-deleted-single" });
+  const item = await S.getStagedItem(db, singleId, { gmail, now: t0 + 3 * 60 * 60 * 1000 });
+  assert.equal(item.state, "failed");
+  assert.equal(item.failReason, "Sent or deleted in Gmail");
+});
+
+test("the draft re-read is capped at five rows per list", async () => {
+  const S = await import("../servers/gateway/staged/send-service.js");
+  S._resetDraftChecksForTest();
+  const sid = "perchlive-l4-cap";
+  for (let i = 0; i < 7; i += 1) await stagedRow(null, { sessionId: sid, providerDraftId: `draft-cap-${i}` });
+  let reads = 0;
+  const gmail = () => ({ getDraft: async () => { reads += 1; return { snapshot: {}, threadId: null, faithful: true }; }, hasSentTo: async () => false });
+  await S.listStagedForSession(db, sid, { gmail, now: Date.now() + 2 * 60 * 60 * 1000 });
+  assert.equal(reads, 5, "at most five provider reads per list request");
+});
+
+/* -------------------------------------------------------------------- L5 */
+
+/**
+ * The standalone page's own script, run the way a browser runs it: the page HTML parsed into a real
+ * DOM (linkedom), the script's click listener captured off #staged-page, fetch answered by the test.
+ * Nothing here re-implements the page.
+ */
+function runPage(html, { reply = () => ({ status: 200, json: { ok: true } }) } = {}) {
+  const script = /<script>([\s\S]*?)<\/script>/.exec(html);
+  assert.ok(script, "the page carries its script");
+  const { document } = parseHTML(html);
+  const root = document.getElementById("staged-page");
+  assert.ok(root, "the page carries the card");
+  const listeners = {};
+  root.addEventListener = (type, fn) => { listeners[type] = fn; };
+  Object.defineProperty(document, "cookie", { value: "crow_csrf=test-csrf", configurable: true });
+  const calls = [];
+  const replaced = [];
+  const fetchStub = (url, opts) => {
+    calls.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body ? JSON.parse(opts.body) : null });
+    const r = reply(url, opts) || { status: 200, json: { ok: true } };
+    return Promise.resolve({
+      status: r.status,
+      ok: r.status >= 200 && r.status < 300,
+      json: () => (r.json == null ? Promise.reject(new Error("no json")) : Promise.resolve(r.json)),
+    });
+  };
+  const location = { replace: (u) => replaced.push(String(u)) };
+  vm.runInContext(script[1], vm.createContext({ document, window: {}, fetch: fetchStub, location, console }));
+  const click = (el) => { assert.ok(el, "there is something to click"); return listeners.click({ target: el }); };
+  const status = () => document.getElementById("staged-status").textContent;
+  return { document, root, calls, replaced, click, status };
+}
+
+test("the page's discard takes Send and Edit away instead of lighting them back up", async () => {
+  const id = await store.createStaged(db, {
+    sessionId: null, botId: "channel-bot", channel: "gmail",
+    credRef: { server: "google-workspace", role: "primary" },
+    providerDraftId: "draft-page-discard",
+    snapshot: { to: ["alex@example.com"], cc: [], bcc: [], subject: "Bye", body: "Body" },
+  });
+  const page = await request("GET", "/dashboard/staged/" + id);
+  assert.equal(page.status, 200, page.text);
+  const rig = runPage(page.text, { reply: () => ({ status: 200, json: { ok: true, code: "discarded", state: "discarded" } }) });
+  assert.ok(rig.document.querySelector('[data-act="send"]'), "Send is there before");
+  assert.ok(rig.document.querySelector('[data-act="edit"]'));
+  rig.click(rig.document.querySelector('[data-act="discard"]'));
+  await settle();
+  assert.equal(rig.calls.length, 1);
+  assert.match(rig.calls[0].url, /\/staged\/ss-[0-9a-f]{16}\/discard$/);
+  assert.equal(rig.document.querySelector('[data-act="send"]'), null, "Send is gone, not re-enabled");
+  assert.equal(rig.document.querySelector('[data-act="edit"]'), null, "and Edit with it");
+  assert.equal(rig.status(), "Discarded here. It stays a draft in Gmail.");
+});
+
+test("the page's changed-with-no-new-row clears Sending and puts the buttons back", async () => {
+  const id = await store.createStaged(db, {
+    sessionId: null, botId: "channel-bot", channel: "gmail",
+    credRef: { server: "google-workspace", role: "primary" },
+    providerDraftId: "draft-page-changed",
+    snapshot: { to: ["alex@example.com"], cc: [], bcc: [], subject: "Moved", body: "Body" },
+  });
+  const page = await request("GET", "/dashboard/staged/" + id);
+  assert.equal(page.status, 200, page.text);
+  const rig = runPage(page.text, { reply: () => ({ status: 409, json: { error: "changed" } }) });
+  const send = rig.document.querySelector('[data-act="send"]');
+  rig.click(send);
+  await settle();
+  assert.equal(rig.replaced.length, 0, "no new row to go to");
+  assert.equal(rig.status(), "The draft changed, review it again.");
+  assert.equal(send.disabled, false, "the buttons come back for the review");
+  assert.equal(rig.document.querySelector('[data-act="edit"]').disabled, false);
+});
+
+test("the page's placeholders message names the brackets", async () => {
+  const id = await store.createStaged(db, {
+    sessionId: null, botId: "channel-bot", channel: "gmail",
+    credRef: { server: "google-workspace", role: "primary" },
+    providerDraftId: "draft-page-placeholders",
+    snapshot: { to: ["alex@example.com"], cc: [], bcc: [], subject: "Hi [Client Name]", body: "Due [Date]" },
+  });
+  const page = await request("GET", "/dashboard/staged/" + id);
+  assert.equal(page.status, 200, page.text);
+  assert.ok(page.text.includes("Fill in [Client Name], [Date] first"), "the page says it up front");
+  // The script's own answer to an in-flight refusal (a stale page whose Send was drawn enabled):
+  // the sentence is the template FILLED, never the raw {list}.
+  const rig = runPage(page.text, { reply: () => ({ status: 409, json: { error: "placeholders" } }) });
+  rig.click(rig.document.querySelector('[data-act="send"]'));
+  await settle();
+  assert.equal(rig.status(), "Fill in [Client Name], [Date] first");
+  assert.equal(rig.document.querySelector('[data-act="send"]').disabled, false);
+});
+
+/* -------------------------------------------------------------------- L6/L8 */
+
+const allIn = (root, tag) => {
+  const out = [];
+  const walk = (n) => { if (n.tagName === tag) out.push(n); for (const c of n.children || []) walk(c); };
+  walk(root);
+  return out;
+};
+
+test("Ask for a change is its own label and keeps the operator's unsent words", async () => {
+  const { hub } = await mount({ items: [item()] });
+  hub.els["perch-input"].value = "My own unsent note";
+  findByClass(hub.els["perch-transcript"], "staged-ask").onclick();
+  const askSend = findByClass(hub.els["perch-transcript"], "staged-asksend");
+  assert.equal(askSend.textContent, "Ask for a change", "its own label, never Send's");
+  allIn(hub.els["perch-transcript"], "TEXTAREA").at(-1).value = "Make it shorter";
+  askSend.onclick();
+  assert.equal(hub.els["perch-input"].value,
+    "My own unsent note\nAbout the draft you made:\nMake it shorter",
+    "the note is appended on a new line, never over the operator's text");
+  // The rest of the composer is untouched, and nothing was posted.
+  assert.equal(text(hub, "staged-status"), "Added to your message box \u2014 send it to ask the bot for a change.");
+});
+
+test("a vanished row is only 'replaced' by a newer row for the SAME provider draft", async () => {
+  const state = { items: [item({ providerDraftId: "draft-one" })] };
+  const { hub } = await mount(state);
+  assert.ok(has(hub, "staged-card"));
+  // An unrelated draft arrives; the first row has gone (discarded elsewhere, not replaced).
+  state.items = [item({
+    id: "ss-dddddddddddddddd", providerDraftId: "draft-two", contentHash: "b".repeat(64),
+    snapshot: { to: ["alex@example.com"], cc: [], bcc: [], subject: "Unrelated", body: "Other words" },
+  })];
+  draftEnd(hub);
+  await settle();
+  assert.equal(transcriptText(hub).includes("Replaced by a newer draft"), false, "nothing claims a replacement");
+  assert.ok(transcriptText(hub).includes("Other words"), "the new draft is on screen");
+  assert.equal(all(hub, "staged-body").length, 1, "and the vanished one is simply gone");
+
+  // The real replacement (the same provider draft, a newer row) still says so.
+  const state2 = { items: [item({ providerDraftId: "draft-three" })] };
+  const second = await mount(state2);
+  state2.items = [item({ id: "ss-eeeeeeeeeeeeeeee", providerDraftId: "draft-three", contentHash: "c".repeat(64) })];
+  draftEnd(second.hub);
+  await settle();
+  assert.ok(transcriptText(second.hub).includes("Replaced by a newer draft"), "same draft, newer row");
 });

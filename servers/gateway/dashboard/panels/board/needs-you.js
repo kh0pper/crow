@@ -17,23 +17,13 @@ import { TASKS_DB, lockMapFor } from "../bot-board/data-queries.js";
 import { threadProjects } from "../../../routes/perch.js";
 import { laneRows, defsFor, cardsByIds } from "../board.js";
 import { groupByLane, openDecision } from "./lanes.js";
-import { listStaged } from "../../../staged/store.js";
+// The one staged-draft read (spec §12). Re-exported below: it is what Needs you has always used,
+// and every other surface that asks "is this card waiting on a draft?" reads the same map.
+import { stagedCardIds } from "../../../staged/card-index.js";
 
 const ABSENT_RE = /no such table/i;
 
-/**
- * The staged drafts waiting on the operator's yes, as the set of card ids they belong to
- * (spec §12; ids only, never a snapshot). `sending` is deliberately NOT here: a send in flight is
- * not waiting on a person. An old database without the table has nothing staged.
- */
-async function stagedCardIds(db) {
-  try {
-    const rows = await listStaged(db, { states: ["staged", "failed"] });
-    const out = new Set();
-    for (const r of rows) if (r.cardId != null) out.add(Number(r.cardId));
-    return out;
-  } catch { return new Set(); }
-}
+export { stagedCardIds };
 
 /** True when the project keeps its cards in the store the Board reads. */
 function inSharedStore(project, tasksDbPath) {
@@ -206,7 +196,9 @@ async function computeCounts(db, list, engine, tasksDbPath) {
     const lockMap = await lockMapFor(db, all.map((r) => r.id));
     const defs = await defsFor(tdb, all);
     const waiting = await waitingByProject(db, engine);
-    const staged = await stagedCardIds(db);
+    // Scoped to the store this listing reads (card ids are per store): a draft recorded on a
+    // project that keeps its OWN store is that store's card, never this one's with the same number.
+    const staged = await stagedCardIds(db, { tasksDbPath });
     for (const p of shared) {
       const needs = groupByLane(rowsBy.get(p.id), defs, lockMap, staged).needs_you;
       const held = new Set(needs.map((c) => c.id));
@@ -226,20 +218,29 @@ async function computeCounts(db, list, engine, tasksDbPath) {
 
 export { needsYouLabel };
 
-/** The kind of ask a Needs-you card is, or null when it carries none of the three. */
-export function kindOf(c) {
+/**
+ * The kind of ask a Needs-you card is, or null when it carries none. A card whose only reason is
+ * an open staged draft is a "draft": its item leads to the draft (/dashboard/staged/<id>), because
+ * the card itself has nothing to answer. A card with any other ask keeps that kind — the ask is
+ * what the card is for, and the draft is drawn in its own chat.
+ *
+ * `staged` is the stagedCardIds map (Map<cardId, stagedRowId>) the lane was computed with.
+ */
+export function kindOf(c, staged = null) {
   if (openDecision(c)) return "decision";
-  if (c.latest_result_status === "recorded") return "review";
-  if (String(c.action_needed ?? "").trim() !== "") return "question";
+  if (c && c.latest_result_status === "recorded") return "review";
+  if (String(c && c.action_needed != null ? c.action_needed : "").trim() !== "") return "question";
+  if (staged && c && c.id != null && staged.has(Number(c.id))) return "draft";
   return null;
 }
 
 /** The project's whole Needs-you lane (Board order), read from an open tasks.db. */
-async function needsLane(db, tdb, projectId, staged) {
+async function needsLane(db, tdb, projectId, staged, tasksDbPath = TASKS_DB) {
   const rows = await laneRows(tdb, { projectId: Number(projectId) });
   const lockMap = await lockMapFor(db, rows.map((r) => r.id));
   const defs = await defsFor(tdb, rows);
-  return groupByLane(rows, defs, lockMap, staged == null ? await stagedCardIds(db) : staged).needs_you;
+  const map = staged == null ? await stagedCardIds(db, { tasksDbPath }) : staged;
+  return groupByLane(rows, defs, lockMap, map).needs_you;
 }
 
 /**
@@ -261,11 +262,16 @@ export async function needsYouItems(db, project, { engine = null, tasksDbPath = 
     let held = new Set();
     if (shared && existsSync(tasksDbPath)) {
       tdb = createDbClient(tasksDbPath);
-      const needs = await needsLane(db, tdb, project.id);
+      const staged = await stagedCardIds(db, { tasksDbPath });
+      const needs = await needsLane(db, tdb, project.id, staged, tasksDbPath);
       held = new Set(needs.map((c) => c.id));
       const top = needs.slice(0, limit);
       const full = await cardsByIds(tdb, top.map((r) => r.id));
-      cards = top.map((r) => full.get(r.id)).filter(Boolean).map((c) => ({ ...c, kind: kindOf(c) }));
+      // `stagedId` is the card's newest open draft, so a "draft" item can link straight to it.
+      cards = top.map((r) => full.get(r.id)).filter(Boolean).map((c) => {
+        const kind = kindOf(c, staged);
+        return { ...c, kind, stagedId: kind === "draft" ? staged.get(Number(c.id)) : null };
+      });
     }
     const room = Math.max(0, limit - cards.length);
     const waiting = room && shared

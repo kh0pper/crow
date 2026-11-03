@@ -77,9 +77,16 @@ button:disabled { opacity:.55; cursor:default; }
 [hidden] { display:none !important; }
 `;
 
+/** The bracket form of a row's unfilled placeholders: `[Client Name], [Date]`. */
+function bracketsOf(item) {
+  const placeholders = Array.isArray(item && item.placeholders) ? item.placeholders : [];
+  return placeholders.map((p) => "[" + String(p) + "]").join(", ");
+}
+
 /** The fixed strings the page's script may need after a click. Server-rendered text carries the
- *  rest; nothing here is derived from the draft. */
-function scriptStrings(lang) {
+ *  rest; nothing here is derived from the draft except the placeholder names, which are the
+ *  operator's own brackets (the script writes them with textContent, never as markup). */
+function scriptStrings(lang, item = null) {
   return {
     sending: t("perch.stagedSending", lang),
     sent: t("perch.stagedSent", lang),
@@ -89,6 +96,10 @@ function scriptStrings(lang) {
     generic: t("perch.stagedFailedGeneric", lang),
     offline: t("perch.stagedOffline", lang),
     fillFirst: t("perch.stagedFillFirst", lang),
+    // The names the "Fill in {list} first" sentence fills, so a refused send names the brackets
+    // the server refused instead of showing the raw template.
+    fillList: bracketsOf(item),
+    changed: t("perch.stagedChanged", lang),
     notEditable: t("perch.stagedNotEditable", lang),
     discarded: t("perch.stagedDiscarded", lang),
     noRecipients: t("perch.stagedNoRecipients", lang),
@@ -116,7 +127,7 @@ function renderCard(item, lang) {
   const listOf = (key) => (Array.isArray(snap[key]) ? snap[key] : []);
   const placeholders = Array.isArray(item.placeholders) ? item.placeholders : [];
   const blocked = placeholders.length > 0;
-  const brackets = placeholders.map((p) => "[" + String(p) + "]").join(", ");
+  const brackets = bracketsOf(item);
   const fillLine = t("perch.stagedFillFirst", lang).split("{list}").join(brackets);
 
   let status = "";
@@ -173,8 +184,8 @@ ${form}
 }
 
 /** The page's own script: the same three actions the chat's card posts, against the same routes. */
-function renderScript(lang) {
-  const s = JSON.stringify(scriptStrings(lang));
+function renderScript(lang, item = null) {
+  const s = JSON.stringify(scriptStrings(lang, item));
   return `<script>
 (function(){
   var S=${s};
@@ -194,6 +205,13 @@ function renderScript(lang) {
   function say(text){ var el=document.getElementById('staged-status'); if(el) el.textContent=text; }
   function fill(tpl,vals){ var out=String(tpl); for(var k in vals) out=out.split('{'+k+'}').join(String(vals[k])); return out; }
   function busy(on){ var b=root.querySelectorAll('button'); for(var i=0;i<b.length;i++) b[i].disabled=on; }
+  /* A discarded row has nothing left to press: the actions go, rather than lighting back up as if
+     there were still something to do on a draft that is no longer waiting. */
+  function dropActions(){
+    var a=root.querySelectorAll('.actions');
+    for(var i=0;i<a.length;i++){ if(a[i].parentNode) a[i].parentNode.removeChild(a[i]); }
+    var f=document.getElementById('staged-form'); if(f) f.hidden=true;
+  }
   function splitList(v){ var parts=String(v==null?'':v).split(','), out=[]; for(var i=0;i<parts.length;i++){ var p=parts[i].trim(); if(p) out.push(p); } return out; }
   function go(newId){ if(newId) location.replace('/dashboard/staged/'+encodeURIComponent(newId)); }
   function send(){
@@ -203,14 +221,18 @@ function renderScript(lang) {
       if(r&&r.ok&&j&&j.state==='sent'){
         var time=''; try{ time=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }catch(e){}
         say(fill(S.sent,{time:time,recipients:root.getAttribute('data-recipients')||S.noRecipients}));
-        var a=root.querySelectorAll('.actions'); for(var i=0;i<a.length;i++) a[i].parentNode.removeChild(a[i]);
+        dropActions();
         return;
       }
       if(r&&r.ok&&j&&j.state==='failed'){ busy(false); say(j.failReason||S.generic); return; }
-      if(r&&r.status===409&&j&&j.error==='changed'){ go(j.id); return; }
+      if(r&&r.status===409&&j&&j.error==='changed'){
+        if(j.id){ go(j.id); return; }
+        /* Changed, but there is no new row to show: say so and put the buttons back for a review. */
+        busy(false); say(S.changed); return;
+      }
       if(r&&r.status===409&&j&&j.error==='already_sent'){ busy(false); say(S.already); return; }
       if(r&&r.status===403){ busy(false); say(S.notOwner); return; }
-      if(r&&r.status===409&&j&&j.error==='placeholders'){ busy(false); say(S.fillFirst); return; }
+      if(r&&r.status===409&&j&&j.error==='placeholders'){ busy(false); say(fill(S.fillFirst,{list:S.fillList})); return; }
       busy(false); say((!r||r.status===0)?S.offline:S.generic);
     });
   }
@@ -222,10 +244,10 @@ function renderScript(lang) {
       subject:String(val('f-subject')), body:String(val('f-body'))
     }).then(function(r){
       var j=r&&r.j;
-      if(r&&r.ok&&j&&String(j.code)==='edited'){ go(j.id); return; }
+      if(r&&r.ok&&j&&String(j.code)==='edited'){ if(j.id){ go(j.id); return; } busy(false); say(S.changed); return; }
       busy(false);
       if(r&&r.status===400&&j&&j.error==='bad_address'){ say(S.badAddress); return; }
-      if(r&&r.status===409&&j&&j.error==='changed'){ go(j.id); return; }
+      if(r&&r.status===409&&j&&j.error==='changed'){ if(j.id){ go(j.id); return; } say(S.changed); return; }
       if(r&&r.status===409&&j&&(j.error==='not_editable'||j.error==='open_in_gmail')){ say(S.notEditable); return; }
       if(r&&r.status===403){ say(S.notOwner); return; }
       say((!r||r.status===0)?S.offline:S.generic);
@@ -234,8 +256,9 @@ function renderScript(lang) {
   function discard(){
     busy(true);
     api('POST','/staged/'+encodeURIComponent(id)+'/discard',{}).then(function(r){
-      if(r&&r.ok){ say(S.discarded); busy(false); return; }
+      if(r&&r.ok){ dropActions(); say(S.discarded); return; }
       if(r&&r.status===403){ busy(false); say(S.notOwner); return; }
+      if(r&&r.status===409){ dropActions(); say(S.changed); return; }
       busy(false); say((!r||r.status===0)?S.offline:S.generic);
     });
   }
@@ -299,7 +322,7 @@ export function stagedPageRouter(dashboardAuth, { openDb = () => createDbClient(
       const item = await getStagedItem(db, id);
       if (!item) return refusal(res, 404, lang, "perch.stagedNotFound");
       const title = t("perch.stagedTitle", lang);
-      res.type("html").send(page(lang, renderCard(item, lang) + renderScript(lang), title));
+      res.type("html").send(page(lang, renderCard(item, lang) + renderScript(lang, item), title));
     } catch (err) {
       console.warn(`[staged-page] ${STAGED_ID_RE.test(id) ? "row" : "id"}: ${(err && err.name) || "Error"}`);
       if (!res.headersSent) refusal(res, 500, lang, "perch.stagedFailedGeneric");

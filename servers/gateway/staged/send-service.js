@@ -75,6 +75,15 @@ export const STALE_SENDING_MS = 10 * 60 * 1000;
 /** At most this many interrupted sends are re-read per list request. */
 const RECONCILE_MAX = 20;
 
+/**
+ * How old a `staged` row must be before its draft is re-read at all, and how often each row is
+ * re-read afterwards. A draft the operator sent or deleted IN GMAIL never goes through Claim, so
+ * without this its card would stay "waiting for your yes" for ever.
+ */
+export const DRAFT_CHECK_MS = 60 * 60 * 1000;
+/** At most this many rows are re-read per list request (each one is a Gmail call). */
+const DRAFT_CHECK_MAX = 5;
+
 /** A queued note nobody claimed (the chat was never used again) is dropped after a day. */
 export const STAGED_NOTE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -456,6 +465,59 @@ async function reconcileInterrupted(db, { gmail, now }) {
 }
 
 /**
+ * The last time each open row's draft was re-read (in memory: a re-read is a provider call, and the
+ * table has no column for it). A row that settles leaves the map on the next read that finds it
+ * gone; the map is bounded by the same cap the sweep applies.
+ */
+const draftCheckedAt = new Map();
+
+/** Test seam: forget every "already checked" stamp (the clock is the caller's `now`). */
+export function _resetDraftChecksForTest() { draftCheckedAt.clear(); }
+
+/**
+ * A `staged` row the operator may have sent or deleted IN GMAIL: re-read its draft, at most once an
+ * hour per row, and settle it `failed` on a 404 ("Sent or deleted in Gmail") — there is no message
+ * id either way, and Gmail deletes a draft once it is sent, so a retry's re-read is the same 404
+ * and never a second send. Anything else is left exactly as it was: a draft we can still read is
+ * still waiting (if its text moved, the send route's own re-read answers "the draft changed"), and
+ * an auth/network failure is retried an hour later rather than guessed at.
+ *
+ * Returns the row it should now be read as (the same object when nothing changed).
+ */
+async function recheckDraft(db, row, { gmail, now }) {
+  if (!row || row.state !== "staged" || row.credRef == null) return row;
+  if (Number(now) - row.updatedAt < DRAFT_CHECK_MS) return row;
+  const checked = draftCheckedAt.get(row.id);
+  if (checked != null && Number(now) - checked < DRAFT_CHECK_MS) return row;
+  draftCheckedAt.set(row.id, Number(now));
+  const client = gmailClientFor(row.credRef, gmail);
+  if (!client) return row;
+  try {
+    await client.getDraft(row.providerDraftId);
+    return row;
+  } catch (err) {
+    if (!err || err.code !== "gone") return row;
+    try {
+      const ok = await settleRow(db, row.id, { state: "failed", failReason: SEND_FAILED.sentOrDeleted, expectedUpdatedAt: row.updatedAt });
+      // A lost settle means the row moved on under us (a send claimed it, a retry): read it as it
+      // is now, not as this re-read found it.
+      return ok ? { ...row, state: "failed", failReason: SEND_FAILED.sentOrDeleted } : row;
+    } catch {
+      return row; // a locked DB never blocks the card
+    }
+  }
+}
+
+/** The same sweep over a list, oldest rows first, at most DRAFT_CHECK_MAX of them per read. */
+async function recheckDrafts(db, rows, { gmail, now }) {
+  const due = rows.filter((r) => r && r.state === "staged" && r.credRef != null && Number(now) - r.updatedAt >= DRAFT_CHECK_MS);
+  if (!due.length) return rows;
+  const checked = new Map();
+  for (const row of due.slice(0, DRAFT_CHECK_MAX)) checked.set(row.id, await recheckDraft(db, row, { gmail, now }));
+  return rows.map((r) => checked.get(r.id) || r);
+}
+
+/**
  * The session's open rows (staged/sending/failed) as the card reads them:
  * `{ id, state, snapshot, contentHash, placeholders, newRecipients, sendable, failReason, tainted,
  *    providerDraftId }`.
@@ -470,7 +532,7 @@ async function reconcileInterrupted(db, { gmail, now }) {
  */
 export async function listStagedForSession(db, sessionId, { gmail = null, now = Date.now() } = {}) {
   await reconcileInterrupted(db, { gmail, now });
-  const rows = await listStaged(db, { sessionId: String(sessionId) });
+  const rows = await recheckDrafts(db, await listStaged(db, { sessionId: String(sessionId) }), { gmail, now });
   const items = [];
   for (const row of rows) items.push(await cardItem(db, row, { gmail }));
   return items;
@@ -504,11 +566,13 @@ async function cardItem(db, row, { gmail = null } = {}) {
 /**
  * One row, in the same shape the list returns — the standalone page's read
  * (GET /dashboard/perch-api/staged/:id). Nothing here reconciles `sending` rows: that is the
- * card list's job, and a single read must never put a live send back on screen. A row that does not
- * exist is null (the route answers 404).
+ * card list's job, and a single read must never put a live send back on screen. It does re-read a
+ * `staged` row the same way the list does (an hour old, once an hour), so a draft sent or deleted
+ * in Gmail settles there too. A row that does not exist is null (the route answers 404).
  */
-export async function getStagedItem(db, id, { gmail = null } = {}) {
-  const row = await getStaged(db, id);
-  if (!row) return null;
+export async function getStagedItem(db, id, { gmail = null, now = Date.now() } = {}) {
+  const found = await getStaged(db, id);
+  if (!found) return null;
+  const row = await recheckDraft(db, found, { gmail, now });
   return await cardItem(db, row, { gmail });
 }

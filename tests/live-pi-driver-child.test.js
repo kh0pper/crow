@@ -377,3 +377,40 @@ test("the child's static imports are node built-ins and the guard alone", () => 
   assert.ok(specs.length > 0);
   for (const s of specs) assert.ok(s.startsWith("node:") || ["./eval-guard.mjs", "./protected-paths.mjs"].includes(s), `static import ${s}`);
 });
+
+/**
+ * Eval output is copied and read elsewhere, and a draft call's args/result ARE the recipients, the
+ * subject and the body. A turn's tool calls therefore reach the progress NDJSON with the tool, its
+ * error flag and its id only — this is the reduction, and the wiring that applies it.
+ */
+test("progress tool calls carry no draft content", async () => {
+  const { progressToolCalls } = await import("../scripts/lib/live-pi-driver-child.mjs");
+  const calls = [
+    {
+      tool: "mcp__google-workspace__gmail_create_draft",
+      isError: false,
+      toolCallId: "call-1",
+      args: { to: ["alex@example.com"], cc: [], bcc: [], subject: "Quarterly numbers", body: "The full body" },
+      result: JSON.stringify({ success: true, data: { draft_id: "draft_9abc" } }),
+    },
+    { tool: "read", isError: true },
+  ];
+  const reduced = progressToolCalls(calls);
+  assert.deepEqual(reduced, [
+    { tool: "mcp__google-workspace__gmail_create_draft", isError: false, toolCallId: "call-1" },
+    { tool: "read", isError: true, toolCallId: null },
+  ], "exactly three fields, and nothing of the call's payload");
+  const line = JSON.stringify(reduced);
+  for (const secret of ["alex@example.com", "Quarterly numbers", "The full body", "draft_9abc"]) {
+    assert.equal(line.includes(secret), false, `no ${JSON.stringify(secret)} in the progress line`);
+  }
+  assert.deepEqual(Object.keys(reduced[0]).sort(), ["isError", "tool", "toolCallId"]);
+  assert.deepEqual(progressToolCalls(undefined), []);
+  assert.deepEqual(progressToolCalls("not a list"), []);
+
+  // And the turn-end event is written through it: a helper that exists but is not wired would
+  // leave the payload on the event.
+  const src = readFileSync(CHILD, "utf8");
+  assert.match(src, /toolCalls:\s*progressToolCalls\(/);
+  assert.equal(/toolCalls:\s*\(r && r\.toolCalls\)/.test(src), false, "the raw list never reaches an event");
+});

@@ -24,7 +24,9 @@
  * hook's summarizeSessionByThread call, after the last turn.
  *
  * Progress (one appended, synced line per event): start, briefing ({ chars, sha256, rank }, never
- * the text), turn-start, turn-end, capacity, rank ({ recall }: the recall gate's askerRank),
+ * the text), turn-start, turn-end (its tool calls reduced to tool / isError / toolCallId by
+ * progressToolCalls: a draft's args and result carry the recipients and the body, and this file is
+ * eval output), capacity, rank ({ recall }: the recall gate's askerRank),
  * summary ({ written, reason, detail?, transport: "injected" }, never the text), done.
  * Exit codes: 0 all turns ran; 1 guard refusal (including a thread id that already has a
  * bot_sessions row) or crash; 4 a turn's action was not asked/executed (its turn-end is
@@ -46,6 +48,21 @@ const PARENT_POLL_MS = 1000;
 
 const fail = (code, msg) => Object.assign(new Error(msg), { exitCode: code });
 const refuse = (msg) => fail(1, `live pi driver child refused: ${msg}`);
+
+/**
+ * A turn's tool calls as the progress NDJSON may carry them: the tool, whether it errored and its
+ * call id, and NOTHING else. `args` and `result` are the tool's own payload — a Gmail draft call's
+ * recipients, subject and body are exactly what this run exists to stage — and the progress file is
+ * eval output that gets copied, read and mailed around. Only the three field names above leave.
+ */
+export function progressToolCalls(calls) {
+  if (!Array.isArray(calls)) return [];
+  return calls.map((c) => ({
+    tool: c && c.tool != null ? String(c.tool) : null,
+    isError: !!(c && c.isError === true),
+    toolCallId: c && c.toolCallId != null ? String(c.toolCallId) : null,
+  }));
+}
 
 /** The job file, shape-checked. Anything malformed is a refusal (exit 1), never a guess. */
 function readJob(path, env) {
@@ -307,7 +324,7 @@ async function runThread({ job, env, thread, perch, pdb, hooks, handleInbound, g
       const end = {
         ev: "turn-end", thread, turn, injected, action: r && r.action, reply: replies.join("\n"),
         piSessionId: (r && r.piSessionId) || null, sessionDir: (session && session.pi_session_dir) || null,
-        toolCalls: (r && r.toolCalls) || [],
+        toolCalls: progressToolCalls(r && r.toolCalls),
       };
       emit(end);
       if (!OK_ACTIONS.has(end.action)) throw fail(4, `turn ${turn} ended with action ${end.action}${r && r.error ? `: ${r.error}` : ""}`);

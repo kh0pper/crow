@@ -4447,7 +4447,11 @@ ${perchStagedCardJs(lang)}
     api:function(method,path,body){ return perchApi(method,path,body); },
     askChange:function(text){
       var inp=el('perch-input'); if(!inp) return false;
-      inp.value=String(text);
+      /* APPENDED, never over the operator's own unsent text: their words are theirs, and this
+         button only adds to the message they are about to send. */
+      var add=String(text==null?'':text);
+      var cur=inp.value==null?'':String(inp.value);
+      inp.value=(cur&&add)?cur+String.fromCharCode(10)+add:(cur||add);
       inp.style.height='auto';
       if(inp.focus) inp.focus();
       return true;

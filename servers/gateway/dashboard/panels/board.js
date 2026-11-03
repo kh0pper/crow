@@ -26,6 +26,7 @@ import { resolveBoardDef, DEFAULT_BOARD_DEF } from "../../routes/board-defs.js";
 import { activeProjects } from "../../../shared/shell-items.js";
 import { getInteractiveEngine } from "../../perch-interactive.js";
 import { LANES, groupByLane } from "./board/lanes.js";
+import { stagedCardIds } from "../../staged/card-index.js";
 import { boardHtml, cardHref } from "./board/html.js";
 
 export { cardHref };
@@ -111,11 +112,13 @@ function countsOf(byLane) {
  * Cards per lane in a scope: laneOf over laneRows, with the caller's lock
  * map (lockMapFor's Map<Number id, boolean>). Never truncated. Same scope
  * SQL as the rendered lanes; { unassigned } needs `opts.activeIds` (the live
- * project ids, activeProjects(db)).
+ * project ids, activeProjects(db)). `opts.staged` is the open-draft map
+ * (stagedCardIds: Map<cardId, stagedRowId>): a card holding a draft is in
+ * Needs you, so a count without it is not the Board's count.
  */
 export async function laneCounts(tdb, scope, lockMap, opts = {}) {
   const rows = await laneRows(tdb, scope, opts);
-  return countsOf(groupByLane(rows, await defsFor(tdb, rows), lockMap));
+  return countsOf(groupByLane(rows, await defsFor(tdb, rows), lockMap, opts.staged));
 }
 
 /** Full card rows (the face's columns + latest result) for the given ids. */
@@ -182,7 +185,10 @@ async function loadBoard(db, scope, engine) {
     const rows = await laneRows(tdb, scope, { activeIds });
     const lockMap = await lockMapFor(db, rows.map((r) => r.id));
     const defs = await defsFor(tdb, rows);
-    const grouped = groupByLane(rows, defs, lockMap);
+    // The open drafts on these cards (spec §12): a card waiting on the operator's yes is in
+    // Needs you, and the chip counts must be laneOf over the SAME answer (stagedCardIds, one read).
+    const staged = await stagedCardIds(db, { tasksDbPath: TASKS_DB });
+    const grouped = groupByLane(rows, defs, lockMap, staged);
     const counts = countsOf(grouped);
     const shownIds = LANES.flatMap((l) => grouped[l].slice(0, LANE_RENDER_CAP).map((r) => r.id));
     const full = await cardsByIds(tdb, shownIds);

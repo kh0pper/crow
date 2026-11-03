@@ -63,8 +63,9 @@ export function laneOf(card, def, { locked, staged } = {}) {
  * project's board def; a card whose project has no entry uses the `null`
  * entry if present, else DEFAULT_BOARD_DEF. `lockMap` is lockMapFor's
  * Map<cardId, boolean>: every id has an entry, so "held" is `get(id) === true`,
- * never `has(id)`. `stagedMap` is the set of card ids that have an open staged
- * draft (Set of numbers, or a Map); absent means none.
+ * never `has(id)`. `stagedMap` is the open-draft map (stagedCardIds:
+ * Map<cardId, stagedRowId>); only its keys are read, and an absent map means
+ * no card is holding a draft.
  */
 export function groupByLane(cards, defsByProject, lockMap, stagedMap) {
   const out = Object.fromEntries(LANES.map((l) => [l, []]));

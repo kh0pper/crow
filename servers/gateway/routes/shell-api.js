@@ -60,6 +60,7 @@ import { resolveBoardDef } from "./board-defs.js";
 import { getCard, moveCard, updateCard } from "../board/card-service.js";
 import { acceptResult } from "../board/result-service.js";
 import { LANES, laneOf, movePlan, cardVersion, CONFIRM_OUTCOMES } from "../dashboard/panels/board/lanes.js";
+import { stagedCardIds } from "../staged/card-index.js";
 
 const DASHBOARD_ACTOR = Object.freeze({ kind: "human", id: null, jobId: null });
 
@@ -80,8 +81,9 @@ async function latestResultOf(tdb, id) {
 /**
  * Everything a lane decision reads, from stored state: the same laneOf
  * inputs as the Board panel (status, latest result status, action_needed,
- * data_json, and the lock map keyed by Number id). Null for a card that is
- * missing, archived or a tracker item.
+ * data_json, whether a bot's draft waits on the operator, and the lock map
+ * keyed by Number id). Null for a card that is missing, archived or a tracker
+ * item.
  */
 export async function laneState(tdb, cdb, id) {
   const card = await getCard(tdb, id);
@@ -89,7 +91,10 @@ export async function laneState(tdb, cdb, id) {
   const def = await resolveBoardDef(tdb, { projectId: card.project_id == null ? null : Number(card.project_id) });
   const latestResult = await latestResultOf(tdb, id);
   const locked = (await lockMapFor(cdb, [id])).get(id) === true;
-  const lane = laneOf({ ...card, latest_result_status: latestResult ? latestResult.status : null }, def, { locked });
+  // A card holding an open staged draft is in Needs you here exactly as on the Board (one read,
+  // scoped to the store this card lives in).
+  const staged = (await stagedCardIds(cdb, { tasksDbPath: TASKS_DB })).has(Number(card.id));
+  const lane = laneOf({ ...card, latest_result_status: latestResult ? latestResult.status : null }, def, { locked, staged });
   return { card, def, latestResult, locked, lane };
 }
 

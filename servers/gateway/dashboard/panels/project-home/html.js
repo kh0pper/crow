@@ -17,7 +17,7 @@ import { manageProjectHtml } from "../../shared/project-lifecycle-ui.js";
 import { servicesUiEnabled } from "../../../services/ui-flag.js";
 import { sessionCardHtml, sessionCardModel, startControlHtml } from "../../shared/session-cards.js";
 
-const KIND_KEY = Object.freeze({ decision: "shell.kindDecision", review: "shell.kindReview", question: "shell.kindQuestion" });
+const KIND_KEY = Object.freeze({ decision: "shell.kindDecision", review: "shell.kindReview", question: "shell.kindQuestion", draft: "shell.kindDraft" });
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 /** t(key) with {name} filled; split/join, so a "$" in a value is never a replace pattern. */

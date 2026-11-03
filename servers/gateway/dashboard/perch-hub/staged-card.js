@@ -45,6 +45,7 @@ export function perchStagedCardJs(lang = "en") {
   var STAGED_SAVE='${tJs("perch.stagedSave", lang)}';
   var STAGED_CANCEL='${tJs("perch.stagedCancel", lang)}';
   var STAGED_ASK='${tJs("perch.stagedAsk", lang)}';
+  var STAGED_ASK_SEND='${tJs("perch.stagedAskSend", lang)}';
   var STAGED_ASK_PH='${tJs("perch.stagedAskPlaceholder", lang)}';
   var STAGED_ASK_PREFIX='${tJs("perch.stagedAskPrefix", lang)}';
   var STAGED_ASK_ADDED='${tJs("perch.stagedAskAdded", lang)}';
@@ -74,11 +75,12 @@ export function perchStagedCardJs(lang = "en") {
      reload() -> void }. client.js assigns it; a card rendered without one simply has no actions
      that need it. */
   var stagedHost=null;
-  /* Per transcript: the node drawn for a row, the row's display key, its quiet note, and the ids
-     that reached a final state here (sent / already sent / a discarded edit) and must not be
-     redrawn or dropped by a later refetch. */
+  /* Per transcript: the node drawn for a row, the row's display key, the provider draft it was
+     drawn from (the replacement test), its quiet note, and the ids that reached a final state here
+     (sent / already sent / a discarded edit) and must not be redrawn or dropped by a later refetch. */
   var stagedNodes={};
   var stagedKeys={};
+  var stagedDrafts={};
   var stagedNotes={};
   var stagedFinal={};
   var stagedDelayedSid=null;
@@ -342,7 +344,9 @@ export function perchStagedCardJs(lang = "en") {
   }
 
   /* Ask for a change: the operator's note goes into the composer behind a fixed line, so the
-     ordinary send path (and its paste detector) runs. Nothing is sent from here. */
+     ordinary send path (and its paste detector) runs. Nothing is sent from here. The note is
+     APPENDED to whatever is already in the composer: unsent words of the operator's are theirs,
+     and this button may not replace them. */
   function stagedAskForm(item,host,card,actions,status){
     if(stagedFind(card,'staged-askform')) return;
     if(!host||typeof host.askChange!=='function') return;
@@ -351,7 +355,7 @@ export function perchStagedCardJs(lang = "en") {
     if(note.setAttribute) note.setAttribute('placeholder',STAGED_ASK_PH);
     note.placeholder=STAGED_ASK_PH;
     var row=document.createElement('div'); row.className='staged-actions';
-    stagedButton(row,'primary staged-asksend',STAGED_SEND,function(){
+    stagedButton(row,'primary staged-asksend',STAGED_ASK_SEND,function(){
       var text=String(note.value==null?'':note.value).trim();
       if(!text) return;
       if(host.askChange(STAGED_ASK_PREFIX+STAGED_NL+text)!==false){
@@ -379,13 +383,18 @@ export function perchStagedCardJs(lang = "en") {
     return node;
   }
   /* Draw (or redraw) every row the server sent; drop the ones it no longer sends. A card that
-     disappears while a NEWER row appears was replaced by it (a bot's new draft, or Gmail's own
-     text after a refused send) and says so; one that merely goes away is dropped. Returns true
-     when the answer held a row this transcript had never drawn — the delayed refetch's signal. */
+     disappears while the provider's draft is now held by a NEWER row was REPLACED by it (a bot's
+     new draft, or Gmail's own text after a refused send) and says so; one that merely goes away —
+     discarded in another tab, deleted in Gmail — is dropped without a word. Returns true when the
+     answer held a row this transcript had never drawn — the delayed refetch's signal. */
   function stagedDraw(items){
     var tr=el('perch-transcript'); if(!tr) return false;
-    var list=Array.isArray(items)?items:[], anyNew=false, seen={}, i;
-    for(i=0;i<list.length;i++){ if(list[i]&&list[i].id!=null) seen[String(list[i].id)]=true; }
+    var list=Array.isArray(items)?items:[], anyNew=false, seen={}, seenDrafts={}, i, it;
+    for(i=0;i<list.length;i++){
+      it=list[i]; if(!it||it.id==null) continue;
+      seen[String(it.id)]=true;
+      if(it.providerDraftId) seenDrafts[String(it.providerDraftId)]=true;
+    }
     /* Oldest first, so the newest draft lands last, where the eye (and the scroll) already is. */
     for(i=list.length-1;i>=0;i--){
       var item=list[i]; if(!item||item.id==null) continue;
@@ -399,20 +408,24 @@ export function perchStagedCardJs(lang = "en") {
         stagedNodes[id].parentNode.insertBefore(node,stagedNodes[id]);
         stagedNodes[id].parentNode.removeChild(stagedNodes[id]);
       } else tr.appendChild(node);
-      stagedNodes[id]=node; stagedKeys[id]=key;
+      stagedNodes[id]=node; stagedKeys[id]=key; stagedDrafts[id]=String(item.providerDraftId||'');
     }
     for(var k in stagedNodes){
       if(seen[k]||stagedFinal[k]) continue;
       var old=stagedNodes[k];
       var wasTomb=old&&old.getAttribute&&old.getAttribute('data-staged-replaced')==='1';
-      if(anyNew&&!wasTomb){
+      var draftId=stagedDrafts[k]||'';
+      /* Replaced only when the same provider draft is now held by a newer row: a row that merely
+         left the list is not "replaced by" an unrelated draft, and saying so would be a lie the
+         operator cannot check. */
+      if(draftId&&seenDrafts[draftId]&&!wasTomb){
         var tomb=stagedTombstone(k);
         if(old&&old.parentNode){ old.parentNode.insertBefore(tomb,old); old.parentNode.removeChild(old); }
         else tr.appendChild(tomb);
         stagedNodes[k]=tomb; stagedKeys[k]='tomb';
       } else if(!wasTomb){
         stagedRemove(old);
-        delete stagedNodes[k]; delete stagedKeys[k]; delete stagedNotes[k];
+        delete stagedNodes[k]; delete stagedKeys[k]; delete stagedNotes[k]; delete stagedDrafts[k];
       }
     }
     return anyNew;
@@ -427,7 +440,7 @@ export function perchStagedCardJs(lang = "en") {
       var id=String(h.oldId);
       stagedRemove(stagedNodes[id]);
       stagedFinal[id]=true;
-      delete stagedNodes[id]; delete stagedKeys[id]; delete stagedNotes[id];
+      delete stagedNodes[id]; delete stagedKeys[id]; delete stagedNotes[id]; delete stagedDrafts[id];
     }
     if(stagedHost&&typeof stagedHost.reload==='function') stagedHost.reload();
   }
@@ -466,7 +479,7 @@ export function perchStagedCardJs(lang = "en") {
   /* A session switch: the transcript, and every reading in it, is gone. */
   function resetStaged(){
     for(var k in stagedNodes) stagedRemove(stagedNodes[k]);
-    stagedNodes={}; stagedKeys={}; stagedNotes={}; stagedFinal={}; stagedDelayedSid=null;
+    stagedNodes={}; stagedKeys={}; stagedDrafts={}; stagedNotes={}; stagedFinal={}; stagedDelayedSid=null;
   }
 `;
 }

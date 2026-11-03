@@ -230,7 +230,10 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
   }
   const items = await needsYouItems(db, project, { engine, ...opts, limit: 3 });
   const links = await cardLinks(db, project, items.cards);
-  const needsYou = items.cards.map((c) => ({ title: String(c.title || ""), kind: c.kind, ...links(c) }));
+  // A card whose only ask is a bot's draft leads to the DRAFT (its own page), not to the card.
+  const needsYou = items.cards.map((c) => (c.kind === "draft" && c.stagedId
+    ? { title: String(c.title || ""), kind: c.kind, conversation: false, href: `/dashboard/staged/${encodeURIComponent(String(c.stagedId))}` }
+    : { title: String(c.title || ""), kind: c.kind, ...links(c) }));
   const labels = await sessionLabels(db, items.waiting.map((w) => w.sid));
   for (const w of items.waiting) {
     needsYou.push({ title: labels.get(w.sid) || null, kind: null, waiting: true, href: `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${encodeURIComponent(w.sid)}` });

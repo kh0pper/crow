@@ -3829,6 +3829,7 @@ export const translations = {
   "perch.stagedSave": { en: "Save", es: "Guardar" },
   "perch.stagedCancel": { en: "Cancel", es: "Cancelar" },
   "perch.stagedAsk": { en: "Ask for a change", es: "Pedir un cambio" },
+  "perch.stagedAskSend": { en: "Ask for a change", es: "Pedir un cambio" },
   "perch.stagedAskPlaceholder": { en: "What should change?", es: "¿Qué debe cambiar?" },
   "perch.stagedAskPrefix": { en: "About the draft you made:", es: "Sobre el borrador que hiciste:" },
   "perch.stagedAskAdded": {
@@ -4248,6 +4249,7 @@ export const translations = {
   "shell.kindDecision": { en: "Decision", es: "Decisión" },
   "shell.kindReview": { en: "Review", es: "Revisión" },
   "shell.kindQuestion": { en: "Question", es: "Pregunta" },
+  "shell.kindDraft": { en: "Draft", es: "Borrador" },
   "shell.earlierSessions": { en: "Earlier sessions", es: "Sesiones anteriores" },
   "shell.untitledSession": { en: "Untitled session", es: "Sesión sin título" },
   "shell.liveSession": { en: "Live", es: "En curso" },
@@ -4660,6 +4662,7 @@ export const translations = {
   "widgets.needsMe.kindPlan": { en: "Plan to approve", es: "Plan por aprobar" },
   "widgets.needsMe.kindHandoff": { en: "Waiting on your phone", es: "Esperando en tu teléfono" },
   "widgets.needsMe.kindMessage": { en: "Unread message", es: "Mensaje sin leer" },
+  "widgets.needsMe.kindDraft": { en: "Draft to send", es: "Borrador por enviar" },
   // Staged sends (servers/gateway/staged/recorder.js): the notification a bridge or job draft raises.
   // Title only — the draft's recipients, subject and body never touch a notification.
   "staged.notify.title": { en: "Draft ready to review", es: "Borrador listo para revisar" },
