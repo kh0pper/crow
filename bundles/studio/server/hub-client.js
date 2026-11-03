@@ -22,7 +22,14 @@
  * result (`{ok:false, code, error}`), and mapping the status back to a code
  * here would lose the message the agent needs. So the parsed JSON is returned
  * whatever the status, and only a body that is not JSON at all becomes an
- * "unavailable" result.
+ * "unavailable" result. The one exception is code `internal`: that sentence is
+ * the gateway's own diagnosis and may name a query or a path, so it is logged
+ * here and replaced by one fixed sentence before the agent sees it.
+ *
+ * A READ carries the caller's resolved author id in the `x-studio-author`
+ * header (a mutation carries the whole author in its body), because the gateway
+ * is what scopes a Crow bot to its own project: without the author a listing
+ * cannot tell a bot from the operator's own MCP session.
  *
  * The method list is the plan's Task 9 interface — one method per agent route,
  * no more — so the tool layer above it cannot reach anything the gateway does
@@ -44,6 +51,26 @@ const NO_TOKEN = "Studio is not running in the Crow gateway yet (no agent token)
 
 /** What the agent is told when the request never reached the gateway. */
 const UNREACHABLE = "Studio could not reach the Crow gateway.";
+
+/** What the agent is told when the gateway reports its own failure. */
+const INTERNAL = "Studio hit an internal error.";
+
+/** The header a read carries its caller's agent id in (the gateway scopes by it). */
+const AUTHOR_HEADER = "x-studio-author";
+
+/**
+ * The agent id one author travels as, or null.
+ *
+ * A header value is a byte string, so anything outside printable ASCII is
+ * dropped; the ids in play are a bot id or `mcp`, both plain.
+ * @param {{id?: string}|null} author
+ * @returns {string|null}
+ */
+function authorIdOf(author) {
+  if (!author || typeof author.id !== "string") return null;
+  const id = author.id.replace(/[^\x20-\x7e]/g, "").slice(0, 80);
+  return id === "" ? null : id;
+}
 
 /** @returns {string} the Crow home the default token path lives under. */
 function crowHome() {
@@ -99,20 +126,26 @@ export function createHubClient({
    * @param {"GET"|"POST"} method
    * @param {string} path - the route path, already escaped
    * @param {object} [body] - JSON body for a POST
+   * @param {{kind?: string, id?: string}|null} [author] - the caller's author, so
+   *   a read can be scoped by the gateway exactly like a write
    * @returns {Promise<object>} the route's JSON (the hub result, on any status)
    */
-  async function call(method, path, body) {
+  async function call(method, path, body, author = null) {
     const token = readToken();
     if (!token) return unavailable(NO_TOKEN);
+
+    const headers = {
+      "x-studio-token": token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    };
+    const authorId = authorIdOf(author);
+    if (authorId) headers[AUTHOR_HEADER] = authorId;
 
     let response;
     try {
       response = await doFetch(baseUrl + path, {
         method,
-        headers: {
-          "x-studio-token": token,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
+        headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(limit),
       });
@@ -126,7 +159,14 @@ export function createHubClient({
     } catch {
       parsed = null;
     }
-    if (parsed && typeof parsed === "object") return parsed;
+    if (parsed && typeof parsed === "object") {
+      // The gateway's own diagnosis stays on this machine's log.
+      if (parsed.code === "internal") {
+        console.warn("[studio]", parsed.error ?? "internal error");
+        return { ok: false, code: "internal", error: INTERNAL };
+      }
+      return parsed;
+    }
     return unavailable(`Studio answered HTTP ${response.status} with no JSON.`);
   }
 
@@ -136,13 +176,16 @@ export function createHubClient({
   }
 
   /**
+   * The songs this caller may see. The gateway scopes a Crow bot to its own
+   * project, so `project_id` narrows the answer and can never widen it.
    * @param {{project_id?: number}} [filter]
+   * @param {{kind?: string, id?: string}|null} [author]
    * @returns {Promise<Array<{id: string, project_id: number, title: string, updated_at: string}>|object>}
    */
-  function listSongs(filter = {}) {
+  function listSongs(filter = {}, author = null) {
     const projectId = filter?.project_id;
     const query = projectId == null ? "" : `?project_id=${segment(projectId)}`;
-    return call("GET", `/api/studio/agent/songs${query}`);
+    return call("GET", `/api/studio/agent/songs${query}`, undefined, author);
   }
 
   /**
@@ -158,22 +201,25 @@ export function createHubClient({
   }
 
   /**
+   * One song's document and plain snapshot.
    * @param {string} song_id
-   * @returns {Promise<{song_id: string, snapshot: object, state: string}|object>}
+   * @param {{kind?: string, id?: string}|null} [author]
+   * @returns {Promise<{song_id: string, project_id: number, snapshot: object, state: string}|object>}
    */
-  function snapshot(song_id) {
-    return call("GET", `/api/studio/agent/songs/${segment(song_id)}/snapshot`);
+  function snapshot(song_id, author = null) {
+    return call("GET", `/api/studio/agent/songs/${segment(song_id)}/snapshot`, undefined, author);
   }
 
   /**
    * @param {string} song_id
    * @param {{limit?: number}} [options]
+   * @param {{kind?: string, id?: string}|null} [author]
    * @returns {Promise<object[]|object>} the newest entries first
    */
-  function history(song_id, options = {}) {
+  function history(song_id, options = {}, author = null) {
     const limit = options?.limit;
     const query = limit == null ? "" : `?limit=${segment(limit)}`;
-    return call("GET", `/api/studio/agent/songs/${segment(song_id)}/history${query}`);
+    return call("GET", `/api/studio/agent/songs/${segment(song_id)}/history${query}`, undefined, author);
   }
 
   /**

@@ -38,7 +38,13 @@ const STUB_CATALOGUE = async () => ({
 
 /**
  * A fake hub client: the same seven methods `createHubClient` returns.
- * @param {{command?: Function, songs?: object[]}} [options]
+ *
+ * Every method records the author it was given as well as its arguments, because
+ * the real client puts that author on the wire (a read in the `x-studio-author`
+ * header) and the gateway is what scopes a Crow bot with it.
+ * @param {{command?: Function, songs?: object[], snapshotProject?: number}} [options]
+ *   `snapshotProject` adds a project id to the snapshot answer, as the real
+ *   agent snapshot route does
  */
 function makeHub(options = {}) {
   const calls = {
@@ -54,18 +60,19 @@ function makeHub(options = {}) {
     { id: "song-1", project_id: 4, title: "Bass and drums", updated_at: "2026-01-01T00:00:00.000Z" },
   ];
   const hub = {
-    async listSongs(filter = {}) {
-      calls.listSongs.push(filter);
+    async listSongs(filter = {}, author = null) {
+      calls.listSongs.push({ ...filter, author });
       return songs;
     },
     async createSong(request = {}) {
       calls.createSong.push(request);
       return { ok: true, song_id: "song-2" };
     },
-    async snapshot(songId) {
-      calls.snapshot.push(songId);
+    async snapshot(songId, author = null) {
+      calls.snapshot.push({ song_id: songId, author });
       return {
         song_id: songId,
+        ...(options.snapshotProject == null ? {} : { project_id: options.snapshotProject }),
         snapshot: {
           meta: { title: "Bass and drums", bpm: 112, key: "A minor" },
           tracks: [],
@@ -75,8 +82,8 @@ function makeHub(options = {}) {
         state: "",
       };
     },
-    async history(songId, historyOptions = {}) {
-      calls.history.push({ song_id: songId, ...historyOptions });
+    async history(songId, historyOptions = {}, author = null) {
+      calls.history.push({ song_id: songId, ...historyOptions, author });
       return [{ id: "entry-0", seq: 1, command: "track.add", summary: "Added track \"Bass\"" }];
     },
     async command(songId, request = {}) {
@@ -276,6 +283,91 @@ test("studio_render passes seconds through and surfaces limit errors", async () 
     assert.equal(tooLong.isError, true);
     assert.match(textOf(tooLong), /300 seconds/);
   } finally {
+    await client.close();
+  }
+});
+
+test("render uses the project from the hub, not from the arguments", async () => {
+  // The snapshot route names the song's project, so that is what the render is
+  // filed under — a project id in the arguments is ignored.
+  const direct = makeHub({
+    snapshotProject: 4,
+    songs: [{ id: "song-1", project_id: 7, title: "Bass and drums", updated_at: "2026-01-01T00:00:00.000Z" }],
+  });
+  const first = makeRenderer();
+  const directClient = await connect({ hub: direct.hub, renderer: first.renderer });
+  try {
+    const result = await directClient.callTool({
+      name: "studio_render",
+      arguments: { song_id: "song-1", seconds: 2, project_id: 999 },
+    });
+    assert.notEqual(result.isError, true, textOf(result));
+    assert.equal(first.calls.length, 1);
+    assert.equal(first.calls[0].project_id, 4, "the project comes from the hub's snapshot answer");
+    assert.equal(direct.calls.listSongs.length, 0, "the snapshot was enough");
+  } finally {
+    await directClient.close();
+  }
+
+  // Without a project on the snapshot the listing decides — still the hub's
+  // answer, and still not the arguments.
+  const fallback = makeHub({
+    songs: [{ id: "song-1", project_id: 7, title: "Bass and drums", updated_at: "2026-01-01T00:00:00.000Z" }],
+  });
+  const second = makeRenderer();
+  const fallbackClient = await connect({ hub: fallback.hub, renderer: second.renderer });
+  try {
+    const result = await fallbackClient.callTool({
+      name: "studio_render",
+      arguments: { song_id: "song-1", seconds: 2, project_id: 999 },
+    });
+    assert.notEqual(result.isError, true, textOf(result));
+    assert.equal(second.calls.length, 1);
+    assert.equal(second.calls[0].project_id, 7, "the project comes from the hub's song listing");
+  } finally {
+    await fallbackClient.close();
+  }
+});
+
+test("reads carry the caller's author so the gateway can scope them", async () => {
+  const { hub, calls } = makeHub();
+  const client = await connect({
+    hub,
+    renderer: makeRenderer().renderer,
+    env: { CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "bassbot" },
+    actor: { actorFromEnv, resolveCallActor },
+  });
+  try {
+    const expected = { kind: "agent", id: "bot:bassbot", label: "Bot bassbot" };
+    await client.callTool({ name: "studio_list_songs", arguments: {} });
+    await client.callTool({ name: "studio_session_summary", arguments: { song_id: "song-1" } });
+    await client.callTool({ name: "studio_history", arguments: { song_id: "song-1" } });
+    assert.deepEqual(calls.listSongs[0].author, expected, "the listing names the bot");
+    assert.deepEqual(calls.snapshot[0].author, expected, "the snapshot names the bot");
+    assert.deepEqual(calls.history[0].author, expected, "the history names the bot");
+  } finally {
+    await client.close();
+  }
+});
+
+test("an internal refusal reaches the agent as one fixed sentence, logged in full", async () => {
+  const { hub } = makeHub();
+  hub.listSongs = async () => ({ ok: false, code: "internal", error: "SQLITE secret path" });
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  try {
+    const result = await client.callTool({ name: "studio_list_songs", arguments: {} });
+    assert.equal(result.isError, true, "an internal failure is a tool error");
+    assert.equal(textOf(result), "Studio hit an internal error.");
+    assert.equal(textOf(result).includes("SQLITE"), false, "the detail never reaches the agent");
+    assert.ok(logged.some((args) => args[0] === "[studio]"), "the detail is logged instead");
+  } finally {
+    console.warn = realWarn;
     await client.close();
   }
 });

@@ -106,6 +106,16 @@ const SAVE_FAILED = "Studio could not save that change; nothing was changed.";
 /** What a caller is told when a `cmd_id` comes back for a different change. */
 const CMD_ID_REUSED = "That command id was already used for a different change.";
 
+/**
+ * The prefix the agent transport puts on a bot's author id (see web.js).
+ * The MCP layer resolves a Crow bot as `bot:<id>` and the agent routes force
+ * `kind:"agent"`, so the author an audit line is written for is `agent:bot:<id>`.
+ */
+const AGENT_BOT_PREFIX = "agent:bot:";
+
+/** The prefix every author that came through the agent transport carries. */
+const AGENT_PREFIX = "agent:";
+
 /** Sweep the de-duplication table once it holds this many entries in total. */
 const DEDUPE_PRUNE_AT = 1000;
 
@@ -133,6 +143,31 @@ function fingerprintOf(change) {
 /** @returns {object} a refusal a caller can relay. */
 function refuse(code, error, extra = {}) {
   return { ok: false, code, error, ...extra };
+}
+
+/**
+ * The `project_audit_log` actor for one Studio author.
+ *
+ * The timeline stores actors the app's own way (`servers/research/actor.js`
+ * auditActor): a person is "local", a bot is "bot" with its BARE bot id, and an
+ * agent with no bot to name is "bot" with no id. The transport's prefix
+ * (`agent:`) is therefore stripped here, so the timeline never records a
+ * transport detail: `agent:bot:<botId>` files under `<botId>`, and the
+ * operator's own MCP session (`agent:mcp`) files under no id at all. An author
+ * that reached the hub without that prefix is a caller naming itself directly,
+ * and keeps its id exactly as it always has.
+ *
+ * @param {{kind?: string, id?: string|null}} author
+ * @returns {{actor_type: "local"|"bot", actor_id: string|null}}
+ */
+function auditActor(author) {
+  if (author?.kind === "human") return { actor_type: "local", actor_id: author.id ?? null };
+  const id = String(author?.id ?? "");
+  if (id.startsWith(AGENT_BOT_PREFIX) && id.length > AGENT_BOT_PREFIX.length) {
+    return { actor_type: "bot", actor_id: id.slice(AGENT_BOT_PREFIX.length) };
+  }
+  if (id.startsWith(AGENT_PREFIX)) return { actor_type: "bot", actor_id: null };
+  return { actor_type: "bot", actor_id: id === "" ? null : id };
 }
 
 /** @returns {object|null} the parsed JSON value, or null when the column is empty. */
@@ -440,10 +475,11 @@ export function createHub({
    */
   async function audit(project_id, author, action, song_id, payload) {
     try {
+      const actor = auditActor(author);
       await acl.appendAudit(db, {
         project_id,
-        actor_type: author.kind === "human" ? "local" : "bot",
-        actor_id: author.id,
+        actor_type: actor.actor_type,
+        actor_id: actor.actor_id,
         action,
         target: "song:" + song_id,
         payload,

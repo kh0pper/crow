@@ -19,7 +19,8 @@ tools:
 
 Studio is one song, edited live by two people at once: the operator in the dashboard and you over MCP. There is no "your copy" and no save step — every command you send lands in the one shared document, shows up in the operator's browser as you send it, and is one undoable step in the shared history.
 
-Powered by SunVox (modular synth) Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru
+Powered by SunVox (modular synth & tracker)
+Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru
 
 ## Start here
 
@@ -42,6 +43,7 @@ Powered by SunVox (modular synth) Copyright (c) 2008 - 2026, Alexander Zolotov <
 
 ## Rules you must keep
 
+- **You only see songs in your own project.** A song in another project is not there for you: it answers exactly like a song that does not exist, and a new song can only be created in your own project. Say so plainly if the operator names a song you cannot see, rather than guessing at its contents.
 - **Never touch a locked track.** A locked track is the operator's; an edit on it (or on its clips) is refused with the code `locked` and the track's name. Say so and ask, or work on another track.
 - **A clip the operator has open is refused too** (`focused`). Wait, or pick another clip.
 - **Only a person can lock or unlock a track** (`human_only`).

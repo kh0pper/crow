@@ -8,6 +8,9 @@
  * dependency by injection; one session hub is built here for the life of the
  * gateway process, on the gateway's own database client, and its broadcasts go
  * straight back into the web layer so an edit reaches every open client.
+ * The bot scope is wired here too: a Crow bot's linked project comes from
+ * `pi_bot_defs` on that same client, and the voice-bot rule from the app's own
+ * `servers/gateway/voice/crow-voice.js`.
  *
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
  * runs before the panel router, so nothing here adds one.
@@ -39,6 +42,9 @@ const { csrfTokenAccepted } = await appImport("servers/gateway/dashboard/shared/
 // socket, so `req.socket.remoteAddress` alone cannot tell a local caller from
 // a tailnet one; the agent routes ask this instead.
 const { classifyPeer } = await appImport("servers/shared/peer-class.js");
+// The one definition of Crow's voice bot, so the Studio agent API never keeps a
+// second copy of that id: the voice bot reads every song and writes none.
+const { isVoiceBotId } = await appImport("servers/gateway/voice/crow-voice.js");
 // The real project ACL module: the hub decides no access by itself.
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
@@ -63,6 +69,20 @@ web = createStudioWeb({
   auth: { isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted, classifyPeer },
   crowHome,
   bundleDir: BUNDLE_DIR,
+  // Which songs a Crow bot may see. A bot's home project is the one its
+  // `pi_bot_defs` row names — the same rule the Board applies to a bot's cards
+  // — read on the gateway's own client. Without a project it sees no song.
+  botScope: {
+    async projectOf(botId) {
+      const { rows } = await db.execute({
+        sql: "SELECT project_id FROM pi_bot_defs WHERE bot_id = ?",
+        args: [String(botId)],
+      });
+      const linked = rows[0]?.project_id;
+      return linked == null ? null : Number(linked);
+    },
+    isVoiceBot: (botId) => isVoiceBotId(String(botId)) === true,
+  },
 });
 
 // Mint the agent token at boot so a Studio MCP process started from the same

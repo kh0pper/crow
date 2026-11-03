@@ -21,6 +21,9 @@
  *     from `<CROW_HOME>/studio-agent-token`. Its author is always
  *     `kind:"agent"`, with an `agent:` prefix on the id: an MCP call is never
  *     attributed to the person, and its id can never be the human's "local".
+ *     A Crow bot among those authors is scoped to the project it is linked to:
+ *     a song outside it answers like a missing one, and Crow's voice bot reads
+ *     every song while changing none (see `botScope` and `scopeOf`).
  *
  * The WebSocket at `/api/studio/ws` follows the kiosk session-display
  * sequence: no Funnel header, an allowed network, a same-origin handshake, a
@@ -67,6 +70,16 @@ const MAX_SOCKETS_PER_TOKEN = 20;
 
 /** What a caller is told when Studio itself broke; the real error goes to the log. */
 const INTERNAL_ERROR_TEXT = "Studio hit an internal error.";
+
+/**
+ * The prefix `agentAuthor` puts on a bot's author id. The MCP layer resolves a
+ * Crow bot as `bot:<id>`, so the author the routes see is `agent:bot:<id>` and
+ * the bare `<id>` is what the bot's own record is keyed by.
+ */
+const AGENT_BOT_PREFIX = "agent:bot:";
+
+/** What Crow's voice is told when it tries to change a song it may read. */
+const READ_ONLY_TEXT = "Crow's voice can read songs but not change them; ask the project's bot.";
 
 /** HTTP status for each hub refusal code. */
 const STATUS_BY_CODE = Object.freeze({
@@ -226,6 +239,59 @@ function agentAuthor(author) {
   };
 }
 
+/**
+ * The author of one agent HTTP request.
+ *
+ * A mutation names its author in the body, which is the only place a label can
+ * travel; a read has no body, so the MCP client puts the id it resolved in the
+ * `x-studio-author` header instead. Either way the value goes through
+ * `agentAuthor`, so the author can only ever be an agent — and it is taken at
+ * its word for scope, because the token already marks a local process, which
+ * could read crow.db itself (see the agent section below).
+ * @param {object} req - the Express request
+ * @returns {{kind: "agent", id: string, label: string}}
+ */
+function agentAuthorFor(req) {
+  const body = req?.body?.author;
+  if (body && typeof body === "object") return agentAuthor(body);
+  const headerId = typeof req?.get === "function" ? String(req.get("x-studio-author") || "") : "";
+  return agentAuthor(headerId ? { id: headerId } : null);
+}
+
+/**
+ * The one answer a song a caller may not name gets.
+ *
+ * A song outside a bot's project answers with exactly this body, so it is
+ * indistinguishable from a song that does not exist and another project's
+ * songs cannot be probed.
+ * @param {string} songId
+ * @returns {{ok: false, code: "not_found", error: string}}
+ */
+function noSong(songId) {
+  return { ok: false, code: "not_found", error: `There is no song "${songId}".` };
+}
+
+/**
+ * The one answer a project a caller may not name gets (a bot may create a song
+ * only in its own project, and never learns that another one exists).
+ * @param {unknown} projectId
+ * @returns {{ok: false, code: "not_found", error: string}}
+ */
+function noProject(projectId) {
+  const id = Number(projectId);
+  const error = Number.isInteger(id) && id > 0 ? `There is no project "${id}".` : "There is no such project.";
+  return { ok: false, code: "not_found", error };
+}
+
+/**
+ * Refuse a write from Crow's voice: it reads every song and changes none.
+ * @param {object} res - the Express response
+ * @returns {void}
+ */
+function sendReadOnly(res) {
+  res.status(403).json({ ok: false, code: "read_only", error: READ_ONLY_TEXT });
+}
+
 /** @returns {number} the HTTP status for a hub refusal code. */
 function statusForCode(code) {
   return STATUS_BY_CODE[code] ?? 400;
@@ -325,6 +391,12 @@ function refuse(socket, status, text) {
  *   whether an agent caller is really on this machine
  * @param {string} [options.crowHome] - where the agent token file lives
  * @param {string} [options.bundleDir] - the bundle directory asset routes read
+ * @param {{projectOf: (botId: string) => Promise<number|null>,
+ *          isVoiceBot: (botId: string) => boolean}|null} [options.botScope]
+ *   which songs a Crow bot may see: the project linked to the bot
+ *   (`pi_bot_defs.project_id`) and whether it is Crow's voice bot. The panel
+ *   loader injects both; a caller that injects neither gets the strict
+ *   default, in which every bot has no project and therefore sees no song.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -337,6 +409,7 @@ export function createStudioWeb({
   auth,
   crowHome,
   bundleDir,
+  botScope = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -352,6 +425,12 @@ export function createStudioWeb({
   ]) {
     if (typeof auth?.[name] !== "function") throw new TypeError(`Studio web: auth.${name} is required`);
   }
+
+  // Bot scope. Both halves arrive by injection because this module owns no
+  // database and imports nothing from the gateway's own tree; without them a
+  // bot has no project at all, which is the fail-closed default.
+  const projectOfBot = typeof botScope?.projectOf === "function" ? botScope.projectOf : async () => null;
+  const isVoiceBot = typeof botScope?.isVoiceBot === "function" ? botScope.isVoiceBot : () => false;
 
   /** `<song_id> → <client_id → socket record>` for every client that said hello. */
   const rooms = new Map();
@@ -755,6 +834,18 @@ export function createStudioWeb({
     };
   }
 
+  // ---- the Studio MCP process's gate ---------------------------------------
+  //
+  // The boot token is the gate, and it is a gate for LOCAL PROCESSES, not a
+  // per-caller identity: whatever can read `<CROW_HOME>/studio-agent-token` and
+  // reach a loopback socket is the agent. An uncontained process with a shell
+  // can read that file — and such a process can open crow.db directly, so the
+  // token hands it nothing it did not already have. A contained bot has no
+  // CROW_HOME, so it has no token file and its agent calls fail closed. The
+  // author an agent names is taken at its word for the same reason; what keeps
+  // a Crow bot inside its own project is the scope check on every agent route
+  // below, not the caller's honesty about who it is.
+
   /**
    * A truly local caller, no Funnel, and the boot token — in that order.
    *
@@ -796,6 +887,60 @@ export function createStudioWeb({
   function historyOptions(query) {
     const limit = Number(query?.limit);
     return Number.isFinite(limit) && limit > 0 ? { limit } : {};
+  }
+
+  /**
+   * The song scope of one agent author, or null for an agent that is not a bot.
+   *
+   * A Crow bot is an agent whose id is `agent:bot:<botId>`. A bot sees the songs
+   * of the project it is linked to (`pi_bot_defs.project_id`) and nothing else;
+   * a bot with no project — including an unreadable one — sees nothing. Crow's
+   * voice is the one reader that sees every song, because it hands work to the
+   * right project's bot; it changes none of them (the routes refuse its writes).
+   *
+   * Every other agent — the operator's own Claude Code session, `agent:mcp` —
+   * is not a bot: the project ACL is its scope, exactly as before.
+   *
+   * @param {{id?: string}|null} author - a sanitized agent author
+   * @returns {Promise<{botId: string, projectId: number|null, voice: boolean}|null>}
+   */
+  async function scopeOf(author) {
+    const id = String(author?.id ?? "");
+    if (!id.startsWith(AGENT_BOT_PREFIX)) return null;
+    const botId = id.slice(AGENT_BOT_PREFIX.length);
+
+    let projectId = null;
+    if (botId !== "") {
+      try {
+        const linked = await projectOfBot(botId);
+        const value = Number(linked);
+        if (linked != null && linked !== "" && Number.isInteger(value) && value > 0) projectId = value;
+      } catch {
+        // A project that cannot be read is no project: the bot fails closed.
+        projectId = null;
+      }
+    }
+    return { botId, projectId, voice: botId !== "" && isVoiceBot(botId) === true };
+  }
+
+  /**
+   * The row of one song this caller may name, or null.
+   *
+   * Null is the answer for a missing song AND for a song outside a bot's
+   * project, so the routes above answer both with one 404 body. A bot with no
+   * project is settled before any query: it sees no song at all.
+   *
+   * @param {{projectId: number|null, voice: boolean}|null} scope - `scopeOf`'s
+   *   answer; null for a non-bot agent, whose scope is the project ACL
+   * @param {string} song_id
+   * @returns {Promise<{id: string, project_id: number}|null>}
+   */
+  async function agentSongRow(scope, song_id) {
+    if (scope && !scope.voice && scope.projectId == null) return null;
+    const filter = scope && !scope.voice ? { project_ids: [scope.projectId] } : {};
+    const songs = await hub.listSongs(filter);
+    if (!Array.isArray(songs)) return null;
+    return songs.find((song) => song && song.id === song_id) ?? null;
   }
 
   /**
@@ -877,61 +1022,114 @@ export function createStudioWeb({
     }));
 
     // ---- the Studio MCP process -----------------------------------------
+    //
+    // Every route resolves the caller's author first and its scope with it: a
+    // Crow bot may name only the songs of its own project, a song outside it
+    // answers with exactly the body a missing song gets, and Crow's voice reads
+    // every song and writes none. The operator's own MCP session (`agent:mcp`)
+    // is not a bot, so the project ACL remains its scope.
 
     r.get(`${AGENT}/songs`, agentGuard, handled(async (req, res) => {
-      res.json(await hub.listSongs(songFilter(req.query)));
+      const filter = songFilter(req.query);
+      const scope = await scopeOf(agentAuthorFor(req));
+      if (!scope || scope.voice) return res.json(await hub.listSongs(filter));
+      if (scope.projectId == null) return res.json([]);
+      // Another project's songs are an empty list, never an error: a bot cannot
+      // tell a project that has songs from one that does not.
+      const asked = filter.project_ids?.[0];
+      if (asked != null && asked !== scope.projectId) return res.json([]);
+      return res.json(await hub.listSongs({ project_ids: [scope.projectId] }));
     }));
 
     r.post(`${AGENT}/songs`, agentGuard, handled(async (req, res) => {
+      const author = agentAuthorFor(req);
+      const scope = await scopeOf(author);
+      if (scope?.voice) return sendReadOnly(res);
+      if (scope) {
+        const projectId = Number(req.body?.project_id);
+        if (!Number.isInteger(projectId) || projectId !== scope.projectId) {
+          // A bot may create a song only in its own project; any other project
+          // is as hidden as one that does not exist.
+          return res.status(404).json(noProject(req.body?.project_id));
+        }
+      }
       const result = await hub.createSong({
         project_id: req.body?.project_id,
         title: req.body?.title,
-        author: agentAuthor(req.body?.author),
+        author,
       });
       if (result.ok !== true) return sendResult(res, result);
       res.json({ song_id: result.song_id });
     }));
 
     r.get(`${AGENT}/songs/:id/snapshot`, agentGuard, handled(async (req, res) => {
+      const scope = await scopeOf(agentAuthorFor(req));
+      const row = await agentSongRow(scope, req.params.id);
+      if (!row) return res.status(404).json(noSong(req.params.id));
       const opened = await hub.openSong(req.params.id);
       res.json({
         song_id: req.params.id,
+        // The project a render is filed under is the hub's own answer, scoped
+        // above — never something the agent's tool arguments can name.
+        project_id: Number(row.project_id),
         snapshot: opened.snapshot,
         state: toBase64(encodeDocState(opened.doc)),
       });
     }));
 
     r.get(`${AGENT}/songs/:id/history`, agentGuard, handled(async (req, res) => {
+      const scope = await scopeOf(agentAuthorFor(req));
+      if (!(await agentSongRow(scope, req.params.id))) {
+        return res.status(404).json(noSong(req.params.id));
+      }
       res.json(await hub.history(req.params.id, historyOptions(req.query)));
     }));
 
     r.post(`${AGENT}/songs/:id/command`, agentGuard, handled(async (req, res) => {
+      const author = agentAuthorFor(req);
+      const scope = await scopeOf(author);
+      if (scope?.voice) return sendReadOnly(res);
+      if (!(await agentSongRow(scope, req.params.id))) {
+        return res.status(404).json(noSong(req.params.id));
+      }
       const result = await hub.runCommand({
         song_id: req.params.id,
         cmd_id: req.body?.cmd_id ?? null,
         command: req.body?.command,
         args: req.body?.args ?? {},
-        author: agentAuthor(req.body?.author),
+        author,
       });
       sendResult(res, result);
     }));
 
     r.post(`${AGENT}/songs/:id/undo`, agentGuard, handled(async (req, res) => {
+      const author = agentAuthorFor(req);
+      const scope = await scopeOf(author);
+      if (scope?.voice) return sendReadOnly(res);
+      if (!(await agentSongRow(scope, req.params.id))) {
+        return res.status(404).json(noSong(req.params.id));
+      }
       const result = await hub.undo({
         song_id: req.params.id,
         cmd_id: req.body?.cmd_id ?? null,
         entry_id: req.body?.entry_id,
-        author: agentAuthor(req.body?.author),
+        author,
       });
       sendResult(res, result);
     }));
 
     r.post(`${AGENT}/songs/:id/redo`, agentGuard, handled(async (req, res) => {
+      const author = agentAuthorFor(req);
+      const scope = await scopeOf(author);
+      if (scope?.voice) return sendReadOnly(res);
+      if (!(await agentSongRow(scope, req.params.id))) {
+        return res.status(404).json(noSong(req.params.id));
+      }
       const result = await hub.redo({
         song_id: req.params.id,
         cmd_id: req.body?.cmd_id ?? null,
         entry_id: req.body?.entry_id,
-        author: agentAuthor(req.body?.author),
+        author,
       });
       sendResult(res, result);
     }));

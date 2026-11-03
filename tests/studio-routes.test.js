@@ -27,6 +27,22 @@ import { createStudioWeb, ensureAgentToken } from "../bundles/studio/server/web.
 /** The project every song in these tests belongs to. */
 const PROJECT = 21;
 
+/** A second project, so a bot's own project and another one both exist. */
+const OTHER_PROJECT = 22;
+
+/** The bot the scope tests speak as, and its linked project. */
+const BOT = "bassbot";
+
+/** Crow's voice bot: it reads every song and writes none. */
+const VOICE_BOT = "crow.voice";
+
+/** The body every write from Crow's voice is refused with. */
+const READ_ONLY = Object.freeze({
+  ok: false,
+  code: "read_only",
+  error: "Crow's voice can read songs but not change them; ask the project's bot.",
+});
+
 /** The dashboard's own author for a command sent from a browser. */
 const HUMAN = { kind: "human", id: "local", label: "You" };
 
@@ -38,19 +54,39 @@ function scratchDb(t) {
 }
 
 /**
- * A project ACL that allows this project and refuses nothing. The hub maps its
- * errors exactly as it does the real module's.
+ * A project ACL that allows the two projects these tests use and records every
+ * audit line the hub writes. The hub maps its errors exactly as it does the real
+ * module's.
+ * @returns {{assertProjectExists: Function, assertCapability: Function,
+ *            appendAudit: Function, audit: object[]}}
  */
 function fakeAcl() {
+  const projects = new Set([PROJECT, OTHER_PROJECT]);
+  const audit = [];
   async function assertProjectExists(_db, projectId) {
-    if (Number(projectId) !== PROJECT) throw new AclError(`Project #${projectId} not found`, "not_found");
-    return { id: PROJECT };
+    const id = Number(projectId);
+    if (!projects.has(id)) throw new AclError(`Project #${id} not found`, "not_found");
+    return { id };
   }
   async function assertCapability(db, projectId) {
     return assertProjectExists(db, projectId);
   }
-  async function appendAudit() {}
-  return { assertProjectExists, assertCapability, appendAudit };
+  async function appendAudit(_db, row) {
+    audit.push(row);
+  }
+  return { assertProjectExists, assertCapability, appendAudit, audit };
+}
+
+/**
+ * The bot scope the panel loader injects: each bot's linked project, and which
+ * bot is Crow's voice. A bot the map does not name has no project.
+ * @param {{projects?: Record<string, number>, voice?: string[]}} [scope]
+ */
+function botScope({ projects = {}, voice = [] } = {}) {
+  return {
+    projectOf: async (botId) => projects[botId] ?? null,
+    isVoiceBot: (botId) => voice.includes(botId),
+  };
 }
 
 /** @returns {string|null} one cookie's value out of a Cookie header. */
@@ -88,9 +124,9 @@ function classifyPeer(req) {
 /**
  * Boot a gateway-shaped server for one test.
  * @param {import("node:test").TestContext} t
- * @param {{allowNetwork?: boolean}} [options]
+ * @param {{allowNetwork?: boolean, botScope?: object}} [options]
  */
-async function boot(t, { allowNetwork = true } = {}) {
+async function boot(t, { allowNetwork = true, botScope = null } = {}) {
   const db = scratchDb(t);
   await initStudioTables(db);
   const acl = fakeAcl();
@@ -118,6 +154,7 @@ async function boot(t, { allowNetwork = true } = {}) {
     },
     crowHome,
     bundleDir: null,
+    botScope,
   });
   webRef.web = web;
 
@@ -153,8 +190,8 @@ async function boot(t, { allowNetwork = true } = {}) {
 }
 
 /** Create one song with a track and a scene, through the hub. */
-async function seedSong(hub) {
-  const created = await hub.createSong({ project_id: PROJECT, title: "Session song", author: HUMAN });
+async function seedSong(hub, projectId = PROJECT, title = "Session song") {
+  const created = await hub.createSong({ project_id: projectId, title, author: HUMAN });
   assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
   for (const [command, args] of [
     ["track.add", { id: "bass", name: "Bass" }],
@@ -267,6 +304,28 @@ function refusedUpgrade(port, headers) {
 /** POST one agent command; returns the parsed body and the status. */
 async function agentCommand(base, token, songId, body) {
   const response = await fetch(`${base}/api/studio/agent/songs/${songId}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-studio-token": token },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/**
+ * GET one agent route as the caller presents itself. A read has no body, so the
+ * MCP client's author arrives in the `x-studio-author` header; without one the
+ * caller is the operator's own MCP session.
+ */
+async function agentGet(base, token, path, authorId = null) {
+  const headers = { "x-studio-token": token };
+  if (authorId) headers["x-studio-author"] = authorId;
+  const response = await fetch(`${base}${path}`, { headers });
+  return { status: response.status, body: await response.json() };
+}
+
+/** POST any other agent route (create, undo, redo). */
+async function agentPost(base, token, path, body) {
+  const response = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-studio-token": token },
     body: JSON.stringify(body),
@@ -411,14 +470,16 @@ test("agent command arrives at WS client tagged kind agent", async (t) => {
     cmd_id: "agent-1",
     command: "scene.add",
     args: { id: "intro", name: "Intro" },
-    // An agent naming itself as a person is still an agent.
-    author: { kind: "human", id: "bot:studio-test", label: "Studio test bot" },
+    // An agent naming itself as a person is still an agent. (Its id must not
+    // look like a Crow bot's `bot:<id>`, which the agent routes scope to that
+    // bot's own project — see the bot scope tests at the end of this file.)
+    author: { kind: "human", id: "studio-test", label: "Studio test bot" },
   });
   assert.equal(sent.status, 200, `the agent command was refused: ${JSON.stringify(sent.body)}`);
 
   const update = await next((msg) => msg.type === "update");
   assert.equal(update.entry.author.kind, "agent");
-  assert.equal(update.entry.author.id, "agent:bot:studio-test");
+  assert.equal(update.entry.author.id, "agent:studio-test");
   assert.equal(update.entry.author.label, "Studio test bot");
 });
 
@@ -599,4 +660,279 @@ test("token file is mode 0600", () => {
   assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.equal(readFileSync(path, "utf8").trim(), token);
   assert.equal(ensureAgentToken(crowHome), token, "a second call reads the same file back");
+});
+
+// ---- bot project scope (the operator's rule: a bot sees only its project) --
+
+/** The author id a Crow bot's MCP call arrives as. */
+const botHeader = (botId) => `bot:${botId}`;
+
+/** The body author the MCP layer sends for a bot. */
+const botAuthor = (botId) => ({ id: botHeader(botId), label: `Bot ${botId}` });
+
+test("a bot lists only its own project's songs", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
+  const token = ensureAgentToken(crowHome);
+  const mine = await seedSong(hub, PROJECT, "Mine");
+  const theirs = await seedSong(hub, OTHER_PROJECT, "Theirs");
+
+  const listed = await agentGet(base, token, "/api/studio/agent/songs", botHeader(BOT));
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.map((song) => song.id), [mine], "only the bot's own project");
+
+  // Asking for another project is an empty list, never an error: the bot
+  // cannot tell a project with songs from one without.
+  const asked = await agentGet(
+    base,
+    token,
+    `/api/studio/agent/songs?project_id=${OTHER_PROJECT}`,
+    botHeader(BOT),
+  );
+  assert.equal(asked.status, 200);
+  assert.deepEqual(asked.body, []);
+
+  // The same token with no bot author is the operator's MCP session: full access.
+  const operator = await agentGet(base, token, "/api/studio/agent/songs");
+  assert.deepEqual(operator.body.map((song) => song.id).sort(), [mine, theirs].sort());
+});
+
+test("a bot cannot read, edit, undo or render-snapshot a song in another project (404 like a missing song)", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
+  const token = ensureAgentToken(crowHome);
+  const mine = await seedSong(hub, PROJECT, "Mine");
+  const theirs = await seedSong(hub, OTHER_PROJECT, "Theirs");
+  const missing = "no-such-song";
+  const author = botAuthor(BOT);
+  /** The body the hub itself answers a song id it does not have with. */
+  const absentBody = (id) => ({ ok: false, code: "not_found", error: `There is no song "${id}".` });
+  const before = (await hub.openSong(theirs)).snapshot;
+
+  // The reads: a hidden song answers exactly like a song that does not exist.
+  for (const tail of ["snapshot", "history"]) {
+    const hidden = await agentGet(base, token, `/api/studio/agent/songs/${theirs}/${tail}`, botHeader(BOT));
+    const absent = await agentGet(base, token, `/api/studio/agent/songs/${missing}/${tail}`, botHeader(BOT));
+    assert.equal(hidden.status, 404, `${tail}: a song in another project is not readable`);
+    assert.equal(absent.status, 404, `${tail}: a missing song is a 404`);
+    assert.deepEqual(hidden.body, absentBody(theirs), `${tail}: the body a missing song gets`);
+    assert.deepEqual(absent.body, absentBody(missing), `${tail}: the body a missing song gets`);
+  }
+
+  // The writes: the same body, and nothing applied.
+  const command = await agentCommand(base, token, theirs, {
+    cmd_id: "bot-hidden-1",
+    command: "scene.add",
+    args: { id: "secret", name: "Secret" },
+    author,
+  });
+  const commandMissing = await agentCommand(base, token, missing, {
+    cmd_id: "bot-hidden-2",
+    command: "scene.add",
+    args: { id: "secret", name: "Secret" },
+    author,
+  });
+  assert.equal(command.status, 404);
+  assert.deepEqual(command.body, absentBody(theirs));
+  assert.deepEqual(commandMissing.body, absentBody(missing));
+
+  for (const [kind, cmd_id] of [["undo", "bot-hidden-undo"], ["redo", "bot-hidden-redo"]]) {
+    const hidden = await agentPost(base, token, `/api/studio/agent/songs/${theirs}/${kind}`, {
+      cmd_id,
+      entry_id: "any-entry",
+      author,
+    });
+    const absent = await agentPost(base, token, `/api/studio/agent/songs/${missing}/${kind}`, {
+      cmd_id: `${cmd_id}-2`,
+      entry_id: "any-entry",
+      author,
+    });
+    assert.equal(hidden.status, 404, `${kind}: refused`);
+    assert.deepEqual(hidden.body, absentBody(theirs), `${kind}: the body a missing song gets`);
+    assert.deepEqual(absent.body, absentBody(missing), `${kind}: the body a missing song gets`);
+  }
+
+  const after = (await hub.openSong(theirs)).snapshot;
+  assert.deepEqual(after, before, "no step landed on the other project's song");
+
+  // The bot's own project keeps working, reads and writes alike.
+  const ownSnapshot = await agentGet(base, token, `/api/studio/agent/songs/${mine}/snapshot`, botHeader(BOT));
+  assert.equal(ownSnapshot.status, 200);
+  assert.equal(ownSnapshot.body.project_id, PROJECT, "the snapshot names the song's own project");
+  const ownHistory = await agentGet(base, token, `/api/studio/agent/songs/${mine}/history`, botHeader(BOT));
+  assert.equal(ownHistory.status, 200);
+  const ownCommand = await agentCommand(base, token, mine, {
+    cmd_id: "bot-own-1",
+    command: "scene.add",
+    args: { id: "bridge", name: "Bridge" },
+    author,
+  });
+  assert.equal(ownCommand.status, 200, `the bot's own song was refused: ${JSON.stringify(ownCommand.body)}`);
+});
+
+test("a bot cannot create a song in another project", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
+  const token = ensureAgentToken(crowHome);
+  const author = botAuthor(BOT);
+
+  const foreign = await agentPost(base, token, "/api/studio/agent/songs", {
+    project_id: OTHER_PROJECT,
+    title: "Sneaky",
+    author,
+  });
+  assert.equal(foreign.status, 404);
+  assert.equal(foreign.body.ok, false);
+  assert.equal(foreign.body.code, "not_found");
+  assert.deepEqual(await hub.listSongs({ project_ids: [OTHER_PROJECT] }), [], "nothing was created elsewhere");
+
+  const own = await agentPost(base, token, "/api/studio/agent/songs", {
+    project_id: PROJECT,
+    title: "Mine",
+    author,
+  });
+  assert.equal(own.status, 200, `the bot's own project was refused: ${JSON.stringify(own.body)}`);
+  assert.match(own.body.song_id, /^[0-9a-f-]{36}$/);
+});
+
+test("a bot with no project sees nothing", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: {} }) });
+  const token = ensureAgentToken(crowHome);
+  const songId = await seedSong(hub, PROJECT);
+  const lonely = "lonelybot";
+
+  const listed = await agentGet(base, token, "/api/studio/agent/songs", botHeader(lonely));
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body, [], "a bot with no project has no songs");
+
+  const snapshot = await agentGet(base, token, `/api/studio/agent/songs/${songId}/snapshot`, botHeader(lonely));
+  assert.equal(snapshot.status, 404);
+  assert.equal(snapshot.body.code, "not_found");
+
+  const command = await agentCommand(base, token, songId, {
+    cmd_id: "lonely-1",
+    command: "scene.add",
+    args: { id: "x", name: "X" },
+    author: botAuthor(lonely),
+  });
+  assert.equal(command.status, 404);
+
+  const created = await agentPost(base, token, "/api/studio/agent/songs", {
+    project_id: PROJECT,
+    title: "Not mine",
+    author: botAuthor(lonely),
+  });
+  assert.equal(created.status, 404);
+  const titles = (await hub.listSongs({})).map((song) => song.title);
+  assert.deepEqual(titles, ["Session song"], "the bot's neighbour gained no song");
+});
+
+test("Crow's voice reads every song but cannot change one", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: {}, voice: [VOICE_BOT] }) });
+  const token = ensureAgentToken(crowHome);
+  const mine = await seedSong(hub, PROJECT, "Mine");
+  const theirs = await seedSong(hub, OTHER_PROJECT, "Theirs");
+  const author = botAuthor(VOICE_BOT);
+  const before = (await hub.openSong(theirs)).snapshot;
+
+  const listed = await agentGet(base, token, "/api/studio/agent/songs", botHeader(VOICE_BOT));
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.map((song) => song.id).sort(), [mine, theirs].sort(), "every song");
+
+  for (const tail of ["snapshot", "history"]) {
+    const read = await agentGet(base, token, `/api/studio/agent/songs/${theirs}/${tail}`, botHeader(VOICE_BOT));
+    assert.equal(read.status, 200, `the voice bot reads ${tail} of any song`);
+  }
+
+  const command = await agentCommand(base, token, theirs, {
+    cmd_id: "voice-1",
+    command: "scene.add",
+    args: { id: "x", name: "X" },
+    author,
+  });
+  assert.equal(command.status, 403);
+  assert.deepEqual(command.body, READ_ONLY);
+
+  for (const [kind, cmd_id] of [["undo", "voice-undo"], ["redo", "voice-redo"]]) {
+    const refused = await agentPost(base, token, `/api/studio/agent/songs/${theirs}/${kind}`, {
+      cmd_id,
+      entry_id: "any-entry",
+      author,
+    });
+    assert.equal(refused.status, 403, `${kind}: refused`);
+    assert.deepEqual(refused.body, READ_ONLY);
+  }
+
+  const created = await agentPost(base, token, "/api/studio/agent/songs", {
+    project_id: PROJECT,
+    title: "Voice song",
+    author,
+  });
+  assert.equal(created.status, 403);
+  assert.deepEqual(created.body, READ_ONLY);
+
+  const after = (await hub.openSong(theirs)).snapshot;
+  assert.deepEqual(after, before, "the voice bot changed nothing");
+});
+
+test("the operator's MCP (no bot) keeps full access", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
+  const token = ensureAgentToken(crowHome);
+  const theirs = await seedSong(hub, OTHER_PROJECT, "Theirs");
+  const operator = { id: "mcp", label: "Agent (MCP)" };
+
+  const listed = await agentGet(base, token, "/api/studio/agent/songs", "mcp");
+  assert.deepEqual(listed.body.map((song) => song.id), [theirs]);
+
+  const snapshot = await agentGet(base, token, `/api/studio/agent/songs/${theirs}/snapshot`, "mcp");
+  assert.equal(snapshot.status, 200);
+  assert.equal(snapshot.body.project_id, OTHER_PROJECT);
+
+  const command = await agentCommand(base, token, theirs, {
+    cmd_id: "operator-1",
+    command: "scene.add",
+    args: { id: "intro", name: "Intro" },
+    author: operator,
+  });
+  assert.equal(command.status, 200, `the operator's step was refused: ${JSON.stringify(command.body)}`);
+
+  const created = await agentPost(base, token, "/api/studio/agent/songs", {
+    project_id: OTHER_PROJECT,
+    title: "Operator's song",
+    author: operator,
+  });
+  assert.equal(created.status, 200, `the operator could not create a song: ${JSON.stringify(created.body)}`);
+});
+
+test("an audit line keeps a bot's bare id and no id for the operator's MCP", async (t) => {
+  const { base, hub, crowHome, acl } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
+  const token = ensureAgentToken(crowHome);
+  const songId = await seedSong(hub, PROJECT);
+
+  const bot = await agentCommand(base, token, songId, {
+    cmd_id: "audit-bot-1",
+    command: "scene.add",
+    args: { id: "bot-scene", name: "Bot scene" },
+    author: botAuthor(BOT),
+  });
+  assert.equal(bot.status, 200, `the bot's step was refused: ${JSON.stringify(bot.body)}`);
+
+  const operator = await agentCommand(base, token, songId, {
+    cmd_id: "audit-mcp-1",
+    command: "scene.add",
+    args: { id: "mcp-scene", name: "MCP scene" },
+    author: { id: "mcp", label: "Agent (MCP)" },
+  });
+  assert.equal(operator.status, 200, `the operator's step was refused: ${JSON.stringify(operator.body)}`);
+
+  const botRows = acl.audit.filter((row) => row.actor_type === "bot" && row.actor_id === BOT);
+  assert.equal(botRows.length, 1, "the bot's step is filed under its bare bot id");
+  const agentRows = acl.audit.filter((row) => row.actor_type === "bot" && row.actor_id === null);
+  assert.equal(agentRows.length, 1, "the operator's MCP session has no bot id");
+  assert.ok(
+    acl.audit.some((row) => row.actor_type === "local" && row.actor_id === "local"),
+    "the operator's own dashboard steps stay local",
+  );
+  assert.equal(
+    acl.audit.some((row) => String(row.actor_id ?? "").startsWith("agent:")),
+    false,
+    "the transport's prefix never reaches the timeline",
+  );
 });

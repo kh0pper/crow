@@ -18,6 +18,11 @@
  * agent HTTP routes force `kind:"agent"` again on their side, so a compromised
  * MCP process still cannot write as the operator.
  *
+ * Every call, reads included, carries that author to the gateway, because the
+ * gateway is what scopes a Crow bot to its own project: the tool arguments
+ * never pick a project, and a song outside the bot's project answers like a
+ * song that does not exist.
+ *
  * ## The three kinds of tool
  *
  *   - one per non-humanOnly registry command, `studio_` + the id with dots
@@ -58,6 +63,9 @@ const SUMMARY_PAGE_SIZE = 50;
 
 /** The most history entries one call returns. */
 const HISTORY_LIMIT_MAX = 50;
+
+/** What the agent is told when Studio itself broke; the detail stays in the log. */
+const INTERNAL_TEXT = "Studio hit an internal error.";
 
 /**
  * The agent author for one resolved call actor.
@@ -111,7 +119,7 @@ function errorResult(text) {
 /** @returns {string} a thrown error's message, never an empty string. */
 function errorText(err) {
   const message = err && typeof err.message === "string" ? err.message.trim() : "";
-  return message === "" ? "Studio hit an internal error." : message;
+  return message === "" ? INTERNAL_TEXT : message;
 }
 
 /**
@@ -126,16 +134,26 @@ function isRefusal(value) {
 
 /**
  * The text a hub refusal becomes: its own sentence, then its code.
+ *
+ * Code `internal` is the one refusal whose sentence is NOT for the agent: the
+ * gateway has already told the agent nothing it could act on, and the detail
+ * — a query, a path, a stack — could name this instance's own files. That
+ * detail is logged here, where the operator can read it, and the agent gets one
+ * fixed sentence instead.
+ *
  * @param {{ok?: boolean, code?: string, error?: string}|null} result
  * @returns {string}
  */
 export function refusalText(result) {
+  const code = result && typeof result.code === "string" ? result.code : "";
+  if (code === "internal") {
+    console.warn("[studio]", result.error ?? "internal error");
+    return INTERNAL_TEXT;
+  }
   const text = result && typeof result.error === "string" && result.error !== ""
     ? result.error
     : "Studio refused the call.";
-  return result && typeof result.code === "string" && result.code !== ""
-    ? `${text} (${result.code})`
-    : text;
+  return code !== "" ? `${text} (${code})` : text;
 }
 
 /**
@@ -184,18 +202,23 @@ export function sessionSummary(songId, snapshot, page = 1) {
 /**
  * The project a song belongs to, for a render (which is filed under it).
  *
- * The agent snapshot route answers with the song's document but not its project,
- * so the song list is the second source; a song in neither is not a song this
- * caller may see.
+ * The project comes from the hub and only from the hub: the song's snapshot
+ * route answers with it (scoped to the caller there), and the song listing is
+ * the fallback for a song the snapshot route does not name one for. The tool's
+ * own arguments are never consulted — a render cannot be filed into a project
+ * the caller asked for instead of the one the song is in.
+ *
  * @param {object} hub - the hub client
  * @param {string} songId
  * @param {object} opened - the snapshot route's answer
+ * @param {{kind: string, id: string, label: string}} author - the call's author,
+ *   so the listing is scoped exactly like every other read
  * @returns {Promise<number>}
  */
-async function projectIdFor(hub, songId, opened) {
+async function projectIdFor(hub, songId, opened, author) {
   const direct = Number(opened?.project_id ?? opened?.snapshot?.project_id);
   if (Number.isInteger(direct) && direct > 0) return direct;
-  const songs = await hub.listSongs({});
+  const songs = await hub.listSongs({}, author);
   if (isRefusal(songs)) throw new Error(refusalText(songs));
   const row = Array.isArray(songs) ? songs.find((song) => song && song.id === songId) : null;
   const projectId = Number(row?.project_id);
@@ -304,10 +327,10 @@ export function createStudioServer({
         project_id: z.number().int().positive().optional().describe("only songs in this project"),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const filter = args.project_id == null ? {} : { project_id: args.project_id };
-        const songs = await hub.listSongs(filter);
+        const songs = await hub.listSongs(filter, authorFor(extra));
         if (isRefusal(songs)) return errorResult(refusalText(songs));
         return textResult(songs);
       } catch (err) {
@@ -353,9 +376,9 @@ export function createStudioServer({
         page: z.number().int().min(1).optional().describe("clip page, 50 clips each; default 1"),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        const opened = await hub.snapshot(args.song_id);
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
         if (isRefusal(opened)) return errorResult(refusalText(opened));
         if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
         return textResult(sessionSummary(args.song_id, opened.snapshot, args.page ?? 1));
@@ -376,9 +399,9 @@ export function createStudioServer({
         clip_id: z.string().min(1).describe("the clip to read"),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        const opened = await hub.snapshot(args.song_id);
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
         if (isRefusal(opened)) return errorResult(refusalText(opened));
         const clip = opened?.snapshot?.clips?.[args.clip_id] ?? null;
         if (!clip) return errorResult(`There is no clip "${args.clip_id}" in this song.`);
@@ -402,10 +425,10 @@ export function createStudioServer({
         limit: z.number().int().min(1).max(HISTORY_LIMIT_MAX).optional().describe("how many entries, at most 50; default 50"),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const limit = args.limit ?? HISTORY_LIMIT_MAX;
-        const entries = await hub.history(args.song_id, { limit });
+        const entries = await hub.history(args.song_id, { limit }, authorFor(extra));
         if (isRefusal(entries)) return errorResult(refusalText(entries));
         return textResult(entries);
       } catch (err) {
@@ -489,10 +512,11 @@ export function createStudioServer({
     },
     async (args, extra) => {
       try {
-        const opened = await hub.snapshot(args.song_id);
+        const author = authorFor(extra);
+        const opened = await hub.snapshot(args.song_id, author);
         if (isRefusal(opened)) return errorResult(refusalText(opened));
         if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
-        const projectId = await projectIdFor(hub, args.song_id, opened);
+        const projectId = await projectIdFor(hub, args.song_id, opened, author);
         const out = await renderer.render({
           song_id: args.song_id,
           project_id: projectId,
@@ -500,7 +524,7 @@ export function createStudioServer({
           scene_id: args.scene_id ?? null,
           clip_id: args.clip_id ?? null,
           seconds: args.seconds,
-          author: authorFor(extra),
+          author,
         });
         return textResult({
           url: out.url,
