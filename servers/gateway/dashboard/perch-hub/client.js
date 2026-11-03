@@ -3,6 +3,8 @@ import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchSecretCardJs } from "./secret-card.js";
+import { perchSecretWarnJs } from "./secret-warn.js";
+import { perchConnectCardJs } from "./connect-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
@@ -2900,6 +2902,9 @@ export function perchHubJs(lang = "en") {
   function draftNote(show){ var n=el('perch-draft-note'); if(n){ n.hidden=!show; n.textContent=show?DRAFT_MAYBE_SENT:''; } }
   function draftSave(){
     draftCancel();
+    /* Credential card (spec 10.3): while the paste warning is open nothing is written to
+       sessionStorage — the text on screen is the one the operator has not decided about. */
+    if(secWarnOpenNow()) return;
     var sid=current.sid, input=el('perch-input'), store=draftStore();
     if(!sid||!input||!store) return;
     var v=String(input.value==null?'':input.value);
@@ -2961,25 +2966,44 @@ export function perchHubJs(lang = "en") {
   bindOnce(window,'pagehide','draftPagehide',function(){ if(live()) draftSave(); });
 
   function send(){
-    histSettledIdle=false;                 /* a turn the operator starts is a new turn */
     var input=el('perch-input'); if(!input) return;
     var text=input.value;
     if(!sendable(text)||!current.sid) return;
+    /* Credential card (spec 10.2/10.3): a message that looks like it holds a password goes
+       nowhere until the operator chooses. Nothing is sent, no draft is written, and the
+       choice applies to THIS send only. */
+    if(secWarnOpenNow()) return;                      /* one warning at a time */
+    if(secretWarnNeeded(text)){ secretWarnDraw(text); return; }
+    sendNow(text,null);
+  }
+
+  /* The body of a send, after the paste gate. ack is the operator's answer to the warning:
+     "strip" (send anyway; the server removes what it finds) or "keep" (it's not a secret).
+     null on an ordinary send. */
+  function sendNow(text,ack){
+    histSettledIdle=false;                 /* a turn the operator starts is a new turn */
+    var input=el('perch-input'); if(!input) return;
+    if(!sendable(text)||!current.sid) return;
     var mySid=current.sid;
-    appendMessage('user','you',text);      /* echo before the round trip */
+    /* Credential card: on "Send anyway" the server strips the secret, and nothing on this side
+       may keep it either: the echo, the in-flight draft in sessionStorage and the retry record
+       all hold the stripped text. Only the request body carries the original. */
+    var shown=(ack==='strip')?secStrip(text).text:text;
+    appendMessage('user','you',shown);     /* echo before the round trip */
     /* 23a: an echo drawn before the history lands is settled against it. */
-    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild,sentAt:Date.now()}); }
+    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:shown,row:trE.lastElementChild,sentAt:Date.now()}); }
     input.value='';
     draftCancel();                         /* Shell P2: the draft stays stored until the send succeeds */
     draftNote(false);
     /* Shell P2: the words are in flight. Stored as the draft too, so a reload
        before the answer restores them (with a note) instead of losing them. */
     sendingNow[mySid]=true;
-    inflightMark(mySid,text);
+    inflightMark(mySid,shown);
     var dst=draftStore();
-    if(dst){ try{ dst.setItem(DRAFT_PREFIX+mySid,String(text)); }catch(e){} }
+    if(dst){ try{ dst.setItem(DRAFT_PREFIX+mySid,String(shown)); }catch(e){} }
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
+    if(ack) body.secretAck=String(ack);      /* the credential card's per-send choice */
     hideCmdMenu();                         /* Wave 3: a sent command closes its own menu */
     /* Wave 1: non-image uploads ride the message as PATHS — the file is
        already in the session's uploadsDir on this machine, and pi's read
@@ -2997,7 +3021,7 @@ export function perchHubJs(lang = "en") {
     if(pendingImages.length) body.images=pendingImages;
     pendingImages=[];
     pendingFilePaths=[];
-    var rec={sid:mySid,text:text,counted:false,failed:false};
+    var rec={sid:mySid,text:shown,counted:false,failed:false};
     lastSent=rec;
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
       /* B5: a 2xx means pi took this message — every older unsent message
@@ -3009,8 +3033,12 @@ export function perchHubJs(lang = "en") {
          the words come back so a reload cannot drop them. */
       delete sendingNow[mySid];
       if(r.ok||r.status>0) inflightClear(mySid);   /* answered; a lost connection (0) stays ambiguous */
-      if(r.ok) draftClear(mySid,text); else draftKeepUnsent(mySid,text);
+      if(r.ok) draftClear(mySid,shown); else draftKeepUnsent(mySid,shown);
       if(current.sid!==mySid) return;
+      /* Credential card: the server removed a pasted secret before the engine saw it. The note
+         carries a count, never the value. */
+      var removedNote=secretRemovedNote(r.j&&r.j.removed);
+      if(r.ok&&removedNote) appendNote(removedNote);
       var code=r.j&&r.j.error;
       /* Only a REAL turn race means "a turn is running" — every other 409
          (pi_gone above all: the bot's child died before the turn started) was
@@ -3496,6 +3524,11 @@ export function perchHubJs(lang = "en") {
       maybeCmdMenu(this.value);            /* Wave 3: '/' opens the command menu */
       draftSaveSoon();                     /* Shell P2: the unsent draft survives a reload */
     };
+    /* Credential card: a paste is checked at once, before Send. The default action fills the
+       field after this task, hence the 0 ms hop. */
+    composerInput.addEventListener('paste',function(){
+      setTimeout(function(){ if(live()) secretWarnFromComposer(); },0);
+    });
   }
   el('perch-back').onclick=function(){ location.hash=''; };
   /* New mode with a filed session: Back goes to its project's home instead.
@@ -4167,6 +4200,10 @@ export function perchHubJs(lang = "en") {
       if(bad) rec.group.failed++;
       toolGroupRefresh(rec.group);
     }
+    /* Project services (credential card Task 4): a tool result that says the service is not
+       connected in this project gets the Connect card, whose link opens that project's connect
+       sheet. Renders nothing for any other result (and nothing when the ids fail validation). */
+    if(d&&d.resultText!=null&&typeof renderConnectCard==='function') renderConnectCard(d.resultText);
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
   }
 
@@ -4347,6 +4384,8 @@ ${perchPhoneCardJs(lang)}
 
 ${perchArtifactCardJs(lang)}
 ${perchSecretCardJs(lang)}
+${perchSecretWarnJs(lang)}
+${perchConnectCardJs(lang)}
 ${perchCardChipJs(lang)}
 ${perchBriefingJs(lang)}
 ${sessionCardsJs(lang)}

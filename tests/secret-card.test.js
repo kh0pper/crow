@@ -311,6 +311,33 @@ test("stop and archive forget the session's request and notes", async () => {
   assert.equal((await h.engine.get(s2.sessionId)).state, "awake", "archiving never touches the child");
 });
 
+test("an ask settling while a password card is open keeps the needs-you open", async () => {
+  const s = await session("m2-bot");
+  const { id } = openCard(s, "m2-bot", "M2 site");
+  // The password card's "needs you" (attentionForAsk) writes one grouped row for this chat.
+  const groupKey = "perch-ask:" + s.sessionId;
+  const groupRow = async () => (await h.db.execute({ sql: "SELECT id, is_read, body FROM notifications WHERE source = ?", args: [groupKey] })).rows[0];
+  await h.tick(20);
+  assert.ok(await groupRow(), "the password card's needs-you row exists");
+  assert.equal(Number((await groupRow()).is_read), 0, "and it is open");
+
+  // An ask card arrives and the operator answers it while the password card still waits.
+  h.pi().emit({ type: "extension_ui_request", id: "req-m2", method: "select", title: "Which one?", options: ["a", "b"] });
+  await h.tick();
+  assert.equal(h.engine._sessionRecordForTest(s.sessionId).pendingUi.requestId, "req-m2", "the ask is live");
+  assert.deepEqual(await h.engine.answer(s.sessionId, "req-m2", { value: "a" }), { ok: true });
+  await h.tick(20);
+  // M2: both cards share `perch-ask:<sid>`, so settling the ask used to mark this row read.
+  assert.equal(Number((await groupRow()).is_read), 0, "answering the ask must not close the password card's needs-you");
+
+  // Once the password card itself closes, the group does close (endSecretCard's own path).
+  store.cancelSecret(id, s.sessionId);
+  store.emitSecretCard(s.sessionId, { type: "secret_request", id, label: "M2 site", state: "closed" }, { botId: "m2-bot" });
+  await h.tick(20);
+  assert.equal(Number((await groupRow()).is_read), 1, "the card closing closes the group");
+  store.takeSecretNotes(s.sessionId);
+});
+
 test("en and es", () => {
   const keys = ["perch.secretTitle", "perch.secretTitleNoLabel", "perch.secretAsks", "perch.secretHelp", "perch.secretEnter",
     "perch.secretSave", "perch.secretNotNow", "perch.secretField", "perch.secretSaved", "perch.secretClosed",
@@ -323,7 +350,8 @@ test("en and es", () => {
   assert.equal(t("perch.secretHelp", "en"), "A browser can't block screenshots; enter this where no one is watching.");
   assert.equal(t("perch.secretSaved", "en"), "Saved. Nothing about it reaches the bot except its name.");
   assert.equal(t("perch.secretTitle", "en"), "🔒 Password for {label}");
-  assert.equal(t("perch.secretAsks", "en"), "{bot} asks for: {label}");
+  assert.equal(t("perch.secretAsks", "en"), "Asked by {bot}");
+  assert.equal(t("perch.secretAsks", "es"), "Preguntado por {bot}");
   for (const lang of ["en", "es"]) {
     const js = perchHubJs(lang);
     assert.ok(js.includes(t("perch.secretEnter", lang).replace(/'/g, "\\'")), lang + " carries its own strings");

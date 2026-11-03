@@ -1221,14 +1221,19 @@ export function createInteractiveEngine({
     const had = !!(s.pendingUi || s.expiredAsk);
     settleAskExpiry(s);
     s.expiredAsk = null;
-    if (had) closeAttention(s);
+    // M2 (final review): the password card uses this same attention group (`perch-ask:<sid>`),
+    // so an ask settling must not close a "needs you" the still-open card needs. Mirrors
+    // endSecretCard's own `!s.pendingUi` guard. The countdown resumes when the card closes.
+    if (had && !s.secretCard) closeAttention(s);
   }
 
   /** A live question died unanswered with its child (exit, abandon): drop it
    * and close its group, so the session's next question pushes again
    * instead of folding silently into a row about a question that is gone. */
   function dropAsk(s) {
-    if (s.pendingUi) closeAttention(s);
+    // M2 (final review): same group key as the password card — a question dying with its child
+    // must not close the card's "needs you" while the card still waits on the operator.
+    if (s.pendingUi && !s.secretCard) closeAttention(s);
     settleAskExpiry(s);
     clearAsk(s);
   }

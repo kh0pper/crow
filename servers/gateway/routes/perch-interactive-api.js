@@ -46,6 +46,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
+import { stripSecrets } from "../../shared/secret-detect.js";
 import { isBodyParserError } from "../body-error-handler.js";
 import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
 import { SHOT_KEEP } from "../browser-tile/shots.js";
@@ -120,6 +121,31 @@ const IMAGE_MESSAGE_BYTES_CAP = 2 * 1024 * 1024;
 
 /** POST /interactive/:sid/files: base64 JSON body, cap 5 MB post-decode. */
 const UPLOAD_BYTES_CAP = 5 * 1024 * 1024;
+
+/**
+ * Credential card (spec §10.2, plan Task 4): the fixed note the model sees, once, when the
+ * operator's message had a secret removed before the engine got it. This is the plan's exact
+ * wording — the model gets fixed gateway text, never the removed value and never the operator's
+ * own words about it.
+ */
+const SECRET_STRIPPED_NOTE =
+  "[The operator's message had a secret in it, and it was removed. Suggest they change that password.]";
+
+/**
+ * `text` with every secret-looking span replaced by "[secret removed]", unless the operator
+ * chose "It's not a secret" for THIS send (`secretAck === "keep"`). Any other value — absent,
+ * "strip", garbage — strips.
+ *
+ * The stripped text is never logged, echoed or returned by any caller: the response carries the
+ * COUNT only, and the errors this router can answer are fixed codes.
+ * @returns {{text: string, removed: number}}
+ */
+function stripIncoming(text, body) {
+  if (body && body.secretAck === "keep") return { text, removed: 0 };
+  const { text: clean, removed } = stripSecrets(text);
+  if (!removed) return { text, removed: 0 };
+  return { text: SECRET_STRIPPED_NOTE + "\n\n" + clean, removed };
+}
 
 /** Extensions the workspace route serves inline (never `attachment`). */
 const WORKSPACE_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
@@ -607,6 +633,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+    // Credential card (spec §10.2): a pasted secret never reaches the engine. The strip runs
+    // BEFORE anything reads the text (note claims included), and the response carries only how
+    // many spans were replaced — never the text itself.
+    const incoming = stripIncoming(message, body);
     // Track 3 Task 9: images the drawer attached via POST .../files, sent on
     // the NEXT message (see normalizeMessageImages' doc — pi's own
     // ImageContent shape, threaded verbatim to promptTurn).
@@ -639,9 +669,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const eng = resolveEngine();
       // "[Crow] " marks a gateway line, as offerNoteLine does.
       const lines = [...secretLines.map((l) => "[Crow] " + l), ...notes.lines];
-      const text = lines.length ? lines.join("\n") + "\n\n" + message : message;
+      const text = lines.length ? lines.join("\n") + "\n\n" + incoming.text : incoming.text;
       const result = await eng.message(sid, text, images, { principal });
-      res.status(202).json({ turnId: result.turnId });
+      res.status(202).json({ turnId: result.turnId, removed: incoming.removed });
     } catch (err) {
       returnSecretNotes(sid, secretLines);
       if (notes.claims.length) {
@@ -663,6 +693,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+    // Credential card (spec §10.2): a steer is the operator's text reaching the same child, so
+    // it gets the same strip and the same count-only answer (silently skipping it would put a
+    // pasted secret into the turn the drawer was told was safe).
+    const incoming = stripIncoming(message, body);
     let pdb = null;
     try {
       // Project services (fix round 1): a steer drives the child's live turn, so the turn's
@@ -670,8 +704,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       let principal = "other";
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
-      const result = await eng.steer(sid, message, { principal });
-      res.json(result);
+      const result = await eng.steer(sid, incoming.text, { principal });
+      res.json({ ...(result && typeof result === "object" ? result : {}), removed: incoming.removed });
     } catch (err) {
       mapEngineError(res, err);
     } finally {

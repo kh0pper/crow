@@ -1601,21 +1601,25 @@ test("classic render is unchanged", async () => {
   // Re-pinned for R1.2 PR 4: the Session section gained the hidden summary
   // card with Forget (both modes share the section, by design).
   // Re-pinned for the credential card: the Chat section gained the empty #perch-secret pane
-  // (both modes share it: a password card must show in classic Perch too).
+  // (both modes share it: a password card must show in classic Perch too) and the empty
+  // #perch-secret-warn pane above the composer (the paste warning, spec 10.3).
   const PINS = {
-    en: { tabs: "43c98153e4b058707336d7f74587337525e96354a4c7b03f8414bf5c0c51027d",
+    en: { tabs: "fd8d14ac30dbbba49c787cffd3c78916f25a19bc503b54e8dcbed66170a52203",
       head: "048286e387d9721effbaa09b37155f48a4df2b60c5b157ef27b745061ff43096" },
-    es: { tabs: "0c696013255dc6556762ee5fd025152f46d74d27e5954a6ba2b70552a21ad2a0",
+    es: { tabs: "0b0498d0e23fd0eac1c81f274e5ffc10f00d0b988c49fb69044307ce8ce2bfdb",
       head: "f2a1635b13058fef450e71b7a0cf277d0ab112469bc1717a5cd586a6f7f014b6" },
   };
+  const actual = {};
   for (const lang of ["en", "es"]) {
+    actual[lang] = {};
     for (const html of [await renderPerch(lang), await renderPerch(lang, {})]) {
-      assert.equal(sha(classicTabsSlice(html)), PINS[lang].tabs, `${lang}: classic tab bar + sections`);
+      actual[lang].tabs = sha(classicTabsSlice(html));
       const head = html.slice(html.indexOf('<div class="perch-head">'), html.indexOf('<nav id="perch-tabs"'));
-      assert.equal(sha(head), PINS[lang].head, `${lang}: classic head`);
+      actual[lang].head = sha(head);
       assert.doesNotMatch(html, /id="(perch-session-sheet|perch-ident-btn|perch-sheet-tabs)"/, "no sheet markup in classic");
     }
   }
+  assert.deepEqual(actual, PINS);
 });
 
 test("new mode: no tab bar, sections inside the sheet with the same ids", async () => {

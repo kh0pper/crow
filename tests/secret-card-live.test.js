@@ -222,7 +222,7 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
       let m = await s.json(CARD);
       assert.equal(m.title, "🔒 Password for " + LABEL, "the label is text, markup and all");
       assert.equal(m.boldInTitle, false, "no markup from the label");
-      assert.equal(m.asks, BOT + " asks for: " + LABEL);
+      assert.equal(m.asks, "Asked by " + BOT, "the second line names the bot only (the label is in the title)");
       assert.equal(m.help, "A browser can't block screenshots; enter this where no one is watching.");
       assert.deepEqual(m.buttons.map((b) => b.text), ["Enter password", "Not now"]);
       assert.equal(m.field, null, "no field until Enter password");
@@ -294,7 +294,7 @@ test("390 px: a live frame draws the card, and Turbo's before-cache wipes a type
   try {
     let m = await s.json(CARD);
     assert.equal(m.title, "🔒 Password", "no label: the plain heading");
-    assert.equal(m.asks, null);
+    assert.equal(m.asks, "Asked by " + BOT, "with no label the card still says who asks");
     // The bot's card settles from another tab, then a new one arrives on the stream.
     pushFrame({ type: "secret_request", id: ID1, label: null, state: "done" });
     await s.waitFor("!!document.querySelector('#perch-secret .secret-result')", "the settled card");

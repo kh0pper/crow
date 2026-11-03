@@ -8,7 +8,7 @@
  * Cases that need a later task are `todo` (they still run, so their state is visible) and are
  * flipped to live by that task:
  *   (a) the keychain card submit                               (LIVE: Task 3)
- *   (b) a composer /message and /steer with the canary pasted   → Task 4
+ *   (b) a composer /message and /steer with the canary pasted   (LIVE: Task 4)
  *   (c) a malformed-JSON body: /message, /steer, other global-parser routes and the secret
  *       submit route (all LIVE)
  *   (d) the services connect submit with the canary as a value  (LIVE now: the route exists;
@@ -173,22 +173,24 @@ test("(a) the keychain card submit: the bot gets the name, the sealed row decryp
 // (b) the composer, a pasted canary with no override
 // ---------------------------------------------------------------------------
 
-test("(b) a composer /message with the canary pasted reaches the model as [secret removed]", { todo: "Task 4: the server-side strip" }, async () => {
+test("(b) a composer /message with the canary pasted reaches the model as [secret removed]", async () => {
   const c = makeCanary();
   const s = await h.spawnSession("paste-bot");
   const r = await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/message`, { message: `my password: ${c} thanks` });
   assert.equal(r.status, 202);
+  assert.equal(r.json.removed, 1, "the count only — never the text");
   assert.match(h.pi().lastTurn().message, /\[secret removed\]/);
   await h.endTurn("noted");
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 
-test("(b) a composer /steer with the canary pasted reaches the model as [secret removed]", { todo: "Task 4: the server-side strip on /steer" }, async () => {
+test("(b) a composer /steer with the canary pasted reaches the model as [secret removed]", async () => {
   const c = makeCanary();
   const s = await h.spawnSession("steer-bot");
   assert.equal((await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/message`, { message: "start" })).status, 202);
   const r = await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/steer`, { message: `use ${c} instead` });
   assert.equal(r.status, 200);
+  assert.equal(r.json.removed, 1);
   await h.endTurn("ok");
   assert.deepEqual(await h.grepEverywhere(c), []);
 });

@@ -424,7 +424,8 @@ test("an err.code that collides with Object.prototype ('constructor') still maps
 test("POST /interactive/:sid/message 202s with the turnId the engine returns", async () => {
   const { status, body } = await postJson("/interactive/sess-1/message", { message: "hello" });
   assert.equal(status, 202);
-  assert.deepEqual(body, { turnId: "turn-1" });
+  // removed (credential card Task 4): 0 here — the count the client needs to stay quiet.
+  assert.deepEqual(body, { turnId: "turn-1", removed: 0 });
   assert.deepEqual(engineCalls.message, [{ sid: "sess-1", text: "hello", images: undefined }]);
 });
 
@@ -485,7 +486,8 @@ test("POST /interactive/:sid/message (strand 2): tool_budget is a 422 carrying t
 test("POST /interactive/:sid/steer 200s {ok:true} and forwards sid + text to the engine", async () => {
   const { status, body } = await postJson("/interactive/sess-1/steer", { message: "actually, do it differently" });
   assert.equal(status, 200);
-  assert.deepEqual(body, { ok: true });
+  // credential card Task 4: the steer answer carries the removed count too.
+  assert.deepEqual(body, { ok: true, removed: 0 });
   assert.deepEqual(engineCalls.steer, [{ sid: "sess-1", text: "actually, do it differently" }]);
 });
 
@@ -505,7 +507,7 @@ test("POST /interactive/:sid/steer with no message is a 400 empty_message, never
   assert.equal(r.body.error, "empty_message");
   r = await postJson("/interactive/sess-1/steer", { message: "go left" });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body, { ok: true });
+  assert.deepEqual(r.body, { ok: true, removed: 0 });
   assert.equal(engineCalls.steer[engineCalls.steer.length - 1].text, "go left");
 });
 

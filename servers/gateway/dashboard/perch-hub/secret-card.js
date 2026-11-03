@@ -60,6 +60,7 @@ export function perchSecretCardJs(lang = "en") {
   function secPane(){ return el('perch-secret'); }
   function resetSecretCard(){
     secWipe(); secShown=null; secGen++;
+    secretWarnClose();          /* nor the paste warning from the previous chat */
     var p=secPane(); if(p) clearEl(p);
   }
   function secBot(){ return current.botName||current.botId||''; }
@@ -76,10 +77,10 @@ export function perchSecretCardJs(lang = "en") {
     title.id='perch-secret-title';
     frame.setAttribute('aria-labelledby','perch-secret-title');
     frame.appendChild(title);
-    if(c.label){
-      var bot=secBot();
-      if(bot) frame.appendChild(line('secret-asks',secFill(SEC_ASKS,{bot:bot,label:c.label})));
-    }
+    /* Concern 5 (final review): the label is already the title line ("🔒 Password for X"),
+       so the second line only says WHO asked. Repeating the label here showed it twice. */
+    var bot=secBot();
+    if(bot) frame.appendChild(line('secret-asks',secFill(SEC_ASKS,{bot:bot})));
     if(c.state!=='open'){
       frame.appendChild(line('secret-result',SEC_RESULT[c.state]||SEC_RESULT.gone));
       pane.appendChild(frame);
