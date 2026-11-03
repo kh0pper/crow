@@ -72,8 +72,7 @@ const stale = (message) => ({ http: 409, error: message, code: "stale" });
 function serviceError(res, e) {
   if (e && e.http === 409) return res.status(409).json({ reason: e.message, code: "stale" });
   if (e && e.http) return jsonError(res, e.http, e.message, e.code ? { code: e.code } : undefined);
-  // The detail stays in the log: SQL or path text never reaches the widget.
-  console.warn(`[widgets] act failed: ${(e && e.message) || e}`);
+  // The detail stays in the route's own log line: SQL or path text never reaches the widget.
   return jsonError(res, 500, "The action failed");
 }
 
@@ -290,6 +289,7 @@ export function widgetsRouter(dashboardAuth, { core = getHandoffCore(), openDb =
       const action = typeof body.action === "string" ? body.action : "";
       const nonce = typeof body.nonce === "string" ? body.nonce : "";
       if (!key || !action) return jsonError(res, 400, "key and action are required", { code: "bad_action" });
+      if (key.length > 200 || action.length > 64 || nonce.length > 64) return jsonError(res, 400, "That action is not offered by this item", { code: "bad_action" });
 
       // The re-read and the nonce check come FIRST: nothing is decided from a stale drawing.
       const item = await readItem(db, req, key);

@@ -460,13 +460,14 @@ test("act by a non-owner session is 404, with nothing decided", async () => {
   assert.equal(mutationCount("decision"), 0);
 });
 
-test("act: a newer result reported after the widget was drawn is never approved by the old tap", async () => {
+test("act: the re-read refuses a result that was replaced after the widget was drawn (409 stale)", async () => {
   const card = addCard({ title: "Soil test v2" });
   const first = addResult(card);
   const drawn = (await summary()).json.items.find((i) => i.kind === "result");
   addResult(card); // a bot reports a newer result before the owner taps
   const r = await act({ key: drawn.key, action: "accept", nonce: drawn.nonce });
-  assert.ok(r.status === 409 || r.status === 404, `refused, got ${r.status}`);
+  assert.equal(r.status, 409);
+  assert.equal(r.json?.code, "stale");
   assert.notEqual(resultRow(first).status, "approved", "the superseded result stays undecided");
 });
 
@@ -483,5 +484,6 @@ test("act: the owner's session from this machine itself, or a peer-signed reques
 
 test("act: a key longer than 200 characters is refused without a lookup", async () => {
   const r = await act({ key: "card:" + "9".repeat(300) + ":decision", action: "option:0", nonce: "x" });
-  assert.ok(r.status === 404 || r.status === 400, `got ${r.status}`);
+  assert.equal(r.status, 400);
+  assert.equal(r.json?.code, "bad_action");
 });
