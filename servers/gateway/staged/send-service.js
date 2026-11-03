@@ -510,7 +510,12 @@ async function recheckDraft(db, row, { gmail, now }) {
 
 /** The same sweep over a list, oldest rows first, at most DRAFT_CHECK_MAX of them per read. */
 async function recheckDrafts(db, rows, { gmail, now }) {
-  const due = rows.filter((r) => r && r.state === "staged" && r.credRef != null && Number(now) - r.updatedAt >= DRAFT_CHECK_MS);
+  // Filter on the hourly stamp BEFORE the cap, so a session with many old drafts reaches all of
+  // them over time instead of re-picking the same five; the least recently checked go first.
+  const due = rows
+    .filter((r) => r && r.state === "staged" && r.credRef != null && Number(now) - r.updatedAt >= DRAFT_CHECK_MS)
+    .filter((r) => { const c = draftCheckedAt.get(r.id); return c == null || Number(now) - c >= DRAFT_CHECK_MS; })
+    .sort((x, y) => (draftCheckedAt.get(x.id) ?? 0) - (draftCheckedAt.get(y.id) ?? 0));
   if (!due.length) return rows;
   const checked = new Map();
   for (const row of due.slice(0, DRAFT_CHECK_MAX)) checked.set(row.id, await recheckDraft(db, row, { gmail, now }));

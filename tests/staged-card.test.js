@@ -723,6 +723,10 @@ test("the draft re-read is capped at five rows per list", async () => {
   const gmail = () => ({ getDraft: async () => { reads += 1; return { snapshot: {}, threadId: null, faithful: true }; }, hasSentTo: async () => false });
   await S.listStagedForSession(db, sid, { gmail, now: Date.now() + 2 * 60 * 60 * 1000 });
   assert.equal(reads, 5, "at most five provider reads per list request");
+  // The next list (still inside the hour for those five) reaches the two that were not read.
+  reads = 0;
+  await S.listStagedForSession(db, sid, { gmail, now: Date.now() + 2 * 60 * 60 * 1000 + 1000 });
+  assert.equal(reads, 2, "the cap rotates through every old draft, it does not re-pick the same five");
 });
 
 /* -------------------------------------------------------------------- L5 */

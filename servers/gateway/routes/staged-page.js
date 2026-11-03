@@ -185,7 +185,8 @@ ${form}
 
 /** The page's own script: the same three actions the chat's card posts, against the same routes. */
 function renderScript(lang, item = null) {
-  const s = JSON.stringify(scriptStrings(lang, item));
+  // Inside an inline <script>: "<" never appears raw, so no text can close the tag.
+  const s = JSON.stringify(scriptStrings(lang, item)).replace(/</g, "\\u003c");
   return `<script>
 (function(){
   var S=${s};
