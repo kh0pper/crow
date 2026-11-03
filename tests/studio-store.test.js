@@ -13,6 +13,7 @@ import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import {
   appendHistory,
   appendUpdate,
+  commitStep,
   createSongRow,
   getSongRow,
   listHistory,
@@ -166,4 +167,82 @@ test("markUndone sets undone_by", async (t) => {
   assert.deepEqual(target.author, human);
   assert.deepEqual(target.touched, ["clip:clip-1"]);
   assert.deepEqual(target.inverse.after, { "clip:clip-1.notes": [] });
+});
+
+test("commitStep writes update, history and undone mark atomically", async (t) => {
+  const db = scratchDb(t);
+  await initStudioTables(db);
+  const { id } = await createSongRow(db, { project_id: 11, title: "Atomic" });
+  const human = { kind: "human", id: "local", label: "You" };
+
+  const first = await commitStep(db, {
+    song_id: id,
+    update: bytes(1),
+    entry: {
+      id: "entry-1",
+      song_id: id,
+      // A placeholder: the store's own sequence number is the one written.
+      seq: 0,
+      command: "track.add",
+      args: { id: "bass", name: "Bass" },
+      author: human,
+      summary: 'Added track "Bass"',
+      touched: ["track:bass"],
+      before: { "track:bass|*": null },
+      after: { "track:bass|*": { id: "bass", name: "Bass" } },
+    },
+  });
+  assert.equal(first, 1);
+  assert.equal((await listHistory(db, id))[0].seq, 1, "the history row carries the update's seq");
+
+  const second = await commitStep(db, {
+    song_id: id,
+    update: bytes(2),
+    entry: {
+      id: "entry-2",
+      song_id: id,
+      seq: 0,
+      command: "history.undo",
+      args: { entry_id: "entry-1" },
+      author: human,
+      inverse: { before: {}, after: {} },
+      undo_of: "entry-1",
+    },
+    undone: { entry_id: "entry-1", by_entry_id: "entry-2" },
+  });
+  assert.equal(second, 2);
+
+  assert.deepEqual((await loadUpdates(db, id)).map(toArray), [[1], [2]]);
+  const entries = await listHistory(db, id);
+  assert.deepEqual(entries.map((entry) => entry.id), ["entry-2", "entry-1"], "newest first");
+  assert.equal(entries.find((entry) => entry.id === "entry-1").undone_by, "entry-2");
+  assert.match((await getSongRow(db, id)).updated_at, /^\d{4}-\d{2}-\d{2}T/);
+
+  // One failing statement takes the whole step back: the duplicate entry id is
+  // the history row, so the update written ahead of it and the undone mark
+  // after it must be gone as well.
+  await assert.rejects(() =>
+    commitStep(db, {
+      song_id: id,
+      update: bytes(3),
+      entry: { id: "entry-2", song_id: id, seq: 0, command: "history.redo", author: human },
+      undone: { entry_id: "entry-1", by_entry_id: "entry-3" },
+    }),
+  );
+  assert.deepEqual((await loadUpdates(db, id)).map(toArray), [[1], [2]], "no half-saved update");
+  assert.deepEqual((await listHistory(db, id)).map((entry) => entry.id), ["entry-2", "entry-1"]);
+  assert.equal(
+    (await listHistory(db, id)).find((entry) => entry.id === "entry-1").undone_by,
+    "entry-2",
+    "the undone mark did not move",
+  );
+
+  // The failed step left its sequence number free.
+  const third = await commitStep(db, {
+    song_id: id,
+    update: bytes(30),
+    entry: { id: "entry-4", song_id: id, seq: 0, command: "history.redo", author: human },
+  });
+  assert.equal(third, 3);
+  assert.deepEqual((await loadUpdates(db, id)).map(toArray), [[1], [2], [30]]);
 });

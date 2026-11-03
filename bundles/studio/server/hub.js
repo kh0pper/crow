@@ -29,7 +29,12 @@
  *   {ok: false, code, error, conflicts?}           a refusal
  *
  * `code` is one of "acl", "human_only", "locked", "focused", "limit",
- * "invalid", "conflict" or "not_found".
+ * "invalid", "conflict", "storage" or "not_found".
+ *
+ * "storage" is the one refusal that has to undo something: the edit was
+ * already applied to the live document when the write failed, so the hub drops
+ * its cached document for that song and the next operation rebuilds it from the
+ * database. Nothing in memory and nothing on disk keeps the step.
  *
  * The two reads (`openSong`, `history`) throw instead, because there is no
  * half-answer to hand back: a StudioError with code "not_found", or the ACL
@@ -38,7 +43,13 @@
 
 import * as Y from "yjs";
 import { newSongDoc, parseObjectRef, snapshot, splitRefField } from "./doc.js";
-import { StudioError, applyCommand, prepareCommand } from "./commands/registry.js";
+import {
+  StudioError,
+  applyCommand,
+  getCommand,
+  hasCommand,
+  prepareCommand,
+} from "./commands/registry.js";
 // The registry is populated by importing the commands for their side effect,
 // so a hub started on its own always has every 1a command available.
 import "./commands/core.js";
@@ -52,14 +63,12 @@ import {
   planUndo,
 } from "./history.js";
 import {
-  appendHistory,
-  appendUpdate,
+  commitStep,
   createSongRow,
   getSongRow,
   listHistory,
   listSongs as listSongRows,
   loadUpdates,
-  markUndone,
   writeSnapshot,
 } from "./store.js";
 import { initStudioTables } from "./init-tables.js";
@@ -79,6 +88,46 @@ const AUDIT_ACTION = "studio.command";
 /** The history action recorded when a song row is created. */
 const AUDIT_CREATE_ACTION = "studio.song.create";
 
+/** The registry ids that record a history step rather than an edit. */
+const HISTORY_COMMANDS = new Set([UNDO_COMMAND, REDO_COMMAND]);
+
+/**
+ * How far an `undo_of` chain is followed before it is treated as broken. A
+ * chain alternates undo and redo, so it is never long; the cap only stops a
+ * corrupted row from looping.
+ */
+const MAX_UNDO_HOPS = 64;
+
+/** What a caller is told when the store could not take a step. */
+const SAVE_FAILED = "Studio could not save that change; nothing was changed.";
+
+/** What a caller is told when a `cmd_id` comes back for a different change. */
+const CMD_ID_REUSED = "That command id was already used for a different change.";
+
+/** Sweep the de-duplication table once it holds this many entries in total. */
+const DEDUPE_PRUNE_AT = 1000;
+
+/** Report a side effect that failed after the step itself was saved. */
+function warn(what, err) {
+  console.warn(`Studio hub: ${what} failed: ${err?.message ?? err}`);
+}
+
+/**
+ * A text form of the change a `cmd_id` was first used for.
+ *
+ * Callers resend the same request, so the same shape stringifies the same way;
+ * that is enough to tell a replay from an id being reused for something else.
+ * @param {unknown} change
+ * @returns {string}
+ */
+function fingerprintOf(change) {
+  try {
+    return JSON.stringify(change);
+  } catch {
+    return "";
+  }
+}
+
 /** @returns {object} a refusal a caller can relay. */
 function refuse(code, error, extra = {}) {
   return { ok: false, code, error, ...extra };
@@ -92,6 +141,48 @@ function parseJson(text) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Note the track an object value belongs to, when it names one.
+ * @param {Set<string>} ids
+ * @param {any} value
+ * @returns {void}
+ */
+function addTrackId(ids, value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+  if (typeof value.track_id === "string" && value.track_id !== "") ids.add(value.track_id);
+}
+
+/**
+ * Every track a history step writes to.
+ *
+ * The refs alone are not enough. A restore puts back an object the song does
+ * not hold any more, so `trackIdForRef` finds nothing for it — the clip's own
+ * `track_id` inside the value being written is then the only thing that says
+ * which track it lands on. The values a plan writes are read for it, and so
+ * are the recorded step's own before/after values, because those are what a
+ * redo of a redo eventually writes.
+ * @param {object} snap - the current snapshot
+ * @param {string[]} refs - the refs the plan's keys name
+ * @param {{apply?: Map<string, any>}|Map<string, any>} plan
+ * @param {object|null} target - the history entry being undone or redone
+ * @returns {Set<string>}
+ */
+function planTrackIds(snap, refs, plan, target) {
+  const ids = new Set();
+  for (const ref of refs) {
+    const trackId = trackIdForRef(snap, ref);
+    if (trackId) ids.add(trackId);
+  }
+
+  const applied = plan?.apply instanceof Map ? plan.apply : plan instanceof Map ? plan : null;
+  for (const value of applied?.values() ?? []) addTrackId(ids, value);
+  for (const map of [target?.inverse?.before, target?.inverse?.after]) {
+    if (!map || typeof map !== "object") continue;
+    for (const value of Object.values(map)) addTrackId(ids, value);
+  }
+  return ids;
 }
 
 /**
@@ -162,8 +253,10 @@ function entryFromRow(row) {
     song_id: String(row.song_id),
     seq: Number(row.seq),
     command: row.command,
+    args: parseJson(row.args_json),
     summary: row.summary ?? "",
     inverse: inverse ?? { before: {}, after: {} },
+    undo_of: row.undo_of ?? null,
     undone_by: row.undone_by ?? null,
   };
 }
@@ -172,7 +265,8 @@ function entryFromRow(row) {
  * Create the session hub for one gateway process.
  *
  * @param {object} options
- * @param {object} options.db - @libsql/client-compatible client
+ * @param {object} options.db - a database client with `execute` and `batch`
+ *   (the gateway's own client and a scratch @libsql/client both qualify)
  * @param {{assertProjectExists: Function, assertCapability: Function,
  *          appendAudit: Function}} options.acl - the project ACL module
  * @param {() => Date} [options.now] - clock, injectable so de-duplication windows are testable
@@ -181,6 +275,17 @@ function entryFromRow(row) {
  *   after every presence change; whatever it returns is awaited
  * @param {number} [options.snapshotEvery] - write a snapshot every N updates
  * @param {number} [options.dedupeMs] - how long a `cmd_id` stays remembered
+ *
+ * Every write call carries an `author`, and this is the contract for it: the
+ * hub trusts the author exactly as given, because only the transport knows who
+ * is on the other end of the call. A dashboard route sets
+ * `{kind:"human", id:"local", label:"You"}` after it has verified the
+ * session; the agent HTTP API forces `kind:"agent"` on whatever the MCP side
+ * resolved. The hub itself never upgrades an author, never learns who a caller
+ * is from anywhere but this field, and treats a missing author as an agent
+ * (see `normalizeAuthor`) — so the one place that has to get this right is the
+ * transport in front of it.
+ *
  * @returns {object} the hub: openSong, createSong, runCommand, undo, redo,
  *   setFocus, clientGone, presence, listSongs, history
  */
@@ -194,6 +299,9 @@ export function createHub({
 } = {}) {
   if (!db || typeof db.execute !== "function") {
     throw new TypeError("Studio hub: a database client is required");
+  }
+  if (typeof db.batch !== "function") {
+    throw new TypeError("Studio hub: a database client with batch() is required");
   }
   if (!acl || typeof acl !== "object") {
     throw new TypeError("Studio hub: an acl module is required");
@@ -213,10 +321,10 @@ export function createHub({
   /** @type {Map<string, Promise<object>>} documents being loaded right now. */
   const loading = new Map();
 
-  /** @type {Map<string, Promise<void>>} the tail of each song's serial queue. */
+  /** @type {Map<string, Promise<void>>} the tail of each song's serial queue, dropped once it settles. */
   const queues = new Map();
 
-  /** @type {Map<string, Map<string, {result: object, at: number}>>} recent cmd_ids. */
+  /** @type {Map<string, Map<string, {result: object, fingerprint: string, at: number}>>} recent steps by de-duplication key. */
   const dedupe = new Map();
 
   /** @type {Map<string, Map<string, {author: object, ref: string|null}>>} who has what open. */
@@ -251,7 +359,14 @@ export function createHub({
   function enqueue(song_id, op) {
     const previous = queues.get(song_id) ?? Promise.resolve();
     const current = previous.then(op, op);
-    queues.set(song_id, current.then(() => {}, () => {}));
+    // The tail is what the next operation waits on. When it is still the last
+    // one by the time it settles, the song's slot goes away with it, so a
+    // gateway that touched a thousand songs keeps no queue rows for them.
+    const tail = current.then(() => {}, () => {});
+    queues.set(song_id, tail);
+    tail.then(() => {
+      if (queues.get(song_id) === tail) queues.delete(song_id);
+    });
     return current;
   }
 
@@ -259,7 +374,7 @@ export function createHub({
    * Broadcast one payload to every client of a song.
    *
    * A broadcast that fails must never undo a step that is already persisted, so
-   * the failure is swallowed here.
+   * the failure is reported and swallowed here.
    * @param {string} song_id
    * @param {object} payload
    * @returns {Promise<void>}
@@ -267,8 +382,10 @@ export function createHub({
   async function broadcast(song_id, payload) {
     try {
       await onBroadcast(song_id, payload);
-    } catch {
-      // Nothing to do: the edit is stored and every later client reloads it.
+    } catch (err) {
+      // The step is already stored, and every client that reconnects rebuilds
+      // the song from the log, so a failed push is reported and ignored.
+      warn("broadcast", err);
     }
   }
 
@@ -292,8 +409,10 @@ export function createHub({
         target: "song:" + song_id,
         payload,
       });
-    } catch {
-      // See the comment above.
+    } catch (err) {
+      // The edit itself is already saved; a missing audit line is reported and
+      // never rolled back.
+      warn("audit", err);
     }
   }
 
@@ -398,44 +517,94 @@ export function createHub({
   }
 
   /**
-   * The original result of a `cmd_id` seen recently, or null.
+   * The key one operation is de-duplicated by: what it is, who sent it and the
+   * client's own id for it.
    *
-   * De-duplication is per song: a client that resends a command after a
-   * reconnect gets its first answer back and the step is not applied twice.
-   * Entries past the window are dropped on every call.
-   * @param {string} song_id
+   * The kind is part of the key because a client that reuses the id of a
+   * command for an undo of that command is asking for two different things;
+   * the author, because a person and an agent may each happen to pick the same
+   * id. The same key with a different change is refused rather than answered
+   * with somebody else's result.
+   * @param {"command"|"undo"|"redo"} kind
+   * @param {{kind: string, id: string|null}} author
    * @param {string|null} cmd_id
-   * @returns {object|null}
+   * @returns {string|null} null when the caller sent no id
    */
-  function recall(song_id, cmd_id) {
-    const perSong = dedupe.get(song_id);
-    if (!perSong) return null;
-
-    const cutoff = now().getTime() - dedupeMs;
-    for (const [key, record] of perSong) {
-      if (record.at <= cutoff) perSong.delete(key);
-    }
-    if (perSong.size === 0) dedupe.delete(song_id);
-
+  function dedupeKey(kind, author, cmd_id) {
     if (cmd_id == null || cmd_id === "") return null;
-    return perSong.get(String(cmd_id))?.result ?? null;
+    return `${kind}:${author.id ?? "unknown"}:${cmd_id}`;
   }
 
   /**
-   * Remember a successful result against its `cmd_id`.
-   * @param {string} song_id
-   * @param {string|null} cmd_id
-   * @param {object} result
+   * Drop every song's expired de-duplication entries, once there are enough of
+   * them to be worth the sweep.
+   *
+   * The table is bounded by the window, not by traffic, but walking it on every
+   * command would be wasteful when it holds a handful of entries: the sweep
+   * runs only once the total is past `DEDUPE_PRUNE_AT`, and then over every
+   * song at once.
    * @returns {void}
    */
-  function remember(song_id, cmd_id, result) {
-    if (cmd_id == null || cmd_id === "") return;
+  function pruneDedupe() {
+    let total = 0;
+    for (const perSong of dedupe.values()) total += perSong.size;
+    if (total <= DEDUPE_PRUNE_AT) return;
+
+    const cutoff = now().getTime() - dedupeMs;
+    for (const [song_id, perSong] of dedupe) {
+      for (const [key, record] of perSong) {
+        if (record.at <= cutoff) perSong.delete(key);
+      }
+      if (perSong.size === 0) dedupe.delete(song_id);
+    }
+  }
+
+  /**
+   * What a `cmd_id` seen recently means for this call.
+   *
+   * A client that resends a step after a reconnect gets its first answer back
+   * and the step is not applied twice. The same key naming a different change
+   * is a caller bug that would otherwise be swallowed: it comes back as
+   * "mismatch" and the caller is told, rather than being handed the earlier
+   * step's result.
+   * @param {string} song_id
+   * @param {string|null} key - as `dedupeKey` builds it
+   * @param {string} fingerprint - the change the key is being used for now
+   * @returns {{status: "none"}|{status: "replay", result: object}|{status: "mismatch"}}
+   */
+  function recall(song_id, key, fingerprint) {
+    if (!key) return { status: "none" };
+    pruneDedupe();
+
+    const perSong = dedupe.get(song_id);
+    const record = perSong?.get(key);
+    if (!record) return { status: "none" };
+
+    if (record.at <= now().getTime() - dedupeMs) {
+      perSong.delete(key);
+      if (perSong.size === 0) dedupe.delete(song_id);
+      return { status: "none" };
+    }
+    if (record.fingerprint !== fingerprint) return { status: "mismatch" };
+    return { status: "replay", result: record.result };
+  }
+
+  /**
+   * Remember a saved step against its de-duplication key.
+   * @param {string} song_id
+   * @param {string|null} key
+   * @param {string} fingerprint
+   * @param {object} result - the result the first call returned
+   * @returns {void}
+   */
+  function remember(song_id, key, fingerprint, result) {
+    if (!key) return;
     let perSong = dedupe.get(song_id);
     if (!perSong) {
       perSong = new Map();
       dedupe.set(song_id, perSong);
     }
-    perSong.set(String(cmd_id), { result, at: now().getTime() });
+    perSong.set(key, { result, fingerprint, at: now().getTime() });
   }
 
   /** @returns {Map<string, {author: object, ref: string|null}>} a song's focus table. */
@@ -464,25 +633,48 @@ export function createHub({
   }
 
   /**
-   * Apply the agent rules to the refs one step will change: people-only
-   * commands, locked tracks, and objects a human has open.
+   * The tracks a command's touched refs resolve to right now.
+   * @param {object} snap
    * @param {string[]} refs
-   * @param {object} snap - the plain snapshot taken before the step
-   * @param {string} song_id
-   * @param {object} author
-   * @param {{humanOnly?: boolean, commandId?: string}} [rules]
+   * @returns {Set<string>}
+   */
+  function tracksOfRefs(snap, refs) {
+    const ids = new Set();
+    for (const ref of refs) {
+      const trackId = trackIdForRef(snap, ref);
+      if (trackId) ids.add(trackId);
+    }
+    return ids;
+  }
+
+  /**
+   * Apply the agent rules to one step: people-only commands, locked tracks, and
+   * objects a human has open.
+   * @param {{refs: string[], trackIds?: Set<string>|null, snap: object,
+   *          song_id: string, author: object, humanOnly?: boolean,
+   *          commandId?: string}} request
+   *   `refs` are the object refs the step names; `trackIds` overrides the
+   *   tracks they resolve to, for a step whose refs do not say (an undo puts a
+   *   clip back, and the track comes from the value it writes)
    * @returns {object|null} a refusal, or null when the step may run
    */
-  function checkAgentRules(refs, snap, song_id, author, { humanOnly = false, commandId = "" } = {}) {
+  function checkAgentRules({
+    refs,
+    trackIds = null,
+    snap,
+    song_id,
+    author,
+    humanOnly = false,
+    commandId = "",
+  }) {
     if (author.kind === "human") return null;
 
     if (humanOnly) {
       return refuse("human_only", `Only a person can run "${commandId}".`);
     }
 
-    for (const ref of refs) {
-      const trackId = trackIdForRef(snap, ref);
-      if (!trackId) continue;
+    const tracks = trackIds ?? tracksOfRefs(snap, refs);
+    for (const trackId of tracks) {
       const track = snap.tracks?.find((item) => item.id === trackId);
       if (track?.locked === true) {
         return refuse("locked", `Track "${track.name}" is locked by the operator.`);
@@ -585,13 +777,59 @@ export function createHub({
     const song_id = created.id;
     const doc = newSongDoc({ title: songTitle });
     const update = Y.encodeStateAsUpdate(doc);
-    const seq = await appendUpdate(db, song_id, update);
+
+    let seq;
+    try {
+      // The empty document is the song's first update, so opening it later
+      // reproduces exactly what its author saw.
+      seq = await commitStep(db, { song_id, update });
+    } catch (err) {
+      // The song's row exists but carries no update; the caller may create the
+      // song again.
+      return storageRefusal(song_id, err);
+    }
     songs.set(song_id, { doc, seq, project_id: projectId });
 
     await audit(projectId, actor, AUDIT_CREATE_ACTION, song_id, { title: songTitle });
     await broadcast(song_id, { update, entry: null });
 
     return { ok: true, song_id, snapshot_version: seq };
+  }
+
+  /**
+   * The result shape for a step the store could not take.
+   *
+   * The edit is already on the live document by the time the write fails, so
+   * the cached document goes with it: whatever reads the song next rebuilds it
+   * from the database, which never saw this step.
+   * @param {string} song_id
+   * @param {unknown} err
+   * @returns {object}
+   */
+  function storageRefusal(song_id, err) {
+    songs.delete(song_id);
+    warn(`saving song ${song_id}`, err);
+    return refuse("storage", SAVE_FAILED);
+  }
+
+  /**
+   * Everything that happens after a step is saved: the periodic snapshot, the
+   * project's timeline and the push to the open clients.
+   *
+   * None of it may fail the step — the step is in the database and undoable —
+   * so each part reports its own failure and the result stands.
+   * @param {{song_id: string, state: object, seq: number, project_id: number,
+   *          author: object, entry: object, update: Uint8Array}} done
+   * @returns {Promise<void>}
+   */
+  async function afterStep({ song_id, state, seq, project_id, author, entry, update }) {
+    try {
+      await compactIfDue(song_id, state, seq);
+    } catch (err) {
+      warn("compaction", err);
+    }
+    await audit(project_id, author, AUDIT_ACTION, song_id, { command: entry.command });
+    await broadcast(song_id, { update, entry });
   }
 
   /**
@@ -615,10 +853,12 @@ export function createHub({
   /** The body of `runCommand`, run inside the song's queue. */
   async function runCommandNow({ song_id, cmd_id, command, args, author }) {
     await ensureTables();
-    const replayed = recall(song_id, cmd_id);
-    if (replayed) return replayed;
-
     const actor = normalizeAuthor(author);
+    const key = dedupeKey("command", actor, cmd_id);
+    const fingerprint = fingerprintOf({ command, args: args ?? null });
+    const replayed = recall(song_id, key, fingerprint);
+    if (replayed.status === "mismatch") return refuse("invalid", CMD_ID_REUSED);
+    if (replayed.status === "replay") return replayed.result;
 
     let row;
     let state;
@@ -637,7 +877,11 @@ export function createHub({
       return toRefusal(err);
     }
 
-    const refused = checkAgentRules(prepared.touched, prepared.snap, song_id, actor, {
+    const refused = checkAgentRules({
+      refs: prepared.touched,
+      snap: prepared.snap,
+      song_id,
+      author: actor,
       humanOnly: prepared.command.humanOnly,
       commandId: prepared.command.id,
     });
@@ -658,12 +902,11 @@ export function createHub({
     }
     const update = Y.encodeStateAsUpdate(state.doc, stateVector);
 
-    const seq = await appendUpdate(db, song_id, update);
-    state.seq = seq;
-
     const entry = makeEntry({
       song_id,
-      seq,
+      // Provisional: the store owns the sequence number, hands the real one
+      // back, and the entry is corrected from it below.
+      seq: state.seq + 1,
       command: prepared.command.id,
       args: prepared.args,
       author: actor,
@@ -673,13 +916,32 @@ export function createHub({
       after: applied.after,
       created_at: nowIso(),
     });
-    await appendHistory(db, entry);
-    await compactIfDue(song_id, state, seq);
-    await audit(row.project_id, actor, AUDIT_ACTION, song_id, { command: prepared.command.id });
+
+    let seq;
+    try {
+      // The update, its history entry and the song's `updated_at` land in one
+      // transaction or not at all: a step nobody can undo is worse than no
+      // step.
+      seq = await commitStep(db, { song_id, update, entry });
+    } catch (err) {
+      return storageRefusal(song_id, err);
+    }
+    entry.seq = seq;
+    state.seq = seq;
 
     const result = { ok: true, entry, snapshot_version: seq };
-    remember(song_id, cmd_id, result);
-    await broadcast(song_id, { update, entry });
+    // Remembered before the side effects finish, so a resend that arrives while
+    // the broadcast is still running replays instead of applying twice.
+    remember(song_id, key, fingerprint, result);
+    await afterStep({
+      song_id,
+      state,
+      seq,
+      project_id: row.project_id,
+      author: actor,
+      entry,
+      update,
+    });
     return result;
   }
 
@@ -715,14 +977,22 @@ export function createHub({
    *
    * A step whose every field has been edited again since cannot go back: the
    * caller gets code "conflict" with the conflicting fields and nothing is
-   * written. A partial undo applies what it still can and reports the rest.
+   * written. A partial undo applies what it still can and reports the rest. A
+   * step the history itself refuses to apply — one that would leave a clip
+   * without its track, say — comes back with the same code and the reasons in
+   * `blocked`.
+   *
+   * A step also carries the command it moves, however far back that is: an
+   * agent meets the rules of the original command, not just of "undo".
    */
   async function historyStepNow(kind, { song_id, cmd_id, entry_id, author }) {
     await ensureTables();
-    const replayed = recall(song_id, cmd_id);
-    if (replayed) return replayed;
-
     const actor = normalizeAuthor(author);
+    const key = dedupeKey(kind, actor, cmd_id);
+    const fingerprint = fingerprintOf({ entry_id });
+    const replayed = recall(song_id, key, fingerprint);
+    if (replayed.status === "mismatch") return refuse("invalid", CMD_ID_REUSED);
+    if (replayed.status === "replay") return replayed.result;
 
     let row;
     let state;
@@ -739,11 +1009,34 @@ export function createHub({
       return refuse("not_found", `There is no history step "${entry_id}" in this song.`);
     }
 
+    // A people-only command stays people-only when it is taken back: undoing
+    // the operator's unlock would let an agent lock the track it may not lock.
+    // The rule follows the `undo_of` chain, so redoing a redo is refused just
+    // as the first undo of it would be.
+    if (actor.kind !== "human") {
+      const original = await originalCommandId(song_id, target);
+      if (original && hasCommand(original) && getCommand(original).humanOnly) {
+        return refuse(
+          "human_only",
+          `Only a person can take back "${original}": it is a people-only command.`,
+        );
+      }
+    }
+
     let plan;
     try {
       plan = kind === "undo" ? planUndo(state.doc, target) : planRedo(state.doc, target);
     } catch (err) {
       return toRefusal(err);
+    }
+
+    // The history declines a plan it could not apply safely and says why: those
+    // reasons are the answer, not "every change was edited again since".
+    if (plan.blocked.length > 0) {
+      return refuse("conflict", plan.blocked.join(" "), {
+        blocked: plan.blocked,
+        conflicts: plan.conflicts,
+      });
     }
 
     if (plan.apply.size === 0) {
@@ -757,10 +1050,18 @@ export function createHub({
     }
 
     // A history step moves the same fields a command does, so an agent meets
-    // the same locks and the same objects the operator has open.
-    const refused = actor.kind === "human"
-      ? null
-      : checkAgentRules(planRefs(plan), snapshot(state.doc), song_id, actor);
+    // the same locks and the same objects the operator has open. A restore puts
+    // back an object the song no longer holds, so its track comes from the
+    // value the plan writes rather than from the ref.
+    const refs = planRefs(plan);
+    const snap = snapshot(state.doc);
+    const refused = checkAgentRules({
+      refs,
+      trackIds: planTrackIds(snap, refs, plan, target),
+      snap,
+      song_id,
+      author: actor,
+    });
     if (refused) return refused;
 
     const stateVector = Y.encodeStateVector(state.doc);
@@ -773,28 +1074,67 @@ export function createHub({
     }
     const update = Y.encodeStateAsUpdate(state.doc, stateVector);
 
-    const seq = await appendUpdate(db, song_id, update);
-    state.seq = seq;
-
     const entry = makeUndoEntry({
       entry: target,
       plan,
       song_id,
-      seq,
+      // Provisional, corrected from the store below, like a command's entry.
+      seq: state.seq + 1,
       author: actor,
       command: kind === "redo" ? REDO_COMMAND : UNDO_COMMAND,
     });
-    await appendHistory(db, entry);
-    await markUndone(db, target.id, entry.id);
-    target.undone_by = entry.id;
 
-    await compactIfDue(song_id, state, seq);
-    await audit(row.project_id, actor, AUDIT_ACTION, song_id, { command: entry.command });
+    let seq;
+    try {
+      seq = await commitStep(db, {
+        song_id,
+        update,
+        entry,
+        // The mark rides in the same transaction: the step that was taken back
+        // and the step that says so can never disagree about it.
+        undone: { entry_id: target.id, by_entry_id: entry.id },
+      });
+    } catch (err) {
+      return storageRefusal(song_id, err);
+    }
+    entry.seq = seq;
+    target.undone_by = entry.id;
+    state.seq = seq;
 
     const result = { ok: true, entry, conflicts: plan.conflicts, snapshot_version: seq };
-    remember(song_id, cmd_id, result);
-    await broadcast(song_id, { update, entry });
+    remember(song_id, key, fingerprint, result);
+    await afterStep({
+      song_id,
+      state,
+      seq,
+      project_id: row.project_id,
+      author: actor,
+      entry,
+      update,
+    });
     return result;
+  }
+
+  /**
+   * The ordinary command a history step ultimately moves.
+   *
+   * An undo of an undo is still an undo of one real command at the bottom of
+   * its `undo_of` chain, and that is the command whose rules apply.
+   * @param {string} song_id
+   * @param {object} target - the entry being undone or redone
+   * @returns {Promise<string|null>} the command id, or null when the chain runs
+   *   out (a step whose original is not in the song any more)
+   */
+  async function originalCommandId(song_id, target) {
+    let current = target;
+    for (let hop = 0; hop < MAX_UNDO_HOPS; hop += 1) {
+      if (!HISTORY_COMMANDS.has(current.command)) return current.command;
+      if (!current.undo_of) return null;
+      const next = await readEntry(song_id, current.undo_of);
+      if (!next) return null;
+      current = next;
+    }
+    return null;
   }
 
   /**
@@ -810,7 +1150,15 @@ export function createHub({
    * @returns {Promise<{ok: true, presence: object[]}>}
    */
   function setFocus(song_id, client_id, ref = null, author = null) {
+    if (typeof song_id !== "string" || song_id === "") {
+      return Promise.resolve({ ok: true, presence: [] });
+    }
     return enqueue(song_id, async () => {
+      await ensureTables();
+      // A socket can outlive the song it was opened on: there is no one to
+      // place, so nothing is remembered for it and nobody is told about it.
+      if (!(await getSongRow(db, song_id))) return { ok: true, presence: [] };
+
       const clients = focusTable(song_id);
       const previous = clients.get(client_id);
       clients.set(client_id, {
@@ -825,11 +1173,17 @@ export function createHub({
 
   /**
    * Drop a client's presence — its socket closed.
+   *
+   * A no-op for a song that never had one: presence is only ever created by a
+   * focus, so an unknown song has no table here to begin with.
    * @param {string} song_id
    * @param {string} client_id
    * @returns {Promise<{ok: true, presence: object[]}>}
    */
   function clientGone(song_id, client_id) {
+    if (typeof song_id !== "string" || song_id === "") {
+      return Promise.resolve({ ok: true, presence: [] });
+    }
     return enqueue(song_id, async () => {
       const clients = focus.get(song_id);
       const had = clients?.delete(client_id) ?? false;

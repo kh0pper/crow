@@ -4,8 +4,9 @@
  *
  * Every function takes the database client as its first argument: production
  * passes the gateway's own @libsql/client-compatible client (via
- * `appImport("servers/db.js")`), tests pass a scratch client. The client only
- * needs `execute({sql, args})`.
+ * `appImport("servers/db.js")`), tests pass a scratch client. The client needs
+ * `execute({sql, args})`, and `batch(statements, "write")` for `commitStep` —
+ * the one write here that has to be all-or-nothing.
  *
  * BLOBs go in as Uint8Array and come out as Uint8Array. libsql hands a file
  * blob back as an ArrayBuffer and other drivers as a Buffer, so every read
@@ -258,6 +259,20 @@ export async function writeSnapshot(db, song_id, state, upto_seq) {
  * @returns {Promise<string>} the entry id
  */
 export async function appendHistory(db, entry) {
+  const { id, statement } = historyInsert(entry);
+  await db.execute(statement);
+  return id;
+}
+
+/**
+ * Build the statement that inserts one history row, so the row can be written
+ * on its own (`appendHistory`) or inside a step's batch (`commitStep`).
+ * @param {object} entry - the shape `appendHistory` documents
+ * @param {number} [seq] - the sequence number to write, when it is already
+ *   known; `entry.seq` otherwise
+ * @returns {{id: string, statement: {sql: string, args: any[]}}}
+ */
+function historyInsert(entry, seq) {
   const id = entry.id ?? randomUUID();
   const argsJson = entry.args_json !== undefined
     ? entry.args_json
@@ -273,29 +288,105 @@ export async function appendHistory(db, entry) {
     ? entry.inverse_json
     : JSON.stringify(inverse);
 
-  await db.execute({
-    sql: `INSERT INTO studio_history
-            (id, song_id, seq, command, args_json, author_kind, author_id, author_label,
-             summary, touched_json, inverse_json, undo_of, undone_by, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [
-      id,
-      entry.song_id,
-      entry.seq,
-      entry.command,
-      argsJson,
-      entry.author?.kind ?? entry.author_kind ?? null,
-      entry.author?.id ?? entry.author_id ?? null,
-      entry.author?.label ?? entry.author_label ?? null,
-      entry.summary ?? null,
-      touchedJson,
-      inverseJson,
-      entry.undo_of ?? null,
-      entry.undone_by ?? null,
-      entry.created_at ?? nowIso(),
-    ],
+  return {
+    id,
+    statement: {
+      sql: `INSERT INTO studio_history
+              (id, song_id, seq, command, args_json, author_kind, author_id, author_label,
+               summary, touched_json, inverse_json, undo_of, undone_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        id,
+        entry.song_id,
+        seq ?? entry.seq,
+        entry.command,
+        argsJson,
+        entry.author?.kind ?? entry.author_kind ?? null,
+        entry.author?.id ?? entry.author_id ?? null,
+        entry.author?.label ?? entry.author_label ?? null,
+        entry.summary ?? null,
+        touchedJson,
+        inverseJson,
+        entry.undo_of ?? null,
+        entry.undone_by ?? null,
+        entry.created_at ?? nowIso(),
+      ],
+    },
+  };
+}
+
+/**
+ * Save one step of a song: its Yjs update, its history entry and — for an undo
+ * or a redo — the mark on the entry it takes back, all in one transaction.
+ *
+ * The sequence number is the next one this song's log has. It is read first
+ * because the history row carries it, and the writes then go in as a single
+ * `db.batch(..., "write")`, which libsql runs as one transaction: either every
+ * row lands or none does. That matters more here than anywhere else in the
+ * store, because a half-saved step cannot be repaired afterwards — an update
+ * with no history entry is a change nobody can undo, and a history entry with
+ * no update describes a song that never happened.
+ *
+ * `entry.seq` may be a placeholder: the sequence returned here is the real
+ * one, and it is what the history row is written with.
+ * @param {object} db
+ * @param {{song_id: string, update: Uint8Array, entry?: object|null,
+ *          undone?: {entry_id: string, by_entry_id: string|null}|null}} step
+ *   `entry` takes the shape `appendHistory` documents and may be left out (a
+ *   song's first update has no step to record); `undone` names the entry this
+ *   step took back
+ * @returns {Promise<number>} the sequence number the update was written with
+ * @throws when the batch fails — nothing is written in that case
+ */
+export async function commitStep(db, { song_id, update, entry = null, undone = null } = {}) {
+  if (typeof song_id !== "string" || song_id === "") {
+    throw new TypeError("Studio store: commitStep needs a song_id");
+  }
+
+  const { rows } = await db.execute({
+    sql: "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM studio_updates WHERE song_id = ?",
+    args: [song_id],
   });
-  return id;
+  const seq = Number(rows[0]?.seq);
+  if (!Number.isFinite(seq) || seq < 1) {
+    throw new Error("Studio store: commitStep got no sequence number back");
+  }
+
+  const now = nowIso();
+  const statements = [
+    {
+      sql: "INSERT INTO studio_updates (song_id, seq, data, created_at) VALUES (?, ?, ?, ?)",
+      args: [song_id, seq, bindBytes(update), now],
+    },
+    {
+      sql: "UPDATE studio_songs SET updated_at = ? WHERE id = ?",
+      args: [now, song_id],
+    },
+  ];
+  if (entry) {
+    // The step's own song wins: one entry can never be filed under another
+    // song's history by accident.
+    statements.push(historyInsert({ ...entry, song_id }, seq).statement);
+  }
+  if (undone && typeof undone.entry_id === "string" && undone.entry_id !== "") {
+    statements.push(markUndoneStatement(undone.entry_id, undone.by_entry_id));
+  }
+
+  await db.batch(statements, "write");
+  return seq;
+}
+
+/**
+ * The statement that marks a history entry as undone by another one.
+ * @param {string} entry_id - the entry that was undone
+ * @param {string|null} by_entry_id - the undo entry (null clears the mark)
+ * @returns {{sql: string, args: any[]}}
+ */
+function markUndoneStatement(entry_id, by_entry_id) {
+  return {
+    sql: "UPDATE studio_history SET undone_by = ? WHERE id = ?",
+    args: [by_entry_id ?? null, entry_id],
+  };
 }
 
 /**
@@ -334,8 +425,5 @@ export async function listHistory(db, song_id, { limit, before_seq } = {}) {
  * @returns {Promise<void>}
  */
 export async function markUndone(db, entry_id, by_entry_id) {
-  await db.execute({
-    sql: "UPDATE studio_history SET undone_by = ? WHERE id = ?",
-    args: [by_entry_id ?? null, entry_id],
-  });
+  await db.execute(markUndoneStatement(entry_id, by_entry_id));
 }
