@@ -139,15 +139,42 @@ function ponSpelled(transcript) {
   return spelledFrom(slot(w, 1), transcript);
 }
 
-/** "play some jazz" → { what: "some jazz" }; "put on the Night Owls" → { what: "night owls" }. */
+// ── F28a: "a random album", "some music", "algo de música" ────────────────────────────────────
+// The slot of a random request holds no name: only words for "any of them" and words for the music
+// itself. After its leading articles it is at most three words, and it must ASK for anything — so
+// "play some jazz" (a genre) and "play Kind of Blue" (a name) stay searches, as before.
+const RANDOM_WORDS = new Set(["random", "any", "something", "anything", "cualquier", "cualquiera", "azar", "aleatorio", "aleatoria", "algun", "alguna"]);
+const RANDOM_NOUNS = new Set(["music", "musica", "song", "songs", "cancion", "canciones", "album", "albums", "disco", "discos", "record", "records"]);
+const RANDOM_ALBUM_NOUNS = new Set(["album", "albums", "disco", "discos", "record", "records"]);
+const RANDOM_FILLER = new Set(["de", "al", "del", "of", "a", "an", "the", "un", "una", "my", "mi"]);
+const RANDOM_MAX_WORDS = 3;
+/** → "album" | "music" when the words after the verb ask for anything at all, or null (a name, a genre, a sentence). */
+function randomKind(rest) {
+  let i = 0;
+  while (i < rest.length - 1 && ARTICLES.has(rest[i])) i += 1;
+  const w = rest.slice(i);
+  if (!w.length || w.length > RANDOM_MAX_WORDS) return null;
+  if (!w.every((x) => RANDOM_WORDS.has(x) || RANDOM_NOUNS.has(x) || RANDOM_FILLER.has(x))) return null;
+  const nouns = w.filter((x) => RANDOM_NOUNS.has(x));
+  if (!w.some((x) => RANDOM_WORDS.has(x)) && !(w.length === 1 && nouns.length === 1)) return null;
+  return nouns.some((x) => RANDOM_ALBUM_NOUNS.has(x)) ? "album" : "music";
+}
+// "shuffle my music" has no play verb of its own: it is one only where the slot asks for anything.
+const SHUFFLE_VERBS = [["shuffle"], ["shuffle", "up"], ["mezcla"], ["mezclar"]];
+
+/** "play some jazz" → { what: "some jazz" }; "put on the Night Owls" → { what: "night owls" }; "play a random album" → { random: "album" }. */
 export function parsePlay(transcript) {
   const w = words(transcript, PLAY_MAX_WORDS);
   if (!w || hasAny(w, NOT_PLAY)) return null;
   let v = PLAY_VERBS.find((p) => startsWith(w, p));
   let rest = v ? (v[0] === "play" ? w.slice(1) : slot(w, v.length)) : null;
   if (!v && w[0] === "pon" && w.slice(1, 4).some((x) => PON_NOUNS.has(x))) { v = ["pon"]; rest = slot(w, 1); }
+  // F28a: "shuffle my music" plays, but "shuffle the cards" is not a play request at all.
+  if (!v) { const s = SHUFFLE_VERBS.find((p) => startsWith(w, p)); const r = s ? randomKind(slot(w, s.length)) : null; if (r) return { random: r }; }
   if (!v || !rest.length) return null;
   if (v[0] === "play" && rest[0] === "the" && rest.length > 1) rest = rest.slice(1);
+  const random = randomKind(rest);
+  if (random) return { random };
   return { what: rest.join(" ") };
 }
 
@@ -649,6 +676,9 @@ export function matchT1(transcript, ctx) {
   if (shown) return { verb: "open", app: shown.id };
   if (!(ctx.sources || []).length) return null;
   const p = parsePlay(transcript);
+  // F28a: "a random album", "some music" — a source that has albums picks one (T1 plays it with no model).
+  // Without a music source the words are only words, as before.
+  if (p?.random) return (ctx.sources || []).includes("music") ? { verb: "play", random: p.random, source: "music" } : null;
   // callSign: the request was written as a call sign, so a near spelling of one may be asked about (never played).
   if (p) return { verb: "play", what: p.what, source: "auto", ...(writesCallSign(transcript) ? { callSign: true } : {}) };
   // A bare spelled call sign ("K T P F.", "No, K T P F", Spanish "Pon K T P F") names a station: searched on the radio

@@ -115,6 +115,23 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       if (down.length) { const worst = down.slice().sort((a, b) => DOWN_ORDER.indexOf(a.code) - DOWN_ORDER.indexOf(b.code))[0]; return { outcome: "unavailable", code: worst.code, source: worst.kind }; }
       return { outcome: "not_found" };
     },
+    /**
+     * F28a: a random play ("play a random album", "some music"). The music source picks an album out of
+     * its index (source.randomAlbum) and it plays through exactly the path a match takes. → the same
+     * outcomes as resolve(); `artist` rides along for the spoken line.
+     */
+    async random(deviceId = null) {
+      const s = registry.available().find((x) => x.kind === "music" && typeof x.randomAlbum === "function");
+      if (!s) return { outcome: "unavailable", code: "none" };
+      const down = [];
+      let c = null;
+      try { c = await within(Promise.resolve().then(() => s.randomAlbum())); } catch (err) { note(down, s, err); }
+      if (!c) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : { outcome: "not_found" };
+      const list = await playables(s, c, down);
+      if (!list.length) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : { outcome: "not_found" };
+      if (deviceId) asked.delete(deviceId);
+      return { ...playing(s, c, list), artist: cleanTitle(c.subtitle) };
+    },
     /** Was "Which one?" asked on this display a moment ago? */
     pending: (deviceId) => !!live(deviceId),
     /** The names offered then (r7c N1: asked again on a bare "Play."). */
@@ -185,9 +202,10 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
   const noop = (ctx, say) => (ctx.strict ? null : result(true, "done", say, { effect: false }));
   const nothing = (ctx, S) => (ctx.strict ? null : result(true, "nothing_playing", S.say_nothing_playing, { effect: false }));
 
-  function start(r, ctx, S) {
+  /** playingSay: the sentence for a play that starts here (a random album names its artist too). */
+  function start(r, ctx, S, playingSay = null) {
     const id = ctx.deviceId, max = maxVolume(ctx);
-    const line = result(true, "playing", fill(S.say_playing, { title: r.title }), { title: r.title });
+    const line = result(true, "playing", playingSay ?? fill(S.say_playing, { title: r.title }), { title: r.title });
     if (media.isCurrent(id, { source: r.source, candidateId: r.candidateId })) {
       // Asked for what is already on: nothing restarts. If it was paused or silent, it is brought back.
       const cur = media.current(id);
@@ -211,6 +229,18 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       const picked = await resolver.choose(id, what); if (picked) return start(picked, ctx, S);
     }
     if (i.choice === true) return null;                                    // a bare sentence that named none of them: the model gets it
+    // F28a: "play a random album", "play some music": the music source picks an album, which plays through the
+    // same path. The line says what it picked, with its artist where the source knows one. `random` is the kind
+    // of request at T1 ("album", "music") and `true` from the model's own call.
+    if (i.random === true || (typeof i.random === "string" && i.random !== "" && i.random !== "false")) {
+      const r = await resolver.random(id);
+      if (r.outcome === "playing") return start(r, ctx, S, r.artist ? fill(S.say_playing_album, { title: r.title, artist: r.artist }) : null);
+      // A source that could not look (or could not queue) is a real answer, with or without a model.
+      if (r.outcome === "unavailable" && r.code !== "none") return result(false, "unavailable", fill(S[`say_play_${r.code}`] || S.say_play_unreachable, { source: S[`source_${r.source}`] || S.source_music }), { reason: r.code });
+      // No music source, or an index with no album in it yet: today's "nothing found" answer.
+      if (ctx.strict) return null;
+      return r.outcome === "unavailable" ? result(false, "unavailable", S.say_play_unavailable) : result(false, "not_found", S.say_play_random_none);
+    }
     if (!what) return ctx.strict ? null : result(false, "not_found", S.say_play_what, { effect: false });
     const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id, callSign: i.callSign === true || writesCallSign(i.what) });
     if (r.outcome === "playing") return start(r, ctx, S);

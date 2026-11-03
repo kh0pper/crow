@@ -81,6 +81,9 @@ export const STRINGS = {
     say_okay: "Okay.",
     say_nothing_playing: "Nothing is playing.",
     say_playing: "Playing {title}.",
+    // F28a: a random play names the album and its artist ("play a random album").
+    say_playing_album: "Playing {title} by {artist}.",
+    say_play_random_none: "I couldn't find an album to play.",
     say_already_playing: "{title} is already playing.",
     say_play_not_found: "I couldn't find {what} to play.",
     say_play_what: "What would you like to hear?",
@@ -295,6 +298,8 @@ export const STRINGS = {
     say_okay: "Vale.",
     say_nothing_playing: "No hay nada sonando.",
     say_playing: "Reproduciendo {title}.",
+    say_playing_album: "Reproduciendo {title} de {artist}.",
+    say_play_random_none: "No encontré ningún álbum para reproducir.",
     say_already_playing: "{title} ya está sonando.",
     say_play_not_found: "No encontré {what} para reproducir.",
     say_play_what: "¿Qué quieres escuchar?",

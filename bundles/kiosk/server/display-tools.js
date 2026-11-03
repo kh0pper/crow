@@ -47,6 +47,16 @@ function playbackVerbOf(transcript) {
   return v && MEDIA_VERBS.includes(v) ? v : null;
 }
 const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "which", "whose", "que", "quien", "como", "cuando", "donde", "cual", "por"]);
+/**
+ * F28a: crow_play's optional `random` — "play a random album" has no name to search for, so the music
+ * source picks one. One clause on the description, one flat optional argument (what may be left empty).
+ */
+const RANDOM_CLAUSE = " To play an album at random, set random true.";
+function withRandom(def) {
+  if (def?.name !== "crow_play" || !def.inputSchema?.properties) return def;
+  return { ...def, description: `${def.description}${RANDOM_CLAUSE}`,
+    inputSchema: { ...def.inputSchema, required: [], properties: { ...def.inputSchema.properties, random: { type: "boolean", description: "true plays an album picked at random; what is then not needed." } } } };
+}
 
 /**
  * ctx = { store, deviceId, caps (effective: .windows, .max_windows), lang, sources, items, emit,
@@ -104,7 +114,8 @@ export function createDisplayTools(ctx) {
       when: playWhen, holdText: playHold, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, (p) => asksPlay(p) && !asksTransport(p)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
       mustDone: (r) => r?.ok === true && ["playing", "audio_instead", "handed_off"].includes(r.outcome),
       // An argument outside its enumeration is never passed on as given.
-      execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto" }, turn),
+      execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto",
+        ...(a?.random === true || a?.random === "true" ? { random: true } : {}) }, turn),
     },
     crow_open: {
       // Held only when the person is asking to open something now; "what's new in the apps?" is offered, never held.
@@ -164,8 +175,8 @@ export function createDisplayTools(ctx) {
   // it must run; a must-run test can never fire for a tool the model was not given.
   return defs.map((definition) => {
     const r = rules[definition.name];
-    if (typeof r.must !== "function") return { definition, ...r };
+    if (typeof r.must !== "function") return { definition: withRandom(definition), ...r };
     const raw = r.must;
-    return { definition, ...r, must: (t) => (typeof r.when !== "function" || r.when(t) === true) && raw(t) === true };
+    return { definition: withRandom(definition), ...r, must: (t) => (typeof r.when !== "function" || r.when(t) === true) && raw(t) === true };
   });
 }
