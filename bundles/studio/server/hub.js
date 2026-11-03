@@ -34,7 +34,9 @@
  * "storage" is the one refusal that has to undo something: the edit was
  * already applied to the live document when the write failed, so the hub drops
  * its cached document for that song and the next operation rebuilds it from the
- * database. Nothing in memory and nothing on disk keeps the step.
+ * database. Nothing in memory and nothing on disk keeps the step. A song whose
+ * first save fails needs no such repair: its row and its first update are one
+ * transaction, so a failed creation writes nothing at all.
  *
  * The two reads (`openSong`, `history`) throw instead, because there is no
  * half-answer to hand back: a StudioError with code "not_found", or the ACL
@@ -64,7 +66,7 @@ import {
 } from "./history.js";
 import {
   commitStep,
-  createSongRow,
+  createSongWithState,
   getSongRow,
   listHistory,
   listSongs as listSongRows,
@@ -143,6 +145,11 @@ function parseJson(text) {
   }
 }
 
+/** @returns {boolean} whether a value is a plain object (not null, not an array). */
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
  * Note the track an object value belongs to, when it names one.
  * @param {Set<string>} ids
@@ -150,39 +157,71 @@ function parseJson(text) {
  * @returns {void}
  */
 function addTrackId(ids, value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+  if (!isPlainObject(value)) return;
   if (typeof value.track_id === "string" && value.track_id !== "") ids.add(value.track_id);
 }
 
 /**
- * Every track a history step writes to.
+ * Note the track one before/after entry names.
+ *
+ * A clip value carries the track it sits on in `track_id`. A whole-track value
+ * (`track:<id>|*`) is the track itself, and it is the one place a restore says
+ * whether that track is locked: a track that was removed is not in the song
+ * any more, so a lock check against the live document would find nothing to
+ * refuse.
+ * @param {{trackIds: Set<string>, lockedTracks: Map<string, string>}} found
+ * @param {string} key - a `"<ref>|<field>"` history key
+ * @param {any} value - the value the entry writes
+ * @returns {void}
+ */
+function noteTrackEntry(found, key, value) {
+  const split = splitRefField(key);
+  const target = split ? parseObjectRef(split.ref) : null;
+  if (target?.kind === "track" && split.field === "*" && isPlainObject(value)) {
+    found.trackIds.add(target.id);
+    if (value.locked === true) {
+      const name = typeof value.name === "string" && value.name !== "" ? value.name : target.id;
+      found.lockedTracks.set(target.id, name);
+    }
+    return;
+  }
+  addTrackId(found.trackIds, value);
+}
+
+/**
+ * Every track a history step writes to, and which of those it would put back
+ * locked.
  *
  * The refs alone are not enough. A restore puts back an object the song does
  * not hold any more, so `trackIdForRef` finds nothing for it — the clip's own
  * `track_id` inside the value being written is then the only thing that says
  * which track it lands on. The values a plan writes are read for it, and so
  * are the recorded step's own before/after values, because those are what a
- * redo of a redo eventually writes.
+ * redo of a redo eventually writes. A whole-track value that says
+ * `locked: true` marks that track locked, so undoing the operator's removal of
+ * a locked track is refused for an agent the way every other locked-track
+ * write is.
  * @param {object} snap - the current snapshot
  * @param {string[]} refs - the refs the plan's keys name
  * @param {{apply?: Map<string, any>}|Map<string, any>} plan
  * @param {object|null} target - the history entry being undone or redone
- * @returns {Set<string>}
+ * @returns {{trackIds: Set<string>, lockedTracks: Map<string, string>}}
+ *   `lockedTracks` maps a track id to the name to print for it
  */
 function planTrackIds(snap, refs, plan, target) {
-  const ids = new Set();
+  const found = { trackIds: new Set(), lockedTracks: new Map() };
   for (const ref of refs) {
     const trackId = trackIdForRef(snap, ref);
-    if (trackId) ids.add(trackId);
+    if (trackId) found.trackIds.add(trackId);
   }
 
   const applied = plan?.apply instanceof Map ? plan.apply : plan instanceof Map ? plan : null;
-  for (const value of applied?.values() ?? []) addTrackId(ids, value);
+  for (const [key, value] of applied ?? []) noteTrackEntry(found, key, value);
   for (const map of [target?.inverse?.before, target?.inverse?.after]) {
     if (!map || typeof map !== "object") continue;
-    for (const value of Object.values(map)) addTrackId(ids, value);
+    for (const [key, value] of Object.entries(map)) noteTrackEntry(found, key, value);
   }
-  return ids;
+  return found;
 }
 
 /**
@@ -522,9 +561,9 @@ export function createHub({
    *
    * The kind is part of the key because a client that reuses the id of a
    * command for an undo of that command is asking for two different things;
-   * the author, because a person and an agent may each happen to pick the same
-   * id. The same key with a different change is refused rather than answered
-   * with somebody else's result.
+   * the kind and the id of the author, because a person and an agent may each
+   * happen to pick the same id. The same key with a different change is
+   * refused rather than answered with somebody else's result.
    * @param {"command"|"undo"|"redo"} kind
    * @param {{kind: string, id: string|null}} author
    * @param {string|null} cmd_id
@@ -532,7 +571,7 @@ export function createHub({
    */
   function dedupeKey(kind, author, cmd_id) {
     if (cmd_id == null || cmd_id === "") return null;
-    return `${kind}:${author.id ?? "unknown"}:${cmd_id}`;
+    return `${kind}:${author.kind}:${author.id ?? "unknown"}:${cmd_id}`;
   }
 
   /**
@@ -655,12 +694,15 @@ export function createHub({
    *          commandId?: string}} request
    *   `refs` are the object refs the step names; `trackIds` overrides the
    *   tracks they resolve to, for a step whose refs do not say (an undo puts a
-   *   clip back, and the track comes from the value it writes)
+   *   clip back, and the track comes from the value it writes); `lockedTracks`
+   *   names tracks the step would put back locked, which the document no
+   *   longer holds to be checked
    * @returns {object|null} a refusal, or null when the step may run
    */
   function checkAgentRules({
     refs,
     trackIds = null,
+    lockedTracks = null,
     snap,
     song_id,
     author,
@@ -678,6 +720,12 @@ export function createHub({
       const track = snap.tracks?.find((item) => item.id === trackId);
       if (track?.locked === true) {
         return refuse("locked", `Track "${track.name}" is locked by the operator.`);
+      }
+      // A track the step would put back is not in the song to be looked up,
+      // so the value it writes is what says the track is locked.
+      const restored = lockedTracks?.get(trackId);
+      if (restored !== undefined) {
+        return refuse("locked", `Track "${restored}" is locked by the operator.`);
       }
     }
 
@@ -740,8 +788,9 @@ export function createHub({
    * Create a song in a project.
    *
    * Needs `write_files`; an archived project is refused by the ACL module. The
-   * new song's empty document is stored as its update seq 1, so opening it
-   * later reproduces exactly what its author saw.
+   * new song's empty document is stored as its update seq 1 in the same
+   * transaction as the song's own row, so opening it later reproduces exactly
+   * what its author saw and a save that fails leaves no empty song behind.
    * @param {{project_id: number, title: string, author: object}} request
    * @returns {Promise<{ok: true, song_id: string, snapshot_version: number}|{ok: false, code: string, error: string}>}
    */
@@ -765,29 +814,30 @@ export function createHub({
       return toRefusal(err);
     }
 
-    let created;
-    try {
-      created = await createSongRow(db, { project_id: projectId, title: songTitle });
-    } catch (err) {
-      if (err instanceof StudioError || err?.name === ACL_ERROR_NAME) return toRefusal(err);
-      if (/500 songs/.test(String(err?.message ?? ""))) return refuse("limit", err.message);
-      throw err;
-    }
-
-    const song_id = created.id;
     const doc = newSongDoc({ title: songTitle });
     const update = Y.encodeStateAsUpdate(doc);
 
-    let seq;
+    let created;
     try {
-      // The empty document is the song's first update, so opening it later
-      // reproduces exactly what its author saw.
-      seq = await commitStep(db, { song_id, update });
+      // The row and the empty document it starts from land together, or not at
+      // all: a song row whose first update is missing is a song nobody can
+      // open, and there is nothing to delete it with afterwards.
+      created = await createSongWithState(db, {
+        project_id: projectId,
+        title: songTitle,
+        update,
+      });
     } catch (err) {
-      // The song's row exists but carries no update; the caller may create the
-      // song again.
-      return storageRefusal(song_id, err);
+      if (err instanceof StudioError || err?.name === ACL_ERROR_NAME) return toRefusal(err);
+      if (/500 songs/.test(String(err?.message ?? ""))) return refuse("limit", err.message);
+      // Nothing was written, and a song that was never created has no cached
+      // document to drop.
+      warn("creating a song", err);
+      return refuse("storage", SAVE_FAILED);
     }
+
+    const song_id = created.id;
+    const seq = created.seq;
     songs.set(song_id, { doc, seq, project_id: projectId });
 
     await audit(projectId, actor, AUDIT_CREATE_ACTION, song_id, { title: songTitle });
@@ -1012,10 +1062,18 @@ export function createHub({
     // A people-only command stays people-only when it is taken back: undoing
     // the operator's unlock would let an agent lock the track it may not lock.
     // The rule follows the `undo_of` chain, so redoing a redo is refused just
-    // as the first undo of it would be.
+    // as the first undo of it would be. A chain that cannot be followed to an
+    // ordinary command — a missing `undo_of` row, or one that never ends —
+    // could be hiding anything, so it is people-only too.
     if (actor.kind !== "human") {
       const original = await originalCommandId(song_id, target);
-      if (original && hasCommand(original) && getCommand(original).humanOnly) {
+      if (original === null) {
+        return refuse(
+          "human_only",
+          "Only a person can take that step back: the command it came from is not in this song's history.",
+        );
+      }
+      if (hasCommand(original) && getCommand(original).humanOnly) {
         return refuse(
           "human_only",
           `Only a person can take back "${original}": it is a people-only command.`,
@@ -1055,9 +1113,11 @@ export function createHub({
     // value the plan writes rather than from the ref.
     const refs = planRefs(plan);
     const snap = snapshot(state.doc);
+    const { trackIds, lockedTracks } = planTrackIds(snap, refs, plan, target);
     const refused = checkAgentRules({
       refs,
-      trackIds: planTrackIds(snap, refs, plan, target),
+      trackIds,
+      lockedTracks,
       snap,
       song_id,
       author: actor,
@@ -1123,7 +1183,8 @@ export function createHub({
    * @param {string} song_id
    * @param {object} target - the entry being undone or redone
    * @returns {Promise<string|null>} the command id, or null when the chain runs
-   *   out (a step whose original is not in the song any more)
+   *   out (a step whose original is not in the song any more, or one that
+   *   never reaches an ordinary command)
    */
   async function originalCommandId(song_id, target) {
     let current = target;

@@ -17,7 +17,7 @@ import { createClient } from "@libsql/client";
 import { AclError } from "../servers/shared/project-acl.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
-import { getSongRow } from "../bundles/studio/server/store.js";
+import { appendHistory, getSongRow } from "../bundles/studio/server/store.js";
 
 /** The project every song in these tests belongs to. */
 const PROJECT = 21;
@@ -207,6 +207,21 @@ async function updateSeqs(db, song_id) {
     args: [song_id],
   });
   return rows.map((row) => Number(row.seq));
+}
+
+/** @returns {Promise<{songs: number, updates: number, history: number}>} what the tables hold. */
+async function rowCounts(db) {
+  const { rows } = await db.execute({
+    sql: `SELECT (SELECT COUNT(*) FROM studio_songs) AS songs,
+                 (SELECT COUNT(*) FROM studio_updates) AS updates,
+                 (SELECT COUNT(*) FROM studio_history) AS history`,
+  });
+  const row = rows[0] ?? {};
+  return {
+    songs: Number(row.songs ?? 0),
+    updates: Number(row.updates ?? 0),
+    history: Number(row.history ?? 0),
+  };
 }
 
 test("two commands race; both apply in arrival order and history seq is gapless", async (t) => {
@@ -1015,4 +1030,231 @@ test("focus for an unknown song creates nothing", async (t) => {
   assert.deepEqual(real.presence, [
     { client_id: "client-a", author: HUMAN, focus: "clip:bass-verse" },
   ]);
+});
+
+test("agent cannot undo the removal of a locked track", async (t) => {
+  const { hub, db } = await setup(t);
+  const song_id = await seedSong(hub);
+
+  assert.equal(
+    (await hub.runCommand({
+      song_id,
+      cmd_id: "locked-remove-1",
+      command: "track.lock",
+      args: { track_id: "bass" },
+      author: HUMAN,
+    })).ok,
+    true,
+  );
+  const removed = await hub.runCommand({
+    song_id,
+    cmd_id: "locked-remove-2",
+    command: "track.remove",
+    args: { track_id: "bass" },
+    author: HUMAN,
+  });
+  assert.equal(removed.ok, true, `track.remove was refused: ${removed.error}`);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.tracks, []);
+  const updatesBefore = await updateSeqs(db, song_id);
+
+  // The track is out of the song, so nothing in the document says it is
+  // locked: only the value the undo would write back does.
+  const refused = refuses(
+    await hub.undo({
+      song_id,
+      cmd_id: "locked-remove-3",
+      entry_id: removed.entry.id,
+      author: AGENT,
+    }),
+    "locked",
+  );
+  assert.equal(refused.error, 'Track "Bass" is locked by the operator.');
+  assert.deepEqual(await updateSeqs(db, song_id), updatesBefore, "a refused undo writes nothing");
+  const held = (await hub.openSong(song_id)).snapshot;
+  assert.deepEqual(held.tracks, []);
+  assert.deepEqual(Object.keys(held.clips), []);
+
+  // The operator's own undo puts the locked track and its clip back.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "locked-remove-4",
+    entry_id: removed.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  const restored = (await hub.openSong(song_id)).snapshot;
+  assert.deepEqual(
+    restored.tracks.map((track) => [track.name, track.locked]),
+    [["Bass", true]],
+  );
+  assert.deepEqual(Object.keys(restored.clips), ["bass-verse"]);
+
+  // A track the operator never locked still comes back for an agent: only a
+  // locked restore is refused.
+  const other = await seedSong(hub, { title: "Unlocked song" });
+  const gone = await hub.runCommand({
+    song_id: other,
+    cmd_id: "unlocked-remove-1",
+    command: "track.remove",
+    args: { track_id: "bass" },
+    author: HUMAN,
+  });
+  assert.equal(gone.ok, true, `track.remove was refused: ${gone.error}`);
+  const cameBack = await hub.undo({
+    song_id: other,
+    cmd_id: "unlocked-remove-2",
+    entry_id: gone.entry.id,
+    author: AGENT,
+  });
+  assert.equal(cameBack.ok, true, `an unlocked restore was refused: ${cameBack.error}`);
+  assert.equal((await hub.openSong(other)).snapshot.tracks[0].name, "Bass");
+});
+
+test("a broken undo chain is refused for agents", async (t) => {
+  const { hub, db } = await setup(t);
+  const song_id = await seedSong(hub);
+
+  const renamed = await hub.runCommand({
+    song_id,
+    cmd_id: "broken-1",
+    command: "clip.rename",
+    args: { clip_id: "bass-verse", name: "Renamed" },
+    author: HUMAN,
+  });
+  assert.equal(renamed.ok, true);
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "broken-2",
+    entry_id: renamed.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+
+  // The command the undo came from is gone, so the rules that step carries
+  // cannot be known; an agent is refused rather than trusted.
+  await db.execute({
+    sql: "DELETE FROM studio_history WHERE id = ?",
+    args: [renamed.entry.id],
+  });
+  const updatesBefore = await updateSeqs(db, song_id);
+  const refused = refuses(
+    await hub.redo({ song_id, cmd_id: "broken-3", entry_id: undone.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.match(refused.error, /not in this song's history/);
+  assert.deepEqual(await updateSeqs(db, song_id), updatesBefore, "a refused step writes nothing");
+  assert.equal((await hub.openSong(song_id)).snapshot.clips["bass-verse"].name, "Verse bass");
+
+  // Two undo rows that point at each other never reach an ordinary command
+  // either: the hop cap ends the walk and the answer is the same.
+  const left = await appendHistory(db, {
+    song_id,
+    seq: 900,
+    command: "history.undo",
+    author: HUMAN,
+    inverse: { before: {}, after: {} },
+  });
+  const right = await appendHistory(db, {
+    song_id,
+    seq: 901,
+    command: "history.undo",
+    author: HUMAN,
+    inverse: { before: {}, after: {} },
+    undo_of: left,
+  });
+  await db.execute({
+    sql: "UPDATE studio_history SET undo_of = ? WHERE id = ?",
+    args: [right, left],
+  });
+  refuses(
+    await hub.redo({ song_id, cmd_id: "broken-4", entry_id: right, author: AGENT }),
+    "human_only",
+  );
+
+  // The operator still takes the step back himself.
+  const redone = await hub.redo({
+    song_id,
+    cmd_id: "broken-5",
+    entry_id: undone.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(redone.ok, true, `the operator's redo was refused: ${redone.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.clips["bass-verse"].name, "Renamed");
+});
+
+test("if creating a song fails to save, no song row is left", async (t) => {
+  const { disk, db, hub } = await setupFlaky(t);
+
+  db.failNextBatch();
+  const refused = refuses(
+    await hub.createSong({ project_id: PROJECT, title: "Never saved", author: HUMAN }),
+    "storage",
+  );
+  assert.equal(refused.error, "Studio could not save that change; nothing was changed.");
+  assert.deepEqual(await hub.listSongs({ project_ids: [PROJECT] }), [], "no song row was left behind");
+  assert.deepEqual(
+    await rowCounts(disk),
+    { songs: 0, updates: 0, history: 0 },
+    "nothing was written at all",
+  );
+
+  // The next attempt is a whole song: one row and the first update of its own
+  // empty document.
+  const created = await hub.createSong({ project_id: PROJECT, title: "Saved this time", author: HUMAN });
+  assert.equal(created.ok, true, `the second createSong was refused: ${created.error}`);
+  assert.equal(created.snapshot_version, 1);
+  assert.deepEqual(await rowCounts(disk), { songs: 1, updates: 1, history: 0 });
+  const opened = await hub.openSong(created.song_id);
+  assert.equal(opened.snapshot.meta.title, "Saved this time");
+  assert.equal(opened.snapshot_version, 1);
+});
+
+test("an agent and the human reusing the same cmd_id do not collide", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+
+  const agent = await hub.runCommand({
+    song_id,
+    cmd_id: "shared-cmd-id",
+    command: "track.rename",
+    args: { track_id: "bass", name: "Agent take" },
+    author: AGENT,
+  });
+  assert.equal(agent.ok, true, `the agent's step was refused: ${agent.error}`);
+
+  // The operator happens to pick the same id for their own step: that is a
+  // different author's step, so it runs instead of replaying the agent's.
+  const human = await hub.runCommand({
+    song_id,
+    cmd_id: "shared-cmd-id",
+    command: "track.rename",
+    args: { track_id: "bass", name: "Operator take" },
+    author: HUMAN,
+  });
+  assert.equal(human.ok, true, `the operator's step was refused: ${human.error}`);
+  assert.notEqual(human.entry.id, agent.entry.id);
+  assert.equal(human.entry.author.kind, "human");
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].name, "Operator take");
+
+  // Each author still gets their own answer back on a resend.
+  assert.deepEqual(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "shared-cmd-id",
+      command: "track.rename",
+      args: { track_id: "bass", name: "Agent take" },
+      author: AGENT,
+    }),
+    agent,
+  );
+  assert.deepEqual(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "shared-cmd-id",
+      command: "track.rename",
+      args: { track_id: "bass", name: "Operator take" },
+      author: HUMAN,
+    }),
+    human,
+  );
 });

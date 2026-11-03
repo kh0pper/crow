@@ -15,6 +15,7 @@ import {
   appendUpdate,
   commitStep,
   createSongRow,
+  createSongWithState,
   getSongRow,
   listHistory,
   listSongs,
@@ -104,6 +105,27 @@ test("createSongRow refuses the 501st song in a project", async (t) => {
   // The limit is per project, not per instance.
   const { id } = await createSongRow(db, { project_id: 8, title: "Another project" });
   assert.ok(id);
+});
+
+test("createSongWithState writes the song row and its first update together", async (t) => {
+  const db = scratchDb(t);
+  await initStudioTables(db);
+
+  const created = await createSongWithState(db, { project_id: 9, title: "One step", update: bytes(7) });
+  assert.equal(created.seq, 1, "a new song's first update is seq 1");
+  assert.equal((await getSongRow(db, created.id)).title, "One step");
+  assert.deepEqual((await loadUpdates(db, created.id)).map(toArray), [[7]]);
+
+  // The cap is checked before anything is written, exactly as createSongRow
+  // checks it.
+  for (let i = 0; i < 500; i++) {
+    await createSongRow(db, { project_id: 10, title: `Full ${i + 1}` });
+  }
+  await assert.rejects(
+    () => createSongWithState(db, { project_id: 10, title: "One too many", update: bytes(8) }),
+    /500 songs/,
+  );
+  assert.equal((await listSongs(db, { project_ids: [10] })).length, 500);
 });
 
 test("writeSnapshot then loadUpdates returns only later updates", async (t) => {

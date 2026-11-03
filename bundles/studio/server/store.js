@@ -5,8 +5,8 @@
  * Every function takes the database client as its first argument: production
  * passes the gateway's own @libsql/client-compatible client (via
  * `appImport("servers/db.js")`), tests pass a scratch client. The client needs
- * `execute({sql, args})`, and `batch(statements, "write")` for `commitStep` —
- * the one write here that has to be all-or-nothing.
+ * `execute({sql, args})`, and `batch(statements, "write")` for the two writes
+ * that have to be all-or-nothing: `commitStep` and `createSongWithState`.
  *
  * BLOBs go in as Uint8Array and come out as Uint8Array. libsql hands a file
  * blob back as an ArrayBuffer and other drivers as a Buffer, so every read
@@ -130,6 +130,50 @@ export async function createSongRow(db, { project_id, title }) {
     args: [id, project_id, title, now, now],
   });
   return { id };
+}
+
+/**
+ * Create a song row and write its first update, in one transaction.
+ *
+ * The 500-song cap is checked before anything is written, exactly as
+ * `createSongRow` checks it. The row and the document the song starts from
+ * then go in as one `db.batch(..., "write")`: a failed save leaves no song row
+ * behind, because a row whose first update is missing is a song nobody can
+ * open and nothing can tidy away.
+ * @param {object} db
+ * @param {{project_id: number, title: string, update: Uint8Array}} song
+ * @returns {Promise<{id: string, seq: number}>} the new song's id and the
+ *   sequence number its first update was written with
+ * @throws when the cap is reached or the batch fails — nothing is written then
+ */
+export async function createSongWithState(db, { project_id, title, update }) {
+  const { rows } = await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM studio_songs WHERE project_id = ?",
+    args: [project_id],
+  });
+  if (Number(rows[0]?.n ?? 0) >= MAX_SONGS_PER_PROJECT) {
+    throw new Error("This project already has 500 songs, the most Studio allows.");
+  }
+
+  const id = randomUUID();
+  const now = nowIso();
+  // A brand-new song has no updates, so its first one is always seq 1.
+  const seq = 1;
+  await db.batch(
+    [
+      {
+        sql: `INSERT INTO studio_songs (id, project_id, title, created_at, updated_at, snapshot, snapshot_seq)
+              VALUES (?, ?, ?, ?, ?, NULL, 0)`,
+        args: [id, project_id, title, now, now],
+      },
+      {
+        sql: "INSERT INTO studio_updates (song_id, seq, data, created_at) VALUES (?, ?, ?, ?)",
+        args: [id, seq, bindBytes(update), now],
+      },
+    ],
+    "write",
+  );
+  return { id, seq };
 }
 
 /**
