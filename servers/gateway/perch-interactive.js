@@ -140,7 +140,8 @@
  */
 import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, isSentinel, mentionsLock } from "../../scripts/pi-bots/narrowing-lock.mjs";
 import { taintsSession } from "../../scripts/pi-bots/outside-text-tools.mjs";
-import { markTaintUnrecorded } from "./session-taint-memory.js";
+import { isTaintUnrecorded, markTaintUnrecorded } from "./session-taint-memory.js";
+import { isDraftTool, redactMcpConfig, safeRecordDraft } from "./staged/recorder.js";
 import { redactErrorText, lastAssistantError } from "./perch-error-text.js";
 import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scripts/pi-bots/tool-budget.mjs";
 import Database from "better-sqlite3";
@@ -2714,6 +2715,12 @@ export function createInteractiveEngine({
     // in practice unreachable, since a crow-file: notify rides a live child;
     // belt for the test seams that return a bare world).
     s.worldRoot = world.sessionDir || null;
+    // Staged sends (spec §12.2): a draft tool's credential is named by the MCP block it came through
+    // (server key + primary/personal role), and the block lives in THIS turn's world config. Keep a
+    // redacted copy on the session — server ids and which token env each carries, never a path — so
+    // the draft recorder at tool_execution_end can name the credential without holding a token
+    // location. Rebuilt on every spawn/wake, exactly like the world itself.
+    s.credConfig = redactMcpConfig(world.mcpConfig);
     // Track 3 Task 4 (wake fidelity, review finding 8): if the engine tracks a
     // model different from what prepareSpawn just resolved fresh (a live
     // model_select or a control() switch made while this session was awake or
@@ -3042,6 +3049,10 @@ export function createInteractiveEngine({
     switch (m.type) {
       case "tool_execution_start":
         onBrowserToolEvent(s, m, "start");
+        // Staged sends: remember this call's args, and whether the session was ALREADY tainted when
+        // it started. Read BEFORE the D22 taint write below on purpose — a draft tool is never on
+        // the clean list, so its own taint must not count as "written from outside content".
+        if (isDraftTool(m.toolName)) rememberDraftCall(s, m);
         // D22: reading outside text taints this session for Artifacts trust.
         // Recorded at call START from the engine's own (bot, thread).
         // Written SYNCHRONOUSLY in this tick (before the gateway handles any
@@ -3062,14 +3073,21 @@ export function createInteractiveEngine({
         emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false,
           toolCallId: m.toolCallId || null, argsText: safeSnippet(maskDeep(m.args), 600) });
         return;
-      case "tool_execution_end":
+      case "tool_execution_end": {
         if (s.turn && m.toolName) s.turn.toolNames.push(m.toolName);
         onBrowserToolEvent(s, m, "end");
         // Wave 3: same for the outcome — the result's TEXT blocks, pi-lab's
         // own 2000-char cap, stringified fallback for non-text payloads.
-        emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
-          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(maskDeep(m.result), 2000) });
+        const endFrame = { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
+          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(maskDeep(m.result), 2000) };
+        // Staged sends (spec §12.1): the staged row must exist BEFORE this frame — the hub refetches
+        // the card when a draft tool's end frame arrives, and a frame promising a row the DB cannot
+        // serve yet draws an empty card. The recorder never breaks the turn (one log line, code
+        // only) and the frame is emitted either way.
+        if (isDraftTool(m.toolName)) { void recordDraftThenEmit(s, m, endFrame); return; }
+        emit(s, endFrame);
         return;
+      }
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
         const text = withoutDatesEcho(s.turn, assistantTextOf(m.message));
@@ -3126,6 +3144,85 @@ export function createInteractiveEngine({
         // message_update, … — not part of the lens vocabulary.
         // Silence is the contract, not an oversight.
     }
+  }
+
+  /**
+   * Staged sends: hold one draft call's args and its "tainted before" verdict until its end event.
+   * Bounded because a pi child cannot have many draft calls in flight at once; a Map miss at the end
+   * (a resume mid-call) is handled fail-closed there.
+   */
+  function rememberDraftCall(s, m) {
+    if (!s.draftCalls) s.draftCalls = new Map();
+    if (s.draftCalls.size >= 8) s.draftCalls.clear();
+    s.draftCalls.set(String(m.toolCallId || ""), {
+      args: m.args && typeof m.args === "object" ? m.args : null,
+      taintedBefore: taintedBeforeDraft(s),
+    });
+  }
+
+  /**
+   * Was this session tainted BEFORE the tool call that is starting now (spec §12.3 item 7)? D22's
+   * record is read one way only: the row is written at the START of any tainting tool, so an existing
+   * row read here — before this call's own write — is exactly "before". Its `ts` (SQLite UTC, second
+   * precision) is compared with the wall clock, not with the engine's injectable `now`, because the
+   * row's clock is SQLite's. An unreadable row fails CLOSED (tainted); a plain missing table is a
+   * session that never tainted anything, which is clean.
+   */
+  function taintedBeforeDraft(s) {
+    let db = null;
+    try {
+      if (isTaintUnrecorded(s.botId, s.threadId)) return true;
+      db = new Database(process.env.CROW_DB_PATH || join(resolveDataDir(), "crow.db"));
+      db.pragma("busy_timeout = 1000");
+      const row = db.prepare("SELECT ts FROM artifact_session_taint WHERE bot_id=? AND thread_id=?").get(s.botId, s.threadId);
+      if (!row) return false;
+      const ts = Date.parse(String(row.ts).replace(" ", "T") + "Z");
+      // A record at (or, within clock skew, around) this start is "before"; an unparseable one is
+      // unknown, and unknown means tainted.
+      return !Number.isFinite(ts) || ts <= Date.now() + 1000;
+    } catch (e) {
+      return !/no such table/i.test(String((e && e.message) || ""));
+    } finally {
+      try { db && db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /** Record one Perch draft call, then emit its end frame (never the other way round). */
+  async function recordDraftThenEmit(s, m, endFrame) {
+    const key = String(m.toolCallId || "");
+    const pending = s.draftCalls ? s.draftCalls.get(key) : null;
+    if (s.draftCalls) s.draftCalls.delete(key);
+    let db = null;
+    try {
+      db = createDbClient();
+      await safeRecordDraft({
+        db,
+        toolName: m.toolName,
+        args: pending ? pending.args : (m.args && typeof m.args === "object" ? m.args : null),
+        resultText: m.result,
+        // One line, tool name + code, through the engine's own log.
+        log: (line) => log(s.sessionId + ": " + line),
+        context: {
+          channel: "gmail",
+          sessionId: s.sessionId,
+          threadId: s.threadId,
+          botId: s.botId,
+          cardId: s.cardId,
+          credConfig: s.credConfig,
+          // The chat card is the whole point here: a Perch row pushes nothing.
+          notify: false,
+          // A start event we never saw (a resume mid-call) fails closed.
+          tainted: pending ? pending.taintedBefore === true : true,
+        },
+      });
+    } catch (e) {
+      log(s.sessionId + ": staged draft not recorded (" + String(m.toolName || "?") + "): " + ((e && typeof e.code === "string" && e.code) || "error"));
+    } finally {
+      if (db) { try { db.close(); } catch { /* already closed */ } }
+    }
+    // The frame goes out whatever the recorder did. (It is emitted here rather than in the switch
+    // because the row has to exist first; a frame must never break the turn either way.)
+    try { emit(s, endFrame); } catch { /* a broken subscriber never breaks a turn */ }
   }
 
   /**

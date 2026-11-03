@@ -58,6 +58,7 @@ import { CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY } from "../../servers/shared/
 import { findPiLabDir, piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
 import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
+import { betterSqliteDb, isDraftTool, recordDrafts, redactMcpConfig } from "../../servers/gateway/staged/recorder.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { createEgressRelay } from "./pi_egress.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
@@ -1158,7 +1159,25 @@ export class PiRpc {
       t += mm.content.filter((c) => c.type === "text").map((c) => c.text).join("");
     return t.trim();
   }
-  toolCalls() { return this.events.filter((e) => e.type === "tool_execution_end").map((e) => ({ tool: e.toolName, isError: !!e.isError })); }
+  // Staged sends (spec §12.1): keep WHAT the call carried as well as its name. The draft recorder
+  // needs the draft id from the end event's result and the recipients/subject/body from the START
+  // event of the same toolCallId (a fallback when the provider read cannot be used). The extra keys
+  // are added only when the child actually emitted them, so a caller (or a test stub) that sends
+  // neither keeps the exact {tool, isError} shape this returned before.
+  toolCalls() {
+    const argsById = new Map();
+    for (const e of this.events) {
+      if (e.type === "tool_execution_start" && e.toolCallId) argsById.set(e.toolCallId, e.args);
+    }
+    return this.events.filter((e) => e.type === "tool_execution_end").map((e) => {
+      const call = { tool: e.toolName, isError: !!e.isError };
+      const args = e.args !== undefined ? e.args : (e.toolCallId ? argsById.get(e.toolCallId) : undefined);
+      if (args !== undefined) call.args = args;
+      if (e.result !== undefined) call.result = e.result;
+      if (e.toolCallId) call.toolCallId = e.toolCallId;
+      return call;
+    });
+  }
   async close() {
     try { this.proc.stdin.end(); } catch (e) {}
     const pid = this.proc.pid;
@@ -1342,6 +1361,41 @@ export function upsertSession(s) {
 function parseCardIntent(msg) {
   const m = /\b(?:do\s+)?card\s*#?\s*(\d+)\b/i.exec(msg) || /\bexecute\s+#?(\d+)\b/i.exec(msg);
   return m ? Number(m[1]) : null;
+}
+
+/**
+ * Staged sends (spec §12.1): record this turn's Gmail drafts, so the operator reviews them on the
+ * Board and on `/dashboard/staged/<id>`. Called once per NON-JOB channel turn — a job turn is the
+ * job runner's to record (it owns job_id/card_id, and a card job's world config never reaches here).
+ *
+ * Every channel turn is outside content by definition (turn-principal's NEVER_OWNER_GATEWAYS), so
+ * every row it writes is tainted. The credential is named from THIS turn's own world config, redacted
+ * to server ids and roles: no token path is ever held on a row or in a log. A turn with no chat to
+ * push into gets a notification (the recorder adds it). Never throws.
+ */
+async function recordStagedDrafts({ calls, mcpConfig, log, session, threadId, botId, cardId }) {
+  if (!Array.isArray(calls) || !calls.some((c) => c && isDraftTool(c.tool))) return [];
+  let conn = null;
+  try {
+    conn = db(CROW_DB);
+    return await recordDrafts(betterSqliteDb(conn), calls, {
+      channel: "gmail",
+      sessionId: session && session.id != null ? session.id : null,
+      threadId,
+      botId,
+      cardId: cardId == null ? null : cardId,
+      credConfig: redactMcpConfig(mcpConfig),
+      tainted: true,
+      notify: true,
+      log,
+    });
+  } catch (e) {
+    // A connection failure, not a draft: one line, an error code, no content.
+    log("staged drafts not recorded: " + ((e && typeof e.code === "string" && e.code) || "error"));
+    return [];
+  } finally {
+    if (conn) { try { conn.close(); } catch { /* already closed */ } }
+  }
 }
 
 export async function handleInbound(opts) {
@@ -1685,6 +1739,11 @@ export async function handleInbound(opts) {
       ? "(note: escalation requested but no escalation model is configured for this bot; ran on " + resolved.key + ")\n\n"
       : "";
     await sendReply(notice + text);
+    // Staged sends: AFTER the reply, so the correspondent never waits on a DB write. A job turn is
+    // skipped here — job_runner records it (with its own job_id/card_id).
+    if (!opts.job_id) {
+      await recordStagedDrafts({ calls, mcpConfig: world.mcpConfig, log, session, threadId: gateway_thread_id, botId: bot_id, cardId });
+    }
     result = { action: cardId != null ? "executed" : "asked", cardId, cardStatus: newCardStatus,
       piSessionId, toolCalls: calls, replyPreview: text.slice(0, 120), stdoutClean: pi.badStdout === 0 };
     // M3b: audit every bot turn so the project timeline records what happened.

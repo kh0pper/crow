@@ -4591,6 +4591,9 @@ export const translations = {
   "widgets.needsMe.kindPlan": { en: "Plan to approve", es: "Plan por aprobar" },
   "widgets.needsMe.kindHandoff": { en: "Waiting on your phone", es: "Esperando en tu teléfono" },
   "widgets.needsMe.kindMessage": { en: "Unread message", es: "Mensaje sin leer" },
+  // Staged sends (servers/gateway/staged/recorder.js): the notification a bridge or job draft raises.
+  // Title only — the draft's recipients, subject and body never touch a notification.
+  "staged.notify.title": { en: "Draft ready to review", es: "Borrador listo para revisar" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
