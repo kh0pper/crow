@@ -208,3 +208,54 @@ test("sendNtfySilent skips silently when push is not configured", async () => {
     }
   }
 });
+// ---- the opt-in -------------------------------------------------------------
+import { widgetsPushOn, WIDGETS_PUSH_KEY } from "../servers/gateway/widgets/changed.js";
+
+test("the silent push is opt-in: only the exact value \"on\" sends", () => {
+  assert.equal(WIDGETS_PUSH_KEY, "widgets_push");
+  assert.equal(widgetsPushOn("on"), true);
+  for (const v of [null, undefined, "", "off", "ON", "1", "true", true]) {
+    assert.equal(widgetsPushOn(v), false, `value ${JSON.stringify(v)} is off`);
+  }
+});
+
+test("the default sender publishes nothing while widgets_push is unset, and publishes once it is \"on\"", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const saved = {
+    fetch: globalThis.fetch,
+    NTFY_TOPIC: process.env.NTFY_TOPIC,
+    NTFY_HOST: process.env.NTFY_HOST,
+  };
+  const captured = [];
+  globalThis.fetch = async (url, init) => { captured.push({ url, init }); return new Response(null, { status: 200 }); };
+  process.env.NTFY_TOPIC = "crow-widgets-test";
+  process.env.NTFY_HOST = "127.0.0.1";
+  const db = createDbClient();
+  const fire = async () => {
+    _resetWidgetsChangedForTest();
+    let run = null;
+    notifyWidgetsChanged({ setTimer: (fn) => { run = fn; return { unref() {} }; } });
+    run();
+    for (let n = 0; n < 20; n++) await settle();
+  };
+  try {
+    await db.execute("CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)");
+    await db.execute("CREATE TABLE IF NOT EXISTS dashboard_settings_overrides (key TEXT, instance_id TEXT, value TEXT, updated_at TEXT, PRIMARY KEY (key, instance_id))");
+    await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [WIDGETS_PUSH_KEY] });
+    await fire();
+    assert.equal(captured.length, 0, "an old phone app gets no blank alert: nothing is published");
+
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES (?, 'on')", args: [WIDGETS_PUSH_KEY] });
+    await fire();
+    assert.equal(captured.length, 1, "switched on, the silent push goes out");
+    assert.equal(captured[0].init.headers["X-Tags"], "crow-widgets");
+  } finally {
+    try { await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [WIDGETS_PUSH_KEY] }); } catch { /* scratch */ }
+    try { db.close(); } catch { /* closed */ }
+    globalThis.fetch = saved.fetch;
+    for (const k of ["NTFY_TOPIC", "NTFY_HOST"]) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});

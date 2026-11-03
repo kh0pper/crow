@@ -33,10 +33,37 @@ export const WIDGETS_CHANGED_DEBOUNCE_MS = 5000;
 export const WIDGETS_CHANGED_TAG = "crow-widgets";
 
 /**
- * The default sender. A dynamic import so this module costs nothing (and
- * imports nothing gateway-specific) until a window actually closes.
+ * The opt-in: the silent push goes out only while this setting is "on". A phone
+ * app older than the widget build turns every ntfy message into a notification,
+ * and ntfy fills an empty body with "triggered", so an unconditional send would
+ * put a blank alert on that phone every few seconds. The app that has the
+ * widget switches this on; until then nothing is sent.
+ */
+export const WIDGETS_PUSH_KEY = "widgets_push";
+
+/** True only for the exact value "on" (anything else, including a read failure, is off). */
+export function widgetsPushOn(value) {
+  return value === "on";
+}
+
+/**
+ * The default sender. Dynamic imports so this module costs nothing (and
+ * imports nothing gateway-specific) until a window actually closes. A failed
+ * setting read is "off".
  */
 async function sendNtfySilentLazy(opts) {
+  let on = false;
+  try {
+    const [{ createDbClient }, { readSetting }] = await Promise.all([
+      import("../../db.js"),
+      import("../dashboard/settings/registry.js"),
+    ]);
+    const db = createDbClient();
+    try { on = widgetsPushOn(await readSetting(db, WIDGETS_PUSH_KEY)); } finally { try { db.close(); } catch { /* closed */ } }
+  } catch {
+    on = false;
+  }
+  if (!on) return { ok: false, skipped: true, reason: "widgets_push off" };
   const mod = await import("../push/ntfy.js");
   return mod.sendNtfySilent(opts);
 }
