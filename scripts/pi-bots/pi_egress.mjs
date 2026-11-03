@@ -682,6 +682,8 @@ export function createEgressRelay(o) {
   // One connection may hold 1000 requests; beyond that the parser stops
   // (a cheap bound on a bot that never stops asking on one socket).
   doors.maxRequestsPerSocket = 1000;
+  // What the relay advertises (Keep-Alive: timeout=) is what it enforces.
+  doors.keepAliveTimeout = idleMs;
   // Per-connection pipeline bound: one request in flight, this many waiting.
   const MAX_QUEUED = 8;
   // Methods with no body: nothing here can frame one for the gateway's wire.
@@ -847,7 +849,8 @@ export function createEgressRelay(o) {
       const q = st.queue.shift();
       if (q) return startOne(q.req, q.res, st);
       // Keep-alive and nothing in flight: an idle connection is closed here.
-      req.socket.setTimeout(idleMs, () => { try { req.socket.destroy(); } catch {} });
+      // (no callback: enterDoors registered the one timeout handler)
+      req.socket.setTimeout(idleMs);
     };
     res.on("finish", next);
     res.on("close", next);
@@ -855,6 +858,9 @@ export function createEgressRelay(o) {
   }
 
   doors.on("request", (req, res) => {
+    // The first request ends the absolute head timer (enterDoors).
+    const ht = headTimers.get(req.socket);
+    if (ht) { clearTimeout(ht); headTimers.delete(req.socket); }
     const st = connState(req.socket);
     if (st.busy) {
       if (st.queue.length >= MAX_QUEUED) return refuseUnavailable(req, res, "too many pipelined requests");
@@ -872,13 +878,20 @@ export function createEgressRelay(o) {
   });
 
   /** Hand the bot's connection to the HTTP parser once the PORT line is read. */
+  const headTimers = new WeakMap();
   const enterDoors = (c) => {
     doors.emit("connection", c);
     // The doors server never listens, so node's own timeout checker never runs
-    // for it: the head timeout is armed HERE, and replaced by the idle timeout
-    // once the first request is answered (startOne). Cleared while a request is
-    // in flight, because an SSE answer is long by design.
-    c.setTimeout(headTimeoutMs, () => { try { c.destroy(); } catch {} });
+    // for it. The first head gets an ABSOLUTE timer (a trickled header cannot
+    // keep it alive), cleared by the first request. After that the socket's
+    // idle timeout takes over (startOne), set without a callback: the ONE
+    // handler is registered here, so a long keep-alive session never piles up
+    // timeout listeners. It is off while a request is in flight (SSE is long).
+    const ht = setTimeout(() => { try { c.destroy(); } catch {} }, headTimeoutMs);
+    if (ht.unref) ht.unref();
+    headTimers.set(c, ht);
+    c.once("close", () => { clearTimeout(ht); headTimers.delete(c); });
+    c.on("timeout", () => { try { c.destroy(); } catch {} });
     // The parser attaches its own readers; a socket paused for the PORT line
     // must be resumed explicitly (a 'data' listener alone does not unpause it).
     c.resume();

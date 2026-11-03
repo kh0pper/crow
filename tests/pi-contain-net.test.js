@@ -123,3 +123,20 @@ test("reaper: outer bwrap -> namespace init -> network entry -> pi counts as ONE
   assert.equal(procs[0].innerPid, 103);
   assert.equal(procs[0].rssKb, 300000);
 });
+
+test("CROW_PI_CONTAIN_NET=off: no network inputs (the host network is kept); anything else keeps the closed network", async () => {
+  const { containNetInputs } = await import("../scripts/pi-bots/bridge.mjs");
+  const saved = process.env.CROW_PI_CONTAIN_NET;
+  try {
+    process.env.CROW_PI_CONTAIN_NET = "off";
+    assert.equal(containNetInputs({ def: {} }), null);
+    process.env.CROW_PI_CONTAIN_NET = "OFF";
+    assert.equal(containNetInputs({ def: {} }), null, "case-insensitive");
+    delete process.env.CROW_PI_CONTAIN_NET;
+    const on = containNetInputs({ def: { permission_policy: { egress: ["api.example.com"] } } });
+    assert.ok(on && on.gatewayPort > 0, "default: the closed network, served on the gateway port");
+    assert.deepEqual(on.egressAllow, ["api.example.com"]);
+  } finally {
+    if (saved === undefined) delete process.env.CROW_PI_CONTAIN_NET; else process.env.CROW_PI_CONTAIN_NET = saved;
+  }
+});

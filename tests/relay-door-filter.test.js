@@ -440,6 +440,42 @@ test("an upstream that dies mid-body closes the bot's connection", async () => {
 
 // ---- the doors server's own timeout (it never listens) ----------------------
 
+test("a head trickled one line at a time is still closed after headTimeoutMs (absolute, not idle)", async () => {
+  const { r } = await relay({ headTimeoutMs: 300 });
+  const c = connect(r.socketPath);
+  c.on("error", () => {});
+  const closed = new Promise((resolve) => c.on("close", () => resolve(true)));
+  let i = 0, iv = null;
+  c.on("connect", () => {
+    c.write(`PORT ${upPort}\nGET /llm/v1/models HTTP/1.1\r\n`);
+    iv = setInterval(() => { try { c.write(`X-T${i++}: y\r\n`); } catch {} }, 100);
+  });
+  c.on("data", () => {});
+  const ok = await Promise.race([closed, sleep(2000).then(() => false)]);
+  clearInterval(iv);
+  assert.equal(ok, true, "a trickled head cannot keep the connection open past the head timeout");
+  c.destroy();
+});
+
+test("a long keep-alive session adds no timeout listeners (no MaxListenersExceededWarning)", async () => {
+  const warnings = [];
+  const onWarn = (w) => { if (w && w.name === "MaxListenersExceededWarning") warnings.push(String(w.message)); };
+  process.on("warning", onWarn);
+  try {
+    const { r } = await relay();
+    const c = doorClient(r.socketPath, upPort);
+    await c.ready;
+    for (let k = 0; k < 30; k++) {
+      c.write(GET("/llm/v1/models"));
+      const res = await c.next();
+      assert.equal(res.status, 200);
+    }
+    c.close();
+    await sleep(50);
+  } finally { process.off("warning", onWarn); }
+  assert.deepEqual(warnings, [], "one timeout handler per connection, not one per request");
+});
+
 test("a PORT line followed by a partial head is closed after headTimeoutMs", async () => {
   const { r } = await relay({ headTimeoutMs: 300 });
   const c = connect(r.socketPath);
