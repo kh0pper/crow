@@ -430,6 +430,13 @@ test("ownerSession (the dashboard chat) reaches the satellite as owner-local but
   // delegate needs the bot tables. ownerSession must not appear in the jobPrincipal expression.
   const src = (await import("node:fs")).readFileSync(new URL("../servers/gateway/ai/tool-executor.js", import.meta.url), "utf8");
   assert.match(src, /const jobPrincipal = opts\.principal === "owner" \? "owner" : null;/);
+  // And the dashboard chat route adds only ownerSession for a local password session, never a
+  // principal (the principal stays chatExecutorOptions' pinned-project rule).
+  const chatSrc = (await import("node:fs")).readFileSync(new URL("../servers/gateway/routes/chat.js", import.meta.url), "utf8");
+  const execLine = chatSrc.split("\n").find((l) => l.includes("const execOpts = {"));
+  assert.ok(execLine, "the chat route builds execOpts");
+  assert.match(execLine, /ownerTurn \? \{ ownerSession: true \}/);
+  assert.doesNotMatch(execLine, /principal/);
 });
 
 test("a peer-relayed executor's crow_discover never lists a satellite tool", async () => {
