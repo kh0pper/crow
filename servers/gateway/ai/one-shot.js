@@ -26,7 +26,8 @@ export async function runOneShot(systemPrompt, userMessage, { peer = false } = {
   const { adapter } = await createProviderAdapter();
   // A task a paired instance sent (bot relay) runs as that peer, never as the operator.
   const toolExecutor = createToolExecutor(peer ? { peerActor: true } : {});
-  const tools = getChatTools();
+  // A peer's turn is not offered the satellite-hosted tools at all (spec §9.2).
+  const tools = getChatTools(peer ? { peer: true } : {});
 
   try {
     const messages = [

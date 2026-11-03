@@ -30,6 +30,7 @@ import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
 import { connectedServers } from "./proxy.js";
+import { localFirst, satelliteVisible } from "./satellites/tool-entry.js";
 import { createDbClient } from "../db.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { peerActorMeta } from "../shared/peer-label.js";
@@ -232,9 +233,10 @@ export function createRouterServer(options = {}) {
       }
 
       // Find which connected server has this tool (local integrations first, then remote instances)
-      for (const [integrationId, entry] of connectedServers) {
+      for (const [integrationId, entry] of localFirst(connectedServers)) {
         if (entry.status !== "connected" || !entry.client) continue;
         if (entry.isRemote) continue; // Skip remote instances for name-based lookup
+        if (!satelliteVisible(entry)) continue; // a peer never reaches a satellite's tools
 
         const hasTool = entry.tools.some((t) => t.name === action);
         if (hasTool) {
@@ -263,6 +265,7 @@ export function createRouterServer(options = {}) {
         if (entry.isRemote) {
           available.push(`${id} (remote: ${entry.instanceName}): use instance_id="${entry.instanceId}" to route tools`);
         } else {
+          if (!satelliteVisible(entry)) continue;
           available.push(`${id}: ${entry.tools.map((t) => t.name).join(", ")}`);
         }
       }
@@ -304,6 +307,7 @@ export function createRouterServer(options = {}) {
         let remoteCount = 0;
         for (const [, entry] of connectedServers) {
           if (entry.isRemote) { remoteCount++; continue; }
+          if (!satelliteVisible(entry)) continue;
           if (entry.status === "connected") externalCount += entry.tools.length;
         }
         if (externalCount > 0) {
@@ -350,6 +354,7 @@ export function createRouterServer(options = {}) {
           // Find the specific tool schema
           for (const [integrationId, entry] of connectedServers) {
             if (entry.status !== "connected") continue;
+            if (!satelliteVisible(entry)) continue;
             const tool = entry.tools.find((t) => t.name === action);
             if (tool) {
               return {
@@ -374,6 +379,7 @@ export function createRouterServer(options = {}) {
         const lines = ["External integration tools:"];
         for (const [id, entry] of connectedServers) {
           if (entry.status !== "connected") continue;
+          if (!satelliteVisible(entry)) continue;
           lines.push(`\n  ${id}:`);
           for (const tool of entry.tools) {
             lines.push(`    - ${tool.name}: ${tool.description || "No description"}`);

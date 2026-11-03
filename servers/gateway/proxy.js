@@ -28,6 +28,7 @@ import { recordPeerProbe } from "./peer-probe-health.js";
 import bus from "../shared/event-bus.js";
 import { rowIsTrusted } from "../shared/peer-trust.js";
 import { peerActorMeta, remoteBotActorAllowed } from "../shared/peer-label.js";
+import { bindSatelliteServers, refreshSatelliteEntries, satelliteVisible } from "./satellites/tool-entry.js";
 
 /** GET <gatewayUrl>/health with a 5 s cap; throws on non-2xx or timeout. */
 async function probePeerHealth(gatewayUrl) {
@@ -44,6 +45,10 @@ async function probePeerHealth(gatewayUrl) {
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
 export { connectedServers };
+// Satellite-hosted bundles live in this same map (one entry per bundle, appended last) so /tools,
+// the router and the tool executor all see them; satellites/tool-entry.js keeps each entry's tool
+// list in step with the owner-approved pins.
+bindSatelliteServers(connectedServers);
 
 /** Drop the federated MCP client for a remote instance (revoke teardown). */
 export function dropRemoteInstance(instanceId) {
@@ -402,6 +407,7 @@ export async function initProxyServers() {
     // require external integrations to be configured.
     await dep("loadDynamicBackends", loadDynamicBackends)();
     await loadAddonServers();
+    await loadSatelliteServers();
     return;
   }
 
@@ -423,8 +429,23 @@ export async function initProxyServers() {
 
   // Load bundle-installed MCP servers from <crow-home>/mcp-addons.json
   await loadAddonServers();
+  // Then the satellite-hosted bundles, so their entries come AFTER every local source.
+  await loadSatelliteServers();
   } finally {
     _markAddonsSettled();
+  }
+}
+
+/**
+ * Load the satellite-hosted bundles as tool entries (spec §9.1). Runs after every local source;
+ * never fatal: a host with no satellites, or satellite tables not migrated yet, has no entries.
+ */
+async function loadSatelliteServers() {
+  try {
+    const { bundles } = await refreshSatelliteEntries();
+    if (bundles) console.log(`[proxy] ${bundles} satellite bundle(s) published as tools`);
+  } catch (err) {
+    console.warn(`  [proxy] satellite tools unavailable: ${err.message}`);
   }
 }
 
@@ -451,6 +472,9 @@ async function loadAddonServers() {
 
   for (const [id, config] of entries) {
     if (connectedServers.has(id)) continue;
+    // A satellite-hosted bundle is not a local add-on: its tools come from the satellite entry
+    // (satellites/tool-entry.js), never from a spawn here (spec §8, §9.1).
+    if (config?.transport === "satellite") continue;
     // A service add-on without its fields is connected per project, not Crow-wide.
     if (!isLegacyConfiguredAddon(id, config)) {
       console.log(`  [proxy] addon ${id}: skipped (service: its account fields are not set)`);
@@ -617,11 +641,16 @@ export function createProxyServer(filter) {
 
   // Register proxy tools for each connected server — servers by id, tools by
   // name, so tools/list is the same bytes on every boot (stable-order.js:
-  // connectedServers fills in connect-completion order).
-  for (const [integrationId, entry] of sortedServers(connectedServers)) {
+  // connectedServers fills in connect-completion order). Satellite entries come
+  // AFTER every local one, so a residual name clash keeps the LOCAL tool.
+  const sources = [...sortedServers(connectedServers)];
+  const ordered = [...sources.filter(([, e]) => !e.isSatellite), ...sources.filter(([, e]) => e.isSatellite)];
+  for (const [integrationId, entry] of ordered) {
     if (entry.status !== "connected" || !entry.client) continue;
     if (filter?.allowSources && !filter.allowSources.includes(integrationId)) continue;
     if (filter?.denySources?.includes(integrationId)) continue;
+    // A paired peer never sees a satellite's tools (spec §9.2).
+    if (!satelliteVisible(entry)) continue;
     // Federation peers (loadRemoteInstances' instance-<id> entries) are never
     // part of the raw tool surface: they carry the peer's /memory/mcp tools
     // under the same crow_* names as this instance (two peers threw on the

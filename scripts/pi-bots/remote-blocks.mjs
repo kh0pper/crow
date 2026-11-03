@@ -10,7 +10,9 @@
  */
 import { signPeerRelayActor } from "./actor-sig.mjs";
 
-/** Core capabilities with a dedicated MCP mount (addons deferred to a later slice). */
+/** Core capabilities with a dedicated MCP mount. Satellite-hosted add-ons are NOT deferred: crow
+ * reaches them through its own satellite tool entry (satellites/tool-entry.js, spec §9.1) and,
+ * from SAT-7 part B, through the /satellite-tools mount. Every OTHER add-on is deferred. */
 export const REMOTE_CANON_MOUNT = {
   "crow-memory": "/memory",
   "crow-projects": "/projects",
@@ -86,7 +88,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, r
   for (const { instanceId, canonicalId } of remoteServersForBot(def)) {
     const mount = REMOTE_CANON_MOUNT[canonicalId];
     if (!mount) {
-      warnings.push(`remote '${instanceId}::${canonicalId}' skipped — only core capabilities are remotely invocable this slice (addon caps deferred)`);
+      warnings.push(`remote '${instanceId}::${canonicalId}' skipped — only core capabilities are remotely invocable this slice (addon caps deferred; satellite-hosted add-ons ride crow's satellite tool entry)`);
       continue;
     }
     const gatewayUrl = peerGatewayUrls[instanceId];

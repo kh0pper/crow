@@ -202,6 +202,9 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
     if (canonical.mcpServers[name]) continue;
     const addon = addons[name];
     if (!addon) continue; // absent from both -> buildBotMcp warns
+    // A satellite-hosted bundle's tools arrive through crow's satellite entry, never through a pi
+    // MCP block on this host (spec §9.1). Part 2 of SAT-7 adds the bot mount.
+    if (addon.transport === "satellite") continue;
     const blk = addonSpawnBlock(name, addon, crowHome);
     if (blk) servers[name] = blk;
   }

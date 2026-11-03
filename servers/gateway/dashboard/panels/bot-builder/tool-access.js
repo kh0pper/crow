@@ -101,7 +101,9 @@ export function sourceLabel(server, lang = "en", opts = {}) {
   return { name: s, account: label, known: false };
 }
 
-/** Attach access to probed tools: [{name, readOnlyHint?, destructiveHint?}] -> [{name, access}] */
-export function catalogFromProbe(tools) {
-  return (tools || []).filter((t) => t && t.name).map((t) => ({ name: t.name, access: classifyTool(t), label: t.label || "" }));
+/** Attach access to probed tools: [{name, readOnlyHint?, destructiveHint?}] -> [{name, access}]
+ * `opts` is passed to classifyTool, so a satellite source is write unless the owner marked the
+ * tool read ({isSatellite: true, readMarks: [...]}). */
+export function catalogFromProbe(tools, opts) {
+  return (tools || []).filter((t) => t && t.name).map((t) => ({ name: t.name, access: classifyTool(t, opts), label: t.label || "" }));
 }

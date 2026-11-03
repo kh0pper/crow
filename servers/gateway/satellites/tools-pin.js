@@ -16,6 +16,12 @@ import { sanitizeStatus } from "./status-sanitize.js";
 export const MAX_TOOLS = 64;
 export const MAX_DESCRIPTION = 300;
 
+/** "HH:MM UTC" of an ISO timestamp ("?" when it does not parse), for the unreachable texts. */
+export function hhmm(iso) {
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d.toISOString().slice(11, 16) + " UTC" : "?";
+}
+
 export const toolsSha = (tools) => sha256Hex(canonicalJson(tools));
 
 /** The tool-name prefix for a bundle id: `-` → `_`. */

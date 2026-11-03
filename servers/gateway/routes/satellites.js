@@ -155,6 +155,9 @@ export default function satellitesRouter({
   router.get(`${B}/backups`, handle("backups", async (db, req, res) => send(res, await mgr().backups(db, req.params.id, req.params.bundle))));
   router.get(`${B}/tools`, handle("tools", async (db, req, res) => send(res, await mgr().tools(db, req.params.id, req.params.bundle))));
   router.post(`${B}/approve-tools`, csrfMiddleware, handle("approve tools", async (db, req, res) => send(res, await mgr().approveTools(db, req.params.id, req.params.bundle, req.body))));
+  // The owner's read marks for a pinned tool list (spec §9.1): satellite tools are write-class
+  // unless marked here, and a new pin clears the marks.
+  router.post(`${B}/read-marks`, csrfMiddleware, handle("read marks", async (db, req, res) => send(res, await mgr().setReadMarks(db, req.params.id, req.params.bundle, req.body))));
 
   return router;
 }

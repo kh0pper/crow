@@ -108,6 +108,13 @@ export function createSatelliteManager({
     try { return JSON.parse(readFileSync(join(appBundlesDir(), id, "manifest.json"), "utf8")); } catch { return null; }
   }
 
+  const readMarksOf = (pin) => {
+    try {
+      const a = JSON.parse(pin?.read_marks_json || "[]");
+      return Array.isArray(a) ? a.filter((n) => typeof n === "string" && n) : [];
+    } catch { return []; }
+  };
+
   async function satOf(db, id) {
     if (!isSatelliteId(id)) throw no(400, "bad_id");
     const sat = await getSatellite(db, id);
@@ -402,7 +409,7 @@ export function createSatelliteManager({
       status: 200,
       json: {
         bundle: id, version, tools: list, tools_sha256: toolsSha(list), check: checkToolList(id, list), max_tools: MAX_TOOLS,
-        pin: pin ? { tools_sha256: pin.tools_sha256, version: pin.version, approved_at: pin.approved_at } : null,
+        pin: pin ? { tools_sha256: pin.tools_sha256, version: pin.version, approved_at: pin.approved_at, read_marks: readMarksOf(pin) } : null,
         diff: pin ? diffTools(old, list) : null,
         same_version: !!pin && pin.version != null && version != null && String(pin.version) === String(version),
       },
@@ -432,6 +439,29 @@ export function createSatelliteManager({
     return { status: 200, json: { ok: true, tools_sha256: sha, state: toolsState(fresh, id, { tools_sha256: sha }).state } };
   }
 
+  /**
+   * Mark individual satellite tools READ (spec §9.1): every satellite tool is write-class, and only
+   * the owner's marks can lower one. Marks live in the pin, so a new pinned list clears them
+   * (approveTools above); a name that is not in the pinned list is refused. Bot grant behaviour is
+   * unchanged — a read mark only says the tool changes nothing.
+   */
+  async function setReadMarks(db, satId, bundle, body = {}) {
+    const sat = await satOf(db, satId);
+    gate(sat, "tools");
+    const id = bundleId(bundle);
+    const pin = await getToolPin(db, sat.id, id);
+    if (!pin) throw no(409, "no_pin");
+    if (!Array.isArray(body.read_marks)) throw no(400, "bad_read_marks");
+    let list = [];
+    try { list = JSON.parse(pin.tools_json); } catch { list = []; }
+    const known = new Set((Array.isArray(list) ? list : []).map((t) => t?.name).filter((n) => typeof n === "string"));
+    const marks = [...new Set(body.read_marks.filter((n) => typeof n === "string" && n))];
+    const unknown = marks.filter((n) => !known.has(n));
+    if (unknown.length) throw no(400, "unknown_tool", { names: unknown.slice(0, 8) });
+    await putToolPin(db, { ...pin, read_marks_json: JSON.stringify(marks) });
+    return { status: 200, json: { ok: true, read_marks: marks } };
+  }
+
   // ── unpair cleanup (the pairing service does the signed unpair and the revocation) ──────────
   function afterUnpair(satId) {
     for (const k of [...startedJobs.keys()]) if (k.startsWith(`${satId}:`)) startedJobs.delete(k);
@@ -444,7 +474,7 @@ export function createSatelliteManager({
 
   return {
     card, eligibleBundles, install, consent, uninstall, job, lifecycle, repin, getEnv, putEnv, logs, backups,
-    update, refresh, renewCert, rotateKey, rename, tools, approveTools, afterUnpair, peers, finishJob,
+    update, refresh, renewCert, rotateKey, rename, tools, approveTools, setReadMarks, afterUnpair, peers, finishJob,
     pendingJobs: (satId) => [...startedJobs.keys()].filter((k) => k.startsWith(`${satId}:`)).length,
     poller: thePoller, renewer: theRenewer, bootSha: () => bootShaFn() || null,
   };

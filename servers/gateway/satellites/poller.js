@@ -25,19 +25,19 @@ import { createNotification } from "../../shared/notifications.js";
 import { satelliteFetch } from "./client.js";
 import { listSatellites, getSatellite, updateSatelliteIfNotRevoked, getToolPin } from "./store.js";
 import { readHealth, fetchToolList } from "./remote.js";
-import { diffTools, formatDiff, lastRecord } from "./tools-pin.js";
+import { diffTools, formatDiff, hhmm, lastRecord } from "./tools-pin.js";
 import { sanitizeStatus } from "./status-sanitize.js";
+import { refreshSatelliteEntries } from "./tool-entry.js";
 
 export const POLL_INTERVAL_MS = 60000;
 export const UNREACHABLE_AFTER_MS = 10 * 60000;
 export const PSI_ALERT_PCT = 10;
 export const SERVERS_URL = "/dashboard/extensions?view=servers";
 
-const hhmm = (iso) => { const d = new Date(iso); return Number.isFinite(d.getTime()) ? d.toISOString().slice(11, 16) + " UTC" : "?"; };
-
 export function createSatellitePoller({
   dbFactory = createDbClient, closeDb = true, fetchImpl = globalThis.fetch, env = process.env, now = Date.now,
   notify = createNotification, intervalMs = POLL_INTERVAL_MS, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval,
+  refreshTools = refreshSatelliteEntries,
   log = (m) => console.warn(m),
 } = {}) {
   let timer = null;
@@ -138,6 +138,9 @@ export function createSatellitePoller({
         for (const s of sats) {
           try { await pollOne(db, s); } catch (err) { log(`[satellites] poll ${s.id}: ${err?.message}`); }
         }
+        // The tool lists follow the poll (spec §9.1): a newly approved pin, a changed hash or a
+        // bundle that vanished is visible to every reader of entry.tools without a restart.
+        await refreshTools({ db }).catch((err) => log(`[satellites] tool entries: ${err?.message}`));
       } catch (err) {
         log(`[satellites] poll: ${err?.message}`);
       } finally {
@@ -152,7 +155,10 @@ export function createSatellitePoller({
   async function pollNow(db, id) {
     const sat = await getSatellite(db, id);
     if (!sat || sat.status === "revoked") return { ok: false, code: "not_found" };
-    return pollOne(db, sat);
+    const out = await pollOne(db, sat);
+    // The approval path lands here, so the just-approved tools are callable at once.
+    await refreshTools({ db }).catch((err) => log(`[satellites] tool entries: ${err?.message}`));
+    return out;
   }
 
   function start() {

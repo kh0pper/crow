@@ -159,6 +159,19 @@ export async function deleteToolPins(db, satelliteId, bundle) {
   }
 }
 
+/**
+ * The tool names the owner marked READ for one pinned bundle (spec §9.1). Read marks are stored
+ * against the pinned hash (approveTools clears them when the list changes) and never come from the
+ * satellite.
+ */
+export async function getReadMarks(db, satelliteId, bundle) {
+  const pin = await getToolPin(db, satelliteId, bundle);
+  try {
+    const a = JSON.parse(pin?.read_marks_json || "[]");
+    return Array.isArray(a) ? a.filter((n) => typeof n === "string" && n) : [];
+  } catch { return []; }
+}
+
 export async function getBotOptin(db, botId) {
   const r = await read(db, "SELECT any_turn FROM satellite_bot_optins WHERE bot_id = ?", [botId], EMPTY);
   return r.rows[0] ? Number(r.rows[0].any_turn) === 1 : false;

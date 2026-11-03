@@ -198,6 +198,10 @@ export function listInstalledExtensions(crowHome = resolveCrowHome(), bundlesDir
   const idx = capabilityIndex(bundlesDir);
   const out = [];
   for (const id of Object.keys(addons)) {
+    // A satellite-hosted bundle is not an extension on this instance: it is spawned nowhere here,
+    // and its tools arrive through crow's satellite tool entry (spec §8, §9.1). Probes, the
+    // Bot Builder source list and the peer-exposure catalog all skip it for that reason.
+    if (addons[id]?.transport === "satellite") continue;
     const cap = idx.get(id) || null;
     const inCanonical = Object.prototype.hasOwnProperty.call(canonical, id);
     out.push({
