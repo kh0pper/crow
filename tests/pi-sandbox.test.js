@@ -202,6 +202,7 @@ test("M1: the mode comes from the gateway's env, never from the child env", () =
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_SANDBOX: "off", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_SANDBOX");
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_BOTS: "x", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_BOTS");
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_DATA_KEEP: "x", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_DATA_KEEP");
+    assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_NET: "off", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_NET");
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }
@@ -299,9 +300,10 @@ test("piSandboxMode parses CROW_PI_SANDBOX, defaulting to auto", () => {
   assert.equal(piSandboxMode({ CROW_PI_SANDBOX: "bogus" }), "auto");
 });
 
-test("isSandboxWrapperArgs recognises bwrap argv only", () => {
+test("isSandboxWrapperArgs recognises a bwrap wrapper and the network entry", () => {
   assert.equal(isSandboxWrapperArgs("/usr/bin/bwrap --dev-bind / / -- node cli.js"), true);
   assert.equal(isSandboxWrapperArgs("bwrap --unshare-user -- x"), true);
+  assert.equal(isSandboxWrapperArgs("/n/node /a/scripts/pi-bots/pi_netns_entry.mjs --sock /run/crow-net/relay.sock -- /n/node cli.js"), true);
   assert.equal(isSandboxWrapperArgs("/usr/bin/node /x/cli.js --mode rpc"), false);
 });
 

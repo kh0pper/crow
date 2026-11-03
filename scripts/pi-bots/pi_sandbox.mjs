@@ -90,6 +90,10 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
 import { buildSeccompProgram, seccompSupported } from "./pi_seccomp.mjs";
+import { ENTRY_MARK } from "./pi_netns_entry.mjs";
+import { fileURLToPath } from "node:url";
+/** The in-namespace entry (network tier), run by the same node as pi. */
+const NETNS_ENTRY = join(dirname(fileURLToPath(import.meta.url)), ENTRY_MARK);
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -184,7 +188,7 @@ export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
 }
 
 const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP"]);
+  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP", "CROW_PI_CONTAIN_NET"]);
 
 /** Copy of env without user-session IPC pointers (and the sandbox switch). */
 export function scrubSandboxEnv(env) {
@@ -250,6 +254,8 @@ export function piSandboxStatus() {
  * really gets: "pidns" (bwrap, user + PID namespace, fresh /proc), "userns"
  * (bwrap, user namespace only), "nnp" (setpriv --no-new-privs only) or
  * "none" (plain spawn). `pidNamespace` is true exactly for "pidns".
+ * opts.passFds names the EXTRA fds the caller really wires for the child
+ * (beyond stdio): the network tier's entry process hands pi only those.
  * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[]}}
  * @throws when mode is "required" and bwrap is unavailable.
  */
@@ -319,9 +325,23 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
       seccomp = buildSeccompProgram();
       pre.push("--seccomp", String(opts.seccompFd));
     }
-    return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: { ...scrubSandboxEnv(env), ...plan.env },
-      sandboxed: true, wrapper: "bwrap", tier: seccomp ? "contain" : "contain-noseccomp", pidNamespace: true, reason: null,
-      masked, unreachable, refused: plan.refused, seccomp };
+    // Network tier (pi_netns_entry.mjs): pi runs under the in-namespace entry,
+    // which makes the allowed loopback ports and the proxy port exist inside.
+    // It is handed the EXACT fds this spawn really passes (stdio plus opts.passFds,
+    // the pipes the caller wired), never the info fd or the seccomp fd: bwrap
+    // consumes those.
+    let inner = [cmd, ...args];
+    if (plan.net) {
+      const passFds = [...new Set([0, 1, 2, ...(Array.isArray(opts.passFds) ? opts.passFds : [])])]
+        .filter((n) => Number.isInteger(n) && n >= 0 && n !== opts.infoFd && n !== opts.seccompFd)
+        .sort((a, b) => a - b);
+      inner = [cmd, NETNS_ENTRY, "--sock", plan.net.sock, "--ports", plan.net.ports.join(","),
+        "--fds", passFds.join(","), "--proxy-port", String(plan.net.proxyPort), "--", cmd, ...args];
+    }
+    const tier = (seccomp ? "contain" : "contain-noseccomp") + (plan.net ? "" : "-hostnet");
+    return { cmd: probe.bwrap, args: [...pre, "--", ...inner], env: { ...scrubSandboxEnv(env), ...plan.env },
+      sandboxed: true, wrapper: "bwrap", tier, pidNamespace: true, reason: null,
+      masked, unreachable, refused: plan.refused, seccomp, net: plan.net };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {
@@ -383,6 +403,8 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */
 export function isSandboxWrapperArgs(argsStr) {
-  const first = String(argsStr || "").trim().split(/\s+/)[0] || "";
-  return basename(first) === "bwrap";
+  const parts = String(argsStr || "").trim().split(/\s+/);
+  if (basename(parts[0] || "") === "bwrap") return true;
+  // The contain tier's network entry (node pi_netns_entry.mjs ... -- node cli.js ...)
+  return basename(parts[1] || "") === ENTRY_MARK;
 }

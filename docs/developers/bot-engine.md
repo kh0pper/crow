@@ -367,6 +367,52 @@ A bot whose provider row has no door — a literal-key cloud row this box never 
 
 A data folder that IS the Crow home (or an ancestor of it) is refused under contain with `contain refused: the data folder is the Crow home`. The reasoning is the instance's own boundary: binding the Crow home read-write would put its tokens, `secrets/` and `env/` inside the sandbox, and masking over that is not built. For the same reason no read-write bind may be the Crow home itself, its `secrets/` dir, or an ancestor of either: a bot policy's `write_paths` entry that names one refuses the spawn with `contain refused: write_paths names …`, and an internal bind that would (the data dir, the bot cache, a session dir) is refused and named in the `[pi-sandbox] contain: not bound: …` log line.
 
+### Contained network: doors only
+
+A contained bot has no NIC. Its only way out is the spawner's egress relay (`scripts/pi-bots/pi_egress.mjs`), a unix socket bound into the sandbox. Two independent layers decide what it can reach.
+
+**Doors.** The relay serves exactly one host loopback port — the spawner's own gateway port — and there only the door paths (`servers/shared/bot-doors.js`, exact and case-sensitive):
+
+| Door | What it is |
+|---|---|
+| `/llm/v1/` | the model router: the bot's models, no provider key |
+| `/llm/p/`, `/llm/c/` | a provider door / a consented cloud door |
+| `/board/mcp`, `/phone/mcp`, `/artifacts/mcp` | the bot's own MCP mounts, under their path-scoped tokens |
+| `/peer-relay/` | the relay to paired peers |
+
+The relay terminates HTTP itself instead of splicing bytes, so **every** request on a connection is judged on its own — a second request pipelined behind an allowed one is never carried through with it — and upgrades and `CONNECT` are refused outright. A refused request gets a `403` written by the relay and nothing is opened upstream; one log line per distinct path says why. Anything that could normalise into another route is refused rather than reasoned about: `..`, a second slash, a backslash, any percent-escape, `*`, and absolute-form URLs. Any other loopback port is refused at the `PORT` line, and with no gateway port (an explicit `0`; unset falls back to the default port) **every** `PORT` line is refused. The relay also drops the headers that say who a request came from (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Tailscale-*` and the like): the relay is the only hop a contained bot has, so a bot can never pose as a Tailscale Serve login or a proxied client.
+
+The relay's own limits, all of them refusing with nothing opened upstream:
+
+- **One request in flight per bot connection.** Pipelined requests wait their turn (Node answers them in order) and each starts when the previous response finished; more than 8 waiting gets `503` and the connection is closed. A relay-wide cap (`maxUpstream`, default 64) answers `503` above it too, so no number of bot connections becomes a flood of upstream sockets.
+- **A body on a bodiless method** (`GET`, `HEAD`, `DELETE`, `OPTIONS`, `TRACE`) is `400` + `Connection: close`. The client's framing header is hop-by-hop and cannot be forwarded, so such a body would land raw after the forwarded headers — a second request on the gateway's wire. A `POST`/`PUT`/`PATCH` body is re-framed `transfer-encoding: chunked` when the client sent it chunked, so it is always framed on the relay's own hop.
+- **An upstream that dies mid-body** closes the bot's connection instead of leaving it half-answered, and a socket that sends a `PORT` line and then no complete head is closed after `headTimeoutMs` (10 s). An idle keep-alive door connection is closed after 120 s; a request in flight has no timeout, because an SSE answer is long by design.
+
+The public web goes through the relay's `CONNECT` branch only: plain `http://` does **not** work (an absolute-form GET is not proxied), and only ports from `egressPorts` (443 by default) are accepted. The network is **closed** (the operator's ruling): an address is reached only when it is global unicast and not this host's own. Every private range, CGNAT and the tailnet, link-local and cloud metadata, ULA, multicast and reserved ranges are refused, IPv4 inside IPv6 is judged by the embedded IPv4, and any refused address refuses the whole name.
+
+The own-host view comes from the kernel's routing tables:
+
+- this host's addresses, from the local table (`ip -j [-6] route show table local`, falling back to `/proc/net/fib_trie` and `/proc/net/ipv6_route`);
+- the **networks this host is directly attached to**, from the main table (`ip -j [-6] route show table main` rows with a `dst` other than `default` and no gateway, falling back to `/proc/net/route` and `/proc/net/ipv6_route`). A LAN neighbour has a global address of its own and nothing in that address says so; it is refused as `this host's network`;
+- the `/64` of every **global** IPv6 address this host owns, refused whether or not a router announces that prefix;
+- if either the local or the main table cannot be read, every target is refused (fail closed).
+
+`CROW_PI_EGRESS_DENY_NETS` (spawner env, comma-separated CIDRs) adds operator-refused networks. A bot that needs a lab service gets a door for it.
+
+Two things an operator should add to that list on a normal home network, because they are not visible in this host's tables: the home's **WAN IPv4 address** and the **delegated IPv6 prefix**, in case the router hairpin-NATs its own public address back to this host.
+
+**`permission_policy.egress`** (a key on the bot def) narrows the proxy further for one bot: a list of exact host names or `*.suffix` patterns (`api.example.com`, `*.example.com` — the bare suffix does not match). It only ever narrows, never widens: a name off the list is refused even when the network would allow it. It is ignored for an uncontained bot (which does not come through the relay) and when the network tier is off.
+
+**Turning the network tier off** (operator env only; a bot def's `spawn_env` cannot set it): `CROW_PI_CONTAIN_NET=off` keeps the host network for contained bots. There is no relay, no `--unshare-net` and no relay socket dir, and the tier string says so — `contain-hostnet` (or `contain-noseccomp-hostnet` where the arch has no seccomp table). It is still the contain tier (`startsWith("contain")`), so the filesystem, secrets and data-dir rules are unchanged; only the host network is kept (no network namespace).
+
+Doors deliberately exclude owner-authority surfaces: `/memory`, `/projects`, `/sharing`, `/tools*`, `/router`, `/dashboard`, `/llm/models`, `/llm/acquire`, and every `/internal` route.
+
+**The mark.** Every socket the relay opens to loopback is bound to `127.0.77.1` (`RELAY_SOURCE_V4`). The relay's own process sets that source address, outside the sandbox, so a bot cannot choose it. On top of the door list, the gateway refuses any `/internal` path on a socket carrying the mark (a plain `404`, before routing — `servers/gateway/middleware/internal-guard.js`), and the signing relay's caller check (`servers/gateway/bot-host-caller.js`) refuses a marked socket before it reads `/proc`. That second layer closes the hole where a bot asked the relay for the gateway port and the spliced socket sat in the spawner's process, which the caller check took for the bot host's `MainPID`.
+
+**The doors refuse the operator's full local token on a marked socket.** `crow.db` is bound read-write into a contained bot (Phase 1), so a bot can write `mcp_local_token_hash` and then present its own value as the operator's full local token — and `/board/mcp` is a door. `localTokenAuthMiddleware` therefore never calls `validateLocalToken` for a relayed socket (`isRelayedSocket`, `servers/shared/bot-doors.js`). Only the path-scoped board, phone and artifacts tokens authenticate a relayed request.
+
+Nothing above changes what an **uncontained** bot can do: it never comes through the relay, so it keeps the existing residual (it can rewrite a host's code and then run as a legitimate host).
+
 ### What a contained bot still reaches
 
 `crow.db`/`tasks.db` are bound read-write (so provider keys, OAuth tokens and bot definitions are readable, and a bot can widen its own next spawn's policy); credentialed add-on MCP servers in the bot's config run inside the sandbox with their secrets; the door routes accept whatever headers the bot sends (trust rests on the signed actor and per-route tokens); an in-session model switch to a provider the spawn was not built for fails, because the agent dir carries only the spawn's providers. Uncontained bots (not opted in, or refused) are exactly as they are without the contain tier.

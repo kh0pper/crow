@@ -1,5 +1,5 @@
 /**
- * Who is calling the loopback signing relay? (item 46 PR-B)
+ * Who is calling the loopback signing relay? (item 46 PR-B; containment PR 6)
  *
  * The separate bot hosts (pibot-bridge@, pibot-gateways@, pibot-discord@)
  * hold no actor key and must never get one, so they cannot prove themselves
@@ -7,6 +7,8 @@
  * same uid could read too. The kernel and the INSTALLED unit files answer
  * instead. A caller is authenticated iff:
  *
+ *   0. the socket is NOT relayed (below): its source address is not the
+ *      egress relay's mark;
  *   1. the connection's client-side row in /proc/net/tcp{,6} gives the
  *      connecting socket's inode (servers/shared/peer-uid.js peerSocketRow);
  *   2. one live unit of the CONFIGURED systemd manager (below) qualifies:
@@ -20,6 +22,20 @@
  *      sits in exactly that unit's cgroup (/proc/<pid>/cgroup), and its start
  *      time (/proc/<pid>/stat) is the one seen when the unit list was read
  *      (so a recycled pid never inherits the unit).
+ *
+ * Step 0 is the containment layer, and it is checked FIRST — before any /proc
+ * read. A contained bot has no NIC: its only way to host loopback is its
+ * spawner's egress relay (scripts/pi-bots/pi_egress.mjs), and every socket
+ * that relay opens is bound to RELAY_SOURCE_V4 (127.0.77.1,
+ * servers/shared/bot-doors.js) by the relay's own process, outside the
+ * sandbox. A bot cannot choose its source address, so a contained bot can
+ * never be this caller, whatever it sends. The relay also holds a door
+ * allowlist that keeps /internal off its wire at all, and the gateway refuses
+ * /internal on a relayed socket (middleware/internal-guard.js); these are
+ * independent layers on purpose. An UNCONTAINED bot is unchanged by step 0: it
+ * does not come through the relay, so it still fails (3) — and it can plant
+ * code that runs as a host's MainPID, the residual below. Phase 3 replaces
+ * (1)-(3) with the scope handle.
  *
  * The manager is product configuration, never probed: CROW_BOT_HOST_MANAGER
  * = "system" (default; scripts/pi-bots/install-runtime.sh installs system
@@ -48,6 +64,8 @@
  * with an open shell can plant code that then runs as a legitimate MainPID.
  * The check protects only against callers that cannot run code: an SSRF-style
  * fetch tool, another uid, a container. Only a dedicated bot user closes this.
+ * A CONTAINED bot never reaches that point: step 0 refuses its only path to
+ * loopback. This paragraph is about uncontained bots.
  *
  * Every reader is a function parameter with a production default.
  */
@@ -56,6 +74,7 @@ import { readdirSync, readlinkSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, normalize, resolve } from "node:path";
 import { peerSocketRow } from "../shared/peer-uid.js";
+import { isRelayedSocket } from "../shared/bot-doors.js";
 
 /** The unit names a bot host runs under (scripts/pi-bots/systemd/). */
 export const BOT_HOST_UNIT_PATTERNS = Object.freeze([
@@ -297,6 +316,9 @@ export function createBotHostCallerResolver({
   /** → { ok: true, unit, pid, template, instance, hostDbPath } | { ok: false, reason } */
   async function authenticate(socket) {
     if (!socket || typeof socket !== "object") return { ok: false, reason: "no socket" };
+    // Step 0, before anything reads /proc: a socket the egress relay opened is
+    // a contained bot, and no contained bot can be a bot host's MainPID.
+    if (isRelayedSocket(socket)) return { ok: false, reason: "relayed socket" };
     let row;
     try { row = peerSocketRow(socket, readProcNet ? { readTable: readProcNet } : {}); } catch { row = null; }
     if (!row || row.unavailable) return { ok: false, reason: "socket table unreadable" };
