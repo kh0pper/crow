@@ -506,7 +506,12 @@ export function compose(spec, { name = "crow-compose" } = {}) {
           if (v < lo || v > hi) throw new Error(`param "${pname}" on "${m.id}" must be from ${lo} to ${hi} (see sunvox_module_types), got ${JSON.stringify(pval)}`);
           const rc = a.sv_set_module_ctl_value(SLOT, mod, c, v, 0);
           if (rc < 0) throw new Error(`set param "${pname}" on "${m.id}" failed (rc=${rc})`);
-          pending.push({ id: m.id, pname, mod, c, v });
+          // A continuous controller is stored on SunVox's 0..0x8000 scale, so the value read back can
+          // be up to one scale step below the one asked (F.freq 1000 reads 999 on a 0..14000 range).
+          // A selector (Waveform, Filter, Polyphony...) is stored as-is and must read back exactly.
+          const scaledMax = a.sv_get_module_ctl_max(SLOT, mod, c, 1);
+          const tol = scaledMax !== hi && hi > lo ? Math.ceil((hi - lo) / 0x8000) : 0;
+          pending.push({ id: m.id, pname, mod, c, v, tol });
         }
       }
       // sv_set_module_ctl_value only QUEUES an event; the engine applies it while it processes
@@ -515,12 +520,13 @@ export function compose(spec, { name = "crow-compose" } = {}) {
       // few short silent chunks so the events land, then read each value back.
       if (pending.length) {
         const buf = Buffer.alloc(CHUNK_FRAMES * 2 * 2);
-        for (let i = 0; i < 4 && pending.some((p) => a.sv_get_module_ctl_value(SLOT, p.mod, p.c, 0) !== p.v); i++) {
+        const landed = (p) => Math.abs(a.sv_get_module_ctl_value(SLOT, p.mod, p.c, 0) - p.v) <= p.tol;
+        for (let i = 0; i < 4 && !pending.every(landed); i++) {
           a.sv_audio_callback(buf, CHUNK_FRAMES, 0, a.sv_get_ticks());
         }
         for (const p of pending) {
           const got = a.sv_get_module_ctl_value(SLOT, p.mod, p.c, 0);
-          if (got !== p.v) throw new Error(`param "${p.pname}" on "${p.id}" did not take effect (asked ${p.v}, engine has ${got})`);
+          if (Math.abs(got - p.v) > p.tol) throw new Error(`param "${p.pname}" on "${p.id}" did not take effect (asked ${p.v}, engine has ${got})`);
         }
       }
 
