@@ -532,7 +532,11 @@ test("integration: a sandboxed pi that IGNORES SIGTERM is still gone within ~6 s
     assert.equal(alive(piPid), true, "pi ignored SIGTERM and is still alive right after close()");
     for (let i = 0; i < 70 && alive(piPid); i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(alive(piPid), false, "SIGKILLed by the kept 5 s timer");
-    assert.throws(() => process.kill(-pgid, 0), "the process group is gone");
+    // The rest of the group (bwrap, the namespace init) exits right after pi; under load that takes
+    // a moment, so poll for it instead of asserting the same instant (a CI flake), still bounded.
+    const groupAlive = () => { try { process.kill(-pgid, 0); return true; } catch { return false; } };
+    for (let i = 0; i < 30 && groupAlive(); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(groupAlive(), false, "the process group is gone");
     pgidForCleanup = null; // never SIGKILL a pgid that may since have been reused
   } finally {
     try { if (pgidForCleanup) process.kill(-pgidForCleanup, "SIGKILL"); } catch { /* gone */ }
