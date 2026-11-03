@@ -61,7 +61,10 @@ function blockFor(mcpConfig, server) {
  * credential. `"personal"` is the `_personal` tool suffix, otherwise `"primary"` — and the role's
  * own env key must be present on the server's block, or there is nothing to resolve later.
  */
-export function credRefFromWorld(mcpConfig, toolName) {
+/** Where a credential reference was named from: the bots' own config, the one every bot world is built from. */
+export const CRED_SOURCES = Object.freeze(["canonical", "addons"]);
+
+export function credRefFromWorld(mcpConfig, toolName, { source = "canonical" } = {}) {
   const m = TOOL_PREFIX.exec(String(toolName ?? ""));
   if (!m) return null;
   const server = m[1];
@@ -71,7 +74,10 @@ export function credRefFromWorld(mcpConfig, toolName) {
   if (!env || typeof env !== "object") return null;
   const value = env[TOKEN_ENV_BY_ROLE[role]];
   if (typeof value !== "string" || !value.trim()) return null;
-  return { server, role };
+  // The source says WHICH operator file named this credential, so the send resolves the token in
+  // that file only. Every bot world (Perch, channel turns, jobs) is built from the canonical pi
+  // config, and the gateway add-on can name the same server id with a different account.
+  return CRED_SOURCES.includes(source) ? { server, role, source } : { server, role };
 }
 
 /** `~/x` -> `<home>/x`; anything else is left for the absolute-path check. */
@@ -91,12 +97,22 @@ function expandHome(path) {
  */
 export function resolveTokenFile(credRef, paths = {}) {
   if (!credRef || typeof credRef !== "object") return null;
-  const { server, role } = credRef;
+  const { server, role, source } = credRef;
   const key = TOKEN_ENV_BY_ROLE[role];
   if (!key || typeof server !== "string" || !server) return null;
 
   const canonical = paths.canonical || canonicalMcpPath();
   const addons = paths.addons || mcpAddonsPath();
+  // A ref that says where it came from resolves in that file only, so an account named differently
+  // in the other file can never stand in for it.
+  if (source === "canonical" || source === "addons") {
+    const block = blockFor(readJson(source === "canonical" ? canonical : addons), server);
+    const value = block && block.env && block.env[key];
+    if (typeof value !== "string" || !value.trim()) return null;
+    const path = expandHome(value.trim());
+    return isAbsolute(path) ? path : null;
+  }
+  // A ref with no source (a row recorded before sources existed):
   // Both operator files can name the same server id with DIFFERENT token files
   // (the canonical config and the gateway add-on, two Google accounts). A
   // {server, role} ref cannot say which one made the draft, and sending from the

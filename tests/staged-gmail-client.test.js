@@ -80,15 +80,15 @@ test("credRefFromWorld primary/personal/unreadable", () => {
       disabled: { command: "gws", disabled: true, env: { GOOGLE_TOKEN_FILE: "/operator/primary.json" } },
     },
   };
-  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft"), { server: "google-workspace", role: "primary" });
-  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft_personal"), { server: "google-workspace", role: "personal" });
-  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_threaded_reply"), { server: "google-workspace", role: "primary" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft"), { server: "google-workspace", role: "primary", source: "canonical" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft_personal"), { server: "google-workspace", role: "personal", source: "canonical" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_threaded_reply"), { server: "google-workspace", role: "primary", source: "canonical" });
 
   // Unreadable: the public workspace-mcp carries no token file env Crow can read.
   assert.equal(credRefFromWorld(world, "mcp__workspace-mcp__gmail_create_draft"), null);
   // The role's own env key must be defined, or there is nothing to resolve at send time.
   assert.equal(credRefFromWorld(world, "mcp__half-configured__gmail_create_draft"), null);
-  assert.deepEqual(credRefFromWorld(world, "mcp__half-configured__gmail_create_draft_personal"), { server: "half-configured", role: "personal" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__half-configured__gmail_create_draft_personal"), { server: "half-configured", role: "personal", source: "canonical" });
   // A disabled block (pi's closed-world file) and a raw (voice/add-on) tool name resolve to nothing.
   assert.equal(credRefFromWorld(world, "mcp__disabled__gmail_create_draft"), null);
   assert.equal(credRefFromWorld(world, "gmail_create_draft"), null);
@@ -96,7 +96,7 @@ test("credRefFromWorld primary/personal/unreadable", () => {
 
   // mcp-addons.json's flat shape works too.
   const addons = { "google-workspace-second": { command: "gws", env: { GOOGLE_TOKEN_FILE: "/operator/second.json" } } };
-  assert.deepEqual(credRefFromWorld(addons, "mcp__google-workspace-second__gmail_create_draft"), { server: "google-workspace-second", role: "primary" });
+  assert.deepEqual(credRefFromWorld(addons, "mcp__google-workspace-second__gmail_create_draft"), { server: "google-workspace-second", role: "primary", source: "canonical" });
 });
 
 test("resolveTokenFile ignores bot-writable paths", () => {
@@ -583,4 +583,26 @@ test("a draft that became unfaithful after the card was shown is not sent from C
   await assert.rejects(client.sendDraft("d1", { snapshot: approved.snapshot, threadId: "t1" }),
     (e) => e instanceof GmailError && e.code === "unfaithful" && !/example\.com/.test(e.message));
   assert.equal((fake.sent || []).length, 0, "nothing was sent");
+});
+
+test("a ref that names its source resolves in that file only, even when the other file names another account", () => {
+  const dir = scratch();
+  const canonical = join(dir, "mcp.json");
+  const addons = join(dir, "mcp-addons.json");
+  writeFileSync(canonical, JSON.stringify({ mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: join(dir, "work.json") } } } }));
+  writeFileSync(addons, JSON.stringify({ "google-workspace": { env: { GOOGLE_TOKEN_FILE: join(dir, "personal.json") } } }));
+  const paths = { canonical, addons };
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "canonical" }, paths), join(dir, "work.json"));
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "addons" }, paths), join(dir, "personal.json"));
+  // A row recorded before sources existed keeps the old rule: ambiguous means nothing.
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary" }, paths), null);
+  // A source whose file lacks the key resolves to nothing, never falls through to the other file.
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "personal", source: "canonical" }, paths), null);
+  // An unknown source is ignored (treated as no source).
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "elsewhere" }, paths), null);
+});
+
+test("credRefFromWorld records that the credential came from the canonical config", () => {
+  const ref = credRefFromWorld({ mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: "/x.json" } } } }, "mcp__google-workspace__gmail_create_draft");
+  assert.deepEqual(ref, { server: "google-workspace", role: "primary", source: "canonical" });
 });

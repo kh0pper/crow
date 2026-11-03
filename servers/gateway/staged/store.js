@@ -60,7 +60,10 @@ function credRefJson(credRef) {
   if (credRef == null) return null;
   const server = credRef.server == null ? "" : String(credRef.server);
   if (!server || !CRED_ROLES.includes(credRef.role)) return null;
-  return JSON.stringify({ server, role: credRef.role });
+  // `source` (which operator file named it) is kept when it is one of the known ones; the send
+  // resolves the token in that file only (cred-ref.js).
+  const source = credRef.source === "canonical" || credRef.source === "addons" ? credRef.source : null;
+  return JSON.stringify(source ? { server, role: credRef.role, source } : { server, role: credRef.role });
 }
 
 function cap(value, max) {

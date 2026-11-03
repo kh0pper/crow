@@ -38,7 +38,7 @@
  */
 import { readFileSync } from "node:fs";
 import { canonicalSnapshot } from "./canonical.js";
-import { TOKEN_ENV_BY_ROLE, canonicalMcpPath, mcpAddonsPath, credRefFromWorld } from "./cred-ref.js";
+import { TOKEN_ENV_BY_ROLE, canonicalMcpPath, credRefFromWorld } from "./cred-ref.js";
 import { createGmailClient } from "./gmail-client.js";
 import { createStaged, findStagedByDraftId } from "./store.js";
 
@@ -134,13 +134,15 @@ export function redactMcpConfig(mcpConfig) {
 }
 
 /**
- * The same redacted view of the OPERATOR's own config (the canonical pi `mcp.json` plus this
- * instance's `mcp-addons.json`) — the fallback for a caller that never held a world config (a card
- * job's turn is built inside the bridge). Operator-owned files only; a bot cannot write either.
+ * The same redacted view of the OPERATOR's own canonical pi `mcp.json` — the fallback for a caller
+ * that never held a world config (a card job's turn is built inside the bridge from that file).
+ * Operator-owned; a bot cannot write it.
  */
 export function credConfigFromOperatorConfig(paths = {}) {
   const servers = {};
-  for (const path of [paths.canonical || canonicalMcpPath(), paths.addons || mcpAddonsPath()]) {
+  // The canonical pi config only: a card job's world is built from it inside the bridge, and the
+  // recorded ref says "canonical" (cred-ref.js resolves it there and nowhere else).
+  for (const path of [paths.canonical || canonicalMcpPath()]) {
     let json = null;
     try { json = JSON.parse(readFileSync(path, "utf8")); } catch { continue; }
     const redacted = redactMcpConfig(json).mcpServers;

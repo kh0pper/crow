@@ -250,15 +250,15 @@ test("cred_ref primary vs personal", async () => {
     context: { threadId: "thread-cred", fetchImpl: fake.fetchImpl },
   });
 
-  assert.deepEqual(primary.credRef, { server: "google-workspace", role: "primary" });
-  assert.deepEqual(personal.credRef, { server: "google-workspace", role: "personal" });
+  assert.deepEqual(primary.credRef, { server: "google-workspace", role: "primary", source: "canonical" });
+  assert.deepEqual(personal.credRef, { server: "google-workspace", role: "personal", source: "canonical" });
   assert.equal(primary.openInGmail, false);
   assert.equal(personal.openInGmail, false);
 
   const rowPrimary = await stagedById(primary.id);
   const rowPersonal = await stagedById(personal.id);
-  assert.deepEqual(rowPrimary.credRef, { server: "google-workspace", role: "primary" });
-  assert.deepEqual(rowPersonal.credRef, { server: "google-workspace", role: "personal" });
+  assert.deepEqual(rowPrimary.credRef, { server: "google-workspace", role: "primary", source: "canonical" });
+  assert.deepEqual(rowPersonal.credRef, { server: "google-workspace", role: "personal", source: "canonical" });
   // The provider's draft is what gets approved and hashed, never the args.
   assert.equal(rowPrimary.snapshot.subject, "Provider subject");
   assert.deepEqual(rowPrimary.snapshot.to, ["alex@example.com"]);
@@ -710,7 +710,7 @@ test("a card job names its credential through the operator config", async () => 
   const rows = stagedFor("job_id", "job-staged-cred");
   assert.equal(rows.length, 1);
   const row = await stagedById(rows[0].id);
-  assert.deepEqual(row.credRef, { server: "google-workspace", role: "primary" }, "named from ~/.pi/agent/mcp.json");
+  assert.deepEqual(row.credRef, { server: "google-workspace", role: "primary", source: "canonical" }, "named from ~/.pi/agent/mcp.json");
   assert.equal(row.snapshot.subject, "Provider subject", "the credential worked: the provider's draft is the snapshot");
   assert.equal(fake.calls.get, 1);
   const text = JSON.stringify(row);
@@ -749,7 +749,7 @@ test("a bridge turn whose world can name a credential records cred_ref", async (
   const rows = stagedFor("thread_id", "gmail-thread-cred");
   assert.equal(rows.length, 1);
   const row = await stagedById(rows[0].id);
-  assert.deepEqual(row.credRef, { server: "google-workspace", role: "primary" }, "the turn's own world names the credential");
+  assert.deepEqual(row.credRef, { server: "google-workspace", role: "primary", source: "canonical" }, "the turn's own world names the credential");
   assert.equal(row.snapshot.subject, "Provider subject");
   assert.equal(fake.calls.get, 1);
 });
