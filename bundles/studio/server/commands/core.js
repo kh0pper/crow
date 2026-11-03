@@ -260,7 +260,9 @@ defineCommand({
     .object({
       title: nameSchema.optional().describe("the song title"),
       bpm: z.number().int().min(20).max(300).optional().describe("tempo, 20-300"),
-      key: nameSchema.optional().describe('the musical key, e.g. "C major"'),
+      // A fresh schema, not nameSchema: the JSON-schema export turns a reused
+      // instance into a $ref, which the tool-schema audit refuses.
+      key: z.string().min(1).max(MAX_NAME).optional().describe('the musical key, e.g. "C major"'),
     })
     .strict()
     .refine(

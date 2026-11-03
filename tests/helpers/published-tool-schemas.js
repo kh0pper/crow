@@ -92,6 +92,9 @@ function bundleArgs(name, ctx) {
       return [{ db: ctx.db, ownerNumber: "+15125550100", McpServer: ctx.McpServer, z: ctx.z, verifyActor: () => null }];
     case "createKioskServer":
       return [{ fetchImpl: async () => { throw new Error("no network in tests"); } }];
+    case "createStudioServer":
+      // The tool list never touches the hub or the renderer; any call would.
+      return [{ hub: { command() {}, snapshot() {} }, renderer: {} }];
     default:
       return [];
   }
