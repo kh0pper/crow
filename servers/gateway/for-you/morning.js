@@ -124,8 +124,11 @@ async function leftOffLine(db, projectsById) {
  * lock map is read from this process's crow.db, one database file per process (as
  * shared/cross-host-auth.js assumes), so it needs no key of its own. An entry expires by time
  * alone; nothing else invalidates it.
+ *
+ * Exported as needsLaneCached: the "What needs me" widget aggregator (widgets/needs-me.js) reads the
+ * SAME cached lane, so the two surfaces never pay for two Board reads.
  */
-async function needsLane(db, tdb, key) {
+export async function needsLaneCached(db, tdb, key) {
   const at = needsCacheClock();
   const hit = needsCache.get(key);
   if (hit && at - hit.at < NEEDS_CACHE_MS) return hit.value;
@@ -160,8 +163,8 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
     let tdb;
     try {
       tdb = createDbClient(tasksDbPath);
-      // Needs you: the Board's Everything lane (cached; see needsLane).
-      const lane = await needsLane(db, tdb, needsKey);
+      // Needs you: the Board's Everything lane (cached; see needsLaneCached).
+      const lane = await needsLaneCached(db, tdb, needsKey);
       out.needs.total = lane.total;
       const listed = new Set();
       const needCards = lane.cards;

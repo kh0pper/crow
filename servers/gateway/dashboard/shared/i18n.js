@@ -4522,6 +4522,15 @@ export const translations = {
   "forYou.movesStreak.one": { en: "{n}-day streak", es: "{n} día seguido" },
   "forYou.movesStreak.other": { en: "{n}-day streak", es: "{n} días seguidos" },
   "forYou.movesSwapRefused": { en: "That's all the swaps for today.", es: "No quedan más cambios hoy." },
+  // Widgets phase 1: "What needs me" (widgets/needs-me.js)
+  "widgets.needsMe.title": { en: "What needs me", es: "Lo que me espera" },
+  "widgets.needsMe.allClear": { en: "All clear", es: "Todo en orden" },
+  "widgets.needsMe.waiting": { en: "{n} waiting", es: "{n} en espera" },
+  "widgets.needsMe.accept": { en: "Accept", es: "Aceptar" },
+  "widgets.needsMe.notNow": { en: "Not now", es: "Ahora no" },
+  "widgets.needsMe.yes": { en: "Yes", es: "Sí" },
+  "widgets.needsMe.no": { en: "No", es: "No" },
+  "widgets.needsMe.doing": { en: "Your bots are working on", es: "Tus bots están con" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
