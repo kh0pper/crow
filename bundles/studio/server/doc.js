@@ -35,6 +35,14 @@ import * as Y from "yjs";
  * limit.
  * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number, params: number}}
  */
+/**
+ * The SunVox modules a Studio track may use as its instrument in 1a: the
+ * self-contained synthesizers. Other generator-flagged modules need inputs
+ * Studio does not provide yet (Input, Sampler and Vorbis player need audio;
+ * MultiSynth and Velocity2Ctl only route control to other modules).
+ */
+export const INSTRUMENT_TYPES = Object.freeze(["Analog generator", "DrumSynth", "Generator", "SpectraVoice"]);
+
 export const LIMITS = Object.freeze({
   tracks: 16,
   notesPerClip: 4096,

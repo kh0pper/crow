@@ -754,7 +754,7 @@ test("undo of track.remove does not move old clips onto a re-created track with 
   // Someone puts a different instrument on the id the removed track had. The
   // removal's track no longer matches the document, and the clip it took with
   // it must not come back onto that new track.
-  s.run("track.add", { name: "Keys", id: "bass", device: { type: "FM" } });
+  s.run("track.add", { name: "Keys", id: "bass", device: { type: "SpectraVoice" } });
 
   const { plan } = s.undo(removed.entry);
   assert.equal(plan.apply.size, 0);
@@ -793,7 +793,7 @@ test("undo of set_param conflicts after the device was swapped", (t) => {
 
   // The FM module happens to have the same Cutoff value, so comparing the
   // controller alone would have matched and deleted it from the new device.
-  s.run("track.set_device", { track_id: "bass", type: "FM", params: { Cutoff: 40 } });
+  s.run("track.set_device", { track_id: "bass", type: "SpectraVoice", params: { Cutoff: 40 } });
 
   const plan = planUndo(s.doc, stored);
   assert.equal(plan.apply.size, 0);
@@ -802,11 +802,11 @@ test("undo of set_param conflicts after the device was swapped", (t) => {
   assert.equal(conflict.ref, "track:bass");
   assert.equal(conflict.field, "device.type");
   assert.equal(conflict.expected, "Analog generator");
-  assert.equal(conflict.actual, "FM");
+  assert.equal(conflict.actual, "SpectraVoice");
 
   // A guard is compared, never restored: the FM device is left as it is.
   const device = snapshot(s.doc).tracks[0].device;
-  assert.equal(device.type, "FM");
+  assert.equal(device.type, "SpectraVoice");
   assert.equal(device.params.Cutoff, 40);
 });
 

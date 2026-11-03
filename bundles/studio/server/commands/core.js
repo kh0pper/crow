@@ -20,6 +20,7 @@ import { z } from "zod";
 import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   BEATS_PER_BAR,
+  INSTRUMENT_TYPES,
   LIMITS,
   STEP_GUARDS,
   TRACK_COLORS,
@@ -45,6 +46,7 @@ const BEATS = BEATS_PER_BAR;
 
 /** A track added without a device gets SunVox's plain analog synth. */
 const DEFAULT_DEVICE_TYPE = "Analog generator";
+const instrumentTypeSchema = z.enum(INSTRUMENT_TYPES);
 
 /** Names (tracks, scenes, clips, params, keys) are 1-80 characters. */
 const MAX_NAME = 80;
@@ -309,7 +311,7 @@ defineCommand({
       device: z
         .object({
           engine: z.literal("sunvox").default("sunvox"),
-          type: z.string().min(1).max(MAX_NAME).describe('a SunVox module type, e.g. "Analog generator"'),
+          type: instrumentTypeSchema.describe('a SunVox instrument: one of ' + INSTRUMENT_TYPES.join(", ")),
           params: paramsSchema.default({}),
         })
         .strict()
@@ -438,7 +440,7 @@ defineCommand({
   schema: z
     .object({
       track_id: idSchema,
-      type: z.string().min(1).max(MAX_NAME).describe('a SunVox module type, e.g. "FM"'),
+      type: instrumentTypeSchema.describe('a SunVox instrument: one of ' + INSTRUMENT_TYPES.join(", ")),
       params: paramsSchema.default({}).describe("the new module's controller values; they replace the old ones"),
     })
     .strict(),

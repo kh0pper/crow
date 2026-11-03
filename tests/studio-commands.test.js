@@ -301,7 +301,7 @@ test("apply returns before/after for every touched field", (t) => {
       args: { track_id: track, gain_db: -3, pan: -0.5 },
       keys: [`${tr}|gain_db`, `${tr}|pan`],
     },
-    { id: "track.set_device", args: { track_id: track, type: "FM" }, keys: [`${tr}|device`] },
+    { id: "track.set_device", args: { track_id: track, type: "SpectraVoice" }, keys: [`${tr}|device`] },
     {
       id: "track.set_param",
       args: { track_id: track, name: "Cutoff", value: 40 },
@@ -556,7 +556,7 @@ test("set_device with 65 params is refused", (t) => {
   );
 
   const over = refuses(
-    () => runCommand(doc, "track.set_device", { track_id: track, type: "FM", params }),
+    () => runCommand(doc, "track.set_device", { track_id: track, type: "SpectraVoice", params }),
     "limit",
   );
   assert.equal(over.message, "A device can have at most 64 parameters.");
@@ -564,7 +564,7 @@ test("set_device with 65 params is refused", (t) => {
 
   // track.add caps the same record, and refuses before it creates anything.
   const added = refuses(
-    () => runCommand(doc, "track.add", { id: "strings", name: "Strings", device: { type: "FM", params } }),
+    () => runCommand(doc, "track.add", { id: "strings", name: "Strings", device: { type: "SpectraVoice", params } }),
     "limit",
   );
   assert.equal(added.message, "A device can have at most 64 parameters.");
@@ -572,7 +572,7 @@ test("set_device with 65 params is refused", (t) => {
 
   // Exactly 64 is allowed.
   const allowed = Object.fromEntries(Object.entries(params).slice(0, LIMITS.params));
-  const set = runCommand(doc, "track.set_device", { track_id: track, type: "FM", params: allowed });
+  const set = runCommand(doc, "track.set_device", { track_id: track, type: "SpectraVoice", params: allowed });
   assert.deepEqual(Object.keys(set.after), [`track:${track}|device`]);
   assert.deepEqual(snapshot(doc).tracks[0].device.params, allowed);
 });
@@ -609,5 +609,17 @@ test("set_param cannot add a 65th controller and rejects reserved or dotted name
   run("track.set_param", { track_id: "t1", name: "p3", value: 99 }); // changing an existing one is fine
   for (const bad of ["__proto__", "a.b", "a|b"]) {
     assert.throws(() => run("track.set_param", { track_id: "t1", name: bad, value: 1 }));
+  }
+});
+
+test("tracks accept only the self-contained SunVox instruments", async () => {
+  const { newSongDoc, INSTRUMENT_TYPES } = await import("../bundles/studio/server/doc.js");
+  const reg = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/core.js");
+  const doc = newSongDoc({ title: "instruments" });
+  const run = (command, args) => doc.transact(() => reg.runCommand(doc, command, args));
+  for (const type of INSTRUMENT_TYPES) run("track.add", { name: type.slice(0, 20), device: { engine: "sunvox", type, params: {} } });
+  for (const type of ["Input", "Sampler", "Reverb", "Velocity2Ctl"]) {
+    assert.throws(() => run("track.add", { name: "x", device: { engine: "sunvox", type, params: {} } }));
   }
 });
