@@ -2958,6 +2958,30 @@ await initTable("voice_handoffs table", `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_handoffs_phone_open ON voice_handoffs(device_id, kind) WHERE status = 'awaiting_phone';
 `);
 
+// staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
+// servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the
+// recipients and the body. Epoch-ms times; state is validated in the store (no CHECK). Same DDL as
+// STAGED_SENDS_DDL in scripts/migrations/0017-staged-sends.mjs — one shape, two rails; additive, no
+// SCHEMA_GENERATION bump.
+await initTable("staged_sends table", `
+  CREATE TABLE IF NOT EXISTS staged_sends (
+    id TEXT PRIMARY KEY,
+    session_id TEXT, thread_id TEXT, bot_id TEXT, card_id INTEGER, job_id TEXT,
+    channel TEXT NOT NULL DEFAULT 'gmail',
+    cred_ref TEXT,
+    provider_draft_id TEXT NOT NULL, provider_thread_id TEXT,
+    snapshot TEXT NOT NULL, content_hash TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'staged', fail_reason TEXT,
+    tainted INTEGER NOT NULL DEFAULT 0, new_recipients TEXT, source_flags TEXT,
+    sent_at INTEGER, provider_message_id TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS idx_staged_sends_session ON staged_sends(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_staged_sends_card ON staged_sends(card_id, created_at DESC) WHERE card_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_staged_sends_thread ON staged_sends(thread_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_staged_sends_draft ON staged_sends(provider_draft_id);
+  CREATE INDEX IF NOT EXISTS idx_staged_sends_state ON staged_sends(state, created_at DESC);
+`);
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so
