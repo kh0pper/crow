@@ -8,7 +8,7 @@ Crow Studio is a shared music studio: you in the dashboard and an AI agent over 
 
 ## Songs live in projects
 
-Every song belongs to a [project space](/guide/workspace). The project decides who may write, and the song document, its history and its renders stay on the Crow instance that owns the project.
+Every song belongs to a [project space](/guide/projects). The project decides who may write, and the song document, its history and its renders stay on the Crow instance that owns the project.
 
 A project's bot only ever sees the songs of its **own** project: a song in another project answers exactly like a song that does not exist. Crow's voice can read any song, but it cannot change one.
 
@@ -34,13 +34,19 @@ Agents are held back from the parts you are using:
 
 ## Letting a bot use Studio
 
-Studio's tools (`studio_*`) are an extension. A bot gets them when you enable the **Studio** extension for that bot in [Bot Builder](/guide/bot-builder); it can then list and edit its own project's songs, one command per tool call.
+Studio is an extension: its tools (`studio_*`) are how a bot lists and edits its own project's songs, one command per tool call.
 
-Your own coding agent — Claude Code and any other MCP client — reaches Studio through the gateway's tools MCP. The Studio MCP server itself speaks stdio only and opens no network port; the gateway serves the panel, the live sync socket and the agent API.
+Installing Studio restarts the gateway; the Studio page, its live connection and the agent tools start after that.
+
+To give a bot those tools, open it in [Bot Builder](/guide/bot-builder) → the bot's **Abilities** tab → set the **Studio** row to **Read-only** or **All**. *Read-only* lets it look at songs; *All* lets it edit them, under the rules above (locked tracks, the clip you have open, your playback).
+
+The **Ask the agent** box is a chat, so it needs the bot's **Perch** channel too ([Bot Builder](/guide/bot-builder) → **Basics** → channel → **Perch (dashboard chat)**). Tools without a channel are still usable by a coding agent; the box just has nothing to talk to.
+
+Your own coding agent — [Claude Code](/platforms/claude-code) and any other MCP client — reaches Studio through the gateway's tools endpoint at `/tools/mcp`. The Studio MCP server itself speaks stdio only and opens no network port; the gateway serves the panel, the live sync socket and the agent API.
 
 ### Ask the agent
 
-A song page carries an **Ask the agent** box. It opens a chat with the song project's bot — the bot whose home project is that project — and shows the bot's replies underneath as they arrive. If the project has no bot yet the box stays disabled and says so. If the bot engine is not running, or the bot has no chat channel set up (Bot Builder → Perch), the box says that instead of failing silently.
+A song page carries an **Ask the agent** box. It opens a chat with the song project's bot — the bot whose home project is that project — and shows the bot's replies underneath as they arrive. The chat is remembered per song for the tab, so coming back to it carries on where you left off. If the project has no bot yet the box stays disabled and says so. If the bot engine is not running, or the bot has no chat channel set up (Bot Builder → Perch), the box says that instead of failing silently.
 
 ## Renders and loudness
 
@@ -59,6 +65,11 @@ The bot can render the song, one scene, or one clip through the same engine your
 | Songs per project | 500 | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
+
+## Known limits
+
+- **Your own MCP session sees every song.** A coding agent connected as you (an MCP session on this instance) is not a bot: the project filter is a bot rule, not a permission, and a session with the owner's access can read and edit any song on the instance it can reach. Studio is single-operator in this phase.
+- **Calls through the gateway's shared tools endpoint with the gateway token count as you.** If an MCP client reaches Studio through the gateway's `/tools/mcp` using the gateway token, Studio sees the owner, with every song and every permission that token already carries (it already grants access to every gateway tool). Bots are the only callers Studio marks as agents, and they come through their own per-bot scope.
 
 ## Credits
 
