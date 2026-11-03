@@ -175,20 +175,29 @@ test("input grows to 5 lines then scrolls, resets after send", async (t) => {
 test("Send flips to Steer during a turn and Stop stays reachable", async (t) => {
   if (!available) return t.skip("no headless Chrome");
   const s = await tab(390, 800);
+  const emitUntil = async (state, expression, what, ms = 15000) => {
+    const stop = Date.now() + ms;
+    for (;;) {
+      emit("state", state);
+      if (await s.evalIn(expression).catch(() => false)) return;
+      if (Date.now() > stop) throw new Error("timed out waiting for " + what);
+      await sleep(250);
+    }
+  };
   try {
     assert.equal(await s.evalIn(SHOWN("perch-abort")), false, "no Stop while idle");
     // Wait for the stream to be open, then push a turn-start state frame.
     const end = Date.now() + 8000;
     while (!streams.size && Date.now() < end) await sleep(100);
     assert.ok(streams.size, "the stream opened");
-    emit("state", { turnInFlight: true });
-    await s.waitFor(`document.getElementById('perch-send').textContent==='Steer'&&${SHOWN("perch-abort")}`, "Steer + Stop");
+    // A stream left from the previous test's tab can still be open when this tab's own stream has
+    // not subscribed yet, so a single frame can go only to the old one: send it until the page shows it.
+    await emitUntil({ turnInFlight: true }, `document.getElementById('perch-send').textContent==='Steer'&&${SHOWN("perch-abort")}`, "Steer + Stop");
     const r = await s.json(`(function(){ var a=document.getElementById('perch-abort').getBoundingClientRect(), b=document.getElementById('perch-send').getBoundingClientRect();
       return JSON.stringify({aw:a.width,ah:a.height,bh:b.height,right:a.right,vw:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth}); })()`);
     assert.ok(r.ah >= 44 && r.bh >= 44, "44px targets");
     assert.ok(r.right <= r.vw && r.sw <= r.vw, "Stop is on screen with no horizontal scroll");
-    emit("state", { turnInFlight: false });
-    await s.waitFor(`document.getElementById('perch-send').textContent==='Send'&&!${SHOWN("perch-abort")}`, "back to Send");
+    await emitUntil({ turnInFlight: false }, `document.getElementById('perch-send').textContent==='Send'&&!${SHOWN("perch-abort")}`, "back to Send");
   } finally { await s.close(); }
 });
 
