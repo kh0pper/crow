@@ -23,9 +23,10 @@
  *   pageSizes   an optional per-page default size ({ page: [w, h] }), for a widget that fills For
  *               You's row but is half of the generic page's first screenful (What needs me). It must
  *               be one of `sizes`; widgets/grid-html.js ignores anything else;
- *   available   an optional `(crowHome) => boolean` offer gate: the camera widget is offered only
- *               while the Frigate add-on is installed. No `crowHome` handed in = offered (a
- *               caller with no host to ask loses nothing);
+ *   available   an optional `(crowHome) => boolean` offer gate: the widget is offered only while
+ *               the host answers true. No `crowHome` handed in = offered (a caller with no host to
+ *               ask loses nothing). No built-in carries one today — an add-on's own widgets are
+ *               offered by their presence (widgets/addons.js);
  *   load(ctx)   reads the data, or returns null when nothing came back (the grid draws the widget's
  *               own one-line error instead). A throw is the same as null;
  *   render      draws the widget from that data; "" means "nothing to show": no cell at all (the
@@ -44,8 +45,13 @@
  * weather offered, drawn hidden); the generic page's is needs-me and today (everything else offered
  * from "+ Add widget"). `defaultPages`/`defaultOn` say which, and widgets/grid-html.js draws the rest
  * hidden — a cell the page offers but this device has not put on it yet. Widgets phase 3's in-Crow
- * widgets (messages, camera, apps, projects, bots) are offered on both pages and on neither default:
- * their loaders and renderers live in widgets/more.js and widgets/more-html.js.
+ * widgets (messages, apps, projects, bots) are offered on both pages and on neither default: their
+ * loaders and renderers live in widgets/more.js and widgets/more-html.js.
+ *
+ * Installed bundles contribute widgets too (widgets phase 3, PR 3): `widgetsForPage` appends
+ * `addonWidgets(crowHome)` after these built-ins, each entry shaped like the ones above but titled by
+ * a literal `title` (a string or { en, es }) instead of a `titleKey` (widgets/addons.js). `WIDGETS`
+ * itself stays frozen and built-in only.
  */
 import { t } from "../dashboard/shared/i18n.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
@@ -57,8 +63,9 @@ import { loadMoves } from "../for-you/moves.js";
 import { loadListen } from "../for-you/listen.js";
 import { loadNews } from "../for-you/news.js";
 import { loadToday } from "../for-you/today.js";
-import { loadMessages, loadCameras, loadApps, loadProjects, loadBots, frigateInstalled } from "./more.js";
-import { messagesHtml, cameraHtml, appsHtml, projectsHtml, botsHtml } from "./more-html.js";
+import { loadMessages, loadApps, loadProjects, loadBots } from "./more.js";
+import { messagesHtml, appsHtml, projectsHtml, botsHtml } from "./more-html.js";
+import { addonWidgets } from "./addons.js";
 
 const e = escapeHtml;
 
@@ -202,20 +209,6 @@ export const WIDGETS = Object.freeze([
     render: (data, lang, opts) => messagesHtml(data, lang, opts && opts.now ? opts.now : undefined),
   },
   {
-    id: "camera",
-    titleKey: "widgets.more.camera.title",
-    section: null,
-    sizes: HALF_SIZES,
-    defaultSize: [2, 2],
-    pages: ["for-you", "widgets"],
-    defaultOn: false,
-    // Only offered while the Frigate add-on is installed: the stills it draws are that bundle's
-    // own route, and a widget for a bundle that is not there would be a broken tile.
-    available: (crowHome) => frigateInstalled(crowHome),
-    load: (ctx) => loadCameras({ crowHome: ctx.crowHome }),
-    render: (data, lang) => cameraHtml(data, lang),
-  },
-  {
     id: "apps",
     titleKey: "widgets.more.apps.title",
     section: null,
@@ -250,7 +243,11 @@ export const WIDGETS = Object.freeze([
   },
 ]);
 
-/** The widget with this id, or null (an id from an older layout that no longer exists). */
+/**
+ * The BUILT-IN widget with this id, or null (an id from an older layout that no longer exists).
+ * Add-on ids (`addon-<bundle>-<widget>`) are not here: they depend on what is installed on this host,
+ * so they resolve through `widgetsForPage` (which merges widgets/addons.js) or `loadWidgets`.
+ */
 export function widgetOf(id) {
   const key = String(id == null ? "" : id);
   for (const w of WIDGETS) if (w.id === key) return w;
@@ -267,8 +264,8 @@ export function widgetOffered(widget, settings) {
 
 /**
  * Whether a widget is offered on this host at all: a widget that names an `available(crowHome)`
- * predicate (the camera, which needs the Frigate add-on) is offered only while it answers true.
- * With no host to ask (a test that names none) the widget is offered — its own load decides.
+ * predicate is offered only while it answers true. With no host to ask (a test that names none) the
+ * widget is offered — its own load decides.
  */
 export function widgetAvailable(widget, crowHome = null) {
   if (!widget || typeof widget.available !== "function") return true;
@@ -276,10 +273,21 @@ export function widgetAvailable(widget, crowHome = null) {
   try { return !!widget.available(crowHome); } catch { return false; }
 }
 
-/** The page's widgets in registry order: those it lists, its settings offer, and this host offers. */
-export function widgetsForPage(pageId, { settings = null, widgets = WIDGETS, crowHome = null } = {}) {
+/**
+ * The page's widgets in registry order: those it lists, its settings offer, and this host offers.
+ *
+ * With a `crowHome` and NO `widgets` list passed by the caller, the installed add-ons' widgets
+ * (widgets/addons.js) are appended after the built-ins, then the same filters apply. A caller that
+ * passes its own list — a page with a fixture, a test — gets exactly that list and nothing merged.
+ */
+export function widgetsForPage(pageId, { settings = null, widgets = null, crowHome = null } = {}) {
   const page = String(pageId == null ? "" : pageId);
-  return (widgets || []).filter((w) => Array.isArray(w.pages) && w.pages.includes(page)
+  const own = Array.isArray(widgets) ? widgets : null;
+  let list = own || WIDGETS;
+  if (!own && crowHome) {
+    try { list = [...WIDGETS, ...addonWidgets(crowHome)]; } catch { list = WIDGETS; }
+  }
+  return list.filter((w) => Array.isArray(w.pages) && w.pages.includes(page)
     && widgetOffered(w, settings) && widgetAvailable(w, crowHome));
 }
 

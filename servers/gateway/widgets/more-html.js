@@ -1,20 +1,21 @@
 /**
- * The in-Crow widgets' markup (widgets phase 3, PR 2): Messages, cameras and the apps / projects /
- * bots launchers. The data they draw comes from widgets/more.js; nothing here reads or fetches.
+ * The in-Crow widgets' markup (widgets phase 3, PR 2): Messages and the apps / projects / bots
+ * launchers. The data they draw comes from widgets/more.js; nothing here reads or fetches.
  *
  * Rules this file owns:
- *   - every name, label, alt and attribute value goes through escapeHtml: a conversation's title,
- *     a camera's name and a project's name all reach markup from a store;
+ *   - every name, label, alt and attribute value goes through escapeHtml: a conversation's title and
+ *     a project's name both reach markup from a store;
  *   - a launcher tile whose href is not same-site is DROPPED here as well as in the loader (the
  *     renderer is the last line, Review focus 5);
- *   - the camera is never a video: one `<img loading="lazy">` of the Frigate still route per camera,
- *     inside a button the page's client re-loads with `?t=<now>` on a tap (the handler lives in
- *     panels/for-you/client.js — the widgets' own client, emitted on both pages);
  *   - the widget always draws a card: with nothing to show it says so in one line, because "no
  *     conversations yet" is information, not a failure (a failed READ is the registry's error cell
  *     instead, widgets/registry.js).
  *
- * The styles are the widgets' own (`widgetsMoreCss`), emitted by both pages next to the grid's.
+ * The camera widget moved to the add-on contract: Frigate's own `widgets/cameras.js` supplies the
+ * summary and widgets/addon-html.js draws it. The stills' styles stay here (`widgetsMoreCss`,
+ * emitted by both pages next to the grid's), because the generic add-on renderer uses the same
+ * `.wg-cam` markup and the page's client reloads it on a tap.
+ *
  * NOTE: never write a literal closing style tag inside a comment here.
  */
 import { escapeHtml } from "../dashboard/shared/components.js";
@@ -59,33 +60,6 @@ export function messagesHtml(data, lang = "en", now = Date.now()) {
     body,
     moreHref: "/dashboard/messages",
     moreKey: "widgets.more.messages.open",
-  }, lang);
-}
-
-/**
- * Cameras: the first few of Frigate's cameras as stills, each a button that reloads its image on a
- * tap, and a link into the Frigate panel. `state` "panel" (no module to read the list with) draws
- * the link alone; an empty list says so. Never a `<video>`: the widget shows the latest still only.
- */
-export function cameraHtml(data, lang = "en") {
-  const cams = data && Array.isArray(data.cameras) ? data.cameras : [];
-  const tiles = cams.map((name) => {
-    const src = `/api/frigate/${encodeURIComponent(name)}/latest.jpg`;
-    return `<li class="wg-cam-row"><button type="button" class="wg-cam" data-wg-cam aria-label="${e(fill(t("widgets.more.camera.refresh", lang), { name }))}">
-        <img class="wg-cam-img" loading="lazy" src="${e(src)}" alt="${e(String(name))}">
-        <span class="wg-cam-name">${e(String(name))}</span>
-      </button></li>`;
-  }).join("");
-  let body;
-  if (tiles) body = `<ul class="wg-cams">${tiles}</ul>`;
-  else if (data && data.state === "panel") body = `<p class="fy-note">${e(t("widgets.more.camera.unavailable", lang))}</p>`;
-  else body = `<p class="fy-note">${e(t("widgets.more.camera.empty", lang))}</p>`;
-  return cardHtml({
-    id: "wg-camera",
-    title: t("widgets.more.camera.title", lang),
-    body,
-    moreHref: "/dashboard/frigate",
-    moreKey: "widgets.more.camera.open",
   }, lang);
 }
 

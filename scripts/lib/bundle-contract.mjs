@@ -110,6 +110,7 @@ export function detectSurfaces(manifest) {
   if (manifest && manifest.server) s.push("server");
   if (manifest && manifest.panel) s.push("panel");
   if (manifest && manifest.panelRoutes) s.push("panelRoutes");
+  if (manifest && Array.isArray(manifest.widgets) && manifest.widgets.length) s.push("widgets");
   if (manifest && Array.isArray(manifest.skills) && manifest.skills.length) s.push("skills");
   return s;
 }
@@ -203,6 +204,18 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
   }
   if (manifest && typeof manifest.panelRoutes === "string" && !fileExists(bundleDir, manifest.panelRoutes)) {
     errors.push(`panelRoutes "${manifest.panelRoutes}" not found`);
+  }
+  // widgets: each declaration's code is ALWAYS widgets/<id>.js beside the manifest, so the only
+  // referential work is the duplicate check and the file check. The shape (id pattern, title,
+  // sizes) is the schema's, and a bad id cannot reach this loop: the shape check short-circuits.
+  if (manifest && Array.isArray(manifest.widgets)) {
+    const seen = new Set();
+    for (const w of manifest.widgets) {
+      if (!w || typeof w !== "object" || typeof w.id !== "string") continue;
+      if (seen.has(w.id)) errors.push(`widgets: duplicate id "${w.id}"`);
+      seen.add(w.id);
+      if (!fileExists(bundleDir, join("widgets", `${w.id}.js`))) errors.push(`widgets/${w.id}.js not found`);
+    }
   }
   if (manifest && Array.isArray(manifest.skills)) {
     for (const sk of manifest.skills) {
