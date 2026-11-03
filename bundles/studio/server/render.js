@@ -33,6 +33,18 @@
  * `startRendering()`, and a render that throws before that point releases the
  * worklet thread by hand (`startRendering()` is what normally releases it, and
  * a leaked worklet would keep the process alive).
+ *
+ * ## Renders are serialized, and there is no timeout
+ *
+ * Every render of one renderer runs alone: the queue holds one running job and
+ * at most three waiting behind it, because the process has ONE worklet host and
+ * one storage client. There is no render timeout in 1a — a wedged worklet holds
+ * the slot (and refuses later calls until the queue's waiters are gone) until
+ * the MCP process is restarted. Peak memory of a full 300 s render is a few
+ * hundred MB: two 57 MB float channels for the audio itself, the 86 MB WAV, and
+ * the filter copies the loudness and true-peak meters make. That is why the
+ * channels are dropped as soon as they have been measured and encoded, and why
+ * the WAV is handed to storage as a view rather than a copy.
  */
 
 import { createRequire } from "node:module";
@@ -59,8 +71,18 @@ const studioEngine = require(join(ENGINE_DIR, "engine-client.js"));
 /** Every render is 48 kHz stereo: the rate the engine and the meters assume. */
 const SAMPLE_RATE = 48000;
 
-/** MPEG-1 style "1 hour" for the presigned download URL, in seconds. */
+/** How long a render's presigned download URL lives, in seconds (one hour). */
 const URL_EXPIRY_SECONDS = 3600;
+
+/**
+ * What a song id may look like: a UUID, or one of the short ids the registry
+ * lets an agent choose. It becomes a storage key segment and an audit target,
+ * so anything else is refused before the id is used anywhere.
+ */
+const SONG_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The message a song id that fails `SONG_ID_PATTERN` gets. */
+const INVALID_SONG_ID_MESSAGE = "That is not a valid song id.";
 
 /** The `storage_files.reference_type` a Studio render is filed under. */
 const REFERENCE_TYPE = "studio_song";
@@ -208,13 +230,14 @@ export function createRenderer({
   /**
    * Render a song and store it, returning where it landed and how it measures.
    *
-   * Order matters: the time limit is checked before anything is touched, then
-   * the ACL, then the queue (a refused render must not hold a slot), and only
-   * then is any audio rendered.
+   * Order matters: the song id and the project are validated, then the time
+   * limit is checked, all before anything is touched; then the ACL, then the
+   * queue (a refused render must not hold a slot), and only then is any audio
+   * rendered.
    *
    * @param {object} request
    * @param {string} request.song_id
-   * @param {number|null} [request.project_id] the project the song lives in
+   * @param {number} request.project_id the project the song lives in (required)
    * @param {object} request.snapshot the song to render
    * @param {string|null} [request.scene_id] render this scene
    * @param {string|null} [request.clip_id] render this clip
@@ -227,6 +250,12 @@ export function createRenderer({
   async function render(request = {}) {
     const { song_id, project_id = null, snapshot, scene_id = null, clip_id = null, seconds, author = null } = request;
     if (typeof song_id !== "string" || song_id === "") throw new Error("A render needs the song's id.");
+    // The id is a key segment and an audit target: refuse anything else here,
+    // before any upload, row or audit line can carry it.
+    if (!SONG_ID_PATTERN.test(song_id)) throw new Error(INVALID_SONG_ID_MESSAGE);
+    // A render is always filed under the song's project: the ACL call and the
+    // storage prefix both need it, so a render without one is refused clearly.
+    if (project_id == null) throw new Error("A render needs the song's project.");
     const span = checkSeconds(seconds, longest);
 
     await acl.assertLocalCapability(db, project_id, "write_files");
@@ -234,21 +263,29 @@ export function createRenderer({
     try {
       const audio = await renderAudio(snapshot, { scene_id, clip_id, seconds: span });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
+      const renderedSeconds = audio.seconds;
       const lufs = integratedLufs(audio.left, audio.right, rate);
       const truePeak = truePeakDb(audio.left, audio.right, rate);
       const wav = encodeWav24(audio.left, audio.right, rate);
+      // Measured and quantised: the two float channels (~57 MB each for a
+      // 300 s render) are never read again, so drop the last references to
+      // them before the upload starts.
+      audio.left = null;
+      audio.right = null;
 
       const prefix = await storagePrefixFor(db, project_id);
       const stem = renderName(snapshot, { scene_id, clip_id });
       const key = `${prefix}studio/${song_id}/${timestampOf(now)}-${stem}.wav`;
 
-      await storage.uploadObject(key, Buffer.from(wav), { bucket, contentType: "audio/wav" });
+      // A view over the encoder's bytes, not a copy: the WAV is up to ~86 MB.
+      const wavBytes = Buffer.from(wav.buffer, wav.byteOffset, wav.byteLength);
+      await storage.uploadObject(key, wavBytes, { bucket, contentType: "audio/wav" });
 
       try {
         await db.execute({
           sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [key, `${stem}.wav`, "audio/wav", wav.byteLength, bucket, REFERENCE_TYPE, song_id, project_id ?? null],
+          args: [key, `${stem}.wav`, "audio/wav", wav.byteLength, bucket, REFERENCE_TYPE, song_id, project_id],
         });
       } catch (error) {
         // A row that never landed must not leave an untracked object behind.
@@ -262,14 +299,13 @@ export function createRenderer({
 
       await acl.appendAudit(db, {
         project_id,
-        actor_type: author && author.kind === "human" ? "local" : "bot",
-        actor_id: author && author.id != null ? author.id : null,
+        ...auditActor(author),
         action: "studio.render",
         target: `song:${song_id}`,
         payload: {
           scene_id,
           clip_id,
-          seconds: audio.seconds,
+          seconds: renderedSeconds,
           storage_key: key,
           lufs,
           true_peak_db: truePeak,
@@ -277,13 +313,26 @@ export function createRenderer({
       });
 
       const url = await storage.getPresignedUrl(key, { bucket, expiry: URL_EXPIRY_SECONDS });
-      return { storage_key: key, url, seconds: audio.seconds, lufs, true_peak_db: truePeak };
+      return { storage_key: key, url, seconds: renderedSeconds, lufs, true_peak_db: truePeak };
     } finally {
       release();
     }
   }
 
   return { render };
+}
+
+/**
+ * Who gets the audit line: a human author is `local`, and anything else — an
+ * agent, or no author at all (an internal call) — is `bot` with no id.
+ * @param {{kind?: string, id?: string}|null} [author]
+ * @returns {{actor_type: string, actor_id: (string|null)}}
+ */
+function auditActor(author) {
+  if (author && author.kind === "human") {
+    return { actor_type: "local", actor_id: author.id != null ? author.id : null };
+  }
+  return { actor_type: "bot", actor_id: author && author.id != null ? author.id : null };
 }
 
 /**

@@ -74,26 +74,31 @@ export function encodeWav24(left, right, sampleRate) {
 
   let at = HEADER_BYTES;
   for (let frame = 0; frame < frames; frame += 1) {
-    at = writeSample(view, at, left[frame]);
-    at = writeSample(view, at, right[frame]);
+    at = writeSample(file, at, left[frame]);
+    at = writeSample(file, at, right[frame]);
   }
   return file;
 }
 
 /**
  * Write one float as a 24-bit little-endian two's-complement integer.
- * @param {DataView} view
+ *
+ * The bytes go straight into the file's `Uint8Array` (indexed assignment) rather
+ * than through a `DataView`: that is one bounds check per byte instead of a
+ * method call per byte, and there are six bytes in every frame of a render.
+ *
+ * @param {Uint8Array} bytes the file being built
  * @param {number} at byte offset to write at
  * @param {number} value a sample in [-1, 1]
  * @returns {number} the offset just past the sample
  */
-function writeSample(view, at, value) {
+function writeSample(bytes, at, value) {
   const sample = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
   let integer = Math.round(sample * FULL_SCALE);
   if (integer < 0) integer += 0x1000000; // 24-bit two's complement
-  view.setUint8(at, integer & 0xff);
-  view.setUint8(at + 1, (integer >> 8) & 0xff);
-  view.setUint8(at + 2, (integer >> 16) & 0xff);
+  bytes[at] = integer & 0xff;
+  bytes[at + 1] = (integer >> 8) & 0xff;
+  bytes[at + 2] = (integer >> 16) & 0xff;
   return at + BYTES_PER_SAMPLE;
 }
 

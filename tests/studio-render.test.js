@@ -331,6 +331,79 @@ test("render queue full on fifth concurrent call", async () => {
   );
 });
 
+test("a render without a project is refused clearly", async () => {
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    maxSeconds: 300,
+    now: () => CLOCK,
+    renderAudio: async () => stubAudio(),
+  });
+
+  for (const project_id of [undefined, null]) {
+    await assert.rejects(
+      renderer.render({ song_id: "song-1", project_id, snapshot: oneTrackSong(), seconds: 1 }),
+      { message: "A render needs the song's project." },
+    );
+  }
+
+  assert.equal(acl.calls.length, 0, "the ACL is never called without a project");
+  assert.equal(storage.uploads.length, 0, "nothing is uploaded");
+  assert.equal(acl.audits.length, 0, "nothing is audited");
+  assert.deepEqual(db.statements, [], "nothing is written");
+});
+
+test("a song id containing a slash or dots is refused before any upload", async () => {
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    maxSeconds: 300,
+    now: () => CLOCK,
+    renderAudio: async () => stubAudio(),
+  });
+
+  for (const song_id of ["x/y", ".."]) {
+    await assert.rejects(
+      renderer.render({ song_id, project_id: PROJECT, snapshot: oneTrackSong(), seconds: 1 }),
+      { message: "That is not a valid song id." },
+    );
+  }
+
+  assert.equal(acl.calls.length, 0, "an invalid id is refused before the ACL");
+  assert.equal(storage.uploads.length, 0, "nothing is uploaded under an invalid id");
+  assert.equal(storage.urls.length, 0, "no URL is handed out");
+  assert.equal(acl.audits.length, 0, "nothing is audited");
+  assert.deepEqual(db.statements, [], "nothing is written");
+});
+
+test("a render with no author is audited as bot", async () => {
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    maxSeconds: 300,
+    now: () => CLOCK,
+    renderAudio: async () => stubAudio(),
+  });
+
+  await renderer.render({ song_id: "song-1", project_id: PROJECT, snapshot: oneTrackSong(), seconds: 1 });
+
+  assert.equal(acl.audits.length, 1);
+  assert.equal(acl.audits[0].actor_type, "bot");
+  assert.equal(acl.audits[0].actor_id, null);
+});
+
 test("a failed storage_files insert deletes the uploaded object", async () => {
   const db = fakeDb({ failInsert: true });
   const storage = fakeStorage();
