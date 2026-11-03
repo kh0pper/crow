@@ -103,6 +103,16 @@ const CHUNK_LIMIT_BYTES = 1048576 + 6;
 /** What a client whose chunk is over the limit is told. */
 const CHUNK_TOO_LARGE_TEXT = "A take chunk can be at most 1 MiB.";
 
+/**
+ * What a client is told when its chunk body was not raw bytes at all.
+ *
+ * The gateway's global JSON parser runs before this router, so a chunk sent as
+ * `application/json` arrives here already parsed into an object: the bytes the
+ * recorder sends are gone, and staging an empty chunk would silently drop the
+ * audio. It is refused instead.
+ */
+const CHUNK_NOT_BYTES_TEXT = "Send a take chunk as raw audio bytes.";
+
 /** What every take route answers when this instance cannot stage takes. */
 const TAKES_UNAVAILABLE_TEXT = "Studio cannot take recordings on this instance.";
 
@@ -505,6 +515,12 @@ function refuse(socket, status, text) {
  *   gateway passes `(limit) => express.raw({type: () => true, limit,
  *   inflate: false})`). Without it the chunk route answers 503, because raw
  *   bytes are the one body this router has to parse itself.
+ * @param {((songId: string) => Promise<object|null>)|null} [options.songRowOf]
+ *   one song's row by id — the store's single-row lookup (`getSongRow`, the
+ *   same function the hub reads a song with), injected because this module
+ *   owns no database. The audio route needs one song's project and asks this
+ *   instead of reading every song; without it the hub's song list is filtered
+ *   here, which is the same answer at the cost of the whole list.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -522,6 +538,7 @@ export function createStudioWeb({
   takeUploads = null,
   takeStorage = null,
   rawBody = null,
+  songRowOf = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -547,6 +564,22 @@ export function createStudioWeb({
   // The project's bot, for the panel's "Ask the agent" box. Same contract as
   // the bot scope above: injected, and absent means "no bot", never a guess.
   const projectBot = typeof projectBotOf === "function" ? projectBotOf : async () => null;
+
+  // One song's row, for the routes that need one song and not the catalogue.
+  const songRowLookup = typeof songRowOf === "function" ? songRowOf : null;
+
+  /**
+   * The row of one song: through the store's single-row lookup when one is
+   * injected, otherwise by filtering the hub's song list.
+   * @param {string} song_id
+   * @returns {Promise<object|null>}
+   */
+  async function readSongRow(song_id) {
+    if (songRowLookup) return songRowLookup(String(song_id));
+    const songs = await hub.listSongs({});
+    if (!Array.isArray(songs)) return null;
+    return songs.find((song) => song && song.id === song_id) ?? null;
+  }
 
   /** `<song_id> → <client_id → socket record>` for every client that said hello. */
   const rooms = new Map();
@@ -1284,13 +1317,17 @@ export function createStudioWeb({
       res.json({ chunk_bytes: begun.chunk_bytes });
     }));
 
-    // One chunk of a take, as raw 24-bit interleaved PCM.
+    // One chunk of a take, as raw 24-bit interleaved PCM. A body that did not
+    // arrive as bytes (the gateway's JSON parser consumed it) is refused: an
+    // empty chunk would stage nothing and lose the recording.
     r.put(`${TAKES_BASE}/:take_id/chunks/:index`, dashboardAuth, requireCsrf, parseChunkBody, takesHandled(async (req, res) => {
-      const bytes = Buffer.isBuffer(req.body) ? req.body : new Uint8Array(0);
+      if (!Buffer.isBuffer(req.body)) {
+        return res.status(415).json({ error: CHUNK_NOT_BYTES_TEXT });
+      }
       const staged = await takeUploads.putChunk(
         String(req.params.take_id ?? ""),
         Number(req.params.index),
-        bytes,
+        req.body,
       );
       res.json({ sha256: staged.sha256 });
     }));
@@ -1313,6 +1350,15 @@ export function createStudioWeb({
     // fetch. The read check is the one every other read route makes: the hub's
     // own `openSong`, which throws for an unknown song and for a project the
     // caller may not see (its AclError becomes a 403 in `handled`).
+    //
+    // Storage is the one dependency that can fail at any point in this route,
+    // and its errors are answered here rather than in `handled`: an S3 error's
+    // message names the bucket and the key it was asked for, and its `code` is
+    // a string, which `errorText` would take for a caller-safe StudioError.
+    // A missing object is the take this song does not have (404); anything
+    // else about the store is a 503 with one fixed sentence. The audio headers
+    // go out only with the first byte of the WAV, because a Content-Length the
+    // response will not honour is the one answer that cannot be taken back.
     r.get("/api/studio/songs/:id/takes/:take_id/audio", dashboardAuth, handled(async (req, res) => {
       const songId = String(req.params.id ?? "");
       const takeId = String(req.params.take_id ?? "");
@@ -1320,8 +1366,7 @@ export function createStudioWeb({
         return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       }
 
-      const songs = await hub.listSongs({});
-      const row = Array.isArray(songs) ? songs.find((song) => song && song.id === songId) : null;
+      const row = await readSongRow(songId);
       if (!row) return res.status(404).json(noSuchTake(takeId));
 
       const opened = await hub.openSong(songId);
@@ -1339,25 +1384,70 @@ export function createStudioWeb({
       if (take.storage_key !== expected) return res.status(404).json(noSuchTake(takeId));
 
       const bucket = typeof takeStorage.defaultBucket === "function" ? takeStorage.defaultBucket() : undefined;
-      const { stream, stat } = await takeStorage.getObject(take.storage_key, { bucket });
-      // Headers go out only once there is a stream to fill them: a half-sent
-      // WAV must never look complete, and a response with its headers down and
-      // no body would hang the page.
-      if (!stream || typeof stream.pipe !== "function") {
+
+      let object = null;
+      try {
+        object = await takeStorage.getObject(take.storage_key, { bucket });
+      } catch (err) {
+        const code = String(err?.code ?? "");
+        if (code === "NotFound" || code === "NoSuchKey") {
+          // The song points at a take whose audio is not in the bucket: for
+          // this route that is a take that cannot be played, not a bug.
+          return res.status(404).json(noSuchTake(takeId));
+        }
+        console.warn("[studio] take audio:", err);
         return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       }
-      const size = Number(stat?.size ?? stat?.metaData?.["content-length"]);
-      res.setHeader("Content-Type", "audio/wav");
-      res.setHeader("Cache-Control", TAKE_CACHE_CONTROL);
-      if (Number.isFinite(size) && size >= 0) res.setHeader("Content-Length", String(size));
+
+      const stream = object?.stream;
+      if (!stream || typeof stream.pipe !== "function" || typeof stream.on !== "function") {
+        console.warn("[studio] take audio: storage returned no stream for take", takeId);
+        return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      }
+
+      const size = Number(object?.stat?.size ?? object?.stat?.metaData?.["content-length"]);
+
+      let headed = false;
+      /** The audio headers, set once and only once the WAV is really coming. */
+      function sendAudioHeaders() {
+        if (headed) return;
+        headed = true;
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", TAKE_CACHE_CONTROL);
+        if (Number.isFinite(size) && size >= 0) res.setHeader("Content-Length", String(size));
+      }
+
+      /** Take back any audio header that was set before the first byte failed. */
+      function dropAudioHeaders() {
+        if (res.headersSent) return;
+        for (const name of ["Content-Type", "Content-Length", "Cache-Control"]) {
+          res.removeHeader(name);
+        }
+      }
+
+      // The first chunk (or an empty object's end) is what makes this a WAV
+      // response: until one of them arrives, an error is still a clean JSON
+      // 503 with no audio headers on it.
+      stream.once("data", sendAudioHeaders);
+      stream.once("end", sendAudioHeaders);
       stream.on("error", (err) => {
-        // The headers are out by now, so the only honest answer is to cut the
-        // response: a half-sent WAV must not look complete.
-        if (!res.headersSent) return sendError(res, err);
-        res.destroy();
-        return undefined;
+        if (res.headersSent) {
+          // The headers are out, so the only honest answer is to cut the
+          // response: a half-sent WAV must not look complete.
+          res.destroy();
+          return;
+        }
+        console.warn("[studio] take audio stream:", err);
+        dropAudioHeaders();
+        res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      });
+      // A client that goes away mid-WAV has nobody left to answer, so the stream
+      // is dropped and the response torn down; neither is an error to report.
+      res.on("error", () => {
+        if (typeof stream.destroy === "function") stream.destroy();
       });
       res.on("close", () => {
+        if (typeof stream.unpipe === "function") stream.unpipe(res);
         if (typeof stream.destroy === "function") stream.destroy();
       });
       return stream.pipe(res);

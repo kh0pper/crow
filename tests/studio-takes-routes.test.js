@@ -15,21 +15,43 @@
  *
  * The audio route hands the finished WAV to `decodeWav`, so the bytes that
  * would have gone to a bucket are read back through the real decoder.
+ *
+ * The network gate is the REAL one (`servers/gateway/dashboard/auth.js`), not a
+ * hand-rolled header check: the test server is always reached over loopback,
+ * which bare loopback never passes, so this file declares loopback a trusted
+ * proxy — the shape a same-box reverse proxy has — and names a private client
+ * in `x-forwarded-for` on every request. The Funnel header is then refused by
+ * the gate itself, which is what these tests are pinning.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import express from "express";
 import { WebSocketServer } from "ws";
+import { createTakeStorage } from "../bundles/studio/server/take-storage.js";
 import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import { decodeWav } from "../bundles/studio/server/wav.js";
+import { isAllowedNetwork } from "../servers/gateway/dashboard/auth.js";
+
+// A test server is reached over loopback, which the real gate refuses on its
+// own (bare loopback is how a same-box process reaches a private route).
+// Declaring loopback a trusted proxy — a supported deployment shape — lets this
+// file name a private client per request and still exercise the real gate.
+process.env.CROW_TRUSTED_PROXIES = "loopback";
+delete process.env.CROW_DASHBOARD_PUBLIC;
+
+/** The private client every request in this file says it came from. */
+const CLIENT = "10.0.0.5";
+
+/** The forwarding header that names `CLIENT` to the trusted loopback proxy. */
+const FORWARDED = Object.freeze({ "x-forwarded-for": CLIENT });
 
 /** The song every take in these tests was recorded into. */
 const SONG = "song-1";
@@ -66,6 +88,9 @@ const CSRF = "csrf-ok";
 
 /** The Funnel header tailscaled sets on public traffic; it must never pass. */
 const FUNNEL = Object.freeze({ "tailscale-funnel-request": "1" });
+
+/** What every take route answers when this instance has no object storage. */
+const STORAGE_UNAVAILABLE = "Crow storage is not available on this instance.";
 
 /** @returns {string} the one storage key a take of a song may be played from. */
 function takeKey(songId, takeId) {
@@ -140,6 +165,45 @@ function fakeStorage({ uploadUnavailable = false } = {}) {
 }
 
 /**
+ * A stand-in for `servers/storage/s3-client.js`: `isConfigured()` answers from
+ * `state.configured`, so a test can flip the instance from "no Shared Storage"
+ * to "configured" the way the Nest's save handler does, and `getClient()`
+ * answers null until it is. `state.failPut` makes the bucket call fail the way
+ * a lost connection does (no HTTP meaning of its own).
+ */
+function fakeS3Module() {
+  const state = { configured: false, failPut: null, puts: [], deletes: [], stats: [], buckets: [], gets: [] };
+  const sdk = {
+    async putObject(bucket, key, stream, size, metaData) {
+      if (state.failPut) throw state.failPut;
+      state.puts.push({ bucket, key, size, metaData });
+    },
+  };
+  return {
+    state,
+    module: {
+      isConfigured: () => state.configured === true,
+      getClient: () => (state.configured ? sdk : null),
+      defaultBucket: () => "crow-files",
+      async ensureBucket(bucket) {
+        state.buckets.push(bucket);
+      },
+      async deleteObject(key, bucket) {
+        state.deletes.push({ key, bucket });
+      },
+      async getBucketStats(bucket) {
+        state.stats.push(bucket);
+        return { fileCount: 2, totalSizeBytes: 5 };
+      },
+      async getObject(key, options) {
+        state.gets.push({ key, options });
+        return { stream: Readable.from([Buffer.from("wav")]), stat: { size: 3 } };
+      },
+    },
+  };
+}
+
+/**
  * The playback adapter the audio route streams through: `getObject` answers
  * from the same object map, and records which keys were asked for.
  * @param {ReturnType<typeof fakeStorage>} storage
@@ -201,20 +265,29 @@ function fakeAcl() {
 
 /**
  * A session hub with what the web layer asks of it: the song list (a song's
- * project), a song's snapshot (its takes) and the commands an upload's finish
- * applies. `take.add` stores the take in the song and refuses an id the song
- * already has, as the real hub's de-duplication does.
+ * project) and a song's snapshot (its takes). `take.add` stores the take in the
+ * song and refuses an id the song already has, as the real hub's
+ * de-duplication does. `songRow(id)` is the single-row lookup the routes
+ * prefer, so a test can prove the audio route asks for one song instead of
+ * listing them all.
  * @param {{takes?: object, otherTakes?: object}} [options]
  */
 function fakeHub({ takes = {}, otherTakes = {} } = {}) {
   const commands = [];
+  const songRows = [];
   const state = {
     [SONG]: { project_id: PROJECT, takes: { ...takes } },
     [OTHER_SONG]: { project_id: PROJECT, takes: { ...otherTakes } },
   };
   return {
     commands,
+    songRows,
     state,
+    async songRow(songId) {
+      songRows.push(String(songId));
+      const song = state[songId];
+      return song ? { id: songId, project_id: song.project_id } : null;
+    },
     async listSongs() {
       return Object.entries(state).map(([id, song]) => ({
         id,
@@ -261,12 +334,13 @@ function cookieOf(header, name) {
 
 /**
  * The dashboard session check the gateway hands the router
- * (`servers/gateway/dashboard/auth.js`), narrowed to these tests: the network
- * rule refuses the Funnel header and a request with no live session, and the
- * page's CSRF value is the only one accepted.
+ * (`servers/gateway/dashboard/auth.js`), narrowed to these tests: the REAL
+ * network rule answers first — so the Funnel header is refused by the gate
+ * itself, and an off-network caller is refused the same way — and the page's
+ * CSRF value is the only one accepted.
  */
 function dashboardAuth(req, res, next) {
-  if (req.headers["tailscale-funnel-request"]) {
+  if (!isAllowedNetwork(req)) {
     return res.status(403).type("html").send("Access Denied");
   }
   if (cookieOf(req.headers.cookie, "crow_session") !== "good") {
@@ -280,14 +354,20 @@ function dashboardAuth(req, res, next) {
  * scratch staging directory, a real express app, and the fakes above.
  * @param {import("node:test").TestContext} t
  * @param {{uploadUnavailable?: boolean, playback?: boolean, takes?: object,
- *          otherTakes?: object}} [options]
+ *          otherTakes?: object, audioStorage?: object|null}} [options]
+ *   `audioStorage` replaces the playback adapter the audio route streams
+ *   through, so a test can make storage refuse, hide an object, or stream
+ *   slowly; null with `playback: false` is an instance with no storage.
  */
-async function boot(t, { uploadUnavailable = false, playback = true, takes = {}, otherTakes = {} } = {}) {
+async function boot(
+  t,
+  { uploadUnavailable = false, playback = true, takes = {}, otherTakes = {}, audioStorage = null } = {},
+) {
   const db = fakeDb();
   const acl = fakeAcl();
   const hub = fakeHub({ takes, otherTakes });
   const storage = fakeStorage({ uploadUnavailable });
-  const playbackStorage = playback ? takeStorageOf(storage) : null;
+  const playbackStorage = audioStorage ?? (playback ? takeStorageOf(storage) : null);
   const staging = mkdtempSync(join(tmpdir(), "studio-takes-routes-"));
 
   const takeUploads = createTakeUploads({
@@ -308,7 +388,8 @@ async function boot(t, { uploadUnavailable = false, playback = true, takes = {},
     Router: express.Router,
     WebSocketServer,
     auth: {
-      isAllowedNetwork: (req) => !req.headers["tailscale-funnel-request"],
+      // The real gate, as the gateway injects it (the WebSocket asks it too).
+      isAllowedNetwork,
       sessionFromRequest: (req) => cookieOf(req.headers.cookie, "crow_session"),
       verifySession: async (token) => token === "good",
       csrfTokenAccepted: (_req, presented) => presented === CSRF,
@@ -318,6 +399,8 @@ async function boot(t, { uploadUnavailable = false, playback = true, takes = {},
     bundleDir: null,
     takeUploads,
     takeStorage: playbackStorage,
+    // What the panel loader injects: the store's single-row song lookup.
+    songRowOf: (songId) => hub.songRow(songId),
     // What the panel loader hands the web layer: the gateway's own byte parser
     // for the chunk route, with the limit the web layer names.
     rawBody: (limit) => express.raw({ type: () => true, limit, inflate: false }),
@@ -340,6 +423,7 @@ async function boot(t, { uploadUnavailable = false, playback = true, takes = {},
 
   return {
     base: `http://127.0.0.1:${server.address().port}`,
+    port: server.address().port,
     db,
     acl,
     hub,
@@ -357,7 +441,8 @@ function beginBody(overrides = {}) {
 
 /**
  * One dashboard request to the take routes, as the Studio page sends it: the
- * session cookie, the CSRF header, and a JSON body.
+ * session cookie, the CSRF header, the forwarding header the trusted loopback
+ * proxy adds, and a JSON body.
  * @returns {Promise<{status: number, body: object|null, text: string, headers: Headers}>}
  */
 async function call(base, path, { method = "GET", body, headers = {} } = {}) {
@@ -366,6 +451,7 @@ async function call(base, path, { method = "GET", body, headers = {} } = {}) {
     headers: {
       cookie: SESSION,
       "x-crow-csrf": CSRF,
+      ...FORWARDED,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...headers,
     },
@@ -389,6 +475,7 @@ async function sendChunk(base, takeId, index, bytes, headers = {}) {
       cookie: SESSION,
       "x-crow-csrf": CSRF,
       "content-type": "application/octet-stream",
+      ...FORWARDED,
       ...headers,
     },
     body: bytes,
@@ -406,7 +493,7 @@ async function sendChunk(base, takeId, index, bytes, headers = {}) {
 /** GET one take's audio, keeping the headers and the bytes. */
 async function fetchAudio(base, songId, takeId, headers = {}) {
   const response = await fetch(`${base}/api/studio/songs/${songId}/takes/${takeId}/audio`, {
-    headers: { cookie: SESSION, ...headers },
+    headers: { cookie: SESSION, ...FORWARDED, ...headers },
   });
   const bytes = Buffer.from(await response.arrayBuffer());
   let parsed = null;
@@ -432,6 +519,53 @@ test("chunk route refuses a body over 1 MiB naming the limit", async (t) => {
   const tooBig = await sendChunk(base, TAKE, 1, Buffer.alloc(CHUNK_BYTES + 7));
   assert.equal(tooBig.status, 413);
   assert.deepEqual(tooBig.body, { error: "A take chunk can be at most 1 MiB." });
+});
+
+test("chunk PUT with a JSON body is refused with 415", async (t) => {
+  const { base, hub, staging } = await boot(t);
+  const begun = await call(base, `/api/studio/takes/${TAKE}`, { method: "PUT", body: beginBody() });
+  assert.equal(begun.status, 200);
+
+  // The gateway's JSON parser runs before this router, so a chunk sent as JSON
+  // reaches the route as an object: the bytes are gone, and staging an empty
+  // chunk would silently drop the audio.
+  const json = await call(base, `/api/studio/takes/${TAKE}/chunks/0`, {
+    method: "PUT",
+    body: { chunk: "this is not audio" },
+  });
+  assert.equal(json.status, 415);
+  assert.deepEqual(json.body, { error: "Send a take chunk as raw audio bytes." });
+  assert.equal(existsSync(join(staging, TAKE, "000000.pcm")), false);
+
+  const status = await call(base, `/api/studio/takes/${TAKE}`);
+  assert.equal(status.status, 200);
+  assert.deepEqual(status.body.received, []);
+  assert.equal(hub.commands.length, 0);
+});
+
+test("chunk and begin PUTs need CSRF", async (t) => {
+  const { base, hub, staging } = await boot(t);
+
+  const begunWithout = await call(base, `/api/studio/takes/${TAKE}`, {
+    method: "PUT",
+    body: beginBody(),
+    headers: { "x-crow-csrf": "not-the-token" },
+  });
+  assert.equal(begunWithout.status, 403);
+  assert.deepEqual(begunWithout.body, { error: "csrf" });
+  // Nothing was staged and nothing reached the song.
+  assert.deepEqual(readdirSync(staging), []);
+  assert.equal(hub.commands.length, 0);
+
+  // A begun take, so the chunk route would have somewhere to put the bytes.
+  const begun = await call(base, `/api/studio/takes/${TAKE}`, { method: "PUT", body: beginBody() });
+  assert.equal(begun.status, 200);
+
+  const chunkWithout = await sendChunk(base, TAKE, 0, pcm24(1), { "x-crow-csrf": "not-the-token" });
+  assert.equal(chunkWithout.status, 403);
+  assert.deepEqual(chunkWithout.body, { error: "csrf" });
+  assert.equal(existsSync(join(staging, TAKE, "000000.pcm")), false);
+  assert.equal(hub.commands.length, 0);
 });
 
 test("finish route needs CSRF", async (t) => {
@@ -481,7 +615,7 @@ test("audio route refuses a take of another song", async (t) => {
 test("audio route streams the take with immutable caching", async (t) => {
   const key = takeKey(SONG, TAKE);
   const bytes = pcm24(8);
-  const { base, storage, playbackStorage } = await boot(t, {
+  const { base, hub, storage, playbackStorage } = await boot(t, {
     takes: { [TAKE]: { id: TAKE, clip_id: CLIP, storage_key: key, frames: 8, rate: 48000 } },
   });
   storage.objects.set(key, bytes);
@@ -496,8 +630,136 @@ test("audio route streams the take with immutable caching", async (t) => {
     playbackStorage.requested.map((entry) => entry.key),
     [key],
   );
+  // One song was asked for by id, not the whole song list.
+  assert.deepEqual(hub.songRows, [SONG]);
 });
 
+test("audio route answers 503 without audio headers when storage fails", async (t) => {
+  const key = takeKey(SONG, TAKE);
+  const takes = { [TAKE]: { id: TAKE, clip_id: CLIP, storage_key: key, frames: 8, rate: 48000 } };
+
+  // Storage that cannot be reached at all: the driver's own error names an
+  // address, so it must never reach the caller (or `errorText`).
+  const unreachable = await boot(t, {
+    takes,
+    audioStorage: {
+      defaultBucket: () => "crow-files",
+      storagePrefixFor: async () => PREFIX,
+      async getObject() {
+        throw new Error(`connect ECONNREFUSED while reading ${key}`);
+      },
+    },
+  });
+  const refused = await fetchAudio(unreachable.base, SONG, TAKE);
+  assert.equal(refused.status, 503);
+  assert.deepEqual(refused.body, { error: STORAGE_UNAVAILABLE });
+  assert.match(refused.headers.get("content-type"), /^application\/json/);
+  assert.equal(refused.headers.get("cache-control"), null, "no take is cached for a year when none could be read");
+
+  // Storage that opened the object and then failed before its first byte: the
+  // response is still a clean 503, with no audio headers on it.
+  const brokenStream = await boot(t, {
+    takes,
+    audioStorage: {
+      defaultBucket: () => "crow-files",
+      storagePrefixFor: async () => PREFIX,
+      async getObject() {
+        const stream = new Readable({
+          read() {
+            this.destroy(new Error("the object store dropped the connection"));
+          },
+        });
+        return { stream, stat: { size: 4096 } };
+      },
+    },
+  });
+  const broken = await fetchAudio(brokenStream.base, SONG, TAKE);
+  assert.equal(broken.status, 503);
+  assert.deepEqual(broken.body, { error: STORAGE_UNAVAILABLE });
+  assert.match(broken.headers.get("content-type"), /^application\/json/);
+  assert.equal(broken.headers.get("cache-control"), null);
+  assert.notEqual(broken.headers.get("content-length"), "4096");
+});
+
+test("audio route answers 404 when the object is missing in storage", async (t) => {
+  const key = takeKey(SONG, TAKE);
+  const missingObject = (code) => ({
+    defaultBucket: () => "crow-files",
+    storagePrefixFor: async () => PREFIX,
+    async getObject() {
+      const error = new Error("The specified key does not exist.");
+      error.code = code;
+      throw error;
+    },
+  });
+
+  // minio.js spells it NotFound; the S3 API spells it NoSuchKey.
+  for (const code of ["NotFound", "NoSuchKey"]) {
+    const { base } = await boot(t, { takes: { [TAKE]: { id: TAKE, clip_id: CLIP, storage_key: key } }, audioStorage: missingObject(code) });
+    const played = await fetchAudio(base, SONG, TAKE);
+    assert.equal(played.status, 404, code);
+    assert.deepEqual(played.body, { error: `There is no take ${TAKE} in this song.` }, code);
+    assert.equal(played.headers.get("cache-control"), null, code);
+  }
+});
+
+test("audio route survives a client abort mid-stream", async (t) => {
+  const key = takeKey(SONG, TAKE);
+  /** @type {import("node:stream").Readable|null} the stream the route was handed */
+  let handed = null;
+  const { port } = await boot(t, {
+    takes: { [TAKE]: { id: TAKE, clip_id: CLIP, storage_key: key } },
+    audioStorage: {
+      defaultBucket: () => "crow-files",
+      storagePrefixFor: async () => PREFIX,
+      async getObject() {
+        handed = new Readable({
+          read() {
+            // A slow drip, so the page can go away in the middle of the WAV.
+            setTimeout(() => this.push(Buffer.alloc(1024, 7)), 5);
+          },
+        });
+        return { stream: handed, stat: { size: 1024 * 1024 } };
+      },
+    },
+  });
+
+  const rejections = [];
+  const onRejection = (err) => rejections.push(err);
+  process.on("unhandledRejection", onRejection);
+  t.after(() => process.off("unhandledRejection", onRejection));
+
+  await new Promise((resolve) => {
+    const req = httpRequest({
+      host: "127.0.0.1",
+      port,
+      path: `/api/studio/songs/${SONG}/takes/${TAKE}/audio`,
+      headers: { cookie: SESSION, ...FORWARDED },
+    });
+    req.on("response", (res) => {
+      res.once("data", () => {
+        // The tab was closed after the first piece of the WAV arrived.
+        req.destroy();
+        resolve();
+      });
+      res.on("error", () => {});
+    });
+    // Destroying our own request is the test's own doing, not a failure.
+    req.on("error", () => {});
+    req.end();
+  });
+
+  // The route tears the source stream down instead of leaving it running, and
+  // nothing it did became an unhandled rejection.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(handed, "the route opened the object");
+  assert.equal(handed.destroyed, true, "the source stream is destroyed with the response");
+  assert.deepEqual(rejections, []);
+});
+
+// The refusal below is the real `isAllowedNetwork` from the dashboard's auth
+// module answering `dashboardAuth` — not a header check written for this test —
+// so a route that lost the gate would be caught here.
 test("funnel header refused on every take route", async (t) => {
   const key = takeKey(SONG, TAKE);
   const { base, hub, storage, staging } = await boot(t, {
@@ -620,4 +882,59 @@ test("begin, chunks and finish through the routes put the take in the song", asy
   assert.equal(played.status, 200);
   assert.deepEqual(played.bytes, uploaded);
   assert.equal(played.headers.get("cache-control"), "private, max-age=31536000, immutable");
+});
+
+test("storage configured after boot is picked up without a restart", async (t) => {
+  const { state, module: s3 } = fakeS3Module();
+  const storage = createTakeStorage({ client: s3, db: fakeDb() });
+  const isUnavailable = (err) => {
+    assert.equal(err?.status, 503);
+    assert.equal(err?.message, STORAGE_UNAVAILABLE);
+    return true;
+  };
+
+  // The gateway booted before Shared Storage was set up: this instance has no
+  // object storage at all, and every call says so in one sentence.
+  await assert.rejects(storage.putObjectStream("k.wav", Readable.from([Buffer.from([1])]), 1), isUnavailable);
+  await assert.rejects(storage.getBucketStats(), isUnavailable);
+  await assert.rejects(storage.deleteObject("k.wav"), isUnavailable);
+  await assert.rejects(storage.getObject("k.wav"), isUnavailable);
+  assert.equal(storage.defaultBucket(), "crow-files");
+  assert.deepEqual(state.puts, []);
+
+  // The operator saved Shared Storage in the Nest (a fresh config plus
+  // `resetStorageClient()`): the very next call is served from the bucket,
+  // with nothing restarted and no adapter rebuilt.
+  state.configured = true;
+
+  await storage.putObjectStream("k.wav", Readable.from([Buffer.from([1, 2, 3])]), 3, { contentType: "audio/wav" });
+  assert.deepEqual(state.puts, [
+    { bucket: "crow-files", key: "k.wav", size: 3, metaData: { "Content-Type": "audio/wav" } },
+  ]);
+  assert.deepEqual(await storage.getBucketStats(), { fileCount: 2, totalSizeBytes: 5 });
+  await storage.deleteObject("k.wav");
+  assert.deepEqual(state.deletes, [{ key: "k.wav", bucket: "crow-files" }]);
+  const { stream, stat } = await storage.getObject("k.wav");
+  const pieces = [];
+  for await (const piece of stream) pieces.push(piece);
+  assert.equal(Buffer.concat(pieces).toString(), "wav");
+  assert.equal(stat.size, 3);
+
+  // A bucket call that fails with no HTTP meaning of its own is the same 503
+  // sentence: the driver's message names an endpoint, so it only goes to the
+  // log.
+  state.failPut = new Error("socket hang up (storage.example:9000)");
+  await assert.rejects(
+    storage.putObjectStream("k.wav", Readable.from([Buffer.from([1])]), 1),
+    isUnavailable,
+  );
+
+  // A refusal that already has a status keeps it: this adapter never flattens
+  // somebody else's answer into a 503.
+  const outOfQuota = Object.assign(new Error("Storage quota exceeded (5120 MB)."), { status: 507 });
+  state.failPut = outOfQuota;
+  await assert.rejects(storage.putObjectStream("k.wav", Readable.from([Buffer.from([1])]), 1), (err) => {
+    assert.equal(err, outOfQuota);
+    return true;
+  });
 });

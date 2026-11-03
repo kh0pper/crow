@@ -16,10 +16,11 @@
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
  * runs before the panel router, so nothing here adds one — with one exception.
  * A take chunk is 1 MiB of raw 24-bit PCM, which the JSON parser leaves alone,
- * so the take upload service is wired here too: its storage adapter over
- * `servers/storage/s3-client.js`, the song lookup on the gateway's client, its
- * staging directory under CROW_HOME, and an `express.raw` parser that the web
- * layer applies to the chunk route alone (its errors become JSON there).
+ * so the take upload service is wired here too: its storage adapter
+ * (`server/take-storage.js`, over `servers/storage/s3-client.js`), the song
+ * lookup on the gateway's client, its staging directory under CROW_HOME, and
+ * an `express.raw` parser that the web layer applies to the chunk route alone
+ * (its errors become JSON there).
  */
 import { Router, raw } from "express";
 import { WebSocketServer } from "ws";
@@ -56,6 +57,11 @@ const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
 const { createStudioWeb, ensureAgentToken } = await bImport("server/web.js");
 const { createTakeUploads } = await bImport("server/takes-upload.js");
+// The take storage adapter: the instance's object storage, narrowed to the
+// calls the uploads and the audio route make. It is built whether or not
+// storage is configured yet, and it asks on every call, so a Shared Storage
+// setting saved after boot works without a restart.
+const { createTakeStorage } = await bImport("server/take-storage.js");
 // The song table: a take's project is its song's project, never a caller's
 // word for it. The studio tables are created by the hub, so this is the same
 // function the hub itself reads a song row with.
@@ -81,13 +87,15 @@ const hub = createHub({
 let studioTablesReady = null;
 
 /**
- * The finished-take storage the audio route reads through, or null when this
- * instance has none (the route then answers 503 instead of guessing).
+ * The finished-take storage the audio route reads through and the uploads write
+ * through. Built unconditionally: `take-storage.js` decides availability per
+ * call, so an instance whose Shared Storage is configured later (the Nest's
+ * save handler calls `resetStorageClient()`) starts using it at once, and one
+ * with no storage at all answers 503 with one fixed sentence. When
+ * `servers/storage/s3-client.js` itself cannot be loaded, `s3` is null and the
+ * same adapter refuses every call, which is the same 503.
  */
-const takeStorage =
-  s3 && typeof s3.isConfigured === "function" && s3.isConfigured() === true
-    ? takeStorageAdapter(s3)
-    : null;
+const takeStorage = createTakeStorage({ client: s3, db });
 
 /**
  * The studio tables are created by the hub before its own first use, and a
@@ -119,7 +127,7 @@ let takeUploads = null;
 try {
   takeUploads = createTakeUploads({
     stagingDir: join(crowHome, "studio-staging"),
-    storage: takeStorage ?? unavailableTakeStorage(),
+    storage: takeStorage,
     db,
     acl: projectAcl,
     hub,
@@ -157,6 +165,10 @@ web = createStudioWeb({
   // byte parser is built here too, and its errors become JSON in the web layer.
   takeUploads,
   takeStorage,
+  // The song's own row for one id, through the store's single-row lookup (the
+  // same function the hub reads a song with): the audio route needs one song's
+  // project, never the whole catalogue.
+  songRowOf: (songId) => getSongRow(db, String(songId)),
   rawBody: (limit) => raw({ type: () => true, limit, inflate: false }),
   // Which songs a Crow bot may see. A bot's home project is the one its
   // `pi_bot_defs` row names — the same rule the Board applies to a bot's cards
@@ -190,88 +202,6 @@ web = createStudioWeb({
     return { bot_id: String(row.bot_id), name: String(row.display_name || row.bot_id) };
   },
 });
-
-/**
- * The take uploads' storage adapter: `servers/storage/s3-client.js`, narrowed
- * to the calls `takes-upload.js` makes and the two the audio route makes.
- *
- * `putObjectStream` is `putObject` with the size known up front, so a 345 MB
- * take streams into the bucket from the staging directory instead of being
- * built in memory. `storagePrefixFor` answers `project_spaces.storage_prefix`
- * on the gateway's own client: the web layer owns no database, and the one key
- * a take may be played from is built on that prefix (the same query
- * `server/render.js` makes).
- *
- * @param {object} client the s3-client module
- * @returns {{putObjectStream: Function, deleteObject: Function, getBucketStats: Function,
- *            defaultBucket: Function, getObject: Function, storagePrefixFor: Function}}
- */
-function takeStorageAdapter(client) {
-  const bucketOf = (bucket) => bucket || client.defaultBucket();
-  return {
-    async putObjectStream(key, stream, size, options = {}) {
-      const bucket = bucketOf(options.bucket);
-      const metaData = options.contentType ? { "Content-Type": options.contentType } : {};
-      await client.ensureBucket(bucket);
-      await client.getClient().putObject(bucket, key, stream, size, metaData);
-    },
-    async deleteObject(key, bucket) {
-      await client.deleteObject(key, bucketOf(bucket));
-    },
-    async getBucketStats(bucket) {
-      return client.getBucketStats(bucketOf(bucket));
-    },
-    defaultBucket() {
-      return client.defaultBucket();
-    },
-    async getObject(key, options = {}) {
-      return client.getObject(key, { bucket: bucketOf(options.bucket) });
-    },
-    async storagePrefixFor(projectId) {
-      if (projectId == null) return "";
-      const { rows } = await db.execute({
-        sql: "SELECT storage_prefix FROM project_spaces WHERE id = ?",
-        args: [Number(projectId)],
-      });
-      const prefix = rows && rows[0] ? rows[0].storage_prefix : null;
-      return typeof prefix === "string" ? prefix : "";
-    },
-  };
-}
-
-/**
- * What the take uploads get when this instance has no shared storage.
- *
- * Staging still works — a take recorded now is not lost — and every call that
- * would reach the bucket refuses with a 503 the routes hand straight on. The
- * quota figure is zero bytes used because nothing was ever uploaded.
- *
- * @returns {object} a storage adapter whose uploads refuse
- */
-function unavailableTakeStorage() {
-  const refuse = () => {
-    const error = new Error("Crow storage is not available on this instance.");
-    error.status = 503;
-    return error;
-  };
-  return {
-    async putObjectStream() {
-      throw refuse();
-    },
-    async deleteObject() {
-      throw refuse();
-    },
-    async getBucketStats() {
-      return { fileCount: 0, totalSizeBytes: 0 };
-    },
-    defaultBucket() {
-      return typeof s3?.defaultBucket === "function" ? s3.defaultBucket() : "crow-files";
-    },
-    async getObject() {
-      throw refuse();
-    },
-  };
-}
 
 // Mint the agent token at boot so a Studio MCP process started from the same
 // CROW_HOME finds it; the first agent request mints it too if this fails.
