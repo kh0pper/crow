@@ -124,6 +124,25 @@
             </intent-filter>
         </receiver>
 
+        <!-- "What needs me" home-screen widget (widgets phase 1). The provider must be exported for
+             the launcher's APPWIDGET_UPDATE broadcast to reach it; the button-tap receiver is only
+             ever started by an explicit PendingIntent, so it stays private. -->
+        <receiver
+            android:name=".NeedsMeWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_needs_me_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/needs_me_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".NeedsMeActionReceiver"
+            android:exported="false" />
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

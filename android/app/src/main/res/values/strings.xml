@@ -45,4 +45,10 @@
     <string name="download_failed">Could not save the file.</string>
     <string name="download_cannot_save">This download can\'t be saved in the app. Use a desktop browser.</string>
     <string name="download_busy">Another file is being saved. Try again in a moment.</string>
+
+    <!-- "What needs me" home-screen widget -->
+    <string name="widget_needs_me_label">What needs me</string>
+    <string name="widget_needs_me_sign_in">Open Crow to sign in</string>
+    <string name="widget_needs_me_error">Couldn\'t load what needs you</string>
+    <string name="widget_needs_me_see_all">See all</string>
 </resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spanish: only the "What needs me" widget's strings. Everything else falls back to the default
+     resources, so this file must not grow a second copy of strings.xml. -->
+<resources>
+    <string name="widget_needs_me_label">Qué me necesita</string>
+    <string name="widget_needs_me_sign_in">Abre Crow para iniciar sesión</string>
+    <string name="widget_needs_me_error">No se pudo cargar lo que te necesita</string>
+    <string name="widget_needs_me_see_all">Ver todo</string>
+</resources>

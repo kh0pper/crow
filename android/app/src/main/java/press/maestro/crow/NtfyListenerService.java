@@ -2,8 +2,10 @@ package press.maestro.crow;
 
 import android.app.Notification;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.IBinder;
@@ -11,6 +13,7 @@ import android.util.Log;
 import android.webkit.CookieManager;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
 
@@ -49,6 +52,13 @@ public class NtfyListenerService extends Service {
      * TTL (24h) before taking effect on a running installation.
      */
     private static final String KEY_NTFY_CACHE_BUILT_FOR = "ntfy_cache_built_for_version";
+    /**
+     * The gateway's silent "something may have changed" ping (servers/gateway/widgets/changed.js,
+     * WIDGETS_CHANGED_TAG). It carries no title, no body and no link on purpose: it exists only so
+     * the home-screen widget can re-read the summary, so it must never become a notification (ntfy
+     * would fill an empty body with "triggered").
+     */
+    private static final String WIDGETS_CHANGED_TAG = "crow-widgets";
     private static final String ENCRYPTED_PREFS_NAME = "CrowSecurePrefs";
     private static final String KEY_NTFY_AUTH = "ntfy_auth_token";
     private static final long CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -61,6 +71,8 @@ public class NtfyListenerService extends Service {
     private Thread streamThread;
     private int consecutiveFailures = 0;
     private boolean degradedShown = false;
+    /** Redraws the home-screen widget when the screen goes off and when it is unlocked. */
+    private BroadcastReceiver screenReceiver;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -87,7 +99,49 @@ public class NtfyListenerService extends Service {
             streamThread.start();
         }
 
+        // The widget follows the keyguard (locked: the count only). This service is long-lived, so
+        // it is the right home for the screen-off / unlocked receiver.
+        registerScreenReceiver();
+
         return START_STICKY;
+    }
+
+    /**
+     * Locked shows the count only, unlocked shows the rows again; both are drawn from the cached
+     * summary, so neither touches the network.
+     */
+    private void registerScreenReceiver() {
+        if (screenReceiver != null) return;
+        screenReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent == null ? null : intent.getAction();
+                if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    NeedsMeWidgetProvider.drawAll(NtfyListenerService.this, true);
+                } else if (Intent.ACTION_USER_PRESENT.equals(action)) {
+                    NeedsMeWidgetProvider.drawAll(NtfyListenerService.this, false);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+        try {
+            ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
+        } catch (Exception e) {
+            Log.w(TAG, "screen receiver not registered: " + e.getMessage());
+            screenReceiver = null;
+        }
+    }
+
+    private void unregisterScreenReceiver() {
+        if (screenReceiver == null) return;
+        try {
+            unregisterReceiver(screenReceiver);
+        } catch (Exception ignored) {
+            // Already unregistered (the system drops receivers with a dying service).
+        }
+        screenReceiver = null;
     }
 
     @Override
@@ -122,6 +176,7 @@ public class NtfyListenerService extends Service {
         if (streamThread != null) {
             streamThread.interrupt();
         }
+        unregisterScreenReceiver();
         super.onDestroy();
     }
 
@@ -132,6 +187,7 @@ public class NtfyListenerService extends Service {
         if (streamThread != null) {
             streamThread.interrupt();
         }
+        unregisterScreenReceiver();
         super.onTaskRemoved(rootIntent);
     }
 
@@ -409,6 +465,25 @@ public class NtfyListenerService extends Service {
                     sb.append(tagsArray.getString(i));
                 }
                 tags = sb.toString();
+            }
+
+            // The widgets' silent ping: refresh the home-screen widget from the gateway and stop.
+            // Nothing is drawn on the lock screen and no notification exists at all — this message
+            // deliberately carries no title and no body to show. The tag must match exactly, never
+            // as a substring: a notification that merely mentions it is not a widget refresh.
+            if (tagsArray != null) {
+                boolean widgetsChanged = false;
+                for (int i = 0; i < tagsArray.length(); i++) {
+                    if (WIDGETS_CHANGED_TAG.equals(tagsArray.getString(i))) {
+                        widgetsChanged = true;
+                        break;
+                    }
+                }
+                if (widgetsChanged) {
+                    NeedsMeWidgetProvider.refreshAll(this);
+                    prefs.edit().putString(KEY_NTFY_LAST_ID, id).apply();
+                    return;
+                }
             }
 
             String type = NotificationHelper.typeFromNtfyTags(tags);
