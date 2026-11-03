@@ -203,6 +203,11 @@ test("finding 5: an index still being read says so, instead of 'I couldn't find 
   const es = setup({ sources: [cold()], lang: "es" });
   assert.equal((await es.tool("crow_play")({ random: true })).say, "La biblioteca de música todavía se está cargando. Inténtalo en un minuto.");
   assert.equal((await es.say("Pon algo de música.", es.es))?.say, STRINGS.es.say_music_loading);
+  // A first build that FAILED (warm false, error set) is not "loading": it never says try again in a minute.
+  const broken = fakeMusic([], { randomAlbum: () => null, indexState: () => ({ warm: false, artists_complete: false, building: false, error: "unreachable" }) });
+  const b = await setup({ sources: [broken] }).tool("crow_play")({ random: true });
+  assert.notEqual(b.reason, "loading", "a failed index is not reported as loading");
+  assert.notEqual(b.say, STRINGS.en.say_music_loading);
   // A warm library that really holds no album is still the nothing-found answer.
   const warmEmpty = setup({ sources: [fakeMusic([], { randomAlbum: () => null, indexState: () => ({ warm: true }) })] });
   assert.equal((await warmEmpty.tool("crow_play")({ random: true })).say, STRINGS.en.say_play_random_none);

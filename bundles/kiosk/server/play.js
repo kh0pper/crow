@@ -129,7 +129,7 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       try { c = await within(Promise.resolve().then(() => s.randomAlbum())); } catch (err) { note(down, s, err); }
       // Review round 1, finding 5: an index that is still being read is not an empty library. A source that can
       // say so (its own indexState().warm is false) gets the "still loading" line, not "I couldn't find an album".
-      const loading = () => { try { return typeof s.indexState === "function" && s.indexState()?.warm === false; } catch { return false; } };
+      const loading = () => { try { return typeof s.indexState === "function" && s.indexState()?.warm === false && !s.indexState()?.error; } catch { return false; } };
       if (!c) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : loading() ? { outcome: "loading", source: s.kind } : { outcome: "not_found" };
       const list = await playables(s, c, down);
       if (!list.length) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : { outcome: "not_found" };
