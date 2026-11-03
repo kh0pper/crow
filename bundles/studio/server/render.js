@@ -146,12 +146,16 @@ export async function renderSong(snapshot, options = {}) {
     await engine.flush();
     const buffer = await context.startRendering();
     rendered = true;
-    return {
-      left: buffer.getChannelData(0),
-      right: buffer.getChannelData(1),
-      sampleRate: rate,
-      seconds: length / rate,
-    };
+    // copyFromChannel into JS-owned arrays, never getChannelData():
+    // node-web-audio-api 2.2.0's getChannelData() hands JS a view of the
+    // buffer's native memory (an external array with a no-op finalizer), and
+    // under CPU pressure a render read that way came back silent, holding
+    // another render's audio, or full of 1e22-sized garbage.
+    const left = new Float32Array(length);
+    const right = new Float32Array(length);
+    buffer.copyFromChannel(left, 0);
+    buffer.copyFromChannel(right, 1);
+    return { left, right, sampleRate: rate, seconds: length / rate };
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);

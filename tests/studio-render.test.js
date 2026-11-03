@@ -12,6 +12,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import v8 from "node:v8";
+import { runInNewContext } from "node:vm";
 import { renderSong, createRenderer } from "../bundles/studio/server/render.js";
 import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js";
 import { encodeWav24 } from "../bundles/studio/server/wav.js";
@@ -248,6 +250,37 @@ test("renderSong with a scene renders that scene's clips (non-silent)", async ()
   const automatic = await renderSong(song, { seconds: 2 });
   const automaticPeak = peakOf(automatic.left, automatic.right);
   assert.ok(automaticPeak > 0.01, `expected the first scene with clips to sound, peak was ${automaticPeak}`);
+});
+
+/** Run a full garbage collection, so a freed AudioBuffer really is freed. */
+function forceGc() {
+  v8.setFlagsFromString("--expose-gc");
+  runInNewContext("gc")();
+}
+
+test("a render's samples stay put after later renders and a garbage collection", async () => {
+  // renderSong must hand back JS-owned copies (copyFromChannel). Reading a
+  // render through node-web-audio-api's getChannelData() views let a later
+  // render, or a garbage collection on a busy runner, change it afterwards:
+  // zeros, another render's audio, or 1e22-sized garbage.
+  const song = oneTrackSong();
+  const first = await renderSong(song, { scene_id: "scene-1", seconds: 2 });
+  const before = Float32Array.from(first.left);
+  const beforePeak = peakOf(first.left, first.right);
+  assert.ok(beforePeak > 0.01 && beforePeak <= 1, `the first render should sound, peak was ${beforePeak}`);
+
+  for (let round = 0; round < 5; round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    forceGc();
+    await renderSong(emptySong(), { seconds: 2 });
+  }
+
+  let changed = 0;
+  for (let index = 0; index < before.length; index += 1) {
+    if (!Object.is(before[index], first.left[index])) changed += 1;
+  }
+  assert.equal(changed, 0, `${changed} samples of an earlier render changed after it returned`);
+  assert.equal(peakOf(first.left, first.right), beforePeak);
 });
 
 test("a song with no clips renders silence and lufs -Infinity, no throw", async () => {
