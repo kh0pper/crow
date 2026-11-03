@@ -32,6 +32,18 @@ export function forYouCss() {
     background: var(--crow-bg-surface); min-width: 0;
   }
   .fy-morning { background: var(--crow-accent-muted); border-color: var(--crow-accent); }
+  /* What needs me: the first card, answered in place where the summary offers it. */
+  .fy-needs { display: flex; flex-direction: column; gap: 4px; border-color: var(--crow-accent); }
+  .fy-needs [hidden] { display: none; }
+  .fy-needs .fy-sum { margin: 0; font-weight: 600; }
+  .fy-needs-list { margin-top: 2px; }
+  .fy-needs-item { display: flex; flex-direction: column; gap: 8px; padding: 6px 0; border-top: 1px solid var(--crow-border); }
+  .fy-needs-item:first-child { border-top: 0; }
+  .fy-needs-item .fy-line { padding: 0; }
+  .fy-needs-acts { grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); }
+  .fy-needs-acts .fy-btn { min-height: 44px; }
+  .fy-needs-acts .fy-btn:last-child { grid-column: auto; }
+  .fy-needs .fy-kicker:not(:first-child) { margin-top: 6px; }
   .fy-kicker { margin: 0; padding: 0; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--crow-text-secondary); }
   .fy-sum { margin: 6px 0 0; font-size: 1rem; line-height: 1.5; }
   .fy-lines { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; }

@@ -120,3 +120,56 @@ export async function sendNtfyNotification({ title, body, url, priority = "norma
   });
   return result;
 }
+
+/**
+ * The silent "something changed, refresh" ping a home-screen widget listens
+ * for: same topic, same auth, but NO title, body or click URL. The phone app
+ * keys off the tag and re-fetches the summary; there is nothing on screen to
+ * read, so a locked phone learns nothing (design: widgets phase 1).
+ *
+ * Deliberately NOT recorded via recordNtfyStatus: the status file's "last
+ * push" is what the Phone-notifications settings panel shows as the last
+ * real notification, and background pings would overwrite it constantly.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.tag='crow-widgets'] - X-Tags value the app matches on
+ * @returns {Promise<{ok:boolean, status?:number, error?:string, skipped?:boolean}>} never throws
+ */
+export async function sendNtfySilent({ tag = "crow-widgets" } = {}) {
+  let cfg;
+  try { cfg = resolveNtfyConfig(); } catch { cfg = null; }
+  if (!cfg) return { ok: false, skipped: true };
+
+  const ntfyUrl = `http://${cfg.publishHost}:${cfg.publishPort}/${encodeURIComponent(cfg.topic)}`;
+
+  // Exactly two headers plus auth: an empty publish with no title and no
+  // click action. `body` is the empty string, never the title fallback
+  // sendNtfyNotification uses (that would put content on the lock screen).
+  const headers = {
+    "X-Tags": tag,
+    "X-Priority": "1",
+  };
+  if (cfg.publishToken) {
+    headers["Authorization"] = `Bearer ${cfg.publishToken}`;
+  }
+
+  const timeoutMs = parseInt(process.env.CROW_PUSH_SEND_TIMEOUT_MS, 10) || 10_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let result;
+  try {
+    const res = await fetch(ntfyUrl, {
+      method: "POST",
+      headers,
+      body: "",
+      signal: controller.signal,
+    });
+    result = res.ok ? { ok: true, status: res.status } : { ok: false, status: res.status, error: `ntfy answered HTTP ${res.status}` };
+    try { await res.body?.cancel?.(); } catch { /* nothing to drain */ }
+  } catch (err) {
+    result = { ok: false, error: err?.name === "AbortError" ? `timed out after ${timeoutMs} ms` : String(err?.message || err) };
+  } finally {
+    clearTimeout(timer);
+  }
+  return result;
+}

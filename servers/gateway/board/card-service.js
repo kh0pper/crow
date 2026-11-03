@@ -29,6 +29,7 @@
 
 import { resolveBoardDef, resolveSlugBoardDef, isValidStatus, isTerminal } from "../routes/board-defs.js";
 import { lockState } from "../routes/board-lock.js";
+import { notifyWidgetsChanged } from "../widgets/changed.js";
 import { nowStamp } from "./util.js";
 
 function fail(msg, code, http) {
@@ -61,10 +62,15 @@ function stampTerminal(sets, args, detail, cur, wasTerminal, nowTerminal) {
 /** INSERT one board_mutations row. `detail` is stored as detail_json. */
 export function recordMutation(tdb, { itemId, verb, actor, detail }) {
   const a = actor || {};
-  return tdb.execute({
+  const write = tdb.execute({
     sql: "INSERT INTO board_mutations (item_id, verb, actor_kind, actor_id, job_id, detail_json) VALUES (?,?,?,?,?,?)",
     args: [itemId, verb, a.kind || "human", a.id ?? null, a.jobId ?? null, JSON.stringify(detail || {})],
   });
+  // Widgets phase 1: whatever a card move/decision/result does, what-needs-me
+  // may now differ. Fire-and-forget and debounced (one silent push per 5 s for
+  // a whole burst) — this write must never wait on, or fail because of, a push.
+  notifyWidgetsChanged();
+  return write;
 }
 
 // ---- reads ----

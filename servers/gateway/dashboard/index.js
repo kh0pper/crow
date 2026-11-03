@@ -103,6 +103,7 @@ import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
+import widgetsRouter from "../routes/widgets.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
 import { isLocalPasswordSessionOn } from "./local-session.js";
 import { withForYouOwner } from "./shell/chrome.js";
@@ -780,6 +781,12 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // refused upstream, its own dashboardAuth on its prefix; see
   // routes/voice-handoffs.js's header.
   router.use(voiceHandoffsRouter(dashboardAuth));
+
+  // The "What needs me" widget's API (widgets phase 1): the JSON summary both renderers draw and
+  // the act endpoint that answers an item in place. Same slot and rails as the phone confirm page
+  // above — session + CSRF, Funnel refused upstream, its own dashboardAuth and owner check on
+  // /dashboard/widgets-api; see routes/widgets.js's header.
+  router.use(widgetsRouter(dashboardAuth));
 
   // The shell's POST /dashboard/mode and /dashboard/scope (redesign P2): after
   // dashboardAuth and csrfMiddleware, like every state-changing dashboard route.

@@ -1,9 +1,10 @@
 /**
- * For You (v1): /dashboard/for-you, the operator's morning page beside the Crow home. Your morning
- * (Board facts, for-you/morning.js), Move (today's Ramble challenge with Done and Swap, the bird's
- * Health, steps and streak, for-you/moves.js, which reads the installed bundle's own module),
- * Listen (today's spoken briefing, podcasts and the Music app, for-you/listen.js), Your news
- * (Media Hub's picks, for-you/news.js) and a weather chip (Open-Meteo, for-you/weather.js);
+ * For You (v1): /dashboard/for-you, the operator's morning page beside the Crow home. What needs me
+ * (widgets phase 1: the summary widgets/needs-me.js builds, answered in place where the item offers
+ * it) sits above Your morning (Board facts, for-you/morning.js), Move (today's Ramble challenge with
+ * Done and Swap, the bird's Health, steps and streak, for-you/moves.js, which reads the installed
+ * bundle's own module), Listen (today's spoken briefing, podcasts and the Music app, for-you/listen.js),
+ * Your news (Media Hub's picks, for-you/news.js) and a weather chip (Open-Meteo, for-you/weather.js);
  * ?view=customize turns sections on or off and sets the weather city.
  *
  * Gates, in this order, on every method:
@@ -26,6 +27,12 @@ import { loadMorning } from "../../for-you/morning.js";
 import { loadNews } from "../../for-you/news.js";
 import { loadListen } from "../../for-you/listen.js";
 import { loadMoves } from "../../for-you/moves.js";
+import { loadNeedsMe } from "../../widgets/needs-me.js";
+import { WIDGETS_SNOOZED_KEY } from "../../routes/widgets.js";
+import { readSetting } from "../settings/registry.js";
+import { existsSync } from "node:fs";
+import { createDbClient } from "../../../db.js";
+import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { activeProjects } from "../../../shared/shell-items.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
@@ -36,12 +43,45 @@ import { forYouClientJs } from "./for-you/client.js";
 
 const FLASHES = new Set(["saved", "notfound", "failed"]);
 
-/** Test seams: the geocoder, the weather fetch and the project list. null restores each. */
+/** Test seams: the geocoder, the weather fetch, the project list and the "What needs me" read. null restores each. */
 let geocode = geocodeCity;
 let weather = weatherFor;
 let listProjects = activeProjects;
-export function _setForYouSeamsForTest({ geocode: g, weather: w, projects: p } = {}) {
+let needsMeForPage = loadNeedsMeForPage;
+export function _setForYouSeamsForTest({ geocode: g, weather: w, projects: p, needsMe: n } = {}) {
   geocode = g || geocodeCity; weather = w || weatherFor; listProjects = p || activeProjects;
+  needsMeForPage = n || loadNeedsMeForPage;
+}
+
+/**
+ * The "What needs me" summary this page draws above Your morning (widgets/needs-me.js). Its own reads
+ * degrade here: an unknown project list costs the project names, a missing or unreadable tasks store
+ * costs the Board's rows, a malformed snooze setting reads as none. The caller still catches: a
+ * throw is one line where the widget goes, and every other section renders as usual.
+ */
+async function loadNeedsMeForPage(db, { now, lang }) {
+  let projects = [];
+  try { projects = await listProjects(db); }
+  catch (err) { console.warn(`[for-you] needs-me projects failed: ${err && err.message}`); }
+  let snoozed = {};
+  try {
+    const raw = JSON.parse((await readSetting(db, WIDGETS_SNOOZED_KEY)) || "null");
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [key, until] of Object.entries(raw)) {
+        const ms = Number(until);
+        if (Number.isFinite(ms)) snoozed[key] = ms;
+      }
+    }
+  } catch { snoozed = {}; }
+  const path = tasksDbPath();
+  let tdb = null;
+  try { if (path && existsSync(path)) tdb = createDbClient(path); }
+  catch (err) { console.warn(`[for-you] needs-me tasks store failed: ${err && err.message}`); tdb = null; }
+  try {
+    return await loadNeedsMe(db, tdb, { now, projects: Array.isArray(projects) ? projects : [], snoozed, lang, tasksDbPath: path });
+  } finally {
+    if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+  }
 }
 
 /**
@@ -122,7 +162,8 @@ export default {
     try { tz = await instanceZone(db); } catch { tz = undefined; }
     // Each section degrades alone: a failed read costs its section one line, never the page.
     const failed = (what, fallback) => (err) => { console.warn(`[for-you] ${what} failed: ${err && err.message}`); return fallback; };
-    const [morning, listen, news, wx] = await Promise.all([
+    const [needsMe, morning, listen, news, wx] = await Promise.all([
+      needsMeForPage(db, { now, lang }).catch(failed("needs me", null)),
       settings.sections.morning
         ? listProjects(db).then((projects) => loadMorning(db, { projects, tz, now })).catch(failed("morning", { error: true }))
         : null,
@@ -138,7 +179,7 @@ export default {
       : null;
     return layout({
       title: t("forYou.title", lang),
-      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), morning, moves, listen, news, weather: wx }, lang, now) + forYouClientJs(),
+      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), needsMe, morning, moves, listen, news, weather: wx }, lang, now) + forYouClientJs(),
     });
   },
 };

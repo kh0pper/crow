@@ -12,6 +12,9 @@
  *     with them, crowPlayer.queue), as Media Hub plays; without the bar,
  *     the tile's own <audio> element (Play / Pause, one at a time). A podcast episode that starts
  *     playing is marked read ({action:"mark_read"}), so it leaves the list.
+ *   What needs me -> POST /dashboard/widgets-api/needs-me/act {key, action, nonce}, then the widget is
+ *     repainted from the returned summary; a 409 (the item changed elsewhere) re-reads the summary
+ *     and repaints that instead of retrying.
  * Messages come from the page's data-fy-* attributes (server-translated).
  *
  * Emitted inside a template literal: this source must contain NO backticks. It re-runs on every
@@ -87,9 +90,145 @@ export function forYouClientJs() {
     }
   }
 
+  // 'What needs me': a button answers its item in place. The tap carries the nonce the row was
+  // drawn with, so a change made on another device answers 409 stale and the widget re-reads the
+  // summary instead of acting twice; any other failure is the page's own action-failed line.
+  function needsText(value) {
+    return String(value == null ? '' : value);
+  }
+  // One item row, rebuilt from the summary: text and attributes only, never markup.
+  function needsRow(box, item) {
+    var li = document.createElement('li');
+    li.className = 'fy-needs-item';
+    li.setAttribute('data-fy-needs-item', needsText(item.key));
+    var a = document.createElement('a');
+    a.className = 'fy-line';
+    var href = needsText(item.href);
+    a.setAttribute('href', href.charAt(0) === '/' && href.charAt(1) !== '/' ? href : '/dashboard/bot-board');
+    var text = document.createElement('span');
+    text.className = 'fy-line-text';
+    var tag = box.getAttribute('data-fy-needs-kind-' + needsText(item.kind));
+    if (tag) {
+      var tagEl = document.createElement('span');
+      tagEl.className = 'fy-line-tag';
+      tagEl.textContent = tag;
+      text.appendChild(tagEl);
+    }
+    var title = document.createElement('span');
+    title.className = 'fy-line-title';
+    title.textContent = needsText(item.title);
+    if (item.project) {
+      var proj = document.createElement('span');
+      proj.className = 'fy-line-proj';
+      proj.textContent = ' · ' + needsText(item.project);
+      title.appendChild(proj);
+    }
+    text.appendChild(title);
+    a.appendChild(text);
+    li.appendChild(a);
+    var actions = item.actions || [];
+    if (actions.length) {
+      var acts = document.createElement('div');
+      acts.className = 'fy-acts fy-needs-acts';
+      for (var i = 0; i < actions.length; i++) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = actions[i].style === 'primary' ? 'fy-btn fy-btn--primary' : 'fy-btn';
+        b.textContent = needsText(actions[i].label);
+        b.setAttribute('aria-label', needsText(actions[i].label) + ': ' + needsText(item.title));
+        b.setAttribute('data-fy-needs-act', needsText(actions[i].id));
+        b.setAttribute('data-fy-needs-key', needsText(item.key));
+        b.setAttribute('data-fy-needs-nonce', needsText(item.nonce));
+        acts.appendChild(b);
+      }
+      li.appendChild(acts);
+    }
+    return li;
+  }
+  function needsFill(list, rows) {
+    if (!list) return;
+    while (list.firstChild) list.removeChild(list.firstChild);
+    for (var i = 0; i < rows.length; i++) list.appendChild(rows[i]);
+    if (rows.length) list.removeAttribute('hidden'); else list.setAttribute('hidden', '');
+  }
+  // Repaint the widget from a summary (the act's own answer, or a fresh read after a stale tap).
+  function paintNeeds(box, summary) {
+    if (!box || !summary || !Array.isArray(summary.items)) return false;
+    var head = box.querySelector('[data-fy-needs-headline]');
+    if (head) {
+      head.textContent = summary.state === 'error'
+        ? (box.getAttribute('data-fy-needs-error') || '')
+        : needsText(summary.headline);
+    }
+    var items = summary.items || [];
+    var rows = [];
+    for (var i = 0; i < items.length; i++) rows.push(needsRow(box, items[i]));
+    needsFill(box.querySelector('[data-fy-needs-list]'), rows);
+    var doing = summary.doing || [];
+    var dhead = box.querySelector('[data-fy-needs-doing-h]');
+    if (dhead) {
+      dhead.textContent = box.getAttribute('data-fy-needs-doing-label') || dhead.textContent;
+      if (doing.length) dhead.removeAttribute('hidden'); else dhead.setAttribute('hidden', '');
+    }
+    var drows = [];
+    for (var j = 0; j < doing.length; j++) {
+      var line = document.createElement('li');
+      line.className = 'fy-line-text';
+      line.textContent = needsText(doing[j]);
+      drows.push(line);
+    }
+    needsFill(box.querySelector('[data-fy-needs-doing]'), drows);
+    return true;
+  }
+  // A JSON request whose status this code has to read: 409 is a refresh, never a retry.
+  function needsFetch(url, opts) {
+    return fetch(url, opts).then(function (r) {
+      return r.json().then(function (json) {
+        return { status: r.status, ok: r.ok, json: json };
+      }, function () {
+        return { status: r.status, ok: r.ok, json: null };
+      });
+    });
+  }
+  function needsAct(box, btn, status, btns) {
+    var body = {
+      key: btn.getAttribute('data-fy-needs-key') || '',
+      action: btn.getAttribute('data-fy-needs-act') || '',
+      nonce: btn.getAttribute('data-fy-needs-nonce') || ''
+    };
+    if (box.getAttribute('data-fy-needs-busy')) return;
+    box.setAttribute('data-fy-needs-busy', '1');
+    if (status) status.textContent = '';
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+    function done() { box.removeAttribute('data-fy-needs-busy'); }
+    function failed() {
+      if (status) status.textContent = root.getAttribute('data-fy-failed') || '';
+      for (var k = 0; k < btns.length; k++) btns[k].disabled = false;
+    }
+    return needsFetch('/dashboard/widgets-api/needs-me/act', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-crow-csrf': csrf() },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      if (res.status === 409) {
+        return needsFetch('/dashboard/widgets-api/needs-me', { credentials: 'same-origin' }).then(function (fresh) {
+          if (!fresh.ok || !paintNeeds(box, fresh.json)) throw new Error('refresh failed');
+        });
+      }
+      if (!res.ok || !res.json || !res.json.summary) throw new Error('act failed');
+      if (!paintNeeds(box, res.json.summary)) throw new Error('act failed');
+    }).catch(failed).then(done, done);
+  }
+
   root.addEventListener('click', function (e) {
     var t = e.target && e.target.closest ? e.target : null;
     if (!t) return;
+    var need = t.closest('[data-fy-needs-act]');
+    if (need) {
+      var box = need.closest('[data-fy-needs]');
+      if (box) needsAct(box, need, box.querySelector('[data-fy-needs-status]'), box.querySelectorAll('[data-fy-needs-act]'));
+      return;
+    }
     var play = t.closest('[data-fy-play]');
     if (play) {
       var audio = document.getElementById(play.getAttribute('data-fy-play'));

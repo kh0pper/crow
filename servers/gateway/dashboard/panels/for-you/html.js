@@ -275,6 +275,62 @@ export function weatherHtml(w, lang = "en") {
   return { chip, detail };
 }
 
+const NEEDS_KIND = {
+  decision: "widgets.needsMe.kindDecision",
+  result: "widgets.needsMe.kindResult",
+  plan: "widgets.needsMe.kindPlan",
+  handoff: "widgets.needsMe.kindHandoff",
+  message: "widgets.needsMe.kindMessage",
+};
+
+/** One item: a row that opens the item, and a button for each action the summary offered. */
+function needsMeRow(item, lang) {
+  const key = String(item.key || "");
+  const tag = NEEDS_KIND[item.kind] ? t(NEEDS_KIND[item.kind], lang) : "";
+  const name = item.title ? e(item.title) : e(t("forYou.untitled", lang));
+  const proj = item.project ? `<span class="fy-line-proj"> · ${e(item.project)}</span>` : "";
+  const actions = Array.isArray(item.actions) ? item.actions : [];
+  const acts = actions.map((a) => `<button type="button" class="fy-btn${a.style === "primary" ? " fy-btn--primary" : ""}" data-fy-needs-act="${e(a.id)}" data-fy-needs-key="${e(key)}" data-fy-needs-nonce="${e(item.nonce || "")}" aria-label="${e(`${a.label}: ${item.title || ""}`)}">${e(a.label)}</button>`).join("");
+  return `<li class="fy-needs-item" data-fy-needs-item="${e(key)}">
+        <a class="fy-line" href="${e(item.href || "/dashboard/bot-board")}"><span class="fy-line-text">${tag ? `<span class="fy-line-tag">${e(tag)}</span>` : ""}<span class="fy-line-title">${name}${proj}</span></span></a>
+        ${acts ? `<div class="fy-acts fy-needs-acts">${acts}</div>` : ""}
+      </li>`;
+}
+
+/**
+ * The "What needs me" widget (widgets phase 1): the summary widgets/needs-me.js built, drawn above
+ * Your morning. Every title, project name and label goes through e(); an inline button exists only
+ * for the actions the SUMMARY listed, so a plan or a message row has none and its link is the way
+ * in (inline plan approval does not exist, the operator's ruling of 2026-11-03). A null summary is
+ * the loader's own failure: one line says so, and every other section of the page still renders.
+ * `data-fy-needs-*` mark what the client repaints after an action (for-you/client.js).
+ */
+export function needsMeWidgetHtml(summary, lang = "en") {
+  const attrs = ` data-fy-needs data-fy-needs-error="${e(t("widgets.needsMe.error", lang))}" data-fy-needs-doing-label="${e(t("widgets.needsMe.doing", lang))}"`
+    + Object.entries(NEEDS_KIND).map(([kind, key]) => ` data-fy-needs-kind-${kind}="${e(t(key, lang))}"`).join("");
+  const title = e(summary && summary.title ? summary.title : t("widgets.needsMe.title", lang));
+  const more = `<a class="fy-more-link" href="${e((summary && summary.more_href) || "/dashboard/bot-board")}">${e(t("widgets.needsMe.seeAll", lang))}</a>`;
+  if (!summary) {
+    return `<section class="fy-card fy-needs" aria-labelledby="fy-needs-h"${attrs}>
+      <h2 class="fy-kicker" id="fy-needs-h">${title}</h2>
+      <p class="fy-sum" data-fy-needs-headline>${e(t("widgets.needsMe.error", lang))}</p>
+      ${more}
+    </section>`;
+  }
+  const items = Array.isArray(summary.items) ? summary.items : [];
+  const doing = (Array.isArray(summary.doing) ? summary.doing : []).filter(Boolean);
+  const headline = summary.state === "error" ? t("widgets.needsMe.error", lang) : String(summary.headline || "");
+  return `<section class="fy-card fy-needs" aria-labelledby="fy-needs-h"${attrs}>
+      <h2 class="fy-kicker" id="fy-needs-h">${title}</h2>
+      <p class="fy-sum" data-fy-needs-headline>${e(headline)}</p>
+      <ul class="fy-lines fy-needs-list" data-fy-needs-list${items.length ? "" : " hidden"}>${items.map((it) => needsMeRow(it, lang)).join("")}</ul>
+      <p class="fy-kicker" data-fy-needs-doing-h${doing.length ? "" : " hidden"}>${e(t("widgets.needsMe.doing", lang))}</p>
+      <ul class="fy-lines" data-fy-needs-doing${doing.length ? "" : " hidden"}>${doing.map((d) => `<li class="fy-line-text">${e(d)}</li>`).join("")}</ul>
+      ${more}
+      <p class="fy-status" role="status" data-fy-needs-status></p>
+    </section>`;
+}
+
 /**
  * The page. `data`: { settings, dateText, morning|null, moves|null, listen|null, news|null, weather|null }.
  * A section that is off is absent; with every one off, one line says where to turn them on.
@@ -301,6 +357,7 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
     </header>
     ${wx.detail}${addCity}
     ${anyOn ? "" : `<p class="fy-note">${e(t("forYou.allOff", lang))}</p>`}
+    ${needsMeWidgetHtml(data.needsMe, lang)}
     ${settings.sections.morning && data.morning ? morningHtml(data.morning, lang) : ""}
     ${settings.sections.moves && data.moves ? movesHtml(data.moves, lang) : ""}
     ${settings.sections.listen && data.listen ? listenHtml(data.listen, lang, now) : ""}
