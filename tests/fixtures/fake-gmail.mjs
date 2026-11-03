@@ -3,17 +3,29 @@
  * (servers/gateway/staged/gmail-client.js): drafts get/update/send plus the OAuth2 refresh grant,
  * served as a `fetchImpl` so no test ever touches the network.
  *
- * It is deliberately blunt about content: the message raw is base64url MIME, and an error response's
- * body repeats the request (a 404 says the draft id, a failure carries whatever `failNext` was given)
- * — that is exactly what the real API does, and the client must never put any of it in an error.
+ * `drafts.send` honours a `message.raw` in the request — the client sends the APPROVED snapshot that
+ * way, not the stored draft — and records the raw it was asked to send in `fake.sent`, so a test can
+ * prove that an edit made after approval did not ride along.
+ *
+ * It is deliberately blunt about content: an error response's body repeats the request (a 404 says
+ * the draft id, a failure carries whatever `failNext` was given) and every read of a failed
+ * response's body is counted in `fake.errorBodyReads` — that is exactly what the real API does, and
+ * the client must never read it, let alone put it in an error.
  *
  * Usage:
  *   const fake = createFakeGmail({ drafts: { d1: { raw: makeDraftRaw({...}), threadId: "t1" } } });
  *   createGmailClient({ credRef, fetchImpl: fake.fetchImpl, configPaths });
- *   fake.calls    { token, get, update, send }
- *   fake.updates  [{ id, threadId, raw }]   // decoded raw of every PUT
- *   fake.sent     [{ id }]                  // every drafts.send
- *   fake.failNext = { status: 500, body: "..." }  // one-shot failure for the next draft request
+ *   fake.calls            { token, get, update, send }
+ *   fake.updates          [{ id, threadId, raw }]   // decoded raw of every PUT
+ *   fake.sent             [{ id, threadId, raw }]   // every drafts.send, with the raw actually sent
+ *   fake.errorBodyReads   number                    // text()/json() calls on FAILED responses
+ *   fake.failNext         { status, body, on? }     // one-shot failure: `on` is "get"/"update"/"send"
+ *                                                 //   (absent: the next draft request, whatever it is)
+ *   fake.drafts           Map<id, { threadId, raw }> // mutate a draft to simulate a post-approval edit
+ *
+ * Like the real API a sent draft is gone from the drafts list — except here it is KEPT by default, so
+ * a test can re-read it. A test that wants the real deletion (a 404 after the send) sets
+ * `fake.sentDeletesDraft = true`.
  */
 
 export const encodeRaw = (text) => Buffer.from(String(text), "utf8").toString("base64")
@@ -21,13 +33,14 @@ export const encodeRaw = (text) => Buffer.from(String(text), "utf8").toString("b
 
 export const decodeRaw = (text) => Buffer.from(String(text).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 
-/** A gws-shaped draft: multipart/alternative with one base64 text/plain part, CRLF line endings. */
+/** A gws-shaped draft: multipart/alternative with a base64 text/plain part, CRLF line endings. */
 export function makeDraftRaw({
   to = "alex@example.com",
   cc,
   bcc,
   subject = "Hello",
   body = "Hello there",
+  html,
   messageId = "<draft-1@example.com>",
   inReplyTo,
   references,
@@ -48,19 +61,25 @@ export function makeDraftRaw({
   lines.push("Content-Transfer-Encoding: base64");
   lines.push("");
   lines.push(Buffer.from(String(body), "utf8").toString("base64"));
+  if (html != null) {
+    lines.push(`--${boundary}`);
+    lines.push('Content-Type: text/html; charset="UTF-8"');
+    lines.push("Content-Transfer-Encoding: base64");
+    lines.push("");
+    lines.push(Buffer.from(String(html), "utf8").toString("base64"));
+  }
   lines.push(`--${boundary}--`);
   lines.push("");
   return lines.join("\r\n");
 }
 
-function reply(status, body) {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => (typeof body === "string" ? JSON.parse(body) : body),
-    text: async () => text,
-  };
+/** Whether a pending `failNext` applies to this request: `on` narrows it to one kind of call. */
+function matchesFail(failure, method, pathname, base) {
+  if (!failure.on) return true;
+  if (failure.on === "send") return pathname === `${base}/send`;
+  if (failure.on === "update") return method === "PUT";
+  if (failure.on === "get") return method === "GET";
+  return true;
 }
 
 export function createFakeGmail({ drafts = {} } = {}) {
@@ -74,8 +93,23 @@ export function createFakeGmail({ drafts = {} } = {}) {
     calls: { token: 0, get: 0, update: 0, send: 0 },
     updates: [],
     sent: [],
+    errorBodyReads: 0,
     failNext: null,
+    sentDeletesDraft: false,
   };
+
+  /** A response. A FAILED one counts every read of its body: the client must never read it. */
+  function reply(status, body) {
+    const ok = status >= 200 && status < 300;
+    const text = typeof body === "string" ? body : JSON.stringify(body);
+    const read = () => { if (!ok) state.errorBodyReads += 1; };
+    return {
+      ok,
+      status,
+      json: async () => { read(); return typeof body === "string" ? JSON.parse(body) : body; },
+      text: async () => { read(); return text; },
+    };
+  }
 
   async function fetchImpl(url, init = {}) {
     const href = new URL(String(url));
@@ -91,32 +125,40 @@ export function createFakeGmail({ drafts = {} } = {}) {
       return reply(200, { access_token: "fake-access-token", expires_in: 3600 });
     }
 
-    if (state.failNext) {
+    const isSend = href.pathname === `${base}/send` && method === "POST";
+    const one = new RegExp(`^${base}/([^/]+)$`).exec(href.pathname);
+    // Count the ATTEMPT before a fake failure can refuse it: `calls` says what was tried.
+    if (isSend) state.calls.send += 1;
+    else if (one && method === "GET") state.calls.get += 1;
+    else if (one && method === "PUT") state.calls.update += 1;
+
+    if (state.failNext && matchesFail(state.failNext, method, href.pathname, base)) {
       const { status, body } = state.failNext;
       state.failNext = null;
       return reply(status, body ?? "");
     }
 
-    if (href.pathname === `${base}/send` && method === "POST") {
-      state.calls.send += 1;
+    if (isSend) {
       const payload = JSON.parse(String(init.body || "{}"));
       const draft = store.get(payload.id);
       if (!draft) return reply(404, `{"error":"draft ${payload.id} not found"}`);
-      state.sent.push({ id: payload.id });
-      return reply(200, { id: `msg-${state.sent.length}`, threadId: draft.threadId });
+      const message = payload.message || {};
+      // The client rebuilds the message from the approved snapshot: send THAT, not the stored draft.
+      const raw = message.raw == null ? draft.raw : decodeRaw(message.raw);
+      const threadId = message.threadId ?? draft.threadId ?? null;
+      state.sent.push({ id: payload.id, threadId, raw });
+      if (state.sentDeletesDraft) store.delete(payload.id);
+      return reply(200, { id: `msg-${state.sent.length}`, threadId });
     }
 
-    const one = new RegExp(`^${base}/([^/]+)$`).exec(href.pathname);
     if (one) {
       const id = decodeURIComponent(one[1]);
       const draft = store.get(id);
       if (!draft) return reply(404, `{"error":"draft ${id} not found"}`);
       if (method === "GET") {
-        state.calls.get += 1;
         return reply(200, { id, message: { id: `msg-${id}`, threadId: draft.threadId, raw: encodeRaw(draft.raw) } });
       }
       if (method === "PUT") {
-        state.calls.update += 1;
         const payload = JSON.parse(String(init.body || "{}"));
         const message = payload.message || {};
         const raw = decodeRaw(message.raw || "");

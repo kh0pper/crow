@@ -7,7 +7,9 @@
  * Claiming is the whole safety story. `claimSend` is one compare-and-set on (state, content_hash):
  * of two racing claims exactly one changes a row, so a double tap on two devices still produces one
  * send, and a snapshot the operator did not see can never be claimed. A `failed` row may be claimed
- * again (the operator's retry); a `sent` row never leaves `sent`.
+ * again (the operator's retry); a `sending` row may be settled back to `staged` when the provider
+ * changed after the claim (`reconcileStale` finds the ones that got stuck); a `sent` row never leaves
+ * `sent`.
  *
  * Only the dashboard route calls claimSend/settle. No MCP tool does — a bot must never move a row to
  * `sending` or `sent` (spec §12.3 item 3).
@@ -16,7 +18,7 @@
  * response body or an address; the store caps its length only.
  */
 import { randomBytes } from "node:crypto";
-import { canonicalSnapshot, contentHash } from "./canonical.js";
+import { canonicalSnapshot, contentHash, parseAddressList } from "./canonical.js";
 
 /** Every state a row may hold. The table has no CHECK: this list is the validation. */
 export const STAGED_STATES = Object.freeze(["staged", "sending", "sent", "replaced", "discarded", "failed"]);
@@ -32,6 +34,9 @@ const SETTLE_FROM = Object.freeze({
   failed: ["staged", "sending"],
   replaced: ["staged", "failed"],
   discarded: ["staged", "failed"],
+  // Back to `staged`: the provider changed after the claim (or the claim timed out before anything
+  // was sent), so the operator has to review it again. Nothing was sent by us in that case.
+  staged: ["sending"],
 });
 
 const FAIL_REASON_MAX = 200;
@@ -97,38 +102,52 @@ function toStaged(row) {
   };
 }
 
-/** Insert one staged draft; `snapshot` is canonicalised and hashed here so the two cannot drift. */
-export async function createStaged(db, fields = {}) {
+const INSERT_COLUMNS = `(id, session_id, thread_id, bot_id, card_id, job_id, channel, cred_ref,
+             provider_draft_id, provider_thread_id, snapshot, content_hash, state,
+             tainted, new_recipients, source_flags, created_at, updated_at)`;
+const INSERT_VALUES = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?)`;
+
+/**
+ * A new row's id and statement: the snapshot is canonicalised and hashed here so the two cannot
+ * drift. With `guardId` the insert is conditional on that row still being replaceable, which is what
+ * lets `replaceWith` do its compare-and-set and its insert in one transaction.
+ */
+function insertPlan(fields = {}, guardId = null) {
   const snapshot = canonicalSnapshot(fields.snapshot || {});
   const id = "ss-" + randomBytes(8).toString("hex");
   const t = Date.now();
-  await db.execute({
-    sql: `INSERT INTO staged_sends
-            (id, session_id, thread_id, bot_id, card_id, job_id, channel, cred_ref,
-             provider_draft_id, provider_thread_id, snapshot, content_hash, state,
-             tainted, new_recipients, source_flags, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?)`,
-    args: [
-      id,
-      fields.sessionId == null ? null : String(fields.sessionId),
-      fields.threadId == null ? null : String(fields.threadId),
-      fields.botId == null ? null : String(fields.botId),
-      fields.cardId == null ? null : Number(fields.cardId),
-      fields.jobId == null ? null : String(fields.jobId),
-      fields.channel == null ? "gmail" : String(fields.channel),
-      credRefJson(fields.credRef),
-      requireText(fields.providerDraftId, "providerDraftId"),
-      fields.providerThreadId == null ? null : String(fields.providerThreadId),
-      JSON.stringify(snapshot),
-      contentHash(snapshot),
-      fields.tainted ? 1 : 0,
-      fields.newRecipients == null ? null : JSON.stringify(fields.newRecipients),
-      fields.sourceFlags == null ? null : JSON.stringify(fields.sourceFlags),
-      t,
-      t,
-    ],
-  });
-  return id;
+  const args = [
+    id,
+    fields.sessionId == null ? null : String(fields.sessionId),
+    fields.threadId == null ? null : String(fields.threadId),
+    fields.botId == null ? null : String(fields.botId),
+    fields.cardId == null ? null : Number(fields.cardId),
+    fields.jobId == null ? null : String(fields.jobId),
+    fields.channel == null ? "gmail" : String(fields.channel),
+    credRefJson(fields.credRef),
+    requireText(fields.providerDraftId, "providerDraftId"),
+    fields.providerThreadId == null ? null : String(fields.providerThreadId),
+    JSON.stringify(snapshot),
+    contentHash(snapshot),
+    fields.tainted ? 1 : 0,
+    fields.newRecipients == null ? null : JSON.stringify(fields.newRecipients),
+    fields.sourceFlags == null ? null : JSON.stringify(fields.sourceFlags),
+    t,
+    t,
+  ];
+  const sql = guardId == null
+    ? `INSERT INTO staged_sends ${INSERT_COLUMNS} VALUES ${INSERT_VALUES}`
+    // INSERT … SELECT … WHERE: the row only lands if the old one can still be replaced.
+    : `INSERT INTO staged_sends ${INSERT_COLUMNS} SELECT ${INSERT_VALUES.slice(1, -1)}
+         WHERE EXISTS (SELECT 1 FROM staged_sends WHERE id = ? AND state IN ('staged', 'failed'))`;
+  return { id, sql, args: guardId == null ? args : [...args, String(guardId)] };
+}
+
+/** Insert one staged draft; `snapshot` is canonicalised and hashed here so the two cannot drift. */
+export async function createStaged(db, fields = {}) {
+  const plan = insertPlan(fields);
+  await db.execute({ sql: plan.sql, args: plan.args });
+  return plan.id;
 }
 
 export async function getStaged(db, id) {
@@ -200,8 +219,13 @@ export async function settle(db, id, { state, providerMessageId = null, failReas
 /**
  * A new draft card for the same thread ("Ask for a change" answered with a fresh draft): the old row
  * becomes `replaced` and a new row is created. The new row inherits the thread/session/card/bot and
- * the credential reference, and takes the new provider draft id and snapshot. The insert runs first,
- * so a failure leaves the old card usable.
+ * the credential reference, and takes the new provider draft id and snapshot.
+ *
+ * Both statements run in ONE transaction (db.batch) under the same predicate — the old row is still
+ * `staged`/`failed` — so a send claim that wins the race either both stops the replacement or leaves
+ * it whole: there is no window where the old card is replaced and the new one is missing, and no
+ * window where a row claimed for send gets replaced under the claim. A CAS that changes nothing
+ * throws `not_replaceable` and the insert never happens (it is guarded by the same predicate).
  */
 export async function replaceWith(db, oldId, newFields = {}) {
   const old = await getStaged(db, oldId);
@@ -209,7 +233,7 @@ export async function replaceWith(db, oldId, newFields = {}) {
   if (!SETTLE_FROM.replaced.includes(old.state)) {
     throw bad(`staged_sends: a ${old.state} row cannot be replaced`, "not_replaceable");
   }
-  const id = await createStaged(db, {
+  const plan = insertPlan({
     sessionId: old.sessionId,
     threadId: old.threadId,
     botId: old.botId,
@@ -220,12 +244,54 @@ export async function replaceWith(db, oldId, newFields = {}) {
     providerThreadId: old.providerThreadId,
     tainted: old.tainted,
     ...newFields,
-  });
-  await settle(db, oldId, { state: "replaced" });
-  return id;
+  }, oldId);
+  const casAt = Date.now();
+  const results = await db.batch([
+    { sql: plan.sql, args: plan.args },
+    {
+      sql: `UPDATE staged_sends SET state = 'replaced', fail_reason = NULL, updated_at = ?
+             WHERE id = ? AND state IN ('staged', 'failed')`,
+      args: [casAt, String(oldId)],
+    },
+  ]);
+  const [inserted, replaced] = results;
+  if (!inserted || inserted.rowsAffected !== 1 || !replaced || replaced.rowsAffected !== 1) {
+    throw bad(`staged_sends: a ${old.state} row cannot be replaced`, "not_replaceable");
+  }
+  return plan.id;
 }
 
 /** "Not now", after the send slot was never taken: staged/failed -> discarded. */
 export async function discard(db, id) {
   return settle(db, id, { state: "discarded" });
+}
+
+/**
+ * The `new_recipients` list (the addresses a reply adds, which the card calls out): canonicalised the
+ * same way as the snapshot's lists, and replaced whole. True when the row exists.
+ */
+export async function setNewRecipients(db, id, list) {
+  const addresses = parseAddressList(list ?? []);
+  const r = await db.execute({
+    sql: "UPDATE staged_sends SET new_recipients = ?, updated_at = ? WHERE id = ?",
+    args: [addresses.length ? JSON.stringify(addresses) : null, Date.now(), String(id)],
+  });
+  return r.rowsAffected === 1;
+}
+
+/**
+ * Ids of rows stuck in `sending` for longer than `olderThanMs` (the gateway or the provider died
+ * between the claim and the settle). This changes NOTHING: the caller re-reads each draft and settles
+ * it, and a draft it can no longer read is settled `sent` — because Gmail DELETES a draft once it is
+ * sent, so a 404 after a timeout means the message went out. Retrying a send is therefore never the
+ * answer here: the retry's read gets the 404, and a second `drafts.send` is never issued.
+ */
+export async function reconcileStale(db, { olderThanMs = 120_000, now = Date.now() } = {}) {
+  const age = Math.max(0, Math.floor(Number(olderThanMs)) || 0);
+  const cutoff = Math.floor(Number(now)) - age;
+  const { rows } = await db.execute({
+    sql: "SELECT id FROM staged_sends WHERE state = 'sending' AND updated_at <= ? ORDER BY updated_at ASC",
+    args: [cutoff],
+  });
+  return rows.map((r) => String(r.id));
 }
