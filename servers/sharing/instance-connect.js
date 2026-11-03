@@ -165,6 +165,10 @@ export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKey
     }
   };
 
+  // Synchronous, from PeerManager._admit before our `authenticated` frame:
+  // put the Hypercore muxer on the stream before the peer can replicate.
+  peerManager.onInstanceAdmitting = (conn) => instanceSyncManager.attachMuxer?.(conn);
+
   // peer-manager asks us for OUR outgoing feed key to a specific peer
   // instance (remoteInstanceId is the peer's local id, which matches the
   // `id` column in our crow_instances table for that peer's row).

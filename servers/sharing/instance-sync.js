@@ -2384,6 +2384,17 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Put the Hypercore muxer on a sibling stream now (synchronous), so the
+   * peer's Protomux frames are read from the first one even when replicate()
+   * runs later. Idempotent: replicate() reuses the same muxer. Returns it.
+   */
+  attachMuxer(stream) {
+    if (this.feedsDisabled || !stream) return null;
+    Hypercore.createProtocolStream(stream);
+    return stream.userData ?? null;
+  }
+
+  /**
    * Replicate feeds over a NoiseSecretStream-wrapped transport. Hyperswarm
    * connections are already NoiseSecretStream instances; for plain WebSocket
    * or other Duplex transports, wrap with `new NoiseSecretStream(isInitiator,

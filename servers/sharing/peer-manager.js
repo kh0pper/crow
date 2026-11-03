@@ -217,6 +217,7 @@ export class PeerManager {
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null) — instance-to-instance connections
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — a proven sibling advertised its outgoing Hypercore feed key
+    this.onInstanceAdmitting = null; // sync (conn) => muxer|null — a sibling is being admitted: put the replication muxer on the stream before our `authenticated`
     this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
     this.localInstanceId = null; // wired by server.js — the local Crow instance id we advertise to peers
 
@@ -813,21 +814,37 @@ export class PeerManager {
     state.kind = kind;
     state.admitMsg = msg;
 
-    // line_max: the longest line we accept; the peer's send() keeps under it.
-    conn.write(JSON.stringify({ type: "authenticated", line_max: this.postAdmitLineMax }) + "\n");
+    // A sibling link also carries Hypercore replication, and the peer starts
+    // replicating as soon as it reads our `authenticated`. So the muxer goes
+    // on the stream first (a Protomux frame that arrives before any muxer
+    // listens is lost, and the peer's next channel open then kills the link
+    // with "Invalid open message"), corked until our last admission frame is
+    // out (a mux reply in between would reach the peer's line parser ahead of
+    // our instance-key and corrupt that line).
+    let mux = null;
+    if (kind === "instance" && typeof this.onInstanceAdmitting === "function") {
+      try { mux = this.onInstanceAdmitting(conn) || null; } catch {}
+      mux?.cork?.();
+    }
+    try {
+      // line_max: the longest line we accept; the peer's send() keeps under it.
+      conn.write(JSON.stringify({ type: "authenticated", line_max: this.postAdmitLineMax }) + "\n");
 
-    await this._sendDeferredReply(conn, state);
+      await this._sendDeferredReply(conn, state);
 
-    if (kind === "instance") {
-      // A new sibling (cb proof) gets our feed key in its own frame; an old
-      // one got it on the deferred challenge-response above.
-      if (state.proof === "cb" && this.localInstanceId && remoteInstanceId && this.getFeedKeyForInstance) {
-        let feedKeyHex = null;
-        try { feedKeyHex = await this.getFeedKeyForInstance(remoteInstanceId); } catch {}
-        if (feedKeyHex && !state.closed) {
-          conn.write(JSON.stringify({ type: "instance-key", instance_id: this.localInstanceId, feed_key_hex: feedKeyHex }) + "\n");
+      if (kind === "instance") {
+        // A new sibling (cb proof) gets our feed key in its own frame; an old
+        // one got it on the deferred challenge-response above.
+        if (state.proof === "cb" && this.localInstanceId && remoteInstanceId && this.getFeedKeyForInstance) {
+          let feedKeyHex = null;
+          try { feedKeyHex = await this.getFeedKeyForInstance(remoteInstanceId); } catch {}
+          if (feedKeyHex && !state.closed) {
+            conn.write(JSON.stringify({ type: "instance-key", instance_id: this.localInstanceId, feed_key_hex: feedKeyHex }) + "\n");
+          }
         }
       }
+    } finally {
+      mux?.uncork?.();
     }
 
     if (state.peerAuthed) await this._completeAdmit(conn, state);
