@@ -487,9 +487,12 @@
         return;
       }
       if (message.type === "audio_loaded") {
-        const resolveTake = pendingAudio.get(message.take_id);
-        if (resolveTake) {
-          pendingAudio.delete(message.take_id);
+        // One ack per `audio` message, in order: resolve the oldest load of
+        // that take still waiting, so a re-load never strands an earlier one.
+        const waiting = pendingAudio.get(message.take_id);
+        if (waiting && waiting.length > 0) {
+          const resolveTake = waiting.shift();
+          if (waiting.length === 0) pendingAudio.delete(message.take_id);
           resolveTake();
         }
         return;
@@ -643,7 +646,13 @@
         const id = String(takeId);
         const list = [];
         for (const channel of Array.isArray(channels) ? channels : []) {
-          list.push(channel instanceof Float32Array ? channel : Float32Array.from(channel));
+          // A view into a larger buffer is copied: transferring it would hand
+          // the processor (and detach here) the whole underlying buffer.
+          if (channel instanceof Float32Array) {
+            list.push(channel.byteLength === channel.buffer.byteLength ? channel : channel.slice());
+          } else {
+            list.push(Float32Array.from(channel));
+          }
         }
         const from = Number(rate);
         const pcm =
@@ -661,7 +670,9 @@
         }
 
         return new Promise((resolve) => {
-          pendingAudio.set(id, resolve);
+          const waiting = pendingAudio.get(id) || [];
+          waiting.push(resolve);
+          pendingAudio.set(id, waiting);
           post({ type: "audio", take_id: id, channels: pcm }, transfer);
         });
       },

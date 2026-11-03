@@ -21,6 +21,11 @@
  * the level). The cutoff is `min(fromRate, toRate) / 2 * 0.95`: at or below
  * Nyquist for both rates, with a little room for the window's transition band.
  *
+ * The kernel spans a fixed 16 input samples either side, whatever the ratio.
+ * That is right for the ratios Studio meets (44.1/48/88.2/96 kHz, at most
+ * about 2:1); a much larger downsampling ratio would get a wide transition
+ * band and weak alias rejection, and would need a kernel that scales with it.
+ *
  * ## Why it is bit-identical in Chromium and Node
  *
  * Only `Math.floor`, `Math.round`, `Math.sin`, `Math.cos` and IEEE double
@@ -111,29 +116,40 @@
     const step = from / to;
     const cutoff = CUTOFF_SCALE * MAX_CUTOFF * Math.min(1, to / from);
 
+    // The taps' weights depend only on the output index, so they are worked
+    // out once per output sample and shared by every channel (same values,
+    // same summing order: the result is unchanged, the trig work is not
+    // repeated per channel). Channels are expected to be the same length; a
+    // shorter one simply finds fewer taps inside it.
     const output = [];
     for (let channel = 0; channel < list.length; channel += 1) {
-      const input = list[channel];
-      const length = input ? input.length : 0;
-      const converted = new Float32Array(outputLength);
-      for (let index = 0; index < outputLength; index += 1) {
-        const centre = index * step;
-        const base = Math.floor(centre);
+      output.push(new Float32Array(outputLength));
+    }
+    const weights = new Float64Array(TAPS);
+    for (let index = 0; index < outputLength; index += 1) {
+      const centre = index * step;
+      const base = Math.floor(centre);
+      for (let tap = 0; tap < TAPS; tap += 1) {
+        const source = base + FIRST_TAP + tap;
+        weights[tap] = source < 0 ? 0 : weightAt(centre - source, cutoff);
+      }
+      for (let channel = 0; channel < list.length; channel += 1) {
+        const input = list[channel];
+        const length = input ? input.length : 0;
         let sum = 0;
         let total = 0;
         for (let tap = 0; tap < TAPS; tap += 1) {
           const source = base + FIRST_TAP + tap;
           if (source < 0 || source >= length) continue;
-          const weight = weightAt(centre - source, cutoff);
+          const weight = weights[tap];
           sum += input[source] * weight;
           total += weight;
         }
         // Dividing by the taps that were actually there keeps the level right
         // where the kernel runs off the end of the input, and makes a constant
         // input convert to the same constant.
-        converted[index] = total === 0 ? 0 : sum / total;
+        output[channel][index] = total === 0 ? 0 : sum / total;
       }
-      output.push(converted);
     }
     return output;
   }
