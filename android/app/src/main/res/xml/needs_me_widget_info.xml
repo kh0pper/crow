@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    "What needs me" (widgets phase 1): 2x1 at minimum — one line of what waits on the operator — and
+    resizable up to 4x3, where there is room for all five rows and their buttons. Cell sizes follow
+    the launcher formula (70dp * n - 30dp): 2 cells = 110dp wide, 1 cell = 40dp tall, 4x3 = 250x180.
+
+    updatePeriodMillis is 0 on purpose: Android's own periodic update is at most every 30 minutes and
+    wakes the device for it. The refresh is NeedsMeRefreshWorker's unique periodic work (30 min),
+    plus the gateway's silent "crow-widgets" push, an unlock and every button tap.
+
+    widgetCategory is home_screen only, never keyguard: a locked phone lying on a table is in public,
+    so the widget must not be drawn there at all. The provider still draws its count-only view for any
+    host that places the widget on the keyguard anyway (see NeedsMeWidgetProvider.drawsOnKeyguard).
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:initialLayout="@layout/widget_needs_me"
+    android:minWidth="110dp"
+    android:minHeight="40dp"
+    android:minResizeWidth="110dp"
+    android:minResizeHeight="40dp"
+    android:maxResizeWidth="250dp"
+    android:maxResizeHeight="180dp"
+    android:resizeMode="horizontal|vertical"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

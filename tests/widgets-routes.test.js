@@ -14,7 +14,9 @@
  *   - a nonce drawn before the item changed is 409 stale, and a decision answered on another device is
  *     never answered twice;
  *   - not_now hides the item for four hours in the LOCAL-scope setting and never touches the card;
- *   - an act without the CSRF token is 403 before anything is read.
+ *   - an act without the CSRF token is 403 before anything is read;
+ *   - the push switch: the owner turns the silent push on and off (local scope only), a non-owner
+ *     session gets 404 with nothing written, and a missing CSRF token or a non-boolean `on` is refused.
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -161,6 +163,8 @@ function resetStores() {
     c.exec("DELETE FROM voice_handoffs; DELETE FROM messages; DELETE FROM contacts; DELETE FROM bot_jobs; DELETE FROM bot_sessions;");
     c.prepare("DELETE FROM dashboard_settings_overrides WHERE key = 'widgets_snoozed'").run();
     c.prepare("DELETE FROM dashboard_settings WHERE key = 'widgets_snoozed'").run();
+    c.prepare("DELETE FROM dashboard_settings_overrides WHERE key = 'widgets_push'").run();
+    c.prepare("DELETE FROM dashboard_settings WHERE key = 'widgets_push'").run();
   } finally { c.close(); }
   M._resetNeedsCacheForTest();
 }
@@ -248,8 +252,8 @@ async function get(path, { session = OWN } = {}) {
 
 const summary = (opts) => get("/dashboard/widgets-api/needs-me", opts);
 
-async function act(body, { session = OWN, csrf = CSRF, extra = {} } = {}) {
-  const r = await fetch(base + "/dashboard/widgets-api/needs-me/act", {
+async function post(path, body, { session = OWN, csrf = CSRF, extra = {} } = {}) {
+  const r = await fetch(base + path, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -264,6 +268,9 @@ async function act(body, { session = OWN, csrf = CSRF, extra = {} } = {}) {
   try { json = JSON.parse(text); } catch { /* not JSON */ }
   return { status: r.status, text, json };
 }
+
+const act = (body, opts) => post("/dashboard/widgets-api/needs-me/act", body, opts);
+const push = (body, opts) => post("/dashboard/widgets-api/push", body, opts);
 
 beforeEach(() => resetStores());
 
@@ -486,4 +493,61 @@ test("act: a key longer than 200 characters is refused without a lookup", async 
   const r = await act({ key: "card:" + "9".repeat(300) + ":decision", action: "option:0", nonce: "x" });
   assert.equal(r.status, 400);
   assert.equal(r.json?.code, "bad_action");
+});
+
+// ---- the push switch ---------------------------------------------------------
+
+/** The setting as the gateway's own reader resolves it (local override wins). */
+async function storedPush() {
+  const { createDbClient } = await import("../servers/db.js");
+  const { readSetting } = await import("../servers/gateway/dashboard/settings/registry.js");
+  const db = createDbClient();
+  try { return await readSetting(db, "widgets_push"); } finally { db.close(); }
+}
+
+test("push: the owner turns the silent push on and then off, in LOCAL scope only", async () => {
+  const on = await push({ on: true });
+  assert.equal(on.status, 200);
+  assert.deepEqual(on.json, { ok: true, on: true });
+  assert.equal(await storedPush(), "on");
+  assert.equal(setting("local", "widgets_push"), "on");
+  assert.equal(setting("global", "widgets_push"), null, "never the synced table");
+
+  const off = await push({ on: false });
+  assert.equal(off.status, 200);
+  assert.deepEqual(off.json, { ok: true, on: false });
+  assert.equal(await storedPush(), "off");
+  assert.equal(setting("local", "widgets_push"), "off");
+  assert.equal(setting("global", "widgets_push"), null, "never the synced table");
+});
+
+test("push: a non-owner session is 404 and nothing is written", async () => {
+  for (const session of ["sso-sess", "onhost-sess", "plain-sess"]) {
+    const r = await push({ on: true }, { session });
+    assert.equal(r.status, 404, session);
+  }
+  for (const extra of [{ "x-test-on-box": "1" }, { "x-test-crosshost": "1" }]) {
+    const r = await push({ on: true }, { extra });
+    assert.equal(r.status, 404, JSON.stringify(extra));
+  }
+  assert.equal(setting("local", "widgets_push"), null, "nothing written");
+  assert.equal(await storedPush(), null);
+});
+
+test("push without the CSRF token is refused 403, and nothing is written", async () => {
+  for (const csrf of [null, "not-the-token"]) {
+    const r = await push({ on: true }, { csrf });
+    assert.equal(r.status, 403, String(csrf));
+    assert.match(r.text, /CSRF/);
+  }
+  assert.equal(setting("local", "widgets_push"), null);
+});
+
+test("push: `on` must be a real boolean — a string is 400 bad_request and nothing is written", async () => {
+  for (const body of [{ on: "yes" }, { on: 1 }, { on: null }, {}]) {
+    const r = await push(body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.json?.code, "bad_request");
+  }
+  assert.equal(setting("local", "widgets_push"), null);
 });

@@ -5,6 +5,12 @@
  *
  *   GET  /dashboard/widgets-api/needs-me       the NeedsMeSummary JSON (widgets/needs-me.js)
  *   POST /dashboard/widgets-api/needs-me/act   { key, action, nonce } → { ok: true, summary }
+ *   POST /dashboard/widgets-api/push           { on: boolean } → { ok: true, on }
+ *
+ * THE PUSH SWITCH: the silent, content-free push (widgets/changed.js) only goes out while the
+ * LOCAL-scope setting widgets_push is "on", and only the app that draws the widget flips it — the
+ * Android provider calls it when the first widget is added and when the last one is removed. Until
+ * then, an older phone app would turn every silent ping into a blank notification.
  *
  * MOUNT: inside dashboard/index.js beside voiceHandoffsRouter, i.e. after dashboardAuth AND after the
  * real csrfMiddleware, so a state-changing act carries the crow_csrf double-submit token (header
@@ -30,7 +36,7 @@
  * not_now: a four-hour snooze in the LOCAL-scope setting widgets_snoozed, stored as { [key]: untilMs }
  * (never synced to paired instances, and it never touches the card).
  */
-import { notifyWidgetsChanged } from "../widgets/changed.js";
+import { WIDGETS_PUSH_KEY, notifyWidgetsChanged } from "../widgets/changed.js";
 import { Router } from "express";
 
 import { createDbClient } from "../../db.js";
@@ -50,6 +56,7 @@ import { jsonError } from "./_error.js";
 const P = "/dashboard/widgets-api";
 const SUMMARY = `${P}/needs-me`;
 const ACT = `${P}/needs-me/act`;
+const PUSH = `${P}/push`;
 
 /** The local-scope setting the Not-now snoozes live in, and how long one lasts. */
 export const WIDGETS_SNOOZED_KEY = "widgets_snoozed";
@@ -310,6 +317,24 @@ export function widgetsRouter(dashboardAuth, { core = getHandoffCore(), openDb =
     } catch (err) {
       console.warn(`[widgets] act: ${err && err.message}`);
       return serviceError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // The silent push on/off, flipped by the Android app when the widget comes and goes. Local scope:
+  // whether THIS instance pushes to THIS phone is not a setting any paired peer inherits.
+  router.post(PUSH, async (req, res) => {
+    const db = openDb();
+    try {
+      if (!(await isLocalPasswordSessionOn(db, req))) return jsonError(res, 404, "Not found");
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      if (typeof body.on !== "boolean") return jsonError(res, 400, "on must be true or false", { code: "bad_request" });
+      await writeSetting(db, WIDGETS_PUSH_KEY, body.on ? "on" : "off", { scope: "local" });
+      return res.json({ ok: true, on: body.on });
+    } catch (err) {
+      console.warn(`[widgets] push: ${err && err.message}`);
+      return jsonError(res, 500, "The action failed");
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
