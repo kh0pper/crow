@@ -821,6 +821,9 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             state: s.state,
             cardId,
             pendingUi: !!s.pendingUi,
+            // Concern 7: an open password card is "needs you" too, exactly like pendingUi (the
+            // list's Waiting-on-you chip reads both). The card keeps only its own id and label.
+            secretCard: !!s.secretCard,
             control: dbRow ? dbRow.control : null,
             // The operator's name for this session, ALONGSIDE the id — never
             // instead of it. Same backfill rule as cardId above: the engine

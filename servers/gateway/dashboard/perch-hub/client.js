@@ -2,6 +2,9 @@ import { tJs } from "../shared/i18n.js";
 import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
+import { perchSecretCardJs } from "./secret-card.js";
+import { perchSecretWarnJs } from "./secret-warn.js";
+import { perchConnectCardJs } from "./connect-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
@@ -378,7 +381,7 @@ export function perchHubJs(lang = "en") {
       if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:running.length?'':'idle',cardId:null,pendingUi:false}); return; }
       live.forEach(function(s){
         out.push({botId:b.id,botName:b.name,sessionId:s.sessionId,state:s.state,
-                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi,
+                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!(s.pendingUi||s.secretCard),
                   /* /roost carries the operator's name alongside the id
                      (routes/perch.js) — null when there isn't one. */
                   label:(s.label==null||s.label==='')?null:String(s.label),
@@ -1652,7 +1655,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
     resetBrowserTiles();                  /* live browser tile: its pollers and header line die with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
@@ -1923,6 +1926,8 @@ export function perchHubJs(lang = "en") {
       browserFrame(d);
     });
     on('ask_user',function(d){ renderAsk(d); });
+    /* Credential card (spec 10): metadata only ({id,label,state}); secret-card.js. */
+    on('secret_request',function(d){ secretFrame(d); });
     on('ask_expired',function(d){
       if(askShown&&d&&askShown.requestId===d.requestId) renderAsk(Object.assign({},askShown,{expired:true}));
     });
@@ -2259,7 +2264,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
     resetBrowserTiles();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
@@ -2540,6 +2545,7 @@ export function perchHubJs(lang = "en") {
     loadCardOffers(current.sid);   /* P5: pending offers and the card-made notes */
     loadCardChip(current.sid);     /* P5: the card this chat is linked to */
     loadBriefing(current.sid);     /* R1.2 PR 4: the Briefing card on top, the summary in the Session tab */
+    loadSecret(current.sid);       /* credential card: an open password card comes back on reload */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -2772,11 +2778,12 @@ export function perchHubJs(lang = "en") {
     pendingImages=[];            /* nor its queued-but-unsent image */
     pendingFilePaths=[];         /* nor its queued upload paths (Wave 1) */
     setAttn(false);              /* nor its unanswered-question banner */
+    askShown=null;               /* nor the card that banner spoke for (the pane was cleared above) */
     /* Wave 2/3: the new session inherits none of the old one's readings. */
     planState=null; renderPlan();
     toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
     resetFacts();
     /* Composer dictation: a switch drops the recording and frees the mic;
        each open re-probes the server (dictation.js). */
@@ -2896,9 +2903,16 @@ export function perchHubJs(lang = "en") {
   function draftNote(show){ var n=el('perch-draft-note'); if(n){ n.hidden=!show; n.textContent=show?DRAFT_MAYBE_SENT:''; } }
   function draftSave(){
     draftCancel();
+    /* Credential card (spec 10.3): while the paste warning is open nothing is written to
+       sessionStorage — the text on screen is the one the operator has not decided about. */
+    if(secWarnOpenNow()) return;
     var sid=current.sid, input=el('perch-input'), store=draftStore();
     if(!sid||!input||!store) return;
     var v=String(input.value==null?'':input.value);
+    /* Credential card (spec 10.3, B1): a TYPED secret never reaches sessionStorage either. The
+       draft keeps the same stripped text the echo and the retry record hold; the request body is
+       the one place the original rides. */
+    if(secretWarnNeeded(v)) v=secStrip(v).text;
     try{
       if(v.trim()) store.setItem(DRAFT_PREFIX+sid,v);
       else {
@@ -2957,25 +2971,44 @@ export function perchHubJs(lang = "en") {
   bindOnce(window,'pagehide','draftPagehide',function(){ if(live()) draftSave(); });
 
   function send(){
-    histSettledIdle=false;                 /* a turn the operator starts is a new turn */
     var input=el('perch-input'); if(!input) return;
     var text=input.value;
     if(!sendable(text)||!current.sid) return;
+    /* Credential card (spec 10.2/10.3): a message that looks like it holds a password goes
+       nowhere until the operator chooses. Nothing is sent, no draft is written, and the
+       choice applies to THIS send only. */
+    if(secWarnOpenNow()) return;                      /* one warning at a time */
+    if(secretWarnNeeded(text)){ secretWarnDraw(text); return; }
+    sendNow(text,null);
+  }
+
+  /* The body of a send, after the paste gate. ack is the operator's answer to the warning:
+     "strip" (send anyway; the server removes what it finds) or "keep" (it's not a secret).
+     null on an ordinary send. */
+  function sendNow(text,ack){
+    histSettledIdle=false;                 /* a turn the operator starts is a new turn */
+    var input=el('perch-input'); if(!input) return;
+    if(!sendable(text)||!current.sid) return;
     var mySid=current.sid;
-    appendMessage('user','you',text);      /* echo before the round trip */
+    /* Credential card: on "Send anyway" the server strips the secret, and nothing on this side
+       may keep it either: the echo, the in-flight draft in sessionStorage and the retry record
+       all hold the stripped text. Only the request body carries the original. */
+    var shown=(ack==='strip')?secStrip(text).text:text;
+    appendMessage('user','you',shown);     /* echo before the round trip */
     /* 23a: an echo drawn before the history lands is settled against it. */
-    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild,sentAt:Date.now()}); }
+    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:shown,row:trE.lastElementChild,sentAt:Date.now()}); }
     input.value='';
     draftCancel();                         /* Shell P2: the draft stays stored until the send succeeds */
     draftNote(false);
     /* Shell P2: the words are in flight. Stored as the draft too, so a reload
        before the answer restores them (with a note) instead of losing them. */
     sendingNow[mySid]=true;
-    inflightMark(mySid,text);
+    inflightMark(mySid,shown);
     var dst=draftStore();
-    if(dst){ try{ dst.setItem(DRAFT_PREFIX+mySid,String(text)); }catch(e){} }
+    if(dst){ try{ dst.setItem(DRAFT_PREFIX+mySid,String(shown)); }catch(e){} }
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
+    if(ack) body.secretAck=String(ack);      /* the credential card's per-send choice */
     hideCmdMenu();                         /* Wave 3: a sent command closes its own menu */
     /* Wave 1: non-image uploads ride the message as PATHS — the file is
        already in the session's uploadsDir on this machine, and pi's read
@@ -2993,7 +3026,7 @@ export function perchHubJs(lang = "en") {
     if(pendingImages.length) body.images=pendingImages;
     pendingImages=[];
     pendingFilePaths=[];
-    var rec={sid:mySid,text:text,counted:false,failed:false};
+    var rec={sid:mySid,text:shown,counted:false,failed:false};
     lastSent=rec;
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
       /* B5: a 2xx means pi took this message — every older unsent message
@@ -3005,8 +3038,12 @@ export function perchHubJs(lang = "en") {
          the words come back so a reload cannot drop them. */
       delete sendingNow[mySid];
       if(r.ok||r.status>0) inflightClear(mySid);   /* answered; a lost connection (0) stays ambiguous */
-      if(r.ok) draftClear(mySid,text); else draftKeepUnsent(mySid,text);
+      if(r.ok) draftClear(mySid,shown); else draftKeepUnsent(mySid,shown);
       if(current.sid!==mySid) return;
+      /* Credential card: the server removed a pasted secret before the engine saw it. The note
+         carries a count, never the value. */
+      var removedNote=secretRemovedNote(r.j&&r.j.removed);
+      if(r.ok&&removedNote) appendNote(removedNote);
       var code=r.j&&r.j.error;
       /* Only a REAL turn race means "a turn is running" — every other 409
          (pi_gone above all: the bot's child died before the turn started) was
@@ -3151,9 +3188,15 @@ export function perchHubJs(lang = "en") {
   function answerPayloadFor(card,choice){
     var out={requestId:card.requestId};
     if(choice&&choice.cancelled){ out.cancelled=true; return out; }
-    if(card.method==='questions'){ out.answers=(choice&&choice.answers)||[]; return out; }
+    if(card.method==='questions'){
+      out.answers=(choice&&choice.answers)||[];
+      if(choice&&choice.secretAck) out.secretAck=String(choice.secretAck);
+      return out;
+    }
     if(card.method==='confirm'){ out.confirmed=!!(choice&&choice.confirm); return out; }
     out.value=String(choice&&choice.value!=null?choice.value:'');
+    /* Credential card (B2): the per-send choice the paste warning collected ("strip" / "keep"). */
+    if(choice&&choice.secretAck) out.secretAck=String(choice.secretAck);
     return out;
   }
 
@@ -3168,7 +3211,8 @@ export function perchHubJs(lang = "en") {
                     answerPayloadFor(card,choice)).then(function(r){
       if(current.sid!==mySid) return;
       clearEl(el('perch-ask'));
-      setAttn(false);                          /* the banner dies with the card */
+      askShown=null;
+      syncAttn();                              /* the banner dies with the card, unless a password card waits */
       /* request_expired: the question timed out or the turn was parked
          before this answer arrived — nothing was run, and the note says so. */
       if(r.status===409) appendNote(r.j&&r.j.error==='request_expired'?ASK_EXPIRED:ASK_STALE);
@@ -3180,6 +3224,10 @@ export function perchHubJs(lang = "en") {
      scrollable past inside the transcript. Built with createElement/
      textContent only — never innerHTML. */
   function setAttn(show){ var b=el('perch-attn'); if(b) b.hidden=!show; }
+  /* Concern 7: "needs you" is a live ask card OR an open password card. The banner reads the same
+     two facts the session list row does, so a card waiting on the operator is never silent. */
+  function needsYou(){ return !!(askShown||(typeof secShown!=='undefined'&&!!secShown&&secShown.state==='open')); }
+  function syncAttn(){ setAttn(needsYou()); }
   /* A card opening takes height from the transcript, which keeps its old
      scrollTop and so shows an older slice; re-pin it to the newest row (the
      running ask_user chip that explains the card). */
@@ -3189,7 +3237,7 @@ export function perchHubJs(lang = "en") {
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
     askShown=card&&card.requestId?card:null;
-    if(!card||!card.requestId){ setAttn(false); return; }
+    if(!card||!card.requestId){ syncAttn(); return; }
     /* New mode: an ask is never hidden (spec 9.4). The card and the banner
        live in the chat, which the modal sheet makes inert, so it closes. */
     if(SHEET&&SHEET.open) closeSheet();
@@ -3214,7 +3262,7 @@ export function perchHubJs(lang = "en") {
       if(card.message) xf.appendChild(line('ask-message',card.message));
       xf.appendChild(line('ask-expired',ASK_EXPIRED));
       pane.appendChild(xf);
-      setAttn(true);
+      syncAttn();
       pinTranscript();
       return;
     }
@@ -3247,7 +3295,17 @@ export function perchHubJs(lang = "en") {
       field.value=fields.initial;
       field.placeholder=fields.placeholder;
       var submit=document.createElement('button'); submit.type='button'; submit.textContent=ASK_SUBMIT;
-      submit.onclick=function(){ answerAsk(card,{value:field.value}); };
+      /* Credential card (B2): a free-text answer is operator text reaching the child, so it gets
+         the paste warning before it is sent. "Remove it" strips the field and stays on the card;
+         "Send anyway" / "It's not a secret" post the answer with that choice, once. */
+      submit.onclick=function(){
+        var v=String(field.value==null?'':field.value);
+        if(!secretWarnNeeded(v)){ answerAsk(card,{value:v}); return; }
+        secretWarnDraw(v,function(ack){
+          if(ack==='remove'){ field.value=secStrip(v).text; return; }
+          answerAsk(card,{value:v,secretAck:ack});
+        });
+      };
       controls.appendChild(field); controls.appendChild(submit);
     }
 
@@ -3259,7 +3317,7 @@ export function perchHubJs(lang = "en") {
 
     frame.appendChild(controls);
     pane.appendChild(frame);
-    setAttn(true);                             /* Wave 1: say why the bot went quiet */
+    syncAttn();                                /* Wave 1: say why the bot went quiet */
     pinTranscript();
   }
 
@@ -3274,7 +3332,7 @@ export function perchHubJs(lang = "en") {
      already carries the mySid identity guard. */
   function renderAskCombined(pane,card){
     var qs=Array.isArray(card.questions)?card.questions:[];
-    if(!qs.length&&!card.message){ setAttn(false); return; }
+    if(!qs.length&&!card.message){ syncAttn(); return; }
     var frame=document.createElement('div'); frame.className='ask-card ask-combined';
     /* The engine's note (secrets hidden / possible secret shown), or why a
        card that could not be masked in full shows no questions. */
@@ -3285,7 +3343,7 @@ export function perchHubJs(lang = "en") {
       nc.onclick=function(){ answerAsk(card,{cancelled:true}); };
       nf.appendChild(nc); frame.appendChild(nf);
       pane.appendChild(frame);
-      setAttn(true);
+      syncAttn();
       pinTranscript();
       return;
     }
@@ -3295,6 +3353,7 @@ export function perchHubJs(lang = "en") {
     var qbody=document.createElement('div'); qbody.className='ask-body';
     var sel=qs.map(function(){ return []; });
     var other=qs.map(function(){ return ''; });
+    var otherInputs=[];                               /* the "Other" fields, so a strip can show */
     var optBtns=qs.map(function(){ return []; });   /* per question: [{btn,label}] */
     var sent=false;
     var sendBtn=null;
@@ -3338,6 +3397,7 @@ export function perchHubJs(lang = "en") {
       var oi=document.createElement('input'); oi.type='text'; oi.className='ask-other'; oi.placeholder=ASK_OTHER_PH;
       oi.oninput=function(){ other[qi]=oi.value; refresh(); };
       qd.appendChild(oi);
+      otherInputs.push(oi);
       qbody.appendChild(qd);
     });
     frame.appendChild(qbody);
@@ -3346,14 +3406,33 @@ export function perchHubJs(lang = "en") {
     sendBtn=document.createElement('button'); sendBtn.type='button'; sendBtn.className='ask-send primary';
     sendBtn.textContent=(qs.length>1?ASK_SEND_ANSWERS:ASK_SEND_ANSWER);
     sendBtn.disabled=true;
-    sendBtn.onclick=function(){
-      if(!ready()||sent) return;
+    /* One submit for every question; "ack" is the paste warning's choice for the whole card. */
+    function submitAnswers(ack){
       sent=true; sendBtn.disabled=true; sendBtn.textContent=ASK_SENDING;
       var answers=qs.map(function(q,i){
         var oth=(other[i]&&other[i].trim()!=='')?other[i].trim():null;
         return { question:(q.question==null?'':String(q.question)), selected:sel[i].slice(), other:oth };
       });
-      answerAsk(card,{answers:answers});
+      var choice={answers:answers};
+      if(ack) choice.secretAck=String(ack);
+      answerAsk(card,choice);
+    }
+    sendBtn.onclick=function(){
+      if(!ready()||sent) return;
+      /* Credential card (B2): the "Other" fields are free text, so the same warning runs before
+         the one submit. "Remove it" strips them here and stays on the card. */
+      var bad=null;
+      for(var i=0;i<qs.length;i++){ if(other[i]&&secretWarnNeeded(other[i])){ bad=other[i]; break; } }
+      if(!bad){ submitAnswers(null); return; }
+      secretWarnDraw(bad,function(ack){
+        if(ack!=='remove'){ submitAnswers(ack); return; }
+        for(var j=0;j<qs.length;j++){
+          if(!other[j]||!secretWarnNeeded(other[j])) continue;
+          other[j]=secStrip(other[j]).text;
+          if(otherInputs[j]) otherInputs[j].value=other[j];
+        }
+        refresh();
+      });
     };
     var cancel=document.createElement('button'); cancel.type='button'; cancel.className='quiet'; cancel.textContent=ASK_CANCEL;
     cancel.onclick=function(){ if(sent) return; answerAsk(card,{cancelled:true}); };
@@ -3361,7 +3440,7 @@ export function perchHubJs(lang = "en") {
     frame.appendChild(foot);
 
     pane.appendChild(frame);
-    setAttn(true);
+    syncAttn();
     pinTranscript();
     refresh();
   }
@@ -3492,6 +3571,11 @@ export function perchHubJs(lang = "en") {
       maybeCmdMenu(this.value);            /* Wave 3: '/' opens the command menu */
       draftSaveSoon();                     /* Shell P2: the unsent draft survives a reload */
     };
+    /* Credential card: a paste is checked at once, before Send. The default action fills the
+       field after this task, hence the 0 ms hop. */
+    composerInput.addEventListener('paste',function(){
+      setTimeout(function(){ if(live()) secretWarnFromComposer(); },0);
+    });
   }
   el('perch-back').onclick=function(){ location.hash=''; };
   /* New mode with a filed session: Back goes to its project's home instead.
@@ -4163,6 +4247,10 @@ export function perchHubJs(lang = "en") {
       if(bad) rec.group.failed++;
       toolGroupRefresh(rec.group);
     }
+    /* Project services (credential card Task 4): a tool result that says the service is not
+       connected in this project gets the Connect card, whose link opens that project's connect
+       sheet. Renders nothing for any other result (and nothing when the ids fail validation). */
+    if(d&&d.resultText!=null&&typeof renderConnectCard==='function') renderConnectCard(d.resultText,d.name);
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
   }
 
@@ -4342,6 +4430,9 @@ export function perchHubJs(lang = "en") {
 ${perchPhoneCardJs(lang)}
 
 ${perchArtifactCardJs(lang)}
+${perchSecretCardJs(lang)}
+${perchSecretWarnJs(lang)}
+${perchConnectCardJs(lang)}
 ${perchCardChipJs(lang)}
 ${perchBriefingJs(lang)}
 ${sessionCardsJs(lang)}

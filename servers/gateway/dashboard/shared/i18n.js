@@ -3755,6 +3755,54 @@ export const translations = {
   "perch.textDefault": { en: "Default text size", es: "Tamaño de texto predeterminado" },
   "perch.textLarger": { en: "Larger text", es: "Texto más grande" },
   "perch.copyCode": { en: "Copy code", es: "Copiar código" },
+  // Credential card (R1.2 spec §10): the password card in a Perch chat.
+  "perch.secretTitle": { en: "\ud83d\udd12 Password for {label}", es: "\ud83d\udd12 Contrase\u00f1a para {label}" },
+  "perch.secretTitleNoLabel": { en: "\ud83d\udd12 Password", es: "\ud83d\udd12 Contrase\u00f1a" },
+  "perch.secretAsks": { en: "Asked by {bot}", es: "Preguntado por {bot}" },
+  "perch.secretHelp": {
+    en: "A browser can't block screenshots; enter this where no one is watching.",
+    es: "Un navegador no puede bloquear las capturas de pantalla; escr\u00edbela donde nadie te vea.",
+  },
+  "perch.secretEnter": { en: "Enter password", es: "Escribir contrase\u00f1a" },
+  "perch.secretSave": { en: "Save", es: "Guardar" },
+  "perch.secretSaving": { en: "Saving\u2026", es: "Guardando\u2026" },
+  "perch.secretNotNow": { en: "Not now", es: "Ahora no" },
+  "perch.secretField": { en: "Password", es: "Contrase\u00f1a" },
+  "perch.secretSaved": { en: "Saved. Nothing about it reaches the bot except its name.", es: "Guardada. Al bot solo le llega su nombre." },
+  "perch.secretClosed": { en: "You closed the form. Nothing was sent.", es: "Cerraste el formulario. No se envi\u00f3 nada." },
+  "perch.secretExpired": { en: "This request expired. Nothing was sent.", es: "Esta solicitud caduc\u00f3. No se envi\u00f3 nada." },
+  "perch.secretGone": { en: "This request is no longer open. Nothing was sent.", es: "Esta solicitud ya no est\u00e1 abierta. No se envi\u00f3 nada." },
+  "perch.secretNotSetUp": {
+    en: "The keychain isn't set up yet, so nothing was saved. Set it up in Settings \u2192 Security & passwords.",
+    es: "El llavero a\u00fan no est\u00e1 configurado, as\u00ed que no se guard\u00f3 nada. Config\u00faralo en Ajustes \u2192 Seguridad y contrase\u00f1as.",
+  },
+  "perch.secretFailed": { en: "The password couldn't be saved. Nothing was sent.", es: "No se pudo guardar la contrase\u00f1a. No se envi\u00f3 nada." },
+  // M3 (Task 3 review): a lost connection or a 5xx is not a failure — nothing says the value was
+  // not saved. A1: the card is the owner's alone, and says so on a 403 not_owner.
+  "perch.secretUnknown": {
+    en: "Couldn't confirm it was saved. Check the keychain before trying again.",
+    es: "No se pudo confirmar que se guardara. Revisa el llavero antes de volver a intentarlo.",
+  },
+  "perch.secretNotOwner": { en: "Only the owner can fill this.", es: "Solo el propietario puede rellenar esto." },
+  // Credential card (spec §10.3), Task 4: the paste detector's warning, its fixed choices and
+  // the count note; the Connect card a "not connected in this project" tool result renders.
+  "perch.secretWarnTitle": { en: "This looks like a password. Remove it, or send it anyway?", es: "Esto parece una contrase\u00f1a. \u00bfLa quitas o la env\u00edas igualmente?" },
+  "perch.secretWarnHelp": {
+    en: "You never need to paste a password here: Crow keeps it in your keychain and the bot only learns its name. If this is a service, connect it in Services instead.",
+    es: "Nunca hace falta pegar una contrase\u00f1a aqu\u00ed: Crow la guarda en tu llavero y el bot solo conoce su nombre. Si es un servicio, con\u00e9ctalo en Servicios.",
+  },
+  "perch.secretWarnServices": { en: "Open Services", es: "Abrir Servicios" },
+  "perch.secretWarnRemove": { en: "Remove it", es: "Quitarla" },
+  "perch.secretWarnSend": { en: "Send anyway", es: "Enviarla igualmente" },
+  "perch.secretWarnKeep": { en: "It's not a secret", es: "No es un secreto" },
+  "perch.secretRemovedOne": { en: "1 secret removed before sending.", es: "1 secreto eliminado antes de enviar." },
+  "perch.secretRemoved": { en: "{n} secrets removed before sending.", es: "{n} secretos eliminados antes de enviar." },
+  "perch.connectTitle": { en: "Connect {service}", es: "Conectar {service}" },
+  "perch.connectHelp": {
+    en: "This service isn't connected in this project. Enter its key on the Services page, not in this chat.",
+    es: "Este servicio no est\u00e1 conectado en este proyecto. Escribe su clave en la p\u00e1gina Servicios, no en este chat.",
+  },
+  "perch.connectOpen": { en: "Open Services", es: "Abrir Servicios" },
   "perch.waitingBanner": {
     en: "Waiting on your answer — respond to the question card below.",
     es: "Esperando tu respuesta — contesta la tarjeta de abajo.",

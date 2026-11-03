@@ -41,7 +41,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
-import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
+import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER } from "./crow-server-catalog.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
 
@@ -77,6 +77,19 @@ export function serversForBot(def) {
     set.add(entry.split("/")[0]);
   }
   return [...set];
+}
+
+// Credential card (spec §10.2): crow_request_secret is "granted with the browser or Workspace
+// tools". A def that selects any of these servers also gets the secrets server (it stays
+// selectable on its own too, as `crow-secrets/crow_request_secret`). The browser is the canonical
+// `crow-browser` or its add-on id `browser`; Workspace is the Crow Workspace bundle (`workspace`)
+// and the Google Workspace server (`google-workspace`).
+export const SECRETS_GRANTING_SERVERS = Object.freeze(["crow-browser", "browser", "workspace", "google-workspace"]);
+
+/** The servers a def's selection implies (today only the secrets server; see above). */
+export function impliedServers(def) {
+  const sel = new Set(serversForBot(def));
+  return SECRETS_GRANTING_SERVERS.some((n) => sel.has(n)) ? [SECRETS_SERVER] : [];
 }
 
 // The gateway mounts that serve the project tools with a gateway token's authority: routes/mcp.js
@@ -217,8 +230,13 @@ export function buildBotMcp(def, canonical, opts = {}) {
   // name absent from the catalog rides the same unconfigured/soft-warning
   // path as a selected-but-absent server.
   const ensure = (opts.ensureServers || []).filter((n) => typeof n === "string" && n);
-  const want = [...new Set([...serversForBot(def), ...ensure])];
   const catalog = opts.catalog || {};
+  // An IMPLIED name (impliedServers) joins only when the catalog has it: unlike an explicit or
+  // ensured name it never warns (an instance without the secrets token just doesn't offer it).
+  // Only for an interactive (Perch) spawn, the same gate as bridge.mjs buildToolsCsv: a channel
+  // or job bot could never use crow_request_secret, so it gets no entry at all.
+  const implied = opts.interactive === true ? impliedServers(def).filter((n) => catalog[n]) : [];
+  const want = [...new Set([...serversForBot(def), ...ensure, ...implied])];
   const unconfigured = opts.unconfigured || {};
   const binding = opts.binding;
   const crowHome = opts.crowHome;
@@ -387,6 +405,7 @@ export function writeBotMcp(def, opts = {}) {
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
+    interactive: opts.interactive === true,
     actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId } : undefined,
   });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has

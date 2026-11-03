@@ -247,6 +247,9 @@ async function writeWorldMcp(a, sessionId) {
       botId: a.botId, jobId: a.jobId, threadId: a.threadId, gatewayType: a.gatewayType, sessionId: sid,
       displayName: a.displayName,
       ensureServers: (a.jobId || a.cardBound || a.projectBoard) ? ["board"] : [],
+      // Credential card: the implied crow-secrets entry only for a Perch (interactive) turn,
+      // never a channel or job turn (mcp_writer.mjs buildBotMcp).
+      interactive: a.gatewayType === "perch" && !a.jobId,
       write: a.mcpDelivery === "file",
     });
     mcpConfig = w.json || null;

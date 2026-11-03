@@ -46,6 +46,8 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
+import { stripSecrets } from "../../shared/secret-detect.js";
+import { isBodyParserError } from "../body-error-handler.js";
 import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
 import { SHOT_KEEP } from "../browser-tile/shots.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
@@ -87,6 +89,7 @@ import {
   loadBotRow, loadGiveTarget, getOffer, listOffers, claimOffer, renewLease, releaseClaim,
   settleOffer, findOfferCard, recoverThread, claimOfferNotes, unclaimOfferNotes, offerTag,
 } from "../board/offer-service.js";
+import { takeSecretNotes, returnSecretNotes, openRequestFor } from "../secrets/request-store.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -118,6 +121,119 @@ const IMAGE_MESSAGE_BYTES_CAP = 2 * 1024 * 1024;
 
 /** POST /interactive/:sid/files: base64 JSON body, cap 5 MB post-decode. */
 const UPLOAD_BYTES_CAP = 5 * 1024 * 1024;
+
+/**
+ * Credential card (spec §10.2, plan Task 4): the fixed note the model sees, once, when the
+ * operator's message had a secret removed before the engine got it. This is the plan's exact
+ * wording — the model gets fixed gateway text, never the removed value and never the operator's
+ * own words about it.
+ */
+const SECRET_STRIPPED_NOTE =
+  "[The operator's message had a secret in it, and it was removed. Suggest they change that password.]";
+
+/**
+ * `text` with every secret-looking span replaced by "[secret removed]", unless the operator
+ * chose "It's not a secret" for THIS send (`secretAck === "keep"`). Any other value — absent,
+ * "strip", garbage — strips.
+ *
+ * The stripped text is never logged, echoed or returned by any caller: the response carries the
+ * COUNT only, and the errors this router can answer are fixed codes.
+ * @returns {{text: string, removed: number}}
+ */
+function stripIncoming(text, body) {
+  if (body && body.secretAck === "keep") return { text, removed: 0 };
+  const { text: clean, removed } = stripSecrets(text);
+  if (!removed) return { text, removed: 0 };
+  return { text: SECRET_STRIPPED_NOTE + "\n\n" + clean, removed };
+}
+
+/**
+ * The pending ask card's own options for question `i` of a combined card (its option labels, as
+ * the operator was shown them), or null when the card is not a combined one / has no options.
+ * @returns {string[]|null}
+ */
+function questionOptionLabels(card, i) {
+  if (!card || !Array.isArray(card.questions)) return null;
+  const q = card.questions[i];
+  if (!q || !Array.isArray(q.options)) return null;
+  return q.options.map((o) => String(o && typeof o === "object" ? (o.label == null ? "" : o.label) : o));
+}
+
+/**
+ * B2 (credential card): every free-text answer the operator sends to a pending ask goes through
+ * the same strip, and the same per-send "keep", before the engine sees it. `question` and
+ * `selected` carry the card's own text and chosen labels, not free text, so only the free-text
+ * fields are stripped with the note.
+ *
+ * N1: a label the BOT itself offered is never a secret to strip — a select option that happens
+ * to look like a token ("Session 9fK2mQ…") must reach the child exactly as it was offered, or
+ * the child gets a value it never offered plus a false "your message had a secret" note. So
+ * `value` is stripped only when the pending card's method is a free-text one (input/editor) or
+ * when it is not exactly one of the card's options, and a combined card's `selected`/`labels`
+ * entry is stripped only when it matches no option of its own question. The `other` free text
+ * is always stripped.
+ *
+ * N2: a free-text field is coerced with String() before the strip — the engine coerces it later
+ * anyway, so `value: ["ghp_…"]` must not slip past the strip as a non-string.
+ *
+ * @param {object} body the request body (mutated in place)
+ * @param {object|null} card the pending ask card (method + options), or null when unknown
+ * @returns {number} how many spans were removed
+ */
+function stripAnswerText(body, card) {
+  let removed = 0;
+  const method = card && typeof card.method === "string" ? card.method : null;
+  const freeText = method === "input" || method === "editor";
+  const offered = Array.isArray(card && card.options) ? card.options.map((o) => String(o)) : null;
+  if (body.value !== undefined && body.value !== null) {
+    const isOffered = typeof body.value === "string" && offered != null && offered.includes(body.value);
+    if (freeText || !isOffered) {
+      const r = stripIncoming(String(body.value), body);
+      body.value = r.text; removed += r.removed;
+    }
+  }
+  if (Array.isArray(body.answers)) {
+    body.answers = body.answers.map((a, i) => {
+      if (!a || typeof a !== "object" || Array.isArray(a)) return a;
+      const out = { ...a };
+      for (const k of ["other", "value", "text"]) {
+        if (out[k] == null) continue;
+        const r = stripIncoming(String(out[k]), body);
+        out[k] = r.text; removed += r.removed;
+      }
+      const labels = questionOptionLabels(card, i);
+      for (const k of ["selected", "labels"]) {
+        if (!Array.isArray(out[k])) continue;
+        out[k] = out[k].map((v) => {
+          if (v == null) return v;
+          const text = String(v);
+          if (labels && labels.includes(text)) return v;   // the bot offered it: send as offered
+          const r = stripSecrets(text);
+          removed += r.removed;
+          return r.text;
+        });
+      }
+      return out;
+    });
+  }
+  return removed;
+}
+
+/**
+ * The card a pending answer is answering: the engine's own snapshot of the session
+ * (`get(...).pendingUi`, the shim/expired card included), which is where the card's method and
+ * options live. null when the engine cannot say (an older/fake engine without `get`, an unknown
+ * session, or no pending card) — the callers then fall back to stripping everything.
+ * Read-only: get() never wakes a child and never answers anything.
+ * @returns {Promise<object|null>}
+ */
+async function pendingAskCard(eng, sid) {
+  try {
+    if (!eng || typeof eng.get !== "function") return null;
+    const snap = await eng.get(sid);
+    return snap && snap.pendingUi ? snap.pendingUi : null;
+  } catch { return null; }
+}
 
 /** Extensions the workspace route serves inline (never `attachment`). */
 const WORKSPACE_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
@@ -375,7 +491,7 @@ function deliveredExists(sid, name) {
   finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
 }
 
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key) } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key), ownerCheck = isLocalPasswordSessionOn } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
   async function piNames(env) {
@@ -605,6 +721,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+    // Credential card (spec §10.2): a pasted secret never reaches the engine. The strip runs
+    // BEFORE anything reads the text (note claims included), and the response carries only how
+    // many spans were replaced — never the text itself.
+    const incoming = stripIncoming(message, body);
     // Track 3 Task 9: images the drawer attached via POST .../files, sent on
     // the NEXT message (see normalizeMessageImages' doc — pi's own
     // ImageContent shape, threaded verbatim to promptTurn).
@@ -625,16 +745,23 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       }
     }
     let pdb = null;
+    // Credential card (spec §10.2): the outcome of a password request rides the same way, as
+    // fixed lines from secrets/request-store.js (in memory, taken once; handed back when the
+    // turn never started). Never a value: no value is ever held there.
+    const secretLines = message.trim() ? takeSecretNotes(sid) : [];
     try {
       // The owner typed it here when this is their local session (the offer lines are fixed
       // gateway text); an SSO or peer session is "other". A failed read is "other" (fail closed).
       let principal = "other";
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
-      const text = notes.lines.length ? notes.lines.join("\n") + "\n\n" + message : message;
+      // "[Crow] " marks a gateway line, as offerNoteLine does.
+      const lines = [...secretLines.map((l) => "[Crow] " + l), ...notes.lines];
+      const text = lines.length ? lines.join("\n") + "\n\n" + incoming.text : incoming.text;
       const result = await eng.message(sid, text, images, { principal });
-      res.status(202).json({ turnId: result.turnId });
+      res.status(202).json({ turnId: result.turnId, removed: incoming.removed });
     } catch (err) {
+      returnSecretNotes(sid, secretLines);
       if (notes.claims.length) {
         try { await unclaimOfferNotes(ndb, notes.claims); } catch (e) { console.warn("[perch-interactive-api] offer note unclaim failed:", e.message); }
       }
@@ -654,6 +781,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+    // Credential card (spec §10.2): a steer is the operator's text reaching the same child, so
+    // it gets the same strip and the same count-only answer (silently skipping it would put a
+    // pasted secret into the turn the drawer was told was safe).
+    const incoming = stripIncoming(message, body);
     let pdb = null;
     try {
       // Project services (fix round 1): a steer drives the child's live turn, so the turn's
@@ -661,8 +792,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       let principal = "other";
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
-      const result = await eng.steer(sid, message, { principal });
-      res.json(result);
+      const result = await eng.steer(sid, incoming.text, { principal });
+      res.json({ ...(result && typeof result === "object" ? result : {}), removed: incoming.removed });
     } catch (err) {
       mapEngineError(res, err);
     } finally {
@@ -763,13 +894,18 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const requestId = body.requestId == null ? "" : String(body.requestId);
     let pdb = null;
     try {
+      const eng = resolveEngine();
+      // Credential card (B2 + N1): an ask card's free-text answer is operator text reaching the
+      // same child, so it gets the same strip and the same count-only answer as /message and
+      // /steer — but an option the bot itself offered is never stripped. The pending card (its
+      // method and options) is read from the engine's own snapshot BEFORE the answer resolves it.
+      const removed = stripAnswerText(body, await pendingAskCard(eng, sid));
       // Project services (fix round 1): an answer resolves a dialog the child holding the
       // owner's service blocks is waiting on, so it carries the turn's principal too.
       let principal = "other";
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
-      const eng = resolveEngine();
       const result = await eng.answer(sid, requestId, body, { principal });
-      res.json(result);
+      res.json({ ...(result && typeof result === "object" ? result : {}), removed });
     } catch (err) {
       // S4: a dead child must yield a 409-shaped no_such_request, never a raw
       // 500 — engine.answer() already enforces liveness before it ever calls
@@ -1113,6 +1249,24 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
+  });
+
+  // ---- GET /interactive/:sid/secret — the open password card, for a reload ----
+  // Credential card (spec §10.2): `{ id, label, kind, expiresAt }` for this session's open
+  // request, or null. Metadata only (the store never holds a value); no-store, because a card
+  // that was just answered must not come back from a cache. Read-only, and the OWNER's alone
+  // (the Services routes' rule): a peer SSO session, a session minted by a login on this machine
+  // and any request from this machine are refused with 403 {error:"not_owner"} before the store
+  // is read. `ownerCheck` is the seam the canary harness passes a passing stub to.
+  router.get(P + "/interactive/:sid/secret", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    let owner = false;
+    let db = null;
+    try { db = createDbClient(); owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
+    finally { if (db) { try { db.close(); } catch { /* closed */ } } }
+    if (!owner) return jsonError(res, 403, "not_owner");
+    const r = openRequestFor(String(req.params.sid));
+    res.json(r ? { id: r.id, label: r.label, kind: r.kind, expiresAt: r.expiresAt } : null);
   });
 
   // ---- POST /interactive/:sid/forget-summary — Forget (sheet → Session) ----
@@ -1941,6 +2095,26 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     } catch (err) {
       mapEngineError(res, err);
     }
+  });
+
+  // The route-scoped body parsers above (/message, /files): a malformed or oversized body may
+  // hold a pasted secret, and Node's JSON.parse message quotes body text, so the express default
+  // handler's stack log would print it. Every parser refusal answers a fixed code and logs one
+  // fixed line, never the parser's message (the services-api.js idiom, credential card §10.3).
+  // Any other error keeps its own 4xx/5xx status (500 otherwise) and logs one fixed line of its
+  // name, method and route path, never its message.
+  router.use(P, (err, req, res, next) => {
+    if (!err || res.headersSent) return next(err);
+    const status = Number(err.status || err.statusCode);
+    if (isBodyParserError(err)) {
+      console.warn("[perch-interactive-api] bad body");
+      return status === 413 ? jsonError(res, 413, "too_large") : jsonError(res, 400, "bad_body");
+    }
+    const code = status >= 400 && status <= 599 ? status : 500;
+    const name = typeof err.name === "string" ? err.name.slice(0, 60) : "Error";
+    const route = (req.baseUrl || "") + (req.route && req.route.path ? req.route.path : req.path);
+    console.error(`[perch-interactive-api] request failed: ${name} ${req.method} ${route}`);
+    jsonError(res, code, code >= 500 ? "internal" : "request_failed");
   });
 
   return router;

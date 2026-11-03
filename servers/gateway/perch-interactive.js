@@ -176,6 +176,7 @@ import { createWatcher as createBrowserWatcher, createFinalShotHook } from "./br
 import { storeShot } from "./browser-tile/shots.js";
 import { createTakeOver as createBrowserTakeOver, createAppTakeOvers } from "./browser-tile/take-over.js";
 import { appTileInfo, desktopApp, takeOverOffered, appLeaseDir } from "./apps/app-tile.js";
+import { getSecretRequest, expireSessionRequests, forgetSession as forgetSecretSession } from "./secrets/request-store.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -889,6 +890,9 @@ export function createInteractiveEngine({
       // mirror in onUiRequest, driven the other way by control({planMode}).
       planMode: null,
       pendingUi: null,
+      // Credential card (spec §10.2): the open password card's { id, label }, or null. Treated
+      // like pendingUi by armIdle/armStall/eviction/cycle; the value never comes near it.
+      secretCard: null,
       // PR-A (audit item 5): combined multi-question ask-card state.
       //   pendingQuestions — the rich `{id, questions}` from a `crow-ask:`
       //     notify, stashed until the child's first `select` upgrades it into
@@ -993,6 +997,10 @@ export function createInteractiveEngine({
       // A live card, or an expired one still shown (expired:true) so the
       // operator sees what was asked: either way the session waits for them.
       pendingUi: shownCard(s),
+      // Concern 7: an open password card is "needs you" too. The client counts it exactly as it
+      // counts pendingUi (the session list flag and the attention banner); the card keeps only
+      // its own id and label, never a value.
+      secretCard: !!s.secretCard,
       lastError: s.lastError ? maskSecrets(s.lastError) : s.lastError,
       // Track 3 Task 4: the engine-tracked model wins over the raw
       // prepareSpawn resolution once one is known (a live model_select or a
@@ -1148,14 +1156,14 @@ export function createInteractiveEngine({
     const delay = Math.min(Math.max(0, (Number.isFinite(at) ? at : now()) - now()), MAX_TIMER_MS);
     s.attnTimer = timer(() => {
       s.attnTimer = null;
-      if (sessions.get(s.sessionId) !== s || s.state === "stopped" || !s.pendingUi) return;
+      if (sessions.get(s.sessionId) !== s || s.state === "stopped" || !(s.pendingUi || s.secretCard)) return;
       chainAttention(s, async (db, N) => {
         const r = await N.repushNotificationGroup(db, {
           groupKey: attentionKey(s), title: (n) => attentionTitle(s, n),
           priority: "high", type: "attention", nowMs: now(),
         });
         // Snoozed: try again when the snooze ends, if a card still waits.
-        if (r && Number.isFinite(r.snoozedUntilMs) && s.pendingUi) armRepush(s, r.snoozedUntilMs);
+        if (r && Number.isFinite(r.snoozedUntilMs) && (s.pendingUi || s.secretCard)) armRepush(s, r.snoozedUntilMs);
       });
     }, delay);
   }
@@ -1217,14 +1225,19 @@ export function createInteractiveEngine({
     const had = !!(s.pendingUi || s.expiredAsk);
     settleAskExpiry(s);
     s.expiredAsk = null;
-    if (had) closeAttention(s);
+    // M2 (final review): the password card uses this same attention group (`perch-ask:<sid>`),
+    // so an ask settling must not close a "needs you" the still-open card needs. Mirrors
+    // endSecretCard's own `!s.pendingUi` guard. The countdown resumes when the card closes.
+    if (had && !s.secretCard) closeAttention(s);
   }
 
   /** A live question died unanswered with its child (exit, abandon): drop it
    * and close its group, so the session's next question pushes again
    * instead of folding silently into a row about a question that is gone. */
   function dropAsk(s) {
-    if (s.pendingUi) closeAttention(s);
+    // M2 (final review): same group key as the password card — a question dying with its child
+    // must not close the card's "needs you" while the card still waits on the operator.
+    if (s.pendingUi && !s.secretCard) closeAttention(s);
     settleAskExpiry(s);
     clearAsk(s);
   }
@@ -1253,6 +1266,8 @@ export function createInteractiveEngine({
       state: s.state,
       lastError: s.lastError ? maskSecrets(s.lastError) : null,
       pendingUi: shownCard(s),
+      // Concern 7: same as snapshot() — an open password card is "needs you" too.
+      secretCard: !!s.secretCard,
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: servingModel(s),
       label: s.label || null,
@@ -1331,11 +1346,14 @@ export function createInteractiveEngine({
     if (!s.pi || s.state !== "awake") return;
     if (s.turn) return;
     if (s.pendingUi) return;
+    if (s.secretCard) return;                          // an open password card waits on the operator too
     s.idleTimer = timer(() => { hibernate(s).catch(() => {}); }, idleMs());
   }
 
-  /** Arm the per-turn stall watchdog. Paused (not armed) while a card is
-   * pending — a human thinking is not a stalled agent. */
+  /** Arm the per-turn stall watchdog. Paused (not armed) while an ask card is
+   * pending — a human thinking is not a stalled agent — but NOT while a
+   * password card is open: that card only waits for a short typed answer, and
+   * a turn wedged behind it must still be caught (M1, the Task 3 review). */
   function armStall(s) {
     clearStall(s);
     // Live browser tile: nor while the operator holds the browser — a bot
@@ -2313,6 +2331,7 @@ export function createInteractiveEngine({
         if (other.state !== "awake") continue;
         if (other.turn) continue;
         if (other.pendingUi) continue;
+        if (other.secretCard) continue;                  // an open password card, like pendingUi
         if (!victim || other.lastEventAt < victim.lastEventAt) victim = other;
       }
       if (!victim) throw e;                              // no eligible victim: rethrow untouched
@@ -2949,6 +2968,7 @@ export function createInteractiveEngine({
       clearStall(s);
       clearIdle(s);
       dropAsk(s);                                    // r1 S4 (+ PR-A dance state; 2026-10-20 group)
+      expireSecretCard(s);                           // credential card: dies with its child
       s.lastError = message;
       // Operators read the gateway log, not the drawer: without this line a
       // child that dies at spawn (an unknown provider) left only "world
@@ -4131,7 +4151,7 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
-    if (s.turn || s.pendingUi || s.cycling) throw engineError("cycle_busy");
+    if (s.turn || s.pendingUi || s.secretCard || s.cycling) throw engineError("cycle_busy");
     s.cycling = true;                                  // ← the re-entrancy claim
     // Acceptance F4: the drawer renders `log` events, and a cycle is several
     // seconds of world rebuild + model warm + spawn during which the operator
@@ -4690,6 +4710,12 @@ export function createInteractiveEngine({
         args: [stamp, id],
       });
       if (!res || res.rowsAffected === 0) throw engineError("no_such_session");
+      // Credential card: an archived chat's request and queued notes go.
+      if (archived) {
+        forgetSecretSession(id);
+        const live = sessions.get(id);
+        if (live && live.secretCard) endSecretCard(live, "expired");
+      }
       // R1.2 PR 4: an archived session's gateway-owned system prompt copy
       // goes (the row keeps the block; a wake writes the file fresh).
       if (archived) {
@@ -4718,6 +4744,9 @@ export function createInteractiveEngine({
     settleAsk(s);                                    // 2026-10-20
     clearAsk(s);
     s.state = "stopped";
+    // Credential card: a stopped session's request and queued notes go (no note is ever read).
+    forgetSecretSession(s.sessionId);
+    if (s.secretCard) endSecretCard(s, "expired");
     // Track 3 Task 6: released on stop() — a stopped session's card is free
     // for a fresh dispatch. This is the primary release path (attachExit's
     // twin above only fires for an exit that lands on an already-stopped
@@ -4790,6 +4819,8 @@ export function createInteractiveEngine({
       // shown a card no child is waiting on.
       if (s.pendingUi) replay({ type: "ask_user", ...s.pendingUi });
       else if (s.expiredAsk) replay({ type: "ask_user", ...s.expiredAsk });
+      // Credential card: the open password card (metadata only; the hub also refetches it).
+      if (s.secretCard) replay(secretCardFrame(s.secretCard, "open"));
       // Track 3 Task 5: replay the last known plan-mode mirror so a late
       // subscriber's drawer opens already showing plan-mode state instead of
       // waiting for the NEXT bus tick (which may never come if nothing
@@ -4880,6 +4911,7 @@ export function createInteractiveEngine({
           rowId: Number(r.id),
           state: r.status === "stopped" ? "stopped" : "hibernating",
           pendingUi: null,
+          secretCard: false,
           lastError: null,
           model: r.model || null,
         });
@@ -4938,6 +4970,7 @@ export function createInteractiveEngine({
     clearStall(s);
     clearAsk(s);
     s.state = "hibernating";
+    expireSecretCard(s);                             // the child is gone, so its password request dies
     try { await pi.close(); } catch { /* already dead */ }
     writeLeases();
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
@@ -4976,6 +5009,7 @@ export function createInteractiveEngine({
       if (s.turn) s.turn.aborted = true;
       s.turn = null;
       if (s.state !== "stopped") s.state = "hibernating";
+      expireSecretCard(s);
       let timerHandle = null;
       await Promise.race([
         (async () => {
@@ -5085,6 +5119,86 @@ export function createInteractiveEngine({
     return { delivered: true, botId: s.botId };
   }
 
+  /**
+   * Credential card (spec §10.2): is this a RESIDENT session of this bot with a live child?
+   * sessions.get only, never resolveSession: a check must never adopt a row or wake a
+   * hibernating child. The caller must name the bot (as notifyCard's I3).
+   */
+  function isLiveSession(sessionId, opts) {
+    const s = sessions.get(String(sessionId));
+    if (!s) return false;
+    const want = opts && opts.botId != null ? String(opts.botId) : null;
+    if (!want || want !== s.botId) return false;
+    return s.state === "awake" && !!s.pi;
+  }
+
+  /**
+   * Credential card hook (spec §10.2; the notifyCard/emitExternal pattern). A
+   * `secret_request` frame is `{ type, id, label, state }`, primitives only, and NEVER a value:
+   *  - RESIDENT sessions only (sessions.get, never resolveSession), and the caller names the
+   *    session's bot (I3);
+   *  - allowlisted keys, primitive fields, a 32-hex id and a frozen state enum;
+   *  - "open" needs an awake child and a request in the store for THIS session and bot; the
+   *    label shown is the store's cleaned label, never the caller's frame. It pauses the stall
+   *    watchdog and blocks hibernation (like pendingUi) and sends the "needs you" push;
+   *  - "done" / "failed" / "closed" / "expired" settle the open card with that id only.
+   * Not persisted: the hub refetches GET /interactive/:sid/secret on load.
+   */
+  const SECRET_FRAME_KEYS = new Set(["type", "id", "label", "state"]);
+  const SECRET_FRAME_STATES = new Set(["open", "done", "failed", "closed", "expired"]);
+  const SECRET_ID_RE = /^[0-9a-f]{32}$/;
+  const SECRET_ATTENTION = "A bot needs a password";
+  function secretCardFrame(c, state) {
+    return { type: "secret_request", id: c.id, label: c.label, state };
+  }
+  function endSecretCard(s, state) {
+    const c = s.secretCard;
+    if (!c) return;
+    s.secretCard = null;
+    if (!s.pendingUi) closeAttention(s);
+    emit(s, secretCardFrame(c, state));
+    armStall(s);
+    armIdle(s);
+  }
+  /** The child is gone: the open request expires (its note waits for the next turn). */
+  function expireSecretCard(s) {
+    try { expireSessionRequests(s.sessionId); } catch { /* in memory only */ }
+    if (s.secretCard) endSecretCard(s, "expired");
+  }
+  function emitSecretCard(sessionId, frame, opts) {
+    const s = sessions.get(String(sessionId));
+    if (!s) return { delivered: false, botId: null, reason: "no_session" };
+    const want = opts && opts.botId != null ? String(opts.botId) : null;
+    if (!want) return { delivered: false, botId: s.botId, reason: "bot_required" };
+    if (want !== s.botId) return { delivered: false, botId: s.botId, reason: "bot_mismatch" };
+    if (!frame || typeof frame !== "object" || frame.type !== "secret_request") return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    const out = {};
+    for (const [k, v] of Object.entries(frame)) {
+      if (!SECRET_FRAME_KEYS.has(k)) continue;
+      if (v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))) out[k] = v;
+      else return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    }
+    if (typeof out.id !== "string" || !SECRET_ID_RE.test(out.id) || !SECRET_FRAME_STATES.has(out.state)) {
+      return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    }
+    if (out.state === "open") {
+      if (s.state !== "awake" || !s.pi) return { delivered: false, botId: s.botId, reason: "not_live" };
+      const r = getSecretRequest(out.id);
+      if (!r || r.sessionId !== s.sessionId || r.botId !== s.botId) return { delivered: false, botId: s.botId, reason: "no_request" };
+      s.secretCard = { id: r.id, label: r.label || null };
+      // M1: the turn clock keeps running behind a password card (it waits for a typed answer,
+      // not for a human to think), so the watchdog is re-armed rather than paused.
+      armStall(s);
+      clearIdle(s);
+      emit(s, secretCardFrame(s.secretCard, "open"));
+      attentionForAsk(s, SECRET_ATTENTION);
+      return { delivered: true, botId: s.botId };
+    }
+    if (!s.secretCard || s.secretCard.id !== out.id) return { delivered: false, botId: s.botId, reason: "no_card" };
+    endSecretCard(s, out.state);
+    return { delivered: true, botId: s.botId };
+  }
+
   return {
     spawn,
     message,
@@ -5122,8 +5236,12 @@ export function createInteractiveEngine({
       const s = sessions.get(String(sessionId));
       return s ? s.briefingDelivered : undefined;
     },
+    /** Credential card: a resident, awake session of the named bot (never wakes one). */
+    isLiveSession,
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,
+    /** Credential card frames (spec §10.2) — resident only, bot-checked, never a value. */
+    emitSecretCard,
     /** Artifacts chat-first pointer frames (spec v1.6 D25) — resident sessions
      * only, bot-checked, allowlisted `artifact` type. See its own doc. */
     emitExternal,
@@ -5215,6 +5333,22 @@ export async function notifyCardToResident(sid, frame, opts) {
   const eng = getInteractiveEngine({ createIfMissing: false });
   if (!eng || typeof eng.notifyCard !== "function") return { delivered: false, botId: null, reason: "no_engine" };
   return eng.notifyCard(sid, frame, opts);
+}
+
+/** The credential card's liveness check for the /secrets mount: never creates an engine; with
+ * no engine in this process no session is live. */
+export function isLiveResidentSession(sessionId, opts) {
+  const eng = getInteractiveEngine({ createIfMissing: false });
+  if (!eng || typeof eng.isLiveSession !== "function") return false;
+  return eng.isLiveSession(sessionId, opts);
+}
+
+/** The credential card's default hook (request-store.js setEmitSecretCard, wired at boot):
+ * never creates an engine; with none in this process the card is not shown. */
+export function emitSecretCardToResident(sessionId, frame, opts) {
+  const eng = getInteractiveEngine({ createIfMissing: false });
+  if (!eng || typeof eng.emitSecretCard !== "function") return { delivered: false, botId: null, reason: "no_engine" };
+  return eng.emitSecretCard(sessionId, frame, opts);
 }
 
 /** The one default emitExternal hook for callers outside the engine (the

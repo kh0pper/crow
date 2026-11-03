@@ -354,6 +354,22 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root #perch-ask > .ask-combined{display:flex;flex-direction:column;overflow:hidden}
 #perch-hub-root .ask-body{display:grid;gap:13px;flex:0 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 #perch-hub-root .ask-combined .ask-foot{flex-shrink:0}
+/* Credential card (spec 10): the password card's own pane under the ask pane. It never
+   scrolls away with the transcript, every target is 44 px, the field's 16 px text stops iOS
+   zooming on focus, and a long bot label wraps instead of widening the column. */
+#perch-hub-root #perch-secret{flex:0 0 auto;min-width:0}
+#perch-hub-root #perch-secret:not(:empty){margin-top:6px}
+#perch-hub-root .secret-card{min-width:0}
+#perch-hub-root .secret-title,#perch-hub-root .secret-asks{overflow-wrap:anywhere}
+#perch-hub-root .secret-asks{font-size:13px;color:var(--dim)}
+#perch-hub-root .secret-help{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .secret-controls{align-items:center;gap:8px}
+#perch-hub-root .secret-controls button{min-height:44px;padding:10px 14px}
+#perch-hub-root .secret-controls button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .secret-controls .secret-input{flex:1 1 100%;min-width:0;width:auto;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card)}
+#perch-hub-root .secret-result{font-size:13.5px;color:var(--dim)}
+#perch-hub-root .secret-status{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .secret-status:empty{display:none}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page
@@ -1076,5 +1092,25 @@ border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;back
 @media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-apps-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
 }
+/* --- Credential card, Task 4: the paste warning and the Connect card --------
+   Both live in the chat column at 390px: the warning is a card ABOVE the
+   sticky composer (inside the same flex chain as the ask card, so the
+   transcript stays the only scroller), and every control in it is a 44px
+   target. The three choices wrap rather than overflow a 360px screen. */
+#perch-secret-warn{flex-shrink:0}
+#perch-secret-warn[hidden]{display:none}
+#perch-hub-root .secret-warn{border-color:var(--attn);background:var(--warn-soft)}
+#perch-hub-root .secret-warn .ask-title{color:var(--warn)}
+#perch-hub-root .secret-warn-help{font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+#perch-hub-root .secret-warn-link{display:inline-flex;align-items:center;min-height:44px;padding:8px 0;color:var(--teal);font-weight:600;font-size:13.5px}
+#perch-hub-root .secret-warn-controls{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root .secret-warn-controls button{min-height:44px;padding:8px 14px;font-size:14px}
+#perch-hub-root .secret-warn-controls .secret-warn-keep{background:transparent}
+/* The Connect card: one card per "not connected in this project" tool result.
+   The link is the whole 44px target, never a bare inline word. */
+#perch-hub-root .connect-card{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+#perch-hub-root .connect-title{font-size:14px;font-weight:600;color:var(--ink)}
+#perch-hub-root .connect-help{font-size:13px;color:var(--dim);overflow-wrap:anywhere}
+#perch-hub-root .connect-open{display:inline-flex;align-items:center;align-self:flex-start;min-height:44px;padding:8px 14px;margin-top:2px;border:1px solid var(--teal);border-radius:10px;color:var(--teal);font-weight:600;font-size:13.5px;text-decoration:none}
 `);
 }

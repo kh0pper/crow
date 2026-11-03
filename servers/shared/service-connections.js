@@ -22,6 +22,39 @@ import {
   KeychainKeyMissingError,
 } from "../gateway/keychain/store.js";
 
+/**
+ * The fixed marker a service tool's result carries when the service is not connected in the
+ * project the turn runs in (project services §6.7, credential card plan Task 4). The Perch
+ * client shows its Connect card whenever a tool result carries this exact line; the marker is
+ * the ONLY contract between the tool family and the card, so it lives here.
+ *
+ * GAP (Task 4): no tool emits it yet — the services tool family has not landed. A tool returns
+ * notConnectedResult() the day it does; nothing else has to change on the client side.
+ */
+export const NOT_CONNECTED_MARKER = "[not connected in this project]";
+
+/** The ids a Connect card may put in a link or a label (plan Task 4: anything else renders no
+ *  card). The client re-checks both values itself; this is the producer's own guard. */
+const CONNECT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * The result text a service tool returns for a service that is not connected in this project.
+ * It names the service, then the project's Services page with the connect sheet already open —
+ * the operator types the key there, never in chat. A value the client would refuse to link
+ * (a service id or slug outside CONNECT_ID_RE) still yields the honest marker line, with no link.
+ * @param {string} serviceId  a service-catalog id ("github")
+ * @param {string} slug       the project's slug ("home")
+ * @returns {string}
+ */
+export function notConnectedResult(serviceId, slug) {
+  const id = serviceId == null ? "" : String(serviceId);
+  const project = slug == null ? "" : String(slug);
+  const link = CONNECT_ID_RE.test(id) && CONNECT_ID_RE.test(project)
+    ? ` The operator can connect it at /dashboard/project/${project}/services?connect=${id} — the key is typed there, never in chat.`
+    : "";
+  return `${NOT_CONNECTED_MARKER} ${id} is not connected in this project.${link}`;
+}
+
 /** The dashboard error classes (plan Global Constraints). A ConnectionError carries one of these. */
 export const CONNECTION_ERROR_CLASSES = Object.freeze(new Set([
   "unreachable", "auth_failed", "timeout", "bad_address", "redirect", "unexpected_response",
