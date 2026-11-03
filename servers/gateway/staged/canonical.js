@@ -23,7 +23,7 @@
  * The placeholder rule (`[Client Name]`) blocks Send until the operator fills it in. It must not
  * fire on a Markdown link (`[text](url)`) or on a subject tag (`[EXTERNAL SENDER] Re: [crow-dev]`),
  * so the pattern requires at least two characters and no following `(`, a short allowlist of tags is
- * skipped case-insensitively, and every leading bracketed tag in the subject is stripped first.
+ * skipped case-insensitively, and a subject's leading labels are stripped first (stripSubjectTags).
  */
 import { createHash } from "node:crypto";
 
@@ -37,12 +37,41 @@ export const PLACEHOLDER_ALLOWLIST = Object.freeze(["external", "ext", "fwd", "f
  */
 export const PLACEHOLDER_PATTERN = String.raw`\[([A-Za-z][A-Za-z0-9 '_\-]{1,39})\](?!\()`;
 
+/** The reply/forward prefixes a subject inherits, lower-cased, without the colon. */
+export const SUBJECT_PREFIXES = Object.freeze(["re", "fwd", "fw"]);
+/** Whole subject tags that are labels, never placeholders, lower-cased. */
+export const SUBJECT_TAG_ALLOW = Object.freeze(["external", "ext", "external sender", "external email", "external message"]);
+/** RFC 5322's line limit: a longer subject is scanned only this far (and never by a backtracking regex). */
+export const SUBJECT_SCAN_MAX = 998;
+
 /**
- * A subject's leading labels: `[EXTERNAL SENDER]`, `[crow-dev]`, and any `Re:`/`Fwd:`/`Fw:` prefix
- * around them. Applied until it stops matching, because a tag can sit on either side of the prefix
- * ("[EXTERNAL SENDER] Re: [crow-dev] Hello" is two strips).
+ * The subject with its leading labels removed, by a linear scan (a regex here was a ReDoS).
+ *
+ * Leading `Re:`/`Fwd:`/`Fw:` prefixes are skipped. A leading bracketed tag is skipped when a prefix
+ * came before it (an inherited list tag, `Re: [crow-dev] …`) or when it is a known label
+ * (`[EXTERNAL SENDER]`). Anything else at the start stops the scan, so `[Client Name] proposal` and
+ * `[Your Name] Re: hello` still show their placeholder. The cost: a placeholder right after a reply
+ * prefix (`Re: [Client Name]`) reads as an inherited tag.
  */
-export const SUBJECT_TAG_PREFIX = String.raw`^(\s*(re|fwd?|fw):\s*)*(\[[^\]]*\]\s*)+`;
+export function stripSubjectTags(subject) {
+  const s = String(subject ?? "").slice(0, SUBJECT_SCAN_MAX);
+  let i = 0;
+  let afterPrefix = false;
+  for (;;) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    const rest = s.slice(i, i + 4).toLowerCase();
+    const prefix = SUBJECT_PREFIXES.find((p) => rest.startsWith(p + ":"));
+    if (prefix) { i += prefix.length + 1; afterPrefix = true; continue; }
+    if (s[i] === "[") {
+      const close = s.indexOf("]", i + 1);
+      if (close < 0) break;
+      const tag = s.slice(i + 1, close).trim().toLowerCase();
+      if (afterPrefix || SUBJECT_TAG_ALLOW.includes(tag)) { i = close + 1; continue; }
+    }
+    break;
+  }
+  return s.slice(i);
+}
 
 /* ---------------------------------------------------------------- addresses */
 
@@ -53,6 +82,19 @@ export const SUBJECT_TAG_PREFIX = String.raw`^(\s*(re|fwd?|fw):\s*)*(\[[^\]]*\]\
  * card falls back to "Open in Gmail to send" instead of guessing.
  */
 const ADDR_SPEC = /^(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*)@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+
+/**
+ * A clean addr-spec, stricter than ADDR_SPEC alone: no control characters anywhere (a newline inside a
+ * quoted local part would be rewritten on send, so what went out would differ from what was hashed),
+ * and a quoted local part may not carry < > @ ; ( : characters, which a mail parser could read as a
+ * second address (a comma is fine: "john,doe"@x is one address to every parser we checked).
+ */
+function isCleanAddr(address) {
+  const a = String(address);
+  if (!ADDR_SPEC.test(a) || /[\u0000-\u001f\u007f]/.test(a)) return false;
+  const quoted = /^"((?:[^"\\]|\\.)*)"@/.exec(a);
+  return !(quoted && /[<>@;(:]/.test(quoted[1]));
+}
 
 /**
  * The index just past an RFC 2047 encoded word starting at `i`, or -1. Encoded words are treated as
@@ -216,11 +258,11 @@ function readEntry(entry) {
     const last = angles[angles.length - 1];
     const address = stripComments(last.content).trim();
     const leftover = stripQuotedNames(masked.slice(0, last.start) + " " + masked.slice(last.end)).trim();
-    const clean = angles.length === 1 && !/[@<>"]/.test(leftover) && ADDR_SPEC.test(address);
+    const clean = angles.length === 1 && !/[@<>"]/.test(leftover) && isCleanAddr(address);
     return { address, clean };
   }
   const candidate = stripQuotedNames(masked).trim();
-  return { address: candidate, clean: ADDR_SPEC.test(candidate) };
+  return { address: candidate, clean: isCleanAddr(candidate) };
 }
 
 /**
@@ -236,7 +278,7 @@ export function parseAddressListDetailed(header) {
     for (const entry of splitEntries(chunk)) {
       if (!stripComments(entry).trim()) continue; // a trailing comma, or a comment on its own
       const { address, clean } = readEntry(entry);
-      if (ADDR_SPEC.test(address)) seen.add(address.toLowerCase());
+      if (isCleanAddr(address)) seen.add(address.toLowerCase());
       if (!clean) invalid.push(entry.trim());
     }
   }
@@ -343,7 +385,6 @@ export function contentHash(snapshot) {
  */
 export function findPlaceholders(snapshot) {
   const re = new RegExp(PLACEHOLDER_PATTERN, "g");
-  const tagRe = new RegExp(SUBJECT_TAG_PREFIX, "i");
   const out = [];
   const seen = new Set();
   const scan = (text) => {
@@ -354,29 +395,24 @@ export function findPlaceholders(snapshot) {
       out.push(token);
     }
   };
-  // Strip the subject's leading labels until there are none left: a tag can precede or follow the
-  // Re:/Fwd: prefix, and each strip removes at least one bracket, so the loop always ends.
-  let subject = String(snapshot?.subject ?? "");
-  for (let i = 0; i < 16; i++) {
-    const next = subject.replace(tagRe, "");
-    if (next === subject) break;
-    subject = next;
-  }
-  scan(subject);
+  scan(stripSubjectTags(snapshot?.subject));
   scan(snapshot?.body);
   return out;
 }
 
 /**
  * The rule as data for the Perch client, which greps the draft's own text the same way (client JS
- * lives in template literals, so it cannot import this module). `allow` is lower-cased; the client
- * strips `subjectPrefix` (also in a loop) before it scans a subject.
+ * lives in template literals, so it cannot import this module). `allow` is lower-cased. The client
+ * strips a subject's leading labels with the same linear scan as stripSubjectTags, from
+ * `subjectPrefixes`, `subjectTagAllow` and `subjectScanMax`.
  */
 export function placeholderSource() {
   return {
     pattern: PLACEHOLDER_PATTERN,
     flags: "gi",
     allow: [...PLACEHOLDER_ALLOWLIST],
-    subjectPrefix: SUBJECT_TAG_PREFIX,
+    subjectPrefixes: [...SUBJECT_PREFIXES],
+    subjectTagAllow: [...SUBJECT_TAG_ALLOW],
+    subjectScanMax: SUBJECT_SCAN_MAX,
   };
 }

@@ -282,9 +282,10 @@ export async function setNewRecipients(db, id, list) {
 /**
  * Ids of rows stuck in `sending` for longer than `olderThanMs` (the gateway or the provider died
  * between the claim and the settle). This changes NOTHING: the caller re-reads each draft and settles
- * it, and a draft it can no longer read is settled `sent` — because Gmail DELETES a draft once it is
- * sent, so a 404 after a timeout means the message went out. Retrying a send is therefore never the
- * answer here: the retry's read gets the 404, and a second `drafts.send` is never issued.
+ * it. A draft it can no longer read (404) was either sent (Gmail deletes a draft once it is sent) or
+ * deleted by the operator in Gmail, and there is no message id either way: the caller settles it with
+ * "sent or deleted in Gmail" and leaves provider_message_id null. Retrying a send is never the
+ * answer: the retry's read gets the 404, and a second `drafts.send` is never issued.
  */
 export async function reconcileStale(db, { olderThanMs = 120_000, now = Date.now() } = {}) {
   const age = Math.max(0, Math.floor(Number(olderThanMs)) || 0);

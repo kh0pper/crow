@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { credRefFromWorld, resolveTokenFile } from "../servers/gateway/staged/cred-ref.js";
 import { createGmailClient, faithful, GmailError, snapshotFromRaw } from "../servers/gateway/staged/gmail-client.js";
-import { contentHash, findPlaceholders } from "../servers/gateway/staged/canonical.js";
+import { contentHash, findPlaceholders, parseAddressList, parseAddressListDetailed } from "../servers/gateway/staged/canonical.js";
 import { createFakeGmail, makeDraftRaw } from "./fixtures/fake-gmail.mjs";
 
 const dirs = [];
@@ -508,4 +508,24 @@ test("error message has no body", async () => {
   const err = await thrown(deadClient.getDraft("d1"));
   assert.equal(err.code, "other");
   assert.ok(!err.message.includes("CANARY"));
+});
+test("control characters and address-like quoted local parts are not clean addresses", () => {
+  const { invalid } = parseAddressListDetailed(['"a\nb"@example.com', '"a\\" <evil@example.com>"@example.com', "ok@example.com"]);
+  assert.ok(invalid.length >= 2, JSON.stringify(invalid));
+  assert.deepEqual(parseAddressList("ok@example.com"), ["ok@example.com"]);
+});
+
+test("a draft that became unfaithful after the card was shown is not sent from Crow", async () => {
+  const dir = scratch();
+  const fake = createFakeGmail({
+    drafts: { d1: { raw: makeDraftRaw({ to: "alex@example.com", subject: "Hello", body: "Words", messageId: "<d1@example.com>" }), threadId: "t1" } },
+  });
+  const client = clientAgainst(dir, fake);
+  const approved = await client.getDraft("d1");
+  assert.equal(approved.faithful, true);
+  // A Reply-To added after approval makes the draft one Crow cannot represent.
+  fake.drafts.get("d1").raw = "Reply-To: elsewhere@example.com\r\n" + fake.drafts.get("d1").raw;
+  await assert.rejects(client.sendDraft("d1", { snapshot: approved.snapshot, threadId: "t1" }),
+    (e) => e instanceof GmailError && e.code === "unfaithful" && !/example\.com/.test(e.message));
+  assert.equal((fake.sent || []).length, 0, "nothing was sent");
 });

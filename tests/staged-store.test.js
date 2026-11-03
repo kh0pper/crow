@@ -11,7 +11,7 @@ import Database from "better-sqlite3";
 import { STAGED_SENDS_DDL } from "../scripts/migrations/0017-staged-sends.mjs";
 import {
   parseAddressList, parseAddressListDetailed, canonicalSnapshot, contentHash, findPlaceholders,
-  placeholderSource, decodeEncodedWords,
+  placeholderSource, decodeEncodedWords, stripSubjectTags,
 } from "../servers/gateway/staged/canonical.js";
 import {
   createStaged, getStaged, listStaged, claimSend, settle, replaceWith, discard,
@@ -153,24 +153,39 @@ test("placeholder rule", () => {
   assert.deepEqual(at("Quick note", "Dear [Client's Name], hello."), ["Client's Name"]);
   assert.deepEqual(at("Quick note", "Re: [CLIENT_NAME] now."), ["CLIENT_NAME"]);
 
-  // The serialised rule the client greps with agrees with the server, subject prefix included.
+  // The serialised rule the client greps with agrees with the server.
   const src = placeholderSource();
   assert.equal(src.flags, "gi");
   assert.ok(src.allow.includes("external"));
-  assert.ok(src.subjectPrefix);
+  assert.deepEqual(src.subjectPrefixes, ["re", "fwd", "fw"]);
+  assert.ok(src.subjectTagAllow.includes("external sender"));
+  assert.equal(src.subjectScanMax, 998);
   const client = new RegExp(src.pattern, src.flags);
-  const tagRe = new RegExp(src.subjectPrefix, "i");
-  const stripTags = (text) => {
-    let s = text;
-    for (let i = 0; i < 16; i++) { const next = s.replace(tagRe, ""); if (next === s) break; s = next; }
-    return s;
-  };
   const tokens = (text) => [...String(text).matchAll(client)]
     .map((m) => m[1].trim())
     .filter((t) => t && !src.allow.includes(t.toLowerCase()));
   assert.deepEqual(tokens("[Client Name] and [text](url) and [EXTERNAL]"), ["Client Name"]);
-  assert.deepEqual(tokens(stripTags("[EXTERNAL SENDER] Re: [crow-dev] Hello")), []);
-  assert.deepEqual(tokens(stripTags("Hello [Client Name]")), ["Client Name"]);
+});
+
+test("a subject's leading labels: inherited and known tags go, a leading placeholder stays", () => {
+  const at = (subject) => findPlaceholders({ to: [], cc: [], bcc: [], subject, body: "" });
+  assert.deepEqual(at("[EXTERNAL SENDER] Re: [crow-dev] Hello"), []);
+  assert.deepEqual(at("[External Email] Hello"), []);
+  assert.deepEqual(at("Fwd: Re: [crow-dev] [sic] notes"), []);
+  // The review's false negatives: a placeholder at the very start is still found.
+  assert.deepEqual(at("[Client Name] proposal"), ["Client Name"]);
+  assert.deepEqual(at("[Your Name] Re: hello"), ["Your Name"]);
+  assert.deepEqual(at("Hello [Client Name]"), ["Client Name"]);
+  assert.equal(stripSubjectTags("Re: [crow-dev] Hello"), "Hello");
+});
+
+test("the subject scan is linear on adversarial subjects (no ReDoS)", () => {
+  for (const s of ["re: ".repeat(20000) + "x", " ".repeat(20000) + "re:x", "fw:".repeat(20000) + "[", "re:" + " ".repeat(20000) + "\u0000", "[".repeat(20000), "Re: " + "[a]".repeat(20000)]) {
+    const t = process.hrtime.bigint();
+    findPlaceholders({ to: [], cc: [], bcc: [], subject: s, body: "" });
+    const ms = Number(process.hrtime.bigint() - t) / 1e6;
+    assert.ok(ms < 200, `${JSON.stringify(s.slice(0, 12))} took ${ms} ms`);
+  }
 });
 
 test("RFC 2047 encoded words decode", () => {

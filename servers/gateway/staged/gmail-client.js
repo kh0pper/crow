@@ -41,6 +41,7 @@ const MESSAGES = Object.freeze({
   gone: "This draft is gone from Gmail",
   auth: "Gmail did not accept the credential",
   rate: "Gmail is rate limiting requests",
+  unfaithful: "This draft can only be sent from Gmail",
   other: "Gmail request failed",
 });
 
@@ -273,9 +274,12 @@ function buildRaw(snapshot, keep) {
   add("Cc", snapshot.cc.join(", "));
   add("Bcc", snapshot.bcc.join(", "));
   add("Subject", encodeHeader(snapshot.subject));
-  add("Message-ID", keep["message-id"]);
-  add("In-Reply-To", keep["in-reply-to"]);
-  add("References", keep["references"]);
+  // Threading headers come from the draft, so only plain printable ASCII is kept (a header is ASCII
+  // on the wire; a non-ASCII one would be re-encoded or refused). Losing one only loses threading.
+  const ascii = (v) => (v != null && /^[\x20-\x7e]+$/.test(String(v)) ? v : null);
+  add("Message-ID", ascii(keep["message-id"]));
+  add("In-Reply-To", ascii(keep["in-reply-to"]));
+  add("References", ascii(keep["references"]));
   lines.push("MIME-Version: 1.0");
   lines.push('Content-Type: text/plain; charset="UTF-8"');
   lines.push("Content-Transfer-Encoding: base64");
@@ -420,6 +424,9 @@ export function createGmailClient({ credRef, fetchImpl, configPaths, baseUrl = G
       }
       const approved = canonicalSnapshot(snapshot);
       const current = await transport.get(String(id));
+      // The snapshot is what goes out either way, but a draft that has become unrepresentable since
+      // the card was shown is the operator's to send from Gmail, not ours.
+      if (!faithful(current.raw).ok) throw new GmailError("unfaithful");
       const { headers } = parseMime(current.raw);
       const raw = buildRaw(approved, headers);
       const data = await transport.send(String(id), toBase64Url(raw), threadId ?? current.threadId);
