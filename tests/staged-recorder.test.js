@@ -490,6 +490,27 @@ test("the same draft recorded twice makes one row", async () => {
   assert.equal(stagedFor("provider_draft_id", "draft-twice").length, 1, "one row, not two");
 });
 
+test("a replay whose Gmail read now succeeds does not add a sendable row next to an unreadable one", async () => {
+  const fake = createFakeGmail({
+    drafts: { "draft-flaky": { threadId: "gt-flaky", raw: makeDraftRaw({ to: "alex@example.com", subject: "Flaky", body: "Body" }) } },
+  });
+  const call = (fetchImpl) => recordOnce({
+    toolName: DRAFT,
+    args: { to: "args@example.com", subject: "Args subject", body: "Args body" },
+    resultText: okResult("draft-flaky", "gt-flaky"),
+    context: { threadId: "thread-flaky", fetchImpl },
+  });
+  const first = await call(async () => { throw new Error("network down"); });
+  assert.ok(first && first.id, "the first call records an Open-in-Gmail row");
+  const rows1 = stagedFor("provider_draft_id", "draft-flaky");
+  assert.equal(rows1.length, 1);
+  assert.equal(rows1[0].cred_ref, null, "the failed read left no credential");
+  const replay = await call(fake.fetchImpl);
+  assert.equal(replay, null, "the same draft id is the same draft, whatever this read says");
+  assert.equal(stagedFor("provider_draft_id", "draft-flaky").length, 1, "still one row");
+  assert.equal(fake.calls.get, 0, "the replay never read Gmail (the check runs first)");
+});
+
 test("an error result records nothing", async () => {
   // Through the bridge: the stub child reports the draft call as isError with a success-shaped body
   // (a provider that failed after minting an id, or an MCP error wrapping one). No row.

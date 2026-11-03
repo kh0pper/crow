@@ -234,6 +234,12 @@ export async function recordDraft({ db, toolName, args = null, resultText = null
   const credConfig = context.credConfig !== undefined ? context.credConfig : credConfigFromOperatorConfig();
   const credRef = credRefFromWorld(credConfig, toolName);
 
+  // Idempotency first, before any Gmail read: the draft id under the credential we would use (or a
+  // row for it that ended with none) IS this draft. Checking after the read let a replay whose read
+  // came out differently add a second row; checking here also saves the read. Every state counts,
+  // so a draft the operator already sent or discarded never comes back as a second card.
+  if (await findStagedByDraftId(db, { providerDraftId: parsed.draftId, credRef, orUnreadable: true })) return null;
+
   // Step 2, fail closed: the provider's draft is the snapshot, unless we cannot read it.
   let snapshot = snapshotFromArgs(toolArgs);
   let providerThreadId = parsed.threadId;
@@ -263,10 +269,8 @@ export async function recordDraft({ db, toolName, args = null, resultText = null
     }
   }
 
-  // Idempotency: the draft id plus the credential we ended up with IS the identity. Every state
-  // counts, so a draft the operator already sent or discarded never comes back as a second card.
-  const existing = await findStagedByDraftId(db, { providerDraftId: parsed.draftId, credRef: storedCredRef });
-  if (existing) return null;
+  // A row for the same draft written while this one read Gmail (two paths racing) is caught here.
+  if (await findStagedByDraftId(db, { providerDraftId: parsed.draftId, credRef: storedCredRef, orUnreadable: true })) return null;
 
   // Step 3: one row. new_recipients stays null (the card's "new recipient" hint is filled lazily by
   // the reader that builds the card, never here).

@@ -161,11 +161,15 @@ export async function getStaged(db, id) {
  * come back as a new card because a resumed turn replayed the same tool call. `cred_ref` NULL
  * ("Open in Gmail to send") matches NULL, so `IS` rather than `=`.
  */
-export async function findStagedByDraftId(db, { providerDraftId, credRef = null } = {}) {
+export async function findStagedByDraftId(db, { providerDraftId, credRef = null, orUnreadable = false } = {}) {
   const draft = providerDraftId == null ? "" : String(providerDraftId);
   if (!draft) return null;
+  // orUnreadable: a row for this draft recorded with NO credential (a read that failed before)
+  // is the same draft too, so a replay never adds a second, sendable row next to it.
   const { rows } = await db.execute({
-    sql: "SELECT * FROM staged_sends WHERE provider_draft_id = ? AND cred_ref IS ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    sql: orUnreadable
+      ? "SELECT * FROM staged_sends WHERE provider_draft_id = ? AND (cred_ref IS ? OR cred_ref IS NULL) ORDER BY created_at DESC, rowid DESC LIMIT 1"
+      : "SELECT * FROM staged_sends WHERE provider_draft_id = ? AND cred_ref IS ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
     args: [draft, credRefJson(credRef)],
   });
   return toStaged(rows[0]);

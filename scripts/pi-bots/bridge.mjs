@@ -1769,6 +1769,9 @@ export async function handleInbound(opts) {
     });
     log("turn done: action=" + result.action + " card=" + cardId + " status=" + newCardStatus + " tools=" + calls.length + " clean=" + result.stdoutClean);
   } catch (e) {
+    // The success path's calls are recorded below this catch only when the turn succeeded; a throw
+    // after they were captured (a log line) must not record them twice.
+    stagedCalls = null;
     // Staged sends: a turn that failed AFTER a draft tool ran (a prompt timeout, a reply that threw)
     // still made that draft. Read the calls here, before close() and before the error reply — which
     // is the very thing that just threw — so the row exists either way. A job turn is skipped;
