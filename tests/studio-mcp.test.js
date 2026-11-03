@@ -385,3 +385,20 @@ test("a read-only caller (Crow's voice) cannot file a render", async () => {
     await client.close();
   }
 });
+
+test("a call carrying a forwarded non-bot actor (a peer) is not the operator", async () => {
+  const seen = makeHub({ snapshotProject: 4 });
+  const actor = {
+    actorFromEnv: () => ({ kind: "unknown" }),
+    resolveCallActor: () => ({ kind: "unknown" }),
+  };
+  const client = await connect({ hub: seen.hub, renderer: makeRenderer().renderer, actor });
+  try {
+    await client.callTool({ name: "studio_list_songs", arguments: {}, _meta: { "crow/actor": { kind: "peer", instance: "x" } } });
+    assert.equal(seen.calls.listSongs.at(-1).author.id, "other", "a peer gets the fail-closed author");
+    await client.callTool({ name: "studio_list_songs", arguments: {} });
+    assert.equal(seen.calls.listSongs.at(-1).author.id, "mcp", "no forwarded actor is the operator's session");
+  } finally {
+    await client.close();
+  }
+});

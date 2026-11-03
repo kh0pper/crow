@@ -906,7 +906,10 @@ export function createStudioWeb({
    */
   async function scopeOf(author) {
     const id = String(author?.id ?? "");
-    if (!id.startsWith(AGENT_BOT_PREFIX)) return null;
+    // Fail closed: only the operator's own MCP session ("agent:mcp") is
+    // unscoped. A bot gets its project; any other agent id sees nothing.
+    if (id === "agent:mcp") return null;
+    if (!id.startsWith(AGENT_BOT_PREFIX)) return { botId: "", projectId: null, voice: false };
     const botId = id.slice(AGENT_BOT_PREFIX.length);
 
     let projectId = null;

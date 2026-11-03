@@ -473,17 +473,17 @@ test("agent command arrives at WS client tagged kind agent", async (t) => {
     // An agent naming itself as a person is still an agent. (Its id must not
     // look like a Crow bot's `bot:<id>`, which the agent routes scope to that
     // bot's own project — see the bot scope tests at the end of this file.)
-    author: { kind: "human", id: "studio-test", label: "Studio test bot" },
+    author: { kind: "human", id: "mcp", label: "Agent (MCP)" },
   });
   assert.equal(sent.status, 200, `the agent command was refused: ${JSON.stringify(sent.body)}`);
 
   const update = await next((msg) => msg.type === "update");
   assert.equal(update.entry.author.kind, "agent");
-  assert.equal(update.entry.author.id, "agent:studio-test");
-  assert.equal(update.entry.author.label, "Studio test bot");
+  assert.equal(update.entry.author.id, "agent:mcp");
+  assert.equal(update.entry.author.label, "Agent (MCP)");
 });
 
-test("an agent sending author id local is recorded as agent:local", async (t) => {
+test("an agent sending author id local can never act as the person", async (t) => {
   const { base, hub, crowHome } = await boot(t);
   const songId = await seedSong(hub);
   const token = ensureAgentToken(crowHome);
@@ -494,10 +494,12 @@ test("an agent sending author id local is recorded as agent:local", async (t) =>
     args: { id: "agent-local", name: "Agent local" },
     author: { id: "local", label: "You" },
   });
-  assert.equal(sent.status, 200, `the agent command was refused: ${JSON.stringify(sent.body)}`);
-  assert.equal(sent.body.entry.author.kind, "agent");
-  assert.equal(sent.body.entry.author.id, "agent:local");
-  assert.notEqual(sent.body.entry.author.id, HUMAN.id, "an agent never writes as the person");
+  // "agent:local" is neither the operator's MCP session nor a bot, so the
+  // agent API fails closed: the song is not there for it, and nothing is written.
+  assert.equal(sent.status, 404);
+  const history = await hub.history(songId, { limit: 50 });
+  const entries = Array.isArray(history) ? history : history.entries || [];
+  assert.equal(entries.some((entry) => entry.command === "scene.add" && entry.args?.id === "agent-local"), false);
 });
 
 test("resent command with same cmd_id applies once", async (t) => {
@@ -935,4 +937,29 @@ test("an audit line keeps a bot's bare id and files the operator's MCP as an una
     false,
     "the transport's prefix never reaches the timeline",
   );
+});
+test("an agent that is neither the operator's MCP nor a bot sees nothing (fail closed)", async (t) => {
+  const { base, hub, crowHome } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
+  const token = ensureAgentToken(crowHome);
+  const songId = await seedSong(hub, PROJECT);
+
+  const listed = await agentGet(base, token, "/api/studio/agent/songs", "other");
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body, [], "an unknown caller lists nothing");
+
+  const snapshot = await agentGet(base, token, `/api/studio/agent/songs/${songId}/snapshot`, "other");
+  assert.equal(snapshot.status, 404);
+
+  const command = await agentCommand(base, token, songId, {
+    cmd_id: "other-1",
+    command: "scene.add",
+    args: { id: "y", name: "Y" },
+    author: { id: "other", label: "Unknown caller" },
+  });
+  assert.equal(command.status, 404);
+
+  // The operator's own MCP session keeps its access.
+  const operator = await agentGet(base, token, "/api/studio/agent/songs", "mcp");
+  assert.equal(operator.status, 200);
+  assert.equal(operator.body.length, 1);
 });

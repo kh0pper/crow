@@ -77,6 +77,9 @@ const INTERNAL_TEXT = "Studio hit an internal error.";
  * @param {{kind?: string, id?: string}|null} actor
  * @returns {{kind: "agent", id: string, label: string}}
  */
+/** The author for a forwarded caller that is neither the operator nor a known bot: it sees no songs. */
+const OTHER_AUTHOR = Object.freeze({ kind: "agent", id: "other", label: "Unknown caller" });
+
 export function toAgentAuthor(actor) {
   if (actor && actor.kind === "bot" && typeof actor.id === "string" && actor.id !== "") {
     return { kind: "agent", id: `bot:${actor.id}`, label: `Bot ${actor.id}` };
@@ -262,8 +265,14 @@ export function createStudioServer({
    * @returns {{kind: "agent", id: string, label: string}}
    */
   function authorFor(extra) {
+    // A call that arrives carrying an actor the gateway forwarded (a peer
+    // instance, an unknown caller) is never the operator: it gets an author the
+    // agent API scopes to nothing. Only a call with no forwarded actor, from a
+    // process with no bot identity, is the operator's own MCP session.
+    const forwarded = extra && extra._meta && typeof extra._meta === "object" ? extra._meta["crow/actor"] : undefined;
+    const forwardedBot = forwarded && typeof forwarded === "object" && forwarded.kind === "bot";
     if (!actor || typeof actor.actorFromEnv !== "function" || typeof actor.resolveCallActor !== "function") {
-      return { ...MCP_AUTHOR };
+      return forwarded !== undefined && forwarded !== null && !forwardedBot ? { ...OTHER_AUTHOR } : { ...MCP_AUTHOR };
     }
     let resolved = null;
     try {
@@ -271,6 +280,8 @@ export function createStudioServer({
     } catch {
       resolved = null;
     }
+    if (resolved && resolved.kind === "bot") return toAgentAuthor(resolved);
+    if (forwarded !== undefined && forwarded !== null) return { ...OTHER_AUTHOR };
     return toAgentAuthor(resolved);
   }
 
