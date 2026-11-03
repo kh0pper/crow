@@ -24,7 +24,8 @@
  *
  * Every action is stateless-safe: each item carries a `nonce` (itemNonce) over the state the action
  * was drawn from, so the act route can refuse a tap made against a changed item with 409 stale and
- * send the operator a fresh summary instead of acting twice.
+ * send the operator a fresh summary instead of acting twice. That route re-reads the one item it was
+ * tapped on through findNeedsMeItem, which sees every item (not just the five the widget drew).
  *
  * The read never throws: a source that fails costs its own lines, never the summary.
  */
@@ -36,7 +37,7 @@ import { groupByLane, openDecision } from "../dashboard/panels/board/lanes.js";
 import { drawerHref, drawerHrefs } from "../board/card-link.js";
 import { getCurrentPlan } from "../board/plan-service.js";
 import { createHandoffStore } from "../voice/handoff-store.js";
-import { needsLaneCached } from "../for-you/morning.js";
+import { needsLaneCached, NEEDS_LINES } from "../for-you/morning.js";
 import { contactName } from "../../sharing/contact-display.js";
 import { t, fill } from "../dashboard/shared/i18n.js";
 
@@ -142,12 +143,27 @@ async function boardItem(tdb, card, { links, projectName, lang }) {
 }
 
 /**
+ * The Board's Needs-you lane read afresh: the same rule, order and size as needsLaneCached (morning.js)
+ * but without the process cache. The act route reads through this, because it must see the state it
+ * has just changed — the 45 s cache would hand back the very card it just answered.
+ */
+async function laneFresh(db, tdb) {
+  const rows = await laneRows(tdb, { all: true });
+  const defs = await defsFor(tdb, rows);
+  const lockMap = await lockMapFor(db, rows.map((r) => r.id));
+  const needs = groupByLane(rows, defs, lockMap).needs_you;
+  const top = await cardsByIds(tdb, needs.slice(0, NEEDS_LINES).map((r) => r.id));
+  return { total: needs.length, cards: needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean) };
+}
+
+/**
  * The Board's Needs-you lane, in the Board's own rank, as items. The lane comes through For You's
  * cache, which carries the lane's total and its first NEEDS_LINES cards (morning.js), so the board
  * source contributes at most that many items — the whole list is one tap away on more_href.
+ * `fresh` skips that cache (the act route's own reads).
  */
-async function boardItems(db, tdb, projects, key, lang) {
-  const lane = await needsLaneCached(db, tdb, key);
+async function boardItems(db, tdb, projects, key, lang, fresh = false) {
+  const lane = await (fresh ? laneFresh(db, tdb) : needsLaneCached(db, tdb, key));
   const cards = (lane && lane.cards) || [];
   if (!cards.length) return [];
   let links = new Map();
@@ -230,25 +246,11 @@ function isSnoozed(snoozed, key, now) {
 }
 
 /**
- * Everything the widget draws. `db` is crow.db, `tdb` an open tasks.db client (or null when there is
- * no store). `now` (ms) is the clock (expiry, snoozes, updated_at); `projects` are the live project
- * rows ({ id, slug, name }) the lane's key and names come from; `handoffStore` and `snoozed` are
- * injectable for tests. Items are ordered board rank → hand-offs → messages (newest first within
- * each), snoozed keys are left out, and the list is capped at NEEDS_ME_MAX — while `lock.count` is
- * the whole waiting count.
- *
- * @returns {Promise<{id: string, title: string, updated_at: string, state: "ok"|"empty"|"error",
- *   headline: string, items: object[], more_href: string, lock: {count: number, label: string},
- *   doing: string[]}>}
+ * Every item this widget draws, before snoozes and before the cap, in the order the summary lists
+ * them: board rank first, then hand-offs, then messages. `failed` counts the sources that could not
+ * be read (an all-clear is never claimed when all three failed).
  */
-export async function loadNeedsMe(db, tdb, {
-  now = Date.now(),
-  projects = [],
-  handoffStore,
-  snoozed = {},
-  lang = "en",
-  tasksDbPath = TASKS_DB,
-} = {}) {
+async function collectItems(db, tdb, { now, projects, handoffStore, lang, tasksDbPath, fresh = false }) {
   const list = Array.isArray(projects) ? projects : [];
   const store = handoffStore || createHandoffStore();
   let failed = 0;
@@ -256,7 +258,7 @@ export async function loadNeedsMe(db, tdb, {
   let board = [];
   if (tdb) {
     const key = `${tasksDbPath}|${[...new Set(list.map((p) => Number(p.id)))].sort((a, b) => a - b).join(",")}`;
-    try { board = await boardItems(db, tdb, list, key, lang); }
+    try { board = await boardItems(db, tdb, list, key, lang, fresh); }
     catch (err) { failed++; console.warn("[needs-me] board read failed:", err && err.message); }
   } else {
     failed++;
@@ -270,7 +272,52 @@ export async function loadNeedsMe(db, tdb, {
   try { messages = await messageItems(db, lang); }
   catch (err) { failed++; console.warn("[needs-me] message read failed:", err && err.message); }
 
-  const waiting = [...board, ...handoffs, ...messages].filter((it) => !isSnoozed(snoozed, it.key, now));
+  return { waiting: [...board, ...handoffs, ...messages], failed };
+}
+
+/**
+ * The item `key` as it is NOW — the act route's re-read, before it calls any service. The same three
+ * sources in the same order, before snoozes and before the cap, so a tap finds the item's current
+ * state (its nonce recomputed from it) even once it has moved out of the five the widget drew.
+ * null when no source draws it any more. `fresh` reads the Board lane without its process cache.
+ */
+export async function findNeedsMeItem(db, tdb, key, {
+  now = Date.now(),
+  projects = [],
+  handoffStore,
+  lang = "en",
+  tasksDbPath = TASKS_DB,
+  fresh = false,
+} = {}) {
+  if (typeof key !== "string" || !key) return null;
+  const { waiting } = await collectItems(db, tdb, { now, projects, handoffStore, lang, tasksDbPath, fresh });
+  return waiting.find((it) => it.key === key) || null;
+}
+
+/**
+ * Everything the widget draws. `db` is crow.db, `tdb` an open tasks.db client (or null when there is
+ * no store). `now` (ms) is the clock (expiry, snoozes, updated_at); `projects` are the live project
+ * rows ({ id, slug, name }) the lane's key and names come from; `handoffStore` and `snoozed` are
+ * injectable for tests. Items are ordered board rank → hand-offs → messages (newest first within
+ * each), snoozed keys are left out, and the list is capped at NEEDS_ME_MAX — while `lock.count` is
+ * the whole waiting count. `fresh` skips the Board lane's process cache (after an act, the summary it
+ * returns must not still show the item it just answered).
+ *
+ * @returns {Promise<{id: string, title: string, updated_at: string, state: "ok"|"empty"|"error",
+ *   headline: string, items: object[], more_href: string, lock: {count: number, label: string},
+ *   doing: string[]}>}
+ */
+export async function loadNeedsMe(db, tdb, {
+  now = Date.now(),
+  projects = [],
+  handoffStore,
+  snoozed = {},
+  lang = "en",
+  tasksDbPath = TASKS_DB,
+  fresh = false,
+} = {}) {
+  const { waiting: all, failed } = await collectItems(db, tdb, { now, projects, handoffStore, lang, tasksDbPath, fresh });
+  const waiting = all.filter((it) => !isSnoozed(snoozed, it.key, now));
   const items = waiting.slice(0, NEEDS_ME_MAX);
 
   let state = items.length ? "ok" : "empty";
