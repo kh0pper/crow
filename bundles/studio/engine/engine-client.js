@@ -3,11 +3,24 @@
  *
  * The engine is one AudioWorklet node whose processor hosts SunVox and the
  * sequencer (`studio-processor.js`). A worklet cannot `import`, so this file
- * glues four sources into ONE module and hands it to
+ * glues three sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + sunvox.js + sunvox_lib_loader.js + studio-processor.js
+ *     sequencer.js + sunvox.js + studio-processor.js
  *
+ * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
+ * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
+ * that instance's heap), so it can back only one engine per realm, while the
+ * processor needs one engine per track. It talks to the `_sv_*` exports
+ * directly instead.
+ *
+ * ## One engine per context
+ *
+ * `addModule()` registers the processor name on a context, and a context that
+ * has been given it cannot take it again. A second `create()` on the same
+ * context is therefore refused with a clear error instead of failing later
+ * inside `addModule()`: reuse the engine you already have.
+
  * In a browser that module is a `Blob` URL; in Node it is a file in
  * `os.tmpdir()`, because node-web-audio-api's `addModule()` takes a path (or an
  * http URL) and imports it. The sources come from `assetBase` (fetched, e.g.
@@ -29,17 +42,27 @@
  *
  * ## Ready
  *
- * The processor posts `{type:"ready"}` on its port once SunVox is initialised
- * (which is when the wasm binary has been compiled and `sv_init()` has
- * succeeded). `createStudioEngine()` resolves only then, so an offline render
- * that waits for it and then calls `startRendering()` renders a deterministic
+ * The processor posts `{type:"ready"}` on its port once the wasm binary has
+ * compiled. Each track's SunVox engine is created from that compiled module
+ * when the song arrives (one engine per track, see `studio-processor.js`), and
+ * `flush()` resolves only after that work is done, so an offline render that
+ * waits for both and then calls `startRendering()` renders a deterministic
  * number of frames after the engine came up.
  */
 (function () {
   "use strict";
 
   /** The files that make up the worklet module, in concatenation order. */
-  const SOURCE_FILES = ["sequencer.js", "sunvox.js", "sunvox_lib_loader.js", "studio-processor.js"];
+  const SOURCE_FILES = ["sequencer.js", "sunvox.js", "studio-processor.js"];
+
+  /**
+   * The audio contexts that already have the Studio processor registered. A
+   * WeakSet, so a discarded context is not kept alive by this bookkeeping.
+   */
+  const ENGINE_CONTEXTS = new WeakSet();
+
+  /** What a second `create()` on the same context is told. */
+  const ONE_ENGINE_ERROR = "StudioEngine: one engine per audio context; reuse the existing engine.";
 
   /** The wasm binary, passed to the processor as `processorOptions.wasmBinary`. */
   const WASM_FILE = "sunvox.wasm";
@@ -50,7 +73,7 @@
   /** How long to wait for the worklet to report ready. */
   const READY_TIMEOUT_MS = 20000;
 
-  /** A song can have at most this many SunVox tracks (one slot each). */
+  /** A song can have at most this many SunVox tracks (one engine each). */
   const MAX_TRACKS = 16;
 
   /** @returns {boolean} whether this script runs in Node rather than a browser. */
@@ -226,11 +249,12 @@
    * Build the engine's worklet module and wait for the engine to come up.
    *
    * @param {BaseAudioContext} context an AudioContext or OfflineAudioContext
-   * @param {{assetBase?: string, assetBytes?: object, readyTimeoutMs?: number}} options
+   * @param {{assetBase?: string, assetBytes?: object, readyTimeoutMs?: number,
+   *          testHooks?: boolean}} options
    *   `assetBase` is a URL prefix the engine files are fetched from;
    *   `assetBytes` is a map of file name → string/Uint8Array, which wins over
    *   `assetBase` for the names it holds (Node callers read the files
-   *   themselves)
+   *   themselves); `testHooks` arms the processor's test-only faults
    * @returns {Promise<{node: AudioWorkletNode,
    *                    setSong: function(object): void,
    *                    launchScene: function(string): void,
@@ -239,45 +263,54 @@
    *                    stopAll: function(): void,
    *                    play: function(): void,
    *                    stop: function(): void,
+   *                    flush: function(): Promise<void>,
    *                    onPosition: function(function): function,
+   *                    onError: function(function): function,
+   *                    throwForTest: function(): void,
    *                    dispose: function(): void}>}
    */
   async function createStudioEngine(context, options) {
     if (!context || !context.audioWorklet) throw new Error("StudioEngine: a context with audioWorklet is required");
     const opts = options || {};
 
+    if (ENGINE_CONTEXTS.has(context)) throw new Error(ONE_ENGINE_ERROR);
+
     const texts = [];
     for (const name of SOURCE_FILES) {
-      let text = await readText(name, opts);
-      // The vendored loader calls SunVoxLib() with no options as it is
-      // evaluated; in a worklet that starts a second, wasm-less engine (an
-      // uncaught "require is not defined" under Node, a failed fetch in a
-      // browser). The processor builds its own instance with the wasm bytes,
-      // so the eager call is neutralised in the composed module only; the
-      // vendored file itself stays byte-identical to upstream.
-      if (name === "sunvox_lib_loader.js") {
-        const eager = "var svlib = SunVoxLib();";
-        if (text.indexOf(eager) < 0) throw new Error("StudioEngine: unexpected sunvox_lib_loader.js (the eager SunVoxLib() call moved)");
-        text = text.replace(eager, "var svlib = null;");
-      }
-      texts.push(text);
+      texts.push(await readText(name, opts));
     }
     const wasmBinary = await readWasm(opts);
 
-    // One blank line and a semicolon between files: every one of them is a
-    // classic script that relies on its own final expression, and the SunVox
-    // glue in particular ends without a trailing semicolon.
-    await addEngineModule(context, texts.join("\n;\n"));
+    // Claimed synchronously before the registration (and checked again, since
+    // the reads above awaited), so two concurrent calls cannot both get as far
+    // as `addModule()` and a failure to read an asset does not leave the
+    // context unusable.
+    if (ENGINE_CONTEXTS.has(context)) throw new Error(ONE_ENGINE_ERROR);
+    ENGINE_CONTEXTS.add(context);
+
+    try {
+      // One blank line and a semicolon between files: every one of them is a
+      // classic script that relies on its own final expression, and the SunVox
+      // glue in particular ends without a trailing semicolon.
+      await addEngineModule(context, texts.join("\n;\n"));
+    } catch (error) {
+      // Nothing was registered, so a retry on this context is honest.
+      ENGINE_CONTEXTS.delete(context);
+      throw error;
+    }
 
     const Node = workletNodeClass();
     const node = new Node(context, PROCESSOR_NAME, {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: { wasmBinary: wasmBinary },
+      // `testHooks` is off unless a caller asks for it; it arms the processor's
+      // two test-only faults (see `throwForTest`).
+      processorOptions: { wasmBinary: wasmBinary, testHooks: opts.testHooks === true },
     });
 
     const listeners = new Set();
+    const errorListeners = new Set();
     const flushes = new Map();
     let flushSeq = 0;
     const post = (message) => node.port.postMessage(message);
@@ -316,10 +349,20 @@
         return;
       }
       // A failure after start-up (a device that cannot be built, a refused
-      // song) has no caller to throw to; it is reported loudly instead of
-      // stopping the audio thread.
-      if (message.type === "error" && typeof console !== "undefined" && typeof console.error === "function") {
-        console.error("StudioEngine: " + message.error);
+      // song) has no caller to throw to; it is handed to whoever registered an
+      // error listener and logged, instead of stopping the audio thread.
+      if (message.type === "error") {
+        const text = String(message.error);
+        for (const listener of errorListeners) {
+          try {
+            listener(text);
+          } catch {
+            /* one bad listener must not hide the failure from the others */
+          }
+        }
+        if (typeof console !== "undefined" && typeof console.error === "function") {
+          console.error("StudioEngine: " + text);
+        }
       }
     };
 
@@ -398,12 +441,40 @@
       },
 
       /**
+       * Follow the engine's failures (a device that could not be built, a song
+       * the processor refused, a fault it survived). They are also logged.
+       * @param {(text: string) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onError(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        errorListeners.add(listener);
+        return function unsubscribe() {
+          errorListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Test hook: ask the processor to throw inside its next `process()`, to
+       * prove the block body's guard reports once and goes silent instead of
+       * taking the host's audio thread down. Refused unless the engine was
+       * created with `{testHooks: true}`, because the processor ignores the
+       * message in that case and a silent no-op would be a lie.
+       * @returns {void}
+       */
+      throwForTest() {
+        if (opts.testHooks !== true) throw new Error("StudioEngine: test hooks are not enabled on this engine");
+        post({ type: "__throw" });
+      },
+
+      /**
        * Stop listening and leave the graph. The caller owns the context and the
        * node's connections; this only drops this client's port handler.
        * @returns {void}
        */
       dispose() {
         listeners.clear();
+        errorListeners.clear();
         node.port.onmessage = null;
       },
     };

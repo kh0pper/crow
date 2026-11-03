@@ -7,12 +7,20 @@
  * `bundles/studio/engine/engine-client.js`. Nothing here touches the real
  * `~/.crow`, and nothing is written outside a temp directory.
  *
- * Four checks, from the implementation plan:
+ * The checks, from the implementation plan:
  *   - a C4 on an Analog generator sounds, and its spectral peak is within 3 %
  *     of 261.6 Hz (this is what pins the MIDI → SunVox note offset);
  *   - a muted track renders silence;
- *   - a 17th track is refused at `setSong` (and 16 tracks — 16 SunVox slots —
- *     still render);
+ *   - a 17th track is refused at `setSong` (and 16 tracks still render);
+ *   - per-track gain is the document's dB: −6 dB halves the peak, and the
+ *     bottom of the range (−60 dB) is a level, not silence;
+ *   - a missing or non-finite `gain_db`/`pan` means 0 dB and centre, bit for
+ *     bit;
+ *   - one engine per audio context: a second `create()` on the same context is
+ *     refused without touching `addModule()`;
+ *   - a fault inside `process()` is reported once and the node goes silent
+ *     instead of throwing into the audio thread;
+ *   - a device that cannot be built is not retried on every `setSong`;
  *   - headless Chromium and Node render the same song bit-identically (one
  *     SHA-256 over the left+right float bytes). Gated like the other live
  *     tests: it skips without a browser unless CROW_REQUIRE_TEST_CHROME=1.
@@ -47,7 +55,6 @@ const { kWorkletRelease } = await import(pathToFileURL(SYMBOLS_FILE).href);
 const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
-  "sunvox_lib_loader.js": readFileSync(join(VENDOR_DIR, "sunvox_lib_loader.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
 };
@@ -119,6 +126,23 @@ async function releaseWorklet(context) {
   } catch {
     /* nothing to release */
   }
+}
+
+/** @param {number} ms @returns {Promise<void>} */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wait for something a worklet posts from another thread to arrive.
+ * @param {() => boolean} predicate
+ * @param {number} [ms]
+ * @returns {Promise<boolean>} whether it happened in time
+ */
+async function waitFor(predicate, ms = 2000) {
+  const deadline = Date.now() + ms;
+  while (!predicate() && Date.now() < deadline) await delay(10);
+  return predicate();
 }
 
 /** @returns {number} the largest absolute sample. */
@@ -279,6 +303,206 @@ test("17 tracks refused at setSong", async () => {
   }
 });
 
+test("constant-power pan puts a hard-panned track on one side only", async () => {
+  const notes = [{ t: 0, d: 1, p: 60, v: 80 }];
+  const leftOnly = await renderSong(makeSong({ notes: notes, track: { pan: -1 } }));
+  const rightOnly = await renderSong(makeSong({ notes: notes, track: { pan: 1 } }));
+  const centre = await renderSong(makeSong({ notes: notes }));
+
+  assert.ok(peakOf(leftOnly.left) > 0.01, `expected audio on the left, peak was ${peakOf(leftOnly.left)}`);
+  assert.ok(
+    peakOf(leftOnly.right) < 1e-9,
+    `pan \u22121 should leave the right channel empty, peak was ${peakOf(leftOnly.right)}`,
+  );
+  assert.ok(peakOf(rightOnly.right) > 0.01, `expected audio on the right, peak was ${peakOf(rightOnly.right)}`);
+  assert.ok(
+    peakOf(rightOnly.left) < 1e-9,
+    `pan +1 should leave the left channel empty, peak was ${peakOf(rightOnly.left)}`,
+  );
+
+  // Constant power: the hard-panned side carries the whole level, i.e. \u221a2
+  // times what the same track has on each side at the centre.
+  const ratio = peakOf(leftOnly.left) / peakOf(centre.left);
+  assert.ok(
+    Math.abs(ratio - Math.SQRT2) / Math.SQRT2 < 0.02,
+    `expected the hard-panned side to be \u221a2 times the centre peak, got ${ratio.toFixed(4)}`,
+  );
+});
+
+test("track gain −6 dB halves the peak (±2 %)", async () => {
+  const notes = [{ t: 0, d: 1, p: 60, v: 80 }];
+  const loud = await renderSong(makeSong({ notes: notes }));
+  const quiet = await renderSong(makeSong({ notes: notes, track: { gain_db: -6 } }));
+  const loudPeak = Math.max(peakOf(loud.left), peakOf(loud.right));
+  const quietPeak = Math.max(peakOf(quiet.left), peakOf(quiet.right));
+  assert.ok(loudPeak > 0.01, `the 0 dB render has to be audible, peak was ${loudPeak}`);
+  // A clipped reference says nothing about gain, so it must stay under full scale.
+  assert.ok(loudPeak < 0.99, `the 0 dB reference must not clip, peak was ${loudPeak}`);
+  const target = Math.pow(10, -6 / 20);
+  const ratio = quietPeak / loudPeak;
+  assert.ok(
+    Math.abs(ratio - target) / target < 0.02,
+    `expected a peak ratio of ${target.toFixed(4)} for −6 dB, got ${ratio.toFixed(4)}`,
+  );
+});
+
+test("−50 dB is not silent", async () => {
+  const notes = [{ t: 0, d: 1, p: 60, v: 80 }];
+  const reference = await renderSong(makeSong({ notes: notes }));
+  const quiet = await renderSong(makeSong({ notes: notes, track: { gain_db: -50 } }));
+  const floor = await renderSong(makeSong({ notes: notes, track: { gain_db: -60 } }));
+  const referencePeak = Math.max(peakOf(reference.left), peakOf(reference.right));
+  assert.ok(referencePeak > 0.01 && referencePeak < 0.99, `the reference peak was ${referencePeak}`);
+
+  const quietPeak = Math.max(peakOf(quiet.left), peakOf(quiet.right));
+  assert.ok(quietPeak > 1e-6, `expected −50 dB to still sound, peak was ${quietPeak}`);
+  const expected = referencePeak * Math.pow(10, -50 / 20);
+  assert.ok(
+    Math.abs(quietPeak - expected) / expected < 0.02,
+    `expected a −50 dB peak of ${expected}, got ${quietPeak}`,
+  );
+
+  // −60 dB is the bottom of the document's range, and it is still a level.
+  const floorPeak = Math.max(peakOf(floor.left), peakOf(floor.right));
+  assert.ok(floorPeak > 0, "−60 dB should not be silence");
+  const expectedFloor = referencePeak * Math.pow(10, -60 / 20);
+  assert.ok(
+    Math.abs(floorPeak - expectedFloor) / expectedFloor < 0.02,
+    `expected a −60 dB peak of ${expectedFloor}, got ${floorPeak}`,
+  );
+});
+
+test("missing or non-finite gain_db and pan are 0 dB and centre", async () => {
+  const notes = [{ t: 0, d: 1, p: 60, v: 80 }];
+  const reference = await renderSong(makeSong({ notes: notes }));
+
+  const missing = makeSong({ notes: notes });
+  delete missing.tracks[0].gain_db;
+  delete missing.tracks[0].pan;
+  const missingRender = await renderSong(missing);
+
+  const nonFinite = makeSong({ notes: notes, track: { gain_db: Number.NaN, pan: Number.POSITIVE_INFINITY } });
+  const nonFiniteRender = await renderSong(nonFinite);
+
+  const referenceHash = hashChannels(reference.left, reference.right);
+  assert.equal(
+    hashChannels(missingRender.left, missingRender.right),
+    referenceHash,
+    "a missing gain_db/pan should render exactly like 0 dB and centre",
+  );
+  assert.equal(
+    hashChannels(nonFiniteRender.left, nonFiniteRender.right),
+    referenceHash,
+    "a non-finite gain_db/pan should render exactly like 0 dB and centre",
+  );
+});
+
+test("a second engine on the same context is refused clearly", async () => {
+  const context = new OfflineAudioContext({ numberOfChannels: 2, length: 4800, sampleRate: SAMPLE_RATE });
+  const worklet = context.audioWorklet;
+  const original = worklet.addModule;
+  let added = 0;
+  let spied = false;
+  try {
+    worklet.addModule = function countingAddModule(...args) {
+      added += 1;
+      return original.apply(this, args);
+    };
+    spied = worklet.addModule !== original;
+  } catch {
+    spied = false;
+  }
+  assert.ok(spied, "this host's AudioWorklet should allow counting addModule() calls");
+
+  let engine = null;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    const afterFirst = added;
+    await assert.rejects(() => studioEngine.create(context, { assetBytes: ASSETS }), {
+      message: "StudioEngine: one engine per audio context; reuse the existing engine.",
+    });
+    if (spied) assert.equal(added, afterFirst, "the refused create must not call addModule");
+  } finally {
+    if (engine) engine.dispose();
+    await releaseWorklet(context);
+  }
+});
+
+test("a processor error is reported and the node goes silent instead of throwing", async () => {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(0.5 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  const errors = [];
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS, testHooks: true });
+    engine.onError((text) => errors.push(text));
+    engine.setSong(makeSong());
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    engine.throwForTest();
+    await engine.flush();
+
+    const buffer = await context.startRendering();
+    rendered = true;
+    const peak = Math.max(peakOf(buffer.getChannelData(0)), peakOf(buffer.getChannelData(1)));
+    assert.equal(peak, 0, `expected silence after the fault, peak was ${peak}`);
+
+    assert.ok(await waitFor(() => errors.length > 0), "expected the fault to be reported to the client");
+    await delay(100);
+    assert.equal(errors.length, 1, `expected exactly one report, got ${errors.length}: ${errors.join(" | ")}`);
+    assert.match(errors[0], /test hook/, `unexpected report: ${errors[0]}`);
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
+test("a device that fails to build is not retried until its type changes", async () => {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(0.5 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  const errors = [];
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS, testHooks: true });
+    engine.onError((text) => errors.push(text));
+
+    const broken = makeSong();
+    broken.tracks[0].device = { engine: "sunvox", type: "__fail_device", params: {} };
+    engine.setSong(broken);
+    await engine.flush();
+    assert.equal(errors.length, 1, `expected one report for the failed device, got ${errors.length}`);
+
+    // Same track id and same device type: the failure is remembered.
+    engine.setSong(broken);
+    await engine.flush();
+    assert.equal(errors.length, 1, "a failed device must not be retried on every setSong");
+
+    // A changed type is a new attempt, and this one builds and sounds.
+    engine.setSong(makeSong({ notes: [{ t: 0, d: 1, p: 60, v: 80 }] }));
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
+    const buffer = await context.startRendering();
+    rendered = true;
+    const peak = peakOf(buffer.getChannelData(0));
+    assert.ok(peak > 0.01, `the replaced device should sound, peak was ${peak}`);
+    assert.equal(errors.length, 1, "rebuilding with a working type must not report the old failure again");
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
 // --- the browser side -------------------------------------------------------
 
 /** The engine page: render the song, hash it, hand the hash back. */
@@ -316,7 +540,6 @@ const SERVED = {
   "/assets/engine-client.js": ["text/javascript; charset=utf-8", () => readFileSync(join(ENGINE_DIR, "engine-client.js"), "utf8")],
   "/assets/sequencer.js": ["text/javascript; charset=utf-8", () => ASSETS["sequencer.js"]],
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
-  "/assets/sunvox_lib_loader.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox_lib_loader.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
 };
