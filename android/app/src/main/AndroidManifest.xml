@@ -143,6 +143,21 @@
             android:name=".NeedsMeActionReceiver"
             android:exported="false" />
 
+        <!-- "Your bird" home-screen widget (widgets phase 3): your own bird, drawn on the phone from
+             the gateway's SVG. Exported for the launcher's APPWIDGET_UPDATE broadcast, like the
+             widget above; the tap is an ordinary MainActivity intent. -->
+        <receiver
+            android:name=".BirdWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_bird_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/bird_widget_info" />
+        </receiver>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

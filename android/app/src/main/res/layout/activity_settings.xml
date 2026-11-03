@@ -112,6 +112,37 @@
             android:textSize="14sp"
             android:layout_marginBottom="32dp" />
 
+        <!-- Home screen (widgets phase 3) -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/divider"
+            android:layout_marginBottom="24dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/widget_bird_pin"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/widget_bird_pin_hint"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/pinBirdButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/widget_bird_pin"
+            android:layout_marginBottom="32dp" />
+
         <!-- Save -->
         <View
             android:layout_width="match_parent"

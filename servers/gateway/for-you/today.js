@@ -20,6 +20,9 @@
  * whose every line is optional is never "broken".
  *
  *   loadToday(db, { crowHome, now, tz, lang, weather }) -> { calendar, move, ramble }
+ *   rambleState(db, { crowHome, now }) -> { installed, state }   the bird's own state, and whether
+ *       Ramble is here at all (routes/widgets.js's bird API needs the difference: no Ramble is
+ *       `no_ramble`, an empty read is not)
  *
  * Tests replace the two bundle reads with `_setTodaySeamsForTest({ calendar, ramble })`; passing null
  * restores the real reads. A seam stands in for the whole bundle (install check included), exactly as
@@ -166,17 +169,29 @@ async function moveToday(db, { crowHome, now, lang, weather }) {
 }
 
 async function rambleToday(db, { crowHome, now }) {
+  return (await rambleState(db, { crowHome, now })).state;
+}
+
+/**
+ * The Ramble state today's line reads (pet.js petState, steps.js stepsState), plus whether Ramble is on
+ * this instance at all — the widget API must tell "no Ramble" from "no bird yet", and only the install
+ * check can say which. `installed` is true whenever the bundle is installed (or a test's seam stands in
+ * for it, install check included); `state` is null when the read answered nothing. Never throws.
+ */
+export async function rambleState(db, { crowHome = resolveCrowHome(), now = Date.now() } = {}) {
   try {
-    if (!rambleSeam && (!db || !rambleInstalled(crowHome))) return null;
+    if (!rambleSeam && (!db || !rambleInstalled(crowHome))) return { installed: false, state: null };
     if (rambleSeam) {
       const state = await rambleSeam({ db, now });
-      return state || null;
+      return { installed: true, state: state || null };
     }
     const [pet, steps] = await Promise.all([
       bundleModule(crowHome, "ramble", "pet.js"),
       bundleModule(crowHome, "ramble", "steps.js"),
     ]);
-    if (!pet || !steps || typeof pet.petState !== "function" || typeof steps.stepsState !== "function") return null;
+    if (!pet || !steps || typeof pet.petState !== "function" || typeof steps.stepsState !== "function") {
+      return { installed: true, state: null };
+    }
     // The state the two routes READ — petState and stepsState — and not their side effects: the steps
     // route also calls touchHome (a write), which a page GET has no business doing. petState itself
     // does persist the bird's decay (the same idempotent UPDATE the pet route makes); that is the
@@ -185,16 +200,19 @@ async function rambleToday(db, { crowHome, now }) {
       pet.petState(db, { now }),
       steps.stepsState(db, { now }),
     ]);
-    if (!petState && !stepsState) return null;
+    if (!petState && !stepsState) return { installed: true, state: null };
     return {
-      mood: String((petState && petState.mood) || ""),
-      energy: num(petState && petState.energy),
-      max: num(petState && petState.energy_max),
-      steps: { today: num(stepsState && stepsState.steps), goal: num(stepsState && stepsState.goal) },
+      installed: true,
+      state: {
+        mood: String((petState && petState.mood) || ""),
+        energy: num(petState && petState.energy),
+        max: num(petState && petState.energy_max),
+        steps: { today: num(stepsState && stepsState.steps), goal: num(stepsState && stepsState.goal) },
+      },
     };
   } catch (err) {
     console.warn(`[today] Ramble lines omitted: ${err && err.message}`);
-    return null;
+    return { installed: true, state: null };
   }
 }
 

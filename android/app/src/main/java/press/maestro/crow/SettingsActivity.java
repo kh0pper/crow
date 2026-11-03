@@ -1,6 +1,7 @@
 package press.maestro.crow;
 
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
@@ -27,6 +28,7 @@ public class SettingsActivity extends AppCompatActivity {
     private Button testButton;
     private Button tailscaleButton;
     private Button saveButton;
+    private Button pinBirdButton;
     private androidx.appcompat.widget.SwitchCompat audioGuardSwitch;
 
     @Override
@@ -40,6 +42,7 @@ public class SettingsActivity extends AppCompatActivity {
         testButton = findViewById(R.id.testButton);
         tailscaleButton = findViewById(R.id.tailscaleButton);
         saveButton = findViewById(R.id.saveButton);
+        pinBirdButton = findViewById(R.id.pinBirdButton);
         audioGuardSwitch = findViewById(R.id.audioGuardSwitch);
 
         // Load saved URL
@@ -56,6 +59,26 @@ public class SettingsActivity extends AppCompatActivity {
         testButton.setOnClickListener(v -> testConnection());
         tailscaleButton.setOnClickListener(v -> handleTailscaleAction());
         saveButton.setOnClickListener(v -> saveSettings());
+        pinBirdButton.setOnClickListener(v -> pinBird());
+    }
+
+    /**
+     * "Add your bird to the home screen" (widgets phase 3): pin the bird the widget last cached — the
+     * same drawing, from the same SVG — as a launcher shortcut. With nothing cached yet (a fresh
+     * install, or no bird) the shortcut still pins, with the app icon, and the next refresh repaints it
+     * (BirdRefreshWorker calls BirdShortcut.update when the bird changes). The pin also starts the
+     * half-hourly bird refresh — BirdShortcut.requestPin does — so a pinned bird keeps updating with
+     * no widget on any home screen.
+     */
+    private void pinBird() {
+        Bitmap bird = BirdShortcut.iconBitmap(this);
+        if (BirdShortcut.requestPin(this, bird)) {
+            // The launcher pins the icon it was given; a refresh right away replaces the app-icon
+            // fallback with the real bird as soon as the gateway answers (BirdShortcut.update).
+            BirdWidgetProvider.refreshAll(this);
+            return;
+        }
+        Toast.makeText(this, R.string.widget_bird_pin_unsupported, Toast.LENGTH_SHORT).show();
     }
 
     private void updateTailscaleStatus() {

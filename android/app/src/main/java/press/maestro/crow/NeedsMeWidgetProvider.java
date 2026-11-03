@@ -224,8 +224,11 @@ public class NeedsMeWidgetProvider extends AppWidgetProvider {
      * Whether this widget id sits on a keyguard host. The widget info no longer asks for the keyguard
      * (android:widgetCategory="home_screen"), so this only ever answers yes for a host that ignored
      * that — and then the id is drawn as if the keyguard were up, never as a full view.
+     *
+     * Package-private because BirdWidgetProvider's lock rule is the same rule and must be the same
+     * code: the step count never reaches a keyguard host either.
      */
-    private static boolean drawsOnKeyguard(AppWidgetManager manager, int widgetId) {
+    static boolean drawsOnKeyguard(AppWidgetManager manager, int widgetId) {
         try {
             Bundle options = manager.getAppWidgetOptions(widgetId);
             return options != null

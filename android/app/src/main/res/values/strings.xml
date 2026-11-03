@@ -51,4 +51,19 @@
     <string name="widget_needs_me_sign_in">Open Crow to sign in</string>
     <string name="widget_needs_me_error">Couldn\'t load what needs you</string>
     <string name="widget_needs_me_see_all">See all</string>
+
+    <!-- "Your bird" home-screen widget + pinned shortcut (widgets phase 3) -->
+    <string name="widget_bird_label">Your bird</string>
+    <string name="widget_bird_sign_in">Open Crow to sign in</string>
+    <string name="widget_bird_error">Couldn\'t load your bird</string>
+    <string name="widget_bird_none">No bird yet \u2014 open Ramble</string>
+    <string name="widget_bird_steps">%1$d steps</string>
+    <string name="widget_bird_mood_happy">Happy</string>
+    <string name="widget_bird_mood_tired">Tired</string>
+    <string name="widget_bird_mood_alarmed">Alarmed</string>
+    <string name="widget_bird_shortcut_short">Your bird</string>
+    <string name="widget_bird_shortcut_long">Open your bird in Ramble</string>
+    <string name="widget_bird_pin">Add your bird to the home screen</string>
+    <string name="widget_bird_pin_hint">Pin your bird as a launcher shortcut, drawn from the bird you have now.</string>
+    <string name="widget_bird_pin_unsupported">This launcher doesn\'t support pinned shortcuts.</string>
 </resources>
