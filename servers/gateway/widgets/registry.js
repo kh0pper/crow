@@ -2,7 +2,8 @@
  * The widget registry (widgets phase 2, spec §7.3): the ONE ordered list of widgets a dashboard
  * page can draw as a grid cell.
  *
- * Each entry is `{ id, titleKey, section, sizes, defaultSize, pages, defaultOn, load(ctx), render(data, lang) }`:
+ * Each entry is `{ id, titleKey, section, sizes, defaultSize, pages, defaultOn, defaultPages,
+ * load(ctx), render(data, lang) }`:
  *
  *   id          the cell's identity in the page AND in the device's saved layout
  *               (`crow.widgets.layout.<page>`), so it must never change once shipped;
@@ -10,11 +11,18 @@
  *   section     the For You customize switch that offers it (null = always offered);
  *   sizes       every size the resize handle may cycle through, [w, h] in grid columns/rows;
  *   defaultSize the size a page draws it at before the device has a layout of its own;
- *   pages       the pages that offer it. Phase 2 is For You only: the generic page (widgets phase 2,
- *               Task 3) is not built yet, so NO entry lists "widgets" here;
- *   defaultOn   false = offered, but not part of the page's default layout (the weather, whose chip
+ *   pages       the pages that offer it ("for-you" and the generic /dashboard/widgets page). A page
+ *               may add any widget from "+ Add widget"; this list says where it is OFFERED at all;
+ *   defaultOn   false = offered, but not part of any page's default layout (the weather, whose chip
  *               already lives in For You's header). The server draws the cell hidden and the device
  *               may add it with "+ Add widget";
+ *   defaultPages an optional per-page override of `defaultOn`: the pages whose DEFAULT layout holds
+ *               this widget. Everywhere else it is offered but drawn hidden, so the same widget can
+ *               be the generic page's default while For You leaves it out (Today + Ramble), or For
+ *               You's default while the generic page leaves it out (Your morning and the rest);
+ *   pageSizes   an optional per-page default size ({ page: [w, h] }), for a widget that fills For
+ *               You's row but is half of the generic page's first screenful (What needs me). It must
+ *               be one of `sizes`; widgets/grid-html.js ignores anything else;
  *   load(ctx)   reads the data, or returns null when nothing came back (the grid draws the widget's
  *               own one-line error instead). A throw is the same as null;
  *   render      draws the widget from that data; "" means "nothing to show": no cell at all (the
@@ -28,16 +36,22 @@
  * `widgetsForPage` is the page's ordered offer: the page's entries, minus the widgets whose For You
  * customize switch is off (off now means "not offered", per the phase 2 plan; per-device removal is
  * the grid's job and never touches the server setting).
+ *
+ * Where each one starts out: For You's default layout is needs-me, morning, moves, listen, news (the
+ * weather offered, drawn hidden); the generic page's is needs-me and today (everything else offered
+ * from "+ Add widget"). `defaultPages`/`defaultOn` say which, and widgets/grid-html.js draws the rest
+ * hidden — a cell the page offers but this device has not put on it yet.
  */
 import { t } from "../dashboard/shared/i18n.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
 import {
-  morningHtml, movesHtml, listenHtml, newsHtml, needsMeWidgetHtml, weatherHtml,
+  morningHtml, movesHtml, listenHtml, newsHtml, needsMeWidgetHtml, weatherHtml, todayHtml,
 } from "../dashboard/panels/for-you/html.js";
 import { loadMorning } from "../for-you/morning.js";
 import { loadMoves } from "../for-you/moves.js";
 import { loadListen } from "../for-you/listen.js";
 import { loadNews } from "../for-you/news.js";
+import { loadToday } from "../for-you/today.js";
 
 const e = escapeHtml;
 
@@ -66,7 +80,9 @@ export const WIDGETS = Object.freeze([
     section: null,
     sizes: FULL_SIZES,
     defaultSize: [4, 2],
-    pages: ["for-you"],
+    // For You draws it across the whole row; the generic page puts it beside Today + Ramble.
+    pageSizes: { widgets: [2, 2] },
+    pages: ["for-you", "widgets"],
     defaultOn: true,
     load: (ctx) => ctx.needsMe(),
     render: (data, lang) => needsMeWidgetHtml(data || null, lang),
@@ -80,8 +96,9 @@ export const WIDGETS = Object.freeze([
     section: "morning",
     sizes: FULL_SIZES,
     defaultSize: [4, 2],
-    pages: ["for-you"],
-    defaultOn: true,
+    pages: ["for-you", "widgets"],
+    // For You's default; the generic page offers it from "+ Add widget" only.
+    defaultPages: ["for-you"],
     load: async (ctx) => loadMorning(ctx.db, { projects: await ctx.projects(), tz: ctx.tz, now: ctx.now }),
     render: (data, lang) => morningHtml(data, lang),
     errorHtml: (lang) => morningHtml({ error: true }, lang),
@@ -92,8 +109,8 @@ export const WIDGETS = Object.freeze([
     section: "moves",
     sizes: FULL_SIZES,
     defaultSize: [4, 2],
-    pages: ["for-you"],
-    defaultOn: true,
+    pages: ["for-you", "widgets"],
+    defaultPages: ["for-you"],
     // Ramble's card weighs the weather the header chip already loaded, so it waits for that read
     // (the same value, read once per request by the page's context).
     load: async (ctx) => loadMoves(ctx.db, {
@@ -107,8 +124,8 @@ export const WIDGETS = Object.freeze([
     section: "listen",
     sizes: FULL_SIZES,
     defaultSize: [4, 2],
-    pages: ["for-you"],
-    defaultOn: true,
+    pages: ["for-you", "widgets"],
+    defaultPages: ["for-you"],
     load: (ctx) => loadListen(ctx.db, { crowHome: ctx.crowHome, now: ctx.now }),
     render: (data, lang, opts) => listenHtml(data, lang, opts && opts.now ? opts.now : undefined),
   },
@@ -118,12 +135,29 @@ export const WIDGETS = Object.freeze([
     section: "news",
     sizes: FULL_SIZES,
     defaultSize: [4, 2],
-    pages: ["for-you"],
-    defaultOn: true,
+    pages: ["for-you", "widgets"],
+    defaultPages: ["for-you"],
     load: (ctx) => loadNews(ctx.db, { crowHome: ctx.crowHome, now: ctx.now }),
     render: (data, lang, opts) => newsHtml(data, lang, opts && opts.now ? opts.now : undefined),
     // News keeps its own error state (as it did before the grid), not the generic line.
     errorHtml: (lang) => newsHtml({ state: "error", stories: [], hidden: [] }, lang),
+  },
+  {
+    id: "today",
+    titleKey: "widgets.today.title",
+    section: null,
+    // Two lines of text, a half row, or the whole row: the card never asks for more height than its
+    // four short lines need, and the generic page puts it beside "What needs me".
+    sizes: Object.freeze([[2, 1], [2, 2], [4, 1]]),
+    defaultSize: [2, 2],
+    pages: ["for-you", "widgets"],
+    // The generic page's second default card (widgets phase 2, spec §2.2); For You keeps its own
+    // default layout, so the cell is offered there from "+ Add widget" only.
+    defaultPages: ["widgets"],
+    load: async (ctx) => loadToday(ctx.db, {
+      crowHome: ctx.crowHome, now: ctx.now, tz: ctx.tz, lang: ctx.lang, weather: await ctx.weather(),
+    }),
+    render: (data, lang, opts) => todayHtml(data, lang, opts && opts.now ? opts.now : undefined),
   },
   {
     id: "weather",
@@ -131,7 +165,7 @@ export const WIDGETS = Object.freeze([
     section: "weather",
     sizes: Object.freeze([[1, 1], [2, 1], [4, 1]]),
     defaultSize: [1, 1],
-    pages: ["for-you"],
+    pages: ["for-you", "widgets"],
     // For You's weather chip stays in the page header (For You v1, unchanged). The widget is the
     // same reading as a cell, so "+ Add widget" can put it on the grid on this device.
     defaultOn: false,

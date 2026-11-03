@@ -247,41 +247,45 @@ export function shellClientJs() {
       }
     })();
 
-    // ─── For You: the drag reveal (For You v1; drag reveal 2026-10-30) ───
-    // A left-to-right drag pulls For You in from the left, like the Pixel's
-    // Discover feed: the page and a For You panel beside it follow the finger
-    // 1:1. On release it lands on For You (past COMMIT of the width, or a
-    // flick) or springs back. On For You the mirror drag (right to left)
-    // pushes it back out: Back after a forward drag landed here (a one-time
-    // sessionStorage marker) or when the page before was a Crow page and the
-    // document came from this origin, else the Chat list.
+    // ─── For You: the drag reveal (For You v1; drag reveal 2026-10-30; the chain, widgets phase 2) ───
+    // A left-to-right drag pulls the page to the LEFT in from the left, like the Pixel's Discover
+    // feed: the page and the panel beside it follow the finger 1:1. The chain is
+    // [Widgets, For You, Chat or a project home], so the same drag that brings For You in over the
+    // Chat list brings Widgets in over For You, and the reverse drag (right to left) walks back one
+    // step. On release it lands on the next page in (past COMMIT of the width, or a flick) or springs
+    // back. On For You the mirror drag pushes it back out: Back after a forward drag landed here (a
+    // one-time sessionStorage marker) or when the page before was a Crow page and the document came
+    // from this origin, else the Chat list. On Widgets the mirror drag goes back one step, to For You.
     //
-    // Where: the Chat list (/dashboard/perch with no chat open) and a
-    // project's home (For You itself for the way back), at phone width (the
-    // bottom-bar layout), never on a chat or a canvas. It must not feel like
-    // the system Back gesture (a swipe in from either edge with a small
-    // chevron): it starts at least EDGE px in from the edge it moves away
-    // from, only after a deliberate sideways move (the axis lock: past SLOP
-    // px and AXIS times more sideways than up or down), the whole page moves,
-    // and the forward drag never calls history.back(). Never from a field, a
-    // box that scrolls sideways or a canvas/video/[data-no-swipe], or while a
-    // drawer, sheet or dialog is open; dropped when text is selected, when a
-    // text field on the page holds a draft (leaving would lose it), and on a
-    // paired kiosk display (its browser holds the kiosk's pairing token).
+    // Where: the Chat list (/dashboard/perch with no chat open), a project's home (For You itself for
+    // the way back) and For You (Widgets, reached through the page's own data-widgets-entry link), at
+    // phone width (the bottom-bar layout), never on a chat or a canvas. It must not feel like the
+    // system Back gesture (a swipe in from either edge with a small chevron): it starts at least EDGE
+    // px in from the edge it moves away from, only after a deliberate sideways move (the axis lock:
+    // past SLOP px and AXIS times more sideways than up or down), the whole page moves, and the
+    // forward drag never calls history.back(). Never from a field, a box that scrolls sideways or a
+    // canvas/video/[data-no-swipe], or while a drawer, sheet or dialog is open; dropped when text is
+    // selected, when a text field on the page holds a draft (leaving would lose it), and on a paired
+    // kiosk display (its browser holds the kiosk's pairing token). A gesture that starts inside a
+    // grid being edited (.wg-grid[data-editing]) never starts a reveal at all: that drag moves a
+    // widget (widgets/grid-client.js).
     // Vertical scrolling is untouched: .content-body is touch-action pan-y,
     // touchstart/end are passive, and the one non-passive touchmove listener
     // sits on an eligible page's .main-content and cancels moves only once a
-    // drag has locked. It exists only while the flag is on: the For You link
-    // (data-for-you-entry, rendered only then) is its target.
+    // drag has locked. On the Chat list and a project home it exists only while
+    // the flag is on, because the For You link (data-for-you-entry, rendered
+    // only then) is its forward target; on For You that target is the page's own
+    // widgets link (data-widgets-entry), and on Widgets the reverse drag needs
+    // no link at all.
     //
-    // The panel: For You's HTML is fetched once per page view on the first
+    // The panel: the page being pulled in is fetched once per page view on the first
     // eligible touch (once, success or not; a new render aborts it) and
     // parsed with DOMParser (nothing in it runs); scripts, frames, media,
     // dialogs and SVG animation are dropped, then ids, names, event
     // attributes, off-site URLs and any CSS that could load something
     // (url(, @import), and the copy goes into an inert panel. Until it
     // arrives the panel is a skeleton. On commit the page stays where the animation
-    // left it until Turbo renders For You, so nothing flashes. Transforms only,
+    // left it until Turbo renders the next page, so nothing flashes. Transforms only,
     // will-change while dragging, one rAF per frame; turbo:before-render tidies
     // anything a cached snapshot carried. With prefers-reduced-motion nothing
     // slides: the panel cross-fades in over the page instead.
@@ -290,7 +294,7 @@ export function shellClientJs() {
       var EDGE = 48, SLOP = 12, AXIS = 1.5, COMMIT = 0.35, FLICK = 0.5;
       var SETTLE_MS = 230, MIN_MS = 120, FADE_MS = 150, GIVE_UP_MS = 10000;
       var EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
-      var FY = '/dashboard/for-you', CHAT = '/dashboard/perch';
+      var FY = '/dashboard/for-you', WIDGETS = '/dashboard/widgets', CHAT = '/dashboard/perch';
       var PROJECT = /^\\/dashboard\\/project\\/[^\\/]+$/;
       var DROP = 'script,iframe,frame,frameset,object,embed,link,meta,base,template,noscript,audio,video,source,track,dialog,animate,set,animatemotion,animatetransform';
       var start = null, drag = null, busy = null, raf = 0;
@@ -309,12 +313,36 @@ export function shellClientJs() {
         return PROJECT.test(p);
       }
       function onForYou() { return location.pathname === FY && !/[?&]view=/.test(location.search || ''); }
+      // The generic widget page (widgets phase 2, Task 4) is one step further in, on the LEFT of For
+      // You: the chain the reveal walks is [Widgets, For You, Chat or a project home].
+      function onWidgets() { return location.pathname === WIDGETS; }
+      // For You's way in (the drawer's card, the mascot sheet), and For You's own way on to Widgets
+      // (an icon button in its header, rendered on the page itself).
       function entry() { return document.querySelector('a[data-for-you-entry]'); }
+      function widgetsEntry() { return document.querySelector('a[data-widgets-entry]'); }
+      // The page a forward drag would bring in, and the link that names it: For You from the Chat list
+      // or a project home, Widgets from For You. null where there is nowhere further in (and whenever
+      // the link is absent, which is how the flag-off chrome tells the reveal to stay put).
+      function forwardLink() {
+        if (surface()) return entry();
+        if (onForYou()) return widgetsEntry();
+        return null;
+      }
       // The link's href, only as a same-origin /dashboard/ path (else null).
-      function entryHref() {
-        var link = entry(), h = link ? String(link.getAttribute('href') || '') : '';
+      function hrefOf(link) {
+        var h = link ? String(link.getAttribute('href') || '') : '';
         return /^\\/dashboard\\//.test(h) && !/[\\s\\\\]/.test(h) ? h : null;
       }
+      // The link's own name for the skeleton: its text, else its aria-label (For You's Widgets link is
+      // an icon button, so the label is where its name is).
+      function nameOf(link) {
+        var text = link ? String(link.textContent || '').replace(/\\s+/g, ' ').trim() : '';
+        if (text) return text;
+        return link ? String(link.getAttribute('aria-label') || '').trim() : '';
+      }
+      // Whether this page is on the chain at all. The reverse drag needs no link (Widgets is always
+      // one step out from For You); the forward one is only offered where its link is.
+      function swipePage() { return !!(forwardLink() || onForYou() || onWidgets()); }
       // An open dialog, or a modal layer that is actually on screen. Some modal
       // layers live in every page, hidden by CSS until opened (Crow Talk's
       // overlay is display:none until .active): those must not count, or the
@@ -386,7 +414,8 @@ export function shellClientJs() {
       }
       function copyOf(doc) {
         var main = doc.querySelector('.main-content');
-        if (!main || !main.querySelector('[data-fy]')) return null; // not For You (a sign-in page, an error)
+        // Not the page being pulled in (a sign-in page, an error): the caller keeps the skeleton.
+        if (!main || !main.querySelector('[data-fy], [data-wg-page="widgets"]')) return null;
         var parts = [main, doc.querySelector('.shell-tabs')];
         var box = document.createElement('div');
         for (var i = 0; i < parts.length; i++) {
@@ -399,7 +428,7 @@ export function shellClientJs() {
       // At most one fetch per page view, success or not (a failure keeps the
       // skeleton); a new render aborts it.
       function prefetch() {
-        var href = entryHref();
+        var href = hrefOf(forwardLink());
         if (tried || !href || typeof fetch !== 'function' || typeof DOMParser !== 'function') return;
         tried = true;
         var g = gen;
@@ -428,8 +457,8 @@ export function shellClientJs() {
         var box = document.createElement('div');
         var main = document.createElement('main');
         main.className = 'main-content';
-        var link = entry();
-        var name = (link && String(link.textContent).trim()) || 'For You';
+        var link = forwardLink();
+        var name = nameOf(link) || 'For You';
         // For You has no tab, so its title shows on a line of its own.
         var head = chrome('.main-content > .content-header');
         if (head) {
@@ -490,9 +519,11 @@ export function shellClientJs() {
       // Late guards, checked when the drag would start to show.
       function ready() {
         if (overlayOpen() || selecting() || hasDraft()) return false;
-        if (start.dir < 0) return onForYou();
-        start.href = entryHref();
-        return surface() && !!start.href;
+        // While a widget grid is being edited the page never swipes, wherever the gesture started.
+        if (document.querySelector('.wg-grid[data-editing]')) return false;
+        if (start.dir < 0) return onForYou() || onWidgets();
+        start.href = hrefOf(forwardLink());
+        return !!start.href;
       }
       function lock(t) {
         var w = window.innerWidth || 0;
@@ -541,6 +572,9 @@ export function shellClientJs() {
       // the reverse drag consumes it and goes Back.
       var MARK = 'crow.forYou.dragFrom';
       function crowPath(v) { return typeof v === 'string' && /^\\/dashboard\\//.test(v) && v.indexOf(FY) !== 0 && !/[\\s\\\\]/.test(v); }
+      // The page a forward drag may leave the marker FROM: a Crow page other than For You (as before)
+      // or For You itself when the drag is walking on to Widgets.
+      function markable(v) { return crowPath(v) || v === FY; }
       function readMark() {
         try { var m = JSON.parse(window.sessionStorage.getItem(MARK) || 'null'); return m && typeof m === 'object' ? m : null; } catch (e) { return null; }
       }
@@ -553,19 +587,35 @@ export function shellClientJs() {
         if (at === m.to && !m.landed && Date.now() - m.at < GIVE_UP_MS) { m.landed = true; writeMark(m); }
         else if (at !== m.to || !m.landed) writeMark(null);
       }
-      function cameFromCrow() {
+      // The document came from this very origin (so history.back() cannot leave Crow).
+      function fromThisSite() {
         var ref = '';
         try { ref = document.referrer ? new URL(document.referrer).origin : ''; } catch (e) { ref = ''; }
+        return !!(ref && ref === location.origin);
+      }
+      function cameFromCrow() {
         return !!(prev && prev.indexOf('/dashboard/') === 0 && prev.indexOf(FY) !== 0 &&
-          ref && ref === location.origin && window.history && window.history.length > 1);
+          fromThisSite() && window.history && window.history.length > 1);
       }
       // Arrived: navigate, and keep the page where it is until the new one
       // renders. If it never does, put the page back.
       function land(d) {
         var m = d.dir < 0 ? readMark() : null;
         if (d.dir > 0) {
-          if (crowPath(here)) writeMark({ from: here, to: d.href, at: Date.now(), landed: false });
+          if (markable(here)) writeMark({ from: here, to: d.href, at: Date.now(), landed: false });
           go(d.href);
+        } else if (onWidgets()) {
+          // One step out of Widgets is For You — never out of Crow, so Back only when the page before
+          // this one really was For You (the marker a forward drag left, or the document's own
+          // referrer); otherwise a plain visit, which lands on For You all the same.
+          if (m && m.landed && m.to === here && m.from === FY) {
+            writeMark(null);
+            window.history.back();
+          } else if (prev === FY && fromThisSite() && window.history && window.history.length > 1) {
+            window.history.back();
+          } else {
+            go(FY);
+          }
         } else if (m && m.landed && m.to === here && crowPath(m.from)) {
           writeMark(null);
           window.history.back();
@@ -597,14 +647,24 @@ export function shellClientJs() {
         if (drag) { cancel(); return; } // a second finger mid-drag: spring back
         start = null;
         if (busy || !e.touches || e.touches.length !== 1 || kiosk() || !media('(max-width: 1023px)') || overlayOpen()) return;
-        var dir = surface() ? 1 : onForYou() ? -1 : 0;
-        if (!dir) return;
-        var t = e.touches[0], w = window.innerWidth || 0;
-        if (dir > 0 ? t.clientX < EDGE : t.clientX > w - EDGE) return;
+        // Which ways this page may go: in from the left where there is a page to pull in (For You from
+        // the Chat list or a project home, Widgets from For You), out to the left where there is one to
+        // go back to (For You, Widgets). For You has both. Which one a gesture is, is decided by the
+        // way the finger moves (move()), not here.
+        var canFwd = !!forwardLink(), canBack = onForYou() || onWidgets();
+        if (!canFwd && !canBack) return;
         var tgt = e.target;
         if (!tgt || !tgt.closest || !tgt.closest('.main-content') || blocked(tgt)) return;
-        start = { x: t.clientX, y: t.clientY, dir: dir };
-        if (dir > 0) prefetch();
+        // Edit mode (widgets phase 2, Task 4): a gesture that starts inside the grid being edited is
+        // a widget drag or a handle press, never a page swipe. The grid itself also stops its own
+        // touchstart from bubbling; this is the belt to that braces.
+        if (tgt.closest('.wg-grid[data-editing]')) return;
+        start = { x: e.touches[0].clientX, y: e.touches[0].clientY, dir: 0, canFwd: canFwd, canBack: canBack };
+        // The forward panel is fetched on the first eligible touch, so it is there (or on its way)
+        // by the time the axis lock decides: once per page view, whatever the gesture turns out to be.
+        // On For You that is one bounded render of Widgets per visit (each widget has its own
+        // timeout); fetching only at the forward lock would show the skeleton on every first swipe.
+        if (canFwd) prefetch();
       }
       function move(e) {
         if (!start) return;
@@ -614,7 +674,16 @@ export function shellClientJs() {
           var dx = t.clientX - start.x, dy = t.clientY - start.y;
           var ax = Math.abs(dx), ay = Math.abs(dy);
           if (ax > SLOP && ax > ay * AXIS) {
-            if (dx * start.dir < 0 || !ready() || !lock(t)) { start = null; return; }
+            // The direction the finger took picks the step: to the right pulls the page in from the
+            // left (only where there is one), to the left pushes this page out (likewise). A step
+            // this page does not have is not a swipe at all, and neither is one that starts within
+            // EDGE px of the edge it moves away from (that is the system Back gesture's).
+            var dir = dx > 0 ? (start.canFwd ? 1 : 0) : (start.canBack ? -1 : 0);
+            if (!dir) { start = null; return; }
+            var w = window.innerWidth || 0;
+            if (dir > 0 ? start.x < EDGE : start.x > w - EDGE) { start = null; return; }
+            start.dir = dir;
+            if (!ready() || !lock(t)) { start = null; return; }
           } else {
             if (ay > SLOP) start = null; // a scroll: hands off
             return;
@@ -644,7 +713,7 @@ export function shellClientJs() {
       // preview, the page we came from, and the touch wiring for this body.
       function setTouch() {
         var cb = document.querySelector('.content-body');
-        if (cb) cb.style.touchAction = entry() && (surface() || onForYou()) ? 'pan-y pinch-zoom' : '';
+        if (cb) cb.style.touchAction = swipePage() ? 'pan-y pinch-zoom' : '';
       }
       function visit() {
         gen++;
@@ -655,7 +724,7 @@ export function shellClientJs() {
         if (at !== here) { prev = here; here = at; }
         noteLanding(at);
         var p = location.pathname, main = document.querySelector('.main-content');
-        if (main && !main.__crowFyMove && entry() && (p === CHAT || p === FY || PROJECT.test(p))) {
+        if (main && !main.__crowFyMove && swipePage() && (p === CHAT || p === FY || p === WIDGETS || PROJECT.test(p))) {
           main.__crowFyMove = true;
           main.addEventListener('touchmove', move, { passive: false });
         }
