@@ -30,7 +30,7 @@
  */
 import { realpathSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
-import { checkComposeModel, parseByteSize, resolveHostPath, SERVICE_PRIV, sensitiveRoots, usesHostNetwork } from "../gateway/compose-guard.js";
+import { checkComposeModel, guardCtx, parseByteSize, resolveHostPath, SERVICE_PRIV, sensitiveRoots, usesHostNetwork } from "../gateway/compose-guard.js";
 
 export const MIN_OOM_SCORE_ADJ = 300;
 export const SAT_SAFE_CAPS = Object.freeze(new Set(["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "NET_BIND_SERVICE"]));
@@ -138,7 +138,8 @@ export function checkSatelliteCompose(model, { bundleDir, manifest, ctx }) {
   if (manifest?.privileged === true) return { valid: false, reason: "Not allowed on a small server: the extension declares privileged access" };
   const strict = { ...(manifest || {}), privileged: false, consent_required: false };
   delete strict.host_grants;
-  const shared = checkComposeModel(model, { bundleDir, manifest: strict, consentVerified: false, ctx });
+  // guardCtx adds the ownership seams (who owns an existing volume or compose project), as on crow.
+  const shared = checkComposeModel(model, { bundleDir, manifest: strict, consentVerified: false, ctx: guardCtx(ctx) });
   if (!shared.valid) return shared;
   return checkSatelliteComposeModel(model, { bundleDir, ctx });
 }
