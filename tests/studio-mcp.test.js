@@ -158,7 +158,7 @@ function textOf(result) {
     .join("\n");
 }
 
-test("every non-humanOnly command has exactly one tool and humanOnly ones have none", async () => {
+test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
   const { hub } = makeHub();
   const client = await connect({ hub, renderer: makeRenderer().renderer });
   try {
@@ -166,14 +166,15 @@ test("every non-humanOnly command has exactly one tool and humanOnly ones have n
     for (const command of listCommands()) {
       const expected = `studio_${command.id.replace(/\./g, "_")}`;
       const count = names.filter((name) => name === expected).length;
-      if (command.humanOnly) {
-        assert.equal(count, 0, `${expected} should not exist: ${command.id} is people-only`);
+      if (command.humanOnly || command.internal) {
+        assert.equal(count, 0, `${expected} should not exist: ${command.id} is people-only or Studio's own`);
       } else {
         assert.equal(count, 1, `${expected} should be exposed exactly once for ${command.id}`);
       }
     }
     assert.ok(names.includes("studio_clip_write"), "the clip writer should be a tool");
     assert.ok(!names.includes("studio_track_lock"), "a people-only command must not be a tool");
+    assert.ok(!names.includes("studio_take_add"), "a take is Studio's own step, so it must not be a tool");
   } finally {
     await client.close();
   }

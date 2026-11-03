@@ -8,8 +8,10 @@
  * per step, undone through `history.js`. Nothing here touches a database or a
  * running instance.
  *
- * Part 2 of Task 1 (the internal registry field, the hub's refusals and the
- * agent take-loss guard) is not covered here.
+ * The hub side of Task 1 — the `internal` refusal, the agent take-loss guard and
+ * the MCP/GUI surface — needs the real hub and a scratch database, so those
+ * tests live in `tests/studio-hub.test.js`, `tests/studio-parity.test.js` and
+ * `tests/studio-mcp.test.js`.
  */
 
 import { test } from "node:test";

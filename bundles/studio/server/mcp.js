@@ -25,8 +25,11 @@
  *
  * ## The three kinds of tool
  *
- *   - one per non-humanOnly registry command, `studio_` + the id with dots
- *     turned into underscores (`studio_clip_write`), input `{song_id, ...args}`;
+ *   - one per public, non-humanOnly registry command, `studio_` + the id with
+ *     dots turned into underscores (`studio_clip_write`), input
+ *     `{song_id, ...args}`. A command marked `internal` is Studio's own —
+ *     `take.add` is issued by the gateway's upload finish route — so it gets no
+ *     tool at all;
  *   - the song and history reads and the history steps that are not commands
  *     (list/create/summary/get_clip/history/undo/redo);
  *   - the two tools that answer questions about the engine instead of editing
@@ -47,6 +50,8 @@ import { z } from "zod";
 import { listCommands } from "./commands/registry.js";
 // Registering the 1a commands is a side effect of importing them.
 import "./commands/core.js";
+// The 1b take commands, registered the same way.
+import "./commands/takes.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
@@ -287,7 +292,7 @@ export function createStudioServer({
 
   // ---- one tool per registry command the agent may run --------------------
 
-  for (const command of listCommands()) {
+  for (const command of listCommands({ public: true })) {
     if (command.humanOnly) continue;
     const name = `studio_${command.id.replace(/\./g, "_")}`;
     server.registerTool(

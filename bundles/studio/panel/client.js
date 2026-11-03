@@ -67,6 +67,10 @@
  * rule, and the source of the `var COMMANDS = [...]` line in the script. A
  * registry id missing here, or an id here the registry does not know, is a bug
  * (tests/studio-parity.test.js checks both directions).
+ *
+ * The take commands follow the 1a ones. `take.add` is not here because a take
+ * is never something the GUI sends: the gateway's upload finish route adds it
+ * as Studio's own step once the WAV is in storage.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -87,6 +91,12 @@ export const COMMANDS = Object.freeze([
   "clip.set_length",
   "clip.rename",
   "clip.remove",
+  "take.discard",
+  "take.restore",
+  "take.keep",
+  "take.set_offset",
+  "clip.set_comp",
+  "clip.add_audio",
 ]);
 
 /** The `var COMMANDS = [...]` declaration, built from the one list above. */

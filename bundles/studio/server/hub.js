@@ -28,9 +28,16 @@
  *   {ok: true, entry, conflicts, snapshot_version} an undo or a redo applied
  *   {ok: false, code, error, conflicts?}           a refusal
  *
- * `code` is one of "acl", "human_only", "locked", "focused", "limit",
- * "invalid", "conflict", "storage" or "not_found".
+ * `code` is one of "acl", "human_only", "internal", "locked", "focused",
+ * "limit", "invalid", "conflict", "storage" or "not_found".
  *
+ * Two of those rules are about recordings, which cannot be made again:
+ *   - a command marked `internal` (only `take.add` today) is refused with
+ *     "internal" unless the call says it comes from Studio, so the WS path,
+ *     the agent HTTP API and MCP cannot issue one;
+ *   - a step — a command, an undo or a redo — that would delete a take the
+ *     song still holds is refused for anyone but the operator, with
+ *     "human_only" and a sentence asking for the operator's yes. *
  * "storage" is the one refusal that has to undo something: the edit was
  * already applied to the live document when the write failed, so the hub drops
  * its cached document for that song and the next operation rebuilds it from the
@@ -55,6 +62,8 @@ import {
 // The registry is populated by importing the commands for their side effect,
 // so a hub started on its own always has every 1a command available.
 import "./commands/core.js";
+// The 1b take commands, registered the same way.
+import "./commands/takes.js";
 import {
   REDO_COMMAND,
   UNDO_COMMAND,
@@ -102,6 +111,20 @@ const MAX_UNDO_HOPS = 64;
 
 /** What a caller is told when the store could not take a step. */
 const SAVE_FAILED = "Studio could not save that change; nothing was changed.";
+
+/** What a caller is told when it runs a command only Studio itself may run. */
+const INTERNAL_ONLY = "This command can only be run by Studio itself.";
+
+/**
+ * What an agent is told when a step would drop a recorded take.
+ *
+ * A take is the one thing in a song that cannot be made again, so losing one
+ * needs the operator's own yes (spec §5.10 and §12).
+ */
+const TAKES_NEED_A_YES = "Removing recorded takes needs a yes from the operator.";
+
+/** The ref kinds a step can lose a recorded take through. */
+const TAKE_BEARING_KINDS = Object.freeze(["take", "clip", "track", "scene"]);
 
 /** What a caller is told when a `cmd_id` comes back for a different change. */
 const CMD_ID_REUSED = "That command id was already used for a different change.";
@@ -259,6 +282,96 @@ function planTrackIds(snap, refs, plan, target) {
     for (const [key, value] of Object.entries(map)) noteTrackEntry(found, key, value);
   }
   return found;
+}
+
+/**
+ * The `"<ref>|<field>"` writes of one change set, as pairs.
+ *
+ * A command hands its changes back as a plain object, a history plan keeps its
+ * writes in a Map in the order `applyPlan` takes them; both are read the same
+ * way here, and an empty or missing change set is no writes at all.
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes
+ * @returns {Array<[string, any]>}
+ */
+function changeEntries(changes) {
+  if (changes instanceof Map) return [...changes.entries()];
+  if (changes && typeof changes === "object") return Object.entries(changes);
+  return [];
+}
+
+/**
+ * The first recorded take a set of writes would delete, or null.
+ *
+ * A take leaves a song through exactly one kind of write: its whole object
+ * (`"take:<id>|*"`) set to `null`, which is how doc.js spells "it does not
+ * exist". A take the song no longer holds is not a loss, and neither is one
+ * that is already discarded: it has a flag rather than a recording that plays,
+ * and it comes back with `take.restore`.
+ * @param {Map<string, any>|Object<string, any>} changes - the writes the step makes
+ * @param {object} snap - the song as it is right now
+ * @returns {string|null} the id of the take the step would lose
+ */
+function removedLiveTake(changes, snap) {
+  for (const [key, value] of changeEntries(changes)) {
+    if (value !== null) continue;
+    const split = splitRefField(key);
+    if (!split || split.field !== "*") continue;
+    const target = parseObjectRef(split.ref);
+    if (target?.kind !== "take") continue;
+    const take = snap?.takes?.[target.id];
+    if (!take || take.discarded === true) continue;
+    return target.id;
+  }
+  return null;
+}
+
+/**
+ * Whether a step's writes are a recorded take coming back: the shape of taking
+ * a `take.discard` back, and the one people-only step an agent may undo.
+ *
+ * Restoring a take is an ordinary agent edit (`take.restore`), so undoing the
+ * operator's discard puts back exactly what an agent could have done itself.
+ * A write that discards (`"take:<id>|discarded"` → `true`), deletes a take, or
+ * writes no `discarded: false` at all is not this shape — so redoing a discard,
+ * or taking back the undo that restored it, stays people-only.
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes
+ * @returns {boolean}
+ */
+function onlyPutsTakesBack(changes) {
+  let restored = 0;
+  for (const [key, value] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    const target = split ? parseObjectRef(split.ref) : null;
+    // The clip's comp comes back with the segments the discard took out, so a
+    // write to another object is part of it; a take write is only this shape
+    // when it clears the flag.
+    if (target?.kind !== "take") continue;
+    if (split.field !== "discarded" || value !== false) return false;
+    restored += 1;
+  }
+  return restored > 0;
+}
+
+/**
+ * What one prepared command would change, worked out on a throwaway copy of the
+ * song so a rule can be checked before anything is written.
+ *
+ * The clone is the same dry run `history.js` makes of an undo, and a command
+ * is deterministic on the same content, so the before/after it returns here is
+ * exactly what `applyCommand` returns for the real document a moment later.
+ * @param {import("yjs").Doc} doc
+ * @param {{command: Readonly<object>, args: object, snap: object}} prepared
+ * @returns {{summary: string, before: Object<string, any>, after: Object<string, any>}}
+ * @throws {StudioError} the refusal the command itself would raise
+ */
+function previewChanges(doc, prepared) {
+  const clone = new Y.Doc();
+  try {
+    Y.applyUpdate(clone, Y.encodeStateAsUpdate(doc));
+    return applyCommand(clone, prepared);
+  } finally {
+    clone.destroy();
+  }
 }
 
 /**
@@ -725,6 +838,60 @@ export function createHub({
   }
 
   /**
+   * Refuse a command only Studio itself may run when the call did not say it
+   * comes from Studio.
+   *
+   * The definition is read straight from the registry: no ACL check, no
+   * document load and no history touch comes before this, so a caller that may
+   * not issue a take learns nothing about the song from trying.
+   * @param {string} command
+   * @param {boolean} internal - the call's own word on where it came from
+   * @returns {object|null} the refusal, or null when the command may run
+   */
+  function internalOnlyRefusal(command, internal) {
+    if (internal === true || !hasCommand(command)) return null;
+    return getCommand(command).internal === true ? refuse("internal", INTERNAL_ONLY) : null;
+  }
+
+  /**
+   * The agent take-loss guard: a step that would delete a take the song still
+   * holds has to come from the operator.
+   *
+   * A recording cannot be made again, so neither a command nor an undo or a
+   * redo may drop one on an agent's say-so — `clip.remove`, `track.remove` and
+   * `scene.remove` of a clip holding live takes, and the undo of `take.add`,
+   * all end here. Discarding a take is its own people-only command; a step that
+   * merely sets that flag, or puts a discarded take back, is not a loss and is
+   * allowed (see `removedLiveTake`).
+   * @param {{changes: Map<string, any>|Object<string, any>, snap: object,
+   *          author: object}} check - the writes the step makes, and the song
+   *   as it is now
+   * @returns {object|null} the refusal, or null when the step may run
+   */
+  function takeLossRefusal({ changes, snap, author }) {
+    if (author.kind === "human") return null;
+    return removedLiveTake(changes, snap) === null ? null : refuse("human_only", TAKES_NEED_A_YES);
+  }
+
+  /**
+   * Whether the take-loss guard has to look at what a command would write.
+   *
+   * False when nobody can lose anything (a person is calling, the song holds no
+   * take that is not discarded) and when the command names none of the objects
+   * a take hangs off. When it is true the step is previewed on a clone and
+   * `takeLossRefusal` decides on the writes themselves.
+   * @param {{touched: string[], snap: object}} prepared
+   * @param {object} author
+   * @returns {boolean}
+   */
+  function mayLoseTakes(prepared, author) {
+    if (author.kind === "human") return false;
+    const takes = Object.values(prepared.snap.takes ?? {});
+    if (!takes.some((take) => take.discarded !== true)) return false;
+    return prepared.touched.some((ref) => TAKE_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
+  }
+
+  /**
    * Apply the agent rules to one step: people-only commands, locked tracks, and
    * objects a human has open.
    * @param {{refs: string[], trackIds?: Set<string>|null, snap: object,
@@ -927,19 +1094,30 @@ export function createHub({
    * the ACL check, the lock and focus check against the document as it is
    * right now, the edit itself, and the persistence of its update and history
    * entry. A refusal writes nothing and broadcasts nothing.
-   * @param {{song_id: string, cmd_id?: string, command: string, args?: object, author: object}} request
+   *
+   * `internal` is the caller's word on where it came from, and only the gateway
+   * process itself says it: the WS handler, the agent HTTP API and the MCP
+   * command tool all call this function without it, so none of them can run a
+   * command only Studio may run (see `internalOnlyRefusal`).
+   * @param {{song_id: string, cmd_id?: string, command: string, args?: object,
+   *          author: object, internal?: boolean}} request
    * @returns {Promise<object>} see the module header for the shape
    */
   function runCommand(request) {
-    const { song_id, cmd_id = null, command, args, author } = request ?? {};
+    const { song_id, cmd_id = null, command, args, author, internal = false } = request ?? {};
     if (typeof song_id !== "string" || song_id === "") {
       return Promise.resolve(refuse("invalid", "A command needs the song it applies to."));
     }
-    return enqueue(song_id, () => runCommandNow({ song_id, cmd_id, command, args, author }));
+    return enqueue(song_id, () => runCommandNow({ song_id, cmd_id, command, args, author, internal }));
   }
 
   /** The body of `runCommand`, run inside the song's queue. */
-  async function runCommandNow({ song_id, cmd_id, command, args, author }) {
+  async function runCommandNow({ song_id, cmd_id, command, args, author, internal = false }) {
+    // Before the ACL, the document and the de-duplication table: a caller that
+    // may not run this command gets the same answer whatever is in the song.
+    const internalRefused = internalOnlyRefusal(command, internal);
+    if (internalRefused) return internalRefused;
+
     await ensureTables();
     const actor = normalizeAuthor(author);
     const key = dedupeKey("command", actor, cmd_id);
@@ -974,6 +1152,20 @@ export function createHub({
       commandId: prepared.command.id,
     });
     if (refused) return refused;
+
+    // A recorded take only goes if the operator says so. The step is previewed
+    // on a clone (nothing is written) and refused before the transaction below
+    // opens, so a refused step leaves both the song and its history untouched.
+    if (mayLoseTakes(prepared, actor)) {
+      let preview;
+      try {
+        preview = previewChanges(state.doc, prepared);
+      } catch (err) {
+        return toRefusal(err);
+      }
+      const lost = takeLossRefusal({ changes: preview.after, snap: prepared.snap, author: actor });
+      if (lost) return lost;
+    }
 
     // Capture the diff this one transaction produces: it is exactly the update
     // a client replays and the store keeps. A refusal inside applyCommand
@@ -1097,12 +1289,30 @@ export function createHub({
       return refuse("not_found", `There is no history step "${entry_id}" in this song.`);
     }
 
+    // The plan is worked out first, because the people-only rule below is
+    // decided by what the step writes (see `onlyPutsTakesBack`). Planning only
+    // reads the song — it dry-runs on a clone — so nothing is written by
+    // working it out, and a plan that could not be worked out is reported
+    // after the rule below has had its say.
+    let plan;
+    let planError = null;
+    try {
+      plan = kind === "undo" ? planUndo(state.doc, target) : planRedo(state.doc, target);
+    } catch (err) {
+      planError = err;
+    }
+
     // A people-only command stays people-only when it is taken back: undoing
     // the operator's unlock would let an agent lock the track it may not lock.
     // The rule follows the `undo_of` chain, so redoing a redo is refused just
     // as the first undo of it would be. A chain that cannot be followed to an
     // ordinary command — a missing `undo_of` row, or one that never ends —
     // could be hiding anything, so it is people-only too.
+    //
+    // The one exception is a step that puts a recorded take back: undoing the
+    // operator's discard is exactly what `take.restore` — an ordinary agent
+    // edit — does. It is the writes that say so, so redoing the discard, or
+    // taking back the undo that restored it, stays people-only.
     if (actor.kind !== "human") {
       const original = await originalCommandId(song_id, target);
       if (original === null) {
@@ -1112,19 +1322,17 @@ export function createHub({
         );
       }
       if (hasCommand(original) && getCommand(original).humanOnly) {
-        return refuse(
-          "human_only",
-          `Only a person can take back "${original}": it is a people-only command.`,
-        );
+        const putsTakesBack = kind === "undo" && onlyPutsTakesBack(plan?.apply);
+        if (!putsTakesBack) {
+          return refuse(
+            "human_only",
+            `Only a person can take back "${original}": it is a people-only command.`,
+          );
+        }
       }
     }
 
-    let plan;
-    try {
-      plan = kind === "undo" ? planUndo(state.doc, target) : planRedo(state.doc, target);
-    } catch (err) {
-      return toRefusal(err);
-    }
+    if (planError) return toRefusal(planError);
 
     // The history declines a plan it could not apply safely and says why: those
     // reasons are the answer, not "every change was edited again since".
@@ -1161,6 +1369,13 @@ export function createHub({
       author: actor,
     });
     if (refused) return refused;
+
+    // The guard a command meets, applied to what the plan writes: an undo or a
+    // redo may not drop a recorded take on an agent's say-so — undoing a
+    // `take.add` and redoing a `clip.remove` both end here. A plan only writes
+    // what its step changed, so a step that leaves the takes alone is untouched.
+    const lostTake = takeLossRefusal({ changes: plan.apply, snap, author: actor });
+    if (lostTake) return lostTake;
 
     const stateVector = Y.encodeStateVector(state.doc);
     try {

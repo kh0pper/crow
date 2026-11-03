@@ -316,7 +316,10 @@ const segmentSchema = z
 
 defineCommand({
   id: "take.add",
-  // part 2: internal
+  // Only the gateway's upload finish route issues this, through the hub with
+  // `internal: true`: a take is a recording, and nobody outside Studio may
+  // invent one.
+  internal: true,
   title: "Add a recorded take to an audio clip",
   schema: z
     .object({
@@ -328,7 +331,7 @@ defineCommand({
     return `Added a take to clip "${args.clip_id}"`;
   },
   touches(args, snap) {
-    const refs = [clipRef(args.clip_id), takeRef(args.take.id)];
+    const refs = [takeRef(args.take.id), clipRef(args.clip_id)];
     const clip = snap.clips[args.clip_id];
     if (clip) refs.push(trackRef(clip.track_id));
     return refs;
@@ -441,7 +444,7 @@ defineCommand({
   },
   touches(args, snap) {
     const clip = snap.clips[args.clip_id];
-    const refs = [takeRef(args.take_id), clipRef(args.clip_id)];
+    const refs = [clipRef(args.clip_id), takeRef(args.take_id)];
     if (clip) refs.push(trackRef(clip.track_id));
     return refs;
   },

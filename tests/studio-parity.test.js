@@ -8,6 +8,10 @@
  * that are not commands are the song/history/render/reference set listed below;
  * and the GUI's own command list is exactly the registry, in both directions.
  *
+ * Commands Studio issues itself (`internal`, today only `take.add`) are exempt
+ * from both halves: nobody outside the gateway process may run one, so it is
+ * neither a tool nor a GUI command — the last test here holds that.
+ *
  * The catalogue test loads the vendored WASM engine in Node and asks it, which
  * is the only way to know the catalogue the agent reads is the real one: it
  * asserts the Analog generator is there with at least one controller. It does
@@ -93,7 +97,7 @@ async function toolNames() {
   }
 }
 
-test("every non-humanOnly command has exactly one tool and humanOnly ones have none", async () => {
+test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
   const names = await toolNames();
   const commands = listCommands();
   assert.ok(commands.length > 0, "the registry should be populated (commands/core.js is imported)");
@@ -101,8 +105,8 @@ test("every non-humanOnly command has exactly one tool and humanOnly ones have n
   for (const command of commands) {
     const expected = toolNameOf(command.id);
     const count = names.filter((name) => name === expected).length;
-    if (command.humanOnly) {
-      assert.equal(count, 0, `${expected} exists, but "${command.id}" is people-only`);
+    if (command.humanOnly || command.internal) {
+      assert.equal(count, 0, `${expected} exists, but "${command.id}" is people-only or Studio's own`);
     } else {
       assert.equal(count, 1, `${expected} should exist exactly once for "${command.id}"`);
     }
@@ -112,7 +116,7 @@ test("every non-humanOnly command has exactly one tool and humanOnly ones have n
 test("every MCP tool maps to a registry command or to the documented song/history/render set", async () => {
   const names = await toolNames();
   const commandTools = new Set(
-    listCommands()
+    listCommands({ public: true })
       .filter((command) => !command.humanOnly)
       .map((command) => toolNameOf(command.id)),
   );
@@ -161,13 +165,42 @@ function panelCommandIds() {
   return [...match[1].matchAll(/'([^']+)'/g)].map((found) => found[1]);
 }
 
-test("every registry command id appears in panel/client.js COMMANDS list and vice versa", () => {
+test("every public registry command id appears in panel/client.js COMMANDS list and vice versa", () => {
   const listed = panelCommandIds();
   assert.equal(listed.length, new Set(listed).size, `the panel lists a command twice: ${listed.join(", ")}`);
 
-  const registry = listCommands().map((command) => command.id).sort();
+  const registry = listCommands({ public: true }).map((command) => command.id).sort();
   assert.deepEqual([...listed].sort(), registry, "the GUI's command list and the registry are the same set");
 
   // The module export and the script's own declaration cannot drift apart.
-  assert.deepEqual([...COMMANDS].sort(), registry, "the exported COMMANDS is the registry");
+  assert.deepEqual([...COMMANDS].sort(), registry, "the exported COMMANDS is the public registry");
+});
+
+test("internal commands are neither tools nor GUI commands", async () => {
+  const internal = listCommands().filter((command) => command.internal === true).map((command) => command.id);
+  assert.ok(internal.length > 0, "the registry should hold the commands only Studio itself runs");
+  assert.ok(internal.includes("take.add"), "take.add is Studio's own: only the upload finish route issues it");
+
+  // `listCommands({public: true})` is the outside world's list, and the plain
+  // call still lists everything (the gateway's finish route looks take.add up
+  // by id there).
+  const publicIds = listCommands({ public: true }).map((command) => command.id);
+  const allIds = listCommands().map((command) => command.id);
+  for (const id of internal) {
+    assert.equal(publicIds.includes(id), false, `${id} is internal and should not be public`);
+    assert.equal(allIds.includes(id), true, `${id} is still registered`);
+  }
+  assert.deepEqual(publicIds, allIds.filter((id) => !internal.includes(id)), "the public list is the rest");
+
+  const names = await toolNames();
+  for (const id of internal) {
+    assert.equal(names.includes(toolNameOf(id)), false, `${toolNameOf(id)} should not be an MCP tool`);
+  }
+  const listed = panelCommandIds();
+  for (const id of internal) {
+    assert.equal(listed.includes(id), false, `the panel should never send ${id}`);
+  }
+  assert.equal(toolNameOf("take.discard"), "studio_take_discard");
+  assert.equal(names.includes("studio_take_discard"), false, "take.discard is people-only, so no tool either");
+  assert.equal(names.includes("studio_take_keep"), true, "an agent may keep a take");
 });

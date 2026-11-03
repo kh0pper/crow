@@ -14,8 +14,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AclError } from "../servers/shared/project-acl.js";
 import { createHub } from "../bundles/studio/server/hub.js";
+import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { appendHistory, getSongRow } from "../bundles/studio/server/store.js";
 
@@ -222,6 +225,124 @@ async function rowCounts(db) {
     updates: Number(row.updates ?? 0),
     history: Number(row.history ?? 0),
   };
+}
+
+/** A take id in the UUID shape the recording client generates. */
+const TAKE_A = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
+
+/** A second take id, for the tests that need two recordings. */
+const TAKE_B = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d";
+
+/**
+ * The take object `take.add` accepts, as the gateway's upload finish route
+ * builds it after the WAV is in storage.
+ * @param {string} id
+ * @returns {object}
+ */
+function makeTake(id) {
+  return {
+    id,
+    storage_key: `studio/song/takes/${id}.wav`,
+    rate: 48000,
+    channels: 2,
+    frames: 48000,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 120,
+    recorded_at: "2026-11-02T12:00:00.000Z",
+    author_label: "the operator",
+    discarded: false,
+  };
+}
+
+/**
+ * Add an audio track and an audio clip to a seeded song, so a take has a clip
+ * to belong to.
+ * @param {object} hub
+ * @param {string} song_id
+ * @returns {Promise<{track_id: string, clip_id: string}>}
+ */
+async function seedAudioClip(hub, song_id) {
+  const track = await hub.runCommand({
+    song_id,
+    cmd_id: "seed-audio-track",
+    command: "track.add",
+    args: { id: "gtr", name: "Guitar", kind: "audio" },
+    author: HUMAN,
+  });
+  assert.equal(track.ok, true, `track.add was refused: ${track.error}`);
+
+  const clip = await hub.runCommand({
+    song_id,
+    cmd_id: "seed-audio-clip",
+    command: "clip.add_audio",
+    args: { clip_id: "gtr-take", track_id: "gtr", scene_id: "verse", length_bars: 2, name: "Guitar take" },
+    author: HUMAN,
+  });
+  assert.equal(clip.ok, true, `clip.add_audio was refused: ${clip.error}`);
+  return { track_id: "gtr", clip_id: "gtr-take" };
+}
+
+/**
+ * Add one take the way Studio itself does: `internal: true`, as the gateway's
+ * upload finish route issues it.
+ * @param {object} hub
+ * @param {string} song_id
+ * @param {string} clip_id
+ * @param {object} take
+ * @returns {Promise<object>} the applied step's result
+ */
+async function addTake(hub, song_id, clip_id, take) {
+  const added = await hub.runCommand({
+    song_id,
+    cmd_id: `add-take-${take.id}`,
+    command: "take.add",
+    args: { clip_id, take },
+    author: HUMAN,
+    internal: true,
+  });
+  assert.equal(added.ok, true, `take.add was refused: ${added.error}`);
+  return added;
+}
+
+/**
+ * The hub client the MCP server talks to, over the real hub in this test.
+ * @param {object} hub
+ * @returns {object}
+ */
+function hubClient(hub) {
+  return {
+    command: (song_id, request) => hub.runCommand({ song_id, ...request }),
+    snapshot: (song_id) => hub.openSong(song_id),
+    listSongs: (filter) => hub.listSongs(filter),
+  };
+}
+
+/**
+ * @param {object} hub
+ * @returns {Promise<string[]>} every tool an agent would see for this hub
+ */
+async function mcpToolNames(hub) {
+  const server = createStudioServer({
+    hub: hubClient(hub),
+    renderer: {
+      async render() {
+        throw new Error("this test does not render");
+      },
+    },
+    catalogue: async () => ({ modules: {} }),
+    env: {},
+  });
+  const client = new Client({ name: "studio-hub-test", version: "0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const listed = await client.listTools();
+    return listed.tools.map((tool) => tool.name);
+  } finally {
+    await client.close();
+  }
 }
 
 test("two commands race; both apply in arrival order and history seq is gapless", async (t) => {
@@ -1256,5 +1377,289 @@ test("an agent and the human reusing the same cmd_id do not collide", async (t) 
       author: HUMAN,
     }),
     human,
+  );
+});
+
+// --- The take rules (1b Task 1, part 2) -------------------------------------
+//
+// A recording is the one thing in a song that cannot be made again, so exactly
+// two doors lead to it: `take.add` is Studio's own step, closed to every caller
+// that does not say it comes from Studio, and a step that would drop a
+// recorded take needs the operator's yes.
+
+test("take.add is refused over WS, the agent HTTP API and MCP", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+  const { clip_id } = await seedAudioClip(hub, song_id);
+
+  // The WS handler (web.js `handleMessage`, msg.type "command") and the agent
+  // HTTP route (`POST ${AGENT}/songs/:id/command`) both call `hub.runCommand`
+  // with exactly these fields and no `internal` flag, so this is what a crafted
+  // socket frame and a crafted agent request both amount to.
+  for (const author of [HUMAN, AGENT]) {
+    const refused = refuses(
+      await hub.runCommand({
+        song_id,
+        cmd_id: `take-add-over-wire-${author.kind}`,
+        command: "take.add",
+        args: { clip_id, take: makeTake(TAKE_A) },
+        author,
+      }),
+      "internal",
+    );
+    assert.equal(refused.error, "This command can only be run by Studio itself.");
+  }
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.takes,
+    {},
+    "a refused take wrote nothing at all",
+  );
+
+  // MCP has no tool for it, and none for the people-only discard either.
+  const names = await mcpToolNames(hub);
+  assert.equal(names.includes("studio_take_add"), false, "take.add must not be an MCP tool");
+  assert.equal(names.includes("studio_take_discard"), false, "take.discard is people-only");
+  assert.equal(names.includes("studio_take_keep"), true, "an agent may keep a take");
+
+  // Studio's own step — the upload finish route — goes through.
+  const added = await addTake(hub, song_id, clip_id, makeTake(TAKE_A));
+  assert.equal(added.entry.command, "take.add");
+  const opened = await hub.openSong(song_id);
+  assert.equal(opened.snapshot.takes[TAKE_A].clip_id, clip_id);
+  assert.deepEqual(opened.snapshot.clips[clip_id].comp, [
+    { take_id: TAKE_A, from_beat: 0, to_beat: 8 },
+  ]);
+});
+
+test("agent take.discard is refused", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+  const { clip_id } = await seedAudioClip(hub, song_id);
+  await addTake(hub, song_id, clip_id, makeTake(TAKE_A));
+
+  const refused = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "discard-agent",
+      command: "take.discard",
+      args: { clip_id, take_id: TAKE_A },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.match(refused.error, /Only a person can run "take\.discard"/);
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.takes[TAKE_A].discarded,
+    false,
+    "the refused discard changed nothing",
+  );
+
+  const discarded = await hub.runCommand({
+    song_id,
+    cmd_id: "discard-human",
+    command: "take.discard",
+    args: { clip_id, take_id: TAKE_A },
+    author: HUMAN,
+  });
+  assert.equal(discarded.ok, true, `the operator's discard was refused: ${discarded.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.takes[TAKE_A].discarded, true);
+});
+
+test("agent clip.remove of a clip with takes is refused", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+  const { track_id, clip_id } = await seedAudioClip(hub, song_id);
+  await addTake(hub, song_id, clip_id, makeTake(TAKE_A));
+
+  // The take goes with its clip, so removing the clip would lose a recording.
+  const refused = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "clip-remove-agent",
+      command: "clip.remove",
+      args: { clip_id },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(refused.error, "Removing recorded takes needs a yes from the operator.");
+  const opened = await hub.openSong(song_id);
+  assert.ok(opened.snapshot.clips[clip_id], "the refused removal wrote nothing");
+  assert.ok(opened.snapshot.takes[TAKE_A]);
+
+  // The same guard covers the whole track and the whole scene.
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "track-remove-agent",
+      command: "track.remove",
+      args: { track_id },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "scene-remove-agent",
+      command: "scene.remove",
+      args: { scene_id: "verse" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.ok((await hub.openSong(song_id)).snapshot.takes[TAKE_A]);
+
+  // The operator's own removal goes through, and the undo brings the clip and
+  // its take back in one step.
+  const removed = await hub.runCommand({
+    song_id,
+    cmd_id: "clip-remove-human",
+    command: "clip.remove",
+    args: { clip_id },
+    author: HUMAN,
+  });
+  assert.equal(removed.ok, true, `the operator's removal was refused: ${removed.error}`);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.takes, {});
+  const back = await hub.undo({
+    song_id,
+    cmd_id: "clip-remove-undo",
+    entry_id: removed.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(back.ok, true, `the operator's undo was refused: ${back.error}`);
+  assert.ok((await hub.openSong(song_id)).snapshot.takes[TAKE_A]);
+
+  // A discarded take is not a recording that plays, so an agent may remove the
+  // clip that holds it.
+  const discarded = await hub.runCommand({
+    song_id,
+    cmd_id: "discard-before-remove",
+    command: "take.discard",
+    args: { clip_id, take_id: TAKE_A },
+    author: HUMAN,
+  });
+  assert.equal(discarded.ok, true, `the discard was refused: ${discarded.error}`);
+  const gone = await hub.runCommand({
+    song_id,
+    cmd_id: "clip-remove-discarded",
+    command: "clip.remove",
+    args: { clip_id },
+    author: AGENT,
+  });
+  assert.equal(gone.ok, true, `a clip of discarded takes should be removable: ${gone.error}`);
+});
+
+test("agent undo of take.add is refused", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+  const { clip_id } = await seedAudioClip(hub, song_id);
+  const added = await addTake(hub, song_id, clip_id, makeTake(TAKE_A));
+
+  // Undoing the recording would delete the take, which only the operator may
+  // decide.
+  const refused = refuses(
+    await hub.undo({ song_id, cmd_id: "undo-take-add-agent", entry_id: added.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refused.error, "Removing recorded takes needs a yes from the operator.");
+  assert.ok(
+    (await hub.openSong(song_id)).snapshot.takes[TAKE_A],
+    "the refused undo left the take where it was",
+  );
+
+  // The operator takes it back; an agent redoing that step puts the take back
+  // rather than taking one away, so it is allowed.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "undo-take-add-human",
+    entry_id: added.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.takes, {});
+
+  const redone = await hub.redo({
+    song_id,
+    cmd_id: "redo-take-add-agent",
+    entry_id: undone.entry.id,
+    author: AGENT,
+  });
+  assert.equal(redone.ok, true, `putting a take back should be an agent's step: ${redone.error}`);
+  assert.ok((await hub.openSong(song_id)).snapshot.takes[TAKE_A]);
+});
+
+test("agent undo of take.discard is allowed", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+  const { clip_id } = await seedAudioClip(hub, song_id);
+  await addTake(hub, song_id, clip_id, makeTake(TAKE_A));
+
+  const discarded = await hub.runCommand({
+    song_id,
+    cmd_id: "discard-for-undo",
+    command: "take.discard",
+    args: { clip_id, take_id: TAKE_A },
+    author: HUMAN,
+  });
+  assert.equal(discarded.ok, true, `the operator's discard was refused: ${discarded.error}`);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.clips[clip_id].comp, []);
+
+  // Taking the discard back puts the take and its comp segments back — exactly
+  // what `take.restore`, an ordinary agent edit, does — so an agent may.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "undo-discard-agent",
+    entry_id: discarded.entry.id,
+    author: AGENT,
+  });
+  assert.equal(undone.ok, true, `an agent's undo of a discard should be allowed: ${undone.error}`);
+  const restored = (await hub.openSong(song_id)).snapshot;
+  assert.equal(restored.takes[TAKE_A].discarded, false);
+  assert.deepEqual(restored.clips[clip_id].comp, [{ take_id: TAKE_A, from_beat: 0, to_beat: 8 }]);
+
+  // Discarding again is still people-only: a redo of the discard is refused,
+  // and so is taking back the undo that restored the take.
+  refuses(
+    await hub.redo({ song_id, cmd_id: "redo-discard-agent", entry_id: undone.entry.id, author: AGENT }),
+    "human_only",
+  );
+
+  const relDiscard = await hub.redo({
+    song_id,
+    cmd_id: "redo-discard-human",
+    entry_id: undone.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(relDiscard.ok, true, `the operator's redo was refused: ${relDiscard.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.takes[TAKE_A].discarded, true);
+
+  // An agent may put the take back however deep the chain goes, because a
+  // restore is a restore.
+  const restoredAgain = await hub.undo({
+    song_id,
+    cmd_id: "undo-redo-agent",
+    entry_id: relDiscard.entry.id,
+    author: AGENT,
+  });
+  assert.equal(restoredAgain.ok, true, `an undo that restores a take should be allowed: ${restoredAgain.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.takes[TAKE_A].discarded, false);
+
+  // Taking back that undo discards the take again, which is the people-only
+  // command itself, so it is refused.
+  const refusedLast = refuses(
+    await hub.undo({
+      song_id,
+      cmd_id: "undo-restore-agent",
+      entry_id: restoredAgain.entry.id,
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.match(refusedLast.error, /people-only/);
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.takes[TAKE_A].discarded,
+    false,
+    "the refused undo left the restore in place",
   );
 });
