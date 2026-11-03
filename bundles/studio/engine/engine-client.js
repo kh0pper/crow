@@ -122,8 +122,6 @@
   }
 
   /** A counter so two engines in one Node process never share a temp path. */
-  let tempFiles = 0;
-
   /**
    * Write the glue module to a temp file and return its path.
    *
@@ -137,16 +135,19 @@
     const fs = nodeRequire()("node:fs");
     const os = nodeRequire()("node:os");
     const path = nodeRequire()("node:path");
-    tempFiles += 1;
-    const file = path.join(os.tmpdir(), `studio-engine-${process.pid}-${tempFiles}.mjs`);
-    fs.writeFileSync(file, source, "utf8");
+    // A private 0700 directory per module and an exclusive 0600 create: a
+    // predictable name in the shared tmp dir could be pre-created or swapped
+    // by another local user, and this file is imported as code.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "studio-engine-"));
+    const file = path.join(dir, "engine.mjs");
+    fs.writeFileSync(file, source, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return {
       path: file,
       remove: function remove() {
         try {
-          fs.unlinkSync(file);
+          fs.rmSync(dir, { recursive: true, force: true });
         } catch {
-          /* the module is imported; a leftover file in tmp is harmless */
+          /* the module is imported; a leftover private dir in tmp is harmless */
         }
       },
     };
