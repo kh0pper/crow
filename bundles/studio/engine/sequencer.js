@@ -25,13 +25,39 @@
  * returns events carrying `frame` as an offset inside that block
  * (`0 <= frame < frames`), sorted by frame and, at one frame, offs before ons.
  *
+ * ## Sounding notes: the open set
+ *
+ * Every "on" this file emits registers an entry in an OPEN set, keyed by track
+ * and pitch, holding the frame its off is owed at. "off" events are emitted
+ * from that set and from nowhere else, so:
+ *
+ * - a note can never be released twice (the entry is removed when it is
+ *   emitted, when it is re-triggered, or when it is force-closed);
+ * - a note can never be left stuck: an entry is either reached by the block
+ *   that covers its own off frame, capped at its clip's loop end or its
+ *   segment's end, or closed by `reconcile()` when a state change makes it
+ *   invalid (its note deleted or moved, its clip removed or shortened, its
+ *   track removed, muted or out-soloed);
+ * - an off whose frame fell before the block being built — the transport was
+ *   stopped and then the host asked for a later block — is emitted at frame 0
+ *   of that block instead of being dropped.
+ *
+ * A re-trigger of a pitch that is still sounding emits its off at the same
+ * frame, before the new on (the sort below puts offs first). Two notes of one
+ * pitch starting on the very same frame cannot be told apart by an engine, so
+ * they share one on and one off.
+ *
+ * Forced offs (a state change, not a musical note end) are queued and emitted
+ * at frame 0 of the next block. A mutator is never called from inside
+ * `block()` in 1a, so that queue is always flushed by a later block.
+ *
  * ## Session view
  *
  * One clip sounds per track at a time. `launchClip` / `launchScene` /
  * `stopTrack` / `stopAll` are quantized to the next bar while the transport
- * runs, and take effect at the first bar when it does not. A launch replaces
- * the track's sounding clip at that boundary; the notes still sounding from
- * the replaced clip get their off at the boundary frame.
+ * runs, and take effect at the first bar when it does not. A launch closes the
+ * track's segment at that boundary; the notes still sounding from the replaced
+ * clip get their off there.
  *
  * A clip loops over `length_bars * 4` beats and a note crossing the loop end
  * is cut there. Notes are emitted only for tracks that are not muted and, when
@@ -41,6 +67,13 @@
  * current frame, the position goes back to 1.1.1, and the clips that were
  * sounding stay armed so `play()` starts them again from the transport's
  * beginning.
+ *
+ * ## Tempo
+ *
+ * A `setSong()` that changes the tempo rebases the transport so the playhead
+ * keeps its beat position: the beat under the playhead stays the same beat and
+ * every following note is re-mapped through beats. Launch boundaries are
+ * stored in beats, so a scheduled launch follows a tempo change too.
  *
  * ## Song shape
  *
@@ -63,6 +96,12 @@
 
   /** The rate a host that names none is assumed to run at. */
   const DEFAULT_SAMPLE_RATE = 48000;
+
+  /**
+   * Slack, in beats, for a beat compared against a frame position: small enough
+   * to be below one frame, large enough to survive the rounding.
+   */
+  const EPSILON_BEATS = 1e-9;
 
   /**
    * Create a sequencer for one host. One instance follows one song.
@@ -99,55 +138,92 @@
     let currentFrame = null; // absolute frame just past the last processed block
     let lastFrame = null; // absolute frame of the last processed frame
 
-    /** track id → [{clipId, startBeat, endBeat}] in beat order. */
+    /** track id → [{track_id, clipId, startBeat, endBeat}] in beat order. */
     const segments = new Map();
 
-    /** Offs owed to notes cut short by a stop or a clip switch. */
-    const pendingOffs = [];
+    /**
+     * The sounding notes, `track_id + ":" + p` → entry. An entry holds the note
+     * it was started from (so a later song can be checked against it), the
+     * segment and loop iteration that owns it, and the frame its off is owed.
+     */
+    const open = new Map();
+
+    /** Entries closed by a state change: owed an off at frame 0 of the next block. */
+    const forced = [];
+
+    /** The events of the block being built. Reused; a block allocates nothing. */
+    const events = [];
 
     // --- song ------------------------------------------------------------
 
     /**
-     * Replace the song. While the transport runs, clips that still exist keep
-     * playing and a clip the new snapshot no longer has stops at the next bar,
-     * with offs for its sounding notes. A tempo change re-maps beats to frames
-     * from `originFrame` on; the offs already queued for a boundary keep the
-     * frames they were computed at.
+     * Replace the song. The playhead keeps its beat position (a tempo change
+     * rebases the transport), segments whose clip the new song no longer has
+     * stop at once, and every sounding note that the new song makes invalid —
+     * deleted, moved, shortened, cut by a shorter clip, on a removed track, on
+     * a track that became inaudible — is closed at the current frame.
      * @param {object} snapshot the song as `doc.js`'s `snapshot()` returns it
      */
     function setSong(snapshot) {
       const next = readSong(snapshot);
 
-      if (playing && originFrame !== null) {
-        const boundary = launchBeat();
-        for (const entry of Array.from(segments.entries())) {
-          const trackId = entry[0];
-          const segs = entry[1];
-          const orphaned =
-            !next.trackIndex.has(trackId) || segs.some((seg) => seg.clipId !== null && !next.clips.has(seg.clipId));
-          if (orphaned) scheduleAt(trackId, null, boundary);
+      // Tempo first: everything below measures the playhead in beats, and the
+      // rebase is what keeps that measurement unchanged.
+      if (playing && originFrame !== null && next.framesPerBeat !== framesPerBeat) {
+        rebaseTempo(next.framesPerBeat);
+      }
+
+      for (const [trackId, segs] of segments) {
+        if (!next.trackIndex.has(trackId)) {
+          segments.delete(trackId);
+          continue;
         }
-      } else {
-        for (const entry of Array.from(segments.entries())) {
-          const trackId = entry[0];
-          const segs = entry[1];
-          if (!next.trackIndex.has(trackId)) {
-            segments.delete(trackId);
-            continue;
+        let kept = 0;
+        for (let at = 0; at < segs.length; at += 1) {
+          const seg = segs[at];
+          if (seg.clipId !== null) {
+            const clip = next.clips.get(seg.clipId);
+            // A clip that is gone, or that moved to another track, cannot keep
+            // sounding here; `reconcile` closes the notes the segment owed.
+            if (!clip || clip.track_id !== seg.track_id) continue;
           }
-          const kept = segs.filter((seg) => seg.clipId === null || next.clips.has(seg.clipId));
-          if (kept.length > 0) segments.set(trackId, kept);
-          else segments.delete(trackId);
+          segs[kept] = seg;
+          kept += 1;
         }
+        segs.length = kept;
+        if (kept === 0) segments.delete(trackId);
       }
 
       tracks = next.tracks;
       trackIndex = next.trackIndex;
       clips = next.clips;
       framesPerBeat = next.framesPerBeat;
+
+      reconcile(currentFrame === null ? 0 : currentFrame);
     }
 
-    /** @returns {{bpm: number, framesPerBeat: number, tracks: object[], trackIndex: Map, clips: Map}} */
+    /**
+     * Rebase the transport onto a new tempo: the beat under the playhead stays
+     * the same beat, which moves beat 0 to a new frame. Every open note keeps
+     * its off at the beat it was owed, re-mapped through the new tempo.
+     * @param {number} nextFramesPerBeat the new frames one beat lasts
+     */
+    function rebaseTempo(nextFramesPerBeat) {
+      const previousFramesPerBeat = framesPerBeat;
+      const frameNow = currentFrame === null ? (originFrame === null ? 0 : originFrame) : currentFrame;
+      const beatNow = Math.max(0, (frameNow - originFrame) / previousFramesPerBeat);
+
+      originFrame = frameNow - beatNow * nextFramesPerBeat;
+
+      for (const entry of open.values()) {
+        entry.offFrame = Math.round(originFrame + entry.offBeat * nextFramesPerBeat);
+      }
+    }
+
+    /**
+     * @param {object} snapshot the song in the shape the header documents
+     * @returns {{bpm: number, framesPerBeat: number, tracks: object[], trackIndex: Map, clips: Map}}
+     */
     function readSong(snapshot) {
       const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
       const meta = snap.meta && typeof snap.meta === "object" ? snap.meta : {};
@@ -173,7 +249,11 @@
       return { bpm: bpm, framesPerBeat: framesPerBeatFor(sampleRate, bpm), tracks: list, trackIndex: index, clips: byId };
     }
 
-    /** @returns {{id: string, track_id: string, scene_id: string, lengthBeats: number, notes: object[]}|null} */
+    /**
+     * Read one clip, dropping the notes that cannot sound and sorting the rest
+     * by `t` once — the block path only ever binary-searches this list.
+     * @returns {{id: string, track_id: string, scene_id: string, lengthBeats: number, notes: object[]}|null}
+     */
     function readClip(id, value) {
       if (!value || typeof value !== "object") return null;
       const bars = positive(value.length_bars);
@@ -193,6 +273,7 @@
         if (t < 0 || d <= 0 || t >= lengthBeats) continue;
         notes.push({ t: t, d: d, p: clamp(Math.round(p), 0, 127), v: clamp(Math.round(v), 1, 127) });
       }
+      notes.sort(byStartBeat);
 
       return {
         id: typeof value.id === "string" && value.id !== "" ? value.id : id,
@@ -218,6 +299,7 @@
         const clip = clipFor(track.id, sceneId);
         scheduleAt(track.id, clip ? clip.id : null, at);
       }
+      reconcile(frameNow());
     }
 
     /**
@@ -231,6 +313,7 @@
       if (!clip) return;
       if (!trackIndex.has(clip.track_id)) return;
       scheduleAt(clip.track_id, clip.id, launchBeat());
+      reconcile(frameNow());
     }
 
     /**
@@ -242,19 +325,24 @@
       const trackId = track_id === null || track_id === undefined ? "" : String(track_id);
       if (!trackIndex.has(trackId)) return;
       scheduleAt(trackId, null, launchBeat());
+      reconcile(frameNow());
     }
 
     /** Stop every track at the next bar, with offs for their sounding notes. */
     function stopAll() {
-      if (!playing) {
+      const at = launchBeat();
+      if (!playing || originFrame === null) {
+        forceCloseAll(frameNow());
         segments.clear();
         return;
       }
-      const at = launchBeat();
       for (const track of tracks) {
         if (!segments.has(track.id)) continue;
         scheduleAt(track.id, null, at);
       }
+      // A note whose segment was already gone still stops here.
+      for (const entry of open.values()) capOff(entry, at);
+      reconcile(frameNow());
     }
 
     /**
@@ -262,14 +350,11 @@
      * sounding, from beat 0. The position resets to 1.1.1.
      */
     function play() {
-      if (playing) {
-        pendingOffs.length = 0;
-        queueSoundingOffs();
-      }
       const keep = currentClips();
+      forceCloseAll(frameNow());
       segments.clear();
-      for (const entry of keep) {
-        segments.set(entry[0], [{ clipId: entry[1], startBeat: 0, endBeat: null }]);
+      for (const [trackId, clipId] of keep) {
+        segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
       }
       playing = true;
       originFrame = null;
@@ -283,12 +368,11 @@
      * for the next `play()`.
      */
     function stop() {
-      pendingOffs.length = 0;
-      queueSoundingOffs();
       const keep = currentClips();
+      forceCloseAll(frameNow());
       segments.clear();
-      for (const entry of keep) {
-        segments.set(entry[0], [{ clipId: entry[1], startBeat: 0, endBeat: null }]);
+      for (const [trackId, clipId] of keep) {
+        segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
       }
       playing = false;
       originFrame = null;
@@ -309,77 +393,95 @@
         if (segs[at].startBeat >= atBeat) segs.splice(at, 1);
       }
       const last = segs.length > 0 ? segs[segs.length - 1] : null;
-      if (last && (last.endBeat === null || last.endBeat > atBeat)) closeSegment(trackId, last, atBeat);
-      segs.push({ clipId: clipId === null ? null : String(clipId), startBeat: atBeat, endBeat: null });
+      if (last && (last.endBeat === null || last.endBeat > atBeat)) closeSegment(last, atBeat);
+      segs.push({
+        track_id: trackId,
+        clipId: clipId === null ? null : String(clipId),
+        startBeat: atBeat,
+        endBeat: null,
+      });
     }
 
-    /** End one segment at `atBeat`, queueing offs for what it still sounds. */
-    function closeSegment(trackId, seg, atBeat) {
+    /**
+     * End one segment at a beat: every note it still sounds is capped there,
+     * or closed at once when the boundary has already gone by.
+     * @param {object} seg the segment to end
+     * @param {number} atBeat
+     */
+    function closeSegment(seg, atBeat) {
       seg.endBeat = atBeat;
       if (!playing || originFrame === null) return;
-      if (seg.clipId === null) return;
-      if (!audible(trackId, anySoloed())) return;
-
-      const frame = beatToFrame(atBeat);
-      for (const note of soundingAt(seg.clipId, seg.startBeat, atBeat)) {
-        pendingOffs.push({ frame: frame, track_id: trackId, p: note.p, v: note.v });
-      }
-    }
-
-    /**
-     * Queue an off at the current frame for every note still sounding — the
-     * transport stopping, or restarting, cuts them all.
-     */
-    function queueSoundingOffs() {
-      if (!playing || originFrame === null || currentFrame === null) return;
-      const atFrame = currentFrame;
-      const atBeat = (atFrame - originFrame) / framesPerBeat;
-      const soloMode = anySoloed();
-
-      for (const entry of segments) {
-        const trackId = entry[0];
-        const segs = entry[1];
-        if (!audible(trackId, soloMode)) continue;
-        for (const seg of segs) {
-          if (seg.clipId === null) continue;
-          if (seg.startBeat > atBeat) continue;
-          if (seg.endBeat !== null && seg.endBeat <= atBeat) continue;
-          for (const note of soundingAt(seg.clipId, seg.startBeat, atBeat)) {
-            pendingOffs.push({ frame: atFrame, track_id: trackId, p: note.p, v: note.v });
-          }
-        }
-      }
-    }
-
-    /**
-     * The notes of one clip that are sounding at `atBeat`, in the loop
-     * iteration that covers it. A note is sounding when it started strictly
-     * before that beat and its off is at or after it.
-     * @param {string} clipId
-     * @param {number} segStartBeat
-     * @param {number} atBeat
-     * @returns {object[]} the clip's own note objects
-     */
-    function soundingAt(clipId, segStartBeat, atBeat) {
-      const clip = clips.get(clipId);
-      if (!clip || clip.lengthBeats <= 0) return [];
-
-      const length = clip.lengthBeats;
       const atFrame = beatToFrame(atBeat);
-      const rel = atBeat - segStartBeat;
-      const last = Math.floor(rel / length);
-      const first = Math.max(0, last - 1);
-      const out = [];
-
-      for (let loop = first; loop <= last; loop += 1) {
-        const loopStart = segStartBeat + loop * length;
-        for (const note of clip.notes) {
-          const onFrame = beatToFrame(loopStart + note.t);
-          const offFrame = beatToFrame(Math.min(loopStart + note.t + note.d, loopStart + length));
-          if (onFrame < atFrame && offFrame >= atFrame) out.push(note);
-        }
+      const now = frameNow();
+      for (const entry of open.values()) {
+        if (entry.seg !== seg) continue;
+        if (atFrame <= now) forceClose(entry, atFrame);
+        else capOff(entry, atBeat);
       }
-      return out;
+    }
+
+    /**
+     * The one check every state change runs: a sounding note survives only if
+     * the same clip still plays on its track, the note (`t`, `d`, `p`) is
+     * still in that clip, and the track is still audible. Survivors have their
+     * off re-derived from the song as it is now (a shorter clip or loop end
+     * may have moved it earlier); everything else is closed at `atFrame`.
+     * @param {number} atFrame the frame a closed note's off is owed at
+     */
+    function reconcile(atFrame) {
+      if (open.size === 0) return;
+      const soloMode = anySoloed();
+      const beat = currentBeat();
+
+      for (const entry of open.values()) {
+        const clip = clips.get(entry.clipId);
+        if (!stillSounding(entry, clip, soloMode, beat)) {
+          forceClose(entry, atFrame);
+          continue;
+        }
+
+        let offBeat = entry.loopStart + entry.t + entry.d;
+        const loopEnd = entry.loopStart + clip.lengthBeats;
+        if (loopEnd < offBeat) offBeat = loopEnd;
+        if (entry.seg.endBeat !== null && entry.seg.endBeat < offBeat) offBeat = entry.seg.endBeat;
+        entry.offBeat = offBeat;
+        entry.offFrame = beatToFrame(offBeat);
+
+        // A clip that got shorter can leave the note's whole tail behind the
+        // playhead; it stops where the playhead is.
+        if (entry.offFrame <= atFrame) forceClose(entry, atFrame);
+      }
+    }
+
+    /**
+     * @returns {boolean} whether a sounding note is still part of the song
+     */
+    function stillSounding(entry, clip, soloMode, beat) {
+      if (!clip || clip.lengthBeats <= 0) return false;
+      if (clip.track_id !== entry.track_id) return false;
+      if (!audible(entry.track_id, soloMode)) return false;
+
+      const seg = entry.seg;
+      if (seg.clipId !== entry.clipId) return false;
+      if (seg.startBeat > beat) return false;
+      if (seg.endBeat !== null && seg.endBeat <= beat) return false;
+
+      const segs = segments.get(entry.track_id);
+      if (!segs || segs.indexOf(seg) === -1) return false;
+
+      return hasNote(clip.notes, entry.t, entry.d, entry.p);
+    }
+
+    /**
+     * @returns {boolean} whether a clip still holds a note with these values
+     */
+    function hasNote(notes, t, d, p) {
+      for (let at = lowerBound(notes, t); at < notes.length; at += 1) {
+        const note = notes[at];
+        if (note.t !== t) return false;
+        if (note.d === d && note.p === p) return true;
+      }
+      return false;
     }
 
     /** @returns {number} the bar boundary a launch takes effect at, in beats. */
@@ -387,7 +489,17 @@
       if (!playing || originFrame === null) return 0;
       const beat = currentBeat();
       if (beat <= 0) return 0;
-      return Math.ceil(beat / BEATS_PER_BAR) * BEATS_PER_BAR;
+
+      // Found in frames, not in beats: at most tempos a bar is not a whole
+      // number of frames, so a position one frame past the rounded boundary
+      // still reads as slightly more than the bar and `ceil` would skip a
+      // whole bar. The frame at or after the boundary is the first with
+      // `round(x) >= frame`, i.e. `x >= frame - 0.5`.
+      const barFrames = BEATS_PER_BAR * framesPerBeat;
+      const bar = Math.max(1, Math.ceil((frameNow() - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
+      const at = bar * BEATS_PER_BAR;
+      // A boundary the next block has already passed is no boundary at all.
+      return beatToFrame(at) < frameNow() ? at + BEATS_PER_BAR : at;
     }
 
     // --- block -----------------------------------------------------------
@@ -410,41 +522,51 @@
         if (currentFrame === null || start > currentFrame) currentFrame = start;
       }
 
-      const events = emitBlock(start, count);
+      const out = emitBlock(start, count);
       currentFrame = start + count;
       lastFrame = start + count - 1;
-      return events;
+      return out;
     }
 
-    /** @returns {object[]} the events inside [frameStart, frameStart + frames). */
+    /**
+     * @returns {object[]} the events inside [frameStart, frameStart + frames)
+     */
     function emitBlock(frameStart, frames) {
-      const events = [];
+      events.length = 0;
       const frameEnd = frameStart + frames;
 
-      if (originFrame !== null) {
-        const beatStart = (frameStart - originFrame) / framesPerBeat;
-        const beatEnd = (frameEnd - originFrame) / framesPerBeat;
-        pruneSegments(beatStart);
+      emitForced();
+
+      if (playing && originFrame !== null) {
+        pruneEndedSegments(frameStart);
 
         const soloMode = anySoloed();
-        for (const entry of segments) {
-          const trackId = entry[0];
-          const segs = entry[1];
-          if (!audible(trackId, soloMode)) continue;
-          for (const seg of segs) {
+        const beatFrom = (frameStart - originFrame) / framesPerBeat;
+        const beatTo = (frameEnd - originFrame) / framesPerBeat;
+        // One frame, plus the epsilon: the window is in beats, the events in
+        // rounded frames, so the note search must look slightly wider.
+        const slack = 1 / framesPerBeat + EPSILON_BEATS;
+
+        for (const segs of segments.values()) {
+          if (segs.length === 0) continue;
+          if (!audible(segs[0].track_id, soloMode)) continue;
+
+          for (let at = 0; at < segs.length; at += 1) {
+            const seg = segs[at];
             if (seg.clipId === null) continue;
             const clip = clips.get(seg.clipId);
             if (!clip || clip.lengthBeats <= 0) continue;
 
-            const length = clip.lengthBeats;
             const segEndBeat = seg.endBeat === null ? Infinity : seg.endBeat;
-            const winStart = beatStart > seg.startBeat ? beatStart : seg.startBeat;
-            const winEnd = beatEnd < segEndBeat ? beatEnd : segEndBeat;
+            const segEndFrame = seg.endBeat === null ? Infinity : beatToFrame(seg.endBeat);
+            const winStart = beatFrom > seg.startBeat ? beatFrom : seg.startBeat;
+            const winEnd = beatTo < segEndBeat ? beatTo : segEndBeat;
             if (!(winEnd > winStart)) continue;
 
-            const segEndFrame = seg.endBeat === null ? Infinity : beatToFrame(seg.endBeat);
-            // One iteration either side of the window: the window is measured
-            // in beats and the events in rounded frames.
+            const length = clip.lengthBeats;
+            const notes = clip.notes;
+            // One loop iteration either side of the window: the window is
+            // measured in beats and the events in rounded frames.
             const first = Math.max(0, Math.floor((winStart - seg.startBeat) / length) - 1);
             const last = Math.floor((winEnd - seg.startBeat) / length) + 1;
 
@@ -452,53 +574,176 @@
               const loopStart = seg.startBeat + loop * length;
               if (loopStart >= segEndBeat) break;
               const loopEnd = loopStart + length;
+              const low = winStart - loopStart - slack;
+              const high = winEnd - loopStart + slack;
 
-              for (const note of clip.notes) {
-                if (loopStart + note.t >= segEndBeat) continue;
+              for (let index = lowerBound(notes, low); index < notes.length; index += 1) {
+                const note = notes[index];
+                if (note.t > high) break;
 
-                const onFrame = beatToFrame(loopStart + note.t);
-                if (onFrame >= frameStart && onFrame < frameEnd) {
-                  events.push({ frame: onFrame - frameStart, track_id: trackId, type: "on", p: note.p, v: note.v });
-                }
+                const onBeat = loopStart + note.t;
+                const onFrame = beatToFrame(onBeat);
+                if (onFrame < frameStart || onFrame >= frameEnd) continue;
+                // The same frame rule a segment's off uses, so a note that
+                // would start at the segment's last frame is not started.
+                if (onFrame >= segEndFrame) continue;
 
-                // A note crossing the loop end, or the segment's end, is cut
-                // there; an off exactly on the segment end is one of the
-                // queued offs instead, so it is never emitted twice.
-                const offFrame = beatToFrame(Math.min(loopEnd, loopStart + note.t + note.d));
-                if (offFrame < segEndFrame && offFrame >= frameStart && offFrame < frameEnd) {
-                  events.push({ frame: offFrame - frameStart, track_id: trackId, type: "off", p: note.p, v: note.v });
-                }
+                let offBeat = onBeat + note.d;
+                if (loopEnd < offBeat) offBeat = loopEnd;
+                if (segEndBeat < offBeat) offBeat = segEndBeat;
+                if (offBeat <= onBeat) continue;
+
+                startNote(seg.track_id, note, seg, loopStart, offBeat, onFrame, frameStart);
               }
             }
           }
         }
       }
 
-      // Offs queued for a stop or a switch land at their own frame, on the
-      // one block that covers it.
-      for (let at = pendingOffs.length - 1; at >= 0; at -= 1) {
-        const off = pendingOffs[at];
-        if (off.frame < frameStart) {
-          pendingOffs.splice(at, 1);
-          continue;
-        }
-        if (off.frame >= frameEnd) continue;
-        pendingOffs.splice(at, 1);
-        events.push({ frame: off.frame - frameStart, track_id: off.track_id, type: "off", p: off.p, v: off.v });
+      // Offs come from the open set alone. One that fell before this block was
+      // owed but not emitted yet — the transport was stopped, or the host
+      // skipped frames — so it is paid at frame 0 rather than dropped.
+      for (const entry of open.values()) {
+        if (entry.offFrame >= frameEnd) continue;
+        open.delete(entry.key);
+        events.push({
+          frame: entry.offFrame <= frameStart ? 0 : entry.offFrame - frameStart,
+          track_id: entry.track_id,
+          type: "off",
+          p: entry.p,
+          v: entry.v,
+        });
       }
 
       events.sort(compareEvents);
       return events;
     }
 
-    /** Drop segments that finished before this block: nothing reads them. */
-    function pruneSegments(beatStart) {
-      for (const entry of Array.from(segments.entries())) {
-        const trackId = entry[0];
-        const segs = entry[1];
-        const kept = segs.filter((seg) => seg.endBeat === null || seg.endBeat > beatStart);
-        if (kept.length === 0) segments.delete(trackId);
-        else if (kept.length !== segs.length) segments.set(trackId, kept);
+    /**
+     * Emit the offs a state change owes, at frame 0 of this block.
+     */
+    function emitForced() {
+      if (forced.length === 0) return;
+      for (const entry of forced) {
+        events.push({ frame: 0, track_id: entry.track_id, type: "off", p: entry.p, v: entry.v });
+      }
+      forced.length = 0;
+    }
+
+    /**
+     * Register one sounding note and emit its on. A pitch that is still open
+     * on this track is released first, at this frame — unless it was struck at
+     * this very frame, in which case the two notes are one: the on is already
+     * out and the later note simply borrows it.
+     * @param {string} trackId
+     * @param {object} note the clip's note
+     * @param {object} seg the segment this note plays in
+     * @param {number} loopStart the beat this loop iteration starts at
+     * @param {number} offBeat the beat the note's off is owed at
+     * @param {number} onFrame the absolute frame of the note's on
+     * @param {number} frameStart the block's first frame
+     */
+    function startNote(trackId, note, seg, loopStart, offBeat, onFrame, frameStart) {
+      const key = trackId + ":" + note.p;
+      const previous = open.get(key);
+      if (previous) {
+        if (previous.onFrame === onFrame) {
+          previous.v = note.v;
+          previous.clipId = seg.clipId;
+          previous.seg = seg;
+          previous.t = note.t;
+          previous.d = note.d;
+          previous.loopStart = loopStart;
+          previous.offBeat = offBeat;
+          previous.offFrame = beatToFrame(offBeat);
+          return;
+        }
+
+        const at = previous.offFrame < onFrame ? previous.offFrame : onFrame;
+        open.delete(key);
+        events.push({
+          frame: at <= frameStart ? 0 : at - frameStart,
+          track_id: trackId,
+          type: "off",
+          p: previous.p,
+          v: previous.v,
+        });
+      }
+
+      open.set(key, {
+        key: key,
+        track_id: trackId,
+        p: note.p,
+        v: note.v,
+        clipId: seg.clipId,
+        seg: seg,
+        t: note.t,
+        d: note.d,
+        loopStart: loopStart,
+        onFrame: onFrame,
+        offBeat: offBeat,
+        offFrame: beatToFrame(offBeat),
+      });
+
+      events.push({ frame: onFrame - frameStart, track_id: trackId, type: "on", p: note.p, v: note.v });
+    }
+
+    /**
+     * Close one sounding note now: its off is owed at frame 0 of the next
+     * block, whichever frame the state change happened at.
+     * @param {object} entry an entry of the open set
+     * @param {number} atFrame the frame the state change happened at
+     */
+    function forceClose(entry, atFrame) {
+      if (open.get(entry.key) !== entry) return;
+      open.delete(entry.key);
+      entry.offFrame = atFrame;
+      forced.push(entry);
+    }
+
+    /**
+     * Close every sounding note now, for a stop, a restart or a song that no
+     * longer holds any of them.
+     * @param {number} atFrame
+     */
+    function forceCloseAll(atFrame) {
+      if (open.size === 0) return;
+      for (const entry of open.values()) {
+        entry.offFrame = atFrame;
+        forced.push(entry);
+      }
+      open.clear();
+    }
+
+    /**
+     * Bring one open note's off forward, never later.
+     * @param {object} entry
+     * @param {number} beat
+     */
+    function capOff(entry, beat) {
+      if (beat >= entry.offBeat) return;
+      entry.offBeat = beat;
+      entry.offFrame = beatToFrame(beat);
+    }
+
+    /**
+     * Drop ended segments, and only when one ended: their notes were capped
+     * when the segment closed, so nothing still reads them.
+     * @param {number} frameStart
+     */
+    function pruneEndedSegments(frameStart) {
+      for (const segs of segments.values()) {
+        let ended = 0;
+        while (ended < segs.length) {
+          const seg = segs[ended];
+          if (seg.endBeat === null) break;
+          if (beatToFrame(seg.endBeat) > frameStart) break;
+          ended += 1;
+        }
+        if (ended === 0) continue;
+        const trackId = segs[0].track_id;
+        segs.splice(0, ended);
+        if (segs.length === 0) segments.delete(trackId);
       }
     }
 
@@ -522,13 +767,19 @@
     /** @returns {number} the transport position in beats. */
     function currentBeat() {
       if (originFrame === null) return 0;
-      const frame = currentFrame === null ? originFrame : currentFrame;
+      const frame = frameNow();
       return Math.max(0, (frame - originFrame) / framesPerBeat);
+    }
+
+    /** @returns {number} the first frame the next block will process. */
+    function frameNow() {
+      return currentFrame === null ? (originFrame === null ? 0 : originFrame) : currentFrame;
     }
 
     /** @returns {number} the absolute frame of a beat of the transport. */
     function beatToFrame(beat) {
-      return Math.round((originFrame === null ? 0 : originFrame) + beat * framesPerBeat);
+      const origin = originFrame === null ? 0 : originFrame;
+      return Math.round(origin + beat * framesPerBeat);
     }
 
     /** @returns {Array} this track's segments, created on first use. */
@@ -554,9 +805,9 @@
     function currentClips() {
       const out = new Map();
       const beat = originFrame === null ? 0 : currentBeat();
-      for (const entry of segments) {
-        const seg = audibleSegment(entry[1], beat);
-        if (seg && seg.clipId !== null) out.set(entry[0], seg.clipId);
+      for (const segs of segments.values()) {
+        const seg = audibleSegment(segs, beat);
+        if (seg && seg.clipId !== null) out.set(seg.track_id, seg.clipId);
       }
       return out;
     }
@@ -613,6 +864,27 @@
         return playing;
       },
     };
+  }
+
+  /**
+   * @param {object[]} notes a clip's notes, sorted by `t`
+   * @param {number} t
+   * @returns {number} the index of the first note starting at or after `t`
+   */
+  function lowerBound(notes, t) {
+    let low = 0;
+    let high = notes.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (notes[middle].t < t) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  /** @returns {number} a stable order for notes that start together. */
+  function byStartBeat(a, b) {
+    return a.t - b.t;
   }
 
   /** @returns {number} frames one beat lasts at a tempo. */
