@@ -547,3 +547,18 @@ test("with no gateway port every PORT line is refused", async () => {
   }
   assert.ok(logs.some((l) => /deny 127\.0\.0\.1:\d+ \(no gateway port\)/.test(l)), logs.join("\n"));
 });
+test("an empty main-table read on a host with a real IPv4 address fails closed", () => {
+  const local4 = [{ type: "local", dst: "127.0.0.1", dev: "lo" }, { type: "local", dst: "10.20.30.40", dev: "eth0" }];
+  const local6 = [{ type: "local", dst: "::1", dev: "lo" }];
+  const runWith = (main4) => (args) => {
+    const main = args.includes("main"), v6 = args.includes("-6");
+    if (main) return v6 ? [] : main4;
+    return v6 ? local6 : local4;
+  };
+  const noProc = () => { throw new Error("ip(8) worked: no procfs fallback expected"); };
+  const empty = readLocalTable({ run: runWith([]), readFile: noProc });
+  assert.deepEqual(empty.v4.slice(0, 2), ["127.0.0.1", "10.20.30.40"], "the local table itself was read");
+  assert.equal(empty.v4Failed, true, "a host with 10.20.30.40 always has an on-link IPv4 network: [] is a missed read");
+  const ok = readLocalTable({ run: runWith([{ dst: "10.20.30.0/24", dev: "eth0", scope: "link" }]), readFile: noProc });
+  assert.equal(ok.v4Failed, false, "control: with its on-link row the same host reads fine");
+});

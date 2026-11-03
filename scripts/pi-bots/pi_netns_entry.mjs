@@ -44,8 +44,11 @@ function relayServer(sock, firstLine) {
     u.on("connect", () => { u.write(firstLine); c.pipe(u); u.pipe(c); });
     const kill = () => { try { c.destroy(); } catch {} try { u.destroy(); } catch {} };
     u.on("error", kill); c.on("error", kill);
-    // graceful: pipe() propagates each end; destroy once both sides closed
-    c.once("close", () => { if (!u.destroyed) u.end(); });
+    // pipe() propagates each half-close (FIN). A pi socket that is fully
+    // closed reads nothing more, so the relay side is destroyed, not just
+    // ended: a FIN alone would leave a request the relay is still waiting on
+    // holding its upstream socket and cap slot (the relay is half-open).
+    c.once("close", () => { if (!u.destroyed) u.destroy(); });
     u.once("close", () => { if (!c.destroyed) c.end(); });
   });
 }

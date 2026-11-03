@@ -321,7 +321,10 @@ export function readLocalTable(o = {}) {
   };
   const onLink4 = mainTable(["route", "show", "table", "main"], "/proc/net/route", parseOnLinkRows, parseProcRoute);
   const onLink6 = mainTable(["-6", "route", "show", "table", "main"], "/proc/net/ipv6_route", parseOnLinkRows, parseIpv6OnLink);
-  const onLink4Failed = !onLink4, onLink6Failed = !onLink6;
+  // A host with a real (non-loopback) IPv4 address always has an on-link IPv4
+  // network: an empty read then is a read that missed it, and fails closed.
+  const hasRealV4 = v4.some((a) => !String(a).startsWith("127."));
+  const onLink4Failed = !onLink4 || (onLink4.length === 0 && hasRealV4), onLink6Failed = !onLink6;
   return {
     v4, v6,
     onLink4: onLink4 || [],
@@ -551,6 +554,7 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
  * @param {number} [o.maxUpstream=maxConns]  requests in flight upstream, relay-wide
  * @param {number} [o.headTimeoutMs=10000]
  * @param {number} [o.idleMs=120000]  idle keep-alive timeout on a door connection
+ * @param {number} [o.abandonMs=30000]  a bot that half-closes while its request waits: closed after this
  * @param {Function} [o.lookup]     async (host) => [{address, family}]
  * @param {Function} [o.log]
  * @returns {Promise<{dir, socketPath, close: () => Promise<void>}>}
@@ -601,6 +605,7 @@ export function createEgressRelay(o) {
   const maxUpstream = o.maxUpstream ?? maxConns;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const idleMs = o.idleMs ?? 120000;
+  const abandonMs = o.abandonMs ?? 30000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
   // One line per (decision, target), bounded: a bot that sprays distinct
   // hosts must not grow the spawner's memory (one summary line instead).
@@ -798,6 +803,20 @@ export function createEgressRelay(o) {
     // The bot hung up (or the socket died): stop the other leg too, so an SSE
     // stream nobody reads does not hold sockets for the rest of the spawn.
     res.on("close", () => { try { up.destroy(); } catch {} });
+    // A bot that only half-closes (FIN) while this request waits would hold the
+    // upstream socket and its cap slot for the rest of the spawn: an idle
+    // answer never writes, so nothing would ever notice. A legitimate client
+    // that sends its request and FIN still gets the reply; one whose answer
+    // has not finished within abandonMs of its FIN is closed.
+    const sock = req.socket;
+    const onEnd = () => {
+      const t = setTimeout(() => { try { sock.destroy(); } catch {} }, abandonMs);
+      if (t.unref) t.unref();
+      res.once("close", () => clearTimeout(t));
+      res.once("finish", () => clearTimeout(t));
+    };
+    if (sock.readableEnded) onEnd(); else sock.once("end", onEnd);
+    res.once("close", () => sock.removeListener("end", onEnd));
     req.pipe(up);
   }
 

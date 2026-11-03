@@ -33,6 +33,7 @@ let up, upPort, seen = [];
 before(async () => {
   up = createHttpServer((req, res) => {
     seen.push({ method: req.method, path: req.url, mark: req.socket.remoteAddress, headers: req.headers });
+    if (req.url === "/llm/v1/hang") return; // never answers (an idle long-poll)
     if (req.url === "/llm/v1/sse") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       res.flushHeaders();
@@ -474,6 +475,26 @@ test("a long keep-alive session adds no timeout listeners (no MaxListenersExceed
     await sleep(50);
   } finally { process.off("warning", onWarn); }
   assert.deepEqual(warnings, [], "one timeout handler per connection, not one per request");
+});
+
+test("a bot that hangs up on a waiting request frees its upstream socket and cap slot", async () => {
+  const { r } = await relay({ maxUpstream: 1, abandonMs: 300 });
+  const a = doorClient(r.socketPath, upPort);
+  await a.ready;
+  a.write(GET("/llm/v1/hang"));
+  await sleep(100);
+  a.close();
+  // The slot is free again: a second bot connection gets its answer, not 503.
+  let status = null;
+  for (let k = 0; k < 20 && status !== 200; k++) {
+    await sleep(100);
+    const b = doorClient(r.socketPath, upPort);
+    await b.ready;
+    b.write(GET("/llm/v1/models"));
+    status = (await b.next()).status;
+    b.close();
+  }
+  assert.equal(status, 200, "the abandoned wait released the relay-wide upstream slot");
 });
 
 test("a PORT line followed by a partial head is closed after headTimeoutMs", async () => {
