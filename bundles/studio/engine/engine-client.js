@@ -53,6 +53,25 @@
  * waits for both and then calls `startRendering()` renders a deterministic
  * number of frames after the engine came up.
  *
+ * ## The calibration and recording worklets
+ *
+ * Two more AudioWorkletProcessors ride on the same context, each loaded from its
+ * own file with its own `addModule()` (never as part of the engine module, so an
+ * engine that failed to come up cannot take them with it):
+ *
+ * - `calibrate-emitter.js` (`studio-calibrate-emitter`) clicks a loopback cable;
+ * - `calibrate-detector.js` (`studio-calibrate-detector`) finds those clicks by
+ *   cross-correlation and reports each one's lag in frames;
+ * - `recorder-processor.js` (`studio-recorder`) turns an input into 24-bit PCM
+ *   chunks of a take.
+ *
+ * `loadStudioWorklets()` below adds them once per context and remembers the
+ * promise in a WeakMap, so two recorders (or a recorder and a calibration) on
+ * one context do not register the same processor twice. In a browser each is
+ * fetched from `${assetBase}<file>`; in Node it is read from `assetBytes` or
+ * from the files next to this module (the same fallback the engine sources
+ * use) and handed to `addModule()` as a private temp file.
+ *
  * ## Messages
  *
  * The client's side of the port protocol (the processor's header has the
@@ -94,6 +113,48 @@
 
   /** The processor name `studio-processor.js` registers. */
   const PROCESSOR_NAME = "studio-processor";
+
+  /**
+   * The worklet files loaded separately from the engine module, in load order.
+   * Each is a classic script with one `registerProcessor()` call.
+   */
+  const WORKLET_FILES = Object.freeze([
+    "calibrate-emitter.js",
+    "calibrate-detector.js",
+    "recorder-processor.js",
+  ]);
+
+  /** The processor names those files register. */
+  const CALIBRATE_EMITTER_PROCESSOR = "studio-calibrate-emitter";
+  const CALIBRATE_DETECTOR_PROCESSOR = "studio-calibrate-detector";
+  const RECORDER_PROCESSOR = "studio-recorder";
+
+  /**
+   * The audio contexts whose calibration and recording worklets are added. The
+   * value is the promise of that work, so concurrent callers share one load and
+   * a failed load can be retried. A WeakMap, so a discarded context is not kept
+   * alive by this bookkeeping.
+   * @type {WeakMap<BaseAudioContext, Promise<void>>}
+   */
+  const WORKLET_CONTEXTS = new WeakMap();
+
+  /** How many clicks a calibration plays when the caller names none. */
+  const DEFAULT_CALIBRATION_CLICKS = 16;
+
+  /** The first clicks of a calibration are not measured: a cold chain is noisy. */
+  const IGNORED_CALIBRATION_CLICKS = 2;
+
+  /** Fewer heard clicks than this and there is no measurement to trust. */
+  const MIN_CALIBRATION_CLICKS = 10;
+
+  /** The gap between calibration clicks when the caller names none, in seconds. */
+  const DEFAULT_CALIBRATION_INTERVAL_SECONDS = 0.5;
+
+  /** A loopback whose lags spread wider than this (in seconds) is not stable. */
+  const MAX_CALIBRATION_SPREAD_SECONDS = 0.002;
+
+  /** What a calibration that measured nothing usable is refused with. */
+  const CALIBRATION_REFUSAL = "Check the loopback cable and the input gain.";
 
   /** How long to wait for the worklet to report ready. */
   const READY_TIMEOUT_MS = 20000;
@@ -233,6 +294,102 @@
   }
 
   /**
+   * Whether a value is a `MediaStream` (a microphone or interface input).
+   * @param {unknown} value
+   * @returns {boolean}
+   */
+  function isMediaStream(value) {
+    if (!value || typeof value !== "object") return false;
+    if (typeof MediaStream !== "undefined" && value instanceof MediaStream) return true;
+    // node-web-audio-api's MediaStream is not a DOM global, but it is shaped
+    // the same way; an AudioNode has `connect` and no tracks.
+    return typeof value.getAudioTracks === "function";
+  }
+
+  /**
+   * @param {unknown} value a caller's number
+   * @param {number} fallback the value to use when it is not a number
+   * @param {number} minimum the smallest value allowed
+   * @returns {number} a whole number, at least `minimum`
+   */
+  function wholeAtLeast(value, fallback, minimum) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    const whole = Math.round(number);
+    return whole < minimum ? minimum : whole;
+  }
+
+  /**
+   * @param {unknown} value a frame a caller asked for
+   * @param {string} what the method's name, for the error
+   * @returns {number} a whole frame number
+   */
+  function frameNumber(value, what) {
+    const frame = Number(value);
+    if (!Number.isFinite(frame)) throw new Error(`StudioEngine: ${what} needs a frame number`);
+    return Math.trunc(frame);
+  }
+
+  /**
+   * The median of an ascending list of whole frames.
+   * @param {number[]} sorted
+   * @returns {number}
+   */
+  function medianOf(sorted) {
+    if (sorted.length === 0) return 0;
+    const middle = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) return sorted[middle];
+    return Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+  }
+
+  /**
+   * Add one of `WORKLET_FILES` to a context: a URL in a browser, a private temp
+   * file in Node (where `addModule()` takes a path).
+   * @param {BaseAudioContext} context
+   * @param {string} name
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<void>}
+   */
+  async function addWorkletFile(context, name, options) {
+    const opts = options || {};
+    if (isNode()) {
+      const source = await readText(name, opts);
+      const temp = writeTempModule(source);
+      try {
+        await context.audioWorklet.addModule(temp.path);
+      } finally {
+        temp.remove();
+      }
+      return;
+    }
+    if (!opts.assetBase) throw new Error(`StudioEngine: loading ${name} needs an assetBase in this host`);
+    await context.audioWorklet.addModule(joinUrl(opts.assetBase, name));
+  }
+
+  /**
+   * Add the calibration and recording worklets to a context, once. A second
+   * call on the same context (a recorder after a calibration, two recorders)
+   * waits for the first load instead of registering anything again.
+   * @param {BaseAudioContext} context
+   * @param {{assetBase?: string, assetBytes?: object}} [options]
+   * @returns {Promise<void>}
+   */
+  function loadStudioWorklets(context, options) {
+    if (!context || !context.audioWorklet) {
+      throw new Error("StudioEngine: a context with audioWorklet is required");
+    }
+    const loading = WORKLET_CONTEXTS.get(context);
+    if (loading) return loading;
+    const pending = (async () => {
+      for (const name of WORKLET_FILES) await addWorkletFile(context, name, options);
+    })();
+    WORKLET_CONTEXTS.set(context, pending);
+    // A failed load registered nothing, so a retry on this context is honest.
+    pending.catch(() => WORKLET_CONTEXTS.delete(context));
+    return pending;
+  }
+
+  /**
    * The resampler this host has: the page (or worklet) global in a browser,
    * this module's neighbour in Node. It is the same arithmetic either way — see
    * `resample.js`.
@@ -345,6 +502,8 @@
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onError: function(function): function,
+   *                    calibrate: function(object): Promise<object>,
+   *                    createRecorder: function(object): Promise<object>,
    *                    throwForTest: function(): void,
    *                    dispose: function(): void}>}
    */
@@ -358,6 +517,398 @@
    */
   function composeEngineModule(texts) {
     return texts.join("\n;\n");
+  }
+
+  /**
+   * A loopback calibration: click out of the destination, listen on `input`,
+   * and measure the lag of each click the detector finds.
+   *
+   * `options.input` is a MediaStream (wrapped in a MediaStreamAudioSourceNode —
+   * allowed as an input source only) or, in a Node test, an AudioNode. The
+   * clicks go out through the emitter on frame `first_frame` and every
+   * `interval_frames` after that; the first two are ignored, and the rest give
+   * the median lag, the spread and how many were heard.
+   *
+   * An offline context renders nothing on its own, so this starts
+   * `startRendering()` itself in that case (and waits for it). A realtime
+   * context just plays.
+   *
+   * @param {BaseAudioContext} context
+   * @param {{assetBase?: string, assetBytes?: object}} engineOptions
+   * @param {{input?: MediaStream|AudioNode, clicks?: number, latencyHint?: string,
+   *          sinkId?: string, interval?: number,
+   *          onEmitter?: function(AudioWorkletNode): void}} [options]
+   *   `interval` is the gap between clicks in milliseconds; `onEmitter` is
+   *   handed the emitter node so a host without a cable (a Node test) can route
+   *   it through a stand-in delay. `latencyHint` and `sinkId` are only reported
+   *   back in the result: they describe the context the caller made, which is
+   *   what the panel stores the measurement under
+   * @param {(text: string) => void} notifyError
+   * @returns {Promise<{latency_frames: number, rate: number, spread_frames: number,
+   *                    clicks_heard: number, latencyHint: string|null,
+   *                    sinkId: string|null}>}
+   */
+  async function runCalibration(context, engineOptions, options, notifyError) {
+    const settings = options || {};
+    const input = settings.input;
+    if (!input) throw new Error("StudioEngine: calibrate needs an input (a MediaStream or an AudioNode)");
+
+    const clicks = wholeAtLeast(settings.clicks, DEFAULT_CALIBRATION_CLICKS, 1);
+    const intervalFrames = wholeAtLeast(
+      settings.interval === undefined || settings.interval === null
+        ? undefined
+        : (Number(settings.interval) * context.sampleRate) / 1000,
+      Math.round(context.sampleRate * DEFAULT_CALIBRATION_INTERVAL_SECONDS),
+      1,
+    );
+    // Only the clicks after the first two are measured; a caller asking for 2 or
+    // fewer has nothing counted at all.
+    const counted = Math.max(0, clicks - IGNORED_CALIBRATION_CLICKS);
+
+    await loadStudioWorklets(context, engineOptions);
+    const Node = workletNodeClass();
+    const emitter = new Node(context, CALIBRATE_EMITTER_PROCESSOR, {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      processorOptions: { interval_frames: intervalFrames, first_frame: intervalFrames, clicks: clicks },
+    });
+    const detector = new Node(context, CALIBRATE_DETECTOR_PROCESSOR, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+
+    let source = null;
+    let alone = null;
+    let rendering = null;
+    let renderError = null;
+    let timer = null;
+    const responses = new Map();
+    let resolveResponses = null;
+    const allAnswered = new Promise((resolve) => {
+      resolveResponses = resolve;
+    });
+    const checkAnswers = () => {
+      if (responses.size >= counted) resolveResponses(undefined);
+    };
+
+    try {
+      if (typeof input.connect === "function") {
+        input.connect(detector);
+      } else if (isMediaStream(input)) {
+        if (typeof context.createMediaStreamSource !== "function") {
+          throw new Error("StudioEngine: this host cannot read a MediaStream");
+        }
+        source = context.createMediaStreamSource(input);
+        source.connect(detector);
+      } else {
+        throw new Error("StudioEngine: calibrate needs a MediaStream or an AudioNode as its input");
+      }
+
+      // The detector outputs silence; the gain of 0 is only there so the graph
+      // pulls the detector on a host that runs nothing unreachable.
+      alone = context.createGain();
+      alone.gain.value = 0;
+      detector.connect(alone);
+      alone.connect(context.destination);
+
+      emitter.connect(context.destination);
+      if (typeof settings.onEmitter === "function") settings.onEmitter(emitter);
+
+      let seen = 0;
+      emitter.port.onmessage = (event) => {
+        const message = event && event.data;
+        if (!message || typeof message !== "object") return;
+        if (message.type === "error") {
+          notifyError(String(message.error));
+          return;
+        }
+        if (message.type !== "click") return;
+        seen += 1;
+        if (seen <= IGNORED_CALIBRATION_CLICKS) return;
+        detector.port.postMessage({ type: "expect", frame: message.frame });
+      };
+      detector.port.onmessage = (event) => {
+        const message = event && event.data;
+        if (!message || typeof message !== "object") return;
+        if (message.type === "error") {
+          notifyError(String(message.error));
+          return;
+        }
+        if (message.type !== "heard" && message.type !== "missed") return;
+        if (responses.has(message.frame)) return;
+        responses.set(
+          message.frame,
+          message.type === "heard"
+            ? { heard: true, lag: Math.round(Number(message.lag_frames)) }
+            : { heard: false },
+        );
+        checkAnswers();
+      };
+      if (typeof emitter.port.start === "function") emitter.port.start();
+      if (typeof detector.port.start === "function") detector.port.start();
+
+      // An offline context renders nothing until it is told to; a realtime one
+      // is already running. Either way, a realtime calibration that never
+      // finishes gets a wall-clock guard instead of hanging for ever.
+      const offline = typeof context.startRendering === "function";
+      if (offline) {
+        rendering = context
+          .startRendering()
+          .then(
+            () => undefined,
+            (error) => {
+              renderError = error;
+            },
+          )
+          .then(() => {
+            // Let the reports posted before the render ended reach this thread,
+            // then settle with what arrived: the rest were never measured.
+            setTimeout(() => resolveResponses(undefined), 0);
+          });
+      } else {
+        const schedule = (clicks * intervalFrames * 1000) / context.sampleRate;
+        timer = setTimeout(() => resolveResponses(undefined), Math.round(schedule * 1.5) + 1000);
+      }
+      if (counted === 0) resolveResponses(undefined);
+
+      await allAnswered;
+      if (rendering) await rendering;
+      if (renderError) throw renderError;
+
+      const lags = [];
+      for (const answer of responses.values()) if (answer.heard) lags.push(answer.lag);
+      lags.sort((left, right) => left - right);
+      const result = {
+        latency_frames: medianOf(lags),
+        rate: context.sampleRate,
+        spread_frames: lags.length > 1 ? lags[lags.length - 1] - lags[0] : 0,
+        clicks_heard: lags.length,
+        latencyHint: settings.latencyHint === undefined || settings.latencyHint === null ? null : settings.latencyHint,
+        sinkId: settings.sinkId === undefined || settings.sinkId === null ? null : settings.sinkId,
+      };
+      if (lags.length < MIN_CALIBRATION_CLICKS || result.spread_frames > Math.round(MAX_CALIBRATION_SPREAD_SECONDS * context.sampleRate)) {
+        throw new Error(CALIBRATION_REFUSAL);
+      }
+      return result;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      try {
+        emitter.port.onmessage = null;
+      } catch {
+        /* nothing to drop */
+      }
+      try {
+        detector.port.onmessage = null;
+      } catch {
+        /* nothing to drop */
+      }
+      try {
+        emitter.disconnect();
+      } catch {
+        /* never connected */
+      }
+      try {
+        detector.disconnect();
+      } catch {
+        /* never connected */
+      }
+      if (alone) {
+        try {
+          alone.disconnect();
+        } catch {
+          /* never connected */
+        }
+      }
+      if (source) {
+        try {
+          source.disconnect();
+        } catch {
+          /* never connected */
+        }
+      }
+    }
+  }
+
+  /**
+   * A recorder on this context: an input in, 24-bit take chunks out.
+   *
+   * The caller arms it on a frame the engine reported (`onLaunch`, Task 2) and
+   * stops it on a frame it computes itself (a take's `offset_frames` included,
+   * so the compensated take keeps its tail). `splitAt` cuts one recording into
+   * one take segment per loop pass.
+   *
+   * @param {BaseAudioContext} context
+   * @param {{assetBase?: string, assetBytes?: object}} engineOptions
+   * @param {{input?: MediaStream|AudioNode, channels?: number}} [options]
+   * @param {(text: string) => void} notifyError
+   * @returns {Promise<{node: AudioWorkletNode,
+   *                    armAt: function(number): void,
+   *                    stopAt: function(number): void,
+   *                    splitAt: function(number[]): void,
+   *                    onChunk: function(function): function,
+   *                    onDone: function(function): function,
+   *                    dispose: function(): void}>}
+   */
+  async function runRecorder(context, engineOptions, options, notifyError) {
+    const settings = options || {};
+    const input = settings.input;
+    if (!input) throw new Error("StudioEngine: createRecorder needs an input (a MediaStream or an AudioNode)");
+    const channels = Number(settings.channels) === 2 ? 2 : 1;
+
+    await loadStudioWorklets(context, engineOptions);
+    const Node = workletNodeClass();
+    const node = new Node(context, RECORDER_PROCESSOR, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: channels,
+      channelCountMode: "explicit",
+      processorOptions: { channels: channels },
+    });
+
+    let source = null;
+    // The recorder writes silence to its output, but a host only runs the
+    // processors the destination can reach, so it is connected through a gain of
+    // 0. A gain node is plumbing (it shapes nothing), which the parity rule
+    // allows.
+    const alone = context.createGain();
+    alone.gain.value = 0;
+    if (typeof input.connect === "function") {
+      input.connect(node);
+    } else if (isMediaStream(input)) {
+      if (typeof context.createMediaStreamSource !== "function") {
+        throw new Error("StudioEngine: this host cannot read a MediaStream");
+      }
+      source = context.createMediaStreamSource(input);
+      source.connect(node);
+    } else {
+      throw new Error("StudioEngine: createRecorder needs a MediaStream or an AudioNode as its input");
+    }
+    node.connect(alone);
+    alone.connect(context.destination);
+
+    const chunkListeners = new Set();
+    const doneListeners = new Set();
+    node.port.onmessage = (event) => {
+      const message = event && event.data;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "chunk") {
+        for (const listener of chunkListeners) {
+          try {
+            listener(message.bytes, message.index, message.segment);
+          } catch {
+            /* one bad listener must not lose the chunk for the others */
+          }
+        }
+        return;
+      }
+      if (message.type === "done") {
+        const segments = Array.isArray(message.segments) ? message.segments : [];
+        let frames = 0;
+        for (const segment of segments) frames += Number(segment.frames) || 0;
+        const done = {
+          segments: segments,
+          frames: frames,
+          start_frame: segments.length > 0 ? segments[0].start_frame : null,
+        };
+        for (const listener of doneListeners) {
+          try {
+            listener(done);
+          } catch {
+            /* one bad listener must not hide the end from the others */
+          }
+        }
+        return;
+      }
+      if (message.type === "error") notifyError(String(message.error));
+    };
+    if (typeof node.port.start === "function") node.port.start();
+
+    const post = (message) => node.port.postMessage(message);
+
+    return {
+      node: node,
+
+      /** @param {number} frame the context frame to start capturing at @returns {void} */
+      armAt(frame) {
+        post({ type: "arm", frame: frameNumber(frame, "armAt") });
+      },
+
+      /** @param {number} frame the context frame to stop at (exclusive) @returns {void} */
+      stopAt(frame) {
+        post({ type: "stop", frame: frameNumber(frame, "stopAt") });
+      },
+
+      /**
+       * Start a new take segment at each of these context frames (loop record).
+       * @param {number[]} frames
+       * @returns {void}
+       */
+      splitAt(frames) {
+        const list = [];
+        for (const value of Array.isArray(frames) ? frames : []) list.push(frameNumber(value, "splitAt"));
+        post({ type: "split", frames: list });
+      },
+
+      /**
+       * Follow the take's chunks: `listener(bytes, index, segment)`, where
+       * `bytes` is a transferred ArrayBuffer of 24-bit little-endian interleaved
+       * PCM covering whole frames, at most 1 MiB.
+       * @param {(bytes: ArrayBuffer, index: number, segment: number) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onChunk(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        chunkListeners.add(listener);
+        return function unsubscribe() {
+          chunkListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow the end of the take: `listener({segments, frames, start_frame})`.
+       * @param {(done: {segments: object[], frames: number,
+       *                start_frame: number|null}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onDone(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        doneListeners.add(listener);
+        return function unsubscribe() {
+          doneListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Leave the graph and drop this recorder's callbacks. The caller owns the
+       * input stream and the context.
+       * @returns {void}
+       */
+      dispose() {
+        chunkListeners.clear();
+        doneListeners.clear();
+        node.port.onmessage = null;
+        try {
+          node.disconnect();
+        } catch {
+          /* never connected */
+        }
+        try {
+          alone.disconnect();
+        } catch {
+          /* never connected */
+        }
+        if (source) {
+          try {
+            source.disconnect();
+          } catch {
+            /* never connected */
+          }
+        }
+      },
+    };
   }
 
   async function createStudioEngine(context, options) {
@@ -409,6 +960,24 @@
     const listeners = new Set();
     const launchListeners = new Set();
     const errorListeners = new Set();
+    /**
+     * Hand one failure to the error listeners and the console: a fault after
+     * start-up has no caller to throw to.
+     * @param {string} text
+     * @returns {void}
+     */
+    const notifyError = (text) => {
+      for (const listener of errorListeners) {
+        try {
+          listener(text);
+        } catch {
+          /* one bad listener must not hide the failure from the others */
+        }
+      }
+      if (typeof console !== "undefined" && typeof console.error === "function") {
+        console.error("StudioEngine: " + text);
+      }
+    };
     const flushes = new Map();
     let flushSeq = 0;
     const barRequests = new Map();
@@ -501,17 +1070,10 @@
       // song) has no caller to throw to; it is handed to whoever registered an
       // error listener and logged, instead of stopping the audio thread.
       if (message.type === "error") {
-        const text = String(message.error);
-        for (const listener of errorListeners) {
-          try {
-            listener(text);
-          } catch {
-            /* one bad listener must not hide the failure from the others */
-          }
-        }
-        if (typeof console !== "undefined" && typeof console.error === "function") {
-          console.error("StudioEngine: " + text);
-        }
+        // A failure after start-up (a device that cannot be built, a refused
+        // song) has no caller to throw to; it is handed to whoever registered
+        // an error listener and logged, instead of stopping the audio thread.
+        notifyError(String(message.error));
       }
     };
 
@@ -714,6 +1276,39 @@
       },
 
       /**
+       * Measure the round trip of a loopback cable, in context frames.
+       *
+       * The emitter clicks, the detector finds each click by cross-correlation
+       * and reports its lag; the first two clicks are ignored and the median of
+       * the rest is the answer. Fewer than 10 heard clicks, or lags spread over
+       * more than 2 ms, is refused with "Check the loopback cable and the input
+       * gain." Both nodes are cleaned up either way.
+       *
+       * `latencyHint` and `sinkId` are echoed into the result rather than applied
+       * here: they belong to the context the caller created, and the panel keys
+       * the stored measurement on them.
+       * @param {{input: MediaStream|AudioNode, clicks?: number, latencyHint?: string,
+       *          sinkId?: string, interval?: number,
+       *          onEmitter?: function(AudioWorkletNode): void}} options
+       * @returns {Promise<{latency_frames: number, rate: number,
+       *                    spread_frames: number, clicks_heard: number,
+       *                    latencyHint: string|null, sinkId: string|null}>}
+       */
+      calibrate(options) {
+        return runCalibration(context, opts, options, notifyError);
+      },
+
+      /**
+       * Build a recorder on this context: `{armAt, stopAt, splitAt, onChunk,
+       * onDone, dispose}` (see `runRecorder` above for the whole contract).
+       * @param {{input: MediaStream|AudioNode, channels?: number}} options
+       * @returns {Promise<object>}
+       */
+      createRecorder(options) {
+        return runRecorder(context, opts, options, notifyError);
+      },
+
+      /**
        * Stop listening and leave the graph. The caller owns the context and the
        * node's connections; this only drops this client's port handler.
        * @returns {void}
@@ -732,8 +1327,14 @@
     create: createStudioEngine,
     createStudioEngine: createStudioEngine,
     SOURCE_FILES: SOURCE_FILES,
+    WORKLET_FILES: WORKLET_FILES,
     composeEngineModule: composeEngineModule,
     PROCESSOR_NAME: PROCESSOR_NAME,
+    CALIBRATE_EMITTER_PROCESSOR: CALIBRATE_EMITTER_PROCESSOR,
+    CALIBRATE_DETECTOR_PROCESSOR: CALIBRATE_DETECTOR_PROCESSOR,
+    RECORDER_PROCESSOR: RECORDER_PROCESSOR,
+    CALIBRATION_REFUSAL: CALIBRATION_REFUSAL,
+    loadWorklets: loadStudioWorklets,
   };
 
   if (typeof globalThis !== "undefined") globalThis.StudioEngine = api;
