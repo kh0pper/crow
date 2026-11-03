@@ -10,7 +10,8 @@
  * straight back into the web layer so an edit reaches every open client.
  * The bot scope is wired here too: a Crow bot's linked project comes from
  * `pi_bot_defs` on that same client, and the voice-bot rule from the app's own
- * `servers/gateway/voice/crow-voice.js`.
+ * `servers/gateway/voice/crow-voice.js`. The panel's "Ask the agent" box asks
+ * the same table for the song project's bot (`projectBotOf` below).
  *
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
  * runs before the panel router, so nothing here adds one.
@@ -82,6 +83,23 @@ web = createStudioWeb({
       return linked == null ? null : Number(linked);
     },
     isVoiceBot: (botId) => isVoiceBotId(String(botId)) === true,
+  },
+  // The bot the panel's "Ask the agent" box talks to: the first ENABLED bot
+  // whose home project is this song's project, by display name — the same
+  // `pi_bot_defs.project_id` link the bot scope above reads. No enabled bot
+  // means no bot to ask, and the box stays disabled.
+  async projectBotOf(projectId) {
+    const id = Number(projectId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const { rows } = await db.execute({
+      sql:
+        "SELECT bot_id, display_name FROM pi_bot_defs " +
+        "WHERE project_id = ? AND enabled = 1 ORDER BY display_name LIMIT 1",
+      args: [id],
+    });
+    const row = rows?.[0];
+    if (!row) return null;
+    return { bot_id: String(row.bot_id), name: String(row.display_name || row.bot_id) };
   },
 });
 

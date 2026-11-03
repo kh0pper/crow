@@ -12,7 +12,10 @@
  *
  *   - the dashboard, behind `dashboardAuth`, with the CSRF header on every
  *     state-changing call (double submit, the same rule the rest of the
- *     dashboard uses);
+ *     dashboard uses). Its `GET /api/studio/songs/:id/project-bot` route names
+ *     the bot the panel's "Ask the agent" box talks to: the enabled bot whose
+ *     home project is the song's project, read through the injected
+ *     `projectBotOf` (this module owns no database);
  *   - the Studio MCP process, on `/api/studio/agent/*`, which must be a truly
  *     local caller — `classifyPeer(req).via === "local"`: a loopback socket
  *     that is not a trusted proxy and that carries no forwarding and no
@@ -397,6 +400,11 @@ function refuse(socket, status, text) {
  *   (`pi_bot_defs.project_id`) and whether it is Crow's voice bot. The panel
  *   loader injects both; a caller that injects neither gets the strict
  *   default, in which every bot has no project and therefore sees no song.
+ * @param {((projectId: number) => Promise<{bot_id: string, name: string}|null>)|null}
+ *   [options.projectBotOf] the project's bot: the first ENABLED `pi_bot_defs`
+ *   row whose `project_id` is that project, by display name. The panel loader
+ *   reads it on the gateway's own client; a caller that injects nothing has no
+ *   project bot, so the ask box stays disabled.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -410,6 +418,7 @@ export function createStudioWeb({
   crowHome,
   bundleDir,
   botScope = null,
+  projectBotOf = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -431,6 +440,10 @@ export function createStudioWeb({
   // bot has no project at all, which is the fail-closed default.
   const projectOfBot = typeof botScope?.projectOf === "function" ? botScope.projectOf : async () => null;
   const isVoiceBot = typeof botScope?.isVoiceBot === "function" ? botScope.isVoiceBot : () => false;
+
+  // The project's bot, for the panel's "Ask the agent" box. Same contract as
+  // the bot scope above: injected, and absent means "no bot", never a guess.
+  const projectBot = typeof projectBotOf === "function" ? projectBotOf : async () => null;
 
   /** `<song_id> → <client_id → socket record>` for every client that said hello. */
   const rooms = new Map();
@@ -973,6 +986,29 @@ export function createStudioWeb({
       });
       if (result.ok !== true) return sendResult(res, result);
       res.json({ song_id: result.song_id });
+    }));
+
+    // The bot "Ask the agent" talks to: the enabled bot whose home project is
+    // this song's project. A song outside the song list is a 404 (the page
+    // then keeps the box disabled); a project with no enabled bot answers
+    // `{bot_id: null}`, which is the same disabled box.
+    //
+    // The song's project comes from the hub's own song list, so the page is
+    // told the same project the agent routes scope by, and `project_id` rides
+    // back with the bot because the page files its Perch session under it.
+    r.get("/api/studio/songs/:id/project-bot", dashboardAuth, handled(async (req, res) => {
+      const song_id = String(req.params.id ?? "");
+      const songs = await hub.listSongs({});
+      const row = Array.isArray(songs) ? songs.find((song) => song && song.id === song_id) : null;
+      if (!row) return res.status(404).json({ error: "not_found" });
+      const projectId = Number(row.project_id);
+      const bot = Number.isInteger(projectId) ? await projectBot(projectId) : null;
+      const botId = bot && bot.bot_id ? String(bot.bot_id) : null;
+      return res.json({
+        bot_id: botId,
+        name: botId ? String(bot.name || botId) : null,
+        project_id: Number.isInteger(projectId) ? projectId : null,
+      });
     }));
 
     // The engine assets the panel loads. The whitelist is the whole contract:

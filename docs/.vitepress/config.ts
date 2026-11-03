@@ -349,6 +349,7 @@ export default defineConfig({
           { text: 'Kiosk Mode', link: '/guide/kiosk-mode' },
           { text: 'Ramble', link: '/guide/ramble' },
           { text: 'Music', link: '/guide/music' },
+          { text: 'Studio', link: '/guide/studio' },
           { text: 'News briefing', link: '/guide/news-briefing' },
           { text: 'Context & Performance', link: '/guide/context-performance' },
           { text: 'Data Backends', link: '/guide/data-backends' },
