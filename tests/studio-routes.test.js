@@ -19,6 +19,7 @@ import { createClient } from "@libsql/client";
 import express, { Router } from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { AclError } from "../servers/shared/project-acl.js";
+import { GENERAL_LIMITER_SKIP_PREFIXES, generalLimiterSkip } from "../servers/gateway/middleware/rate-limit.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb, ensureAgentToken } from "../bundles/studio/server/web.js";
@@ -61,6 +62,29 @@ function cookieOf(header, name) {
   return null;
 }
 
+/** The loopback addresses a local caller can arrive on. */
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+/** Headers that mean a forwarder is in the path (peer-class.js's own list). */
+const FORWARDING = ["x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"];
+
+/**
+ * The test's own `classifyPeer`: the same rule the real module applies on the
+ * local branch — a loopback socket, with no forwarding header and no
+ * tailscale-* header, is "local"; everything else is "remote".
+ * @param {object} req
+ * @returns {{via: "local"|"remote"}}
+ */
+function classifyPeer(req) {
+  const address = String(req?.socket?.remoteAddress || "");
+  const headers = req?.headers || {};
+  const forwarded = FORWARDING.some((name) => {
+    const value = headers[name];
+    return value != null && String(value).trim() !== "";
+  }) || Object.keys(headers).some((name) => name.toLowerCase().startsWith("tailscale-"));
+  return { via: LOOPBACK.has(address) && !forwarded ? "local" : "remote" };
+}
+
 /**
  * Boot a gateway-shaped server for one test.
  * @param {import("node:test").TestContext} t
@@ -85,12 +109,12 @@ async function boot(t, { allowNetwork = true } = {}) {
     hub,
     Router,
     WebSocketServer,
-    jsonParser: express.json({ limit: "2mb" }),
     auth: {
       isAllowedNetwork: () => allowNetwork,
       sessionFromRequest: (req) => cookieOf(req.headers.cookie, "crow_session"),
       verifySession: async (token) => token === "good",
       csrfTokenAccepted: (_req, presented) => presented === "csrf-ok",
+      classifyPeer,
     },
     crowHome,
     bundleDir: null,
@@ -106,6 +130,9 @@ async function boot(t, { allowNetwork = true } = {}) {
     }
     next();
   });
+  // The gateway parses JSON for every route before the panel router (1 MB cap),
+  // so the studio routes read `req.body` without a parser of their own.
+  app.use(express.json({ limit: "1mb" }));
   app.use(web.router((_req, _res, next) => next()));
 
   const server = createServer(app);
@@ -346,6 +373,29 @@ test("agent API without token 401, from non-loopback 403", async (t) => {
   assert.ok(Array.isArray(await allowed.json()));
 });
 
+test("agent request carrying x-forwarded-for is refused 403", async (t) => {
+  const { base, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+
+  // Serve proxies tailnet traffic from a loopback socket, so the address alone
+  // says nothing: the forwarding header is what marks the caller as remote.
+  const response = await fetch(`${base}/api/studio/agent/songs`, {
+    headers: { "x-studio-token": token, "x-forwarded-for": "100.64.20.9" },
+  });
+  assert.equal(response.status, 403);
+});
+
+test("agent request carrying a tailscale-user-login header is refused 403", async (t) => {
+  const { base, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+
+  // A Serve request names the tailnet user; a local caller never can.
+  const response = await fetch(`${base}/api/studio/agent/songs`, {
+    headers: { "x-studio-token": token, "tailscale-user-login": "someuser" },
+  });
+  assert.equal(response.status, 403);
+});
+
 test("agent command arrives at WS client tagged kind agent", async (t) => {
   const { base, port, hub, crowHome } = await boot(t);
   const songId = await seedSong(hub);
@@ -368,8 +418,25 @@ test("agent command arrives at WS client tagged kind agent", async (t) => {
 
   const update = await next((msg) => msg.type === "update");
   assert.equal(update.entry.author.kind, "agent");
-  assert.equal(update.entry.author.id, "bot:studio-test");
+  assert.equal(update.entry.author.id, "agent:bot:studio-test");
   assert.equal(update.entry.author.label, "Studio test bot");
+});
+
+test("an agent sending author id local is recorded as agent:local", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const songId = await seedSong(hub);
+  const token = ensureAgentToken(crowHome);
+
+  const sent = await agentCommand(base, token, songId, {
+    cmd_id: "agent-local-1",
+    command: "scene.add",
+    args: { id: "agent-local", name: "Agent local" },
+    author: { id: "local", label: "You" },
+  });
+  assert.equal(sent.status, 200, `the agent command was refused: ${JSON.stringify(sent.body)}`);
+  assert.equal(sent.body.entry.author.kind, "agent");
+  assert.equal(sent.body.entry.author.id, "agent:local");
+  assert.notEqual(sent.body.entry.author.id, HUMAN.id, "an agent never writes as the person");
 });
 
 test("resent command with same cmd_id applies once", async (t) => {
@@ -395,6 +462,132 @@ test("resent command with same cmd_id applies once", async (t) => {
   );
   assert.equal(applied.length, 1, "the resent command was applied once");
   assert.equal(applied[0].id, first.body.entry.id);
+});
+
+test("two hellos back to back join only the first song", async (t) => {
+  const { port, hub } = await boot(t);
+  const firstSong = await seedSong(hub);
+  const other = await hub.createSong({ project_id: PROJECT, title: "Other song", author: HUMAN });
+  assert.equal(other.ok, true, `createSong was refused: ${other.error}`);
+
+  const ws = connect(t, port);
+  const next = collector(ws);
+  await opened(ws);
+
+  // No await between them: the second hello arrives while the first is still
+  // opening its song.
+  ws.send(JSON.stringify({ type: "hello", csrf: "csrf-ok", song_id: firstSong, client_id: "client-a" }));
+  ws.send(JSON.stringify({ type: "hello", csrf: "csrf-ok", song_id: other.song_id, client_id: "client-a" }));
+
+  const state = await next((msg) => msg.type === "state");
+  assert.ok(state.update.length > 0, "the first hello was answered with its song");
+  const refused = await next((msg) => msg.type === "error");
+  assert.equal(refused.error, "bad message");
+
+  // The second hello joined no room: a step on that song never reaches this
+  // socket, while one on the first song does. The frames arrive in the order
+  // the steps ran, so a socket in both rooms is handed the wrong entry first.
+  const elsewhere = await hub.runCommand({
+    song_id: other.song_id,
+    cmd_id: null,
+    command: "scene.add",
+    args: { id: "other-scene", name: "Other" },
+    author: HUMAN,
+  });
+  assert.equal(elsewhere.ok, true, `the other song's step was refused: ${elsewhere.error}`);
+  const here = await hub.runCommand({
+    song_id: firstSong,
+    cmd_id: null,
+    command: "scene.add",
+    args: { id: "first-scene", name: "First" },
+    author: HUMAN,
+  });
+  assert.equal(here.ok, true, `the first song's step was refused: ${here.error}`);
+
+  const update = await next((msg) => msg.type === "update");
+  assert.equal(update.entry.args.id, "first-scene");
+});
+
+test("a superseded socket's close leaves the live client's presence alone", async (t) => {
+  const { port, hub } = await boot(t);
+  const songId = await seedSong(hub);
+
+  const a = connect(t, port);
+  const nextA = collector(a);
+  await opened(a);
+  a.send(JSON.stringify({ type: "hello", csrf: "csrf-ok", song_id: songId, client_id: "shared-client" }));
+  await nextA((msg) => msg.type === "state");
+  a.send(JSON.stringify({ type: "focus", ref: "clip:clip-x" }));
+  const presence = await nextA((msg) => msg.type === "presence");
+  assert.deepEqual(presence.presence.map((entry) => entry.client_id), ["shared-client"]);
+
+  // The same client reconnects: the server closes the old socket with 4000.
+  const aClosed = closeCode(a);
+  const b = connect(t, port);
+  const nextB = collector(b);
+  await opened(b);
+  b.send(JSON.stringify({ type: "hello", csrf: "csrf-ok", song_id: songId, client_id: "shared-client" }));
+  await nextB((msg) => msg.type === "state");
+  assert.equal(await aClosed, 4000, "the reconnect superseded the old socket");
+
+  // The room no longer holds the old socket, so its close may not speak for the
+  // client: the live socket's focus is still there for the agent rules to see.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const live = hub.presence(songId);
+  assert.equal(live.length, 1, "the live client is still present");
+  assert.equal(live[0].client_id, "shared-client");
+  assert.equal(live[0].focus, "clip:clip-x");
+});
+
+const INTERNAL_TEXT = "Studio hit an internal error.";
+
+test("an internal error does not leak its message", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+  hub.listSongs = async () => {
+    throw new Error("SQLITE secret path");
+  };
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  const response = await fetch(`${base}/api/studio/agent/songs`, {
+    headers: { "x-studio-token": token },
+  });
+  assert.equal(response.status, 500);
+  const body = await response.json();
+  assert.deepEqual(body, { ok: false, code: "internal", error: INTERNAL_TEXT });
+  assert.equal(JSON.stringify(body).includes("SQLITE"), false, "the real message stays in the log");
+  assert.ok(logged.some((args) => args[0] === "[studio]"), "the real error is logged");
+});
+
+test("the 21st socket for one session is refused", async (t) => {
+  const { port } = await boot(t);
+  const sockets = [];
+  for (let i = 0; i < 20; i += 1) sockets.push(connect(t, port));
+  await Promise.all(sockets.map((ws) => opened(ws)));
+
+  const status = await refusedUpgrade(port, {
+    Cookie: "crow_session=good; crow_csrf=csrf-ok",
+    Origin: `http://127.0.0.1:${port}`,
+  });
+  assert.equal(status, 429);
+});
+
+test("the general limiter never counts the studio agent API", () => {
+  assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/api/studio/agent/"));
+  for (const path of ["/api/studio/agent/songs", "/api/studio/agent/songs/abc/command"]) {
+    assert.equal(generalLimiterSkip({ path }), true, path);
+  }
+  for (const path of ["/api/studio/agent", "/api/studio/agentx/songs", "/api/studio/songs"]) {
+    assert.equal(generalLimiterSkip({ path }), false, path);
+  }
 });
 
 test("token file is mode 0600", () => {

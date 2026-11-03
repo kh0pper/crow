@@ -13,10 +13,14 @@
  *   - the dashboard, behind `dashboardAuth`, with the CSRF header on every
  *     state-changing call (double submit, the same rule the rest of the
  *     dashboard uses);
- *   - the Studio MCP process, on `/api/studio/agent/*`, which is loopback
- *     only and presents the boot token from `<CROW_HOME>/studio-agent-token`.
- *     Its author is always forced to kind "agent": an MCP call is never
- *     attributed to the person.
+ *   - the Studio MCP process, on `/api/studio/agent/*`, which must be a truly
+ *     local caller — `classifyPeer(req).via === "local"`: a loopback socket
+ *     that is not a trusted proxy and that carries no forwarding and no
+ *     tailscale-* header, so a Tailscale Serve proxy (which also reaches the
+ *     gateway from a loopback socket) is refused — and presents the boot token
+ *     from `<CROW_HOME>/studio-agent-token`. Its author is always
+ *     `kind:"agent"`, with an `agent:` prefix on the id: an MCP call is never
+ *     attributed to the person, and its id can never be the human's "local".
  *
  * The WebSocket at `/api/studio/ws` follows the kiosk session-display
  * sequence: no Funnel header, an allowed network, a same-origin handshake, a
@@ -25,6 +29,10 @@
  * and a command it resends keeps its `cmd_id`, so the hub applies it once.
  *
  * Studio routes are never Funnel-public.
+ *
+ * Request bodies are capped at 1 MB by the gateway: its global JSON parser runs
+ * before this router, so the routes here read `req.body` and add no parser of
+ * their own.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -54,8 +62,11 @@ const HISTORY_PAGE = 50;
 /** The author every dashboard-issued command carries (spec §5.3). */
 const HUMAN_AUTHOR = Object.freeze({ kind: "human", id: "local", label: "You" });
 
-/** The addresses that may present the agent token. */
-const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+/** Open Studio sockets one session token may hold; the next upgrade is 429. */
+const MAX_SOCKETS_PER_TOKEN = 20;
+
+/** What a caller is told when Studio itself broke; the real error goes to the log. */
+const INTERNAL_ERROR_TEXT = "Studio hit an internal error.";
 
 /** HTTP status for each hub refusal code. */
 const STATUS_BY_CODE = Object.freeze({
@@ -190,13 +201,22 @@ function toBase64(bytes) {
 /**
  * Normalise the author an MCP caller sends. The kind is always "agent": an
  * agent can name itself, never the person.
+ *
+ * The id is prefixed with `agent:` so that a caller naming itself "local" (or
+ * anything else) still cannot pass for the human author the dashboard uses.
+ * Control characters go, and the id is bounded like the label.
  * @param {{id?: string, label?: string}|null} author
  * @returns {{kind: "agent", id: string, label: string}}
  */
 function agentAuthor(author) {
+  const id = String(author?.id ?? "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 80);
   return {
     kind: "agent",
-    id: String(author?.id || "mcp").slice(0, 80),
+    id: `agent:${id || "mcp"}`,
     label: String(author?.label || "Agent (MCP)").slice(0, 80),
   };
 }
@@ -213,24 +233,42 @@ function sendResult(res, result) {
 }
 
 /**
+ * The text one thrown error may be reported with.
+ *
+ * A refusal carries a code — a StudioError from the hub, or an AclError with
+ * its name — and its message is written for the caller. Anything else is a bug:
+ * its message may name a file, a query or a stack, so it is logged here and
+ * replaced by one fixed sentence.
+ * @param {unknown} err
+ * @returns {string}
+ */
+function errorText(err) {
+  const code = typeof err?.code === "string" ? err.code : null;
+  if (code || err?.name === "AclError") return String(err?.message || INTERNAL_ERROR_TEXT);
+  console.warn("[studio]", err);
+  return INTERNAL_ERROR_TEXT;
+}
+
+/**
  * Answer with an error a read threw.
  *
  * The hub's reads throw (there is no half-answer to hand back): a StudioError
  * keeps its code, an ACL refusal becomes 403 with code "acl", and anything
- * else is a 500.
+ * unexpected becomes a 500 with code "internal" and a fixed sentence, so a
+ * broken query never reaches the caller.
  */
 function sendError(res, err) {
   if (res.headersSent) return;
   const code = typeof err?.code === "string" ? err.code : null;
-  if (!code) {
-    res.status(500).json({ ok: false, error: err?.message || "Studio error" });
+  const isAcl = err?.name === "AclError";
+  if (!code && !isAcl) {
+    res.status(500).json({ ok: false, code: "internal", error: errorText(err) });
     return;
   }
-  const isAcl = err?.name === "AclError";
   res.status(isAcl ? 403 : (STATUS_BY_CODE[code] ?? 500)).json({
     ok: false,
     code: isAcl ? "acl" : code,
-    error: err?.message || "Studio error",
+    error: errorText(err),
   });
 }
 
@@ -274,10 +312,12 @@ function refuse(socket, status, text) {
  * @param {object} options.hub - the session hub (createHub); the only writer
  * @param {Function} options.Router - Express's Router constructor
  * @param {Function} options.WebSocketServer - the `ws` WebSocketServer class
- * @param {Function} options.jsonParser - Express JSON body middleware
  * @param {{isAllowedNetwork: Function, sessionFromRequest: Function,
- *          verifySession: Function, csrfTokenAccepted: Function}} options.auth
- *   the gateway's dashboard-session checks (auth.js and shared/csrf.js)
+ *          verifySession: Function, csrfTokenAccepted: Function,
+ *          classifyPeer: Function}} options.auth
+ *   the gateway's dashboard-session checks (auth.js and shared/csrf.js) and the
+ *   peer classifier (`servers/shared/peer-class.js`), which is what says
+ *   whether an agent caller is really on this machine
  * @param {string} [options.crowHome] - where the agent token file lives
  * @param {string} [options.bundleDir] - the bundle directory asset routes read
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
@@ -289,7 +329,6 @@ export function createStudioWeb({
   hub,
   Router,
   WebSocketServer,
-  jsonParser,
   auth,
   crowHome,
   bundleDir,
@@ -299,13 +338,31 @@ export function createStudioWeb({
   }
   if (typeof Router !== "function") throw new TypeError("Studio web: Router is required");
   if (typeof WebSocketServer !== "function") throw new TypeError("Studio web: WebSocketServer is required");
-  if (typeof jsonParser !== "function") throw new TypeError("Studio web: the JSON body parser is required");
-  for (const name of ["isAllowedNetwork", "sessionFromRequest", "verifySession", "csrfTokenAccepted"]) {
+  for (const name of [
+    "isAllowedNetwork",
+    "sessionFromRequest",
+    "verifySession",
+    "csrfTokenAccepted",
+    "classifyPeer",
+  ]) {
     if (typeof auth?.[name] !== "function") throw new TypeError(`Studio web: auth.${name} is required`);
   }
 
   /** `<song_id> → <client_id → socket record>` for every client that said hello. */
   const rooms = new Map();
+
+  /** `<session token → Set<socket record>>` for every open socket, hello or not. */
+  const openByToken = new Map();
+
+  /** @returns {Set<object>} the open sockets holding one session token. */
+  function openSocketsFor(token) {
+    let open = openByToken.get(token);
+    if (!open) {
+      open = new Set();
+      openByToken.set(token, open);
+    }
+    return open;
+  }
 
   /** The boot token, minted on first use so a fresh CROW_HOME works. */
   let cachedToken = null;
@@ -354,7 +411,11 @@ export function createStudioWeb({
     }
   }
 
-  /** Remember a helloed socket under its song and client id. */
+  /**
+   * Remember a helloed socket under its song and client id.
+   * @param {object} record
+   * @returns {void}
+   */
   function register(record) {
     let room = rooms.get(record.song_id);
     if (!room) {
@@ -371,13 +432,25 @@ export function createStudioWeb({
       }
     }
     room.set(record.client_id, record);
+    // The room this record actually joined, which is the only one its close may
+    // speak for; a superseded record keeps pointing at the room it left.
+    record.room = room;
   }
 
-  /** Forget a socket and drop its presence. */
+  /**
+   * Forget a socket and drop its presence.
+   *
+   * Only the socket a room still holds may speak for its client: a socket that
+   * a reconnect superseded is closed after its replacement joined, so its close
+   * must not remove the live client or clear its focus.
+   * @param {object} record
+   * @returns {void}
+   */
   function unregister(record) {
-    const room = rooms.get(record.song_id);
-    if (room && room.get(record.client_id) === record) room.delete(record.client_id);
-    if (room && room.size === 0) rooms.delete(record.song_id);
+    const room = record.room;
+    if (!room || room.get(record.client_id) !== record) return;
+    room.delete(record.client_id);
+    if (room.size === 0 && rooms.get(record.song_id) === room) rooms.delete(record.song_id);
     Promise.resolve()
       .then(() => hub.clientGone(record.song_id, record.client_id))
       .catch(() => {
@@ -419,10 +492,13 @@ export function createStudioWeb({
     let opened;
     let history = [];
     try {
-      opened = await hub.openSong(song_id);
+      // The history first, then the document: the hub drops a song's cached
+      // document when a save fails, so no doc reference outlives another hub
+      // call — it is opened and read inside this one turn.
       history = await hub.history(song_id, { limit: HISTORY_PAGE });
+      opened = await hub.openSong(song_id);
     } catch (err) {
-      send(record.ws, { type: "error", error: err?.message || "The song could not be opened." });
+      send(record.ws, { type: "error", error: errorText(err) });
       try {
         record.ws.close(4404, "song unavailable");
       } catch {
@@ -492,13 +568,26 @@ export function createStudioWeb({
       }
       send(record.ws, { type: "error", error: "bad message" });
     } catch (err) {
-      send(record.ws, { type: "error", error: err?.message || "The command failed." });
+      send(record.ws, { type: "error", error: errorText(err) });
     }
   }
 
-  /** A freshly upgraded socket, before it has said hello. */
+  /**
+   * A freshly upgraded socket, before it has said hello.
+   * @returns {object} the record the upgrade handler tracks and the room holds
+   */
   function openSocket(ws, req, token) {
-    const record = { ws, req, token, song_id: null, client_id: null, helloed: false, author: HUMAN_AUTHOR };
+    const record = {
+      ws,
+      req,
+      token,
+      song_id: null,
+      client_id: null,
+      room: null,
+      helloing: false,
+      helloed: false,
+      author: HUMAN_AUTHOR,
+    };
     const helloTimer = setTimeout(() => {
       if (record.helloed) return;
       try {
@@ -513,16 +602,34 @@ export function createStudioWeb({
       // A close follows; nothing else to do.
     });
     ws.on("message", (raw) => {
+      // The first hello claims the socket synchronously, so a second frame that
+      // arrives while the song is still being opened (a duplicate hello, or a
+      // command) is answered instead of run: two hellos can never join two
+      // rooms.
+      if (record.helloed) {
+        Promise.resolve()
+          .then(() => handleMessage(record, raw))
+          .catch((err) => {
+            send(ws, { type: "error", error: errorText(err) });
+          });
+        return;
+      }
+      if (record.helloing) {
+        send(ws, { type: "error", error: "bad message" });
+        return;
+      }
+      record.helloing = true;
       Promise.resolve()
-        .then(() => (record.helloed ? handleMessage(record, raw) : handleHello(record, raw)))
-        .catch(() => {
-          send(ws, { type: "error", error: "bad message" });
+        .then(() => handleHello(record, raw))
+        .catch((err) => {
+          send(ws, { type: "error", error: errorText(err) });
         });
     });
     ws.on("close", () => {
       clearTimeout(helloTimer);
-      if (record.helloed && record.song_id && record.client_id) unregister(record);
+      if (record.helloed) unregister(record);
     });
+    return record;
   }
 
   /**
@@ -595,13 +702,27 @@ export function createStudioWeb({
       });
 
       // Everything else is decided before the upgrade: the cookie must be a
-      // live dashboard session, and hello has to echo its CSRF value.
+      // live dashboard session, that session may hold at most
+      // MAX_SOCKETS_PER_TOKEN open Studio sockets, and hello has to echo the
+      // session's CSRF value.
       Promise.resolve()
         .then(() => auth.sessionFromRequest(req))
         .then((token) => {
           if (socket.destroyed) return;
           if (!token) return refuse(socket, 401, "Unauthorized");
-          wss.handleUpgrade(req, socket, head, (ws) => openSocket(ws, req, token));
+          const open = openSocketsFor(token);
+          if (open.size >= MAX_SOCKETS_PER_TOKEN) {
+            return refuse(socket, 429, "Too Many Requests");
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            const record = openSocket(ws, req, token);
+            open.add(record);
+            ws.on("close", () => {
+              open.delete(record);
+              if (open.size === 0) openByToken.delete(token);
+            });
+          });
+          return undefined;
         })
         .catch(() => {
           if (!socket.destroyed) refuse(socket, 401, "Unauthorized");
@@ -629,13 +750,21 @@ export function createStudioWeb({
     };
   }
 
-  /** Loopback only, no Funnel, and the boot token — in that order. */
+  /**
+   * A truly local caller, no Funnel, and the boot token — in that order.
+   *
+   * `classifyPeer` is what makes "local" mean something behind Tailscale
+   * Serve: Serve proxies tailnet traffic from a loopback socket, so
+   * `remoteAddress` alone says 127.0.0.1 for a caller who is not on this
+   * machine. Only `via === "local"` — a loopback socket that is not a trusted
+   * proxy and carries no forwarding or tailscale-* header — may present the
+   * token.
+   */
   function agentGuard(req, res, next) {
     if (req.headers["tailscale-funnel-request"]) {
       return res.status(403).json({ ok: false, error: "refused" });
     }
-    const address = String(req.socket?.remoteAddress || "");
-    if (!LOOPBACK_ADDRESSES.has(address)) {
+    if (auth.classifyPeer(req)?.via !== "local") {
       return res.status(403).json({ ok: false, error: "refused" });
     }
     if (!tokenMatches(req.get("x-studio-token"), agentToken())) {
@@ -683,7 +812,7 @@ export function createStudioWeb({
       res.json(await hub.listSongs(songFilter(req.query)));
     }));
 
-    r.post("/api/studio/songs", dashboardAuth, jsonParser, requireCsrf, handled(async (req, res) => {
+    r.post("/api/studio/songs", dashboardAuth, requireCsrf, handled(async (req, res) => {
       const result = await hub.createSong({
         project_id: req.body?.project_id,
         title: req.body?.title,
@@ -709,7 +838,7 @@ export function createStudioWeb({
       res.json(await hub.listSongs(songFilter(req.query)));
     }));
 
-    r.post(`${AGENT}/songs`, agentGuard, jsonParser, handled(async (req, res) => {
+    r.post(`${AGENT}/songs`, agentGuard, handled(async (req, res) => {
       const result = await hub.createSong({
         project_id: req.body?.project_id,
         title: req.body?.title,
@@ -732,7 +861,7 @@ export function createStudioWeb({
       res.json(await hub.history(req.params.id, historyOptions(req.query)));
     }));
 
-    r.post(`${AGENT}/songs/:id/command`, agentGuard, jsonParser, handled(async (req, res) => {
+    r.post(`${AGENT}/songs/:id/command`, agentGuard, handled(async (req, res) => {
       const result = await hub.runCommand({
         song_id: req.params.id,
         cmd_id: req.body?.cmd_id ?? null,
@@ -743,7 +872,7 @@ export function createStudioWeb({
       sendResult(res, result);
     }));
 
-    r.post(`${AGENT}/songs/:id/undo`, agentGuard, jsonParser, handled(async (req, res) => {
+    r.post(`${AGENT}/songs/:id/undo`, agentGuard, handled(async (req, res) => {
       const result = await hub.undo({
         song_id: req.params.id,
         cmd_id: req.body?.cmd_id ?? null,
@@ -753,7 +882,7 @@ export function createStudioWeb({
       sendResult(res, result);
     }));
 
-    r.post(`${AGENT}/songs/:id/redo`, agentGuard, jsonParser, handled(async (req, res) => {
+    r.post(`${AGENT}/songs/:id/redo`, agentGuard, handled(async (req, res) => {
       const result = await hub.redo({
         song_id: req.params.id,
         cmd_id: req.body?.cmd_id ?? null,

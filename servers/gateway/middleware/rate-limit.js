@@ -159,6 +159,10 @@ export const GENERAL_LIMITER_SKIP_PREFIXES = Object.freeze([
   // A remote caller is refused there with an empty 404 before any work (the
   // mount's source check is its first step, ahead of any DB read).
   "/services-tools/", "/satellite-tools/",
+  // Studio's agent API (Crow Studio 1a): local callers only, its own per-boot
+  // token (bundles/studio/server/web.js); every MCP call shares one 127.0.0.1
+  // bucket.
+  "/api/studio/agent/",
 ]);
 
 /** express-rate-limit `skip` predicate for the general limiter; `extraPrefixes` = GATEWAY_RATE_LIMIT_SKIP_PREFIXES. */

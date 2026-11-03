@@ -8,8 +8,11 @@
  * dependency by injection; one session hub is built here for the life of the
  * gateway process, on the gateway's own database client, and its broadcasts go
  * straight back into the web layer so an edit reaches every open client.
+ *
+ * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
+ * runs before the panel router, so nothing here adds one.
  */
-import express, { Router } from "express";
+import { Router } from "express";
 import { WebSocketServer } from "ws";
 import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -32,6 +35,10 @@ const { createDbClient } = await appImport("servers/db.js");
 // rather than minting anything: a Studio socket is a dashboard session.
 const { isAllowedNetwork, sessionFromRequest, verifySession } = await appImport("servers/gateway/dashboard/auth.js");
 const { csrfTokenAccepted } = await appImport("servers/gateway/dashboard/shared/csrf.js");
+// The real peer classifier. Serve proxies tailnet traffic from a loopback
+// socket, so `req.socket.remoteAddress` alone cannot tell a local caller from
+// a tailnet one; the agent routes ask this instead.
+const { classifyPeer } = await appImport("servers/shared/peer-class.js");
 // The real project ACL module: the hub decides no access by itself.
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
@@ -53,8 +60,7 @@ web = createStudioWeb({
   hub,
   Router,
   WebSocketServer,
-  jsonParser: express.json({ limit: "2mb" }),
-  auth: { isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted },
+  auth: { isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted, classifyPeer },
   crowHome,
   bundleDir: BUNDLE_DIR,
 });
