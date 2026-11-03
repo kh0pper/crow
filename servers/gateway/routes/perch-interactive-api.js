@@ -52,7 +52,7 @@ import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shar
 import { SHOT_KEEP } from "../browser-tile/shots.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
-import { createDbClient } from "../../db.js";
+import { createDbClient, auditLog } from "../../db.js";
 import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { cwdList, cwdRead } from "../perch-files.js";
@@ -90,6 +90,9 @@ import {
   settleOffer, findOfferCard, recoverThread, claimOfferNotes, unclaimOfferNotes, offerTag,
 } from "../board/offer-service.js";
 import { takeSecretNotes, returnSecretNotes, openRequestFor } from "../secrets/request-store.js";
+import {
+  claimStagedNotes, discardStaged, editStaged, listStagedForSession, returnStagedNotes, sendStaged,
+} from "../staged/send-service.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -491,7 +494,7 @@ function deliveredExists(sid, name) {
   finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
 }
 
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key), ownerCheck = isLocalPasswordSessionOn } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key), ownerCheck = isLocalPasswordSessionOn, stagedGmail = null } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
   async function piNames(env) {
@@ -749,6 +752,11 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // fixed lines from secrets/request-store.js (in memory, taken once; handed back when the
     // turn never started). Never a value: no value is ever held there.
     const secretLines = message.trim() ? takeSecretNotes(sid) : [];
+    // Staged sends (spec §12.3): what happened to the bot's draft — sent with a message id, edited,
+    // discarded — rides the same way, as fixed lines from staged/send-service.js (in memory, taken
+    // once, handed back below when the turn never started). After the offer and password lines: the
+    // bot hears about its draft last. No address, subject or body is ever in one.
+    const stagedLines = message.trim() ? claimStagedNotes(sid) : [];
     try {
       // The owner typed it here when this is their local session (the offer lines are fixed
       // gateway text); an SSO or peer session is "other". A failed read is "other" (fail closed).
@@ -756,12 +764,13 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
       // "[Crow] " marks a gateway line, as offerNoteLine does.
-      const lines = [...secretLines.map((l) => "[Crow] " + l), ...notes.lines];
+      const lines = [...secretLines.map((l) => "[Crow] " + l), ...notes.lines, ...stagedLines.map((l) => "[Crow] " + l)];
       const text = lines.length ? lines.join("\n") + "\n\n" + incoming.text : incoming.text;
       const result = await eng.message(sid, text, images, { principal });
       res.status(202).json({ turnId: result.turnId, removed: incoming.removed });
     } catch (err) {
       returnSecretNotes(sid, secretLines);
+      returnStagedNotes(sid, stagedLines);
       if (notes.claims.length) {
         try { await unclaimOfferNotes(ndb, notes.claims); } catch (e) { console.warn("[perch-interactive-api] offer note unclaim failed:", e.message); }
       }
@@ -1154,6 +1163,112 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       try { db.close(); } catch { /* already closed */ }
       if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     }
+  });
+
+  // ---- Staged sends (spec §12): the operator's yes on a bot's Gmail draft ----
+  //   GET  /interactive/:sid/staged      the chat's open drafts, as the card reads them
+  //   POST /staged/:id/send    { content_hash }
+  //   POST /staged/:id/edit    { to, cc, bcc, subject, body }
+  //   POST /staged/:id/discard
+  //
+  // Rails, copied from the credential card (routes/secret-submit.js) on purpose:
+  //  - OWNER ONLY, checked before anything is read: an SSO session, a session minted by a login on
+  //    this machine and any request from this machine are 403 {"error":"not_owner"} (review I1).
+  //    The session gate and CSRF come from the dashboard mount, like every state-changing route.
+  //  - A route-scoped parser on the three POSTs, and their paths are in index.js `_hasOwnParser`,
+  //    so the gateway's global parser never reads a body that carries addresses and a draft's
+  //    text: a malformed or oversized one gets the router's fixed `bad_body`/`too_large` and one
+  //    fixed log line, never Node's JSON.parse message (which quotes the body).
+  //  - Only `application/json` bodies are ours: a urlencoded post is refused before it is read.
+  //  - `Cache-Control: no-store` on every answer.
+  //
+  // Every decision and every write is in staged/send-service.js; the answers below are fixed codes
+  // plus the row id and its hash. A body, an address or a subject is never echoed — the LIST is the
+  // card's own read, and it is the one route that returns a snapshot (the operator is looking at it).
+  const STAGED_PREFIX = P + "/staged";
+  const stagedNoStore = (req, res, next) => { res.set("Cache-Control", "no-store"); next(); };
+  const stagedOwnerOnly = async (req, res, next) => {
+    let owner = false;
+    let db = null;
+    try { db = createDbClient(); owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
+    finally { if (db) { try { db.close(); } catch { /* closed */ } } }
+    if (!owner) return jsonError(res, 403, "not_owner");
+    next();
+  };
+  // Before the parser, for the same reason secret-submit does it: nothing of a body is read until
+  // the caller is known to be the owner.
+  router.use(STAGED_PREFIX, stagedNoStore, stagedOwnerOnly);
+  const stagedJson = express.json({ limit: "256kb" });
+  const stagedRequireJson = (req, res, next) => (
+    /^application\/json\b/i.test(String(req.headers["content-type"] || "")) ? next() : jsonError(res, 400, "bad_body"));
+  for (const action of ["send", "edit", "discard"]) {
+    router.use(`${STAGED_PREFIX}/:id/${action}`, stagedRequireJson, stagedJson);
+  }
+
+  /** outcome → fixed HTTP answer. No draft content ever passes through here. */
+  function stagedAnswer(res, out) {
+    const o = out || {};
+    switch (o.outcome) {
+      case "sent": return res.json({ ok: true, state: "sent", messageId: o.messageId ?? null });
+      case "edited": return res.json({ ok: true, code: "edited", id: o.id, contentHash: o.contentHash, state: o.state || "staged" });
+      case "discarded": return res.json({ ok: true, code: "discarded", state: "discarded" });
+      case "failed": return res.json({ ok: false, state: "failed", failReason: o.failReason });
+      case "not_found": return jsonError(res, 404, "not_found");
+      case "placeholders": return jsonError(res, 409, "placeholders");
+      case "already_sent": return jsonError(res, 409, "already_sent");
+      case "changed": return jsonError(res, 409, "changed");
+      case "not_editable": return jsonError(res, 409, "not_editable");
+      case "open_in_gmail": return jsonError(res, 409, "open_in_gmail");
+      case "bad_address": return jsonError(res, 400, "bad_address");
+      default: return jsonError(res, 500, "internal");
+    }
+  }
+
+  /** One DB client per request; a failure is a fixed 500 and one fixed line (its class only). */
+  async function stagedRoute(res, what, run) {
+    const db = createDbClient();
+    try {
+      return stagedAnswer(res, await run(db));
+    } catch (err) {
+      console.warn("[perch-interactive-api] staged " + what + " failed: " + ((err && err.name) || "Error"));
+      return jsonError(res, 500, "internal");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  router.get(P + "/interactive/:sid/staged", stagedNoStore, stagedOwnerOnly, async (req, res) => {
+    const sid = String(req.params.sid);
+    const db = createDbClient();
+    try {
+      const items = await listStagedForSession(db, sid, { gmail: stagedGmail });
+      res.json({ items });
+    } catch (err) {
+      console.warn("[perch-interactive-api] staged list failed: " + ((err && err.name) || "Error"));
+      jsonError(res, 500, "internal");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  router.post(STAGED_PREFIX + "/:id/send", async (req, res) => {
+    const id = String(req.params.id);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const hash = typeof body.content_hash === "string" ? body.content_hash : "";
+    await stagedRoute(res, "send", (db) => sendStaged(db, id, hash, { gmail: stagedGmail, audit: auditLog }));
+  });
+
+  router.post(STAGED_PREFIX + "/:id/edit", async (req, res) => {
+    const id = String(req.params.id);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    // Read exactly the five fields the card can edit; nothing else is forwarded.
+    const posted = { to: body.to, cc: body.cc, bcc: body.bcc, subject: body.subject, body: body.body };
+    await stagedRoute(res, "edit", (db) => editStaged(db, id, posted, { gmail: stagedGmail, audit: auditLog }));
+  });
+
+  router.post(STAGED_PREFIX + "/:id/discard", async (req, res) => {
+    const id = String(req.params.id);
+    await stagedRoute(res, "discard", (db) => discardStaged(db, id, { audit: auditLog }));
   });
 
   // ---- GET /interactive/:sid/card — this chat's card, its open result, its questions (P5) ----

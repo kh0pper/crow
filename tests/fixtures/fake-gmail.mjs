@@ -7,6 +7,10 @@
  * way, not the stored draft — and records the raw it was asked to send in `fake.sent`, so a test can
  * prove that an edit made after approval did not ride along.
  *
+ * It also serves `GET /gmail/v1/users/me/messages?q=in:sent to:<addr>&maxResults=1` for the client's
+ * `hasSentTo` (the card's "new recipient" hint): an address in `fake.sentTo` answers one message,
+ * anything else answers an empty list, and every query is recorded in `fake.sentQueries`.
+ *
  * It is deliberately blunt about content: an error response's body repeats the request (a 404 says
  * the draft id, a failure carries whatever `failNext` was given) and every read of a failed
  * response's body is counted in `fake.errorBodyReads` — that is exactly what the real API does, and
@@ -15,12 +19,14 @@
  * Usage:
  *   const fake = createFakeGmail({ drafts: { d1: { raw: makeDraftRaw({...}), threadId: "t1" } } });
  *   createGmailClient({ credRef, fetchImpl: fake.fetchImpl, configPaths });
- *   fake.calls            { token, get, update, send }
+ *   fake.calls            { token, get, update, send, sentTo }
  *   fake.updates          [{ id, threadId, raw }]   // decoded raw of every PUT
  *   fake.sent             [{ id, threadId, raw }]   // every drafts.send, with the raw actually sent
+ *   fake.sentQueries      string[]                  // every in:sent search, as asked
+ *   fake.sentTo           Set<address>              // addresses the search says were written to
  *   fake.errorBodyReads   number                    // text()/json() calls on FAILED responses
- *   fake.failNext         { status, body, on? }     // one-shot failure: `on` is "get"/"update"/"send"
- *                                                 //   (absent: the next draft request, whatever it is)
+ *   fake.failNext         { status, body, on? }     // one-shot failure: `on` is "get"/"update"/
+ *                                                 //   "send"/"sentTo" (absent: the next request)
  *   fake.drafts           Map<id, { threadId, raw }> // mutate a draft to simulate a post-approval edit
  *
  * Like the real API a sent draft is gone from the drafts list — except here it is KEPT by default, so
@@ -79,6 +85,7 @@ function matchesFail(failure, method, pathname, base) {
   if (failure.on === "send") return pathname === `${base}/send`;
   if (failure.on === "update") return method === "PUT";
   if (failure.on === "get") return method === "GET";
+  if (failure.on === "sentTo") return pathname === "/gmail/v1/users/me/messages";
   return true;
 }
 
@@ -90,9 +97,11 @@ export function createFakeGmail({ drafts = {} } = {}) {
 
   const state = {
     drafts: store,
-    calls: { token: 0, get: 0, update: 0, send: 0 },
+    calls: { token: 0, get: 0, update: 0, send: 0, sentTo: 0 },
     updates: [],
     sent: [],
+    sentQueries: [],
+    sentTo: new Set(),
     errorBodyReads: 0,
     failNext: null,
     sentDeletesDraft: false,
@@ -126,9 +135,11 @@ export function createFakeGmail({ drafts = {} } = {}) {
     }
 
     const isSend = href.pathname === `${base}/send` && method === "POST";
+    const isSentSearch = href.pathname === "/gmail/v1/users/me/messages" && method === "GET";
     const one = new RegExp(`^${base}/([^/]+)$`).exec(href.pathname);
     // Count the ATTEMPT before a fake failure can refuse it: `calls` says what was tried.
     if (isSend) state.calls.send += 1;
+    else if (isSentSearch) state.calls.sentTo += 1;
     else if (one && method === "GET") state.calls.get += 1;
     else if (one && method === "PUT") state.calls.update += 1;
 
@@ -136,6 +147,17 @@ export function createFakeGmail({ drafts = {} } = {}) {
       const { status, body } = state.failNext;
       state.failNext = null;
       return reply(status, body ?? "");
+    }
+
+    if (isSentSearch) {
+      const q = href.searchParams.get("q") || "";
+      state.sentQueries.push(q);
+      const m = /^in:sent to:(.+)$/.exec(q);
+      const address = m ? m[1].trim().toLowerCase() : null;
+      if (!address) return reply(400, '{"error":"bad query"}');
+      return state.sentTo.has(address)
+        ? reply(200, { messages: [{ id: "msg-sent-1", threadId: "thread-sent-1" }], resultSizeEstimate: 1 })
+        : reply(200, { resultSizeEstimate: 0 });
     }
 
     if (isSend) {

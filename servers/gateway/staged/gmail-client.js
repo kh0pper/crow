@@ -371,6 +371,16 @@ function fetchTransport({ credRef, fetchImpl, configPaths, baseUrl, tokenUrl }) 
         body: JSON.stringify({ id, message: { threadId, raw } }),
       });
     },
+    /**
+     * Whether this account has ever sent a message to `address`: Gmail's own `in:sent to:`
+     * search, one result is enough. The address goes in the query string only (encoded); the
+     * response is a message list, never a draft, so nothing here can echo the draft.
+     */
+    async sentTo(address) {
+      const q = encodeURIComponent("in:sent to:" + String(address));
+      const data = await call(`/gmail/v1/users/me/messages?q=${q}&maxResults=1`);
+      return Array.isArray(data && data.messages) ? data.messages.length > 0 : false;
+    },
     async send(id, raw, threadId) {
       return call("/gmail/v1/users/me/drafts/send", {
         method: "POST",
@@ -383,10 +393,11 @@ function fetchTransport({ credRef, fetchImpl, configPaths, baseUrl, tokenUrl }) 
 /* ----------------------------------------------------------------- client */
 
 /**
- * `{ getDraft, updateDraft, sendDraft }` for one credential reference.
+ * `{ getDraft, updateDraft, sendDraft, hasSentTo }` for one credential reference.
  *   getDraft(id)                  -> { snapshot, threadId, raw, faithful, reason }
  *   updateDraft(id, snap)         -> void        (keeps threadId + reply headers)
  *   sendDraft(id, {snapshot, threadId}) -> { messageId, threadId }
+ *   hasSentTo(address)            -> boolean     (the card's "new recipient" hint)
  * Throws GmailError only (plus a `no_snapshot` Error for a programming mistake). `configPaths` is
  * the token-config seam ({ canonical, addons }).
  */
@@ -418,6 +429,13 @@ export function createGmailClient({ credRef, fetchImpl, configPaths, baseUrl = G
      * threading headers and its thread; the bytes that go out are rebuilt from `snapshot`, so they
      * are exactly the bytes that were hashed. The route has already claimed the row for that hash.
      */
+    /** True when this account has sent to `address` before (the "new recipient" hint). */
+    async hasSentTo(address) {
+      const a = String(address ?? "");
+      if (!a) return false;
+      return transport.sentTo(a);
+    },
+
     async sendDraft(id, { snapshot, threadId } = {}) {
       if (!snapshot) {
         throw Object.assign(new Error("staged_sends: sendDraft needs the approved snapshot"), { code: "no_snapshot" });
