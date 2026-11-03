@@ -584,3 +584,21 @@ test("a draft that became unfaithful after the card was shown is not sent from C
     (e) => e instanceof GmailError && e.code === "unfaithful" && !/example\.com/.test(e.message));
   assert.equal((fake.sent || []).length, 0, "nothing was sent");
 });
+
+test("a ref that names its source resolves in that file only, even when the other file names another account", () => {
+  const dir = scratch();
+  const canonical = join(dir, "mcp.json");
+  const addons = join(dir, "mcp-addons.json");
+  writeFileSync(canonical, JSON.stringify({ mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: join(dir, "work.json") } } } }));
+  writeFileSync(addons, JSON.stringify({ "google-workspace": { env: { GOOGLE_TOKEN_FILE: join(dir, "personal.json") } } }));
+  const paths = { canonical, addons };
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "canonical" }, paths), join(dir, "work.json"));
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "addons" }, paths), join(dir, "personal.json"));
+  // A row recorded before sources existed keeps the old rule: ambiguous means nothing.
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary" }, paths), null);
+  // A source whose file lacks the key resolves to nothing, never falls through to the other file.
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "personal", source: "canonical" }, paths), null);
+  // An unknown source is ignored (treated as no source).
+  assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "elsewhere" }, paths), null);
+});
+

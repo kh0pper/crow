@@ -60,7 +60,10 @@ function credRefJson(credRef) {
   if (credRef == null) return null;
   const server = credRef.server == null ? "" : String(credRef.server);
   if (!server || !CRED_ROLES.includes(credRef.role)) return null;
-  return JSON.stringify({ server, role: credRef.role });
+  // `source` (which operator file named it) is kept when it is one of the known ones; the send
+  // resolves the token in that file only (cred-ref.js).
+  const source = credRef.source === "canonical" || credRef.source === "addons" ? credRef.source : null;
+  return JSON.stringify(source ? { server, role: credRef.role, source } : { server, role: credRef.role });
 }
 
 function cap(value, max) {
@@ -164,13 +167,18 @@ export async function getStaged(db, id) {
 export async function findStagedByDraftId(db, { providerDraftId, credRef = null, orUnreadable = false } = {}) {
   const draft = providerDraftId == null ? "" : String(providerDraftId);
   if (!draft) return null;
-  // orUnreadable: a row for this draft recorded with NO credential (a read that failed before)
-  // is the same draft too, so a replay never adds a second, sendable row next to it.
+  // The same draft is the same server and role; a source is compared only when both rows have one
+  // (a row recorded before sources existed matches either). orUnreadable: a row for this draft
+  // recorded with NO credential is the same draft too, so a replay never adds a second, sendable
+  // row next to it.
+  const ref = credRefJson(credRef) ? JSON.parse(credRefJson(credRef)) : null;
+  const match = ref
+    ? "(json_extract(cred_ref,'$.server') = ? AND json_extract(cred_ref,'$.role') = ? AND (json_extract(cred_ref,'$.source') IS NULL OR ? IS NULL OR json_extract(cred_ref,'$.source') = ?))"
+    : "cred_ref IS NULL";
+  const args = ref ? [draft, ref.server, ref.role, ref.source ?? null, ref.source ?? null] : [draft];
   const { rows } = await db.execute({
-    sql: orUnreadable
-      ? "SELECT * FROM staged_sends WHERE provider_draft_id = ? AND (cred_ref IS ? OR cred_ref IS NULL) ORDER BY created_at DESC, rowid DESC LIMIT 1"
-      : "SELECT * FROM staged_sends WHERE provider_draft_id = ? AND cred_ref IS ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    args: [draft, credRefJson(credRef)],
+    sql: `SELECT * FROM staged_sends WHERE provider_draft_id = ? AND (${match}${orUnreadable && ref ? " OR cred_ref IS NULL" : ""}) ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    args,
   });
   return toStaged(rows[0]);
 }
