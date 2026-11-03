@@ -6344,6 +6344,55 @@
       "official": true
     },
     {
+      "id": "studio",
+      "name": "Crow Studio",
+      "version": "0.1.0",
+      "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "media",
+      "tags": [
+        "music",
+        "studio",
+        "sunvox",
+        "daw",
+        "clips",
+        "collaboration"
+      ],
+      "icon": "music",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "STUDIO_MAX_RENDER_SECONDS"
+        ]
+      },
+      "panel": "panel/studio.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/studio.md"
+      ],
+      "capabilities": {
+        "mcp_server_id": "studio",
+        "group": "Studio",
+        "skills": [
+          "studio"
+        ],
+        "runtimes": {
+          "pi": true
+        }
+      },
+      "requires": {
+        "min_ram_mb": 256,
+        "min_disk_mb": 50
+      },
+      "env_vars": [],
+      "notes": "Powered by SunVox (modular synth & tracker) Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru. One shared session: the dashboard and an MCP agent edit the same song, every edit is tagged with its author and undoable, and the browser and the server's offline renders run the same Web Audio engine. Songs live in project spaces, so the project ACL decides who may write; song documents and their history stay on the instance that owns the project until collaboration ships. A bot gets the studio_* tools by enabling this extension for it in Bot Builder, and a song page's Ask the agent box talks to the song project's bot over Perch. The MCP server is stdio-only and opens no network port; the gateway serves the panel routes and the WebSocket.",
+      "official": true
+    },
+    {
       "id": "sunvox-studio",
       "name": "SunVox Studio",
       "version": "0.2.1",
