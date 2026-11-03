@@ -196,14 +196,24 @@ export function containedClassifierBlock(block, sel, { gatewayPort, rows = [], l
   const providerId = sel && typeof sel.providerId === "string" && sel.providerId ? sel.providerId : null;
   let named = null;
   if (providerId) {
-    const row = doorRow(rowFor(rows, providerId));
+    // Exact id: the selection named a real row, so a case-folded look-alike is never stood in.
+    const row = doorRow((Array.isArray(rows) ? rows : []).find((r) => r && r.id === providerId) || null);
     named = row && OPENAI_TYPES.has(row.provider_type) ? row.id : null;
   } else {
     named = doorProviderOf(block.url);
   }
   if (named) {
     const url = providerDoorUrl(doorBaseFor(gatewayPort), named);
-    try { if (isDoorPath(new URL(url).pathname)) return { ...block, url }; } catch { /* not a URL */ }
+    try {
+      if (isDoorPath(new URL(url).pathname)) {
+        // An operator endpoint naming another host's door is moved to THIS gateway's door of that
+        // id: say so, since it changes the host the operator chose.
+        if (!providerId && new URL(block.url).host !== `127.0.0.1:${gatewayPort}`) {
+          log("[pi-bots] bash=auto: the safety classifier endpoint's host was moved to this gateway's provider door for a contained bot");
+        }
+        return { ...block, url };
+      }
+    } catch { /* not a URL */ }
   }
   log(CONTAINED_CLASSIFIER_NO_DOOR);
   return null;

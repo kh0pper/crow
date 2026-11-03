@@ -36,10 +36,16 @@ const quiet = { log: () => {} };
 test("a contained bot's provider classifier goes through its provider door", () => {
   const out = containedClassifierBlock(BLOCK, sel({ providerId: "crow-voice" }), { gatewayPort: GW, rows: [bundleRow(), lanRow()], ...quiet });
   assert.deepEqual(out, { url: doorOf("crow-voice"), model: "qwen3.5-4b", timeout_ms: 6000 }, "the model stays; only the URL moves");
-  // pi folds provider ids to lower case, so the row match is case-insensitive
-  // and the door names the row's own id.
+  // The selection names an exact row id: a case-folded look-alike is never stood in.
   const folded = containedClassifierBlock(BLOCK, sel({ providerId: "CROW-VOICE" }), { gatewayPort: GW, rows: [bundleRow()], ...quiet });
-  assert.equal(folded.url, doorOf("crow-voice"));
+  assert.equal(folded, null, "no exact row: the classifier is dropped");
+});
+
+test("an operator endpoint on another host is moved to this gateway's door, and that is logged", () => {
+  const lines = [];
+  const out = containedClassifierBlock({ ...BLOCK, url: "http://192.0.2.20:3001/llm/p/crow-voice/v1" }, sel({ providerId: null, source: "setting-endpoint" }), { gatewayPort: GW, rows: [bundleRow()], log: (l) => lines.push(l) });
+  assert.equal(out.url, doorOf("crow-voice"));
+  assert.ok(lines.some((l) => l.includes("host was moved")), JSON.stringify(lines));
 });
 
 test("an operator door endpoint is rewritten to this gateway's door", () => {
