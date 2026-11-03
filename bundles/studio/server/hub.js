@@ -166,7 +166,9 @@ function auditActor(author) {
   if (id.startsWith(AGENT_BOT_PREFIX) && id.length > AGENT_BOT_PREFIX.length) {
     return { actor_type: "bot", actor_id: id.slice(AGENT_BOT_PREFIX.length) };
   }
-  if (id.startsWith(AGENT_PREFIX)) return { actor_type: "bot", actor_id: null };
+  // The operator's own MCP session (no bot to name) is filed the way the rest
+  // of Crow files an unattributed local caller.
+  if (id.startsWith(AGENT_PREFIX)) return { actor_type: "local", actor_id: "unknown" };
   return { actor_type: "bot", actor_id: id === "" ? null : id };
 }
 

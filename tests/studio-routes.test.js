@@ -901,7 +901,7 @@ test("the operator's MCP (no bot) keeps full access", async (t) => {
   assert.equal(created.status, 200, `the operator could not create a song: ${JSON.stringify(created.body)}`);
 });
 
-test("an audit line keeps a bot's bare id and no id for the operator's MCP", async (t) => {
+test("an audit line keeps a bot's bare id and files the operator's MCP as an unattributed local caller", async (t) => {
   const { base, hub, crowHome, acl } = await boot(t, { botScope: botScope({ projects: { [BOT]: PROJECT } }) });
   const token = ensureAgentToken(crowHome);
   const songId = await seedSong(hub, PROJECT);
@@ -924,8 +924,8 @@ test("an audit line keeps a bot's bare id and no id for the operator's MCP", asy
 
   const botRows = acl.audit.filter((row) => row.actor_type === "bot" && row.actor_id === BOT);
   assert.equal(botRows.length, 1, "the bot's step is filed under its bare bot id");
-  const agentRows = acl.audit.filter((row) => row.actor_type === "bot" && row.actor_id === null);
-  assert.equal(agentRows.length, 1, "the operator's MCP session has no bot id");
+  const agentRows = acl.audit.filter((row) => row.actor_type === "local" && row.actor_id === "unknown");
+  assert.equal(agentRows.length, 1, "the operator's MCP session is filed like any unattributed local caller");
   assert.ok(
     acl.audit.some((row) => row.actor_type === "local" && row.actor_id === "local"),
     "the operator's own dashboard steps stay local",

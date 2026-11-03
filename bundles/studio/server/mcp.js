@@ -516,6 +516,9 @@ export function createStudioServer({
         const opened = await hub.snapshot(args.song_id, author);
         if (isRefusal(opened)) return errorResult(refusalText(opened));
         if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        if (opened.read_only === true) {
+          return errorResult("Crow's voice can listen to songs but not file renders; ask the project's bot. (read_only)");
+        }
         const projectId = await projectIdFor(hub, args.song_id, opened, author);
         const out = await renderer.render({
           song_id: args.song_id,

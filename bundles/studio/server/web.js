@@ -1072,6 +1072,9 @@ export function createStudioWeb({
         // The project a render is filed under is the hub's own answer, scoped
         // above — never something the agent's tool arguments can name.
         project_id: Number(row.project_id),
+        // Crow's voice may read any song but not change one; a render files a
+        // WAV into the project's storage, so the MCP side refuses it there.
+        read_only: scope?.voice === true,
         snapshot: opened.snapshot,
         state: toBase64(encodeDocState(opened.doc)),
       });

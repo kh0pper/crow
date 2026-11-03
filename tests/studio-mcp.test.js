@@ -73,6 +73,7 @@ function makeHub(options = {}) {
       return {
         song_id: songId,
         ...(options.snapshotProject == null ? {} : { project_id: options.snapshotProject }),
+        ...(options.readOnly ? { read_only: true } : {}),
         snapshot: {
           meta: { title: "Bass and drums", bpm: 112, key: "A minor" },
           tracks: [],
@@ -368,6 +369,19 @@ test("an internal refusal reaches the agent as one fixed sentence, logged in ful
     assert.ok(logged.some((args) => args[0] === "[studio]"), "the detail is logged instead");
   } finally {
     console.warn = realWarn;
+    await client.close();
+  }
+});
+test("a read-only caller (Crow's voice) cannot file a render", async () => {
+  const voice = makeHub({ snapshotProject: 4, readOnly: true });
+  const rendered = makeRenderer();
+  const client = await connect({ hub: voice.hub, renderer: rendered.renderer });
+  try {
+    const result = await client.callTool({ name: "studio_render", arguments: { song_id: "song-1", seconds: 2 } });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /read_only/);
+    assert.equal(rendered.calls.length, 0, "nothing was rendered or stored");
+  } finally {
     await client.close();
   }
 });
