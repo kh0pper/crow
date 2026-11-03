@@ -91,7 +91,7 @@ import {
 } from "../board/offer-service.js";
 import { takeSecretNotes, returnSecretNotes, openRequestFor } from "../secrets/request-store.js";
 import {
-  claimStagedNotes, discardStaged, editStaged, listStagedForSession, returnStagedNotes, sendStaged,
+  claimStagedNotes, discardStaged, editStaged, getStagedItem, listStagedForSession, returnStagedNotes, sendStaged,
 } from "../staged/send-service.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
@@ -1276,6 +1276,25 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   router.post(STAGED_PREFIX + "/:id/discard", async (req, res) => {
     const id = String(req.params.id);
     await stagedRoute(res, "discard", (db) => discardStaged(db, id, { audit: auditLog }));
+  });
+
+  // GET /staged/:id — one row, in the shape the list returns. This is the standalone page's read
+  // (/dashboard/staged/:id): a bridge or job draft has no Perch chat to list it. `no-store` and the
+  // owner rule come from the prefix middleware above, which every /staged path passes through, so
+  // an SSO session or a signed peer call is refused before this handler runs.
+  router.get(STAGED_PREFIX + "/:id", async (req, res) => {
+    const id = String(req.params.id);
+    const db = createDbClient();
+    try {
+      const item = await getStagedItem(db, id, { gmail: stagedGmail });
+      if (!item) return jsonError(res, 404, "not_found");
+      res.json({ item });
+    } catch (err) {
+      console.warn("[perch-interactive-api] staged read failed: " + ((err && err.name) || "Error"));
+      jsonError(res, 500, "internal");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
   });
 
   // ---- GET /interactive/:sid/card — this chat's card, its open result, its questions (P5) ----

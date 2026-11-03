@@ -104,6 +104,7 @@ import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
+import stagedPageRouter from "../routes/staged-page.js";
 import widgetsRouter from "../routes/widgets.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
 import { isLocalPasswordSessionOn } from "./local-session.js";
@@ -787,6 +788,13 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // refused upstream, its own dashboardAuth on its prefix; see
   // routes/voice-handoffs.js's header.
   router.use(voiceHandoffsRouter(dashboardAuth));
+
+  // The staged draft's standalone page (spec §12): a draft a bot made from a
+  // channel turn or a job has no Perch chat to draw its card in, so the
+  // notification opens /dashboard/staged/:id. Same slot and rails as the phone
+  // confirm page above (session + CSRF, Funnel refused upstream), and the page
+  // is owner-only on its own prefix — see routes/staged-page.js's header.
+  router.use(stagedPageRouter(dashboardAuth));
 
   // The "What needs me" widget's API (widgets phase 1): the JSON summary both renderers draw and
   // the act endpoint that answers an item in place. Same slot and rails as the phone confirm page

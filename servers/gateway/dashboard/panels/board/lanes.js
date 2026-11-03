@@ -34,15 +34,21 @@ export function openDecision(card) {
 /**
  * Lane for one card on its own board def, in this order:
  *   1. terminal status on the card's board        -> done
- *   2. recorded result, action needed, or an open
- *      decision                                   -> needs_you
+ *   2. recorded result, action needed, an open
+ *      decision, or a staged draft tied to it     -> needs_you
  *   3. a live session or job holds the card       -> working
  *   4. otherwise                                  -> up_next
  * An "in progress" card nothing holds is up_next, not working.
+ *
+ * `staged` is "this card has an open `staged_sends` row" (a bot's Gmail draft waiting for the
+ * operator's yes). It arrives as a prefetched map, the way `locked` does, because laneOf is pure and
+ * needs only fields a count query can select — the staged rows live in another table (and another
+ * process's writes) so the caller reads them once per page and hands the answer in.
  */
-export function laneOf(card, def, { locked } = {}) {
+export function laneOf(card, def, { locked, staged } = {}) {
   if (isTerminal(def || DEFAULT_BOARD_DEF, card.status)) return "done";
   if (
+    staged === true ||
     card.latest_result_status === "recorded" ||
     String(card.action_needed ?? "").trim() !== "" ||
     openDecision(card)
@@ -57,13 +63,15 @@ export function laneOf(card, def, { locked } = {}) {
  * project's board def; a card whose project has no entry uses the `null`
  * entry if present, else DEFAULT_BOARD_DEF. `lockMap` is lockMapFor's
  * Map<cardId, boolean>: every id has an entry, so "held" is `get(id) === true`,
- * never `has(id)`.
+ * never `has(id)`. `stagedMap` is the set of card ids that have an open staged
+ * draft (Set of numbers, or a Map); absent means none.
  */
-export function groupByLane(cards, defsByProject, lockMap) {
+export function groupByLane(cards, defsByProject, lockMap, stagedMap) {
   const out = Object.fromEntries(LANES.map((l) => [l, []]));
   for (const card of cards || []) {
     const def = defsByProject?.get(card.project_id) ?? defsByProject?.get(null) ?? DEFAULT_BOARD_DEF;
-    out[laneOf(card, def, { locked: lockMap?.get(card.id) === true })].push(card);
+    const staged = stagedMap ? stagedMap.has(Number(card.id)) === true : false;
+    out[laneOf(card, def, { locked: lockMap?.get(card.id) === true, staged })].push(card);
   }
   const byPrioId = (a, b) => (Number(a.priority) || 0) - (Number(b.priority) || 0) || Number(a.id) - Number(b.id);
   for (const l of LANES) out[l].sort(byPrioId);

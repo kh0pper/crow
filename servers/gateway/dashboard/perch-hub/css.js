@@ -370,6 +370,30 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .secret-result{font-size:13.5px;color:var(--dim)}
 #perch-hub-root .secret-status{font-size:12.5px;color:var(--dim)}
 #perch-hub-root .secret-status:empty{display:none}
+/* Staged send card (spec 12): the operator's yes on a bot's Gmail draft. It lives in the
+   transcript (the card-offer precedent), so it scrolls with the conversation; the body is pre-wrap
+   (what Gmail will send) and every address wraps instead of widening the column. Every target is
+   44 px, and every field is 16 px so iOS does not zoom on focus. */
+#perch-hub-root .staged-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:6px;background:var(--sky);min-width:0}
+#perch-hub-root .staged-title{font-weight:600}
+#perch-hub-root .staged-note{font-size:12.5px;color:var(--dim);font-style:italic;overflow-wrap:anywhere}
+#perch-hub-root .staged-rcpt{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;min-width:0}
+#perch-hub-root .staged-label{font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--teal)}
+#perch-hub-root .staged-addr,#perch-hub-root .staged-subject{overflow-wrap:anywhere;min-width:0}
+#perch-hub-root .staged-subject{font-weight:600}
+#perch-hub-root .staged-new{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:0 6px}
+#perch-hub-root .staged-body{white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto;overscroll-behavior:contain}
+#perch-hub-root .staged-yes{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .staged-taint{font-size:12.5px;color:var(--warn);background:var(--warn-soft);border-radius:6px;padding:6px 8px}
+#perch-hub-root .staged-status,#perch-hub-root .staged-block{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .staged-status:empty{display:none}
+#perch-hub-root .staged-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#perch-hub-root .staged-actions button,#perch-hub-root .staged-gmail{min-height:44px;padding:10px 14px;display:inline-flex;align-items:center;justify-content:center}
+#perch-hub-root .staged-actions button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .staged-form{display:grid;gap:8px}
+#perch-hub-root .staged-field{display:grid;gap:4px;min-width:0}
+#perch-hub-root .staged-field input,#perch-hub-root .staged-field textarea{width:100%;min-width:0;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px}
+#perch-hub-root .staged-field textarea{min-height:120px;resize:vertical;white-space:pre-wrap}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page

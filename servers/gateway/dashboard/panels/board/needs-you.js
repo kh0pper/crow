@@ -17,8 +17,23 @@ import { TASKS_DB, lockMapFor } from "../bot-board/data-queries.js";
 import { threadProjects } from "../../../routes/perch.js";
 import { laneRows, defsFor, cardsByIds } from "../board.js";
 import { groupByLane, openDecision } from "./lanes.js";
+import { listStaged } from "../../../staged/store.js";
 
 const ABSENT_RE = /no such table/i;
+
+/**
+ * The staged drafts waiting on the operator's yes, as the set of card ids they belong to
+ * (spec §12; ids only, never a snapshot). `sending` is deliberately NOT here: a send in flight is
+ * not waiting on a person. An old database without the table has nothing staged.
+ */
+async function stagedCardIds(db) {
+  try {
+    const rows = await listStaged(db, { states: ["staged", "failed"] });
+    const out = new Set();
+    for (const r of rows) if (r.cardId != null) out.add(Number(r.cardId));
+    return out;
+  } catch { return new Set(); }
+}
 
 /** True when the project keeps its cards in the store the Board reads. */
 function inSharedStore(project, tasksDbPath) {
@@ -191,8 +206,9 @@ async function computeCounts(db, list, engine, tasksDbPath) {
     const lockMap = await lockMapFor(db, all.map((r) => r.id));
     const defs = await defsFor(tdb, all);
     const waiting = await waitingByProject(db, engine);
+    const staged = await stagedCardIds(db);
     for (const p of shared) {
-      const needs = groupByLane(rowsBy.get(p.id), defs, lockMap).needs_you;
+      const needs = groupByLane(rowsBy.get(p.id), defs, lockMap, staged).needs_you;
       const held = new Set(needs.map((c) => c.id));
       const extra = (waiting.get(p.id) || []).filter((w) => !(w.cardId != null && held.has(w.cardId))).length;
       result.set(p.id, needs.length + extra);
@@ -219,11 +235,11 @@ export function kindOf(c) {
 }
 
 /** The project's whole Needs-you lane (Board order), read from an open tasks.db. */
-async function needsLane(db, tdb, projectId) {
+async function needsLane(db, tdb, projectId, staged) {
   const rows = await laneRows(tdb, { projectId: Number(projectId) });
   const lockMap = await lockMapFor(db, rows.map((r) => r.id));
   const defs = await defsFor(tdb, rows);
-  return groupByLane(rows, defs, lockMap).needs_you;
+  return groupByLane(rows, defs, lockMap, staged == null ? await stagedCardIds(db) : staged).needs_you;
 }
 
 /**

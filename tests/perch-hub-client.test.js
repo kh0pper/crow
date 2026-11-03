@@ -229,7 +229,9 @@ test("async continuations are guarded — a fast back button must not cross sess
   // continuation and Forget's.
   // 48 with the credential card (secret-card.js): loadSecret's continuation and the Save and
   // Not now continuations.
-  assert.equal(guards, 48, "expected exactly 48 identity guards, found " + guards);
+  // 50 with the staged send card (staged-card.js, spec §12): loadStaged's continuation and the
+  // one delayed refetch a draft tool's end frame schedules.
+  assert.equal(guards, 50, "expected exactly 50 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {

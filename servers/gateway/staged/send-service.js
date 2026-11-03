@@ -457,8 +457,11 @@ async function reconcileInterrupted(db, { gmail, now }) {
 
 /**
  * The session's open rows (staged/sending/failed) as the card reads them:
- * `{ id, state, snapshot, contentHash, placeholders, newRecipients, sendable, failReason, tainted }`.
- * Never `raw`, never the credential reference, never a token path.
+ * `{ id, state, snapshot, contentHash, placeholders, newRecipients, sendable, failReason, tainted,
+ *    providerDraftId }`.
+ * Never `raw`, never the credential reference, never a token path. `providerDraftId` is here
+ * because the card's "Open in Gmail to send" link needs it (a Gmail draft id, not a secret); the
+ * client validates it before it can reach a URL.
  *
  * The new-recipient hint is computed on the first read of a sendable row and cached on it — the
  * whole answer, `[]` included ("none of these is new" is an answer too, and asking Gmail again for
@@ -469,27 +472,43 @@ export async function listStagedForSession(db, sessionId, { gmail = null, now = 
   await reconcileInterrupted(db, { gmail, now });
   const rows = await listStaged(db, { sessionId: String(sessionId) });
   const items = [];
-  for (const row of rows) {
-    let newOnes = Array.isArray(row.newRecipients) ? row.newRecipients : [];
-    if (row.credRef != null && row.newRecipients == null) {
-      const client = gmailClientFor(row.credRef, gmail);
-      const found = client ? await newRecipients(db, row.snapshot, { gmail: client }) : null;
-      if (found) {
-        try { await setNewRecipients(db, row.id, found); } catch { /* the hint is not worth a failed read */ }
-        newOnes = found;
-      }
-    }
-    items.push({
-      id: row.id,
-      state: row.state,
-      snapshot: row.snapshot,
-      contentHash: row.contentHash,
-      placeholders: findPlaceholders(row.snapshot),
-      newRecipients: newOnes,
-      sendable: row.credRef != null,
-      failReason: row.failReason,
-      tainted: row.tainted,
-    });
-  }
+  for (const row of rows) items.push(await cardItem(db, row, { gmail }));
   return items;
+}
+
+/** One row as the card reads it (the list's shape, for a single row). */
+async function cardItem(db, row, { gmail = null } = {}) {
+  let newOnes = Array.isArray(row.newRecipients) ? row.newRecipients : [];
+  if (row.credRef != null && row.newRecipients == null) {
+    const client = gmailClientFor(row.credRef, gmail);
+    const found = client ? await newRecipients(db, row.snapshot, { gmail: client }) : null;
+    if (found) {
+      try { await setNewRecipients(db, row.id, found); } catch { /* the hint is not worth a failed read */ }
+      newOnes = found;
+    }
+  }
+  return {
+    id: row.id,
+    state: row.state,
+    snapshot: row.snapshot,
+    contentHash: row.contentHash,
+    placeholders: findPlaceholders(row.snapshot),
+    newRecipients: newOnes,
+    sendable: row.credRef != null,
+    failReason: row.failReason,
+    tainted: row.tainted,
+    providerDraftId: row.providerDraftId,
+  };
+}
+
+/**
+ * One row, in the same shape the list returns — the standalone page's read
+ * (GET /dashboard/perch-api/staged/:id). Nothing here reconciles `sending` rows: that is the
+ * card list's job, and a single read must never put a live send back on screen. A row that does not
+ * exist is null (the route answers 404).
+ */
+export async function getStagedItem(db, id, { gmail = null } = {}) {
+  const row = await getStaged(db, id);
+  if (!row) return null;
+  return await cardItem(db, row, { gmail });
 }
