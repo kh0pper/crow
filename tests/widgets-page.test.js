@@ -167,8 +167,10 @@ test("its default screenful is What needs me and Today + Ramble at 2×2; the res
     const needs = drawn.find((c) => c.id === "needs-me");
     assert.deepEqual([needs.w, needs.h], [2, 2]);
     // Every registered widget is offered on the page: the hidden ones are "+ Add widget" entries.
-    assert.deepEqual(drawn.map((c) => c.id), ["needs-me", "morning", "listen", "news", "today"], "the cells the loads drew");
-    for (const id of ["morning", "listen", "news"]) {
+    // Widgets phase 3, PR 2's in-Crow widgets are all offered and all hidden (the camera is absent:
+    // Frigate is not installed on this scratch home).
+    assert.deepEqual(drawn.map((c) => c.id), ["needs-me", "morning", "listen", "news", "today", "messages", "apps", "projects", "bots"], "the cells the loads drew");
+    for (const id of ["morning", "listen", "news", "messages", "apps", "projects", "bots"]) {
       assert.equal(drawn.find((c) => c.id === id).hidden, true, `${id} is offered, not part of the default`);
     }
     // Move and the weather drew no cell at all: Ramble is not installed, and there is no city.

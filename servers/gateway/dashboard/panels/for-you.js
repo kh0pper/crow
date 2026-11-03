@@ -31,6 +31,7 @@ import { loadNews } from "../../for-you/news.js";
 import { loadNeedsMe } from "../../widgets/needs-me.js";
 import { loadWidgets, widgetsForPage, WIDGET_TIMEOUT_MS } from "../../widgets/registry.js";
 import { widgetsGridCss } from "../../widgets/grid-css.js";
+import { widgetsMoreCss } from "../../widgets/more-html.js";
 import { gridClientJs } from "../../widgets/grid-client.js";
 import { WIDGETS_SNOOZED_KEY } from "../../routes/widgets.js";
 import { readSetting } from "../settings/registry.js";
@@ -208,10 +209,11 @@ export default {
       new Promise((resolve) => { wxTimer = setTimeout(() => resolve(null), WIDGET_TIMEOUT_MS); wxTimer.unref?.(); }),
     ]).finally(() => clearTimeout(wxTimer));
     // Each widget degrades alone: a failed read is its own one-line error cell, never the page's.
-    const cells = await loadWidgets(widgetsForPage("for-you", { settings }), context);
+    // `crowHome` lets a widget that needs an add-on (the camera and Frigate) be offered only there.
+    const cells = await loadWidgets(widgetsForPage("for-you", { settings, crowHome }), context);
     return layout({
       title: t("forYou.title", lang),
-      content: forYouCss() + widgetsGridCss()
+      content: forYouCss() + widgetsGridCss() + widgetsMoreCss()
         + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), weather: wx, cells }, lang, now)
         + forYouClientJs() + gridClientJs(),
     });

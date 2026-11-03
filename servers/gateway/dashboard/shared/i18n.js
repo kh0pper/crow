@@ -4694,6 +4694,24 @@ export const translations = {
   "widgets.today.mood.tired": { en: "Tired", es: "Cansado" },
   "widgets.today.mood.alarmed": { en: "Alarmed", es: "Alarmado" },
   "widgets.today.open": { en: "Open Ramble", es: "Abrir Ramble" },
+  // Widgets phase 3, PR 2: the in-Crow widgets (widgets/more.js, widgets/more-html.js). Messages,
+  // the Frigate camera stills and the three launchers (apps, projects, bots).
+  "widgets.more.messages.title": { en: "Messages", es: "Mensajes" },
+  "widgets.more.messages.empty": { en: "No conversations yet", es: "Aún no hay conversaciones" },
+  "widgets.more.messages.open": { en: "Open Messages", es: "Abrir Mensajes" },
+  "widgets.more.messages.unread": { en: "{n} unread", es: "{n} sin leer" },
+  "widgets.more.camera.title": { en: "Cameras", es: "Cámaras" },
+  "widgets.more.camera.empty": { en: "No cameras yet", es: "Aún no hay cámaras" },
+  "widgets.more.camera.unavailable": { en: "Frigate is installed, but its camera list could not be read. Open Frigate to look.", es: "Frigate está instalado, pero su lista de cámaras no se pudo leer. Abre Frigate para verlo." },
+  "widgets.more.camera.refresh": { en: "Refresh {name}", es: "Actualizar {name}" },
+  "widgets.more.camera.open": { en: "Open Frigate", es: "Abrir Frigate" },
+  "widgets.more.apps.title": { en: "Apps", es: "Aplicaciones" },
+  "widgets.more.apps.empty": { en: "No apps yet", es: "Aún no hay aplicaciones" },
+  "widgets.more.projects.title": { en: "Projects", es: "Proyectos" },
+  "widgets.more.projects.empty": { en: "No projects yet", es: "Aún no hay proyectos" },
+  "widgets.more.bots.title": { en: "Bots", es: "Tus bots" },
+  "widgets.more.bots.empty": { en: "No bots yet", es: "Aún no hay bots" },
+  "widgets.more.seeAll": { en: "See all", es: "Ver todo" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

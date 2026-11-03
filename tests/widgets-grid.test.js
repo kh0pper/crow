@@ -60,7 +60,11 @@ const NOW = Date.parse("2026-11-03T12:00:00Z");
 test("the registry: unique ids in For You's order, sizes that include the default, and both pages", () => {
   const ids = WIDGETS.map((w) => w.id);
   assert.equal(ids.length, new Set(ids).size, "every id is unique");
-  assert.deepEqual(ids, ["needs-me", "morning", "moves", "listen", "news", "today", "weather"], "For You's default order, then Today + Ramble, then the weather");
+  assert.deepEqual(ids, [
+    "needs-me", "morning", "moves", "listen", "news", "today", "weather",
+    // Widgets phase 3, PR 2: offered on both pages, on neither default layout.
+    "messages", "camera", "apps", "projects", "bots",
+  ], "For You's default order, then Today + Ramble, then the weather, then the in-Crow widgets");
   for (const w of WIDGETS) {
     assert.ok(Array.isArray(w.sizes) && w.sizes.length > 0, `${w.id} lists its sizes`);
     assert.ok(Array.isArray(w.defaultSize) && w.defaultSize.length === 2, `${w.id} has a default size`);
@@ -82,12 +86,15 @@ test("the registry: unique ids in For You's order, sizes that include the defaul
 
 test("the offer: a section's customize switch off means not offered, and never changes the server setting", () => {
   const settings = { sections: { morning: true, moves: false, listen: false, news: false, weather: true } };
+  // The in-Crow widgets (widgets phase 3, PR 2) carry no switch either, so they are always offered —
+  // from "+ Add widget" on either page (they are part of neither page's DEFAULT layout).
+  const inCrow = ["messages", "camera", "apps", "projects", "bots"];
   // `today` carries no customize switch, so it is always offered — from "+ Add widget" on either page
   // (it is only part of the generic page's DEFAULT layout; see the widget page's own test).
-  assert.deepEqual(widgetsForPage("for-you", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather"]);
+  assert.deepEqual(widgetsForPage("for-you", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather", ...inCrow]);
   // The generic page offers the same widgets (the customize switches are page-blind); `today` has no
   // switch, so it is always offered there.
-  assert.deepEqual(widgetsForPage("widgets", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather"]);
+  assert.deepEqual(widgetsForPage("widgets", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather", ...inCrow]);
   assert.deepEqual(widgetsForPage("for-you").map((w) => w.id), WIDGETS.map((w) => w.id), "no settings: everything is offered");
 });
 
@@ -722,8 +729,9 @@ test("1280×800: four columns, a resize, a mouse drag, and a Remove / Add round-
     await p.until("!!document.querySelector('[data-wg-picker][open]')", "the picker");
     await p.ev(TWO_FRAMES);
     await assertTargets(p, [["[data-wg-picker] [data-wg-add]", 1, "picker buttons"]], "desktop, picker");
-    assert.equal(await p.ev("[...document.querySelectorAll('[data-wg-picker] [data-wg-add]')].filter(function(b){return !b.hasAttribute('hidden')}).map(function(b){return b.getAttribute('data-wg-add')}).join(',')"), "news",
-      "only the removed widget is offered");
+    const offered = (await p.ev("[...document.querySelectorAll('[data-wg-picker] [data-wg-add]')].filter(function(b){return !b.hasAttribute('hidden')}).map(function(b){return b.getAttribute('data-wg-add')}).join(',')")).split(",");
+    assert.ok(offered.includes("news"), "the removed widget is offered: " + offered.join(","));
+    for (const id of ["morning", "needs-me", "listen"]) assert.ok(!offered.includes(id), id + ", still on the page, is not offered");
     await p.click('[data-wg-picker] [data-wg-add="news"]');
     await p.ev(TWO_FRAMES);
     assert.deepEqual(await p.ev(ORDER), ["morning", "needs-me", "listen", "news"], "added back, last");
