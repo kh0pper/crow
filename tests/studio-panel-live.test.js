@@ -292,7 +292,7 @@ async function agentCommand(body) {
     body: JSON.stringify({
       ...body,
       cmd_id: randomUUID(),
-      author: { id: "bot:studio-live", label: "Studio agent" },
+      author: { id: "mcp", label: "Studio agent" }, // the operator's MCP session: unscoped (a bot is scoped to its project)
     }),
   });
   return { status: response.status, body: await response.json() };
@@ -477,4 +477,73 @@ test("locking a track in page A makes the agent API return locked", async (t) =>
   assert.equal(refused.status, 409, `expected a refusal, got ${refused.status}: ${JSON.stringify(refused.body)}`);
   assert.equal(refused.body.code, "locked");
   assert.match(String(refused.body.error), /locked/i);
+});
+
+test("after a Turbo-style teardown and re-run the page reconnects and shows agent edits", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+
+  const page = await openPage(studioUrl());
+  t.after(() => page.close());
+  await waitForStudio(page);
+
+  // `turbo:before-cache` is where Turbo takes the snapshot it keeps for the
+  // Back button. What it caches must be the static shell: no ready flag and no
+  // live regions, so a restore draws its own from the hub.
+  const shell = await page.evaluate(`(function () {
+    var script = document.querySelector('.studio script:not([type])');
+    window.__studioScript = script ? script.textContent : '';
+    document.dispatchEvent(new Event('turbo:before-cache'));
+    var root = document.querySelector('.studio');
+    return {
+      scripted: window.__studioScript.length,
+      ready: root.getAttribute('data-studio-ready'),
+      grid: document.querySelector('[data-role=grid]').children.length,
+      history: document.querySelector('[data-role=history]').children.length,
+      presence: document.querySelector('[data-role=presence]').children.length,
+      editorHidden: document.querySelector('[data-role=editor]').hidden
+    };
+  })()`);
+  assert.ok(shell.scripted > 1000, "the page carries the inline client script");
+  assert.equal(shell.ready, null, "the ready flag is gone, so a restore boots again");
+  assert.equal(shell.grid, 0, "the cached grid is empty");
+  assert.equal(shell.history, 0, "the cached history is empty");
+  assert.equal(shell.presence, 0, "the cached presence row is empty");
+  assert.equal(shell.editorHidden, true, "the editor is closed in the cached shell");
+
+  // Turbo restores the cached body and runs its inline script again.
+  const restarted = await page.evaluate(`(function () {
+    var node = document.createElement('script');
+    node.textContent = window.__studioScript;
+    document.querySelector('.studio').appendChild(node);
+    return true;
+  })()`);
+  assert.equal(restarted, true, "the script was put back the way a restore does");
+
+  await waitForStudio(page);
+  assert.ok(
+    await waitFor(page, "document.querySelector('[data-role=grid] .st-corner') && "
+      + "document.querySelectorAll('[data-role=history] .st-entry').length >= 1", 20000),
+    "the restored page reconnected and drew the session from the hub again",
+  );
+
+  // Its own track: an earlier test leaves the seeded one locked.
+  const track = await agentCommand({ command: "track.add", args: { id: "restored-track", name: "Restored" } });
+  assert.equal(track.status, 200, `the agent track was refused: ${JSON.stringify(track.body)}`);
+
+  const written = await agentCommand({
+    command: "clip.write",
+    args: {
+      clip_id: "c-restored",
+      track_id: "restored-track",
+      scene_id: "verse",
+      name: "Restored line",
+      length_bars: 1,
+      notes: [{ t: 0, d: 1, p: 60, v: 100 }],
+    },
+  });
+  assert.equal(written.status, 200, `the agent write was refused: ${JSON.stringify(written.body)}`);
+  assert.ok(
+    await waitFor(page, "!!document.querySelector('[data-clip-id=c-restored]')", 5000),
+    "the reconnected page shows the agent's edit",
+  );
 });

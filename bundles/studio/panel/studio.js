@@ -23,6 +23,18 @@
  * copy, which server/web.js serves beside `yjs.mjs` from the asset whitelist.
  * That is the only reason this page has an import map.
  *
+ * ## One import map per document (the Turbo limitation)
+ *
+ * A document may register exactly one import map, and only before its first
+ * module load. A bundle's panel cannot write into the dashboard's `<head>`, so
+ * this map travels in the body next to the script. Turbo never reloads a
+ * document, so a Studio page reached by a Turbo visit cannot register the map
+ * again: the browser refuses it, and Yjs's bare `lib0/...` imports may then
+ * fail to resolve. There is no API to add or replace a registered map, so the
+ * client treats a failed `import()` of `yjs.mjs` as "this page needs a real
+ * load" and shows a Reload notice with a button that does
+ * `location.reload()` (see `showReloadNotice` in panel/client.js).
+ *
  * ## Where the client comes from
  *
  * A bundle's panel is loaded twice: from its own bundle directory in the
@@ -275,6 +287,12 @@ const STYLES = `
   .studio .st-entry-text { margin: 0; font-size: 13px; line-height: 1.4; }
   .studio .st-conflict { margin: 0; font-size: 11px; color: var(--st-danger); }
   .studio .st-empty-note { margin: 0; font-size: 12px; color: var(--st-muted); }
+  .studio .st-notice {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    margin: 12px; padding: 12px; border: 1px solid var(--st-edge); border-radius: 8px;
+    background: var(--st-panel);
+  }
+  .studio .st-notice-text { margin: 0; font-size: 13px; }
   .studio .st-ask-label { font-size: 12px; color: var(--st-muted); }
   .studio .st-ask { display: flex; gap: 6px; }
   .studio .st-ask input {

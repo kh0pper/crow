@@ -156,19 +156,12 @@ test("the studio page carries the import map for Yjs's own imports", async () =>
 });
 
 /**
- * Run the real client script against a real DOM (linkedom) and a stubbed
- * browser wire, then look at what it drew and what it sent.
- *
- * This is the half of the panel a browser is not needed for: the page's own
- * script, the document it renders from a real Yjs state frame, the commands a
- * click sends, and the focus a clip editor opens and closes. The live test
- * (tests/studio-panel-live.test.js) covers the networked and audio side.
- *
- * @returns {Promise<{page: object, sent: object[], socket: object, frame: Function, click: Function}>}
+ * The document the client tests draw from: one track (with the palette's first
+ * colour), two scenes and one 1-bar clip on Bass × Verse.
+ * @returns {Promise<object>} a Y.Doc
  */
-async function bootClient() {
-  const { parseHTML } = await import("linkedom");
-  const { newSongDoc, encodeDocState } = await import("../bundles/studio/server/doc.js");
+async function standardDoc() {
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
   await import("../bundles/studio/server/commands/core.js");
 
@@ -184,41 +177,96 @@ async function bootClient() {
     length_bars: 1,
     notes: [{ t: 0, d: 1, p: 60, v: 100 }],
   });
+  return doc;
+}
+
+/**
+ * Run the real client script against a real DOM (linkedom) and a stubbed
+ * browser wire, then look at what it drew and what it sent.
+ *
+ * This is the half of the panel a browser is not needed for: the page's own
+ * script, the document it renders from a real Yjs state frame, the commands a
+ * click sends, the focus a clip editor opens and closes, and the Turbo
+ * teardown/restore cycle (dispatch `turbo:before-cache`, run the script again —
+ * which is what Turbo does with the body it restores). The live test
+ * (tests/studio-panel-live.test.js) covers the networked and audio side.
+ *
+ * @param {object} [options]
+ * @param {object} [options.doc] - a Y.Doc to draw instead of the standard song
+ * @param {boolean} [options.coarse] - report a coarse pointer from matchMedia
+ * @param {boolean} [options.autoState] - push the state frame before returning
+ * @param {string} [options.yjsUrl] - a substitute for the served Yjs module
+ * @returns {Promise<object>}
+ */
+async function bootClient(options = {}) {
+  const { parseHTML } = await import("linkedom");
+  const { encodeDocState } = await import("../bundles/studio/server/doc.js");
+
+  const doc = options.doc || (await standardDoc());
 
   const pageHtml = await render({ song: "song-1" });
-  const { document, window } = parseHTML(pageHtml);
+  const { document, window: domWindow } = parseHTML(pageHtml);
 
-  /** Every frame the client sent. */
+  /** Every frame the client sent, across reconnects. */
   const sent = [];
-  /** The one socket the client opened. */
-  const socket = { readyState: 1, handlers: {}, sent };
-  socket.addEventListener = (name, handler) => {
-    (socket.handlers[name] ||= []).push(handler);
-    // The handshake: a real socket opens after the page registers its
-    // handlers, and the client says hello from its `open` handler.
-    if (name === "open") Promise.resolve().then(() => handler());
-  };
-  socket.send = (text) => sent.push(JSON.parse(text));
-  socket.close = () => {
-    socket.readyState = 3;
+  /** One entry per socket the client opened. */
+  const sockets = [];
+  /** How many times the page asked to be reloaded. */
+  const reload = { count: 0 };
+  /** Timers the page scheduled, so a test can run them on demand. */
+  const timers = [];
+
+  function makeSocket() {
+    const socket = { readyState: 1, handlers: {} };
+    socket.addEventListener = (name, handler) => {
+      (socket.handlers[name] ||= []).push(handler);
+      // The handshake: a real socket opens after the page registers its
+      // handlers, and the client says hello from its `open` handler.
+      if (name === "open") Promise.resolve().then(() => handler());
+    };
+    socket.send = (text) => sent.push(JSON.parse(text));
+    socket.close = () => {
+      socket.readyState = 3;
+    };
+    sockets.push(socket);
+    return socket;
+  }
+
+  /** The socket the page holds now (it opens a new one after a reconnect). */
+  const current = () => sockets[sockets.length - 1];
+
+  /** Push one server frame into the page's current socket. */
+  const frame = (message) => {
+    for (const handler of current().handlers.message || []) handler({ data: JSON.stringify(message) });
   };
 
-  /** Push one server frame into the page. */
-  const frame = (message) => {
-    for (const handler of socket.handlers.message || []) handler({ data: JSON.stringify(message) });
+  /** Dispatch a document-level event the way Turbo does. */
+  const fire = (name) => {
+    document.dispatchEvent(new domWindow.Event(name));
   };
+
+  const windowStub = {
+    crypto: globalThis.crypto,
+    location: {
+      protocol: "http:",
+      host: "127.0.0.1:1",
+      reload() {
+        reload.count += 1;
+      },
+    },
+    atob: globalThis.atob,
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  if (options.coarse) {
+    windowStub.matchMedia = (query) => ({ matches: /pointer:\s*coarse/.test(String(query)) });
+  }
 
   const sandbox = {
     document,
-    window: {
-      crypto: globalThis.crypto,
-      location: { protocol: "http:", host: "127.0.0.1:1" },
-      atob: globalThis.atob,
-      addEventListener() {},
-      removeEventListener() {},
-    },
+    window: windowStub,
     WebSocket: function WebSocketStub() {
-      return socket;
+      return makeSocket();
     },
     fetch: async (url) => ({
       ok: true,
@@ -232,7 +280,10 @@ async function bootClient() {
     crypto: globalThis.crypto,
     atob: globalThis.atob,
     console,
-    setTimeout: () => 0,
+    setTimeout: (fn) => {
+      timers.push(fn);
+      return timers.length;
+    },
     clearTimeout() {},
     setInterval: () => 0,
     clearInterval() {},
@@ -241,9 +292,11 @@ async function bootClient() {
   // The page imports Yjs from the dashboard's asset route; here the same
   // module is imported straight from the bundle, so the test needs no server.
   // (The route itself is covered by tests/studio-panel-live.test.js.)
-  const yjsUrl = pathToFileURL(
-    new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
-  ).href;
+  const yjsUrl =
+    options.yjsUrl ||
+    pathToFileURL(
+      new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
+    ).href;
   const scriptText = CLIENT_SCRIPT.replace("'/dashboard/studio/assets/yjs.mjs'", JSON.stringify(yjsUrl));
   assert.notEqual(scriptText, CLIENT_SCRIPT, "the test replaces the Yjs asset URL with the file on disk");
   const run = new Function(
@@ -260,19 +313,22 @@ async function bootClient() {
     "clearInterval",
     scriptText,
   );
-  run(
-    sandbox.document,
-    sandbox.window,
-    sandbox.WebSocket,
-    sandbox.fetch,
-    sandbox.crypto,
-    sandbox.atob,
-    sandbox.console,
-    sandbox.setTimeout,
-    sandbox.clearTimeout,
-    sandbox.setInterval,
-    sandbox.clearInterval,
-  );
+  /** Run the inline script again — what Turbo does with a restored body. */
+  const start = () =>
+    run(
+      sandbox.document,
+      sandbox.window,
+      sandbox.WebSocket,
+      sandbox.fetch,
+      sandbox.crypto,
+      sandbox.atob,
+      sandbox.console,
+      sandbox.setTimeout,
+      sandbox.clearTimeout,
+      sandbox.setInterval,
+      sandbox.clearInterval,
+    );
+  start();
 
   const page = document.querySelector(".studio");
 
@@ -280,16 +336,19 @@ async function bootClient() {
   const click = (selector) => {
     const node = document.querySelector(selector);
     assert.ok(node, `nothing matches ${selector}`);
-    node.dispatchEvent(new window.Event("click", { bubbles: true }));
+    node.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
     return node;
   };
 
   /** Let the page's own promises (the Yjs import, a frame) settle. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-  // The Yjs import has to resolve before the state frame can be applied.
-  await settle();
-  frame({
+  /** Run every timer the page has scheduled so far (a deferred reboot, say). */
+  const flush = () => {
+    for (const fn of timers.splice(0)) fn();
+  };
+
+  const stateFrame = {
     type: "state",
     update: Buffer.from(encodeDocState(doc)).toString("base64"),
     history: [
@@ -305,10 +364,32 @@ async function bootClient() {
       },
     ],
     presence: [],
-  });
-  await settle();
+  };
 
-  return { page, document, window, sent, socket, frame, click, settle };
+  // The Yjs import has to resolve before the state frame can be applied.
+  await settle();
+  if (options.autoState !== false) {
+    frame(stateFrame);
+    await settle();
+  }
+
+  return {
+    page,
+    document,
+    window: windowStub,
+    sent,
+    sockets,
+    socket: sockets[0],
+    current,
+    frame,
+    fire,
+    click,
+    settle,
+    flush,
+    rerun: start,
+    stateFrame,
+    reloads: () => reload.count,
+  };
 }
 
 test("the client renders the grid, the history and its own presence", async () => {
@@ -443,4 +524,164 @@ test("an agent's step outlines its clip in the agent colour", async () => {
   assert.equal(cell.textContent.includes("by the agent"), true, "and says so");
   assert.match(String(cell.getAttribute("style")), /(93|5da9f0)/i, "outlined in the agent colour");
   assert.equal(ui.document.querySelectorAll("[data-role=presence] .st-chip").length, 2, "both people are on the presence row");
+});
+
+test("a command sent while the socket is down is refused with a notice, not dropped", async () => {
+  const ui = await bootClient();
+  const before = ui.sent.filter((message) => message.type === "command").length;
+
+  // The hub drops the socket: a gateway restart, or a laptop waking up.
+  for (const handler of ui.current().handlers.close || []) handler({ code: 1006 });
+  ui.click("[data-act=add-track]");
+
+  assert.equal(
+    ui.sent.filter((message) => message.type === "command").length,
+    before,
+    "nothing is written to a socket that is gone",
+  );
+  assert.match(
+    String(ui.document.querySelector("[data-role=toast]").textContent),
+    /Still connecting/,
+    "the page says it is still connecting instead of dropping the edit silently",
+  );
+});
+
+test("a second run of the script on a live page does nothing", async () => {
+  const ui = await bootClient();
+  assert.equal(ui.sockets.length, 1, "the page opened one socket");
+
+  ui.rerun();
+  await ui.settle();
+
+  assert.equal(ui.sockets.length, 1, "the live session still owns the page: no second socket");
+  assert.equal(ui.sent.filter((message) => message.type === "hello").length, 1, "one hello, not two");
+});
+
+test("a cancelled Turbo visit leaves a working page", async () => {
+  const ui = await bootClient();
+
+  // Turbo fires before-visit even for a visit that then does not happen.
+  ui.fire("turbo:before-visit");
+  assert.equal(ui.document.querySelector("[data-role=grid]").children.length, 0, "the shell was torn down");
+
+  // No turbo:visit follows, so the page never left: it boots itself again.
+  ui.flush();
+  await ui.settle();
+  assert.equal(ui.sockets.length, 2, "the page booted again instead of staying dead");
+
+  ui.frame(ui.stateFrame);
+  await ui.settle();
+  assert.ok(ui.document.querySelector("[data-role=grid] .st-corner"), "the grid is back");
+});
+
+test("a Turbo cache teardown leaves a static shell and the page boots again", async () => {
+  const ui = await bootClient();
+  ui.click("[data-clip-id=c1]");
+  assert.ok(ui.document.querySelector("[data-role=grid] .st-corner"), "the grid is drawn first");
+  assert.equal(ui.document.querySelector("[data-role=editor]").hidden, false, "with a clip open");
+
+  // Turbo takes its snapshot here: what it caches has to be the shell the
+  // handler rendered, with no live regions and no ready flag.
+  ui.fire("turbo:before-cache");
+
+  assert.equal(ui.document.querySelector(".studio").getAttribute("data-studio-ready"), null);
+  assert.equal(ui.document.querySelector("[data-role=grid]").children.length, 0, "the grid is emptied");
+  assert.equal(ui.document.querySelector("[data-role=editor]").children.length, 0, "the editor is emptied");
+  assert.equal(ui.document.querySelector("[data-role=history]").children.length, 0, "the history is emptied");
+  assert.equal(ui.document.querySelector("[data-role=presence]").children.length, 0, "the presence row is emptied");
+  assert.equal(ui.document.querySelector("[data-role=editor]").hidden, true, "the editor is closed");
+  assert.equal(ui.socket.readyState, 3, "the socket the session owned was closed");
+
+  // Turbo restores the cached body and runs the script again.
+  ui.rerun();
+  await ui.settle();
+  assert.equal(ui.sockets.length, 2, "the restored page opens a fresh socket");
+
+  ui.frame(ui.stateFrame);
+  await ui.settle();
+
+  assert.ok(ui.document.querySelector("[data-role=grid] .st-corner"), "the grid is back");
+  assert.equal(ui.document.querySelectorAll(".st-entry").length, 1, "the history is back");
+  assert.equal(
+    ui.sent.filter((message) => message.type === "hello").length,
+    2,
+    "the restored page says hello again",
+  );
+});
+
+test("a track colour that is not a six-digit hex is replaced with the default", async () => {
+  // The document's own colour reaches the notes when it is a plain hex value.
+  const plain = await bootClient();
+  plain.click("[data-clip-id=c1]");
+  assert.equal(plain.document.querySelector(".st-note").getAttribute("fill"), "#E8C07A");
+
+  // Anything else is refused by the client, whatever the document holds.
+  const doc = await standardDoc();
+  doc.getMap("song").get("tracks").get(0).set("color", "url(javascript:alert(1))");
+  const ui = await bootClient({ doc });
+  ui.click("[data-clip-id=c1]");
+  assert.equal(ui.document.querySelector(".st-note").getAttribute("fill"), "#8FC1E8");
+});
+
+test("a clip whose notes field is not a list draws an empty roll", async () => {
+  const doc = await standardDoc();
+  doc.getMap("song").get("clips").get("c1").set("notes", null);
+  const ui = await bootClient({ doc });
+
+  ui.click("[data-clip-id=c1]");
+  assert.ok(ui.document.querySelector("[data-role=editor] .st-roll-svg"), "the roll is still drawn");
+  assert.equal(ui.document.querySelectorAll(".st-note").length, 0, "with no notes in it");
+});
+
+test("a coarse pointer gets 24 px piano-roll rows", async () => {
+  const fine = await bootClient();
+  fine.click("[data-clip-id=c1]");
+  assert.equal(
+    fine.document.querySelector("[data-role=editor] .st-roll-svg").getAttribute("height"),
+    String(128 * 12),
+    "a mouse gets the 12 px rows",
+  );
+
+  const coarse = await bootClient({ coarse: true });
+  coarse.click("[data-clip-id=c1]");
+  assert.equal(
+    coarse.document.querySelector("[data-role=editor] .st-roll-svg").getAttribute("height"),
+    String(128 * 24),
+    "a finger gets rows twice as tall",
+  );
+  assert.equal(coarse.document.querySelector(".st-note").getAttribute("height"), String(24 - 2));
+});
+
+test("a clip without a notes array can still be clicked and edited by hand", async () => {
+  // The same document, but the roll opens: a click on an empty cell writes a
+  // one-note clip built from an empty list rather than from the broken field.
+  const doc = await standardDoc();
+  doc.getMap("song").get("clips").get("c1").set("notes", "nonsense");
+  const ui = await bootClient({ doc });
+
+  ui.click("[data-clip-id=c1]");
+  const svg = ui.document.querySelector("[data-role=editor] .st-roll-svg");
+  const box = svg.getBoundingClientRect();
+  svg.dispatchEvent(
+    new ui.document.defaultView.Event("pointerdown", {
+      bubbles: true,
+      clientX: box.left + 46 + 24 + 2,
+      clientY: box.top + 12 * 12 + 2,
+    }),
+  );
+
+  const written = ui.sent.find((message) => message.command === "clip.write");
+  assert.ok(written, "the click wrote the clip");
+  assert.equal(written.args.notes.length, 1, "with the one note that was added");
+});
+
+test("when the Yjs module cannot load the page asks for a reload", async () => {
+  const ui = await bootClient({ yjsUrl: "file:///no-such-studio-yjs-module.mjs" });
+
+  const notice = ui.document.querySelector("[data-role=reload]");
+  assert.ok(notice, "the notice is shown");
+  assert.match(String(notice.textContent), /Reload the page to open Studio/);
+
+  ui.click("[data-act=reload]");
+  assert.equal(ui.reloads(), 1, "its button reloads the page");
 });
