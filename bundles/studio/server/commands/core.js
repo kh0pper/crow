@@ -11,6 +11,9 @@
  *   scene.add  scene.rename  scene.remove
  *   clip.write  clip.edit_notes  clip.set_length  clip.rename  clip.remove
  *
+ * `track.add` also makes an audio track (`kind: "audio"`), the one kind that
+ * plays recorded takes; the take commands themselves live in `takes.js`.
+ *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (a limit, an unknown object, a note past the clip's end) leaves the
  * document exactly as it was.
@@ -19,6 +22,7 @@
 import { z } from "zod";
 import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
+  AUDIO_DEVICE,
   BEATS_PER_BAR,
   INSTRUMENT_TYPES,
   LIMITS,
@@ -33,9 +37,13 @@ import {
   getClip,
   getScene,
   getTrack,
+  isAudioClip,
+  isAudioTrack,
   objectMap,
   objectRef,
   songMap,
+  takeEntries,
+  takeMap,
   toPlain,
   trackList,
   sceneList,
@@ -131,6 +139,11 @@ function clipRef(id) {
   return objectRef("clip", id);
 }
 
+/** @returns {string} the ref of a take. */
+function takeRef(id) {
+  return objectRef("take", id);
+}
+
 /** @returns {number} "1 bar" vs "8 bars" without the plural bug. */
 function barsText(bars) {
   return bars === 1 ? "1 bar" : `${bars} bars`;
@@ -169,6 +182,80 @@ function idOf(object) {
 /** @returns {string} "1 clip" vs "3 clips". */
 function clipsText(count) {
   return count === 1 ? "1 clip" : `${count} clips`;
+}
+
+/**
+ * Refuse an edit that only makes sense on a SunVox track, naming the track.
+ * @param {Y.Map<any>} track
+ * @param {string} what - what an audio track does not have, e.g. "SunVox module"
+ * @returns {void}
+ */
+function refuseOnAudioTrack(track, what) {
+  if (!isAudioTrack(track)) return;
+  refuseInvalid(`Track "${track.get("name")}" is an audio track; it has no ${what}.`);
+}
+
+/**
+ * Refuse a notes edit on an audio clip, naming the clip.
+ * @param {Y.Map<any>} clip
+ * @returns {void}
+ */
+function refuseOnAudioClip(clip) {
+  if (!isAudioClip(clip)) return;
+  refuseInvalid(
+    `Clip "${clip.get("name")}" holds recorded takes rather than notes; there are no notes to write there.`,
+  );
+}
+
+/**
+ * Record and delete every take of the clips a removal takes with it, so one
+ * undo brings the clips and their takes back together.
+ * @param {Y.Doc} doc
+ * @param {Set<string>} clipIds - the clips being removed
+ * @param {Object<string, any>} before - the removal's before map, filled in
+ * @param {Object<string, any>} after - the removal's after map, filled in
+ * @returns {void}
+ */
+function removeTakes(doc, clipIds, before, after) {
+  const takes = takeMap(doc);
+  for (const { id, take } of takeEntries(doc)) {
+    if (!clipIds.has(take.get("clip_id"))) continue;
+    before[fieldKey(takeRef(id), "*")] = cloneJson(toPlain(take));
+    after[fieldKey(takeRef(id), "*")] = ABSENT;
+    takes.delete(id);
+  }
+}
+
+/**
+ * The takes of a clip, as the refs a lock/focus check has to see with it.
+ * @param {object} snap
+ * @param {string} clipId
+ * @returns {string[]}
+ */
+function takeRefsOfClip(snap, clipId) {
+  const refs = [];
+  for (const take of Object.values(snap.takes ?? {})) {
+    if (take.clip_id === clipId) refs.push(takeRef(take.id));
+  }
+  return refs;
+}
+
+/**
+ * Clamp an audio clip's comp to a (possibly shorter) clip: a segment that runs
+ * past the new end is cut there, and one that starts past it goes away.
+ * @param {Array<{take_id: string, from_beat: number, to_beat: number}>} segments
+ * @param {number} limit - the new length in beats
+ * @returns {Array<{take_id: string, from_beat: number, to_beat: number}>}
+ */
+function clampComp(segments, limit) {
+  const out = [];
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const from = typeof segment?.from_beat === "number" ? segment.from_beat : 0;
+    const to = typeof segment?.to_beat === "number" ? segment.to_beat : 0;
+    if (from >= limit) continue;
+    out.push({ take_id: segment.take_id, from_beat: from, to_beat: Math.min(to, limit) });
+  }
+  return out;
 }
 
 /** @returns {string} a beat or bar position without float noise. */
@@ -323,9 +410,14 @@ defineCommand({
       pan: z.number().finite().min(-1).max(1).optional(),
       mute: z.boolean().optional(),
       solo: z.boolean().optional(),
+      kind: z
+        .enum(["sunvox", "audio"])
+        .optional()
+        .describe('what the track plays: "sunvox" (the default) or "audio" for recorded takes'),
     })
     .strict(),
   summary(args) {
+    if (args.kind === "audio") return `Added audio track "${args.name}"`;
     return `Added track "${args.name}" (${args.device?.type ?? DEFAULT_DEVICE_TYPE})`;
   },
   touches(args) {
@@ -339,16 +431,22 @@ defineCommand({
     if (findTrackIndex(doc, args.id) >= 0) {
       refuseInvalid(`A track with id "${args.id}" already exists in this song.`);
     }
+    const audio = args.kind === "audio";
+    if (audio && args.device !== undefined) {
+      refuseInvalid(`An audio track has no instrument; leave the device out when adding one.`);
+    }
     const index = tracks.length;
     const track = {
       id: args.id,
       name: args.name,
       color: args.color ?? nextTrackColor(doc),
-      device: {
-        engine: "sunvox",
-        type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
-        params: { ...(args.device?.params ?? {}) },
-      },
+      device: audio
+        ? { ...AUDIO_DEVICE }
+        : {
+            engine: "sunvox",
+            type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
+            params: { ...(args.device?.params ?? {}) },
+          },
       mute: args.mute ?? false,
       solo: args.solo ?? false,
       gain_db: args.gain_db ?? 0,
@@ -383,7 +481,9 @@ defineCommand({
   touches(args, snap) {
     const refs = [trackRef(args.track_id)];
     for (const clip of Object.values(snap.clips)) {
-      if (clip.track_id === args.track_id) refs.push(clipRef(clip.id));
+      if (clip.track_id !== args.track_id) continue;
+      refs.push(clipRef(clip.id));
+      refs.push(...takeRefsOfClip(snap, clip.id));
     }
     return refs;
   },
@@ -409,6 +509,9 @@ defineCommand({
       before[fieldKey(clipRef(id), "*")] = cloneJson(toPlain(clip));
       after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
+    // A recorded take belongs to its clip, so it goes with it and comes back
+    // with it, in the same step.
+    removeTakes(doc, new Set(clips.map(({ id }) => id)), before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
@@ -449,11 +552,12 @@ defineCommand({
   summary(args, snap) {
     return `Set track "${labelOfTrack(snap, args.track_id)}" to the "${args.type}" module`;
   },
-  touches(args) {
+  touches(args, snap) {
     return [trackRef(args.track_id)];
   },
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
+    refuseOnAudioTrack(track, "SunVox module to swap");
     const ref = trackRef(args.track_id);
     const before = fieldValue(track, "device");
     const device = { engine: "sunvox", type: args.type, params: { ...paramsDefaults(args.params) } };
@@ -489,6 +593,7 @@ defineCommand({
    */
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
+    refuseOnAudioTrack(track, "SunVox controller to set");
     const ref = trackRef(args.track_id);
     const device = toPlain(track.get("device")) ?? {
       engine: "sunvox",
@@ -669,6 +774,7 @@ defineCommand({
       if (clip.scene_id !== args.scene_id) continue;
       refs.push(clipRef(clip.id));
       refs.push(trackRef(clip.track_id));
+      refs.push(...takeRefsOfClip(snap, clip.id));
     }
     return refs;
   },
@@ -694,6 +800,7 @@ defineCommand({
       before[fieldKey(clipRef(id), "*")] = cloneJson(toPlain(clip));
       after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
+    removeTakes(doc, new Set(clips.map(({ id }) => id)), before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
@@ -726,8 +833,13 @@ defineCommand({
     return [clipRef(args.clip_id), trackRef(args.track_id)];
   },
   apply(doc, args) {
-    requireTrack(doc, args.track_id);
+    const track = requireTrack(doc, args.track_id);
     requireScene(doc, args.scene_id);
+    const existingAudio = getClip(doc, args.clip_id);
+    if (existingAudio) refuseOnAudioClip(existingAudio);
+    if (isAudioTrack(track)) {
+      refuseInvalid(`Track "${track.get("name")}" is an audio track; use clip.add_audio to make a clip on it.`);
+    }
 
     if (args.notes.length > LIMITS.notesPerClip) {
       refuseLimit(`A clip can have at most ${LIMITS.notesPerClip} notes.`);
@@ -826,6 +938,7 @@ defineCommand({
   },
   apply(doc, args) {
     const clip = requireClip(doc, args.clip_id);
+    refuseOnAudioClip(clip);
     const name = clip.get("name") ?? args.clip_id;
     const lengthBars = clip.get("length_bars") ?? 1;
     const limit = lengthBars * BEATS;
@@ -893,6 +1006,27 @@ defineCommand({
       refuseLimit(`A clip can be at most ${LIMITS.clipBars} bars long.`);
     }
     const name = clip.get("name") ?? args.clip_id;
+    const ref = clipRef(args.clip_id);
+
+    // An audio clip has no notes to fit, but its comp says which take plays
+    // over which beats: a shorter clip cuts the segment that crosses its new
+    // end and drops the ones that start past it.
+    if (isAudioClip(clip)) {
+      const beforeLength = fieldValue(clip, "length_bars");
+      const beforeComp = fieldValue(clip, "comp") ?? [];
+      const nextComp = clampComp(beforeComp, args.length_bars * BEATS);
+      const compChanged = JSON.stringify(nextComp) !== JSON.stringify(beforeComp);
+      clip.set("length_bars", args.length_bars);
+      const before = { [fieldKey(ref, "length_bars")]: beforeLength };
+      const after = { [fieldKey(ref, "length_bars")]: args.length_bars };
+      if (compChanged) {
+        clip.set("comp", nextComp);
+        before[fieldKey(ref, "comp")] = beforeComp;
+        after[fieldKey(ref, "comp")] = cloneJson(nextComp);
+      }
+      return { before, after };
+    }
+
     const notes = toPlain(clip.get("notes")) ?? [];
     const limit = args.length_bars * BEATS;
     for (const note of notes) {
@@ -903,8 +1037,8 @@ defineCommand({
     const before = fieldValue(clip, "length_bars");
     clip.set("length_bars", args.length_bars);
     return {
-      before: { [fieldKey(clipRef(args.clip_id), "length_bars")]: before },
-      after: { [fieldKey(clipRef(args.clip_id), "length_bars")]: args.length_bars },
+      before: { [fieldKey(ref, "length_bars")]: before },
+      after: { [fieldKey(ref, "length_bars")]: args.length_bars },
     };
   },
 });
@@ -944,16 +1078,19 @@ defineCommand({
   },
   touches(args, snap) {
     const clip = snap.clips[args.clip_id];
-    const refs = [clipRef(args.clip_id)];
+    const refs = [clipRef(args.clip_id), ...takeRefsOfClip(snap, args.clip_id)];
     if (clip) refs.push(trackRef(clip.track_id));
     return refs;
   },
   apply(doc, args) {
     const clip = requireClip(doc, args.clip_id);
     const ref = clipRef(args.clip_id);
-    const before = cloneJson(toPlain(clip));
+    const before = { [fieldKey(ref, "*")]: cloneJson(toPlain(clip)) };
+    const after = { [fieldKey(ref, "*")]: ABSENT };
+    // Its recorded takes go with it, captured for the same undo step.
+    removeTakes(doc, new Set([args.clip_id]), before, after);
     clipMap(doc).delete(args.clip_id);
-    return { before: { [fieldKey(ref, "*")]: before }, after: { [fieldKey(ref, "*")]: ABSENT } };
+    return { before, after };
   },
 });
 

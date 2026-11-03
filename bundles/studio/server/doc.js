@@ -9,7 +9,17 @@
  *                            mute, solo, gain_db, pan, locked}
  *   scenes  Y.Array of Y.Map {id, name}
  *   clips   Y.Map of clip id → Y.Map {id, track_id, scene_id, name,
- *                            length_bars, notes: [{t, d, p, v}]}
+ *                            length_bars, notes: [{t, d, p, v}]}, plus
+ *                            kind: "audio" and comp: [Segment] on a recorded
+ *                            (audio) clip
+ *   takes   Y.Map of take id → Y.Map {id, clip_id, storage_key, rate,
+ *                            channels, frames, offset_frames, compensated,
+ *                            bpm, recorded_at, author_label, discarded}
+ *
+ * A take is one recording on disk that an audio clip comps from. A segment is
+ * `{take_id, from_beat, to_beat}` and says which take plays over which beats
+ * of its clip. A song written before takes existed has no `takes` container:
+ * every reader treats that as an empty map (see `readContainer`).
  *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
@@ -31,9 +41,10 @@ import * as Y from "yjs";
 
 /**
  * What one song may hold (spec §1, phase 1a), plus the per-device controller
- * cap. Commands refuse past these with a plain-English message naming the
- * limit.
- * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number, params: number}}
+ * cap and the per-clip take cap of 1b. Commands refuse past these with a
+ * plain-English message naming the limit.
+ * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number,
+ *         params: number, takesPerClip: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -49,7 +60,15 @@ export const LIMITS = Object.freeze({
   scenes: 64,
   clipBars: 64,
   params: 64,
+  takesPerClip: 64,
 });
+
+/**
+ * The device of an audio track: the one track kind that plays recorded takes
+ * instead of SunVox notes. It carries no module and no controllers.
+ * @type {Readonly<{engine: "audio"}>}
+ */
+export const AUDIO_DEVICE = Object.freeze({ engine: "audio" });
 
 /** 1a is four beats to the bar, in every scene. */
 export const BEATS_PER_BAR = 4;
@@ -101,9 +120,9 @@ export const STEP_GUARDS = Symbol("studio.step-guards");
 
 /**
  * The ref a command, a lock or a history entry names one object by.
- * @param {"song"|"track"|"scene"|"clip"} kind
+ * @param {"song"|"track"|"scene"|"clip"|"take"} kind
  * @param {string} id
- * @returns {string} e.g. `"clip:abc"`, or `"song:meta"` for the song itself
+ * @returns {string} e.g. `"clip:abc"`, `"take:abc"`, or `"song:meta"` for the song itself
  */
 export function objectRef(kind, id) {
   return `${kind}:${id}`;
@@ -197,6 +216,7 @@ export function newSongDoc({ title = "Untitled song", bpm = 120, key = "C major"
     song.set("tracks", new Y.Array());
     song.set("scenes", new Y.Array());
     song.set("clips", new Y.Map());
+    song.set("takes", new Y.Map());
   }, "studio:new-song");
   return doc;
 }
@@ -236,6 +256,81 @@ export function sceneList(doc) {
  */
 export function clipMap(doc) {
   return ensureContainer(doc, "clips", () => new Y.Map());
+}
+
+/**
+ * The takes map, keyed by take id. Writers use this; a song written before
+ * takes existed gets the container when it is first written to.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function takeMap(doc) {
+  return ensureContainer(doc, "takes", () => new Y.Map());
+}
+
+/**
+ * Every take in the song, in the order the map holds them. A song without a
+ * takes container has none.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, take: Y.Map<any>}>}
+ */
+export function takeEntries(doc) {
+  const takes = readContainer(doc, "takes");
+  if (!(takes instanceof Y.Map)) return [];
+  const out = [];
+  for (const [id, take] of takes.entries()) {
+    if (take instanceof Y.Map) out.push({ id, take });
+  }
+  return out;
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live take object, or null
+ */
+export function getTake(doc, id) {
+  const takes = readContainer(doc, "takes");
+  if (!(takes instanceof Y.Map)) return null;
+  const take = takes.get(id);
+  return take instanceof Y.Map ? take : null;
+}
+
+/**
+ * Every take recorded into one clip.
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @returns {Array<{id: string, take: Y.Map<any>}>}
+ */
+export function takesForClip(doc, clipId) {
+  return takeEntries(doc).filter(({ take }) => take.get("clip_id") === clipId);
+}
+
+/**
+ * Whether a track plays recorded takes rather than a SunVox module.
+ * @param {Y.Map<any>|null|undefined} track
+ * @returns {boolean}
+ */
+export function isAudioTrack(track) {
+  return deviceEngine(track) === AUDIO_DEVICE.engine;
+}
+
+/**
+ * Whether a clip holds recorded takes (an audio clip) rather than notes.
+ * @param {Y.Map<any>|null|undefined} clip
+ * @returns {boolean}
+ */
+export function isAudioClip(clip) {
+  return clip?.get?.("kind") === "audio";
+}
+
+/** @returns {string|null} the engine a track's device names, when it names one. */
+function deviceEngine(track) {
+  if (!track || typeof track.get !== "function") return null;
+  const device = track.get("device");
+  const plain = device instanceof Y.Map ? toPlain(device) : device;
+  const engine = plain && typeof plain === "object" ? plain.engine : null;
+  return typeof engine === "string" ? engine : null;
 }
 
 /** @returns {any} the stored container, created (and stored) when missing. */
@@ -363,7 +458,8 @@ export function clipsForScene(doc, sceneId) {
  * read, and the value two hubs compare after a restart.
  * @param {Y.Doc} doc
  * @returns {{meta: {title: string, bpm: number, meter: number[], key: string},
- *            tracks: object[], scenes: object[], clips: Object<string, object>}}
+ *            tracks: object[], scenes: object[], clips: Object<string, object>,
+ *            takes: Object<string, object>}}
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -380,6 +476,14 @@ export function snapshot(doc) {
     }
   }
 
+  const takes = [];
+  const takesValue = readContainer(doc, "takes");
+  if (takesValue instanceof Y.Map) {
+    for (const [id, take] of takesValue.entries()) {
+      takes.push([id, normalizeTake(id, take)]);
+    }
+  }
+
   return {
     meta: {
       ...meta,
@@ -393,6 +497,7 @@ export function snapshot(doc) {
     // Object.fromEntries defines own properties, so a clip id like "__proto__"
     // stays an ordinary key instead of touching the object's prototype.
     clips: Object.fromEntries(clips),
+    takes: Object.fromEntries(takes),
   };
 }
 
@@ -405,7 +510,12 @@ export function snapshot(doc) {
  *   - every clip sits on a track and in a scene the song still has;
  *   - a clip's notes end inside its own length, the rule `clip.write`,
  *     `clip.edit_notes` and `clip.set_length` enforce on their own edits (four
- *     beats to the bar, see `BEATS_PER_BAR`).
+ *     beats to the bar, see `BEATS_PER_BAR`);
+ *   - a clip holds at most `LIMITS.takesPerClip` takes;
+ *   - every take names an audio clip the song still has;
+ *   - an audio clip's comp is in beat order, inside the clip, and every one of
+ *     its segments names a take of that clip that is not discarded — the rule
+ *     `clip.set_comp` enforces on its own edits.
  *
  * The history dry-runs an undo's plan on a clone of the document and calls
  * this, so a plan that would leave the song in one of these states is refused
@@ -428,9 +538,24 @@ export function checkInvariants(doc) {
   reasons.push(...duplicateIdReasons(song.tracks, "track"));
   reasons.push(...duplicateIdReasons(song.scenes, "scene"));
   reasons.push(...duplicateIdReasons(Object.values(song.clips), "clip"));
+  reasons.push(...duplicateIdReasons(Object.values(song.takes), "take"));
 
   const trackIds = new Set(song.tracks.map((track) => track.id));
   const sceneIds = new Set(song.scenes.map((scene) => scene.id));
+
+  const takesById = new Map();
+  const takesPerClip = new Map();
+  for (const take of Object.values(song.takes)) {
+    takesById.set(take.id, take);
+    takesPerClip.set(take.clip_id, (takesPerClip.get(take.clip_id) ?? 0) + 1);
+    const owner = song.clips[take.clip_id];
+    if (!owner) {
+      reasons.push(`The take "${take.id}" would be left without its clip: there is no clip "${take.clip_id}" in the song.`);
+    } else if (owner.kind !== "audio") {
+      const ownerLabel = owner.name === "" ? `clip "${owner.id}"` : `clip "${owner.name}"`;
+      reasons.push(`The take "${take.id}" would belong to the ${ownerLabel}, which holds notes rather than a recording.`);
+    }
+  }
 
   for (const clip of Object.values(song.clips)) {
     const label = clip.name === "" ? `clip "${clip.id}"` : `clip "${clip.name}"`;
@@ -441,6 +566,15 @@ export function checkInvariants(doc) {
       reasons.push(`The ${label} would be left without its scene: there is no scene "${clip.scene_id}" in the song.`);
     }
     const limit = clip.length_bars * BEATS_PER_BAR;
+    if (clip.kind === "audio") {
+      const count = takesPerClip.get(clip.id) ?? 0;
+      if (count > LIMITS.takesPerClip) {
+        reasons.push(
+          `The ${label} would have ${count} takes; a clip can have at most ${LIMITS.takesPerClip} takes.`,
+        );
+      }
+      reasons.push(...segmentReasons(clip, label, takesById, limit));
+    }
     for (let index = 0; index < clip.notes.length; index += 1) {
       const note = clip.notes[index];
       if (note.t + note.d > limit) {
@@ -452,6 +586,58 @@ export function checkInvariants(doc) {
     }
   }
 
+  return reasons;
+}
+
+/**
+ * What is wrong with one audio clip's comp, in plain English.
+ * @param {object} clip - the clip from a snapshot (it carries `kind: "audio"`)
+ * @param {string} label - what the messages call the clip
+ * @param {Map<string, object>} takesById - every take in the song
+ * @param {number} limit - the clip's length in beats
+ * @returns {string[]}
+ */
+function segmentReasons(clip, label, takesById, limit) {
+  const reasons = [];
+  const segments = Array.isArray(clip.comp) ? clip.comp : [];
+  let previous = null;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const which = `Segment ${index + 1} of the ${label}`;
+    if (!(segment.from_beat < segment.to_beat)) {
+      reasons.push(
+        `${which} would end at beat ${beatText(segment.to_beat)}, before it starts at beat ${beatText(segment.from_beat)}.`,
+      );
+      continue;
+    }
+    if (segment.from_beat < 0 || segment.to_beat > limit) {
+      reasons.push(
+        `${which} would run from beat ${beatText(segment.from_beat)} to beat ${beatText(segment.to_beat)}, outside the ${barsText(clip.length_bars)} of that clip.`,
+      );
+      continue;
+    }
+    if (previous && segment.from_beat < previous.from_beat) {
+      reasons.push(
+        `${which} would start at beat ${beatText(segment.from_beat)}, before the segment in front of it; segments go in beat order.`,
+      );
+      continue;
+    }
+    if (previous && segment.from_beat < previous.to_beat) {
+      reasons.push(
+        `${which} would start at beat ${beatText(segment.from_beat)}, inside the segment that ends at beat ${beatText(previous.to_beat)}.`,
+      );
+      continue;
+    }
+    previous = segment;
+    const take = takesById.get(segment.take_id);
+    if (!take || take.clip_id !== clip.id) {
+      reasons.push(`${which} would play take "${segment.take_id}", which is not a take of that clip.`);
+      continue;
+    }
+    if (take.discarded) {
+      reasons.push(`${which} would play take "${take.id}", which is discarded.`);
+    }
+  }
   return reasons;
 }
 
@@ -491,6 +677,8 @@ function barsText(bars) {
  *     track's device and leaves its other controllers alone;
  *   - `"clip:abc|*"` with an object (re)creates the whole clip, and with
  *     `null` deletes it;
+ *   - `"take:abc|*"` does the same for a take, and `"take:abc|offset_frames"`
+ *     writes one field of it;
  *   - `"track:abc|*"` and `"scene:abc|*"` do the same at the object's original
  *     position, carried inside the object JSON as `_index`, `_after` and
  *     `_before` (stripped again on the way in and out, so they never show up
@@ -533,6 +721,9 @@ export function applyBeforeAfter(doc, plan) {
       case "clip":
         writeClip(doc, target.id, split.field, value);
         break;
+      case "take":
+        writeTake(doc, target.id, split.field, value);
+        break;
       default:
         throw new Error(`Studio: "${target.kind}" is not an object kind`);
     }
@@ -571,6 +762,13 @@ export function readField(doc, ref, field = "*") {
     if (!clip) return ABSENT;
     if (field === "*") return toPlain(clip);
     return readPath(clip, fieldPath(field));
+  }
+
+  if (target.kind === "take") {
+    const take = getTake(doc, target.id);
+    if (!take) return ABSENT;
+    if (field === "*") return toPlain(take);
+    return readPath(take, fieldPath(field));
   }
 
   if (target.kind === "track" || target.kind === "scene") {
@@ -763,6 +961,24 @@ function writeClip(doc, id, field, value) {
   writeField(clip, field, value);
 }
 
+/** Write one field of a take, or (re)create/delete the whole take. */
+function writeTake(doc, id, field, value) {
+  const takes = takeMap(doc);
+  if (field === "*") {
+    if (value === ABSENT) {
+      takes.delete(id);
+      return;
+    }
+    const object = cloneJson(value) ?? {};
+    delete object._index;
+    takes.set(id, objectMap({ ...object, id: object.id ?? id }));
+    return;
+  }
+  const take = takes.get(id);
+  if (!(take instanceof Y.Map)) throw new Error(`Studio: there is no take "${id}" to write to`);
+  writeField(take, field, value);
+}
+
 /** @returns {any} the value without its internal `_index`/`_after`/`_before` hints. */
 function stripHints(value) {
   const object = toPlain(value) ?? {};
@@ -787,15 +1003,20 @@ function integerOr(value, fallback) {
 function normalizeTrack(value) {
   const plain = stripHints(value);
   const device = plain.device && typeof plain.device === "object" ? plain.device : {};
+  const engine = typeof device.engine === "string" ? device.engine : "sunvox";
   return {
     id: typeof plain.id === "string" ? plain.id : "",
     name: typeof plain.name === "string" ? plain.name : "",
     color: typeof plain.color === "string" ? plain.color : TRACK_COLORS[0],
-    device: {
-      engine: typeof device.engine === "string" ? device.engine : "sunvox",
-      type: typeof device.type === "string" ? device.type : "",
-      params: device.params && typeof device.params === "object" ? cloneJson(device.params) : {},
-    },
+    // An audio track has no module and no controllers: its device is exactly
+    // {engine: "audio"}, never an empty set of SunVox fields.
+    device: engine === AUDIO_DEVICE.engine
+      ? { engine: AUDIO_DEVICE.engine }
+      : {
+          engine,
+          type: typeof device.type === "string" ? device.type : "",
+          params: device.params && typeof device.params === "object" ? cloneJson(device.params) : {},
+        },
     mute: plain.mute === true,
     solo: plain.solo === true,
     gain_db: numberOr(plain.gain_db, 0),
@@ -813,11 +1034,17 @@ function normalizeScene(value) {
   };
 }
 
-/** A clip as a snapshot carries it, with its notes as plain {t, d, p, v}. */
+/**
+ * A clip as a snapshot carries it, with its notes as plain {t, d, p, v}.
+ *
+ * A SunVox clip carries no `kind` (an absent kind is "notes"); an audio clip
+ * adds `kind: "audio"` and its comp, so a reader can tell the two apart
+ * without a second lookup.
+ */
 function normalizeClip(id, value) {
   const plain = stripHints(value);
   const notes = Array.isArray(plain.notes) ? plain.notes : [];
-  return {
+  const clip = {
     id: typeof plain.id === "string" ? plain.id : id,
     track_id: typeof plain.track_id === "string" ? plain.track_id : "",
     scene_id: typeof plain.scene_id === "string" ? plain.scene_id : "",
@@ -832,6 +1059,40 @@ function normalizeClip(id, value) {
         v: integerOr(item.v, 100),
       };
     }),
+  };
+  if (plain.kind !== "audio") return clip;
+  return { ...clip, kind: "audio", comp: normalizeSegments(plain.comp) };
+}
+
+/** A comp as a snapshot carries it, with its segments as plain {take_id, from_beat, to_beat}. */
+function normalizeSegments(value) {
+  const segments = Array.isArray(value) ? value : [];
+  return segments.map((segment) => {
+    const item = segment && typeof segment === "object" ? segment : {};
+    return {
+      take_id: typeof item.take_id === "string" ? item.take_id : "",
+      from_beat: numberOr(item.from_beat, 0),
+      to_beat: numberOr(item.to_beat, 0),
+    };
+  });
+}
+
+/** A take as a snapshot carries it: every field present, nothing extra. */
+function normalizeTake(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
+    storage_key: typeof plain.storage_key === "string" ? plain.storage_key : "",
+    rate: integerOr(plain.rate, 48000),
+    channels: integerOr(plain.channels, 1),
+    frames: integerOr(plain.frames, 0),
+    offset_frames: integerOr(plain.offset_frames, 0),
+    compensated: plain.compensated === true,
+    bpm: numberOr(plain.bpm, 120),
+    recorded_at: typeof plain.recorded_at === "string" ? plain.recorded_at : "",
+    author_label: typeof plain.author_label === "string" ? plain.author_label : "",
+    discarded: plain.discarded === true,
   };
 }
 /**
