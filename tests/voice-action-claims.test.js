@@ -206,10 +206,10 @@ test("claimsAction: an English sign-off or intention is not a stop claim (fix ro
 });
 
 test("claimsAction: Spanish \"voy a parar\" — the reflexive and the \"to do something\" forms are not stop claims (fix round 1)", () => {
-  for (const t of ["Voy a parar la tarea.", "Lo voy a parar.", "Voy a detener la investigación.", "Voy a parar un momento.", "Voy a parar a Writer.", "Voy a añadirlo a tu calendario."]) {
+  for (const t of ["Voy a parar la tarea.", "Lo voy a parar.", "Voy a detener la investigación.", "Voy a parar a Writer.", "Voy a añadirlo a tu calendario.", "Voy a pararlo.", "Voy a detenerla ahora."]) {
     assert.equal(claimsAction(t, { agents: ["Writer"] }), true, t);
   }
-  for (const t of ["Voy a parar a comer.", "Voy a parar a descansar un poco.", "Voy a detenerme.", "Voy a pararme un rato."]) {
+  for (const t of ["Voy a parar a comer.", "Voy a parar a descansar un poco.", "Voy a detenerme.", "Voy a pararme un rato.", "Voy a parar un momento.", "Voy a parar aquí.", "Voy a parar de hablar."]) {
     assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
   }
 });

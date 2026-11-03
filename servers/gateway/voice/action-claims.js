@@ -118,7 +118,7 @@ const CLAIMS = [
   // detenerme": no word boundary after the verb) and never "voy a parar a <infinitive>", which is to stop doing
   // something ("voy a parar a comer", "voy a parar a descansar"). A name after it is no infinitive, so "voy a parar a
   // Writer" stays a claim (the ruling: not a case to handle specially).
-  new RegExp(`${NEG}\\bvoy a (?:parar|detener)\\b(?!me\\b)${ES_PARA_A}`),
+  new RegExp(`${NEG}\\bvoy a (?:parar|detener)(?:l[oae]s?)?\\b(?!me\\b|te\\b|se\\b|nos\\b)(?! (?:un momento|aqui|ya|de)\\b)${ES_PARA_A}`),
   new RegExp(`${NEG}\\bpuedo (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar)`),
   /\b(?:quieres|te gustaria|deseas|prefieres) que (?:te |lo |la |le )*(?:recuerde|anada|agregue|cree|programe|agende|reserve|envie|mande|guarde|anote|apunte|avise)\b/,
   new RegExp(`${NEG}\\b(?:ya )?(?:esta|quedo|queda) (?:listo|lista|puest[oa]|configurad[oa]|programad[oa]|agendad[oa]|anadid[oa]|agregad[oa]|guardad[oa]|reservad[oa]|en tu (?:calendario|agenda|lista))\\b`),
