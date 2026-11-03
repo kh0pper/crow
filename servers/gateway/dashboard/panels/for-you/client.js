@@ -15,6 +15,8 @@
  *   What needs me -> POST /dashboard/widgets-api/needs-me/act {key, action, nonce}, then the widget is
  *     repainted from the returned summary; a 409 (the item changed elsewhere) re-reads the summary
  *     and repaints that instead of retrying.
+ *   A camera still (the camera widget) -> the same image URL with a fresh ?t=<now> on the end, so a
+ *     tap asks Frigate for a newer frame. Never a video: the widget only ever shows one still.
  * Messages come from the page's data-fy-* attributes (server-translated).
  *
  * Emitted inside a template literal: this source must contain NO backticks. It re-runs on every
@@ -227,6 +229,14 @@ export function forYouClientJs() {
     if (need) {
       var box = need.closest('[data-fy-needs]');
       if (box) needsAct(box, need, box.querySelector('[data-fy-needs-status]'), box.querySelectorAll('[data-fy-needs-act]'));
+      return;
+    }
+    // A camera still: a tap reloads that image and leaves the rest of the grid alone.
+    var cam = t.closest('[data-wg-cam]');
+    if (cam) {
+      var camImg = cam.querySelector('img');
+      var camSrc = camImg ? String(camImg.getAttribute('src') || '').split('?')[0] : '';
+      if (camSrc) camImg.setAttribute('src', camSrc + '?t=' + String(Date.now()));
       return;
     }
     var play = t.closest('[data-fy-play]');

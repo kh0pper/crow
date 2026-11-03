@@ -23,6 +23,9 @@
  *   pageSizes   an optional per-page default size ({ page: [w, h] }), for a widget that fills For
  *               You's row but is half of the generic page's first screenful (What needs me). It must
  *               be one of `sizes`; widgets/grid-html.js ignores anything else;
+ *   available   an optional `(crowHome) => boolean` offer gate: the camera widget is offered only
+ *               while the Frigate add-on is installed. No `crowHome` handed in = offered (a
+ *               caller with no host to ask loses nothing);
  *   load(ctx)   reads the data, or returns null when nothing came back (the grid draws the widget's
  *               own one-line error instead). A throw is the same as null;
  *   render      draws the widget from that data; "" means "nothing to show": no cell at all (the
@@ -40,7 +43,9 @@
  * Where each one starts out: For You's default layout is needs-me, morning, moves, listen, news (the
  * weather offered, drawn hidden); the generic page's is needs-me and today (everything else offered
  * from "+ Add widget"). `defaultPages`/`defaultOn` say which, and widgets/grid-html.js draws the rest
- * hidden — a cell the page offers but this device has not put on it yet.
+ * hidden — a cell the page offers but this device has not put on it yet. Widgets phase 3's in-Crow
+ * widgets (messages, camera, apps, projects, bots) are offered on both pages and on neither default:
+ * their loaders and renderers live in widgets/more.js and widgets/more-html.js.
  */
 import { t } from "../dashboard/shared/i18n.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
@@ -52,6 +57,8 @@ import { loadMoves } from "../for-you/moves.js";
 import { loadListen } from "../for-you/listen.js";
 import { loadNews } from "../for-you/news.js";
 import { loadToday } from "../for-you/today.js";
+import { loadMessages, loadCameras, loadApps, loadProjects, loadBots, frigateInstalled } from "./more.js";
+import { messagesHtml, cameraHtml, appsHtml, projectsHtml, botsHtml } from "./more-html.js";
 
 const e = escapeHtml;
 
@@ -71,6 +78,14 @@ const FULL_SIZES = Object.freeze([[4, 2], [2, 2], [4, 1], [2, 1]]);
 
 /** How long any one widget may hold the page before it is drawn as its own error cell. */
 export const WIDGET_TIMEOUT_MS = 8000;
+
+/**
+ * The in-Crow widgets' sizes (widgets phase 3, PR 2): the launchers are one line of tiles or two,
+ * half or full width; Messages and the camera want the taller half/full-row box. Each list starts
+ * with the widget's default, so the grid's Size button always has somewhere to step.
+ */
+const HALF_SIZES = Object.freeze([[2, 2], [4, 2]]);
+const LAUNCHER_SIZES = Object.freeze([[2, 1], [2, 2], [4, 1], [4, 2]]);
 
 /** The registry, in For You's default order (the weather last: offered, not part of the default). */
 export const WIDGETS = Object.freeze([
@@ -172,6 +187,67 @@ export const WIDGETS = Object.freeze([
     load: async (ctx) => ({ wx: await ctx.weather() }),
     render: (data, lang) => weatherCell(data, lang),
   },
+  // ─── widgets phase 3, PR 2: the in-Crow widgets ───
+  // Offered on both pages, on NEITHER page's default layout (`defaultOn: false`): the server draws
+  // each cell hidden and "+ Add widget" puts it on this device's grid (widgets/grid-html.js).
+  {
+    id: "messages",
+    titleKey: "widgets.more.messages.title",
+    section: null,
+    sizes: HALF_SIZES,
+    defaultSize: [2, 2],
+    pages: ["for-you", "widgets"],
+    defaultOn: false,
+    load: (ctx) => loadMessages(ctx.db),
+    render: (data, lang, opts) => messagesHtml(data, lang, opts && opts.now ? opts.now : undefined),
+  },
+  {
+    id: "camera",
+    titleKey: "widgets.more.camera.title",
+    section: null,
+    sizes: HALF_SIZES,
+    defaultSize: [2, 2],
+    pages: ["for-you", "widgets"],
+    defaultOn: false,
+    // Only offered while the Frigate add-on is installed: the stills it draws are that bundle's
+    // own route, and a widget for a bundle that is not there would be a broken tile.
+    available: (crowHome) => frigateInstalled(crowHome),
+    load: (ctx) => loadCameras({ crowHome: ctx.crowHome }),
+    render: (data, lang) => cameraHtml(data, lang),
+  },
+  {
+    id: "apps",
+    titleKey: "widgets.more.apps.title",
+    section: null,
+    sizes: LAUNCHER_SIZES,
+    defaultSize: [2, 2],
+    pages: ["for-you", "widgets"],
+    defaultOn: false,
+    load: (ctx) => loadApps(ctx.db, { crowHome: ctx.crowHome, lang: ctx.lang }),
+    render: (data, lang) => appsHtml(data, lang),
+  },
+  {
+    id: "projects",
+    titleKey: "widgets.more.projects.title",
+    section: null,
+    sizes: LAUNCHER_SIZES,
+    defaultSize: [2, 2],
+    pages: ["for-you", "widgets"],
+    defaultOn: false,
+    load: (ctx) => loadProjects(ctx.db),
+    render: (data, lang) => projectsHtml(data, lang),
+  },
+  {
+    id: "bots",
+    titleKey: "widgets.more.bots.title",
+    section: null,
+    sizes: LAUNCHER_SIZES,
+    defaultSize: [2, 2],
+    pages: ["for-you", "widgets"],
+    defaultOn: false,
+    load: (ctx) => loadBots(ctx.db),
+    render: (data, lang) => botsHtml(data, lang),
+  },
 ]);
 
 /** The widget with this id, or null (an id from an older layout that no longer exists). */
@@ -189,10 +265,22 @@ export function widgetOffered(widget, settings) {
   return sections[widget.section] !== false;
 }
 
-/** The page's widgets in registry order: those it lists, and those its settings offer. */
-export function widgetsForPage(pageId, { settings = null, widgets = WIDGETS } = {}) {
+/**
+ * Whether a widget is offered on this host at all: a widget that names an `available(crowHome)`
+ * predicate (the camera, which needs the Frigate add-on) is offered only while it answers true.
+ * With no host to ask (a test that names none) the widget is offered — its own load decides.
+ */
+export function widgetAvailable(widget, crowHome = null) {
+  if (!widget || typeof widget.available !== "function") return true;
+  if (!crowHome) return true;
+  try { return !!widget.available(crowHome); } catch { return false; }
+}
+
+/** The page's widgets in registry order: those it lists, its settings offer, and this host offers. */
+export function widgetsForPage(pageId, { settings = null, widgets = WIDGETS, crowHome = null } = {}) {
   const page = String(pageId == null ? "" : pageId);
-  return (widgets || []).filter((w) => Array.isArray(w.pages) && w.pages.includes(page) && widgetOffered(w, settings));
+  return (widgets || []).filter((w) => Array.isArray(w.pages) && w.pages.includes(page)
+    && widgetOffered(w, settings) && widgetAvailable(w, crowHome));
 }
 
 /**

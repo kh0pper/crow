@@ -29,6 +29,7 @@ import { forYouEnabled } from "../../for-you/flag.js";
 import { readForYouSettings } from "../../for-you/settings.js";
 import { loadWidgets, widgetsForPage } from "../../widgets/registry.js";
 import { widgetsGridCss } from "../../widgets/grid-css.js";
+import { widgetsMoreCss } from "../../widgets/more-html.js";
 import { gridClientJs } from "../../widgets/grid-client.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
@@ -64,10 +65,11 @@ export default {
     // moved from one page to the other shows the same thing on both.
     const context = forYouContext(db, { settings, crowHome, now, tz, lang });
     // Each widget degrades alone: a failed or timed-out read is its own one-line error cell.
-    const cells = await loadWidgets(widgetsForPage("widgets", { settings }), context);
+    // `crowHome` is what offers the camera widget only while the Frigate add-on is installed.
+    const cells = await loadWidgets(widgetsForPage("widgets", { settings, crowHome }), context);
     return layout({
       title: t("widgets.page.title", lang),
-      content: forYouCss() + widgetsGridCss()
+      content: forYouCss() + widgetsGridCss() + widgetsMoreCss()
         + widgetsPageHtml({ cells }, lang, now)
         + forYouClientJs() + gridClientJs(),
     });
