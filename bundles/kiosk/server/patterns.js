@@ -143,13 +143,19 @@ function ponSpelled(transcript) {
 // The slot of a random request holds no name: only words for "any of them" and words for the music
 // itself. After its leading articles it is at most three words, and it must ASK for anything — so
 // "play some jazz" (a genre) and "play Kind of Blue" (a name) stay searches, as before.
-const RANDOM_WORDS = new Set(["random", "any", "something", "anything", "cualquier", "cualquiera", "azar", "aleatorio", "aleatoria", "algun", "alguna"]);
+// "algo" is a random word on its own (review round 1, finding 3: "toca algo", "pon algo"); a kind of
+// music after it still names something to search for ("algo de jazz") — the nouns rule below keeps that.
+const RANDOM_WORDS = new Set(["random", "any", "something", "anything", "algo", "cualquier", "cualquiera", "azar", "aleatorio", "aleatoria", "algun", "alguna"]);
 const RANDOM_NOUNS = new Set(["music", "musica", "song", "songs", "cancion", "canciones", "album", "albums", "disco", "discos", "record", "records"]);
 const RANDOM_ALBUM_NOUNS = new Set(["album", "albums", "disco", "discos", "record", "records"]);
 const RANDOM_FILLER = new Set(["de", "al", "del", "of", "a", "an", "the", "un", "una", "my", "mi"]);
 const RANDOM_MAX_WORDS = 3;
-/** → "album" | "music" when the words after the verb ask for anything at all, or null (a name, a genre, a sentence). */
-function randomKind(rest) {
+/**
+ * → "album" | "music" when the words after the verb ask for anything at all, or null (a name, a genre, a
+ * sentence). Exported for crow_play, which honours `random` only when `what` is empty or is itself a random
+ * form (review round 1, finding 2).
+ */
+export function randomKind(rest) {
   let i = 0;
   while (i < rest.length - 1 && ARTICLES.has(rest[i])) i += 1;
   const w = rest.slice(i);
@@ -160,22 +166,30 @@ function randomKind(rest) {
   return nouns.some((x) => RANDOM_ALBUM_NOUNS.has(x)) ? "album" : "music";
 }
 // "shuffle my music" has no play verb of its own: it is one only where the slot asks for anything.
-const SHUFFLE_VERBS = [["shuffle"], ["shuffle", "up"], ["mezcla"], ["mezclar"]];
+// The longer form is tried FIRST: the lookup takes the first form that matches, so ["shuffle"] ahead of
+// ["shuffle", "up"] would make the second one unreachable (review round 1, finding 4).
+const SHUFFLE_VERBS = [["shuffle", "up"], ["shuffle"], ["mezcla"], ["mezclar"]];
 
-/** "play some jazz" → { what: "some jazz" }; "put on the Night Owls" → { what: "night owls" }; "play a random album" → { random: "album" }. */
+/**
+ * "play some jazz" → { what: "some jazz" }; "put on the Night Owls" → { what: "night owls" };
+ * "play a random album" → { random: "album", what: "a random album" }. A random form keeps the words it was
+ * said in, so a display with no music source searches them exactly as before (matchT1 decides).
+ */
 export function parsePlay(transcript) {
   const w = words(transcript, PLAY_MAX_WORDS);
   if (!w || hasAny(w, NOT_PLAY)) return null;
   let v = PLAY_VERBS.find((p) => startsWith(w, p));
   let rest = v ? (v[0] === "play" ? w.slice(1) : slot(w, v.length)) : null;
-  if (!v && w[0] === "pon" && w.slice(1, 4).some((x) => PON_NOUNS.has(x))) { v = ["pon"]; rest = slot(w, 1); }
+  // "pon algo" asks for anything; "pon algo de jazz" names a genre, which stays a search (and so is no play
+  // request here at all, as before).
+  if (!v && w[0] === "pon" && (w.slice(1, 4).some((x) => PON_NOUNS.has(x)) || randomKind(slot(w, 1)))) { v = ["pon"]; rest = slot(w, 1); }
   // F28a: "shuffle my music" plays, but "shuffle the cards" is not a play request at all.
-  if (!v) { const s = SHUFFLE_VERBS.find((p) => startsWith(w, p)); const r = s ? randomKind(slot(w, s.length)) : null; if (r) return { random: r }; }
+  if (!v) { const s = SHUFFLE_VERBS.find((p) => startsWith(w, p)); const r = s ? slot(w, s.length) : null; const k = r && randomKind(r); if (k) return { random: k, what: r.join(" ") }; }
   if (!v || !rest.length) return null;
   if (v[0] === "play" && rest[0] === "the" && rest.length > 1) rest = rest.slice(1);
+  const what = rest.join(" ");
   const random = randomKind(rest);
-  if (random) return { random };
-  return { what: rest.join(" ") };
+  return random ? { random, what } : { what };
 }
 
 // ── offered: the request is about playing / opening ──────────────────────────────────────────────
@@ -677,8 +691,9 @@ export function matchT1(transcript, ctx) {
   if (!(ctx.sources || []).length) return null;
   const p = parsePlay(transcript);
   // F28a: "a random album", "some music" — a source that has albums picks one (T1 plays it with no model).
-  // Without a music source the words are only words, as before.
-  if (p?.random) return (ctx.sources || []).includes("music") ? { verb: "play", random: p.random, source: "music" } : null;
+  // Only a MUSIC source can pick, so with none the random form keeps today's path: its words are searched
+  // exactly as they were before this form existed (review round 1, finding 1: a radio-only display is unchanged).
+  if (p?.random && (ctx.sources || []).includes("music")) return { verb: "play", random: p.random, source: "music" };
   // callSign: the request was written as a call sign, so a near spelling of one may be asked about (never played).
   if (p) return { verb: "play", what: p.what, source: "auto", ...(writesCallSign(transcript) ? { callSign: true } : {}) };
   // A bare spelled call sign ("K T P F.", "No, K T P F", Spanish "Pon K T P F") names a station: searched on the radio

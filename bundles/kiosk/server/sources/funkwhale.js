@@ -431,7 +431,9 @@ export function createMusicSource({ config, fetchImpl = fetch, clock = Date.now,
   /**
    * F28a: "play a random album" — one album out of the index, uniformly, as the candidate a normal
    * album match gives (so it plays through the same queue path). rand is injected for tests.
-   * → candidate | null when the index holds no album yet (it starts building if it never has).
+   * → candidate | null when the index holds no album yet (it starts building if it never has). While that
+   * first build is still running, indexState().warm is false: a caller can then say the library is loading
+   * rather than that it has no albums (review round 1, finding 5).
    */
   function randomAlbum(rand = Math.random) {
     if (!cfg()) return null;

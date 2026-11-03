@@ -118,7 +118,8 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
     /**
      * F28a: a random play ("play a random album", "some music"). The music source picks an album out of
      * its index (source.randomAlbum) and it plays through exactly the path a match takes. → the same
-     * outcomes as resolve(); `artist` rides along for the spoken line.
+     * outcomes as resolve(); `artist` rides along for the spoken line, and "loading" says the source's
+     * index is still being read (see below).
      */
     async random(deviceId = null) {
       const s = registry.available().find((x) => x.kind === "music" && typeof x.randomAlbum === "function");
@@ -126,7 +127,10 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       const down = [];
       let c = null;
       try { c = await within(Promise.resolve().then(() => s.randomAlbum())); } catch (err) { note(down, s, err); }
-      if (!c) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : { outcome: "not_found" };
+      // Review round 1, finding 5: an index that is still being read is not an empty library. A source that can
+      // say so (its own indexState().warm is false) gets the "still loading" line, not "I couldn't find an album".
+      const loading = () => { try { return typeof s.indexState === "function" && s.indexState()?.warm === false; } catch { return false; } };
+      if (!c) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : loading() ? { outcome: "loading", source: s.kind } : { outcome: "not_found" };
       const list = await playables(s, c, down);
       if (!list.length) return down.length ? { outcome: "unavailable", code: down[0].code, source: s.kind } : { outcome: "not_found" };
       if (deviceId) asked.delete(deviceId);
@@ -235,6 +239,9 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     if (i.random === true || (typeof i.random === "string" && i.random !== "" && i.random !== "false")) {
       const r = await resolver.random(id);
       if (r.outcome === "playing") return start(r, ctx, S, r.artist ? fill(S.say_playing_album, { title: r.title, artist: r.artist }) : null);
+      // Review round 1, finding 5: the index is still loading. The source said so, so that is the answer — with
+      // or without a model — rather than "I couldn't find an album", which the library would contradict a minute later.
+      if (r.outcome === "loading") return result(false, "unavailable", S.say_music_loading, { reason: "loading" });
       // A source that could not look (or could not queue) is a real answer, with or without a model.
       if (r.outcome === "unavailable" && r.code !== "none") return result(false, "unavailable", fill(S[`say_play_${r.code}`] || S.say_play_unreachable, { source: S[`source_${r.source}`] || S.source_music }), { reason: r.code });
       // No music source, or an index with no album in it yet: today's "nothing found" answer.

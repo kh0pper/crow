@@ -84,6 +84,8 @@ export const STRINGS = {
     // F28a: a random play names the album and its artist ("play a random album").
     say_playing_album: "Playing {title} by {artist}.",
     say_play_random_none: "I couldn't find an album to play.",
+    // Review round 1: a random play while the library's index is still being read (only then, never for an empty one).
+    say_music_loading: "The music library is still loading. Try again in a minute.",
     say_already_playing: "{title} is already playing.",
     say_play_not_found: "I couldn't find {what} to play.",
     say_play_what: "What would you like to hear?",
@@ -300,6 +302,7 @@ export const STRINGS = {
     say_playing: "Reproduciendo {title}.",
     say_playing_album: "Reproduciendo {title} de {artist}.",
     say_play_random_none: "No encontré ningún álbum para reproducir.",
+    say_music_loading: "La biblioteca de música todavía se está cargando. Inténtalo en un minuto.",
     say_already_playing: "{title} ya está sonando.",
     say_play_not_found: "No encontré {what} para reproducir.",
     say_play_what: "¿Qué quieres escuchar?",

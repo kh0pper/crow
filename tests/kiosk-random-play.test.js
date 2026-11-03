@@ -19,25 +19,50 @@ import { createDisplayTools } from "../bundles/kiosk/server/display-tools.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
 
 // ── the words ────────────────────────────────────────────────────────────────────────────────────
-test("every random form parses to a random play intent; a name, a genre or an ordinary sentence does not", () => {
+test("every random form parses to a random play intent, keeping the words it was said in; a name, a genre or an ordinary sentence does not", () => {
   for (const [q, kind] of [
     ["play a random album", "album"], ["play any album", "album"], ["play an album", "album"], ["Play a random album, please.", "album"],
-    ["play some music", "music"], ["play something", "music"], ["shuffle my music", "music"], ["play random music", "music"],
+    ["play some music", "music"], ["play something", "music"], ["shuffle my music", "music"], ["shuffle up my music", "music"], ["play random music", "music"],
     ["pon un álbum al azar", "album"], ["pon cualquier álbum", "album"], ["pon música", "music"], ["pon algo de música", "music"],
+    // Finding 3: Spanish "algo" asks for anything on its own, with or without "pon".
+    ["pon algo", "music"], ["ponme algo", "music"], ["toca algo", "music"], ["reproduce algo", "music"],
     ["Put on a random album.", "album"], ["Play some songs.", "music"], ["Play music.", "music"],
-  ]) assert.deepEqual(parsePlay(q), { random: kind }, q);
+  ]) {
+    const p = parsePlay(q);
+    assert.equal(p?.random, kind, q);
+    assert.ok(typeof p.what === "string" && p.what.length > 0, `${q}: the words are kept, for a display with no music source`);
+  }
   // A name or a genre is searched as before: "some jazz" is a genre request, never a random one.
   for (const q of ["play some jazz", "play Kind of Blue", "play the Night Owls", "play classic", "play WXYZ HD", "play something relaxing for dinner",
-    "shuffle the cards", "shuffle that deck", "pon música de salsa", "Quiero escuchar la radio", "Pon un temporizador de cinco minutos"]) {
+    "shuffle the cards", "shuffle up the cards", "shuffle that deck", "pon música de salsa", "Quiero escuchar la radio", "Pon un temporizador de cinco minutos",
+    "pon algo de jazz", "toca algo de jazz", "play algo de jazz"]) {
     assert.equal(parsePlay(q)?.random, undefined, q);
   }
   assert.deepEqual(parsePlay("Play some jazz."), { what: "some jazz" }, "unchanged: still the words, searched");
+  assert.deepEqual(parsePlay("pon algo de jazz"), null, "a kind of music after 'algo' names something to search for, not a random request");
+  assert.deepEqual(parsePlay("play algo de jazz"), { what: "algo de jazz" }, "…and where a play verb carries the words, they are searched");
   // T1 marks the intent random, and only where a music source can pick.
   const ctx = { sources: ["music"], items: [], deviceId: "d" };
   assert.deepEqual(matchT1("play a random album", ctx), { verb: "play", random: "album", source: "music" });
   assert.deepEqual(matchT1("Pon algo de música", ctx), { verb: "play", random: "music", source: "music" });
-  assert.equal(matchT1("play a random album", { ...ctx, sources: ["radio"] }), null, "no music source: not handled at T1, as before");
+  assert.deepEqual(matchT1("toca algo", ctx), { verb: "play", random: "music", source: "music" });
   assert.equal(matchT1("play some jazz", ctx)?.random, undefined, "a genre keeps today's behaviour");
+});
+
+test("finding 1: a radio-only display keeps today's play path — every random form is searched, never a random pick", () => {
+  const radio = { sources: ["radio"], items: [], deviceId: "d" };
+  assert.deepEqual(matchT1("play some music", radio), { verb: "play", what: "some music", source: "auto" });
+  assert.deepEqual(matchT1("play a random album", radio), { verb: "play", what: "a random album", source: "auto" });
+  assert.deepEqual(matchT1("shuffle my music", radio), { verb: "play", what: "music", source: "auto" });
+  assert.deepEqual(matchT1("pon algo de música", radio), { verb: "play", what: "musica", source: "auto" });
+  assert.deepEqual(matchT1("toca algo", radio), { verb: "play", what: "algo", source: "auto" });
+  assert.equal(matchT1("play some music", { ...radio, sources: [] }), null, "no source at all: nothing is handled at T1, as before");
+});
+
+test("finding 4: 'shuffle up my music' is the longer shuffle form, tried first; 'shuffle up the cards' is still no play request", () => {
+  assert.deepEqual(parsePlay("shuffle up my music"), { random: "music", what: "music" });
+  assert.equal(parsePlay("shuffle up the cards"), null);
+  assert.deepEqual(matchT1("Shuffle up my music.", { sources: ["music"], items: [], deviceId: "d" }), { verb: "play", random: "music", source: "music" });
 });
 
 // ── the pick ─────────────────────────────────────────────────────────────────────────────────────
@@ -97,6 +122,8 @@ function fakeMusic(albums = [ALBUMS[0]], over = {}) {
     randomAlbum: () => (albums.length ? cand(albums[0]) : null),
     ...over };
 }
+/** A radio-only source that finds nothing: the display has no music source, as before this branch. */
+const fakeRadio = (over = {}) => ({ kind: "radio", contract: 1, available: () => true, search: async () => [], queue: async () => [], resolve: async () => null, choose: () => null, ...over });
 function setup({ sources = [fakeMusic()], lang = "en" } = {}) {
   const sent = [];
   const store = createWmStore({ now: () => 0, setTimer: () => ({}), clearTimer: () => {} });
@@ -131,6 +158,11 @@ test("T1: with no music source the request is not handled there (today's behavio
   assert.equal(matchT1("Play a random album.", none.ctx), null);
   assert.equal(await none.say("Play a random album."), null);
   assert.equal(none.sent.length, 0, "nothing was sent to the page");
+  // A radio-only display: the random form is searched like any other play request, and finds no station here.
+  const radio = setup({ sources: [fakeRadio()] });
+  assert.deepEqual(matchT1("Play a random album.", radio.ctx), { verb: "play", what: "a random album", source: "auto" });
+  assert.equal(await radio.say("Play a random album."), null, "nothing found: the model gets the turn");
+  assert.equal(radio.sent.length, 0);
   // A music source that has no album to pick from: T1 says nothing and the turn goes on, as any miss does.
   const empty = setup({ sources: [fakeMusic([], { randomAlbum: () => null })] });
   assert.equal(await empty.say("Play a random album."), null);
@@ -150,6 +182,32 @@ test("crow_play: random true plays a random album for the model, and the tool sa
   assert.equal((await s.tool("crow_play")({ what: "a random album", random: true })).title, "Harbour Static");
   const es = setup({ lang: "es" });
   assert.equal((await es.tool("crow_play")({ random: true }, "Pon música.")).say, "Reproduciendo Harbour Static de Quartz Heron Trio.");
+});
+
+test("finding 2: crow_play honours random only when what is empty or is itself a random form; otherwise what wins", async () => {
+  const s = setup();
+  const play = s.tool("crow_play");
+  const jazz = await play({ what: "jazz", random: true });
+  assert.deepEqual([jazz.ok, jazz.outcome, jazz.say], [false, "not_found", "I couldn't find jazz to play."], "what wins: jazz is searched, not picked at random");
+  assert.equal(loads(s).length, 0, "nothing played");
+  assert.equal((await play({ what: "a random album", random: true })).title, "Harbour Static", "what is itself a random form: random is honoured");
+  assert.equal((await play({ what: "some music", random: true })).title, "Harbour Static");
+  assert.equal((await play({ random: true })).title, "Harbour Static", "an empty what: random is honoured");
+});
+
+test("finding 5: an index still being read says so, instead of 'I couldn't find an album'", async () => {
+  const cold = () => fakeMusic([], { randomAlbum: () => null, indexState: () => ({ warm: false, artists_complete: false, building: true }) });
+  const s = setup({ sources: [cold()] });
+  assert.deepEqual(await s.tool("crow_play")({ random: true }), { ok: false, outcome: "unavailable", reason: "loading", say: STRINGS.en.say_music_loading, final: true });
+  assert.equal((await s.say("Play a random album."))?.say, STRINGS.en.say_music_loading, "the same with no model");
+  const es = setup({ sources: [cold()], lang: "es" });
+  assert.equal((await es.tool("crow_play")({ random: true })).say, "La biblioteca de música todavía se está cargando. Inténtalo en un minuto.");
+  assert.equal((await es.say("Pon algo de música.", es.es))?.say, STRINGS.es.say_music_loading);
+  // A warm library that really holds no album is still the nothing-found answer.
+  const warmEmpty = setup({ sources: [fakeMusic([], { randomAlbum: () => null, indexState: () => ({ warm: true }) })] });
+  assert.equal((await warmEmpty.tool("crow_play")({ random: true })).say, STRINGS.en.say_play_random_none);
+  // The real music source reports a cold index before its first build lands.
+  assert.equal(musicSource().indexState().warm, false);
 });
 
 test("crow_play: an empty index is the nothing-found answer, and a music source that cannot look says why", async () => {

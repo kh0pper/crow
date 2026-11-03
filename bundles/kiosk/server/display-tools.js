@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic, transportWords, spelledRequest, NOT_CALL_SIGNS } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic, transportWords, spelledRequest, randomKind, NOT_CALL_SIGNS } from "./patterns.js";
 import { spokenWords, KIND_NOUNS, matchT0 } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -52,6 +52,11 @@ const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where",
  * source picks one. One clause on the description, one flat optional argument (what may be left empty).
  */
 const RANDOM_CLAUSE = " To play an album at random, set random true.";
+/**
+ * Review round 1, finding 2: `random` is honoured only when `what` is empty or is itself a random form —
+ * "a random album", "some music", "toca algo". `{ what: "jazz", random: true }` means jazz: what wins.
+ */
+const randomWanted = (a) => (a?.random === true || a?.random === "true") && (str(a?.what, 120) === "" || randomKind(spokenWords(str(a?.what, 120)) || []) !== null);
 function withRandom(def) {
   if (def?.name !== "crow_play" || !def.inputSchema?.properties) return def;
   return { ...def, description: `${def.description}${RANDOM_CLAUSE}`,
@@ -115,7 +120,7 @@ export function createDisplayTools(ctx) {
       mustDone: (r) => r?.ok === true && ["playing", "audio_instead", "handed_off"].includes(r.outcome),
       // An argument outside its enumeration is never passed on as given.
       execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto",
-        ...(a?.random === true || a?.random === "true" ? { random: true } : {}) }, turn),
+        ...(randomWanted(a) ? { random: true } : {}) }, turn),
     },
     crow_open: {
       // Held only when the person is asking to open something now; "what's new in the apps?" is offered, never held.
