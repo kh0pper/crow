@@ -38,7 +38,7 @@
  */
 import { readFileSync } from "node:fs";
 import { canonicalSnapshot } from "./canonical.js";
-import { TOKEN_ENV_BY_ROLE, canonicalMcpPath, credRefFromWorld } from "./cred-ref.js";
+import { CRED_SOURCES, TOKEN_ENV_BY_ROLE, canonicalMcpPath, credRefFromWorld, mcpAddonsPath, resolveTokenFile } from "./cred-ref.js";
 import { createGmailClient } from "./gmail-client.js";
 import { createStaged, findStagedByDraftId } from "./store.js";
 
@@ -134,15 +134,14 @@ export function redactMcpConfig(mcpConfig) {
 }
 
 /**
- * The same redacted view of the OPERATOR's own canonical pi `mcp.json` — the fallback for a caller
- * that never held a world config (a card job's turn is built inside the bridge from that file).
- * Operator-owned; a bot cannot write it.
+ * The same redacted view of the OPERATOR's own config (the canonical pi `mcp.json` plus this
+ * instance's `mcp-addons.json`) — the fallback for a caller that never held a world config (a card
+ * job's turn is built inside the bridge). Operator-owned files only; a bot cannot write either.
  */
 export function credConfigFromOperatorConfig(paths = {}) {
   const servers = {};
-  // The canonical pi config only: a card job's world is built from it inside the bridge, and the
-  // recorded ref says "canonical" (cred-ref.js resolves it there and nowhere else).
-  for (const path of [paths.canonical || canonicalMcpPath()]) {
+  // Both operator files can name the server; which one made the draft is proven at record time.
+  for (const path of [paths.canonical || canonicalMcpPath(), paths.addons || mcpAddonsPath()]) {
     let json = null;
     try { json = JSON.parse(readFileSync(path, "utf8")); } catch { continue; }
     const redacted = redactMcpConfig(json).mcpServers;
@@ -249,8 +248,27 @@ export async function recordDraft({ db, toolName, args = null, resultText = null
   let reason = credRef ? null : "no_credential";
   if (credRef) {
     try {
-      const client = createGmailClient({ credRef, fetchImpl: context.fetchImpl, configPaths: context.configPaths });
-      const draft = await client.getDraft(parsed.draftId);
+      // Which operator file's account holds this draft? Read it with each file's token for this
+      // server and role (two files can name different accounts); the one that finds the draft is
+      // the source, and the send will resolve the token there only. None finds it: no credential.
+      const candidates = [];
+      const seenPaths = new Set();
+      for (const source of CRED_SOURCES) {
+        const ref = { ...credRef, source };
+        const path = resolveTokenFile(ref, context.configPaths);
+        if (path && !seenPaths.has(path)) { seenPaths.add(path); candidates.push(ref); }
+      }
+      if (!candidates.length) throw Object.assign(new Error("no credential"), { code: "no_credential" });
+      let draft = null;
+      let lastError = null;
+      for (const ref of candidates) {
+        try {
+          draft = await createGmailClient({ credRef: ref, fetchImpl: context.fetchImpl, configPaths: context.configPaths }).getDraft(parsed.draftId);
+          storedCredRef = ref;
+          break;
+        } catch (e) { lastError = e; }
+      }
+      if (!draft) throw lastError || Object.assign(new Error("unreadable"), { code: "unreadable" });
       if (draft.threadId) providerThreadId = draft.threadId;
       if (draft.faithful === false) {
         // Readable but not representable (an attachment, a Reply-To, …): the operator sends it from

@@ -516,3 +516,12 @@ test("replaceWith keeps the source flags, the credential and the taint", async (
   assert.equal(row.tainted, true);
   assert.deepEqual(row.credRef, before.credRef);
 });
+
+test("dedup: a row recorded before sources existed is the same draft as a new ref with a source", async () => {
+  const db = freshDb();
+  await createStaged(db, { ...base(), providerDraftId: "d-old", credRef: { server: "google-workspace", role: "primary" } });
+  const hit = await findStagedByDraftId(db, { providerDraftId: "d-old", credRef: { server: "google-workspace", role: "primary", source: "canonical" } });
+  assert.ok(hit, "matched across the deploy");
+  const miss = await findStagedByDraftId(db, { providerDraftId: "d-old", credRef: { server: "google-workspace", role: "personal", source: "canonical" } });
+  assert.equal(miss, null, "a different role is a different credential");
+});

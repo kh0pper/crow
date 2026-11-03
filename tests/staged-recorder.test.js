@@ -818,3 +818,52 @@ test("a real handleInbound call with a job_id records zero rows", async () => {
   assert.equal(stagedFor("job_id", "job-staged-guard").length, 0, "the bridge leaves a job turn to the job runner");
   assert.equal(stagedFor("thread_id", "board-job-guard-1").length, 0, "and wrote no row of its own");
 });
+test("a draft held by the add-on account records source addons, proven by the read", async () => {
+  // Two accounts under one server and role: the canonical file names "work", the add-on file names
+  // "personal-acct". The draft lives in the add-on account, so the canonical token's read 404s.
+  const WORK = join(TOKEN_DIR, "work.json");
+  const OTHER = join(TOKEN_DIR, "addon-acct.json");
+  writeFileSync(WORK, JSON.stringify({ refresh_token: "refresh-work", client_id: "c", client_secret: "s" }));
+  writeFileSync(OTHER, JSON.stringify({ refresh_token: "refresh-addon", client_id: "c", client_secret: "s" }));
+  const canon = join(ROOT, "two-acct-mcp.json");
+  const addons = join(ROOT, "two-acct-addons.json");
+  writeFileSync(canon, JSON.stringify({ mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: WORK } } } }));
+  writeFileSync(addons, JSON.stringify({ "google-workspace": { env: { GOOGLE_TOKEN_FILE: OTHER } } }));
+  const reads = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/token")) {
+      const rt = new URLSearchParams(String(opts.body)).get("refresh_token");
+      return { ok: true, status: 200, json: async () => ({ access_token: "at-" + rt, expires_in: 3600 }) };
+    }
+    const auth = (opts.headers && (opts.headers.authorization || opts.headers.Authorization)) || "";
+    reads.push(auth.replace("Bearer ", ""));
+    if (u.includes("/drafts/draft-in-addon") && auth.endsWith("at-refresh-addon")) {
+      const raw = Buffer.from("To: alex@example.com\r\nSubject: Hi\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nBody\r\n", "latin1").toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+      return { ok: true, status: 200, json: async () => ({ id: "draft-in-addon", message: { raw, threadId: "t-addon" } }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+  };
+  const out = await recordOnce({
+    resultText: okResult("draft-in-addon", "t-addon"),
+    context: { threadId: "thread-two-acct", fetchImpl, configPaths: { canonical: canon, addons }, credConfig: { mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: "1" } } } } },
+  });
+  assert.ok(out && out.id, "recorded");
+  const row = stagedFor("provider_draft_id", "draft-in-addon")[0];
+  assert.deepEqual(JSON.parse(row.cred_ref), { server: "google-workspace", role: "primary", source: "addons" }, "the account that holds the draft");
+  assert.ok(reads.includes("at-refresh-work") && reads.includes("at-refresh-addon"), "both accounts were tried");
+});
+
+test("a draft neither account holds records no credential", async () => {
+  const canon = join(ROOT, "two-acct-mcp.json");
+  const addons = join(ROOT, "two-acct-addons.json");
+  const fetchImpl = async (url) => String(url).includes("/token")
+    ? { ok: true, status: 200, json: async () => ({ access_token: "at-x", expires_in: 3600 }) }
+    : { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+  const out = await recordOnce({
+    resultText: okResult("draft-nowhere", "t-nowhere"),
+    context: { threadId: "thread-nowhere", fetchImpl, configPaths: { canonical: canon, addons }, credConfig: { mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: "1" } } } } },
+  });
+  assert.ok(out && out.id);
+  assert.equal(stagedFor("provider_draft_id", "draft-nowhere")[0].cred_ref, null, "Open in Gmail: no account was proven");
+});

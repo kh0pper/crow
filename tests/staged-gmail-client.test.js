@@ -80,15 +80,15 @@ test("credRefFromWorld primary/personal/unreadable", () => {
       disabled: { command: "gws", disabled: true, env: { GOOGLE_TOKEN_FILE: "/operator/primary.json" } },
     },
   };
-  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft"), { server: "google-workspace", role: "primary", source: "canonical" });
-  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft_personal"), { server: "google-workspace", role: "personal", source: "canonical" });
-  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_threaded_reply"), { server: "google-workspace", role: "primary", source: "canonical" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft"), { server: "google-workspace", role: "primary" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_draft_personal"), { server: "google-workspace", role: "personal" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__google-workspace__gmail_create_threaded_reply"), { server: "google-workspace", role: "primary" });
 
   // Unreadable: the public workspace-mcp carries no token file env Crow can read.
   assert.equal(credRefFromWorld(world, "mcp__workspace-mcp__gmail_create_draft"), null);
   // The role's own env key must be defined, or there is nothing to resolve at send time.
   assert.equal(credRefFromWorld(world, "mcp__half-configured__gmail_create_draft"), null);
-  assert.deepEqual(credRefFromWorld(world, "mcp__half-configured__gmail_create_draft_personal"), { server: "half-configured", role: "personal", source: "canonical" });
+  assert.deepEqual(credRefFromWorld(world, "mcp__half-configured__gmail_create_draft_personal"), { server: "half-configured", role: "personal" });
   // A disabled block (pi's closed-world file) and a raw (voice/add-on) tool name resolve to nothing.
   assert.equal(credRefFromWorld(world, "mcp__disabled__gmail_create_draft"), null);
   assert.equal(credRefFromWorld(world, "gmail_create_draft"), null);
@@ -96,7 +96,7 @@ test("credRefFromWorld primary/personal/unreadable", () => {
 
   // mcp-addons.json's flat shape works too.
   const addons = { "google-workspace-second": { command: "gws", env: { GOOGLE_TOKEN_FILE: "/operator/second.json" } } };
-  assert.deepEqual(credRefFromWorld(addons, "mcp__google-workspace-second__gmail_create_draft"), { server: "google-workspace-second", role: "primary", source: "canonical" });
+  assert.deepEqual(credRefFromWorld(addons, "mcp__google-workspace-second__gmail_create_draft"), { server: "google-workspace-second", role: "primary" });
 });
 
 test("resolveTokenFile ignores bot-writable paths", () => {
@@ -602,7 +602,3 @@ test("a ref that names its source resolves in that file only, even when the othe
   assert.equal(resolveTokenFile({ server: "google-workspace", role: "primary", source: "elsewhere" }, paths), null);
 });
 
-test("credRefFromWorld records that the credential came from the canonical config", () => {
-  const ref = credRefFromWorld({ mcpServers: { "google-workspace": { env: { GOOGLE_TOKEN_FILE: "/x.json" } } } }, "mcp__google-workspace__gmail_create_draft");
-  assert.deepEqual(ref, { server: "google-workspace", role: "primary", source: "canonical" });
-});

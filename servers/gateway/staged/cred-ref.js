@@ -61,10 +61,7 @@ function blockFor(mcpConfig, server) {
  * credential. `"personal"` is the `_personal` tool suffix, otherwise `"primary"` — and the role's
  * own env key must be present on the server's block, or there is nothing to resolve later.
  */
-/** Where a credential reference was named from: the bots' own config, the one every bot world is built from. */
-export const CRED_SOURCES = Object.freeze(["canonical", "addons"]);
-
-export function credRefFromWorld(mcpConfig, toolName, { source = "canonical" } = {}) {
+export function credRefFromWorld(mcpConfig, toolName) {
   const m = TOOL_PREFIX.exec(String(toolName ?? ""));
   if (!m) return null;
   const server = m[1];
@@ -74,11 +71,16 @@ export function credRefFromWorld(mcpConfig, toolName, { source = "canonical" } =
   if (!env || typeof env !== "object") return null;
   const value = env[TOKEN_ENV_BY_ROLE[role]];
   if (typeof value !== "string" || !value.trim()) return null;
-  // The source says WHICH operator file named this credential, so the send resolves the token in
-  // that file only. Every bot world (Perch, channel turns, jobs) is built from the canonical pi
-  // config, and the gateway add-on can name the same server id with a different account.
-  return CRED_SOURCES.includes(source) ? { server, role, source } : { server, role };
+  return { server, role };
 }
+
+/**
+ * Which operator file a recorded credential came from. The recorder PROVES it at record time: it
+ * reads the draft with each file's token for that server and role, and the file whose mailbox holds
+ * the draft is the source (a Gmail draft id lives in one mailbox). The send then resolves the token
+ * in that file only.
+ */
+export const CRED_SOURCES = Object.freeze(["canonical", "addons"]);
 
 /** `~/x` -> `<home>/x`; anything else is left for the absolute-path check. */
 function expandHome(path) {
@@ -88,10 +90,10 @@ function expandHome(path) {
 }
 
 /**
- * The token file for a credential reference, read from operator config only, or null. Canonical
- * `mcp.json` wins over `mcp-addons.json` (a pi bot's world is minted from canonical; the gateway
- * add-on is the fallback). Only an absolute path is accepted: a relative one would resolve against
- * whatever cwd the gateway happens to have.
+ * The token file for a credential reference, read from operator config only, or null. A ref with a
+ * `source` (proven at record time) resolves in that file only. A ref without one is resolved in
+ * both files and refuses to guess when they disagree. Only an absolute path is accepted: a
+ * relative one would resolve against whatever cwd the gateway happens to have.
  *
  * `paths` is the test seam ({ canonical, addons }); production reads the two real locations.
  */
