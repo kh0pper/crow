@@ -14,6 +14,13 @@
  *   → 200 { sigs: { <kind>: <hex> } }      nothing else, never the key
  *
  * Order:
+ *   0. a socket the egress relay opened carries the relay mark
+ *      (servers/shared/bot-doors.js), so a contained bot's request never
+ *      arrives at all: the relay's own door allowlist has no /internal path,
+ *      and the gateway refuses /internal on a relayed socket before routing
+ *      (middleware/internal-guard.js)                                    404
+ *      The caller check below refuses a relayed socket too (403), so neither
+ *      layer depends on the other.
  *   1. a plain loopback request (classifyPeer via "local")           else 404
  *   2. the caller is the MAIN process of a live, installed bot host unit
  *      (bot-host-caller.js: socket inode ↔ /proc/<MainPID>/fd, cgroup,
@@ -52,6 +59,18 @@
  * callers that cannot run code as the gateway's user (an SSRF-style fetch
  * tool, another uid, a container); it is not protection against a bot with
  * a shell, which can rewrite a host's code (see bot-host-caller.js).
+ *
+ * Two more layers keep a CONTAINED bot away from this route, and they are
+ * independent on purpose. (a) The egress relay serves the gateway port over
+ * an exact door allowlist that has no /internal path. (b) Every socket the
+ * relay opens carries the relay mark, and the gateway refuses /internal on a
+ * relayed socket before routing (middleware/internal-guard.js);
+ * bot-host-caller.js refuses such a socket before it reads /proc. The mark is
+ * set by the relay's own process, outside the sandbox: a bot cannot choose its
+ * source address. So a contained bot can never be the MainPID caller above.
+ * An uncontained bot is unchanged by this (it does not come through the relay;
+ * its residual is the code-planting one described in bot-host-caller.js).
+ * Phase 3 replaces the MainPID check with the scope handle.
  *
  * Mountable on a bare express app: every dependency is a function parameter.
  */

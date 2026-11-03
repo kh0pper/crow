@@ -57,6 +57,7 @@ import { trustedProxyList, resolveClientMiddleware, warnLoopbackProxiedDoors } f
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
+import { refuseRelayedInternal } from "./middleware/internal-guard.js";
 import { gatewayListenPort } from "./listen-port.js";
 
 import { validateRoomToken } from "../sharing/server.js";
@@ -412,6 +413,14 @@ app.use(async (req, res, next) => {
 // PUBLIC_FUNNEL_PREFIXES and assert new routes never slip into the public
 // surface by accident.
 app.use(rejectFunneledMiddleware());
+
+// Containment PR 6: a socket the egress relay opened carries the relay mark
+// (127.0.77.1), so it is a contained bot's request and nothing else. Such a
+// caller never reaches an /internal route — the signing relay above all —
+// whatever the relay's own door allowlist did or did not catch. Mounted here,
+// before every router (mountMcpServers mounts the actor-sign route below), so a
+// later mount cannot sit in front of it.
+app.use(refuseRelayedInternal);
 
 // Classify the peer once (servers/shared/peer-class.js): req.crowPeer, and
 // for Serve/Funnel traffic req.ip = the client tailscaled named. Before

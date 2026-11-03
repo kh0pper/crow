@@ -367,6 +367,27 @@ A bot whose provider row has no door — a literal-key cloud row this box never 
 
 A data folder that IS the Crow home (or an ancestor of it) is refused under contain with `contain refused: the data folder is the Crow home`. The reasoning is the instance's own boundary: binding the Crow home read-write would put its tokens, `secrets/` and `env/` inside the sandbox, and masking over that is not built. For the same reason no read-write bind may be the Crow home itself, its `secrets/` dir, or an ancestor of either: a bot policy's `write_paths` entry that names one refuses the spawn with `contain refused: write_paths names …`, and an internal bind that would (the data dir, the bot cache, a session dir) is refused and named in the `[pi-sandbox] contain: not bound: …` log line.
 
+### Contained network: doors only
+
+A contained bot has no NIC. Its only way out is the spawner's egress relay (`scripts/pi-bots/pi_egress.mjs`), a unix socket bound into the sandbox. Two independent layers decide what it can reach.
+
+**Doors.** The relay serves exactly one host loopback port — the spawner's own gateway port — and there only the door paths (`servers/shared/bot-doors.js`, exact and case-sensitive):
+
+| Door | What it is |
+|---|---|
+| `/llm/v1/` | the model router: the bot's models, no provider key |
+| `/llm/p/`, `/llm/c/` | a provider door / a consented cloud door |
+| `/board/mcp`, `/phone/mcp`, `/artifacts/mcp` | the bot's own MCP mounts, under their path-scoped tokens |
+| `/peer-relay/` | the relay to paired peers |
+
+The relay terminates HTTP itself instead of splicing bytes, so **every** request on a connection is judged — a second request pipelined behind an allowed one is refused too — and upgrades and `CONNECT` are refused outright. A refused request gets a `403` written by the relay and nothing is opened upstream; one log line per distinct path says why. Anything that could normalise into another route is refused rather than reasoned about: `..`, a second slash, a backslash, any percent-escape, `*`, and absolute-form URLs. Any other loopback port is refused at the `PORT` line. The relay also drops the headers that say who a request came from (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Tailscale-*` and the like): the relay is the only hop a contained bot has, so a bot can never pose as a Tailscale Serve login or a proxied client. The public web still goes through the relay's `CONNECT` branch on 443, which is a separate path.
+
+Doors deliberately exclude owner-authority surfaces: `/memory`, `/projects`, `/sharing`, `/tools*`, `/router`, `/dashboard`, `/llm/models`, `/llm/acquire`, and every `/internal` route.
+
+**The mark.** Every socket the relay opens to loopback is bound to `127.0.77.1` (`RELAY_SOURCE_V4`). The relay's own process sets that source address, outside the sandbox, so a bot cannot choose it. On top of the door list, the gateway refuses any `/internal` path on a socket carrying the mark (a plain `404`, before routing — `servers/gateway/middleware/internal-guard.js`), and the signing relay's caller check (`servers/gateway/bot-host-caller.js`) refuses a marked socket before it reads `/proc`. That second layer closes the hole where a bot asked the relay for the gateway port and the spliced socket sat in the spawner's process, which the caller check took for the bot host's `MainPID`.
+
+Nothing above changes what an **uncontained** bot can do: it never comes through the relay, so it keeps the existing residual (it can rewrite a host's code and then run as a legitimate host).
+
 ### What a contained bot still reaches
 
 `crow.db`/`tasks.db` are bound read-write (so provider keys, OAuth tokens and bot definitions are readable, and a bot can widen its own next spawn's policy); credentialed add-on MCP servers in the bot's config run inside the sandbox with their secrets; the door routes accept whatever headers the bot sends (trust rests on the signed actor and per-route tokens); an in-session model switch to a provider the spawn was not built for fails, because the agent dir carries only the spawn's providers. Uncontained bots (not opted in, or refused) are exactly as they are without the contain tier.

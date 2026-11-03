@@ -4,6 +4,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, connect } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,17 @@ after(async () => { for (const c of closers) await c(); rmSync(scratch, { recurs
 function echoServer(tag = "") {
   return new Promise((resolve) => {
     const srv = createServer((c) => c.on("data", (d) => c.write(tag + d.toString())));
+    srv.listen(0, "127.0.0.1", () => { closers.push(() => new Promise((r) => srv.close(() => r()))); resolve(srv.address().port); });
+  });
+}
+/** An HTTP upstream standing in for the gateway (the gateway port is served over the doors only). */
+function httpServer(tag = "OK") {
+  return new Promise((resolve) => {
+    const srv = createHttpServer((req, res) => {
+      if (req.url === "/llm/v1/big") { res.writeHead(200, { "content-length": 200000 }); res.end("y".repeat(200000)); return; }
+      res.writeHead(200, { "content-type": "text/plain", "content-length": Buffer.byteLength(tag) });
+      res.end(tag);
+    });
     srv.listen(0, "127.0.0.1", () => { closers.push(() => new Promise((r) => srv.close(() => r()))); resolve(srv.address().port); });
   });
 }
@@ -74,12 +86,13 @@ test("hostAllowed: no list = any host; a list narrows to exact names and *.suffi
   assert.equal(hostAllowed("API.EXAMPLE.COM.", ["api.example.com"]), true, "case and trailing dot normalized");
 });
 
-test("PORT: an allowed loopback port is spliced, any other is refused", async () => {
-  const ok = await echoServer("A:"), other = await echoServer("B:");
-  const { r, logs } = await relay({ loopbackPorts: [ok] });
-  assert.equal(await talk(r.socketPath, `PORT ${ok}\nhello`), "A:hello");
-  assert.equal(await talk(r.socketPath, `PORT ${other}\nhello`), "", "not in the allowlist: closed");
-  assert.ok(logs.some((l) => /deny 127\.0\.0\.1:\d+.*loopback port not allowed/.test(l)));
+test("PORT: the gateway port is served over the doors, and any other loopback port is refused", async () => {
+  const gw = await httpServer("OK"), other = await echoServer("B:");
+  const { r, logs } = await relay({ gatewayPort: gw });
+  assert.match(await talk(r.socketPath, `PORT ${gw}\nGET /llm/v1/models HTTP/1.1\r\nHost: x\r\n\r\n`), /^HTTP\/1\.1 200/);
+  assert.match(await talk(r.socketPath, `PORT ${gw}\nGET /internal/actor-sign HTTP/1.1\r\nHost: x\r\n\r\n`), /^HTTP\/1\.1 403/);
+  assert.equal(await talk(r.socketPath, `PORT ${other}\nhello`), "", "not the gateway port: closed");
+  assert.ok(logs.some((l) => /deny 127\.0\.0\.1:\d+.*not the bot's gateway port/.test(l)));
 });
 
 test("PROXY CONNECT: a public host (via the lookup seam) is allowed and tunnelled; the response is 200", async () => {
@@ -132,16 +145,17 @@ test("PROXY: only CONNECT; an oversize or unterminated head is refused", async (
 });
 
 test("connection cap per spawn, one log line per (decision, host)", async () => {
-  const up = await echoServer("U:");
-  const { r, logs } = await relay({ loopbackPorts: [up], maxConns: 1 });
-  const a = connect(r.socketPath); await new Promise((res) => a.on("connect", res)); a.write(`PORT ${up}\n`);
+  const gw = await httpServer("OK");
+  const req = "GET /llm/v1/models HTTP/1.1\r\nHost: x\r\n\r\n";
+  const { r, logs } = await relay({ gatewayPort: gw, maxConns: 1 });
+  const a = connect(r.socketPath); await new Promise((res) => a.on("connect", res)); a.write(`PORT ${gw}\n`);
   await new Promise((res) => setTimeout(res, 50));
-  assert.equal(await talk(r.socketPath, `PORT ${up}\nx`), "", "second concurrent connection refused");
+  assert.equal(await talk(r.socketPath, `PORT ${gw}\n${req}`), "", "second concurrent connection refused");
   a.destroy();
   await new Promise((res) => setTimeout(res, 50));
-  assert.equal(await talk(r.socketPath, `PORT ${up}\ny`), "U:y");
+  assert.match(await talk(r.socketPath, `PORT ${gw}\n${req}`), /^HTTP\/1\.1 200/);
   await new Promise((res) => setTimeout(res, 50));
-  assert.equal(await talk(r.socketPath, `PORT ${up}\nz`), "U:z");
+  assert.match(await talk(r.socketPath, `PORT ${gw}\n${req}`), /^HTTP\/1\.1 200/);
   assert.equal(logs.filter((l) => / allow 127\.0\.0\.1:/.test(l)).length, 1, "logged once");
 });
 
@@ -178,19 +192,18 @@ test("a client that leaves during the DNS lookup opens no upstream connection", 
 });
 
 test("half-close: a client that sends FIN and waits still gets the whole reply", async () => {
-  const upSrv = createServer({ allowHalfOpen: true }, (c) => { let b = ""; c.on("data", (d) => b += d); c.on("end", () => { c.end("REPLY:" + b + ":" + "x".repeat(200000).length); }); });
-  const upPort = await new Promise((res) => upSrv.listen(0, "127.0.0.1", () => res(upSrv.address().port)));
-  closers.push(() => new Promise((res) => upSrv.close(() => res())));
-  const { r } = await relay({ loopbackPorts: [upPort] });
+  const gw = await httpServer("OK");
+  const { r } = await relay({ gatewayPort: gw });
   const out = await new Promise((resolve) => {
     const c = connect({ path: r.socketPath, allowHalfOpen: true });
     let b = "";
-    c.on("connect", () => { c.write(`PORT ${upPort}\nhello`); c.end(); });
+    c.on("connect", () => { c.write(`PORT ${gw}\nGET /llm/v1/big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`); c.end(); });
     c.on("data", (d) => b += d);
     c.on("end", () => resolve(b));
     setTimeout(() => resolve(b || "TIMEOUT"), 3000);
   });
-  assert.equal(out, "REPLY:hello:200000");
+  assert.match(out, /^HTTP\/1\.1 200/, out.slice(0, 40));
+  assert.ok(out.includes("y".repeat(200000)), "the whole body arrived after the client's FIN");
 });
 
 test("every checked address is tried in order (a dual-stack host whose first address has no route)", async () => {

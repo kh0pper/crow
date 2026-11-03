@@ -6,7 +6,8 @@ import { test, before, after } from "node:test";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { createServer } from "node:net";
+import { createServer as createNetServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -47,10 +48,12 @@ after(() => {
 const listen = (srv, host = "127.0.0.1", path = null) => new Promise((r) => { servers.push(srv); path ? srv.listen(path, r) : srv.listen(0, host, () => r(srv.address().port)); });
 
 test("integration: allowed loopback port reachable inside; other loopback ports, direct IPs and abstract sockets are not; the proxy is the relay", { skip, timeout: 60000 }, async () => {
-  const gw = await listen(createServer((c) => c.end("GATEWAY")));
-  const other = await listen(createServer((c) => c.end("OTHER")));
+  // The gateway port is served over the doors only (containment PR 6): an HTTP
+  // upstream, reached with a door path.
+  const gw = await listen(createHttpServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("GATEWAY"); }));
+  const other = await listen(createNetServer((c) => c.end("OTHER")));
   const abstractName = "\0crow-net-test-" + process.pid;
-  await listen(createServer((c) => c.end("ABSTRACT")), null, abstractName);
+  await listen(createNetServer((c) => c.end("ABSTRACT")), null, abstractName);
   process.env.CROW_GATEWAY_PORT = String(gw);
   process.env.CROW_PI_CONTAIN_BOTS = "net-test-bot";
   delete process.env.CROW_PI_SANDBOX;
@@ -63,11 +66,13 @@ import { connect } from "node:net";
 const P = JSON.parse(process.env.CROW_TEST_NET);
 const tryConn = (opts) => new Promise((res) => { const s = connect(opts); let b = ""; s.on("data", (d) => b += d); s.on("end", () => res(b || "EMPTY"));
   s.on("error", (e) => res("ERR:" + e.code)); setTimeout(() => { s.destroy(); res(b || "TIMEOUT"); }, 3000); });
+const tryHttp = (opts, text) => new Promise((res) => { const s = connect(opts); let b = ""; s.on("connect", () => s.write(text)); s.on("data", (d) => b += d);
+  s.on("end", () => res(b || "EMPTY")); s.on("error", (e) => res("ERR:" + e.code)); setTimeout(() => { s.destroy(); res(b || "TIMEOUT"); }, 3000); });
 const proxyTry = () => new Promise((res) => { const u = new URL(process.env.HTTPS_PROXY); const s = connect({ host: u.hostname, port: Number(u.port) });
   let b = ""; s.on("connect", () => s.write("CONNECT 169.254.169.254:443 HTTP/1.1\\r\\nHost: 169.254.169.254:443\\r\\n\\r\\n")); s.on("data", (d) => { b += d; s.destroy(); res(b.split("\\r\\n")[0]); });
   s.on("error", (e) => res("ERR:" + e.code)); setTimeout(() => res(b || "TIMEOUT"), 3000); });
 const r = {
-  gw: await tryConn({ host: "127.0.0.1", port: P.gw }),
+  gw: await tryHttp({ host: "127.0.0.1", port: P.gw }, "GET /llm/v1/models HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n"),
   other: await tryConn({ host: "127.0.0.1", port: P.other }),
   direct: await tryConn({ host: "1.1.1.1", port: 443 }),
   abstract: await tryConn({ path: P.abstract }),
@@ -87,7 +92,8 @@ process.stdin.resume();
     assert.match(pi.sandboxTier, /^contain/);
     assert.doesNotMatch(pi.sandboxTier, /hostnet/);
     const r = await pi.waitFor((m) => m.type === "report", 30000, "report");
-    assert.equal(r.gw, "GATEWAY", "the spawner's gateway port is relayed in");
+    assert.match(r.gw, /^HTTP\/1\.1 200/, "the spawner's gateway port is relayed in: " + r.gw);
+    assert.match(r.gw, /GATEWAY/, "a door path, served by the gateway: " + r.gw);
     assert.notEqual(r.other, "OTHER", "another host loopback port is not reachable: " + r.other);
     assert.match(r.direct, /^ERR:(ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)/, "no route out of the namespace: " + r.direct);
     assert.notEqual(r.abstract, "ABSTRACT", "host abstract sockets are not reachable: " + r.abstract);

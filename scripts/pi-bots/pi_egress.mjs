@@ -9,11 +9,15 @@
  * killing or replacing.
  *
  * Each connection starts with one line:
- *   PORT <n>\n  splice to 127.0.0.1:<n> on the host, only for the spawn's
- *               loopback allowlist (its gateway port, a loopback model
- *               provider, loopback URLs in its own MCP config). Nothing else
- *               on loopback: other instances, unused model servers, a
- *               browser's DevTools port, adb.
+ *   PORT <n>\n  speak HTTP to 127.0.0.1:<n> from this relay. Only the spawn's
+ *               own gateway port, and there only the bot doors
+ *               (servers/shared/bot-doors.js): every request on the
+ *               connection, keep-alive included, is judged by one HTTP
+ *               parser, upgrades and CONNECT are refused, and every upstream
+ *               socket carries the relay mark (127.0.77.1), which the gateway
+ *               refuses for /internal. Nothing else on loopback is reachable:
+ *               other instances, unused model servers, a browser's DevTools
+ *               port, adb.
  *   PROXY\n     an HTTP CONNECT request follows (the bot's HTTPS_PROXY). Only
  *               CONNECT; ports from egressPorts (default 443); public AND
  *               private destinations are allowed (D4), but no address the
@@ -27,6 +31,8 @@
  * connection cap bounds what one bot can open.
  */
 import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { isDoorPath, RELAY_SOURCE_V4 } from "../../servers/shared/bot-doors.js";
 import { networkInterfaces } from "node:os";
 import { spawnSync } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -369,7 +375,9 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
  * @param {object} o
  * @param {string} o.dir            fresh dir for the socket (created 0700, removed on close)
  * @param {string} o.botId
- * @param {number[]} o.loopbackPorts
+ * @param {number} o.gatewayPort    the one loopback port served, over the doors only
+ * @param {number[]} [o.loopbackPorts]  what the sandbox listens on (no policy here)
+ * @param {boolean} [o.doorFilter=true]  test seam: false forwards without the door check
  * @param {string[]|null} o.egressAllow
  * @param {number[]} [o.egressPorts=[443,80]]
  * @param {number} [o.maxConns=64]
@@ -394,7 +402,14 @@ export function createEgressRelay(o) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const socketPath = join(dir, "relay.sock");
-  const loopback = new Set((o.loopbackPorts || []).map(Number).filter((p) => p > 0 && p < 65536));
+  // The gateway port is the ONE loopback port a contained bot reaches, and
+  // only over the doors below. o.loopbackPorts is what the sandbox's entry
+  // process listens on (pi_contain.mjs); it is no longer policy here, so a
+  // bot cannot reach a second loopback port the sandbox happens to hold.
+  const gatewayPort = Number(o.gatewayPort) || 0;
+  // Test seam: false still forwards through node:http and still sets the mark,
+  // but skips the door check — the way to prove the gateway-side guard alone.
+  const doorFilter = o.doorFilter !== false;
   // CONNECT is for TLS; plain http:// needs an absolute-form GET, which this
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
@@ -462,6 +477,121 @@ export function createEgressRelay(o) {
 
   const refuse = (c, status, text) => { try { c.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`); } catch {} };
 
+  // ---- the doors (containment PR 6) ---------------------------------------
+  // The gateway port is no longer spliced. One node:http parser terminates the
+  // bot's connection, so EVERY request on it is judged (a spliced connection
+  // carried a second request past any one-shot check), upgrades never reach
+  // the gateway, and each upstream socket is opened from RELAY_SOURCE_V4 — the
+  // mark the gateway refuses for /internal (middleware/internal-guard.js) and
+  // the #614 caller check refuses outright. This process runs outside the
+  // sandbox, so a bot cannot choose its own source address.
+  // A client that sends its request and then FIN must still get the reply (a
+  // hand-rolled bot HTTP client may half-close). Node reads this off the
+  // server, not from createServer() options.
+  const doors = createHttpServer({ requestTimeout: 0, headersTimeout: 60000 });
+  doors.httpAllowHalfOpen = true;
+  // Hop-by-hop headers belong to the relay's own hop: passing them through
+  // would let a body be framed twice (transfer-encoding) or a connection be
+  // kept alive in a way the parser here has no say over.
+  const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "proxy-authenticate",
+    "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
+  // Headers that tell the gateway who a request came from (a proxy hop, a
+  // Tailscale Serve login, a client address). The relay is the only hop a
+  // contained bot has, so a bot never gets to speak for one: classifyPeer
+  // would otherwise read a forged Serve shape (X-Forwarded-For + -Host) and a
+  // Tailscale-User-Login off a door request.
+  const IDENTITY = /^(?:forwarded|x-forwarded-.*|x-real-ip|x-client-ip|true-client-ip|cf-connecting-ip|tailscale-.*)$/;
+  const targetOf = (req) => `${req.method} ${String(req.url || "").slice(0, 80)}`;
+  const endToEnd = (from, { request = false } = {}) => {
+    const out = {};
+    for (const [k, v] of Object.entries(from || {})) {
+      if (HOP_BY_HOP.has(k)) continue;
+      if (request && IDENTITY.test(k)) continue;
+      out[k] = v;
+    }
+    return out;
+  };
+
+  /** A refusal the relay writes itself: nothing is opened upstream. */
+  function refuseDoor(req, res, reason) {
+    note("deny", targetOf(req), reason);
+    const body = JSON.stringify({ error: "forbidden" });
+    try {
+      res.shouldKeepAlive = false;
+      res.writeHead(403, { "content-type": "application/json", "content-length": Buffer.byteLength(body), connection: "close" });
+      res.end(body);
+    } catch { try { req.socket.destroy(); } catch {} }
+  }
+
+  /** A raw-socket refusal ('upgrade', 'connect'): no HTTP parser owns it yet. */
+  function refuseRaw(req, socket, reason) {
+    note("deny", targetOf(req), reason);
+    try { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); } catch {}
+    const t = setTimeout(() => { try { socket.destroy(); } catch {} }, 1000);
+    if (t.unref) t.unref();
+  }
+
+  /** Upstream trouble (including a failed bind of the mark): fail closed. */
+  function failDoor(req, res, e) {
+    note("deny", targetOf(req), "upstream " + ((e && e.code) || "error"));
+    if (res.headersSent) { try { res.destroy(); } catch {} return; }
+    const body = JSON.stringify({ error: "bad gateway" });
+    try {
+      res.shouldKeepAlive = false;
+      res.writeHead(502, { "content-type": "application/json", "content-length": Buffer.byteLength(body), connection: "close" });
+      res.end(body);
+    } catch { try { req.socket.destroy(); } catch {} }
+  }
+
+  function forwardDoor(req, res) {
+    let up;
+    try {
+      up = httpRequest({
+        host: "127.0.0.1", port: gatewayPort, localAddress: RELAY_SOURCE_V4,
+        method: req.method, path: req.url, headers: endToEnd(req.headers, { request: true }),
+        // No pooling: the mark belongs to this request's socket, and a pooled
+        // socket would outlive the request that earned it.
+        agent: false,
+      });
+    } catch (e) { return failDoor(req, res, e); }
+    up.on("response", (ur) => {
+      try {
+        res.writeHead(ur.statusCode || 502, endToEnd(ur.headers));
+        // Streamed both ways: an SSE answer arrives chunk by chunk and no body
+        // is ever held whole in this process.
+        ur.pipe(res);
+      } catch (e) { try { ur.destroy(); } catch {} failDoor(req, res, e); }
+    });
+    up.on("error", (e) => failDoor(req, res, e));
+    // The bot hung up (or the socket died): stop the other leg too, so an SSE
+    // stream nobody reads does not hold sockets for the rest of the spawn.
+    res.on("close", () => { try { up.destroy(); } catch {} });
+    req.pipe(up);
+  }
+
+  doors.on("request", (req, res) => {
+    const upgrade = req.headers.upgrade !== undefined
+      || /(?:^|,)\s*upgrade\s*(?:,|$)/i.test(String(req.headers.connection || ""));
+    if (req.method === "CONNECT" || upgrade) return refuseDoor(req, res, "upgrade refused");
+    if (doorFilter && !isDoorPath(req.url)) return refuseDoor(req, res, "not a door");
+    forwardDoor(req, res);
+  });
+  // Node hands these two off the request event; neither may reach the gateway.
+  doors.on("upgrade", (req, socket) => refuseRaw(req, socket, "upgrade refused"));
+  doors.on("connect", (req, socket) => refuseRaw(req, socket, "CONNECT refused"));
+  doors.on("clientError", (err, socket) => {
+    if (!socket.writable || (err && err.code === "ECONNRESET")) { try { socket.destroy(); } catch {} return; }
+    try { socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); } catch { try { socket.destroy(); } catch {} }
+  });
+
+  /** Hand the bot's connection to the HTTP parser once the PORT line is read. */
+  const enterDoors = (c) => {
+    doors.emit("connection", c);
+    // The parser attaches its own readers; a socket paused for the PORT line
+    // must be resumed explicitly (a 'data' listener alone does not unpause it).
+    c.resume();
+  };
+
   async function handleProxy(c, head) {
     const first = head.split("\r\n")[0] || "";
     const m = first.match(/^(\S+)\s+(\S+)\s+HTTP\/1\.[01]$/);
@@ -512,13 +642,19 @@ export function createEgressRelay(o) {
         if (pm) {
           c.removeListener("data", onData); clearTimeout(timer);
           const port = Number(pm[1]);
-          if (!loopback.has(port)) { note("deny", "127.0.0.1:" + port, "loopback port not allowed"); c.destroy(); return; }
+          if (port !== gatewayPort) {
+            // No other loopback port is served at all: the one a contained bot
+            // reaches is its own gateway's, and there only the doors.
+            note("deny", "127.0.0.1:" + port, gatewayPort ? "not the bot's gateway port" : "no gateway port");
+            c.destroy();
+            return;
+          }
           note("allow", "127.0.0.1:" + port);
-          // Paused until splice() pipes it (pipe resumes); bytes that came
-          // with the header line go back on the stream first.
+          // Paused until the HTTP parser owns it; bytes that came with the
+          // header line (usually a whole request) go back on the stream first.
           c.pause();
           if (buf.length) c.unshift(buf);
-          splice(c, ["127.0.0.1"], port, null);
+          enterDoors(c);
           return;
         }
         if (verb !== "PROXY") { clearTimeout(timer); c.destroy(); return; }
