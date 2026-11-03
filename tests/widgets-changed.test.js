@@ -225,11 +225,14 @@ test("the default sender publishes nothing while widgets_push is unset, and publ
     fetch: globalThis.fetch,
     NTFY_TOPIC: process.env.NTFY_TOPIC,
     NTFY_HOST: process.env.NTFY_HOST,
+    CROW_DATA_DIR: process.env.CROW_DATA_DIR,
   };
   const captured = [];
   globalThis.fetch = async (url, init) => { captured.push({ url, init }); return new Response(null, { status: 200 }); };
   process.env.NTFY_TOPIC = "crow-widgets-test";
   process.env.NTFY_HOST = "127.0.0.1";
+  // Its own scratch data dir: even under a raw `node --test` this never touches a real crow.db.
+  process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "widgets-optin-"));
   const db = createDbClient();
   const fire = async () => {
     _resetWidgetsChangedForTest();
@@ -253,7 +256,7 @@ test("the default sender publishes nothing while widgets_push is unset, and publ
     try { await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [WIDGETS_PUSH_KEY] }); } catch { /* scratch */ }
     try { db.close(); } catch { /* closed */ }
     globalThis.fetch = saved.fetch;
-    for (const k of ["NTFY_TOPIC", "NTFY_HOST"]) {
+    for (const k of ["NTFY_TOPIC", "NTFY_HOST", "CROW_DATA_DIR"]) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
