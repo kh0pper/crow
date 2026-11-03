@@ -94,6 +94,9 @@ const STATUS_BY_CODE = Object.freeze({
   locked: 409,
   focused: 409,
   human_only: 409,
+  // A command only Studio itself may run, tried through a door that is not
+  // Studio's own: the caller may not have it, whatever it asks the song.
+  studio_only: 403,
   conflict: 409,
 });
 

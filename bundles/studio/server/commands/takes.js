@@ -576,6 +576,9 @@ defineCommand({
     return [clipRef(args.clip_id), trackRef(args.track_id)];
   },
   apply(doc, args) {
+    if (getClip(doc, args.clip_id)) {
+      refuseInvalid(`A clip with id "${args.clip_id}" already exists in this song.`);
+    }
     const track = getTrack(doc, args.track_id);
     if (!track) throw new StudioError("not_found", `There is no track "${args.track_id}" in this song.`);
     const scene = getScene(doc, args.scene_id);

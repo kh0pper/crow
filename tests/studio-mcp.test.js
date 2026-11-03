@@ -373,6 +373,32 @@ test("an internal refusal reaches the agent as one fixed sentence, logged in ful
     await client.close();
   }
 });
+test("MCP client sees the studio-only message, not \"internal error\"", async () => {
+  const refusal = { ok: false, code: "studio_only", error: "This command can only be run by Studio itself." };
+  const { hub } = makeHub({ command: async () => refusal });
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+  try {
+    const result = await client.callTool({
+      name: "studio_clip_write",
+      arguments: {
+        song_id: "song-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Verse bass",
+        notes: [{ t: 0, d: 1, p: 40, v: 100 }],
+      },
+    });
+    assert.equal(result.isError, true, "a refusal must be a tool error");
+    const text = textOf(result);
+    // The sentence is the agent's own answer: it says what the command is for,
+    // so it reaches the caller unchanged with only its code after it.
+    assert.equal(text, "This command can only be run by Studio itself. (studio_only)");
+    assert.equal(text.includes("internal error"), false, "a studio-only refusal is not a server bug");
+  } finally {
+    await client.close();
+  }
+});
+
 test("a read-only caller (Crow's voice) cannot file a render", async () => {
   const voice = makeHub({ snapshotProject: 4, readOnly: true });
   const rendered = makeRenderer();

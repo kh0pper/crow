@@ -253,6 +253,47 @@ test("clip.write on an audio clip is refused", (t) => {
   assert.deepEqual(snapshot(s.doc).clips[clip].kind, "audio");
 });
 
+test("clip.add_audio refuses an existing clip id", (t) => {
+  const s = studio(t);
+  const guitar = addAudioTrack(s.doc, "Guitar");
+  const vocal = addAudioTrack(s.doc, "Vocal");
+  const verse = addScene(s.doc, "Verse");
+  const chorus = addScene(s.doc, "Chorus");
+  const clip = addAudioClip(s.doc, guitar, verse, 2);
+  const first = take();
+  s.run("take.add", { clip_id: clip, take: first });
+
+  // An id names one clip, the way it names one track and one scene: adding a
+  // clip over an existing one would replace it and strand whatever lives on it
+  // (here, a recording), so it is refused instead.
+  const taken = refuses(
+    () => s.run("clip.add_audio", { clip_id: clip, track_id: vocal, scene_id: chorus, length_bars: 1 }),
+    "invalid",
+  );
+  assert.equal(taken.message, `A clip with id "${clip}" already exists in this song.`);
+  assert.equal(clipOf(s.doc, clip).track_id, guitar, "the existing clip kept its track");
+  assert.equal(clipOf(s.doc, clip).scene_id, verse);
+  assert.deepEqual(Object.keys(snapshot(s.doc).takes), [first.id]);
+  assert.deepEqual(clipOf(s.doc, clip).comp, [{ take_id: first.id, from_beat: 0, to_beat: 8 }]);
+
+  // A SunVox clip's id is taken too, so an audio clip cannot land on it.
+  const bass = runCommand(s.doc, "track.add", { name: "Bass" }).args.id;
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: bass,
+    scene_id: verse,
+    name: "Verse bass",
+    notes: [{ t: 0, d: 1, p: 36, v: 100 }],
+  });
+  const sunvox = refuses(
+    () => s.run("clip.add_audio", { clip_id: "bass-verse", track_id: vocal, scene_id: chorus, length_bars: 1 }),
+    "invalid",
+  );
+  assert.equal(sunvox.message, 'A clip with id "bass-verse" already exists in this song.');
+  assert.equal(clipOf(s.doc, "bass-verse").track_id, bass, "the SunVox clip kept its track and its notes");
+  assert.equal(clipOf(s.doc, "bass-verse").notes.length, 1);
+});
+
 test("first take becomes the comp", (t) => {
   const s = studio(t);
   const track = addAudioTrack(s.doc);

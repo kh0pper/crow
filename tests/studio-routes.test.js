@@ -604,6 +604,30 @@ test("a superseded socket's close leaves the live client's presence alone", asyn
 
 const INTERNAL_TEXT = "Studio hit an internal error.";
 
+/** What a caller is told when it runs a command only Studio itself may run. */
+const STUDIO_ONLY_TEXT = "This command can only be run by Studio itself.";
+
+/**
+ * A take in the shape a recording client uploads, for the crafted `take.add`
+ * requests below. `take.add` is Studio's own step, so none of these may land.
+ * @returns {object}
+ */
+function craftedTake() {
+  return {
+    id: "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70",
+    storage_key: "studio/song/takes/6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70.wav",
+    rate: 48000,
+    channels: 2,
+    frames: 48000,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 120,
+    recorded_at: "2026-11-02T12:00:00.000Z",
+    author_label: "the operator",
+    discarded: false,
+  };
+}
+
 test("an internal error does not leak its message", async (t) => {
   const { base, hub, crowHome } = await boot(t);
   const token = ensureAgentToken(crowHome);
@@ -628,6 +652,52 @@ test("an internal error does not leak its message", async (t) => {
   assert.deepEqual(body, { ok: false, code: "internal", error: INTERNAL_TEXT });
   assert.equal(JSON.stringify(body).includes("SQLITE"), false, "the real message stays in the log");
   assert.ok(logged.some((args) => args[0] === "[studio]"), "the real error is logged");
+});
+
+test("take.add over the agent HTTP route is refused with 403 and the studio-only message", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const songId = await seedSong(hub);
+  const token = ensureAgentToken(crowHome);
+
+  // A crafted agent request carrying a whole, valid-looking take: the hub
+  // refuses the command itself, before it looks at the song or the arguments.
+  const sent = await agentCommand(base, token, songId, {
+    cmd_id: "take-add-agent-route",
+    command: "take.add",
+    args: { clip_id: "gtr-take", take: craftedTake() },
+    author: { id: "mcp", label: "Agent (MCP)" },
+  });
+
+  assert.equal(sent.status, 403, `expected 403, got ${sent.status}: ${JSON.stringify(sent.body)}`);
+  assert.deepEqual(sent.body, { ok: false, code: "studio_only", error: STUDIO_ONLY_TEXT });
+  assert.deepEqual((await hub.openSong(songId)).snapshot.takes, {}, "the refused take wrote nothing");
+});
+
+test("take.add in a WS command frame is refused with the studio-only message, even with internal:true in the frame", async (t) => {
+  const { port, hub } = await boot(t);
+  const songId = await seedSong(hub);
+
+  const ws = connect(t, port);
+  const next = collector(ws);
+  await opened(ws);
+  ws.send(JSON.stringify({ type: "hello", csrf: "csrf-ok", song_id: songId, client_id: "client-take" }));
+  await next((msg) => msg.type === "state");
+
+  // Only the gateway process itself may say a command comes from Studio, so a
+  // frame's own word on it counts for nothing.
+  ws.send(JSON.stringify({
+    type: "command",
+    cmd_id: "take-add-ws",
+    command: "take.add",
+    args: { clip_id: "gtr-take", take: craftedTake() },
+    internal: true,
+  }));
+
+  const result = await next((msg) => msg.type === "result");
+  assert.equal(result.ok, false, `the frame was accepted: ${JSON.stringify(result)}`);
+  assert.equal(result.code, "studio_only");
+  assert.equal(result.error, STUDIO_ONLY_TEXT);
+  assert.deepEqual((await hub.openSong(songId)).snapshot.takes, {}, "the refused take wrote nothing");
 });
 
 test("the 21st socket for one session is refused", async (t) => {

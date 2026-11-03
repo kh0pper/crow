@@ -28,16 +28,16 @@
  *   {ok: true, entry, conflicts, snapshot_version} an undo or a redo applied
  *   {ok: false, code, error, conflicts?}           a refusal
  *
- * `code` is one of "acl", "human_only", "internal", "locked", "focused",
+ * `code` is one of "acl", "human_only", "studio_only", "locked", "focused",
  * "limit", "invalid", "conflict", "storage" or "not_found".
  *
  * Two of those rules are about recordings, which cannot be made again:
  *   - a command marked `internal` (only `take.add` today) is refused with
- *     "internal" unless the call says it comes from Studio, so the WS path,
+ *     "studio_only" unless the call says it comes from Studio, so the WS path,
  *     the agent HTTP API and MCP cannot issue one;
- *   - a step — a command, an undo or a redo — that would delete a take the
- *     song still holds is refused for anyone but the operator, with
- *     "human_only" and a sentence asking for the operator's yes. *
+ *   - a step — a command, an undo or a redo — whose writes would delete a take
+ *     or discard one is refused for anyone but the operator, with
+ *     "human_only" and a sentence asking for the operator's yes.
  * "storage" is the one refusal that has to undo something: the edit was
  * already applied to the live document when the write failed, so the hub drops
  * its cached document for that song and the next operation rebuilds it from the
@@ -113,7 +113,7 @@ const MAX_UNDO_HOPS = 64;
 const SAVE_FAILED = "Studio could not save that change; nothing was changed.";
 
 /** What a caller is told when it runs a command only Studio itself may run. */
-const INTERNAL_ONLY = "This command can only be run by Studio itself.";
+const STUDIO_ONLY = "This command can only be run by Studio itself.";
 
 /**
  * What an agent is told when a step would drop a recorded take.
@@ -122,6 +122,23 @@ const INTERNAL_ONLY = "This command can only be run by Studio itself.";
  * needs the operator's own yes (spec §5.10 and §12).
  */
 const TAKES_NEED_A_YES = "Removing recorded takes needs a yes from the operator.";
+
+/**
+ * The one people-only command an agent may take back, and only in the one safe
+ * shape `onlyPutsTakesBack` recognises: the operator's `take.discard` undone.
+ */
+const TAKE_DISCARD_COMMAND = "take.discard";
+
+/**
+ * What an agent is told when it moves a take's `discarded` flag through the
+ * history rather than through a command.
+ *
+ * A command is a fresh decision — `take.restore` is an ordinary agent edit and
+ * `take.discard` is the operator's own — while a step back along the history
+ * re-writes raw fields, which is the door the take-loss hole was found behind.
+ */
+const TAKE_FLAG_BY_COMMAND_ONLY =
+  "Only a person can take back a step that changes whether a take is discarded.";
 
 /** The ref kinds a step can lose a recorded take through. */
 const TAKE_BEARING_KINDS = Object.freeze(["take", "clip", "track", "scene"]);
@@ -300,56 +317,87 @@ function changeEntries(changes) {
 }
 
 /**
- * The first recorded take a set of writes would delete, or null.
+ * The first recorded take a set of writes would lose, or null.
  *
- * A take leaves a song through exactly one kind of write: its whole object
+ * A take is lost through exactly two kinds of write: its whole object
  * (`"take:<id>|*"`) set to `null`, which is how doc.js spells "it does not
- * exist". A take the song no longer holds is not a loss, and neither is one
- * that is already discarded: it has a flag rather than a recording that plays,
- * and it comes back with `take.restore`.
+ * exist", and its `discarded` flag set to `true`, which is how a take stops
+ * being a recording that plays. Both lose the recording for anyone who is not
+ * the operator: a discarded take is still on disk and still comes back with
+ * `take.restore`.
  * @param {Map<string, any>|Object<string, any>} changes - the writes the step makes
- * @param {object} snap - the song as it is right now
  * @returns {string|null} the id of the take the step would lose
  */
-function removedLiveTake(changes, snap) {
+function lostTake(changes) {
   for (const [key, value] of changeEntries(changes)) {
-    if (value !== null) continue;
     const split = splitRefField(key);
-    if (!split || split.field !== "*") continue;
+    if (!split) continue;
     const target = parseObjectRef(split.ref);
     if (target?.kind !== "take") continue;
-    const take = snap?.takes?.[target.id];
-    if (!take || take.discarded === true) continue;
-    return target.id;
+    if (split.field === "*" && value === null) return target.id;
+    if (split.field === "discarded" && value === true) return target.id;
   }
   return null;
 }
 
 /**
- * Whether a step's writes are a recorded take coming back: the shape of taking
- * a `take.discard` back, and the one people-only step an agent may undo.
+ * Whether a step's writes would move a take's `discarded` flag without losing
+ * the take: the flag being cleared, in practice.
  *
- * Restoring a take is an ordinary agent edit (`take.restore`), so undoing the
- * operator's discard puts back exactly what an agent could have done itself.
- * A write that discards (`"take:<id>|discarded"` → `true`), deletes a take, or
- * writes no `discarded: false` at all is not this shape — so redoing a discard,
- * or taking back the undo that restored it, stays people-only.
- * @param {Map<string, any>|Object<string, any>|null|undefined} changes
+ * Setting it (`discarded` → `true`) is already a loss (see `lostTake`); what is
+ * left is a step that puts a discarded take back.
+ * @param {Map<string, any>|Object<string, any>} changes - the writes the step makes
  * @returns {boolean}
  */
-function onlyPutsTakesBack(changes) {
-  let restored = 0;
+function movesTakeFlag(changes) {
+  for (const [key] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    if (!split || split.field !== "discarded") continue;
+    if (parseObjectRef(split.ref)?.kind === "take") return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a step's writes are exactly a recorded take coming back: the one
+ * people-only step an agent may take back, in its one harmless shape.
+ *
+ * Restoring a take is an ordinary agent edit (`take.restore`), so undoing the
+ * operator's `take.discard` puts back exactly what an agent could have done
+ * itself — the take's flag, and the comp the discard took its segments out of.
+ * Every other write is somebody else's business: a discard, a deletion, a
+ * second take, a take of another clip, any other field. So redoing a discard,
+ * or taking back the undo that restored it, stays people-only, and so does the
+ * undo of every other people-only command.
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes
+ * @param {object} snap - the song as it is right now, to find the take's clip
+ * @returns {boolean}
+ */
+function onlyPutsTakesBack(changes, snap) {
+  let takeId = null;
+  let clipId = null;
   for (const [key, value] of changeEntries(changes)) {
     const split = splitRefField(key);
     const target = split ? parseObjectRef(split.ref) : null;
-    // The clip's comp comes back with the segments the discard took out, so a
-    // write to another object is part of it; a take write is only this shape
-    // when it clears the flag.
-    if (target?.kind !== "take") continue;
-    if (split.field !== "discarded" || value !== false) return false;
-    restored += 1;
+    if (target?.kind === "take") {
+      if (split.field !== "discarded" || value !== false) return false;
+      if (takeId !== null && takeId !== target.id) return false;
+      takeId = target.id;
+      continue;
+    }
+    // The comp the discard removed the take's segments from comes back with
+    // it, and that is the only other object this shape writes.
+    if (target?.kind === "clip") {
+      if (split.field !== "comp") return false;
+      if (clipId !== null && clipId !== target.id) return false;
+      clipId = target.id;
+      continue;
+    }
+    return false;
   }
-  return restored > 0;
+  if (takeId === null) return false;
+  if (clipId === null) return true;
+  return snap?.takes?.[takeId]?.clip_id === clipId;
 }
 
 /**
@@ -850,35 +898,34 @@ export function createHub({
    */
   function internalOnlyRefusal(command, internal) {
     if (internal === true || !hasCommand(command)) return null;
-    return getCommand(command).internal === true ? refuse("internal", INTERNAL_ONLY) : null;
+    return getCommand(command).internal === true ? refuse("studio_only", STUDIO_ONLY) : null;
   }
 
   /**
-   * The agent take-loss guard: a step that would delete a take the song still
-   * holds has to come from the operator.
+   * The agent take-loss guard: a step that would delete a take or discard one
+   * has to come from the operator.
    *
    * A recording cannot be made again, so neither a command nor an undo or a
    * redo may drop one on an agent's say-so — `clip.remove`, `track.remove` and
-   * `scene.remove` of a clip holding live takes, and the undo of `take.add`,
-   * all end here. Discarding a take is its own people-only command; a step that
-   * merely sets that flag, or puts a discarded take back, is not a loss and is
-   * allowed (see `removedLiveTake`).
-   * @param {{changes: Map<string, any>|Object<string, any>, snap: object,
-   *          author: object}} check - the writes the step makes, and the song
-   *   as it is now
+   * `scene.remove` of a clip holding any take (discarded or not), the undo of
+   * `take.add`, and any step that sets a take's `discarded` flag all end here.
+   * Only `take.discard` sets it for a step of its own, and that command is
+   * people-only already (see `lostTake`).
+   * @param {{changes: Map<string, any>|Object<string, any>, author: object}}
+   *   check - the writes the step makes
    * @returns {object|null} the refusal, or null when the step may run
    */
-  function takeLossRefusal({ changes, snap, author }) {
+  function takeLossRefusal({ changes, author }) {
     if (author.kind === "human") return null;
-    return removedLiveTake(changes, snap) === null ? null : refuse("human_only", TAKES_NEED_A_YES);
+    return lostTake(changes) === null ? null : refuse("human_only", TAKES_NEED_A_YES);
   }
 
   /**
    * Whether the take-loss guard has to look at what a command would write.
    *
-   * False when nobody can lose anything (a person is calling, the song holds no
-   * take that is not discarded) and when the command names none of the objects
-   * a take hangs off. When it is true the step is previewed on a clone and
+   * False when nobody can lose anything (a person is calling, or the song holds
+   * no take at all) and when the command names none of the objects a take hangs
+   * off. When it is true the step is previewed on a clone and
    * `takeLossRefusal` decides on the writes themselves.
    * @param {{touched: string[], snap: object}} prepared
    * @param {object} author
@@ -886,8 +933,7 @@ export function createHub({
    */
   function mayLoseTakes(prepared, author) {
     if (author.kind === "human") return false;
-    const takes = Object.values(prepared.snap.takes ?? {});
-    if (!takes.some((take) => take.discarded !== true)) return false;
+    if (Object.keys(prepared.snap.takes ?? {}).length === 0) return false;
     return prepared.touched.some((ref) => TAKE_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
   }
 
@@ -1163,7 +1209,7 @@ export function createHub({
       } catch (err) {
         return toRefusal(err);
       }
-      const lost = takeLossRefusal({ changes: preview.after, snap: prepared.snap, author: actor });
+      const lost = takeLossRefusal({ changes: preview.after, author: actor });
       if (lost) return lost;
     }
 
@@ -1301,6 +1347,7 @@ export function createHub({
     } catch (err) {
       planError = err;
     }
+    const snap = snapshot(state.doc);
 
     // A people-only command stays people-only when it is taken back: undoing
     // the operator's unlock would let an agent lock the track it may not lock.
@@ -1310,11 +1357,14 @@ export function createHub({
     // could be hiding anything, so it is people-only too.
     //
     // The one exception is a step that puts a recorded take back: undoing the
-    // operator's discard is exactly what `take.restore` — an ordinary agent
-    // edit — does. It is the writes that say so, so redoing the discard, or
-    // taking back the undo that restored it, stays people-only.
+    // operator's `take.discard` is exactly what `take.restore` — an ordinary
+    // agent edit — does, and it is the only people-only step an agent may take
+    // back. The writes have to be that take's flag and its clip's comp and
+    // nothing else, so redoing the discard, or taking back the undo that
+    // restored it, stays people-only.
+    let original = null;
     if (actor.kind !== "human") {
-      const original = await originalCommandId(song_id, target);
+      original = await originalCommandId(song_id, target);
       if (original === null) {
         return refuse(
           "human_only",
@@ -1322,7 +1372,9 @@ export function createHub({
         );
       }
       if (hasCommand(original) && getCommand(original).humanOnly) {
-        const putsTakesBack = kind === "undo" && onlyPutsTakesBack(plan?.apply);
+        const putsTakesBack = kind === "undo"
+          && original === TAKE_DISCARD_COMMAND
+          && onlyPutsTakesBack(plan?.apply, snap);
         if (!putsTakesBack) {
           return refuse(
             "human_only",
@@ -1358,7 +1410,6 @@ export function createHub({
     // back an object the song no longer holds, so its track comes from the
     // value the plan writes rather than from the ref.
     const refs = planRefs(plan);
-    const snap = snapshot(state.doc);
     const { trackIds, lockedTracks } = planTrackIds(snap, refs, plan, target);
     const refused = checkAgentRules({
       refs,
@@ -1372,10 +1423,24 @@ export function createHub({
 
     // The guard a command meets, applied to what the plan writes: an undo or a
     // redo may not drop a recorded take on an agent's say-so — undoing a
-    // `take.add` and redoing a `clip.remove` both end here. A plan only writes
-    // what its step changed, so a step that leaves the takes alone is untouched.
-    const lostTake = takeLossRefusal({ changes: plan.apply, snap, author: actor });
-    if (lostTake) return lostTake;
+    // `take.add`, redoing a `clip.remove` and redoing a discard all end here. A
+    // plan only writes what its step changed, so a step that leaves the takes
+    // alone is untouched.
+    const takeLoss = takeLossRefusal({ changes: plan.apply, author: actor });
+    if (takeLoss) return takeLoss;
+
+    // Nor may a step back along the history move a take's `discarded` flag the
+    // other way: a command is a fresh decision (`take.restore` is an agent's,
+    // `take.discard` is the operator's), while a redo or an undo re-writes raw
+    // fields. The one exception is taking the operator's `take.discard` back,
+    // which is the shape `onlyPutsTakesBack` recognises.
+    if (
+      actor.kind !== "human"
+      && movesTakeFlag(plan.apply)
+      && !(kind === "undo" && original === TAKE_DISCARD_COMMAND && onlyPutsTakesBack(plan.apply, snap))
+    ) {
+      return refuse("human_only", TAKE_FLAG_BY_COMMAND_ONLY);
+    }
 
     const stateVector = Y.encodeStateVector(state.doc);
     try {

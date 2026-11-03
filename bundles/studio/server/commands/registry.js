@@ -55,7 +55,7 @@ export const REFUSAL_CODES = Object.freeze([
   "invalid",
   "not_found",
   "human_only",
-  "internal",
+  "studio_only",
   "locked",
   "focused",
   "acl",
