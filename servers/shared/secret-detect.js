@@ -133,7 +133,12 @@ export function findSecrets(text) {
       const keyed = KEYED_RUN_PREFIX.exec(seg);
       const value = keyed ? seg.slice(keyed[0].length) : seg;
       const start = keyed ? at + keyed[0].length : at;
-      if (looksRandom(value)) hits.push({ start, end: start + value.length, kind: "entropy" });
+      // N3: the KEYED value alone can be a touch too short to flag (22 characters behind
+      // "key=") while the whole segment — key, separator and value — still has a token's shape
+      // and length. Either one flags; the span always starts AFTER the separator, so the key's
+      // name survives the strip ("key=[secret removed]"). Off a keyed segment seg === value, so
+      // the two tests are the same one.
+      if (looksRandom(value) || looksRandom(seg)) hits.push({ start, end: start + value.length, kind: "entropy" });
       at += seg.length + 1;
     }
   }

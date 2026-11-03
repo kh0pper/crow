@@ -148,33 +148,67 @@ function stripIncoming(text, body) {
 }
 
 /**
+ * The pending ask card's own options for question `i` of a combined card (its option labels, as
+ * the operator was shown them), or null when the card is not a combined one / has no options.
+ * @returns {string[]|null}
+ */
+function questionOptionLabels(card, i) {
+  if (!card || !Array.isArray(card.questions)) return null;
+  const q = card.questions[i];
+  if (!q || !Array.isArray(q.options)) return null;
+  return q.options.map((o) => String(o && typeof o === "object" ? (o.label == null ? "" : o.label) : o));
+}
+
+/**
  * B2 (credential card): every free-text answer the operator sends to a pending ask goes through
  * the same strip, and the same per-send "keep", before the engine sees it. `question` and
  * `selected` carry the card's own text and chosen labels, not free text, so only the free-text
- * fields are stripped with the note; a chosen label is still passed through stripSecrets (never
- * the note) so a label can never carry a value onward either. Returns the count removed.
- * @returns {number}
+ * fields are stripped with the note.
+ *
+ * N1: a label the BOT itself offered is never a secret to strip — a select option that happens
+ * to look like a token ("Session 9fK2mQ…") must reach the child exactly as it was offered, or
+ * the child gets a value it never offered plus a false "your message had a secret" note. So
+ * `value` is stripped only when the pending card's method is a free-text one (input/editor) or
+ * when it is not exactly one of the card's options, and a combined card's `selected`/`labels`
+ * entry is stripped only when it matches no option of its own question. The `other` free text
+ * is always stripped.
+ *
+ * N2: a free-text field is coerced with String() before the strip — the engine coerces it later
+ * anyway, so `value: ["ghp_…"]` must not slip past the strip as a non-string.
+ *
+ * @param {object} body the request body (mutated in place)
+ * @param {object|null} card the pending ask card (method + options), or null when unknown
+ * @returns {number} how many spans were removed
  */
-function stripAnswerText(body) {
+function stripAnswerText(body, card) {
   let removed = 0;
-  if (typeof body.value === "string") {
-    const r = stripIncoming(body.value, body);
-    body.value = r.text; removed += r.removed;
+  const method = card && typeof card.method === "string" ? card.method : null;
+  const freeText = method === "input" || method === "editor";
+  const offered = Array.isArray(card && card.options) ? card.options.map((o) => String(o)) : null;
+  if (body.value !== undefined && body.value !== null) {
+    const isOffered = typeof body.value === "string" && offered != null && offered.includes(body.value);
+    if (freeText || !isOffered) {
+      const r = stripIncoming(String(body.value), body);
+      body.value = r.text; removed += r.removed;
+    }
   }
   if (Array.isArray(body.answers)) {
-    body.answers = body.answers.map((a) => {
+    body.answers = body.answers.map((a, i) => {
       if (!a || typeof a !== "object" || Array.isArray(a)) return a;
       const out = { ...a };
       for (const k of ["other", "value", "text"]) {
-        if (typeof out[k] !== "string") continue;
-        const r = stripIncoming(out[k], body);
+        if (out[k] == null) continue;
+        const r = stripIncoming(String(out[k]), body);
         out[k] = r.text; removed += r.removed;
       }
+      const labels = questionOptionLabels(card, i);
       for (const k of ["selected", "labels"]) {
         if (!Array.isArray(out[k])) continue;
         out[k] = out[k].map((v) => {
-          if (typeof v !== "string") return v;
-          const r = stripSecrets(v);
+          if (v == null) return v;
+          const text = String(v);
+          if (labels && labels.includes(text)) return v;   // the bot offered it: send as offered
+          const r = stripSecrets(text);
           removed += r.removed;
           return r.text;
         });
@@ -183,6 +217,22 @@ function stripAnswerText(body) {
     });
   }
   return removed;
+}
+
+/**
+ * The card a pending answer is answering: the engine's own snapshot of the session
+ * (`get(...).pendingUi`, the shim/expired card included), which is where the card's method and
+ * options live. null when the engine cannot say (an older/fake engine without `get`, an unknown
+ * session, or no pending card) — the callers then fall back to stripping everything.
+ * Read-only: get() never wakes a child and never answers anything.
+ * @returns {Promise<object|null>}
+ */
+async function pendingAskCard(eng, sid) {
+  try {
+    if (!eng || typeof eng.get !== "function") return null;
+    const snap = await eng.get(sid);
+    return snap && snap.pendingUi ? snap.pendingUi : null;
+  } catch { return null; }
 }
 
 /** Extensions the workspace route serves inline (never `attachment`). */
@@ -842,16 +892,18 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const requestId = body.requestId == null ? "" : String(body.requestId);
-    // Credential card (B2): an ask card's free-text answer is operator text reaching the same
-    // child, so it gets the same strip and the same count-only answer as /message and /steer.
-    const removed = stripAnswerText(body);
     let pdb = null;
     try {
+      const eng = resolveEngine();
+      // Credential card (B2 + N1): an ask card's free-text answer is operator text reaching the
+      // same child, so it gets the same strip and the same count-only answer as /message and
+      // /steer — but an option the bot itself offered is never stripped. The pending card (its
+      // method and options) is read from the engine's own snapshot BEFORE the answer resolves it.
+      const removed = stripAnswerText(body, await pendingAskCard(eng, sid));
       // Project services (fix round 1): an answer resolves a dialog the child holding the
       // owner's service blocks is waiting on, so it carries the turn's principal too.
       let principal = "other";
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
-      const eng = resolveEngine();
       const result = await eng.answer(sid, requestId, body, { principal });
       res.json({ ...(result && typeof result === "object" ? result : {}), removed });
     } catch (err) {

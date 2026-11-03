@@ -149,6 +149,20 @@ test("pass=<token> keeps the key name", () => {
   assert.deepEqual(stripSecrets("x " + ENTROPY + " y"), { text: "x " + SECRET_REMOVED + " y", removed: 1 });
 });
 
+test("key=AbC1x9QwErTy45ZpLm7Vb2 is caught and keeps its key name", () => {
+  // N3: the value alone is 22 characters — short of the entropy rule's 24 — while the whole
+  // keyed segment (key, separator and value) has a token's shape and length. The segment counts
+  // too; the span still starts after the separator, so the key's NAME survives.
+  const SHORT_TOKEN = "AbC1x9QwErTy45ZpLm7Vb2";
+  assert.equal(SHORT_TOKEN.length, 22);
+  assert.deepEqual(spans("key=" + SHORT_TOKEN), [SHORT_TOKEN], "only the value is the span");
+  assert.deepEqual(stripSecrets("key=" + SHORT_TOKEN), { text: "key=" + SECRET_REMOVED, removed: 1 });
+  // The same value with no key in front is still below the length rule: nothing is flagged.
+  assert.deepEqual(findSecrets(SHORT_TOKEN), []);
+  // "pass=<token>" keeps its key name too (the long value is caught by the value's own rule).
+  assert.deepEqual(stripSecrets("pass=" + ENTROPY), { text: "pass=" + SECRET_REMOVED, removed: 1 });
+});
+
 test("detectorSource rebuilds the same regexes (what the client will get)", () => {
   const src = detectorSource();
   assert.ok(Array.isArray(src.prefixes) && src.prefixes.length >= 18);

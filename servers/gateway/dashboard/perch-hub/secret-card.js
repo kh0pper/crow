@@ -178,16 +178,19 @@ export function perchSecretCardJs(lang = "en") {
   }
 
   /* On load: the open card from the gateway (a reload or a second tab). The gateway saying this
-     chat has NO open request, while a card is on screen, means the card is gone — draw that, never
-     leave a dead card the operator can type into. */
+     chat has NO open request means the card on screen is gone — draw that, never leave a dead card
+     the operator can type into. N4: only the card that was ALREADY on screen when this GET was
+     sent can be called gone by its answer. A card the live stream opened while the answer was in
+     flight is newer than the answer, and a null from a GET sent before it says nothing about it. */
   function loadSecret(sid){
     if(!sid) return;
     var mySid=sid, myGen=secGen;
+    var shownId=(secShown&&secShown.id)?String(secShown.id):null;
     perchApi('GET','/interactive/'+encodeURIComponent(mySid)+'/secret').then(function(r){
       if(!live()||current.sid!==mySid||secGen!==myGen) return;
       if(!r||!r.ok) return;                    /* a failed fetch says nothing about the card */
       if(!r.j||typeof r.j.id!=='string'){
-        if(secShown&&secShown.state==='open') renderSecret({id:secShown.id,label:secShown.label,state:'gone'});
+        if(shownId&&secShown&&String(secShown.id)===shownId&&secShown.state==='open') renderSecret({id:secShown.id,label:secShown.label,state:'gone'});
         return;
       }
       if(secShown&&secShown.id===r.j.id) return;

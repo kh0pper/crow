@@ -345,6 +345,83 @@ test("keep on an ask answer is honoured once", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// N1/N2 (credential card review): a label the bot itself offered is never stripped
+// ---------------------------------------------------------------------------
+
+test("an option label that looks like a token is sent as offered", async () => {
+  const c = makeCanary();
+  const s = await session("select-offered-bot");
+  const label = "Session " + c;
+  h.pi().emit({ type: "extension_ui_request", id: "ask-o1", method: "select", title: "Which session?", options: [label, "Another session"] });
+  await h.tick();
+  const r = await h.post(answerPath(s.sessionId), { requestId: "ask-o1", value: label });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.removed, 0, "the bot's own option is not something to strip");
+  const sent = h.pi().sent.filter((f) => f && f.type === "extension_ui_response");
+  assert.deepEqual(sent.at(-1), { type: "extension_ui_response", id: "ask-o1", value: label },
+    "the child gets the option exactly as it offered it: " + JSON.stringify(sent.at(-1)));
+  assert.ok(!JSON.stringify(sent).includes(NOTE), "and no false 'your message had a secret' note");
+  // A select value the card did NOT offer is still stripped (the escape hatch stays shut).
+  h.pi().emit({ type: "extension_ui_request", id: "ask-o2", method: "select", title: "Which session?", options: ["one", "two"] });
+  await h.tick();
+  const r2 = await h.post(answerPath(s.sessionId), { requestId: "ask-o2", value: "token: " + c });
+  assert.equal(r2.json.removed, 1);
+  const last = JSON.stringify(h.pi().sent[h.pi().sent.length - 1]);
+  assert.ok(last.includes("[secret removed]") && !last.includes(c), last);
+  await h.endTurn("ok");
+});
+
+test("a combined card's chosen option is sent as offered, and its Other text is still stripped", async () => {
+  const offered = makeCanary();
+  const typed = makeCanary();
+  const { ASK_OTHER, askOptionRow } = await import("../servers/gateway/perch-interactive.js");
+  const s = await session("combined-offered-bot");
+  const label = "Session " + offered;
+  const q0 = { header: "Auth", question: "Which session?", options: [{ label, description: "the live one" }, { label: "Another session" }] };
+  const q1 = { header: "Notes", question: "Anything else?", options: [{ label: "Nothing" }] };
+  h.pi().emit({ type: "extension_ui_request", method: "notify", message: "crow-ask:" + JSON.stringify({ id: "ask-c1", questions: [q0, q1] }) });
+  // The child's first select is upgraded into the combined card (the options are its own rows).
+  h.pi().emit({ type: "extension_ui_request", id: "ask-c1", method: "select", title: "Which session?", options: [askOptionRow(q0.options[0]), askOptionRow(q0.options[1])] });
+  await h.tick();
+  const r = await h.post(answerPath(s.sessionId), {
+    requestId: "ask-c1",
+    answers: [
+      { question: "Which session?", selected: [label], other: null },
+      { question: "Anything else?", selected: [], other: "password: " + typed },
+    ],
+  });
+  assert.equal(r.status, 200, r.text);
+  assert.ok(r.json.removed >= 1, "the Other text was stripped: " + r.text);
+  // The rest of the answer dance: the child's next two dialogs consume the scripted replies.
+  h.pi().emit({ type: "extension_ui_request", id: "ask-c1-b", method: "select", options: [ASK_OTHER] });
+  await h.tick();
+  h.pi().emit({ type: "extension_ui_request", id: "ask-c1-c", method: "input" });
+  await h.tick();
+  const values = h.pi().sent.filter((f) => f && f.type === "extension_ui_response").map((f) => String(f.value));
+  assert.ok(values.includes(askOptionRow(q0.options[0])), "the chosen option is sent as offered: " + JSON.stringify(values));
+  assert.ok(!values.some((v) => v.includes(offered) && v.includes("[secret removed]")), "the offered label is never rewritten");
+  const other = values.find((v) => v !== askOptionRow(q0.options[0]) && v !== ASK_OTHER);
+  assert.ok(other && other.includes("[secret removed]"), "the Other text is stripped: " + JSON.stringify(values));
+  assert.ok(!other.includes(typed), "the typed secret never reaches the child: " + JSON.stringify(other));
+  await h.endTurn("ok");
+});
+
+test("a non-string answer value is stripped too", async () => {
+  const c = makeCanary();
+  const s = await session("array-answer-bot");
+  h.pi().emit({ type: "extension_ui_request", id: "ask-a1", method: "input", title: "Which password?", placeholder: "type it" });
+  await h.tick();
+  const r = await h.post(answerPath(s.sessionId), { requestId: "ask-a1", value: ["my password: " + c] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.removed, 1, "the count, never the value");
+  const last = JSON.stringify(h.pi().sent[h.pi().sent.length - 1]);
+  assert.ok(last.includes("[secret removed]"), last);
+  assert.ok(!last.includes(c), "a non-string free-text answer cannot skip the strip: " + last);
+  await h.endTurn("ok");
+  assert.deepEqual(await h.grepEverywhere(c), []);
+});
+
+// ---------------------------------------------------------------------------
 // i18n
 // ---------------------------------------------------------------------------
 

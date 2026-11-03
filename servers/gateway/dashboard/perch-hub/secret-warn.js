@@ -113,10 +113,12 @@ export function perchSecretWarnJs(lang = "en") {
       if(skip) continue;
       var at=rs,segs=m[0].split(SEC_DET.entropy.segmentSeparator);
       for(i=0;i<segs.length;i++){
-        /* "pass=<token>": the key and its separator are inside the run; the key's name survives. */
+        /* "pass=<token>": the key and its separator are inside the run; the key's name survives.
+           N3: the whole segment is tested too — a 22-character value behind "key=" is short of
+           the length rule on its own, while the segment has a token's shape. */
         var seg=segs[i], val=seg, st=at, km=kp.exec(seg);
         if(km){ val=seg.slice(km[0].length); st=at+km[0].length; }
-        if(secLooksRandom(val)) hits.push({start:st,end:st+val.length});
+        if(secLooksRandom(val)||secLooksRandom(seg)) hits.push({start:st,end:st+val.length});
         at+=seg.length+1;
       }
     }

@@ -435,6 +435,40 @@ test("L6: the open-card GET returning null while the card is shown renders it as
   assert.equal(findByClass(hub.els["perch-secret"], "secret-input"), null, "and offers no field");
 });
 
+test("N4: an open frame that arrives before a null GET answer keeps the card", async () => {
+  // The GET is sent while NO card is on screen (a fresh load). The live stream opens a card while
+  // that answer is still in flight, and the answer is then the gateway's null: a "no open
+  // request" measured BEFORE the frame existed says nothing about the card the frame brought.
+  const id = "e".repeat(32);
+  let release = null;
+  const held = new Promise((r) => { release = r; });
+  let heldOnce = false;
+  const hub = await mountWith((method, path) => {
+    if (path.includes("/secret")) {
+      if (method === "GET" && !heldOnce) { heldOnce = true; return held.then(() => makeResponse(200, null)); }
+      return makeResponse(200, null);
+    }
+    return stdFetch()(method, path);
+  });
+  await openChatSession(hub);
+  await tick();
+  const asked = hub.fetchCalls.find((x) => x.method === "GET" && x.path.includes("/secret"));
+  assert.ok(asked, "the on-load GET went out with no card on screen");
+  assert.equal(findByClass(hub.els["perch-secret"], "secret-card"), null, "and nothing was on screen yet");
+
+  const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  es._serverFrame("secret_request", { id, label: "Late site", state: "open" });
+  await tick();
+  assert.ok(findByClass(hub.els["perch-secret"], "secret-enter"), "the frame drew the open card");
+
+  release();
+  await tick();
+  await tick();
+  assert.equal(findByClass(hub.els["perch-secret"], "secret-result"), null,
+    "the older null answer does not mark the newer card gone");
+  assert.ok(findByClass(hub.els["perch-secret"], "secret-enter"), "the card is still open and typeable");
+});
+
 test("M3: a lost connection shows couldn't confirm, and a later done frame wins", async () => {
   const id = "b".repeat(32);
   const hub = await mountWith((method, path) => {
