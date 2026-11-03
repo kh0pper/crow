@@ -59,7 +59,7 @@ function summaryOf(over = {}) {
       },
       {
         key: "message:3", kind: "message", title: "Second user", project: null,
-        href: "/dashboard/messages#peer-3", nonce: "n5", actions: [],
+        href: "/dashboard/messages?open=3", nonce: "n5", actions: [],
       },
     ],
     ...over,
@@ -105,7 +105,7 @@ test("a plan row (and a message row) has no button and links to its item", () =>
   assert.match(plan, /href="\/dashboard\/board\?card=9"/, "the card link is the way in");
   const msg = row(html, "message:3");
   assert.deepEqual(actIds(msg), [], "a message has nothing to answer in place");
-  assert.match(msg, /href="\/dashboard\/messages#peer-3"/);
+  assert.match(msg, /href="\/dashboard\/messages\?open=3"/);
 });
 
 test("the empty state says All clear and lists what the bots are working on", () => {
@@ -201,7 +201,7 @@ test("the page draws What needs me first, above Your morning, from the real aggr
   assert.match(widget, /1 waiting/);
   assert.match(widget, /Unread message/, "the message row says what it is");
   assert.match(widget, /Second user/, "the thread's contact is the title");
-  assert.match(widget, new RegExp('href="/dashboard/messages#peer-' + CONTACT_ID + '"'));
+  assert.match(widget, new RegExp('href="/dashboard/messages\\?open=' + CONTACT_ID + '"'));
   assert.ok(!widget.includes("data-fy-needs-act"), "a message has no inline action");
   assert.match(widget, /href="\/dashboard\/bot-board"/, "the full list is one tap away");
 });
@@ -312,7 +312,7 @@ test("a 409 re-reads the summary and draws that instead of retrying the action",
         state: "ok", headline: "1 waiting",
         items: [{
           key: "card:8:result:12", kind: "message", title: "Something else", project: null,
-          href: "/dashboard/messages#peer-4", nonce: "zzz", actions: [],
+          href: "/dashboard/messages?open=4", nonce: "zzz", actions: [],
         }],
         doing: [], lock: { count: 1, label: "1 waiting" },
       },

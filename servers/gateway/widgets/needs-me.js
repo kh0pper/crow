@@ -240,7 +240,7 @@ async function messageItems(db, lang) {
       kind: "message",
       title: oneLine(contactName(r, { fallback: r.crow_id ? String(r.crow_id) : String(contactId) })) || t("messages.pageTitle", lang),
       project: null,
-      href: `/dashboard/messages#peer-${contactId}`,
+      href: `/dashboard/messages?open=${contactId}`, // the messages page opens a thread from ?open= (messages/client.js)
       nonce: itemNonce({ kind: "message", id: contactId, status: "received", updated_at: r.created_at, version: Number(r.message_id) }),
       actions: [],
     };
