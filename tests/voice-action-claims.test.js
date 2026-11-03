@@ -272,6 +272,31 @@ test("claimsAction: a first-person stop is a held claim; a thing that stopped on
   ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
 });
 
+test("claimsAction: a stop promised, in progress or as a state is held too; \"stop by\" is not a stop (PR 6 follow-up)", () => {
+  const agents = ["Writer"];
+  for (const t of [
+    "I'll stop Writer.", "I will stop it.", "I'm stopping Writer now.", "I am stopping it.",
+    "Writer has been stopped.", "It has been halted.",
+    "Lo voy a parar.", "Lo estoy parando.", "Estoy deteniendo la tarea.",
+  ]) assert.equal(claimsAction(t, { agents }), true, t);
+  // "stop by" is a visit, not a stop.
+  for (const t of ["I stopped by the store.", "I'll stop by later.", "I stopped by to check."]) assert.equal(claimsAction(t, { agents }), false, t);
+  // The plain done forms are still held.
+  for (const t of ["I stopped Writer.", "I stopped it."]) assert.equal(claimsAction(t, { agents }), true, t);
+});
+
+test("claimsAction: a Spanish yes/no question about the hand-off asks, it does not claim (PR 6 follow-up)", () => {
+  for (const t of ["¿Está en ello?", "¿ya está con ello?", "¿Ya está en ello?"]) {
+    assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+    assert.equal(claimsAction(t), false, `no agents: ${t}`);
+  }
+  // The statement (no question marks) is still held.
+  for (const t of ["Ya está con ello.", "Writer está en ello."]) assert.equal(claimsAction(t, { agents: ["Writer"] }), true, t);
+  // Read sentence by sentence: the question is released, the statement after it is still held.
+  assert.equal(claimsAction("¿Está en ello? Sí, ya está con ello.", { agents: ["Writer"] }), true);
+  assert.equal(claimsAction("¿Está en ello? Writer no está en ello.", { agents: ["Writer"] }), false);
+});
+
 test("claimsAction: the Spanish hand-off claims, with an agent subject where the sentence has one (PR 6 carry)", () => {
   const agents = ["Writer", "Helper"];
   for (const t of [
