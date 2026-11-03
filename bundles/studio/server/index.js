@@ -12,7 +12,8 @@
  * `~/.crow/bundles/studio`, so `servers/…` never resolves by itself):
  *
  *   - the database client, for the renderer's storage row and its ACL check;
- *   - the S3 client, for the render's upload and download URL;
+ *   - the S3 client, for the render's upload and download URL, and for reading
+ *     back the recorded takes a render plays;
  *   - the project ACL, so a render is refused where writing is refused;
  *   - the research server's actor helpers, which say whether this call comes
  *     from a Crow bot — the MCP tool layer still forces the author to an agent.
@@ -70,6 +71,11 @@ const renderStorage = storage || {
     throw new Error(STORAGE_UNAVAILABLE);
   },
   getPresignedUrl: async () => {
+    throw new Error(STORAGE_UNAVAILABLE);
+  },
+  // A render that plays recorded takes reads them back through this; without
+  // storage there is nothing to read, and the refusal says so once.
+  getObject: async () => {
     throw new Error(STORAGE_UNAVAILABLE);
   },
   deleteObject: async () => {

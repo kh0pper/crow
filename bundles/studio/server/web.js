@@ -38,7 +38,22 @@
  *
  * Request bodies are capped at 1 MB by the gateway: its global JSON parser runs
  * before this router, so the routes here read `req.body` and add no parser of
- * their own.
+ * their own — except one. A take chunk is 1 MiB of raw 24-bit PCM, which the
+ * gateway's JSON parser leaves alone (`application/octet-stream` is not JSON),
+ * so the chunk route runs the byte parser the gateway injects as `rawBody`.
+ *
+ * Take uploads are the one way a recording reaches storage. The panel PUTs a
+ * take whose id it chose in 1 MiB pieces (`PUT /api/studio/takes/:take_id`,
+ * then `PUT .../chunks/:index` with raw bytes), asks
+ * `GET /api/studio/takes/:take_id` what has arrived after a reload, and says
+ * `POST .../finish` once the last piece is in. The service behind those routes
+ * (`takes-upload.js`: staging on disk, the streamed WAV, the internal
+ * `take.add`) arrives injected as `takeUploads`; when it is null — an instance
+ * that cannot stage takes — every take route answers 503 with one fixed
+ * sentence. What it produces is played back through
+ * `GET /api/studio/songs/:id/takes/:take_id/audio`, which streams the WAV from
+ * object storage (the injected `takeStorage`) and only from the exact key
+ * `finish` wrote under the song's own `studio/<song_id>/takes/`.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -74,6 +89,31 @@ const MAX_SOCKETS_PER_TOKEN = 20;
 
 /** What a caller is told when Studio itself broke; the real error goes to the log. */
 const INTERNAL_ERROR_TEXT = "Studio hit an internal error.";
+
+/** Where the take upload routes live. */
+const TAKES_BASE = "/api/studio/takes";
+
+/**
+ * The largest take chunk the routes accept: 1 MiB plus one stereo 24-bit
+ * frame, because the client cuts its chunks on frame boundaries and a frame is
+ * three or six bytes wide (the same margin `takes-upload.js` allows itself).
+ */
+const CHUNK_LIMIT_BYTES = 1048576 + 6;
+
+/** What a client whose chunk is over the limit is told. */
+const CHUNK_TOO_LARGE_TEXT = "A take chunk can be at most 1 MiB.";
+
+/** What every take route answers when this instance cannot stage takes. */
+const TAKES_UNAVAILABLE_TEXT = "Studio cannot take recordings on this instance.";
+
+/** What the audio route answers when this instance has no object storage. */
+const STORAGE_UNAVAILABLE_TEXT = "Crow storage is not available on this instance.";
+
+/**
+ * A take's WAV never changes under its key — the key is fixed per take id — so
+ * a browser may keep it for as long as it likes, and only in private caches.
+ */
+const TAKE_CACHE_CONTROL = "private, max-age=31536000, immutable";
 
 /**
  * The prefix `agentAuthor` puts on a bot's author id. The MCP layer resolves a
@@ -308,6 +348,41 @@ function statusForCode(code) {
   return STATUS_BY_CODE[code] ?? 400;
 }
 
+/**
+ * The one answer a take its song does not hold gets.
+ *
+ * The same body is used for a take of another song and for a take whose
+ * storage key names anything but this song's own takes directory, so a caller
+ * cannot tell which of the two it met.
+ * @param {string} takeId
+ * @returns {{error: string}}
+ */
+function noSuchTake(takeId) {
+  return { error: `There is no take ${takeId} in this song.` };
+}
+
+/**
+ * Answer with an error a take route threw.
+ *
+ * `takes-upload.js` writes its refusals for the caller and marks them with
+ * `error.status` (400, 403, 404, 409, 413, 503, 507), so that status is used
+ * as-is. Anything without one is a bug: its message could name a file or a
+ * query, so it is logged here and replaced by a fixed sentence.
+ * @param {object} res - the Express response
+ * @param {unknown} err
+ * @returns {void}
+ */
+function sendTakeError(res, err) {
+  if (res.headersSent) return;
+  const status = Number(err?.status);
+  if (Number.isInteger(status) && status >= 400 && status <= 599) {
+    res.status(status).json({ error: String(err?.message || INTERNAL_ERROR_TEXT) });
+    return;
+  }
+  console.warn("[studio] take upload:", err);
+  res.status(500).json({ error: "Studio could not save that take." });
+}
+
 /** Answer with a hub result: 200 when it applied, the code's status when not. */
 function sendResult(res, result) {
   const status = result?.ok === true ? 200 : statusForCode(result?.code);
@@ -413,6 +488,23 @@ function refuse(socket, status, text) {
  *   row whose `project_id` is that project, by display name. The panel loader
  *   reads it on the gateway's own client; a caller that injects nothing has no
  *   project bot, so the ask box stays disabled.
+ * @param {{begin: Function, putChunk: Function, status: Function,
+ *          finish: Function, sweepStale: Function}|null} [options.takeUploads]
+ *   the take upload service (`createTakeUploads`). Null means this instance
+ *   cannot stage recordings, and every take route then answers 503.
+ * @param {{getObject: Function, defaultBucket: Function,
+ *          storagePrefixFor?: Function}|null} [options.takeStorage]
+ *   object storage for the finished take: `getObject(key, {bucket})` resolves
+ *   to `{stream, stat}`, `defaultBucket()` names the bucket, and the optional
+ *   `storagePrefixFor(projectId)` answers the project's
+ *   `project_spaces.storage_prefix` (this module owns no database, so the
+ *   adapter answers it; without it only keys under the empty prefix match).
+ *   Null means the audio route answers 503.
+ * @param {((limit: number) => Function)|null} [options.rawBody] a factory for
+ *   an `express.raw`-shaped parser, used for the take chunk body only (the
+ *   gateway passes `(limit) => express.raw({type: () => true, limit,
+ *   inflate: false})`). Without it the chunk route answers 503, because raw
+ *   bytes are the one body this router has to parse itself.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -427,6 +519,9 @@ export function createStudioWeb({
   bundleDir,
   botScope = null,
   projectBotOf = null,
+  takeUploads = null,
+  takeStorage = null,
+  rawBody = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -898,6 +993,50 @@ export function createStudioWeb({
     return next();
   }
 
+  /**
+   * Answer one take route, or refuse it when this instance cannot stage takes.
+   *
+   * The refusal comes before the body is read and before the hub is asked
+   * anything, so a gateway without the upload service never touches a take.
+   * @param {(req: object, res: object) => Promise<void>} fn
+   * @returns {Function} an Express handler
+   */
+  function takesHandled(fn) {
+    return (req, res) => {
+      if (!takeUploads) {
+        res.status(503).json({ error: TAKES_UNAVAILABLE_TEXT });
+        return;
+      }
+      Promise.resolve()
+        .then(() => fn(req, res))
+        .catch((err) => sendTakeError(res, err));
+    };
+  }
+
+  /**
+   * The storage key one take may be played from, exactly as `finish` wrote it:
+   * `<prefix>studio/<song_id>/takes/<take_id>.wav`.
+   *
+   * The prefix is the song project's `project_spaces.storage_prefix`, which
+   * this module cannot read (it owns no database), so the injected storage
+   * adapter answers it. Without that answer the prefix is empty, and a take
+   * whose key names any prefix at all is then refused rather than fetched —
+   * the route never streams an object it cannot place inside the song's own
+   * takes directory.
+   *
+   * @param {number|null} projectId the project the song lives in
+   * @param {string} songId
+   * @param {string} takeId
+   * @returns {Promise<string>}
+   */
+  async function takeKeyOf(projectId, songId, takeId) {
+    const prefix =
+      typeof takeStorage?.storagePrefixFor === "function"
+        ? String((await takeStorage.storagePrefixFor(projectId)) ?? "")
+        : "";
+    return `${prefix}studio/${songId}/takes/${takeId}.wav`;
+  }
+
   /** @returns {{project_ids?: number[]}} the filter a `project_id` query asks for. */
   function songFilter(query) {
     const projectId = Number(query?.project_id);
@@ -970,6 +1109,10 @@ export function createStudioWeb({
   /**
    * Build the Express router for the dashboard's own routes (behind
    * `dashboardAuth`) and the agent routes (behind `agentGuard`).
+   *
+   * The dashboard's routes include the take upload and take playback routes;
+   * they are the only ones behind `dashboardAuth` that parse a body themselves
+   * (the chunk's raw bytes, through `rawBody`).
    * @param {Function} dashboardAuth - the gateway's dashboard session middleware
    * @returns {object} an Express Router
    */
@@ -1093,6 +1236,131 @@ export function createStudioWeb({
       // catalogue has been built, so it is read after the await, never
       // destructured before it.
       res.json({ generators: [...catalogueModule.GENERATOR_TYPES], modules: catalogue.modules });
+    }));
+
+    // ---- takes -----------------------------------------------------------
+    //
+    // A recording arrives as a client-chosen id and 1 MiB pieces, because the
+    // browser that made it may be offline, may lose the network mid-take, or
+    // may have its tab closed (spec §5.7, Review Focus 1). Everything here is
+    // the dashboard's own: the author of a take is the person at the page, and
+    // no route lets a caller name a storage key — `finish` writes it.
+    //
+    // `rawBody` is the gateway's byte parser (express.raw), made for this one
+    // route: the gateway's global JSON parser skips a chunk's
+    // `application/octet-stream`, so the bytes are read here. Its errors are
+    // turned into JSON the way the Perch dictation route does, because the
+    // gateway has no error middleware and a bare next(err) would answer HTML.
+    const chunkBody = typeof rawBody === "function" ? rawBody(CHUNK_LIMIT_BYTES) : null;
+
+    /** Read one chunk's raw bytes, or refuse it in JSON. */
+    function parseChunkBody(req, res, next) {
+      if (!takeUploads || !chunkBody) return res.status(503).json({ error: TAKES_UNAVAILABLE_TEXT });
+      return chunkBody(req, res, (err) => {
+        if (!err) return next();
+        if (res.headersSent || res.destroyed) return undefined;
+        if (err.type === "entity.too.large") {
+          return res.status(413).json({ error: CHUNK_TOO_LARGE_TEXT });
+        }
+        return res.status(400).json({ error: "That chunk could not be read." });
+      });
+    }
+
+    // Begin (or re-begin) one take's upload. Idempotent for the same details,
+    // so a client that lost the answer can simply ask again.
+    r.put(`${TAKES_BASE}/:take_id`, dashboardAuth, requireCsrf, takesHandled(async (req, res) => {
+      const body = req.body ?? {};
+      const begun = await takeUploads.begin(String(req.params.take_id ?? ""), {
+        song_id: body.song_id,
+        project_id: body.project_id,
+        clip_id: body.clip_id,
+        rate: body.rate,
+        channels: body.channels,
+        offset_frames: body.offset_frames,
+        compensated: body.compensated,
+        bpm: body.bpm,
+        author: HUMAN_AUTHOR,
+      });
+      res.json({ chunk_bytes: begun.chunk_bytes });
+    }));
+
+    // One chunk of a take, as raw 24-bit interleaved PCM.
+    r.put(`${TAKES_BASE}/:take_id/chunks/:index`, dashboardAuth, requireCsrf, parseChunkBody, takesHandled(async (req, res) => {
+      const bytes = Buffer.isBuffer(req.body) ? req.body : new Uint8Array(0);
+      const staged = await takeUploads.putChunk(
+        String(req.params.take_id ?? ""),
+        Number(req.params.index),
+        bytes,
+      );
+      res.json({ sha256: staged.sha256 });
+    }));
+
+    // What has arrived, so a panel that was reloaded resumes where it stopped.
+    r.get(`${TAKES_BASE}/:take_id`, dashboardAuth, takesHandled(async (req, res) => {
+      res.json(await takeUploads.status(String(req.params.take_id ?? "")));
+    }));
+
+    // The last piece is in: stream the WAV into storage and put the take in the
+    // song. A retried finish returns the same take without uploading again.
+    r.post(`${TAKES_BASE}/:take_id/finish`, dashboardAuth, requireCsrf, takesHandled(async (req, res) => {
+      const finished = await takeUploads.finish(String(req.params.take_id ?? ""), {
+        chunk_hashes: req.body?.chunk_hashes,
+      });
+      res.json({ take: finished.take });
+    }));
+
+    // One take's recorded audio, for the panel to play and for a render to
+    // fetch. The read check is the one every other read route makes: the hub's
+    // own `openSong`, which throws for an unknown song and for a project the
+    // caller may not see (its AclError becomes a 403 in `handled`).
+    r.get("/api/studio/songs/:id/takes/:take_id/audio", dashboardAuth, handled(async (req, res) => {
+      const songId = String(req.params.id ?? "");
+      const takeId = String(req.params.take_id ?? "");
+      if (!takeStorage || typeof takeStorage.getObject !== "function") {
+        return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      }
+
+      const songs = await hub.listSongs({});
+      const row = Array.isArray(songs) ? songs.find((song) => song && song.id === songId) : null;
+      if (!row) return res.status(404).json(noSuchTake(takeId));
+
+      const opened = await hub.openSong(songId);
+      const takes = opened?.snapshot?.takes;
+      const take = takes && typeof takes === "object" ? takes[takeId] : null;
+      if (!take || typeof take.storage_key !== "string") {
+        return res.status(404).json(noSuchTake(takeId));
+      }
+
+      // Only the key `finish` writes may be streamed: one under this song's own
+      // `studio/<song_id>/takes/`, named for this exact take. A key anywhere
+      // else — another song's, another project's, or one with a `..` in it — is
+      // a take this song does not hold.
+      const expected = await takeKeyOf(Number(row.project_id), songId, takeId);
+      if (take.storage_key !== expected) return res.status(404).json(noSuchTake(takeId));
+
+      const bucket = typeof takeStorage.defaultBucket === "function" ? takeStorage.defaultBucket() : undefined;
+      const { stream, stat } = await takeStorage.getObject(take.storage_key, { bucket });
+      // Headers go out only once there is a stream to fill them: a half-sent
+      // WAV must never look complete, and a response with its headers down and
+      // no body would hang the page.
+      if (!stream || typeof stream.pipe !== "function") {
+        return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      }
+      const size = Number(stat?.size ?? stat?.metaData?.["content-length"]);
+      res.setHeader("Content-Type", "audio/wav");
+      res.setHeader("Cache-Control", TAKE_CACHE_CONTROL);
+      if (Number.isFinite(size) && size >= 0) res.setHeader("Content-Length", String(size));
+      stream.on("error", (err) => {
+        // The headers are out by now, so the only honest answer is to cut the
+        // response: a half-sent WAV must not look complete.
+        if (!res.headersSent) return sendError(res, err);
+        res.destroy();
+        return undefined;
+      });
+      res.on("close", () => {
+        if (typeof stream.destroy === "function") stream.destroy();
+      });
+      return stream.pipe(res);
     }));
 
     // ---- the Studio MCP process -----------------------------------------
