@@ -6,6 +6,15 @@
  *   GET  /dashboard/widgets-api/needs-me       the NeedsMeSummary JSON (widgets/needs-me.js)
  *   POST /dashboard/widgets-api/needs-me/act   { key, action, nonce } → { ok: true, summary }
  *   POST /dashboard/widgets-api/push           { on: boolean } → { ok: true, on }
+ *   GET  /dashboard/widgets-api/bird           "your bird" (widgets phase 3): { mood, steps, steps_goal, walked, svg }
+ *
+ * YOUR BIRD: the phone has no SVG decoder, so the gateway hands it the drawing itself — the SAME
+ * string the profile picture is made of (servers/sharing/profile-avatar.js renderBirdSvg, over
+ * readPortrait: the active bird, its current decayed mood, its outfit and the walked-today badge),
+ * plus today's steps read the way For You's Today card reads them (for-you/today.js rambleState: the
+ * installed bundle's pet.petState / steps.stepsState, never an HTTP self-call). No Ramble installed
+ * is 404 { code: "no_ramble" }; an installed Ramble with no hatched bird is 404 { code: "no_bird" } —
+ * the app tells those two from a sign-in and falls back to the app icon.
  *
  * THE PUSH SWITCH: the silent, content-free push (widgets/changed.js) only goes out while the
  * LOCAL-scope setting widgets_push is "on", and only the app that draws the widget flips it — the
@@ -45,6 +54,9 @@ import { activeProjectWhere } from "../../shared/shell-items.js";
 import { getHandoffCore } from "../voice/handoff.js";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { parseCookies } from "../dashboard/auth.js";
+import { readPortrait, renderBirdSvg } from "../../sharing/profile-avatar.js";
+import { rambleState } from "../for-you/today.js";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
 import { findNeedsMeItem, loadNeedsMe } from "../widgets/needs-me.js";
@@ -57,6 +69,7 @@ const P = "/dashboard/widgets-api";
 const SUMMARY = `${P}/needs-me`;
 const ACT = `${P}/needs-me/act`;
 const PUSH = `${P}/push`;
+const BIRD = `${P}/bird`;
 
 /** The local-scope setting the Not-now snoozes live in, and how long one lasts. */
 export const WIDGETS_SNOOZED_KEY = "widgets_snoozed";
@@ -64,6 +77,9 @@ export const SNOOZE_MS = 4 * 60 * 60 * 1000;
 
 /** Every dashboard-originated write is attributed to this actor (provenance; the brief-pinned shape). */
 const DASHBOARD_ACTOR = Object.freeze({ kind: "human", id: null, jobId: null });
+
+/** The three moods the engine draws (bird-svg.cjs MOODS): anything else is the portrait's own. */
+const BIRD_MOODS = new Set(["happy", "tired", "alarmed"]);
 
 // Item keys (widgets/needs-me.js owns their shape): the id spaces the services need back.
 const CARD_KEY = /^card:(\d+):(?:decision|plan:(\d+)|result:(\d+))$/;
@@ -335,6 +351,43 @@ export function widgetsRouter(dashboardAuth, { core = getHandoffCore(), openDb =
     } catch (err) {
       console.warn(`[widgets] push: ${err && err.message}`);
       return jsonError(res, 500, "The action failed");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // "Your bird" (widgets phase 3): the drawing, the mood and today's steps, for the owner's own
+  // phone. Only paths, no HTML and no data URI — the app renders the SVG itself.
+  router.get(BIRD, async (req, res) => {
+    const db = openDb();
+    try {
+      if (!(await isLocalPasswordSessionOn(db, req))) return jsonError(res, 404, "Not found");
+      const at = Number(now());
+      const { installed, state } = await rambleState(db, { crowHome: resolveCrowHome(), now: at });
+      if (!installed) return jsonError(res, 404, "Ramble is not installed", { code: "no_ramble" });
+      // The same portrait the profile picture is drawn from: bird, decayed mood, outfit, walk badge.
+      const bird = await readPortrait(db, { now: at });
+      if (!bird) return jsonError(res, 404, "There is no bird yet", { code: "no_bird" });
+      // Ramble's own read is the same decay-on-read the portrait makes, so it names the same mood; when
+      // it does, the DRAWING takes it too — the word and the face never disagree.
+      const reported = state && typeof state.mood === "string" ? state.mood.trim() : "";
+      const mood = BIRD_MOODS.has(reported) ? reported : bird.mood;
+
+      const svg = renderBirdSvg({ ...bird, mood });
+      if (!svg) return jsonError(res, 404, "There is no bird yet", { code: "no_bird" });
+
+      const steps = state && state.steps ? Number(state.steps.today) : 0;
+      const goal = state && state.steps ? Number(state.steps.goal) : 0;
+      return res.json({
+        mood: String(mood || "happy"),
+        steps: Number.isFinite(steps) ? steps : 0,
+        steps_goal: Number.isFinite(goal) ? goal : 0,
+        walked: bird.walked === true,
+        svg,
+      });
+    } catch (err) {
+      console.warn(`[widgets] bird: ${err && err.message}`);
+      return jsonError(res, 500, "The bird could not be drawn");
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }

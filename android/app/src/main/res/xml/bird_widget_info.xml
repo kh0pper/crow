@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    "Your bird" (widgets phase 3): one cell (so it fits anywhere) up to two cells wide, where there is
+    room for the mood and the step count beside the bird. Cell sizes follow the launcher formula
+    (70dp * n - 30dp): 1 cell = 40dp, 2 cells = 110dp.
+
+    updatePeriodMillis is 0 on purpose: Android's own periodic update is at most every 30 minutes and
+    wakes the device for it. The refresh is BirdRefreshWorker's unique periodic work (30 min), plus the
+    gateway's silent "crow-widgets" push and onUpdate.
+
+    widgetCategory is home_screen only, never keyguard — the SAME rule as "What needs me": a widget that
+    can sit on the lock screen has to reason about what a locked phone may show, and this one shows a
+    step count. The provider still drops the step count for any host that places it there anyway (see
+    BirdWidgetProvider.build, which reuses NeedsMeWidgetProvider.drawsOnKeyguard).
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:initialLayout="@layout/widget_bird"
+    android:minWidth="40dp"
+    android:minHeight="40dp"
+    android:minResizeWidth="40dp"
+    android:minResizeHeight="40dp"
+    android:maxResizeWidth="110dp"
+    android:maxResizeHeight="40dp"
+    android:resizeMode="horizontal"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

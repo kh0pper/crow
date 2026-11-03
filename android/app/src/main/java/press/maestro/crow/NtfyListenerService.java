@@ -433,7 +433,9 @@ public class NtfyListenerService extends Service {
                     }
                 }
                 if (widgetsChanged) {
+                    // Both widgets re-read: the ping says something may have changed, not what.
                     NeedsMeWidgetProvider.refreshAll(this);
+                    BirdWidgetProvider.refreshAll(this);
                     prefs.edit().putString(KEY_NTFY_LAST_ID, id).apply();
                     return;
                 }

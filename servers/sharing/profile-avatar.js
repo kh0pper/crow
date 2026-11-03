@@ -169,8 +169,13 @@ export async function readPortrait(db, { now = Date.now() } = {}) {
   return { ...bird, mood, outfit, walked };
 }
 
-/** Pure: the portrait (mood default "happy", outfit default none) as an SVG data URI, validated; null on any engine complaint. */
-export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
+/**
+ * Pure: the portrait (mood default "happy", outfit default none) as the raw SVG string the engine
+ * draws, walk badge included; null on any engine complaint. The ONE place the bird is drawn: the
+ * profile picture wraps this string into a data URI (renderBirdAvatar below) and the widgets API
+ * (routes/widgets.js, GET /dashboard/widgets-api/bird) hands the same string to the phone.
+ */
+export function renderBirdSvg(bird, engine = loadBirdEngine()) {
   if (!bird || !engine) return null;
   try {
     let genome = engine.rollGenome(bird.seed, bird.species);
@@ -180,8 +185,16 @@ export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
     const mood = MOODS.has(bird.mood) ? bird.mood : "happy";
     // An older installed engine has no badge: it draws the plain bird.
     const badge = bird.walked === true && typeof engine.drawWalkBadge === "function" ? engine.drawWalkBadge() : "";
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">'
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">'
       + engine.drawBird(genome, mood) + badge + "</svg>";
+  } catch { return null; }
+}
+
+/** Pure: renderBirdSvg as a validated SVG data URI (the profile picture); null on any engine complaint. */
+export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
+  const svg = renderBirdSvg(bird, engine);
+  if (!svg) return null;
+  try {
     return validateAvatar("data:image/svg+xml;base64," + Buffer.from(svg, "utf8").toString("base64"));
   } catch { return null; }
 }

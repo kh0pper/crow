@@ -1,9 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spanish: only the "What needs me" widget's strings. Everything else falls back to the default
+<!-- Spanish: the two home-screen widgets' strings. Everything else falls back to the default
      resources, so this file must not grow a second copy of strings.xml. -->
 <resources>
     <string name="widget_needs_me_label">Qué me necesita</string>
     <string name="widget_needs_me_sign_in">Abre Crow para iniciar sesión</string>
     <string name="widget_needs_me_error">No se pudo cargar lo que te necesita</string>
     <string name="widget_needs_me_see_all">Ver todo</string>
+
+    <string name="widget_bird_label">Tu pájaro</string>
+    <string name="widget_bird_sign_in">Abre Crow para iniciar sesión</string>
+    <string name="widget_bird_error">No se pudo cargar tu pájaro</string>
+    <string name="widget_bird_none">Aún no hay pájaro: abre Ramble</string>
+    <string name="widget_bird_steps">%1$d pasos</string>
+    <string name="widget_bird_mood_happy">Contento</string>
+    <string name="widget_bird_mood_tired">Cansado</string>
+    <string name="widget_bird_mood_alarmed">Alarmado</string>
+    <string name="widget_bird_shortcut_short">Tu pájaro</string>
+    <string name="widget_bird_shortcut_long">Abre tu pájaro en Ramble</string>
+    <string name="widget_bird_pin">Añade tu pájaro a la pantalla de inicio</string>
+    <string name="widget_bird_pin_hint">Fija tu pájaro como atajo del launcher, dibujado con el pájaro que tienes ahora.</string>
+    <string name="widget_bird_pin_unsupported">Este launcher no admite atajos fijados.</string>
 </resources>
