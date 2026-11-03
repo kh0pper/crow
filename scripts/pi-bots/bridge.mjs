@@ -1159,11 +1159,12 @@ export class PiRpc {
       t += mm.content.filter((c) => c.type === "text").map((c) => c.text).join("");
     return t.trim();
   }
-  // Staged sends (spec §12.1): keep WHAT the call carried as well as its name. The draft recorder
-  // needs the draft id from the end event's result and the recipients/subject/body from the START
-  // event of the same toolCallId (a fallback when the provider read cannot be used). The extra keys
-  // are added only when the child actually emitted them, so a caller (or a test stub) that sends
-  // neither keeps the exact {tool, isError} shape this returned before.
+  // Staged sends (spec §12.1): keep WHAT the call carried as well as its name, for DRAFT tools only.
+  // The recorder needs the draft id from the end event's result and the recipients/subject/body from
+  // the START event of the same toolCallId (the fallback when the provider read cannot be used).
+  // Any other call keeps the bare {tool, isError} shape it always had: this list is reported as the
+  // turn's `toolCalls` (live-pi-driver-child writes it into its progress NDJSON, job_runner stores a
+  // count), so another tool's args and result must never ride along.
   toolCalls() {
     const argsById = new Map();
     for (const e of this.events) {
@@ -1171,6 +1172,7 @@ export class PiRpc {
     }
     return this.events.filter((e) => e.type === "tool_execution_end").map((e) => {
       const call = { tool: e.toolName, isError: !!e.isError };
+      if (!isDraftTool(e.toolName)) return call;
       const args = e.args !== undefined ? e.args : (e.toolCallId ? argsById.get(e.toolCallId) : undefined);
       if (args !== undefined) call.args = args;
       if (e.result !== undefined) call.result = e.result;
@@ -1687,6 +1689,8 @@ export async function handleInbound(opts) {
   const pi = new PiRpc(Object.assign({}, spawnPrep.piRpcOpts, {
     piSessionId: effectiveResume ? session.pi_session_id : null }));
   let result;
+  // Staged sends: this turn's draft calls, captured before close() and recorded after it.
+  let stagedCalls = null;
   // B1: captured on a successful turn so the post-turn skill review (fired AFTER
   // pi.close(), so the idle-only gate sees a clean slate) has the transcript.
   let postTurn = null;
@@ -1739,11 +1743,10 @@ export async function handleInbound(opts) {
       ? "(note: escalation requested but no escalation model is configured for this bot; ran on " + resolved.key + ")\n\n"
       : "";
     await sendReply(notice + text);
-    // Staged sends: AFTER the reply, so the correspondent never waits on a DB write. A job turn is
-    // skipped here — job_runner records it (with its own job_id/card_id).
-    if (!opts.job_id) {
-      await recordStagedDrafts({ calls, mcpConfig: world.mcpConfig, log, session, threadId: gateway_thread_id, botId: bot_id, cardId });
-    }
+    // Staged sends: recorded after close() (below), so the pi process and its concurrency slot are
+    // not held while the recorder re-reads drafts from Gmail. The calls were captured here. A job
+    // turn is skipped — job_runner records it (with its own job_id/card_id).
+    if (!opts.job_id) stagedCalls = calls;
     result = { action: cardId != null ? "executed" : "asked", cardId, cardStatus: newCardStatus,
       piSessionId, toolCalls: calls, replyPreview: text.slice(0, 120), stdoutClean: pi.badStdout === 0 };
     // M3b: audit every bot turn so the project timeline records what happened.
@@ -1766,6 +1769,15 @@ export async function handleInbound(opts) {
     });
     log("turn done: action=" + result.action + " card=" + cardId + " status=" + newCardStatus + " tools=" + calls.length + " clean=" + result.stdoutClean);
   } catch (e) {
+    // Staged sends: a turn that failed AFTER a draft tool ran (a prompt timeout, a reply that threw)
+    // still made that draft. Read the calls here, before close() and before the error reply — which
+    // is the very thing that just threw — so the row exists either way. A job turn is skipped;
+    // `toolCalls` below is what lets the job runner record it.
+    let failedCalls = [];
+    try { failedCalls = pi.toolCalls(); } catch { failedCalls = []; }
+    if (!opts.job_id) {
+      await recordStagedDrafts({ calls: failedCalls, mcpConfig: world.mcpConfig, log, session, threadId: gateway_thread_id, botId: bot_id, cardId });
+    }
     session.status = "error";
     session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
     upsertSession(session);
@@ -1773,7 +1785,7 @@ export async function handleInbound(opts) {
       ? "(note: escalation requested but no escalation model is configured for this bot; ran on " + resolved.key + ")\n\n"
       : "";
     await sendReply(notice + "(bridge error: " + e.message + ")");
-    result = { action: "error", error: e.message };
+    result = { action: "error", error: e.message, toolCalls: failedCalls };
     appendAuditBridge(projectId, {
       actor_type: "bot", actor_id: bot_id, action: "bot.error",
       target: cardId != null ? ("card:" + cardId) : ("thread:" + gateway_thread_id),
@@ -1781,6 +1793,11 @@ export async function handleInbound(opts) {
     });
   } finally {
     await pi.close();
+  }
+  // Staged sends (spec §12.1): a channel turn's drafts become rows once the child is gone — the
+  // tool calls are already captured, so the recorder's Gmail reads hold no pi slot. Never throws.
+  if (stagedCalls) {
+    await recordStagedDrafts({ calls: stagedCalls, mcpConfig: world.mcpConfig, log, session, threadId: gateway_thread_id, botId: bot_id, cardId });
   }
   // B1: post-turn self-learning review. Fire-and-forget — do NOT await (it must
   // never delay this turn's return or the next queued turn). It self-gates on

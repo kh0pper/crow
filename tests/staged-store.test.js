@@ -14,7 +14,7 @@ import {
   placeholderSource, decodeEncodedWords, stripSubjectTags,
 } from "../servers/gateway/staged/canonical.js";
 import {
-  createStaged, getStaged, listStaged, claimSend, settle, replaceWith, discard,
+  createStaged, getStaged, listStaged, findStagedByDraftId, claimSend, settle, replaceWith, discard,
   setNewRecipients, reconcileStale,
 } from "../servers/gateway/staged/store.js";
 
@@ -401,4 +401,23 @@ test("listStaged scopes by session, card and state", async () => {
   assert.equal(await discard(db, b), true);
   assert.deepEqual((await listStaged(db, { cardId: 9 })).map((r) => r.id), [c], "a discarded row is not open");
   await assert.rejects(() => listStaged(db, { states: ["nonsense"] }), /unknown state/);
+});
+
+test("findStagedByDraftId matches the draft id plus the credential, in every state", async () => {
+  const db = freshDb();
+  const primary = await createStaged(db, base({ providerDraftId: "d-1" }));
+  const open = await createStaged(db, base({ providerDraftId: "d-2", credRef: null }));
+
+  assert.equal((await findStagedByDraftId(db, { providerDraftId: "d-1", credRef: { server: "google-workspace", role: "primary" } })).id, primary);
+  assert.equal(await findStagedByDraftId(db, { providerDraftId: "d-1", credRef: { server: "google-workspace", role: "personal" } }), null,
+    "another role is another draft");
+  assert.equal((await findStagedByDraftId(db, { providerDraftId: "d-2", credRef: null })).id, open,
+    "a NULL cred_ref matches NULL (Open in Gmail)");
+  assert.equal(await findStagedByDraftId(db, { providerDraftId: "nope", credRef: null }), null);
+  assert.equal(await findStagedByDraftId(db, { providerDraftId: "", credRef: null }), null);
+
+  // A row that left the open states still counts: a replay must not resurrect a sent draft.
+  await claimSend(db, primary, (await getStaged(db, primary)).contentHash);
+  await settle(db, primary, { state: "sent", providerMessageId: "m-1" });
+  assert.equal((await findStagedByDraftId(db, { providerDraftId: "d-1", credRef: { server: "google-workspace", role: "primary" } })).id, primary);
 });

@@ -49,6 +49,7 @@ process.env.PIBOT_WARM_GATEWAY_URL = "http://127.0.0.1:1";   // refused instantl
 process.env.PIBOT_WARM_TIMEOUT_MS = "1500";
 process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS = "8000";
 process.env.PIBOT_TURN_TIMEOUT_MS = "5000";
+process.env.PIBOT_JOB_TIMEOUT_MS = "5000";
 process.env.PI_MODELS_JSON = join(ROOT, "models.json");
 
 const CROW_HOME = process.env.CROW_HOME;
@@ -85,7 +86,7 @@ const DRAFT_MISSING_TOKEN = "mcp__google-workspace-gone__gmail_create_draft";
 
 /* ------------------------------------------------------------- module seams */
 
-let recordDraft, betterSqliteDb, getStaged, handleInbound, runJob;
+let recordDraft, recordDrafts, betterSqliteDb, getStaged, handleInbound, runJob;
 
 /* --------------------------------------------------------------- helpers */
 
@@ -137,19 +138,29 @@ before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
     env: { ...process.env, CROW_DATA_DIR: ROOT }, stdio: "pipe", cwd: REPO,
   });
+  // The stub child's own model registry: a key pi's models.json declares needs no
+  // `pi --list-models` probe (the goal-job leg runs checkPiModel).
+  writeFileSync(process.env.PI_MODELS_JSON, JSON.stringify({
+    providers: { stub: { models: [{ id: "m1" }] } },
+  }));
 
   // The one bot the bridge leg runs a turn for. No project, no MCP servers: the world carries no
   // google block, so the recorder names no credential (and never calls Gmail).
+  // `credstagebot` is the opposite case: its world DOES carry the google-workspace block, which is
+  // what proves a bridge turn can name a credential when the operator config has one.
   const c = db();
+  const defOf = (sessionDir, crowMcp) => JSON.stringify({
+    system_prompt: "You are the staged-send test bot.",
+    models: { default: "stub/m1" },
+    tools: { pi_builtin: ["read"], crow_mcp: crowMcp },
+    permission_policy: { bash: "deny", write_paths: [], multi_agent: false },
+    session_dir: sessionDir,
+  });
   c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)").run(
-    "stagebot", "Stage Bot",
-    JSON.stringify({
-      system_prompt: "You are the staged-send test bot.",
-      models: { default: "stub/m1" },
-      tools: { pi_builtin: ["read"], crow_mcp: [] },
-      permission_policy: { bash: "deny", write_paths: [], multi_agent: false },
-      session_dir: join(ROOT, "bots", "stagebot"),
-    }), 1,
+    "stagebot", "Stage Bot", defOf(join(ROOT, "bots", "stagebot"), []), 1,
+  );
+  c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)").run(
+    "credstagebot", "Cred Stage Bot", defOf(join(ROOT, "bots", "credstagebot"), ["google-workspace"]), 1,
   );
   c.close();
 
@@ -176,6 +187,8 @@ before(async () => {
     '        if (call.args !== undefined) out({ type: "tool_execution_start", toolName: call.tool, toolCallId: call.id, args: call.args });',
     '        out({ type: "tool_execution_end", toolName: call.tool, toolCallId: call.id, isError: !!call.isError, result: call.result });',
     '      }',
+    '      // The "turn dies after its tools ran" leg: no agent_end, an exit instead.',
+    '      if (process.env.PIBOT_TEST_DIE_AFTER_CALLS) { process.exit(1); }',
     '      out({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });',
     '    } else if (m.type === "abort") out({ type: "response", command: "abort" });',
     '  }',
@@ -186,6 +199,7 @@ before(async () => {
 
   const recorder = await import("../servers/gateway/staged/recorder.js");
   recordDraft = recorder.recordDraft;
+  recordDrafts = recorder.recordDrafts;
   betterSqliteDb = recorder.betterSqliteDb;
   ({ getStaged } = await import("../servers/gateway/staged/store.js"));
   ({ handleInbound } = await import("../scripts/pi-bots/bridge.mjs"));
@@ -435,4 +449,351 @@ test("job records with job_id and card_id", async () => {
   const note = c.prepare("SELECT * FROM notifications WHERE action_url = ?").get("/dashboard/staged/" + row.id);
   c.close();
   assert.ok(note, "a job row notifies");
+});
+
+/* ------------------------------------------------ M2: a forged draft id */
+
+test("a draft id inside wrapped or echoed text is not parsed", async () => {
+  // The result must be the tool's OWN JSON, whole. Anything around it — a wrapper sentence, an echoed
+  // copy, a different shape — is how a forged id would arrive, so none of these records.
+  const inner = okResult("draft-echo", "gt-echo");
+  for (const resultText of [
+    "Done! " + inner,
+    inner + "\n(the tool answered above)",
+    JSON.stringify({ success: true, data: { draft_id: "draft echo" } }),
+    JSON.stringify({ success: true, data: { draft_id: "draft-echo; DROP" } }),
+    JSON.stringify({ success: true, data: { draft_id: 42 } }),
+    JSON.stringify({ success: true, data: { draft_id: "" } }),
+    JSON.stringify({ ok: true, data: { draft_id: "draft-echo" } }),
+  ]) {
+    const r = await recordOnce({ toolName: DRAFT, resultText, context: { threadId: "thread-echo" } });
+    assert.equal(r, null, "records nothing: " + resultText.slice(0, 60));
+  }
+  assert.equal(stagedFor("thread_id", "thread-echo").length, 0);
+});
+
+test("the same draft recorded twice makes one row", async () => {
+  const fake = createFakeGmail({
+    drafts: { "draft-twice": { threadId: "gt-twice", raw: makeDraftRaw({ to: "alex@example.com", subject: "Once", body: "Body" }) } },
+  });
+  const once = () => recordOnce({
+    toolName: DRAFT,
+    args: { to: "args@example.com", subject: "Args subject", body: "Args body" },
+    resultText: okResult("draft-twice", "gt-twice"),
+    context: { threadId: "thread-twice", fetchImpl: fake.fetchImpl },
+  });
+
+  const first = await once();
+  assert.ok(first && first.id, "the first call records");
+  const replay = await once();
+  assert.equal(replay, null, "a replay of the same draft id + credential records nothing");
+  assert.equal(stagedFor("provider_draft_id", "draft-twice").length, 1, "one row, not two");
+});
+
+test("an error result records nothing", async () => {
+  // Through the bridge: the stub child reports the draft call as isError with a success-shaped body
+  // (a provider that failed after minting an id, or an MCP error wrapping one). No row.
+  process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([{
+    id: "call-error-1",
+    tool: DRAFT,
+    isError: true,
+    args: { to: "error-recipient@example.com", subject: "Should not stage", body: "Body" },
+    result: piResult(okResult("draft-error", "gt-error")),
+  }]);
+  const result = await handleInbound({
+    bot_id: "stagebot",
+    gateway_type: "gmail",
+    gateway_thread_id: "gmail-thread-error",
+    user_message: "please draft it",
+    log: () => {},
+    sendReply: async () => {},
+  });
+  process.env.PIBOT_TEST_TOOLCALLS = "[]";
+
+  assert.equal(result.action, "asked", "the turn itself succeeded");
+  assert.equal(stagedFor("thread_id", "gmail-thread-error").length, 0, "an errored call records nothing");
+
+  // And the shared per-turn path skips it too (a card job's failed call never becomes a row).
+  const written = await withRecorderDb((dbClient) => recordDrafts(dbClient, [{
+    tool: DRAFT, isError: true,
+    args: { to: "error-recipient@example.com", subject: "Should not stage", body: "Body" },
+    result: piResult(okResult("draft-error-direct", "gt-error")),
+  }], { threadId: "thread-error-direct", credConfig: CRED_CONFIG, configPaths: CONFIG_PATHS }));
+  assert.deepEqual(written, []);
+  assert.equal(stagedFor("thread_id", "thread-error-direct").length, 0);
+});
+
+/* --------------------------------------------------- L4: the injected log */
+
+test("recordDrafts logs a recorder failure through the injected log", async () => {
+  const lines = [];
+  // A connection that refuses every statement: the recorder fails inside safeRecordDraft.
+  const broken = { async execute() { throw Object.assign(new Error("boom"), { code: "db_busy" }); } };
+  const written = await recordDrafts(broken, [{
+    tool: DRAFT,
+    args: { to: "log-recipient@example.com", subject: "Log subject", body: "Log body" },
+    result: piResult(okResult("draft-log", "gt-log")),
+  }], { threadId: "thread-log", credConfig: { mcpServers: {} }, log: (l) => lines.push(String(l)) });
+
+  assert.deepEqual(written, []);
+  assert.equal(lines.length, 1, "exactly one line, through the caller's sink");
+  assert.match(lines[0], /gmail_create_draft\): db_busy$/, "the tool name and an error code");
+  for (const token of ["log-recipient@example.com", "Log subject", "Log body"]) {
+    assert.ok(!lines[0].includes(token), "no draft content in the log: " + token);
+  }
+});
+
+/* ------------------------------------------- M3: a draft made before a failure */
+
+test("a draft made before a turn failed is still recorded", async () => {
+  process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([{
+    id: "call-failed-turn-1",
+    tool: DRAFT,
+    args: { to: "failed-recipient@example.com", subject: "Made before the failure", body: "Body" },
+    result: piResult(okResult("draft-failed-turn", "gt-failed")),
+  }]);
+  let replies = 0;
+  const result = await handleInbound({
+    bot_id: "stagebot",
+    gateway_type: "gmail",
+    gateway_thread_id: "gmail-thread-failed",
+    user_message: "please draft it",
+    log: () => {},
+    // The reply is what fails, AFTER the draft tool already ran — the catch path's own reply works.
+    sendReply: async () => { replies += 1; if (replies === 1) throw new Error("the gateway is down"); },
+  });
+  process.env.PIBOT_TEST_TOOLCALLS = "[]";
+
+  assert.equal(result.action, "error");
+  assert.ok(
+    Array.isArray(result.toolCalls) && result.toolCalls.some((c) => /gmail_create_draft$/.test(String(c.tool))),
+    "the failed turn's result still reports its calls (a card job records from them)",
+  );
+  const rows = stagedFor("thread_id", "gmail-thread-failed");
+  assert.equal(rows.length, 1, "the draft the failed turn made is still recorded");
+  assert.equal(rows[0].provider_draft_id, "draft-failed-turn");
+});
+
+test("a goal job records its draft", async () => {
+  process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([{
+    id: "call-goal-1",
+    tool: DRAFT,
+    args: { to: "goal-recipient@example.com", subject: "Goal subject", body: "Goal body" },
+    result: piResult(okResult("draft-goal", "gt-goal")),
+  }]);
+  let out;
+  try {
+    out = await runJob(
+      { job_id: "job-staged-goal", bot_id: "stagebot", goal: "draft the goal reply", escalate: 0 },
+      { log: () => {} },
+    );
+  } finally {
+    process.env.PIBOT_TEST_TOOLCALLS = "[]";
+  }
+  assert.equal(out.result, "ok", "the stub's own reply is the job's result");
+
+  const rows = stagedFor("job_id", "job-staged-goal");
+  assert.equal(rows.length, 1, "a goal job's draft is a row");
+  assert.equal(rows[0].provider_draft_id, "draft-goal");
+  assert.equal(rows[0].channel, "gmail");
+  assert.equal(JSON.parse(rows[0].snapshot).subject, "Goal subject");
+});
+
+test("a goal job records its draft when the turn dies after it", async () => {
+  // The goal-job catch path: pi exits after the draft tool ran, so the turn never completes. The
+  // calls are read before the child closes and recorded, or the row would be lost.
+  process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([{
+    id: "call-goal-died-1",
+    tool: DRAFT,
+    args: { to: "goal-died@example.com", subject: "Died subject", body: "Body" },
+    result: piResult(okResult("draft-goal-died", "gt-goal-died")),
+  }]);
+  process.env.PIBOT_TEST_DIE_AFTER_CALLS = "1";
+  try {
+    await assert.rejects(
+      () => runJob({ job_id: "job-staged-goal-died", bot_id: "stagebot", goal: "draft then die", escalate: 0 }, { log: () => {} }),
+      /pi exited|exited/,
+    );
+  } finally {
+    delete process.env.PIBOT_TEST_DIE_AFTER_CALLS;
+    process.env.PIBOT_TEST_TOOLCALLS = "[]";
+  }
+  const rows = stagedFor("job_id", "job-staged-goal-died");
+  assert.equal(rows.length, 1, "a goal job that died after its draft still records it");
+  assert.equal(rows[0].provider_draft_id, "draft-goal-died");
+});
+
+test("a failed card job still records its draft", async () => {
+  // The bridge's failed turn reports `toolCalls`; the job records them before it fails the job.
+  const jobBridge = {
+    async handleInbound() {
+      return {
+        action: "error",
+        error: "pi exited mid-turn",
+        toolCalls: [{
+          tool: DRAFT,
+          isError: false,
+          args: { to: "card-fail-recipient@example.com", subject: "Card failed", body: "Body" },
+          result: piResult(okResult("draft-card-fail", "gt-card-fail")),
+        }],
+      };
+    },
+  };
+  await assert.rejects(
+    () => runJob(
+      { job_id: "job-staged-fail", bot_id: "stagebot", card_id: 44, source: "card", goal: "reply" },
+      { log: () => {}, bridge: jobBridge },
+    ),
+    /card execute failed/,
+  );
+  const rows = stagedFor("job_id", "job-staged-fail");
+  assert.equal(rows.length, 1, "the failed card job's draft is still recorded");
+  assert.equal(rows[0].provider_draft_id, "draft-card-fail");
+  assert.equal(rows[0].card_id, 44);
+});
+
+/* ------------------------------------------- credentials from a real config */
+
+test("a card job names its credential through the operator config", async () => {
+  const fake = createFakeGmail({
+    drafts: { "draft-card-cred": { threadId: "gt-card-cred", raw: makeDraftRaw({ to: "alex@example.com", subject: "Provider subject", body: "Provider body" }) } },
+  });
+  const jobBridge = {
+    async handleInbound() {
+      return {
+        action: "executed",
+        piSessionId: "pi-job-cred",
+        replyPreview: "done",
+        toolCalls: [{
+          tool: DRAFT,
+          isError: false,
+          args: { to: "args@example.com", subject: "Args subject", body: "Args body" },
+          result: piResult(okResult("draft-card-cred", "gt-card-cred")),
+        }],
+      };
+    },
+  };
+  // A card job's world is built inside the bridge, so the credential comes from the operator's own
+  // config. The provider read goes through the fake: nothing here opens a socket.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = fake.fetchImpl;
+  try {
+    await runJob(
+      { job_id: "job-staged-cred", bot_id: "stagebot", card_id: 45, source: "card", goal: "reply" },
+      { log: () => {}, bridge: jobBridge },
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  const rows = stagedFor("job_id", "job-staged-cred");
+  assert.equal(rows.length, 1);
+  const row = await stagedById(rows[0].id);
+  assert.deepEqual(row.credRef, { server: "google-workspace", role: "primary" }, "named from ~/.pi/agent/mcp.json");
+  assert.equal(row.snapshot.subject, "Provider subject", "the credential worked: the provider's draft is the snapshot");
+  assert.equal(fake.calls.get, 1);
+  const text = JSON.stringify(row);
+  assert.ok(!text.includes(PRIMARY_TOKEN), "the row names a credential, never a token path");
+});
+
+test("a bridge turn whose world can name a credential records cred_ref", async () => {
+  const fake = createFakeGmail({
+    drafts: { "draft-bridge-cred": { threadId: "gt-bridge-cred", raw: makeDraftRaw({ to: "alex@example.com", subject: "Provider subject", body: "Provider body" }) } },
+  });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = fake.fetchImpl;
+  let result;
+  try {
+    // credstagebot's def selects google-workspace, so its world carries the server's token env.
+    process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([{
+      id: "call-bridge-cred-1",
+      tool: DRAFT,
+      args: { to: "args@example.com", subject: "Args subject", body: "Args body" },
+      result: piResult(okResult("draft-bridge-cred", "gt-bridge-cred")),
+    }]);
+    result = await handleInbound({
+      bot_id: "credstagebot",
+      gateway_type: "gmail",
+      gateway_thread_id: "gmail-thread-cred",
+      user_message: "please draft the reply",
+      log: () => {},
+      sendReply: async () => {},
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+    process.env.PIBOT_TEST_TOOLCALLS = "[]";
+  }
+  assert.equal(result.action, "asked");
+
+  const rows = stagedFor("thread_id", "gmail-thread-cred");
+  assert.equal(rows.length, 1);
+  const row = await stagedById(rows[0].id);
+  assert.deepEqual(row.credRef, { server: "google-workspace", role: "primary" }, "the turn's own world names the credential");
+  assert.equal(row.snapshot.subject, "Provider subject");
+  assert.equal(fake.calls.get, 1);
+});
+
+/* ------------------------------------ L5: only a draft call keeps its payload */
+
+test("a non-draft tool's args and result are not kept", async () => {
+  process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([
+    {
+      id: "call-read-1",
+      tool: "read",
+      args: { path: "/tmp/inside-note.txt" },
+      result: piResult("a private file body"),
+    },
+    {
+      id: "call-draft-keep",
+      tool: DRAFT,
+      args: { to: "keep@example.com", subject: "Kept", body: "Kept body" },
+      result: piResult(okResult("draft-keep", "gt-keep")),
+    },
+  ]);
+  const result = await handleInbound({
+    bot_id: "stagebot",
+    gateway_type: "gmail",
+    gateway_thread_id: "gmail-thread-keep",
+    user_message: "read it and draft a reply",
+    log: () => {},
+    sendReply: async () => {},
+  });
+  process.env.PIBOT_TEST_TOOLCALLS = "[]";
+
+  // This list is what live-pi-driver-child writes into its progress NDJSON: an eval run must never
+  // carry another tool's args or result.
+  const read = result.toolCalls.find((c) => c.tool === "read");
+  assert.ok(read, "the call is still reported by name");
+  assert.deepEqual(Object.keys(read).sort(), ["isError", "tool"], "a non-draft call keeps the bare shape");
+  const draft = result.toolCalls.find((c) => /gmail_create_draft$/.test(String(c.tool)));
+  assert.ok(draft && draft.args && draft.result, "a draft call keeps what the recorder needs");
+  assert.ok(!JSON.stringify(result.toolCalls).includes("inside-note"), "no other tool's payload rides along");
+});
+
+/* ------------------------------- the duplicate guard on a real job turn */
+
+test("a real handleInbound call with a job_id records zero rows", async () => {
+  // The bridge must leave a job turn entirely to the job runner (which owns job_id/card_id). If it
+  // recorded here too, every card job's draft would become two rows.
+  process.env.PIBOT_TEST_TOOLCALLS = JSON.stringify([{
+    id: "call-job-guard-1",
+    tool: DRAFT,
+    args: { to: "guard-recipient@example.com", subject: "Guard subject", body: "Body" },
+    result: piResult(okResult("draft-job-guard", "gt-job-guard")),
+  }]);
+  const result = await handleInbound({
+    bot_id: "stagebot",
+    gateway_type: "board",
+    gateway_thread_id: "board-job-guard-1",
+    user_message: "draft the reply for this job",
+    job_id: "job-staged-guard",
+    log: () => {},
+    sendReply: async () => {},
+  });
+  process.env.PIBOT_TEST_TOOLCALLS = "[]";
+
+  assert.equal(result.action, "asked");
+  assert.ok((result.toolCalls || []).some((c) => /gmail_create_draft$/.test(String(c.tool))), "the draft call happened");
+  assert.equal(stagedFor("job_id", "job-staged-guard").length, 0, "the bridge leaves a job turn to the job runner");
+  assert.equal(stagedFor("thread_id", "board-job-guard-1").length, 0, "and wrote no row of its own");
 });

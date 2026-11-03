@@ -100,6 +100,7 @@ function makeBridge() {
       this.proc = { pid: ++pidSeq };
       this.piSessionId = "pisess-" + this.proc.pid;
       this.toolsCsv = "";
+      this.turns = [];
       let done;
       this.exited = new Promise((r) => { done = r; });
       this._done = done;
@@ -108,7 +109,12 @@ function makeBridge() {
     }
     async getState() { return { data: { sessionId: this.piSessionId } }; }
     async getSessionStats() { return { data: { tokens: { input: 1, output: 1, cacheRead: 0 } } }; }
-    promptTurn() { return new Promise(() => {}); }
+    promptTurn(message, ms, images) {
+      const rec = { message, ms, images };
+      rec.promise = new Promise((resolve, reject) => { rec.resolve = resolve; rec.reject = reject; });
+      this.turns.push(rec);
+      return rec.promise;
+    }
     trimLog() {}
     async abortSince() { return null; }
     send(o) { this.sent.push(o); }
@@ -116,6 +122,7 @@ function makeBridge() {
     exit(code = 0) { if (this._exitCode != null) return; this._exitCode = code; this._done(code); }
     _exitError() { return new Error("pi exited"); }
     emit(m) { this.onEvent(m); }
+    lastTurn() { return this.turns[this.turns.length - 1]; }
   }
 
   return {
@@ -178,6 +185,8 @@ function makeEngine(o = {}) {
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
     log: o.log || (() => {}),
+    // Only the slow-recording test passes one; `undefined` takes the real recorder.
+    recordDraft: o.recordDraft,
   });
   return { engine, clock, state: bridge._state };
 }
@@ -189,13 +198,21 @@ async function spawned(engine, botId = "botty") {
 }
 
 /** One successful draft call, as pi reports it (start carries args, end carries the result). */
-function emitDraft(pi, { toolCallId = "call-1", toolName = DRAFT, args = {}, draftId = "draft-1", threadId = "gt-1" } = {}) {
+function emitDraft(pi, { toolCallId = "call-1", toolName = DRAFT, args = {}, draftId = "draft-1", threadId = "gt-1", isError = false } = {}) {
   pi.emit({ type: "tool_execution_start", toolName, toolCallId, args });
   pi.emit({
-    type: "tool_execution_end", toolName, toolCallId, isError: false,
+    type: "tool_execution_end", toolName, toolCallId, isError,
     result: { content: [{ type: "text", text: JSON.stringify({ success: true, data: { draft_id: draftId, thread_id: threadId } }) }] },
   });
 }
+
+/** An assistant message_end / agent_end message. */
+const textMsg = (text) => ({ role: "assistant", content: [{ type: "text", text }] });
+
+/** The chat-relevant frames only, as compact strings (the probe form: "tool:end:<callId>"). */
+const seenOf = (frames) => frames
+  .filter((e) => e.type === "tool" || e.type === "text" || e.type === "reply")
+  .map((e) => (e.type === "tool" ? "tool:" + e.phase + ":" + e.toolCallId : e.type));
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -336,4 +353,117 @@ test("a draft tool the session never started is still recorded (resume mid-call)
   assert.ok(row, "the row is still written");
   assert.equal(row.tainted, 1, "a call whose start we never saw fails closed");
   assert.equal(row.provider_draft_id, "draft-o");
+});
+
+/* ------------------------------------------------- frames keep their order (H1) */
+
+test("frames keep their order while a draft is recorded", async () => {
+  if (_resetInteractiveEngineForTest) _resetInteractiveEngineForTest();
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine, "botty");
+  const frames = [];
+  await engine.subscribe(s.sessionId, (e) => frames.push(e));
+  await engine.message(s.sessionId, "please draft it");
+  const pi = state.instances[0];
+
+  // One turn's events, with no tick in between: draft end, text, a second tool, text, agent_end.
+  emitDraft(pi, { toolCallId: "c1", toolName: DRAFT, draftId: "draft-order-1", args: { subject: "One" } });
+  pi.emit({ type: "message_end", message: textMsg("the draft is ready") });
+  pi.emit({ type: "tool_execution_start", toolName: "read", toolCallId: "c2", args: { path: "/tmp/x" } });
+  pi.emit({ type: "message_end", message: textMsg("and reviewed") });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [textMsg("the draft is ready")] });
+
+  // Until the row exists, only the frames BEFORE the draft's end may reach the client: everything
+  // after it waits its turn. Without the queue the text, the next tool and the reply overtake it.
+  assert.deepEqual(seenOf(frames), ["tool:start:c1"], "nothing overtakes a draft's end frame");
+
+  await tick(20);
+  assert.deepEqual(seenOf(frames), [
+    "tool:start:c1",
+    "tool:end:c1",
+    "text",
+    "tool:start:c2",
+    "text",
+    "reply",
+  ], "the client sees the original order, with nothing dropped");
+  assert.equal(stagedRows(s.sessionId).length, 1, "the wait was for a real row");
+  // Nothing was dropped on the way: the turn's state frames came through too.
+  assert.ok(frames.some((e) => e.type === "state"), "state frames are queued and released, not dropped");
+});
+
+test("two drafts in one turn end in their own order", async () => {
+  if (_resetInteractiveEngineForTest) _resetInteractiveEngineForTest();
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine, "botty");
+  const frames = [];
+  await engine.subscribe(s.sessionId, (e) => frames.push(e));
+  await engine.message(s.sessionId, "draft two replies");
+  const pi = state.instances[0];
+
+  emitDraft(pi, { toolCallId: "c1", draftId: "draft-first", args: { subject: "First" } });
+  pi.emit({ type: "message_end", message: textMsg("first done") });
+  emitDraft(pi, { toolCallId: "c2", draftId: "draft-second", args: { subject: "Second" } });  pi.emit({ type: "message_end", message: textMsg("second done") });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [textMsg("two drafts")] });
+
+  assert.deepEqual(seenOf(frames), ["tool:start:c1"]);
+  await tick(20);
+  // Each draft's own end frame sits where its call did: the second never jumps the first.
+  assert.deepEqual(seenOf(frames), [
+    "tool:start:c1", "tool:end:c1", "text", "tool:start:c2", "tool:end:c2", "text", "reply",
+  ]);
+  const rows = stagedRows(s.sessionId);
+  assert.deepEqual(rows.map((r) => r.provider_draft_id), ["draft-first", "draft-second"], "two rows, in call order");
+});
+
+test("a slow recording does not hold the chat past 5 s", async () => {
+  if (_resetInteractiveEngineForTest) _resetInteractiveEngineForTest();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const recordCalls = [];
+  const { engine, clock, state } = makeEngine({
+    recordDraft: async (args) => { recordCalls.push(args); await gate; return { id: "ss-late" }; },
+  });
+  const s = await spawned(engine, "botty");
+  const frames = [];
+  await engine.subscribe(s.sessionId, (e) => frames.push(e));
+  await engine.message(s.sessionId, "draft it slowly");
+  const pi = state.instances[0];
+
+  emitDraft(pi, { toolCallId: "c1", draftId: "draft-slow" });
+  pi.emit({ type: "message_end", message: textMsg("waiting on the draft") });
+  assert.deepEqual(seenOf(frames), ["tool:start:c1"], "the end frame waits for its row");
+
+  clock.advance(4_999);
+  assert.deepEqual(seenOf(frames), ["tool:start:c1"], "still inside the cap");
+
+  clock.advance(2);
+  assert.equal(recordCalls.length, 1, "the recorder ran exactly once");
+  assert.deepEqual(seenOf(frames), ["tool:start:c1", "tool:end:c1", "text"],
+    "at the 5 s cap the end frame goes out anyway (the row lands later and the card refetches)");
+
+  // The row arriving late must not send the frame a second time.
+  release();
+  await tick(20);
+  assert.deepEqual(seenOf(frames), ["tool:start:c1", "tool:end:c1", "text"], "a late row adds no second frame");
+});
+
+test("an error result records nothing", async () => {
+  if (_resetInteractiveEngineForTest) _resetInteractiveEngineForTest();
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine, "botty");
+  const frames = [];
+  await engine.subscribe(s.sessionId, (e) => frames.push(e));
+  const pi = state.instances[0];
+
+  // isError with a success-shaped body: a forged draft id must never become a row. The end frame
+  // still goes out (the tool DID end), and it does not open a slot: nothing waits for a row.
+  pi.emit({ type: "tool_execution_start", toolName: DRAFT, toolCallId: "e1", args: { subject: "Forged" } });
+  pi.emit({ type: "tool_execution_end", toolName: DRAFT, toolCallId: "e1", isError: true,
+    result: { content: [{ type: "text", text: JSON.stringify({ success: true, data: { draft_id: "forged-1" } }) }] } });
+  pi.emit({ type: "message_end", message: textMsg("that failed") });
+
+  assert.deepEqual(seenOf(frames), ["tool:start:e1", "tool:end:e1", "text"], "an errored call never queues frames");
+  await tick(20);
+  assert.equal(stagedRows(s.sessionId).length, 0, "an errored call made no draft");
+  assert.equal(frames.find((e) => e.type === "tool" && e.phase === "end").isError, true);
 });

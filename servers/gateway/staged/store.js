@@ -156,6 +156,22 @@ export async function getStaged(db, id) {
 }
 
 /**
+ * The row already recorded for this provider draft with this credential, or null — the recorder's
+ * idempotency check. Every state counts: a draft the operator already sent or discarded must not
+ * come back as a new card because a resumed turn replayed the same tool call. `cred_ref` NULL
+ * ("Open in Gmail to send") matches NULL, so `IS` rather than `=`.
+ */
+export async function findStagedByDraftId(db, { providerDraftId, credRef = null } = {}) {
+  const draft = providerDraftId == null ? "" : String(providerDraftId);
+  if (!draft) return null;
+  const { rows } = await db.execute({
+    sql: "SELECT * FROM staged_sends WHERE provider_draft_id = ? AND cred_ref IS ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    args: [draft, credRefJson(credRef)],
+  });
+  return toStaged(rows[0]);
+}
+
+/**
  * Rows in the given scope, newest first. `states` defaults to STAGED_OPEN; `sessionId`, `cardId` and
  * `threadId` are ANDed, and naming none of them lists every row in those states (the Board's
  * needs-you prefetch).

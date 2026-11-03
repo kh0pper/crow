@@ -5,16 +5,17 @@
  * Three places a bot can create a draft hook into this, and only these:
  *   - the Perch engine's `tool_execution_end` (before the tool end frame is emitted, so the hub's
  *     refetch on that frame finds the row);
- *   - a bridge channel turn (`toolCalls()` after the turn);
+ *   - a bridge channel turn (`toolCalls()`, captured before the child is closed and recorded after);
  *   - the job runner (a goal job, and a card job through the bridge's own entry point).
  * Voice (the gateway's in-process executor) is out of scope: `isDraftTool` recognises the raw
  * gateway tool name so a future hook can see such a call, but `recordDraft` only records the
  * pi-named form, so nothing here can be reached from a voice turn by accident.
  *
  * The order matters and is the whole safety story (§12.3):
- *   1. Parse `{success, data:{draft_id, thread_id}}` out of the tool RESULT. `success !== true`, or
- *      no draft id, records nothing — the Gmail MCP server reports a provider error as
- *      `{success:false}` text, not as an MCP error, so the text is the only signal.
+ *   1. Parse `{success, data:{draft_id, thread_id}}` out of the tool RESULT. `success !== true`, no
+ *      draft id, or a result that is not the tool's own JSON records nothing — the Gmail MCP server
+ *      reports a provider error as `{success:false}` text, not as an MCP error, so the text is the
+ *      only signal. A call pi marked `isError` never reaches here (the hooks skip it).
  *   2. Re-read the draft from the provider and hash THAT: what the operator approves has to be what
  *      Gmail holds, not what the bot says it wrote. The re-read snapshot is also what the send route
  *      re-checks later.
@@ -39,7 +40,7 @@ import { readFileSync } from "node:fs";
 import { canonicalSnapshot } from "./canonical.js";
 import { TOKEN_ENV_BY_ROLE, canonicalMcpPath, mcpAddonsPath, credRefFromWorld } from "./cred-ref.js";
 import { createGmailClient } from "./gmail-client.js";
-import { createStaged } from "./store.js";
+import { createStaged, findStagedByDraftId } from "./store.js";
 
 /** The pi-named draft tools: `mcp__<server>__gmail_create_draft[_personal]` / `…threaded_reply`. */
 const DRAFT_TOOL_PI = /__gmail_create_(?:draft(?:_personal)?|threaded_reply)$/;
@@ -48,6 +49,8 @@ const DRAFT_TOOL_RAW = /^gmail_create_(?:draft(?:_personal)?|threaded_reply)$/;
 
 /** The recipient/subject/body keys all three draft tools share (threaded_reply has no cc/bcc). */
 const SNAPSHOT_ARGS = Object.freeze(["to", "cc", "bcc", "subject", "body"]);
+/** A provider draft id: opaque, but always this alphabet (Gmail's ids are URL-safe). */
+const DRAFT_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
  * True for a draft tool, pi-named or raw. The raw form is matched only so a caller can RECOGNISE
@@ -76,27 +79,22 @@ export function resultTextOf(result) {
 }
 
 /**
- * `{draftId, threadId}` from a draft tool's result text, or null. The MCP server answers with one
- * JSON object as text; anything around it (a wrapper, a trailing newline) is tolerated by falling
- * back to the outermost braces. `success !== true` is a provider error and records nothing.
+ * `{draftId, threadId}` from a draft tool's result text, or null. The WHOLE trimmed text must parse
+ * to the tool's own `{success, data:{draft_id, thread_id}}` JSON: no brace-slicing, because a draft
+ * id quoted inside wrapped or echoed text is a forged id, not a draft this turn made. A `draft_id`
+ * that is not a non-empty `[A-Za-z0-9_-]` string is equally not ours, and `success !== true` is a
+ * provider error — both record nothing.
  */
 export function parseDraftResult(text) {
   const raw = String(text ?? "").trim();
   if (!raw) return null;
   let body = null;
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start < 0 || end <= start) return null;
-    try { body = JSON.parse(raw.slice(start, end + 1)); } catch { return null; }
-  }
+  try { body = JSON.parse(raw); } catch { return null; }
   if (!body || typeof body !== "object" || body.success !== true) return null;
   const data = body.data && typeof body.data === "object" ? body.data : {};
-  if (data.draft_id == null || String(data.draft_id) === "") return null;
+  if (typeof data.draft_id !== "string" || !DRAFT_ID_RE.test(data.draft_id)) return null;
   return {
-    draftId: String(data.draft_id),
+    draftId: data.draft_id,
     threadId: data.thread_id == null ? null : String(data.thread_id),
   };
 }
@@ -211,7 +209,8 @@ export function betterSqliteDb(conn) {
 /**
  * Record one successful draft tool call as a staged row. Returns
  * `{id, credRef, openInGmail, reason}` (or null when the call recorded nothing), where `openInGmail`
- * true / `credRef` null is the card's "Open in Gmail to send".
+ * true / `credRef` null is the card's "Open in Gmail to send". A replay of a draft that already has
+ * a row (a resumed turn, a duplicate end event) records nothing and returns null.
  *
  * `context`:
  *   channel        default "gmail"
@@ -221,7 +220,7 @@ export function betterSqliteDb(conn) {
  *   notify         true for a non-Perch row (bridge, job); the Perch card needs no push
  *   lang           "en" | "es"; otherwise the dashboard setting decides
  *   fetchImpl / configPaths   Gmail client seams (tests)
- *   log            unused here; kept so a caller can pass one object through
+ *   log            read by `recordDrafts` (its one failure line); not used here
  */
 export async function recordDraft({ db, toolName, args = null, resultText = null, context = {} } = {}) {
   // Pi-named only: the raw gateway form is a voice/executor call, out of scope (see the header).
@@ -264,6 +263,11 @@ export async function recordDraft({ db, toolName, args = null, resultText = null
     }
   }
 
+  // Idempotency: the draft id plus the credential we ended up with IS the identity. Every state
+  // counts, so a draft the operator already sent or discarded never comes back as a second card.
+  const existing = await findStagedByDraftId(db, { providerDraftId: parsed.draftId, credRef: storedCredRef });
+  if (existing) return null;
+
   // Step 3: one row. new_recipients stays null (the card's "new recipient" hint is filled lazily by
   // the reader that builds the card, never here).
   const id = await createStaged(db, {
@@ -290,14 +294,16 @@ export async function recordDraft({ db, toolName, args = null, resultText = null
 
 /**
  * `recordDraft` for each draft call in a turn's `toolCalls()` list (the bridge and job shape:
- * `{tool, args, result}`). Stops nothing on a failure — each call is recorded on its own and a
- * failure is logged by `safeRecordDraft`. Returns the rows actually written.
+ * `{tool, isError, args, result}`). An errored call made no draft, so it is skipped. Stops nothing on
+ * a failure — each call is recorded on its own and a failure is logged by `safeRecordDraft` through
+ * the caller's own `log` (the `context.log` the hooks pass). Returns the rows actually written.
  */
 export async function recordDrafts(db, calls, context = {}) {
   const written = [];
+  const log = typeof context.log === "function" ? context.log : null;
   for (const call of Array.isArray(calls) ? calls : []) {
-    if (!call || !DRAFT_TOOL_PI.test(String(call.tool ?? ""))) continue;
-    const r = await safeRecordDraft({ db, toolName: call.tool, args: call.args ?? null, resultText: call.result ?? null, context });
+    if (!call || call.isError === true || !DRAFT_TOOL_PI.test(String(call.tool ?? ""))) continue;
+    const r = await safeRecordDraft({ db, log, toolName: call.tool, args: call.args ?? null, resultText: call.result ?? null, context });
     if (r) written.push(r);
   }
   return written;
