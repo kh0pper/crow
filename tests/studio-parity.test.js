@@ -3,10 +3,10 @@
  * catalogue against the vendored SunVox build.
  *
  * The parity rule (spec §5.1) is that no edit exists for one caller only. This
- * task covers the MCP half of it: every command the GUI can send is a tool the
+ * file covers both halves of it: every command the GUI can send is a tool the
  * agent can call, people-only commands are tools for nobody, and the only tools
- * that are not commands are the song/history/render/reference set listed below.
- * (The GUI half — the panel's own command list — is covered with the panel.)
+ * that are not commands are the song/history/render/reference set listed below;
+ * and the GUI's own command list is exactly the registry, in both directions.
  *
  * The catalogue test loads the vendored WASM engine in Node and asks it, which
  * is the only way to know the catalogue the agent reads is the real one: it
@@ -21,6 +21,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { listCommands } from "../bundles/studio/server/commands/registry.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "../bundles/studio/server/catalogue.js";
+import { CLIENT_SCRIPT, COMMANDS } from "../bundles/studio/panel/client.js";
 
 /**
  * The tools that are not registry commands: the song/history reads, the two
@@ -146,4 +147,27 @@ test("moduleCatalogue lists Analog generator with a Volume-like controller", asy
     assert.equal(typeof controller.default, "number");
   }
   assert.ok(GENERATOR_TYPES.includes("Analog generator"), "it is one of the 1a track devices");
+});
+
+/**
+ * Every command id the panel declares, read out of the script it actually
+ * serves: the `var COMMANDS = [...]` line inside CLIENT_SCRIPT.
+ * @returns {string[]}
+ */
+function panelCommandIds() {
+  const match = /var COMMANDS = \[([^\]]*)\]/
+    .exec(CLIENT_SCRIPT);
+  assert.ok(match, "panel/client.js should declare `var COMMANDS = [...]` inside its script");
+  return [...match[1].matchAll(/'([^']+)'/g)].map((found) => found[1]);
+}
+
+test("every registry command id appears in panel/client.js COMMANDS list and vice versa", () => {
+  const listed = panelCommandIds();
+  assert.equal(listed.length, new Set(listed).size, `the panel lists a command twice: ${listed.join(", ")}`);
+
+  const registry = listCommands().map((command) => command.id).sort();
+  assert.deepEqual([...listed].sort(), registry, "the GUI's command list and the registry are the same set");
+
+  // The module export and the script's own declaration cannot drift apart.
+  assert.deepEqual([...COMMANDS].sort(), registry, "the exported COMMANDS is the registry");
 });

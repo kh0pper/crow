@@ -38,7 +38,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { encodeDocState } from "./doc.js";
 
 /** File under CROW_HOME holding the per-boot token the MCP process presents. */
@@ -93,6 +93,11 @@ const ASSET_FILES = new Map([
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],
   ["sunvox.wasm", join("vendor", "sunvox", "sunvox.wasm")],
   ["sunvox_lib_loader.js", join("vendor", "sunvox", "sunvox_lib_loader.js")],
+  // The panel's read replica of the song needs Yjs in the browser. It is the
+  // dependency the hub itself uses, so the page applies updates with exactly
+  // the code the hub encoded them with. Its own imports are served beside it
+  // (see the lib0 route below).
+  ["yjs.mjs", join("node_modules", "yjs", "dist", "yjs.mjs")],
 ]);
 
 /** @returns {string} the current Studio home (`<CROW_HOME>` or `~/.crow`). */
@@ -829,8 +834,47 @@ export function createStudioWeb({
       if (!relative || !bundleDir) return res.status(404).json({ error: "not_found" });
       const path = join(bundleDir, relative);
       if (!existsSync(path)) return res.status(404).json({ error: "not_found" });
+      // Yjs is an ES module. Its MIME type is set here rather than left to the
+      // send library's lookup table, because a module served as anything but
+      // JavaScript is refused by the browser, and `.mjs` is not in every
+      // version of that table.
+      res.type("text/javascript");
       return res.sendFile(path);
     });
+
+    // Yjs's ES module imports `lib0` by name, which a browser cannot resolve on
+    // its own; the panel page carries an import map that points `lib0/` here
+    // (panel/studio.js). One plain module file at a time, and nothing else in
+    // the bundle's node_modules is reachable: the name is a bare word ending
+    // in `.js`, resolved inside lib0's own directory only.
+    r.get(/^\/dashboard\/studio\/assets\/lib0\/(.+)$/, dashboardAuth, (req, res) => {
+      if (!bundleDir) return res.status(404).json({ error: "not_found" });
+      const name = String(req.params[0] || "");
+      // Plain path segments only (lib0 imports its own siblings such as
+      // "./logging.common.js" and "./trait/equality.js"): no "..", no empty or
+      // dot-leading segment, at most 3 deep, and the file must stay inside lib0.
+      const segments = name.split("/");
+      const plain = segments.length <= 3 && segments.every((seg) => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(seg) && !seg.includes(".."));
+      if (!plain) return res.status(404).json({ error: "not_found" });
+      const root = join(bundleDir, "node_modules", "lib0");
+      const path = join(root, name.endsWith(".js") ? name : `${name}.js`);
+      if (!path.startsWith(root + sep) || !existsSync(path)) return res.status(404).json({ error: "not_found" });
+      res.type("text/javascript");
+      return res.sendFile(path);
+    });
+
+    // The SunVox module catalogue the panel's device pickers read: the same
+    // engine the songs play through, asked once per process (catalogue.js
+    // caches the promise), so a picker can never drift from the instrument it
+    // creates. Only the self-contained generators are offered as a track.
+    r.get("/api/studio/module-types", dashboardAuth, handled(async (_req, res) => {
+      const catalogueModule = await import("./catalogue.js");
+      const catalogue = await catalogueModule.moduleCatalogue();
+      // GENERATOR_TYPES is a live binding: it is only filled once the
+      // catalogue has been built, so it is read after the await, never
+      // destructured before it.
+      res.json({ generators: [...catalogueModule.GENERATOR_TYPES], modules: catalogue.modules });
+    }));
 
     // ---- the Studio MCP process -----------------------------------------
 
