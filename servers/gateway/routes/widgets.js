@@ -72,7 +72,9 @@ const stale = (message) => ({ http: 409, error: message, code: "stale" });
 function serviceError(res, e) {
   if (e && e.http === 409) return res.status(409).json({ reason: e.message, code: "stale" });
   if (e && e.http) return jsonError(res, e.http, e.message, e.code ? { code: e.code } : undefined);
-  return jsonError(res, 500, String((e && e.message) || e));
+  // The detail stays in the log: SQL or path text never reaches the widget.
+  console.warn(`[widgets] act failed: ${(e && e.message) || e}`);
+  return jsonError(res, 500, "The action failed");
 }
 
 /**
@@ -241,7 +243,7 @@ export function widgetsRouter(dashboardAuth, { core = getHandoffCore(), openDb =
       if (!tdb) return { http: 404, error: "No such item" };
       try {
         // Accept = approve; the card is NOT moved (decideResult's own contract, as on the Board).
-        await decideResult(tdb, Number(m[1]), Number(m[3]), "approved", DASHBOARD_ACTOR, "widget");
+        await decideResult(tdb, Number(m[1]), Number(m[3]), "approved", DASHBOARD_ACTOR, "widget", { newestOnly: true });
       } catch (e) {
         if (e && e.http === 409) return stale(e.message);
         throw e;

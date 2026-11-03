@@ -25,7 +25,7 @@
  * Every action is stateless-safe: each item carries a `nonce` (itemNonce) over the state the action
  * was drawn from, so the act route can refuse a tap made against a changed item with 409 stale and
  * send the operator a fresh summary instead of acting twice. That route re-reads the one item it was
- * tapped on through findNeedsMeItem, which sees every item (not just the five the widget drew).
+ * tapped on through findNeedsMeItem, which reads the same window the widget draws (the lane's first NEEDS_LINES cards, uncached); a card that has left that window answers 409 stale.
  *
  * The read never throws: a source that fails costs its own lines, never the summary.
  */
@@ -289,7 +289,7 @@ export async function findNeedsMeItem(db, tdb, key, {
   tasksDbPath = TASKS_DB,
   fresh = false,
 } = {}) {
-  if (typeof key !== "string" || !key) return null;
+  if (typeof key !== "string" || !key || key.length > 200) return null;
   const { waiting } = await collectItems(db, tdb, { now, projects, handoffStore, lang, tasksDbPath, fresh });
   return waiting.find((it) => it.key === key) || null;
 }

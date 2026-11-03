@@ -73,7 +73,8 @@ const fakeCore = {
 /** The session stub: the cookie names the session, and the peer-class memo makes it the laptop's. */
 function stubAuth(req, res, next) {
   const m = /(?:^|;\s*)crow_session=([^;]+)/.exec(req.headers.cookie || "");
-  if (m) { req.dashboardSession = m[1]; markFromLaptop(req); }
+  if (m) { req.dashboardSession = m[1]; if (!req.headers["x-test-on-box"]) markFromLaptop(req); }
+  if (req.headers["x-test-crosshost"]) req.crossHostAuth = true;
   return next();
 }
 
@@ -247,13 +248,14 @@ async function get(path, { session = OWN } = {}) {
 
 const summary = (opts) => get("/dashboard/widgets-api/needs-me", opts);
 
-async function act(body, { session = OWN, csrf = CSRF } = {}) {
+async function act(body, { session = OWN, csrf = CSRF, extra = {} } = {}) {
   const r = await fetch(base + "/dashboard/widgets-api/needs-me/act", {
     method: "POST",
     headers: {
       "content-type": "application/json",
       cookie: jar(session),
       ...(csrf ? { "x-crow-csrf": csrf } : {}),
+      ...extra,
     },
     body: JSON.stringify(body),
   });
@@ -456,4 +458,30 @@ test("act by a non-owner session is 404, with nothing decided", async () => {
   assert.equal(chosenOf(card), null, "nothing decided");
   assert.equal(taskRow(card).status, "pending");
   assert.equal(mutationCount("decision"), 0);
+});
+
+test("act: a newer result reported after the widget was drawn is never approved by the old tap", async () => {
+  const card = addCard({ title: "Soil test v2" });
+  const first = addResult(card);
+  const drawn = (await summary()).json.items.find((i) => i.kind === "result");
+  addResult(card); // a bot reports a newer result before the owner taps
+  const r = await act({ key: drawn.key, action: "accept", nonce: drawn.nonce });
+  assert.ok(r.status === 409 || r.status === 404, `refused, got ${r.status}`);
+  assert.notEqual(resultRow(first).status, "approved", "the superseded result stays undecided");
+});
+
+test("act: the owner's session from this machine itself, or a peer-signed request, is 404 and nothing is decided", async () => {
+  const card = addCard({ title: "Soil test v3" });
+  const result = addResult(card);
+  const drawn = (await summary()).json.items.find((i) => i.kind === "result");
+  for (const extra of [{ "x-test-on-box": "1" }, { "x-test-crosshost": "1" }]) {
+    const r = await act({ key: drawn.key, action: "accept", nonce: drawn.nonce }, { extra });
+    assert.equal(r.status, 404, JSON.stringify(extra));
+  }
+  assert.notEqual(resultRow(result).status, "approved");
+});
+
+test("act: a key longer than 200 characters is refused without a lookup", async () => {
+  const r = await act({ key: "card:" + "9".repeat(300) + ":decision", action: "option:0", nonce: "x" });
+  assert.ok(r.status === 404 || r.status === 400, `got ${r.status}`);
 });
