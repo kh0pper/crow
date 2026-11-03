@@ -31,12 +31,18 @@ function makeRepo() {
   // One file per commit, so a rebase never conflicts.
   const commit = (msg) => { const f = "f" + (++n) + ".txt"; writeFileSync(join(dir, f), msg); git("add", f); git("commit", "-q", "-m", msg); return git("rev-parse", "HEAD"); };
   const out = join(dir, "ranges.txt");
-  const push = (localSha, remoteSha) => {
+  const push = (localSha, remoteSha, { expectFail = false } = {}) => {
     writeFileSync(out, "");
-    execFileSync("bash", [join(dir, "scripts", "hooks", "pre-push")], {
-      cwd: dir, input: `refs/heads/b ${localSha} refs/heads/b ${remoteSha}\n`,
-      env: { ...process.env, RANGES_OUT: out },
-    });
+    try {
+      execFileSync("bash", [join(dir, "scripts", "hooks", "pre-push")], {
+        cwd: dir, input: `refs/heads/b ${localSha} refs/heads/b ${remoteSha}\n`,
+        env: { ...process.env, RANGES_OUT: out }, stdio: ["pipe", "pipe", "pipe"],
+      });
+      if (expectFail) throw new Error("the hook was expected to refuse");
+    } catch (e) {
+      if (!expectFail) throw e;
+      return { refused: true, ranges: readFileSync(out, "utf8").trim(), stderr: String(e.stderr || "") };
+    }
     return readFileSync(out, "utf8").trim();
   };
   return { dir, git, commit, push, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
@@ -59,7 +65,7 @@ test("a fast-forward push scans what is new since the remote head", () => {
 test("a rebased push scans only from where the branch leaves main, not main's own messages", () => {
   const r = makeRepo();
   try {
-    const base = r.commit("main 1");
+    r.commit("main 1");
     r.git("checkout", "-q", "-b", "b");
     const oldTip = r.commit("branch 1");             // pushed before
     r.git("checkout", "-q", "main");
@@ -73,7 +79,6 @@ test("a rebased push scans only from where the branch leaves main, not main's ow
     const scanned = r.git("log", "--format=%s", range);
     assert.ok(!scanned.includes("main 2"), "main's own message is not re-checked: " + scanned);
     assert.ok(scanned.includes("branch 1"), "the branch's own message is checked");
-    void base;
   } finally { r.cleanup(); }
 });
 
@@ -85,5 +90,29 @@ test("a new branch scans from where it leaves main", () => {
     r.git("checkout", "-q", "-b", "b");
     const tip = r.commit("branch 1");
     assert.equal(r.push(tip, ZERO), `${base}..${tip}`);
+  } finally { r.cleanup(); }
+});
+
+test("with no origin/main the hook refuses instead of skipping the messages", () => {
+  const r = makeRepo();
+  try {
+    r.commit("main 1");
+    r.git("checkout", "-q", "-b", "b");
+    const tip = r.commit("branch 1");
+    const res = r.push(tip, ZERO, { expectFail: true });
+    assert.equal(res.refused, true);
+    assert.equal(res.ranges, "", "no scan ran with a made-up range");
+    assert.match(res.stderr, /git fetch origin/);
+  } finally { r.cleanup(); }
+});
+
+test("a branch with no history in common with main scans the whole branch", () => {
+  const r = makeRepo();
+  try {
+    const base = r.commit("main 1");
+    r.git("update-ref", "refs/remotes/origin/main", base);
+    r.git("checkout", "-q", "--orphan", "lone");
+    const tip = r.commit("lone 1");
+    assert.equal(r.push(tip, ZERO), `origin/main..${tip}`, "an empty merge-base falls back to origin/main..local");
   } finally { r.cleanup(); }
 });

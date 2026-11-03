@@ -36,7 +36,10 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   if [ -n "$range" ]; then
     node "$root/scripts/check-public-hygiene.mjs" --rev "$local_sha" --messages "$range" || status=1
   else
-    node "$root/scripts/check-public-hygiene.mjs" --rev "$local_sha" || status=1
+    # No remote head and no origin/main to measure from: the messages being
+    # published cannot be told apart, so refuse rather than skip them.
+    echo "pre-push: no origin/main to scan commit messages from; run 'git fetch origin' and push again (or --no-verify deliberately)" >&2
+    status=1
   fi
 done
 exit $status
