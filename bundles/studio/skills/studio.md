@@ -1,62 +1,125 @@
 ---
 name: studio
-description: A shared music studio — edit the operator's live song over MCP (tracks, scenes, clips) and listen to the result through offline renders
+description: Use when the operator asks for anything in Crow Studio — writing, editing or mixing parts; adding, renaming or removing tracks, scenes and clips; changing an instrument; setting level, pan, mute or solo; rendering a song, scene or clip to hear it and read its loudness; or undoing a Studio edit.
 triggers:
   - studio
   - edit the song
+  - add a track
   - write a bassline
-  - add a clip
-  - arrange the song
   - write a drum part
-  - mix the tracks
+  - make it busier
+  - change the instrument
+  - mute the pad
   - render the song
+  - undo that
+  - mix the tracks
   - hacer una canción
+  - añade un bajo
+  - sube el volumen
 tools:
   - studio
 ---
 
 # Crow Studio
 
-Studio is one song, edited live by two people at once: the operator in the dashboard and you over MCP. There is no "your copy" and no save step — every command you send lands in the one shared document, shows up in the operator's browser as you send it, and is one undoable step in the shared history.
+Crow Studio is one live song: the operator works in the dashboard while you edit the same document over MCP. Every call lands at once, appears tagged as yours, and is one undoable step. You hear nothing — every claim about sound comes from a render's numbers or from the operator's ear.
 
 Powered by SunVox (modular synth & tracker)
 Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru
 
-## Start here
+## Read first
 
-1. **`studio_session_summary`** — always first. It gives the title, tempo, key, the tracks (with their device type and lock state), the scenes, and the clips with a note count each. Ask for `page: 2`, `3`, … when it says there are more pages.
-2. **`studio_get_clip`** — one clip's notes, before you change it.
-3. **`studio_module_types`** — the SunVox module catalogue, generated from the engine the songs actually play through. **A track's device must be a generator** (the `generators` list); effects are not track instruments in this phase.
+- `studio_session_summary` — always your first call: tracks with device and lock state, scenes, clips with a note count each. It pages 50 clips at a time; ask for `page: 2`, `3`, … while it says there is more.
+- `studio_get_clip` — read a clip's notes before you change it.
+- `studio_module_types` — the real controller names, ranges and defaults. A track device must be a generator: Analog generator, DrumSynth, Generator or SpectraVoice.
+- Load `studio-preferences` at the start of every session — it reads and stores preferences through `crow-memory` — and store one whenever the operator teaches you one.
 
-## What a song is
+## Conventions
 
-- **Tracks** hold one SunVox instrument each (`track.add`, `track.set_device`). A song has at most 16.
-- **Scenes** are columns (verse, chorus, …). **Clips** sit at one track × one scene.
-- **Notes** are `{t, d, p, v}`: `t` start and `d` length **in beats** (4 beats to the bar), `p` a MIDI pitch (60 = C4, 0–127), `v` velocity (1–127). A clip loops over its length in bars, and a note may not run past the clip's end.
+| Thing | Rule |
+|---|---|
+| Time | 4/4 only, 4 beats per bar. `t` and `d` are beats from the clip start, decimals allowed (0.5 = eighth). |
+| Pitch | MIDI `p` 0–127, C4 = 60, one semitone per step. Quote names with numbers: "A2 (45)". |
+| Velocity | `v` 1–127 per note: roughly 100+ accent, 70–90 body, 45–60 ghost. It drives the instrument, not the fader. |
+| Clip length | `length_bars` 1–64; the clip loops over it, so notes must end inside it. |
+| Scenes | A column; launching one starts that row on the next bar. One clip per track sounds at a time. |
+| Track mix | `gain_db` −60..+12 (0 = unity), `pan` −1..+1, `mute`, `solo`. |
+| Limits | 16 tracks, 64 scenes, 64 bars and 4096 notes per clip, plus the render length limit. Refused, never truncated — the message names the limit. |
+| Missing | No insert effects, sends, EQ, compressor, master bus, timeline or audio recording yet. Say "Studio cannot yet …" rather than improvising. |
 
-## Writing
+## Request → tools
 
-- `studio_clip_write` creates a clip or replaces its whole note list: `{track_id, scene_id, name, notes}`. Write small parts first — a bar or two — and grow them.
-- `studio_clip_edit_notes` adds, removes or moves notes **by index** (`add` / `remove` / `move`), which is cheaper than rewriting a long clip.
-- `studio_song_set_meta` sets tempo, title or key; `studio_track_add` / `studio_track_set_mix` / `studio_track_set_param` shape the sound and the balance.
-- `studio_history` lists the steps; `studio_undo` / `studio_redo` take one back or put it back. An undo only restores what is still unchanged — anything edited since comes back as a conflict instead of being clobbered.
+| Request | Do this |
+|---|---|
+| "add a drum / pad / bass track" | `studio_track_add` with `device.type` and `params` from the catalogue, then `studio_clip_write` for its first clip |
+| "rename this track / scene / clip" | `studio_track_rename` / `studio_scene_rename` / `studio_clip_rename` |
+| "add a section / a bridge" | `studio_scene_add` |
+| "delete that track / scene / clip" | `studio_track_remove`, `studio_scene_remove` (both take their clips too) or `studio_clip_remove` — confirm first when notes would go |
+| "change the instrument" | `studio_track_set_device`: `params` **replace** the old set, so pass every value you want kept |
+| "darker / brighter / open the filter / shorten a drum" | `studio_track_set_param` with one real name from `studio_module_types`: `F.freq` or `F.resonance` (Analog generator), `Bass tone`, `Bass length`, `Snare tone`, `Snare length`, `Hihat length` (DrumSynth has no Attack or Release), `Volume` on every generator, `Attack`/`Release` only on Analog generator, Generator and SpectraVoice |
+| "write / replace a part" | `studio_clip_write` with the whole note list; it creates the clip when `clip_id` is omitted |
+| "fix, nudge or delete a note" | `studio_get_clip`, then `studio_clip_edit_notes` — `remove` by index, then `move`/`add`; indexes are the clip's own order |
+| "make that clip 8 bars" | `studio_clip_set_length` (`length_bars`) |
+| "make it busier" | `studio_clip_edit_notes` `add` on off-beats (0.5 or 0.25 offsets), shorten existing note lengths with `move`, or add a second clip on another track. Report the event count before and after |
+| "make it sparser" | delete notes whose starts fall off the main beats with `remove`, lengthen the survivors with `move`, drop inner velocities 10–20 |
+| "louder / quieter" | `studio_track_set_mix` `gain_db` in 1.5–3 dB steps (never above +12), or scale `v` by 10–15 % of its current value (never above 127); re-render and quote both LUFS readings |
+| "wider / more stereo" | `studio_track_set_mix` `pan` two parts apart (−0.5 and +0.5); keep bass, kick and lead at 0. There is no width effect |
+| "mute / solo / level / pan" | `studio_track_set_mix` |
+| "play it" | You cannot start or stop the operator's playback. `studio_render` instead and give the operator the download URL |
+| "undo that" / "redo it" | `studio_history`, then `studio_undo` with that entry's `id` as `entry_id`, on the newest entry authored by you (unless the operator names another); `studio_redo` takes the same `entry_id` and puts it back |
+| "how loud is it / is it balanced?" | `studio_render` with `seconds` plus `scene_id` or `clip_id`; report `lufs` and `true_peak_db` |
+| "tempo / key / title" | `studio_song_set_meta` (`bpm` 20–300) |
 
-## Rules you must keep
+Refusals are information: a locked track (`locked`) or the clip the operator has open (`focused`) is off-limits. Say which one, and offer an alternative — another track, a new clip, or waiting for them to unlock it. Never reach around it.
 
-- **You only see songs in your own project.** A song in another project is not there for you: it answers exactly like a song that does not exist, and a new song can only be created in your own project. Say so plainly if the operator names a song you cannot see, rather than guessing at its contents.
-- **Never touch a locked track.** A locked track is the operator's; an edit on it (or on its clips) is refused with the code `locked` and the track's name. Say so and ask, or work on another track.
-- **A clip the operator has open is refused too** (`focused`). Wait, or pick another clip.
-- **Only a person can lock or unlock a track** (`human_only`).
-- **Limits are refused, never truncated**: 16 tracks, 64 scenes, 64 bars per clip, 4096 notes per clip, and the operator's render length (`STUDIO_MAX_RENDER_SECONDS`). Read the message: it names the limit.
-- Keep **one change per call**, so each can be seen, heard and undone on its own.
+## Editing etiquette
 
-## Listening
+- **Read, then edit.** Never write a clip you have not read, and never invent ids: take them from the summary.
+- **One request, as few steps as possible.** Each call is a separate undoable step, so a five-call answer to "louder" makes undo useless. Batch notes into one `clip_write`, and do not tidy unrelated things.
+- **Say what changed, in music and in numbers**: "bar 2 beat 3, A2 (45) held 2 beats; the bass is now five notes instead of three".
+- **Ask when the request is ambiguous.** "Busier" can mean more events, more layers, or more level — ask which, or do the smallest version and name the options.
+- **Do not rewrite the operator's part unasked.** Add a new clip or scene beside it instead.
+- **Variant work goes in a new scene or clip labelled A/B**, so the original stays untouched until the operator picks.
 
-`studio_render` renders the song — or one scene, or one clip — offline through the same engine the operator hears, and returns a download `url`, the integrated loudness (`lufs`), the true peak (`true_peak_db`) and the rendered `seconds`. Use it to check a part is audible, to compare a mix, and to report levels: LUFS is what the operator mixes to. Say what you heard and what the numbers are.
+## Part balance
 
-## How to work with the operator
+Renders come per song, scene or clip — there is no per-track render. To compare parts, solo each one in turn:
 
-- Say what you are about to change, then make the smallest edit that does it, then say what changed.
-- Your edits appear **in blue** next to theirs; each is tagged as yours and either of you can undo it.
-- Do not start or stop the operator's playback, and do not rewrite their parts without asking.
-- When a call is refused, report the refusal in plain words and continue from what you can see — a fresh `studio_session_summary` is the truth.
+1. `studio_track_set_mix` `solo: true` on one track.
+2. `studio_render` the scene for enough `seconds` (4 bars = 960/bpm seconds).
+3. Note its LUFS, then `solo: false`.
+4. Render the scene with nothing soloed and compare each part to that figure.
+
+Every solo step is an undoable edit, so say so before you start and offer to skip it. Compare parts in LU (dB), not adjectives, and start from these rules, then trust the operator's ear:
+
+- Lead/melody sits 1–3 LU above the next-loudest sustaining part; if it is not the loudest melodic line, say so.
+- Bass within 3 LU of the lead; bass more than 1 LU above the lead usually means one of the two is misplaced.
+- Pads and ghost layers 6–10 LU below the lead.
+- Two parts within 1 LU of each other are not heard as separate layers; give them different registers or levels.
+- Keep true peak at or below −1 dBTP. If a level change pushes it over, lower other tracks instead of raising this one.
+
+## Feedback loop
+
+- You cannot hear. Ask for timestamps ("the third chord drags") and convert: **beats = seconds × bpm ÷ 60**; then bar = ⌊beats ÷ 4⌋ + 1, beat = the remainder + 1. 7.5 s at 92 bpm = 11.5 beats = bar 3, beat 4½. That assumes a constant bpm and a render starting at the scene's first bar — ask which pass when a loop or tempo change is involved.
+- Offer A/B scenes or clips, render both, and give the numbers for each. Replace nothing until the operator chooses.
+- When the operator's ear and your measurement disagree, believe the ear and say what the measurement was.
+
+## When to load another Studio skill
+
+| Skill | For |
+|---|---|
+| `studio-counterpoint` | Writing or checking two or more lines against each other |
+| `studio-harmony` | Chords, progressions, melody and key |
+| `studio-rhythm-and-form` | Grooves, drums, sampler-style patterns, song structure |
+| `studio-arranging-and-sound` | Instrument ranges, voicing, SunVox patches |
+| `studio-mixing` | Levels, loudness targets, delivery |
+| `studio-modern` | Post-tonal and experimental techniques |
+| `studio-preferences` | Always: read at the start, store when taught |
+
+A request to *write* a line — "write a bassline", "harmonise this melody" — fires both: load `studio-counterpoint` for intervals and voice leading, `studio-harmony` for chords, key and melody, before the first note.
+
+## Sources
+
+- SunVox, Alexander Zolotov, WarmPlace.ru — module catalogue and controller ranges, read from `studio_module_types`.
+- ITU-R BS.1770-4, *Algorithms to measure audio programme loudness and true-peak audio level* (2015) — LUFS and dBTP.
+- Ableton Live Reference Manual, "Launching Clips" (2024) — clip loop and next-bar scene launch conventions.
