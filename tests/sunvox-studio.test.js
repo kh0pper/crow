@@ -622,3 +622,23 @@ test("sunvox: module params take effect (Volume 0 is silent, louder volumes rend
   assert.equal(p0, 0, "Volume 0 renders silence");
   assert.ok(p100 > 0 && p200 > p100 * 1.5, `louder Volume renders louder (100 → ${p100}, 200 → ${p200})`);
 });
+
+test("sunvox: a wide-range param within one scale step is accepted; a selector must match exactly", { skip: !engine && SKIP_REASON }, async () => {
+  // SunVox stores continuous controllers on a 0..0x8000 scale: F.freq 1000 on a 0..14000 range
+  // reads back 999, and Osc2 1006 (0..2000) reads 1005. That is the engine's own rounding, not a
+  // param that failed to land, so compose must accept it.
+  const composeWith = (params) => engine.compose({
+    bpm: 120, tpl: 6,
+    modules: [{ id: "pad", type: "Analog generator", params }],
+    connections: [["pad", "out"]],
+    patterns: [{ name: "p", tracks: 3, lines: 16, x: 0, y: 0, events: [{ track: 0, line: 0, note: "C4", velocity: 100, module: "pad" }] }],
+  }, { name: "quant-test" });
+  for (const v of [50, 1000, 2600, 13999]) {
+    const r = await composeWith({ Filter: 1, "F.freq": v, Osc2: 1006 });
+    assert.ok(r && r.project, `F.freq ${v} composes`);
+  }
+  // A selector is exact: an out-of-range waveform is still refused by the range check.
+  await assert.rejects(() => composeWith({ Waveform: 99 }), /must be from 0 to/);
+  // And a selector inside its range lands exactly (Waveform 3 composes).
+  assert.ok((await composeWith({ Waveform: 3 })).project);
+});
