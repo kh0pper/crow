@@ -178,6 +178,42 @@ test("claimsAction (code review I6/I7): openers before a bare claim are claims; 
     "I'd love to make you laugh.", "I'll make it simple: Paris."]) assert.equal(claimsAction(s), false, s);
 });
 
+test("claimsAction: a claim that spans a clause join is held — the whole sentence is read first (fix round 1)", () => {
+  // The join word sits between the subject and the verb, so neither clause holds it alone.
+  for (const t of [
+    "I'll also remind you.", "I can also add it.", "I will also send that email.", "I'm going to also book it for nine.",
+    "I'm gonna also check back tomorrow.", "I shall also notify you.",
+    // The same, one clause each side of the join.
+    "I'll also add it and remind you.",
+  ]) assert.equal(claimsAction(t), true, t);
+});
+
+test("claimsAction: a tag question after a statement does not release the statement (fix round 1)", () => {
+  const agents = ["Writer"];
+  for (const t of ["Writer está en ello ¿vale?", "Ya está con ello, ¿vale?", "Writer está en ello ¿no?"]) assert.equal(claimsAction(t, { agents }), true, t);
+  // A "?" closing the sentence, or a "¿" opening it, still asks.
+  for (const t of ["¿Está en ello?", "¿Ya está con ello?"]) assert.equal(claimsAction(t, { agents }), false, t);
+  // The question asks about its own words, not the statement before it.
+  assert.equal(claimsAction("¿Está en ello? Writer está en ello.", { agents }), true);
+});
+
+test("claimsAction: an English sign-off or intention is not a stop claim (fix round 1)", () => {
+  for (const t of [
+    "I'll stop there.", "I'll stop here.", "I'm stopping to think.", "I'm going to stop and check.",
+    "I'm going to stop talking.", "I'll stop now and let you go.", "I stopped there for a moment.",
+  ]) assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+  for (const t of ["I'll stop Writer.", "I'm stopping it.", "I stopped Writer.", "I'll stop the research."]) assert.equal(claimsAction(t, { agents: ["Writer"] }), true, t);
+});
+
+test("claimsAction: Spanish \"voy a parar\" — the reflexive and the \"to do something\" forms are not stop claims (fix round 1)", () => {
+  for (const t of ["Voy a parar la tarea.", "Lo voy a parar.", "Voy a detener la investigación.", "Voy a parar un momento.", "Voy a parar a Writer.", "Voy a añadirlo a tu calendario."]) {
+    assert.equal(claimsAction(t, { agents: ["Writer"] }), true, t);
+  }
+  for (const t of ["Voy a parar a comer.", "Voy a parar a descansar un poco.", "Voy a detenerme.", "Voy a pararme un rato."]) {
+    assert.equal(claimsAction(t, { agents: ["Writer"] }), false, t);
+  }
+});
+
 test("claimsAction: a claim at the END of a very long reply is still read", () => {
   assert.equal(claimsAction(`${"Lisbon is lovely. ".repeat(400)}I've added it to your calendar.`), true);
 });

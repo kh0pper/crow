@@ -8,8 +8,8 @@
  *
  * English and Spanish. The text is capped BEFORE any pattern runs (its first and last
  * CLAIM_MAX_CHARS characters), split into sentences, lower-cased, accents dropped, apostrophes
- * made spaces; each sentence is tested on its own, so "^" means the start of a sentence. Every
- * pattern is a bounded alternation.
+ * made spaces; each sentence is tested whole and then clause by clause (see clauses), so "^" means
+ * the start of a sentence. Every pattern is a bounded alternation.
  * Negations never match: an English claim needs a subject form such as "I've", "I'll" or "I can"
  * right before the verb ("I can't add" is "i can t add"), and a Spanish one may not follow "no"
  * ("no puedo añadir", "no te lo he puesto").
@@ -21,10 +21,14 @@ export const CLAIM_MAX_CHARS = 2000;
 const NEG = "(?<!\\bno(?: (?:te|lo|la|los|las|se|le|me|nunca|todavia|aun))* )";
 // stopped / halted (PR 6): "Okay, I stopped Writer" is a stop only the server may report (handoff-stop.js); "the rain
 // stopped" has no "I" before it. Every form is a claim — done, promised ("I'll stop Writer"), in progress ("I'm
-// stopping it") and as a state ("it has been halted") — but "stop by"
-// is a visit, never a stop: "I stopped by the store", "I'll stop by later" are released.
-const EN_DONE = "added|created|scheduled|rescheduled|booked|set up|set|sent|saved|stored|noted|put|deleted|removed|canceled|cancelled|moved|changed|updated|emailed|texted|invited|written down|stopped(?! by\\b)|halted";
-const EN_DO = "add|create|schedule|reschedule|book|set up|set|send|save|store|note|put|delete|remove|cancel|move|change|update|email|text|invite|remind|write down|let you know|follow up|keep track|check back|ping|notify|alert|stop(?! by\\b)|halt";
+// stopping it") and as a state ("it has been halted") — but a stop must name what it stops:
+// - "stop by" is a visit, never a stop: "I stopped by the store", "I'll stop by later" are released;
+// - a sign-off or an intention is no claim: "I'll stop there", "I'll stop here", "I'm stopping to think",
+//   "I'm going to stop and check", "I'll stop now and let you go" (a clause keeps its join word, see clauses, so the
+//   "and" forms read as written).
+const STOP_NOT = "(?! by\\b| here\\b| there\\b| talking\\b| to\\b| and\\b| now and\\b)";
+const EN_DONE = `added|created|scheduled|rescheduled|booked|set up|set|sent|saved|stored|noted|put|deleted|removed|canceled|cancelled|moved|changed|updated|emailed|texted|invited|written down|halted|stopped${STOP_NOT}`;
+const EN_DO = `add|create|schedule|reschedule|book|set up|set|send|save|store|note|put|delete|remove|cancel|move|change|update|email|text|invite|remind|write down|let you know|follow up|keep track|check back|ping|notify|alert|halt|stop${STOP_NOT}`;
 // "Let me …" without the verbs a plain answer uses ("let me put it this way", "let me note that…").
 const EN_LET = "add|create|schedule|reschedule|book|set up|set|send|save|delete|remove|cancel|move|update|email|text|invite|remind";
 // Sentence openers a small model puts before a bare claim ("Okay, added!", "Sure, done.", "Vale, apuntado.").
@@ -43,6 +47,9 @@ const STARTS_ON_ITS_OWN = "movie|film|show|timer|meeting|game|class|event|call|c
 // and their clitics (the subjunctive: "que lo pare", "cuando pare la lluvia", "ojalá pare pronto").
 const NOT_ME_QUE = "(?<!\\bme )(?<!\\b(?:que|cuando|si|ojala|aunque|mientras|en cuanto)(?: (?:lo|la|le|los|las|se|te|me))* )";
 const STARTS_ON_ITS_OWN_ES = "pelicula|partido|reunion|temporizador|juego|clase|evento|llamada|cancion|episodio|serie|concierto|lluvia|fiesta|sesion|alarma";
+// What may follow "voy a parar a …" when the stop is of one's own doing ("voy a parar a comer" = to stop to eat): a
+// bounded list of the common infinitives, so a name after it ("voy a parar a Writer") is still read as a stop of it.
+const ES_PARA_A = "(?! a (?:comer|beber|tomar|desayunar|almorzar|cenar|descansar|dormir|pensar|mirar|ver|leer|hablar|escuchar|escribir|trabajar|estudiar|jugar|correr|caminar|salir|volver|ir|hacer|limpiar|cocinar|revisar|comprobar|respirar|esperar|empezar|terminar|seguir)\\b)";
 // The Spanish hand-off as a state ("ya está con ello"). Read by claimIn on its own, not with the other patterns, so the
 // question forms ("¿ya está con ello?", "¿está en ello?") can be released: they ask, they do not claim.
 const ES_ON_IT_STATE = new RegExp(`${NEG}\\bya esta con ello\\b`);
@@ -54,7 +61,7 @@ const CLAIMS = [
   new RegExp(`\\bi(?: ve| have| just| ve just| have just)? (?:${EN_DONE})\\b`),
   // Promised: "I'll remind you", "I will add", "I'm going to send".
   new RegExp(`\\bi(?: ll| will| m going to| am going to| m gonna| shall)(?: also| go ahead and| make sure to| be sure to)? (?:${EN_DO})\\b`),
-  new RegExp(`\\bi (?:m|am) (?:now |just )?(?:adding|creating|scheduling|rescheduling|setting|saving|sending|booking|putting|noting|deleting|removing|canceling|cancelling|moving|changing|updating|emailing|texting|reminding|stopping(?! by\\b)|halting)\\b`),
+  new RegExp(`\\bi (?:m|am) (?:now |just )?(?:adding|creating|scheduling|rescheduling|setting|saving|sending|booking|putting|noting|deleting|removing|canceling|cancelling|moving|changing|updating|emailing|texting|reminding|halting|stopping${STOP_NOT})\\b`),
   // Offered: "I can remind you", "want me to add", "would you like me to set", "Shall I schedule it?".
   new RegExp(`\\bi can(?: also)? (?:${EN_DO})\\b`),
   new RegExp(`\\b(?:want me to|would you like me to|do you want me to|should i go ahead and) (?:${EN_DO})\\b`),
@@ -104,7 +111,14 @@ const CLAIMS = [
   // subjunctive after que, as the first-person stop above.
   new RegExp(`${NEG}${NOT_ME_QUE}\\b(?:te |lo |la |los |las |se |le )?(?:estoy|estamos) (?:ya )?(?:parando|deteniendo)\\b`),
   new RegExp(`${NEG}\\b(?:recordare|anadire|agregare|creare|programare|agendare|reservare|enviare|mandare|guardare|anotare|apuntare|avisare|borrare|eliminare|cancelare)\\b`),
-  new RegExp(`${NEG}\\bvoy a (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar|borrar|eliminar|cancelar|parar|detener)`),
+  // No trailing boundary on these: the clitic rides on the infinitive ("voy a añadirlo a tu calendario", "voy a
+  // mandarlo").
+  new RegExp(`${NEG}\\bvoy a (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar|borrar|eliminar|cancelar)`),
+  // A promise to stop: "lo voy a parar", "voy a detener la tarea". Never the reflexive ("voy a pararme", "voy a
+  // detenerme": no word boundary after the verb) and never "voy a parar a <infinitive>", which is to stop doing
+  // something ("voy a parar a comer", "voy a parar a descansar"). A name after it is no infinitive, so "voy a parar a
+  // Writer" stays a claim (the ruling: not a case to handle specially).
+  new RegExp(`${NEG}\\bvoy a (?:parar|detener)\\b(?!me\\b)${ES_PARA_A}`),
   new RegExp(`${NEG}\\bpuedo (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar)`),
   /\b(?:quieres|te gustaria|deseas|prefieres) que (?:te |lo |la |le )*(?:recuerde|anada|agregue|cree|programe|agende|reserve|envie|mande|guarde|anote|apunte|avise)\b/,
   new RegExp(`${NEG}\\b(?:ya )?(?:esta|quedo|queda) (?:listo|lista|puest[oa]|configurad[oa]|programad[oa]|agendad[oa]|anadid[oa]|agregad[oa]|guardad[oa]|reservad[oa]|en tu (?:calendario|agenda|lista))\\b`),
@@ -149,7 +163,10 @@ function claimParts(text) {
   const out = [];
   for (let i = 0; i < parts.length; i += 2) {
     const t = claimText(parts[i]);
-    const question = /[?¿]/.test(parts[i + 1] ?? "") || /[¿]/.test(parts[i - 1] ?? "");
+    // Only a "?" in the separator AFTER the sentence asks about it, and only a "¿" in the separator BEFORE it opens it
+    // as a question: a tag question tagged on after a statement ("Writer está en ello ¿vale?") asks with its own words,
+    // so the statement before it stays a claim, and an earlier sentence's "?" never reaches forward to the next one.
+    const question = /\?/.test(parts[i + 1] ?? "") || /¿/.test(parts[i - 1] ?? "");
     if (t) out.push({ t, question });
   }
   return out;
@@ -185,8 +202,18 @@ const agentEnEllo = (t, agents) => {
 const claimIn = (t, agents, question = false) => CLAIMS.some((re) => re.test(t))
   || (!question && (ES_ON_IT_STATE.test(t) || agentEnEllo(t, agents))) || agentOnIt(t, agents);
 
-// Clauses joined by "and" are read on their own too ("I've made a note and added it to your calendar").
-const clauses = (text) => claimParts(text).flatMap(({ t, question }) => t.split(/ (?:and|also|then|plus|y|tambien|luego) /).map((c) => ({ t: c, question })));
+// A sentence is read whole FIRST, then clause by clause ("I've made a note and added it to your calendar"): a claim can
+// span a join ("I'll also remind you", "I can also add it", "I'm gonna also check back") and neither clause holds it on
+// its own. Each clause keeps the join word in front of it with its LEFT half ("…going to stop and"), so a stop that ends
+// a clause still reads as what it is in the sentence (STOP_NOT's "and").
+const CLAUSE_JOIN = / (and|also|then|plus|y|tambien|luego) /;
+const clauses = (text) => claimParts(text).flatMap(({ t, question }) => {
+  const parts = t.split(CLAUSE_JOIN);
+  if (parts.length === 1) return [{ t, question }];
+  const joined = [];
+  for (let i = 0; i < parts.length; i += 2) joined.push(i + 2 < parts.length ? `${parts[i]} ${parts[i + 1]}` : parts[i]);
+  return [t, ...joined].map((c) => ({ t: c, question }));
+});
 /** opts.agents: the bots this turn could hand work to ("Writer's on it" is a claim only about one of them, or an agent word). */
 export function claimsAction(text, opts = {}) {
   const agents = agentSet(opts);
