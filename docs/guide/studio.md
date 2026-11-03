@@ -69,7 +69,7 @@ Every limit refuses with a plain-English error that names it; nothing is ever tr
 ## Known limits
 
 - **Your own MCP session sees every song.** A coding agent connected as you (an MCP session on this instance) is not a bot: the project filter is a bot rule, not a permission, and a session with the owner's access can read and edit any song on the instance it can reach. Studio is single-operator in this phase.
-- **Calls through the gateway's shared tools endpoint with the gateway token count as you.** If an MCP client reaches Studio through the gateway's `/tools/mcp` using the gateway token, Studio sees the owner, with every song and every permission that token already carries (it already grants access to every gateway tool). Bots are the only callers Studio marks as agents, and they come through their own per-bot scope.
+- **Calls through the gateway's shared tools endpoint with the gateway token count as you.** Every MCP caller is recorded as an agent, but only a Crow bot running its own copy of Studio's tools is limited to its project. A client that reaches Studio through the gateway's `/tools/mcp` (or the router) with the gateway token is treated as the owner, with every song — even a device bridge that calls itself a bot over that endpoint, such as the companion. That token already grants owner access to every gateway tool, so Studio adds nothing it did not already allow.
 
 ## Credits
 

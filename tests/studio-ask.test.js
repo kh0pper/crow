@@ -501,12 +501,14 @@ test("the first ask carries the song context in the message and briefing:true on
   assert.equal(perch.messages[0].sid, "session-1", "to the session the spawn returned");
   assert.equal(
     perch.messages[0].body.message,
-    '[Crow Studio] You are helping on the song "Bass song" (song id ' + botSong + "). "
+    "[Crow Studio] You are helping on the song with id " + botSong + ". Read it with studio_session_summary. "
       + "Use the studio_* tools; the operator sees every edit live and can undo it. "
       + "Never edit locked tracks; never start or stop the operator's playback."
       + "\n\nMake the bass line fatter",
     "the song context goes in front of the operator's question",
   );
+  // The title is agent-editable data: it never rides in the operator's turn.
+  assert.equal(perch.messages[0].body.message.includes(SONG_TITLE), false);
 });
 
 test("one session per song: later asks are sent exactly as typed", async (t) => {
@@ -522,7 +524,7 @@ test("one session per song: later asks are sent exactly as typed", async (t) => 
   assert.equal(perch.messages[0].sid, perch.messages[1].sid, "on the same session");
   assert.equal(perch.messages[1].body.message, "second question", "a later question carries no context");
 
-  const remembered = JSON.parse(ui.stored.get("crow-studio-ask:" + botSong));
+  const remembered = JSON.parse(ui.stored.get("crow-studio-ask:" + botSong + ":" + BOT.bot_id));
   assert.equal(remembered.sid, "session-1", "the session is remembered under the song");
   assert.equal(remembered.briefed, true, "and it is remembered that it has the context");
 });
@@ -557,7 +559,7 @@ test("a turn still running is reported as the bot still answering", async (t) =>
   assert.match(ui.askLog(), /Bass Bot is still answering/, "the box says what is happening");
   assert.equal(perch.spawns.length, 1, "the session is kept: nothing is respawned");
   assert.equal(
-    JSON.parse(ui.stored.get("crow-studio-ask:" + botSong)).sid,
+    JSON.parse(ui.stored.get("crow-studio-ask:" + botSong + ":" + BOT.bot_id)).sid,
     "session-1",
     "and it is still remembered for the next question",
   );
