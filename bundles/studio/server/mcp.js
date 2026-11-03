@@ -1,0 +1,541 @@
+/**
+ * Studio MCP server — the agent's half of the shared session.
+ *
+ * Every tool here has a GUI twin, and they are the same code path: a tool call
+ * becomes one registry command, sent to the session hub through the agent HTTP
+ * API, applied to the one live song document the dashboard is showing. That is
+ * why the command tools are generated from the registry rather than written out
+ * by hand — a command can never exist for the GUI and be missing for the agent,
+ * or the other way round (`tests/studio-parity.test.js` holds that rule).
+ *
+ * ## Attribution
+ *
+ * An MCP call is NEVER attributed to the person. The author is resolved from
+ * the call (`servers/research/actor.js`, injected through `actor`) and then
+ * forced to `kind:"agent"`: a Crow bot becomes `{kind:"agent", id:"bot:<id>"}`,
+ * anything else — the operator's own session, an unknown client, no actor at
+ * all — becomes `{kind:"agent", id:"mcp", label:"Agent (MCP)"}`. The gateway's
+ * agent HTTP routes force `kind:"agent"` again on their side, so a compromised
+ * MCP process still cannot write as the operator.
+ *
+ * ## The three kinds of tool
+ *
+ *   - one per non-humanOnly registry command, `studio_` + the id with dots
+ *     turned into underscores (`studio_clip_write`), input `{song_id, ...args}`;
+ *   - the song and history reads and the history steps that are not commands
+ *     (list/create/summary/get_clip/history/undo/redo);
+ *   - the two tools that answer questions about the engine instead of editing
+ *     (render, module types).
+ *
+ * `studio_session_summary` exists because a song does not fit in a prompt: it
+ * returns the tracks, scenes and a page of clips with note counts, and the
+ * agent asks for one clip's notes with `studio_get_clip` when it needs them.
+ *
+ * A refusal from the hub is a tool error whose text is the hub's own sentence
+ * plus its code in parentheses — the sentence names the object (the locked
+ * track, the limit), which is what the agent has to tell the operator.
+ */
+
+import { randomUUID } from "node:crypto";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { listCommands } from "./commands/registry.js";
+// Registering the 1a commands is a side effect of importing them.
+import "./commands/core.js";
+import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
+
+/** The author every call falls back to: an agent, never the person (spec §5.3). */
+export const MCP_AUTHOR = Object.freeze({ kind: "agent", id: "mcp", label: "Agent (MCP)" });
+
+/** Real name of the server, as it appears to an MCP client. */
+export const SERVER_NAME = "studio";
+
+/** The one line every command tool carries about how an edit behaves. */
+const UNDO_LINE = "Every change shows up live for the operator, tagged as yours, and can be undone.";
+
+/** Clips per page of `studio_session_summary` (the plan's Task 9 interface). */
+const SUMMARY_PAGE_SIZE = 50;
+
+/** The most history entries one call returns. */
+const HISTORY_LIMIT_MAX = 50;
+
+/**
+ * The agent author for one resolved call actor.
+ *
+ * A bot keeps its identity (`bot:<id>`), so the operator can tell which bot
+ * made an edit; everyone else — the operator's own MCP session, an unknown
+ * caller, no actor — is the generic MCP agent. The kind is always "agent".
+ *
+ * @param {{kind?: string, id?: string}|null} actor
+ * @returns {{kind: "agent", id: string, label: string}}
+ */
+export function toAgentAuthor(actor) {
+  if (actor && actor.kind === "bot" && typeof actor.id === "string" && actor.id !== "") {
+    return { kind: "agent", id: `bot:${actor.id}`, label: `Bot ${actor.id}` };
+  }
+  return { ...MCP_AUTHOR };
+}
+
+/**
+ * The field shape of a command's zod schema.
+ *
+ * A command schema may be wrapped in a refinement (`z.object(...).strict()
+ * .refine(...)`), and a ZodEffects has no `.shape` of its own; the wrapped
+ * object does, so unwrap until it is found. Refinements are not carried into
+ * the MCP input schema — the hub runs the full schema on every call anyway —
+ * but the command's fields, their types and their own strictness are.
+ *
+ * @param {object} schema - a zod schema
+ * @returns {object} a zod raw shape
+ */
+export function commandShape(schema) {
+  let current = schema;
+  for (let depth = 0; depth < 10 && current; depth += 1) {
+    if (current.shape && typeof current.shape === "object") return current.shape;
+    current = current._def?.schema ?? null;
+  }
+  return {};
+}
+
+/** @returns {object} a one-text-block tool result. */
+function textResult(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 1);
+  return { content: [{ type: "text", text }] };
+}
+
+/** @returns {object} a tool error carrying one sentence. */
+function errorResult(text) {
+  return { isError: true, content: [{ type: "text", text: String(text) }] };
+}
+
+/** @returns {string} a thrown error's message, never an empty string. */
+function errorText(err) {
+  const message = err && typeof err.message === "string" ? err.message.trim() : "";
+  return message === "" ? "Studio hit an internal error." : message;
+}
+
+/**
+ * Whether a read route answered with the hub's refusal shape instead of its
+ * data (an ACL refusal, a missing song, the gateway reporting itself down).
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isRefusal(value) {
+  return !!value && typeof value === "object" && value.ok === false && typeof value.code === "string";
+}
+
+/**
+ * The text a hub refusal becomes: its own sentence, then its code.
+ * @param {{ok?: boolean, code?: string, error?: string}|null} result
+ * @returns {string}
+ */
+export function refusalText(result) {
+  const text = result && typeof result.error === "string" && result.error !== ""
+    ? result.error
+    : "Studio refused the call.";
+  return result && typeof result.code === "string" && result.code !== ""
+    ? `${text} (${result.code})`
+    : text;
+}
+
+/**
+ * The compact view of a song `studio_session_summary` returns: no notes, a note
+ * count per clip, one page of clips at a time.
+ * @param {string} songId
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {number} page - 1-based page of clips
+ * @returns {object}
+ */
+export function sessionSummary(songId, snapshot, page = 1) {
+  const meta = snapshot?.meta ?? {};
+  const allClips = Object.values(snapshot?.clips ?? {}).map((clip) => ({
+    id: clip.id,
+    track_id: clip.track_id,
+    scene_id: clip.scene_id,
+    name: clip.name,
+    length_bars: clip.length_bars,
+    note_count: Array.isArray(clip.notes) ? clip.notes.length : 0,
+  }));
+  const pages = Math.max(1, Math.ceil(allClips.length / SUMMARY_PAGE_SIZE));
+  const wanted = Number.isFinite(page) ? Math.trunc(page) : 1;
+  const current = Math.min(Math.max(1, wanted), pages);
+  const from = (current - 1) * SUMMARY_PAGE_SIZE;
+
+  return {
+    song_id: songId,
+    title: typeof meta.title === "string" ? meta.title : "Untitled song",
+    bpm: Number.isFinite(meta.bpm) ? meta.bpm : 120,
+    key: typeof meta.key === "string" ? meta.key : "C major",
+    tracks: (snapshot?.tracks ?? []).map((track) => ({
+      id: track.id,
+      name: track.name,
+      device: { type: track.device?.type ?? null },
+      mute: track.mute === true,
+      solo: track.solo === true,
+      locked: track.locked === true,
+    })),
+    scenes: (snapshot?.scenes ?? []).map((scene) => ({ id: scene.id, name: scene.name })),
+    clips: allClips.slice(from, from + SUMMARY_PAGE_SIZE),
+    page: current,
+    pages,
+  };
+}
+
+/**
+ * The project a song belongs to, for a render (which is filed under it).
+ *
+ * The agent snapshot route answers with the song's document but not its project,
+ * so the song list is the second source; a song in neither is not a song this
+ * caller may see.
+ * @param {object} hub - the hub client
+ * @param {string} songId
+ * @param {object} opened - the snapshot route's answer
+ * @returns {Promise<number>}
+ */
+async function projectIdFor(hub, songId, opened) {
+  const direct = Number(opened?.project_id ?? opened?.snapshot?.project_id);
+  if (Number.isInteger(direct) && direct > 0) return direct;
+  const songs = await hub.listSongs({});
+  if (isRefusal(songs)) throw new Error(refusalText(songs));
+  const row = Array.isArray(songs) ? songs.find((song) => song && song.id === songId) : null;
+  const projectId = Number(row?.project_id);
+  if (!Number.isInteger(projectId)) {
+    throw new Error(`There is no song "${songId}".`);
+  }
+  return projectId;
+}
+
+/**
+ * Build the Studio MCP server.
+ *
+ * Everything external is injected: the hub client (the gateway's agent API),
+ * the renderer (offline audio), the catalogue generator and the actor helpers.
+ * Tests pass fakes for all four; `server/index.js` passes the real ones.
+ *
+ * @param {object} options
+ * @param {object} options.hub - the hub client (`createHubClient`)
+ * @param {{render: Function}} options.renderer - the offline renderer
+ * @param {() => Promise<{modules: object}>} [options.catalogue] - the module catalogue generator
+ * @param {NodeJS.ProcessEnv|object} [options.env] - the env the base actor comes from
+ * @param {{actorFromEnv: Function, resolveCallActor: Function}|null} [options.actor]
+ *   the app's actor helpers; without them every call is the generic MCP agent
+ * @returns {McpServer} the server, ready to `connect()` to a transport
+ */
+export function createStudioServer({
+  hub,
+  renderer,
+  catalogue = moduleCatalogue,
+  env = process.env,
+  actor = null,
+} = {}) {
+  if (!hub || typeof hub.command !== "function" || typeof hub.snapshot !== "function") {
+    throw new TypeError("Studio MCP: a hub client is required");
+  }
+  const server = new McpServer({ name: SERVER_NAME, version: "0.1.0" });
+
+  /**
+   * Who this call is, forced to an agent.
+   * @param {object} [extra] - the MCP request context (carries `_meta` / headers)
+   * @returns {{kind: "agent", id: string, label: string}}
+   */
+  function authorFor(extra) {
+    if (!actor || typeof actor.actorFromEnv !== "function" || typeof actor.resolveCallActor !== "function") {
+      return { ...MCP_AUTHOR };
+    }
+    let resolved = null;
+    try {
+      resolved = actor.resolveCallActor(actor.actorFromEnv(env), extra);
+    } catch {
+      resolved = null;
+    }
+    return toAgentAuthor(resolved);
+  }
+
+  // ---- one tool per registry command the agent may run --------------------
+
+  for (const command of listCommands()) {
+    if (command.humanOnly) continue;
+    const name = `studio_${command.id.replace(/\./g, "_")}`;
+    server.registerTool(
+      name,
+      {
+        title: command.title,
+        description: `${command.title}. ${UNDO_LINE}`,
+        // The command's own fields plus the song they apply to; strict, so a
+        // typo in an argument is refused instead of silently ignored.
+        inputSchema: z
+          .object({
+            song_id: z.string().min(1).describe("the song to edit"),
+            ...commandShape(command.schema),
+          })
+          .strict(),
+      },
+      async (args, extra) => {
+        const { song_id: songId, ...commandArgs } = args;
+        try {
+          const result = await hub.command(songId, {
+            cmd_id: randomUUID(),
+            command: command.id,
+            args: commandArgs,
+            author: authorFor(extra),
+          });
+          if (result && result.ok === true) {
+            const summary = result.entry && typeof result.entry.summary === "string"
+              ? result.entry.summary
+              : command.title;
+            return textResult(summary);
+          }
+          return errorResult(refusalText(result));
+        } catch (err) {
+          return errorResult(errorText(err));
+        }
+      },
+    );
+  }
+
+  // ---- songs -------------------------------------------------------------
+
+  server.registerTool(
+    "studio_list_songs",
+    {
+      title: "List songs",
+      description: "List the Studio songs this caller can see, newest edit first. Pass project_id to narrow to one project.",
+      inputSchema: {
+        project_id: z.number().int().positive().optional().describe("only songs in this project"),
+      },
+    },
+    async (args) => {
+      try {
+        const filter = args.project_id == null ? {} : { project_id: args.project_id };
+        const songs = await hub.listSongs(filter);
+        if (isRefusal(songs)) return errorResult(refusalText(songs));
+        return textResult(songs);
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "studio_create_song",
+    {
+      title: "Create a song",
+      description:
+        "Create an empty song in a project and return its id. The project ACL decides whether you may write there; a song starts with no tracks or scenes.",
+      inputSchema: {
+        project_id: z.number().int().positive().describe("the project the song lives in"),
+        title: z.string().min(1).max(80).describe("the song title"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const result = await hub.createSong({
+          project_id: args.project_id,
+          title: args.title,
+          author: authorFor(extra),
+        });
+        if (result && result.ok === true) return textResult({ song_id: result.song_id });
+        return errorResult(refusalText(result));
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "studio_session_summary",
+    {
+      title: "Summarise the session",
+      description:
+        "The song's tracks (with their device type and lock state), scenes and clips — no note data, one note count per clip. Call this first: it is how you see what the operator has. Clips are paged 50 per page; read one clip's notes with studio_get_clip.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song to summarise"),
+        page: z.number().int().min(1).optional().describe("clip page, 50 clips each; default 1"),
+      },
+    },
+    async (args) => {
+      try {
+        const opened = await hub.snapshot(args.song_id);
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        return textResult(sessionSummary(args.song_id, opened.snapshot, args.page ?? 1));
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "studio_get_clip",
+    {
+      title: "Read one clip",
+      description:
+        "One clip in full, notes included: each note is {t, d, p, v} — start and length in beats, MIDI pitch 0-127, velocity 1-127.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song the clip is in"),
+        clip_id: z.string().min(1).describe("the clip to read"),
+      },
+    },
+    async (args) => {
+      try {
+        const opened = await hub.snapshot(args.song_id);
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        const clip = opened?.snapshot?.clips?.[args.clip_id] ?? null;
+        if (!clip) return errorResult(`There is no clip "${args.clip_id}" in this song.`);
+        return textResult(clip);
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  // ---- history -----------------------------------------------------------
+
+  server.registerTool(
+    "studio_history",
+    {
+      title: "Read the shared history",
+      description:
+        "The song's history, newest first: one entry per applied step, with its author, summary, command and id. Pass an id to studio_undo to take that step back.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song whose history to read"),
+        limit: z.number().int().min(1).max(HISTORY_LIMIT_MAX).optional().describe("how many entries, at most 50; default 50"),
+      },
+    },
+    async (args) => {
+      try {
+        const limit = args.limit ?? HISTORY_LIMIT_MAX;
+        const entries = await hub.history(args.song_id, { limit });
+        if (isRefusal(entries)) return errorResult(refusalText(entries));
+        return textResult(entries);
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  /**
+   * Run one undo or redo and shape the answer for the agent.
+   * @param {Function} run - `hub.undo` or `hub.redo`
+   * @param {object} args - `{song_id, entry_id}`
+   * @param {object} extra - the MCP request context
+   * @param {string} label - "undo" or "redo", for the error fallback
+   * @returns {Promise<object>} a tool result
+   */
+  async function historyStep(run, args, extra, label) {
+    try {
+      const result = await run(args.song_id, {
+        cmd_id: randomUUID(),
+        entry_id: args.entry_id,
+        author: authorFor(extra),
+      });
+      if (result && result.ok === true) {
+        const entry = result.entry ?? {};
+        return textResult({
+          ok: true,
+          summary: typeof entry.summary === "string" ? entry.summary : "",
+          entry_id: entry.id ?? null,
+          command: entry.command ?? null,
+          conflicts: Array.isArray(result.conflicts) ? result.conflicts : [],
+        });
+      }
+      return errorResult(refusalText(result));
+    } catch (err) {
+      return errorResult(`${label} failed: ${errorText(err)}`);
+    }
+  }
+
+  server.registerTool(
+    "studio_undo",
+    {
+      title: "Undo a step",
+      description:
+        "Take back one history step by id. Only fields that still hold what that step wrote are restored: anything edited since is reported as a conflict and left alone, never clobbered.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song the step is in"),
+        entry_id: z.string().min(1).describe("the history step to take back"),
+      },
+    },
+    async (args, extra) => historyStep(hub.undo, args, extra, "Undo"),
+  );
+
+  server.registerTool(
+    "studio_redo",
+    {
+      title: "Redo a step",
+      description: "Put back a step that was undone, by that step's id. It meets the same conflicts rule as undo.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song the step is in"),
+        entry_id: z.string().min(1).describe("the undone step to re-apply"),
+      },
+    },
+    async (args, extra) => historyStep(hub.redo, args, extra, "Redo"),
+  );
+
+  // ---- listening and reference -------------------------------------------
+
+  server.registerTool(
+    "studio_render",
+    {
+      title: "Render the song to audio",
+      description:
+        "Render the song — or one scene, or one clip — offline through the same engine the operator hears, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB). The operator's render length limit applies; listen before and after a change and report the numbers.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song to render"),
+        scene_id: z.string().min(1).optional().describe("render this scene (every clip it holds)"),
+        clip_id: z.string().min(1).optional().describe("render just this clip"),
+        seconds: z.number().positive().describe("how many seconds to render"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const opened = await hub.snapshot(args.song_id);
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        const projectId = await projectIdFor(hub, args.song_id, opened);
+        const out = await renderer.render({
+          song_id: args.song_id,
+          project_id: projectId,
+          snapshot: opened.snapshot,
+          scene_id: args.scene_id ?? null,
+          clip_id: args.clip_id ?? null,
+          seconds: args.seconds,
+          author: authorFor(extra),
+        });
+        return textResult({
+          url: out.url,
+          lufs: out.lufs,
+          true_peak_db: out.true_peak_db,
+          seconds: out.seconds,
+        });
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "studio_module_types",
+    {
+      title: "SunVox module catalogue",
+      description:
+        "Every SunVox module type with its controllers (name, min, max, kind, default), generated from the engine the songs play through. A track device must be one of the generators. Output exists automatically at module 0 and is never created.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const built = await catalogue();
+        const modules = built && built.modules && typeof built.modules === "object" ? built.modules : {};
+        const generators = Object.keys(modules).filter((type) => modules[type]?.kind === "generator");
+        return textResult({
+          generators: generators.length > 0 ? generators.sort() : [...GENERATOR_TYPES],
+          modules,
+        });
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  return server;
+}
