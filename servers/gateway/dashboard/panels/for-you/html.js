@@ -5,6 +5,8 @@
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
+import { gridHtml } from "../../../widgets/grid-html.js";
+import { widgetOf } from "../../../widgets/registry.js";
 import { whyText, ageText } from "../../../for-you/news.js";
 import { listenAudioUrl } from "../../../for-you/listen.js";
 import { weatherKind } from "../../../for-you/weather.js";
@@ -334,8 +336,37 @@ export function needsMeWidgetHtml(summary, lang = "en") {
 }
 
 /**
- * The page. `data`: { settings, dateText, morning|null, moves|null, listen|null, news|null, weather|null }.
- * A section that is off is absent; with every one off, one line says where to turn them on.
+ * The page's cells, in the order For You draws them: needs-me, morning, moves, listen, news (and the
+ * weather, which is offered but not part of the default: its chip lives in the header). A caller
+ * that already ran the registry's loads passes `data.cells` instead; everyone else passes the
+ * sections' own data, as For You v1's callers and tests always have.
+ */
+export function forYouCells(data) {
+  if (Array.isArray(data.cells)) return data.cells;
+  const { settings } = data;
+  const cells = [];
+  const needsMe = widgetOf("needs-me");
+  if (needsMe) cells.push({ widget: needsMe, data: data.needsMe === undefined ? null : data.needsMe });
+  const sections = [
+    ["morning", data.morning], ["moves", data.moves], ["listen", data.listen], ["news", data.news],
+  ];
+  for (const [section, value] of sections) {
+    if (!settings.sections[section] || !value) continue;
+    const widget = widgetOf(section);
+    if (widget) cells.push({ widget, data: value });
+  }
+  // The weather is offered whenever its section is on, whatever the reading: the server draws that
+  // cell hidden (the chip already lives in the header) and the device decides to put it on the grid.
+  const weather = widgetOf("weather");
+  if (weather && settings.sections.weather) cells.push({ widget: weather, data: { wx: data.weather || null } });
+  return cells;
+}
+
+/**
+ * The page. `data`: { settings, dateText, cells?, morning|null, moves|null, listen|null, news|null,
+ * weather|null }. The widgets are one grid (widgets phase 2): the registry's own renderers, in For
+ * You's default order, which `widgets/grid-client.js` then reorders per device. A section that is
+ * off is absent; with every one off, one line says where to turn them on.
  */
 export function forYouPageHtml(data, lang = "en", now = Date.now()) {
   const { settings } = data;
@@ -359,11 +390,7 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
     </header>
     ${wx.detail}${addCity}
     ${anyOn ? "" : `<p class="fy-note">${e(t("forYou.allOff", lang))}</p>`}
-    ${needsMeWidgetHtml(data.needsMe, lang)}
-    ${settings.sections.morning && data.morning ? morningHtml(data.morning, lang) : ""}
-    ${settings.sections.moves && data.moves ? movesHtml(data.moves, lang) : ""}
-    ${settings.sections.listen && data.listen ? listenHtml(data.listen, lang, now) : ""}
-    ${settings.sections.news && data.news ? newsHtml(data.news, lang, now) : ""}
+    ${gridHtml("for-you", forYouCells(data), lang, { now })}
   </div>`;
 }
 

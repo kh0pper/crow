@@ -1,11 +1,15 @@
 /**
- * For You (v1): /dashboard/for-you, the operator's morning page beside the Crow home. What needs me
- * (widgets phase 1: the summary widgets/needs-me.js builds, answered in place where the item offers
- * it) sits above Your morning (Board facts, for-you/morning.js), Move (today's Ramble challenge with
- * Done and Swap, the bird's Health, steps and streak, for-you/moves.js, which reads the installed
- * bundle's own module), Listen (today's spoken briefing, podcasts and the Music app, for-you/listen.js),
- * Your news (Media Hub's picks, for-you/news.js) and a weather chip (Open-Meteo, for-you/weather.js);
- * ?view=customize turns sections on or off and sets the weather city.
+ * For You (v1, widgets phase 2): /dashboard/for-you, the operator's morning page beside the Crow
+ * home. What needs me (widgets phase 1: the summary widgets/needs-me.js builds, answered in place
+ * where the item offers it) sits above Your morning (Board facts, for-you/morning.js), Move (today's
+ * Ramble challenge with Done and Swap, the bird's Health, steps and streak, for-you/moves.js, which
+ * reads the installed bundle's own module), Listen (today's spoken briefing, podcasts and the Music
+ * app, for-you/listen.js) and Your news (Media Hub's picks, for-you/news.js); a weather chip
+ * (Open-Meteo, for-you/weather.js) stays in the header. Since widgets phase 2 those five are one
+ * grid of widgets (widgets/registry.js, widgets/grid-html.js): the server draws them in that order,
+ * and the device rearranges, resizes and removes them in Edit mode (widgets/grid-client.js), its
+ * layout kept in localStorage and never synced. ?view=customize turns a section on or off (which now
+ * decides whether the widget is offered at all) and sets the weather city.
  *
  * Gates, in this order, on every method:
  *   - CROW_FOR_YOU must be "1" (forYouEnabled), else 404;
@@ -23,11 +27,11 @@ import { isLocalPasswordSessionOn } from "../local-session.js";
 import { forYouEnabled } from "../../for-you/flag.js";
 import { readForYouSettings, writeForYouSettings, normalizeSettings, CITY_MAX, SECTIONS } from "../../for-you/settings.js";
 import { geocodeCity, weatherFor } from "../../for-you/weather.js";
-import { loadMorning } from "../../for-you/morning.js";
 import { loadNews } from "../../for-you/news.js";
-import { loadListen } from "../../for-you/listen.js";
-import { loadMoves } from "../../for-you/moves.js";
 import { loadNeedsMe } from "../../widgets/needs-me.js";
+import { loadWidgets, widgetsForPage, WIDGET_TIMEOUT_MS } from "../../widgets/registry.js";
+import { widgetsGridCss } from "../../widgets/grid-css.js";
+import { gridClientJs } from "../../widgets/grid-client.js";
 import { WIDGETS_SNOOZED_KEY } from "../../routes/widgets.js";
 import { readSetting } from "../settings/registry.js";
 import { existsSync } from "node:fs";
@@ -54,10 +58,10 @@ export function _setForYouSeamsForTest({ geocode: g, weather: w, projects: p, ne
 }
 
 /**
- * The "What needs me" summary this page draws above Your morning (widgets/needs-me.js). Its own reads
- * degrade here: an unknown project list costs the project names, a missing or unreadable tasks store
- * costs the Board's rows, a malformed snooze setting reads as none. The caller still catches: a
- * throw is one line where the widget goes, and every other section renders as usual.
+ * The "What needs me" summary this page draws as its first widget (widgets/needs-me.js). Its own
+ * reads degrade here: an unknown project list costs the project names, a missing or unreadable tasks
+ * store costs the Board's rows, a malformed snooze setting reads as none. The registry's loader
+ * still catches: a throw is this widget's own error line, and every other cell renders as usual.
  */
 async function loadNeedsMeForPage(db, { now, lang }) {
   let projects = [];
@@ -125,6 +129,37 @@ function dateText(now, tz, lang) {
   }
 }
 
+/**
+ * One request's shared reads, handed to the widget registry's loads (widgets/registry.js). Each is
+ * read at most once — the weather is both the header chip and the Move card's input, and the
+ * project list feeds Your morning — and each keeps For You's own test seams. A read that fails is
+ * that widget's own error line, never the page's: the caller's `loadWidgets` catches.
+ */
+function forYouContext(db, { settings, crowHome, now, tz, lang }) {
+  let wx = null;
+  const weatherOf = () => {
+    if (!wx) {
+      wx = settings.sections.weather && settings.place
+        ? Promise.resolve()
+          .then(() => weather(settings.place))
+          .catch((err) => { console.warn(`[for-you] weather failed: ${err && err.message}`); return null; })
+        : Promise.resolve(null);
+    }
+    return wx;
+  };
+  let projects = null;
+  const projectsOf = () => {
+    if (!projects) projects = Promise.resolve().then(() => listProjects(db));
+    return projects;
+  };
+  let needs = null;
+  const needsOf = () => {
+    if (!needs) needs = Promise.resolve().then(() => needsMeForPage(db, { now, lang }));
+    return needs;
+  };
+  return { db, now, tz, lang, crowHome, settings, weather: weatherOf, projects: projectsOf, needsMe: needsOf };
+}
+
 export default {
   id: "for-you",
   name: "For You",
@@ -160,26 +195,21 @@ export default {
     const now = Date.now();
     let tz;
     try { tz = await instanceZone(db); } catch { tz = undefined; }
-    // Each section degrades alone: a failed read costs its section one line, never the page.
-    const failed = (what, fallback) => (err) => { console.warn(`[for-you] ${what} failed: ${err && err.message}`); return fallback; };
-    const [needsMe, morning, listen, news, wx] = await Promise.all([
-      needsMeForPage(db, { now, lang }).catch(failed("needs me", null)),
-      settings.sections.morning
-        ? listProjects(db).then((projects) => loadMorning(db, { projects, tz, now })).catch(failed("morning", { error: true }))
-        : null,
-      settings.sections.listen ? loadListen(db, { crowHome, now }).catch(failed("listen", null)) : null,
-      settings.sections.news ? loadNews(db, { crowHome, now }).catch(failed("news", { state: "error", stories: [], hidden: [] })) : null,
-      settings.sections.weather && settings.place ? weather(settings.place).catch(failed("weather", null)) : null,
-    ]);
-    // Ramble's card weighs the weather the chip already loaded, so it reads after it (the picker
-    // takes { rain, temp, code }); a missing or failing Ramble hides only this section. `lang` goes
-    // along so the why line is written in the page's language.
-    const moves = settings.sections.moves
-      ? await loadMoves(db, { crowHome, now, weather: wx, lang }).catch(failed("moves", null))
-      : null;
+    const context = forYouContext(db, { settings, crowHome, now, tz, lang });
+    // The header's chip is the same reading the weather widget would draw, so it is read once.
+    // Bounded like every widget: a weather service that hangs costs the chip, never the page.
+    let wxTimer;
+    const wx = await Promise.race([
+      Promise.resolve().then(() => context.weather()).catch(() => null),
+      new Promise((resolve) => { wxTimer = setTimeout(() => resolve(null), WIDGET_TIMEOUT_MS); wxTimer.unref?.(); }),
+    ]).finally(() => clearTimeout(wxTimer));
+    // Each widget degrades alone: a failed read is its own one-line error cell, never the page's.
+    const cells = await loadWidgets(widgetsForPage("for-you", { settings }), context);
     return layout({
       title: t("forYou.title", lang),
-      content: forYouCss() + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), needsMe, morning, moves, listen, news, weather: wx }, lang, now) + forYouClientJs(),
+      content: forYouCss() + widgetsGridCss()
+        + forYouPageHtml({ settings, dateText: dateText(now, tz, lang), weather: wx, cells }, lang, now)
+        + forYouClientJs() + gridClientJs(),
     });
   },
 };

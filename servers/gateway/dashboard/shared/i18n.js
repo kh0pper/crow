@@ -4666,6 +4666,20 @@ export const translations = {
   // Staged sends (servers/gateway/staged/recorder.js): the notification a bridge or job draft raises.
   // Title only — the draft's recipients, subject and body never touch a notification.
   "staged.notify.title": { en: "Draft ready to review", es: "Borrador listo para revisar" },
+  // Widgets phase 2: the grid and its edit mode (widgets/grid-html.js, widgets/grid-client.js)
+  "widgets.grid.edit": { en: "Edit", es: "Editar" },
+  "widgets.grid.done": { en: "Done", es: "Listo" },
+  "widgets.grid.add": { en: "+ Add widget", es: "+ Añadir widget" },
+  "widgets.grid.addTitle": { en: "Add a widget", es: "Añadir un widget" },
+  "widgets.grid.close": { en: "Close", es: "Cerrar" },
+  "widgets.grid.remove": { en: "Remove", es: "Quitar" },
+  "widgets.grid.removeNamed": { en: "Remove {name}", es: "Quitar {name}" },
+  "widgets.grid.resize": { en: "Size", es: "Tamaño" },
+  "widgets.grid.resizeNamed": { en: "Change the size of {name}", es: "Cambiar el tamaño de {name}" },
+  "widgets.grid.hint": { en: "Drag a widget to move it. The Size button steps through its sizes.", es: "Arrastra un widget para moverlo. El botón Tamaño recorre sus tamaños." },
+  "widgets.grid.saved": { en: "Layout saved on this device.", es: "Diseño guardado en este dispositivo." },
+  "widgets.grid.none": { en: "Every widget is already on the page.", es: "Todos los widgets ya están en la página." },
+  "widgets.grid.error": { en: "This widget couldn't load just now.", es: "Este widget no se pudo cargar ahora mismo." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

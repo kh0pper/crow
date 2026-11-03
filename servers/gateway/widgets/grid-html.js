@@ -1,0 +1,125 @@
+/**
+ * The grid's markup (widgets phase 2, spec §7.3): `gridHtml(pageId, cells, lang)`.
+ *
+ * The server draws EVERY widget the page offers, in the page's default order, one
+ * `<section class="wg-cell" data-widget data-w data-h data-sizes>` each, inside one CSS grid, plus
+ * the edit toolbar and the "+ Add widget" picker as an inert `<template>`. Which cells are really
+ * on the page — their order, their size, and the ones this device removed — is the device's own
+ * business: `widgets/grid-client.js` applies the layout it finds in
+ * `localStorage["crow.widgets.layout.<page>"]`, with no server round trip. Nothing here knows about
+ * that layout.
+ *
+ * Rules this file owns:
+ *   - a widget whose `render` returns "" draws NO cell (the Move card without Ramble, Listen with
+ *     nothing in it: For You v1 left those sections out, and so does the grid);
+ *   - a widget whose load failed draws its own one-line error instead of its content — its own card
+ *     where it has one (`errorHtml`), so "What needs me" keeps its title and its way into the full
+ *     list — and every other cell still renders;
+ *   - every title, label and attribute value goes through escapeHtml: a widget's name, a cell's
+ *     id and its size list all reach markup from data;
+ *   - the picker lists only the widgets whose cell was really drawn, so a button can never point
+ *     at a cell that is not there. Which of those this device has removed is the client's call.
+ */
+import { escapeHtml } from "../dashboard/shared/components.js";
+import { t, fill } from "../dashboard/shared/i18n.js";
+
+const e = escapeHtml;
+
+/** A widget's name in the page's language. */
+export function widgetTitle(widget, lang = "en") {
+  return widget && widget.titleKey ? t(widget.titleKey, lang) : "";
+}
+
+/** The size the server draws a widget at: its default, guarded by its own list. */
+export function defaultSizeOf(widget) {
+  const list = Array.isArray(widget && widget.sizes) ? widget.sizes : [];
+  const want = Array.isArray(widget && widget.defaultSize) ? widget.defaultSize : null;
+  if (want && list.some((s) => Number(s[0]) === Number(want[0]) && Number(s[1]) === Number(want[1]))) {
+    return [Number(want[0]), Number(want[1])];
+  }
+  return Array.isArray(list[0]) ? [Number(list[0][0]), Number(list[0][1])] : [2, 1];
+}
+
+/** The cell's body: the widget's markup, or its own error line when the load failed. */
+function bodyHtml(entry, lang, now) {
+  const widget = entry.widget;
+  if (entry.failed) {
+    if (typeof widget.errorHtml === "function") return widget.errorHtml(lang);
+    return `<p class="fy-note">${e(t("widgets.grid.error", lang))}</p>`;
+  }
+  try {
+    return widget.render(entry.data, lang, now === undefined ? undefined : { now }) || "";
+  } catch (err) {
+    try { console.warn(`[widgets] ${widget.id} render failed: ${err && err.message}`); } catch { /* never a page */ }
+    return typeof widget.errorHtml === "function"
+      ? widget.errorHtml(lang)
+      : `<p class="fy-note">${e(t("widgets.grid.error", lang))}</p>`;
+  }
+}
+
+/** One cell, or "" when the widget has nothing to show. */
+export function gridCellHtml(entry, lang = "en", now) {
+  const widget = entry && entry.widget;
+  if (!widget || !widget.id) return "";
+  const body = bodyHtml(entry, lang, now);
+  if (!body) return "";
+  const title = widgetTitle(widget, lang);
+  const size = defaultSizeOf(widget);
+  const sizes = JSON.stringify(Array.isArray(widget.sizes) ? widget.sizes : []);
+  const off = widget.defaultOn === false ? " hidden" : "";
+  return `<section class="wg-cell" data-widget="${e(widget.id)}" data-w="${size[0]}" data-h="${size[1]}" data-sizes="${e(sizes)}" data-def="${size[0]},${size[1]}"${off}>
+      <div class="wg-cell-body">${body}</div>
+      <button type="button" class="fy-btn wg-remove" data-wg-remove aria-label="${e(fill(t("widgets.grid.removeNamed", lang), { name: title }))}">${e(t("widgets.grid.remove", lang))}</button>
+      <button type="button" class="fy-btn wg-size" data-wg-size aria-label="${e(fill(t("widgets.grid.resizeNamed", lang), { name: title }))}">${e(t("widgets.grid.resize", lang))}</button>
+    </section>`;
+}
+
+/** The toolbar: Edit, then (while editing) "+ Add widget" and Done, the hint, and a status line. */
+function toolbarHtml(lang) {
+  return `<div class="wg-bar" data-wg-toolbar>
+      <button type="button" class="fy-btn" data-wg-edit>${e(t("widgets.grid.edit", lang))}</button>
+      <button type="button" class="fy-btn" data-wg-add hidden>${e(t("widgets.grid.add", lang))}</button>
+      <button type="button" class="fy-btn fy-btn--primary" data-wg-done hidden>${e(t("widgets.grid.done", lang))}</button>
+    </div>
+    <p class="fy-hint wg-hint" data-wg-hint hidden>${e(t("widgets.grid.hint", lang))}</p>
+    <p class="fy-status wg-status" role="status" data-wg-status></p>`;
+}
+
+/** The picker, inert until the client clones it into a dialog: one button per drawn widget. */
+function pickerHtml(drawn, lang) {
+  const rows = drawn.map(({ entry }) => {
+    const widget = entry.widget;
+    return `<li><button type="button" class="fy-btn wg-picker-add" data-wg-add="${e(widget.id)}">${e(widgetTitle(widget, lang))}</button></li>`;
+  }).join("");
+  return `<template data-wg-picker-tpl>
+      <dialog class="wg-picker" data-wg-picker aria-labelledby="wg-picker-h">
+        <div class="wg-picker-inner">
+          <h2 class="fy-title fy-title--sub" id="wg-picker-h">${e(t("widgets.grid.addTitle", lang))}</h2>
+          <ul class="wg-picker-list">${rows}</ul>
+          <p class="fy-note" data-wg-picker-empty hidden>${e(t("widgets.grid.none", lang))}</p>
+          <button type="button" class="fy-btn" data-wg-picker-close>${e(t("widgets.grid.close", lang))}</button>
+        </div>
+      </dialog>
+    </template>`;
+}
+
+/**
+ * The page's grid. `cells` is what `loadWidgets` returned (or a page's own `[{ widget, data }]`);
+ * `opts.now` reaches a renderer that wants the request's clock. The grid is one element: the client
+ * finds it by its `data-wg-page`, and so does the shell when it must keep a swipe from starting
+ * inside it.
+ */
+export function gridHtml(pageId, cells, lang = "en", opts = {}) {
+  const now = opts.now;
+  const drawn = [];
+  for (const entry of Array.isArray(cells) ? cells : []) {
+    const html = gridCellHtml(entry, lang, now);
+    if (html) drawn.push({ entry, html });
+  }
+  const body = drawn.map((c) => c.html).join("\n    ");
+  return `<div class="wg-grid" data-wg-page="${e(String(pageId == null ? "" : pageId))}" data-wg-saved="${e(t("widgets.grid.saved", lang))}">
+    ${toolbarHtml(lang)}
+    ${body}
+    ${pickerHtml(drawn, lang)}
+  </div>`;
+}
