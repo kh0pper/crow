@@ -428,6 +428,24 @@ export function createMusicSource({ config, fetchImpl = fetch, clock = Date.now,
     return (await tracksFor(c, candidate, n)).map((t) => playable(c, t)).filter(Boolean).slice(0, n);
   }
 
+  /**
+   * F28a: "play a random album" — one album out of the index, uniformly, as the candidate a normal
+   * album match gives (so it plays through the same queue path). rand is injected for tests.
+   * → candidate | null when the index holds no album yet (it starts building if it never has). While that
+   * first build is still running, indexState().warm is false: a caller can then say the library is loading
+   * rather than that it has no albums (review round 1, finding 5).
+   */
+  function randomAlbum(rand = Math.random) {
+    if (!cfg()) return null;
+    if (autoStart && !started && !stopped) start();
+    const albums = state.ix.albums;
+    if (!albums.length) return null;
+    const x = Number(typeof rand === "function" ? rand() : NaN);
+    const at = Number.isFinite(x) ? Math.min(Math.max(Math.floor(x * albums.length), 0), albums.length - 1) : 0;
+    const e = albums[at];
+    return { id: `music:album:${e.id}`, kind: "album", title: e.name, subtitle: e.artist || "", confident: true };
+  }
+
   return {
     kind: "music",
     contract: SOURCE_CONTRACT,
@@ -440,6 +458,7 @@ export function createMusicSource({ config, fetchImpl = fetch, clock = Date.now,
       return one;
     },
     choose: (candidates, utterance) => choose(candidates, utterance),
+    randomAlbum,
     start,
     stop,
     /** Build the index now. → true when albums, genres, playlists and artists all landed. */
