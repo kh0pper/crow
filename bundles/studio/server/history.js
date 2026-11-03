@@ -24,6 +24,13 @@
  * same object reverts only its own field, and a step whose field has since
  * changed is reported per field instead of overwriting the newer edit.
  *
+ * A whole-object restore (`"*"`) is skipped too when the object it belongs to
+ * came back as a different object. A track removal records the track and each
+ * of its clips as one such key; if a new track was created under the removed
+ * track's id since, the track's own key conflicts, and every clip of that
+ * entry is reported (`owner_changed: true`) instead of restoring the old notes
+ * onto whatever now holds that id.
+ *
  * A plan is dry-run before it is offered: its writes are applied to a clone of
  * the document and `checkInvariants()` (doc.js) is run on the clone. A plan
  * that would throw, or that would leave the song inconsistent — a clip without
@@ -56,6 +63,7 @@ import {
   applyBeforeAfter,
   checkInvariants,
   cloneJson,
+  objectRef,
   parseObjectRef,
   readField as readDocField,
   splitRefField,
@@ -109,16 +117,35 @@ export function readField(doc, key) {
 }
 
 /**
- * A value with its position hints removed: `_index` and `_after` say where an
- * object sat when a step was recorded, never what it holds, so an object that
- * moved because something in front of it was removed is not a changed object.
+ * A value with its position hints removed: `_index`, `_after` and `_before`
+ * say where an object sat when a step was recorded, never what it holds, so an
+ * object that moved because something in front of it was removed is not a
+ * changed object.
  * @param {any} value
  * @returns {any}
  */
 function withoutPositionHints(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  const { _index, _after, ...rest } = value;
+  const { _index, _after, _before, ...rest } = value;
   return rest;
+}
+
+/**
+ * The refs a whole-object value belongs to: a clip points at its track and at
+ * its scene; a track, a scene or the song points at nothing.
+ * @param {any} value - a whole-object value from a before/after map
+ * @returns {string[]} e.g. `["track:bass", "scene:verse"]`
+ */
+function ownerRefsOf(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+  const refs = [];
+  if (typeof value.track_id === "string" && value.track_id !== "") {
+    refs.push(objectRef("track", value.track_id));
+  }
+  if (typeof value.scene_id === "string" && value.scene_id !== "") {
+    refs.push(objectRef("scene", value.scene_id));
+  }
+  return refs;
 }
 
 /**
@@ -269,8 +296,15 @@ export function makeEntry({
  * gone (`gone: true`). A `"*"` key compares (and restores) the whole object,
  * and is skipped when another field of the same object is already in conflict —
  * the object is no longer the one the step made. Position hints (`_index`,
- * `_after`) are ignored on both sides: an object moving because a neighbour
- * was removed is not an edit to it.
+ * `_after`, `_before`) are ignored on both sides: an object moving because a
+ * neighbour was removed is not an edit to it.
+ *
+ * A `"*"` key for a track or scene that no longer matches — the object was
+ * removed and another one now holds its id — also takes every clip of the same
+ * entry with it: those clips are reported with `owner_changed: true` and left
+ * where they are instead of being restored onto the object that took the id
+ * over. Their `expected` is what the step left that key at (usually `null`,
+ * because the step deleted the clip).
  *
  * `inverse.guards` are compared the same way but never restored: a guard that
  * has moved on means the object the step wrote to is not the object that is
@@ -285,7 +319,8 @@ export function makeEntry({
  * @param {import("yjs").Doc} doc
  * @param {object} entry - a history entry, as `makeEntry` returns it
  * @returns {{apply: Map<string, any>,
- *            conflicts: Array<{ref: string, field: string, expected: any, actual: any, gone?: boolean}>,
+ *            conflicts: Array<{ref: string, field: string, expected: any, actual: any,
+ *                               gone?: boolean, owner_changed?: boolean}>,
  *            blocked: string[]}}
  * @throws {StudioError} code "conflict" when the step is already undone,
  *   code "invalid" when the entry carries nothing to undo
@@ -305,6 +340,8 @@ export function planUndo(doc, entry) {
   const conflicts = [];
   const refsInConflict = new Set();
   const guardedRefs = new Set();
+  // Track and scene refs whose whole-object restore came back in conflict.
+  const changedOwners = new Set();
 
   // Guards first: one that has moved on means this ref is not the object the
   // step edited, so its fields are left alone (and the guard is never written).
@@ -352,6 +389,31 @@ export function planUndo(doc, entry) {
       continue;
     }
     conflicts.push(conflictFor(key, expected, actual));
+    // A track or scene whose whole-object restore is in conflict may be a new
+    // object under an old id; the clips of this entry cannot go back to it.
+    const target = parseObjectRef(split.ref);
+    if (target?.kind === "track" || target?.kind === "scene") changedOwners.add(split.ref);
+  }
+
+  // The clips of an entry whose track or scene was re-created under the same id
+  // stay deleted: restoring them would move the old notes onto a different
+  // instrument, or into a scene that is not the one they were written for.
+  if (changedOwners.size > 0) {
+    for (const key of keys) {
+      const split = splitRefField(key);
+      if (!split || split.field !== "*") continue;
+      if (!planned.has(key)) continue;
+      const owners = ownerRefsOf(planned.get(key));
+      if (!owners.some((ref) => changedOwners.has(ref))) continue;
+      planned.delete(key);
+      conflicts.push({
+        ref: split.ref,
+        field: "*",
+        expected: cloneJson(after.get(key) ?? ABSENT),
+        actual: ABSENT,
+        owner_changed: true,
+      });
+    }
   }
 
   const apply = orderPlan(planned);
@@ -396,7 +458,8 @@ function dryRun(doc, plan) {
  * @param {import("yjs").Doc} doc
  * @param {object} undoEntry - the `history.undo` entry to take back
  * @returns {{apply: Map<string, any>,
- *            conflicts: Array<{ref: string, field: string, expected: any, actual: any, gone?: boolean}>,
+ *            conflicts: Array<{ref: string, field: string, expected: any, actual: any,
+ *                               gone?: boolean, owner_changed?: boolean}>,
  *            blocked: string[]}}
  * @throws {StudioError} code "conflict" when that undo has itself been undone
  */

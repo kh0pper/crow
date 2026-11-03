@@ -143,7 +143,24 @@ function barsText(bars) {
  * @returns {string|null}
  */
 function siblingBefore(previous) {
-  const id = previous?.get?.("id");
+  return idOf(previous);
+}
+
+/**
+ * The sibling a restored track or scene should precede, for the `_before`
+ * position hint. It is the second anchor a restore can use: when the object in
+ * front of a removed one is gone too, the one behind it still says where its
+ * old place was. Only a removal records one — a created track or scene is
+ * appended, so nothing follows it when it appears.
+ * @param {Y.Map<any>|null} next - the sibling that came after it
+ * @returns {string|null}
+ */
+function siblingAfter(next) {
+  return idOf(next);
+}
+/** @returns {string|null} a live object's id, or null when there is no object. */
+function idOf(object) {
+  const id = object?.get?.("id");
   return typeof id === "string" ? id : ABSENT;
 }
 
@@ -371,13 +388,16 @@ defineCommand({
     if (index < 0) throw new StudioError("not_found", `There is no track "${args.track_id}" in this song.`);
     const track = getTrack(doc, args.track_id);
     const clips = clipEntries(doc).filter(({ clip }) => clip.get("track_id") === args.track_id);
-    const previous = index > 0 ? trackList(doc).get(index - 1) : null;
+    const tracks = trackList(doc);
+    const previous = index > 0 ? tracks.get(index - 1) : null;
+    const next = index + 1 < tracks.length ? tracks.get(index + 1) : null;
 
     const before = {
       [fieldKey(trackRef(args.track_id), "*")]: {
         ...cloneJson(toPlain(track)),
         _index: index,
         _after: siblingBefore(previous),
+        _before: siblingAfter(next),
       },
     };
     const after = { [fieldKey(trackRef(args.track_id), "*")]: ABSENT };
@@ -653,13 +673,16 @@ defineCommand({
     if (index < 0) throw new StudioError("not_found", `There is no scene "${args.scene_id}" in this song.`);
     const scene = getScene(doc, args.scene_id);
     const clips = clipEntries(doc).filter(({ clip }) => clip.get("scene_id") === args.scene_id);
-    const previous = index > 0 ? sceneList(doc).get(index - 1) : null;
+    const scenes = sceneList(doc);
+    const previous = index > 0 ? scenes.get(index - 1) : null;
+    const next = index + 1 < scenes.length ? scenes.get(index + 1) : null;
 
     const before = {
       [fieldKey(sceneRef(args.scene_id), "*")]: {
         ...cloneJson(toPlain(scene)),
         _index: index,
         _after: siblingBefore(previous),
+        _before: siblingAfter(next),
       },
     };
     const after = { [fieldKey(sceneRef(args.scene_id), "*")]: ABSENT };

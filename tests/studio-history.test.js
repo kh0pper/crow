@@ -704,6 +704,82 @@ test("undoing two removals restores the original order", (t) => {
   assert.deepEqual(snapshot(s.doc).tracks.map((track) => track.id), ["a", "b", "c"]);
 });
 
+test("undoing two removals in the order they happened restores the original order", (t) => {
+  const s = studio(t);
+  for (const id of ["a", "b", "c"]) s.run("track.add", { name: id.toUpperCase(), id });
+
+  // A created track records the sibling it followed, and a removed one also
+  // records the sibling that followed it (`_before`).
+  assert.equal(s.entries[2].inverse.after["track:c|*"]._after, "b");
+
+  const removedB = s.run("track.remove", { track_id: "b" });
+  const removedA = s.run("track.remove", { track_id: "a" });
+  assert.deepEqual(trackNames(s.doc), ["C"]);
+
+  // B kept a sibling on either side of it; A had nothing in front of it any
+  // more, only C behind it.
+  assert.equal(removedB.entry.inverse.before["track:b|*"]._after, "a");
+  assert.equal(removedB.entry.inverse.before["track:b|*"]._before, "c");
+  assert.equal(removedA.entry.inverse.before["track:a|*"]._after, null);
+  assert.equal(removedA.entry.inverse.before["track:a|*"]._before, "c");
+
+  // Taking B back first puts it in front of C, and A then goes back in front
+  // of B even though the sibling it followed has been gone since its removal.
+  const undoB = s.undo(removedB.entry);
+  assert.deepEqual(undoB.plan.conflicts, []);
+  assert.deepEqual(trackNames(s.doc), ["B", "C"]);
+
+  const undoA = s.undo(removedA.entry);
+  assert.deepEqual(undoA.plan.conflicts, []);
+  assert.deepEqual(snapshot(s.doc).tracks.map((track) => track.id), ["a", "b", "c"]);
+
+  // The hint is used on the way back in and never left on the song.
+  assert.equal(snapshot(s.doc).tracks.some((track) => "_before" in track), false);
+});
+
+test("undo of track.remove does not move old clips onto a re-created track with the same id", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  const removed = s.run("track.remove", { track_id: "bass" });
+
+  // Someone puts a different instrument on the id the removed track had. The
+  // removal's track no longer matches the document, and the clip it took with
+  // it must not come back onto that new track.
+  s.run("track.add", { name: "Keys", id: "bass", device: { type: "FM" } });
+
+  const { plan } = s.undo(removed.entry);
+  assert.equal(plan.apply.size, 0);
+  assert.deepEqual(plan.blocked, []);
+
+  const conflicts = new Map(plan.conflicts.map((conflict) => [conflict.ref, conflict]));
+  assert.equal(conflicts.size, 2);
+
+  const track = conflicts.get("track:bass");
+  assert.equal(track.field, "*");
+  assert.equal(track.expected, null);
+  assert.equal(track.actual.name, "Keys");
+
+  // The clip is still absent from the document, so it compared clean — only
+  // its owner tells the undo to leave it deleted.
+  const clip = conflicts.get("clip:bass-verse");
+  assert.equal(clip.field, "*");
+  assert.equal(clip.expected, null);
+  assert.equal(clip.actual, null);
+  assert.equal(clip.owner_changed, true);
+
+  assert.deepEqual(trackNames(s.doc), ["Keys"]);
+  assert.deepEqual(snapshot(s.doc).clips, {});
+});
+
 test("undo of set_param conflicts after the device was swapped", (t) => {
   const s = studio(t);
   s.run("track.add", { name: "Bass", id: "bass" });

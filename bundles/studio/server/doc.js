@@ -484,15 +484,18 @@ function barsText(bars) {
  *   - `"clip:abc|*"` with an object (re)creates the whole clip, and with
  *     `null` deletes it;
  *   - `"track:abc|*"` and `"scene:abc|*"` do the same at the object's original
- *     position, carried inside the object JSON as `_index` and `_after`
- *     (stripped again on the way in and out, so they never show up in a
- *     snapshot).
+ *     position, carried inside the object JSON as `_index`, `_after` and
+ *     `_before` (stripped again on the way in and out, so they never show up
+ *     in a snapshot).
  *
- * `_index` and `_after` are position hints, not song data: `snapshot()` drops
- * them, and `readField()` reports where the object sits now, so a stored
- * creation value compares cleanly with the document. `_after` is the id of the
- * sibling the object followed when it was recorded and wins on restore when
- * that sibling is still there; `_index` is the fallback, clamped to the list,
+ * `_index`, `_after` and `_before` are position hints, not song data:
+ * `snapshot()` drops them, and `readField()` strips them from what it reads, so
+ * a stored creation value compares cleanly with the document. `_after` is the
+ * id of the sibling the object followed when it was recorded and wins on
+ * restore when that sibling is still there; `_before` is the id of the sibling
+ * that followed it (recorded when an object is removed) and is the second
+ * anchor, so removing one object and then another in front of it can be undone
+ * in the order it happened; `_index` is the last fallback, clamped to the list,
  * so restoring a track after an unrelated one was removed does not push it to
  * the wrong place.
  *
@@ -540,7 +543,10 @@ export function applyBeforeAfter(doc, plan) {
  * @returns {any} the value as the document holds it, or `null` when the object
  *   or the field is not there. A whole track or scene carries its current
  *   `_index` and `_after` (the id of the sibling before it), matching the JSON
- *   a creating command wrote.
+ *   a creating command wrote; any position hint stored inside the object is
+ *   stripped first, so it never shows up in a snapshot or a comparison. A
+ *   `_before` hint is only an anchor for a restore (see `applyBeforeAfter`),
+ *   so it is never reported here.
  */
 export function readField(doc, ref, field = "*") {
   const target = parseObjectRef(ref);
@@ -567,7 +573,7 @@ export function readField(doc, ref, field = "*") {
     if (index < 0) return ABSENT;
     const object = items[index];
     if (field === "*") {
-      const { _index, _after, ...plain } = toPlain(object) ?? {};
+      const { _index, _after, _before, ...plain } = toPlain(object) ?? {};
       const previous = index > 0 ? items[index - 1] : null;
       return {
         ...plain,
@@ -683,12 +689,14 @@ function writeListObject(doc, containerKey, id, field, value, label) {
     }
     const object = cloneJson(value) ?? {};
     const afterId = typeof object._after === "string" ? object._after : null;
+    const beforeId = typeof object._before === "string" ? object._before : null;
     const wanted = Number.isInteger(object._index) ? object._index : null;
     delete object._after;
+    delete object._before;
     delete object._index;
     const created = objectMap(object);
     if (index >= 0) list.delete(index, 1);
-    list.insert(positionFor(list, afterId, wanted), [created]);
+    list.insert(positionFor(list, afterId, beforeId, wanted), [created]);
     return;
   }
 
@@ -697,24 +705,36 @@ function writeListObject(doc, containerKey, id, field, value, label) {
 }
 
 /**
- * Where a (re)stored track or scene goes: right after the sibling it followed
- * when it was recorded, else at its recorded index, clamped to the list.
+ * Where a (re)stored track or scene goes, from what the entry recorded about
+ * its old place: the siblings on either side of it and its index.
  *
- * The sibling wins because a recorded index goes stale as soon as an object in
- * front of it is removed: restoring it then would put it back in the wrong
- * place even though its old neighbour is still there to anchor it.
+ * The two siblings bracket the place it held. `_after` — the sibling it
+ * followed — is still there means the place is at or behind that one;
+ * `_before` — the sibling that followed it — is still there means it is at or
+ * before that one. A recorded index goes stale in both directions (a removal
+ * in front of it pulls the place left, a restore in front of it pushes it
+ * right), so it only chooses the exact spot inside the bracket, clamped to the
+ * list. With both neighbours gone, the index alone answers, clamped as before.
+ *
+ * Keeping the whole bracket is what lets two removals be undone in the order
+ * they happened: each one still finds the far end of its old place.
  * @param {Y.Array<any>} list - the list after the object itself was removed
  * @param {string|null} afterId - the sibling to follow, when there was one
+ * @param {string|null} beforeId - the sibling to precede, when there was one
  * @param {number|null} wanted - the recorded index, when there was one
  * @returns {number}
  */
-function positionFor(list, afterId, wanted) {
-  if (afterId !== null) {
-    const at = list.toArray().findIndex((item) => item instanceof Y.Map && item.get("id") === afterId);
-    if (at >= 0) return at + 1;
-  }
-  const fallback = wanted === null ? list.length : wanted;
-  return Math.max(0, Math.min(fallback, list.length));
+function positionFor(list, afterId, beforeId, wanted) {
+  const items = list.toArray();
+  const indexOf = (id) =>
+    id === null ? -1 : items.findIndex((item) => item instanceof Y.Map && item.get("id") === id);
+
+  const afterAt = indexOf(afterId);
+  const beforeAt = indexOf(beforeId);
+  const lowest = afterAt >= 0 ? afterAt + 1 : 0;
+  const highest = beforeAt >= 0 ? beforeAt : items.length;
+  const fallback = wanted === null ? highest : Math.max(0, Math.min(wanted, items.length));
+  return Math.max(lowest, Math.min(fallback, highest));
 }
 
 /** Write one field of a clip, or (re)create/delete the whole clip. */
@@ -735,11 +755,11 @@ function writeClip(doc, id, field, value) {
   writeField(clip, field, value);
 }
 
-/** @returns {any} the value without its internal `_index`/`_after` hints. */
+/** @returns {any} the value without its internal `_index`/`_after`/`_before` hints. */
 function stripHints(value) {
   const object = toPlain(value) ?? {};
-  if (object && typeof object === "object" && ("_index" in object || "_after" in object)) {
-    const { _index, _after, ...rest } = object;
+  if (object && typeof object === "object" && ("_index" in object || "_after" in object || "_before" in object)) {
+    const { _index, _after, _before, ...rest } = object;
     return rest;
   }
   return object;
