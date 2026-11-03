@@ -293,6 +293,9 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
     app.use(servicesApiRouter({
       dbFactory: () => createDbClient(dbFile),
       sessionGate,
+      // The harness's "good" session is the owner's (a local password session from
+      // another device): the Services routes answer only the owner.
+      ownerCheck: async () => true,
       testConnection: async (service) => { connectTests.push(service.id); return { ok: true }; },
       installedIds: () => new Set(["github"]),
       uiEnabled: () => true,
