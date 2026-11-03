@@ -17,13 +17,13 @@ import { mountHub, openChatSession, findByClass, stdFetch, FakeEventSource } fro
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** Mount a hub on an open chat and hand one finished tool result to the client. */
-async function toolResult(resultText) {
+async function toolResult(resultText, toolName = "mcp__github__list_repos") {
   const hub = await mountHub({ fetchImpl: stdFetch() });
   await openChatSession(hub);
   const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
   es._serverFrame("state", { state: "awake", turnInFlight: true });
-  es._serverFrame("tool", { phase: "start", name: "mcp__github__list_repos", toolCallId: "c1" });
-  es._serverFrame("tool", { phase: "end", name: "mcp__github__list_repos", toolCallId: "c1", resultText, isError: false });
+  es._serverFrame("tool", { phase: "start", name: toolName, toolCallId: "c1" });
+  es._serverFrame("tool", { phase: "end", name: toolName, toolCallId: "c1", resultText, isError: false });
   await tick();
   return hub;
 }
@@ -71,6 +71,28 @@ test("a bad slug renders no connect card", async () => {
 test("a result without the marker renders no connect card", async () => {
   const hub = await toolResult("3 repositories found: alpha, beta, gamma");
   assert.equal(findByClass(hub.els["perch-transcript"], "connect-card"), null);
+});
+
+test("a marker in the middle of a result renders no card", async () => {
+  const hub = await toolResult("Note: " + notConnectedResult("github", "home"));
+  assert.equal(findByClass(hub.els["perch-transcript"], "connect-card"), null, "only a result that STARTS with the marker");
+});
+
+test("another project's slug renders no card", async () => {
+  const hub = await toolResult(notConnectedResult("github", "spring"));
+  assert.equal(findByClass(hub.els["perch-transcript"], "connect-card"), null, "the link is only for this chat's own project");
+});
+
+test("a non-services tool's result renders no card", async () => {
+  // The frame's only family evidence is the tool name: a memory tool is not a service block.
+  const hub = await toolResult(notConnectedResult("github", "home"), "mcp__memory__search");
+  assert.equal(findByClass(hub.els["perch-transcript"], "connect-card"), null);
+  // A service block of another service is not it either.
+  const other = await toolResult(notConnectedResult("github", "home"), "mcp__trello-main__list_cards");
+  assert.equal(findByClass(other.els["perch-transcript"], "connect-card"), null);
+  // The labelled block of the service in the marker is.
+  const ok = await toolResult(notConnectedResult("github", "home"), "mcp__github-work__list_repos");
+  assert.ok(findByClass(ok.els["perch-transcript"], "connect-card"), "<serviceId>-<label> is a service block");
 });
 
 test("en and es", async () => {

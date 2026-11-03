@@ -9,7 +9,7 @@
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createCanaryHarness, makeCanary } from "./fixtures/credential-canary.mjs";
 
@@ -45,6 +45,18 @@ test("create, one open per session", () => {
   assert.deepEqual({ outcome: closed.outcome, note: closed.note }, { outcome: "ok", note: "You closed the form. Nothing was sent." });
   assert.equal(closed.request.id, id, "the closed request's metadata comes back for the card frame");
   assert.ok(store.createSecretRequest(req()).id);
+});
+
+test("a label with a known secret is masked", () => {
+  const c = makeCanary();
+  mkdirSync(join(h.crowHome, "secrets"), { recursive: true });
+  // The display set maskSecrets() hides on any display path (secret-values.js).
+  writeFileSync(join(h.crowHome, "secrets", "pi-bot-secret-values-display"), c + "\n", { mode: 0o600 });
+  const { id } = store.createSecretRequest(req({ label: "Key " + c }));
+  const r = store.getSecretRequest(id);
+  assert.equal(r.label, "Key [REDACTED]", "the card, the note and the keychain entry's name never carry it");
+  assert.ok(!JSON.stringify(r).includes(c));
+  store.cancelSecret(id, "perchlive-aaaa1111");
 });
 
 test("expired", () => {

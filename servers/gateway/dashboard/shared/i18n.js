@@ -3777,6 +3777,13 @@ export const translations = {
     es: "El llavero a\u00fan no est\u00e1 configurado, as\u00ed que no se guard\u00f3 nada. Config\u00faralo en Ajustes \u2192 Seguridad y contrase\u00f1as.",
   },
   "perch.secretFailed": { en: "The password couldn't be saved. Nothing was sent.", es: "No se pudo guardar la contrase\u00f1a. No se envi\u00f3 nada." },
+  // M3 (Task 3 review): a lost connection or a 5xx is not a failure — nothing says the value was
+  // not saved. A1: the card is the owner's alone, and says so on a 403 not_owner.
+  "perch.secretUnknown": {
+    en: "Couldn't confirm it was saved. Check the keychain before trying again.",
+    es: "No se pudo confirmar que se guardara. Revisa el llavero antes de volver a intentarlo.",
+  },
+  "perch.secretNotOwner": { en: "Only the owner can fill this.", es: "Solo el propietario puede rellenar esto." },
   // Credential card (spec §10.3), Task 4: the paste detector's warning, its fixed choices and
   // the count note; the Connect card a "not connected in this project" tool result renders.
   "perch.secretWarnTitle": { en: "This looks like a password. Remove it, or send it anyway?", es: "Esto parece una contrase\u00f1a. \u00bfLa quitas o la env\u00edas igualmente?" },

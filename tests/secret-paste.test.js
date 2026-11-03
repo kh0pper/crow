@@ -37,6 +37,7 @@ async function session(botId) {
 
 const messagePath = (sid) => `/dashboard/perch-api/interactive/${sid}/message`;
 const steerPath = (sid) => `/dashboard/perch-api/interactive/${sid}/steer`;
+const answerPath = (sid) => `/dashboard/perch-api/interactive/${sid}/answer`;
 
 // ---------------------------------------------------------------------------
 // The client: the warning before a send, and no draft while it is open
@@ -62,12 +63,15 @@ test("warn before send, no draft write", async () => {
     "nothing is sent while the warning is open");
   assert.equal(input.value, "my password: " + c, "the operator's text stays put for the choice");
 
-  // Typing still schedules a draft save; while the warning is open that save writes nothing.
+  // Typing still schedules a draft save; while the warning is open that save writes nothing with
+  // the secret in it (B1: the stored draft is the stripped text).
   input.oninput();
   for (const [id, fn] of [...hub.timers]) {
     if (hub.timerDelays.get(id) === 300) { hub.timers.delete(id); hub.timerDelays.delete(id); fn(); }
   }
-  assert.equal(hub.storage._map.size, 0, "no draft is written while the warning is open");
+  const draftsWhileOpen = JSON.stringify([...hub.storage._map.entries()]);
+  assert.ok(!draftsWhileOpen.includes(c), "no draft holds the secret while the warning is open: " + draftsWhileOpen);
+  assert.ok(draftsWhileOpen.includes("[secret removed]"), "the draft holds the stripped text");
 });
 
 test("remove strips locally", async () => {
@@ -172,6 +176,52 @@ test("the paste warning's help text links to the project's Services page", async
   assert.equal(a.textContent, "Open Services");
 });
 
+test("a typed (not pasted) secret never reaches sessionStorage", async () => {
+  const c = makeCanary();
+  const storage = makeStorage();
+  const written = [];
+  const set = storage.setItem;
+  storage.setItem = (k, v) => { written.push(String(v)); set(k, v); };
+  const hub = await mountHub({ storage, fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const input = hub.els["perch-input"];
+  input.value = "my password: " + c;
+  input.oninput();                                   /* typed, not pasted */
+  for (const [id, fn] of [...hub.timers]) {
+    if (hub.timerDelays.get(id) === 300) { hub.timers.delete(id); hub.timerDelays.delete(id); fn(); }
+  }
+  assert.ok(written.length, "the draft timer ran");
+  assert.ok(!written.some((v) => v.includes(c)), "the draft holds no canary: " + JSON.stringify(written));
+  assert.ok(written.some((v) => v.includes("[secret removed]")), "it holds the stripped text instead");
+  // The warning opening does not put it back either (the stored draft is overwritten stripped).
+  hub.els["perch-send"].onclick();
+  assert.equal(hub.els["perch-secret-warn"].hidden, false, "the warning is on screen");
+  assert.ok(!written.some((v) => v.includes(c)), "still nothing with the warning open");
+  assert.ok(!JSON.stringify([...hub.storage._map.entries()]).includes(c), "and nothing stored holds it");
+});
+
+test("the ask text field warns before submit", async () => {
+  const c = makeCanary();
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/answer": () => makeResponse(200, { ok: true, removed: 0 }) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  es._serverFrame("ask_user", { requestId: "r1", method: "input", title: "Which password?", placeholder: "type it" });
+  await new Promise((r) => setTimeout(r, 0));
+  const controls = findByClass(hub.els["perch-ask"], "ask-controls");
+  assert.ok(controls, "the ask card has its controls");
+  const field = controls.children[0], submit = controls.children[1];
+  field.value = "my password: " + c;
+  submit.onclick();
+  assert.equal(hub.els["perch-secret-warn"].hidden, false, "the answer warns before it is sent");
+  assert.equal(hub.fetchCalls.filter((x) => x.method === "POST" && x.path.endsWith("/answer")).length, 0,
+    "nothing is answered while the warning is open");
+  clickClass(hub.els["perch-secret-warn"], "secret-warn-send");
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((x) => x.method === "POST" && x.path.endsWith("/answer"));
+  assert.equal(posts.length, 1, "one answer, now the operator has chosen");
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { requestId: "r1", value: "my password: " + c, secretAck: "strip" });
+});
+
 // ---------------------------------------------------------------------------
 // The server: the strip, its note, and the per-send override
 // ---------------------------------------------------------------------------
@@ -257,6 +307,41 @@ test("steer is covered", async () => {
   assert.ok(!frames.includes(c), "the value never reached the child");
   await h.endTurn("ok");
   assert.deepEqual(await h.grepEverywhere(c), []);
+});
+
+test("an ask answer with a secret is stripped server-side", async () => {
+  const c = makeCanary();
+  const s = await session("ask-strip-bot");
+  h.pi().emit({ type: "extension_ui_request", id: "ask-1", method: "input", title: "Which password?", placeholder: "type it" });
+  await h.tick();
+  const r = await h.post(answerPath(s.sessionId), { requestId: "ask-1", value: `my password: ${c}` });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.removed, 1, "the count, never the value");
+  const sent = JSON.stringify(h.pi().sent);
+  assert.ok(sent.includes("[secret removed]"), "the child got the stripped answer: " + sent);
+  assert.ok(!sent.includes(c), "the value never reached the child");
+  assert.deepEqual(await h.grepEverywhere(c), []);
+});
+
+test("keep on an ask answer is honoured once", async () => {
+  const c = makeCanary();
+  const s = await session("ask-keep-bot");
+  h.pi().emit({ type: "extension_ui_request", id: "ask-k1", method: "editor", title: "Notes", placeholder: "" });
+  await h.tick();
+  const keep = await h.post(answerPath(s.sessionId), { requestId: "ask-k1", value: `it is ${c} actually`, secretAck: "keep" });
+  assert.equal(keep.status, 200, keep.text);
+  assert.equal(keep.json.removed, 0);
+  assert.ok(JSON.stringify(h.pi().sent).includes(c), "keep sends the operator's answer unchanged (this once)");
+
+  // The next answer carries no ack: nothing was remembered, so the strip is back.
+  h.pi().emit({ type: "extension_ui_request", id: "ask-k2", method: "input", title: "And again?", placeholder: "" });
+  await h.tick();
+  const next = await h.post(answerPath(s.sessionId), { requestId: "ask-k2", value: `again ${c}` });
+  assert.equal(next.json.removed, 1);
+  const last = JSON.stringify(h.pi().sent[h.pi().sent.length - 1]);
+  assert.ok(last.includes("[secret removed]"), last);
+  assert.ok(!last.includes(c), "the next answer strips again");
+  await h.endTurn("ok");
 });
 
 // ---------------------------------------------------------------------------

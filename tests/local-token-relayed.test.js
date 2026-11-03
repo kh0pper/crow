@@ -5,8 +5,8 @@
  * mcp_local_token_hash and then present its own value as the operator's full
  * local token on /board/mcp — a door. localTokenAuthMiddleware therefore skips
  * validateLocalToken entirely for a socket carrying the relay mark
- * (127.0.77.1); only the path-scoped board, phone and artifacts tokens may
- * authenticate a relayed request.
+ * (127.0.77.1); only the path-scoped board, phone, artifacts and secrets
+ * tokens may authenticate a relayed request.
  *
  * The middleware is driven directly with fake req objects; the DB is a stub
  * whose settings make one full token and one board token valid.
@@ -20,10 +20,11 @@ import { RELAY_SOURCE_V4 } from "../servers/shared/bot-doors.js";
 
 const FULL = "test-full-local-token";
 const BOARD = "test-board-token";
+const SECRETS = "test-secrets-token";
 const sha256 = (t) => createHash("sha256").update(t).digest("hex");
 
 /** The settings registry reads `{rows:[{value}]}`; a known key answers with its hash. */
-const HASHES = { mcp_local_token_hash: sha256(FULL), mcp_board_token_hash: sha256(BOARD) };
+const HASHES = { mcp_local_token_hash: sha256(FULL), mcp_board_token_hash: sha256(BOARD), mcp_secrets_token_hash: sha256(SECRETS) };
 const db = {
   execute: async ({ sql, args }) => {
     const key = args && args[0];
@@ -73,4 +74,13 @@ test("the full local token from a plain loopback socket keeps its full access", 
 test("a board token is still useless off the board paths", async () => {
   const req = await run(fakeReq({ remoteAddress: RELAY, path: "/memory/mcp", token: BOARD }));
   assert.equal(req.localTokenAuth, undefined, "the board token stays path-scoped");
+});
+
+test("the path-scoped secrets token authenticates a relayed /secrets/mcp socket, and the full local token never does", async () => {
+  const req = await run(fakeReq({ remoteAddress: RELAY, path: "/secrets/mcp", token: SECRETS }));
+  assert.deepEqual(req.localTokenAuth, { token: "local-mcp", scope: "secrets" });
+  const full = await run(fakeReq({ remoteAddress: RELAY, path: "/secrets/mcp", token: FULL }));
+  assert.equal(full.localTokenAuth, undefined, "crow.db is bot-writable: the full local token is never the operator on a relayed socket");
+  const off = await run(fakeReq({ remoteAddress: RELAY, path: "/memory/mcp", token: SECRETS }));
+  assert.equal(off.localTokenAuth, undefined, "the secrets token opens nothing but its own mount");
 });

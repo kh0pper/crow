@@ -997,6 +997,10 @@ export function createInteractiveEngine({
       // A live card, or an expired one still shown (expired:true) so the
       // operator sees what was asked: either way the session waits for them.
       pendingUi: shownCard(s),
+      // Concern 7: an open password card is "needs you" too. The client counts it exactly as it
+      // counts pendingUi (the session list flag and the attention banner); the card keeps only
+      // its own id and label, never a value.
+      secretCard: !!s.secretCard,
       lastError: s.lastError ? maskSecrets(s.lastError) : s.lastError,
       // Track 3 Task 4: the engine-tracked model wins over the raw
       // prepareSpawn resolution once one is known (a live model_select or a
@@ -1262,6 +1266,8 @@ export function createInteractiveEngine({
       state: s.state,
       lastError: s.lastError ? maskSecrets(s.lastError) : null,
       pendingUi: shownCard(s),
+      // Concern 7: same as snapshot() — an open password card is "needs you" too.
+      secretCard: !!s.secretCard,
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: servingModel(s),
       label: s.label || null,
@@ -1344,13 +1350,15 @@ export function createInteractiveEngine({
     s.idleTimer = timer(() => { hibernate(s).catch(() => {}); }, idleMs());
   }
 
-  /** Arm the per-turn stall watchdog. Paused (not armed) while a card is
-   * pending — a human thinking is not a stalled agent. */
+  /** Arm the per-turn stall watchdog. Paused (not armed) while an ask card is
+   * pending — a human thinking is not a stalled agent — but NOT while a
+   * password card is open: that card only waits for a short typed answer, and
+   * a turn wedged behind it must still be caught (M1, the Task 3 review). */
   function armStall(s) {
     clearStall(s);
     // Live browser tile: nor while the operator holds the browser — a bot
     // waiting on the operator's hands is not stalled either (spec §7 item 14).
-    if (!s.turn || !s.pi || s.pendingUi || s.secretCard || browserOperatorHeld) return;
+    if (!s.turn || !s.pi || s.pendingUi || browserOperatorHeld) return;
     const turn = s.turn;
     s.stallTimer = timer(() => { onStall(s, turn); }, stallMs());
   }
@@ -4903,6 +4911,7 @@ export function createInteractiveEngine({
           rowId: Number(r.id),
           state: r.status === "stopped" ? "stopped" : "hibernating",
           pendingUi: null,
+          secretCard: false,
           lastError: null,
           model: r.model || null,
         });
@@ -5177,7 +5186,9 @@ export function createInteractiveEngine({
       const r = getSecretRequest(out.id);
       if (!r || r.sessionId !== s.sessionId || r.botId !== s.botId) return { delivered: false, botId: s.botId, reason: "no_request" };
       s.secretCard = { id: r.id, label: r.label || null };
-      clearStall(s);
+      // M1: the turn clock keeps running behind a password card (it waits for a typed answer,
+      // not for a human to think), so the watchdog is re-armed rather than paused.
+      armStall(s);
       clearIdle(s);
       emit(s, secretCardFrame(s.secretCard, "open"));
       attentionForAsk(s, SECRET_ATTENTION);

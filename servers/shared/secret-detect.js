@@ -27,6 +27,11 @@ export const SECRET_REMOVED = "[secret removed]";
 // so plain prose ("the password is incorrect") is not flagged.
 const PHRASE = /\b(pass(word)?|pwd|passcode|secret|token|api[_ -]?key)(?:\s*[:=]\s*|\s+is\s+(?=\S*\d))(\S{6,})/gi;
 const ENTROPY_RUN = /[A-Za-z0-9_\-+/=]{24,}/g;
+// A keyed value's own label at the start of an entropy run: "pass=<token>" puts the KEY and the
+// separator inside the run (both are in the run's character class), so the run's span starts at
+// the key. The key's NAME is not secret and must survive the strip (D2): the span starts after
+// the separator instead.
+const KEYED_RUN_PREFIX = /^(?:pass(?:word)?|pwd|passcode|secret|token|api[_ -]?key|key)[:=]/i;
 // Runs inside these tokens are never entropy hits: a URL's path and a data: URI are random-
 // looking by nature (a key inside a URL is still caught by the known-prefix list).
 const ENTROPY_SKIP = /\bhttps?:\/\/\S+|\bdata:\S+/gi;
@@ -125,7 +130,10 @@ export function findSecrets(text) {
     // Each "/"-separated segment on its own: a path is never one long token.
     let at = rs;
     for (const seg of m[0].split("/")) {
-      if (looksRandom(seg)) hits.push({ start: at, end: at + seg.length, kind: "entropy" });
+      const keyed = KEYED_RUN_PREFIX.exec(seg);
+      const value = keyed ? seg.slice(keyed[0].length) : seg;
+      const start = keyed ? at + keyed[0].length : at;
+      if (looksRandom(value)) hits.push({ start, end: start + value.length, kind: "entropy" });
       at += seg.length + 1;
     }
   }
@@ -163,6 +171,7 @@ export function detectorSource() {
     phrase: { source: PHRASE.source, flags: PHRASE.flags, valueGroup: 3 },
     entropy: {
       run: { source: ENTROPY_RUN.source, flags: ENTROPY_RUN.flags },
+      keyedPrefix: { source: KEYED_RUN_PREFIX.source, flags: KEYED_RUN_PREFIX.flags },
       skip: { source: ENTROPY_SKIP.source, flags: ENTROPY_SKIP.flags },
       hexOnly: { source: HEX_ONLY.source, flags: HEX_ONLY.flags },
       piece: { source: PIECE.source, flags: PIECE.flags },

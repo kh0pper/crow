@@ -33,6 +33,7 @@ export const BOT_DOOR_PREFIXES = Object.freeze([
   "/board/mcp",    // its own board mount, under the board token
   "/phone/mcp",    // phone plans, under the phone token and the actor signature
   "/artifacts/mcp",
+  "/secrets/mcp",  // the bot-only credential-card mount, under the secrets token and a signed Perch actor
   "/peer-relay/",  // the relay to paired peers, under the relay token
 ]);
 

@@ -105,6 +105,7 @@ export function perchSecretWarnJs(lang = "en") {
       if(val) hits.push({start:end-val.length,end:end});
     }
     var skips=secSkipSpans(s);
+    var kp=new RegExp(SEC_DET.entropy.keyedPrefix.source,SEC_DET.entropy.keyedPrefix.flags||'');
     r=secRe(SEC_DET.entropy.run);
     while((m=r.exec(s))){
       var rs=m.index,re=rs+m[0].length,skip=false;
@@ -112,8 +113,11 @@ export function perchSecretWarnJs(lang = "en") {
       if(skip) continue;
       var at=rs,segs=m[0].split(SEC_DET.entropy.segmentSeparator);
       for(i=0;i<segs.length;i++){
-        if(secLooksRandom(segs[i])) hits.push({start:at,end:at+segs[i].length});
-        at+=segs[i].length+1;
+        /* "pass=<token>": the key and its separator are inside the run; the key's name survives. */
+        var seg=segs[i], val=seg, st=at, km=kp.exec(seg);
+        if(km){ val=seg.slice(km[0].length); st=at+km[0].length; }
+        if(secLooksRandom(val)) hits.push({start:st,end:st+val.length});
+        at+=seg.length+1;
       }
     }
     hits.sort(function(a,b){ return a.start-b.start||b.end-a.end; });
@@ -138,6 +142,7 @@ export function perchSecretWarnJs(lang = "en") {
   }
 
   var secWarnPending=null;      /* the text waiting for a choice, or null (nothing on screen) */
+  var secWarnAnswer=null;       /* an ask card's own choice handler, or null (the composer) */
   function secWarnOpenNow(){ return secWarnPending!=null; }
   function secretWarnNeeded(text){ return secFind(text).length>0; }
   /* The project's Services page, when this session is filed in one. The slug is operator data
@@ -153,15 +158,34 @@ export function perchSecretWarnJs(lang = "en") {
   }
   function secretWarnClose(){
     secWarnPending=null;
+    secWarnAnswer=null;
     var p=el('perch-secret-warn');
     if(p){ clearEl(p); p.hidden=true; }
   }
-  function secretWarnDraw(text){
+  /* B1: the draft already stored for this session is overwritten with the stripped text the
+     moment the warning opens — the composer holds the operator's words, the draft must not. */
+  function secWarnDraftStrip(text){
+    var sid=current.sid, store=draftStore();
+    if(!sid||!store) return;
+    var stripped=secStrip(String(text==null?'':text));
+    try{
+      if(stripped.text.trim()) store.setItem(DRAFT_PREFIX+sid,stripped.text);
+      else store.removeItem(DRAFT_PREFIX+sid);
+    }catch(e){}
+  }
+  /* onChoose is set by an ASK card (B2): it runs with "remove" (strip the field and stay),
+     "strip" or "keep". Without it the warning belongs to the composer and this file sends. */
+  function secretWarnDraw(text,onChoose){
     var pane=el('perch-secret-warn');
     /* No pane in this document: never swallow the operator's message over a missing element. */
-    if(!pane){ sendNow(text,null); return; }
+    if(!pane){
+      if(typeof onChoose==='function') onChoose('strip'); else sendNow(text,null);
+      return;
+    }
     secretWarnClose();
     secWarnPending=String(text);
+    secWarnAnswer=typeof onChoose==='function'?onChoose:null;
+    if(!secWarnAnswer) secWarnDraftStrip(text);
     var box=document.createElement('div'); box.className='ask-card secret-warn';
     box.setAttribute('role','group');
     box.appendChild(line('ask-title secret-warn-title',SEC_WARN_TITLE));
@@ -189,9 +213,10 @@ export function perchSecretWarnJs(lang = "en") {
   }
   /* "Remove it": strip the composer, send nothing. The operator can read it and then send. */
   function secretWarnRemove(){
-    var t=secWarnPending;
+    var t=secWarnPending, on=secWarnAnswer;
     secretWarnClose();
     if(t==null) return;
+    if(on){ on('remove'); return; }
     var stripped=secStrip(t);
     var input=el('perch-input');
     if(input){
@@ -203,9 +228,10 @@ export function perchSecretWarnJs(lang = "en") {
   }
   /* "Send anyway" / "It's not a secret": one send, carrying this choice only. */
   function secretWarnChoose(ack){
-    var t=secWarnPending;
+    var t=secWarnPending, on=secWarnAnswer;
     secretWarnClose();
     if(t==null) return;
+    if(on){ on(ack); return; }
     sendNow(t,ack);
   }
   /* On paste: the operator should learn before they tap Send. */

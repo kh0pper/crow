@@ -381,7 +381,7 @@ export function perchHubJs(lang = "en") {
       if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:running.length?'':'idle',cardId:null,pendingUi:false}); return; }
       live.forEach(function(s){
         out.push({botId:b.id,botName:b.name,sessionId:s.sessionId,state:s.state,
-                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi,
+                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!(s.pendingUi||s.secretCard),
                   /* /roost carries the operator's name alongside the id
                      (routes/perch.js) — null when there isn't one. */
                   label:(s.label==null||s.label==='')?null:String(s.label),
@@ -2778,6 +2778,7 @@ export function perchHubJs(lang = "en") {
     pendingImages=[];            /* nor its queued-but-unsent image */
     pendingFilePaths=[];         /* nor its queued upload paths (Wave 1) */
     setAttn(false);              /* nor its unanswered-question banner */
+    askShown=null;               /* nor the card that banner spoke for (the pane was cleared above) */
     /* Wave 2/3: the new session inherits none of the old one's readings. */
     planState=null; renderPlan();
     toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
@@ -2908,6 +2909,10 @@ export function perchHubJs(lang = "en") {
     var sid=current.sid, input=el('perch-input'), store=draftStore();
     if(!sid||!input||!store) return;
     var v=String(input.value==null?'':input.value);
+    /* Credential card (spec 10.3, B1): a TYPED secret never reaches sessionStorage either. The
+       draft keeps the same stripped text the echo and the retry record hold; the request body is
+       the one place the original rides. */
+    if(secretWarnNeeded(v)) v=secStrip(v).text;
     try{
       if(v.trim()) store.setItem(DRAFT_PREFIX+sid,v);
       else {
@@ -3183,9 +3188,15 @@ export function perchHubJs(lang = "en") {
   function answerPayloadFor(card,choice){
     var out={requestId:card.requestId};
     if(choice&&choice.cancelled){ out.cancelled=true; return out; }
-    if(card.method==='questions'){ out.answers=(choice&&choice.answers)||[]; return out; }
+    if(card.method==='questions'){
+      out.answers=(choice&&choice.answers)||[];
+      if(choice&&choice.secretAck) out.secretAck=String(choice.secretAck);
+      return out;
+    }
     if(card.method==='confirm'){ out.confirmed=!!(choice&&choice.confirm); return out; }
     out.value=String(choice&&choice.value!=null?choice.value:'');
+    /* Credential card (B2): the per-send choice the paste warning collected ("strip" / "keep"). */
+    if(choice&&choice.secretAck) out.secretAck=String(choice.secretAck);
     return out;
   }
 
@@ -3200,7 +3211,8 @@ export function perchHubJs(lang = "en") {
                     answerPayloadFor(card,choice)).then(function(r){
       if(current.sid!==mySid) return;
       clearEl(el('perch-ask'));
-      setAttn(false);                          /* the banner dies with the card */
+      askShown=null;
+      syncAttn();                              /* the banner dies with the card, unless a password card waits */
       /* request_expired: the question timed out or the turn was parked
          before this answer arrived — nothing was run, and the note says so. */
       if(r.status===409) appendNote(r.j&&r.j.error==='request_expired'?ASK_EXPIRED:ASK_STALE);
@@ -3212,6 +3224,10 @@ export function perchHubJs(lang = "en") {
      scrollable past inside the transcript. Built with createElement/
      textContent only — never innerHTML. */
   function setAttn(show){ var b=el('perch-attn'); if(b) b.hidden=!show; }
+  /* Concern 7: "needs you" is a live ask card OR an open password card. The banner reads the same
+     two facts the session list row does, so a card waiting on the operator is never silent. */
+  function needsYou(){ return !!(askShown||(typeof secShown!=='undefined'&&!!secShown&&secShown.state==='open')); }
+  function syncAttn(){ setAttn(needsYou()); }
   /* A card opening takes height from the transcript, which keeps its old
      scrollTop and so shows an older slice; re-pin it to the newest row (the
      running ask_user chip that explains the card). */
@@ -3221,7 +3237,7 @@ export function perchHubJs(lang = "en") {
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
     askShown=card&&card.requestId?card:null;
-    if(!card||!card.requestId){ setAttn(false); return; }
+    if(!card||!card.requestId){ syncAttn(); return; }
     /* New mode: an ask is never hidden (spec 9.4). The card and the banner
        live in the chat, which the modal sheet makes inert, so it closes. */
     if(SHEET&&SHEET.open) closeSheet();
@@ -3246,7 +3262,7 @@ export function perchHubJs(lang = "en") {
       if(card.message) xf.appendChild(line('ask-message',card.message));
       xf.appendChild(line('ask-expired',ASK_EXPIRED));
       pane.appendChild(xf);
-      setAttn(true);
+      syncAttn();
       pinTranscript();
       return;
     }
@@ -3279,7 +3295,17 @@ export function perchHubJs(lang = "en") {
       field.value=fields.initial;
       field.placeholder=fields.placeholder;
       var submit=document.createElement('button'); submit.type='button'; submit.textContent=ASK_SUBMIT;
-      submit.onclick=function(){ answerAsk(card,{value:field.value}); };
+      /* Credential card (B2): a free-text answer is operator text reaching the child, so it gets
+         the paste warning before it is sent. "Remove it" strips the field and stays on the card;
+         "Send anyway" / "It's not a secret" post the answer with that choice, once. */
+      submit.onclick=function(){
+        var v=String(field.value==null?'':field.value);
+        if(!secretWarnNeeded(v)){ answerAsk(card,{value:v}); return; }
+        secretWarnDraw(v,function(ack){
+          if(ack==='remove'){ field.value=secStrip(v).text; return; }
+          answerAsk(card,{value:v,secretAck:ack});
+        });
+      };
       controls.appendChild(field); controls.appendChild(submit);
     }
 
@@ -3291,7 +3317,7 @@ export function perchHubJs(lang = "en") {
 
     frame.appendChild(controls);
     pane.appendChild(frame);
-    setAttn(true);                             /* Wave 1: say why the bot went quiet */
+    syncAttn();                                /* Wave 1: say why the bot went quiet */
     pinTranscript();
   }
 
@@ -3306,7 +3332,7 @@ export function perchHubJs(lang = "en") {
      already carries the mySid identity guard. */
   function renderAskCombined(pane,card){
     var qs=Array.isArray(card.questions)?card.questions:[];
-    if(!qs.length&&!card.message){ setAttn(false); return; }
+    if(!qs.length&&!card.message){ syncAttn(); return; }
     var frame=document.createElement('div'); frame.className='ask-card ask-combined';
     /* The engine's note (secrets hidden / possible secret shown), or why a
        card that could not be masked in full shows no questions. */
@@ -3317,7 +3343,7 @@ export function perchHubJs(lang = "en") {
       nc.onclick=function(){ answerAsk(card,{cancelled:true}); };
       nf.appendChild(nc); frame.appendChild(nf);
       pane.appendChild(frame);
-      setAttn(true);
+      syncAttn();
       pinTranscript();
       return;
     }
@@ -3327,6 +3353,7 @@ export function perchHubJs(lang = "en") {
     var qbody=document.createElement('div'); qbody.className='ask-body';
     var sel=qs.map(function(){ return []; });
     var other=qs.map(function(){ return ''; });
+    var otherInputs=[];                               /* the "Other" fields, so a strip can show */
     var optBtns=qs.map(function(){ return []; });   /* per question: [{btn,label}] */
     var sent=false;
     var sendBtn=null;
@@ -3370,6 +3397,7 @@ export function perchHubJs(lang = "en") {
       var oi=document.createElement('input'); oi.type='text'; oi.className='ask-other'; oi.placeholder=ASK_OTHER_PH;
       oi.oninput=function(){ other[qi]=oi.value; refresh(); };
       qd.appendChild(oi);
+      otherInputs.push(oi);
       qbody.appendChild(qd);
     });
     frame.appendChild(qbody);
@@ -3378,14 +3406,33 @@ export function perchHubJs(lang = "en") {
     sendBtn=document.createElement('button'); sendBtn.type='button'; sendBtn.className='ask-send primary';
     sendBtn.textContent=(qs.length>1?ASK_SEND_ANSWERS:ASK_SEND_ANSWER);
     sendBtn.disabled=true;
-    sendBtn.onclick=function(){
-      if(!ready()||sent) return;
+    /* One submit for every question; "ack" is the paste warning's choice for the whole card. */
+    function submitAnswers(ack){
       sent=true; sendBtn.disabled=true; sendBtn.textContent=ASK_SENDING;
       var answers=qs.map(function(q,i){
         var oth=(other[i]&&other[i].trim()!=='')?other[i].trim():null;
         return { question:(q.question==null?'':String(q.question)), selected:sel[i].slice(), other:oth };
       });
-      answerAsk(card,{answers:answers});
+      var choice={answers:answers};
+      if(ack) choice.secretAck=String(ack);
+      answerAsk(card,choice);
+    }
+    sendBtn.onclick=function(){
+      if(!ready()||sent) return;
+      /* Credential card (B2): the "Other" fields are free text, so the same warning runs before
+         the one submit. "Remove it" strips them here and stays on the card. */
+      var bad=null;
+      for(var i=0;i<qs.length;i++){ if(other[i]&&secretWarnNeeded(other[i])){ bad=other[i]; break; } }
+      if(!bad){ submitAnswers(null); return; }
+      secretWarnDraw(bad,function(ack){
+        if(ack!=='remove'){ submitAnswers(ack); return; }
+        for(var j=0;j<qs.length;j++){
+          if(!other[j]||!secretWarnNeeded(other[j])) continue;
+          other[j]=secStrip(other[j]).text;
+          if(otherInputs[j]) otherInputs[j].value=other[j];
+        }
+        refresh();
+      });
     };
     var cancel=document.createElement('button'); cancel.type='button'; cancel.className='quiet'; cancel.textContent=ASK_CANCEL;
     cancel.onclick=function(){ if(sent) return; answerAsk(card,{cancelled:true}); };
@@ -3393,7 +3440,7 @@ export function perchHubJs(lang = "en") {
     frame.appendChild(foot);
 
     pane.appendChild(frame);
-    setAttn(true);
+    syncAttn();
     pinTranscript();
     refresh();
   }
@@ -4203,7 +4250,7 @@ export function perchHubJs(lang = "en") {
     /* Project services (credential card Task 4): a tool result that says the service is not
        connected in this project gets the Connect card, whose link opens that project's connect
        sheet. Renders nothing for any other result (and nothing when the ids fail validation). */
-    if(d&&d.resultText!=null&&typeof renderConnectCard==='function') renderConnectCard(d.resultText);
+    if(d&&d.resultText!=null&&typeof renderConnectCard==='function') renderConnectCard(d.resultText,d.name);
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
   }
 

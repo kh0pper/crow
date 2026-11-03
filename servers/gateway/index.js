@@ -520,7 +520,7 @@ app.use("/dashboard/login", dashboardLoginLimiter);
 const _jsonParser = express.json({ limit: "1mb" });
 // The credential card's password submit parses its own 4kb body (routes/secret-submit.js).
 const _hasOwnParser = (p) => p.toLowerCase().startsWith("/llm") || p.toLowerCase().startsWith("/api/workspace/live/v1/") || /^\/s\/[^/]+\/feedback$/.test(p) ||
-  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+$/i.test(p);
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---

@@ -147,6 +147,44 @@ function stripIncoming(text, body) {
   return { text: SECRET_STRIPPED_NOTE + "\n\n" + clean, removed };
 }
 
+/**
+ * B2 (credential card): every free-text answer the operator sends to a pending ask goes through
+ * the same strip, and the same per-send "keep", before the engine sees it. `question` and
+ * `selected` carry the card's own text and chosen labels, not free text, so only the free-text
+ * fields are stripped with the note; a chosen label is still passed through stripSecrets (never
+ * the note) so a label can never carry a value onward either. Returns the count removed.
+ * @returns {number}
+ */
+function stripAnswerText(body) {
+  let removed = 0;
+  if (typeof body.value === "string") {
+    const r = stripIncoming(body.value, body);
+    body.value = r.text; removed += r.removed;
+  }
+  if (Array.isArray(body.answers)) {
+    body.answers = body.answers.map((a) => {
+      if (!a || typeof a !== "object" || Array.isArray(a)) return a;
+      const out = { ...a };
+      for (const k of ["other", "value", "text"]) {
+        if (typeof out[k] !== "string") continue;
+        const r = stripIncoming(out[k], body);
+        out[k] = r.text; removed += r.removed;
+      }
+      for (const k of ["selected", "labels"]) {
+        if (!Array.isArray(out[k])) continue;
+        out[k] = out[k].map((v) => {
+          if (typeof v !== "string") return v;
+          const r = stripSecrets(v);
+          removed += r.removed;
+          return r.text;
+        });
+      }
+      return out;
+    });
+  }
+  return removed;
+}
+
 /** Extensions the workspace route serves inline (never `attachment`). */
 const WORKSPACE_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
@@ -403,7 +441,7 @@ function deliveredExists(sid, name) {
   finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
 }
 
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key) } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames, rankBriefingTarget = (db, key) => targetRankOf(db, key), ownerCheck = isLocalPasswordSessionOn } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
   async function piNames(env) {
@@ -804,6 +842,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const requestId = body.requestId == null ? "" : String(body.requestId);
+    // Credential card (B2): an ask card's free-text answer is operator text reaching the same
+    // child, so it gets the same strip and the same count-only answer as /message and /steer.
+    const removed = stripAnswerText(body);
     let pdb = null;
     try {
       // Project services (fix round 1): an answer resolves a dialog the child holding the
@@ -812,7 +853,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       try { pdb = createDbClient(); principal = await turnPrincipal(pdb, req); } catch { principal = "other"; }
       const eng = resolveEngine();
       const result = await eng.answer(sid, requestId, body, { principal });
-      res.json(result);
+      res.json({ ...(result && typeof result === "object" ? result : {}), removed });
     } catch (err) {
       // S4: a dead child must yield a 409-shaped no_such_request, never a raw
       // 500 — engine.answer() already enforces liveness before it ever calls
@@ -1161,9 +1202,17 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // ---- GET /interactive/:sid/secret — the open password card, for a reload ----
   // Credential card (spec §10.2): `{ id, label, kind, expiresAt }` for this session's open
   // request, or null. Metadata only (the store never holds a value); no-store, because a card
-  // that was just answered must not come back from a cache. Read-only.
-  router.get(P + "/interactive/:sid/secret", (req, res) => {
+  // that was just answered must not come back from a cache. Read-only, and the OWNER's alone
+  // (the Services routes' rule): a peer SSO session, a session minted by a login on this machine
+  // and any request from this machine are refused with 403 {error:"not_owner"} before the store
+  // is read. `ownerCheck` is the seam the canary harness passes a passing stub to.
+  router.get(P + "/interactive/:sid/secret", async (req, res) => {
     res.set("Cache-Control", "no-store");
+    let owner = false;
+    let db = null;
+    try { db = createDbClient(); owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
+    finally { if (db) { try { db.close(); } catch { /* closed */ } } }
+    if (!owner) return jsonError(res, 403, "not_owner");
     const r = openRequestFor(String(req.params.sid));
     res.json(r ? { id: r.id, label: r.label, kind: r.kind, expiresAt: r.expiresAt } : null);
   });

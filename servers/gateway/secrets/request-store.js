@@ -23,6 +23,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { getTarget } from "./targets.js";
+import { maskSecrets } from "../../shared/secret-mask.js";
 
 export const SECRET_REQUEST_TTL_MS = 10 * 60 * 1000;
 /** A queued note nobody took (the chat was never used again) is dropped after this. */
@@ -86,12 +87,17 @@ export class SecretRequestError extends Error {
   }
 }
 
-/** A bot-supplied label as a short single line, or null. Control characters are dropped. */
+/** A bot-supplied label as a short single line, or null. Control characters are dropped, and a
+ *  known secret in it is masked (display mode): the label is rendered in the card, in a note and
+ *  in the keychain entry's name, so a value a bot pasted into its own label never travels there. */
 export function cleanLabel(v) {
   if (typeof v !== "string") return null;
   // eslint-disable-next-line no-control-regex
   const t = v.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim().slice(0, LABEL_MAX).trim();
-  return t || null;
+  if (!t) return null;
+  let masked = t;
+  try { masked = maskSecrets(t); } catch { /* a masking bug leaves the label as typed */ }
+  return masked || null;
 }
 
 /** Queue one fixed line for the session's next turn. */

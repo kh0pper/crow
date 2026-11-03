@@ -6,12 +6,17 @@
  *
  * Rails:
  *  - dashboardAuth, then a refusal for any peer-signed request, then CSRF (the `X-Crow-Csrf`
- *    header; the dashboard router's own CSRF rail runs too). Mounted under /dashboard/perch-api,
- *    which is never on Funnel and skips the rate limiter like the rest of the dashboard.
- *  - Its own 4kb JSON parser: the path is in index.js `_hasOwnParser`, so the gateway's global
- *    parser never reads this body, and a malformed or oversized body gets the fixed answer and
- *    the fixed log line from the error handler at the end of this router, never the parser's
- *    message (Node's JSON.parse message quotes the body).
+ *    header; the dashboard router's own CSRF rail runs too), then the OWNER check: a peer SSO
+ *    session, a session minted by a login on this machine and any request from this machine are
+ *    refused with 403 {error:"not_owner"} before the body is read (the Services routes' rule,
+ *    review I1). Mounted under /dashboard/perch-api, which is never on Funnel and skips the rate
+ *    limiter like the rest of the dashboard.
+ *  - A body that is not `application/json` is refused with the fixed `bad_body` answer before
+ *    the parser runs (a urlencoded body is never read as one of ours). Its own 4kb JSON parser:
+ *    the path is in index.js `_hasOwnParser`, so the gateway's global parser never reads this
+ *    body, and a malformed or oversized body gets the fixed answer and the fixed log line from
+ *    the error handler at the end of this router, never the parser's message (Node's
+ *    JSON.parse message quotes the body).
  *  - `Cache-Control: no-store` on every answer.
  *
  * The value: read from the body exactly once (and deleted from it), checked as a non-empty
@@ -30,11 +35,12 @@ import { resolveCrowHome } from "../../shared/crow-home.js";
 import { refreshGatewaySecretValues } from "../../shared/secret-values-collect.js";
 import { claimSecret, cancelSecret, deliverSecret, emitSecretCard, secretFrame } from "../secrets/request-store.js";
 import { KEYCHAIN_NOTES } from "../secrets/targets.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 
 const BASE = "/dashboard/perch-api/secret";
 
-/** The path this router parses itself (index.js `_hasOwnParser` uses it). */
-export const SECRET_SUBMIT_PATH_RE = /^\/dashboard\/perch-api\/secret\/[^/]+$/;
+/** The path this router parses itself (index.js `_hasOwnParser` uses it; a trailing slash too). */
+export const SECRET_SUBMIT_PATH_RE = /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/;
 
 /** A typed password longer than this is refused (the parser's own cap is 4kb). */
 export const SECRET_VALUE_MAX = 1024;
@@ -50,6 +56,7 @@ const ANSWERS = Object.freeze({
   tooLarge: [413, { error: "too_large" }],
   expired: [410, { error: "expired" }],
   notFound: [404, { error: "not_found" }],
+  notOwner: [403, { error: "not_owner" }],
   forbidden: [403, { error: "forbidden" }],
   internal: [500, { error: "internal" }],
 });
@@ -68,6 +75,8 @@ function refusal(outcome) {
  * @param {(sid, frame, opts) => any} [o.emit] the card hook (default the request store's seam)
  * @param {Function} [o.audit] auditLog(db, event, { details })
  * @param {() => void} [o.refreshMasking] re-collect this gateway's masking sets after a save
+ * @param {(db: object, req: object) => Promise<boolean>} [o.ownerCheck] the owner rule (default
+ *   isLocalPasswordSessionOn; the canary harness passes a passing stub)
  */
 export default function secretSubmitRouter(dashboardAuth, {
   dbFactory = () => createDbClient(),
@@ -75,6 +84,7 @@ export default function secretSubmitRouter(dashboardAuth, {
   emit = emitSecretCard,
   audit = auditLog,
   refreshMasking,
+  ownerCheck = isLocalPasswordSessionOn,
 } = {}) {
   const home = () => crowHome || resolveCrowHome();
   const maskEnv = () => ({ ...process.env, CROW_HOME: home() });
@@ -97,7 +107,22 @@ export default function secretSubmitRouter(dashboardAuth, {
 
   const jsonBody = express.json({ limit: "4kb" });
 
-  router.post(BASE + "/:id", jsonBody, async (req, res) => {
+  // The owner's turn, before anything is read (review I1, the Services rule): a peer SSO session,
+  // a session minted by a login on this machine and any request from this machine are refused.
+  const ownerOnly = async (req, res, next) => {
+    let owner = false;
+    let db = null;
+    try { db = dbFactory(); owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
+    finally { if (db) { try { db.close(); } catch { /* closed */ } } }
+    if (!owner) return answer(res, "notOwner");
+    next();
+  };
+
+  // Only JSON bodies are ours: a form post is never parsed as one of these answers.
+  const requireJson = (req, res, next) => (
+    /^application\/json\b/i.test(String(req.headers["content-type"] || "")) ? next() : answer(res, "badBody"));
+
+  router.post(BASE + "/:id", ownerOnly, requireJson, jsonBody, async (req, res) => {
     try {
       const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
       const id = String(req.params.id);

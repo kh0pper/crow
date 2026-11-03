@@ -278,7 +278,7 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
   // The gateway's global 1mb JSON parser, skipping the routes that parse their own body: the
   // same predicate as servers/gateway/index.js `_hasOwnParser` for the prefixes mounted here.
   const globalJson = express.json({ limit: "1mb" });
-  const hasOwnParser = (p) => /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+$/i.test(p);
+  const hasOwnParser = (p) => /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p);
   app.use((req, res, next) => (hasOwnParser(req.path) ? next() : globalJson(req, res, next)));
 
   const sessionGate = (req, res, next) => {
@@ -309,6 +309,9 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
   dash.use(perchInteractiveApiRouter(sessionGate, {
     engine: () => engine,
     annotate: async (m) => m, providerModels: () => [], piProviders: () => null,
+    // The harness's "good" session is the owner's (a local password session from another
+    // device): the card's GET and the submit route answer only the owner.
+    ownerCheck: async () => true,
   }));
   app.use(dash);
   // The gateway's last handler (servers/gateway/index.js registers it after every router).
@@ -458,7 +461,6 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
   /** Mount another router behind the same CSRF rail and session gate (a later task's route,
    *  e.g. the secret submit route). Its paths are reached because the harness has no 404. */
   function mountDashboard(router) { dash.use(router); }
-
   return {
     dir, dataDir, crowHome, dbFile, db, engine, bridge, frames, responses, connectTests, clock,
     console: cap, AUTH, sessionGate,

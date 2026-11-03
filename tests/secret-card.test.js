@@ -11,6 +11,9 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createCanaryHarness, makeCanary } from "./fixtures/credential-canary.mjs";
+import {
+  mountHub, openChatSession, findByClass, clickClass, stdFetch, makeResponse, FakeEventSource,
+} from "./fixtures/perch-hub-vm.mjs";
 
 const STALL_MS = 60_000;
 const IDLE_MS = 300_000;
@@ -23,7 +26,7 @@ before(async () => {
   ({ perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js"));
   ({ t } = await import("../servers/gateway/dashboard/shared/i18n.js"));
   const { default: secretSubmitRouter } = await import("../servers/gateway/routes/secret-submit.js");
-  h.mountDashboard(secretSubmitRouter(h.sessionGate));
+  h.mountDashboard(secretSubmitRouter(h.sessionGate, { ownerCheck: async () => true }));
 });
 after(async () => { if (h) await h.close(); });
 
@@ -136,6 +139,10 @@ test("submit stores and emits done", async () => {
   assert.equal((await h.keychainRows()).filter((x) => x.label === "Submit site").length, 1);
   // The stall watchdog and idle timer re-arm once the card is gone (the idle timer is held).
   assert.equal((await h.engine.get(s.sessionId)).state, "awake");
+  // L7: the idle timer is ARMED again, not only the state word — the countdown really runs.
+  h.clock.advance(IDLE_MS + 1);
+  await h.tick(10);
+  assert.equal((await h.engine.get(s.sessionId)).state, "hibernating", "the idle countdown resumed after the save");
   assert.deepEqual(await h.grepEverywhere(c), []);
 });
 
@@ -220,19 +227,27 @@ test("restart drops the request", async () => {
   assert.deepEqual(store.takeSecretNotes(s2.sessionId), ["The password request expired. Nothing was sent."]);
 });
 
-test("stall/idle paused while open", async () => {
-  // Stall: a turn in flight, a card opens; the child keeps talking (which re-arms the watchdog
-  // whenever nothing waits on the operator), then ten stall windows pass with no stall.
-  const s = await session("stall-bot");
+test("the stall watchdog still fires for a wedged turn while a card is open", async () => {
+  // M1: a password card waits for a typed answer, not for a human to think, so an open card no
+  // longer pauses the turn clock.
+  const s = await session("stall-card-bot");
   assert.equal((await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/message`, { message: "work" })).status, 202);
-  const { id } = openCard(s, "stall-bot");
-  const errs = () => h.frames.filter((f) => f.sessionId === s.sessionId && f.event.type === "error" && /stall/.test(f.event.text)).length;
-  h.pi().emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "waiting for the password" } });
+  const k = openCard(s, "stall-card-bot");
+  h.clock.advance(STALL_MS + 1);
   await h.tick();
-  h.clock.advance(STALL_MS * 10);
-  await h.tick();
-  assert.equal(errs(), 0, "a bot waiting on a typed password is not stalled");
+  const errs = h.frames.filter((f) => f.sessionId === s.sessionId && f.event.type === "error" && /stall/.test(f.event.text));
+  assert.equal(errs.length, 1, "a wedged turn behind a card is still caught");
+  store.cancelSecret(k.id, s.sessionId);
+  store.emitSecretCard(s.sessionId, { type: "secret_request", id: k.id, label: null, state: "closed" }, { botId: "stall-card-bot" });
+  await h.tick(10);
+  store.takeSecretNotes(s.sessionId);
+});
+
+test("idle paused while open", async () => {
   // Idle: the turn ends while the card is open; the idle window passes with no hibernation.
+  const s = await session("idle-card-bot");
+  assert.equal((await h.post(`/dashboard/perch-api/interactive/${s.sessionId}/message`, { message: "work" })).status, 202);
+  const { id } = openCard(s, "idle-card-bot");
   await h.endTurn("I'll wait for the card.");
   h.clock.advance(IDLE_MS * 3);
   await h.tick();
@@ -241,18 +256,18 @@ test("stall/idle paused while open", async () => {
   await assert.rejects(h.engine.cycle(s.sessionId), (e) => e.code === "cycle_busy");
   // The card closes: the idle countdown resumes.
   store.cancelSecret(id, s.sessionId);
-  store.emitSecretCard(s.sessionId, { type: "secret_request", id, label: null, state: "closed" }, { botId: "stall-bot" });
+  store.emitSecretCard(s.sessionId, { type: "secret_request", id, label: null, state: "closed" }, { botId: "idle-card-bot" });
   h.clock.advance(IDLE_MS + 1);
   await h.tick(10);
   assert.equal((await h.engine.get(s.sessionId)).state, "hibernating", "the idle countdown resumes after");
   store.takeSecretNotes(s.sessionId);
 
   // And the watchdog resumes once the card is gone (a second session, a fresh turn).
-  const s2 = await session("stall-bot-2");
+  const s2 = await session("idle-card-bot-2");
   assert.equal((await h.post(`/dashboard/perch-api/interactive/${s2.sessionId}/message`, { message: "work" })).status, 202);
-  const k = openCard(s2, "stall-bot-2");
+  const k = openCard(s2, "idle-card-bot-2");
   store.cancelSecret(k.id, s2.sessionId);
-  store.emitSecretCard(s2.sessionId, { type: "secret_request", id: k.id, label: null, state: "closed" }, { botId: "stall-bot-2" });
+  store.emitSecretCard(s2.sessionId, { type: "secret_request", id: k.id, label: null, state: "closed" }, { botId: "idle-card-bot-2" });
   h.clock.advance(STALL_MS + 1);
   await h.tick();
   assert.equal(h.frames.filter((f) => f.sessionId === s2.sessionId && f.event.type === "error" && /stall/.test(f.event.text)).length, 1);
@@ -338,10 +353,171 @@ test("an ask settling while a password card is open keeps the needs-you open", a
   store.takeSecretNotes(s.sessionId);
 });
 
+test("L4: a urlencoded submit is refused with bad_body and the request stays open", async () => {
+  const s = await session("urlenc-bot");
+  const { id } = openCard(s, "urlenc-bot");
+  const r = await h.post(submitPath(id, s.sessionId), "value=hunter2-but-longer", { contentType: "application/x-www-form-urlencoded" });
+  assert.equal(r.status, 400);
+  assert.deepEqual(r.json, { error: "bad_body" });
+  assert.ok(store.getSecretRequest(id), "a refused body never burns the request");
+  /* And the JSON body still works on the same id. */
+  const ok = await h.post(submitPath(id, s.sessionId), { value: "" });
+  assert.deepEqual([ok.status, ok.json], [400, { error: "bad_value" }]);
+  store.cancelSecret(id, s.sessionId);
+  store.takeSecretNotes(s.sessionId);
+});
+
+test("L4: a trailing slash still uses the route's own parser", async () => {
+  const { readFileSync } = await import("node:fs");
+  const repo = new URL("..", import.meta.url).pathname;
+  const src = readFileSync(repo + "servers/gateway/index.js", "utf8");
+  const m = /const _hasOwnParser = \(p\) =>([\s\S]*?);\napp\.use/.exec(src);
+  assert.ok(m, "the predicate is where it was");
+  const skip = new Function("p", "return " + m[1] + ";");
+  for (const p of ["/dashboard/perch-api/secret/abc", "/dashboard/perch-api/secret/abc/", "/DASHBOARD/Perch-API/secret/abc/"]) {
+    assert.equal(skip(p), true, p);
+  }
+  for (const p of ["/dashboard/perch-api/secret/", "/dashboard/perch-api/secret/abc/extra", "/dashboard/perch-api/secret"]) {
+    assert.equal(skip(p), false, p);
+  }
+  // …and the route itself answers a trailing-slash submit through its own handler.
+  const s = await session("slash-bot");
+  const { id } = openCard(s, "slash-bot");
+  const r = await h.post(`/dashboard/perch-api/secret/${id}/?sid=${encodeURIComponent(s.sessionId)}`, { value: "" });
+  assert.deepEqual([r.status, r.json], [400, { error: "bad_value" }], "the handler ran, not the global parser");
+  assert.ok(store.getSecretRequest(id));
+  store.cancelSecret(id, s.sessionId);
+  store.takeSecretNotes(s.sessionId);
+});
+
+// ---------------------------------------------------------------------------
+// The card on the client (the vm harness runs the emitted script itself)
+// ---------------------------------------------------------------------------
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const runTimers = (hub, delay) => {
+  for (const [id, fn] of [...hub.timers]) {
+    if (hub.timerDelays.get(id) === delay) { hub.timers.delete(id); hub.timerDelays.delete(id); fn(); }
+  }
+};
+
+function mountWith(fetchImpl) {
+  return mountHub({ fetchImpl });
+}
+
+test("L6: the open-card GET returning null while the card is shown renders it as gone", async () => {
+  const id = "a".repeat(32);
+  let live = { id, label: "Reload site", kind: "password", expiresAt: 0 };
+  const hub = await mountWith((method, path) => {
+    if (path.includes("/secret")) return makeResponse(200, live);
+    return stdFetch()(method, path);
+  });
+  await openChatSession(hub);
+  await tick();
+  assert.ok(findByClass(hub.els["perch-secret"], "secret-card"), "the card is on screen");
+
+  // A reconnect: the resync replays the card (the engine does this on subscribe), then the
+  // history batch refetches it and the gateway answers null — the card is gone, not typeable.
+  live = null;
+  const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  es._nativeError();
+  await tick();
+  runTimers(hub, 2000);
+  await tick();
+  const es2 = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  es2._open();
+  es2._serverFrame("secret_request", { id, label: "Reload site", state: "open" });
+  await tick();
+  await tick();
+  const res = findByClass(hub.els["perch-secret"], "secret-result");
+  assert.ok(res, "the card says it is gone");
+  assert.equal(res.textContent, t("perch.secretGone", "en"));
+  assert.equal(findByClass(hub.els["perch-secret"], "secret-input"), null, "and offers no field");
+});
+
+test("M3: a lost connection shows couldn't confirm, and a later done frame wins", async () => {
+  const id = "b".repeat(32);
+  const hub = await mountWith((method, path) => {
+    if (path.includes("/secret")) return method === "POST" ? makeResponse(0, null) : makeResponse(200, { id, label: "Site", kind: "password", expiresAt: 0 });
+    return stdFetch()(method, path);
+  });
+  await openChatSession(hub);
+  await tick();
+  clickClass(hub.els["perch-secret"], "secret-enter");
+  const field = findByClass(hub.els["perch-secret"], "secret-input");
+  assert.ok(field, "the field is open");
+  field.value = "hunter2-but-longer";
+  clickClass(hub.els["perch-secret"], "secret-save");
+  await tick();
+  await tick();
+  assert.equal(findByClass(hub.els["perch-secret"], "secret-result").textContent, t("perch.secretUnknown", "en"),
+    "a lost connection is not 'couldn't be saved'");
+
+  // The server's own frame for the same id is the truth, and replaces the provisional line.
+  const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  es._serverFrame("secret_request", { id, label: "Site", state: "done" });
+  await tick();
+  assert.equal(findByClass(hub.els["perch-secret"], "secret-result").textContent, t("perch.secretSaved", "en"));
+});
+
+test("A1: a 403 not_owner shows the owner-only line on the card", async () => {
+  const id = "d".repeat(32);
+  const hub = await mountWith((method, path) => {
+    if (path.includes("/secret")) return method === "POST" ? makeResponse(403, { error: "not_owner" }) : makeResponse(200, { id, label: "Site", kind: "password", expiresAt: 0 });
+    return stdFetch()(method, path);
+  });
+  await openChatSession(hub);
+  await tick();
+  clickClass(hub.els["perch-secret"], "secret-enter");
+  findByClass(hub.els["perch-secret"], "secret-input").value = "hunter2-but-longer";
+  clickClass(hub.els["perch-secret"], "secret-save");
+  await tick();
+  await tick();
+  assert.equal(findByClass(hub.els["perch-secret"], "secret-result").textContent, t("perch.secretNotOwner", "en"));
+});
+
+test("concern 7: the engine's snapshot (what /roost reads) carries secretCard while a card is open", async () => {
+  const s = await session("needsyou-bot");
+  const { id } = openCard(s, "needsyou-bot");
+  const snap = await h.engine.get(s.sessionId);
+  assert.equal(snap.pendingUi, null, "the password card is not an ask card");
+  assert.equal(snap.secretCard, true, "but the session still needs the operator");
+  store.cancelSecret(id, s.sessionId);
+  store.emitSecretCard(s.sessionId, { type: "secret_request", id, label: "Needs you site", state: "closed" }, { botId: "needsyou-bot" });
+  assert.equal((await h.engine.get(s.sessionId)).secretCard, false);
+  store.takeSecretNotes(s.sessionId);
+});
+
+test("concern 7: an open password card shows in the session list as needs-you", async () => {
+  const roost = (secretCard) => ({
+    birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+      sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false, secretCard, projectId: 7 }] }],
+  });
+  let secretCard = false;
+  const hub = await mountWith((method, path) => (path === "/roost" ? makeResponse(200, roost(secretCard)) : stdFetch()(method, path)));
+  await tick();
+  const listText = (h) => { const deep = (n) => (n.textContent || "") + (n.children || []).map(deep).join(" "); return h.els["perch-list-body"].children.map(deep).join("\n"); };
+  assert.ok(!listText(hub).includes(t("perch.waitingOnYou", "en")), "nothing waits yet");
+  secretCard = true;
+  hub.location.hash = "";                        /* a poll redraws the list */
+  runTimers(hub, 10000);
+  await tick();
+  assert.ok(listText(hub).includes(t("perch.waitingOnYou", "en")), "the card is the row's needs-you: " + listText(hub));
+
+  // The attention banner reads the same fact: an open card on screen says the bot went quiet.
+  await openChatSession(hub);
+  await tick();
+  const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  es._serverFrame("secret_request", { id: "c".repeat(32), label: "Site", state: "open" });
+  await tick();
+  assert.equal(hub.els["perch-attn"].hidden, false, "the banner is on");
+});
+
 test("en and es", () => {
   const keys = ["perch.secretTitle", "perch.secretTitleNoLabel", "perch.secretAsks", "perch.secretHelp", "perch.secretEnter",
     "perch.secretSave", "perch.secretNotNow", "perch.secretField", "perch.secretSaved", "perch.secretClosed",
-    "perch.secretExpired", "perch.secretGone", "perch.secretNotSetUp", "perch.secretFailed", "perch.secretSaving"];
+    "perch.secretExpired", "perch.secretGone", "perch.secretNotSetUp", "perch.secretFailed", "perch.secretSaving",
+    "perch.secretUnknown", "perch.secretNotOwner"];
   for (const k of keys) {
     const en = t(k, "en"), es = t(k, "es");
     assert.ok(en && en !== k, k + " en");
@@ -352,6 +528,8 @@ test("en and es", () => {
   assert.equal(t("perch.secretTitle", "en"), "🔒 Password for {label}");
   assert.equal(t("perch.secretAsks", "en"), "Asked by {bot}");
   assert.equal(t("perch.secretAsks", "es"), "Preguntado por {bot}");
+  assert.equal(t("perch.secretUnknown", "en"), "Couldn't confirm it was saved. Check the keychain before trying again.");
+  assert.equal(t("perch.secretNotOwner", "en"), "Only the owner can fill this.");
   for (const lang of ["en", "es"]) {
     const js = perchHubJs(lang);
     assert.ok(js.includes(t("perch.secretEnter", lang).replace(/'/g, "\\'")), lang + " carries its own strings");

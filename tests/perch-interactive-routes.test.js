@@ -535,7 +535,7 @@ test("POST /interactive/:sid/steer maps no_turn (409), pi_gone (409), and sessio
 test("POST /interactive/:sid/answer forwards requestId + the full body as the value, and returns {ok:true}", async () => {
   const { status, body } = await postJson("/interactive/sess-1/answer", { requestId: "r1", value: "yes" });
   assert.equal(status, 200);
-  assert.deepEqual(body, { ok: true });
+  assert.deepEqual(body, { ok: true, removed: 0 });
   assert.deepEqual(engineCalls.answer, [{ sid: "sess-1", requestId: "r1", value: { requestId: "r1", value: "yes" } }]);
 });
 
@@ -550,7 +550,7 @@ test("POST /interactive/:sid/answer forwards a combined card's answers[] untouch
   };
   const { status, body } = await postJson("/interactive/sess-1/answer", combined);
   assert.equal(status, 200);
-  assert.deepEqual(body, { ok: true });
+  assert.deepEqual(body, { ok: true, removed: 0 });
   assert.deepEqual(engineCalls.answer, [{ sid: "sess-1", requestId: "sel1", value: combined }],
     "the answers[] array rides the body verbatim — the engine, not the route, drives the dance");
 });

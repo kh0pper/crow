@@ -29,7 +29,7 @@ before(async () => { h = await createCanaryHarness(); });
 async function mountSecretSubmit() {
   if (secretMounted) return;
   const { default: secretSubmitRouter } = await import("../servers/gateway/routes/secret-submit.js");
-  h.mountDashboard(secretSubmitRouter(h.sessionGate));
+  h.mountDashboard(secretSubmitRouter(h.sessionGate, { ownerCheck: async () => true }));
   secretMounted = true;
 }
 after(async () => { if (h) await h.close(); });
@@ -110,6 +110,12 @@ test("(c) a malformed-JSON body to the secret submit route: fixed answer, fixed 
   assert.equal(big.status, 413);
   assert.deepEqual(big.json, { error: "too_large" });
   assert.deepEqual(await h.grepEverywhere(c), []);
+  // L4: a urlencoded body is not ours, so it is refused before it is read (and never logged).
+  const c3 = makeCanary();
+  const form = await h.post("/dashboard/perch-api/secret/" + "0".repeat(32) + "?sid=x", "value=" + c3, { contentType: "application/x-www-form-urlencoded" });
+  assert.equal(form.status, 400);
+  assert.deepEqual(form.json, { error: "bad_body" });
+  assert.deepEqual(await h.grepEverywhere(c3), []);
 });
 
 test("(c) a malformed-JSON /steer body holding the canary (the global parser): fixed answer, fixed line, zero hits", async () => {

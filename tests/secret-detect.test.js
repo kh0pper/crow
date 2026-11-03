@@ -137,6 +137,18 @@ test("strip is surgical", () => {
   assert.deepEqual(stripSecrets(null), { text: "", removed: 0 });
 });
 
+test("pass=<token> keeps the key name", () => {
+  // D2: the entropy run's own characters include the key and the separator ("=" and letters),
+  // so its span started at the key and the whole "pass=<token>" was replaced. The key's name is
+  // not secret: the span starts after the separator.
+  assert.deepEqual(stripSecrets("pass=" + ENTROPY), { text: "pass=" + SECRET_REMOVED, removed: 1 });
+  assert.deepEqual(spans("pass=" + ENTROPY), [ENTROPY], "only the value is the span");
+  assert.deepEqual(stripSecrets("key=" + ENTROPY), { text: "key=" + SECRET_REMOVED, removed: 1 });
+  assert.deepEqual(stripSecrets("pwd:" + ENTROPY), { text: "pwd:" + SECRET_REMOVED, removed: 1 });
+  // A bare token is still replaced whole.
+  assert.deepEqual(stripSecrets("x " + ENTROPY + " y"), { text: "x " + SECRET_REMOVED + " y", removed: 1 });
+});
+
 test("detectorSource rebuilds the same regexes (what the client will get)", () => {
   const src = detectorSource();
   assert.ok(Array.isArray(src.prefixes) && src.prefixes.length >= 18);

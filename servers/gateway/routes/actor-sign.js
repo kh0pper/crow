@@ -85,6 +85,15 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 export const ACTOR_SIGN_PATH = "/internal/actor-sign";
+/**
+ * The kinds this loopback relay will sign. "secrets" (the credential card's actor kind,
+ * actor-sig.mjs signSecretsActor) is deliberately NOT among them: a Perch turn always signs
+ * in-process. The Perch engine runs in the gateway, it is the ONLY thing that can give a session
+ * its live "secrets" actor (a resident, awake session of that bot), and the bot's per-turn MCP
+ * config is built there too. A key-less bot host has no Perch session, so it has nothing this
+ * kind could honestly attest; messageFor() has no tuple for it either. Keeping the relay blind
+ * to "secrets" means the credential-card door has no off-process signing path at all.
+ */
 export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", ...SESSION_ACTOR_KINDS, ...SCOPE_ACTOR_KINDS]);
 
 const REFUSE_LOG_WINDOW_MS = 3_600_000;

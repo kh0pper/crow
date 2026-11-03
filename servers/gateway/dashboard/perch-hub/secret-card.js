@@ -38,7 +38,9 @@ export function perchSecretCardJs(lang = "en") {
     expired:'${tJs("perch.secretExpired", lang)}',
     gone:'${tJs("perch.secretGone", lang)}',
     not_set_up:'${tJs("perch.secretNotSetUp", lang)}',
-    failed:'${tJs("perch.secretFailed", lang)}'
+    failed:'${tJs("perch.secretFailed", lang)}',
+    unknown:'${tJs("perch.secretUnknown", lang)}',
+    not_owner:'${tJs("perch.secretNotOwner", lang)}'
   };
 
   var secShown=null;     /* {id,label,state} on screen, or null */
@@ -62,6 +64,7 @@ export function perchSecretCardJs(lang = "en") {
     secWipe(); secShown=null; secGen++;
     secretWarnClose();          /* nor the paste warning from the previous chat */
     var p=secPane(); if(p) clearEl(p);
+    syncAttn();                 /* concern 7: the banner follows the card */
   }
   function secBot(){ return current.botName||current.botId||''; }
 
@@ -69,6 +72,7 @@ export function perchSecretCardJs(lang = "en") {
     var pane=secPane(); if(!pane) return;
     secWipe(); clearEl(pane);
     secShown=card&&card.id?{id:String(card.id),label:card.label==null?null:String(card.label),state:card.state||'open'}:null;
+    syncAttn();                 /* concern 7: an open card is "needs you" */
     if(!secShown) return;
     var c=secShown;
     var frame=document.createElement('div'); frame.className='ask-card secret-card';
@@ -121,12 +125,15 @@ export function perchSecretCardJs(lang = "en") {
 
   function secPath(c,sid){ return '/secret/'+encodeURIComponent(c.id)+'?sid='+encodeURIComponent(sid); }
 
-  /* The answer's fixed code → the card's result. */
+  /* The answer's fixed code → the card's result. A lost connection (status 0) or a 5xx is NOT a
+     failure: nothing says the value was not saved, so the card says it could not confirm it. */
   function secResultFor(r){
     if(r&&r.ok&&r.j&&r.j.ok) return r.j.code==='closed'?'closed':'done';
     if(r&&r.j&&r.j.code==='not_set_up') return 'not_set_up';
+    if(r&&r.status===403&&r.j&&r.j.error==='not_owner') return 'not_owner';
     if(r&&r.status===410) return 'expired';
     if(r&&r.status===404) return 'gone';
+    if(r&&(r.status===0||(r.status>=500&&r.status<=599))) return 'unknown';
     return 'failed';
   }
 
@@ -157,7 +164,9 @@ export function perchSecretCardJs(lang = "en") {
   }
 
   /* A live frame: an open card is drawn unless it is already on screen (a typed value is never
-     wiped by a replay); a settled one replaces this card only. */
+     wiped by a replay); a settled one replaces this card only. A CLIENT-DERIVED result ("couldn't
+     confirm it was saved") is provisional too: the server's own done/failed frame for the same id
+     is the truth and replaces it. */
   function secretFrame(d){
     if(!d||typeof d.id!=='string') return;
     if(d.state==='open'){
@@ -165,16 +174,22 @@ export function perchSecretCardJs(lang = "en") {
       renderSecret(d);
       return;
     }
-    if(secShown&&secShown.id===d.id&&secShown.state==='open') renderSecret(d);
+    if(secShown&&secShown.id===d.id&&(secShown.state==='open'||secShown.state==='unknown')) renderSecret(d);
   }
 
-  /* On load: the open card from the gateway (a reload or a second tab). */
+  /* On load: the open card from the gateway (a reload or a second tab). The gateway saying this
+     chat has NO open request, while a card is on screen, means the card is gone — draw that, never
+     leave a dead card the operator can type into. */
   function loadSecret(sid){
     if(!sid) return;
     var mySid=sid, myGen=secGen;
     perchApi('GET','/interactive/'+encodeURIComponent(mySid)+'/secret').then(function(r){
       if(!live()||current.sid!==mySid||secGen!==myGen) return;
-      if(!r||!r.ok||!r.j||typeof r.j.id!=='string') return;
+      if(!r||!r.ok) return;                    /* a failed fetch says nothing about the card */
+      if(!r.j||typeof r.j.id!=='string'){
+        if(secShown&&secShown.state==='open') renderSecret({id:secShown.id,label:secShown.label,state:'gone'});
+        return;
+      }
       if(secShown&&secShown.id===r.j.id) return;
       renderSecret({id:r.j.id,label:r.j.label,state:'open'});
     });
