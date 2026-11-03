@@ -43,6 +43,7 @@
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { encodeDocState } from "./doc.js";
@@ -1010,6 +1011,27 @@ export function createStudioWeb({
         project_id: Number.isInteger(projectId) ? projectId : null,
       });
     }));
+
+    // The engine's worklet module, composed here from the same source files a
+    // Node render composes (engine-client's SOURCE_FILES and
+    // composeEngineModule). A browser page under the dashboard's CSP cannot
+    // load a worklet from a blob: URL; a same-origin script it can.
+    let engineModule = null;
+    r.get("/dashboard/studio/assets/engine-module.js", dashboardAuth, (req, res) => {
+      if (!bundleDir) return res.status(404).json({ error: "not_found" });
+      try {
+        if (engineModule == null) {
+          const engine = createRequire(import.meta.url)(join(bundleDir, "engine", "engine-client.js"));
+          const texts = engine.SOURCE_FILES.map((name) => readFileSync(join(bundleDir, ASSET_FILES.get(name)), "utf8"));
+          engineModule = engine.composeEngineModule(texts);
+        }
+      } catch (error) {
+        console.warn("[studio] could not compose the engine module:", error?.message || error);
+        return res.status(500).json({ error: "internal" });
+      }
+      res.type("text/javascript");
+      return res.send(engineModule);
+    });
 
     // The engine assets the panel loads. The whitelist is the whole contract:
     // a name that is not in it never touches the filesystem.
