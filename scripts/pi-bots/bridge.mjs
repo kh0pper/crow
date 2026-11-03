@@ -58,6 +58,7 @@ import { findPiLabDir, piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
 import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
+import { createEgressRelay } from "./pi_egress.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
@@ -89,7 +90,13 @@ function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
   let kids = "";
   try { kids = readFileSync("/proc/" + initPid + "/task/" + initPid + "/children", "utf8").trim(); } catch { /* not yet / gone */ }
   const first = Number(kids.split(/\s+/)[0]);
-  if (Number.isInteger(first) && first > 0) { rpc.piPid = first; return; }
+  if (Number.isInteger(first) && first > 0) {
+    // Contain's network tier runs pi under an entry process: step past it.
+    let cmd = "";
+    try { cmd = readFileSync("/proc/" + first + "/cmdline", "utf8"); } catch {}
+    if (cmd.includes("pi_netns_entry.mjs")) return resolveSandboxedPiPid(rpc, first, tries);
+    rpc.piPid = first; return;
+  }
   if (tries >= 100 || rpc._exitCode != null) { if (rpc.piPid == null) rpc.piPid = initPid; return; }
   const t = setTimeout(() => resolveSandboxedPiPid(rpc, initPid, tries + 1), 20);
   if (t.unref) t.unref();
@@ -158,6 +165,22 @@ function containModelInputs(resolved, piProvider) {
  * spawner-built closed-world config). Creates the per-instance bot cache and
  * the per-spawn GENERATED agent dir (pi_contain_agent.mjs).
  */
+/**
+ * The contain tier's network inputs (spec §10, closed network): the only host
+ * loopback port a contained spawn reaches is its own gateway's, and there only
+ * the door paths (the relay's door filter); models go through the gateway's
+ * /llm doors (the generated agent dir), so no provider port is opened. Other
+ * hosts are reached only through the CONNECT proxy, on 443, never a private or
+ * own-host address; the def's `egress` list narrows that further.
+ * CROW_PI_CONTAIN_NET=off (operator env) keeps the host network.
+ */
+function containNetInputs({ def }) {
+  if (String(process.env.CROW_PI_CONTAIN_NET || "").toLowerCase() === "off") return null;
+  const listed = def && def.permission_policy && Array.isArray(def.permission_policy.egress) ? def.permission_policy.egress.slice() : null;
+  const gatewayPort = gatewayListenPort();
+  return { gatewayPort, loopbackPorts: [gatewayPort], egressAllow: listed };
+}
+
 function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved, piProvider, otherHomes }) {
   const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
   const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
@@ -191,7 +214,23 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     modelRolesFile: roleSnapshotPath(),
   });
   const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
+  const netIn = containNetInputs({ def });
+  let relay = null;
+  if (netIn) {
+    // The relay dir holds only the socket; it stays in /tmp (unix socket
+    // paths are limited to 108 bytes) and carries the spawner's pid for the
+    // stale-dir sweep.
+    try {
+      const botIdForLog = opts.botId || (def && (def.bot_id || def.id)) || null;
+      relay = createEgressRelay({ dir: mkdtempSync(join(tmpdir(), "crow-pi-net-" + process.pid + "-")), botId: botIdForLog,
+        gatewayPort: netIn.gatewayPort, loopbackPorts: netIn.loopbackPorts, egressAllow: netIn.egressAllow });
+    } catch (e) {
+      shadow.cleanup();
+      throw e;
+    }
+  }
   return {
+    net: relay ? { relayDir: relay.dir, loopbackPorts: netIn.loopbackPorts } : null,
     home: HOME, uid: process.getuid(), nodeBin, cliPath,
     appRoot: BRIDGE_APP_ROOT,
     piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
@@ -212,7 +251,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     cloudTokenPath: shadow.cloudTokenPath,
     missing: shadow.missing,
     modelRolesEnv: shadow.env,
-    _cleanups: [shadow.cleanup],
+    _cleanups: [shadow.cleanup, ...(relay ? [() => relay.close()] : [])],
   };
 }
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -240,13 +279,13 @@ export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
   for (const k of Object.keys((def && def.spawn_env) || {})) {
-    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS / _DATA_KEEP) is the operator's switch for the pi sandbox; a bot def must
+    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS / _DATA_KEEP / _NET) is the operator's switch for the pi sandbox; a bot def must
     // not be able to turn the sandbox off for itself.
     // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
     // must not point pi at a file of its choosing.
     // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
     // peer credential store.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_PI_CONTAIN_NET" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
     // Loader hooks run code before pi starts (and a bot can edit its own def
     // through its DB-touching tools): never from a def. A NODE_OPTIONS made
     // only of heap-size flags is kept.
