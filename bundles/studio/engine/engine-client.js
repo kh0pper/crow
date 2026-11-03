@@ -48,6 +48,23 @@
  * `flush()` resolves only after that work is done, so an offline render that
  * waits for both and then calls `startRendering()` renders a deterministic
  * number of frames after the engine came up.
+ *
+ * ## Messages
+ *
+ * The client's side of the port protocol (the processor's header has the
+ * whole list):
+ *
+ * - `onPosition(listener)` follows `{type:"position", bar, beat, sixteenth}`,
+ *   posted at most every 50 ms of audio.
+ * - `onLaunch(listener)` follows `{type:"launched", track_id, clip_id,
+ *   scene_id, bar, frame}`: one report per launch or stop the sequencer
+ *   APPLIED, `frame` being the frame of the whole AudioContext (the worklet's
+ *   shared `currentFrame`) where it took effect and `bar` the 0-based bar. A
+ *   recorder on the same context arms from that frame.
+ * - `nextBarFrame()` asks for the next bar boundary on the same clock and
+ *   resolves `{frame, bar}` (0-based bar; while the transport is stopped, the
+ *   frame bar 0 would start at).
+ * - `flush()` resolves once every message posted before it has been applied.
  */
 (function () {
   "use strict";
@@ -265,6 +282,8 @@
    *                    stop: function(): void,
    *                    flush: function(): Promise<void>,
    *                    onPosition: function(function): function,
+   *                    onLaunch: function(function): function,
+   *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onError: function(function): function,
    *                    throwForTest: function(): void,
    *                    dispose: function(): void}>}
@@ -328,9 +347,12 @@
     });
 
     const listeners = new Set();
+    const launchListeners = new Set();
     const errorListeners = new Set();
     const flushes = new Map();
     let flushSeq = 0;
+    const barRequests = new Map();
+    let barSeq = 0;
     const post = (message) => node.port.postMessage(message);
 
     try {
@@ -363,6 +385,31 @@
           } catch {
             /* one bad listener must not stop the transport's clock */
           }
+        }
+        return;
+      }
+      if (message.type === "launched") {
+        const launch = {
+          track_id: message.track_id,
+          clip_id: message.clip_id === null || message.clip_id === undefined ? null : message.clip_id,
+          scene_id: message.scene_id === null || message.scene_id === undefined ? null : message.scene_id,
+          bar: message.bar,
+          frame: message.frame,
+        };
+        for (const listener of launchListeners) {
+          try {
+            listener(launch);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "nextBarFrame") {
+        const resolveFrame = barRequests.get(message.id);
+        if (resolveFrame) {
+          barRequests.delete(message.id);
+          resolveFrame({ frame: message.frame, bar: message.bar });
         }
         return;
       }
@@ -459,6 +506,42 @@
       },
 
       /**
+       * Follow the launches the engine applied: one report per launch or stop,
+       * with the AudioContext frame it took effect at and its 0-based bar. This
+       * is what a recorder arms from, so it is never rounded or resequenced
+       * here.
+       * @param {(launch: {track_id: string, clip_id: string|null,
+       *                   scene_id: string|null, bar: number, frame: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onLaunch(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        launchListeners.add(listener);
+        return function unsubscribe() {
+          launchListeners.delete(listener);
+        };
+      },
+
+      /**
+       * The next bar boundary, on the engine's clock: `frame` is an
+       * AudioContext frame and `bar` is the 0-based bar it belongs to. While
+       * the transport is stopped this is the frame bar 0 would start at. It is
+       * the same boundary the sequencer quantizes launches to, so a recorder
+       * that arms here and a launch report name the very same frame.
+       *
+       * Resolves when the processor answers; a processor that has failed never
+       * does, so callers should not depend on it after an error.
+       * @returns {Promise<{frame: number, bar: number}>}
+       */
+      nextBarFrame() {
+        const id = ++barSeq;
+        return new Promise((resolve) => {
+          barRequests.set(id, resolve);
+          post({ type: "nextBarFrame", id: id });
+        });
+      },
+
+      /**
        * Follow the engine's failures (a device that could not be built, a song
        * the processor refused, a fault it survived). They are also logged.
        * @param {(text: string) => void} listener
@@ -492,6 +575,7 @@
        */
       dispose() {
         listeners.clear();
+        launchListeners.clear();
         errorListeners.clear();
         node.port.onmessage = null;
       },

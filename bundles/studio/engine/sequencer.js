@@ -63,6 +63,28 @@
  * is cut there. Notes are emitted only for tracks that are not muted and, when
  * any track is soloed, only for the soloed ones.
  *
+ * ## Launch reports
+ *
+ * Every launch this file APPLIES is reported in the very block it takes effect
+ * in. The array `block()` returns carries that block's reports as a
+ * non-enumerable `launches` property, so the events themselves keep the shape
+ * every caller already reads. One report is
+ * `{track_id, clip_id|null, scene_id|null, bar, frame}`:
+ *
+ * - `frame` is the offset inside that block of the boundary frame
+ *   (`0 <= frame < frames`), so a host adds its own frame at the block's start
+ *   to get an absolute frame;
+ * - `bar` is the 0-based bar the launch took effect at;
+ * - `clip_id` is `null` for a stop;
+ * - a scene launch reports one entry per track it changed, all with that
+ *   scene's id, and a track already playing the clip it is asked for is not a
+ *   change and is not reported. A `stopTrack` / `stopAll` report carries the
+ *   scene of the clip it replaces, when that clip is known.
+ *
+ * A launch scheduled while the transport is stopped takes effect at beat 0, so
+ * it is reported in the block that starts the transport, not in the block the
+ * launch was asked in.
+ *
  * `stop()` halts the transport: every sounding note gets its off at the
  * current frame, the position goes back to 1.1.1, and the clips that were
  * sounding stay armed so `play()` starts them again from the transport's
@@ -119,6 +141,7 @@
    *            play: function(): void,
    *            stop: function(): void,
    *            block: function(number, number): Array<object>,
+   *            nextBarFrame: function(): {bar: number, beat: number, frame: number},
    *            position: function(): {bar: number, beat: number, sixteenth: number},
    *            isPlaying: function(): boolean}}
    */
@@ -153,6 +176,27 @@
 
     /** The events of the block being built. Reused; a block allocates nothing. */
     const events = [];
+
+    /**
+     * The launches applied in the block being built, in block frames. Reused
+     * like `events`, and hung off it as a non-enumerable `launches` property:
+     * the events array keeps exactly the shape callers already iterate.
+     */
+    const launches = [];
+    Object.defineProperty(events, "launches", {
+      value: launches,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    /**
+     * Launches scheduled but not yet inside a processed block, in the order
+     * they were asked for: `{track_id, clip_id, scene_id, atBeat}`. The
+     * boundary frame is derived from `atBeat` when the block is built, so a
+     * tempo change moves a scheduled launch with the bars.
+     */
+    const pending = [];
 
     // --- song ------------------------------------------------------------
 
@@ -198,6 +242,7 @@
       trackIndex = next.trackIndex;
       clips = next.clips;
       framesPerBeat = next.framesPerBeat;
+      prunePending();
 
       reconcile(currentFrame === null ? 0 : currentFrame);
     }
@@ -297,7 +342,7 @@
       const at = launchBeat();
       for (const track of tracks) {
         const clip = clipFor(track.id, sceneId);
-        scheduleAt(track.id, clip ? clip.id : null, at);
+        applyLaunch(track.id, clip ? clip.id : null, sceneId, at);
       }
       reconcile(frameNow());
     }
@@ -312,7 +357,7 @@
       const clip = clips.get(clip_id === null || clip_id === undefined ? "" : String(clip_id));
       if (!clip) return;
       if (!trackIndex.has(clip.track_id)) return;
-      scheduleAt(clip.track_id, clip.id, launchBeat());
+      applyLaunch(clip.track_id, clip.id, sceneOf(clip), launchBeat());
       reconcile(frameNow());
     }
 
@@ -324,7 +369,9 @@
     function stopTrack(track_id) {
       const trackId = track_id === null || track_id === undefined ? "" : String(track_id);
       if (!trackIndex.has(trackId)) return;
-      scheduleAt(trackId, null, launchBeat());
+      // No scene is named: the report falls back to the scene of the clip the
+      // stop replaces (see `applyLaunch`).
+      applyLaunch(trackId, null, undefined, launchBeat());
       reconcile(frameNow());
     }
 
@@ -334,11 +381,13 @@
       if (!playing || originFrame === null) {
         forceCloseAll(frameNow());
         segments.clear();
+        // Nothing is scheduled any more, so no scheduled launch can land.
+        pending.length = 0;
         return;
       }
       for (const track of tracks) {
         if (!segments.has(track.id)) continue;
-        scheduleAt(track.id, null, at);
+        applyLaunch(track.id, null, undefined, at);
       }
       // A note whose segment was already gone still stops here.
       for (const entry of open.values()) capOff(entry, at);
@@ -356,6 +405,7 @@
       for (const [trackId, clipId] of keep) {
         segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
       }
+      keepFirstBarLaunches();
       playing = true;
       originFrame = null;
       currentFrame = null;
@@ -374,9 +424,111 @@
       for (const [trackId, clipId] of keep) {
         segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
       }
+      keepFirstBarLaunches();
       playing = false;
       originFrame = null;
       lastFrame = null;
+    }
+
+    /**
+     * Apply one launch and remember to report it.
+     *
+     * The report is made when the block that holds the boundary frames is
+     * built, so a launch that changes nothing — the track already plays that
+     * clip, or a stop for a track that is already silent — is not reported.
+     * @param {string} trackId
+     * @param {string|null} clipId the clip to play, `null` to stop
+     * @param {string|null|undefined} sceneId the scene being launched, or
+     *   `undefined` to fall back to the scene of the clip being replaced
+     * @param {number} atBeat the boundary the launch takes effect at
+     */
+    function applyLaunch(trackId, clipId, sceneId, atBeat) {
+      const segs = segments.get(trackId);
+      const replaced = segs ? clipAtBeat(segs, atBeat) : null;
+      scheduleAt(trackId, clipId, atBeat);
+      const applied = clipAtBeat(segmentsOf(trackId), atBeat);
+      if (applied === replaced) return;
+
+      let scene = sceneId;
+      if (scene === undefined || scene === null) {
+        // A stop names no scene of its own, so the report carries the one of
+        // the clip it replaced; a track that played nothing has none.
+        const replacedClip = replaced === null ? null : clips.get(replaced);
+        scene = replacedClip ? sceneOf(replacedClip) : null;
+      }
+      // A launch for a boundary that has not been reached yet supersedes the
+      // one already waiting for it on this track: only the launch the track
+      // actually ends up playing took effect.
+      for (let at = pending.length - 1; at >= 0; at -= 1) {
+        if (pending[at].track_id === trackId && pending[at].atBeat === atBeat) pending.splice(at, 1);
+      }
+      pending.push({ track_id: trackId, clip_id: applied, scene_id: scene, atBeat: atBeat });
+    }
+
+    /**
+     * Report the launches whose boundary frame falls inside this block.
+     * @param {number} frameStart
+     * @param {number} frames
+     */
+    function reportLaunches(frameStart, frames) {
+      // Nothing takes effect while the transport is not running: a launch for
+      // bar 0 waits for the block that actually starts it.
+      if (pending.length === 0 || !playing || originFrame === null) return;
+      const frameEnd = frameStart + frames;
+      let kept = 0;
+      for (let at = 0; at < pending.length; at += 1) {
+        const entry = pending[at];
+        const frame = beatToFrame(entry.atBeat);
+        if (frame >= frameEnd) {
+          pending[kept] = entry;
+          kept += 1;
+          continue;
+        }
+        launches.push({
+          track_id: entry.track_id,
+          clip_id: entry.clip_id,
+          scene_id: entry.scene_id === undefined ? null : entry.scene_id,
+          bar: Math.round(entry.atBeat / BEATS_PER_BAR),
+          // A boundary the transport has already gone past (a tempo change can
+          // bring one forward) takes effect at the block's first frame.
+          frame: frame <= frameStart ? 0 : frame - frameStart,
+        });
+      }
+      pending.length = kept;
+      if (launches.length > 1) launches.sort(byLaunchFrame);
+    }
+
+    /**
+     * Drop the scheduled launches that have no target in the song any more.
+     */
+    function prunePending() {
+      if (pending.length === 0) return;
+      let kept = 0;
+      for (let at = 0; at < pending.length; at += 1) {
+        const entry = pending[at];
+        if (!trackIndex.has(entry.track_id)) continue;
+        if (entry.clip_id !== null && !clips.has(entry.clip_id)) continue;
+        pending[kept] = entry;
+        kept += 1;
+      }
+      pending.length = kept;
+    }
+
+    /**
+     * Keep only the launches scheduled for bar 0: `play()` and `stop()` both
+     * put the playhead back at beat 0, so those are the only boundaries that
+     * still exist. A bar-0 launch is reported in the block that starts the new
+     * run.
+     */
+    function keepFirstBarLaunches() {
+      if (pending.length === 0) return;
+      let kept = 0;
+      for (let at = 0; at < pending.length; at += 1) {
+        if (pending[at].atBeat !== 0) continue;
+        pending[kept] = pending[at];
+        kept += 1;
+      }
+      pending.length = kept;
     }
 
     /**
@@ -487,19 +639,23 @@
     /** @returns {number} the bar boundary a launch takes effect at, in beats. */
     function launchBeat() {
       if (!playing || originFrame === null) return 0;
-      const beat = currentBeat();
-      if (beat <= 0) return 0;
+      return nextBarFrom(frameNow(), originFrame, framesPerBeat).beat;
+    }
 
-      // Found in frames, not in beats: at most tempos a bar is not a whole
-      // number of frames, so a position one frame past the rounded boundary
-      // still reads as slightly more than the bar and `ceil` would skip a
-      // whole bar. The frame at or after the boundary is the first with
-      // `round(x) >= frame`, i.e. `x >= frame - 0.5`.
-      const barFrames = BEATS_PER_BAR * framesPerBeat;
-      const bar = Math.max(1, Math.ceil((frameNow() - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
-      const at = bar * BEATS_PER_BAR;
-      // A boundary the next block has already passed is no boundary at all.
-      return beatToFrame(at) < frameNow() ? at + BEATS_PER_BAR : at;
+    /**
+     * The next bar boundary from the transport position right now, in this
+     * sequencer's own frames — the answer to a host's `nextBarFrame` request.
+     *
+     * While the transport runs it is the boundary the next launch would take
+     * effect at (the same rounding `launchBeat` uses). While it is stopped, or
+     * before its first block, bar 0 starts at the next block's first frame.
+     * @returns {{bar: number, beat: number, frame: number}} `bar` is 0-based
+     */
+    function nextBarFrame() {
+      if (playing && originFrame !== null) {
+        return nextBarFrom(frameNow(), originFrame, framesPerBeat);
+      }
+      return { bar: 0, beat: 0, frame: frameNow() };
     }
 
     // --- block -----------------------------------------------------------
@@ -510,12 +666,18 @@
      * @param {number} frames how many frames the block holds
      * @returns {Array<{frame: number, track_id: string, type: "on"|"off",
      *                  p: number, v: number}>} events in block-relative
-     *   frames, sorted by frame with offs before ons at one frame
+     *   frames, sorted by frame with offs before ons at one frame. The array
+     *   also carries this block's launch reports as a non-enumerable
+     *   `launches` property (see the header).
      */
     function block(frameStart, frames) {
       const start = Math.trunc(Number(frameStart));
       const count = Math.trunc(Number(frames));
-      if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return [];
+      launches.length = 0;
+      if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) {
+        events.length = 0;
+        return events;
+      }
 
       if (playing) {
         if (originFrame === null) originFrame = start;
@@ -616,6 +778,10 @@
       }
 
       events.sort(compareEvents);
+      // The launches this block applied, reported after the notes they brought
+      // in: a host posts them as they are, so their offsets are framed against
+      // the very block start the events use.
+      reportLaunches(frameStart, frames);
       return events;
     }
 
@@ -812,6 +978,25 @@
       return out;
     }
 
+    /**
+     * @param {object[]} segs a track's segments, in beat order
+     * @param {number} beat
+     * @returns {string|null} the clip these segments sound at `beat`, `null`
+     *   for a stop (or no segment at all)
+     */
+    function clipAtBeat(segs, beat) {
+      const seg = audibleSegment(segs, beat);
+      return seg ? seg.clipId : null;
+    }
+
+    /**
+     * @param {object} clip a clip of `clips`
+     * @returns {string|null} the clip's scene, `null` when it names none
+     */
+    function sceneOf(clip) {
+      return clip && clip.scene_id !== "" ? clip.scene_id : null;
+    }
+
     /** @returns {object|null} the clip on one track and scene, if any. */
     function clipFor(trackId, sceneId) {
       for (const clip of clips.values()) {
@@ -859,11 +1044,50 @@
       play: play,
       stop: stop,
       block: block,
+      nextBarFrame: nextBarFrame,
       position: position,
       isPlaying: function isPlaying() {
         return playing;
       },
     };
+  }
+
+  /**
+   * The next bar boundary at or after a frame, on a timeline whose beat 0 sits
+   * at `originFrame`.
+   *
+   * This is the ONE place the boundary rounding lives: the launch quantizer
+   * (`launchBeat`) and the `nextBarFrame` answer both come from it, so a host
+   * asking where the next bar begins and the block that reports a launch
+   * landing there can never disagree by a frame.
+   *
+   * It is found in frames, not in beats: at most tempos a bar is not a whole
+   * number of frames, so a position one frame past the rounded boundary still
+   * reads as slightly more than the bar and `ceil` would skip a whole bar. The
+   * frame at or after the boundary is the first with `round(x) >= frame`, i.e.
+   * `x >= frame - 0.5`.
+   *
+   * @param {number} frame the frame to start from (a block's first frame)
+   * @param {number} originFrame the absolute frame of beat 0
+   * @param {number} framesPerBeat how many frames one beat lasts
+   * @returns {{bar: number, beat: number, frame: number}} the boundary, with a
+   *   0-based `bar`, the boundary in `beat`s and its rounded `frame`
+   */
+  function nextBarFrom(frame, originFrame, framesPerBeat) {
+    const barFrames = BEATS_PER_BAR * framesPerBeat;
+    let bar = Math.max(0, Math.ceil((frame - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
+    let boundary = Math.round(originFrame + bar * barFrames);
+    // A boundary the caller has already gone past is no boundary at all.
+    if (boundary < frame) {
+      bar += 1;
+      boundary = Math.round(originFrame + bar * barFrames);
+    }
+    return { bar: bar, beat: bar * BEATS_PER_BAR, frame: boundary };
+  }
+
+  /** @returns {number} launch reports in the order of their block frames. */
+  function byLaunchFrame(a, b) {
+    return a.frame - b.frame;
   }
 
   /**
@@ -905,7 +1129,7 @@
     return value;
   }
 
-  const api = { create: create, BEATS_PER_BAR: BEATS_PER_BAR };
+  const api = { create: create, nextBarFrom: nextBarFrom, BEATS_PER_BAR: BEATS_PER_BAR };
 
   if (typeof globalThis !== "undefined") globalThis.StudioSequencer = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

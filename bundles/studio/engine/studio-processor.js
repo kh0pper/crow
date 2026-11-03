@@ -86,10 +86,22 @@
  *
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
- * `{type:"play"}`, `{type:"stop"}`, `{type:"flush", id}`
+ * `{type:"play"}`, `{type:"stop"}`, `{type:"flush", id}`,
+ * `{type:"nextBarFrame", id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth}` (at most every 50 ms of
- * audio)
+ * audio), `{type:"launched", track_id, clip_id, scene_id, bar, frame}` (one
+ * per launch the sequencer applied in that block; see below),
+ * `{type:"nextBarFrame", id, frame, bar}`
+ *
+ * ## Frames the client can count on
+ *
+ * A `launched` report and a `nextBarFrame` answer are both in the CONTEXT's
+ * frames, not this processor's: `currentFrame`, the AudioWorkletGlobalScope
+ * global every processor on one AudioContext shares, so a recorder built as a
+ * second worklet on the same context arms on the very frame the engine's
+ * launch took effect. `bar` is 0-based. The translation from the sequencer's
+ * own frames is measured once, at the first block (see `contextOffset()`).
  *
  * Two message types exist only when `processorOptions.testHooks === true`, and
  * are ignored otherwise: `{type:"__throw"}` arms a throw inside the next
@@ -172,6 +184,19 @@
     if (value < low) return low;
     if (value > high) return high;
     return value;
+  }
+
+  /**
+   * The AudioWorkletGlobalScope's `currentFrame`: the frame the whole context
+   * has rendered so far, which every processor on that context reads the same
+   * way. A host that does not provide it answers `null`.
+   * @returns {number|null}
+   */
+  function contextFrameNow() {
+    // `typeof` on an undeclared identifier is safe and is the only way to ask
+    // for a worklet global without assuming the host has one.
+    if (typeof currentFrame === "undefined") return null;
+    return typeof currentFrame === "number" && Number.isFinite(currentFrame) ? currentFrame : null;
   }
 
   /** @returns {string} the module type a track's device names. */
@@ -454,6 +479,12 @@
       /** Absolute frame of the next block, so `block()` calls stay contiguous. */
       this.frame = 0;
 
+      /**
+       * The context's frame counter minus this processor's own, measured at
+       * the first block (`null` until then). See `contextOffset()`.
+       */
+      this.frameOffset = null;
+
       /** Frames accumulated since the last `position` message. */
       this.sincePosition = 0;
       this.positionEvery = Math.max(1, Math.round(sampleRate * POSITION_INTERVAL_SECONDS));
@@ -553,6 +584,18 @@
         case "stopAll":
           this.sequencer.stopAll();
           break;
+        case "nextBarFrame": {
+          // Answered from the sequencer's own clock, moved onto the context's:
+          // the frame a recorder should arm at.
+          const boundary = this.sequencer.nextBarFrame();
+          this.port.postMessage({
+            type: "nextBarFrame",
+            id: message.id,
+            frame: this.contextOffset() + boundary.frame,
+            bar: boundary.bar,
+          });
+          break;
+        }
         case "play":
           this.sequencer.play();
           break;
@@ -882,6 +925,10 @@
       const count = output && output.length > 0 ? output[0].length : 0;
       if (!output || count === 0) return true;
 
+      // The context's clock is sampled here, at the top of the block, while
+      // `this.frame` still is this block's first frame.
+      this.contextOffset();
+
       const left = output[0];
       const right = output.length > 1 ? output[1] : null;
       try {
@@ -915,6 +962,7 @@
       // The sequencer must see every block, ready or not: its events are
       // measured from contiguous frame starts.
       const events = this.sequencer.block(this.frame, count);
+      this.reportLaunches(events.launches);
 
       if (!this.ready || this.failure) {
         this.frame += count;
@@ -1014,6 +1062,54 @@
       } else {
         record.engine.sendEvent(SLOT, 0, NOTECMD_NOTE_OFF, 0, module, 0, 0);
       }
+    }
+
+    /**
+     * Post every launch the sequencer applied in this block, in context frames.
+     *
+     * The sequencer reports a launch with the offset of its boundary inside the
+     * block; the frame the client gets is the context's, so a recorder on the
+     * same AudioContext can arm on the very frame the launch took effect.
+     * @param {Array<object>|undefined} launches the block's launch reports
+     * @returns {void}
+     */
+    reportLaunches(launches) {
+      if (!launches || launches.length === 0) return;
+      const base = this.contextOffset() + this.frame;
+      for (let at = 0; at < launches.length; at += 1) {
+        const launch = launches[at];
+        this.port.postMessage({
+          type: "launched",
+          track_id: launch.track_id,
+          clip_id: launch.clip_id,
+          scene_id: launch.scene_id,
+          bar: launch.bar,
+          frame: base + launch.frame,
+        });
+      }
+    }
+
+    /**
+     * The offset from this processor's frames to the context's.
+     *
+     * Measured once, at the first block, from the shared `currentFrame` global
+     * minus this processor's own `frame`: both counters advance block by block
+     * at the same rate, so the difference is constant. It is not re-measured on
+     * every block because a host may not advance that global at all
+     * (node-web-audio-api keeps it at 0), and re-measuring would drift further
+     * away with every block.
+     *
+     * A host without the global leaves the offset at 0: every frame reported
+     * then is this processor's own `this.frame` plus the block offset, which is
+     * still one consistent clock.
+     * @returns {number}
+     */
+    contextOffset() {
+      if (this.frameOffset === null) {
+        const now = contextFrameNow();
+        this.frameOffset = now === null ? 0 : now - this.frame;
+      }
+      return this.frameOffset;
     }
 
     /**

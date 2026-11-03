@@ -533,6 +533,58 @@ test("a device that fails to build is not retried until its type changes", async
   }
 });
 
+test("launch report carries the context frame of the bar it took effect", async () => {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(0.25 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  const launches = [];
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    engine.setSong(makeSong());
+    const unsubscribe = engine.onLaunch((launch) => launches.push(launch));
+    assert.equal(typeof unsubscribe, "function", "onLaunch has to return an unsubscribe function");
+
+    // The other half of a recorder's clock: nextBarFrame answers on the same
+    // one, and its round trip works before a single block has been rendered.
+    // Nothing has played yet, so bar 0 starts at the next block.
+    await engine.flush();
+    assert.deepEqual(await engine.nextBarFrame(), { frame: 0, bar: 0 });
+
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
+    await context.startRendering();
+    rendered = true;
+
+    assert.ok(await waitFor(() => launches.length > 0), "expected the launch to be reported");
+    assert.equal(launches.length, 1, `expected one report, got ${launches.length}: ${JSON.stringify(launches)}`);
+    // The scene was launched before the transport started, so it took effect at
+    // the transport's first frame: bar 0, at the block's first frame. The
+    // reported frame is the CONTEXT frame the processor saw in that block,
+    // which is 0 for a render that starts at frame 0 — exactly the number a
+    // recorder on this context would arm at. The offset arithmetic itself is
+    // pinned by the sequencer test `launchScene queued mid-bar is reported at
+    // the next bar's frame offset`.
+    assert.deepEqual(launches[0], {
+      track_id: "track-1",
+      clip_id: "clip-1",
+      scene_id: "scene-1",
+      bar: 0,
+      frame: 0,
+    });
+
+    unsubscribe();
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
 // --- the browser side -------------------------------------------------------
 
 /** The engine page: render the song, hash it, hand the hash back. */
