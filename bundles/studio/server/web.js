@@ -108,6 +108,7 @@ const STATUS_BY_CODE = Object.freeze({
  */
 const ASSET_FILES = new Map([
   ["sequencer.js", join("engine", "sequencer.js")],
+  ["resample.js", join("engine", "resample.js")],
   ["studio-processor.js", join("engine", "studio-processor.js")],
   ["engine-client.js", join("engine", "engine-client.js")],
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],

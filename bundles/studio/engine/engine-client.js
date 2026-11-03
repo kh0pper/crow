@@ -3,10 +3,14 @@
  *
  * The engine is one AudioWorklet node whose processor hosts SunVox and the
  * sequencer (`studio-processor.js`). A worklet cannot `import`, so this file
- * glues three sources into ONE module and hands it to
+ * glues four sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + sunvox.js + studio-processor.js
+ *     sequencer.js + resample.js + sunvox.js + studio-processor.js
+ *
+ * `resample.js` rides along so the worklet scope has the very same resampler a
+ * page does (`StudioResample`), even though the conversion itself happens on
+ * the client side of the port, before the PCM is handed over.
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -65,12 +69,16 @@
  *   resolves `{frame, bar}` (0-based bar; while the transport is stopped, the
  *   frame bar 0 would start at).
  * - `flush()` resolves once every message posted before it has been applied.
+ * - `loadAudio(take_id, channels, rate)` hands the processor one take's PCM,
+ *   resampled here to the context's rate when the take was recorded at another
+ *   one, and resolves when the processor has it. `unloadAudio(take_id)` drops
+ *   it again.
  */
 (function () {
   "use strict";
 
   /** The files that make up the worklet module, in concatenation order. */
-  const SOURCE_FILES = ["sequencer.js", "sunvox.js", "studio-processor.js"];
+  const SOURCE_FILES = ["sequencer.js", "resample.js", "sunvox.js", "studio-processor.js"];
 
   /**
    * The audio contexts that already have the Studio processor registered. A
@@ -131,6 +139,11 @@
   /**
    * Read one source file as text, from `assetBytes` when the caller supplied
    * bytes, else from `assetBase` over fetch.
+   *
+   * A Node caller that names neither (the offline renderer predates
+   * `resample.js` and passes only the files it knows) is served the copy that
+   * sits next to this module: the engine sources are its own neighbours, so the
+   * file it left out is still the same file the render is meant to run.
    * @param {string} name
    * @param {{assetBase?: string, assetBytes?: object}} options
    * @returns {Promise<string>}
@@ -138,10 +151,36 @@
   async function readText(name, options) {
     const supplied = options.assetBytes;
     if (supplied && supplied[name] !== undefined) return textOf(supplied[name]);
-    if (!options.assetBase) throw new Error(`StudioEngine: no ${name} in assetBytes and no assetBase`);
+    if (!options.assetBase) {
+      const local = readLocalText(name);
+      if (local !== null) return local;
+      throw new Error(`StudioEngine: no ${name} in assetBytes and no assetBase`);
+    }
     const response = await fetch(joinUrl(options.assetBase, name));
     if (!response.ok) throw new Error(`StudioEngine: could not load ${name} (${response.status})`);
     return response.text();
+  }
+
+  /**
+   * One engine source file from the directory this module lives in, in Node.
+   * @param {string} name
+   * @returns {string|null} the text, or null when this host has no such file
+   */
+  function readLocalText(name) {
+    const req = nodeRequire();
+    if (!req || typeof __dirname !== "string" || __dirname === "") return null;
+    try {
+      const fs = req("node:fs");
+      const path = req("node:path");
+      // Only a plain file name: a caller's name is never turned into a path
+      // outside this module's own directory.
+      if (name !== path.basename(name)) return null;
+      const file = path.join(__dirname, name);
+      if (!fs.existsSync(file)) return null;
+      return fs.readFileSync(file, "utf8");
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -191,6 +230,27 @@
         }
       },
     };
+  }
+
+  /**
+   * The resampler this host has: the page (or worklet) global in a browser,
+   * this module's neighbour in Node. It is the same arithmetic either way — see
+   * `resample.js`.
+   * @returns {{toRate: function(Float32Array[], number, number): Float32Array[]}}
+   */
+  function resamplerOf() {
+    const shared = typeof globalThis !== "undefined" ? globalThis.StudioResample : null;
+    if (shared && typeof shared.toRate === "function") return shared;
+    const req = nodeRequire();
+    if (req) {
+      try {
+        const local = req("./resample.js");
+        if (local && typeof local.toRate === "function") return local;
+      } catch {
+        /* fall through to the error below */
+      }
+    }
+    throw new Error("StudioEngine: resampling needs StudioResample (engine/resample.js) in this host");
   }
 
   /**
@@ -353,7 +413,20 @@
     let flushSeq = 0;
     const barRequests = new Map();
     let barSeq = 0;
-    const post = (message) => node.port.postMessage(message);
+    /** take id → resolvers waiting for the processor's `audio_loaded`. */
+    const pendingAudio = new Map();
+    const post = (message, transfer) => {
+      if (transfer && transfer.length > 0) {
+        try {
+          node.port.postMessage(message, transfer);
+          return;
+        } catch {
+          // A host whose port will not take a transfer list still gets the
+          // message, just by copying it.
+        }
+      }
+      node.port.postMessage(message);
+    };
 
     try {
       await awaitReady(node, opts.readyTimeoutMs || READY_TIMEOUT_MS);
@@ -410,6 +483,14 @@
         if (resolveFrame) {
           barRequests.delete(message.id);
           resolveFrame({ frame: message.frame, bar: message.bar });
+        }
+        return;
+      }
+      if (message.type === "audio_loaded") {
+        const resolveTake = pendingAudio.get(message.take_id);
+        if (resolveTake) {
+          pendingAudio.delete(message.take_id);
+          resolveTake();
         }
         return;
       }
@@ -542,6 +623,59 @@
       },
 
       /**
+       * Hand the engine one take's PCM, already decoded.
+       *
+       * The processor plays takes at the context's own rate, so a take recorded
+       * at another rate is converted here first, on the client, with
+       * `resample.js` — never by the context or by `decodeAudioData` (the parity
+       * rule). The channels are transferred rather than copied, so the caller
+       * must not use the arrays it passed after the promise resolves.
+       *
+       * TODO(Task 7): the panel runs this conversion in a Worker, so a long
+       * take does not block the page; this inline path is what the panel falls
+       * back to and what a Node render uses.
+       * @param {string} takeId
+       * @param {Float32Array[]} channels the take's decoded samples, one per channel
+       * @param {number} rate the rate those samples are at, in Hz
+       * @returns {Promise<void>} resolves when the processor has the PCM
+       */
+      loadAudio(takeId, channels, rate) {
+        const id = String(takeId);
+        const list = [];
+        for (const channel of Array.isArray(channels) ? channels : []) {
+          list.push(channel instanceof Float32Array ? channel : Float32Array.from(channel));
+        }
+        const from = Number(rate);
+        const pcm =
+          Number.isFinite(from) && from > 0 && from !== context.sampleRate
+            ? resamplerOf().toRate(list, from, context.sampleRate)
+            : list;
+
+        // One transfer per underlying buffer: two views of one buffer would
+        // ask the port to transfer it twice.
+        const transfer = [];
+        for (const channel of pcm) {
+          if (channel.buffer instanceof ArrayBuffer && transfer.indexOf(channel.buffer) === -1) {
+            transfer.push(channel.buffer);
+          }
+        }
+
+        return new Promise((resolve) => {
+          pendingAudio.set(id, resolve);
+          post({ type: "audio", take_id: id, channels: pcm }, transfer);
+        });
+      },
+
+      /**
+       * Drop one take's PCM from the engine (a comp that no longer uses it).
+       * @param {string} takeId
+       * @returns {void}
+       */
+      unloadAudio(takeId) {
+        post({ type: "audio_unload", take_id: String(takeId) });
+      },
+
+      /**
        * Follow the engine's failures (a device that could not be built, a song
        * the processor refused, a fault it survived). They are also logged.
        * @param {(text: string) => void} listener
@@ -577,6 +711,7 @@
         listeners.clear();
         launchListeners.clear();
         errorListeners.clear();
+        pendingAudio.clear();
         node.port.onmessage = null;
       },
     };

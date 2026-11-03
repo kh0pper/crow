@@ -1,10 +1,10 @@
 /**
  * Studio engine worklet processor — the SunVox host.
  *
- * `engine-client.js` concatenates three files into ONE module and loads it with
+ * `engine-client.js` concatenates four files into ONE module and loads it with
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + sunvox.js + studio-processor.js
+ *     sequencer.js + resample.js + sunvox.js + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
  * declares the `SunVoxLib` factory) and with the pure sequencer
@@ -63,6 +63,29 @@
  * branch of the factory would reach for `require("fs")`/`__dirname`, neither of
  * which exists in that scope.
  *
+ * ## Audio tracks: two PCM voices, not an engine
+ *
+ * A track whose device is `{engine: "audio"}` plays recorded takes instead of
+ * SunVox notes, so it has no engine and no module. Its slot holds two PCM
+ * voices: the sequencer alternates between them at consecutive comp segment
+ * starts, and when a start lands while the other voice is still sounding the
+ * two crossfade linearly over 64 frames — the old one 1 → 0, the new one
+ * 0 → 1, sample-exact and independent of the block size, because the ramps are
+ * counted in frames and not in blocks. A voice that reaches the end of its
+ * take goes silent.
+ *
+ * The PCM arrives already at the context's rate
+ * (`{type:"audio", take_id, channels:[Float32Array…]}`, transferred), because
+ * resampling is `engine/resample.js`'s business and runs on the client. A
+ * start for a take that has not been loaded plays silence and is reported once
+ * per take id: "Take <id> is not loaded yet." A mono take plays to both
+ * channels; the take's own `take_frame` says where in it to start (it already
+ * carries the recorded offset, and may be negative, which is a short silence
+ * before the take begins).
+ *
+ * Track gain, pan, mute and solo apply to an audio track exactly as they do to
+ * an engine's output: in the mix below, after the voices are summed.
+ *
  * ## Block splitting
  *
  * `process()` is handed 128 frames. The sequencer's events for the block are
@@ -87,12 +110,14 @@
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
  * `{type:"play"}`, `{type:"stop"}`, `{type:"flush", id}`,
- * `{type:"nextBarFrame", id}`
+ * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
+ * `{type:"audio_unload", take_id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth}` (at most every 50 ms of
  * audio), `{type:"launched", track_id, clip_id, scene_id, bar, frame}` (one
  * per launch the sequencer applied in that block; see below),
- * `{type:"nextBarFrame", id, frame, bar}`
+ * `{type:"nextBarFrame", id, frame, bar}`, `{type:"audio_loaded", take_id}`
+ * (one ack per `audio` message, so the client knows the PCM is in)
  *
  * ## Frames the client can count on
  *
@@ -178,12 +203,23 @@
   /** The smallest block this processor allocates and primes for. */
   const INITIAL_QUANTUM = 128;
 
+  /** The device engine that marks a track as a PCM one (see `isAudioTrack`). */
+  const AUDIO_ENGINE = "audio";
+
+  /** How long a comp-boundary crossfade runs, in frames. */
+  const VOICE_FADE_FRAMES = 64;
+
   /** @returns {number} the value held between two bounds. */
   function clamp(value, low, high) {
     if (!Number.isFinite(value)) return low;
     if (value < low) return low;
     if (value > high) return high;
     return value;
+  }
+
+  /** @returns {string} an id in the form a Map is keyed by. */
+  function asId(value) {
+    return value === undefined || value === null ? "" : String(value);
   }
 
   /**
@@ -204,6 +240,78 @@
     const device = track && typeof track === "object" ? track.device : null;
     const type = device && typeof device.type === "string" ? device.type.trim() : "";
     return type === "" ? FALLBACK_DEVICE : type;
+  }
+
+  /**
+   * Whether a track plays recorded takes instead of a SunVox module. An audio
+   * track's device is exactly `{engine: "audio"}` (see `doc.js`).
+   * @param {object} track
+   * @returns {boolean}
+   */
+  function isAudioTrack(track) {
+    const device = track && typeof track === "object" ? track.device : null;
+    return !!(device && typeof device === "object" && device.engine === AUDIO_ENGINE);
+  }
+
+  /**
+   * A silent PCM voice. `position` is the frame of the take it will read next
+   * (negative until the take starts); `gain` is its fade envelope. The ramp is
+   * advanced once per rendered frame in `advanceFade()`, so it is the same 64
+   * frames whatever block size the host asks for.
+   * @returns {object}
+   */
+  function newVoice() {
+    return {
+      channels: null,
+      position: 0,
+      sounding: false,
+      gain: 0,
+      fadeRemaining: 0,
+      fadeStep: 0,
+      fadeTarget: 1,
+    };
+  }
+
+  /**
+   * Start a linear ramp of one voice's gain, over the crossfade length.
+   * @param {object} voice
+   * @param {number} target the gain to reach
+   */
+  function beginFade(voice, target) {
+    voice.fadeRemaining = VOICE_FADE_FRAMES;
+    voice.fadeStep = (target - voice.gain) / VOICE_FADE_FRAMES;
+    voice.fadeTarget = target;
+  }
+
+  /**
+   * Send one voice out: 1 → 0 over the crossfade length, from wherever its
+   * gain is now. A voice already on its way out keeps the ramp it has, so a
+   * stop landing after the start that began the crossfade cannot restart it.
+   * @param {object} voice
+   */
+  function beginFadeOut(voice) {
+    if (!voice.sounding) return;
+    if (voice.fadeRemaining > 0 && voice.fadeTarget === 0) return;
+    if (voice.gain <= 0) {
+      voice.sounding = false;
+      return;
+    }
+    beginFade(voice, 0);
+  }
+
+  /**
+   * Advance one voice's envelope by one frame, after that frame was rendered.
+   * @param {object} voice
+   */
+  function advanceFade(voice) {
+    if (voice.fadeRemaining <= 0) return;
+    voice.fadeRemaining -= 1;
+    if (voice.fadeRemaining === 0) {
+      voice.gain = voice.fadeTarget;
+      if (voice.gain <= 0) voice.sounding = false;
+      return;
+    }
+    voice.gain += voice.fadeStep;
   }
 
   /** @returns {object} a track's device parameters as a plain object. */
@@ -495,6 +603,12 @@
       /** track index → that track's record (engine, device module, mix gains). */
       this.slots = [];
 
+      /** take id → its decoded PCM, one Float32Array per channel. */
+      this.takes = new Map();
+
+      /** Take ids already reported as not loaded, so each is reported once. */
+      this.missingTakes = new Set();
+
       /** Serialises the async slot work, so songs apply in arrival order. */
       this.queue = Promise.resolve();
 
@@ -602,6 +716,12 @@
         case "stop":
           this.sequencer.stop();
           break;
+        case "audio":
+          this.loadTake(message.take_id, message.channels);
+          break;
+        case "audio_unload":
+          this.takes.delete(asId(message.take_id));
+          break;
         case "flush":
           // Messages are handled in arrival order and slot work is queued, so
           // answering at the end of the queue proves every message posted
@@ -630,6 +750,32 @@
       this.queue = this.queue.then(task).catch((error) => {
         this.report(error);
       });
+    }
+
+    /**
+     * Store one take's PCM, already at the context's rate, and acknowledge it.
+     * A take whose bytes arrive again simply replaces the old ones.
+     * @param {string} takeId
+     * @param {Float32Array[]|ArrayBufferView[]} channels
+     * @returns {void}
+     */
+    loadTake(takeId, channels) {
+      const id = asId(takeId);
+      const list = [];
+      const raw = Array.isArray(channels) ? channels : [];
+      for (const channel of raw) {
+        if (channel instanceof Float32Array) list.push(channel);
+        else if (ArrayBuffer.isView(channel)) {
+          list.push(
+            new Float32Array(channel.buffer.slice(channel.byteOffset, channel.byteOffset + channel.byteLength)),
+          );
+        } else if (Array.isArray(channel)) list.push(Float32Array.from(channel));
+      }
+      this.takes.set(id, list);
+      // A take that arrived late is no longer missing, so it may be reported
+      // again only if it goes away a second time.
+      this.missingTakes.delete(id);
+      this.port.postMessage({ type: "audio_loaded", take_id: id });
     }
 
     /**
@@ -672,19 +818,21 @@
       for (let index = 0; index < tracks.length; index += 1) {
         const track = tracks[index] && typeof tracks[index] === "object" ? tracks[index] : {};
         const id = typeof track.id === "string" ? track.id : "";
-        const type = deviceType(track);
+        const audio = isAudioTrack(track);
+        const type = audio ? AUDIO_ENGINE : deviceType(track);
         let record = previous[index];
-        if (record && (record.track_id !== id || record.type !== type)) {
+        if (record && (record.track_id !== id || record.type !== type || !!record.audio !== audio)) {
           this.teardown(record);
           record = null;
         }
         // Building an engine is the only await here; the old record is still in
         // `this.slots` (and so still in the mix) until the swap at the end.
-        if (!record) record = await this.buildSlot(index, id, type);
+        if (!record) record = audio ? this.buildAudioSlot(index, id) : await this.buildSlot(index, id, type);
         next.push(record);
-        if (record.failed || !record.engine) continue;
+        if (record.failed) continue;
+        if (!record.audio && !record.engine) continue;
         this.applyMix(record, track, anySolo);
-        this.applyParams(record, track);
+        if (!record.audio) this.applyParams(record, track);
         if (id !== "") trackSlots.set(id, index);
       }
 
@@ -694,6 +842,34 @@
 
       this.slots = next;
       this.trackSlots = trackSlots;
+    }
+
+    /**
+     * Build one audio track's slot: two PCM voices, no engine and no module.
+     * Nothing here can fail, so it is synchronous — an audio track is playable
+     * as soon as its song arrives.
+     * @param {number} index the track's position in the song
+     * @param {string} trackId
+     * @returns {object} the track's record
+     */
+    buildAudioSlot(index, trackId) {
+      return {
+        index: index,
+        track_id: trackId,
+        type: AUDIO_ENGINE,
+        audio: true,
+        failed: false,
+        engine: null,
+        module: -1,
+        outPtr: 0,
+        frames: 0,
+        clock: 0,
+        ctlNames: null,
+        paramsKey: null,
+        left: 0,
+        right: 0,
+        voices: [newVoice(), newVoice()],
+      };
     }
 
     /**
@@ -796,6 +972,12 @@
      * @returns {void}
      */
     teardown(record, engine) {
+      if (record.voices) {
+        for (const voice of record.voices) {
+          voice.sounding = false;
+          voice.channels = null;
+        }
+      }
       const own = engine || record.engine;
       if (!own) return;
       try {
@@ -973,7 +1155,7 @@
       let next = 0;
       while (cursor < count) {
         while (next < events.length && events[next].frame <= cursor) {
-          this.sendNote(events[next]);
+          this.applyEvent(events[next]);
           next += 1;
         }
         const boundary = next < events.length ? Math.min(count, events[next].frame) : count;
@@ -988,7 +1170,8 @@
 
     /**
      * Render `frames` of every track, mix them with their gain and pan, and hard
-     * clip at ±1.0 — 1a's whole master stage.
+     * clip at ±1.0 — 1a's whole master stage. An audio track contributes its
+     * PCM voices here instead of a SunVox engine, through the very same mix.
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
@@ -999,7 +1182,12 @@
       const slots = this.slots;
       for (let index = 0; index < slots.length; index += 1) {
         const record = slots[index];
-        if (!record || !record.engine || record.module < 0) continue;
+        if (!record) continue;
+        if (record.audio) {
+          this.renderAudio(record, frames, left, right, offset);
+          continue;
+        }
+        if (!record.engine || record.module < 0) continue;
         // Every engine is rendered every sub-block, muted or not: its voices
         // have to advance with the song, or a track would come back mid-note.
         const interleaved = record.engine.render(
@@ -1030,6 +1218,48 @@
     }
 
     /**
+     * Mix one audio track's voices over a run of frames: each sounding voice
+     * reads its take at its own position (which may still be negative, a short
+     * silence before the take begins), scaled by its fade envelope and then by
+     * the track's gain and pan — the very same mix the engines get.
+     * @param {object} record
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array|null} right
+     * @param {number} offset
+     * @returns {void}
+     */
+    renderAudio(record, frames, left, right, offset) {
+      const voices = record.voices;
+      const gainLeft = record.left;
+      const gainRight = record.right;
+      for (let at = 0; at < voices.length; at += 1) {
+        const voice = voices[at];
+        if (!voice.sounding) continue;
+        const channels = voice.channels;
+        const length = channels && channels[0] ? channels[0].length : 0;
+        const mono = !channels || channels.length < 2;
+        for (let frame = 0; frame < frames; frame += 1) {
+          const gain = voice.gain;
+          const position = voice.position;
+          voice.position = position + 1;
+          if (position >= 0 && position < length) {
+            const sample = channels[0][position];
+            if (gainLeft !== 0) left[offset + frame] += sample * gain * gainLeft;
+            if (right && gainRight !== 0) {
+              right[offset + frame] += (mono ? sample : channels[1][position]) * gain * gainRight;
+            }
+          }
+          advanceFade(voice);
+        }
+        if (!voice.sounding || voice.position >= length) {
+          voice.sounding = false;
+          voice.channels = null;
+        }
+      }
+    }
+
+    /**
      * The wasm buffer one track renders into, allocated at the smallest block
      * size and grown only if a host asks for a bigger one.
      * @param {object} record
@@ -1044,6 +1274,93 @@
       record.frames = size;
       if (!record.outPtr) throw new Error("could not grow the engine's block buffer");
       return record.outPtr;
+    }
+
+    /**
+     * Apply one sequencer event at the cursor: an audio start or stop goes to
+     * its track's voices, a note on or off to its track's engine.
+     * @param {{frame: number, type: string}} event
+     * @returns {void}
+     */
+    applyEvent(event) {
+      if (event.type === "audio") this.startVoice(event);
+      else if (event.type === "audio_stop") this.stopVoice(event);
+      else this.sendNote(event);
+    }
+
+    /**
+     * Start a take on one of an audio track's voices. When the other voice is
+     * still sounding the two crossfade (see the file header); a take that has
+     * not been loaded plays silence and is reported once.
+     * @param {{track_id: string, take_id: string, take_frame: number, voice: number}} event
+     * @returns {void}
+     */
+    startVoice(event) {
+      const record = this.audioRecord(event.track_id);
+      if (!record) return;
+      const index = event.voice === 1 ? 1 : 0;
+      const voice = record.voices[index];
+      if (!voice) return;
+
+      const channels = this.takes.get(asId(event.take_id));
+      if (!channels || channels.length === 0 || !channels[0] || channels[0].length === 0) {
+        this.reportMissingTake(event.take_id);
+        return;
+      }
+
+      const frame = Number(event.take_frame);
+      voice.channels = channels;
+      voice.position = Number.isFinite(frame) ? Math.trunc(frame) : 0;
+      voice.sounding = true;
+
+      const other = record.voices[index === 0 ? 1 : 0];
+      if (other && other.sounding && other.gain > 0) {
+        voice.gain = 0;
+        beginFade(voice, 1);
+        beginFadeOut(other);
+      } else {
+        voice.gain = 1;
+        voice.fadeRemaining = 0;
+        voice.fadeTarget = 1;
+      }
+    }
+
+    /**
+     * Send one audio voice out over the crossfade length.
+     * @param {{track_id: string, voice: number}} event
+     * @returns {void}
+     */
+    stopVoice(event) {
+      const record = this.audioRecord(event.track_id);
+      if (!record) return;
+      const voice = record.voices[event.voice === 1 ? 1 : 0];
+      if (!voice) return;
+      beginFadeOut(voice);
+    }
+
+    /**
+     * @param {string} trackId
+     * @returns {object|null} the audio record one track's slot holds
+     */
+    audioRecord(trackId) {
+      const index = this.trackSlots.get(trackId);
+      if (index === undefined) return null;
+      const record = this.slots[index];
+      return record && record.audio ? record : null;
+    }
+
+    /**
+     * Report a take the song plays but the client has not loaded yet, once per
+     * take id: a voice with no PCM is silence, and a clip that loops would
+     * otherwise say so on every pass.
+     * @param {string} takeId
+     * @returns {void}
+     */
+    reportMissingTake(takeId) {
+      const id = asId(takeId);
+      if (this.missingTakes.has(id)) return;
+      this.missingTakes.add(id);
+      this.report(new Error(`Take ${id} is not loaded yet.`));
     }
 
     /**
