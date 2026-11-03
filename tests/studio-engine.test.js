@@ -146,6 +146,19 @@ async function waitFor(predicate, ms = 2000) {
 }
 
 /** @returns {number} the largest absolute sample. */
+/**
+ * One channel of a rendered buffer, copied into JS-owned memory. Never
+ * getChannelData() in node: see renderSong in bundles/studio/server/render.js.
+ * @param {AudioBuffer} buffer
+ * @param {number} channel
+ * @returns {Float32Array}
+ */
+function channelOf(buffer, channel) {
+  const samples = new Float32Array(buffer.length);
+  buffer.copyFromChannel(samples, channel);
+  return samples;
+}
+
 function peakOf(samples) {
   let peak = 0;
   for (let index = 0; index < samples.length; index += 1) {
@@ -253,7 +266,12 @@ async function renderSong(song, { seconds = 2, sampleRate = SAMPLE_RATE } = {}) 
     await engine.flush();
     const buffer = await context.startRendering();
     rendered = true;
-    return { left: buffer.getChannelData(0), right: buffer.getChannelData(1), sampleRate };
+    // copyFromChannel, never getChannelData: see renderSong in server/render.js.
+    const left = new Float32Array(buffer.length);
+    const right = new Float32Array(buffer.length);
+    buffer.copyFromChannel(left, 0);
+    buffer.copyFromChannel(right, 1);
+    return { left, right, sampleRate };
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
@@ -296,7 +314,7 @@ test("17 tracks refused at setSong", async () => {
     await engine.flush();
     const buffer = await context.startRendering();
     rendered = true;
-    assert.ok(peakOf(buffer.getChannelData(0)) > 0.01, "16 tracks should render audio, not silence");
+    assert.ok(peakOf(channelOf(buffer, 0)) > 0.01, "16 tracks should render audio, not silence");
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
@@ -461,7 +479,7 @@ test("a processor error is reported and the node goes silent instead of throwing
 
     const buffer = await context.startRendering();
     rendered = true;
-    const peak = Math.max(peakOf(buffer.getChannelData(0)), peakOf(buffer.getChannelData(1)));
+    const peak = Math.max(peakOf(channelOf(buffer, 0)), peakOf(channelOf(buffer, 1)));
     assert.equal(peak, 0, `expected silence after the fault, peak was ${peak}`);
 
     assert.ok(await waitFor(() => errors.length > 0), "expected the fault to be reported to the client");
@@ -506,7 +524,7 @@ test("a device that fails to build is not retried until its type changes", async
     await engine.flush();
     const buffer = await context.startRendering();
     rendered = true;
-    const peak = peakOf(buffer.getChannelData(0));
+    const peak = peakOf(channelOf(buffer, 0));
     assert.ok(peak > 0.01, `the replaced device should sound, peak was ${peak}`);
     assert.equal(errors.length, 1, "rebuilding with a working type must not report the old failure again");
   } finally {
