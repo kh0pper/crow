@@ -76,7 +76,7 @@ Scopes are requested during the OAuth authorization flow:
 
 | Scope | Why |
 |---|---|
-| `gmail.modify` | Read, search, label, and draft email (no full send) |
+| `gmail.modify` | Read, search, label, draft and send drafts (Gmail's `drafts.send` is part of this scope; sending a message that was never a draft needs `gmail.send`) |
 | `calendar.events` | Read, create, and respond to calendar events |
 | `drive` | Search, read, and organize files in Drive |
 | `documents` | Read and edit Google Docs |
@@ -84,6 +84,18 @@ Scopes are requested during the OAuth authorization flow:
 | `presentations` | Read and edit Google Slides |
 
 The exact scopes are granted during the OAuth consent flow — review them there; narrower read-only scopes work if you only need read tools.
+
+## Staged sends
+
+When a bot writes an email, the draft waits for you instead of going out. A card shows the
+recipients, the subject and the full message, and nothing is sent until you press Send on it. You
+can edit the text first, send it from Gmail instead, or tell the bot what to change and let it
+draft again.
+
+What leaves is the version you approved: Crow re-reads the draft from Gmail at the moment you press
+Send, and if the draft has changed since the card was drawn it shows you the new text for another
+look rather than sending something you have not seen. A draft Crow cannot rebuild faithfully — one
+with an attachment, for example — can still be reviewed on the card, but it is sent from Gmail.
 
 ## Troubleshooting
 

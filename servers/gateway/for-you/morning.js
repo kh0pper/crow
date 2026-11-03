@@ -24,6 +24,7 @@ import { TASKS_DB, lockMapFor } from "../dashboard/panels/bot-board/data-queries
 import { laneRows, defsFor, cardsByIds, threadsByCard, cardHref } from "../dashboard/panels/board.js";
 import { groupByLane } from "../dashboard/panels/board/lanes.js";
 import { kindOf } from "../dashboard/panels/board/needs-you.js";
+import { stagedCardIds } from "../staged/card-index.js";
 import { drawerHrefs } from "../board/card-link.js";
 import { briefingEnabled } from "../perch/briefing.js";
 import { localYmd } from "../../shared/relative-dates.js";
@@ -127,19 +128,24 @@ async function leftOffLine(db, projectsById) {
  *
  * Exported as needsLaneCached: the "What needs me" widget aggregator (widgets/needs-me.js) reads the
  * SAME cached lane, so the two surfaces never pay for two Board reads.
+ *
+ * The value also carries `staged` (stagedCardIds: Map<cardId, stagedRowId>, the open drafts the
+ * lane was computed with), so both readers can name a draft item's own link without a second read.
  */
-export async function needsLaneCached(db, tdb, key) {
+export async function needsLaneCached(db, tdb, key, { tasksDbPath = TASKS_DB } = {}) {
   const at = needsCacheClock();
   const hit = needsCache.get(key);
   if (hit && at - hit.at < NEEDS_CACHE_MS) return hit.value;
   const rows = await laneRows(tdb, { all: true });
   const defs = await defsFor(tdb, rows);
   const lockMap = await lockMapFor(db, rows.map((r) => r.id));
-  const needs = groupByLane(rows, defs, lockMap).needs_you;
+  const staged = await stagedCardIds(db, { tasksDbPath });
+  const needs = groupByLane(rows, defs, lockMap, staged).needs_you;
   const top = await cardsByIds(tdb, needs.slice(0, NEEDS_LINES).map((r) => r.id));
   const value = {
     total: needs.length,
     cards: needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean),
+    staged,
   };
   if (!needsCache.has(key) && needsCache.size >= NEEDS_CACHE_MAX) needsCache.delete(needsCache.keys().next().value);
   needsCache.set(key, { at, value });
@@ -164,7 +170,7 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
     try {
       tdb = createDbClient(tasksDbPath);
       // Needs you: the Board's Everything lane (cached; see needsLaneCached).
-      const lane = await needsLaneCached(db, tdb, needsKey);
+      const lane = await needsLaneCached(db, tdb, needsKey, { tasksDbPath });
       out.needs.total = lane.total;
       const listed = new Set();
       const needCards = lane.cards;
@@ -212,7 +218,16 @@ export async function loadMorning(db, { projects = [], tz, now = Date.now(), tas
       const links = await linksFor(db, [...needCards, ...dueTop, ...finTop], slugByProject);
       const names = await botNames(db, [...new Set(finTop.map((r) => r.actor_id).filter(Boolean).map(String))]);
 
-      out.needs.items = needCards.map((c) => ({ title: oneLine(c.title), project: nameOf(c.project_id), kind: kindOf(c), href: links.get(Number(c.id)) }));
+      out.needs.items = needCards.map((c) => {
+        const stagedMap = lane.staged || new Map();
+        const kind = kindOf(c, stagedMap);
+        // A card waiting only on a bot's draft leads to the DRAFT, not to a card with no way to it.
+        const stagedRow = kind === "draft" ? stagedMap.get(Number(c.id)) : null;
+        return {
+          title: oneLine(c.title), project: nameOf(c.project_id), kind,
+          href: stagedRow ? `/dashboard/staged/${encodeURIComponent(String(stagedRow))}` : links.get(Number(c.id)),
+        };
+      });
       out.due.items = dueTop.map((r) => ({ title: oneLine(r.title), project: nameOf(r.project_id), overdue: String(r.due_date).slice(0, 10) < today, href: links.get(r.id) }));
       out.finished.items = finTop.map((r) => ({
         title: oneLine(r.title), project: nameOf(r.project_id), outcome: String(r.outcome),

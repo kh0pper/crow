@@ -51,6 +51,7 @@ import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { isVoiceBotId, isVoiceBotDef } from "../../servers/shared/voice-bot.js";
+import { betterSqliteDb, credConfigFromOperatorConfig, isDraftTool, recordDrafts, redactMcpConfig } from "../../servers/gateway/staged/recorder.js";
 
 const JOB_TIMEOUT_MS = Number(process.env.PIBOT_JOB_TIMEOUT_MS || 600000); // 10 min, < 30-min reaper cap
 const MAX_JOB_ATTEMPTS = Number(process.env.PIBOT_MAX_JOB_ATTEMPTS || 3);  // caps re-enqueue of abandoned jobs
@@ -194,6 +195,35 @@ export function finalizeJob(job_id, { status, result, error, tool_calls, pi_sess
   } finally { c.close(); }
 }
 
+/**
+ * Staged sends (spec §12.1): record this job turn's Gmail drafts. A job has no chat to push into, so
+ * each row notifies (`Draft ready to review`) and links to its card. Job turns have no taint record
+ * to consult — a job's goal can carry outside text — so they fail closed and are always tainted.
+ * Never throws: the recorder logs one line (tool name + code) and the job carries on.
+ */
+async function recordJobDrafts({ calls, credConfig, log, job }) {
+  if (!Array.isArray(calls) || !calls.some((c) => c && isDraftTool(c.tool))) return [];
+  let conn = null;
+  try {
+    conn = dbConn();
+    return await recordDrafts(betterSqliteDb(conn), calls, {
+      channel: "gmail",
+      jobId: job.job_id,
+      cardId: job.card_id == null ? null : job.card_id,
+      botId: job.bot_id,
+      credConfig,
+      tainted: true,
+      notify: true,
+      log,
+    });
+  } catch (e) {
+    log("staged draft not recorded: " + ((e && typeof e.code === "string" && e.code) || "error"));
+    return [];
+  } finally {
+    if (conn) { try { conn.close(); } catch { /* already closed */ } }
+  }
+}
+
 function buildJobPrompt(goal) {
   return [
     "You are running a BACKGROUND job for the user — no one is waiting on this exact",
@@ -267,15 +297,24 @@ async function runCardExecute(job, { log, bridge }) {
     sendReply: async (t) => { replies.push(String(t == null ? "" : t)); },
   });
   const action = r && r.action;
-  if (action === "error") throw new Error("card execute failed: " + ((r && r.error) || "unknown bridge error"));
+  // Staged sends: the bridge skipped this turn (it carries a job_id), so the job records it here with
+  // its own job_id + card_id — on a FAILED turn too, which is why the bridge reports `toolCalls` on
+  // its error result. handleInbound built its own world, so the credential is named from the
+  // operator's config (the files that world's MCP blocks are minted from).
+  const calls = Array.isArray(r && r.toolCalls) ? r.toolCalls : [];
+  if (action === "error") {
+    await recordJobDrafts({ calls, credConfig: credConfigFromOperatorConfig(), log, job });
+    throw new Error("card execute failed: " + ((r && r.error) || "unknown bridge error"));
+  }
   if (action === "deferred") {
     return { result: "deferred: " + ((r && r.reason) || "unknown"), toolCalls: 0, sessionId: null };
   }
   // 'executed' | 'asked' | 'noop-done' | 'stopped' — all non-failures. Each one
   // sends its own text through sendReply, so the captured reply IS the result.
+  await recordJobDrafts({ calls, credConfig: credConfigFromOperatorConfig(), log, job });
   return {
     result: replies.join("\n\n").trim() || (r && r.replyPreview) || "(" + (action || "no action") + ")",
-    toolCalls: Array.isArray(r && r.toolCalls) ? r.toolCalls.length : 0,
+    toolCalls: calls.length,
     sessionId: (r && r.piSessionId) || null,
   };
 }
@@ -429,7 +468,18 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       }
       const text = pi.assistantText() || "(no reply)";
       const calls = pi.toolCalls();
+      // Staged sends (spec §12.1): a goal job's drafts become rows too, with the
+      // job id (and a card id, when the row carries one) for the Board.
+      await recordJobDrafts({ calls, credConfig: redactMcpConfig(mcpConfig), log, job });
       return { result: text, toolCalls: calls.length, sessionId, model: resolved.key };
+    } catch (e) {
+      // Staged sends: a goal job whose turn failed after a draft tool ran (a prompt
+      // timeout, a metering throw) still owns that draft. The calls are read here,
+      // before the finally's close(); the recorder never throws.
+      let failedCalls = [];
+      try { failedCalls = pi.toolCalls(); } catch { failedCalls = []; }
+      await recordJobDrafts({ calls: failedCalls, credConfig: redactMcpConfig(mcpConfig), log, job });
+      throw e;
     } finally {
       await pi.close();
     }

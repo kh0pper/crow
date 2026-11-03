@@ -3807,6 +3807,76 @@ export const translations = {
     es: "Este servicio no est\u00e1 conectado en este proyecto. Escribe su clave en la p\u00e1gina Servicios, no en este chat.",
   },
   "perch.connectOpen": { en: "Open Services", es: "Abrir Servicios" },
+  // Staged send card (spec §12): the operator's yes on a bot's Gmail draft. Every string here is
+  // also the standalone page's (/dashboard/staged/:id), which renders the same card server-side.
+  "perch.stagedTitle": { en: "Draft email", es: "Borrador de correo" },
+  "perch.stagedTo": { en: "To", es: "Para" },
+  "perch.stagedCc": { en: "Cc", es: "Cc" },
+  "perch.stagedBcc": { en: "Bcc", es: "Cco" },
+  "perch.stagedNew": { en: "new", es: "nuevo" },
+  "perch.stagedNoRecipients": { en: "No recipient yet", es: "Todavía sin destinatario" },
+  "perch.stagedSubject": { en: "Subject", es: "Asunto" },
+  "perch.stagedNoSubject": { en: "(no subject)", es: "(sin asunto)" },
+  "perch.stagedBody": { en: "Message", es: "Mensaje" },
+  "perch.stagedYes": { en: "Nothing goes out without your yes.", es: "Nada sale sin tu sí." },
+  "perch.stagedTainted": {
+    en: "Written from outside content: read it before sending.",
+    es: "Escrito a partir de contenido externo: léelo antes de enviarlo.",
+  },
+  "perch.stagedSend": { en: "Send", es: "Enviar" },
+  "perch.stagedSending": { en: "Sending…", es: "Enviando…" },
+  "perch.stagedEdit": { en: "Edit", es: "Editar" },
+  "perch.stagedSave": { en: "Save", es: "Guardar" },
+  "perch.stagedCancel": { en: "Cancel", es: "Cancelar" },
+  "perch.stagedAsk": { en: "Ask for a change", es: "Pedir un cambio" },
+  "perch.stagedAskSend": { en: "Ask for a change", es: "Pedir un cambio" },
+  "perch.stagedAskPlaceholder": { en: "What should change?", es: "¿Qué debe cambiar?" },
+  "perch.stagedAskPrefix": { en: "About the draft you made:", es: "Sobre el borrador que hiciste:" },
+  "perch.stagedAskAdded": {
+    en: "Added to your message box — send it to ask the bot for a change.",
+    es: "Añadido a tu cuadro de mensaje: envíalo para pedirle un cambio al bot.",
+  },
+  "perch.stagedNotNow": { en: "Not now", es: "Ahora no" },
+  "perch.stagedFillFirst": { en: "Fill in {list} first", es: "Rellena {list} primero" },
+  "perch.stagedOpenGmail": { en: "Open in Gmail to send", es: "Abrir en Gmail para enviar" },
+  "perch.stagedNoGmailLink": {
+    en: "Crow can't open this draft in Gmail. It is still in the Gmail drafts folder.",
+    es: "Crow no puede abrir este borrador en Gmail. Sigue en la carpeta de borradores de Gmail.",
+  },
+  "perch.stagedSent": { en: "Sent {time} to {recipients}", es: "Enviado {time} a {recipients}" },
+  "perch.stagedReplaced": { en: "Replaced by a newer draft", es: "Reemplazado por un borrador más nuevo" },
+  "perch.stagedChanged": { en: "The draft changed, review it again.", es: "El borrador cambió; revísalo otra vez." },
+  "perch.stagedAlreadySent": {
+    en: "Already sent, so there is nothing left to confirm.",
+    es: "Ya se envió, así que no queda nada que confirmar.",
+  },
+  "perch.stagedDiscarded": {
+    en: "Discarded here. It stays a draft in Gmail.",
+    es: "Descartado aquí. Sigue siendo un borrador en Gmail.",
+  },
+  "perch.stagedNotOwner": { en: "Only the owner can send this.", es: "Solo el propietario puede enviar esto." },
+  "perch.stagedNotOwnerSee": {
+    en: "Only the owner can see this draft.",
+    es: "Solo el propietario puede ver este borrador.",
+  },
+  "perch.stagedBadAddress": {
+    en: "One of those addresses isn't a valid email address.",
+    es: "Una de esas direcciones no es una dirección de correo válida.",
+  },
+  "perch.stagedNotEditable": {
+    en: "This draft can't be edited here any more.",
+    es: "Este borrador ya no se puede editar aquí.",
+  },
+  "perch.stagedFailedGeneric": {
+    en: "This draft couldn't be sent. Nothing was sent.",
+    es: "No se pudo enviar este borrador. No se envió nada.",
+  },
+  "perch.stagedOffline": {
+    en: "Couldn't reach the gateway. Nothing was sent.",
+    es: "No se pudo contactar con la pasarela. No se envió nada.",
+  },
+  "perch.stagedRetry": { en: "Retry", es: "Reintentar" },
+  "perch.stagedNotFound": { en: "This draft is no longer here.", es: "Este borrador ya no está aquí." },
   "perch.waitingBanner": {
     en: "Waiting on your answer — respond to the question card below.",
     es: "Esperando tu respuesta — contesta la tarjeta de abajo.",
@@ -4179,6 +4249,7 @@ export const translations = {
   "shell.kindDecision": { en: "Decision", es: "Decisión" },
   "shell.kindReview": { en: "Review", es: "Revisión" },
   "shell.kindQuestion": { en: "Question", es: "Pregunta" },
+  "shell.kindDraft": { en: "Draft", es: "Borrador" },
   "shell.earlierSessions": { en: "Earlier sessions", es: "Sesiones anteriores" },
   "shell.untitledSession": { en: "Untitled session", es: "Sesión sin título" },
   "shell.liveSession": { en: "Live", es: "En curso" },
@@ -4591,6 +4662,10 @@ export const translations = {
   "widgets.needsMe.kindPlan": { en: "Plan to approve", es: "Plan por aprobar" },
   "widgets.needsMe.kindHandoff": { en: "Waiting on your phone", es: "Esperando en tu teléfono" },
   "widgets.needsMe.kindMessage": { en: "Unread message", es: "Mensaje sin leer" },
+  "widgets.needsMe.kindDraft": { en: "Draft to send", es: "Borrador por enviar" },
+  // Staged sends (servers/gateway/staged/recorder.js): the notification a bridge or job draft raises.
+  // Title only — the draft's recipients, subject and body never touch a notification.
+  "staged.notify.title": { en: "Draft ready to review", es: "Borrador listo para revisar" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

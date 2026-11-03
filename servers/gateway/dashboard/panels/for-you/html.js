@@ -281,6 +281,8 @@ const NEEDS_KIND = {
   plan: "widgets.needsMe.kindPlan",
   handoff: "widgets.needsMe.kindHandoff",
   message: "widgets.needsMe.kindMessage",
+  // A card waiting only on a bot's draft: the row opens the draft's own page, not the card.
+  draft: "widgets.needsMe.kindDraft",
 };
 
 /** One item: a row that opens the item, and a button for each action the summary offered. */

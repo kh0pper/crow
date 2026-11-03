@@ -16,6 +16,7 @@ import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { resolveBoardDef } from "../routes/board-defs.js";
 import { lockMapFor } from "../routes/board-lock.js";
 import { laneOf } from "../dashboard/panels/board/lanes.js";
+import { stagedCardIds } from "../staged/card-index.js";
 import { cardDrawerHref, drawerHref } from "../board/card-link.js";
 
 const noTable = (err) => /no such table/i.test(String(err?.message || err));
@@ -133,8 +134,9 @@ async function laneRow(tdb, id) {
  * What a document's header says about its card (P6 Task 6.2), or null when there is no
  * such top-level card (or no tasks.db). Every field is read, never guessed:
  *  - title: the card's title (bot/operator text: callers escape it);
- *  - lane: laneOf over the card's status, latest result, ask and decision, its board def
- *    and whether a session or job holds it (the Board tab's rule); null if any part fails;
+ *  - lane: laneOf over the card's status, latest result, ask, decision, whether a bot's draft is
+ *    waiting on the operator, its board def and whether a session or job holds it (the Board tab's
+ *    rule); null if any part fails;
  *  - href: cardDrawerHref (the drawer on its own project's card-board bot, else ?card=), sharing this call's tasks.db;
  *  - thread: the card's conversation by the Board tab's rule (threadsByCard), or null.
  * One tasks.db client per call: call it once per request, never in a loop.
@@ -153,7 +155,10 @@ export async function cardSummary(db, cardId, { tasksDb = null } = {}) {
     try {
       const def = await resolveBoardDef(tdb, { projectId: row.project_id == null ? null : Number(row.project_id) });
       const locked = (await lockMapFor(db, [id])).get(id) === true;
-      lane = laneOf(row, def, { locked });
+      // The Board's own answer for a card a bot staged a draft on (one read, scoped to the store
+      // this header reads): the draft waits on the operator, so the card is in Needs you.
+      const staged = (await stagedCardIds(db, { tasksDbPath: tasksDbPath() })).has(Number(row.id));
+      lane = laneOf(row, def, { locked, staged });
     } catch { lane = null; }
     let href = null;
     try { href = await cardDrawerHref(db, id, { tasksDb: tdb }); } catch { href = null; }

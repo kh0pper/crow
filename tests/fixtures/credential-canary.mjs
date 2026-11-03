@@ -278,7 +278,7 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
   // The gateway's global 1mb JSON parser, skipping the routes that parse their own body: the
   // same predicate as servers/gateway/index.js `_hasOwnParser` for the prefixes mounted here.
   const globalJson = express.json({ limit: "1mb" });
-  const hasOwnParser = (p) => /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p);
+  const hasOwnParser = (p) => /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p);
   app.use((req, res, next) => (hasOwnParser(req.path) ? next() : globalJson(req, res, next)));
 
   const sessionGate = (req, res, next) => {

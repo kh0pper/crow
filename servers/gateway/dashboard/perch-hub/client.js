@@ -5,6 +5,7 @@ import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchSecretCardJs } from "./secret-card.js";
 import { perchSecretWarnJs } from "./secret-warn.js";
 import { perchConnectCardJs } from "./connect-card.js";
+import { perchStagedCardJs } from "./staged-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
@@ -1655,7 +1656,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged();
     resetBrowserTiles();                  /* live browser tile: its pollers and header line die with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
@@ -1876,6 +1877,10 @@ export function perchHubJs(lang = "en") {
       } else if(d.phase==='end'){
         finishToolChip(d);
         if(String(d.name||'').indexOf('board_offer_card')>=0&&current.sid) loadCardOffers(current.sid);   /* P5 */
+        /* spec 12: a draft tool just returned. The recorder re-reads Gmail and writes the row
+           before this frame, but it can finish up to 5 s after it — loadStaged schedules its one
+           delayed read when this refetch finds no new row. */
+        if(current.sid&&stagedDraftTool(d.name)) loadStaged(current.sid,{afterDraft:true});
       }
     });
     on('log',function(d){ if(d.text) appendActivity(d.text); });
@@ -2264,7 +2269,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged();
     resetBrowserTiles();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
@@ -2546,6 +2551,7 @@ export function perchHubJs(lang = "en") {
     loadCardChip(current.sid);     /* P5: the card this chat is linked to */
     loadBriefing(current.sid);     /* R1.2 PR 4: the Briefing card on top, the summary in the Session tab */
     loadSecret(current.sid);       /* credential card: an open password card comes back on reload */
+    loadStaged(current.sid);       /* spec 12: this chat's open Gmail drafts, as the card reads them */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -2783,7 +2789,7 @@ export function perchHubJs(lang = "en") {
     planState=null; renderPlan();
     toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged();
     resetFacts();
     /* Composer dictation: a switch drops the recording and frees the mic;
        each open re-probes the server (dictation.js). */
@@ -4433,6 +4439,25 @@ ${perchArtifactCardJs(lang)}
 ${perchSecretCardJs(lang)}
 ${perchSecretWarnJs(lang)}
 ${perchConnectCardJs(lang)}
+${perchStagedCardJs(lang)}
+  /* The staged card's host hooks (spec 12): the composer for "Ask for a change" — the note goes
+     into the ordinary message box, so the normal send path and its paste detector run — and the
+     refetch after a replacement. */
+  stagedHost={
+    api:function(method,path,body){ return perchApi(method,path,body); },
+    askChange:function(text){
+      var inp=el('perch-input'); if(!inp) return false;
+      /* APPENDED, never over the operator's own unsent text: their words are theirs, and this
+         button only adds to the message they are about to send. */
+      var add=String(text==null?'':text);
+      var cur=inp.value==null?'':String(inp.value);
+      inp.value=(cur&&add)?cur+String.fromCharCode(10)+add:(cur||add);
+      inp.style.height='auto';
+      if(inp.focus) inp.focus();
+      return true;
+    },
+    reload:function(){ if(current.sid) loadStaged(current.sid); }
+  };
 ${perchCardChipJs(lang)}
 ${perchBriefingJs(lang)}
 ${sessionCardsJs(lang)}

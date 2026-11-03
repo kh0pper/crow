@@ -34,6 +34,7 @@ import { createHash } from "node:crypto";
 import { TASKS_DB, lockMapFor } from "../dashboard/panels/bot-board/data-queries.js";
 import { laneRows, defsFor, cardsByIds } from "../dashboard/panels/board.js";
 import { groupByLane, openDecision } from "../dashboard/panels/board/lanes.js";
+import { stagedCardIds } from "../staged/card-index.js";
 import { drawerHref, drawerHrefs } from "../board/card-link.js";
 import { getCurrentPlan } from "../board/plan-service.js";
 import { createHandoffStore } from "../voice/handoff-store.js";
@@ -102,8 +103,11 @@ export function decisionActions(card) {
   }));
 }
 
+/** The kind of draft item's href: the standalone page for the newest open draft on the card. */
+const stagedHref = (rowId) => `/dashboard/staged/${encodeURIComponent(String(rowId))}`;
+
 /** One board card as an item, or null for a needs-you card this widget has no kind for. */
-async function boardItem(tdb, card, { links, projectName, lang }) {
+async function boardItem(tdb, card, { links, projectName, lang, staged }) {
   const id = Number(card.id);
   const base = {
     title: oneLine(card.title) || t("forYou.untitled", lang),
@@ -139,6 +143,17 @@ async function boardItem(tdb, card, { links, projectName, lang }) {
       actions: [],
     };
   }
+  // A card whose only ask is a bot's draft waiting on the operator's yes: the item leads to the
+  // DRAFT (/dashboard/staged/<id>), because the card has nothing to answer and no way to it.
+  const stagedRow = staged ? staged.get(id) : null;
+  if (stagedRow) {
+    return {
+      key: `card:${id}:draft:${stagedRow}`, kind: "draft", ...base,
+      href: stagedHref(stagedRow),
+      nonce: itemNonce({ kind: "draft", id, status: card.status, updated_at: card.updated_at, version: null }),
+      actions: [],
+    };
+  }
   return null;
 }
 
@@ -147,13 +162,14 @@ async function boardItem(tdb, card, { links, projectName, lang }) {
  * but without the process cache. The act route reads through this, because it must see the state it
  * has just changed — the 45 s cache would hand back the very card it just answered.
  */
-async function laneFresh(db, tdb) {
+async function laneFresh(db, tdb, tasksDbPath = TASKS_DB) {
   const rows = await laneRows(tdb, { all: true });
   const defs = await defsFor(tdb, rows);
   const lockMap = await lockMapFor(db, rows.map((r) => r.id));
-  const needs = groupByLane(rows, defs, lockMap).needs_you;
+  const staged = await stagedCardIds(db, { tasksDbPath });
+  const needs = groupByLane(rows, defs, lockMap, staged).needs_you;
   const top = await cardsByIds(tdb, needs.slice(0, NEEDS_LINES).map((r) => r.id));
-  return { total: needs.length, cards: needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean) };
+  return { total: needs.length, cards: needs.slice(0, NEEDS_LINES).map((r) => top.get(r.id)).filter(Boolean), staged };
 }
 
 /**
@@ -162,9 +178,12 @@ async function laneFresh(db, tdb) {
  * source contributes at most that many items — the whole list is one tap away on more_href.
  * `fresh` skips that cache (the act route's own reads).
  */
-async function boardItems(db, tdb, projects, key, lang, fresh = false) {
-  const lane = await (fresh ? laneFresh(db, tdb) : needsLaneCached(db, tdb, key));
+async function boardItems(db, tdb, projects, key, lang, fresh = false, tasksDbPath = TASKS_DB) {
+  const lane = await (fresh ? laneFresh(db, tdb, tasksDbPath) : needsLaneCached(db, tdb, key, { tasksDbPath }));
   const cards = (lane && lane.cards) || [];
+  // The cached lane carries the open-draft map it was computed with (morning.js), so a card that
+  // is here only because a bot's draft waits on the operator is drawn here too.
+  const staged = (lane && lane.staged) || new Map();
   if (!cards.length) return [];
   let links = new Map();
   try { links = await drawerHrefs(db, cards, { tasksDb: tdb }); }
@@ -173,7 +192,7 @@ async function boardItems(db, tdb, projects, key, lang, fresh = false) {
   const projectName = (pid) => byId.get(pid) ?? null;
   const out = [];
   for (const card of cards) {
-    const item = await boardItem(tdb, card, { links, projectName, lang });
+    const item = await boardItem(tdb, card, { links, projectName, lang, staged });
     if (item) out.push(item);
   }
   return out;
@@ -229,11 +248,14 @@ async function messageItems(db, lang) {
 }
 
 /** What the bots are working on, for the all-clear state: the Board's in-progress lane, ≤ DOING_MAX titles. */
-async function doingTitles(db, tdb) {
+async function doingTitles(db, tdb, tasksDbPath = TASKS_DB) {
   const rows = await laneRows(tdb, { all: true });
   const lockMap = await lockMapFor(db, rows.map((r) => r.id));
   const defs = await defsFor(tdb, rows);
-  const working = groupByLane(rows, defs, lockMap).working.slice(0, DOING_MAX);
+  // The staged map rides along so this lane is grouped by the same rule as the Board's (a card
+  // holding a draft is Needs you, never Working).
+  const staged = await stagedCardIds(db, { tasksDbPath });
+  const working = groupByLane(rows, defs, lockMap, staged).working.slice(0, DOING_MAX);
   if (!working.length) return [];
   const full = await cardsByIds(tdb, working.map((r) => r.id));
   return working.map((r) => oneLine(full.get(r.id)?.title)).filter(Boolean);
@@ -258,7 +280,7 @@ async function collectItems(db, tdb, { now, projects, handoffStore, lang, tasksD
   let board = [];
   if (tdb) {
     const key = `${tasksDbPath}|${[...new Set(list.map((p) => Number(p.id)))].sort((a, b) => a - b).join(",")}`;
-    try { board = await boardItems(db, tdb, list, key, lang, fresh); }
+    try { board = await boardItems(db, tdb, list, key, lang, fresh, tasksDbPath); }
     catch (err) { failed++; console.warn("[needs-me] board read failed:", err && err.message); }
   } else {
     failed++;
@@ -330,7 +352,7 @@ export async function loadNeedsMe(db, tdb, {
 
   let doing = [];
   if (state === "empty" && tdb) {
-    try { doing = await doingTitles(db, tdb); }
+    try { doing = await doingTitles(db, tdb, tasksDbPath); }
     catch (err) { console.warn("[needs-me] what bots are doing failed:", err && err.message); }
   }
 

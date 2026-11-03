@@ -140,7 +140,8 @@
  */
 import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, isSentinel, mentionsLock } from "../../scripts/pi-bots/narrowing-lock.mjs";
 import { taintsSession } from "../../scripts/pi-bots/outside-text-tools.mjs";
-import { markTaintUnrecorded } from "./session-taint-memory.js";
+import { isTaintUnrecorded, markTaintUnrecorded } from "./session-taint-memory.js";
+import { isDraftTool, redactMcpConfig, safeRecordDraft } from "./staged/recorder.js";
 import { redactErrorText, lastAssistantError } from "./perch-error-text.js";
 import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scripts/pi-bots/tool-budget.mjs";
 import Database from "better-sqlite3";
@@ -259,6 +260,9 @@ const ASK_EXPIRY_LEAD_MS = 2000;
 const EXPIRED_IDS_MAX = 20;
 /** Default window between grouped "needs you" re-pushes. */
 const DEFAULT_ATTENTION_REPUSH_MS = 600_000;
+/** Staged sends: how long one draft's end frame may wait for its row before it goes out anyway. The
+ * row lands later and the card refetches; a recording must never hold the chat. */
+const DRAFT_FRAME_CAP_MS = 5000;
 
 /** PR-A (audit item 5): prefix pi-lab's ask-user extension puts on a `notify`
  * message to relay the RICH questions payload (`{id, questions}`) of an
@@ -679,6 +683,9 @@ function clearAsk(s) {
  * @param {Function} [opts.now] injectable clock (lease expiry is testable).
  * @param {Function} [opts.setTimer] injectable timer factory.
  * @param {Function} [opts.clearTimer]
+ * @param {Function} [opts.recordDraft] test seam: the staged-send recorder the Perch hook
+ *   calls (`safeRecordDraft`'s `{db, toolName, args, resultText, log, context}` shape). Only a
+ *   test that holds a recording open uses it (the frame queue's 5 s cap); production passes none.
  * @param {Function} [opts.log]
  */
 export function createInteractiveEngine({
@@ -690,6 +697,7 @@ export function createInteractiveEngine({
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   log: rawLog = (m) => console.log("[perch-interactive] " + m),
+  recordDraft: recordDraftFn = safeRecordDraft,
   notifications = null,
   // Dirs the pi sandbox hides from a bot besides <CROW_HOME>/secrets (user
   // runtime/session IPC): send_user_file, which copies on the host, never
@@ -1045,11 +1053,70 @@ export function createInteractiveEngine({
     };
   }
 
-  function emit(s, event) {
+  /**
+   * Send one frame to this session's subscribers, masked. Only emitFrame and the queue below
+   * call this; nothing else may touch `s.subscribers`.
+   */
+  function emitFrame(s, event) {
     const shown = maskFrame(event);
     for (const fn of [...s.subscribers]) {
       try { fn(shown); } catch { /* a broken subscriber never breaks a turn */ }
     }
+  }
+
+  /**
+   * Emit one frame for a session.
+   *
+   * Staged sends: a draft tool's end frame only goes out once its staged row exists (the hub
+   * refetches the card on that frame), so while ANY draft's end frame is still waiting, every later
+   * frame for this session queues behind it instead of overtaking it — otherwise the assistant's
+   * text, the next tool's start and the turn's reply all land while the draft's end frame is still
+   * in flight and the client renders them out of order. `s.frameQueue` holds one entry per waiting
+   * draft: its end frame plus the frames emitted after it (and before the next draft ended).
+   */
+  function emit(s, event) {
+    if (s.frameQueue && s.frameQueue.length) {
+      s.frameQueue[s.frameQueue.length - 1].frames.push(event);
+      return;
+    }
+    emitFrame(s, event);
+  }
+
+  /** A draft's end frame is waiting for its row: the queue entry that holds it and what follows. */
+  function openFrameSlot(s, endFrame) {
+    if (!s.frameQueue) s.frameQueue = [];
+    const slot = { endFrame, frames: [], settled: false, sent: false, timer: null };
+    s.frameQueue.push(slot);
+    // Capped, and unref'd like every engine timer: a recorder that hangs must neither hold the chat
+    // past 5 s nor keep the gateway process open.
+    slot.timer = timer(() => { slot.timer = null; settleFrameSlot(s, slot); }, DRAFT_FRAME_CAP_MS);
+    return slot;
+  }
+
+  /** The row is written (or the recorder failed, or the cap fired): let that frame go. */
+  function settleFrameSlot(s, slot) {
+    if (slot.settled) return;
+    slot.settled = true;
+    if (slot.timer != null) { clearTimer(slot.timer); slot.timer = null; }
+    drainFrameQueue(s);
+  }
+
+  /**
+   * Release the frames of every settled slot from the head, in order. A slot that settles out of
+   * turn (the cap firing before an earlier row lands) simply waits here: a later draft's end frame
+   * can never overtake an earlier one, and no frame is ever dropped.
+   */
+  function drainFrameQueue(s) {
+    const q = s.frameQueue;
+    if (!q) return;
+    while (q.length && q[0].settled) {
+      const slot = q.shift();
+      if (!slot.sent) { slot.sent = true; emitFrame(s, slot.endFrame); }
+      const frames = slot.frames;
+      slot.frames = [];
+      for (const frame of frames) emitFrame(s, frame);
+    }
+    if (!q.length) s.frameQueue = null;
   }
 
   /**
@@ -2714,6 +2781,12 @@ export function createInteractiveEngine({
     // in practice unreachable, since a crow-file: notify rides a live child;
     // belt for the test seams that return a bare world).
     s.worldRoot = world.sessionDir || null;
+    // Staged sends (spec §12.2): a draft tool's credential is named by the MCP block it came through
+    // (server key + primary/personal role), and the block lives in THIS turn's world config. Keep a
+    // redacted copy on the session — server ids and which token env each carries, never a path — so
+    // the draft recorder at tool_execution_end can name the credential without holding a token
+    // location. Rebuilt on every spawn/wake, exactly like the world itself.
+    s.credConfig = redactMcpConfig(world.mcpConfig);
     // Track 3 Task 4 (wake fidelity, review finding 8): if the engine tracks a
     // model different from what prepareSpawn just resolved fresh (a live
     // model_select or a control() switch made while this session was awake or
@@ -3042,6 +3115,10 @@ export function createInteractiveEngine({
     switch (m.type) {
       case "tool_execution_start":
         onBrowserToolEvent(s, m, "start");
+        // Staged sends: remember this call's args, and whether the session was ALREADY tainted when
+        // it started. Read BEFORE the D22 taint write below on purpose — a draft tool is never on
+        // the clean list, so its own taint must not count as "written from outside content".
+        if (isDraftTool(m.toolName)) rememberDraftCall(s, m);
         // D22: reading outside text taints this session for Artifacts trust.
         // Recorded at call START from the engine's own (bot, thread).
         // Written SYNCHRONOUSLY in this tick (before the gateway handles any
@@ -3062,14 +3139,33 @@ export function createInteractiveEngine({
         emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false,
           toolCallId: m.toolCallId || null, argsText: safeSnippet(maskDeep(m.args), 600) });
         return;
-      case "tool_execution_end":
+      case "tool_execution_end": {
         if (s.turn && m.toolName) s.turn.toolNames.push(m.toolName);
         onBrowserToolEvent(s, m, "end");
         // Wave 3: same for the outcome — the result's TEXT blocks, pi-lab's
         // own 2000-char cap, stringified fallback for non-text payloads.
-        emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
-          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(maskDeep(m.result), 2000) });
+        const endFrame = { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
+          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(maskDeep(m.result), 2000) };
+        // Staged sends (spec §12.1): the staged row must exist BEFORE this frame — the hub refetches
+        // the card when a draft tool's end frame arrives, and a frame promising a row the DB cannot
+        // serve yet draws an empty card. The recorder never breaks the turn (one log line, code
+        // only) and the frame is emitted either way. Until it is, every later frame for this session
+        // queues behind it (openFrameSlot), so the chat keeps its order.
+        if (isDraftTool(m.toolName)) {
+          // An errored call made no draft: drop its remembered args, record nothing, and open no
+          // slot — nothing has to wait for a row.
+          if (m.isError) {
+            if (s.draftCalls) s.draftCalls.delete(String(m.toolCallId || ""));
+            emit(s, endFrame);
+            return;
+          }
+          const slot = openFrameSlot(s, endFrame);
+          void recordDraftThenEmit(s, m, slot);
+          return;
+        }
+        emit(s, endFrame);
         return;
+      }
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
         const text = withoutDatesEcho(s.turn, assistantTextOf(m.message));
@@ -3125,6 +3221,85 @@ export function createInteractiveEngine({
       default:
         // message_update, … — not part of the lens vocabulary.
         // Silence is the contract, not an oversight.
+    }
+  }
+
+  /**
+   * Staged sends: hold one draft call's args and its "tainted before" verdict until its end event.
+   * Bounded because a pi child cannot have many draft calls in flight at once; a Map miss at the end
+   * (a resume mid-call) is handled fail-closed there.
+   */
+  function rememberDraftCall(s, m) {
+    if (!s.draftCalls) s.draftCalls = new Map();
+    if (s.draftCalls.size >= 8) s.draftCalls.clear();
+    s.draftCalls.set(String(m.toolCallId || ""), {
+      args: m.args && typeof m.args === "object" ? m.args : null,
+      taintedBefore: taintedBeforeDraft(s),
+    });
+  }
+
+  /**
+   * Was this session tainted when the draft tool started (spec §12.3 item 7)? The D22 row is written
+   * with INSERT OR IGNORE at the START of any tainting tool and this check runs BEFORE this call's
+   * own write, so an existing row simply means "the session had a taint record when the tool
+   * started" — there is no timestamp to compare (a one-row-per-session record has no ordering to
+   * read, and both clocks would be the same wall clock anyway). An unreadable row fails CLOSED
+   * (tainted); a plain missing table is a session that never tainted anything, which is clean.
+   */
+  function taintedBeforeDraft(s) {
+    let db = null;
+    try {
+      if (isTaintUnrecorded(s.botId, s.threadId)) return true;
+      db = new Database(process.env.CROW_DB_PATH || join(resolveDataDir(), "crow.db"));
+      db.pragma("busy_timeout = 1000");
+      const row = db.prepare("SELECT 1 AS t FROM artifact_session_taint WHERE bot_id=? AND thread_id=?").get(s.botId, s.threadId);
+      return !!row;
+    } catch (e) {
+      return !/no such table/i.test(String((e && e.message) || ""));
+    } finally {
+      try { db && db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /**
+   * Record one Perch draft call, then release its end frame (never the other way round). The slot
+   * was opened synchronously by the caller, so every frame emitted while this awaits is already
+   * queued behind it; settling in `finally` releases them whether the row landed or not.
+   */
+  async function recordDraftThenEmit(s, m, slot) {
+    const key = String(m.toolCallId || "");
+    const pending = s.draftCalls ? s.draftCalls.get(key) : null;
+    if (s.draftCalls) s.draftCalls.delete(key);
+    let db = null;
+    try {
+      db = createDbClient();
+      await recordDraftFn({
+        db,
+        toolName: m.toolName,
+        args: pending ? pending.args : (m.args && typeof m.args === "object" ? m.args : null),
+        resultText: m.result,
+        // One line, tool name + code, through the engine's own log.
+        log: (line) => log(s.sessionId + ": " + line),
+        context: {
+          channel: "gmail",
+          sessionId: s.sessionId,
+          threadId: s.threadId,
+          botId: s.botId,
+          cardId: s.cardId,
+          credConfig: s.credConfig,
+          // The chat card is the whole point here: a Perch row pushes nothing.
+          notify: false,
+          // A start event we never saw (a resume mid-call) fails closed.
+          tainted: pending ? pending.taintedBefore === true : true,
+        },
+      });
+    } catch (e) {
+      log(s.sessionId + ": staged draft not recorded (" + String(m.toolName || "?") + "): " + ((e && typeof e.code === "string" && e.code) || "error"));
+    } finally {
+      if (db) { try { db.close(); } catch { /* already closed */ } }
+      // The frame goes out whatever the recorder did (or the cap fired first): a frame must never
+      // break the turn, and a recorder error must never stop the queue either.
+      settleFrameSlot(s, slot);
     }
   }
 
