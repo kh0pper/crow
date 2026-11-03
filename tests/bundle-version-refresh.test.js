@@ -18,7 +18,7 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -1144,5 +1144,112 @@ describe("skill sync — rules 0–4, record, modes, atomic writes", async () =>
       }
     }
     assert.deepEqual(out.skillsKept.filter((k) => shipping.includes(k.bundle)), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// installed.json's `version` follows the INSTALLED copy. The Extensions page
+// shows the record's version, and the refresh above only ever rewrote the files
+// — so a live instance showed media 1.0.0 while its installed manifest said
+// 1.2.7, and a record left stale by an earlier refresh never caught up either.
+// ---------------------------------------------------------------------------
+describe("installed.json version follows the installed manifest", () => {
+  const installedAt = "2026-01-02T03:04:05.000Z";
+  const installedPath = () => join(CROW_HOME, "installed.json");
+  const readInstalledJson = () => JSON.parse(readAt(CROW_HOME, "installed.json"));
+  const setRecords = (records) => put(CROW_HOME, "installed.json", JSON.stringify(records, null, 2));
+  const versionLines = (repaired) => repaired.filter((r) => r.includes("installed.json version"));
+  /** A throwaway "repo" root holding just `<id>/manifest.json` at `version`. */
+  function repoManifest(id, version) {
+    const root = freshRoot(`crowrepo-${id}-`);
+    put(root, `${id}/manifest.json`, JSON.stringify({ id, name: id, version, type: "mcp-server" }));
+    return root;
+  }
+
+  test("a version refresh updates the installed.json record", async () => {
+    const id = "iv-refresh";
+    const repoRoot = repoManifest(id, "1.1.0");
+    put(repoRoot, `${id}/server/index.js`, "v2\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    setRecords([{ id, type: "mcp-server", version: "1.0.0", installedAt, source: "registry" }]);
+
+    const { repaired, errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+
+    const [rec] = readInstalledJson();
+    assert.equal(rec.version, "1.1.0");
+    assert.equal(rec.installedAt, installedAt, "the install date is untouched");
+    assert.equal(rec.type, "mcp-server");
+    assert.equal(rec.source, "registry");
+    assert.deepEqual(Object.keys(rec).sort(), ["id", "installedAt", "source", "type", "version"], "only `version` changed");
+    assert.ok(repaired.includes(`${id}: installed.json version 1.0.0 -> 1.1.0`), JSON.stringify(repaired));
+  });
+
+  test("a record left stale by an earlier refresh is corrected", async () => {
+    const id = "iv-stale";
+    // Repo and installed copy already agree: the refresh does NOT fire this
+    // boot, only the record is behind (the media case).
+    const repoRoot = repoManifest(id, "1.2.7");
+    put(repoRoot, `${id}/server/index.js`, "REPO\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.2.7", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${id}/server/index.js`, "INSTALLED\n");
+    setRecords([{ id, type: "mcp-server", version: "1.0.0", installedAt }]);
+
+    const { repaired, errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readInstalledJson()[0].version, "1.2.7");
+    assert.equal(readInstalledJson()[0].installedAt, installedAt);
+    assert.ok(!repaired.some((r) => r.includes("refreshed")), "no version delta → nothing is refreshed");
+    assert.deepEqual(versionLines(repaired), [`${id}: installed.json version 1.0.0 -> 1.2.7`]);
+    assert.equal(readAt(destBundleDir(id), "server/index.js"), "INSTALLED\n", "no files are copied");
+  });
+
+  test("nothing is written when every record matches", async () => {
+    const id = "iv-match";
+    const repoRoot = repoManifest(id, "2.0.0");
+    put(repoRoot, `${id}/server/index.js`, "REPO\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "2.0.0", type: "mcp-server" }));
+    setRecords([{ id, type: "mcp-server", version: "2.0.0", installedAt }]);
+
+    const before = readAt(CROW_HOME, "installed.json");
+    const mtimeBefore = statSync(installedPath()).mtimeMs;
+    const { repaired, errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(CROW_HOME, "installed.json"), before, "the file is byte-identical");
+    assert.equal(statSync(installedPath()).mtimeMs, mtimeBefore, "no write happened at all");
+    assert.deepEqual(versionLines(repaired), []);
+  });
+
+  test("a record for a bundle with no installed manifest is left alone", async () => {
+    const id = "iv-nomanifest";
+    // The repo bundle dir exists (so the loop handles the id) but ships no
+    // manifest.json — there is no installed version to copy from.
+    const repoRoot = freshRoot(`crowrepo-${id}-`);
+    mkdirSync(join(repoRoot, id), { recursive: true });
+    setRecords([{ id, type: "mcp-server", version: "0.9.0", installedAt }]);
+
+    const before = readAt(CROW_HOME, "installed.json");
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(CROW_HOME, "installed.json"), before, "no installed manifest → no version to record");
+  });
+
+  test("a string record is left as is", async () => {
+    const str = "iv-string";
+    const obj = "iv-object";
+    const repoRoot = freshRoot("crowrepo-iv-mixed-");
+    for (const id of [str, obj]) put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: id, version: "1.1.0", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${str}/manifest.json`, JSON.stringify({ id: str, version: "1.1.0", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${obj}/manifest.json`, JSON.stringify({ id: obj, version: "1.0.0", type: "mcp-server" }));
+    // A bare id string next to an object record that DOES need the update, so
+    // the write path really runs over both shapes.
+    setRecords([str, { id: obj, type: "mcp-server", version: "1.0.0", installedAt }]);
+
+    const { repaired, errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    const after = readInstalledJson();
+    assert.equal(after[0], str, "a string record is written back exactly as it was");
+    assert.equal(after[1].version, "1.1.0");
+    assert.deepEqual(versionLines(repaired), [`${obj}: installed.json version 1.0.0 -> 1.1.0`]);
   });
 });

@@ -1077,6 +1077,9 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
   const skillLines = [];
   const skillsKept = [];
   const ledger = skillLedger || readSkillLedger(appBundles);
+  // id -> the INSTALLED manifest's version once this pass is done with that bundle
+  // (see the sync at the end: the record's version must follow the installed copy).
+  const installedVersions = new Map();
 
   let installed;
   try {
@@ -1158,7 +1161,41 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
       }
     } catch (err) {
       errors.push({ id, error: err.message });
+    } finally {
+      // Read AFTER the refresh/repair above (a `continue` still runs this): the
+      // installed manifest is the copy that is actually on disk. A bundle whose
+      // copy is missing or unreadable simply has no version to record.
+      const version = readJsonSafe(join(destDir, "manifest.json"), null)?.version;
+      if (version !== undefined && version !== null && version !== "") installedVersions.set(id, version);
     }
+  }
+
+  // installed.json's version must follow the installed copy: the refresh above
+  // rewrites the files (and manifest.json) but never the record, so the
+  // Extensions page kept showing the version from the first install — and a
+  // record left stale by an earlier boot never caught up either.
+  try {
+    if (installedVersions.size > 0) {
+      // Re-read fresh: an install that wrote installed.json during this pass is
+      // not in the snapshot from the top of the function and must survive.
+      const current = getInstalled();
+      const next = [];
+      const lines = [];
+      for (const rec of current) {
+        // A bare "id" string record carries no fields to update.
+        if (!rec || typeof rec !== "object" || Array.isArray(rec)) { next.push(rec); continue; }
+        const version = installedVersions.get(rec.id);
+        if (version === undefined || rec.version === version) { next.push(rec); continue; }
+        lines.push(`${rec.id}: installed.json version ${rec.version} -> ${version}`);
+        next.push({ ...rec, version });
+      }
+      if (lines.length > 0) {
+        saveInstalled(next); // the one writer: atomic, and it drops the apps catalog cache
+        repaired.push(...lines);
+      }
+    }
+  } catch (err) {
+    errors.push({ id: "*", error: `installed.json version sync: ${err.message}` });
   }
 
   return { repaired, errors, skillLines, skillsKept };
