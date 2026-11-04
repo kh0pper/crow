@@ -21,7 +21,8 @@
  * (installer, gateway, a second boot) ends up agreeing with what is on disk.
  * Creation is first-writer-wins (link(2), which cannot replace an existing
  * file), so two processes racing to mint a token cannot end up disagreeing,
- * and nothing mints a token once a password exists.
+ * and boot never mints a token once a password exists (a request that raced the first
+ * password may recreate the file; harmless, since the gate is unused once a password exists).
  *
  * Node built-ins only.
  */
@@ -75,7 +76,19 @@ export function getSetupToken({ crowHome = resolveCrowHome(), hasPassword = fals
     try {
       linkSync(tmp, file);
     } catch (err) {
-      if (err.code !== "EEXIST") throw err;
+      if (err.code === "EEXIST") {
+        /* another writer won: read theirs back below */
+      } else if (["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(err.code)) {
+        // A filesystem without hard links (some network or FUSE mounts):
+        // create-if-absent directly, still 0600 and still first-writer-wins.
+        try {
+          writeFileSync(file, readFileSync(tmp, "utf8"), { mode: 0o600, flag: "wx" });
+        } catch (e2) {
+          if (e2.code !== "EEXIST") throw e2;
+        }
+      } else {
+        throw err;
+      }
     }
   } catch {
     /* read-back below is the source of truth */
@@ -175,13 +188,16 @@ export function announceSetupToken({ crowHome = resolveCrowHome(), passwordSet =
   if (passwordSet) return null;
   if (process.env.CROW_SETUP_TOKEN) return null;
   let path;
+  let token = "";
   try {
-    path = getSetupToken({ crowHome }).path;
+    ({ path, token } = getSetupToken({ crowHome }));
   } catch {
     return null;
   }
   if (!path) return null;
-  const line = `[setup] No dashboard password yet. Open the setup link from ${path} (only this machine's user can read it).`;
+  const line = token
+    ? `[setup] No dashboard password yet. Open the setup link from ${path} (only this machine's user can read it).`
+    : `[setup] No dashboard password yet, and the setup token could not be written to ${path}. First-run setup works only from this machine (http://localhost:3001/setup) until the file can be created.`;
   log(line);
   return line;
 }
