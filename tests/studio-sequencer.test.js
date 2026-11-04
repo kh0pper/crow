@@ -721,11 +721,11 @@ test("stopTrack is reported with clip_id null", () => {
   ]);
 });
 
-test("a scene launch reports every track it changed", () => {
+test("a scene launch reports every track in its row, empty slots included", () => {
   const seq = sequencer(
     song({
-      // The third track has no clip in either scene, so no launch can change
-      // it and it must never be reported.
+      // The third track has no clip in either scene: a scene launch still
+      // reports it (as a stop), so a recording armed on an empty slot starts.
       tracks: [track("t1"), track("t2"), track("t3")],
       scenes: [scene("s1"), scene("s2")],
       clips: [
@@ -741,6 +741,7 @@ test("a scene launch reports every track it changed", () => {
   assert.deepEqual(launchesOf(seq.block(0, 128)), [
     { track_id: "t1", clip_id: "c1", scene_id: "s1", bar: 0, frame: 0 },
     { track_id: "t2", clip_id: "c2", scene_id: "s1", bar: 0, frame: 0 },
+    { track_id: "t3", clip_id: null, scene_id: "s1", bar: 0, frame: 0 },
   ]);
 
   // Scene 2 changes both: t1 gets its other clip, t2 stops. Every entry
@@ -751,10 +752,11 @@ test("a scene launch reports every track it changed", () => {
   assert.deepEqual(launchesOf(seq.block(FRAMES_PER_BAR, 128)), [
     { track_id: "t1", clip_id: "c3", scene_id: "s2", bar: 1, frame: 0 },
     { track_id: "t2", clip_id: null, scene_id: "s2", bar: 1, frame: 0 },
+    { track_id: "t3", clip_id: null, scene_id: "s2", bar: 1, frame: 0 },
   ]);
 
-  // Asking for the scene that is already playing changes nothing, so there is
-  // nothing to report.
+  // Launching the scene that is already playing is still a launch of that
+  // row, so every track is reported again at the next bar.
   seq.launchScene("s2");
-  assert.deepEqual(launchesOf(seq.block(FRAMES_PER_BAR + 128, FRAMES_PER_BAR * 2)), []);
+  assert.equal(launchesOf(seq.block(FRAMES_PER_BAR + 128, FRAMES_PER_BAR * 2)).length, 3);
 });

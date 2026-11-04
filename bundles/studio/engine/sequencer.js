@@ -449,7 +449,10 @@
       const at = launchBeat();
       for (const track of tracks) {
         const clip = clipFor(track.id, sceneId);
-        applyLaunch(track.id, clip ? clip.id : null, sceneId, at);
+        // Every track of the row is reported, an empty slot included (as a
+        // stop): a recording armed on an empty audio slot starts on this
+        // very frame, and Record to timeline sees the whole row.
+        applyLaunch(track.id, clip ? clip.id : null, sceneId, at, true);
       }
       reconcile(frameNow());
     }
@@ -553,12 +556,12 @@
      *   `undefined` to fall back to the scene of the clip being replaced
      * @param {number} atBeat the boundary the launch takes effect at
      */
-    function applyLaunch(trackId, clipId, sceneId, atBeat) {
+    function applyLaunch(trackId, clipId, sceneId, atBeat, always = false) {
       const segs = segments.get(trackId);
       const replaced = segs ? clipAtBeat(segs, atBeat) : null;
       scheduleAt(trackId, clipId, atBeat);
       const applied = clipAtBeat(segmentsOf(trackId), atBeat);
-      if (applied === replaced) return;
+      if (applied === replaced && !always) return;
 
       let scene = sceneId;
       if (scene === undefined || scene === null) {

@@ -138,6 +138,17 @@
    */
   const WORKLET_CONTEXTS = new WeakMap();
 
+  /**
+   * The resampling workers this page has, one per asset base. A worker keeps
+   * its own copy of `resample.js`, so a long take is converted off the page's
+   * main thread (a frozen panel is a frozen transport and a frozen history).
+   * @type {Map<string, {worker: Worker, pending: Map<number, object>}>}
+   */
+  const RESAMPLE_WORKERS = new Map();
+
+  /** The id of the last conversion sent to a worker. */
+  let RESAMPLE_SEQ = 0;
+
   /** How many clicks a calibration plays when the caller names none. */
   const DEFAULT_CALIBRATION_CLICKS = 16;
 
@@ -408,6 +419,81 @@
       }
     }
     throw new Error("StudioEngine: resampling needs StudioResample (engine/resample.js) in this host");
+  }
+
+  /**
+   * This host's resampling worker, built on first use.
+   *
+   * A worker is the only way to keep a long take's conversion off the page's
+   * main thread. A host without `Worker` (Node), a refusal to construct one,
+   * or a failed error are all answered with null, and the caller converts
+   * inline instead.
+   * @param {string} assetBase the URL prefix the worker's own script is at
+   * @returns {{worker: Worker, pending: Map<number, object>}|null}
+   */
+  function resampleWorker(assetBase) {
+    const url = joinUrl(assetBase, "resample-worker.js");
+    const held = RESAMPLE_WORKERS.get(url);
+    if (held) return held;
+    if (typeof Worker !== "function") return null;
+    let worker = null;
+    try {
+      worker = new Worker(url);
+    } catch {
+      return null;
+    }
+    const entry = { worker: worker, pending: new Map() };
+    worker.onmessage = (event) => {
+      const message = event && event.data;
+      if (!message || typeof message !== "object" || message.id === undefined) return;
+      const settle = entry.pending.get(message.id);
+      if (!settle) return;
+      entry.pending.delete(message.id);
+      if (message.error) settle.reject(new Error("StudioEngine: " + String(message.error)));
+      else settle.resolve(message.channels);
+    };
+    // A worker that never loads (a 404, a policy refusal) rejects the loads
+    // waiting on it and is forgotten, so the next one converts inline.
+    worker.onerror = () => {
+      const waiting = Array.from(entry.pending.values());
+      entry.pending.clear();
+      RESAMPLE_WORKERS.delete(url);
+      try {
+        worker.terminate();
+      } catch {
+        /* already gone */
+      }
+      for (const settle of waiting) settle.reject(new Error("StudioEngine: the resampling worker failed"));
+    };
+    RESAMPLE_WORKERS.set(url, entry);
+    return entry;
+  }
+
+  /**
+   * Convert one take's channels in the page's resampling worker.
+   *
+   * The input arrays are copied by the port rather than transferred: a worker
+   * that fails after it has received them would otherwise leave the caller's
+   * fallback with detached buffers. The worker's own output IS transferred.
+   * @param {string} assetBase
+   * @param {Float32Array[]} channels
+   * @param {number} from the rate they are at, in Hz
+   * @param {number} to the rate they are wanted at, in Hz
+   * @returns {Promise<Float32Array[]>}
+   */
+  function resampleInWorker(assetBase, channels, from, to) {
+    const entry = resampleWorker(assetBase);
+    if (!entry) return Promise.reject(new Error("StudioEngine: this host has no resampling worker"));
+    const id = (RESAMPLE_SEQ += 1);
+    return new Promise((resolve, reject) => {
+      entry.pending.set(id, { resolve: resolve, reject: reject });
+      try {
+        entry.worker.postMessage({ id: id, channels: channels, from: from, to: to });
+      } catch (error) {
+        entry.pending.delete(id);
+        reject(error);
+      }
+    });
   }
 
   /**
@@ -1193,12 +1279,14 @@
        * The processor plays takes at the context's own rate, so a take recorded
        * at another rate is converted here first, on the client, with
        * `resample.js` — never by the context or by `decodeAudioData` (the parity
-       * rule). The channels are transferred rather than copied, so the caller
-       * must not use the arrays it passed after the promise resolves.
+       * rule). In a browser the conversion runs in the page's resampling worker
+       * (`${assetBase}resample-worker.js`), so a long take does not block the
+       * panel; a host without one (Node, a worker that would not load) converts
+       * inline with the very same file.
        *
-       * TODO(Task 7): the panel runs this conversion in a Worker, so a long
-       * take does not block the page; this inline path is what the panel falls
-       * back to and what a Node render uses.
+       * The converted channels are transferred to the processor rather copied,
+       * so the caller must not use the arrays it passed after the promise
+       * resolves.
        * @param {string} takeId
        * @param {Float32Array[]} channels the take's decoded samples, one per channel
        * @param {number} rate the rate those samples are at, in Hz
@@ -1217,26 +1305,32 @@
           }
         }
         const from = Number(rate);
-        const pcm =
-          Number.isFinite(from) && from > 0 && from !== context.sampleRate
-            ? resamplerOf().toRate(list, from, context.sampleRate)
-            : list;
 
-        // One transfer per underlying buffer: two views of one buffer would
-        // ask the port to transfer it twice.
-        const transfer = [];
-        for (const channel of pcm) {
-          if (channel.buffer instanceof ArrayBuffer && transfer.indexOf(channel.buffer) === -1) {
-            transfer.push(channel.buffer);
+        const deliver = (pcm) => {
+          // One transfer per underlying buffer: two views of one buffer would
+          // ask the port to transfer it twice.
+          const transfer = [];
+          for (const channel of pcm) {
+            if (channel.buffer instanceof ArrayBuffer && transfer.indexOf(channel.buffer) === -1) {
+              transfer.push(channel.buffer);
+            }
           }
-        }
+          return new Promise((resolve) => {
+            const waiting = pendingAudio.get(id) || [];
+            waiting.push(resolve);
+            pendingAudio.set(id, waiting);
+            post({ type: "audio", take_id: id, channels: pcm }, transfer);
+          });
+        };
 
-        return new Promise((resolve) => {
-          const waiting = pendingAudio.get(id) || [];
-          waiting.push(resolve);
-          pendingAudio.set(id, waiting);
-          post({ type: "audio", take_id: id, channels: pcm }, transfer);
-        });
+        if (!Number.isFinite(from) || from <= 0 || from === context.sampleRate) return deliver(list);
+
+        const convert = opts.assetBase && !isNode()
+          ? resampleInWorker(opts.assetBase, list, from, context.sampleRate).catch(() =>
+              resamplerOf().toRate(list, from, context.sampleRate),
+            )
+          : Promise.resolve(resamplerOf().toRate(list, from, context.sampleRate));
+        return convert.then(deliver);
       },
 
       /**
