@@ -18,7 +18,7 @@ test("isInstanceIdShape / isValidHost", () => {
   assert.equal(isInstanceIdShape("host-b-5fc01ac74463b6f4"), false);
   assert.equal(isInstanceIdShape("aaaaaaaa-0000-0000-0000-00000000000a"), false);
   for (const v of ["local", "cloud", OWN_ID]) assert.equal(isValidHost(v), true, v);
-  for (const v of ["raven", "external", "host-b-5fc01ac74463b6f4", "", null, undefined, "LOCAL", 42]) {
+  for (const v of ["boxb", "external", "host-b-5fc01ac74463b6f4", "", null, undefined, "LOCAL", 42]) {
     assert.equal(isValidHost(v), false, String(v));
   }
 });
@@ -26,13 +26,13 @@ test("isInstanceIdShape / isValidHost", () => {
 test("hostnameOf / isIpLiteral", () => {
   assert.equal(hostnameOf("http://[::1]:8080/v1"), "::1");
   assert.equal(hostnameOf("http://[FD00::5]:80/"), "fd00::5");
-  assert.equal(hostnameOf("HTTP://Raven:8030/v1"), "raven");
+  assert.equal(hostnameOf("HTTP://BoxB:8030/v1"), "boxb");
   assert.equal(hostnameOf("not a url"), null);
   assert.equal(hostnameOf(""), null);
   assert.equal(hostnameOf(null), null);
   assert.equal(isIpLiteral("10.0.0.203"), true);
   assert.equal(isIpLiteral("fd00::5"), true);
-  assert.equal(isIpLiteral("raven"), false);
+  assert.equal(isIpLiteral("boxb"), false);
 });
 
 test("inferHost: own/loopback → local; every foreign address → cloud (the regression)", () => {
@@ -46,7 +46,7 @@ test("inferHost: own/loopback → local; every foreign address → cloud (the re
   assert.equal(inferHost("http://192.168.1.50:8000/v1", null, o), "cloud");
   assert.equal(inferHost("http://100.64.20.2:9100/v1", null, o), "cloud");
   assert.equal(inferHost("https://api.z.ai/api/coding/paas/v4", null, o), "cloud");
-  assert.equal(inferHost("http://raven:8030/v1", null, o), "cloud"); // D8 unchanged
+  assert.equal(inferHost("http://boxb:8030/v1", null, o), "cloud"); // D8 unchanged
   assert.equal(inferHost("", null, o), "local");
   assert.equal(inferHost(null, null, o), "local");
   assert.equal(inferHost("not a url", null, o), "local");
@@ -55,7 +55,7 @@ test("inferHost: own/loopback → local; every foreign address → cloud (the re
 test("inferHost: valid existing host short-circuits; invalid falls through", () => {
   assert.equal(inferHost("http://10.0.0.203:8030/v1", "local", { ownAddrs: CROW }), "local");
   assert.equal(inferHost("http://10.0.0.203:8030/v1", PEER_ID, { ownAddrs: CROW }), PEER_ID);
-  assert.equal(inferHost("http://10.0.0.203:8030/v1", "raven", { ownAddrs: CROW }), "cloud");
+  assert.equal(inferHost("http://10.0.0.203:8030/v1", "boxb", { ownAddrs: CROW }), "cloud");
   assert.equal(inferHost("http://100.64.20.2:9100/v1", "host-b-5fc01ac74463b6f4",
     { ownAddrs: new Set(["127.0.0.1", "100.64.20.2"]) }), "local");
 });
@@ -63,7 +63,7 @@ test("inferHost: valid existing host short-circuits; invalid falls through", () 
 test("isForeignInstanceHost: only a DIFFERENT 32-hex id is foreign; id read lazily", () => {
   let reads = 0;
   const own = () => { reads++; return OWN_ID; };
-  for (const h of ["local", "cloud", "raven", "host-b-5fc01ac74463b6f4", null, undefined]) {
+  for (const h of ["local", "cloud", "boxb", "host-b-5fc01ac74463b6f4", null, undefined]) {
     assert.equal(isForeignInstanceHost(h, own), false, String(h));
   }
   assert.equal(reads, 0, "never reads the instance id for non-id hosts");
@@ -88,13 +88,13 @@ test("inRepairScope: bundle, owned-native, local_only and disabled rows are out"
 test("repairHostDecision: the two live crow rows", () => {
   const o = { ownInstanceId: OWN_ID, ownAddrs: CROW };
   assert.equal(repairHostDecision(row("local", "http://10.0.0.203:8731/v1"), o), "cloud");
-  assert.equal(repairHostDecision(row("raven", "http://10.0.0.203:8030/v1"), o), "cloud");
+  assert.equal(repairHostDecision(row("boxb", "http://10.0.0.203:8030/v1"), o), "cloud");
 });
 
 test("repairHostDecision D3: another instance's write is never touched", () => {
   const o = { ownInstanceId: OWN_ID, ownAddrs: CROW };
   assert.equal(repairHostDecision(row("local", "http://10.0.0.203:8731/v1", { instance_id: PEER_ID }), o), null);
-  assert.equal(repairHostDecision(row("raven", "http://10.0.0.203:8030/v1", { instance_id: PEER_ID }), o), null);
+  assert.equal(repairHostDecision(row("boxb", "http://10.0.0.203:8030/v1", { instance_id: PEER_ID }), o), null);
   assert.equal(repairHostDecision(row("local", "http://10.0.0.203:8731/v1"), { ownInstanceId: null, ownAddrs: CROW }), null);
 });
 
@@ -112,25 +112,25 @@ test("repairHostDecision: never touches valid non-local hosts, own addresses, DN
   assert.equal(repairHostDecision(row("local", "http://100.64.20.1:8003/v1"), o), null);
   assert.equal(repairHostDecision(row("local", "http://127.0.0.1:8020/v1"), o), null);
   assert.equal(repairHostDecision(row("local", "https://api.z.ai/api/coding/paas/v4"), o), null);
-  assert.equal(repairHostDecision(row("local", "http://raven:8030/v1"), o), null);
+  assert.equal(repairHostDecision(row("local", "http://boxb:8030/v1"), o), null);
   assert.equal(repairHostDecision(row("local", ""), o), null);
   // invalid label on a DNS-name row → left for the operator (cloud result, not judgeable)
-  assert.equal(repairHostDecision(row("raven", "http://raven:8030/v1"), o), null);
+  assert.equal(repairHostDecision(row("boxb", "http://boxb:8030/v1"), o), null);
   // invalid label whose inference is local (own address) IS repaired
-  assert.equal(repairHostDecision(row("raven", "http://127.0.0.1:9/v1"), o), "local");
+  assert.equal(repairHostDecision(row("boxb", "http://127.0.0.1:9/v1"), o), "local");
 });
 
 test("repairHostDecision G1: 100.x targets skipped while no CGNAT own address — BOTH branches", () => {
   const o = { ownInstanceId: OWN_ID, ownAddrs: CROW_NO_TS };
   assert.equal(repairHostDecision(row("local", "http://100.64.20.1:8003/v1"), o), null);
-  assert.equal(repairHostDecision(row("raven", "http://100.64.20.2:9100/v1"), o), null);
+  assert.equal(repairHostDecision(row("boxb", "http://100.64.20.2:9100/v1"), o), null);
   assert.equal(repairHostDecision(row("local", "http://10.0.0.203:8731/v1"), o), "cloud");
 });
 
 test("repairHostDecision G1: loopback-only box repairs nothing to cloud", () => {
   const o = { ownInstanceId: OWN_ID, ownAddrs: LOOP_ONLY };
   assert.equal(repairHostDecision(row("local", "http://10.0.0.203:8731/v1"), o), null);
-  assert.equal(repairHostDecision(row("raven", "http://10.0.0.203:8030/v1"), o), null);
+  assert.equal(repairHostDecision(row("boxb", "http://10.0.0.203:8030/v1"), o), null);
 });
 
 test("repairHostDecision G1: link-local and public-family mismatch are not judged", () => {
@@ -159,11 +159,11 @@ test("addressClass", () => {
   assert.equal(hostnameOf("http://[::ffff:10.0.0.1]/"), "::ffff:a00:1");
   assert.equal(addressClass("8.8.8.8"), "public4");
   assert.equal(addressClass("2606:4700::1111"), "public6");
-  assert.equal(addressClass("raven"), null);
+  assert.equal(addressClass("boxb"), null);
 });
 
 test("isPrivateHost (display only)", () => {
-  for (const h of ["10.0.0.203", "100.64.20.2", "fd00::5", "raven", "localhost",
+  for (const h of ["10.0.0.203", "100.64.20.2", "fd00::5", "boxb", "localhost",
                    "host-b.example.ts.net", "nas.local", "box.lan", "x.home.arpa", "y.internal"]) {
     assert.equal(isPrivateHost(h), true, h);
   }
@@ -185,5 +185,5 @@ test("hostLabel", () => {
   assert.deepEqual(hostLabel({ host: PEER_ID, baseUrl: "http://x/v1" }, ctx), { kind: "instance", text: "Primary" });
   const unknown = "ffffffffffffffffffffffffffffffff";
   assert.deepEqual(hostLabel({ host: unknown, baseUrl: "http://x/v1" }, ctx), { kind: "instance", text: unknown.slice(0, 18) });
-  assert.deepEqual(hostLabel({ host: "raven", baseUrl: "http://10.0.0.203:8030/v1" }, ctx), { kind: "invalid", text: "raven" });
+  assert.deepEqual(hostLabel({ host: "boxb", baseUrl: "http://10.0.0.203:8030/v1" }, ctx), { kind: "invalid", text: "boxb" });
 });

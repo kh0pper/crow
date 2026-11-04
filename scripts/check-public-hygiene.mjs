@@ -193,7 +193,7 @@ export function parseDenylistHosts(text) {
 
 // A host name only counts in a host shape: a bare word is prose (bird species,
 // an identifier stem), so these regexes stay narrow and never report the name.
-const FILE_EXTENSIONS = "md|mjs|cjs|js|json|svg|png|jpg|webp|txt|yml|yaml|sh|py|ts|html|css";
+const FILE_EXTENSIONS = "md|mjs|cjs|js|json|svg|png|jpg|webp|txt|yml|yaml|sh|py|ts|html|css|db|sqlite|sqlite3";
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const HOST_SHAPES = (host) => {
   const h = escapeRe(host);
