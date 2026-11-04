@@ -1787,6 +1787,59 @@ test("a store failure mid-record stops and uploads what was kept", async () => {
   assert.equal(ui.store.pendings.size, 0, "a finished take leaves nothing on this device");
 });
 
+test("leaving the page just after a take starts keeps its round trip", async () => {
+  // A calibrated interface cuts 3,408 frames (71 ms) from every take's start.
+  // The page goes away 1,632 frames into the take: stopping on that very frame
+  // would make a take shorter than its own offset, which the gateway refuses,
+  // so the take would be lost. The stop keeps the round trip after it instead,
+  // as Stop does.
+  const latency = { latency_frames: 3408, rate: 48000, spread_frames: 0 };
+  const store = fakeTakeStore({ latency, log: [] });
+  const put = store.putPending.bind(store);
+  const saved = [];
+  store.putPending = async (value) => {
+    saved.push({ chunk_count: value.chunk_count, frames: value.frames, offset_frames: value.offset_frames });
+    return put(value);
+  };
+  const ui = await bootPanel({ store, clock: 0.75 });
+  const recorder = await startFakeRecording(ui, 34368);
+  recorder.chunk(new Uint8Array(1632 * 6).buffer, 0, 0);
+  await ui.settle();
+
+  ui.document.dispatchEvent(new ui.document.defaultView.Event("turbo:before-cache"));
+  await ui.settle();
+  assert.equal(recorder.stopFrame, 36000 + 3408, "the stop keeps the round trip after the frame it was asked on");
+
+  const frames = recorder.stopFrame - 34368;
+  recorder.chunk(new Uint8Array((frames - 1632) * 6).buffer, 1, 0);
+  recorder.done({ segments: [{ segment: 0, start_frame: 34368, frames }], frames, start_frame: 34368 });
+  await ui.settle(24);
+
+  const finished = ui.requests.filter((request) => request.url.includes("/finish"));
+  assert.equal(finished.length, 1, "the take was finished");
+  const counted = saved.find((entry) => entry.chunk_count === 2);
+  assert.ok(counted, "the take was counted");
+  assert.equal(counted.offset_frames, 3408, "it carries the interface's round trip");
+  assert.equal(counted.frames, 1632 + 3408, "and holds the round trip after the stop as well");
+});
+
+test("a pass that holds no more than its round trip is dropped, not refused", async () => {
+  // Nothing past the cut: no played audio is in it. It leaves this device
+  // instead of being sent to a gateway that would refuse it for good.
+  const latency = { latency_frames: 3408, rate: 48000, spread_frames: 0 };
+  const ui = await bootPanel({ latency, clock: 0.75 });
+  const recorder = await startFakeRecording(ui, 34368);
+  recorder.chunk(new Uint8Array(1000 * 6).buffer, 0, 0);
+  await ui.settle();
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  recorder.done({ segments: [{ segment: 0, start_frame: 34368, frames: 1000 }], frames: 1000, start_frame: 34368 });
+  await ui.settle(24);
+
+  assert.equal(ui.requests.filter((request) => request.url.includes("/takes/")).length, 0, "nothing was sent");
+  assert.equal(ui.store.pendings.size, 0, "and nothing is left on this device");
+});
+
 test("each loop pass uploads as soon as it ends", async () => {
   const ui = await bootPanel({ gateFinish: true });
   const recorder = await startFakeRecording(ui, 48000);
