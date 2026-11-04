@@ -150,6 +150,19 @@ export class PeerLineOverCapError extends Error {
 }
 export const isPeerLineOverCap = (err) => err?.code === "PEER_LINE_OVER_CAP";
 
+/**
+ * The ONE place a payload becomes a wire line: `send()` and a frame's own `reply`
+ * both go through here, so the two can never frame (or cap-check) one differently.
+ * A line over `cap` throws `PeerLineOverCapError` BEFORE anything is written.
+ * @returns {string} the line, newline included
+ */
+function dataLine(payload, cap) {
+  const line = JSON.stringify({ type: "data", payload });
+  const bytes = Buffer.byteLength(line);
+  if (bytes > cap) throw new PeerLineOverCapError(bytes, cap);
+  return line + "\n";
+}
+
 export class PeerManager {
   /**
    * @param {object} identity
@@ -206,13 +219,16 @@ export class PeerManager {
     this.instanceSyncTopic = null; // Buffer — the instance sync DHT topic
     this.onPeerConnected = null; // callback(crowId, conn)
     // callback(crowId, payload, meta) — a `data` frame of an admitted CONTACT.
-    // meta = { proof: "cb"|"sig", instanceId: string|null }. instanceId is the
-    // id the peer CLAIMED in its challenge (state.peerInstanceId, null unless
-    // it matches ENROLL_ID_RE): all of a
+    // meta = { proof: "cb"|"sig", instanceId: string|null, reply: (payload) => boolean }.
+    // instanceId is the id the peer CLAIMED in its challenge (state.peerInstanceId,
+    // null unless it matches ENROLL_ID_RE): all of a
     // contact's instances share one key, so nothing proves it. Use it for
     // routing only, never for authorization. (Only a sibling's
     // state.remoteInstanceId can be proven, by PT-2a pair binding; sibling
     // connections never reach onPeerData.)
+    // reply writes on THIS connection — the one the frame arrived on — and is a
+    // no-op once it has closed (Z1: send(crowId, …) can reach a sibling, because
+    // this.connections holds one connection per Crow id).
     this.onPeerData = null;
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null, { peerMuxEarly }) — instance-to-instance connections
@@ -957,7 +973,14 @@ export class PeerManager {
       if (state.remoteCrowId && this.onPeerData) {
         // The claimed id is passed only in the enroll-id shape; anything else is null.
         const claimed = state.peerInstanceId;
-        const meta = { proof: state.proof, instanceId: typeof claimed === "string" && ENROLL_ID_RE.test(claimed) ? claimed : null };
+        const meta = {
+          proof: state.proof,
+          instanceId: typeof claimed === "string" && ENROLL_ID_RE.test(claimed) ? claimed : null,
+          // Z1: bound to THIS connection, not to `connections.get(crowId)`. Paired
+          // siblings share one Crow id, so `send(crowId, …)` may reach the sibling
+          // that did not ask; an ack or a refusal must answer the asker.
+          reply: (payload) => this._replyOn(conn, state, payload),
+        };
         try { await this.onPeerData(state.remoteCrowId, msg.payload, meta); } catch {}
       }
       return;
@@ -1014,17 +1037,48 @@ export class PeerManager {
     if (!peer || !peer.authenticated) {
       throw new Error(`Not connected to ${crowId}`);
     }
-    const line = JSON.stringify({ type: "data", payload });
-    const bytes = Buffer.byteLength(line);
-    const cap = this.lineMaxFor(crowId);
-    if (bytes > cap) throw new PeerLineOverCapError(bytes, cap);
-    peer.conn.write(line + "\n");
+    peer.conn.write(dataLine(payload, this.lineMaxFor(crowId)));
   }
 
   /** The longest line we may send `crowId`: our cap, or the peer's advertised line_max if lower. */
   lineMaxFor(crowId) {
-    const peerMax = this.connections.get(crowId)?.peerLineMax;
+    return this.lineMaxForPeer(this.connections.get(crowId));
+  }
+
+  /** The longest line we may write on THIS connection: our cap, or its advertised line_max if lower. */
+  lineMaxForPeer(peer) {
+    const peerMax = peer?.peerLineMax;
     return Number.isSafeInteger(peerMax) ? Math.min(this.postAdmitLineMax, peerMax) : this.postAdmitLineMax;
+  }
+
+  /**
+   * Z1: reply on the connection a frame ARRIVED on (see onPeerData's `meta.reply`).
+   *
+   * Same framing as `send()` (one `dataLine`, so the two can never diverge), the cap
+   * of THIS connection (its own advertised line_max). Unlike `send()` it never
+   * throws: a link that has closed, or a payload that does not fit it, is a `false`
+   * — the frame being answered is still queued at its sender (the outbox), so a reply
+   * that cannot be written must never break the receive path.
+   *
+   * @returns {boolean} whether the line was written
+   */
+  _replyOn(conn, state, payload) {
+    if (!conn || state?.closed || state?.refused || conn.destroyed) return false;
+    let line;
+    try {
+      line = dataLine(payload, this.lineMaxForPeer(state));
+    } catch (err) {
+      // Over the cap: nothing was written. Ids and sizes only, never a payload (a
+      // frame body can carry a contact's own words).
+      console.warn(`[peer-manager] reply over cap: ${err?.bytes} > ${err?.cap} for ${logSafe(state?.remoteCrowId)}`);
+      return false;
+    }
+    try {
+      conn.write(line);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

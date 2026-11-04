@@ -264,7 +264,8 @@ export function c2cApiRouter(dashboardAuth) {
     return res.json({ ok: true, memberUuid: out.memberUuid, seq: out.seq });
   }));
 
-  // The owner's live-members list (role, state, updateRequired).
+  // The owner's live-members list (role, state, updateRequired, and the Z2
+  // `problem`/`problemReason` pair: why nothing is moving for that member).
   router.get(P + "/projects/:id/members", handler("members", async (req, res, db) => {
     const projectId = projectIdOf(req, res);
     if (projectId === null) return;

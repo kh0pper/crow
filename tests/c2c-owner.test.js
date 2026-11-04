@@ -19,6 +19,7 @@ import {
   inviteContact, setRole, unshareContact, listLiveMembers, onAccept, onDecline,
   createOwnerHandlers,
 } from "../servers/sharing/c2c/owner.js";
+import { onAck, onRefuse, streamOf } from "../servers/sharing/c2c/outbox.js";
 import { AclError, CAPABILITY_KEYS, effectiveCapabilities } from "../servers/shared/project-acl.js";
 import { fill, t } from "../servers/gateway/dashboard/shared/i18n.js";
 
@@ -585,6 +586,7 @@ test("listLiveMembers reports invited, active, the update flag, and skips revoke
     assert.deepEqual(members, [{
       contactId: CONTACT, displayName: "alex", role: "commenter",
       state: "invited", updateRequired: false,
+      problem: null, problemReason: null,
     }]);
 
     await acceptDirect(s);
@@ -603,6 +605,100 @@ test("listLiveMembers reports invited, active, the update flag, and skips revoke
       projectId: s.projectId, contactId: CONTACT, localInstanceId: LOCAL,
     });
     assert.deepEqual(await listLiveMembers(s.db, s.projectId), [], "a revoked member is gone");
+  });
+});
+
+/* ------------------------------------------------------------------- Z2 */
+
+/** The newest queued frame of one kind (the membership's invite, usually). */
+async function frameRow(s, kind = "project.invite") {
+  const { rows } = await s.db.execute({
+    sql: "SELECT * FROM c2c_outbox WHERE kind = ? ORDER BY id DESC LIMIT 1",
+    args: [kind],
+  });
+  return rows[0] ?? null;
+}
+
+/** Answer one queued frame the way the receive pipeline does (outbox.js onRefuse). */
+async function refuseFrame(s, row, reason) {
+  await onRefuse(s.db, {
+    contactId: CONTACT,
+    projectUuid: row.project_uuid,
+    epoch: row.epoch,
+    stream: streamOf(row.to_instance_id),
+    seq: Number(row.seq),
+    reason,
+  });
+}
+
+/** A stored SQLite `datetime('now')`-shaped value, `ms` in the past (UTC). */
+const sqlAgo = (ms) => new Date(Date.now() - ms).toISOString().slice(0, 19).replace("T", " ");
+
+test("Z2: a terminal refusal of the newest frame is shown as refused, with its reason", async () => {
+  await withDb(async (s) => {
+    const { memberUuid } = await invite(s);
+    const row = await frameRow(s);
+    assert.equal(row.epoch, memberUuid, "the invite carries the membership's epoch");
+
+    await refuseFrame(s, row, "stale_epoch");
+    const [member] = await listLiveMembers(s.db, s.projectId);
+    assert.equal(member.problem, "refused");
+    assert.equal(member.problemReason, "stale_epoch", "the reason reaches the owner's UI");
+
+    // Only the CURRENT epoch's frames count (S1): the re-invite just minted a new
+    // membership, so the old epoch's refusal says nothing about it.
+    await invite(s);
+    const [fresh] = await listLiveMembers(s.db, s.projectId);
+    assert.equal(fresh.problem, null);
+    assert.equal(fresh.problemReason, null);
+  });
+});
+
+test("Z2: a HOLDING refusal is not 'refused' (the frame is still queued)", async () => {
+  await withDb(async (s) => {
+    await invite(s);
+    await refuseFrame(s, await frameRow(s), "not_home");
+    const [member] = await listLiveMembers(s.db, s.projectId);
+    assert.equal(member.problem, null, "R5: not_home keeps the frame for another attempt");
+    assert.equal(member.problemReason, null);
+  });
+});
+
+test("Z2: an invite that never gets through is unreachable after 10 attempts or 24 hours", async () => {
+  await withDb(async (s) => {
+    await invite(s);
+    const row = await frameRow(s);
+    const setAttempts = (n, createdAt = null) => s.db.execute({
+      sql: "UPDATE c2c_outbox SET attempts = ?, created_at = COALESCE(?, created_at) WHERE id = ?",
+      args: [n, createdAt, row.id],
+    });
+
+    await setAttempts(1);
+    assert.equal((await listLiveMembers(s.db, s.projectId))[0].problem, null, "one try is not a problem");
+
+    await setAttempts(11);
+    let [member] = await listLiveMembers(s.db, s.projectId);
+    assert.equal(member.problem, "unreachable", "more than 10 unanswered attempts");
+    assert.equal(member.problemReason, null);
+
+    await setAttempts(10);
+    assert.equal((await listLiveMembers(s.db, s.projectId))[0].problem, null,
+      "exactly 10 is still trying (the rule is more than 10)");
+
+    // Queued for over a day with no answer: unreachable even at two attempts.
+    await setAttempts(2, sqlAgo(25 * 60 * 60 * 1000));
+    [member] = await listLiveMembers(s.db, s.projectId);
+    assert.equal(member.problem, "unreachable", "longer than 24 hours unacked");
+
+    // An ack clears it: nothing is waiting any more.
+    await onAck(s.db, {
+      contactId: CONTACT,
+      projectUuid: row.project_uuid,
+      epoch: row.epoch,
+      stream: streamOf(row.to_instance_id),
+      seqs: [Number(row.seq)],
+    });
+    assert.equal((await listLiveMembers(s.db, s.projectId))[0].problem, null);
   });
 });
 

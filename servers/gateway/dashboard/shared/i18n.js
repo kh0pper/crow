@@ -4921,6 +4921,11 @@ export const translations = {
   "projects.c2c.state.left": { en: "Left", es: "Ya no participas" },
   "projects.c2c.state.unshared": { en: "No longer shared", es: "Ya no se comparte" },
   "projects.c2c.updateRequired": { en: "Ask them to update Crow to share with them.", es: "Pídeles que actualicen Crow para compartir con ellos." },
+  // Z2 of the final-review fix wave: the owner sees when an invite or a frame never
+  // got through (owner.js `listLiveMembers`'s `problem`). `{reason}` is a closed
+  // refusal code from outbox.js's TERMINAL_REFUSALS.
+  "projects.c2c.problem.unreachable": { en: "Couldn't reach their Crow. Ask them to update Crow, or try again later.", es: "No se pudo contactar con su Crow. Pídeles que actualicen Crow o inténtalo de nuevo más tarde." },
+  "projects.c2c.problem.refused": { en: "Their Crow refused this ({reason}).", es: "Su Crow rechazó esto ({reason})." },
   "projects.c2c.updateRole": { en: "Update role", es: "Actualizar rol" },
   "projects.c2c.unshare": { en: "Stop sharing", es: "Dejar de compartir" },
   "projects.c2c.unshareConfirm": { en: "Their Crow will be asked to delete it. We can't guarantee a copy wasn't kept.", es: "Se le pedirá a su Crow que lo borre. No podemos garantizar que no se haya guardado una copia." },

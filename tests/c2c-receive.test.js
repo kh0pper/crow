@@ -125,14 +125,18 @@ const contactByCrowId = async (crowId) =>
   (crowId === CROW ? { id: CONTACT, crow_id: CROW, display_name: "Peer" } : null);
 
 /** Deliver one payload through the real pipeline; returns the frames it sent. */
-async function deliver(db, payload, { proof = "cb", handlers = {}, sent = [] } = {}) {
+async function deliver(db, payload, { proof = "cb", handlers = {}, sent = [], replies = null } = {}) {
+  const meta = { proof, instanceId: PEER };
+  // A transport that offers `meta.reply` (PeerManager, Z1): a reply goes back on the
+  // connection the frame arrived on, so it lands in `replies`, never in `sent`.
+  if (replies) meta.reply = (frame) => { replies.push(frame); };
   await handleC2cFrame({
     db,
     send: (crowId, frame) => { sent.push({ crowId, frame }); },
     localInstanceId: LOCAL,
     contactByCrowId,
     handlers,
-  }, CROW, payload, { proof, instanceId: PEER });
+  }, CROW, payload, meta);
   return sent;
 }
 
@@ -190,6 +194,76 @@ async function updateFlag(db, crowId = CROW) {
 }
 
 /* --------------------------------------------------------------- proof */
+
+test("Z1: acks and refusals answer the connection the frame arrived on (meta.reply)", async () => {
+  await withDb(async ({ db }) => {
+    await addProject(db);
+    await addVisit(db);
+    const role = recorder("onRole");
+    const handlers = { onRole: role.handler };
+
+    // The ack of an applied frame: through meta.reply, never through ctx.send.
+    const ackReplies = [];
+    const sent = await deliver(db, mk("project.role"), { handlers, replies: ackReplies });
+    assert.equal(role.calls.length, 1, "the frame was applied");
+    assert.deepEqual(sent, [], "nothing went through ctx.send");
+    assert.deepEqual(ackReplies.map((f) => f.kind), ["project.ack"]);
+    assert.equal(ackReplies[0].to_instance_id, PEER, "the ack names the frame's sender (S3)");
+    assert.deepEqual(ackReplies[0].body, { epoch: EPOCH, stream: LOCAL, seqs: [1] });
+
+    // The refusal of a frame aimed at another instance (a holding `not_home`).
+    const refuseReplies = [];
+    const sent2 = await deliver(db, mk("project.role", { toInstanceId: OTHER }), {
+      handlers, replies: refuseReplies,
+    });
+    assert.deepEqual(sent2, [], "the refusal did not use ctx.send either");
+    assert.deepEqual(refuseReplies.map((f) => f.kind), ["project.refuse"]);
+    assert.equal(refuseReplies[0].body.reason, "not_home");
+    assert.equal(refuseReplies[0].body.stream, OTHER, "the refusal names the frame's own stream");
+    assert.equal(refuseReplies[0].to_instance_id, PEER);
+  });
+});
+
+test("Z1: without meta.reply every ack and refusal falls back to ctx.send", async () => {
+  await withDb(async ({ db }) => {
+    await addProject(db);
+    await addVisit(db);
+    const role = recorder("onRole");
+    const handlers = { onRole: role.handler };
+
+    const acked = await deliver(db, mk("project.role"), { handlers });
+    assert.deepEqual(acked.map((s) => s.frame.kind), ["project.ack"], "the ack goes through send");
+    assert.equal(acked[0].crowId, CROW);
+
+    const refused = await deliver(db, mk("project.role", { toInstanceId: OTHER }), { handlers });
+    assert.deepEqual(refused.map((s) => s.frame.kind), ["project.refuse"]);
+    assert.equal(refused[0].frame.body.reason, "not_home");
+  });
+});
+
+test("Z1: a transport whose reply throws does not break the receive path", async () => {
+  await withDb(async ({ db }) => {
+    await addProject(db);
+    await addVisit(db);
+    const role = recorder("onRole");
+    const sent = [];
+    await withWarnings(async () => {
+      await handleC2cFrame({
+        db,
+        send: (crowId, frame) => { sent.push({ crowId, frame }); },
+        localInstanceId: LOCAL,
+        contactByCrowId,
+        handlers: { onRole: role.handler },
+      }, CROW, mk("project.role"), {
+        proof: "cb", instanceId: PEER,
+        reply: () => { throw new Error("conn is gone"); },
+      });
+    });
+    assert.equal(role.calls.length, 1, "the effect still ran");
+    assert.equal(await highWater(db), 1, "and the seq is committed");
+    assert.deepEqual(sent, [], "the throwing reply is not retried through ctx.send");
+  });
+});
 
 test("sig proof refused update_required (the flag is recorded and no handler runs)", async () => {
   await withDb(async ({ db }) => {

@@ -32,8 +32,8 @@ import { sanitizeDisplayName } from "../display-name.js";
 import { isCbPinnedStrict, lookupPinnedContactKey } from "../contact-binding.js";
 import { CONTACT_CAPS_JSON, memberRole } from "./authz.js";
 import {
-  cancelEpoch, enqueue, flush, nextInviteGeneration, streamOf, unackedUnshareStreams,
-  withTransaction,
+  TERMINAL_REFUSALS, cancelEpoch, enqueue, flush, nextInviteGeneration, streamOf,
+  unackedUnshareStreams, withTransaction,
 } from "./outbox.js";
 import { ROLES as C2C_ROLES, buildFrame, parseFrame } from "./frames.js";
 
@@ -523,16 +523,31 @@ export async function unshareContact(db, {
  * for that key counts: a sibling instance that saw the legacy proof is just as good
  * a reason to ask them to update. A missing table (an old DB) means "no flag".
  *
+ * Z2: `problem` says why the owner has seen nothing happen for this membership, and
+ * `problemReason` carries the refusal's code when there is one (the S2 contract
+ * paragraph in outbox.js):
+ *   - `"refused"` — the membership's NEWEST queued frame for the CURRENT epoch was
+ *     closed by a TERMINAL refusal (`forbidden`, `stale_epoch`, `unsupported`,
+ *     `bad_frame`): the sender will not retry it, so nothing more will arrive;
+ *   - `"unreachable"` — a frame of the current epoch is still unacked after more
+ *     than `UNREACHABLE_ATTEMPTS` tries, or has been queued for longer than
+ *     `UNREACHABLE_AFTER_MS`;
+ *   - `null` — nothing to report.
+ * Only THIS epoch's rows are read (S1): an earlier membership's refusal or stuck
+ * frame says nothing about the current one.
+ *
  * @returns {Promise<Array<{contactId:number, displayName:string,
  *   role:"viewer"|"commenter"|"editor"|null, state:"invited"|"active",
- *   updateRequired:boolean}>>}
+ *   updateRequired:boolean, problem:null|"refused"|"unreachable",
+ *   problemReason:string|null}>>}
  */
 export async function listLiveMembers(db, projectId) {
   const { rows } = await db.execute({
     sql: `SELECT pm.id, pm.contact_id, pm.role, pm.accepted_at, pm.uuid,
-                 c.crow_id, c.display_name
+                 c.crow_id, c.display_name, ps.uuid AS project_uuid
             FROM project_members pm
             LEFT JOIN contacts c ON c.id = pm.contact_id
+            LEFT JOIN project_spaces ps ON ps.id = pm.project_id
            WHERE pm.project_id = ? AND pm.contact_id IS NOT NULL
              AND pm.mode = 'live' AND pm.revoked_at IS NULL
            ORDER BY pm.id`,
@@ -540,15 +555,84 @@ export async function listLiveMembers(db, projectId) {
   });
   const out = [];
   for (const row of rows) {
+    const contactId = Number(row.contact_id);
+    // pm.uuid IS the membership's epoch (every frame of it carries that value).
+    const { problem, problemReason } = await outboxProblemFor(db, {
+      contactId, projectUuid: row.project_uuid, epoch: row.uuid,
+    });
     out.push({
-      contactId: Number(row.contact_id),
+      contactId,
       displayName: sanitizeDisplayName(row.display_name) ?? row.crow_id ?? "",
       role: memberRole(row),
       state: row.accepted_at ? "active" : "invited",
       updateRequired: await updateRequiredFor(db, row.crow_id),
+      problem,
+      problemReason,
     });
   }
   return out;
+}
+
+/** Z2: unanswered send attempts after which a membership reads as unreachable. */
+export const UNREACHABLE_ATTEMPTS = 10;
+
+/** Z2: an unacked frame this old also reads as unreachable (a day with no answer). */
+export const UNREACHABLE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** SQLite `datetime('now')` is UTC; parse a stored time back to ms (0 when absent). */
+function sqlTimeToMs(value) {
+  if (!value) return 0;
+  const t = Date.parse(String(value).replace(" ", "T") + "Z");
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/**
+ * Z2: the `problem` / `problemReason` pair of one membership (see `listLiveMembers`).
+ *
+ * Reads only the current epoch's rows, newest first (S1: another membership's
+ * frames are another stream and have nothing to say about this one).
+ *
+ * - `refused`: the NEWEST frame was CLOSED (`acked_at`) by a terminal refusal
+ *   (`TERMINAL_REFUSALS`, outbox.js R4/R5). It will never be retried, so its reason
+ *   is the whole story and it is reported as `problemReason`.
+ * - `unreachable`: some frame is still unacked and has been tried more than
+ *   `UNREACHABLE_ATTEMPTS` times, or has been queued for longer than
+ *   `UNREACHABLE_AFTER_MS`. A holding refusal (`busy`, `not_home`, `gap`,
+ *   `update_required`) does not change that: it is exactly a frame that has not got
+ *   through (R5).
+ *
+ * An unreadable table (an old DB whose 0016 migration was deferred) or any read
+ * error is "no problem": the panel must render either way.
+ *
+ * @returns {Promise<{problem: null|"refused"|"unreachable", problemReason: string|null}>}
+ */
+async function outboxProblemFor(db, { contactId, projectUuid, epoch }, now = Date.now()) {
+  const none = { problem: null, problemReason: null };
+  if (typeof projectUuid !== "string" || !projectUuid) return none;
+  if (typeof epoch !== "string" || !epoch) return none;
+  let rows;
+  try {
+    ({ rows } = await db.execute({
+      sql: `SELECT kind, attempts, last_refusal, acked_at, created_at
+              FROM c2c_outbox
+             WHERE contact_id = ? AND project_uuid = ? AND epoch = ?
+             ORDER BY id DESC`,
+      args: [contactId, projectUuid, epoch],
+    }));
+  } catch {
+    return none; // no c2c tables here (a host whose 0016 application was deferred)
+  }
+  const newest = rows[0];
+  if (newest && newest.acked_at && TERMINAL_REFUSALS.includes(newest.last_refusal)) {
+    return { problem: "refused", problemReason: String(newest.last_refusal) };
+  }
+  for (const row of rows) {
+    if (row.acked_at) continue;
+    if (Number(row.attempts) > UNREACHABLE_ATTEMPTS) return { problem: "unreachable", problemReason: null };
+    const queuedAt = sqlTimeToMs(row.created_at);
+    if (queuedAt && now - queuedAt > UNREACHABLE_AFTER_MS) return { problem: "unreachable", problemReason: null };
+  }
+  return none;
 }
 
 /** Mirrors `C2C_UPDATE_REQUIRED_PREFIX` in receive.js (importing it would cycle). */

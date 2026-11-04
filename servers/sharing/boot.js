@@ -1060,7 +1060,8 @@ export async function initSharingRuntime(managers, helpers) {
   const loadC2cHandlers = createC2cHandlerLoader();
 
   // Handle data from connected peers (shares, revokes, etc.)
-  // meta = { proof, instanceId } (instanceId is claimed, routing only).
+  // meta = { proof, instanceId, reply } (instanceId is claimed, routing only;
+  // `reply` answers on the connection the frame arrived on — receive.js Z1).
   peerManager.onPeerData = async (crowId, payload, meta) => {
     if (!payload?.type) return;
 

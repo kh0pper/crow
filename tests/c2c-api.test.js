@@ -352,6 +352,7 @@ test("an owner invite is 200, and the member is listed", async () => {
   assert.equal(list.status, 200);
   assert.deepEqual(list.body.members, [{
     contactId: BOUND, displayName: "alex", role: "commenter", state: "invited", updateRequired: false,
+    problem: null, problemReason: null,
   }]);
   // The invite frame is queued (no peer manager in a test process: it stays for the tick).
   assert.deepEqual(await outboxKinds(await uuidOf(p.id)), ["project.invite"], "one invite frame, queued");
@@ -504,6 +505,79 @@ test("the panel's visitor list draws Accept / Decline / Leave for a live visit",
 
   assert.equal(document.querySelector(`[data-c2c-visit="${ended.id}"]`), null,
     "a visit that is over has nothing to answer and is not listed");
+});
+
+/* --------------------------------------------------------------------- Z2 */
+
+test("Z2: the owner is shown a refusal's reason and an unreachable invitation, escaped", async () => {
+  const { onRefuse } = await import("../servers/sharing/c2c/outbox.js");
+  const { c2cMemberRowHtml } = await import("../servers/gateway/dashboard/panels/projects.js");
+  const p = await newProject();
+  await post(`/projects/${p.id}/invite`, { contact_id: BOUND, role: "viewer" });
+
+  /** The project's invite row, as inviteContact queued it. */
+  const inviteRow = async () => (await db.execute({
+    sql: `SELECT o.id, o.project_uuid, o.epoch, o.seq, o.to_instance_id
+            FROM c2c_outbox o JOIN project_spaces ps ON ps.uuid = o.project_uuid
+           WHERE ps.id = ? AND o.kind = 'project.invite'
+           ORDER BY o.id DESC LIMIT 1`,
+    args: [p.id],
+  })).rows[0];
+
+  // A terminal refusal of the invite (what the pipeline calls when the peer says no).
+  const row = await inviteRow();
+  await onRefuse(db, {
+    contactId: BOUND,
+    projectUuid: row.project_uuid,
+    epoch: row.epoch,
+    stream: row.to_instance_id ?? "*",
+    seq: Number(row.seq),
+    reason: "forbidden",
+  });
+
+  const en = parseHTML(`<html><body>${await renderPanel({ view: String(p.id) }, "en")}</body></html>`).document;
+  const refusedEn = en.querySelector(`[data-c2c-member="${BOUND}"] [data-c2c-problem]`);
+  assert.ok(refusedEn, "the refused member carries a problem line");
+  assert.equal(refusedEn.getAttribute("data-c2c-problem"), "refused");
+  assert.equal(refusedEn.textContent, "Their Crow refused this (forbidden).");
+
+  const es = parseHTML(`<html><body>${await renderPanel({ view: String(p.id) }, "es")}</body></html>`).document;
+  assert.equal(
+    es.querySelector(`[data-c2c-member="${BOUND}"] [data-c2c-problem]`).textContent,
+    "Su Crow rechazó esto (forbidden).",
+  );
+
+  // A re-invite is a NEW membership; this one has been tried more than 10 times.
+  await post(`/projects/${p.id}/invite`, { contact_id: BOUND, role: "viewer" });
+  const fresh = await inviteRow();
+  assert.notEqual(fresh.epoch, row.epoch, "the re-invite minted a new epoch");
+  await db.execute({ sql: "UPDATE c2c_outbox SET attempts = 11 WHERE id = ?", args: [fresh.id] });
+
+  const unreachableEn = parseHTML(`<html><body>${await renderPanel({ view: String(p.id) }, "en")}</body></html>`).document
+    .querySelector(`[data-c2c-member="${BOUND}"] [data-c2c-problem]`);
+  assert.equal(unreachableEn.getAttribute("data-c2c-problem"), "unreachable");
+  assert.equal(unreachableEn.textContent,
+    "Couldn't reach their Crow. Ask them to update Crow, or try again later.");
+  const unreachableEs = parseHTML(`<html><body>${await renderPanel({ view: String(p.id) }, "es")}</body></html>`).document
+    .querySelector(`[data-c2c-member="${BOUND}"] [data-c2c-problem]`);
+  assert.equal(unreachableEs.textContent,
+    "No se pudo contactar con su Crow. Pídeles que actualicen Crow o inténtalo de nuevo más tarde.");
+
+  // The reason is a closed refusal code in practice, but the line is escaped like
+  // everything else on the page: a hostile value in the row is never markup.
+  const hostile = c2cMemberRowHtml(p.id, {
+    contactId: BOUND, displayName: "alex", role: "viewer", state: "invited",
+    updateRequired: false, problem: "refused", problemReason: "</div><script>alert(1)</script>",
+  }, "en");
+  assert.ok(hostile.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "the reason is escaped");
+  assert.ok(!hostile.includes("<script>alert(1)</script>"), "and never reaches the page as markup");
+
+  // Nothing to report: no problem line at all.
+  const clean = c2cMemberRowHtml(p.id, {
+    contactId: BOUND, displayName: "alex", role: "viewer", state: "invited",
+    updateRequired: false, problem: null, problemReason: null,
+  }, "en");
+  assert.equal(clean.includes("data-c2c-problem"), false);
 });
 
 test("the panel client is a template literal's worth: no backtick, no dollar-brace, parses", () => {

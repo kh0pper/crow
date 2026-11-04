@@ -268,7 +268,9 @@ test("an admitted line at the cap is delivered, with proof and the claimed insta
   assert.equal(crowId, B.identity.crowId);
   assert.equal(payload.type, "noop");
   assert.equal(payload.pad.length, CAP - JSON.stringify({ type: "data", payload: { type: "noop", pad: "" } }).length);
-  assert.deepEqual(meta, { proof: "cb", instanceId: CLAIMED });
+  const { reply, ...rest } = meta;
+  assert.deepEqual(rest, { proof: "cb", instanceId: CLAIMED });
+  assert.equal(typeof reply, "function", "Z1: the frame carries a reply bound to its connection");
   assert.equal(R.closed, false, "still open");
 });
 
@@ -363,7 +365,9 @@ test("meta.instanceId is null when the claimed id is not in the enroll-id shape 
     const { pa, R } = await admittedRaw(t, A, B, {}, { claimed });
     R.write(dataLine(100) + "\n");
     assert.ok(await until(() => pa.peerData.length === 1, 5000), `${JSON.stringify(claimed)}: delivered`);
-    assert.deepEqual(pa.peerData[0][2], { proof: "cb", instanceId: null }, JSON.stringify(claimed));
+    const { reply, ...rest } = pa.peerData[0][2];
+    assert.deepEqual(rest, { proof: "cb", instanceId: null }, JSON.stringify(claimed));
+    assert.equal(typeof reply, "function", "Z1: the per-connection reply is always offered");
   }
   // Control: the longest valid shape passes through.
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
@@ -371,7 +375,9 @@ test("meta.instanceId is null when the claimed id is not in the enroll-id shape 
   const { pa, R } = await admittedRaw(t, A, B, {}, { claimed: ok });
   R.write(dataLine(100) + "\n");
   assert.ok(await until(() => pa.peerData.length === 1, 5000));
-  assert.deepEqual(pa.peerData[0][2], { proof: "cb", instanceId: ok });
+  const { reply: okReply, ...okRest } = pa.peerData[0][2];
+  assert.deepEqual(okRest, { proof: "cb", instanceId: ok });
+  assert.equal(typeof okReply, "function");
 });
 
 test("a trickled line: over the cap in 64 KiB writes is killed; at the cap it is delivered", { timeout: 60_000 }, async (t) => {

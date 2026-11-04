@@ -864,8 +864,28 @@ const C2C_BTN = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);bord
 const C2C_SELECT = "padding:0.3rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);font-size:0.8rem";
 const C2C_ROW = "display:flex;justify-content:space-between;align-items:start;gap:0.5rem;flex-wrap:wrap;padding:0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);margin-top:0.4rem";
 
-/** One live member: who, the state, the update-required line, and the two controls. */
-function c2cMemberRowHtml(projectId, member, lang) {
+/**
+ * Z2: the one line that says a membership is stuck, or "" when it is not.
+ *
+ * The reason is a closed refusal code (`outbox.js` TERMINAL_REFUSALS), never contact
+ * text, but it is still escaped with the rest of the line: the row comes from the DB,
+ * and no path into the page may skip `escapeHtml`.
+ */
+function c2cProblemHtml(member, lang) {
+  const problem = member?.problem;
+  if (problem !== "refused" && problem !== "unreachable") return "";
+  const text = problem === "refused"
+    ? fill(t("projects.c2c.problem.refused", lang), { reason: String(member.problemReason ?? "") })
+    : t("projects.c2c.problem.unreachable", lang);
+  return `<div data-c2c-problem="${problem}" style="font-size:0.75rem;color:var(--crow-warning,var(--crow-text-secondary));margin-top:0.2rem">${escapeHtml(text)}</div>`;
+}
+
+/**
+ * One live member: who, the state, the update-required line, the Z2 problem line, and
+ * the two controls. Exported so a test can check the escaping of the problem line
+ * directly (`tests/c2c-api.test.js`).
+ */
+export function c2cMemberRowHtml(projectId, member, lang) {
   const role = C2C_ROLES.includes(member.role) ? member.role : "viewer";
   const active = member.state === "active";
   const stateLabel = t(active ? "projects.c2c.state.active" : "projects.c2c.state.invited", lang);
@@ -880,6 +900,7 @@ function c2cMemberRowHtml(projectId, member, lang) {
       <div style="font-weight:600;font-size:0.85rem">${escapeHtml(member.displayName)}</div>
       <div style="margin-top:0.15rem">${badge(stateLabel, active ? "connected" : "draft")}</div>
       ${updateRequired}
+      ${c2cProblemHtml(member, lang)}
     </div>
     <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
       <select data-c2c-member-role aria-label="${escapeHtml(t("projects.c2c.roleLabel", lang))}" style="${C2C_SELECT}">${c2cRoleOptionsHtml(role, lang)}</select>

@@ -65,6 +65,23 @@
  *     generation is refused `stale_epoch`, and the owner UI shows the refusal
  *     (Task 6/7).
  *
+ *     Z2 of the final-review fix wave: WHAT the owner UI shows, exactly. The
+ *     generation is invisible to the person looking at the members list, so
+ *     `owner.js`'s `listLiveMembers` reports, per live member, a `problem` for the
+ *     membership's CURRENT epoch (the `project_members.uuid` row; an earlier epoch's
+ *     rows are never read, S1):
+ *       - `"refused"` (with `problemReason`) when the membership's NEWEST
+ *         `c2c_outbox` row for that epoch was CLOSED (`acked_at`) by a TERMINAL
+ *         refusal of R4 (`forbidden`, `stale_epoch`, `unsupported`, `bad_frame`) —
+ *         the sender will never retry it, so that reason is the whole story;
+ *       - `"unreachable"` when a row of that epoch is still unacked after more than
+ *         10 attempts, or after 24 hours queued — a holding refusal (`busy`,
+ *         `not_home`, `gap`, `update_required`) does not change that, it is exactly
+ *         a frame that has not got through;
+ *       - `null` otherwise.
+ *     The Projects panel draws both lines (en + es, escaped as everything else there),
+ *     and a read error or a missing table is `null`: the panel must render anyway.
+ *
  * S3. Acks and refusals name their frame's stream. `project.ack`'s body is
  *     `{ epoch, stream, seqs }` and `project.refuse`'s is
  *     `{ epoch, stream, seq, reason[, detail] }` (frames.js validates both, and an
@@ -218,6 +235,29 @@
  *     memberships is a follow-up, not this task's. S9's cap bounds the table in the
  *     meantime: a new stream past 512 rows is dropped (with no mark and no reply)
  *     rather than growing it or resetting anyone's marks.
+ *
+ * L1 (documented limitation; plan 2's sync-layer work). `flush` hands each frame to
+ *     the transport's `send(crowId, frame)`, and PeerManager keeps ONE connection per
+ *     crowId — paired siblings share a crowId, so a flush goes to whichever sibling
+ *     connected LAST. A frame aimed at a specific instance (an accept to the owner
+ *     instance O1 while its sibling O2 holds the connection) is therefore refused
+ *     `not_home` by O2 (the routing rule, receive.js step 5), which is a HOLDING
+ *     refusal (R5): it stays queued and is delivered only when the connections change
+ *     (O1 connects, or O2's link drops). Nothing is lost. Replies are NOT affected:
+ *     an ack or a refusal answers the CONNECTION its frame arrived on (`meta.reply`,
+ *     receive.js), not `send(crowId, …)`. Fixing L1 needs connections tracked per
+ *     INSTANCE in PeerManager (crowId → instanceId → conn); that is a sync-layer
+ *     change, scheduled before plan 2, not part of this plan's receive pipeline.
+ *
+ *     Two notes for plan 2 from the same review:
+ *       - an UNKNOWN kind is refused `unsupported` TERMINALLY by a plan-1 Crow (R4:
+ *         the seq is consumed), so a plan-2 sender must know the peer supports a new
+ *         kind BEFORE it sends it — a capability check in the invite/accept exchange
+ *         (or the router), never "send it and see";
+ *       - a per-CONTACT invite rate limit is still owed beyond S9's 512 mark cap: that
+ *         cap bounds `c2c_inbound_seq` ROWS, not how often an owner may invite, and
+ *         every invite mints an epoch (a new mark row on the visitor side, a new
+ *         stream here).
  *
  * Every write the module makes outside a transaction goes through the same
  * per-handle serialization (`write`): `flush`'s attempt bump, `onAck`, `onRefuse`,
