@@ -143,7 +143,12 @@ test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain m
   assert.equal(isTrustedDoorRequest("100.64.20.3", {}), true, "plain tailnet");
   assert.equal(isTrustedDoorRequest("10.0.0.50", {}), false, "LAN socket");
   assert.equal(isTrustedDoorRequest("10.0.0.50", { "x-forwarded-for": "127.0.0.1" }), false, "a header never upgrades an untrusted socket");
-  // public client behind Caddy + Serve (Serve appends the black-swan hop)
+  // A public client behind a proxy that appends in front of Serve: Serve
+  // REPLACES an inbound X-Forwarded-For with the real tailnet source, it does
+  // not append (the Serve behaviour recorded in
+  // bundles/workspace/server/live/routes-live.js), so the two-entry value here
+  // models that appending proxy ahead of Serve. Every entry must be trusted,
+  // and the public one is not.
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "168.171.4.20, 100.64.20.3" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "8.8.8.8" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-real-ip": "8.8.8.8" }), false);
