@@ -65,6 +65,18 @@ export async function lastKeychainExport(db) {
   return (await readState(db)).at;
 }
 
+/**
+ * Whether ONE entry's current sealed value is in the last recorded Export. The vault upload gate
+ * needs a yes/no per entry (the off-site backup key), which unexportedCount cannot answer.
+ */
+export async function entryInLastExport(db, id) {
+  await ensureKeychainTable(db);
+  const row = (await db.execute({ sql: "SELECT secret_sealed FROM crow_keychain WHERE id = ?", args: [Number(id)] })).rows[0];
+  if (!row) return false;
+  const st = await readState(db);
+  return st.fp[Number(id)] !== undefined && st.fp[Number(id)] === fp(row.secret_sealed);
+}
+
 /** Active, readable extension entries whose current sealed value is in no Export. */
 export async function unexportedCount(db, keyId) {
   if (!keyId) return 0;
