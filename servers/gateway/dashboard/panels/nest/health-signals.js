@@ -32,6 +32,14 @@
  *               one warn issue per problem ("artifact-node:<code>"), so each
  *               distinct problem is pushed by the health monitor. An origin
  *               URL configured WITHOUT the socket warns "unmonitored".
+ *   publishedPorts — the audit behind the engine fence (plan PR S5a), read from
+ *               the fence's snapshot file (CROW_PUBLISH_SNAPSHOT): a publish on
+ *               the wildcard/LAN/bridge/an empty host, a tailnet-address publish
+ *               without the interface-pinned raw rule, a rule pinned to a
+ *               different address, a Docker below the floor or a fence facts
+ *               hash mismatch → warn; a fenced or allowlisted publish → info;
+ *               loopback → silent; no readable snapshot → info "unknown", never
+ *               ok-looking. Lists the shapes it could not inspect (M4).
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -63,6 +71,12 @@ import { readReservation } from "../../../box-reservation.js";
 import { localBackupContext, newestBackupOwnership } from "../../../../shared/backup-naming.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 import { createSidecarHealthReader } from "../../../artifact-origin/sidecar-health.js";
+import {
+  inspectPublishedPorts,
+  parseAllowlistSetting,
+  PUBLISHED_PORTS_ALLOWLIST_KEY,
+  DOCKER_FLOOR,
+} from "./published-ports.js";
 import { unexportedCount } from "../../../keychain/reminder.js";
 import { loadKeychainKey } from "../../../keychain/key.js";
 
@@ -1251,6 +1265,178 @@ async function externalEnginesSignal(lang, nowFn) {
   return { id: "externalEngines", severity: null, state: "ok", label, value: lines.join(" · ") };
 }
 
+// Published ports (plan PR S5a) — the audit behind the engine fence. Reads ONE
+// JSON file (see published-ports.js): never docker, never iptables, so this
+// signal cannot hang on a wedged daemon and cannot change anything. A
+// tailnet-address publish is INFO only with the interface-pinned raw rule in
+// the snapshot; anything unfenced is a WARN per (container, port); loopback is
+// silent; a snapshot that cannot be read is "unknown" (info), never ok-looking.
+const PUBLISHED_PORTS_CODE_KEYS = {
+  wildcard: "signals.publishedPorts.wildcard",
+  "empty-host": "signals.publishedPorts.emptyHost",
+  bridge: "signals.publishedPorts.bridge",
+  lan: "signals.publishedPorts.lan",
+  unfenced: "signals.publishedPorts.unfenced",
+  "fence-unknown": "signals.publishedPorts.fenceUnknown",
+  "address-mismatch": "signals.publishedPorts.addressMismatch",
+  "unknown-host": "signals.publishedPorts.unknownHost",
+  "unfenced-protocol": "signals.publishedPorts.unfencedProtocol",
+  "host-network-engine": "signals.publishedPorts.hostNetworkEngine",
+  "host-network": "signals.publishedPorts.hostNetwork",
+};
+
+const PUBLISHED_PORTS_BLIND_KEYS = {
+  "host-network": "signals.publishedPorts.blindHostNetwork",
+  "userland-proxy-false": "signals.publishedPorts.blindUserlandProxy",
+  "rootless-or-podman": "signals.publishedPorts.blindRootless",
+  "other-netns": "signals.publishedPorts.blindNetns",
+};
+
+async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
+  const label = t("signals.publishedPorts.label", lang);
+  const action = {
+    actionLabel: t("signals.publishedPorts.action", lang),
+    actionHref: "/dashboard/extensions",
+  };
+
+  // The operator's allowlist is a LOCAL setting (never synced): a malformed or
+  // unreadable value can only make the audit stricter, never hide a publish.
+  let allowlist = [];
+  try {
+    allowlist = parseAllowlistSetting(await readSetting(db, PUBLISHED_PORTS_ALLOWLIST_KEY));
+  } catch {}
+
+  let audit;
+  try {
+    // `opts.inspect` is a test seam only (a throwing inspector must degrade to
+    // 'off' like every other signal, never escape).
+    const inspect = typeof opts.inspect === "function" ? opts.inspect : inspectPublishedPorts;
+    audit = inspect({
+      nowMs: nowFn(),
+      snapshotPath: opts.snapshotPath,
+      readFile: opts.readFile,
+      allowlist,
+      repoBundlesDir: opts.repoBundlesDir,
+      installedBundlesDir: opts.installedBundlesDir,
+    });
+  } catch {
+    return {
+      id: "publishedPorts", severity: null, state: "off", label,
+      value: t("signals.publishedPorts.off", lang),
+    };
+  }
+
+  // M4: name the shapes this audit could not inspect, in the signal's own output.
+  const blindList = (audit.blindSpots || [])
+    .filter((b) => !b.inspected)
+    .map((b) => t(PUBLISHED_PORTS_BLIND_KEYS[b.code] || b.code, lang))
+    .join(", ");
+  const withBlind = (value) => (blindList
+    ? `${value} · ${fill(t("signals.publishedPorts.blind", lang), { list: blindList })}`
+    : value);
+
+  if (!audit.hasRows) {
+    // Missing / unreadable / malformed snapshot: the direct docker read is OUT
+    // of this build, so "unknown" is the whole answer — info, never a warn.
+    return {
+      id: "publishedPorts", severity: "info", state: "info", label,
+      value: withBlind(t("signals.publishedPorts.unknown", lang)),
+      issueLabel: fill(t("signals.publishedPorts.unknownWhy", lang), { reason: audit.status }),
+    };
+  }
+
+  const issues = [];
+  let warnCount = 0;
+  let infoCount = 0;
+
+  // One issue per (container, port) — the id the plan names — so a v4 and a v6
+  // binding on the same port cannot produce two issues under one id. A warn
+  // always wins over an info for the same id.
+  const byId = new Map();
+  for (const p of audit.publishes) {
+    const prev = byId.get(p.id);
+    if (!prev || (prev.severity !== "warn" && p.severity === "warn")) byId.set(p.id, p);
+  }
+
+  for (const p of byId.values()) {
+    const vars = {
+      name: p.name || String(p.containerId || "container").slice(0, 12),
+      port: p.port ?? "?",
+      addr: p.hostIp || (p.kind === "empty" ? "0.0.0.0" : "?"),
+      proto: p.proto || "?",
+      kind: p.fenced === "port-only"
+        ? t("signals.publishedPorts.kindPortOnly", lang)
+        : t("signals.publishedPorts.kindAddressed", lang),
+    };
+    if (p.severity === "warn") {
+      warnCount++;
+      const key = PUBLISHED_PORTS_CODE_KEYS[p.code] || PUBLISHED_PORTS_CODE_KEYS["unknown-host"];
+      issues.push({
+        id: p.id, severity: "warn", state: "warn", issueOnly: true, label,
+        issueLabel: fill(t(key, lang), vars), ...action,
+      });
+    } else {
+      // Allowlisted and fenced entries are listed, never hidden.
+      infoCount++;
+      const key = p.code === "allowlisted"
+        ? "signals.publishedPorts.infoAllowlisted"
+        : "signals.publishedPorts.infoFenced";
+      issues.push({
+        id: p.id, severity: "info", state: "info", issueOnly: true, label,
+        issueLabel: fill(t(key, lang), vars), ...action,
+      });
+    }
+  }
+
+  // Docker floor (shared constant with the engine-bind rules, PR S3).
+  if (audit.docker.belowFloor === true) {
+    warnCount++;
+    issues.push({
+      id: "published-ports:docker-floor", severity: "warn", state: "warn", issueOnly: true, label,
+      issueLabel: fill(t("signals.publishedPorts.dockerFloor", lang), {
+        version: audit.docker.version, floor: DOCKER_FLOOR,
+      }), ...action,
+    });
+  } else if (audit.docker.belowFloor === null) {
+    infoCount++;
+    issues.push({
+      id: "published-ports:docker-version", severity: "info", state: "info", issueOnly: true, label,
+      issueLabel: t("signals.publishedPorts.dockerUnknown", lang), ...action,
+    });
+  }
+
+  // M4: a saved-facts / conf / docker-flags hash mismatch means the boot apply
+  // would refuse until the operator re-checks the fence.
+  if ((audit.fence.hashMismatch || []).length > 0) {
+    warnCount++;
+    issues.push({
+      id: "published-ports:fence-hashes", severity: "warn", state: "warn", issueOnly: true, label,
+      issueLabel: fill(t("signals.publishedPorts.hashMismatch", lang), {
+        changes: audit.fence.hashMismatch.join(", "),
+      }), ...action,
+    });
+  }
+
+  const parts = [];
+  if (!audit.trusted && audit.ageMs != null) {
+    parts.push(fill(t("signals.publishedPorts.staleValue", lang), { age: formatAge(audit.ageMs) }));
+  }
+  if (warnCount > 0) parts.push(fill(t("signals.publishedPorts.review", lang), { n: warnCount }));
+  if (infoCount > 0) parts.push(fill(t("signals.publishedPorts.fenced", lang), { n: infoCount }));
+  const value = withBlind(parts.length ? parts.join(" · ") : t("signals.publishedPorts.ok", lang));
+
+  const state = warnCount > 0 ? "warn" : parts.length || issues.length ? "info" : "ok";
+  const card = {
+    id: "publishedPorts",
+    severity: state === "ok" ? null : state,
+    state,
+    cardOnly: issues.length > 0, // per-publish issues carry the detail
+    label,
+    value,
+  };
+  return issues.length ? [card, ...issues] : card;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -1259,6 +1445,9 @@ async function externalEnginesSignal(lang, nowFn) {
  * @param {object} db      libsql client
  * @param {object} [opts]
  * @param {function} [opts.now]  Injectable clock: () => number (ms since epoch)
+ * @param {string} [opts.lang]
+ * @param {object} [opts.publishedPorts]  test seams for the publishedPorts signal:
+ *   { snapshotPath, readFile, repoBundlesDir, installedBundlesDir, inspect }
  * @returns {Promise<{ok: boolean, issues: Array, details: Array}>}
  */
 export async function collectHealthSignals(db, opts = {}) {
@@ -1290,6 +1479,7 @@ export async function collectHealthSignals(db, opts = {}) {
     // Deferred so a throwing reader lands in the per-signal catch below
     // instead of escaping the array literal (review M8).
     Promise.resolve().then(() => reservationSignal(lang, nowFn)),
+    Promise.resolve().then(() => publishedPortsSignal(db, lang, nowFn, opts.publishedPorts || {})),
     artifactNodeSignal(lang),
     import("../../../satellites/nest-signals.js").then((m) => m.satellitesSignal(db, lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({
