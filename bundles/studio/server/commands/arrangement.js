@@ -24,11 +24,15 @@
  * undo against:
  *
  *   - placements on one track never overlap;
- *   - a placement plays a clip of its own track;
+ *   - a placement plays a clip of its own track (and so sits on that track for
+ *     good: `arrangement.move` only changes the bar);
  *   - nothing on the timeline runs past bar 999;
  *   - an arrangement holds at most 2048 placements, a song 256 markers and 128
  *     sections;
  *   - sections never overlap each other.
+ *
+ * `arrangement.split` marks itself `undoWhole`: its two halves are one edit, so
+ * the history takes the step back whole or not at all (history.js).
  *
  * None of these is people-only or Studio's own: the operator and the agent lay
  * the song out the same way, under the same lock checks (a placement maps to
@@ -205,9 +209,9 @@ function requireSection(doc, id) {
 /**
  * Refuse a placement whose clip belongs to another track.
  *
- * A placement plays a clip of its own track: a clip has one track, so moving a
- * placement to a different track is only allowed when that is the clip's own
- * track.
+ * A placement plays a clip of its own track, and a clip has exactly one track,
+ * so the placement's lane follows from the clip (which is why nothing can move
+ * a placement to another track).
  * @param {Y.Map<any>} clip
  * @param {string} trackId
  * @returns {void}
@@ -372,46 +376,33 @@ defineCommand({
 
 defineCommand({
   id: "arrangement.move",
-  title: "Move a placement to another bar or track",
+  title: "Move a placement to another bar",
   schema: z
     .object({
       id: idSchema.describe("the placement to move"),
-      start_bar: z.number().int().min(0).optional().describe("the bar it now starts at, from 0"),
-      track_id: idSchema.optional().describe("the track it now sits on; the clip must belong to it"),
+      start_bar: z.number().int().min(0).describe("the bar it now starts at, from 0"),
     })
-    .strict()
-    .refine(
-      (args) => args.start_bar !== undefined || args.track_id !== undefined,
-      "arrangement.move needs start_bar, track_id or both",
-    ),
+    .strict(),
   summary(args, snap) {
     const placement = placementOf(snap, args.id);
-    const at = args.start_bar ?? placement?.start_bar ?? 0;
-    const track = args.track_id ?? placement?.track_id ?? "";
-    return `Moved the placement of ${placementLabel(snap, args.id)} to bar ${at} on ${labelOfTrack(snap, track)}`;
+    return `Moved the placement of ${placementLabel(snap, args.id)} to bar ${args.start_bar} on ${labelOfTrack(snap, placement?.track_id ?? "")}`;
   },
   touches(args) {
-    return args.track_id === undefined
-      ? [placementRef(args.id)]
-      : [placementRef(args.id), trackRef(args.track_id)];
+    return [placementRef(args.id)];
   },
+  /**
+   * A placement always sits on its clip's own track, so a move only changes the
+   * bar: the track follows from the clip and is not something a caller can
+   * choose.
+   */
   apply(doc, args) {
     const placement = requirePlacement(doc, args.id);
     const clip = requireClip(doc, placement.get("clip_id"));
     const currentStart = Number(placement.get("start_bar"));
-    const currentTrack = placement.get("track_id");
-    const startBar = args.start_bar ?? currentStart;
-    const trackId = args.track_id ?? currentTrack;
-
-    if (trackId !== currentTrack) {
-      requireTrack(doc, trackId);
-      checkClipOnTrack(clip, trackId);
-    }
-
     const next = {
       id: args.id,
-      track_id: trackId,
-      start_bar: startBar,
+      track_id: placement.get("track_id"),
+      start_bar: args.start_bar,
       bars: Number(placement.get("bars")),
       offset_beats: Number(placement.get("offset_beats")),
       fade_in_beats: Number(placement.get("fade_in_beats")) || 0,
@@ -421,19 +412,12 @@ defineCommand({
     checkFreeLane(doc, next);
 
     const ref = placementRef(args.id);
-    const before = {};
-    const after = {};
-    if (startBar !== currentStart) {
-      before[fieldKey(ref, "start_bar")] = currentStart;
-      after[fieldKey(ref, "start_bar")] = startBar;
-      placement.set("start_bar", startBar);
-    }
-    if (trackId !== currentTrack) {
-      before[fieldKey(ref, "track_id")] = currentTrack;
-      after[fieldKey(ref, "track_id")] = trackId;
-      placement.set("track_id", trackId);
-    }
-    return { before, after };
+    if (args.start_bar === currentStart) return { before: {}, after: {} };
+    placement.set("start_bar", args.start_bar);
+    return {
+      before: { [fieldKey(ref, "start_bar")]: currentStart },
+      after: { [fieldKey(ref, "start_bar")]: args.start_bar },
+    };
   },
 });
 
@@ -479,6 +463,9 @@ defineCommand({
 defineCommand({
   id: "arrangement.split",
   title: "Split a placement in two at a bar",
+  // One placement becomes two halves of the same block: taking the step back is
+  // all-or-nothing, so half a split never lands in the song (history.js).
+  undoWhole: true,
   schema: z
     .object({
       id: idSchema.describe("the placement to split"),
@@ -492,20 +479,28 @@ defineCommand({
         .describe("your id for the second half; one is generated when omitted"),
     })
     .strict(),
+  /**
+   * The second half's id is decided before `touches` runs, so the lock and
+   * focus checks see the new placement as well as the old one.
+   */
+  prepareArgs(args) {
+    return args.new_id === undefined ? { ...args, new_id: randomUUID() } : args;
+  },
   summary(args, snap) {
     return `Split the placement of ${placementLabel(snap, args.id)} at bar ${args.at_bar}`;
   },
   touches(args) {
-    return args.new_id === undefined
-      ? [placementRef(args.id)]
-      : [placementRef(args.id), placementRef(args.new_id)];
+    return [placementRef(args.id), placementRef(args.new_id)];
   },
   /**
-   * The first half keeps the id, its fades on the outside and its offset; the
-   * second half gets a new id, starts at the split, and continues the clip
-   * where the first one stopped — so the two together play exactly what the one
-   * placement played, without a gap or a repeat. The fades on the new inner
-   * edge are 0: a split is not a crossfade.
+   * The first half keeps the id, its offset and its fade in; the second half
+   * gets a new id, starts at the split, and continues the clip where the first
+   * one stopped — so the two together play exactly what the one placement
+   * played, without a gap or a repeat. The fades on the new inner edge are 0: a
+   * split is not a crossfade.
+   *
+   * An outer fade longer than the half that keeps it is clamped to that half's
+   * length, because a placement cannot fade for longer than it lasts.
    */
   apply(doc, args) {
     const placement = requirePlacement(doc, args.id);
@@ -531,6 +526,8 @@ defineCommand({
     const firstBars = args.at_bar - start;
     const secondBars = start + bars - args.at_bar;
     const trackId = placement.get("track_id");
+    const firstFadeIn = Math.min(oldFadeIn, firstBars * BEATS);
+    const secondFadeOut = Math.min(oldFadeOut, secondBars * BEATS);
 
     const first = {
       id: args.id,
@@ -538,7 +535,7 @@ defineCommand({
       start_bar: start,
       bars: firstBars,
       offset_beats: offset,
-      fade_in_beats: oldFadeIn,
+      fade_in_beats: firstFadeIn,
       fade_out_beats: 0,
     };
     const second = {
@@ -549,7 +546,7 @@ defineCommand({
       bars: secondBars,
       offset_beats: modulo(offset + firstBars * BEATS, clipLengthBeats(clip)),
       fade_in_beats: 0,
-      fade_out_beats: oldFadeOut,
+      fade_out_beats: secondFadeOut,
     };
     checkPlacementFit(clip, first);
     checkPlacementFit(clip, second);
@@ -559,6 +556,7 @@ defineCommand({
     // placement was placed and neither half grows past the old range.
     placement.set("bars", firstBars);
     placement.set("fade_out_beats", 0);
+    if (firstFadeIn !== oldFadeIn) placement.set("fade_in_beats", firstFadeIn);
     placementMap(doc).set(second.id, objectMap(second));
 
     const ref = placementRef(args.id);
@@ -571,6 +569,10 @@ defineCommand({
       [fieldKey(ref, "bars")]: firstBars,
       [fieldKey(secondRef, "*")]: cloneJson(second),
     };
+    if (oldFadeIn !== firstFadeIn) {
+      before[fieldKey(ref, "fade_in_beats")] = oldFadeIn;
+      after[fieldKey(ref, "fade_in_beats")] = firstFadeIn;
+    }
     if (oldFadeOut !== 0) {
       before[fieldKey(ref, "fade_out_beats")] = oldFadeOut;
       after[fieldKey(ref, "fade_out_beats")] = 0;
@@ -657,6 +659,18 @@ defineCommand({
         .describe("what the performance played, in the order it was played"),
     })
     .strict(),
+  /**
+   * Every performed placement gets its id before `touches` runs, so the lock
+   * and focus checks name each block the performance will make, not just the
+   * tracks it plays on.
+   */
+  prepareArgs(args) {
+    return {
+      ...args,
+      placements: args.placements.map((item) =>
+        item.id === undefined ? { ...item, id: randomUUID() } : item),
+    };
+  },
   summary(args) {
     const count = args.placements.length;
     return count === 1
@@ -666,7 +680,7 @@ defineCommand({
   touches(args) {
     const refs = [];
     for (const item of args.placements) {
-      if (typeof item.id === "string" && item.id !== "") refs.push(placementRef(item.id));
+      refs.push(placementRef(item.id));
       refs.push(trackRef(item.track_id));
     }
     return refs;
@@ -689,7 +703,7 @@ defineCommand({
       requireTrack(doc, item.track_id);
       const clip = requireClip(doc, item.clip_id);
       checkClipOnTrack(clip, item.track_id);
-      const id = item.id ?? randomUUID();
+      const id = item.id;
       if (getPlacement(doc, id) || seen.has(id)) {
         refuseInvalid(`A placement with id "${id}" already exists in this song.`);
       }

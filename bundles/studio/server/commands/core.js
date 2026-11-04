@@ -322,6 +322,36 @@ function clampComp(segments, limit) {
   return out;
 }
 
+/**
+ * Keep a clip's placements valid when the clip's length changes.
+ *
+ * A placement starts inside its clip, so an offset that no longer fits is
+ * folded back into the clip the way the clip loops under a placement longer
+ * than it — `offset % length` — which keeps it on the sixteenth-of-a-beat grid,
+ * because both the offset and the length are whole grid steps. Each offset that
+ * actually changes is recorded as one `placement:<id>|offset_beats` pair, so the
+ * clip's own length change and the placements it moved undo together.
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @param {number} lengthBeats - the clip's length after the change
+ * @param {Object<string, any>} before - the step's before map, filled in
+ * @param {Object<string, any>} after - the step's after map, filled in
+ * @returns {void}
+ */
+function wrapPlacementOffsets(doc, clipId, lengthBeats, before, after) {
+  if (!(lengthBeats > 0)) return;
+  for (const { id, placement } of placementEntries(doc)) {
+    if (placement.get("clip_id") !== clipId) continue;
+    const offset = Number(placement.get("offset_beats")) || 0;
+    const wrapped = offset % lengthBeats;
+    if (wrapped === offset) continue;
+    const ref = placementRef(id);
+    before[fieldKey(ref, "offset_beats")] = offset;
+    after[fieldKey(ref, "offset_beats")] = wrapped;
+    placement.set("offset_beats", wrapped);
+  }
+}
+
 /** @returns {string} a beat or bar position without float noise. */
 function beatText(beats) {
   return String(Math.round(beats * 1000) / 1000);
@@ -1074,7 +1104,7 @@ defineCommand({
   },
   touches(args, snap) {
     const clip = snap.clips[args.clip_id];
-    const refs = [clipRef(args.clip_id)];
+    const refs = [clipRef(args.clip_id), ...placementRefsOfClip(snap, args.clip_id)];
     if (clip) refs.push(trackRef(clip.track_id));
     return refs;
   },
@@ -1085,6 +1115,7 @@ defineCommand({
     }
     const name = clip.get("name") ?? args.clip_id;
     const ref = clipRef(args.clip_id);
+    const lengthBeats = args.length_bars * BEATS;
 
     // An audio clip has no notes to fit, but its comp says which take plays
     // over which beats: a shorter clip cuts the segment that crosses its new
@@ -1092,7 +1123,7 @@ defineCommand({
     if (isAudioClip(clip)) {
       const beforeLength = fieldValue(clip, "length_bars");
       const beforeComp = fieldValue(clip, "comp") ?? [];
-      const nextComp = clampComp(beforeComp, args.length_bars * BEATS);
+      const nextComp = clampComp(beforeComp, lengthBeats);
       const compChanged = JSON.stringify(nextComp) !== JSON.stringify(beforeComp);
       clip.set("length_bars", args.length_bars);
       const before = { [fieldKey(ref, "length_bars")]: beforeLength };
@@ -1102,22 +1133,23 @@ defineCommand({
         before[fieldKey(ref, "comp")] = beforeComp;
         after[fieldKey(ref, "comp")] = cloneJson(nextComp);
       }
+      // Its placements keep starting inside it: an offset past the new end
+      // wraps into the shorter clip, in the same step.
+      wrapPlacementOffsets(doc, args.clip_id, lengthBeats, before, after);
       return { before, after };
     }
 
     const notes = toPlain(clip.get("notes")) ?? [];
-    const limit = args.length_bars * BEATS;
     for (const note of notes) {
-      if (note.t + note.d > limit) {
+      if (note.t + note.d > lengthBeats) {
         refuseInvalid(`Clip "${name}" has notes past ${barsText(args.length_bars)}; move or remove them first.`);
       }
     }
-    const before = fieldValue(clip, "length_bars");
+    const before = { [fieldKey(ref, "length_bars")]: fieldValue(clip, "length_bars") };
+    const after = { [fieldKey(ref, "length_bars")]: args.length_bars };
     clip.set("length_bars", args.length_bars);
-    return {
-      before: { [fieldKey(ref, "length_bars")]: before },
-      after: { [fieldKey(ref, "length_bars")]: args.length_bars },
-    };
+    wrapPlacementOffsets(doc, args.clip_id, lengthBeats, before, after);
+    return { before, after };
   },
 });
 

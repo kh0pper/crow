@@ -68,7 +68,7 @@ import {
   readField as readDocField,
   splitRefField,
 } from "./doc.js";
-import { StudioError } from "./commands/registry.js";
+import { StudioError, getCommand, hasCommand } from "./commands/registry.js";
 
 /** The command id an undo entry carries. */
 export const UNDO_COMMAND = "history.undo";
@@ -88,6 +88,28 @@ const REF_ORDER = Object.freeze({ song: 0, track: 1, scene: 2, clip: 3 });
  * `null`, so it survives `JSON.stringify` (which drops `undefined` keys).
  */
 const ABSENT = null;
+
+/**
+ * Why a step that may only be taken back whole is refused: one of its pieces
+ * was edited again since, and putting the rest back would leave half an edit.
+ */
+const UNDO_WHOLE_CONFLICT = Object.freeze([
+  "Part of that split was changed since; undo the later edits first, or move the pieces by hand.",
+]);
+
+/**
+ * Whether the step behind a history entry is one that only makes sense whole
+ * (the command it records says `undoWhole`, see registry.js). A split turns one
+ * placement into two, so putting one half back is not a state the song was ever
+ * in: the whole step goes back, or none of it does.
+ * @param {object|null} entry - a history entry
+ * @returns {boolean}
+ */
+function undoWhole(entry) {
+  const id = entry?.command;
+  if (typeof id !== "string" || id === "") return false;
+  return hasCommand(id) && getCommand(id).undoWhole === true;
+}
 
 /**
  * What `readField` reports for a single field whose owning object is not in the
@@ -310,6 +332,12 @@ export function makeEntry({
  * has moved on means the object the step wrote to is not the object that is
  * there now, so nothing on that ref is restored either.
  *
+ * A step whose command says `undoWhole` — today `arrangement.split` — is never
+ * undone in part: if ANY of its keys conflicts, the plan comes back EMPTY with
+ * one reason in `blocked`, and the whole step waits for the later edits to go
+ * first. `planRedo` runs this same comparison, so a redo of such a step is
+ * planned by the same rule.
+ *
  * The plan is then dry-run on a clone of the document (see `dryRun`). If any
  * of it would leave the song invalid, `apply` comes back EMPTY and `blocked`
  * says why — a caller that gets an empty `apply` has nothing to undo and
@@ -414,6 +442,12 @@ export function planUndo(doc, entry) {
         owner_changed: true,
       });
     }
+  }
+
+  // A step that is one edit from end to end cannot go back in pieces: as soon
+  // as one of its keys has moved on, the whole undo is refused.
+  if (conflicts.length > 0 && undoWhole(entry)) {
+    return { apply: new Map(), conflicts, blocked: [...UNDO_WHOLE_CONFLICT] };
   }
 
   const apply = orderPlan(planned);

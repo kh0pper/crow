@@ -235,16 +235,17 @@ test("place refuses a clip of another track", (t) => {
   assert.match(error.message, /belongs to track/);
   assert.deepEqual(placementsOf(s.doc), {});
 
-  // Moving a placement to a track its clip is not on is refused the same way,
-  // and so is moving it to a track the song does not have.
+  // A placement plays a clip of its own track, so there is nothing that moves
+  // it to another lane: `arrangement.move` takes a bar and nothing else.
   s.run("arrangement.place", { id: "p-a", track_id: keys, clip_id: keysClip, start_bar: 0 });
-  refuses(() => s.run("arrangement.move", { id: "p-a", track_id: bass }), "invalid");
-  refuses(() => s.run("arrangement.move", { id: "p-a", track_id: "ghost-track" }), "not_found");
+  refuses(() => s.run("arrangement.move", { id: "p-a", track_id: bass, start_bar: 4 }), "invalid");
   assert.equal(placementOf(s.doc, "p-a").track_id, keys);
+  assert.equal(placementOf(s.doc, "p-a").start_bar, 0);
 
   // A placement of a clip whose track it is on moves along that track.
   s.run("arrangement.move", { id: "p-a", start_bar: 8 });
   assert.equal(placementOf(s.doc, "p-a").start_bar, 8);
+  assert.equal(placementOf(s.doc, "p-a").track_id, keys);
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
@@ -359,6 +360,87 @@ test("split makes two placements that play the same audio", (t) => {
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
+test("split clamps an outer fade to its half", (t) => {
+  const s = studio(t);
+  const { track, clip } = placeable(s.doc, { bars: 8 });
+
+  // A twelve-beat fade in on a placement split after one bar: the first half is
+  // only four beats long, so it keeps a four-beat fade rather than a fade
+  // longer than itself.
+  s.run("arrangement.place", { id: "p-a", track_id: track, clip_id: clip, start_bar: 0, bars: 8 });
+  s.run("arrangement.set_fades", { id: "p-a", fade_in_beats: 12, fade_out_beats: 4 });
+  const splitIn = s.run("arrangement.split", { id: "p-a", at_bar: 1, new_id: "p-b" });
+  assert.equal(placementOf(s.doc, "p-a").bars, 1);
+  assert.equal(placementOf(s.doc, "p-a").fade_in_beats, 4);
+  assert.equal(placementOf(s.doc, "p-a").fade_out_beats, 0);
+  assert.equal(placementOf(s.doc, "p-b").fade_out_beats, 4);
+  // The clamped value is part of the step, so the undo puts the longer fade back.
+  assert.equal(splitIn.result.before["placement:p-a|fade_in_beats"], 12);
+  assert.equal(splitIn.result.after["placement:p-a|fade_in_beats"], 4);
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // The same on the way out: a twelve-beat fade out on a placement whose last
+  // half is one bar long keeps four beats of fade, recorded on the second half.
+  s.run("arrangement.set_fades", { id: "p-b", fade_in_beats: 0, fade_out_beats: 12 });
+  const splitOut = s.run("arrangement.split", { id: "p-b", at_bar: 7, new_id: "p-c" });
+  assert.equal(placementOf(s.doc, "p-b").fade_out_beats, 0);
+  assert.equal(placementOf(s.doc, "p-c").bars, 1);
+  assert.equal(placementOf(s.doc, "p-c").fade_out_beats, 4);
+  assert.equal(splitOut.result.after["placement:p-c|*"].fade_out_beats, 4);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("split names both halves in touched", (t) => {
+  const s = studio(t);
+  const { track, clip } = placeable(s.doc);
+  s.run("arrangement.place", { id: "p-a", track_id: track, clip_id: clip, start_bar: 0, bars: 4 });
+
+  // No `new_id`: the second half's id is decided before the lock and focus
+  // checks run, so `touched` names the placement the split creates.
+  const split = s.run("arrangement.split", { id: "p-a", at_bar: 2 });
+  const secondId = split.result.args.new_id;
+  assert.equal(typeof secondId, "string");
+  assert.ok(secondId.length > 0);
+  assert.deepEqual(split.result.touched, ["placement:p-a", `placement:${secondId}`]);
+  assert.deepEqual(Object.keys(split.result.after), ["placement:p-a|bars", `placement:${secondId}|*`]);
+  assert.deepEqual(Object.keys(placementsOf(s.doc)).sort(), ["p-a", secondId].sort());
+});
+
+test("set_length keeps a split placement editable", (t) => {
+  const s = studio(t);
+  const { track, clip } = placeable(s.doc, { bars: 2 });
+  s.run("arrangement.place", { id: "p-a", track_id: track, clip_id: clip, start_bar: 0, bars: 8 });
+  s.run("arrangement.split", { id: "p-a", at_bar: 1, new_id: "p-b" });
+  assert.equal(placementOf(s.doc, "p-b").offset_beats, 4);
+
+  // Shrinking the clip to one bar leaves the second half four beats into a
+  // four-beat clip: its offset wraps to the clip's start in the same step,
+  // instead of leaving the placement unable to move, resize or split at all.
+  const shortened = s.run("clip.set_length", { clip_id: clip, length_bars: 1 });
+  assert.equal(placementOf(s.doc, "p-b").offset_beats, 0);
+  assert.deepEqual(shortened.result.after, {
+    [`clip:${clip}|length_bars`]: 1,
+    "placement:p-b|offset_beats": 0,
+  });
+  assert.ok(shortened.result.touched.includes("placement:p-b"));
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // Every edit the second half can be asked to make now works on it.
+  s.run("arrangement.move", { id: "p-b", start_bar: 2 });
+  s.run("arrangement.resize", { id: "p-b", bars: 3 });
+  s.run("arrangement.set_fades", { id: "p-b", fade_in_beats: 1, fade_out_beats: 1 });
+  s.run("arrangement.split", { id: "p-b", at_bar: 3, new_id: "p-c" });
+  assert.deepEqual(Object.keys(placementsOf(s.doc)).sort(), ["p-a", "p-b", "p-c"]);
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // The wrap is part of the length step, so undoing it puts the offset back.
+  const undone = s.undo(shortened.entry);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.equal(placementOf(s.doc, "p-b").offset_beats, 4);
+  assert.equal(snapshot(s.doc).clips[clip].length_bars, 2);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
 test("record_performance is one undo step", (t) => {
   const s = studio(t);
   const guitar = addTrack(s.doc, "Guitar");
@@ -405,6 +487,19 @@ test("record_performance is one undo step", (t) => {
   const redone = s.redo(undone.entry);
   assert.deepEqual(redone.plan.conflicts, []);
   assert.deepEqual(Object.keys(placementsOf(s.doc)).sort(), ["perf-1", "perf-2", "perf-3"]);
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // A performance that names none of its placements gets an id for each one
+  // before the lock check runs, so `touched` names every object it creates.
+  const unnamed = s.run("arrangement.record_performance", {
+    placements: [{ track_id: guitar, clip_id: guitarClip, start_bar: 40, bars: 2 }],
+  });
+  const generated = unnamed.result.args.placements[0].id;
+  assert.equal(typeof generated, "string");
+  assert.ok(generated.length > 0);
+  assert.ok(unnamed.result.touched.includes(`placement:${generated}`));
+  assert.ok(`placement:${generated}|*` in unnamed.result.after);
+  assert.deepEqual(Object.keys(placementsOf(s.doc)).sort(), ["perf-1", "perf-2", "perf-3", generated].sort());
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
