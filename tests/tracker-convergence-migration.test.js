@@ -23,6 +23,11 @@ const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 // DO NOT "fix" 0002 if you hit this — fix the fixture.
 function markPhaseADone(c) {
   c.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
+  // 0000-tasks-base too: it is already on file for every existing instance (it
+  // creates the base tables on a FRESH store, and is a logged no-op on one that
+  // has them). Case (b) below needs a store where tasks_items is genuinely
+  // absent, which a registry pass that includes 0000 would never see.
+  c.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES ('0000-tasks-base', datetime('now'))").run();
   c.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES ('0001-board-stages', datetime('now'))").run();
   c.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES ('0002-board-defs', datetime('now'))").run();
 }
