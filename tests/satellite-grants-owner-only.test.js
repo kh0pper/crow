@@ -97,9 +97,28 @@ test("a signed peer's patch of a peer-managed bot cannot add or remove a satelli
 
 test("a bundle that becomes satellite-hosted starts with no bot grants", async () => {
   await setDef({ tools: { crow_mcp: ["crow-memory/crow_recall", "gitea/gitea_create_repo", "gitea__gitea_list_repos", "gitea"] }, permission_policy: { confirm: ["gitea/gitea_create_repo"] } });
-  const changed = await stripBotGrantsForBundle(db, "gitea");
+  const { changed, failed } = await stripBotGrantsForBundle(db, "gitea");
   assert.deepEqual(changed, [BOT]);
+  assert.deepEqual(failed, []);
   const def = await defNow();
   assert.deepEqual(def.tools.crow_mcp, ["crow-memory/crow_recall"]);
   assert.deepEqual(def.permission_policy.confirm, ["gitea/gitea_create_repo"], "asking first is kept (never wider)");
+});
+
+test("clearing grants retries a compare-and-swap miss, and reports what it could not clear", async () => {
+  await setDef({ tools: { crow_mcp: ["gitea/gitea_create_repo"] }, permission_policy: {} });
+  let misses = 1;
+  const flaky = { execute: async (q) => {
+    if (q.sql.startsWith("UPDATE") && misses > 0) { misses--; return { rowsAffected: 0 }; }
+    return db.execute(q);
+  } };
+  const r1 = await stripBotGrantsForBundle(flaky, "gitea");
+  assert.deepEqual(r1.changed, [BOT], "the second attempt lands");
+  assert.deepEqual((await defNow()).tools.crow_mcp, []);
+  await setDef({ tools: { crow_mcp: ["gitea/gitea_create_repo"] }, permission_policy: {} });
+  const never = { execute: async (q) => (q.sql.startsWith("UPDATE") ? { rowsAffected: 0 } : db.execute(q)) };
+  const lines = [];
+  const r2 = await stripBotGrantsForBundle(never, "gitea", { log: (l) => lines.push(l) });
+  assert.deepEqual(r2.failed, [BOT]);
+  assert.ok(lines.some((l) => /could not clear/.test(l)), "it says so");
 });
