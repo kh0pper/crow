@@ -69,8 +69,10 @@ export async function stripBotGrantsForBundle(db, bundle, { log = () => {} } = {
     const kept = mcp.filter((k) => { const e = splitEntry(k); return !(e && e[0] === bundle) && k !== bundle; });
     if (kept.length === mcp.length) continue;
     def.tools.crow_mcp = kept;
-    await db.execute({ sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = ? AND definition = ?", args: [JSON.stringify(def), row.bot_id, row.definition] });
-    changed.push(String(row.bot_id));
+    const r = await db.execute({ sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = ? AND definition = ?", args: [JSON.stringify(def), row.bot_id, row.definition] });
+    // Compare-and-swap: a concurrent edit makes this miss; never report it as cleared.
+    if (Number(r?.rowsAffected ?? 0) > 0) changed.push(String(row.bot_id));
+    else log(`[satellites] ${bundle}: bot ${row.bot_id} changed meanwhile; its grants for ${bundle} were not cleared — check it in Bot Builder`);
   }
   if (changed.length) log(`[satellites] ${bundle} is satellite-hosted now: cleared its grants on ${changed.length} bot(s); grant them again in Bot Builder`);
   return changed;
