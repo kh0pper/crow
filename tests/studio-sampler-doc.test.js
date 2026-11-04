@@ -360,6 +360,27 @@ test("undo of a lock edit keeps a newer edit on another step", (t) => {
   assert.deepEqual(snapshot(s.doc).steps[stepKey(clip, "a", 4, bankId, 0)].locks, { cutoff_hz: 9001 });
 });
 
+test("every pad field can be locked on a step, and nothing else", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: 16 });
+  s.run("step.toggle", { clip_id: clip, pattern_id: "a", at: 0, bank_id: bankId, index: 0 });
+  const at = { clip_id: clip, pattern_id: "a", at: 0, bank_id: bankId, index: 0 };
+
+  s.run("step.set", { ...at, locks: { attack_ms: 12, sustain: 0.25, filter_type: "hp" } });
+  assert.deepEqual(snapshot(s.doc).steps[stepKey(clip, "a", 0, bankId, 0)].locks, {
+    attack_ms: 12,
+    sustain: 0.25,
+    filter_type: "hp",
+  });
+
+  refuses(() => s.run("step.set", { ...at, locks: { filter_type: "notch" } }), "invalid");
+  refuses(() => s.run("step.set", { ...at, locks: { sustain: 2 } }), "invalid");
+  refuses(() => s.run("step.set", { ...at, locks: { sample_id: "x" } }), "invalid");
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
 test("undo of one pad's edit keeps a newer edit on another pad", (t) => {
   const s = studio(t);
   const { trackId, bankId } = addKit(s.doc);

@@ -347,10 +347,13 @@ const lockFields = {
   gain_db: z.number().finite().min(-60).max(12).describe("level in dB, -60 to +12"),
   cutoff_hz: z.number().finite().min(20).max(20000).describe("the pad filter's cutoff, 20-20000 Hz"),
   resonance: z.number().finite().min(0).max(1).describe("the pad filter's resonance, 0-1"),
+  attack_ms: z.number().finite().min(0).max(10000).describe("attack in ms, 0-10000"),
   decay_ms: z.number().finite().min(0).max(10000).describe("decay in ms, 0-10000"),
+  sustain: z.number().finite().min(0).max(1).describe("sustain level, 0-1"),
   release_ms: z.number().finite().min(0).max(10000).describe("release in ms, 0-10000"),
   pan: z.number().finite().min(-1).max(1).describe("pan, -1 left to +1 right"),
   reverse: z.boolean().describe("play the sound backwards"),
+  filter_type: z.enum(PAD_FILTER_TYPES).describe('the pad filter\'s type: "off", "lp", "hp" or "bp"'),
 };
 
 /** What one step overrides for its own voice: pad fields and their values. */
@@ -360,10 +363,13 @@ const locksSchema = z
     gain_db: lockFields.gain_db.optional(),
     cutoff_hz: lockFields.cutoff_hz.optional(),
     resonance: lockFields.resonance.optional(),
+    attack_ms: lockFields.attack_ms.optional(),
     decay_ms: lockFields.decay_ms.optional(),
+    sustain: lockFields.sustain.optional(),
     release_ms: lockFields.release_ms.optional(),
     pan: lockFields.pan.optional(),
     reverse: lockFields.reverse.optional(),
+    filter_type: lockFields.filter_type.optional(),
   })
   .strict()
   .describe(`the pad fields this one step overrides; at most ${LIMITS.locksPerStep}`);
