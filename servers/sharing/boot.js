@@ -34,6 +34,8 @@ import { wireContactBinding } from "./contact-binding.js";
 import { crowIdMatchesKey } from "./identity.js";
 import { isPeerLineOverCap } from "./peer-manager.js";
 import { importedShareSource } from "../shared/summary-source.js";
+import { handleC2cFrame } from "./c2c/receive.js";
+import { flush as flushC2cOutbox } from "./c2c/outbox.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
@@ -967,12 +969,70 @@ export async function initSharingRuntime(managers, helpers) {
     } catch (err) {
       console.warn(`[sharing] deliverPendingShares for ${crowId}: ${err.message}`);
     }
+
+    // Crow-to-Crow: the contact just came online, so its unacked frames go out
+    // (including any that piled up while it was away). Never throws into the
+    // connection callback; an old DB without 0016 only warns.
+    try {
+      const sent = await flushC2cOutbox(db, (frame) => peerManager.send(crowId, frame), { contactId: Number(c.id) });
+      if (sent > 0) console.log(`[c2c] sent ${sent} queued frame(s) to ${crowId}`);
+    } catch (err) {
+      console.warn(`[c2c] flush on connect for ${crowId}: ${err?.message || err}`);
+    }
+  };
+
+  // The owner (owner.js) and visitor (visitor.js) handlers, loaded lazily: those
+  // modules land in Tasks 6 and 7, and a host whose migration was deferred must
+  // still boot. With neither present, a sequenced kind is refused `unsupported`
+  // (the receive pipeline's failure path), never dropped.
+  let c2cHandlersPromise = null;
+  const loadC2cHandlers = () => {
+    if (!c2cHandlersPromise) {
+      c2cHandlersPromise = (async () => {
+        const handlers = {};
+        for (const spec of ["./c2c/owner.js", "./c2c/visitor.js"]) {
+          try {
+            Object.assign(handlers, await import(spec));
+          } catch (err) {
+            if (err?.code !== "ERR_MODULE_NOT_FOUND") {
+              console.warn(`[c2c] handler module ${spec} failed: ${err?.message || err}`);
+            }
+          }
+        }
+        return handlers;
+      })();
+    }
+    return c2cHandlersPromise;
   };
 
   // Handle data from connected peers (shares, revokes, etc.)
-  // meta = { proof, instanceId } (instanceId is claimed, routing only); unused here.
-  peerManager.onPeerData = async (crowId, payload, _meta) => {
+  // meta = { proof, instanceId } (instanceId is claimed, routing only).
+  peerManager.onPeerData = async (crowId, payload, meta) => {
     if (!payload?.type) return;
+
+    // Crow-to-Crow project frames: proof, routing, dedupe, authorization and
+    // dispatch live in receive.js. `meta.instanceId` is the peer's CLAIMED id and
+    // is used for routing only, never for authorization.
+    if (payload.type === "c2c") {
+      try {
+        await handleC2cFrame({
+          db,
+          send: (toCrowId, frame) => peerManager.send(toCrowId, frame),
+          localInstanceId: localIdOf(managers),
+          contactByCrowId: async (id) => {
+            const { rows } = await db.execute({
+              sql: "SELECT * FROM contacts WHERE crow_id = ? AND is_blocked = 0 LIMIT 1",
+              args: [id],
+            });
+            return rows[0] ?? null;
+          },
+          handlers: await loadC2cHandlers(),
+        }, crowId, payload, meta);
+      } catch (err) {
+        console.warn(`[c2c] receive failed: ${err?.message || err}`);
+      }
+      return;
+    }
 
     const contact = await db.execute({
       sql: "SELECT * FROM contacts WHERE crow_id = ? AND is_blocked = 0",
@@ -1124,4 +1184,37 @@ export async function initSharingRuntime(managers, helpers) {
   syncManager.onEntry = async (contactId, entry) => {
     console.log(`[sharing] Received Hypercore entry for contact ${contactId}:`, entry.type);
   };
+
+  // Crow-to-Crow: retry the unacked frames of CONNECTED contacts every 60 s. A
+  // `not_home` from a sibling, a `busy` hold or a link that dropped mid-flush all
+  // leave rows queued, and this tick is what eventually gets them out. It runs
+  // outside any transaction (S4) and the timer is unref'd, so it never holds the
+  // process open; `managers.c2cFlushStop()` is the shutdown hook.
+  let c2cFlushing = false;
+  const flushConnectedC2c = async () => {
+    if (c2cFlushing) return;
+    c2cFlushing = true;
+    try {
+      const crowIds = typeof peerManager.getConnectedPeers === "function"
+        ? peerManager.getConnectedPeers()
+        : [...(peerManager.connections?.keys?.() ?? [])];
+      for (const crowId of crowIds) {
+        try {
+          const { rows } = await db.execute({
+            sql: "SELECT id FROM contacts WHERE crow_id = ? AND is_blocked = 0 LIMIT 1",
+            args: [crowId],
+          });
+          if (!rows[0]) continue; // a paired sibling, not a contact
+          await flushC2cOutbox(db, (frame) => peerManager.send(crowId, frame), { contactId: Number(rows[0].id) });
+        } catch (err) {
+          console.warn(`[c2c] flush for ${crowId}: ${err?.message || err}`);
+        }
+      }
+    } finally {
+      c2cFlushing = false;
+    }
+  };
+  const c2cFlushTimer = setInterval(() => { flushConnectedC2c().catch(() => {}); }, 60_000);
+  c2cFlushTimer.unref?.();
+  managers.c2cFlushStop = () => clearInterval(c2cFlushTimer);
 }

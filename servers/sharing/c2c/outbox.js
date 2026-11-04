@@ -132,7 +132,10 @@
  *          included, so the seq is free again and the frame was not applied;
  *       3. a NEW `withTransaction` runs `consumeInbound` for that seq (R4: it takes
  *          the seq with no effect, so one bad frame never wedges the stream);
- *       4. then the frame is refused `unsupported` — after step 3, never before.
+ *       4. then the frame is refused `unsupported` — after step 3, never before;
+ *       5. if that `consumeInbound` returns false, another delivery took the seq (and
+ *          may have applied the frame): re-ack it as a dup, never refuse it
+ *          `unsupported`.
  *
  * S6. `cancelEpoch` is an optimisation, not a correctness rule (S1, S2 do not need
  *     it): it ends the still-queued frames of an earlier membership so fewer dead

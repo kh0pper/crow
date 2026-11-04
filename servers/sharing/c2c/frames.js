@@ -63,6 +63,31 @@ const isText = (x, max) =>
   typeof x === "string" && x.length > 0 && x.length <= max && x.isWellFormed() && !CTRL.test(x);
 const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
 
+/**
+ * The fields every frame shares, checked before the kind-specific rules. An
+ * unknown kind (a newer Crow's) never reaches cleanBody, but the receiver still
+ * needs its stream address to consume the seq (R4), so parseFrame hands it back.
+ * Null means the envelope itself is broken: bad_frame, with nothing to consume.
+ */
+function parseEnvelope(payload) {
+  const { project_uuid, from_instance_id, to_instance_id, epoch, seq } = payload;
+  if (typeof project_uuid !== "string" || !HEX32.test(project_uuid)) return null;
+  if (!isId(from_instance_id) || !(to_instance_id === null || isId(to_instance_id))) return null;
+  const envelope = { project_uuid, from_instance_id, to_instance_id };
+  // A future kind may be unsequenced, so epoch and seq are optional here — but an
+  // epoch without its seq cannot name a stream, and either one malformed is a
+  // broken frame, not an unknown kind.
+  if (epoch !== undefined) {
+    if (typeof epoch !== "string" || !HEX32.test(epoch)) return null;
+    envelope.epoch = epoch;
+  }
+  if (seq !== undefined) {
+    if (!isSeq(seq)) return null;
+    envelope.seq = seq;
+  }
+  return envelope;
+}
+
 /** Rebuild a body from known keys only; null when invalid. */
 function cleanBody(kind, b) {
   switch (kind) {
@@ -101,7 +126,10 @@ function cleanBody(kind, b) {
 /**
  * Validate an untrusted payload. On success returns a REBUILT frame (known
  * fields only), never the raw payload. Never throws.
- * @returns {{ok:true, frame:object}|{ok:false, reason:"bad_frame"|"unsupported"}}
+ * An unknown kind returns `unsupported` together with its parsed envelope (when
+ * the envelope is valid) so the receive pipeline can consume its seq; a broken
+ * envelope is `bad_frame` with no envelope (there is no stream to name).
+ * @returns {{ok:true, frame:object}|{ok:false, reason:"bad_frame"|"unsupported", envelope?:object}}
  */
 export function parseFrame(payload) {
   const bad = { ok: false, reason: "bad_frame" };
@@ -110,7 +138,10 @@ export function parseFrame(payload) {
     if (payload.v !== 1) return { ok: false, reason: "unsupported" };
     const kind = payload.kind;
     if (typeof kind !== "string" || kind.length > 64) return bad;
-    if (!PLAN1_KINDS.includes(kind)) return { ok: false, reason: "unsupported" };
+    if (!PLAN1_KINDS.includes(kind)) {
+      const envelope = parseEnvelope(payload);
+      return envelope ? { ok: false, reason: "unsupported", envelope } : bad;
+    }
     const { project_uuid, from_instance_id, to_instance_id, epoch, seq, body } = payload;
     if (typeof project_uuid !== "string" || !HEX32.test(project_uuid)) return bad;
     if (!isId(from_instance_id) || !(to_instance_id === null || isId(to_instance_id))) return bad;

@@ -31,8 +31,49 @@ test("an oversized body is bad_frame", () => {
   const r = parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], pad: "x".repeat(5000) } }));
   assert.deepEqual(r, { ok: false, reason: "bad_frame" });
 });
-test("an unknown kind is unsupported", () => {
-  assert.deepEqual(parseFrame(mk("project.invite", { kind: "project.teleport" })), { ok: false, reason: "unsupported" });
+test("an unknown kind is unsupported, with its parsed envelope", () => {
+  // The receiver consumes the seq of a kind it does not know (R4), so it needs the
+  // stream address: a newer Crow's frame must never wedge the stream.
+  assert.deepEqual(parseFrame(mk("project.invite", { kind: "project.teleport" })), {
+    ok: false,
+    reason: "unsupported",
+    envelope: { project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b" },
+  });
+});
+
+test("an unknown kind with a broken envelope is bad_frame, with no envelope", () => {
+  for (const over of [
+    { projectUuid: "nope" },
+    { projectUuid: "A".repeat(32) },
+    { fromInstanceId: "a b" },
+    { fromInstanceId: null },
+    { toInstanceId: 5 },
+    { toInstanceId: "" },
+    { seq: 1.5 },
+    { seq: 0 },
+    { epoch: "B".repeat(32) },
+    { epoch: "" },
+  ]) {
+    const r = parseFrame(mk("project.invite", { kind: "project.teleport", ...over }));
+    assert.deepEqual(r, BAD, JSON.stringify(over));
+  }
+});
+
+test("an unknown, unsequenced kind still returns its envelope (nothing to consume)", () => {
+  const f = mk("project.invite", { kind: "project.teleport" });
+  delete f.seq;
+  delete f.epoch;
+  assert.deepEqual(parseFrame(f), {
+    ok: false,
+    reason: "unsupported",
+    envelope: { project_uuid: U, from_instance_id: "i-a", to_instance_id: "i-b" },
+  });
+});
+
+test("an unknown kind with a null target keeps it null in the envelope", () => {
+  const r = parseFrame(mk("project.invite", { kind: "project.teleport", toInstanceId: null }));
+  assert.equal(r.reason, "unsupported");
+  assert.equal(r.envelope.to_instance_id, null);
 });
 test("a non-integer seq is bad_frame", () => {
   assert.equal(parseFrame(mk("project.role", { seq: 1.5 })).reason, "bad_frame");
@@ -53,8 +94,11 @@ const BAD = { ok: false, reason: "bad_frame" };
 test("v other than 1 is unsupported", () => {
   assert.deepEqual(parseFrame({ ...mk("project.role"), v: 2 }), { ok: false, reason: "unsupported" });
 });
-test("project.comment is unsupported", () => {
-  assert.deepEqual(parseFrame(mk("project.role", { kind: "project.comment" })), { ok: false, reason: "unsupported" });
+test("project.comment is unsupported, with its envelope", () => {
+  const r = parseFrame(mk("project.role", { kind: "project.comment" }));
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "unsupported");
+  assert.deepEqual(r.envelope, { project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b" });
 });
 test("__proto__ and extra keys are stripped; Object.prototype untouched", () => {
   const raw = JSON.parse(`{"type":"c2c","v":1,"kind":"project.role","project_uuid":"${U}","epoch":"${E}","seq":1,
