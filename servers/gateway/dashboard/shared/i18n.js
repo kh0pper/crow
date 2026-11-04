@@ -301,6 +301,8 @@ export const translations = {
   "signals.publishedPorts.unknown": { en: "unknown — no fence snapshot", es: "desconocido — no hay instantánea de la valla" },
   "signals.publishedPorts.unknownWhy": { en: "Crow can't read the published-port snapshot ({reason}), so what is reachable beyond loopback is unknown. This build reports unknown rather than reading Docker directly.", es: "Crow no puede leer la instantánea de puertos publicados ({reason}), así que no se sabe qué es accesible más allá de loopback. Esta versión informa «desconocido» en lugar de leer Docker directamente." },
   "signals.publishedPorts.staleValue": { en: "unknown — snapshot {age} old, so no rule in it is trusted", es: "desconocido — instantánea de hace {age}, así que no se puede confiar en ninguna de sus reglas" },
+  "signals.publishedPorts.futureValue": { en: "unknown — the snapshot is dated in the future, so no rule in it is trusted", es: "desconocido — la instantánea tiene fecha futura, así que no se puede confiar en ninguna de sus reglas" },
+  "signals.publishedPorts.listed": { en: "listed below, none fenced", es: "se listan abajo, ninguno protegido" },
   "signals.publishedPorts.review": { en: "{n} to review", es: "{n} por revisar" },
   "signals.publishedPorts.fenced": { en: "{n} fenced", es: "{n} protegidos" },
   "signals.publishedPorts.blind": { en: "not inspected: {list}", es: "sin inspeccionar: {list}" },

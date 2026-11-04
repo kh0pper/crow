@@ -13,7 +13,7 @@
     {
       "id": "a1b2c3d4e5f6",
       "name": "crow-engine-35b",
-      "labels": { "crow.runtime": "docker", "com.docker.compose.project": "grackle-model" },
+      "labels": { "crow.runtime": "docker", "com.docker.compose.project": "example-model" },
       "host_config": {
         "network_mode": "default",
         "port_bindings": {

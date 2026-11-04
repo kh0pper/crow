@@ -38,7 +38,11 @@
  *     "tailscale": { "v4": "100.64.20.5", "v6": "fd7a:115c:a1e0::20" },
  *     "containers": [ {
  *       "id": "0123456789ab", "name": "crow-example",
- *       "labels": { "crow.runtime": "docker", "crow.bundle": "example" },
+ *       "labels": { "crow.runtime": "docker",
+ *                   "crow.bundle": "example",
+ *                   "com.docker.compose.project": "example",
+ *                   "com.docker.compose.project.working_dir":
+ *                     "/home/crow/.crow/bundles/example" },
  *       "host_config": { "network_mode": "default",
  *                        "port_bindings": { "8005/tcp": [ { "HostIp": "0.0.0.0",
  *                                                          "HostPort": "8005" } ] } },
@@ -56,10 +60,28 @@
  * The bundle MANIFEST field read here is `publishedPortsAllowlist` (an array of
  * ports or "<port>/<proto>"), and only from a first-party, version-pinned
  * bundle — see readManifestAllowlist.
+ *
+ * ## Fields the snapshot writer (PR S5b) MUST include
+ *
+ * Beyond `taken_at`, `docker`, `fence`, `tailscale`, `containers`, `listeners`
+ * and `raw_rules`, each container carries the two labels the allowlist check
+ * needs — and both are required, so a writer that omits the second one leaves
+ * every bundle outside its own manifest allowlist (fail closed, never widened):
+ *
+ *   labels["crow.bundle"]                            the bundle the container
+ *                                                    claims to belong to
+ *   labels["com.docker.compose.project.working_dir"] the compose project's
+ *                                                    working directory, which
+ *                                                    must resolve under
+ *                                                    <CROW_HOME>/bundles/<id>
+ *
+ * `containers` itself is required: a snapshot whose `containers` is not an
+ * array is `malformed` (the audit says "unknown"), because an unreadable shape
+ * must never read as "nothing is published beyond loopback".
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCrowHome } from "../../../../shared/crow-home.js";
 
@@ -92,6 +114,14 @@ export const PUBLISHED_PORTS_ALLOWLIST_KEY = "published_ports_allowlist";
  * 80/443.
  */
 export const MANIFEST_ALLOWLIST_KEY = "publishedPortsAllowlist";
+
+/**
+ * The compose label naming the project's working directory on disk. Together
+ * with `crow.bundle` it is what ties a container to an installed bundle — and
+ * it is the half a container cannot fake by labelling itself (the value has to
+ * resolve under `<CROW_HOME>/bundles/<id>`).
+ */
+export const COMPOSE_WORKDIR_LABEL = "com.docker.compose.project.working_dir";
 
 /**
  * The M4 shapes this audit cannot see, or can only see when the snapshot
@@ -137,7 +167,9 @@ export function isIPv6(addr) {
 
 export function isLoopbackAddress(addr) {
   const a = unmapIPv4(addr);
-  return a === "::1" || /^127\./.test(a);
+  // `127.0.0.0/8` only, and only for a real dotted quad: a bare "127." or a
+  // lookalike such as "1270.0.0.1" is not loopback.
+  return a === "::1" || (isIPv4(a) && a.startsWith("127."));
 }
 
 /** This host's tailnet address space: CGNAT v4 and the ULA prefix Tailscale uses. */
@@ -190,30 +222,137 @@ function tokenize(line) {
  *   iface:string|null, portOnly:boolean, dstTypeLocal:boolean, tag:string|null,
  *   id:string|null, generation:string|null}}
  */
+const FENCE_CHAIN = "CROW-ENGINE-FENCE";
+const FENCE_MATCH_MODULES = new Set(["tcp", "udp", "addrtype", "comment"]);
+
 export function parseFenceRule(line) {
   const raw = String(line ?? "").trim();
   if (!raw || !/\bdrop\b/i.test(raw)) return null;
   const tokens = tokenize(raw);
-  const valueAfter = (flag) => {
-    const i = tokens.indexOf(flag);
-    if (i < 0) return null;
+
+  let chain = null;
+  let jump = null;
+  let dest = null;
+  let proto = null;
+  let portToken = null;
+  let destType = null;
+  let comment = null;
+  let iface = null; // only ever set from a `! -i <iface>` pair
+  let negatedIface = false;
+
+  const valueAt = (i) => {
     const v = tokens[i + 1];
-    return v && !v.startsWith("-") ? v : null;
+    return v === undefined || v === "!" || v.startsWith("-") ? null : v;
   };
 
-  const target = valueAfter("-j") || valueAfter("--jump");
-  if (!target || target.toUpperCase() !== "DROP") return null;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    switch (token) {
+      case "-A":
+      case "--append": {
+        const v = valueAt(i);
+        if (v == null || chain != null) return null;
+        chain = v;
+        i++;
+        break;
+      }
+      case "-j":
+      case "--jump": {
+        const v = valueAt(i);
+        if (v == null || jump != null) return null;
+        jump = v;
+        i++;
+        break;
+      }
+      case "-d":
+      case "--destination": {
+        const v = valueAt(i);
+        if (v == null || dest != null) return null;
+        dest = v;
+        i++;
+        break;
+      }
+      case "-p":
+      case "--protocol": {
+        const v = valueAt(i);
+        if (v == null || proto != null) return null;
+        proto = v;
+        i++;
+        break;
+      }
+      case "-m":
+      case "--match": {
+        const v = valueAt(i);
+        if (v == null || !FENCE_MATCH_MODULES.has(v.toLowerCase())) return null;
+        i++;
+        break;
+      }
+      case "--dport":
+      case "--destination-port": {
+        const v = valueAt(i);
+        if (v == null || portToken != null) return null;
+        portToken = v;
+        i++;
+        break;
+      }
+      case "--dst-type": {
+        const v = valueAt(i);
+        if (v == null || destType != null) return null;
+        destType = v;
+        i++;
+        break;
+      }
+      case "--comment": {
+        const v = valueAt(i);
+        if (v == null || comment != null) return null;
+        comment = v;
+        i++;
+        break;
+      }
+      case "!": {
+        // Only the interface pin may be negated, and the `!` must sit
+        // immediately before it. `! -d`, `! -p`, `! --sport`, ... are not
+        // spellings this fence writes, so they reject the whole line.
+        if (negatedIface) return null;
+        const next = tokens[i + 1];
+        if (next !== "-i" && next !== "--in-interface") return null;
+        const v = tokens[i + 2];
+        if (v === undefined || v === "!" || v.startsWith("-")) return null;
+        iface = v;
+        negatedIface = true;
+        i += 2;
+        break;
+      }
+      case "-i":
+      case "--in-interface": {
+        // A plain `-i <iface>` is read but never kept: without the negation it
+        // is not the fence (it would drop tailnet traffic too).
+        const v = valueAt(i);
+        if (v == null) return null;
+        i++;
+        break;
+      }
+      case "-s":
+      case "--source":
+      case "-o":
+      case "--out-interface":
+      case "--sport":
+      case "--source-port":
+        // A fence rule has no source side or output interface.
+        return null;
+      default:
+        // Fail closed on any token this parser does not know (`-m conntrack`,
+        // `-m set`, an unknown option, a stray word).
+        return null;
+    }
+  }
 
-  const portToken = valueAfter("--dport") || valueAfter("--destination-port");
+  if (!jump || jump.toUpperCase() !== "DROP") return null;
   if (!portToken) return null;
   const port = Number(String(portToken).split(":")[0]);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
 
-  const proto = valueAfter("-p") || valueAfter("--protocol");
-  const dest = valueAfter("-d") || valueAfter("--destination");
-  const destType = valueAfter("--dst-type");
-  const comment = valueAfter("--comment") || "";
-  const tag = /crow-engine-fence:([^:\s"]+)(?::(g\d+))?(?::(portonly))?/.exec(comment);
+  const tag = /crow-engine-fence:([^:\s"]+)(?::(g\d+))?(?::(portonly))?/.exec(comment || "");
   // The fence tags every rule it writes. Without the tag this is somebody
   // else's DROP, and counting it as a fence would be a false "ok" — so an
   // untagged line is not a fence rule at all.
@@ -221,39 +360,71 @@ export function parseFenceRule(line) {
 
   return {
     raw,
+    chain,
     port,
     proto: proto ? String(proto).toLowerCase() : null,
     addr: dest ? String(dest).replace(/\/\d+$/, "") : null,
-    iface: valueAfter("-i") || valueAfter("--in-interface") || null,
+    iface,
     portOnly: !dest,
     dstTypeLocal: !!destType && String(destType).toUpperCase() === "LOCAL",
     tag: comment || null,
-    id: tag ? tag[1] : null,
-    generation: tag ? tag[2] || null : null,
+    id: tag[1],
+    generation: tag[2] || null,
   };
 }
 
 /**
  * Parse the snapshot's raw-rule block. Accepts `{ v4: [...], v6: [...] }`, a
  * flat array of lines (all treated as v4), or any of the tolerant aliases the
- * snapshot writer may use. Lines that are not fence-shaped are dropped.
+ * snapshot writer may use. Lines that are not fence-shaped are dropped, and so
+ * is a tagged rule outside CROW-ENGINE-FENCE (it is some other chain's DROP).
+ *
+ * The result records, per family, whether the block contains the PREROUTING
+ * jump into the fence chain: a rule in the chain is only live if the chain is
+ * reachable.
  */
 export function parseFenceRules(rawRules) {
   const block = rawRules && typeof rawRules === "object" && !Array.isArray(rawRules) ? rawRules : null;
   const v4 = block ? block.v4 ?? block.ipv4 ?? block.raw_v4 ?? [] : rawRules;
   const v6 = block ? block.v6 ?? block.ipv6 ?? block.raw_v6 ?? [] : [];
-  const parse = (lines) => (Array.isArray(lines) ? lines : [lines])
-    .map(parseFenceRule)
-    .filter(Boolean);
-  return { v4: parse(v4), v6: parse(v6) };
+  const family = (lines) => {
+    const list = Array.isArray(lines) ? lines : [lines];
+    return {
+      rules: list.map(parseFenceRule).filter(Boolean).filter((r) => r.chain === FENCE_CHAIN),
+      jump: list.some((line) => isFenceJump(line)),
+    };
+  };
+  const parsedV4 = family(v4);
+  const parsedV6 = family(v6);
+  return { v4: parsedV4.rules, v6: parsedV6.rules, jumps: { v4: parsedV4.jump, v6: parsedV6.jump } };
 }
 
-/** Rules that could fence this (address, port): an addressed rule or a port-only one. */
+/** `-A PREROUTING ... -j CROW-ENGINE-FENCE`: the jump that makes the chain reachable. */
+function isFenceJump(line) {
+  const tokens = tokenize(line);
+  const valueOf = (...flags) => {
+    for (let i = 0; i < tokens.length; i++) {
+      if (!flags.includes(tokens[i])) continue;
+      const v = tokens[i + 1];
+      return v && v !== "!" && !v.startsWith("-") ? v : null;
+    }
+    return null;
+  };
+  return valueOf("-A", "--append") === "PREROUTING" && valueOf("-j", "--jump") === FENCE_CHAIN;
+}
+
+/**
+ * Rules that could fence this (address, port): an addressed rule or a port-only
+ * one, inside CROW-ENGINE-FENCE, with the PREROUTING jump present for that
+ * family (a v4 jump says nothing about v6).
+ */
 export function findFenceRule(rules, address, port, proto = "tcp") {
-  const family = isIPv6(unmapIPv4(address)) ? rules.v6 : rules.v4;
+  const family = isIPv6(unmapIPv4(address)) ? "v6" : "v4";
+  // Without the jump into the chain, no rule in it is ever reached.
+  if (!rules?.jumps?.[family]) return null;
   // Interface-pinned only: a rule without `! -i <iface>` is not the fence the
   // plan asks for (it would drop tailnet traffic too), so it does not count.
-  const candidates = family.filter((r) => r.port === port && (!r.proto || r.proto === "tcp") && r.iface);
+  const candidates = (rules[family] || []).filter((r) => r.port === port && (!r.proto || r.proto === "tcp") && r.iface);
   const addressed = candidates.find((r) => r.addr && sameAddress(r.addr, address));
   if (addressed && proto === "tcp") return { kind: "addressed", rule: addressed };
   const portOnly = candidates.find((r) => r.portOnly);
@@ -316,6 +487,15 @@ export function loadPublishSnapshot({
   if (!Number.isFinite(takenAt)) {
     return { status: "malformed", snapshot: null, ageMs: null, reason: "taken_at missing or unparseable", path };
   }
+  // `containers` is not optional. A snapshot whose container list is a string,
+  // an object or missing tells us nothing about what is published — reading it
+  // as an empty list would print "none beyond loopback" for an unknown host.
+  const containerList = Array.isArray(snapshot.containers)
+    ? snapshot.containers
+    : Array.isArray(snapshot.Containers) ? snapshot.Containers : null;
+  if (!containerList) {
+    return { status: "malformed", snapshot: null, ageMs: null, reason: "containers is not an array", path };
+  }
 
   const ageMs = nowMs - takenAt;
   if (ageMs < -FUTURE_SKEW_MS) {
@@ -373,12 +553,18 @@ function normPortBindings(bindings) {
 function normContainer(c) {
   const hostConfig = c?.host_config || c?.HostConfig || {};
   const labels = normLabels(pick(c?.labels, c?.Labels));
+  const rawBindings = pick(hostConfig.port_bindings, hostConfig.PortBindings, c?.port_bindings);
   return {
     id: String(pick(c?.id, c?.short_id, c?.Id, "") || ""),
     name: String(pick(c?.name, c?.Name, "") || ""),
     labels,
     networkMode: String(pick(hostConfig.network_mode, hostConfig.NetworkMode, c?.network_mode, "") || ""),
-    portBindings: normPortBindings(pick(hostConfig.port_bindings, hostConfig.PortBindings, c?.port_bindings)),
+    portBindings: normPortBindings(rawBindings),
+    // A present-but-unreadable port_bindings (an array, a string, a number) is
+    // a shape this module cannot read. It is flagged, never treated as
+    // "nothing published" — see inspectPublishedPorts. `null` is Docker's own
+    // spelling for "no bindings" and stays absent.
+    portBindingsUnreadable: rawBindings != null && (typeof rawBindings !== "object" || Array.isArray(rawBindings)),
     networks: normNetworks(pick(c?.networks, c?.NetworkSettings?.Networks)),
   };
 }
@@ -470,8 +656,17 @@ function publishMatchesAllowlistEntry(entry, publish) {
   if (entry.proto && entry.proto !== publish.proto) return false;
   if (!entry.selector) return true;
   if (entry.selector === "*") return true;
-  const haystack = [publish.name, publish.containerId, publish.bundleId].filter(Boolean).map((s) => String(s).toLowerCase());
-  return haystack.some((h) => h === entry.selector || h.startsWith(entry.selector) || entry.selector.startsWith(h));
+  // A selector names ONE container: it must equal the container's name or its
+  // container id exactly, or the container's bundle id when that identity is
+  // VERIFIED (both the bundle label and a compose working dir under
+  // `<CROW_HOME>/bundles/<id>` — see bundleIdOf). A claimed bundle label on its
+  // own never widens the operator's allowlist. Prefix matching is deliberately
+  // not offered in either direction — `crow` must not cover `crow-caddy`, and a
+  // truncated id must not cover the full one.
+  const haystack = [publish.name, publish.containerId, publish.verifiedBundleId]
+    .filter(Boolean)
+    .map((s) => String(s).toLowerCase());
+  return haystack.some((h) => h === entry.selector);
 }
 
 function normManifestPorts(value) {
@@ -488,9 +683,11 @@ function normManifestPorts(value) {
   return out;
 }
 
+const BUNDLE_ID_RE = /^[A-Za-z0-9._-]+$/;
+
 function readManifestFile(dir, bundleId, readFile) {
   if (!dir || !bundleId) return null;
-  if (!/^[A-Za-z0-9._-]+$/.test(bundleId)) return null; // never join a path segment from a label
+  if (!BUNDLE_ID_RE.test(bundleId)) return null; // never join a path segment from a label
   try {
     const parsed = JSON.parse(readFile(join(dir, bundleId, "manifest.json")));
     return parsed && typeof parsed === "object" ? parsed : null;
@@ -537,14 +734,45 @@ function shortId(id, name) {
   return String(name || "container").slice(0, 12);
 }
 
-/** Crow-labelled means the container carries Crow's own runtime/bundle markers. */
+/** Crow marks its OWN containers with `crow.runtime`; that is the marker that
+ * says "this container is part of this Crow instance". `crow.bundle` and
+ * `crow.component` are descriptive labels a container can carry for other
+ * reasons, so they never make a container Crow-managed by themselves. */
 export function isCrowLabelled(labels) {
   if (!labels || typeof labels !== "object") return false;
-  return Boolean(labels["crow.runtime"] || labels["crow.bundle"] || labels["crow.component"]);
+  return Boolean(labels["crow.runtime"]);
 }
 
-function bundleIdOf(labels) {
-  return labels?.["crow.bundle"] || labels?.["com.docker.compose.project"] || null;
+/** The bundle id a container CLAIMS. Only Crow's own label counts: a compose
+ * project name is set by whoever runs the container. */
+function claimedBundleId(labels) {
+  const id = labels?.["crow.bundle"];
+  return id ? String(id) : null;
+}
+
+/**
+ * The bundle id that may earn a first-party manifest allowlist — and BOTH
+ * labels are required:
+ *
+ *   labels["crow.bundle"]                             the bundle it claims to be
+ *   labels["com.docker.compose.project.working_dir"]  must resolve to
+ *                                                     <installedDir>/<id>
+ *                                                     (or a path inside it)
+ *
+ * A container cannot earn the allowlist by labelling itself: the compose
+ * working dir is what ties it to the installed bundle directory. A missing
+ * working-dir label does not qualify, and `com.docker.compose.project` alone is
+ * never accepted.
+ */
+export function bundleIdOf(labels, { installedDir = installedBundlesDir() } = {}) {
+  const id = claimedBundleId(labels);
+  if (!id || !BUNDLE_ID_RE.test(id)) return null;
+  const workdir = labels?.[COMPOSE_WORKDIR_LABEL];
+  if (typeof workdir !== "string" || !workdir.trim()) return null;
+  if (!installedDir) return null;
+  const root = resolve(String(installedDir), id);
+  const actual = resolve(workdir.trim());
+  return actual === root || actual.startsWith(root + sep) ? id : null;
 }
 
 /**
@@ -591,10 +819,16 @@ function blindSpotReport({ inspected, snapshot }) {
  * @param {string} [opts.repoBundlesDir]
  * @param {string} [opts.installedBundlesDir]
  * @returns {object} { status, trusted, publishes[], docker, fence, blindSpots[], tailnetAddresses[] }
- *   Each publish: { id, containerId, name, bundleId, port, proto, hostIp, kind,
+ *   Each publish: { id, containerId, name, bundleId, verifiedBundleId, port,
+ *                  proto, hostIp, kind,
  *                  severity: "warn"|"info", code, fenced: "addressed"|"port-only"|null,
  *                  allowlisted: boolean }
- *   `id` is the issue id stem: `published-ports:<short-id>:<port>`.
+ *   `id` is the issue id stem: `published-ports:<short-id>:<port>`, and
+ *   `published-ports:<short-id>:host-network` / `…:unknown-host` for the two
+ *   container-level entries. `bundleId` is the bundle the container CLAIMS
+ *   (display only); `verifiedBundleId` is the id that also carries a compose
+ *   working dir under the installed bundle directory, and it is the only
+ *   bundle identity either allowlist accepts.
  */
 export function inspectPublishedPorts({
   nowMs = Date.now(),
@@ -638,9 +872,34 @@ export function inspectPublishedPorts({
   let loopbackCount = 0;
 
   for (const c of containers) {
-    const bundleId = bundleIdOf(c.labels);
-    const allowlistForManifest = bundleId ? manifestAllowlistFor(bundleId) : { qualifies: false, ports: [] };
+    const bundleId = claimedBundleId(c.labels);
+    const allowlistBundleId = bundleIdOf(c.labels, { installedDir });
+    const allowlistForManifest = allowlistBundleId
+      ? manifestAllowlistFor(allowlistBundleId)
+      : { qualifies: false, ports: [] };
     const hostNetwork = c.networkMode.toLowerCase() === "host";
+
+    if (c.portBindingsUnreadable) {
+      // A port_bindings this module cannot read is NOT "nothing published":
+      // the container is flagged so an unreadable shape can never read as
+      // "none beyond loopback".
+      publishes.push({
+        id: `published-ports:${shortId(c.id, c.name)}:unknown-host`,
+        containerId: c.id,
+        name: c.name,
+        bundleId,
+        verifiedBundleId: allowlistBundleId,
+        port: null,
+        proto: null,
+        hostIp: "",
+        kind: "unknown",
+        severity: "warn",
+        code: "unknown-host",
+        fenced: null,
+        allowlisted: false,
+      });
+      continue;
+    }
 
     if (hostNetwork) {
       // A host-network container publishes nothing; its own listeners sit on
@@ -652,6 +911,7 @@ export function inspectPublishedPorts({
         containerId: c.id,
         name: c.name,
         bundleId,
+        verifiedBundleId: allowlistBundleId,
         port: null,
         proto: null,
         hostIp: null,
@@ -671,6 +931,7 @@ export function inspectPublishedPorts({
         containerId: c.id,
         name: c.name,
         bundleId,
+        verifiedBundleId: allowlistBundleId,
         port: binding.port,
         proto: binding.proto,
         hostIp: cls.address || binding.hostIp || "",

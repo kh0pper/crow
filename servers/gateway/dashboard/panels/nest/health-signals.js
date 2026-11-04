@@ -1376,11 +1376,16 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
         issueLabel: fill(t(key, lang), vars), ...action,
       });
     } else {
-      // Allowlisted and fenced entries are listed, never hidden.
-      infoCount++;
-      const key = p.code === "allowlisted"
-        ? "signals.publishedPorts.infoAllowlisted"
-        : "signals.publishedPorts.infoFenced";
+      // Allowlisted, fenced and host-network entries are listed, never hidden.
+      // The message follows the entry's OWN code: a host-network container
+      // publishes no port, so it has no rule to describe and must never be
+      // rendered as fenced.
+      let key;
+      if (p.code === "allowlisted") key = "signals.publishedPorts.infoAllowlisted";
+      else if (p.code === "host-network" || p.code === "host-network-engine") key = "signals.publishedPorts.hostNetwork";
+      else key = "signals.publishedPorts.infoFenced";
+      // …and it is not "fenced" for the count either.
+      if (p.code !== "host-network" && p.code !== "host-network-engine") infoCount++;
       issues.push({
         id: p.id, severity: "info", state: "info", issueOnly: true, label,
         issueLabel: fill(t(key, lang), vars), ...action,
@@ -1419,11 +1424,17 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
 
   const parts = [];
   if (!audit.trusted && audit.ageMs != null) {
-    parts.push(fill(t("signals.publishedPorts.staleValue", lang), { age: formatAge(audit.ageMs) }));
+    // A future-dated snapshot has a negative age: print "in the future", never
+    // a negative number of minutes.
+    parts.push(audit.ageMs < 0
+      ? t("signals.publishedPorts.futureValue", lang)
+      : fill(t("signals.publishedPorts.staleValue", lang), { age: formatAge(audit.ageMs) }));
   }
   if (warnCount > 0) parts.push(fill(t("signals.publishedPorts.review", lang), { n: warnCount }));
   if (infoCount > 0) parts.push(fill(t("signals.publishedPorts.fenced", lang), { n: infoCount }));
-  const value = withBlind(parts.length ? parts.join(" · ") : t("signals.publishedPorts.ok", lang));
+  const value = withBlind(parts.length
+    ? parts.join(" · ")
+    : t(issues.length ? "signals.publishedPorts.listed" : "signals.publishedPorts.ok", lang));
 
   const state = warnCount > 0 ? "warn" : parts.length || issues.length ? "info" : "ok";
   const card = {

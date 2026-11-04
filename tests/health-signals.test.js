@@ -16,6 +16,11 @@ import { backupLabel, instanceBackupTag, backupFileName } from "../servers/share
 // The signal only counts THIS instance's backup files (per-instance naming).
 const OWN_BACKUP = backupFileName(backupLabel(), instanceBackupTag(), "2026-01-01");
 
+// Test isolation: every collectHealthSignals() call in this file that does not
+// pass its own `publishedPorts.snapshotPath` must read this scratch path, never
+// the host's real fence snapshot.
+process.env.CROW_PUBLISH_SNAPSHOT = "/tmp/__crow_test_no_publish_snapshot__.json";
+
 // ─── Stub DB factory ──────────────────────────────────────────────────────────
 
 function makeDb(overrides = {}) {
@@ -372,6 +377,20 @@ test("publishedPorts: no snapshot → info 'unknown' card, no published-port war
     false,
     "no snapshot never produces a publish warn by itself",
   );
+});
+
+test("publishedPorts: a call without its own snapshot path reads the isolated env path", async () => {
+  invalidateHealthCache();
+  assert.ok(
+    process.env.CROW_PUBLISH_SNAPSHOT?.includes("__crow_test"),
+    "the file pins CROW_PUBLISH_SNAPSHOT to a scratch path",
+  );
+
+  const result = await collectHealthSignals(makeDb());
+  const detail = result.details.find(d => d.id === "publishedPorts");
+  assert.ok(detail, "the publishedPorts card is part of the signal list");
+  assert.equal(detail.state, "info");
+  assert.match(detail.value, /unknown/);
 });
 
 test("publishedPorts: a wildcard publish is a warn issue under its own id", async () => {
