@@ -20,6 +20,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -60,6 +61,16 @@ const SAMPLE_AUDIO = encodeWav24(
 /** The fixture WAV an import test hands the file input. */
 const IMPORT_FILE_BYTES = SAMPLE_AUDIO.slice(0);
 
+/** The chop script the page falls back to when a browser has no Worker: the
+ * very file `chop-worker.js` imports, loaded the way a Node caller loads it
+ * (`engine/package.json` marks that directory CommonJS).
+ */
+const ENGINE_DIR = new URL("../bundles/studio/engine/", import.meta.url).pathname;
+const StudioChop = createRequire(join(ENGINE_DIR, "bundles.js"))(join(ENGINE_DIR, "chop.js"));
+
+/** The sample a chop test puts in the song (a sample id is a UUID). */
+const SAMPLE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
+
 /**
  * A stereo WAV of `frames` frames at the fixture's rate: long enough to need
  * more than one staged chunk (a chunk holds floor(1 MiB / 6) frames).
@@ -83,12 +94,93 @@ function fileStub(name, bytes) {
   };
 }
 
+/** A seeded mulberry32: the chop tests' only noise source (no Math.random). */
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return function next() {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * A loop of `hits` decaying noise bursts over a quiet floor: what a drum loop
+ * looks like to the transient detector, with the exact frame each hit starts on.
+ * @param {number} hits how many bursts
+ * @returns {{bytes: Uint8Array, rate: number, frames: number, starts: number[], hz: number}}
+ */
+function hitsWav(hits) {
+  const ms = RATE / 1000;
+  const lead = Math.round(20 * ms);
+  const spacing = Math.round(100 * ms);
+  const burst = Math.round(80 * ms);
+  const frames = lead + spacing * (hits - 1) + burst + Math.round(20 * ms);
+  const starts = Array.from({ length: hits }, (_, at) => lead + at * spacing);
+  const left = new Float32Array(frames);
+  const right = new Float32Array(frames);
+  const attack = Math.max(1, Math.round(1.5 * ms));
+  const release = Math.max(1, Math.round(5 * ms));
+  for (let channel = 0; channel < 2; channel += 1) {
+    const data = channel === 0 ? left : right;
+    const random = seededRandom(20261104 + channel * 7919);
+    for (let at = 0; at < frames; at += 1) data[at] = (random() * 2 - 1) * 0.003;
+    for (const start of starts) {
+      for (let at = 0; at < burst; at += 1) {
+        const rise = at < attack ? at / attack : 1;
+        const fall = at > burst - release ? (burst - at) / release : 1;
+        const envelope = rise * fall * Math.exp(-at / (30 * ms));
+        data[start + at] += (random() * 2 - 1) * 0.8 * envelope;
+      }
+    }
+  }
+  return { bytes: encodeWav24(left, right, RATE), rate: RATE, frames, starts, hz: spacing };
+}
+
+/**
+ * Put a sample in the fixture song and on one pad of its bank.
+ * @param {object} ui a booted page
+ * @param {{id?: string, frames?: number, name?: string, index?: number}} [options]
+ * @returns {Promise<{sampleId: string, bankId: string}>}
+ */
+async function putSample(ui, options = {}) {
+  const bankId = await bankIdOf(ui.doc);
+  const id = options.id || SAMPLE_ID;
+  const frames = Math.max(1, Math.round(Number(options.frames) || FRAMES));
+  await ui.apply("sample.add", {
+    sample: {
+      id,
+      storage_key: `${PREFIX}studio/song-1/samples/${id}.wav`,
+      rate: RATE,
+      channels: 2,
+      frames,
+      name: options.name || "porch-knocks",
+      origin: "import",
+      author_label: "You",
+    },
+  });
+  await ui.apply("pad.assign", {
+    track_id: TRACK,
+    bank_id: bankId,
+    index: Number(options.index) || 0,
+    sample_id: id,
+  });
+  return { sampleId: id, bankId };
+}
+
+/** The step toggle that puts one step of pad `index` on the fixture pattern. */
+function stepArgs(bankId, at, index = 0) {
+  return { clip_id: CLIP, pattern_id: "a", at, bank_id: bankId, index };
+}
+
 // ---- the fixture document --------------------------------------------------
 
 /**
  * The song the client tests draw: one sampler track (whose kit arrives with
  * bank A and its sixteen pads), one scene and one 16-step pattern clip.
- * @param {{extraScene?: boolean}} [options]
+ * @param {{extraScene?: boolean, lengthSteps?: number}} [options]
  * @returns {Promise<import("yjs").Doc>}
  */
 async function samplerDoc(options = {}) {
@@ -106,7 +198,7 @@ async function samplerDoc(options = {}) {
     track_id: TRACK,
     scene_id: SCENE,
     name: "Beat",
-    length_steps: 16,
+    length_steps: Math.max(1, Math.round(Number(options.lengthSteps) || 16)),
   });
   return doc;
 }
@@ -259,8 +351,11 @@ function fakeEngine() {
     stop() {},
     stopAll() {},
     launchScene() {},
-    onPosition() {
-      return () => {};
+    onPosition(listener) {
+      engine.positionListener = listener;
+      return () => {
+        engine.positionListener = null;
+      };
     },
     onLaunch() {
       return () => {};
@@ -399,7 +494,7 @@ function fakeLocks() {
  * fake browser around it, and hand back what it drew, what it sent and what the
  * engine was asked to do.
  * @param {{doc?: object, holdChunks?: boolean, holdRecorder?: boolean, rate?: number,
- *          holdInput?: boolean, store?: object, locks?: object,
+ *          holdInput?: boolean, store?: object, locks?: object, sampleAudio?: Uint8Array,
  *          putChunkProblem?: (takeId: string, index: number) => boolean}} [options]
  */
 async function bootSampler(options = {}) {
@@ -464,7 +559,8 @@ async function bootSampler(options = {}) {
       return response(200, [{ id: "song-1", project_id: PROJECT, title: "Beat box" }]);
     }
     if (target.includes("/samples/") && target.endsWith("/audio")) {
-      return response(200, {}, SAMPLE_AUDIO.slice(0).buffer);
+      const bytes = options.sampleAudio || SAMPLE_AUDIO;
+      return response(200, {}, bytes.slice(0).buffer);
     }
     if (target.includes("/api/studio/takes")) {
       if (target.includes("/chunks/") && heldChunks) await heldChunks;
@@ -515,6 +611,9 @@ async function bootSampler(options = {}) {
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
+    // A browser with a Worker chops off this thread; this one has none, so the
+    // page takes its inline fallback through the very same chop.js.
+    StudioChop: StudioChop,
     addEventListener(name, handler) {
       (windowListeners[name] ||= []).push(handler);
     },
@@ -629,8 +728,7 @@ async function bootSampler(options = {}) {
     releaseInput() {
       if (typeof navigatorStub.releaseInput === "function") navigatorStub.releaseInput();
     },
-    /** Push one tap block of whole frames, starting at `frame`. */
-    tapBlock(frames, frame = 0) {
+    /** Push one tap block of whole frames, starting at `frame`. */    tapBlock(frames, frame = 0) {
       const channels = [new Float32Array(frames), new Float32Array(frames)];
       for (const listener of [...engine.tapListeners]) listener({ target: "master", frame, channels });
     },
@@ -675,12 +773,63 @@ async function bootSampler(options = {}) {
         handler(event("pointerup", props || {}));
       }
     },
+    /** Push one transport position, as the engine's own frames do. */
+    playhead(bar, beat, sixteenth = 1) {
+      assert.ok(engine.positionListener, "the page follows the engine's position");
+      engine.positionListener({ bar, beat, sixteenth });
+    },
     /** Run the real server commands on the fixture song, then redraw the page. */
     async apply(command, args) {
       const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
       runCommand(doc, command, args);
       frame(stateFrame());
       await settle();
+    },
+    /** @returns {object} one of the view's two part-2 hosts */
+    slot(role) {
+      const node = document.querySelector(`[data-role=${role}]`);
+      assert.ok(node, `the ${role} host is on the page`);
+      return node;
+    },
+    /** @returns {object[]} the step buttons drawn right now */
+    steps() {
+      return [...ui.slot("sampler-steps").querySelectorAll("[data-act=step]")];
+    },
+    /** @returns {object} the step button for one position */
+    step(at) {
+      const node = ui.slot("sampler-steps").querySelector(`[data-act=step][data-at="${at}"]`);
+      assert.ok(node, `step ${at} is drawn`);
+      return node;
+    },
+    /** @returns {object[]} the pattern tabs drawn right now */
+    patternTabs() {
+      return [...ui.slot("sampler-steps").querySelectorAll("[data-act=pick-pattern]")];
+    },
+    /** @returns {object} the chain row */
+    chain() {
+      const node = ui.slot("sampler-steps").querySelector("[data-role=chain]");
+      assert.ok(node, "the chain editor is drawn");
+      return node;
+    },
+    /** @returns {object[]} the slice markers drawn right now */
+    markers() {
+      return [...ui.slot("sampler-chop").querySelectorAll("[data-act=slice-marker]")];
+    },
+    /** Press a step, the way a pointer would, and hold it. */
+    holdStep(at) {
+      const node = ui.step(at);
+      node.dispatchEvent(event("pointerdown", { button: 0, clientX: 0 }));
+      return node;
+    },
+    /** Drag a slice marker from one x to another and let go. */
+    dragMarker(index, fromX, toX) {
+      const node = ui.markers()[index];
+      assert.ok(node, `marker ${index} is drawn`);
+      node.dispatchEvent(event("pointerdown", { button: 0, clientX: fromX }));
+      for (const handler of [...(windowListeners.pointermove || [])]) {
+        handler(event("pointermove", { clientX: toX }));
+      }
+      return node;
     },
   };
   return ui;
@@ -1441,6 +1590,412 @@ test("a window blur lets every held pad key go", async () => {
     [{ track_id: TRACK, bank_id: bankId, index: 2 }],
     "the held key was let go",
   );
+});
+
+// ---- part 2: the steps, the chop editor, the patterns and the chain --------
+
+test("toggling steps sends one step.toggle each", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The selected pad's lane of the shown pattern: sixteen buttons for a
+  // sixteen-step pattern, all empty to begin with.
+  assert.equal(ui.steps().length, 16, "sixteen step buttons are drawn");
+  for (const node of ui.steps()) {
+    assert.equal(String(node.tagName), "BUTTON", "a step is a real button");
+    assert.equal(node.getAttribute("aria-pressed"), "false", "an empty step says it is off");
+  }
+  assert.equal(
+    ui.slot("sampler-steps").querySelectorAll("[data-act=step-page]").length,
+    0,
+    "a sixteen-step pattern has no pages to turn",
+  );
+
+  // One click, one step.toggle; and the button says it is on from the document.
+  ui.step(0).dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  let sent = commands(ui, "step.toggle");
+  assert.equal(sent.length, 1, "one step.toggle for one click");
+  assert.deepEqual(
+    sent[0].args,
+    { clip_id: CLIP, pattern_id: "a", at: 0, bank_id: bankId, index: 0 },
+    "naming the clip, the pattern, the position and the pad's lane",
+  );
+
+  await ui.apply("step.toggle", stepArgs(bankId, 0));
+  assert.equal(ui.step(0).getAttribute("aria-pressed"), "true", "the step the document holds is on");
+  const fill = ui.step(0).querySelector("[data-role=step-fill]");
+  assert.ok(fill, "an on step draws its velocity as a fill");
+  assert.equal(fill.style.height, "79%", "the default velocity 100 fills 79% of the step");
+
+  // A second position, one more command; and a click on an ON step takes it off.
+  ui.step(4).dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(commands(ui, "step.toggle").length, 2, "a second click is a second step.toggle");
+  assert.equal(commands(ui, "step.toggle")[1].args.at, 4);
+
+  ui.step(4).dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  sent = commands(ui, "step.toggle");
+  assert.equal(sent.length, 3, "taking a step off is one step.toggle too");
+  assert.equal(sent[2].args.at, 4, "on the step that was clicked");
+  assert.equal(commands(ui, "pad.set").length, 0, "no pad setting was touched");
+});
+
+test("holding a step and turning cutoff sets a lock", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 2));
+  assert.equal(ui.step(2).getAttribute("aria-pressed"), "true", "step 3 is on");
+
+  // The step is held down, and the pad's cutoff is turned while it is.
+  ui.holdStep(2);
+  await ui.settle();
+  const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  assert.ok(cutoff, "the pad's filter cutoff is a control");
+  cutoff.value = "800";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  let locks = commands(ui, "step.set");
+  assert.equal(locks.length, 1, "the control's release is one step.set");
+  assert.deepEqual(locks[0].args, {
+    clip_id: CLIP,
+    pattern_id: "a",
+    at: 2,
+    bank_id: bankId,
+    index: 0,
+    locks: { cutoff_hz: 800 },
+  }, "carrying that one lock on the held step");
+  assert.equal(commands(ui, "pad.set").length, 0, "the pad itself is not changed");
+
+  // Letting the step go writes nothing more.
+  ui.release();
+  await ui.settle();
+  assert.equal(commands(ui, "step.set").length, 1, "the release adds no second step.set");
+
+  // The lock lands on the step being played, not on the pad's lane for good.
+  await ui.apply("step.set", { ...stepArgs(bankId, 2), locks: { cutoff_hz: 800 } });
+  assert.ok(ui.step(2).querySelector(".st-step-lock-dot"), "a locked step shows a dot");
+
+  // Clear locks, on the selected step, is one step.clear_locks.
+  const clear = ui.slot("sampler-steps").querySelector("[data-act=step-clear-locks]");
+  assert.ok(clear, "the selected step offers Clear locks");
+  assert.equal(clear.disabled, false);
+  clear.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  const cleared = commands(ui, "step.clear_locks");
+  assert.equal(cleared.length, 1, "one step.clear_locks");
+  assert.equal(cleared[0].args.at, 2, "on the step that has the lock");
+
+  // A control turned with no step held is the pad's own, as it always was.
+  const gain = ui.view().querySelector("[data-pad-field=gain_db]");
+  gain.value = "-3";
+  gain.dispatchEvent(ui.event("change", { target: gain }));
+  await ui.settle();
+  assert.equal(commands(ui, "step.set").length, 1, "no lock without a held step");
+  assert.equal(commands(ui, "pad.set").length, 1, "the pad takes that change instead");
+});
+
+test("auto-chop then assign fills the pads in order", async () => {
+  const audio = hitsWav(4);
+  const ui = await bootSampler({ sampleAudio: audio.bytes });
+  const { sampleId, bankId } = await putSample(ui, { frames: audio.frames });
+  await ui.openSampler();
+  // The waveform is fetched and decoded once; the chop then runs inline.
+  await ui.settle(60);
+
+  const chop = ui.slot("sampler-chop");
+  const head = String(chop.querySelector(".st-chop-head").textContent);
+  assert.match(head, /porch-knocks/, "the editor names the sample");
+  assert.match(head, /0 slices/, "and says it has none yet");
+  assert.match(head, /pad A01 = the whole sample/, "and what the pad plays");
+
+  const hits = chop.querySelector("[data-act=chop-hits]");
+  assert.ok(hits, "Auto-chop by hits is offered");
+  hits.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(60);
+
+  const sent = commands(ui, "slice.set");
+  assert.equal(sent.length, 1, "one chop is one slice.set");
+  assert.equal(sent[0].args.sample_id, sampleId);
+  const sliced = sent[0].args.slices;
+  assert.ok(sliced.length >= 4, `the four hits were found (got ${sliced.length} slices)`);
+  for (const slice of sliced) {
+    assert.match(String(slice.id), /^sl-/, "a new slice gets an id of its own");
+    assert.ok(slice.end_frame > slice.start_frame, "and holds audio");
+  }
+  assert.equal(new Set(sliced.map((slice) => slice.id)).size, sliced.length, "every id is its own");
+
+  // The document takes the chop, and the editor shows it.
+  await ui.apply("slice.set", { sample_id: sampleId, slices: sliced });
+  assert.equal(ui.markers().length, sliced.length, "one marker per slice start");
+  assert.match(
+    String(ui.slot("sampler-chop").querySelector(".st-chop-head").textContent),
+    new RegExp(`${sliced.length} slices`),
+    "the editor counts the slices the document holds",
+  );
+
+  // Assign slices to pads: one pad.assign per pad, from this one on. (The
+  // editor is drawn again from the snapshot, so the buttons are looked up
+  // afresh each time.)
+  const assignButton = () => ui.slot("sampler-chop").querySelector("[data-act=chop-assign]");
+  assignButton().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(20);
+  const assigns = commands(ui, "pad.assign");
+  assert.equal(assigns.length, sliced.length, "one pad.assign per slice");
+  for (let at = 0; at < sliced.length; at += 1) {
+    assert.deepEqual(assigns[at].args, {
+      track_id: TRACK,
+      bank_id: bankId,
+      index: at,
+      sample_id: sampleId,
+      slice_id: sliced[at].id,
+    }, `pad ${at + 1} takes slice ${at + 1}`);
+  }
+
+  // The document takes them, and assigning again steals nothing: every pad
+  // already plays the slice it was given.
+  for (const assign of assigns) await ui.apply("pad.assign", assign.args);
+  assignButton().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(20);
+  assert.equal(commands(ui, "pad.assign").length, assigns.length, "no pad is assigned twice");
+
+  // A pad that holds a different sound is left alone, and named in one notice.
+  await ui.apply("sample.add", {
+    sample: {
+      id: "0b7f3d1e-1711-4d5f-9d18-2f7f52c9a3b4",
+      storage_key: `${PREFIX}studio/song-1/samples/0b7f3d1e.wav`,
+      rate: RATE,
+      channels: 1,
+      frames: FRAMES,
+      name: "rim",
+      origin: "import",
+      author_label: "You",
+    },
+  });
+  await ui.apply("pad.assign", {
+    track_id: TRACK, bank_id: bankId, index: 1,
+    sample_id: "0b7f3d1e-1711-4d5f-9d18-2f7f52c9a3b4",
+  });
+  const before = commands(ui, "pad.assign").length;
+  assignButton().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(20);
+  assert.equal(commands(ui, "pad.assign").length, before, "a pad holding another sound is skipped");
+  const notice = ui.document.querySelector("[data-role=toast]");
+  assert.match(String(notice.textContent), /A02/, "and the notice names it");
+});
+
+test("chain editor sends one chain.set", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  // An empty chain plays the clip's first pattern on repeat.
+  assert.match(String(ui.chain().textContent), /Chain:/, "the chain is labelled");
+  assert.match(
+    String(ui.chain().textContent),
+    /plays pattern A on repeat/,
+    "an empty chain says what it plays instead",
+  );
+
+  const add = () => ui.chain().querySelector("[data-act=chain-add]");
+  assert.ok(add(), "the shown pattern can be added to the chain");
+  add().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  let sent = commands(ui, "chain.set");
+  assert.equal(sent.length, 1, "adding is one chain.set");
+  assert.deepEqual(sent[0].args, { clip_id: CLIP, chain: ["a"] }, "carrying the whole chain");
+
+  await ui.apply("chain.set", sent[0].args);
+  assert.match(String(ui.chain().textContent), /A/, "the chip is drawn");
+
+  // A second add is another whole chain, not a patch of the first.
+  add().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  sent = commands(ui, "chain.set");
+  assert.equal(sent.length, 2, "one chain.set per change");
+  assert.deepEqual(sent[1].args.chain, ["a", "a"], "the whole new chain");
+  await ui.apply("chain.set", sent[1].args);
+  assert.equal(ui.chain().querySelectorAll(".st-chain-chip").length, 2, "two chips are drawn");
+  assert.deepEqual(
+    [...ui.chain().querySelectorAll(".st-chain-name")].map((node) => String(node.textContent)),
+    ["A", "A"],
+    "in the order they play, joined by an arrow",
+  );
+  assert.match(String(ui.chain().textContent), /\u2192/, "the chips are chained in order");
+
+  // Moving one is one chain.set; so is taking one out.
+  ui.chain().querySelectorAll("[data-act=chain-left]")[1]
+    .dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  sent = commands(ui, "chain.set");
+  assert.equal(sent.length, 3, "moving a chip is one chain.set");
+  assert.deepEqual(sent[2].args.chain, ["a", "a"], "the whole chain, reordered");
+
+  ui.chain().querySelector("[data-act=chain-remove]")
+    .dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  sent = commands(ui, "chain.set");
+  assert.equal(sent.length, 4, "removing a chip is one chain.set");
+  assert.deepEqual(sent[3].args.chain, ["a"], "with that chip gone");
+});
+
+test("dragging a slice marker sends one slice.set on release", async () => {
+  const audio = hitsWav(4);
+  const ui = await bootSampler({ sampleAudio: audio.bytes });
+  const { sampleId } = await putSample(ui, { frames: audio.frames });
+  // Four slices to begin with: 0…2400, 2400…4800, 4800…7200, 7200…9600.
+  const frames = audio.frames;
+  const quarter = Math.round(frames / 4);
+  const fixed = Array.from({ length: 4 }, (_, at) => ({
+    id: `sl-${at + 1}`,
+    start_frame: at * quarter,
+    end_frame: at === 3 ? frames : (at + 1) * quarter,
+  }));
+  await ui.apply("slice.set", { sample_id: sampleId, slices: fixed });
+  await ui.openSampler();
+  await ui.settle(60);
+  assert.equal(ui.markers().length, 4, "one marker per slice start");
+
+  // The second marker sits a quarter of the way across the 800-wide viewBox.
+  const marker = ui.markers()[1];
+  assert.equal(marker.getAttribute("data-slice-id"), "sl-2");
+  assert.equal(marker.getAttribute("x1"), "200");
+
+  // A drag moves the marker on screen; nothing is sent while it moves.
+  ui.dragMarker(1, 200, 300);
+  await ui.settle();
+  assert.equal(commands(ui, "slice.set").length, 0, "a drag sends nothing until it ends");
+  assert.equal(marker.getAttribute("x1"), "300", "and the marker follows the pointer");
+
+  // The release is where the one command goes.
+  ui.release();
+  await ui.settle();
+  const sent = commands(ui, "slice.set");
+  assert.equal(sent.length, 1, "one slice.set for the whole drag");
+  assert.equal(sent[0].args.sample_id, sampleId);
+  const want = Math.round((300 / 800) * frames);
+  const next = sent[0].args.slices;
+  assert.equal(next.length, 4, "the whole slice set is sent");
+  assert.equal(next[1].start_frame, want, "the dragged slice starts where the marker was let go");
+  assert.equal(next[0].end_frame, want, "and the slice before it ends there, so they still tile");
+  assert.deepEqual(next.map((slice) => slice.id), ["sl-1", "sl-2", "sl-3", "sl-4"], "every id is kept");
+  assert.equal(next[2].start_frame, fixed[2].start_frame, "a slice the drag did not touch is unchanged");
+  assert.equal(next[3].end_frame, frames, "the last slice still runs to the end");
+});
+
+test("a pattern longer than 16 steps pages its steps", async () => {
+  const ui = await bootSampler({ doc: await samplerDoc({ lengthSteps: 32 }) });
+  await ui.openSampler();
+
+  // The first page is drawn, and the two page tabs with it.
+  assert.equal(ui.steps().length, 16, "one page of sixteen buttons");
+  assert.equal(ui.steps()[0].getAttribute("data-at"), "0");
+  const tabs = () => [...ui.slot("sampler-steps").querySelectorAll("[data-act=step-page]")];
+  assert.equal(tabs().length, 2, "a thirty-two-step pattern has two pages");
+  assert.deepEqual(tabs().map((node) => String(node.textContent)), ["1-16", "17-32"]);
+  assert.equal(tabs()[0].getAttribute("aria-pressed"), "true", "the first page is the one shown");
+
+  // The second page is positions 17-32, and toggling there names that position.
+  tabs()[1].dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(tabs()[1].getAttribute("aria-pressed"), "true", "the second page is shown");
+  assert.equal(ui.steps().length, 16, "still sixteen buttons");
+  assert.equal(ui.steps()[0].getAttribute("data-at"), "16", "starting at position 17");
+  assert.equal(ui.steps()[0].textContent, "1", "labelled 1 within its page");
+
+  ui.step(16).dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  const sent = commands(ui, "step.toggle");
+  assert.equal(sent.length, 1, "one step.toggle");
+  assert.equal(sent[0].args.at, 16, "at the position the page shows");
+
+  // Sixty-four positions are four pages, and the last one holds sixteen too.
+  await ui.apply("pattern.set_length", { clip_id: CLIP, length_steps: 64 });
+  assert.equal(tabs().length, 4, "sixty-four steps are four pages");
+  tabs()[3].dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(ui.steps().length, 16, "the last page is full");
+  assert.equal(ui.steps()[0].getAttribute("data-at"), "48", "and starts at position 49");
+
+  // While the transport runs, the page follows the playhead instead.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.playhead(2, 1, 1);
+  await ui.settle();
+  assert.equal(tabs()[1].getAttribute("aria-pressed"), "true", "the playhead's page is turned to");
+  assert.equal(ui.steps()[0].getAttribute("data-at"), "16", "and starts at position 17");
+});
+
+test("a refused chop shows the refusal and draws the document's slices", async () => {
+  const audio = hitsWav(4);
+  const ui = await bootSampler({ sampleAudio: audio.bytes });
+  const { sampleId } = await putSample(ui, { frames: audio.frames });
+  const quarter = Math.round(audio.frames / 4);
+  const fixed = Array.from({ length: 4 }, (_, at) => ({
+    id: `sl-${at + 1}`,
+    start_frame: at * quarter,
+    end_frame: at === 3 ? audio.frames : (at + 1) * quarter,
+  }));
+  await ui.apply("slice.set", { sample_id: sampleId, slices: fixed });
+  await ui.openSampler();
+  await ui.settle(60);
+  const before = ui.markers().map((marker) => marker.getAttribute("x1"));
+  assert.equal(before.length, 4, "four markers to begin with");
+
+  // A pad still plays one of these slices, so the hub refuses the re-chop.
+  ui.slot("sampler-chop").querySelector("[data-act=chop-hits]")
+    .dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(60);
+  const sent = commands(ui, "slice.set");
+  assert.equal(sent.length, 1, "the chop went as one slice.set");
+  const refusal = "Pad 1 of bank A still plays slice sl-2 of this sample; clear that pad before removing the slice.";
+  ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: false, error: refusal });
+  await ui.settle();
+
+  const toast = ui.document.querySelector("[data-role=toast]");
+  assert.equal(String(toast.textContent), refusal, "the hub's sentence is shown");
+  assert.match(
+    String(ui.slot("sampler-chop").querySelector(".st-chop-error").textContent),
+    /still plays slice sl-2/,
+    "and the editor keeps it beside the waveform",
+  );
+  assert.deepEqual(
+    ui.markers().map((marker) => marker.getAttribute("x1")),
+    before,
+    "the markers are drawn again from the document, so no slice a pad plays is gone",
+  );
+});
+
+test("an agent's step edit appears without a reload", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  assert.equal(ui.step(1).getAttribute("aria-pressed"), "false", "step 2 starts empty");
+
+  // The hub applies an agent's command and broadcasts the document: the page
+  // draws what the document holds, with no reload and no local guess.
+  await ui.apply("step.toggle", stepArgs(bankId, 1));
+  assert.equal(ui.step(1).getAttribute("aria-pressed"), "true", "the agent's step is drawn");
+  assert.ok(ui.step(1).querySelector("[data-role=step-fill]"), "with its velocity");
+
+  // A lock the agent set on another step shows as that step's dot.
+  await ui.apply("step.toggle", stepArgs(bankId, 5));
+  assert.equal(ui.step(5).getAttribute("aria-pressed"), "true", "the agent's step is drawn");
+  await ui.apply("step.set", { ...stepArgs(bankId, 5), locks: { gain_db: -6, pitch: 3 } });
+  assert.ok(ui.step(5).querySelector(".st-step-lock-dot"), "the agent's lock shows on the step");
+
+  // And the agent's chain is drawn as the document has it.
+  await ui.apply("chain.set", { clip_id: CLIP, chain: ["a"] });
+  assert.match(String(ui.chain().textContent), /A/, "the chain the agent set is drawn");
+
+  // Taking both steps off shows on the page as well.
+  await ui.apply("step.toggle", stepArgs(bankId, 1));
+  assert.equal(ui.step(1).getAttribute("aria-pressed"), "false", "the step is gone again");
+  assert.equal(ui.step(1).querySelector("[data-role=step-fill]"), null, "and draws no velocity");
 });
 
 // ---- the live half: a real Chrome against a real hub ------------------------

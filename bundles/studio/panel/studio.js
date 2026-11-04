@@ -585,6 +585,76 @@ const STYLES = `
   .studio .st-pad-check input { width: 20px; height: 20px; accent-color: var(--st-human); }
   .studio .st-resample-target { max-width: 180px; }
   .studio .st-sampler-slot:empty { display: none; }
+  /* The chop editor: the sample's waveform, one marker per slice start, and the
+     two ways to chop it plus Assign slices to pads. A marker is dragged on the
+     SVG itself, so the whole strip takes no touch scrolling. */
+  .studio .st-chop {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-chop-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .studio .st-chop-meta { font-size: 12px; color: var(--st-muted); }
+  .studio .st-chop-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+  .studio .st-chop-sens {
+    display: flex; flex-direction: column; gap: 2px; min-width: 150px;
+    font-size: 11px; color: var(--st-muted);
+  }
+  .studio .st-wave {
+    display: block; width: 100%; height: 110px; border-radius: 6px;
+    background: #121417; touch-action: none;
+  }
+  .studio .st-slice-marker { cursor: col-resize; stroke-linecap: round; }
+  .studio .st-chop-error { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-danger); }
+  /* The steps, the clip's loop, the patterns and the chain. */
+  .studio .st-steps {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-pattern-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-pattern-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
+  .studio .st-loop { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; }
+  .studio .st-swing { min-width: 160px; }
+  .studio .st-steps-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .studio .st-step-pages { display: flex; gap: 4px; }
+  .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; font-size: 11px; }
+  .studio .st-step-locks { font-size: 11px; color: var(--st-muted); }
+  .studio .st-step-strip {
+    display: grid; grid-template-columns: repeat(16, minmax(28px, 1fr));
+    gap: 4px; overflow-x: auto;
+  }
+  .studio .st-step {
+    position: relative; height: 48px; min-height: 48px; padding: 4px 3px;
+    border-radius: 6px; border: 1px solid #2F343A; background: #1B1E22;
+    color: var(--st-text); font: inherit; cursor: pointer; overflow: hidden;
+  }
+  .studio .st-step:nth-child(4n + 1) { background: #22262B; }
+  .studio .st-step-on { border-color: #FFFFFF; }
+  .studio .st-step-sel { border-color: var(--st-human); }
+  .studio .st-step-held { border-color: var(--st-human); background: #2A2418; }
+  .studio .st-step-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #B6D98A; }
+  .studio .st-step-num {
+    position: relative; z-index: 1; font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+  }
+  .studio .st-step-lock-dot {
+    position: absolute; top: 2px; right: 4px; z-index: 1;
+    color: var(--st-human); font-weight: 700;
+  }
+  .studio .st-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12px; }
+  .studio .st-chain-label { color: var(--st-muted); }
+  .studio .st-chain-empty { color: var(--st-muted); }
+  .studio .st-chain-arrow { color: var(--st-muted); }
+  .studio .st-chain-chip {
+    display: inline-flex; align-items: center; gap: 2px; padding: 2px 6px;
+    border: 1px solid #3A3F46; border-radius: 999px; background: #24282D;
+  }
+  .studio .st-chain-name { font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; }
+  .studio .st-chain-btn {
+    padding: 0 3px; border: 0; background: transparent; color: var(--st-muted);
+    font: inherit; cursor: pointer;
+  }
+  .studio .st-chain-btn:disabled { opacity: 0.35; cursor: default; }
+  .studio .st-chain-add { margin-left: 4px; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
