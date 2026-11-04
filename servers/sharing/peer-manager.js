@@ -973,7 +973,8 @@ export class PeerManager {
       pubkey: state.kind === "contact" ? state.pinnedKey : this.identity.ed25519Pubkey,
       peerLineMax: state.peerLineMax ?? null, // null: an older peer, send() uses our own cap
       // contact: the id it CLAIMED in its challenge (unproven, routing only);
-      // sibling: the id PT-2a pair binding proved (state.remoteInstanceId).
+      // sibling: its state.remoteInstanceId (pair-binding proven when it
+      // offered pair binding; a sibling holds our seed either way).
       instanceId: state.kind === "instance" ? state.remoteInstanceId : claimedInstanceIdOf(state),
       admitSeq: ++this._admitSeq,
     };
@@ -1189,8 +1190,13 @@ export class PeerManager {
    * (_onChallenge -> state.peerInstanceId), so only the endpoint can set it; for
    * a contact it is still a CLAIM (all of one Crow's instances share a key),
    * which is why only a cb_sig-bound connection is routed to: a bare signature
-   * can be relayed from another connection. Siblings carry their pair-binding
-   * proven remoteInstanceId.
+   * can be relayed from another connection. Siblings carry their
+   * remoteInstanceId (pair-binding proven when they offered it; a sibling holds
+   * our seed either way).
+   *
+   * `instanceId` `null` (or `""`) names nobody: it never means "the contact".
+   * That is `send(crowId, payload)`'s job — a targeted frame with no target is
+   * held by its sender (S11) instead of landing on whoever happens to be newest.
    *
    * @returns {boolean} whether a line was written; a frame over that
    *   connection's cap throws PeerLineOverCapError before anything is written.
@@ -1205,10 +1211,12 @@ export class PeerManager {
   /**
    * The longest line we may send `crowId`: our cap, or the peer's advertised
    * line_max if lower. With `instanceId`: the cap of THAT connection (the one
-   * sendTo would write on); not routed there, our own cap.
+   * sendTo would write on); not routed there, our own cap. `null` means "no
+   * instance", exactly like `undefined`: the contact's (newest connection's) cap.
    */
   lineMaxFor(crowId, instanceId) {
-    if (instanceId !== undefined) {
+    // `null` means "no instance", exactly like `undefined`: the contact-level answer.
+    if (instanceId != null) {
       const entry = instanceEntry(this.peerConns.get(crowId), instanceId);
       return entry ? this.lineMaxForPeer(entry) : this.postAdmitLineMax;
     }
@@ -1254,18 +1262,20 @@ export class PeerManager {
   /**
    * Without `instanceId`: unchanged — is the newest live connection of this Crow
    * up? With it: can `sendTo` reach that instance right now (the very same
-   * predicate, so a claim on an unbound connection answers false).
+   * predicate, so a claim on an unbound connection answers false). `null` means
+   * "no instance", exactly like `undefined`: the contact-level answer.
    */
   isConnected(crowId, instanceId) {
-    if (instanceId !== undefined) return !!instanceEntry(this.peerConns.get(crowId), instanceId);
+    if (instanceId != null) return !!instanceEntry(this.peerConns.get(crowId), instanceId);
     const peer = this.connections.get(crowId);
     return peer?.authenticated || false;
   }
 
   /**
    * The instance ids `sendTo` can reach right now, newest first, each once.
-   * A contact's ids are claims, a sibling's are pair-binding proven; a
-   * connection that claims no id (an older peer) never appears.
+   * A contact's ids are claims; a sibling's are its remoteInstanceId (proven to
+   * hold our seed, pair-binding proven when it offered it). A connection that
+   * claims no id (an older peer) never appears.
    */
   connectedInstances(crowId) {
     const bucket = this.peerConns.get(crowId);

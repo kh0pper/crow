@@ -1,5 +1,5 @@
 /**
- * Per-instance PeerManager connections (the index, PI-1 … PI-10).
+ * Per-instance PeerManager connections (the index, PI-1 … PI-15).
  *
  * All instances of one Crow share one Crow identity and one pinned key, so
  * `PeerManager.connections` (crowId -> ONE entry) could only ever name the
@@ -74,6 +74,41 @@ async function link(t, a, b) {
   const ok = await until(() => a.pm.isConnected(b.identity.crowId) && b.pm.isConnected(a.identity.crowId));
   assert.ok(ok, "both sides admitted each other");
   return { connA, connB };
+}
+
+/**
+ * A PeerManager that is ONE instance of a Crow. Two of them, built from the same
+ * identity, are siblings: they share a crowId and a pinned key, so each indexes
+ * the other in its OWN crowId's bucket (kind "instance"). wireInstanceSync
+ * installs the admit guard in production; here it only has to admit.
+ */
+function siblingPeer(identity, localInstanceId) {
+  const pm = new PeerManager(identity, { env: {} });
+  pm.p2pDisabled = true;
+  pm.localInstanceId = localInstanceId;
+  pm.admitGuards.instance = async () => ({ ok: true });
+  const calls = { instanceConnected: [], keyReceived: [], disconnected: [] };
+  pm.onInstanceConnected = (crowId, _conn, remoteInstanceId) => { calls.instanceConnected.push([crowId, remoteInstanceId]); };
+  pm.onInstanceKeyReceived = (id, key) => { calls.keyReceived.push([id, key]); };
+  pm.onPeerDisconnected = (crowId) => calls.disconnected.push(crowId);
+  return { pm, identity, calls };
+}
+
+/**
+ * JSON frames arriving on one end of a link, from now on. The manager's own line
+ * parser ignores a sibling's `data` frames (onPeerData is contacts only), so a
+ * test has to read the wire to see a frame reach its target.
+ */
+function recordFrames(conn) {
+  const frames = [];
+  let buf = "";
+  conn.on("data", (d) => {
+    buf += d.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const l of lines) if (l.trim()) { try { frames.push(JSON.parse(l)); } catch { /* junk */ } }
+  });
+  return frames;
 }
 
 test("PI-1 sendTo reaches the named instance while another holds the newest connection", T, async (t) => {
@@ -336,6 +371,125 @@ test("PI-10 leaveContact destroys every instance and clears both maps; destroy()
   await a.pm.destroy();
   assert.equal(a.pm.connections.size, 0);
   assert.equal(a.pm.peerConns.size, 0);
+});
+
+test("PI-11 null means \"no instance\": sendTo writes nowhere, isConnected/lineMaxFor answer for the contact", T, async (t) => {
+  const { contact, ownerPeer, contactPeer } = scene();
+  const a = ownerPeer();
+  const b1 = contactPeer("inst-visitor-1", { env: { CROW_PEER_LINE_MAX_BYTES: String(MiB) } }); // advertises 1 MiB
+  await link(t, a, b1);
+
+  // No instance: the contact-level answers (the newest connection), not "our own cap".
+  assert.equal(a.pm.lineMaxFor(contact.crowId), MiB);
+  assert.equal(a.pm.lineMaxFor(contact.crowId, null), MiB, "null = no instance: the contact-level cap");
+  assert.equal(a.pm.lineMaxFor(contact.crowId, undefined), MiB, "undefined stays the contact-level cap");
+  assert.equal(a.pm.lineMaxFor(contact.crowId, "inst-visitor-1"), MiB);
+  assert.equal(a.pm.isConnected(contact.crowId), true);
+  assert.equal(a.pm.isConnected(contact.crowId, null), true, "null = no instance: the contact-level answer");
+  assert.equal(a.pm.isConnected(contact.crowId, undefined), true);
+  assert.equal(a.pm.isConnected(contact.crowId, "inst-visitor-1"), true);
+  assert.equal(a.pm.sendTo(contact.crowId, null, { type: "noop" }), false, "null names no target for sendTo");
+  await sleep(100);
+  assert.equal(b1.received.length, 0, "nothing was written");
+
+  // With two instances the contact-level answer is the newest one; null follows it.
+  const b2 = contactPeer("inst-visitor-2");
+  await link(t, a, b2);
+  assert.equal(a.pm.lineMaxFor(contact.crowId), PEER_LINE_MAX_DEFAULT, "the newest connection's cap");
+  assert.equal(a.pm.lineMaxFor(contact.crowId, null), PEER_LINE_MAX_DEFAULT, "null follows the newest connection");
+  assert.equal(a.pm.lineMaxFor(contact.crowId, "inst-visitor-1"), MiB, "a named instance keeps its own cap");
+  assert.equal(a.pm.sendTo(contact.crowId, null, { type: "noop" }), false);
+  await sleep(100);
+  assert.equal(b1.received.length, 0);
+  assert.equal(b2.received.length, 0, "null is never a wildcard");
+});
+
+test("PI-12 error then close on the only connection fires onPeerDisconnected exactly once", T, async (t) => {
+  const { contact, ownerPeer, contactPeer } = scene();
+  const a = ownerPeer();
+  const b1 = contactPeer("inst-visitor-1");
+  const first = await link(t, a, b1);
+
+  // A real teardown reaches the manager twice for one connection: an `error`
+  // (onGone) and then the `close` that streamx emits after it (onGone again).
+  first.connA.emit("error", new Error("boom"));
+  first.connA.destroy();
+  assert.ok(await until(() => a.disconnected.length === 1), "the error alone fired it");
+  await sleep(150);
+  assert.deepEqual(a.disconnected, [contact.crowId], "the close that followed did not fire it again");
+  assert.equal(a.pm.connections.has(contact.crowId), false);
+  assert.equal(a.pm.peerConns.has(contact.crowId), false, "the empty bucket is gone");
+});
+
+test("PI-13 a superseded connection's close after a newer admission does not promote; the newer one stays primary", T, async (t) => {
+  const { contact, ownerPeer, contactPeer } = scene();
+  const a = ownerPeer();
+  const b1 = contactPeer("inst-visitor-1");
+  const b2 = contactPeer("inst-visitor-2");
+  const b3 = contactPeer("inst-visitor-3");
+  const first = await link(t, a, b1);
+  await link(t, a, b2); // b2 is the newest, so b2 owns `connections`
+  first.connA.destroy(); // b1's close is now in flight...
+  const third = await link(t, a, b3); // ...and a newer admission lands first
+
+  assert.equal(a.pm.connections.get(contact.crowId).conn, third.connA, "the newer admission is primary");
+  assert.ok(await until(() => a.pm.peerConns.get(contact.crowId)?.length === 2), "b1's close was handled (two entries are left)");
+  assert.equal(a.pm.connections.get(contact.crowId).conn, third.connA, "the late close did not promote b2 over the newer admission");
+  assert.deepEqual(a.pm.connectedInstances(contact.crowId), ["inst-visitor-3", "inst-visitor-2"], "newest first");
+  assert.equal(a.pm.isConnected(contact.crowId), true, "the contact never went away");
+  assert.deepEqual(a.disconnected, [], "one connection of several closing is not a disconnect");
+});
+
+test("PI-14 _promote with no live survivor clears the primary; the later closes fire the event once", T, async (t) => {
+  const { contact, ownerPeer, contactPeer } = scene();
+  const a = ownerPeer();
+  const b1 = contactPeer("inst-visitor-1");
+  const b2 = contactPeer("inst-visitor-2");
+  const first = await link(t, a, b1);
+  const second = await link(t, a, b2);
+  assert.equal(a.pm.connections.get(contact.crowId).conn, second.connA, "b2 is primary");
+
+  // Both links tear down at once: b1's conn is already dying (`destroying` is set
+  // synchronously) when b2's entry leaves, so _promote has no live survivor.
+  // b2's own close has not arrived yet, so its removal is the one being handled.
+  first.connA.destroy();
+  assert.deepEqual(a.pm._dropConnection(contact.crowId, second.connA), { removed: true, last: false });
+  assert.equal(a.pm.connections.has(contact.crowId), false, "_promote cleared the primary");
+  assert.equal(a.pm.peerConns.get(contact.crowId)?.length, 1, "the dying entry still holds the bucket open");
+  assert.deepEqual(a.disconnected, [], "no close has fired the event yet");
+
+  // b1's close empties the bucket and fires the event; b2's late close is a no-op.
+  assert.ok(await until(() => a.disconnected.length === 1), "the last close fires it");
+  await sleep(150);
+  assert.deepEqual(a.disconnected, [contact.crowId], "exactly once");
+  assert.equal(a.pm.peerConns.has(contact.crowId), false);
+  assert.equal(a.pm.isConnected(contact.crowId), false);
+});
+
+test("PI-15 a SIBLING connection is indexed in our own crowId's bucket and sendTo reaches it", T, async (t) => {
+  const me = newIdentity();
+  const s1 = siblingPeer(me, "inst-sibling-1");
+  const s2 = siblingPeer(me, "inst-sibling-2");
+  const pair = await link(t, s1, s2);
+
+  // Siblings share ONE identity, so the sibling sits in OUR OWN crowId's bucket.
+  assert.equal(s1.pm.connections.get(me.crowId)?.conn, pair.connA, "the sibling is the contact here too");
+  const bucket = s1.pm.peerConns.get(me.crowId);
+  assert.equal(bucket?.length, 1);
+  assert.equal(bucket[0].state.kind, "instance", "an instance-kind connection");
+  assert.equal(bucket[0].instanceId, "inst-sibling-2", "the entry carries the sibling's remoteInstanceId");
+  assert.deepEqual(s1.calls.instanceConnected, [[me.crowId, "inst-sibling-2"]]);
+  assert.deepEqual(s1.pm.connectedInstances(me.crowId), ["inst-sibling-2"]);
+  assert.equal(s1.pm.isConnected(me.crowId, "inst-sibling-2"), true);
+
+  const got = recordFrames(pair.connB);
+  assert.equal(s1.pm.sendTo(me.crowId, "inst-sibling-2", { hi: "sibling" }), true);
+  assert.ok(await until(() => got.some((f) => f.type === "data" && f.payload?.hi === "sibling")), "the sibling connection got the frame");
+  assert.equal(s1.pm.sendTo(me.crowId, "inst-sibling-9", { hi: "nobody" }), false, "an absent sibling routes nowhere");
+  await sleep(100);
+  assert.equal(got.some((f) => f.payload?.hi === "nobody"), false, "nothing was written for it");
+  assert.equal(s1.pm.send(me.crowId, { hi: "via-send" }), undefined);
+  assert.ok(await until(() => got.some((f) => f.payload?.hi === "via-send")), "send() reaches it as the newest connection");
 });
 
 /**

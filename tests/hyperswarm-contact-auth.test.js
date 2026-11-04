@@ -725,12 +725,19 @@ const SIDE_EFFECTS = [
   // _promote is the ONE other writer: it only re-points `connections` at an entry
   // that was already admitted (the newest live survivor of a close), and only
   // _dropConnection calls it.
-  { what: "connections.set(", re: /\.connections\s*\.\s*set\s*\(/g, allowed: ["_completeAdmit", "_promote"] },
+  { what: "connections.set", re: /\bconnections\s*(\?\.|\.)\s*set\b/g, allowed: ["_completeAdmit", "_promote"] },
   { what: "_promote(", re: /\._promote\s*\(/g, allowed: ["_dropConnection"] },
+  // Aliasing either map hands out its mutation path: a local copy can call
+  // set()/delete() behind the APIs' back. Only the constructor may hold one.
+  // A member access after the name (`= this.connections.get(…)`) is a read, not
+  // an alias, so it is not matched; so is a comparison (`=== this.connections`).
+  { what: "alias this.connections", re: /(?<![=!<>])\s*=\s*this\s*\.\s*connections\b(?!\s*(?:\?\.|\.|\[))/g, allowed: ["constructor"] },
+  { what: "alias this.peerConns", re: /(?<![=!<>])\s*=\s*this\s*\.\s*peerConns\b(?!\s*(?:\?\.|\.|\[))/g, allowed: ["constructor"] },
   // The per-instance bucket (crowId -> entry[]) is private to the index: these
-  // are the only methods that may touch it. Everything else goes through the
-  // APIs above, so no other code can pick a connection behind sendTo()'s back.
-  { what: ".peerConns", re: /\.peerConns\b/g, allowed: [
+  // are the only methods that may touch it — by name, or destructured from
+  // `this`. Everything else goes through the APIs above, so no other code can
+  // pick a connection behind sendTo()'s back.
+  { what: "peerConns", re: /\bpeerConns\b/g, allowed: [
     "constructor", "_completeAdmit", "_dropConnection", "_promote",
     "sendTo", "isConnected", "connectedInstances", "lineMaxFor", "leaveContact", "destroy",
   ] },
@@ -823,17 +830,25 @@ test("H-C11 positive control: a planted side effect in a temp copy fails the sca
   const HC = "  _handleConnection(conn, info) {";
   const DROP = "  _dropConnection(crowId, conn) {";
   const plants = [
-    ["connections.set(", at(HC, '    this.connections.set("x", { conn, authenticated: true });\n')],
+    ["connections.set in _handleConnection", at(HC, '    this.connections.set("x", { conn, authenticated: true });\n')],
+    // Optional chaining is the same mutation path, not a read.
+    ["connections.set in _handleConnection", at(HC, '    this.connections?.set("x", { conn, authenticated: true });\n')],
     ["bare sign(", at(HC, "    const s = sign(msg.challenge, this.identity.ed25519Priv);\n")],
     ['{ type: "authenticated" }', at(HC, '    conn.write(JSON.stringify({ type: "authenticated" }) + "\\n");\n')],
     ['{ type: "authenticated" }', at(HC, '    conn.write(JSON.stringify({ type: "authenticated", line_max: 1 }) + "\\n");\n')],
     ["onPeerConnected(", at(HC, "    this.onPeerConnected(remoteCrowId, conn);\n")],
     ["_completeAdmit(", at(HC, "    this._completeAdmit(conn, state);\n")],
     ["verify(... msg.pubkey", at(HC, "    verify(nonce, msg.signature, msg.pubkey);\n")],
-    // The per-instance bucket is reachable only from the named methods.
-    [".peerConns", at(HC, "    this.peerConns.get(x).push(entry);\n")],
-    // Promotion is the only other `connections.set`, and only inside _promote.
-    ["connections.set( in _dropConnection", at(DROP, "    this.connections.set(crowId, bucket[0]);\n")],
+    // The per-instance bucket is reachable only from the named methods: by
+    // name, or destructured out of `this` (which hands the Map itself over).
+    ["peerConns in _handleConnection", at(HC, "    this.peerConns.get(x).push(entry);\n")],
+    ["peerConns in _handleConnection", at(HC, "    const { peerConns } = this;\n")],
+    // An alias is the same handout: set()/delete() through a local copy.
+    ["alias this.connections in _handleConnection", at(HC, "    const conns = this.connections;\n")],
+    ["alias this.peerConns in _handleConnection", at(HC, "    const buckets = this.peerConns;\n")],
+    // Promotion is the only other `connections.set`, and only inside _dropConnection.
+    ["connections.set in _dropConnection", at(DROP, "    this.connections.set(crowId, bucket[0]);\n")],
+    ["_promote( in _handleConnection", at(HC, "    this._promote(crowId, bucket);\n")],
   ];
   for (const [what, text] of plants) {
     const f = join(dir, "peer-manager.js");
@@ -843,7 +858,7 @@ test("H-C11 positive control: a planted side effect in a temp copy fails the sca
   }
   // And a plant inside a comment is not code: not caught.
   const f = join(dir, "peer-manager.js");
-  writeFileSync(f, at(HC, "    // this.connections.set(x) this.peerConns.get(x).push(entry)\n"));
+  writeFileSync(f, at(HC, "    // this.connections.set(x) this.connections?.set(x) const a = this.connections; this.peerConns.get(x).push(entry)\n"));
   assert.deepEqual(scanSideEffects(f), []);
 });
 
