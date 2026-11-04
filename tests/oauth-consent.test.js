@@ -6,7 +6,9 @@
 // reach the gateway could register a client, call /authorize with their own PKCE
 // challenge, lift the code out of the 302 Location, exchange it at /token and
 // hold a full operator MCP bearer token. The code now exists only after the
-// owner, signed in to the dashboard, clicks Allow on /dashboard/oauth/consent.
+// owner, signed in to the dashboard, clicks Allow on /dashboard/oauth/consent —
+// and "the owner" means their own password session, not just any dashboard
+// session (a full MCP token is more powerful than any other owner-only action).
 //
 // Harness: a scratch crow.db, the REAL dashboard router (which mounts the real
 // consent router), the real CrowOAuthProvider, and a request-side socket address
@@ -34,7 +36,19 @@ const { createDbClient } = await import("../servers/db.js");
 const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
 const { setPassword } = await import("../servers/gateway/dashboard/auth.js");
 const { createOAuthProvider } = await import("../servers/gateway/auth.js");
+const { setInterfaceTableForTests } = await import("../servers/shared/ip-classify.js");
 const { isConsentNext, pendingAuthorizations, setOAuthProvider } = await import("../servers/gateway/oauth-consent.js");
+
+// Approving a sign-in is the owner's own turn (dashboard/local-session.js), so
+// the origin rule (servers/shared/self-origin.js) is in play. Pin the interface
+// table the way tests/self-origin.test.js does, so "this machine" does not
+// depend on the NICs of the box the suite runs on: the fake LAN peer below is
+// off-box, BOX_LAN is the box's own LAN address.
+const BOX_LAN = "192.168.77.10";
+setInterfaceTableForTests(() => ({
+  lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", cidr: "127.0.0.1/8" }],
+  lan0: [{ address: BOX_LAN, netmask: "255.255.255.0", family: "IPv4", cidr: `${BOX_LAN}/24` }],
+}));
 
 const db = createDbClient();
 const provider = createOAuthProvider();
@@ -47,18 +61,26 @@ const STATE = "state-abc123";
 const PW = "correct horse battery staple";
 
 const SESSION = randomBytes(32).toString("hex");
+const SSO_SESSION = randomBytes(32).toString("hex");
+const ONHOST_SESSION = randomBytes(32).toString("hex");
 const CSRF = randomBytes(16).toString("hex");
-const COOKIE = `crow_session=${SESSION}; crow_csrf=${CSRF}`;
+const cookieFor = (session) => `crow_session=${session}; crow_csrf=${CSRF}`;
+const COOKIE = cookieFor(SESSION);
 const sha256 = (t) => createHash("sha256").update(t).digest("hex");
 
 const VERIFIER = randomBytes(32).toString("base64url");
 const CHALLENGE = createHash("sha256").update(VERIFIER).digest("base64url");
 
-// A signed-in owner: a real dashboard session row (same storage auth.js uses).
-await db.execute({
-  sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)",
-  args: [sha256(SESSION), new Date(Date.now() + 3_600_000).toISOString()],
-});
+// Signed-in sessions, all real dashboard session rows (the same storage auth.js
+// uses, which does not look at scopes): the owner's own password session, a
+// peer sign-in (dashboard sso), and one minted by a login from this machine
+// (dashboard onhost). Only the first may approve a sign-in.
+for (const [token, scopes] of [[SESSION, "dashboard"], [SSO_SESSION, "dashboard sso src:peer"], [ONHOST_SESSION, "dashboard onhost"]]) {
+  await db.execute({
+    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+    args: [sha256(token), scopes, new Date(Date.now() + 3_600_000).toISOString()],
+  });
+}
 
 /** A LAN peer: the real connection is loopback, the peer address is not. */
 let server;
@@ -88,6 +110,7 @@ before(async () => {
 after(async () => {
   try { provider.db.close(); } catch {}
   try { db.close(); } catch {}
+  setInterfaceTableForTests(null);
   if (server) await new Promise((r) => { server.close(r); server.closeAllConnections(); });
   rmScratch(dir);
 });
@@ -301,4 +324,85 @@ test("12. a password login returns to the consent page for a good next, and to /
   const bad = await post("/dashboard/login", { password: PW, next: "//evil.example" });
   assert.equal(bad.status, 303);
   assert.equal(bad.headers.get("location"), "/dashboard", "an invalid next cannot redirect anywhere");
+});
+
+// --- 13 --------------------------------------------------------------------
+// Only the owner's OWN password session approves. A peer sign-in, a session
+// minted by a login on this machine and a request from this machine itself all
+// hold a working dashboard session, and all are refused (dashboard/local-session.js).
+const OWNER_ONLY_TEXT = /Only the owner, signed in with the password/;
+
+async function refusedFor(scopesSession, { peer = LAN } = {}) {
+  const { id } = await mintPending();
+  const headers = { cookie: cookieFor(scopesSession) };
+  const page = await get(`/dashboard/oauth/consent?req=${id}`, { peer, headers });
+  assert.equal(page.status, 403, `GET refused (${scopesSession.slice(0, 4)}… from ${peer})`);
+  assert.match(await page.text(), OWNER_ONLY_TEXT);
+  assert.equal(pendingAuthorizations.has(id), true, "the GET consumed nothing");
+
+  const decision = await post("/dashboard/oauth/consent", { req: id, _csrf: CSRF, decision: "allow" }, { peer, headers });
+  assert.equal(decision.status, 403, "POST refused even with the right CSRF token");
+  assert.match(await decision.text(), OWNER_ONLY_TEXT);
+  assert.equal(pendingAuthorizations.has(id), true, "nothing was consumed, so the pending request stays");
+  assert.equal(provider.codes.size, 0, "and no code exists");
+  return id;
+}
+
+test("13. a peer SSO session (dashboard sso …) cannot approve a sign-in", async () => {
+  await refusedFor(SSO_SESSION);
+});
+
+test("14. a session minted by a login on this machine (dashboard onhost) cannot approve a sign-in", async () => {
+  await refusedFor(ONHOST_SESSION);
+});
+
+test("15. the owner's own session is still refused when the request comes from this machine itself", async () => {
+  await refusedFor(SESSION, { peer: BOX_LAN });
+});
+
+// --- 16 --------------------------------------------------------------------
+test("16. the owner's password session from a LAN peer still approves end to end", async () => {
+  const { client, id } = await mintPending();
+  const headers = { cookie: COOKIE };
+  const page = await get(`/dashboard/oauth/consent?req=${id}`, { headers });
+  assert.equal(page.status, 200, "the owner's own session gets the page");
+  assert.match(await page.text(), /name="decision"/);
+
+  const r = await post("/dashboard/oauth/consent", { req: id, _csrf: CSRF, decision: "allow" }, { headers });
+  assert.equal(r.status, 303);
+  const code = new URL(r.headers.get("location")).searchParams.get("code");
+  assert.ok(code, "the owner's Allow mints the code");
+  const tokens = await provider.exchangeAuthorizationCode(client, code, VERIFIER);
+  assert.ok(tokens.access_token, "and it exchanges for an access token");
+});
+
+// --- 17 --------------------------------------------------------------------
+const CUSTOM_CLIENT_ID = "consent-test-custom-scheme";
+const CUSTOM_CALLBACK = "myapp://cb";
+
+test("17. a custom-scheme client shows its scheme and host, never the string \"null\"", async () => {
+  const client = await provider.clientsStore.registerClient({ client_id: CUSTOM_CLIENT_ID, client_name: "Custom App", redirect_uris: [CUSTOM_CALLBACK] });
+  const redirected = fakeRes();
+  await provider.authorize(client, { ...authorizationParams(), redirectUri: CUSTOM_CALLBACK }, redirected);
+  assert.equal(redirected.statusCode, 302);
+  const id = new URL("http://crow.invalid" + redirected.location).searchParams.get("req");
+
+  const page = await get(`/dashboard/oauth/consent?req=${id}`, { headers: { cookie: COOKIE } });
+  const html = await page.text();
+  assert.equal(page.status, 200);
+  assert.ok(html.includes("<code>myapp://cb</code>"), "the scheme and host instead of \"null\"");
+  assert.equal(html.includes(">null<"), false, "the origin string \"null\" is never shown");
+});
+
+// --- 18 --------------------------------------------------------------------
+test("18. a request id that is not the shape oauth-consent mints gets the expired page, not a login round trip", async () => {
+  const short = await get("/dashboard/oauth/consent?req=short");
+  assert.equal(short.status, 400, "a malformed id is not carried through the login page");
+  assert.match(await short.text(), /expired/i);
+
+  const missing = await get("/dashboard/oauth/consent");
+  assert.equal(missing.status, 400, "no id at all is the same");
+
+  const hostile = await get("/dashboard/oauth/consent?req=" + encodeURIComponent("A".repeat(31) + "!"), { peer: LAN });
+  assert.equal(hostile.status, 400, "an id with a character the pattern refuses is not a consent next either");
 });

@@ -118,6 +118,9 @@ export const translations = {
   "oauthConsent.wrongAddressTitle": { en: "Approve this from your dashboard address", es: "Aprueba esto desde la dirección de tu panel" },
   "oauthConsent.wrongAddress": { en: "A sign-in has to be approved from the Crow dashboard address — the tailnet or LAN address you normally use, not localhost on the server. Apps running on this machine can use the local MCP token instead (Settings).", es: "Un inicio de sesión debe aprobarse desde la dirección del panel de Crow — la dirección de tailnet o LAN que usas normalmente, no localhost en el servidor. Las aplicaciones que se ejecutan en esta máquina pueden usar en su lugar el token MCP local (Ajustes)." },
   "oauthConsent.needSession": { en: "Sign in to the Crow dashboard first, then allow the app.", es: "Inicia sesión en el panel de Crow primero y luego permite la aplicación." },
+  // A dashboard session is not enough to approve a sign-in (it hands out a full
+  // MCP token): only the owner's own password session is (dashboard/local-session.js).
+  "oauthConsent.ownerOnly": { en: "Only the owner, signed in with the password from their own computer or phone, can approve a sign-in. Apps on this machine can use the local MCP token instead (Settings).", es: "Solo el propietario, con la sesión iniciada con la contraseña desde su propio ordenador o teléfono, puede aprobar un inicio de sesión. Las aplicaciones de esta máquina pueden usar en su lugar el token MCP local (Ajustes)." },
   "oauthConsent.csrfFailed": { en: "That request could not be verified. Open the consent page again from the app and try once more.", es: "No se pudo verificar esa solicitud. Abre de nuevo la página de consentimiento desde la aplicación e inténtalo otra vez." },
   "oauthConsent.notConfigured": { en: "OAuth is not configured on this instance.", es: "OAuth no está configurado en esta instancia." },
 

@@ -10,14 +10,18 @@
  *
  * Now authorize() only records a PENDING request and sends the browser here; a
  * code is minted (issueAuthorizationCode) only after the instance owner, signed
- * in to the dashboard, clicks Allow. The pending store is in memory on purpose:
- * a consent request that does not outlive the gateway process is dead, which is
- * the safe direction for a credential hand-off.
+ * in to the dashboard, clicks Allow — and "the owner" means their own password
+ * session, not just any dashboard session (a full MCP token outranks every other
+ * owner-only action, so it carries that same rule). The pending store is in
+ * memory on purpose: a consent request that does not outlive the gateway process
+ * is dead, which is the safe direction for a credential hand-off.
  */
 
 import express, { Router } from "express";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createDbClient } from "../db.js";
 import { isAllowedNetwork, parseCookies, sessionFromRequest } from "./dashboard/auth.js";
+import { isLocalPasswordSessionOn } from "./dashboard/local-session.js";
 import { escapeHtml } from "./dashboard/shared/components.js";
 import { SUPPORTED_LANGS, t } from "./dashboard/shared/i18n.js";
 
@@ -158,6 +162,32 @@ function expiredPage(res, lang) {
   }));
 }
 
+function ownerOnlyPage(res, lang) {
+  return sendPage(res, 403, pageHtml({
+    title: t("oauthConsent.title", lang),
+    lang,
+    body: `<h1>${escapeHtml(t("oauthConsent.title", lang))}</h1>
+      <p>${escapeHtml(t("oauthConsent.ownerOnly", lang))}</p>`,
+  }));
+}
+
+/**
+ * The owner's own password session only (dashboard/local-session.js): a peer
+ * sign-in (SSO), a session minted by a login on this machine, and any request
+ * from this machine itself are refused. A full MCP token is more powerful than
+ * any other owner-only action, so it carries that same rule. Never throws.
+ */
+async function isOwnersOwnSession(req) {
+  const db = createDbClient();
+  try {
+    return (await isLocalPasswordSessionOn(db, req)) === true;
+  } catch {
+    return false;
+  } finally {
+    try { db.close(); } catch { /* closed */ }
+  }
+}
+
 /**
  * Routes:
  *   GET  /dashboard/oauth/consent?req=<id>  — the Allow/Deny page
@@ -190,9 +220,16 @@ export function createOAuthConsentRouter() {
             <p>${escapeHtml(t("oauthConsent.wrongAddress", lang))}</p>`,
         }));
       }
-      const next = `${CONSENT_PATH}?req=${id}`;
-      return res.redirect(302, "/dashboard/login?next=" + encodeURIComponent(next));
+      // Only a request id oauth-consent itself could have minted may ride the
+      // login hand-off; anything else is simply expired/unknown.
+      if (!isConsentNext(`${CONSENT_PATH}?req=${id}`)) return expiredPage(res, lang);
+      return res.redirect(302, "/dashboard/login?next=" + encodeURIComponent(`${CONSENT_PATH}?req=${id}`));
     }
+
+    // A signed-in dashboard session is not enough: approving a sign-in hands out
+    // a full MCP token, so it is the owner's own password session or nothing.
+    req.dashboardSession = session;
+    if (!(await isOwnersOwnSession(req))) return ownerOnlyPage(res, lang);
 
     const entry = pendingAuthorizations.get(id);
     if (!entry || entry.expiresAt <= Date.now()) {
@@ -204,9 +241,14 @@ export function createOAuthConsentRouter() {
     // escape it, and never let it choose where a POST goes.
     const rawName = typeof entry.client?.client_name === "string" ? entry.client.client_name.trim() : "";
     const appName = escapeHtml(rawName || t("oauthConsent.unnamedApp", lang));
+    // A custom scheme (myapp://cb) has the origin string "null"; show the scheme
+    // and host instead, or the whole URI when it names no host at all.
     let origin = "";
     try {
-      origin = new URL(entry.params.redirectUri).origin;
+      const url = new URL(entry.params.redirectUri);
+      origin = url.origin === "null"
+        ? (url.host ? `${url.protocol}//${url.host}` : String(entry.params.redirectUri || ""))
+        : url.origin;
     } catch {
       origin = String(entry.params.redirectUri || "");
     }
@@ -253,7 +295,13 @@ export function createOAuthConsentRouter() {
       }));
     }
 
-    // 2. CSRF, checked here explicitly: csrfMiddleware skips requests without a
+    // 2. And it must be the owner's own password session, not any dashboard
+    //    session: a full MCP token is more powerful than any other owner-only
+    //    action, so it carries the same rule. Nothing is consumed on a refusal.
+    req.dashboardSession = session;
+    if (!(await isOwnersOwnSession(req))) return ownerOnlyPage(res, lang);
+
+    // 3. CSRF, checked here explicitly: csrfMiddleware skips requests without a
     //    session cookie, so it cannot be the rail for THIS route, and a consent
     //    grant is exactly what a forged cross-site form would aim for. This one
     //    ignores the CROW_CSRF_STRICT rollback switch on purpose — turning the
@@ -268,7 +316,7 @@ export function createOAuthConsentRouter() {
       }));
     }
 
-    // 3. Single use, whatever the decision.
+    // 4. Single use, whatever the decision.
     const entry = takePending(typeof body.req === "string" ? body.req : "");
     if (!entry) return expiredPage(res, lang);
 
