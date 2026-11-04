@@ -12,7 +12,7 @@
  *     raven ("unknown") and MPA;
  *   - memory id collisions, one replicated-then-edited memory (same id and
  *     created_at, different content);
- *   - the home server-6 = crow-6 project, a source-only research_sources.s3_key,
+ *   - the home server's project 6 = crow-6 project, a source-only research_sources.s3_key,
  *     a reordered chat_messages, natural-key Ramble rows (incl. synced rows
  *     only the home server has), unowned tables, bot history, an unmapped table,
  *     and bundle tables crow does not have (media, data-dashboard).
@@ -236,7 +236,7 @@ export async function buildSource(dir) {
     INSERT INTO bot_runs (run_id, bot_id, status) VALUES ('run-1', 'grackle-assistant', 'done');
     INSERT INTO job_search_sites (id, name, source_type, url, scrape_strategy, tier) VALUES ('edjoin', 'EdJoin', 'board', 'https://edjoin.example', 'html', 1);
 
-    -- ramble: one cell + one wallet row crow already has (crow wins), the rest host-b-only
+    -- ramble: one cell + one wallet row crow already has (crow wins), the rest only on the home server
     INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vg4zzz', 50);
     INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vg4yyy', 60);
     INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vg4xxx', 70);
