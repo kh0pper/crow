@@ -16,7 +16,7 @@
  * `globalThis`, so "the page never loaded it" is asserted against a loader that would have recorded
  * it. Nothing here reaches the network.
  */
-import { test, before, after, beforeEach } from "node:test";
+import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -48,6 +48,9 @@ process.env.PIBOT_PI_CLI = "/nonexistent/pi-never-spawned-by-this-file.js";
 const DB_FILE = join(dir, "crow.db");
 writeFileSync(join(dir, "instance-id"), "instance-widgets-lazy");
 const REPO = new URL("..", import.meta.url).pathname;
+// The process's own fetch, put back after every test: a vm rig must never leave a stub behind.
+const NATIVE_FETCH = globalThis.fetch;
+afterEach(() => { if (globalThis.fetch !== NATIVE_FETCH) globalThis.fetch = NATIVE_FETCH; });
 
 // ─── the probe add-on ────────────────────────────────────────────────────────
 // One installed bundle, two widgets: one that says how often it was loaded, one that throws. Its
@@ -541,7 +544,11 @@ function rig({ layout, respond }) {
   const live = { id: "live", titleKey: "forYou.morning", sizes: [[2, 1]], defaultSize: [2, 1], pages: ["for-you"], defaultOn: true, render: () => `<p id="h-live">Live</p>` };
   const lazyWidget = { id: "lazy", titleKey: "forYou.news", sizes: [[2, 1]], defaultSize: [2, 1], pages: ["for-you"], defaultOn: false, render: () => `<p id="h-lazy">Fetched</p>` };
   const cells = [{ widget: live, data: {} }, { widget: lazyWidget, lazy: true }];
-  const { document, window } = parseHTML(`<!doctype html><html><body>${gridHtml("for-you", cells, "en")}</body></html>`);
+  const parsed = parseHTML(`<!doctype html><html><body>${gridHtml("for-you", cells, "en")}</body></html>`);
+  const document = parsed.document;
+  // linkedom's window falls through to the real global: a fetch stub set on it directly would
+  // replace this process's own fetch (and every later test's, the live Chrome one included).
+  const window = Object.create(parsed.window);
   const store = new Map();
   if (layout !== undefined) store.set(KEY, JSON.stringify(layout));
   const calls = [];
