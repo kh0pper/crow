@@ -1,0 +1,31 @@
+{
+  "Id": "dddddeeeeffff2222dddddeeeeffff2222dddddeeeeffff2222dddddeeeeffff2222",
+  "Name": "/crow-engine-embed",
+  "Config": {
+    "Hostname": "1a2b3c4d5e6f",
+    "Env": ["PATH=/usr/local/bin:/usr/bin", "MODEL_API_KEY=FAKE-ENV-SECRET-4a7d2c"],
+    "Cmd": ["--port", "8007"],
+    "Entrypoint": ["/app/embed"],
+    "Labels": {
+      "crow.runtime": "docker",
+      "crow.bundle": "example-embed",
+      "com.docker.compose.project": "example-embed",
+      "com.docker.compose.project.working_dir": "/home/crow/.crow/bundles/example-embed"
+    }
+  },
+  "HostConfig": {
+    "NetworkMode": "default",
+    "PortBindings": {
+      "8007/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "8007" }]
+    }
+  },
+  "Mounts": [],
+  "NetworkSettings": {
+    "Networks": {
+      "bridge": {
+        "NetworkID": "2222222222222222222222222222222222222222222222222222222222222222",
+        "IPAddress": "172.17.0.3"
+      }
+    }
+  }
+}

@@ -1,0 +1,36 @@
+# TEMPLATE — installed by the operator (docs/guide/engine-fence.md), started by
+# crow-publish-snapshot.timer every 5 minutes. It writes ONE JSON file about
+# what this host publishes beyond loopback; the dashboard's publishedPorts audit
+# reads that file and runs nothing itself.
+#
+# Root by design: reading every container's inspect document, the raw table and
+# the socket table needs it. It adds no user to any group.
+[Unit]
+Description=Crow published-ports snapshot (what this host publishes beyond loopback)
+# Never pull docker or tailscaled up on the snapshot's behalf: if a daemon is
+# down, that section is written as null with an error entry instead.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/crow-publish-snapshot
+# No StateDirectory=: with no User=/Group=, systemd would re-chown the
+# directory to root:root on every start, which locks the gateway out of the
+# snapshot. The script creates /var/lib/crow-fence itself as root:<group> 0750.
+# The group that may read the snapshot is the installer's, never a literal in
+# this file: CROW_SNAPSHOT_GROUP=<group> in /etc/crow/publish-snapshot.env.
+EnvironmentFile=-/etc/crow/publish-snapshot.env
+TimeoutStartSec=120
+
+# Sandbox: deliberately NOT ProtectSystem=strict. `iptables -S` takes the
+# xtables lock, which iptables creates under /run, and a strict namespace would
+# need /run writable (the documented strict variant adds a tmpfiles.d line for
+# the lock — see docs/guide/engine-fence.md). full keeps /run and /var writable
+# while everything the job only reads is read-only.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+UMask=0027
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN

@@ -1,0 +1,6 @@
+{
+  "ServerVersion": "28.0.1",
+  "Driver": "overlay2",
+  "FirewallBackend": { "Driver": "nftables", "Info": { "Legacy": false } },
+  "UserlandProxy": true
+}

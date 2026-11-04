@@ -1,0 +1,16 @@
+# TEMPLATE — installed and enabled by the operator (docs/guide/engine-fence.md).
+#
+# Monotonic rather than OnCalendar=: a snapshot every 5 minutes of uptime, first
+# one 2 minutes after boot, so a fleet of hosts never fires every timer at the
+# same wall-clock minute (and never overlaps the nightly jobs).
+[Unit]
+Description=Refresh the Crow published-ports snapshot every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=crow-publish-snapshot.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,3 @@
+-P PREROUTING ACCEPT
+-A PREROUTING -j CROW-ENGINE-FENCE
+-A CROW-ENGINE-FENCE -d 100.64.20.5/32 -p tcp -m tcp --dport 8003 ! -i tailscale0 -m comment --comment "crow-engine-fence:35b:g7" -j DROP

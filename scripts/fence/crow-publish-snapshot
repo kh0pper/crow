@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# Crow published-ports snapshot (implementation plan PR S5b).
+#
+# Writes ONE JSON document — /var/lib/crow-fence/snapshot.json by default —
+# describing what this host publishes beyond loopback, so the dashboard's
+# `publishedPorts` audit can read the facts without running docker, iptables or
+# tailscale itself (the gateway's signal path stays cheap and cannot hang on a
+# wedged daemon).
+#
+# WHAT IS NEVER WRITTEN: `Config.Env` (an inspect dump holds tokens), `Cmd`,
+# `Entrypoint`, mounts, and any process name or command line from `ss` (no -p).
+# Every field is selected explicitly with `docker inspect --format`, and the
+# document is assembled by node — which is present wherever Crow runs — rather
+# than by jq, which is not a dependency of this repo.
+#
+# A command that fails does not fail the run: the section it feeds becomes null
+# and an entry is appended under `errors`, and the snapshot is still written.
+# An audit that cannot read something must say "unknown"; it must never be
+# handed an empty list that reads as "nothing is published".
+#
+# DOCKER IS NEVER STARTED: docker.service is socket-activated, so even
+# `docker version` after `systemctl stop docker` brings dockerd back. The unit
+# state is asked first; while it is not active, no docker CLI call is made and
+# every docker section (including `containers`) is null with that one error.
+#
+# Install, group choice, the strict sandbox variant and removal:
+# docs/guide/engine-fence.md. The unit is crow-publish-snapshot.timer.
+set -euo pipefail
+umask 0077
+
+PROGNAME=${0##*/}
+FENCE_UNIT=crow-engine-fence
+STATE_DIR=/var/lib/crow-fence
+DEFAULT_OUTPUT=/var/lib/crow-fence/snapshot.json
+OUTPUT=${CROW_PUBLISH_SNAPSHOT:-$DEFAULT_OUTPUT}
+GROUP=${CROW_SNAPSHOT_GROUP:-}
+# coreutils timeout, so a wedged daemon costs one section instead of the run.
+CAPTURE_TIMEOUT=15
+
+usage() {
+  cat <<EOF
+usage: $PROGNAME [--output PATH] [--group GROUP]
+
+Writes the published-ports snapshot (default $DEFAULT_OUTPUT): what this host
+publishes beyond loopback, for the dashboard's publishedPorts audit.
+
+  --output PATH   write here (or set CROW_PUBLISH_SNAPSHOT). The output
+                  directory is only used as-is: this script changes mode or
+                  group only on $STATE_DIR, and refuses a directory that is
+                  sticky, world-writable or not owned by root.
+  --group GROUP   leave the file root:GROUP mode 0640 and $STATE_DIR mode
+                  0750, so the gateway's group can read it (or set
+                  CROW_SNAPSHOT_GROUP). Without it the file stays root-owned and
+                  only root can read it.
+EOF
+}
+
+need_value() {
+  [ "$#" -ge 2 ] || { printf '%s: %s needs a value\n' "$PROGNAME" "$1" >&2; exit 2; }
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) need_value "$@"; OUTPUT=$2; shift 2 ;;
+    --group) need_value "$@"; GROUP=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) printf '%s: unknown option %s\n' "$PROGNAME" "$1" >&2; usage >&2; exit 2 ;;
+    *) OUTPUT=$1; shift ;;
+  esac
+done
+
+command -v node >/dev/null 2>&1 || {
+  printf '%s: node is required (it assembles the JSON; jq is not a dependency)\n' "$PROGNAME" >&2
+  exit 1
+}
+
+# ─── Group validation, before anything uses it ───────────────────────────────
+# A group name reaches chgrp/install, so it is checked as a name (never as a
+# path) first, then against the group database when getent is available.
+GROUP_RE='^[a-z_][a-z0-9_-]*\$?$'
+if [ -n "$GROUP" ]; then
+  if ! [[ $GROUP =~ $GROUP_RE ]]; then
+    printf '%s: invalid group name: %s\n' "$PROGNAME" "$GROUP" >&2
+    exit 2
+  fi
+  if command -v getent >/dev/null 2>&1 && ! getent group "$GROUP" >/dev/null 2>&1; then
+    printf '%s: no such group: %s\n' "$PROGNAME" "$GROUP" >&2
+    exit 1
+  fi
+fi
+
+# ─── Output directory ────────────────────────────────────────────────────────
+# Only the dedicated state directory is ever created, chmod-ed or chgrp-ed by
+# this script. Any other --output directory is used exactly as the operator
+# left it, and one that another user could steer (sticky, world-writable, or
+# not root-owned) is refused instead of written into.
+OUTPUT_DIR=$(dirname -- "$OUTPUT")
+
+if [ "$OUTPUT_DIR" = "$STATE_DIR" ]; then
+  # 0750 root:GROUP on the dedicated directory itself. Deliberately not
+  # StateDirectory= in the unit: with no User=/Group= systemd would re-chown it
+  # to root:root on every start, making the snapshot unreadable to the gateway.
+  if [ -n "$GROUP" ]; then
+    install -d -m 0750 -o root -g "$GROUP" -- "$STATE_DIR" || {
+      printf '%s: cannot prepare %s\n' "$PROGNAME" "$STATE_DIR" >&2
+      exit 1
+    }
+  else
+    install -d -m 0750 -o root -- "$STATE_DIR" || {
+      printf '%s: cannot prepare %s\n' "$PROGNAME" "$STATE_DIR" >&2
+      exit 1
+    }
+  fi
+else
+  mkdir -p -- "$OUTPUT_DIR"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || {
+    printf '%s: output directory is not a directory: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+    exit 1
+  }
+  dir_mode=$(stat -c '%a' -- "$OUTPUT_DIR")
+  dir_owner=$(stat -c '%u' -- "$OUTPUT_DIR")
+  case $dir_mode in
+    ''|*[!0-7]*)
+      printf '%s: cannot read the mode of %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+      exit 1 ;;
+  esac
+  if (( (8#$dir_mode & 8#1000) != 0 )); then
+    printf '%s: refusing a sticky output directory: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+    exit 1
+  fi
+  if (( (8#$dir_mode & 8#002) != 0 )); then
+    printf '%s: refusing a world-writable output directory: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+    exit 1
+  fi
+  # Group-writable too: a group member could swap the temp file between the
+  # regular-file check and the chmod/chgrp, which act by path name.
+  if (( (8#$dir_mode & 8#020) != 0 )); then
+    printf '%s: refusing a group-writable output directory: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+    exit 1
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    [ "$dir_owner" -eq 0 ] || {
+      printf '%s: refusing an output directory not owned by root: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+      exit 1
+    }
+  else
+    # An unprivileged run cannot own a root directory; the invoking user is the
+    # only other owner it may write into.
+    [ "$dir_owner" -eq "$(id -u)" ] || [ "$dir_owner" -eq 0 ] || {
+      printf '%s: refusing an output directory owned by another user: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+      exit 1
+    }
+  fi
+fi
+
+WORK=$(mktemp -d -- "${TMPDIR:-/tmp}/crow-publish-snapshot.XXXXXX")
+TMP_JSON=
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  [ -z "$TMP_JSON" ] || rm -f -- "$TMP_JSON"
+  rm -rf -- "$WORK"
+  exit "$rc"
+}
+trap cleanup EXIT
+
+# ─── Capture ─────────────────────────────────────────────────────────────────
+# One file per section under $WORK, plus a tab-separated error line for every
+# command that failed. Both helpers always return 0: a failing command is data
+# (a null section plus an error entry), never a reason to leave no snapshot.
+# Every external command is bounded by timeout, and the error entry names the
+# command without the wrapper (the section, not the timeout, is the subject).
+
+ERRORS="$WORK/errors"
+: > "$ERRORS"
+note_error() { printf '%s\t%s\n' "$1" "$2" >> "$ERRORS"; }
+
+capture() {  # <name> <command...> — exit status matters; a failure nulls the section
+  local name=$1
+  shift
+  local out="$WORK/$name" err status=0
+  err=$(timeout "$CAPTURE_TIMEOUT" "$@" 2>"$out.err") || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s' "$err" > "$out"
+    return 0
+  fi
+  note_error "$*" "exit status $status"
+  return 0
+}
+
+capture_any() {  # <name> <command...> — a non-zero exit with output is still an answer
+  local name=$1
+  shift
+  local out="$WORK/$name" status=0
+  timeout "$CAPTURE_TIMEOUT" "$@" >"$out" 2>"$out.err" || status=$?
+  [ -s "$out" ] && return 0
+  [ "$status" -eq 0 ] || note_error "$*" "exit status $status"
+  return 0
+}
+
+# ─── Docker: ask systemd first, never a CLI call while it is inactive ───────
+DOCKER_ACTIVE=1
+docker_unit_status=0
+timeout "$CAPTURE_TIMEOUT" systemctl is-active --quiet docker.service >/dev/null 2>&1 || docker_unit_status=$?
+if [ "$docker_unit_status" -ne 0 ]; then
+  DOCKER_ACTIVE=0
+  # No docker command is run at all: the socket would start dockerd again.
+  note_error "docker.service" "docker.service not active"
+fi
+
+if [ "$DOCKER_ACTIVE" -eq 1 ]; then
+  capture docker_version docker version --format '{{json .Server.Version}}'
+  capture docker_firewall docker info --format '{{json .FirewallBackend}}'
+  capture docker_userland_proxy docker info --format '{{json .UserlandProxy}}'
+  capture docker_ids docker ps -q --no-trunc
+fi
+capture ss_listen ss -ltn
+capture raw_rules_v4 iptables -t raw -S
+capture raw_rules_v6 ip6tables -t raw -S
+# `is-active` exits non-zero for an inactive or unknown unit; that word IS the
+# answer, so only an empty result is an error here.
+capture_any fence_unit systemctl is-active "$FENCE_UNIT"
+capture tailscale_v4 tailscale ip -4
+capture tailscale_v6 tailscale ip -6
+# A logged-out tailscale exits 0 with no address, which is a fact worth an entry
+# (the audit then has no tailnet address to compare a publish against).
+if [ -f "$WORK/tailscale_v4" ] && [ ! -s "$WORK/tailscale_v4" ]; then
+  note_error "tailscale ip -4" "no address reported"
+fi
+if [ -f "$WORK/tailscale_v6" ] && [ ! -s "$WORK/tailscale_v6" ]; then
+  note_error "tailscale ip -6" "no address reported"
+fi
+
+# Only these fields are ever asked for: labels, the network mode, the port
+# bindings and the network names. Asking for `.Config.Env`, `.Config.Cmd`,
+# `.Config.Entrypoint` or `.Mounts` here would put a secret in the snapshot.
+INSPECT_FORMAT='{"Id":{{json .Id}},"Name":{{json .Name}},"Labels":{{json .Config.Labels}},"NetworkMode":{{json .HostConfig.NetworkMode}},"PortBindings":{{json .HostConfig.PortBindings}},"Networks":{{json .NetworkSettings.Networks}}}'
+
+# Running containers only: a stopped container publishes nothing. A failed
+# inspect is re-checked against `docker ps`: a container that exited between
+# the list and the inspect is dropped (nothing to report), while one that is
+# still there leaves a bare {Id} line, which the assembler turns into a
+# container with no host_config — the reader flags that as an unknown publish
+# shape instead of reading it as "nothing published".
+if [ -f "$WORK/docker_ids" ]; then
+  : > "$WORK/containers_ndjson"
+  # `|| [ -n "$id" ]`: the id list may arrive without a trailing newline, and
+  # `read` returns non-zero for that last line even though it filled `$id`.
+  while IFS= read -r id || [ -n "$id" ]; do
+    [ -n "$id" ] || continue
+    status=0
+    line=$(timeout "$CAPTURE_TIMEOUT" docker inspect --format "$INSPECT_FORMAT" "$id" 2>>"$WORK/inspect.err") || status=$?
+    if [ "$status" -eq 0 ] && [ -n "$line" ]; then
+      printf '%s\n' "$line" >> "$WORK/containers_ndjson"
+      continue
+    fi
+    still_status=0
+    still=$(timeout "$CAPTURE_TIMEOUT" docker ps -q --no-trunc --filter "id=$id" 2>>"$WORK/inspect.err") || still_status=$?
+    if [ "$still_status" -eq 0 ] && [ -z "$still" ]; then
+      continue  # the container is gone: no entry, no error
+    fi
+    note_error "docker inspect $id" "exit status $status"
+    printf '{"Id":"%s"}\n' "$id" >> "$WORK/containers_ndjson"
+  done < "$WORK/docker_ids"
+fi
+
+# ─── Assemble ────────────────────────────────────────────────────────────────
+cat > "$WORK/assemble.mjs" <<'NODE'
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const [work, outPath] = process.argv.slice(2);
+const text = (name) => {
+  try { return readFileSync(join(work, name), "utf8"); } catch { return null; }
+};
+const lines = (name) => {
+  const t = text(name);
+  return t === null ? null : t.split("\n").filter((line) => line.trim() !== "");
+};
+const json = (name) => {
+  const t = text(name);
+  if (t === null || !t.trim()) return null;
+  try { return JSON.parse(t.trim()); } catch { return null; }
+};
+
+// "<command>\t<message>" per line, written by the shell for every command that
+// failed. The section that command fed is null.
+const errors = (lines("errors") || []).map((line) => {
+  const tab = line.indexOf("\t");
+  return tab < 0
+    ? { command: line, message: "" }
+    : { command: line.slice(0, tab), message: line.slice(tab + 1) };
+});
+
+// docker: the server version and the firewall backend. `{{json .FirewallBackend}}`
+// is an object carrying a Driver on current daemons and a bare string on older
+// ones; anything unreadable stays null (the audit reports "unreadable", never
+// "modern daemon").
+const versionRaw = json("docker_version");
+const firewallRaw = json("docker_firewall");
+const driver = (value) => {
+  if (typeof value === "string") return value.trim() || null;
+  if (value && typeof value === "object") {
+    for (const key of ["Driver", "Backend", "driver", "backend"]) {
+      if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+    }
+  }
+  return null;
+};
+const userlandProxy = json("docker_userland_proxy");
+const docker = {
+  version: versionRaw == null ? null : String(versionRaw).trim() || null,
+  firewall_backend: driver(firewallRaw),
+  userland_proxy: typeof userlandProxy === "boolean" ? userlandProxy : null,
+};
+
+// containers: short id, name, the crow.* labels plus the two compose labels the
+// audit's allowlist identity needs, the network mode, the port bindings and the
+// network names. Nothing else from the inspect document is read.
+const KEPT_LABELS = new Set(["com.docker.compose.project", "com.docker.compose.project.working_dir"]);
+const keepLabel = (key) => key.startsWith("crow.") || KEPT_LABELS.has(key);
+const idLines = lines("docker_ids");
+const containers = idLines === null ? null : [];
+if (containers) {
+  for (const line of lines("containers_ndjson") || []) {
+    let raw = null;
+    try { raw = JSON.parse(line); } catch { raw = null; }
+    if (!raw || typeof raw !== "object") continue;
+    const id = String(raw.Id ?? "");
+    const labels = {};
+    const rawLabels = raw.Labels && typeof raw.Labels === "object" ? raw.Labels : {};
+    for (const [key, value] of Object.entries(rawLabels)) {
+      if (keepLabel(key)) labels[key] = value == null ? "" : String(value);
+    }
+    const entry = {
+      id: id.slice(0, 12),
+      name: String(raw.Name ?? "").replace(/^\//, ""),
+      labels,
+      networks: raw.Networks && typeof raw.Networks === "object" && !Array.isArray(raw.Networks)
+        ? Object.keys(raw.Networks)
+        : [],
+    };
+    const readable = raw.NetworkMode !== undefined || raw.PortBindings !== undefined;
+    if (readable) {
+      const bindings = raw.PortBindings && typeof raw.PortBindings === "object" && !Array.isArray(raw.PortBindings)
+        ? raw.PortBindings
+        : null;
+      const portBindings = {};
+      for (const [key, value] of Object.entries(bindings || {})) {
+        portBindings[key] = (Array.isArray(value) ? value : []).map((bound) => ({
+          HostIp: bound && bound.HostIp != null ? String(bound.HostIp) : "",
+          HostPort: bound && bound.HostPort != null ? String(bound.HostPort) : "",
+        }));
+      }
+      entry.host_config = {
+        network_mode: raw.NetworkMode == null ? "" : String(raw.NetworkMode),
+        port_bindings: bindings ? portBindings : null,
+      };
+    }
+    containers.push(entry);
+  }
+}
+
+// listeners: `ss -ltn` rows as address and port only. No process names are
+// collected (the script never passes -p), so these are a hint for the operator,
+// never a claim about which container is listening.
+function splitAddressPort(token) {
+  const cut = token.lastIndexOf(":");
+  if (cut <= 0) return null;
+  const port = Number(token.slice(cut + 1));
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  let address = token.slice(0, cut);
+  const scope = address.indexOf("%"); // fe80::1%eth0
+  if (scope >= 0) address = address.slice(0, scope);
+  if (address.startsWith("[") && address.endsWith("]")) address = address.slice(1, -1);
+  return address ? { address, port } : null;
+}
+const ssLines = lines("ss_listen");
+const listeners = ssLines === null ? null : [];
+if (listeners) {
+  for (const line of ssLines) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 5 || fields[0] === "State" || fields[0] === "Netid") continue;
+    const local = splitAddressPort(fields[3]); // State Recv-Q Send-Q <local> <peer>
+    if (local) listeners.push(local);
+  }
+}
+
+// The unit's is-active word, and the boolean the audit reads. An inactive,
+// failed or unknown unit is not a null section: skipping the fence is a fact
+// about this host, and the audit must be able to report it.
+const unitState = (text("fence_unit") || "").trim();
+const fence = { unit_active: unitState === "active", unit_state: unitState || null };
+
+const addresses = (name) => {
+  const values = (lines(name) || []).map((line) => line.trim()).filter(Boolean);
+  return values.length ? values.join(" ") : null;
+};
+
+const snapshot = {
+  taken_at: new Date().toISOString(),
+  docker,
+  fence,
+  tailscale: { v4: addresses("tailscale_v4"), v6: addresses("tailscale_v6") },
+  containers,
+  listeners,
+  raw_rules: { v4: lines("raw_rules_v4"), v6: lines("raw_rules_v6") },
+  errors,
+};
+
+writeFileSync(outPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+NODE
+
+# ─── Write: same directory, then rename ──────────────────────────────────────
+TMP_JSON=$(mktemp -- "$OUTPUT_DIR/.crow-publish-snapshot.XXXXXX")
+node "$WORK/assemble.mjs" "$WORK" "$TMP_JSON"
+
+# Act on the regular file that mktemp just made, never on a path that could
+# have been swapped for a symlink between the write and the chmod/chgrp.
+[ -f "$TMP_JSON" ] && [ ! -L "$TMP_JSON" ] || {
+  printf '%s: refusing to change the temp file: not a regular file\n' "$PROGNAME" >&2
+  exit 1
+}
+chmod 0640 -- "$TMP_JSON"
+
+if [ -n "$GROUP" ]; then
+  # The group is applied to the snapshot file (and, above, to the dedicated
+  # state directory only). Any other output directory keeps its own owner,
+  # group and mode.
+  if ! chgrp "$GROUP" -- "$TMP_JSON" 2>"$WORK/chgrp.err"; then
+    printf '%s: cannot set group %s on the snapshot: %s\n' "$PROGNAME" "$GROUP" "$(cat -- "$WORK/chgrp.err")" >&2
+    exit 1
+  fi
+else
+  printf '%s: no --group given, so %s stays root-owned and the audit will read it as unknown\n' "$PROGNAME" "$OUTPUT" >&2
+fi
+
+mv -f -- "$TMP_JSON" "$OUTPUT"
+TMP_JSON=
+printf '%s: wrote %s\n' "$PROGNAME" "$OUTPUT"
