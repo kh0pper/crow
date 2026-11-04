@@ -178,6 +178,8 @@ const ASSET_FILES = new Map([
   ["resample.js", join("engine", "resample.js")],
   ["sampler-voice.js", join("engine", "sampler-voice.js")],
   ["resample-worker.js", join("engine", "resample-worker.js")],
+  ["chop.js", join("engine", "chop.js")],
+  ["chop-worker.js", join("engine", "chop-worker.js")],
   ["calibrate-emitter.js", join("engine", "calibrate-emitter.js")],
   ["calibrate-detector.js", join("engine", "calibrate-detector.js")],
   ["recorder-processor.js", join("engine", "recorder-processor.js")],
