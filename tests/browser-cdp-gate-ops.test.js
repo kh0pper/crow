@@ -126,3 +126,16 @@ test("the script is a plain bash script that refuses to run outside tmux by defa
   assert.match(CODE, /--no-tty-guard/);
   assert.ok(statSync(SCRIPT).isFile());
 });
+test("the compose project must be this instance's own: a co-hosted instance's name is read from its .env", (t) => {
+  const { home } = scratchInstance(t);
+  const env = join(home, "bundles", "browser", ".env");
+  writeFileSync(env, readFileSync(env, "utf8") + "CROW_BROWSER_CONTAINER_NAME=crow-browser-second\n", { mode: 0o600 });
+  // The primary's project name is refused for this instance: a wrong -p would replace the primary's browser.
+  assert.throws(
+    () => execFileSync("bash", [SCRIPT, home, "browser", "--dry-run"], { encoding: "utf8", timeout: 30000, stdio: "pipe" }),
+    (err) => /not this instance's project \('crow-browser-second'/.test(String(err.stderr)),
+  );
+  // Its own name is accepted, and the plan names its own container.
+  const out = execFileSync("bash", [SCRIPT, home, "crow-browser-second", "--dry-run"], { encoding: "utf8", timeout: 30000 });
+  assert.match(out, /compose -p:\s+crow-browser-second \(service crow-browser-second\)/);
+});
