@@ -319,7 +319,7 @@ La tabla `notifications` almacena todas las notificaciones:
 
 `servers/shared/notifications.js` exporta dos funciones:
 
-- **`createNotification(db, opts)`** — Crea una notificación después de verificar las preferencias del usuario. Devuelve `{ id }` o `null` si el tipo está deshabilitado. Envuelve siempre las llamadas en `try/catch` para evitar que un fallo de notificación rompa las acciones primarias.
+- **`createNotification(db, opts)`** — Crea una notificación después de verificar las preferencias del usuario. Devuelve `{ id, delivery }` o `null` si el tipo está deshabilitado. Con `deliver: false` escribe la fila y actualiza el contador, pero no envía nada (ni push, ni ntfy, ni correo); `delivery` es la carga que se pasa después a `deliverNotification`, por ejemplo cuando una transacción ya se confirmó. Envuelve siempre las llamadas en `try/catch` para evitar que un fallo de notificación rompa las acciones primarias.
 - **`cleanupNotifications(db)`** — Elimina las notificaciones expiradas y aplica un límite de retención de 500 notificaciones. La llaman el tick del scheduler y el endpoint REST GET.
 
 ### Preferencias de usuario
