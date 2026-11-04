@@ -16,8 +16,22 @@
  * is ever rendered.
  */
 
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import { createClient } from "@libsql/client";
+import express from "express";
+import { WebSocket, WebSocketServer } from "ws";
+import { AclError } from "../servers/shared/project-acl.js";
+import { createHub } from "../bundles/studio/server/hub.js";
+import { initStudioTables } from "../bundles/studio/server/init-tables.js";
+import { createStudioWeb } from "../bundles/studio/server/web.js";
+import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { encodeWav24, decodeWav } from "../bundles/studio/server/wav.js";
 
@@ -819,4 +833,389 @@ test("a pad still uploading says so", async () => {
   await ui.settle(24);
   assert.equal(ui.engine.livePads.length, before, "and a pad still uploading auditions nothing");
   assert.deepEqual(ui.engine.livePads.filter((call) => call.index === 4), [], "pad 5 never played");
+});
+
+// ---- the live half: a real Chrome against a real hub ------------------------
+
+const LIVE_BUNDLE_DIR = new URL("../bundles/studio", import.meta.url).pathname.replace(/\/$/, "");
+const LIVE_HUMAN = { kind: "human", id: "local", label: "You" };
+
+let chrome = null;
+let server = null;
+let upgrades = null;
+let db = null;
+let hub = null;
+let base = "";
+let songId = "";
+let dir = "";
+/** The object store the upload service writes the finished sample into. */
+let objects = new Map();
+
+function liveAcl() {
+  async function assertProjectExists(_db, projectId) {
+    if (Number(projectId) !== PROJECT) throw new AclError(`Project #${projectId} not found`, "not_found");
+    return { id: PROJECT };
+  }
+  async function assertCapability(database, projectId) {
+    return assertProjectExists(database, projectId);
+  }
+  async function appendAudit() {}
+  return { assertProjectExists, assertCapability, appendAudit };
+}
+
+function cookieOf(header, name) {
+  for (const part of String(header || "").split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+
+/** The three `storage_files` statements the upload service runs, and nothing else. */
+function uploadDb() {
+  return {
+    async execute(statement) {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (/storage_prefix/i.test(sql)) return { rows: [{ storage_prefix: PREFIX }] };
+      return { rows: [] };
+    },
+  };
+}
+
+before(async () => {
+  chrome = await startHeadlessChrome({ extraArgs: ["--autoplay-policy=no-user-gesture-required"] });
+  if (!chrome) return;
+
+  dir = mkdtempSync(join(tmpdir(), "studio-panel-sampler-"));
+  db = createClient({ url: "file:" + join(dir, "crow.db") });
+  await db.execute(
+    "CREATE TABLE IF NOT EXISTS project_spaces (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, status TEXT, archived_at TEXT, storage_prefix TEXT)",
+  );
+  await db.execute({
+    sql: "INSERT INTO project_spaces (id, name, storage_prefix) VALUES (?, ?, ?)",
+    args: [PROJECT, "Studio project", PREFIX],
+  });
+  await initStudioTables(db);
+
+  const webRef = { web: null };
+  hub = createHub({
+    db,
+    acl: liveAcl(),
+    onBroadcast: (id, payload) => webRef.web?.broadcast(id, payload),
+  });
+
+  const storage = {
+    async putObjectStream(key, stream) {
+      const pieces = [];
+      for await (const piece of stream) pieces.push(Buffer.from(piece));
+      objects.set(key, Buffer.concat(pieces));
+    },
+    async deleteObject(key) {
+      objects.delete(key);
+    },
+    async getBucketStats() {
+      return { fileCount: objects.size, totalSizeBytes: 0 };
+    },
+    defaultBucket: () => "crow-files",
+  };
+  const takeStorage = {
+    defaultBucket: () => "crow-files",
+    storagePrefixFor: async () => PREFIX,
+    async getObject(key) {
+      const bytes = objects.get(key);
+      if (!bytes) throw new Error(`there is no object at ${key}`);
+      return { stream: Readable.from([bytes]), stat: { size: bytes.length } };
+    },
+  };
+  const takeUploads = createTakeUploads({
+    stagingDir: mkdtempSync(join(dir, "staging-")),
+    storage,
+    db: uploadDb(),
+    acl: liveAcl(),
+    hub,
+    songs: { projectOf: async () => PROJECT },
+    now: () => Date.now(),
+    quotaMb: 5120,
+  });
+
+  const web = createStudioWeb({
+    hub,
+    Router: express.Router,
+    WebSocketServer,
+    auth: {
+      isAllowedNetwork: () => true,
+      sessionFromRequest: (req) => cookieOf(req.headers.cookie, "crow_session"),
+      verifySession: async (token) => token === "good",
+      csrfTokenAccepted: (_req, presented) => presented === "csrf-ok",
+      classifyPeer: () => ({ via: "local" }),
+    },
+    crowHome: join(dir, "home"),
+    bundleDir: LIVE_BUNDLE_DIR,
+    takeUploads,
+    takeStorage,
+    songRowOf: async (id) => (await hub.listSongs({ project_ids: [PROJECT] })).find((row) => row.id === id) ?? null,
+    rawBody: (limit) => express.raw({ type: () => true, limit, inflate: false }),
+  });
+  webRef.web = web;
+
+  const created = await hub.createSong({ project_id: PROJECT, title: "Sampler song", author: LIVE_HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  songId = created.song_id;
+
+  for (const [command, args] of [
+    ["track.add", { id: TRACK, name: "Beat box", kind: "sampler" }],
+    ["scene.add", { id: SCENE, name: "Verse" }],
+    ["clip.add_pattern", { clip_id: CLIP, track_id: TRACK, scene_id: SCENE, name: "Beat", length_steps: 16 }],
+  ]) {
+    const result = await hub.runCommand({ song_id: songId, cmd_id: null, command, args, author: LIVE_HUMAN });
+    assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
+  }
+
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
+  app.use((req, res, next) => {
+    if (req.path === "/dashboard/studio" || req.path.startsWith("/dashboard/studio/")) {
+      res.setHeader("Content-Security-Policy", [
+        "default-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src https://fonts.gstatic.com",
+        "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+        "img-src 'self' data: blob:",
+        "media-src 'self' https: blob:",
+        "connect-src 'self'",
+        "frame-src 'self' https:",
+      ].join("; "));
+    }
+    next();
+  });
+  const dashboardAuth = (req, res, next) => {
+    if (!cookieOf(req.headers.cookie, "crow_session")) return res.status(401).json({ error: "unauthorized" });
+    return next();
+  };
+  app.use(web.router(dashboardAuth));
+  app.get("/dashboard/studio", async (req, res, next) => {
+    try {
+      await studioPanel.handler(req, res, { db, layout: minimalLayout });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  server = createServer(app);
+  upgrades = web.attachUpgrade(server);
+  await new Promise((resolve) => server.listen(0, chrome.bindHost ?? "127.0.0.1", resolve));
+  base = `http://${chrome.pageHost ?? "127.0.0.1"}:${server.address().port}`;
+});
+
+after(async () => {
+  if (upgrades) upgrades.close();
+  if (server) {
+    try {
+      server.closeAllConnections?.();
+    } catch {
+      // Nothing left to close.
+    }
+    await new Promise((resolve) => server.close(resolve));
+  }
+  if (chrome) await chrome.close();
+  try {
+    db?.close?.();
+  } catch {
+    // Already gone.
+  }
+  if (dir) rmSync(dir, { recursive: true, force: true });
+});
+
+/** Open one page in the private browser with the dashboard's session cookies. */
+async function openPage(url) {
+  const tab = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
+  const socket = new WebSocket(tab.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  socket.on("message", (raw) => {
+    const message = JSON.parse(String(raw));
+    if (message.method === "Runtime.exceptionThrown") {
+      console.error(
+        "PAGE exception:",
+        JSON.stringify(
+          message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text,
+        ).slice(0, 500),
+      );
+    }
+  });
+  let nextId = 0;
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const mine = (nextId += 1);
+      const onMessage = (raw) => {
+        const message = JSON.parse(String(raw));
+        if (message.id !== mine) return;
+        socket.off("message", onMessage);
+        if (message.error) reject(new Error(JSON.stringify(message.error)));
+        else resolve(message.result || {});
+      };
+      socket.on("message", onMessage);
+      socket.send(JSON.stringify({ id: mine, method, params }));
+    });
+  const evaluate = async (expression) => {
+    const outcome = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    if (outcome.exceptionDetails) throw new Error(JSON.stringify(outcome.exceptionDetails));
+    return outcome.result?.value;
+  };
+
+  await send("Page.enable");
+  await send("Network.enable");
+  await send("Runtime.enable");
+  for (const [name, value] of [["crow_session", "good"], ["crow_csrf", "csrf-ok"]]) {
+    await send("Network.setCookie", { name, value, url: `${base}/` });
+  }
+  await send("Page.navigate", { url });
+
+  return {
+    evaluate,
+    close: async () => {
+      try {
+        socket.close();
+      } catch {
+        // Already closed.
+      }
+      try {
+        await fetch(chrome.cdp + "/json/close/" + tab.id);
+      } catch {
+        // The tab is going away either way.
+      }
+    },
+  };
+}
+
+/** Poll a page until `expression` is truthy. */
+async function waitFor(page, expression, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = false;
+  while (Date.now() < deadline) {
+    try {
+      last = await page.evaluate(expression);
+    } catch {
+      last = false;
+    }
+    if (last) return last;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return last;
+}
+
+/** Poll the song's document until `check` accepts its snapshot. */
+async function waitForSong(check, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = (await hub.openSong(songId)).snapshot;
+    try {
+      if (check(last)) return last;
+    } catch {
+      // A snapshot mid-update is not an answer; look again.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return last;
+}
+
+/** @returns {object|undefined} pad A01 of the fixture track's one bank */
+function padOf(snap) {
+  const bank = Object.values(snap.banks || {})[0];
+  return bank ? Object.values(snap.pads || {}).find((pad) => pad.track_id === TRACK && pad.bank_id === bank.id && pad.index === 0) : undefined;
+}
+
+test("a file imported in Chrome lands on its pad through the real upload", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+
+  const page = await openPage(`${base}/dashboard/studio?song=${encodeURIComponent(songId)}`);
+  t.after(() => page.close());
+  assert.ok(
+    await waitFor(page, `!!document.querySelector('[data-clip-id=${CLIP}]')`, 20000),
+    "the song's pattern clip is on the grid (the page's Yjs replica did not load)",
+  );
+
+  // Open the pad view and select pad A01.
+  assert.equal(
+    await page.evaluate(`(function () {
+      var open = document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]');
+      if (!open) return false;
+      open.click();
+      return true;
+    })()`),
+    true,
+    "the pattern clip offers its open button",
+  );
+  assert.ok(
+    await waitFor(
+      page,
+      "(function () { var host = document.querySelector('[data-role=sampler]'); return !!host && !host.hidden && !!host.querySelector('[data-act=pad][data-pad-index=\"0\"]'); })()",
+      10000,
+    ),
+    "the pad view opened with its pads",
+  );
+  await page.evaluate("document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index=\"0\"]').click(), true");
+
+  // A WAV made in the page: 0.5 s of 440 Hz at 48 kHz, 16-bit mono, handed to
+  // the import input as a real File through a DataTransfer.
+  const fed = await page.evaluate(`(function () {
+    var input = document.querySelector('[data-role=sampler] input[data-act=sample-import][data-pad-index="0"]');
+    if (!input) return 'no import input for pad A01';
+    var rate = 48000, frames = rate / 2;
+    var bytes = new ArrayBuffer(44 + frames * 2);
+    var view = new DataView(bytes);
+    var tag = function (at, text) { for (var i = 0; i < text.length; i += 1) view.setUint8(at + i, text.charCodeAt(i)); };
+    tag(0, 'RIFF'); view.setUint32(4, 36 + frames * 2, true); tag(8, 'WAVE');
+    tag(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    tag(36, 'data'); view.setUint32(40, frames * 2, true);
+    for (var n = 0; n < frames; n += 1) {
+      view.setInt16(44 + n * 2, Math.round(Math.sin(2 * Math.PI * 440 * n / rate) * 0.5 * 32767), true);
+    }
+    var file = new File([bytes], 'sine440.wav', { type: 'audio/wav' });
+    var transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'ok';
+  })()`);
+  assert.equal(fed, "ok", String(fed));
+
+  // The hub's song gets the sample, and pad A01 points at it.
+  const landed = await waitForSong((snap) => {
+    const sample = Object.values(snap.samples || {}).find((row) => row.origin === "import");
+    if (!sample) return false;
+    return padOf(snap)?.sample_id === sample.id;
+  });
+  const sample = Object.values(landed.samples || {}).find((row) => row.origin === "import");
+  assert.ok(sample, "the song holds an imported sample");
+  assert.equal(padOf(landed)?.sample_id, sample.id, "pad A01 plays the imported sample");
+
+  // 0.5 s at the rate the panel uploaded (the context's rate, within a frame).
+  assert.ok(sample.rate > 0, "the sample carries a rate");
+  assert.ok(
+    Math.abs(sample.frames - sample.rate * 0.5) <= 1,
+    `0.5 s at ${sample.rate} Hz is ${sample.rate * 0.5} frames (got ${sample.frames})`,
+  );
+
+  // The page's pad shows the sample's name, and no longer says Uploading.
+  const shown = await waitFor(
+    page,
+    `(function () {
+      var node = document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index="0"] .st-pad-name');
+      var text = node ? node.textContent : '';
+      return text && text.indexOf('Uploading') < 0 && text === ${JSON.stringify(sample.name)} ? text : false;
+    })()`,
+    15000,
+  );
+  assert.equal(shown, sample.name, "pad A01 shows the sample's name once the upload is through");
+
+  // One pad assignment in the shared history (the upload's own, empty-only one).
+  const entries = await hub.history(songId, { limit: 100 });
+  const assigns = entries.filter((entry) => /^pad\.assign/.test(String(entry.command)));
+  assert.equal(assigns.length, 1, `exactly one pad assignment (got ${assigns.map((e) => e.command).join(", ")})`);
+  assert.equal(assigns[0].args.sample_id, sample.id, "and it is for the imported sample");
 });
