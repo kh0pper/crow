@@ -92,6 +92,46 @@
  * Track gain, pan, mute and solo apply to an audio track exactly as they do to
  * an engine's output: in the mix below, after the voices are summed.
  *
+ * ## Sampler tracks: a pool of pad voices, JS DSP
+ *
+ * A track whose device is `{engine: "sampler"}` plays a kit of pads instead of
+ * notes, and its clips are patterns (see `sequencer.js`). Its slot holds a pool
+ * of 16 voices (`sampler-voice.js`, `StudioSamplerVoice`), and a `pad` event
+ * starts one:
+ *
+ *     {frame, type: "pad", track_id, bank_id, index, v, locks, gate_frames}
+ *
+ * The pad is read from the song's own `pads` container, which `setSong` copies
+ * into a flat map; a step's `locks` override the pad's fields for that one
+ * voice. The voice plays the pad's slice (or the whole sample), pitched by
+ * resampling, through its envelope and its one biquad, then gain and pan.
+ *
+ * - **The PCM** arrives from the client already at the context's rate
+ *   (`{type:"sample", sample_id, channels}`, acknowledged like a take), because
+ *   resampling is `resample.js`'s business and runs on the client. A trigger for
+ *   a sample that is not loaded plays silence and is reported once per sample
+ *   id ("Sample <id> is not loaded yet."), and is also posted as
+ *   `{type:"sample_needed", sample_id}` so the client can load it again.
+ * - **Voice stealing:** 16 voices per track, 64 for the whole song. The 17th
+ *   voice on a track steals that track's oldest, and a start that would take
+ *   the song past 64 steals the song's oldest — a voice that is already fading
+ *   out (choked, or already releasing) goes before one that is still held.
+ * - **Choke groups:** a start in choke group *n* fades every other sounding
+ *   voice of group *n* on that track out over 64 frames.
+ * - **Modes:** a `oneshot` pad plays to the end of its range and stops there
+ *   (with a 64-frame fade when it is still at level); a `gate` pad releases at
+ *   `gate_frames`, the step's own length.
+ * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
+ *   releases a pad from the panel (on-screen audition, MIDI later). A live
+ *   start never goes through history and is never quantized.
+ *
+ * ## Taps
+ *
+ * `{type:"tap", target, on}` turns on a copy of the master ("master") or of
+ * one track's own output (that track's id) per block, posted as
+ * `{type:"tap_block", target, channels}`. Record-into-pad and resampling use it.
+ * A tap is off by default, and off costs nothing at all.
+ *
  * ## Block splitting
  *
  * `process()` is handed 128 frames. The sequencer's events for the block are
@@ -118,13 +158,19 @@
  * `{type:"play"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
  * `{type:"seek", bar}`, `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
- * `{type:"audio_unload", take_id}`
+ * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
+ * `{type:"sample_unload", sample_id}`, `{type:"live", track_id, bank_id,
+ * index, v, on}`, `{type:"tap", target, on}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth}` (at most every 50 ms of
  * audio), `{type:"launched", track_id, clip_id, scene_id, bar, frame}` (one
  * per launch the sequencer applied in that block; see below),
  * `{type:"nextBarFrame", id, frame, bar}`, `{type:"audio_loaded", take_id}`
- * (one ack per `audio` message, so the client knows the PCM is in)
+ * (one ack per `audio` message, so the client knows the PCM is in),
+ * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
+ * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
+ * loaded, once per sample id), `{type:"tap_block", target, channels}` (while a
+ * tap is on, one per block)
  *
  * ## Frames the client can count on
  *
@@ -213,6 +259,30 @@
   /** The device engine that marks a track as a PCM one (see `isAudioTrack`). */
   const AUDIO_ENGINE = "audio";
 
+  /** The device engine that marks a track as a sampler one (see `isSamplerTrack`). */
+  const SAMPLER_ENGINE = "sampler";
+
+  /** How many voices one sampler track holds, and how many the song may sound. */
+  const SAMPLER_VOICES_PER_TRACK = 16;
+  const SAMPLER_VOICES_SONG_WIDE = 64;
+
+  /**
+   * How many bytes of decoded samples may be loaded at once. Past this the
+   * least-recently-triggered sample is unloaded (the client reloads it when a
+   * `sample_needed` says so).
+   */
+  const MAX_SAMPLE_BYTES = 256 * 1024 * 1024;
+
+  /**
+   * What a trigger for a sample the client has not loaded is reported with,
+   * once per sample id.
+   * @param {string} sampleId
+   * @returns {string}
+   */
+  function missingSampleText(sampleId) {
+    return `Sample ${sampleId} is not loaded yet.`;
+  }
+
   /** How long a comp-boundary crossfade runs, in frames. */
   const VOICE_FADE_FRAMES = 64;
 
@@ -258,6 +328,61 @@
   function isAudioTrack(track) {
     const device = track && typeof track === "object" ? track.device : null;
     return !!(device && typeof device === "object" && device.engine === AUDIO_ENGINE);
+  }
+
+  /**
+   * Whether a track plays a kit of pads instead of notes or takes. A sampler
+   * track's device is exactly `{engine: "sampler"}` (see `doc.js`); its kit
+   * lives in the song's own `banks` and `pads`, never inside the device.
+   * @param {object} track
+   * @returns {boolean}
+   */
+  function isSamplerTrack(track) {
+    const device = track && typeof track === "object" ? track.device : null;
+    return !!(device && typeof device === "object" && device.engine === SAMPLER_ENGINE);
+  }
+
+  /**
+   * The key one pad lives under in the song's `pads` container — the same key
+   * `doc.js` writes, so a pad is one lookup and never a walk over the kit.
+   * @param {string} trackId
+   * @param {string} bankId
+   * @param {number} index
+   * @returns {string}
+   */
+  function padKey(trackId, bankId, index) {
+    return `${asId(trackId)}/${asId(bankId)}/${Math.trunc(Number(index) || 0)}`;
+  }
+
+  /**
+   * The key one slice lives under in the song's `slices` container.
+   * @param {string} sampleId
+   * @param {string} sliceId
+   * @returns {string}
+   */
+  function sliceKey(sampleId, sliceId) {
+    return `${asId(sampleId)}/${asId(sliceId)}`;
+  }
+
+  /**
+   * Copy the channels a client posted into JS-owned `Float32Array`s, dropping
+   * anything that is not a channel. A view into a larger buffer is copied, so
+   * the voice never reads past its own channel.
+   * @param {unknown} channels
+   * @returns {Float32Array[]}
+   */
+  function readChannels(channels) {
+    const list = [];
+    const raw = Array.isArray(channels) ? channels : [];
+    for (const channel of raw) {
+      if (channel instanceof Float32Array) list.push(channel);
+      else if (ArrayBuffer.isView(channel)) {
+        list.push(
+          new Float32Array(channel.buffer.slice(channel.byteOffset, channel.byteOffset + channel.byteLength)),
+        );
+      } else if (Array.isArray(channel)) list.push(Float32Array.from(channel));
+    }
+    return list;
   }
 
   /**
@@ -642,6 +767,43 @@
       /** Take ids already reported as not loaded, so each is reported once. */
       this.missingTakes = new Set();
 
+      /**
+       * sample id → `{channels, frames, bytes, lastUsed}`, the decoded PCM the
+       * sampler pads play (at the context's rate; the client resampled it).
+       */
+      this.samples = new Map();
+
+      /** How many bytes those samples hold together, against `MAX_SAMPLE_BYTES`. */
+      this.sampleBytes = 0;
+
+      /** A counter every trigger bumps, so the oldest sample is the least recently played. */
+      this.sampleClock = 0;
+
+      /** Sample ids already reported as not loaded, so each is reported once. */
+      this.missingSamples = new Set();
+
+      /**
+       * The song's pads, slices and sample rates, flattened by `setSong`: the
+       * key is the ref id `doc.js` uses (`padKey` / `sliceKey`).
+       */
+      this.pads = new Map();
+      this.slices = new Map();
+      this.sampleRates = new Map();
+
+      /** A counter every sampler trigger bumps: the trigger order of the voices. */
+      this.voiceSerial = 0;
+
+      /** Whether the master is tapped (record-into-pad / resampling). */
+      this.tapMaster = false;
+
+      /** The track whose own output is tapped, or null. */
+      this.tapTrackId = null;
+
+      /** track index → its tap's stereo scratch, allocated only while a track is tapped. */
+      this.tapIndex = -1;
+      this.tapLeft = null;
+      this.tapRight = null;
+
       /** Serialises the async slot work, so songs apply in arrival order. */
       this.queue = Promise.resolve();
 
@@ -761,6 +923,18 @@
         case "audio_unload":
           this.takes.delete(asId(message.take_id));
           break;
+        case "sample":
+          this.loadSample(message.sample_id, message.channels);
+          break;
+        case "sample_unload":
+          this.unloadSample(asId(message.sample_id));
+          break;
+        case "live":
+          this.live(message);
+          break;
+        case "tap":
+          this.setTap(message.target, message.on === true);
+          break;
         case "flush":
           // Messages are handled in arrival order and slot work is queued, so
           // answering at the end of the queue proves every message posted
@@ -800,21 +974,121 @@
      */
     loadTake(takeId, channels) {
       const id = asId(takeId);
-      const list = [];
-      const raw = Array.isArray(channels) ? channels : [];
-      for (const channel of raw) {
-        if (channel instanceof Float32Array) list.push(channel);
-        else if (ArrayBuffer.isView(channel)) {
-          list.push(
-            new Float32Array(channel.buffer.slice(channel.byteOffset, channel.byteOffset + channel.byteLength)),
-          );
-        } else if (Array.isArray(channel)) list.push(Float32Array.from(channel));
-      }
-      this.takes.set(id, list);
+      this.takes.set(id, readChannels(channels));
       // A take that arrived late is no longer missing, so it may be reported
       // again only if it goes away a second time.
       this.missingTakes.delete(id);
       this.port.postMessage({ type: "audio_loaded", take_id: id });
+    }
+
+    /**
+     * Store one sample's PCM, already at the context's rate, and acknowledge it.
+     *
+     * The song may hold at most `MAX_SAMPLE_BYTES` of decoded samples at once.
+     * A load that would go past that unloads the least-recently-triggered
+     * samples first (a sample that has not been played since it loaded is the
+     * first to go), and the client reloads one when a `sample_needed` says a
+     * trigger wanted it.
+     * @param {string} sampleId
+     * @param {Float32Array[]|ArrayBufferView[]} channels
+     * @returns {void}
+     */
+    loadSample(sampleId, channels) {
+      const id = asId(sampleId);
+      const list = readChannels(channels);
+      let bytes = 0;
+      for (const channel of list) bytes += channel.byteLength;
+      const frames = list.length > 0 && list[0] ? list[0].length : 0;
+
+      const previous = this.samples.get(id);
+      if (previous) this.sampleBytes -= previous.bytes;
+      this.sampleBytes += bytes;
+      this.samples.set(id, {
+        channels: list,
+        frames: frames,
+        bytes: bytes,
+        lastUsed: (this.sampleClock += 1),
+      });
+      this.missingSamples.delete(id);
+
+      this.trimSamples(id);
+      this.port.postMessage({ type: "sample_loaded", sample_id: id });
+    }
+
+    /**
+     * Drop one sample's PCM from the engine, freeing its bytes.
+     * @param {string} sampleId
+     * @returns {void}
+     */
+    unloadSample(sampleId) {
+      const id = asId(sampleId);
+      const held = this.samples.get(id);
+      if (!held) return;
+      this.sampleBytes -= held.bytes;
+      this.samples.delete(id);
+    }
+
+    /**
+     * Bring the loaded samples back under the song-wide cap by unloading the
+     * least-recently-triggered ones. The sample that was just loaded is never a
+     * candidate (a song that would need more than the whole cap for one sample
+     * keeps it), so a load always leaves something to play.
+     * @param {string} keepId the sample that must stay loaded
+     * @returns {void}
+     */
+    trimSamples(keepId) {
+      if (this.sampleBytes <= MAX_SAMPLE_BYTES) return;
+      while (this.sampleBytes > MAX_SAMPLE_BYTES) {
+        let victim = null;
+        for (const [id, held] of this.samples) {
+          if (id === keepId) continue;
+          if (!victim || held.lastUsed < victim.held.lastUsed) victim = { id: id, held: held };
+        }
+        if (!victim) return;
+        this.sampleBytes -= victim.held.bytes;
+        this.samples.delete(victim.id);
+      }
+    }
+
+    /**
+     * Report a sample a trigger wanted but the client has not loaded, once per
+     * sample id: a pad with no PCM plays silence, and a looping pattern would
+     * otherwise say so on every pass. The `sample_needed` post is what lets the
+     * client load it again (see the cap in `trimSamples`).
+     * @param {string} sampleId
+     * @returns {void}
+     */
+    reportMissingSample(sampleId) {
+      const id = asId(sampleId);
+      if (this.missingSamples.has(id)) return;
+      this.missingSamples.add(id);
+      this.port.postMessage({ type: "sample_needed", sample_id: id });
+      this.report(new Error(missingSampleText(id)));
+    }
+
+    /**
+     * Turn a tap on or off: `"master"` for the mix, or a track's id for that
+     * track's own output. Off is the default and costs nothing.
+     * @param {unknown} target
+     * @param {boolean} on
+     * @returns {void}
+     */
+    setTap(target, on) {
+      const name = asId(target);
+      if (on) {
+        if (name === "master") this.tapMaster = true;
+        else if (name !== "") this.tapTrackId = name;
+      } else if (name === "master") {
+        this.tapMaster = false;
+      } else if (this.tapTrackId === name) {
+        this.tapTrackId = null;
+        this.tapIndex = -1;
+      }
+      if (this.tapTrackId === null) {
+        this.tapIndex = -1;
+        this.tapLeft = null;
+        this.tapRight = null;
+      }
     }
 
     /**
@@ -829,8 +1103,40 @@
       if (tracks.length > MAX_TRACKS) {
         throw new Error(`A song can have at most ${MAX_TRACKS} tracks.`);
       }
+      this.readKit(snapshot);
       this.sequencer.setSong(snapshot);
       this.enqueue(() => this.syncSlots(tracks));
+    }
+
+    /**
+     * Read the sampler's containers off the song into flat maps, so a pad
+     * trigger is one lookup. A song written before the sampler existed has
+     * none of them, and reads as an empty kit.
+     * @param {object} snapshot the song as `server/doc.js`'s `snapshot()` returns it
+     * @returns {void}
+     */
+    readKit(snapshot) {
+      const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+      this.pads = new Map();
+      this.slices = new Map();
+      this.sampleRates = new Map();
+
+      const pads = snap.pads && typeof snap.pads === "object" ? snap.pads : {};
+      for (const key of Object.keys(pads)) {
+        const pad = pads[key];
+        if (pad && typeof pad === "object") this.pads.set(key, pad);
+      }
+      const slices = snap.slices && typeof snap.slices === "object" ? snap.slices : {};
+      for (const key of Object.keys(slices)) {
+        const slice = slices[key];
+        if (slice && typeof slice === "object") this.slices.set(key, slice);
+      }
+      const samples = snap.samples && typeof snap.samples === "object" ? snap.samples : {};
+      for (const key of Object.keys(samples)) {
+        const sample = samples[key];
+        const rate = Number(sample && sample.rate);
+        this.sampleRates.set(key, Number.isFinite(rate) && rate > 0 ? rate : sampleRate);
+      }
     }
 
     /**
@@ -858,20 +1164,28 @@
         const track = tracks[index] && typeof tracks[index] === "object" ? tracks[index] : {};
         const id = typeof track.id === "string" ? track.id : "";
         const audio = isAudioTrack(track);
-        const type = audio ? AUDIO_ENGINE : deviceType(track);
+        const sampler = !audio && isSamplerTrack(track);
+        const type = audio ? AUDIO_ENGINE : sampler ? SAMPLER_ENGINE : deviceType(track);
         let record = previous[index];
-        if (record && (record.track_id !== id || record.type !== type || !!record.audio !== audio)) {
+        if (
+          record &&
+          (record.track_id !== id || record.type !== type || !!record.audio !== audio || !!record.sampler !== sampler)
+        ) {
           this.teardown(record);
           record = null;
         }
         // Building an engine is the only await here; the old record is still in
         // `this.slots` (and so still in the mix) until the swap at the end.
-        if (!record) record = audio ? this.buildAudioSlot(index, id) : await this.buildSlot(index, id, type);
+        if (!record) {
+          if (audio) record = this.buildAudioSlot(index, id);
+          else if (sampler) record = this.buildSamplerSlot(index, id);
+          else record = await this.buildSlot(index, id, type);
+        }
         next.push(record);
         if (record.failed) continue;
-        if (!record.audio && !record.engine) continue;
+        if (!record.audio && !record.sampler && !record.engine) continue;
         this.applyMix(record, track, anySolo);
-        if (!record.audio) this.applyParams(record, track);
+        if (!record.audio && !record.sampler) this.applyParams(record, track);
         if (id !== "") trackSlots.set(id, index);
       }
 
@@ -897,6 +1211,7 @@
         track_id: trackId,
         type: AUDIO_ENGINE,
         audio: true,
+        sampler: false,
         failed: false,
         engine: null,
         module: -1,
@@ -908,6 +1223,37 @@
         left: 0,
         right: 0,
         voices: [newVoice(), newVoice()],
+      };
+    }
+
+    /**
+     * Build one sampler track's slot: a pool of `StudioSamplerVoice` records and
+     * no engine. Nothing here can fail, so it is synchronous — a sampler track
+     * is playable as soon as its song arrives.
+     * @param {number} index the track's position in the song
+     * @param {string} trackId
+     * @returns {object} the track's record
+     */
+    buildSamplerSlot(index, trackId) {
+      const voices = [];
+      for (let at = 0; at < SAMPLER_VOICES_PER_TRACK; at += 1) voices.push(StudioSamplerVoice.create());
+      return {
+        index: index,
+        track_id: trackId,
+        type: SAMPLER_ENGINE,
+        audio: false,
+        sampler: true,
+        failed: false,
+        engine: null,
+        module: -1,
+        outPtr: 0,
+        frames: 0,
+        clock: 0,
+        ctlNames: null,
+        paramsKey: null,
+        left: 0,
+        right: 0,
+        voices: voices,
       };
     }
 
@@ -1016,8 +1362,7 @@
           voice.sounding = false;
           voice.channels = null;
         }
-      }
-      const own = engine || record.engine;
+      }      const own = engine || record.engine;
       if (!own) return;
       try {
         if (record.module >= 0) {
@@ -1153,13 +1498,59 @@
       const left = output[0];
       const right = output.length > 1 ? output[1] : null;
       try {
+        this.prepareTap(count);
         this.block(left, right, count);
+        this.postTap(left, right, count);
       } catch (error) {
         this.fail(error);
         left.fill(0);
         if (right) right.fill(0);
       }
       return true;
+    }
+
+    /**
+     * Zero the tapped track's scratch buffers at the start of a block, so what
+     * `render()` accumulates is that block's own output and nothing else.
+     * @param {number} count the frames this block holds
+     * @returns {void}
+     */
+    prepareTap(count) {
+      if (this.tapTrackId === null) {
+        this.tapIndex = -1;
+        return;
+      }
+      const index = this.trackSlots.get(this.tapTrackId);
+      this.tapIndex = index === undefined ? -1 : index;
+      if (this.tapIndex < 0) return;
+      if (!this.tapLeft || this.tapLeft.length < count) {
+        this.tapLeft = new Float32Array(count);
+        this.tapRight = new Float32Array(count);
+      }
+      this.tapLeft.fill(0, 0, count);
+      this.tapRight.fill(0, 0, count);
+    }
+
+    /**
+     * Post a tap's copy of this block: the master (already mixed and clipped)
+     * or the tapped track's own output. Nothing is posted while no tap is on.
+     * @param {Float32Array} left the master's left channel
+     * @param {Float32Array|null} right the master's right channel
+     * @param {number} count the frames this block holds
+     * @returns {void}
+     */
+    postTap(left, right, count) {
+      if (this.tapMaster) {
+        const channels = right ? [left.slice(0, count), right.slice(0, count)] : [left.slice(0, count)];
+        this.port.postMessage({ type: "tap_block", target: "master", channels: channels });
+      }
+      if (this.tapIndex >= 0 && this.tapLeft) {
+        this.port.postMessage({
+          type: "tap_block",
+          target: this.tapTrackId,
+          channels: [this.tapLeft.slice(0, count), this.tapRight.slice(0, count)],
+        });
+      }
     }
 
     /**
@@ -1219,30 +1610,22 @@
      */
     render(frames, left, right, offset) {
       const slots = this.slots;
+      const tapped = this.tapIndex;
       for (let index = 0; index < slots.length; index += 1) {
         const record = slots[index];
         if (!record) continue;
-        if (record.audio) {
-          this.renderAudio(record, frames, left, right, offset);
+        // A tapped track is rendered into its own scratch buffers first and
+        // then added to the mix, so the tap carries that track alone. Nothing
+        // is copied while no track is tapped.
+        if (index === tapped && this.tapLeft) {
+          this.renderRecord(record, frames, this.tapLeft, this.tapRight, 0);
+          for (let at = 0; at < frames; at += 1) {
+            left[offset + at] += this.tapLeft[at];
+            if (right) right[offset + at] += this.tapRight[at];
+          }
           continue;
         }
-        if (!record.engine || record.module < 0) continue;
-        // Every engine is rendered every sub-block, muted or not: its voices
-        // have to advance with the song, or a track would come back mid-note.
-        const interleaved = record.engine.render(
-          this.bufferFor(record, frames),
-          frames,
-          0,
-          record.clock,
-        );
-        record.clock += frames;
-        const gainLeft = record.left;
-        const gainRight = record.right;
-        if (gainLeft === 0 && gainRight === 0) continue;
-        for (let at = 0; at < frames; at += 1) {
-          left[offset + at] += interleaved[at * 2] * gainLeft;
-          if (right) right[offset + at] += interleaved[at * 2 + 1] * gainRight;
-        }
+        this.renderRecord(record, frames, left, right, offset);
       }
 
       for (let at = 0; at < frames; at += 1) {
@@ -1253,6 +1636,62 @@
           const other = right[position];
           right[position] = other > 1 ? 1 : other < -1 ? -1 : other;
         }
+      }
+    }
+
+    /**
+     * Render one track's own output into a run of frames of a mix: whatever its
+     * device is, through the very same track gain and pan.
+     * @param {object} record
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array|null} right
+     * @param {number} offset
+     * @returns {void}
+     */
+    renderRecord(record, frames, left, right, offset) {
+      if (record.audio) {
+        this.renderAudio(record, frames, left, right, offset);
+        return;
+      }
+      if (record.sampler) {
+        this.renderSampler(record, frames, left, right, offset);
+        return;
+      }
+      if (!record.engine || record.module < 0) return;
+      // Every engine is rendered every sub-block, muted or not: its voices
+      // have to advance with the song, or a track would come back mid-note.
+      const interleaved = record.engine.render(this.bufferFor(record, frames), frames, 0, record.clock);
+      record.clock += frames;
+      const gainLeft = record.left;
+      const gainRight = record.right;
+      if (gainLeft === 0 && gainRight === 0) return;
+      for (let at = 0; at < frames; at += 1) {
+        left[offset + at] += interleaved[at * 2] * gainLeft;
+        if (right) right[offset + at] += interleaved[at * 2 + 1] * gainRight;
+      }
+    }
+
+    /**
+     * Mix one sampler track's voices over a run of frames, with the track's own
+     * gain and pan — exactly what an engine's output gets. Every voice is
+     * rendered even when the track is silent, so a muted track's pads come back
+     * at the right point in their sound instead of mid-note.
+     * @param {object} record
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array|null} right
+     * @param {number} offset
+     * @returns {void}
+     */
+    renderSampler(record, frames, left, right, offset) {
+      const voices = record.voices;
+      const gainLeft = record.left;
+      const gainRight = record.right;
+      for (let at = 0; at < voices.length; at += 1) {
+        const voice = voices[at];
+        if (!voice.sounding) continue;
+        StudioSamplerVoice.render(voice, frames, gainLeft === 0 ? null : left, gainRight === 0 ? null : right, offset, gainLeft, gainRight);
       }
     }
 
@@ -1326,7 +1765,205 @@
       if (event.type === "audio") this.startVoice(event);
       else if (event.type === "audio_stop") this.stopVoice(event);
       else if (event.type === "fade") this.startFade(event);
+      else if (event.type === "pad") this.startPad(event, false);
       else this.sendNote(event);
+    }
+
+    /**
+     * @param {string} trackId
+     * @returns {object|null} the sampler record one track's slot holds
+     */
+    samplerRecord(trackId) {
+      const index = this.trackSlots.get(trackId);
+      if (index === undefined) return null;
+      const record = this.slots[index];
+      return record && record.sampler ? record : null;
+    }
+
+    /**
+     * Start one pad's voice: a pattern step (`live` false) or a live press.
+     *
+     * The pad comes from the song's `pads` container and its sample from the
+     * sample store; a step's `locks` then override the pad's own fields for this
+     * one voice. A pad with no sample is silence and is not a fault; a pad whose
+     * sample the client has not loaded is silence and is reported once.
+     *
+     * A step gives a `gate` pad its `gate_frames` to release at. A live press has
+     * no step, so it holds until `liveRelease` for a `gate` pad and plays to the
+     * end of its range for a `oneshot` one.
+     * @param {{track_id: string, bank_id: string, index: number, v: number,
+     *          locks?: object, gate_frames?: number}} event
+     * @param {boolean} live whether this is a live press rather than a step
+     * @returns {void}
+     */
+    startPad(event, live) {
+      const record = this.samplerRecord(event.track_id);
+      if (!record) return;
+      const bankId = asId(event.bank_id);
+      const index = Math.trunc(Number(event.index) || 0);
+      const pad = this.pads.get(padKey(event.track_id, bankId, index));
+      if (!pad) return;
+
+      const sampleId = asId(pad.sample_id);
+      if (sampleId === "") return;
+      const stored = this.samples.get(sampleId);
+      if (!stored || stored.frames === 0) {
+        this.reportMissingSample(sampleId);
+        return;
+      }
+      stored.lastUsed = this.sampleClock += 1;
+
+      const locks = event.locks && typeof event.locks === "object" ? event.locks : null;
+      const field = (name, fallback) => (locks && locks[name] !== undefined ? locks[name] : fallback);
+
+      const range = this.padRange(pad, stored);
+      const mode = typeof pad.mode === "string" ? pad.mode : "oneshot";
+      const gateFrames = mode === "gate" && !live ? Number(event.gate_frames) : NaN;
+      const filter = pad.filter && typeof pad.filter === "object" ? pad.filter : {};
+
+      const voice = this.takeVoice(record);
+      const started = StudioSamplerVoice.start(voice, {
+        channels: stored.channels,
+        frames: stored.frames,
+        start: range.start,
+        end: range.end,
+        reverse: field("reverse", pad.reverse === true) === true,
+        pitch: field("pitch", pad.pitch),
+        gainDb: field("gain_db", pad.gain_db),
+        velocity: event.v,
+        pan: field("pan", pad.pan),
+        attackMs: pad.attack_ms,
+        decayMs: field("decay_ms", pad.decay_ms),
+        sustain: pad.sustain,
+        releaseMs: field("release_ms", pad.release_ms),
+        filterType: typeof filter.type === "string" ? filter.type : "off",
+        cutoffHz: field("cutoff_hz", filter.cutoff_hz),
+        resonance: field("resonance", filter.resonance),
+        gateFrames: Number.isFinite(gateFrames) ? gateFrames : -1,
+        choke: pad.choke,
+        trackId: asId(event.track_id),
+        bankId: bankId,
+        index: index,
+        serial: (this.voiceSerial += 1),
+        sampleRate: sampleRate,
+      });
+      if (!started) return;
+
+      // A new voice in choke group n cuts every other voice of that group on
+      // this track, over the crossfade length.
+      const choke = Math.trunc(Number(pad.choke) || 0);
+      if (choke > 0) {
+        for (const other of record.voices) {
+          if (other === voice) continue;
+          if (!other.sounding || other.choke !== choke) continue;
+          StudioSamplerVoice.beginFadeOut(other);
+        }
+      }
+
+      this.stealSongWide(voice);
+    }
+
+    /**
+     * The frames a pad plays inside one loaded sample: its slice when it names
+     * one, the whole sample otherwise. A slice's frames are in the sample's own
+     * rate (the document's), while the PCM here is at the context's rate, so
+     * they are scaled by the ratio of the two.
+     * @param {object} pad
+     * @param {{frames: number}} stored
+     * @returns {{start: number, end: number}}
+     */
+    padRange(pad, stored) {
+      const sampleId = asId(pad.sample_id);
+      const sliceId = asId(pad.slice_id);
+      if (sliceId === "") return { start: 0, end: stored.frames };
+      const slice = this.slices.get(sliceKey(sampleId, sliceId));
+      if (!slice) return { start: 0, end: stored.frames };
+
+      const docRate = this.sampleRates.get(sampleId) || sampleRate;
+      const scale = sampleRate / docRate;
+      const start = Math.max(0, Math.min(stored.frames, Math.trunc(Math.round(Number(slice.start_frame) * scale))));
+      const end = Math.max(start, Math.min(stored.frames, Math.trunc(Math.round(Number(slice.end_frame) * scale))));
+      return { start: start, end: end };
+    }
+
+    /**
+     * Pick the voice a new trigger uses: a free one, else this track's oldest —
+     * a voice that is already fading out (choked or releasing) goes first.
+     * @param {object} record
+     * @returns {object} the voice record to overwrite
+     */
+    takeVoice(record) {
+      const voices = record.voices;
+      let oldest = voices[0];
+      for (const voice of voices) {
+        if (!voice.sounding) return voice;
+        if (this.stealRank(voice) < this.stealRank(oldest)) oldest = voice;
+      }
+      oldest.sounding = false;
+      return oldest;
+    }
+
+    /**
+     * How good a steal candidate a voice is: the lower the value, the sooner it
+     * goes. A voice already fading out is never heard again in any case, so it
+     * goes before a held one; within a class the oldest goes first.
+     * @param {object} voice
+     * @returns {number}
+     */
+    stealRank(voice) {
+      const fading = voice.fadeRemaining > 0 || voice.stage === StudioSamplerVoice.STAGE_RELEASE;
+      return (fading ? 0 : 1) * 1000000000 + voice.serial;
+    }
+
+    /**
+     * Keep the whole song inside its 64-voice cap: while too many voices sound,
+     * the song's best steal candidate goes — across tracks, choked and releasing
+     * ones first, then the oldest anywhere.
+     * @param {object} newest the voice this trigger just started (never stolen)
+     * @returns {void}
+     */
+    stealSongWide(newest) {
+      let sounding = 0;
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) if (voice.sounding) sounding += 1;
+      }
+      while (sounding > SAMPLER_VOICES_SONG_WIDE) {
+        let victim = null;
+        for (const record of this.slots) {
+          if (!record || !record.sampler) continue;
+          for (const voice of record.voices) {
+            if (!voice.sounding || voice === newest) continue;
+            if (!victim || this.stealRank(voice) < this.stealRank(victim)) victim = voice;
+          }
+        }
+        if (!victim) return;
+        victim.sounding = false;
+        victim.channels = null;
+        sounding -= 1;
+      }
+    }
+
+    /**
+     * A live pad message: a press starts the pad's voice (never through
+     * history, never quantized), a release lets the voices that pad started go.
+     * @param {{track_id: string, bank_id: string, index: number, v: number, on: boolean}} event
+     * @returns {void}
+     */
+    live(event) {
+      if (event.on !== false) {
+        this.startPad(event, true);
+        return;
+      }
+      const record = this.samplerRecord(asId(event.track_id));
+      if (!record) return;
+      const bankId = asId(event.bank_id);
+      const index = Math.trunc(Number(event.index) || 0);
+      for (const voice of record.voices) {
+        if (!voice.sounding) continue;
+        if (voice.bankId !== bankId || voice.index !== index) continue;
+        StudioSamplerVoice.release(voice);
+      }
     }
 
     /**

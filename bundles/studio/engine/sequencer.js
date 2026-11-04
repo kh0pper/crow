@@ -129,6 +129,25 @@
  * the comp only needs their rate and their recorded offset, which are read
  * once per `setSong()` like the rest of the song.
  *
+ * ## Pattern clips
+ *
+ * A sampler track's clip is a pattern: `kind: "pattern"`, with a step length
+ * (`length_steps × step_beats` beats is its loop) and its patterns, whose steps
+ * live in the song's own `steps` container. Its notes are empty. For every step
+ * of the pattern it plays this file emits
+ *
+ *     {frame, type: "pad", track_id, bank_id, index, v, locks, gate_frames}
+ *
+ * where the step sounds at `at × step_beats` beats into the clip's loop and
+ * `gate_frames` is the step's own length in frames (which a `gate` pad releases
+ * at). A pad trigger is not a note: nothing is released, so it has no entry in
+ * the open set — the pad's own mode (one-shot or gate) decides how its voice
+ * ends, which is the processor's business.
+ *
+ * 1c's first step (plan Task 3) plays the clip's FIRST pattern alone, on the
+ * plain step grid: no swing and no chain yet. Task 4 replaces that with the
+ * real step timing and the chain.
+ *
  * ## Launch reports
  *
  * Every launch this file APPLIES is reported in the very block it takes effect
@@ -169,14 +188,28 @@
  * `tracks[{id, mute, solo}]`, `scenes[{id}]`,
  * `clips{id: {id, track_id, scene_id, length_bars, notes[{t, d, p, v}],
  * kind?, comp?}}` with `t`/`d` in beats, `p` a MIDI pitch and `v` a velocity,
- * and `takes{id: {id, clip_id, rate, offset_frames, discarded}}` for the takes
- * an audio clip's comp plays.
+ * `takes{id: {id, clip_id, rate, offset_frames, discarded}}` for the takes
+ * an audio clip's comp plays, and for the sampler
+ * `patterns{"<clip_id>/<pattern_id>": {id, clip_id, order, name}}` and
+ * `steps{"<clip_id>/<pattern_id>/<at>/<bank_id>.<index>": {clip_id,
+ * pattern_id, at, bank_id, index, v, locks}}` for a pattern clip's steps.
  */
 (function () {
   "use strict";
 
   /** 1a is four beats to the bar, in every song. */
   const BEATS_PER_BAR = 4;
+
+  /** A pattern's step positions when the document names none, and their limit. */
+  const DEFAULT_STEP_POSITIONS = 16;
+  const MAX_STEP_POSITIONS = 64;
+
+  /** A pattern's step length when the document names none: a sixteenth note. */
+  const DEFAULT_STEP_BEATS = 0.25;
+
+  /** Shared empties, so a song of pattern clips allocates nothing per read. */
+  const EMPTY_STEPS = Object.freeze([]);
+  const EMPTY_LOCKS = Object.freeze({});
 
   /** A beat holds four sixteenths, which `position()` reports. */
   const SIXTEENTHS_PER_BEAT = 4;
@@ -423,6 +456,8 @@
         if (take) takesById.set(id, take);
       }
 
+      attachPatternSteps(byId, snap);
+
       return {
         bpm: bpm,
         framesPerBeat: framesPerBeatFor(sampleRate, bpm),
@@ -432,6 +467,80 @@
         takes: takesById,
         placements: readPlacements(snap.arrangement),
       };
+    }
+
+    /**
+     * Give every pattern clip the steps of the pattern it plays: 1c's first
+     * step plays the clip's FIRST pattern (the lowest `order`, then the id), so
+     * a song whose patterns were written in any order still plays the same one.
+     *
+     * The step list is built once here, sorted and validated, so the block path
+     * only ever walks a plain array. A step outside the pattern's own step
+     * positions cannot sound and is dropped.
+     * @param {Map} clipsById the clips this song was read into
+     * @param {object} snapshot the song in the shape `doc.js` writes
+     * @returns {void}
+     */
+    function attachPatternSteps(clipsById, snapshot) {
+      const patterns = snapshot.patterns && typeof snapshot.patterns === "object" ? snapshot.patterns : {};
+      const steps = snapshot.steps && typeof snapshot.steps === "object" ? snapshot.steps : {};
+
+      /** clip id → the first pattern of that clip. */
+      const firstByClip = new Map();
+      for (const key of Object.keys(patterns)) {
+        const pattern = patterns[key];
+        if (!pattern || typeof pattern !== "object") continue;
+        const clipId = typeof pattern.clip_id === "string" ? pattern.clip_id : "";
+        if (clipId === "" || !clipsById.has(clipId)) continue;
+        const id =
+          typeof pattern.id === "string" && pattern.id !== ""
+            ? pattern.id
+            : String(key).split("/").pop() || String(key);
+        const order = Number(pattern.order);
+        const entry = { id: id, order: Number.isFinite(order) ? order : 0 };
+        const current = firstByClip.get(clipId);
+        if (!current || entry.order < current.order || (entry.order === current.order && entry.id < current.id)) {
+          firstByClip.set(clipId, entry);
+        }
+      }
+
+      /** clip id → that clip's step list, or undefined while it has none. */
+      const lists = new Map();
+      for (const key of Object.keys(steps)) {
+        const step = steps[key];
+        if (!step || typeof step !== "object") continue;
+        const clipId = typeof step.clip_id === "string" ? step.clip_id : "";
+        const patternId = typeof step.pattern_id === "string" ? step.pattern_id : "";
+        const clip = clipId === "" ? null : clipsById.get(clipId);
+        if (!clip || !clip.pattern) continue;
+        const first = firstByClip.get(clipId);
+        if (!first || first.id !== patternId) continue;
+
+        const at = Math.trunc(Number(step.at));
+        if (!Number.isFinite(at) || at < 0 || at >= clip.lengthSteps) continue;
+        const index = Math.trunc(Number(step.index));
+        if (!Number.isFinite(index) || index < 0) continue;
+        const velocity = Math.round(Number(step.v));
+        const entry = {
+          at: at,
+          bank_id: typeof step.bank_id === "string" ? step.bank_id : "",
+          index: index,
+          v: Number.isFinite(velocity) ? clamp(velocity, 1, 127) : 100,
+          locks: step.locks && typeof step.locks === "object" ? step.locks : EMPTY_LOCKS,
+        };
+        let list = lists.get(clipId);
+        if (!list) {
+          list = [];
+          lists.set(clipId, list);
+        }
+        list.push(entry);
+      }
+
+      for (const [clipId, list] of lists) {
+        list.sort(byStep);
+        const clip = clipsById.get(clipId);
+        if (clip) clip.steps = list;
+      }
     }
 
     /**
@@ -496,12 +605,20 @@
     /**
      * Read one clip, dropping the notes that cannot sound and sorting the rest
      * by `t` once — the block path only ever binary-searches this list.
-     * @returns {{id: string, track_id: string, scene_id: string, lengthBeats: number, notes: object[]}|null}
+     *
+     * A pattern clip's loop is its own `length_steps × step_beats` beats (not
+     * the bars the document derives for scene and placement lengths), and its
+     * steps arrive from `attachPatternSteps`.
+     * @returns {{id: string, track_id: string, scene_id: string, lengthBeats: number,
+     *            notes: object[], pattern: boolean, steps: object[]}|null}
      */
     function readClip(id, value) {
       if (!value || typeof value !== "object") return null;
+      const pattern = value.kind === "pattern";
       const bars = positive(value.length_bars);
-      const lengthBeats = (bars || 1) * BEATS_PER_BAR;
+      const lengthSteps = pattern ? stepPositionsOf(value) : 0;
+      const stepBeats = pattern ? stepBeatsOf(value) : 0;
+      const lengthBeats = pattern ? lengthSteps * stepBeats : (bars || 1) * BEATS_PER_BAR;
 
       const notes = [];
       const rawNotes = Array.isArray(value.notes) ? value.notes : [];
@@ -527,6 +644,10 @@
         audio: value.kind === "audio",
         notes: notes,
         comp: value.kind === "audio" ? readComp(value.comp, lengthBeats) : [],
+        pattern: pattern,
+        lengthSteps: lengthSteps,
+        stepBeats: stepBeats,
+        steps: EMPTY_STEPS,
       };
     }
 
@@ -1508,6 +1629,11 @@
               continue;
             }
 
+            if (clip.pattern) {
+              emitPads(seg, clip, first, last, segEndBeat, segEndFrame, frameStart, frameEnd);
+              continue;
+            }
+
             for (let loop = first; loop <= last; loop += 1) {
               const loopStart = seg.startBeat + loop * length;
               if (loopStart >= segEndBeat) break;
@@ -1740,6 +1866,56 @@
         if (Math.abs(position - takeFrame) <= 1) return entry;
       }
       return null;
+    }
+
+    /**
+     * Emit the pad triggers of one pattern clip's steps inside this block.
+     *
+     * A step sounds `at × step_beats` beats into each loop iteration of the
+     * clip, and its `gate_frames` is the step's own length in frames. Nothing is
+     * registered in an open set: the pad's mode decides how the voice ends.
+     * @param {object} seg the track's segment playing the clip
+     * @param {object} clip a pattern clip, with its steps sorted
+     * @param {number} first the first loop iteration to look at
+     * @param {number} last the last loop iteration to look at
+     * @param {number} segEndBeat the beat the segment is cut at (`Infinity` for none)
+     * @param {number} segEndFrame the frame the segment is cut at (`Infinity` for none)
+     * @param {number} frameStart
+     * @param {number} frameEnd
+     * @returns {void}
+     */
+    function emitPads(seg, clip, first, last, segEndBeat, segEndFrame, frameStart, frameEnd) {
+      const steps = clip.steps;
+      if (!steps || steps.length === 0) return;
+      const stepBeats = clip.stepBeats;
+      const gateFrames = Math.max(1, Math.round(stepBeats * framesPerBeat));
+
+      for (let loop = first; loop <= last; loop += 1) {
+        const loopStart = seg.startBeat + loop * clip.lengthBeats;
+        if (loopStart >= segEndBeat) break;
+
+        for (let at = 0; at < steps.length; at += 1) {
+          const step = steps[at];
+          const onBeat = loopStart + step.at * stepBeats;
+          // A placement that starts part-way into its clip does not play the
+          // steps that began before it, exactly as it does not start notes.
+          if (seg.audibleFrom !== undefined && onBeat < seg.audibleFrom - EPSILON_BEATS) continue;
+          const onFrame = beatToFrame(onBeat);
+          if (onFrame < frameStart || onFrame >= frameEnd) continue;
+          if (onFrame >= segEndFrame) continue;
+
+          events.push({
+            frame: onFrame - frameStart,
+            track_id: seg.track_id,
+            type: "pad",
+            bank_id: step.bank_id,
+            index: step.index,
+            v: step.v,
+            locks: step.locks,
+            gate_frames: gateFrames,
+          });
+        }
+      }
     }
 
     /**
@@ -2024,7 +2200,10 @@
       const bt = trackIndex.has(b.track_id) ? trackIndex.get(b.track_id) : Number.MAX_SAFE_INTEGER;
       if (at !== bt) return at - bt;
       if (a.voice !== undefined || b.voice !== undefined) return (a.voice || 0) - (b.voice || 0);
-      return a.p - b.p;
+      // Pads carry a pad index rather than a pitch; a note's pitch decides its
+      // order, and two events that name neither keep their arrival order.
+      if (a.p !== undefined || b.p !== undefined) return (a.p || 0) - (b.p || 0);
+      return (a.index || 0) - (b.index || 0);
     }
 
     /** @returns {number} the order of an event type inside one frame. */
@@ -2032,8 +2211,10 @@
       if (type === "off") return 0;
       if (type === "audio_stop") return 1;
       if (type === "on") return 2;
-      // A fade follows the start it belongs to: the voice it names is opened by
-      // an "audio" event at the very same frame.
+      // A pad trigger starts a voice of its own, like a note does; it follows
+      // any stop at the same frame. A fade follows the start it belongs to: the
+      // voice it names is opened by an "audio" event at the very same frame.
+      if (type === "pad") return 3;
       if (type === "fade") return 4;
       return 3; // "audio"
     }
@@ -2129,6 +2310,38 @@
   /** @returns {number} a stable order for notes that start together. */
   function byStartBeat(a, b) {
     return a.t - b.t;
+  }
+
+  /**
+   * The order of two steps of one pattern: its position first, then the bank
+   * and pad, so two pads on one position trigger in a fixed order that both
+   * hosts agree on.
+   * @returns {number}
+   */
+  function byStep(a, b) {
+    if (a.at !== b.at) return a.at - b.at;
+    if (a.bank_id !== b.bank_id) return a.bank_id < b.bank_id ? -1 : 1;
+    return a.index - b.index;
+  }
+
+  /**
+   * @param {unknown} value a pattern clip's `length_steps`
+   * @returns {number} how many step positions its pattern has, at least 1
+   */
+  function stepPositionsOf(value) {
+    const steps = Math.trunc(Number(value && value.length_steps));
+    if (!Number.isFinite(steps) || steps < 1) return DEFAULT_STEP_POSITIONS;
+    return Math.min(steps, MAX_STEP_POSITIONS);
+  }
+
+  /**
+   * @param {unknown} value a pattern clip's `step_beats`
+   * @returns {number} how many beats one step lasts, above zero
+   */
+  function stepBeatsOf(value) {
+    const beats = Number(value && value.step_beats);
+    if (!Number.isFinite(beats) || beats <= 0) return DEFAULT_STEP_BEATS;
+    return beats;
   }
 
   /** @returns {number} the beat order of two comp segments. */
