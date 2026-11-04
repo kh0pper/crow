@@ -224,9 +224,9 @@ test("the design constants: 16 KB of headers, 10 s handshake, 32 connections, 32
   assert.equal(m.MAX_HEADER_BYTES, 16 * 1024);
   assert.equal(m.HANDSHAKE_TIMEOUT_MS, 10_000);
   assert.equal(m.MAX_CONNECTIONS, 32);
-  assert.equal(m.MAX_FRAME_BYTES, 32 * 1024 * 1024);
+  assert.equal(m.MAX_FRAME_BYTES, 256 * 1024 * 1024, "the pipe cap matches Playwright, so one page message cannot stop the browser");
   assert.ok(m.MAX_FRAME_BYTES >= 24 * 1024 * 1024, "at least 24 MB, per the review");
-  assert.equal(m.MAX_CLIENT_BUFFER_BYTES, 64 * 1024 * 1024);
+  assert.ok(m.MAX_CLIENT_BUFFER_BYTES > m.MAX_FRAME_BYTES, "one maximum frame never drops an idle client");
   assert.match(m.TOKEN_RE.source, /\[A-Za-z0-9_-\]\{32,256\}/);
 });
 
@@ -714,4 +714,52 @@ test("no relay run ever logs the token, even when a client puts it in a header o
   for (const trace of ALL_TRACES) {
     assert.ok(!JSON.stringify(trace).includes(TOKEN), "the token reached Chromium somewhere");
   }
+});
+// ---------------------------------------------------------------------------
+// review regressions: a peer can never crash the relay (and so the browser)
+// ---------------------------------------------------------------------------
+
+const alive = async (ctx, ms = 400) => (await Promise.race([ctx.exited.then(() => false), sleep(ms).then(() => true)]));
+
+test("an unauthenticated upgrade that resets while the 401 is written never crashes the relay", async (t) => {
+  const ctx = await startRelay(t);
+  const ready = await waitReady(ctx);
+  for (let i = 0; i < 20; i++) {
+    await new Promise((resolve) => {
+      const s = net.connect(ready.port, "127.0.0.1", () => {
+        s.write(`GET /devtools/browser/x HTTP/1.1\r\nHost: 127.0.0.1:${ready.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`);
+        setTimeout(() => { s.resetAndDestroy(); resolve(); }, i % 3);
+      });
+      s.on("error", () => resolve());
+    });
+  }
+  assert.equal(await alive(ctx, 800), true, `the relay is still running; log:\n${ctx.logs()}`);
+  assert.equal((await request(ready.port, { token: TOKEN })).status, 200, "and still answers");
+});
+
+test("a client that resets right after its close frame never crashes the relay", async (t) => {
+  await withRelay(t, {}, async ({ ctx, ready, wsUrl }) => {
+    for (let i = 0; i < 10; i++) {
+      const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${TOKEN}` }, perMessageDeflate: false });
+      await new Promise((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+      ws.close(1000);
+      // The close frame is out; reset the TCP connection before the relay's 1 s destroy timer.
+      setTimeout(() => { try { ws._socket?.resetAndDestroy(); } catch { /* gone */ } }, 5);
+      await sleep(30);
+    }
+    assert.equal(await alive(ctx, 1500), true, `the relay is still running; log:\n${ctx.logs()}`);
+    assert.equal((await request(ready.port, { token: TOKEN })).status, 200);
+  });
+});
+
+test("a 33 MB message from the browser reaches its client and never stops the browser", async (t) => {
+  await withRelay(t, {}, async ({ ctx, wsUrl }) => {
+    const c = openClient(wsUrl);
+    await c.opened;
+    const r = await c.request(1, "Test.stream", { count: 1, size: 33 * 1024 * 1024 });
+    assert.equal(r.result?.chunks, 1);
+    assert.ok(c.messages?.some?.((m) => m.method === "Test.chunk") ?? true, "the big event arrived");
+    assert.equal(await alive(ctx, 500), true, `the relay is still running; log:\n${ctx.logs()}`);
+    c.close();
+  });
 });

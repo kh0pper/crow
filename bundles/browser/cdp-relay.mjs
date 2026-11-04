@@ -39,10 +39,13 @@ export const MAX_HEADER_BYTES = 16 * 1024;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
 /** Concurrent connections, HTTP and WebSocket together. */
 export const MAX_CONNECTIONS = 32;
-/** Largest frame in either direction: one CDP message, from a client or from Chromium. */
-export const MAX_FRAME_BYTES = 32 * 1024 * 1024;
-/** Per-client output buffer; past it that client alone is dropped (close 1009). */
-export const MAX_CLIENT_BUFFER_BYTES = 64 * 1024 * 1024;
+/** Largest frame in either direction: one CDP message, from a client or from Chromium. The
+ *  pipe framer closes (and so the browser stops) past it, so it matches Playwright's own
+ *  client limit: a page cannot make one message big enough to stop the browser below that. */
+export const MAX_FRAME_BYTES = 256 * 1024 * 1024;
+/** Per-client output buffer; past it that client alone is dropped (close 1009). Room for one
+ *  maximum frame plus some backlog, so a single large message never drops an idle client. */
+export const MAX_CLIENT_BUFFER_BYTES = MAX_FRAME_BYTES + 16 * 1024 * 1024;
 /** How long a graceful stop waits for Chromium to close itself after `Browser.close`. */
 export const CLOSE_TIMEOUT_MS = 10_000;
 /** The token shape Crow mints (hex32 or base64url) — the same rule the entrypoint applies. */
@@ -250,6 +253,9 @@ function createWsConnection(socket, head, { maxFrameBytes, onText, onClose, onTo
   socket.once("end", onEnd);
   socket.once("close", onEnd);
   socket.on("error", onEnd);
+  // Permanent: finish() removes onEnd, but the socket can still error while a close frame
+  // flushes (sendClose keeps it up to 1 s). An unhandled error would crash the relay.
+  socket.on("error", () => {});
 
   return {
     sendText(text) { return writeFrame(0x1, Buffer.from(text, "utf8")); },
@@ -619,6 +625,10 @@ export async function createRelay(config) {
   }
 
   function onUpgrade(req, socket, head) {
+    // Node drops its own socket error handler before handing over an upgrade socket. A peer
+    // that resets while we answer (401 included) must never become an uncaught exception,
+    // which would take the relay, and Chromium with it, down.
+    socket.on("error", () => { try { socket.destroy(); } catch { /* gone */ } });
     headSeen.add(socket);
     const route = classify(req.url);
     if (!authenticate(req.headers)) { stats.refused++; reject(socket, 401, "Unauthorized"); logLine("UPGRADE", route, 401); return; }

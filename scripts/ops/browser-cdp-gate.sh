@@ -35,7 +35,6 @@ set -uo pipefail
 DOCKER="${DOCKER:-docker}"
 CURL="${CURL:-curl}"
 GIT="${GIT:-git}"
-SERVICE=crow-browser
 KEY=CROW_BROWSER_CDP_TOKEN
 FILES=(docker-compose.yml Dockerfile entrypoint.sh cdp-relay.mjs)
 
@@ -77,6 +76,13 @@ for f in "${FILES[@]}"; do
 done
 [ -x "$SOURCE/entrypoint.sh" ] || say "note: $SOURCE/entrypoint.sh is not executable; it will be installed 755"
 
+# This instance's container and compose project, from ITS .env (a co-hosted instance sets
+# CROW_BROWSER_CONTAINER_NAME; compose's project then follows it, see docker-compose.yml).
+CNAME="$(sed -n 's/^CROW_BROWSER_CONTAINER_NAME=\([a-z0-9][a-z0-9_-]\{0,63\}\)$/\1/p' "$ENV_FILE" | tail -n 1)"
+SERVICE="${CNAME:-crow-browser}"
+EXPECTED_PROJECT="${CNAME:-browser}"
+[ "$PROJECT" = "$EXPECTED_PROJECT" ] \
+  || fail "<compose-project> '$PROJECT' is not this instance's project ('$EXPECTED_PROJECT', from CROW_BROWSER_CONTAINER_NAME in $ENV_FILE): refusing, a wrong -p would replace another instance's browser"
 CDP_PORT="$(sed -n 's/^CROW_BROWSER_CDP_PORT=\([0-9]\{1,5\}\)$/\1/p' "$ENV_FILE" | tail -n 1)"
 CDP_PORT="${CDP_PORT:-9222}"
 STAMP="${CROW_GATE_NOW:-$(date +%Y%m%d-%H%M%S)}"
@@ -163,9 +169,11 @@ on_exit() {
   echo "[crow-cdp-gate] FAILED or interrupted during '$STAGE'" >&2
   if [ -n "$BACKUP" ] && [ -d "$BACKUP/installed" ]; then
     for f in "${FILES[@]}"; do
-      if [ -e "$BACKUP/installed/$f" ]; then cp -p "$BACKUP/installed/$f" "$BUNDLE_DIR/$f"; else rm -f "$BUNDLE_DIR/$f"; fi
+      # Restore only what was backed up; never delete a file this run did not back up (an
+      # installed copy the gateway already refreshed must not lose its relay).
+      if [ -e "$BACKUP/installed/$f" ]; then cp -p "$BACKUP/installed/$f" "$BUNDLE_DIR/$f"; fi
     done
-    echo "[crow-cdp-gate] the four files are back as they were installed before this run." >&2
+    echo "[crow-cdp-gate] every file that was installed before this run is back as it was." >&2
   fi
   case "$STAGE" in
     recreate|recreated|verify)
@@ -186,8 +194,13 @@ STAGE=backup
 mkdir -p "$BACKUP/pre" "$BACKUP/installed"
 chmod 700 "$INSTANCE_HOME/browser-cdp-gate-backup" "$BACKUP"
 for f in "${FILES[@]}"; do
-  "$GIT" -C "$REPO" show "$FROM_SHA:bundles/browser/$f" > "$BACKUP/pre/$f" 2>/dev/null \
-    || fail "--from-sha '$FROM_SHA' has no bundles/browser/$f"
+  # A file new in the gate (cdp-relay.mjs) cannot exist at a pre-gate sha: nothing to back up.
+  if "$GIT" -C "$REPO" cat-file -e "$FROM_SHA:bundles/browser/$f" 2>/dev/null; then
+    "$GIT" -C "$REPO" show "$FROM_SHA:bundles/browser/$f" > "$BACKUP/pre/$f" 2>/dev/null \
+      || fail "cannot read bundles/browser/$f at --from-sha '$FROM_SHA'"
+  elif [ "$f" != cdp-relay.mjs ]; then
+    fail "--from-sha '$FROM_SHA' has no bundles/browser/$f"
+  fi
   if [ -e "$BUNDLE_DIR/$f" ]; then cp -p "$BUNDLE_DIR/$f" "$BACKUP/installed/$f"; fi
 done
 ( umask 077; cp -p "$ENV_FILE" "$BACKUP/.env" )
@@ -288,8 +301,8 @@ say "  install -m 755 $BACKUP/pre/entrypoint.sh $BUNDLE_DIR/entrypoint.sh"
 say "  rm -f $BUNDLE_DIR/cdp-relay.mjs"
 say "  cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME docker compose -p $PROJECT up -d --build --force-recreate"
 say "A public install rolls FORWARD instead: a later bundle version that reverts these files, because"
-say "the installed manifest already says 1.5.0 and a hand-restored compose would be replaced by the"
-say "next refresh of manifest.refreshFiles."
+say "the installed manifest already says 1.5.0; a hand-restored compose stays until the next bundle"
+say "version's refresh of manifest.refreshFiles replaces it."
 say "backup kept: $BACKUP (it holds a copy of .env, so treat it as a secret; delete it once you are sure)"
 [ "$VERDICT" = ok ] || exit 1
 say "done."
