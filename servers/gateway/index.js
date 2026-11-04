@@ -63,6 +63,7 @@ import { gatewayListenPort } from "./listen-port.js";
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
+import { setOAuthProvider } from "./oauth-consent.js";
 import { resolveIssuerUrl, issuerSource } from "./issuer-url.js";
 import { loadDynamicBackends } from "./proxy.js";
 import { dashboardAuth } from "./dashboard/auth.js";
@@ -590,6 +591,9 @@ let authMiddleware = null;
 
 if (!noAuth) {
   const provider = createOAuthProvider();
+  // The consent page (oauth-consent.js) mints codes through this provider; the
+  // security audit's finding made a code reachable only through it.
+  setOAuthProvider(provider);
   const publicUrl = issuerSource();
   const { url: serverUrl, degraded, reason } = resolveIssuerUrl({ publicUrl, port: PORT });
   if (degraded) {

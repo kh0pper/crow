@@ -98,6 +98,29 @@ export const translations = {
   "login.lockoutSupport": { en: "Need help? Contact support", es: "¿Necesitas ayuda? Contacta soporte" },
   "login.lockoutSelfHosted": { en: "You can reset your password from the command line:", es: "Puedes restablecer tu contraseña desde la línea de comandos:" },
 
+  // ─── OAuth consent (servers/gateway/oauth-consent.js) ───
+  // The page an app's sign-in request lands on. A code is minted only after the
+  // owner clicks Allow here (the security audit's finding), so the warning is
+  // deliberately blunt about what a grant means.
+  "oauthConsent.title": { en: "Allow this app to connect?", es: "¿Permitir que esta aplicación se conecte?" },
+  "oauthConsent.intro": { en: "An app is asking for permission to sign in to your Crow:", es: "Una aplicación pide permiso para iniciar sesión en tu Crow:" },
+  "oauthConsent.unnamedApp": { en: "An unnamed app", es: "Una aplicación sin nombre" },
+  "oauthConsent.redirectOrigin": { en: "When you decide, you will be sent back to:", es: "Cuando decidas, te enviaremos de vuelta a:" },
+  "oauthConsent.warning": { en: "Allowing gives this app full access to your Crow: memories, messages, files and bots. Only allow it if you just started connecting this app yourself.", es: "Permitir da a esta aplicación acceso completo a tu Crow: recuerdos, mensajes, archivos y bots. Solo permítelo si acabas de empezar a conectar esta aplicación tú mismo." },
+  "oauthConsent.allow": { en: "Allow", es: "Permitir" },
+  "oauthConsent.deny": { en: "Deny", es: "Denegar" },
+  "oauthConsent.expiredTitle": { en: "This sign-in request has expired", es: "Esta solicitud de inicio de sesión ha caducado" },
+  "oauthConsent.expired": { en: "This sign-in request expired or was already used. Start connecting the app again.", es: "Esta solicitud de inicio de sesión caducó o ya se usó. Vuelve a conectar la aplicación desde el principio." },
+  // A request that reached the gateway over a bare loopback socket (the server
+  // itself): there is no dashboard login page that address could use, so name
+  // the two doors that do work — the usual tailnet/LAN address, or the local
+  // MCP token for apps living on this machine.
+  "oauthConsent.wrongAddressTitle": { en: "Approve this from your dashboard address", es: "Aprueba esto desde la dirección de tu panel" },
+  "oauthConsent.wrongAddress": { en: "A sign-in has to be approved from the Crow dashboard address — the tailnet or LAN address you normally use, not localhost on the server. Apps running on this machine can use the local MCP token instead (Settings).", es: "Un inicio de sesión debe aprobarse desde la dirección del panel de Crow — la dirección de tailnet o LAN que usas normalmente, no localhost en el servidor. Las aplicaciones que se ejecutan en esta máquina pueden usar en su lugar el token MCP local (Ajustes)." },
+  "oauthConsent.needSession": { en: "Sign in to the Crow dashboard first, then allow the app.", es: "Inicia sesión en el panel de Crow primero y luego permite la aplicación." },
+  "oauthConsent.csrfFailed": { en: "That request could not be verified. Open the consent page again from the app and try once more.", es: "No se pudo verificar esa solicitud. Abre de nuevo la página de consentimiento desde la aplicación e inténtalo otra vez." },
+  "oauthConsent.notConfigured": { en: "OAuth is not configured on this instance.", es: "OAuth no está configurado en esta instancia." },
+
   // ─── Common ───
   "common.save": { en: "Save", es: "Guardar" },
   "common.cancel": { en: "Cancel", es: "Cancelar" },

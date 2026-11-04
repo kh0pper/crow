@@ -731,8 +731,9 @@ function pwToggleScript() {
  * @param {object} opts
  * @param {string} [opts.error] - Error message to display
  * @param {boolean} [opts.isSetup] - True if setting password for first time
+ * @param {string} [opts.next] - Validated post-login destination (oauth-consent.js isConsentNext)
  */
-export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = {}) {
+export function renderLogin({ error, isSetup, setupToken, lockoutHelp, next, lang } = {}) {
   return `<!DOCTYPE html>
 <html lang="${lang || 'en'}">
 <head>
@@ -751,6 +752,7 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
       <p class="login-subtitle">${isSetup ? escapeHtml(t("login.setupSubtitle", lang)) : escapeHtml(t("login.subtitle", lang))}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
       <form method="POST" action="/dashboard/login">
+        ${next ? `<input type="hidden" name="next" value="${escapeHtml(next)}">` : ""}
         ${isSetup ? `${setupToken ? `<input type="hidden" name="setup_token" value="${setupToken}">` : ""}
         <input type="password" data-pw name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
         <input type="password" data-pw name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">` :

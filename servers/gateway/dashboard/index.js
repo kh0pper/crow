@@ -56,6 +56,7 @@ import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
 import { healthAttentionRouter } from "./panels/health.js";
 import { csrfMiddleware } from "./shared/csrf.js";
+import { createOAuthConsentRouter, isConsentNext } from "../oauth-consent.js";
 import secretSubmitRouter from "../routes/secret-submit.js";
 import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
 import federationRouterFactory from "../routes/federation.js";
@@ -120,11 +121,13 @@ function setupTokenMessage(key, lang) {
   return t(key, lang);
 }
 
-/** A retried 2FA step's pending token keeps the SSO context and the on-host flag (auth.js). */
-function retryPendingCtx(ssoCtx, onHost) {
+/** A retried 2FA step's pending token keeps the SSO context, the on-host flag
+ * and any dashboard-consent hand-off (auth.js / oauth-consent.js). */
+function retryPendingCtx(ssoCtx, onHost, next) {
   const ctx = {};
   if (ssoCtx) ctx.sso = ssoCtx;
   if (onHost) ctx.onhost = true;
+  if (next) ctx.next = next;
   return Object.keys(ctx).length ? ctx : null;
 }
 
@@ -182,15 +185,19 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   router.get("/dashboard/login", async (req, res) => {
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
+    // An app's consent hand-off survives the login round trip only in the exact
+    // shape oauth-consent.js minted (isConsentNext): anything else is ignored,
+    // so ?next= can never become an open redirect.
+    const next = isConsentNext(req.query.next) ? req.query.next : undefined;
     const hasPassword = await isPasswordSet();
     if (!hasPassword) {
       const gate = allowFirstRun(req, { from: "query" });
       if (!gate.allowed) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: setupTokenMessage("login.setupTokenGated", lang), lang }));
+        return res.type("html").send(renderLogin({ isSetup: true, error: setupTokenMessage("login.setupTokenGated", lang), lang, next }));
       }
-      return res.type("html").send(renderLogin({ isSetup: true, setupToken: gate.token || undefined, lang }));
+      return res.type("html").send(renderLogin({ isSetup: true, setupToken: gate.token || undefined, lang, next }));
     }
-    res.type("html").send(renderLogin({ isSetup: false, lang }));
+    res.type("html").send(renderLogin({ isSetup: false, lang, next }));
   });
 
   // Login handler
@@ -198,6 +205,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const { password, confirm } = req.body;
+    // The consent hand-off, again only in the exact minted shape.
+    const next = isConsentNext(req.body.next) ? req.body.next : undefined;
     const hasPassword = await isPasswordSet();
     const wasFirstSetup = !hasPassword; // capture before setPassword() runs below
 
@@ -229,7 +238,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const userAgent = req.headers["user-agent"] || null;
     // A login from this machine itself (its console, the shared browser, a local script) is
     // stored as 'dashboard onhost': signed in, never the owner's turn (local-session.js).
-    const result = await attemptLogin(password, req.ip, deviceTrustToken, userAgent, { onHost: isSelfOrigin(req) });
+    const result = await attemptLogin(password, req.ip, deviceTrustToken, userAgent, { onHost: isSelfOrigin(req), next });
     if (result.error) {
       let lockoutHelp = "";
       if (result.locked) {
@@ -248,7 +257,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
           </div>`;
         }
       }
-      return res.type("html").send(renderLogin({ isSetup: false, error: result.error, lockoutHelp, lang }));
+      return res.type("html").send(renderLogin({ isSetup: false, error: result.error, lockoutHelp, lang, next }));
     }
 
     if (result.requires2fa) {
@@ -285,7 +294,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       }
       return res.redirectAfterPost(onboardingDone ? "/dashboard" : "/dashboard/onboarding");
     }
-    res.redirectAfterPost("/dashboard");
+    res.redirectAfterPost(next || "/dashboard");
   });
 
   // 2FA verification (TOTP code entry after password)
@@ -297,6 +306,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // Read any SSO context bound to this pending token BEFORE it is consumed.
     const pendingCtx = await getPending2faContext(pendingToken);
     const ssoCtx = pendingCtx?.sso || null;
+    // A dashboard-consent hand-off rides the same pending token (auth.js).
+    const consentNext = isConsentNext(pendingCtx?.next) ? pendingCtx.next : undefined;
     // On-host if the password step or this step came from this machine (auth.js passwordSessionScopes).
     const onHost = pendingCtx?.onhost === true || isSelfOrigin(req);
 
@@ -310,7 +321,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const secret = await getTotpSecret();
     if (!secret || !verifyTotp(totp_code, secret)) {
       // Re-create pending token for retry, preserving any SSO context.
-      const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost));
+      const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost, consentNext));
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
       res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
@@ -333,7 +344,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       return res.status(401).type("html").send(renderLogin({ error: t("login.ssoRefused", lang), lang }));
     }
     const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
-    const redirectTo = (ssoSrc && ssoDest && isSafeDestPath(ssoDest)) ? ssoDest : "/dashboard";
+    const redirectTo = ssoSrc
+      ? (ssoDest && isSafeDestPath(ssoDest) ? ssoDest : "/dashboard")
+      : (consentNext || "/dashboard");
 
     // Clear pending cookie
     const cookieHeaders = [`crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
@@ -370,6 +383,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // Read SSO context bound to the pending token before it is consumed.
     const pendingCtx = await getPending2faContext(pendingToken);
     const ssoCtx = pendingCtx?.sso || null;
+    const consentNext = isConsentNext(pendingCtx?.next) ? pendingCtx.next : undefined;
     const onHost = pendingCtx?.onhost === true || isSelfOrigin(req);
 
     const validPending = await verifyPending2faToken(pendingToken);
@@ -381,7 +395,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const valid = await verifyRecoveryCode(recovery_code);
     if (!valid) {
       // Re-create pending token for retry, preserving any SSO context.
-      const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost));
+      const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost, consentNext));
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
       res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
@@ -403,7 +417,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       return res.status(401).type("html").send(renderLogin({ error: t("login.ssoRefused", lang), lang }));
     }
     const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
-    const redirectTo = (ssoSrc && ssoDest && isSafeDestPath(ssoDest)) ? ssoDest : "/dashboard";
+    const redirectTo = ssoSrc
+      ? (ssoDest && isSafeDestPath(ssoDest) ? ssoDest : "/dashboard")
+      : (consentNext || "/dashboard");
 
     const cookieHeaders = [`crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
     setSessionCookie(res, result.token, sessionMaxAge);
@@ -690,6 +706,16 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   });
 
   // --- Protected routes ---
+
+  // OAuth consent — the security audit's finding. Mounted in the PUBLIC
+  // section, BEFORE dashboardAuth, because it does its own session check
+  // (sessionFromRequest) so that a signed-out owner can be carried through the
+  // login page and back (?next=), which dashboardAuth's bare redirect loses. It
+  // is still Funnel-refused (sessionFromRequest applies isAllowedNetwork) and
+  // its POST re-checks the session and the CSRF token itself, because
+  // csrfMiddleware below skips requests that carry no session cookie. The
+  // urlencoded body parser above already covers its POST body.
+  router.use(createOAuthConsentRouter());
 
   // Instantiate bundles router once so the cross-host bypass and the normal
   // dashboard-auth mount both dispatch to the same routes.
