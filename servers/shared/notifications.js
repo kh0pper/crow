@@ -36,7 +36,14 @@ const maskText = (v) => (v == null ? v : maskSecrets(v));
  * @param {object} [opts.metadata] - Structured data (stored as JSON)
  * @param {number} [opts.schedule_id] - FK to schedules table
  * @param {number} [opts.expires_in_minutes] - Auto-expire after N minutes
- * @returns {Promise<{id: number}|null>} Notification ID or null if filtered out
+ * @param {Function|false} [opts.deliver=deliverNotification] - the fan-out seam,
+ *   called as `(db, payload)` once the row is written (upsertGroupedNotification's
+ *   `deliver`, same shape). `false` writes the row and refreshes the bell badge
+ *   but sends nothing: for a caller that must not do network I/O inside its
+ *   transaction (the Crow-to-Crow receive pipeline, R7/W1) and delivers the
+ *   returned `delivery` payload itself after COMMIT.
+ * @returns {Promise<{id: number, delivery: object}|null>} the row id plus the exact
+ *   payload the fan-out would have received, or null if the type is filtered out
  */
 export async function createNotification(db, opts) {
   const {
@@ -49,6 +56,7 @@ export async function createNotification(db, opts) {
     metadata = null,
     schedule_id = null,
     expires_in_minutes = null,
+    deliver = deliverNotification,
   } = opts;
   const title = maskText(rawTitle);
   const body = maskText(rawBody);
@@ -68,9 +76,14 @@ export async function createNotification(db, opts) {
   });
 
   await broadcastUnread(db);
-  await deliverNotification(db, { title, body, action_url, priority, type });
 
-  return { id: Number(result.lastInsertRowid) };
+  // The payload is built once, so a caller that delivered nothing here (above)
+  // can hand exactly this to deliverNotification after its own commit.
+  const delivery = { title, body, action_url, priority, type };
+  const fanOut = deliver === false ? null : deliver;
+  if (typeof fanOut === "function") await fanOut(db, delivery);
+
+  return { id: Number(result.lastInsertRowid), delivery };
 }
 
 /** The notification_prefs type gate: false when this type is switched off. */

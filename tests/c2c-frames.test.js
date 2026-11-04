@@ -1,0 +1,284 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { buildFrame, parseFrame, PLAN1_KINDS, BODY_CAPS } from "../servers/sharing/c2c/frames.js";
+
+const U = "a".repeat(32), E = "b".repeat(32);
+const base = { projectUuid: U, fromInstanceId: "i-a", toInstanceId: "i-b" };
+const bodies = {
+  "project.invite": { name: "Proj", role: "editor", owner_instance_id: "i-a", gen: 1 },
+  "project.accept": { visitor_instance_id: "i-b" },
+  "project.decline": { reason: "left" },
+  "project.role": { role: "viewer" },
+  "project.unshare": {},
+  "project.ack": { epoch: E, stream: "*", seqs: [1, 2, 3] },
+  "project.refuse": { epoch: E, stream: "i-b", seq: 4, reason: "gap", detail: "x" },
+};
+const mk = (kind, over = {}) => {
+  const noSeq = kind === "project.ack" || kind === "project.refuse";
+  return buildFrame({ ...base, kind, epoch: noSeq ? undefined : E, seq: noSeq ? undefined : 1, body: bodies[kind], ...over });
+};
+
+for (const kind of PLAN1_KINDS) {
+  test(`${kind} round-trips`, () => {
+    const f = mk(kind);
+    const r = parseFrame(JSON.parse(JSON.stringify(f)));
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.frame, f);
+  });
+}
+
+test("an oversized body is bad_frame", () => {
+  // F3: the envelope parsed, so it comes back with the refusal and the receiver
+  // can hold, dedupe and consume the seq instead of dropping the frame.
+  const r = parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], pad: "x".repeat(5000) } }));
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "bad_frame");
+  assert.deepEqual(r.envelope, { project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b" });
+});
+test("F3: a known kind's body failure returns the parsed envelope", () => {
+  for (const [kind, body] of [
+    ["project.role", { role: "owner" }],
+    ["project.decline", { reason: "nope" }],
+    ["project.invite", { ...bodies["project.invite"], gen: 0 }],
+    ["project.unshare", "not an object"],
+    ["project.accept", new Map()],
+  ]) {
+    const r = parseFrame(mk(kind, { body }));
+    assert.equal(r.ok, false, kind);
+    assert.equal(r.reason, "bad_frame", kind);
+    assert.deepEqual(r.envelope, {
+      project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b",
+    }, `${kind}: the envelope is what lets the receiver consume the seq`);
+  }
+  // An ack/refusal body failure names no envelope stream of its own: nothing to consume.
+  assert.deepEqual(parseFrame(mk("project.ack", { body: { epoch: E, stream: "*", seqs: [0] } })), BAD);
+});
+test("an unknown kind is unsupported, with its parsed envelope", () => {
+  // The receiver consumes the seq of a kind it does not know (R4), so it needs the
+  // stream address: a newer Crow's frame must never wedge the stream.
+  assert.deepEqual(parseFrame(mk("project.invite", { kind: "project.teleport" })), {
+    ok: false,
+    reason: "unsupported",
+    envelope: { project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b" },
+  });
+});
+
+test("an unknown kind with a broken envelope is bad_frame, with no envelope", () => {
+  for (const over of [
+    { projectUuid: "nope" },
+    { projectUuid: "A".repeat(32) },
+    { fromInstanceId: "a b" },
+    { fromInstanceId: null },
+    { toInstanceId: 5 },
+    { toInstanceId: "" },
+    { seq: 1.5 },
+    { seq: 0 },
+    { epoch: "B".repeat(32) },
+    { epoch: "" },
+  ]) {
+    const r = parseFrame(mk("project.invite", { kind: "project.teleport", ...over }));
+    assert.deepEqual(r, BAD, JSON.stringify(over));
+  }
+});
+
+test("an unknown, unsequenced kind still returns its envelope (nothing to consume)", () => {
+  const f = mk("project.invite", { kind: "project.teleport" });
+  delete f.seq;
+  delete f.epoch;
+  assert.deepEqual(parseFrame(f), {
+    ok: false,
+    reason: "unsupported",
+    envelope: { project_uuid: U, from_instance_id: "i-a", to_instance_id: "i-b" },
+  });
+});
+
+test("an unknown kind with a null target keeps it null in the envelope", () => {
+  const r = parseFrame(mk("project.invite", { kind: "project.teleport", toInstanceId: null }));
+  assert.equal(r.reason, "unsupported");
+  assert.equal(r.envelope.to_instance_id, null);
+});
+test("a non-integer seq is bad_frame", () => {
+  assert.equal(parseFrame(mk("project.role", { seq: 1.5 })).reason, "bad_frame");
+  assert.equal(parseFrame(mk("project.role", { seq: 0 })).reason, "bad_frame");
+});
+test("a role outside viewer|commenter|editor is bad_frame", () => {
+  assert.equal(parseFrame(mk("project.role", { body: { role: "owner" } })).reason, "bad_frame");
+});
+test("an invite name over 200 chars is bad_frame", () => {
+  assert.equal(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], name: "n".repeat(201) } })).reason, "bad_frame");
+});
+test("weird input never throws", () => {
+  for (const x of [null, undefined, 5, "s", [], { type: "c2c", v: 1, kind: {} }]) assert.equal(parseFrame(x).ok, false);
+});
+
+const BAD = { ok: false, reason: "bad_frame" };
+
+/**
+ * F3: a KNOWN kind whose body failed keeps its parsed envelope (the receiver
+ * holds, dedupes, consumes and refuses it), while a broken envelope is still the
+ * bare `BAD` above.
+ */
+function assertBodyFailed(r, msg) {
+  assert.equal(r.ok, false, msg);
+  assert.equal(r.reason, "bad_frame", msg);
+  assert.ok(r.envelope, `F3: the parsed envelope comes back (${msg})`);
+}
+
+test("v other than 1 is unsupported", () => {
+  assert.deepEqual(parseFrame({ ...mk("project.role"), v: 2 }), { ok: false, reason: "unsupported" });
+});
+test("project.comment is unsupported, with its envelope", () => {
+  const r = parseFrame(mk("project.role", { kind: "project.comment" }));
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "unsupported");
+  assert.deepEqual(r.envelope, { project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b" });
+});
+test("__proto__ and extra keys are stripped; Object.prototype untouched", () => {
+  const raw = JSON.parse(`{"type":"c2c","v":1,"kind":"project.role","project_uuid":"${U}","epoch":"${E}","seq":1,
+    "from_instance_id":"i-a","to_instance_id":"i-b","extra":1,"__proto__":{"polluted":1},
+    "body":{"role":"editor","junk":2,"__proto__":{"polluted":1}}}`);
+  const r = parseFrame(raw);
+  assert.equal(r.ok, true);
+  assert.notEqual(r.frame, raw);
+  assert.deepEqual(r.frame.body, { role: "editor" });
+  assert.equal(Object.hasOwn(r.frame, "__proto__"), false);
+  assert.equal(Object.hasOwn(r.frame, "extra"), false);
+  assert.equal(Object.getPrototypeOf(r.frame), Object.prototype);
+  assert.equal({}.polluted, undefined);
+});
+test("non-plain objects are bad_frame", () => {
+  assert.deepEqual(parseFrame(Object.create({ type: "c2c" })), BAD);
+  const r = parseFrame(mk("project.role", { body: new Map() }));
+  assert.equal(r.reason, "bad_frame");
+  assert.ok(r.envelope, "F3: the envelope parsed, so the frame is consumable");
+});
+test("ack seqs validation", () => {
+  const ack = (seqs) => parseFrame(mk("project.ack", { body: { ...bodies["project.ack"], seqs } }));
+  assert.equal(ack(Array.from({ length: 256 }, (_, i) => i + 1)).ok, true);
+  assert.deepEqual(ack(Array.from({ length: 257 }, (_, i) => i + 1)), BAD);
+  assert.deepEqual(ack([1, "2"]), BAD);
+  assert.deepEqual(ack([0]), BAD);
+  assert.deepEqual(ack("1,2"), BAD);
+  assert.deepEqual(ack({ length: 1, 0: 1 }), BAD);
+});
+test("refuse validation", () => {
+  const ref = (body) => parseFrame(mk("project.refuse", { body: { ...bodies["project.refuse"], ...body } }));
+  assert.equal(ref({ detail: "d".repeat(200) }).ok, true);
+  assert.deepEqual(ref({ detail: "d".repeat(201) }), BAD);
+  assert.deepEqual(ref({ reason: "nope" }), BAD);
+  assert.deepEqual(ref({ seq: 0 }), BAD);
+  assert.deepEqual(ref({ detail: "a\u0000b" }), BAD);
+  assert.deepEqual(ref({ detail: "a\ud800" }), BAD);
+});
+test("S3: an ack names its frame's stream: epoch and stream are required", () => {
+  const ack = (body) => parseFrame(mk("project.ack", { body }));
+  const base = bodies["project.ack"];
+  assert.equal(ack(base).ok, true);
+  assert.deepEqual(ack({ stream: "*", seqs: [1] }), BAD, "no epoch");
+  assert.deepEqual(ack({ epoch: E, seqs: [1] }), BAD, "no stream");
+  assert.deepEqual(ack({ epoch: E, stream: "", seqs: [1] }), BAD, "an empty stream");
+  assert.deepEqual(ack({ epoch: E, stream: 5, seqs: [1] }), BAD);
+  assert.deepEqual(ack({ epoch: "B".repeat(32), stream: "*", seqs: [1] }), BAD, "epoch must be lowercase hex");
+  assert.deepEqual(ack({ epoch: "b".repeat(31), stream: "*", seqs: [1] }), BAD);
+});
+test("S3: a refusal names its frame's stream: epoch and stream are required", () => {
+  const ref = (body) => parseFrame(mk("project.refuse", { body }));
+  const base = bodies["project.refuse"];
+  assert.equal(ref(base).ok, true);
+  assert.deepEqual(ref({ stream: "*", seq: 4, reason: "gap" }), BAD, "no epoch");
+  assert.deepEqual(ref({ epoch: E, seq: 4, reason: "gap" }), BAD, "no stream");
+  assert.deepEqual(ref({ epoch: E, stream: "a b", seq: 4, reason: "gap" }), BAD);
+  assert.deepEqual(ref({ epoch: E, stream: "*", seq: 4, reason: "nope" }), BAD);
+});
+test("S3: an ack or refusal must name the instance it answers", () => {
+  for (const kind of ["project.ack", "project.refuse"]) {
+    assert.deepEqual(parseFrame(mk(kind, { toInstanceId: null })), BAD, `${kind} with a null target`);
+    assert.deepEqual(parseFrame(mk(kind, { toInstanceId: undefined })), BAD, `${kind} with no target`);
+    assert.equal(parseFrame(mk(kind, { toInstanceId: "i-a" })).ok, true, `${kind} aimed at its asker`);
+  }
+  // Every other kind may still carry a null target (S1: the "*" stream).
+  assert.equal(parseFrame(mk("project.invite", { toInstanceId: null })).ok, true);
+});
+test("S2: an invite's gen is required and positive", () => {
+  const inv = (gen) => parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], gen } }));
+  const { gen: _drop, ...noGen } = bodies["project.invite"];
+  assertBodyFailed(parseFrame(mk("project.invite", { body: noGen })), "missing gen");
+  for (const gen of [0, -1, "1", 1.5, null, true, 2 ** 53]) assertBodyFailed(inv(gen), String(gen));
+  assert.equal(inv(1).ok, true);
+  assert.equal(inv(7).frame.body.gen, 7);
+});
+test("an ack or refuse with an envelope seq or epoch is bad_frame", () => {
+  assert.deepEqual(parseFrame(mk("project.ack", { seq: 1 })), BAD);
+  assert.deepEqual(parseFrame(mk("project.refuse", { seq: 1 })), BAD);
+  // S3: the body is the only place an ack or refusal names its stream.
+  assert.deepEqual(parseFrame(mk("project.ack", { epoch: E })), BAD);
+  assert.deepEqual(parseFrame(mk("project.refuse", { epoch: E })), BAD);
+});
+test("missing epoch on a non-ack frame is bad_frame", () => {
+  assert.deepEqual(parseFrame(mk("project.role", { epoch: undefined })), BAD);
+});
+test("uppercase hex is bad_frame", () => {
+  assert.deepEqual(parseFrame(mk("project.role", { projectUuid: "A".repeat(32) })), BAD);
+  assert.deepEqual(parseFrame(mk("project.role", { epoch: "B".repeat(32) })), BAD);
+});
+test("seq of wrong type or range is bad_frame", () => {
+  for (const seq of ["1", NaN, Infinity, 2 ** 53, -1, null]) {
+    assert.deepEqual(parseFrame(mk("project.role", { seq })), BAD, String(seq));
+  }
+});
+test("instance ids are restricted", () => {
+  for (const id of ["", "a b", "a\nb", "x".repeat(129), "é"]) {
+    assert.deepEqual(parseFrame(mk("project.role", { fromInstanceId: id })), BAD);
+    assert.deepEqual(parseFrame(mk("project.accept", { toInstanceId: id })), BAD);
+  }
+  assertBodyFailed(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], owner_instance_id: "a b" } })), "invite owner instance");
+  assertBodyFailed(parseFrame(mk("project.accept", { body: { visitor_instance_id: "a/b" } })), "accept visitor instance");
+});
+test("invite name rejects control chars and lone surrogates", () => {
+  for (const name of ["a\u0007b", "a\u007f", "a\ud83d", "\udc00x"]) {
+    assertBodyFailed(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], name } })), name);
+  }
+  assert.equal(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], name: "café \u{1F426}" } })).ok, true);
+});
+test("deeply nested body is bad_frame without throwing", () => {
+  let o = {};
+  for (let i = 0; i < 200000; i++) o = { a: o };
+  assert.deepEqual(parseFrame(mk("project.unshare", { body: o })), BAD);
+});
+test("a throwing getter never throws", () => {
+  const p = { type: "c2c", v: 1, get kind() { throw new Error("boom"); } };
+  assert.deepEqual(parseFrame(p), BAD);
+  const f = mk("project.role", { body: { role: "viewer" } });
+  Object.defineProperty(f.body, "role", { get() { throw new Error("boom"); }, enumerable: true });
+  assert.deepEqual(parseFrame(f), BAD);
+});
+test("every cap is exact: at the limit passes, one byte over fails", () => {
+  for (const kind of PLAN1_KINDS) {
+    const cap = BODY_CAPS[kind];
+    const sized = (n) => {
+      const body = { ...bodies[kind], p: "" };
+      body.p = "x".repeat(n - Buffer.byteLength(JSON.stringify(body)));
+      assert.equal(Buffer.byteLength(JSON.stringify(body)), n);
+      return parseFrame(mk(kind, { body }));
+    };
+    const ok = sized(cap);
+    assert.equal(ok.ok, true, kind);
+    assert.equal(Object.hasOwn(ok.frame.body, "p"), false);
+    const over = sized(cap + 1);
+    assert.equal(over.ok, false, kind);
+    assert.equal(over.reason, "bad_frame", kind);
+    // F3: a sequenced kind's body failure keeps the envelope; an ack/refusal has
+    // no stream of its own to name, so it stays the bare bad_frame.
+    if (kind === "project.ack" || kind === "project.refuse") assert.equal(over.envelope, undefined, kind);
+    else assert.ok(over.envelope, kind);
+  }
+});
+
+test("a null target parses and stays null; other non-id targets are bad_frame", () => {
+  const r = parseFrame(mk("project.invite", { toInstanceId: null }));
+  assert.equal(r.ok, true);
+  assert.equal(r.frame.to_instance_id, null);
+  assert.deepEqual(parseFrame(mk("project.invite", { toInstanceId: "" })), BAD);
+  assert.deepEqual(parseFrame(mk("project.invite", { toInstanceId: 5 })), BAD);
+  assert.deepEqual(parseFrame(mk("project.invite", { fromInstanceId: null })), BAD);
+});

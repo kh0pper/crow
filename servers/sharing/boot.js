@@ -13,6 +13,8 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createNotification } from "../shared/notifications.js";
 import bus from "../shared/event-bus.js";
 import { wireInstanceSync } from "./instance-connect.js";
@@ -34,9 +36,79 @@ import { wireContactBinding } from "./contact-binding.js";
 import { crowIdMatchesKey } from "./identity.js";
 import { isPeerLineOverCap } from "./peer-manager.js";
 import { importedShareSource } from "../shared/summary-source.js";
+import { handleC2cFrame } from "./c2c/receive.js";
+import { flush as flushC2cOutbox } from "./c2c/outbox.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
+
+/** The kind modules the receive pipeline needs (Tasks 6 and 7). */
+export const C2C_HANDLER_SPECS = Object.freeze(["./c2c/owner.js", "./c2c/visitor.js"]);
+/** F1: how long a failed or partial handler load waits before it is retried. */
+export const C2C_HANDLER_RETRY_MS = 30_000;
+
+/**
+ * F1: the lazy owner/visitor handler loader.
+ *
+ * A load that is incomplete — a module that is not there yet (owner.js and
+ * visitor.js land in Tasks 6 and 7), or one that fails to import — is NOT
+ * cached: the next frame retries, at most once per `retryMs`, so a module that
+ * lands later is picked up without a restart. The handlers that DID load are
+ * returned meanwhile (the kinds they own keep working), and the kinds of a
+ * module that did not load stay absent — the receive pipeline then refuses those
+ * frames `busy`, a holding refusal, so the sender keeps them.
+ *
+ * `ERR_MODULE_NOT_FOUND` is swallowed only when the handler module ITSELF is
+ * missing (`handlerModuleExists` checks the resolved file); a missing dependency
+ * is logged like any other failure, so a broken install is visible instead of
+ * looking like an unlanded task.
+ */
+export function createC2cHandlerLoader({
+  importModule = (spec) => import(spec),
+  handlerModuleExists = (spec) => {
+    try { return existsSync(fileURLToPath(import.meta.resolve(spec))); } catch { return false; }
+  },
+  specs = C2C_HANDLER_SPECS,
+  retryMs = C2C_HANDLER_RETRY_MS,
+  now = () => Date.now(),
+} = {}) {
+  let loaded = null;                 // the merged handlers, once every module loaded
+  let partial = Object.freeze({});   // the last incomplete load's handlers
+  let nextAttemptAt = 0;
+  let inflight = null;
+
+  const attempt = async () => {
+    const handlers = {};
+    let complete = true;
+    for (const spec of specs) {
+      try {
+        Object.assign(handlers, await importModule(spec));
+      } catch (err) {
+        complete = false;
+        const absent = err?.code === "ERR_MODULE_NOT_FOUND" && !handlerModuleExists(spec);
+        if (!absent) console.warn(`[c2c] handler module ${spec} failed: ${err?.message || err}`);
+      }
+    }
+    return { handlers, complete };
+  };
+
+  return async function loadC2cHandlers() {
+    if (loaded) return loaded;
+    if (inflight) return inflight;
+    if (now() < nextAttemptAt) return partial; // retry at most once per retryMs
+    nextAttemptAt = now() + retryMs;
+    inflight = attempt().then(({ handlers, complete }) => {
+      if (complete) loaded = handlers;
+      else partial = handlers;
+      return handlers;
+    }).catch((err) => {
+      // attempt() never throws today; a failure must never wedge the receive path.
+      console.warn(`[c2c] handler load failed: ${err?.message || err}`);
+      return partial;
+    }).finally(() => { inflight = null; });
+    return inflight;
+  };
+}
 
 /**
  * A remote-chosen string for a notification title: sanitized (controls, bidi
@@ -967,12 +1039,55 @@ export async function initSharingRuntime(managers, helpers) {
     } catch (err) {
       console.warn(`[sharing] deliverPendingShares for ${crowId}: ${err.message}`);
     }
+
+    // Crow-to-Crow: the contact just came online, so its unacked frames go out
+    // (including any that piled up while it was away). Never throws into the
+    // connection callback; an old DB without 0016 only warns.
+    try {
+      const sent = await flushC2cOutbox(db, (frame) => peerManager.send(crowId, frame), { contactId: Number(c.id) });
+      if (sent > 0) console.log(`[c2c] sent ${sent} queued frame(s) to ${crowId}`);
+    } catch (err) {
+      console.warn(`[c2c] flush on connect for ${crowId}: ${err?.message || err}`);
+    }
   };
 
+  // The owner (owner.js) and visitor (visitor.js) handlers, loaded lazily: those
+  // modules land in Tasks 6 and 7, and a host whose migration was deferred must
+  // still boot. F1: a missing or failed load is NEVER cached as if it were final
+  // — the next frame retries it, at most once per 30 s — and a kind whose module
+  // is not loaded is refused the holding `busy`, never the terminal `unsupported`,
+  // so the sender keeps its frame and re-sends it once the module is there.
+  const loadC2cHandlers = createC2cHandlerLoader();
+
   // Handle data from connected peers (shares, revokes, etc.)
-  // meta = { proof, instanceId } (instanceId is claimed, routing only); unused here.
-  peerManager.onPeerData = async (crowId, payload, _meta) => {
+  // meta = { proof, instanceId, reply } (instanceId is claimed, routing only;
+  // `reply` answers on the connection the frame arrived on — receive.js Z1).
+  peerManager.onPeerData = async (crowId, payload, meta) => {
     if (!payload?.type) return;
+
+    // Crow-to-Crow project frames: proof, routing, dedupe, authorization and
+    // dispatch live in receive.js. `meta.instanceId` is the peer's CLAIMED id and
+    // is used for routing only, never for authorization.
+    if (payload.type === "c2c") {
+      try {
+        await handleC2cFrame({
+          db,
+          send: (toCrowId, frame) => peerManager.send(toCrowId, frame),
+          localInstanceId: localIdOf(managers),
+          contactByCrowId: async (id) => {
+            const { rows } = await db.execute({
+              sql: "SELECT * FROM contacts WHERE crow_id = ? AND is_blocked = 0 LIMIT 1",
+              args: [id],
+            });
+            return rows[0] ?? null;
+          },
+          handlers: await loadC2cHandlers(),
+        }, crowId, payload, meta);
+      } catch (err) {
+        console.warn(`[c2c] receive failed: ${err?.message || err}`);
+      }
+      return;
+    }
 
     const contact = await db.execute({
       sql: "SELECT * FROM contacts WHERE crow_id = ? AND is_blocked = 0",
@@ -1124,4 +1239,37 @@ export async function initSharingRuntime(managers, helpers) {
   syncManager.onEntry = async (contactId, entry) => {
     console.log(`[sharing] Received Hypercore entry for contact ${contactId}:`, entry.type);
   };
+
+  // Crow-to-Crow: retry the unacked frames of CONNECTED contacts every 60 s. A
+  // `not_home` from a sibling, a `busy` hold or a link that dropped mid-flush all
+  // leave rows queued, and this tick is what eventually gets them out. It runs
+  // outside any transaction (S4) and the timer is unref'd, so it never holds the
+  // process open; `managers.c2cFlushStop()` is the shutdown hook.
+  let c2cFlushing = false;
+  const flushConnectedC2c = async () => {
+    if (c2cFlushing) return;
+    c2cFlushing = true;
+    try {
+      const crowIds = typeof peerManager.getConnectedPeers === "function"
+        ? peerManager.getConnectedPeers()
+        : [...(peerManager.connections?.keys?.() ?? [])];
+      for (const crowId of crowIds) {
+        try {
+          const { rows } = await db.execute({
+            sql: "SELECT id FROM contacts WHERE crow_id = ? AND is_blocked = 0 LIMIT 1",
+            args: [crowId],
+          });
+          if (!rows[0]) continue; // a paired sibling, not a contact
+          await flushC2cOutbox(db, (frame) => peerManager.send(crowId, frame), { contactId: Number(rows[0].id) });
+        } catch (err) {
+          console.warn(`[c2c] flush for ${crowId}: ${err?.message || err}`);
+        }
+      }
+    } finally {
+      c2cFlushing = false;
+    }
+  };
+  const c2cFlushTimer = setInterval(() => { flushConnectedC2c().catch(() => {}); }, 60_000);
+  c2cFlushTimer.unref?.();
+  managers.c2cFlushStop = () => clearInterval(c2cFlushTimer);
 }

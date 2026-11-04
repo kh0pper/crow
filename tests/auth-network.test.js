@@ -96,7 +96,7 @@ function request(port, path, headers = {}) {
     const req = http.request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
       let body = "";
       res.on("data", (c) => (body += c));
-      res.on("end", () => resolve({ status: res.statusCode, body }));
+      res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location, body }));
     });
     req.on("error", reject);
     req.end();
@@ -302,6 +302,85 @@ test("rejectFunneled middleware: the voice hand-off confirm page is never funnel
   }
   const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
   for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+});
+
+// Crow-to-Crow plan 1, task 7B: the sharing API names contacts, projects and visits —
+// who shares what with whom — so not one of its routes may be reachable from Funnel.
+test("rejectFunneled middleware: the Crow-to-Crow sharing API is never funnel-exposed", async () => {
+  const server = await startTestApp();
+  const paths = [
+    "/dashboard/c2c-api/projects/1/invite",
+    "/dashboard/c2c-api/projects/1/members",
+    "/dashboard/c2c-api/projects/1/members/2/role",
+    "/dashboard/c2c-api/projects/1/members/2/unshare",
+    "/dashboard/c2c-api/visits",
+    "/dashboard/c2c-api/visits/1/accept",
+    "/dashboard/c2c-api/visits/1/decline",
+    "/dashboard/c2c-api/visits/1/leave",
+  ];
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+});
+
+// The same mount rule as the Perch / apps / widgets APIs: the router installs
+// dashboardAuth on its own prefix, so it is closed wherever it is mounted. This
+// case proves the NETWORK GATE: a bare loopback socket is refused (403) before the
+// session check can run at all.
+test("the Crow-to-Crow sharing API is behind the NETWORK GATE: a bare loopback peer is refused", async () => {
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  const { c2cApiRouter } = await import("../servers/gateway/routes/c2c-api.js");
+  let authCalls = 0;
+  const spy = (req, res, next) => { authCalls++; return dashboardAuth(req, res, next); };
+  const app = express();
+  app.use(c2cApiRouter(spy));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const r = await request(server.address().port, "/dashboard/c2c-api/visits");
+    assert.equal(authCalls, 1, "the router runs dashboardAuth on its prefix");
+    assert.equal(r.status, 403);
+    assert.doesNotMatch(String(r.body || ""), /"visits"/);
+  } finally {
+    server.close();
+  }
+});
+
+// Past the network gate, the session rail is what answers: an ALLOWED peer with no
+// cookie is sent to the login page, and the visit list is never rendered. The
+// classifier memo is how a test plants a direct peer from the LAN (an RFC1918
+// address — a TEST-NET one like tests/helpers/off-box.js's LAPTOP_ADDR default is
+// public, so the network gate itself would refuse it).
+test("past the NETWORK GATE, a session-less Crow-to-Crow request goes to the login page", async () => {
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  const { c2cApiRouter } = await import("../servers/gateway/routes/c2c-api.js");
+  const { markFromLaptop } = await import("./helpers/off-box.js");
+  let authCalls = 0;
+  const allowed = (req, res, next) => {
+    authCalls++;
+    markFromLaptop(req, "10.0.0.5");
+    return dashboardAuth(req, res, next);
+  };
+  const app = express();
+  app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
+  app.use(c2cApiRouter(allowed));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const r = await request(server.address().port, "/dashboard/c2c-api/visits");
+    assert.equal(authCalls, 1, "the router runs dashboardAuth on its prefix");
+    assert.equal(r.status, 303, "past the network gate, the session check decides");
+    assert.equal(r.location, "/dashboard/login");
+    assert.doesNotMatch(String(r.body || ""), /"visits"/);
+  } finally {
+    server.close();
+  }
 });
 
 test("dashboardAuth refuses an unauthenticated /dashboard/perch-api request instead of calling next()", async () => {

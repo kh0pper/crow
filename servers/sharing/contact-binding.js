@@ -55,6 +55,36 @@ export async function markCbPinned(db, localId, crowId, { enforced = CB_PIN_ENFO
   return writePin(db, localId, pinKey(crowId));
 }
 
+/**
+ * The STRICT variant of `isCbPinned`: false on a read error (and on a missing
+ * table), where `isCbPinned` answers true.
+ *
+ * Admission uses the fail-closed-toward-`cb` polarity (`readPin`): an unreadable
+ * pin means "require the bound proof", which is the safe answer for a connection
+ * that has already proved it holds the key. A caller asking "is this contact
+ * bound?" for an OUTBOUND action (a Crow-to-Crow invite, which may only go to a
+ * pinned contact) needs the opposite polarity: an unreadable pin must never read as
+ * "bound", or a broken DB would admit a peer that never bound. That is this.
+ */
+export async function isCbPinnedStrict(db, localId, crowId, { enforced = CB_PIN_ENFORCED } = {}) {
+  if (!enforced) return false;
+  return readPinStrict(db, localId, pinKey(crowId));
+}
+
+/** Fail-CLOSED (false on any read error, a missing table included) pin read. */
+async function readPinStrict(db, localId, key) {
+  if (!localId) return false;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
+      args: [key, localId],
+    });
+    return Number(rows[0]?.value) >= 1;
+  } catch {
+    return false;
+  }
+}
+
 /** Has any sibling of `ownCrowId` bound? Same fail-closed rules as isCbPinned. */
 export async function isInstanceCbPinned(db, localId, ownCrowId) {
   return readPin(db, localId, `${INSTANCE_CB_PIN_PREFIX}${ownCrowId}`);

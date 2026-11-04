@@ -338,7 +338,7 @@ The `notifications` table stores all notifications:
 
 `servers/shared/notifications.js` exports two functions:
 
-- **`createNotification(db, opts)`** — Creates a notification after checking user preferences. Returns `{ id }` or `null` if the type is disabled. Always wrap calls in `try/catch` to prevent notification failures from breaking primary actions.
+- **`createNotification(db, opts)`** — Creates a notification after checking user preferences. Returns `{ id, delivery }` or `null` if the type is disabled. With `deliver: false` it writes the row and refreshes the badge but sends nothing (no push, ntfy or email); `delivery` is the payload to pass to `deliverNotification` later, for example after a transaction commits. Always wrap calls in `try/catch` to prevent notification failures from breaking primary actions.
 - **`cleanupNotifications(db)`** — Removes expired notifications and enforces a 500-notification retention limit. Called by the scheduler tick and the REST GET endpoint.
 
 ### User Preferences

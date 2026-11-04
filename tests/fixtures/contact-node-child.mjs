@@ -20,6 +20,13 @@
  * {id, ok, result} or {id, ok:false, error}. Unsolicited {ready:true} once the
  * MCP client is connected, the swarm exists, the Nostr receive path is wired
  * and the node is announced on every full contact's DHT topic.
+ *
+ * Two test-only seams ride that channel for the Crow-to-Crow two-node gate:
+ * `exec` also seeds a project (and its local owner row) besides a memory, and
+ * `c2c` calls ONE allowlisted function of servers/sharing/c2c/{owner,visitor}.js
+ * with this node's real db, local instance id and a live-peer `send` (so the
+ * action's own flush runs after its commit). Nothing else is reachable from the
+ * channel: `sql` stays read-only and no op can send a frame directly.
  */
 import net from "node:net";
 import readline from "node:readline";
@@ -122,6 +129,49 @@ const { getReceiveHealth } = await imp("servers/sharing/receive-health.js");
 
 const toObjects = (res) => res.rows.map((r) => Object.fromEntries((res.columns || Object.keys(r)).map((c) => [c, r[c]])));
 
+/** This node's own instance id (the sharing runtime's, never a frame field). */
+const localInstanceIdNow = () => managers.instanceSyncManager?.localInstanceId || peerManager.localInstanceId || null;
+
+/**
+ * The test-only `c2c` allowlist: exactly the functions the two-node gate drives,
+ * each with the shape its module exports. `owner` actions take this node's own
+ * instance id and a `send` bound to the contact whose queue they flush; `visitor`
+ * actions bind it to the OWNER contact of the visit (as the dashboard routes do).
+ */
+const C2C_OPS = Object.freeze({
+  inviteContact: { module: "owner.js", shape: "owner" },
+  setRole: { module: "owner.js", shape: "owner" },
+  unshareContact: { module: "owner.js", shape: "owner" },
+  listLiveMembers: { module: "owner.js", shape: "owner-list" },
+  acceptVisit: { module: "visitor.js", shape: "visitor" },
+  declineVisit: { module: "visitor.js", shape: "visitor" },
+  leaveVisit: { module: "visitor.js", shape: "visitor" },
+  listVisits: { module: "visitor.js", shape: "visitor-list" },
+});
+const c2cModules = new Map();
+
+function loadC2cModule(file) {
+  if (!c2cModules.has(file)) c2cModules.set(file, imp(`servers/sharing/c2c/${file}`));
+  return c2cModules.get(file);
+}
+
+/** `(frame) => peerManager.send(crowId, frame)` for one contact, or null. */
+async function sendForContact(contactId) {
+  if (!Number.isSafeInteger(contactId) || contactId <= 0) return null;
+  const rows = toObjects(await db.execute({ sql: "SELECT crow_id FROM contacts WHERE id = ? LIMIT 1", args: [contactId] }));
+  const crowId = rows[0]?.crow_id;
+  if (typeof crowId !== "string" || !crowId) return null;
+  return (frame) => peerManager.send(crowId, frame);
+}
+
+/** The owner contact of a visit: the queue its answer flushes onto. */
+async function ownerContactOfVisit(visitId) {
+  if (!Number.isSafeInteger(visitId) || visitId <= 0) return null;
+  const rows = toObjects(await db.execute({ sql: "SELECT owner_contact_id FROM c2c_visits WHERE id = ? LIMIT 1", args: [visitId] }));
+  const id = Number(rows[0]?.owner_contact_id);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
 const ops = {
   async tool({ name, args = {} }) {
     const r = await client.callTool({ name, arguments: args });
@@ -133,13 +183,56 @@ const ops = {
     return toObjects(await db.execute({ sql, args }));
   },
   async exec({ sql, args = [] }) {
-    // Only to seed this node's own memories (the item a test then shares).
-    if (!/^\s*INSERT INTO memories\b/i.test(sql)) throw new Error("exec only inserts into memories");
+    // Seeding only: this node's own memories (the item a test then shares), and —
+    // for the Crow-to-Crow two-node gate — a project with its local owner row,
+    // which every owner action needs `manage_members` for.
+    if (!/^\s*INSERT INTO (memories|project_spaces|project_members)\b/i.test(sql)) {
+      throw new Error("exec only inserts into memories, project_spaces or project_members");
+    }
     const r = await db.execute({ sql, args });
     return { lastInsertRowid: Number(r.lastInsertRowid) };
   },
   async identity() {
-    return { crowId: identity.crowId, ed25519Pubkey: identity.ed25519Pubkey, secp256k1Pubkey: identity.secp256k1Pubkey };
+    return {
+      crowId: identity.crowId,
+      instanceId: localInstanceIdNow(),
+      ed25519Pubkey: identity.ed25519Pubkey,
+      secp256k1Pubkey: identity.secp256k1Pubkey,
+    };
+  },
+  /**
+   * Call one allowlisted Crow-to-Crow function with THIS node's real db, local
+   * instance id and live-peer send. The module's own `flushAfterCommit` then sends
+   * the frame(s) the action queued, and a frame it cannot send stays queued for the
+   * boot's flush-on-connect / 60 s tick — exactly as on a real host.
+   */
+  async c2c({ fn, args = {} } = {}) {
+    const spec = C2C_OPS[fn];
+    if (!spec) throw new Error(`c2c: ${fn} is not an allowlisted Crow-to-Crow function`);
+    const mod = await loadC2cModule(spec.module);
+    const call = mod[fn];
+    if (typeof call !== "function") throw new Error(`c2c: ${spec.module} exports no ${fn}`);
+    let value;
+    if (spec.shape === "owner") {
+      const contactId = Number(args.contactId);
+      value = await call(db, {
+        ...args,
+        localInstanceId: localInstanceIdNow(),
+        actor: "local",
+        send: await sendForContact(contactId),
+      });
+    } else if (spec.shape === "owner-list") {
+      value = await call(db, args.projectId);
+    } else if (spec.shape === "visitor") {
+      value = await call(db, {
+        ...args,
+        localInstanceId: localInstanceIdNow(),
+        send: await sendForContact(await ownerContactOfVisit(Number(args.visitId))),
+      });
+    } else {
+      value = await call(db);
+    }
+    return value === undefined ? { ok: true } : value;
   },
   async seedHex() {
     // For a positive-control harness only (an "honest" second holder of this seed).

@@ -2331,6 +2331,12 @@ export const translations = {
 
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
+  // A live (Crow-to-Crow) membership is owned by the sharing controls; the old
+  // member editor refuses it rather than rewriting role/capabilities or revoking it.
+  "projects.members.liveRefused": {
+    en: "This contact is a live member: change it in the Crow-to-Crow sharing controls.",
+    es: "Este contacto es un miembro en vivo: cámbialo en los controles de compartición de Crow a Crow.",
+  },
 
   // ─── Projects Panel: fetch status per source (lane D, research fetch-before-cite) ───
   "projects.fetch.fetched": { en: "fetched", es: "obtenida" },
@@ -4877,6 +4883,62 @@ export const translations = {
   "widgets.addon.empty": { en: "Nothing to show yet.", es: "Nada que mostrar todavía." },
   "widgets.addon.open": { en: "Open", es: "Abrir" },
   "widgets.addon.refresh": { en: "Reload {name}", es: "Recargar {name}" },
+  // Crow-to-Crow membership notifications (servers/sharing/c2c/owner.js and
+  // visitor.js). The two values are a contact's display name and a project's name —
+  // never a frame body — so the placeholders are the whole message surface.
+  "c2c.notify.joined": { en: "{contact} joined {project}", es: "{contact} se unió a {project}" },
+  "c2c.notify.left": { en: "{contact} left {project}", es: "{contact} salió de {project}" },
+  // The visitor's side of the same two moments (servers/sharing/c2c/visitor.js):
+  // `{contact}` is the owner's contact name and `{project}` the name their invite
+  // carried. Both are sanitized before they get here.
+  "c2c.notify.invited": { en: "{contact} invited you to {project}", es: "{contact} te invitó a {project}" },
+  "c2c.notify.unshared": { en: "{contact} stopped sharing {project}", es: "{contact} dejó de compartir {project}" },
+  // X2 of the Task 7A fix wave: OUR accept/decline/leave was refused `forbidden` or
+  // `stale_epoch`, so the membership is gone and the visit ends without an unshare
+  // frame ever arriving. Different wording from `c2c.notify.unshared` on purpose: no
+  // frame said "stopped sharing", the owner's answer did.
+  "c2c.notify.noLongerSharing": { en: "{contact} is no longer sharing {project}", es: "{contact} ya no comparte {project}" },
+  // Fallbacks when a stored name cannot be shown (sanitizeDisplayName refuses it).
+  "c2c.notify.someone": { en: "A contact", es: "Un contacto" },
+  "c2c.notify.aProject": { en: "a project", es: "un proyecto" },
+  // Crow-to-Crow, the Projects panel (plan 1, task 7B; panels/projects.js). The
+  // owner's side: the sharing form in the Members area, the live-members list and
+  // its controls. Only a contact who has bound this Crow is offered (owner.js O4),
+  // so these strings never explain a failure of the picker itself.
+  "projects.c2c.shareTitle": { en: "Share with a contact's Crow", es: "Compartir con el Crow de un contacto" },
+  "projects.c2c.contact": { en: "Contact", es: "Contacto" },
+  "projects.c2c.roleLabel": { en: "Role", es: "Rol" },
+  "projects.c2c.role.viewer": { en: "Can view", es: "Puede ver" },
+  "projects.c2c.role.commenter": { en: "Can comment", es: "Puede comentar" },
+  "projects.c2c.role.editor": { en: "Can edit", es: "Puede editar" },
+  "projects.c2c.share": { en: "Share", es: "Compartir" },
+  "projects.c2c.noBoundContacts": { en: "No contact's Crow is ready to share with yet. A contact has to pair with this Crow first.", es: "Todavía ningún Crow de un contacto está listo para compartir. Un contacto tiene que emparejarse antes con este Crow." },
+  "projects.c2c.membersTitle": { en: "Shared with contacts", es: "Compartido con contactos" },
+  "projects.c2c.noMembers": { en: "Nothing is shared with another Crow yet.", es: "Todavía no compartes nada con otro Crow." },
+  "projects.c2c.state.invited": { en: "Invited", es: "Invitación pendiente" },
+  "projects.c2c.state.active": { en: "Active", es: "Activo" },
+  "projects.c2c.state.declined": { en: "Declined", es: "Rechazada" },
+  "projects.c2c.state.left": { en: "Left", es: "Ya no participas" },
+  "projects.c2c.state.unshared": { en: "No longer shared", es: "Ya no se comparte" },
+  "projects.c2c.updateRequired": { en: "Ask them to update Crow to share with them.", es: "Pídeles que actualicen Crow para compartir con ellos." },
+  // Z2 of the final-review fix wave: the owner sees when an invite or a frame never
+  // got through (owner.js `listLiveMembers`'s `problem`). `{reason}` is a closed
+  // refusal code from outbox.js's TERMINAL_REFUSALS.
+  "projects.c2c.problem.unreachable": { en: "Couldn't reach their Crow yet. Crow keeps trying; if this stays, ask them to update Crow.", es: "Todavía no se pudo contactar con su Crow. Crow sigue intentándolo; si esto continúa, pídeles que actualicen Crow." },
+  "projects.c2c.problem.refused": { en: "Their Crow refused this ({reason}).", es: "Su Crow rechazó esto ({reason})." },
+  "projects.c2c.updateRole": { en: "Update role", es: "Actualizar rol" },
+  "projects.c2c.unshare": { en: "Stop sharing", es: "Dejar de compartir" },
+  "projects.c2c.unshareConfirm": { en: "Their Crow will be asked to delete it. We can't guarantee a copy wasn't kept.", es: "Se le pedirá a su Crow que lo borre. No podemos garantizar que no se haya guardado una copia." },
+  "projects.c2c.working": { en: "Working…", es: "Procesando…" },
+  "projects.c2c.failed": { en: "That didn't work. Nothing was changed.", es: "No funcionó. No se cambió nada." },
+  // The visitor's side: what another Crow has shared with this one.
+  "projects.c2c.sharedTitle": { en: "Shared with you", es: "Compartido contigo" },
+  "projects.c2c.noneShared": { en: "Nothing is shared with you.", es: "No hay nada compartido contigo." },
+  "projects.c2c.sharedBy": { en: "from {name}", es: "de {name}" },
+  "projects.c2c.untitled": { en: "An untitled project", es: "Un proyecto sin título" },
+  "projects.c2c.accept": { en: "Accept", es: "Aceptar" },
+  "projects.c2c.decline": { en: "Decline", es: "Rechazar" },
+  "projects.c2c.leave": { en: "Leave", es: "Salir" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
