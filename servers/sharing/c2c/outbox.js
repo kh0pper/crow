@@ -4,8 +4,8 @@
  * Outbound: every `project.*` frame that carries state is written to `c2c_outbox`
  * under a sequence number per stream and stays there until the peer acks it.
  * Delivery is at-least-once and FIFO per stream; the receiver dedupes with a
- * per-(contact, sender instance, project, stream) high-water mark, so a month-long
- * offline queue survives without an age-pruned id store.
+ * per-(contact, sender instance, project, epoch, stream) high-water mark, so a
+ * month-long offline queue survives without an age-pruned id store.
  *
  * Ack and refuse frames are NOT sequenced: they are sent directly, never queued.
  *
@@ -17,35 +17,48 @@
  * These rulings settle the cases the spec leaves open. Task 5 (the receive
  * pipeline) follows them; do not change one side without the other.
  *
- * R1. A stream is (contact, project, target). A frame's stream key is its
+ * S1. A stream is (contact, project, epoch, target). Target is the frame's
  *     `to_instance_id`, or "*" when that is null (an invite before the visitor is
- *     known). The sender numbers each stream from 1; the receiver keeps one
- *     high-water mark per (sender instance, project, stream key). Streams are
- *     independent, so a sibling that only sees some of them never sees a hole in
- *     a stream it does receive, and a targeted stream never moves another's mark.
+ *     known). The sender's counter `c2c_outbox_seq` is keyed by
+ *     (contact_id, project_uuid, epoch, stream), and the receiver's mark
+ *     `c2c_inbound_seq` by (contact_id, sender_instance_id, project_uuid, epoch,
+ *     stream): the epoch is part of the KEY, never a stored field to compare. So a
+ *     new membership (a new epoch) starts every stream at 1 and there is no reset
+ *     logic at all — `acceptInbound` has no invite special case and never says
+ *     `stale`. An old-membership frame simply lands on its own old stream and is
+ *     numbered there; authorization (Task 5, by `epoch === membership`) refuses it
+ *     with `stale_epoch`, and R4 consumes its seq, which is harmless because that
+ *     stream is dead. Streams are independent, so a sibling that only sees some of
+ *     them never sees a hole in a stream it does receive, and a targeted stream
+ *     never moves another's mark.
  *
  * R2. The sender's counter never goes backwards: `c2c_outbox_seq` holds the next
- *     seq to hand out per (contact, project, stream), claimed in the same
+ *     seq to hand out per (contact, project, epoch, stream), claimed in the same
  *     transaction as the insert. It is NOT derived from MAX(seq) over
  *     `c2c_outbox`, so pruning acked rows (or an ack) never re-issues a seq.
  *
- * R3. An epoch is a membership's identity, not a clock: the owner's member-row
- *     `uuid` (spec §10), random, compared ONLY for equality. `acceptInbound`
- *     compares the frame's `epoch` with the one stored for that mark:
- *       - a `project.invite` whose epoch DIFFERS from the stored one is `new`
- *         whatever its seq, and committing it sets high_water to that seq and
- *         stores the epoch (the stream restarts for the new membership). This is
- *         also how a contact deleted and re-added on one side recovers: its
- *         counters restart at 1 while the peer's mark is still high, and the
- *         re-invite carries a fresh epoch.
- *       - any other frame whose epoch differs from a stored one is `stale`;
- *         Task 5 refuses it with `stale_epoch` and consumes its seq (R4).
- *     Because "differs" cannot tell an old invite from a new one, the OWNER must
- *     cancel (terminal-ack) every still-queued frame of the old epoch for that
- *     contact and project whenever it mints a new epoch (unshare, re-invite,
- *     clone conversion) and before it enqueues the new invite: `cancelEpoch`.
- *     Then the only invite that can reach a peer with a different epoch is the
- *     newest one.
+ * S2. Invites carry an increasing generation. `c2c_invite_gen(project_uuid,
+ *     next_gen)` is the owner's local-only counter with NO contact foreign key, so
+ *     deleting a contact never rewinds it; `nextInviteGeneration` takes the next
+ *     value inside the caller's transaction and `project.invite` carries it as the
+ *     required body field `gen`. `c2c_visits.gen` remembers the generation a visit
+ *     was created from, and the visitor rule (Task 5/7) is the pure helper
+ *     `inviteSupersedes(visit, frame)`:
+ *       - an invite whose `gen` is <= the visit's `gen` is refused `stale_epoch`;
+ *       - a greater `gen` supersedes the visit whatever its state — an `active`
+ *         visit included, because a newer invite is also an implicit unshare of
+ *         the membership it replaces. It does not need the old unshare to arrive
+ *         first.
+ *     Epoch equality alone cannot tell an old invite still in flight from a new
+ *     one; the generation can, which is why the visitor rule is a generation and
+ *     not an epoch comparison.
+ *
+ * S3. Acks and refusals name their frame's stream. `project.ack`'s body is
+ *     `{ epoch, stream, seqs }` and `project.refuse`'s is
+ *     `{ epoch, stream, seq, reason[, detail] }` (frames.js validates both, and an
+ *     ack or refusal carries no envelope epoch). `onAck` / `onRefuse` REQUIRE
+ *     `epoch` and `stream` and match them exactly: a seq names a frame only inside
+ *     its stream (S1), so there is no "match every stream" default.
  *
  * R4. A terminal refusal of a well-formed sequenced frame still consumes its seq.
  *     `consumeInbound` advances the mark exactly like a commit, with no effect.
@@ -58,10 +71,9 @@
  *
  * R6. Advancing is conditional, so a frame is applied at most once.
  *     `commitInbound` / `consumeInbound` take the seq only when it is exactly
- *     high_water + 1 (or the R3 reset), via one conditional `UPDATE … WHERE
- *     high_water = ?` (or an INSERT for the first row), and return true/false.
- *     `false` means another delivery already took that seq: the caller must roll
- *     back its effect (throw out of `withTransaction`) and re-ack it as a dup.
+ *     high_water + 1, via one conditional `UPDATE … WHERE high_water = ?` (or an
+ *     INSERT for the first row of a stream), and return true/false. `false` means
+ *     another delivery already took that seq (S5: return before any effect).
  *
  * R7. No implicit transaction joining. A failing `BEGIN IMMEDIATE` is an error,
  *     never a cue to join somebody else's transaction. `withTransaction` is the
@@ -78,6 +90,25 @@
  * R8. `flush` holds a project behind an unreadable row: a row whose frame_json
  *     does not parse puts its whole project in `held`, so later frames of that
  *     project are never sent past the hole.
+ *
+ * S4. `flush` reads through the same per-handle serialization `withTransaction`
+ *     uses, so it never sees a row another transaction has not committed: it waits
+ *     for that transaction, and a row that then rolls back is never sent. One
+ *     flush runs per (handle, contact) at a time — a concurrent flush for the same
+ *     contact returns 0 and sends nothing, because the in-flight one is already
+ *     walking that contact's queue (a row enqueued meanwhile goes on the next
+ *     tick). A flush called from inside the caller's own live transaction reads
+ *     directly: those rows are its own.
+ *
+ * S5. Commit the mark before the effect. Task 5 calls `commitInbound` FIRST inside
+ *     its `withTransaction`, and runs the kind's effect only when it returns true.
+ *     A false result (another delivery took the seq) returns at once, before any
+ *     effect or enqueue. The effect and the mark still commit or roll back
+ *     together (R6, R7).
+ *
+ * S6. `cancelEpoch` is an optimisation, not a correctness rule (S1, S2 do not need
+ *     it): it ends the still-queued frames of an earlier membership so fewer dead
+ *     frames are sent.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { buildFrame, parseFrame, REFUSALS } from "./frames.js";
@@ -85,7 +116,7 @@ import { buildFrame, parseFrame, REFUSALS } from "./frames.js";
 /** How long a `busy` refusal holds its project's run (plan 1, task 4). */
 export const BUSY_HOLD_MS = 60_000;
 
-/** The stream key of a frame with no target instance yet (R1). */
+/** The stream key of a frame with no target instance yet (S1). */
 export const WILDCARD_STREAM = "*";
 
 /** Refusals that end a frame: it will never be accepted, so it is acked away. */
@@ -101,7 +132,7 @@ const UNSEQUENCED = new Set(["project.ack", "project.refuse"]);
 
 const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
 
-/** R1: the stream a frame is numbered in. */
+/** S1: the stream a frame is numbered in. */
 export function streamOf(toInstanceId) {
   return toInstanceId ?? WILDCARD_STREAM;
 }
@@ -110,6 +141,16 @@ function c2cError(message, code) {
   const err = new Error(message);
   err.code = code;
   return err;
+}
+
+function requireEpoch(epoch) {
+  if (typeof epoch !== "string" || !epoch) throw c2cError("c2c outbox: epoch is required", "bad_argument");
+  return epoch;
+}
+
+function requireStream(stream) {
+  if (typeof stream !== "string" || !stream) throw c2cError("c2c outbox: stream is required", "bad_argument");
+  return stream;
 }
 
 /** SQLite `datetime('now')` is UTC; parse a stored attempt time back to ms. */
@@ -141,6 +182,8 @@ const chains = new WeakMap();
 // outlives the transaction from joining it. commitInbound/consumeInbound take the
 // caller's handle instead, so their statements ride that same transaction.
 const txScope = new AsyncLocalStorage();
+// The contacts whose queue a flush is walking right now, per handle (S4).
+const flushing = new WeakMap();
 
 function serialize(db, fn) {
   const prev = chains.get(db) ?? Promise.resolve();
@@ -149,6 +192,18 @@ function serialize(db, fn) {
   chains.set(db, tail);
   tail.then(() => { if (chains.get(db) === tail) chains.delete(db); });
   return run;
+}
+
+/** True when this async context is already inside a live transaction on `db`. */
+function inLiveTransaction(db) {
+  const open = txScope.getStore();
+  return Boolean(open?.live && open.db === db);
+}
+
+/** One statement on the handle's turn: never inside somebody else's transaction (S4). */
+function write(db, sql, args) {
+  const run = () => db.execute({ sql, args });
+  return inLiveTransaction(db) ? run() : serialize(db, run);
 }
 
 /**
@@ -185,19 +240,21 @@ export async function withTransaction(db, fn) {
 /**
  * Take the next seq of a stream and publish the one after it (R2). Runs inside the
  * caller's transaction, so a rollback un-takes it and no reader ever sees a gap.
+ * S1: the stream is (epoch, stream), so a new membership's streams start at 1.
  */
-async function claimSeq(handle, { contactId, projectUuid, stream }) {
+async function claimSeq(handle, { contactId, projectUuid, epoch, stream }) {
   const { rows } = await handle.execute({
-    sql: "SELECT next_seq FROM c2c_outbox_seq WHERE contact_id = ? AND project_uuid = ? AND stream = ?",
-    args: [contactId, projectUuid, stream],
+    sql: `SELECT next_seq FROM c2c_outbox_seq
+           WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND stream = ?`,
+    args: [contactId, projectUuid, epoch, stream],
   });
   const seq = rows.length ? Number(rows[0].next_seq) : 1;
   if (!isSeq(seq)) throw c2cError("c2c outbox: the stream counter is unreadable", "bad_state");
   await handle.execute({
-    sql: `INSERT INTO c2c_outbox_seq (contact_id, project_uuid, stream, next_seq)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT (contact_id, project_uuid, stream) DO UPDATE SET next_seq = excluded.next_seq`,
-    args: [contactId, projectUuid, stream, seq + 1],
+    sql: `INSERT INTO c2c_outbox_seq (contact_id, project_uuid, epoch, stream, next_seq)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (contact_id, project_uuid, epoch, stream) DO UPDATE SET next_seq = excluded.next_seq`,
+    args: [contactId, projectUuid, epoch, stream, seq + 1],
   });
   return seq;
 }
@@ -205,21 +262,23 @@ async function claimSeq(handle, { contactId, projectUuid, stream }) {
 /**
  * Queue one frame and return its sequence number.
  *
- * R2: the next seq comes from `c2c_outbox_seq` for this (contact, project, stream)
- * and is claimed inside the SAME transaction as the insert, so two concurrent calls
- * can never get the same one and a rollback never burns a number.
+ * R2: the next seq comes from `c2c_outbox_seq` for this (contact, project, epoch,
+ * stream) and is claimed inside the SAME transaction as the insert, so two
+ * concurrent calls can never get the same one and a rollback never burns a number.
  *
  * The frame is validated by `parseFrame` before it is stored: a frame we could
- * never parse back would sit in the queue forever.
+ * never parse back would sit in the queue forever (an invite without a `gen` is
+ * refused here, S2).
  *
  * @returns {Promise<number>} seq
  */
 export async function enqueue(db, { contactId, projectUuid, kind, epoch, toInstanceId = null, body, localInstanceId }) {
   if (!Number.isSafeInteger(contactId) || contactId <= 0) throw c2cError("c2c outbox: contactId is required", "bad_argument");
   if (UNSEQUENCED.has(kind)) throw c2cError(`c2c outbox: ${kind} is never queued (it is not sequenced)`, "bad_argument");
+  requireEpoch(epoch);
   const stream = streamOf(toInstanceId);
   return withTransaction(db, async () => {
-    const seq = await claimSeq(db, { contactId, projectUuid, stream });
+    const seq = await claimSeq(db, { contactId, projectUuid, epoch, stream });
     const parsed = parseFrame(buildFrame({
       kind, projectUuid, epoch, seq,
       fromInstanceId: localInstanceId, toInstanceId, body,
@@ -231,89 +290,101 @@ export async function enqueue(db, { contactId, projectUuid, kind, epoch, toInsta
     }
     const frame = parsed.frame;
     await db.execute({
-      sql: `INSERT INTO c2c_outbox (contact_id, project_uuid, seq, kind, to_instance_id, frame_json)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [contactId, projectUuid, seq, frame.kind, frame.to_instance_id ?? null, JSON.stringify(frame)],
+      sql: `INSERT INTO c2c_outbox (contact_id, project_uuid, epoch, seq, kind, to_instance_id, frame_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [contactId, projectUuid, epoch, seq, frame.kind, frame.to_instance_id ?? null, JSON.stringify(frame)],
     });
     return seq;
   });
 }
 
 /**
- * Send every unacked frame for a contact, ordered by (project_uuid, stream, seq)
+ * Send every unacked frame for a contact, ordered by (project, epoch, stream, seq)
  * so each stream stays FIFO. `send(frame)` is the transport
  * (`peerManager.send(crowId, frame)`); it may be async and it throws when the
  * peer is not connected.
  *
  * A project whose next unacked frame was refused `busy` under 60 s ago is skipped
- * whole — the receiver's queue is full, so later frames of that project would
- * only pile up behind it. R8: a frame that cannot be read does the same, so no
- * later row is sent past the hole.
+ * whole — the receiver's queue is full, so later frames of that project would only
+ * pile up behind it. R8: a frame that cannot be read does the same, so no later
+ * row is sent past the hole.
+ *
+ * S4: the read is serialized behind any open transaction, and a second concurrent
+ * flush for the same contact returns 0 (see the contract).
  *
  * @returns {Promise<number>} how many frames were sent
  */
 export async function flush(db, send, { contactId, now = Date.now() } = {}) {
-  const { rows } = await db.execute({
-    sql: `SELECT id, project_uuid, seq, frame_json, last_refusal, last_attempt_at
-            FROM c2c_outbox
-           WHERE contact_id = ? AND acked_at IS NULL
-           ORDER BY project_uuid, COALESCE(to_instance_id, '*'), seq`,
-    args: [contactId],
-  });
-  const held = new Set();
-  let sent = 0;
-  for (const row of rows) {
-    if (held.has(row.project_uuid)) continue;
-    if (row.last_refusal === "busy" && now - sqlTimeToMs(row.last_attempt_at) < BUSY_HOLD_MS) {
-      held.add(row.project_uuid);
-      continue;
+  let walking = flushing.get(db);
+  if (!walking) { walking = new Set(); flushing.set(db, walking); }
+  if (walking.has(contactId)) return 0; // S4: the in-flight flush owns this queue
+  walking.add(contactId);
+  try {
+    const read = async () => (await db.execute({
+      sql: `SELECT id, project_uuid, seq, frame_json, last_refusal, last_attempt_at
+              FROM c2c_outbox
+             WHERE contact_id = ? AND acked_at IS NULL
+             ORDER BY project_uuid, epoch, COALESCE(to_instance_id, '*'), seq`,
+      args: [contactId],
+    })).rows;
+    // S4: never send a row another transaction has not committed (and so never one
+    // that is about to roll back).
+    const rows = inLiveTransaction(db) ? await read() : await serialize(db, read);
+    const held = new Set();
+    let sent = 0;
+    for (const row of rows) {
+      if (held.has(row.project_uuid)) continue;
+      if (row.last_refusal === "busy" && now - sqlTimeToMs(row.last_attempt_at) < BUSY_HOLD_MS) {
+        held.add(row.project_uuid);
+        continue;
+      }
+      let frame;
+      try {
+        frame = JSON.parse(row.frame_json);
+      } catch {
+        console.warn(`[c2c] outbox row ${row.id} is unreadable; its project is held`);
+        held.add(row.project_uuid); // R8: never send later seqs past a hole
+        continue;
+      }
+      try {
+        await send(frame);
+      } catch (err) {
+        // The link is gone (or the frame cannot fit it). Stop: nothing after this
+        // one could be sent either, and the rows stay queued for the next flush.
+        console.warn(`[c2c] flush stopped for contact ${contactId}: ${err?.code || err?.message || "send failed"}`);
+        break;
+      }
+      await write(db,
+        "UPDATE c2c_outbox SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?",
+        [row.id]);
+      sent += 1;
     }
-    let frame;
-    try {
-      frame = JSON.parse(row.frame_json);
-    } catch {
-      console.warn(`[c2c] outbox row ${row.id} is unreadable; its project is held`);
-      held.add(row.project_uuid); // R8: never send later seqs past a hole
-      continue;
-    }
-    try {
-      await send(frame);
-    } catch (err) {
-      // The link is gone (or the frame cannot fit it). Stop: nothing after this
-      // one could be sent either, and the rows stay queued for the next flush.
-      console.warn(`[c2c] flush stopped for contact ${contactId}: ${err?.code || err?.message || "send failed"}`);
-      break;
-    }
-    await db.execute({
-      sql: "UPDATE c2c_outbox SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?",
-      args: [row.id],
-    });
-    sent += 1;
+    return sent;
+  } finally {
+    walking.delete(contactId);
   }
-  return sent;
 }
 
 /**
  * Mark a batch of seqs acked (the peer applied them).
  *
- * A seq only means something inside its stream (R1), and `project.ack` carries no
- * stream, so by default every stream of `projectUuid` is matched — pass `stream`
- * when the caller knows which stream it is acking.
+ * S3: an ack names its frame's stream, so `epoch` and `stream` are required and
+ * both must match — a seq only means something inside its stream (S1), and a
+ * resent "*" seq 1 must never close a targeted seq 1.
  * @returns {Promise<number>} rows acked
  */
-export async function onAck(db, { contactId, projectUuid, seqs, stream = null }) {
+export async function onAck(db, { contactId, projectUuid, epoch, stream, seqs }) {
+  requireEpoch(epoch);
+  requireStream(stream);
   const list = normalizeSeqs(seqs);
   if (!list.length) return 0;
   const marks = list.map(() => "?").join(",");
-  const byStream = stream !== null;
   const res = await db.execute({
     sql: `UPDATE c2c_outbox SET acked_at = datetime('now')
-           WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL
-             ${byStream ? "AND COALESCE(to_instance_id, '*') = ?" : ""}
+           WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND acked_at IS NULL
+             AND COALESCE(to_instance_id, '*') = ?
              AND seq IN (${marks})`,
-    args: byStream
-      ? [contactId, projectUuid, stream, ...list]
-      : [contactId, projectUuid, ...list],
+    args: [contactId, projectUuid, epoch, stream, ...list],
   });
   return res.rowsAffected ?? 0;
 }
@@ -329,52 +400,44 @@ export async function onAck(db, { contactId, projectUuid, seqs, stream = null })
  * frame will never be accepted, so resending it forever would just wedge the
  * project's run. The reason is returned so the caller can surface it.
  *
- * Like `onAck`, a seq names a frame only inside its stream (R1): pass `stream` to
- * end exactly one, or leave it null to end that seq in every stream.
+ * Like `onAck` (S3), `epoch` and `stream` are required and match exactly.
  *
  * @returns {Promise<string|null>} the reason when the frame is ended, else null
  */
-export async function onRefuse(db, { contactId, projectUuid, seq, reason, stream = null }) {
+export async function onRefuse(db, { contactId, projectUuid, epoch, stream, seq, reason }) {
   if (!REFUSALS.includes(reason)) throw c2cError(`c2c outbox: unknown refusal ${String(reason)}`, "bad_argument");
+  requireEpoch(epoch);
+  requireStream(stream);
   if (!isSeq(seq)) throw c2cError("c2c outbox: seq is required", "bad_argument");
   const terminal = TERMINAL.has(reason);
-  const byStream = stream !== null;
   await db.execute({
     sql: `UPDATE c2c_outbox
              SET last_refusal = ?,
                  acked_at = CASE WHEN ? = 1 THEN datetime('now') ELSE acked_at END
-           WHERE contact_id = ? AND project_uuid = ? AND seq = ?
-             ${byStream ? "AND COALESCE(to_instance_id, '*') = ?" : ""}`,
-    args: byStream
-      ? [reason, terminal ? 1 : 0, contactId, projectUuid, seq, stream]
-      : [reason, terminal ? 1 : 0, contactId, projectUuid, seq],
+           WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND seq = ?
+             AND COALESCE(to_instance_id, '*') = ?`,
+    args: [reason, terminal ? 1 : 0, contactId, projectUuid, epoch, seq, stream],
   });
   if (terminal) console.log(`[c2c] frame ${seq} closed with ${reason}`);
   return terminal ? reason : null;
 }
 
 /**
- * R3, owner side: end every still-queued frame for (contact, project) whose epoch is not
- * `keepEpoch`, before the invite of a new membership is enqueued. The peer then never
- * receives an older membership's invite after the newer one (epochs compare only for
- * equality), and the new invite resets its stream whatever seq it carries.
+ * S6, owner side, optimisation only: end every still-queued frame for
+ * (contact, project) whose epoch is not `keepEpoch`, before the invite of a new
+ * membership is enqueued, so the peer is not sent frames of a membership it is
+ * about to leave. Correctness does not depend on it: each epoch is its own stream
+ * (S1) and authorization refuses an old membership with `stale_epoch`.
  * @returns {Promise<number>} frames cancelled
  */
 export async function cancelEpoch(db, { contactId, projectUuid, keepEpoch }) {
   if (typeof keepEpoch !== "string" || !keepEpoch) throw c2cError("c2c outbox: keepEpoch is required", "bad_argument");
-  const rows = (await db.execute({
-    sql: "SELECT id, frame_json FROM c2c_outbox WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL",
-    args: [contactId, projectUuid],
-  })).rows;
-  let n = 0;
-  for (const r of rows) {
-    let epoch = null;
-    try { epoch = JSON.parse(r.frame_json)?.epoch ?? null; } catch { epoch = null; }
-    if (epoch === keepEpoch) continue;
-    // An unreadable row is cancelled too: it can never be delivered for the new membership.
-    await db.execute({ sql: "UPDATE c2c_outbox SET acked_at = datetime('now'), last_refusal = 'cancelled' WHERE id = ? AND acked_at IS NULL", args: [r.id] });
-    n++;
-  }
+  const res = await db.execute({
+    sql: `UPDATE c2c_outbox SET acked_at = datetime('now'), last_refusal = 'cancelled'
+           WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL AND epoch <> ?`,
+    args: [contactId, projectUuid, keepEpoch],
+  });
+  const n = res.rowsAffected ?? 0;
   if (n) console.log(`[c2c] cancelled ${n} queued frame(s) of an earlier membership`);
   return n;
 }
@@ -394,98 +457,138 @@ export async function pruneAcked(db, { olderThanDays = 30 } = {}) {
   return res.rowsAffected ?? 0;
 }
 
+/* ------------------------------------------------------------- generations */
+
+/**
+ * S2: take the next invite generation for a project and publish the one after it.
+ * Local-only and never reset by a contact delete (no contact foreign key), so a
+ * generation stays comparable across memberships of the same project. It runs in
+ * the caller's transaction when there is one (the invite and its generation then
+ * roll back together), otherwise it opens its own.
+ * @returns {Promise<number>} the generation to put in the invite body
+ */
+export async function nextInviteGeneration(db, projectUuid) {
+  if (typeof projectUuid !== "string" || !projectUuid) {
+    throw c2cError("c2c invite: projectUuid is required", "bad_argument");
+  }
+  return withTransaction(db, async () => {
+    const { rows } = await db.execute({
+      sql: "SELECT next_gen FROM c2c_invite_gen WHERE project_uuid = ?",
+      args: [projectUuid],
+    });
+    const gen = rows.length ? Number(rows[0].next_gen) : 1;
+    if (!isSeq(gen)) throw c2cError("c2c invite: the generation counter is unreadable", "bad_state");
+    await db.execute({
+      sql: `INSERT INTO c2c_invite_gen (project_uuid, next_gen) VALUES (?, ?)
+            ON CONFLICT (project_uuid) DO UPDATE SET next_gen = excluded.next_gen`,
+      args: [projectUuid, gen + 1],
+    });
+    return gen;
+  });
+}
+
+/**
+ * S2, visitor side: does this invite replace the visit record? Pure (no DB), so
+ * Task 5/7 can ask before writing anything. `visit` is the local `c2c_visits` row
+ * (or null when this owner is unknown), read for its `gen`.
+ *
+ * `false` means refuse the invite `stale_epoch`: it comes from the generation the
+ * visit already has, or an older one (an old invite that overtook a newer one).
+ * `true` means it supersedes the visit whatever its state — `active` included,
+ * because a newer invite is also an implicit unshare of the membership it replaces.
+ *
+ * @returns {boolean}
+ */
+export function inviteSupersedes(visit, frame) {
+  const gen = frame?.body?.gen;
+  if (!isSeq(gen)) return false; // frames.js already refuses such an invite (bad_frame)
+  const known = Number(visit?.gen ?? 0);
+  // An unreadable stored generation is not a trust base: refuse rather than supersede.
+  if (!Number.isSafeInteger(known) || known < 0) return false;
+  return gen > known;
+}
+
 /* ----------------------------------------------------------------- inbound */
 
-const markArgs = ({ contactId, senderInstanceId, projectUuid, stream }) =>
-  [contactId, senderInstanceId, projectUuid, stream];
+// S1: the epoch is part of the key, so no stored-epoch field is read or written.
+const markArgs = ({ contactId, senderInstanceId, projectUuid, epoch, stream }) =>
+  [contactId, senderInstanceId, projectUuid, epoch, stream];
 
 async function readMark(handle, key) {
   const { rows } = await handle.execute({
-    sql: `SELECT high_water, epoch FROM c2c_inbound_seq
-           WHERE contact_id = ? AND sender_instance_id = ? AND project_uuid = ? AND stream = ?`,
+    sql: `SELECT high_water FROM c2c_inbound_seq
+           WHERE contact_id = ? AND sender_instance_id = ? AND project_uuid = ? AND epoch = ? AND stream = ?`,
     args: markArgs(key),
   });
-  const row = rows[0];
-  return { highWater: Number(row?.high_water ?? 0), epoch: row?.epoch ?? null };
+  return Number(rows[0]?.high_water ?? 0);
 }
 
 /**
  * Where an incoming frame sits against its stream's mark, without writing:
- * `new` (apply it), `dup` (already applied, ack it), `gap` (something is missing
- * ahead of it) or `stale` (its epoch is one the receiver has already left; refuse
- * it with `stale_epoch` and consume its seq — R3, R4).
+ * `new` (apply it), `dup` (already applied, ack it) or `gap` (something is missing
+ * ahead of it — refuse it `gap`).
  *
- * @returns {Promise<"new"|"dup"|"gap"|"stale">}
+ * It does NOT judge membership: an old-membership frame is `new` on its own old
+ * stream (S1), and Task 5 refuses it with `stale_epoch` by comparing the frame's
+ * epoch with the membership it holds (R4 then consumes the seq).
+ *
+ * @returns {Promise<"new"|"dup"|"gap">}
  */
 export async function acceptInbound(db, {
-  contactId, senderInstanceId, projectUuid, stream = WILDCARD_STREAM, seq, epoch, kind,
+  contactId, senderInstanceId, projectUuid, epoch, stream = WILDCARD_STREAM, seq,
 }) {
+  requireEpoch(epoch);
+  requireStream(stream);
   if (!isSeq(seq)) throw c2cError("c2c outbox: seq is required", "bad_argument");
-  const mark = await readMark(db, { contactId, senderInstanceId, projectUuid, stream });
-  const otherEpoch = typeof epoch === "string" && mark.epoch !== epoch;
-  // R3: an invite for a different membership restarts the stream, whatever its seq.
-  if (kind === "project.invite" && otherEpoch) return "new";
-  // R3: any other frame from a membership the receiver no longer holds is stale, even
-  // when its seq would otherwise look next or already applied.
-  if (mark.epoch !== null && otherEpoch) return "stale";
-  if (seq <= mark.highWater) return "dup";
-  return seq === mark.highWater + 1 ? "new" : "gap";
+  const highWater = await readMark(db, { contactId, senderInstanceId, projectUuid, epoch, stream });
+  if (seq <= highWater) return "dup";
+  return seq === highWater + 1 ? "new" : "gap";
 }
 
-/* The three conditional writes R6 allows. Each touches at most one row, and the
- * WHERE clause is the whole decision, so a second delivery of a seq takes nothing. */
+/* The two conditional writes R6 allows. Each touches at most one row, and the WHERE
+ * clause is the whole decision, so a second delivery of a seq takes nothing. */
 
-// R3 reset: only an invite for a different membership may restart the stream; a second
-// delivery of the same invite finds the epoch already stored and takes nothing.
-const RESET_SQL = `UPDATE c2c_inbound_seq SET high_water = ?, epoch = ?
-                    WHERE contact_id = ? AND sender_instance_id = ? AND project_uuid = ? AND stream = ?
-                      AND (epoch IS NULL OR epoch <> ?)`;
-
-// The next frame in order. COALESCE keeps a stored epoch: only a reset replaces it.
-const ADVANCE_SQL = `UPDATE c2c_inbound_seq SET high_water = ?, epoch = COALESCE(?, epoch)
-                      WHERE contact_id = ? AND sender_instance_id = ? AND project_uuid = ? AND stream = ?
-                        AND high_water = ?`;
+// The next frame in order of this stream (S1: the epoch is in the key).
+const ADVANCE_SQL = `UPDATE c2c_inbound_seq SET high_water = ?
+                      WHERE contact_id = ? AND sender_instance_id = ? AND project_uuid = ?
+                        AND epoch = ? AND stream = ? AND high_water = ?`;
 
 // The first frame of a stream (no row yet). DO NOTHING when one already exists.
 const FIRST_SQL = `INSERT INTO c2c_inbound_seq
-                     (contact_id, sender_instance_id, project_uuid, stream, high_water, epoch)
+                     (contact_id, sender_instance_id, project_uuid, epoch, stream, high_water)
                    VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT (contact_id, sender_instance_id, project_uuid, stream) DO NOTHING`;
+                   ON CONFLICT (contact_id, sender_instance_id, project_uuid, epoch, stream) DO NOTHING`;
 
-async function advance(handle, { contactId, senderInstanceId, projectUuid, stream, seq, epoch, kind }) {
-  const key = { contactId, senderInstanceId, projectUuid, stream };
-  const reset = kind === "project.invite" && typeof epoch === "string";
-  if (reset) {
-    const res = await handle.execute({ sql: RESET_SQL, args: [seq, epoch, ...markArgs(key), epoch] });
-    if ((res.rowsAffected ?? 0) > 0) return true;
-  }
-  const moved = await handle.execute({ sql: ADVANCE_SQL, args: [seq, epoch ?? null, ...markArgs(key), seq - 1] });
+async function advance(handle, { contactId, senderInstanceId, projectUuid, epoch, stream, seq }) {
+  const key = { contactId, senderInstanceId, projectUuid, epoch, stream };
+  const moved = await handle.execute({ sql: ADVANCE_SQL, args: [seq, ...markArgs(key), seq - 1] });
   if ((moved.rowsAffected ?? 0) > 0) return true;
-  // No row yet (or the mark is elsewhere). A first row may only start at 1, or be
-  // the R3 reset of an invite, which is new whatever its seq.
-  if (seq !== 1 && !reset) return false;
-  const first = await handle.execute({ sql: FIRST_SQL, args: [...markArgs(key), seq, epoch ?? null] });
+  // No row yet: a stream may only start at 1.
+  if (seq !== 1) return false;
+  const first = await handle.execute({ sql: FIRST_SQL, args: [...markArgs(key), seq] });
   return (first.rowsAffected ?? 0) > 0;
 }
 
 /**
- * Advance the high-water mark for a frame that was applied. The caller passes the
- * handle it already has and runs this inside the SAME transaction as the frame's
- * effect (`withTransaction`), so the effect and the mark commit or roll back
+ * Advance the high-water mark for a frame whose effect the caller runs in the same
+ * transaction (`withTransaction`), so the effect and the mark commit or roll back
  * together — a crash can never leave a frame marked applied but not applied.
  *
- * R6: it takes the seq only when it is exactly high_water + 1 (or the R3 reset of
- * a newer-epoch invite), so a frame is applied at most once.
+ * S5: call this FIRST, and run the effect only when it returns true.
+ * R6: it takes the seq only when it is exactly high_water + 1, so a frame is
+ * applied at most once. `epoch` and `stream` name the frame's stream (S1).
  *
  * @returns {Promise<boolean>} true when this call took the seq. `false` means
- *   another delivery already took it: roll the effect back (throw out of
- *   `withTransaction`) and re-ack the frame as a dup.
+ *   another delivery already took it: return at once, before any effect or
+ *   enqueue, and re-ack the frame as a dup.
  */
 export async function commitInbound(handle, {
-  contactId, senderInstanceId, projectUuid, stream = WILDCARD_STREAM, seq, epoch, kind,
+  contactId, senderInstanceId, projectUuid, epoch, stream = WILDCARD_STREAM, seq,
 }) {
+  requireEpoch(epoch);
+  requireStream(stream);
   if (!isSeq(seq)) throw c2cError("c2c outbox: seq is required", "bad_argument");
-  return advance(handle, { contactId, senderInstanceId, projectUuid, stream, seq, epoch, kind });
+  return advance(handle, { contactId, senderInstanceId, projectUuid, epoch, stream, seq });
 }
 
 /**
@@ -494,21 +597,18 @@ export async function commitInbound(handle, {
  * mark exactly like a commit, with no effect, so one refused frame never wedges the
  * frames after it.
  *
- * Same contract as `commitInbound`: run it in the caller's transaction and treat
- * `false` as "already taken" (nothing to do — the seq is gone either way).
- *
- * Known edge (the ruling's, not solved here): after the sender's counters restart
- * (contact deleted and re-added there), an in-flight frame from the abandoned
- * counter space can carry seq high_water + 1, so consuming it would move the mark
- * into the NEW epoch's numbering and make its next frame a dup. It only ever
- * advances for such a restart — after a reset that keeps the counter (unshare then
- * re-invite) every older-epoch frame is below the mark, so the call is a no-op.
+ * Same contract as `commitInbound`: run it in the caller's transaction, name the
+ * frame's own stream (an old membership's frame consumes a seq on its own dead
+ * stream, S1), and treat `false` as "already taken" (nothing to do — the seq is
+ * gone either way).
  *
  * @returns {Promise<boolean>} true when this call took the seq
  */
 export async function consumeInbound(handle, {
-  contactId, senderInstanceId, projectUuid, stream = WILDCARD_STREAM, seq,
+  contactId, senderInstanceId, projectUuid, epoch, stream = WILDCARD_STREAM, seq,
 }) {
+  requireEpoch(epoch);
+  requireStream(stream);
   if (!isSeq(seq)) throw c2cError("c2c outbox: seq is required", "bad_argument");
-  return advance(handle, { contactId, senderInstanceId, projectUuid, stream, seq, epoch: null, kind: null });
+  return advance(handle, { contactId, senderInstanceId, projectUuid, epoch, stream, seq });
 }

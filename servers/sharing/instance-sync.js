@@ -156,7 +156,7 @@ export const SYNCED_TABLES = [
 export const LOCAL_ONLY_TABLES = Object.freeze([
   "crow_keychain", "voice_handoffs", "service_connections", "staged_sends",
   "satellites", "satellite_revocations", "satellite_tool_pins", "satellite_bot_optins",
-  "c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits",
+  "c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits", "c2c_invite_gen",
 ]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {

@@ -5,13 +5,13 @@ import { buildFrame, parseFrame, PLAN1_KINDS, BODY_CAPS } from "../servers/shari
 const U = "a".repeat(32), E = "b".repeat(32);
 const base = { projectUuid: U, fromInstanceId: "i-a", toInstanceId: "i-b" };
 const bodies = {
-  "project.invite": { name: "Proj", role: "editor", owner_instance_id: "i-a" },
+  "project.invite": { name: "Proj", role: "editor", owner_instance_id: "i-a", gen: 1 },
   "project.accept": { visitor_instance_id: "i-b" },
   "project.decline": { reason: "left" },
   "project.role": { role: "viewer" },
   "project.unshare": {},
-  "project.ack": { seqs: [1, 2, 3] },
-  "project.refuse": { seq: 4, reason: "gap", detail: "x" },
+  "project.ack": { epoch: E, stream: "*", seqs: [1, 2, 3] },
+  "project.refuse": { epoch: E, stream: "i-b", seq: 4, reason: "gap", detail: "x" },
 };
 const mk = (kind, over = {}) => {
   const noSeq = kind === "project.ack" || kind === "project.refuse";
@@ -74,7 +74,7 @@ test("non-plain objects are bad_frame", () => {
   assert.deepEqual(parseFrame(mk("project.role", { body: new Map() })), BAD);
 });
 test("ack seqs validation", () => {
-  const ack = (seqs) => parseFrame(mk("project.ack", { body: { seqs } }));
+  const ack = (seqs) => parseFrame(mk("project.ack", { body: { ...bodies["project.ack"], seqs } }));
   assert.equal(ack(Array.from({ length: 256 }, (_, i) => i + 1)).ok, true);
   assert.deepEqual(ack(Array.from({ length: 257 }, (_, i) => i + 1)), BAD);
   assert.deepEqual(ack([1, "2"]), BAD);
@@ -83,17 +83,48 @@ test("ack seqs validation", () => {
   assert.deepEqual(ack({ length: 1, 0: 1 }), BAD);
 });
 test("refuse validation", () => {
-  const ref = (body) => parseFrame(mk("project.refuse", { body }));
-  assert.equal(ref({ seq: 1, reason: "gap", detail: "d".repeat(200) }).ok, true);
-  assert.deepEqual(ref({ seq: 1, reason: "gap", detail: "d".repeat(201) }), BAD);
-  assert.deepEqual(ref({ seq: 1, reason: "nope" }), BAD);
-  assert.deepEqual(ref({ seq: 0, reason: "gap" }), BAD);
-  assert.deepEqual(ref({ seq: 1, reason: "gap", detail: "a\u0000b" }), BAD);
-  assert.deepEqual(ref({ seq: 1, reason: "gap", detail: "a\ud800" }), BAD);
+  const ref = (body) => parseFrame(mk("project.refuse", { body: { ...bodies["project.refuse"], ...body } }));
+  assert.equal(ref({ detail: "d".repeat(200) }).ok, true);
+  assert.deepEqual(ref({ detail: "d".repeat(201) }), BAD);
+  assert.deepEqual(ref({ reason: "nope" }), BAD);
+  assert.deepEqual(ref({ seq: 0 }), BAD);
+  assert.deepEqual(ref({ detail: "a\u0000b" }), BAD);
+  assert.deepEqual(ref({ detail: "a\ud800" }), BAD);
 });
-test("ack or refuse with an envelope seq is bad_frame", () => {
+test("S3: an ack names its frame's stream: epoch and stream are required", () => {
+  const ack = (body) => parseFrame(mk("project.ack", { body }));
+  const base = bodies["project.ack"];
+  assert.equal(ack(base).ok, true);
+  assert.deepEqual(ack({ stream: "*", seqs: [1] }), BAD, "no epoch");
+  assert.deepEqual(ack({ epoch: E, seqs: [1] }), BAD, "no stream");
+  assert.deepEqual(ack({ epoch: E, stream: "", seqs: [1] }), BAD, "an empty stream");
+  assert.deepEqual(ack({ epoch: E, stream: 5, seqs: [1] }), BAD);
+  assert.deepEqual(ack({ epoch: "B".repeat(32), stream: "*", seqs: [1] }), BAD, "epoch must be lowercase hex");
+  assert.deepEqual(ack({ epoch: "b".repeat(31), stream: "*", seqs: [1] }), BAD);
+});
+test("S3: a refusal names its frame's stream: epoch and stream are required", () => {
+  const ref = (body) => parseFrame(mk("project.refuse", { body }));
+  const base = bodies["project.refuse"];
+  assert.equal(ref(base).ok, true);
+  assert.deepEqual(ref({ stream: "*", seq: 4, reason: "gap" }), BAD, "no epoch");
+  assert.deepEqual(ref({ epoch: E, seq: 4, reason: "gap" }), BAD, "no stream");
+  assert.deepEqual(ref({ epoch: E, stream: "a b", seq: 4, reason: "gap" }), BAD);
+  assert.deepEqual(ref({ epoch: E, stream: "*", seq: 4, reason: "nope" }), BAD);
+});
+test("S2: an invite's gen is required and positive", () => {
+  const inv = (gen) => parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], gen } }));
+  const { gen: _drop, ...noGen } = bodies["project.invite"];
+  assert.deepEqual(parseFrame(mk("project.invite", { body: noGen })), BAD, "missing gen");
+  for (const gen of [0, -1, "1", 1.5, null, true, 2 ** 53]) assert.deepEqual(inv(gen), BAD, String(gen));
+  assert.equal(inv(1).ok, true);
+  assert.equal(inv(7).frame.body.gen, 7);
+});
+test("an ack or refuse with an envelope seq or epoch is bad_frame", () => {
   assert.deepEqual(parseFrame(mk("project.ack", { seq: 1 })), BAD);
   assert.deepEqual(parseFrame(mk("project.refuse", { seq: 1 })), BAD);
+  // S3: the body is the only place an ack or refusal names its stream.
+  assert.deepEqual(parseFrame(mk("project.ack", { epoch: E })), BAD);
+  assert.deepEqual(parseFrame(mk("project.refuse", { epoch: E })), BAD);
 });
 test("missing epoch on a non-ack frame is bad_frame", () => {
   assert.deepEqual(parseFrame(mk("project.role", { epoch: undefined })), BAD);

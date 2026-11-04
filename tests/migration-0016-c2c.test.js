@@ -10,7 +10,9 @@ import { run, id } from "../scripts/migrations/0016-crow-to-crow.mjs";
 import { LOCAL_ONLY_TABLES, SYNCED_TABLES, assertLocalOnlyDisjoint } from "../servers/sharing/instance-sync.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
-const TABLES = ["project_shared_items", "c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits"];
+const TABLES = [
+  "project_shared_items", "c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits", "c2c_invite_gen",
+];
 
 /** The pre-0016 shape of the three tables the migration depends on. */
 function legacyDb({ rows = false } = {}) {
@@ -37,13 +39,18 @@ const schemaOf = (dbPath) => {
   const sql = Object.fromEntries(TABLES.map((t) => [t, d.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(t)?.sql]));
   const idx = d.prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='project_shared_items' AND sql IS NOT NULL ORDER BY name").all();
   const pm = d.prepare("PRAGMA table_info(project_members)").all().map((c) => c.name).sort();
-  // The stream mark's own columns: R1's stream key and R3's epoch must match on both rails.
-  const inbound = d.prepare("PRAGMA table_info(c2c_inbound_seq)").all()
+  // The columns of the tables the sequencing contract keys on (outbox.js S1/S2): the
+  // stream key now carries the epoch on both sides, and a visit its invite generation.
+  const cols = (t) => d.prepare(`PRAGMA table_info(${t})`).all()
     .map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt: c.dflt_value, pk: c.pk }));
-  const outboxSeq = d.prepare("PRAGMA table_info(c2c_outbox_seq)").all()
-    .map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt: c.dflt_value, pk: c.pk }));
+  const outbox = cols("c2c_outbox");
+  const inbound = cols("c2c_inbound_seq");
+  const outboxSeq = cols("c2c_outbox_seq");
+  const visits = cols("c2c_visits");
+  const inviteGen = cols("c2c_invite_gen");
+  const streamIdx = d.prepare("SELECT sql FROM sqlite_master WHERE name='idx_c2c_outbox_stream_seq'").get()?.sql;
   d.close();
-  return { sql, idx, pm, inbound, outboxSeq };
+  return { sql, idx, pm, outbox, inbound, outboxSeq, visits, inviteGen, streamIdx };
 };
 
 test("0016 creates every table and column on a fresh DB", () => {
@@ -56,15 +63,31 @@ test("0016 creates every table and column on a fresh DB", () => {
     assert.ok(s.pm.includes("accepted_at"));
     assert.equal(s.idx.length, 1);
     assert.match(s.idx[0].sql, /WHERE removed_at IS NULL/);
-    // R2: the sender's per-stream counter; R1/R3: the mark's stream key and epoch.
-    assert.deepEqual(s.outboxSeq.map((c) => c.name), ["contact_id", "project_uuid", "stream", "next_seq"]);
-    assert.deepEqual(s.outboxSeq.filter((c) => c.pk).map((c) => c.name).sort(), ["contact_id", "project_uuid", "stream"]);
-    for (const col of ["stream", "epoch", "high_water"]) assert.ok(s.inbound.some((c) => c.name === col), col);
+    // R2/S1: the sender's counter is per (contact, project, epoch, stream).
+    assert.deepEqual(s.outboxSeq.map((c) => c.name), ["contact_id", "project_uuid", "epoch", "stream", "next_seq"]);
+    assert.deepEqual(
+      s.outboxSeq.filter((c) => c.pk).map((c) => c.name).sort(),
+      ["contact_id", "epoch", "project_uuid", "stream"],
+    );
+    // S1: the mark is keyed by the epoch, and there is no stored-epoch field left.
+    for (const col of ["epoch", "stream", "high_water"]) assert.ok(s.inbound.some((c) => c.name === col), col);
     assert.deepEqual(
       s.inbound.filter((c) => c.pk).map((c) => c.name).sort(),
-      ["contact_id", "project_uuid", "sender_instance_id", "stream"],
-      "the mark is per (sender instance, project, stream)",
+      ["contact_id", "epoch", "project_uuid", "sender_instance_id", "stream"],
+      "the mark is per (sender instance, project, epoch, stream)",
     );
+    const epochCol = s.inbound.find((c) => c.name === "epoch");
+    assert.equal(epochCol.notnull, 1, "the epoch is part of the key, not a nullable field");
+    // S1: the outbox row carries its epoch, and its uniqueness is per full stream.
+    const outboxEpoch = s.outbox.find((c) => c.name === "epoch");
+    assert.equal(outboxEpoch.notnull, 1);
+    assert.match(s.streamIdx, /contact_id, project_uuid, epoch, COALESCE\(to_instance_id, '\*'\), seq/);
+    // S2: a visit remembers the invite generation it came from; the counter is local-only
+    // and has no contact foreign key, so a contact delete cannot rewind it.
+    const gen = s.visits.find((c) => c.name === "gen");
+    assert.deepEqual({ type: gen.type, notnull: gen.notnull, dflt: gen.dflt }, { type: "INTEGER", notnull: 1, dflt: "0" });
+    assert.deepEqual(s.inviteGen.map((c) => c.name), ["project_uuid", "next_gen"]);
+    assert.deepEqual(s.inviteGen.filter((c) => c.pk).map((c) => c.name), ["project_uuid"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -112,8 +135,12 @@ test("init-db and 0016 produce identical schemas", () => {
       const mig = schemaOf(dbPath);
       assert.deepEqual(mig.sql, initSchema.sql);
       assert.deepEqual(mig.idx, initSchema.idx);
+      assert.deepEqual(mig.outbox, initSchema.outbox, "c2c_outbox columns match");
       assert.deepEqual(mig.inbound, initSchema.inbound, "c2c_inbound_seq columns match");
       assert.deepEqual(mig.outboxSeq, initSchema.outboxSeq, "c2c_outbox_seq columns match");
+      assert.deepEqual(mig.visits, initSchema.visits, "c2c_visits columns match");
+      assert.deepEqual(mig.inviteGen, initSchema.inviteGen, "c2c_invite_gen columns match");
+      assert.deepEqual(mig.streamIdx, initSchema.streamIdx, "the outbox stream index matches");
       assert.ok(initSchema.pm.includes("accepted_at") && mig.pm.includes("accepted_at"));
       // the column definition itself must match too
       const colOf = (p) => { const x = new Database(p); const c = x.prepare("PRAGMA table_info(project_members)").all().find((c) => c.name === "accepted_at"); x.close(); return { type: c.type, notnull: c.notnull, dflt: c.dflt_value }; };
@@ -123,7 +150,9 @@ test("init-db and 0016 produce identical schemas", () => {
 });
 
 test("c2c tables are local-only", () => {
-  for (const t of ["c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits"]) assert.ok(LOCAL_ONLY_TABLES.includes(t), t);
+  for (const t of ["c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits", "c2c_invite_gen"]) {
+    assert.ok(LOCAL_ONLY_TABLES.includes(t), t);
+  }
   assertLocalOnlyDisjoint(SYNCED_TABLES, LOCAL_ONLY_TABLES);
 });
 

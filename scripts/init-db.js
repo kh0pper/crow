@@ -287,7 +287,8 @@ await addColumnIfMissing("project_members", "accepted_at", "TEXT");
 
 // Crow-to-Crow foundation tables. Same DDL as scripts/migrations/0016-crow-to-crow.mjs (one shape,
 // two rails). Additive, no SCHEMA_GENERATION bump. project_shared_items is created now, used in plan 2.
-// c2c_outbox_seq is the sender's stream counter, c2c_inbound_seq the receiver's mark per stream
+// c2c_outbox_seq is the sender's stream counter, c2c_inbound_seq the receiver's mark, both keyed by
+// (project, epoch, stream); c2c_invite_gen is the owner's invite generation per project
 // (the sequencing contract is documented at the top of servers/sharing/c2c/outbox.js).
 await initTable("crow-to-crow tables", `
   CREATE TABLE IF NOT EXISTS project_shared_items (
@@ -306,6 +307,7 @@ await initTable("crow-to-crow tables", `
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     contact_id      INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     project_uuid    TEXT NOT NULL,
+    epoch           TEXT NOT NULL,
     seq             INTEGER NOT NULL,
     kind            TEXT NOT NULL,
     to_instance_id  TEXT,
@@ -317,31 +319,35 @@ await initTable("crow-to-crow tables", `
     acked_at        TEXT
   );
 
-  -- A seq is unique per stream (R1): the same number names different frames on
-  -- different targets, so the old (contact, project, seq) key would collide.
+  -- A stream is (contact, project, epoch, target) (outbox.js S1), so the same seq
+  -- names a different frame on another stream and ack, refuse and flush have to
+  -- match all of it. epoch is a column so no frame_json is parsed to find it.
   CREATE UNIQUE INDEX IF NOT EXISTS idx_c2c_outbox_stream_seq
-    ON c2c_outbox(contact_id, project_uuid, COALESCE(to_instance_id, '*'), seq);
+    ON c2c_outbox(contact_id, project_uuid, epoch, COALESCE(to_instance_id, '*'), seq);
 
-  -- The sender's stream counter: one row per (contact, project, stream), never derived from
+  -- The sender's stream counter: one row per (contact, project, epoch, stream), so a
+  -- new membership starts every stream at 1 with no reset logic. Never derived from
   -- MAX(seq) over c2c_outbox, so pruning never re-issues a seq (outbox.js R2).
   CREATE TABLE IF NOT EXISTS c2c_outbox_seq (
     contact_id   INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     project_uuid TEXT NOT NULL,
+    epoch        TEXT NOT NULL,
     stream       TEXT NOT NULL,
     next_seq     INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (contact_id, project_uuid, stream)
+    PRIMARY KEY (contact_id, project_uuid, epoch, stream)
   );
 
-  -- One high-water mark per stream: the frame's to_instance_id, or '*' when it has none
-  -- (outbox.js R1). The epoch column orders streams: a newer-epoch invite resets one (R3).
+  -- One high-water mark per stream, the epoch being part of the key: the target is
+  -- the frame's to_instance_id, or '*' when it has none (outbox.js S1). There is no
+  -- stored-epoch column, because a membership is a key, not a field to compare.
   CREATE TABLE IF NOT EXISTS c2c_inbound_seq (
     contact_id         INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     sender_instance_id TEXT NOT NULL,
     project_uuid       TEXT NOT NULL,
+    epoch              TEXT NOT NULL,
     stream             TEXT NOT NULL DEFAULT '*',
     high_water         INTEGER NOT NULL DEFAULT 0,
-    epoch              TEXT,
-    PRIMARY KEY (contact_id, sender_instance_id, project_uuid, stream)
+    PRIMARY KEY (contact_id, sender_instance_id, project_uuid, epoch, stream)
   );
 
   CREATE TABLE IF NOT EXISTS c2c_visits (
@@ -351,12 +357,21 @@ await initTable("crow-to-crow tables", `
     name              TEXT NOT NULL,
     role              TEXT NOT NULL CHECK (role IN ('viewer','commenter','editor')),
     epoch             TEXT NOT NULL,
+    gen               INTEGER NOT NULL DEFAULT 0,
     owner_instance_id TEXT,
     state             TEXT NOT NULL CHECK (state IN ('invited','active','declined','left','unshared')),
     invited_at        TEXT NOT NULL DEFAULT (datetime('now')),
     accepted_at       TEXT,
     ended_at          TEXT,
     UNIQUE (owner_contact_id, project_uuid)
+  );
+
+  -- The owner's invite generation per project (outbox.js S2): local-only and with no
+  -- contact foreign key, so deleting a contact never rewinds it. A visit keeps the
+  -- generation it came from in c2c_visits.gen.
+  CREATE TABLE IF NOT EXISTS c2c_invite_gen (
+    project_uuid TEXT PRIMARY KEY,
+    next_gen     INTEGER NOT NULL DEFAULT 1
   );
 `);
 

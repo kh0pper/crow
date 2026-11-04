@@ -55,6 +55,10 @@ const isObj = (x) => {
   return p === Object.prototype || p === null;
 };
 const isId = (x) => typeof x === "string" && ID_RE.test(x);
+// S3: an ack or refusal names its frame's stream the way the outbox does (streamOf):
+// a target instance id, or "*" when the frame had none.
+const isStream = (x) => x === "*" || isId(x);
+const isEpoch = (x) => typeof x === "string" && HEX32.test(x);
 const isText = (x, max) =>
   typeof x === "string" && x.length > 0 && x.length <= max && x.isWellFormed() && !CTRL.test(x);
 const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
@@ -63,8 +67,9 @@ const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
 function cleanBody(kind, b) {
   switch (kind) {
     case "project.invite":
-      return isText(b.name, 200) && ROLES.includes(b.role) && isId(b.owner_instance_id)
-        ? { name: b.name, role: b.role, owner_instance_id: b.owner_instance_id } : null;
+      // S2: gen is the owner's increasing invite generation: required, positive.
+      return isText(b.name, 200) && ROLES.includes(b.role) && isId(b.owner_instance_id) && isSeq(b.gen)
+        ? { name: b.name, role: b.role, owner_instance_id: b.owner_instance_id, gen: b.gen } : null;
     case "project.accept":
       return isId(b.visitor_instance_id) ? { visitor_instance_id: b.visitor_instance_id } : null;
     case "project.decline":
@@ -75,11 +80,13 @@ function cleanBody(kind, b) {
     case "project.unshare":
       return {};
     case "project.ack":
-      return Array.isArray(b.seqs) && b.seqs.length <= 256 && b.seqs.every(isSeq)
-        ? { seqs: b.seqs.slice() } : null;
+      // S3: the body names the stream it acks.
+      return isEpoch(b.epoch) && isStream(b.stream)
+        && Array.isArray(b.seqs) && b.seqs.length <= 256 && b.seqs.every(isSeq)
+        ? { epoch: b.epoch, stream: b.stream, seqs: b.seqs.slice() } : null;
     case "project.refuse": {
-      if (!isSeq(b.seq) || !REFUSALS.includes(b.reason)) return null;
-      const out = { seq: b.seq, reason: b.reason };
+      if (!isEpoch(b.epoch) || !isStream(b.stream) || !isSeq(b.seq) || !REFUSALS.includes(b.reason)) return null;
+      const out = { epoch: b.epoch, stream: b.stream, seq: b.seq, reason: b.reason };
       if (b.detail !== undefined) {
         if (!(typeof b.detail === "string" && b.detail.length <= 200 && b.detail.isWellFormed() && !CTRL.test(b.detail))) return null;
         out.detail = b.detail;
@@ -109,11 +116,9 @@ export function parseFrame(payload) {
     if (!isId(from_instance_id) || !(to_instance_id === null || isId(to_instance_id))) return bad;
     const frame = { type: C2C_TYPE, v: 1, kind, project_uuid };
     if (NO_SEQ.has(kind)) {
-      if (seq !== undefined) return bad;
-      if (epoch !== undefined) {
-        if (typeof epoch !== "string" || !HEX32.test(epoch)) return bad;
-        frame.epoch = epoch;
-      }
+      // S3: an ack or refusal names its stream in the body only, so it carries
+      // neither an envelope seq nor an envelope epoch.
+      if (seq !== undefined || epoch !== undefined) return bad;
     } else {
       if (!isSeq(seq) || typeof epoch !== "string" || !HEX32.test(epoch)) return bad;
       frame.epoch = epoch;
