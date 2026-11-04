@@ -65,6 +65,21 @@ function reqLang(req) {
 // consumes it without an import cycle); imported for local use AND re-exported
 // for existing importers (a bare `export ... from` creates no local binding).
 import { buildCrowMessagesGatewayConfig } from "./gateway-fields.js";
+import { isLocalPasswordSessionOn } from "../../local-session.js";
+import { satelliteBundleIds } from "../../../satellites/installs.js";
+
+/** Put a definition's satellite-bundle grants back to what they were (a non-owner session's save). */
+export function keepSatelliteGrants(def, origDef, { bundleIds = null } = {}) {
+  let sat;
+  try { sat = bundleIds || satelliteBundleIds(); } catch { sat = new Set(); }
+  if (!sat.size) return;
+  const isSat = (k) => typeof k === "string" && sat.has(k.split("/")[0]);
+  const before = Array.isArray(origDef?.tools?.crow_mcp) ? origDef.tools.crow_mcp.filter(isSat) : [];
+  const cur = Array.isArray(def?.tools?.crow_mcp) ? def.tools.crow_mcp : null;
+  if (!cur && !before.length) return;
+  def.tools = def.tools || {};
+  def.tools.crow_mcp = [...(cur || []).filter((k) => !isSat(k)), ...before];
+}
 export { buildCrowMessagesGatewayConfig };
 
 // applyTrackerChoice lives in the leaf ./tracker-choice.js so wizard.js and
@@ -402,6 +417,15 @@ export async function handleBotBuilderPost(req, res, { db }) {
       if (r.column && r.column.display_name) columnNameUpdate = r.column.display_name;
       if (r.column && Object.prototype.hasOwnProperty.call(r.column, "project_id")) columnProjectIdUpdate = r.column.project_id;
       if (Object.prototype.hasOwnProperty.call(r, "satOptin")) satOptin = r.satOptin;
+      // Spec §8: no peer-SSO session drives a satellite. Only the owner's own local password
+      // session may change a bot's satellite grants or its "other people's turns" opt-in; for any
+      // other session those parts of the definition stay exactly as they were.
+      let ownerLocal = false;
+      try { ownerLocal = (await isLocalPasswordSessionOn(db, req)) === true; } catch { ownerLocal = false; }
+      if (!ownerLocal) {
+        if (typeof satOptin === "boolean") { satOptin = undefined; extraQ += "&warn=" + encodeURIComponent(t("botbuilder.satOwnerOnly", lang)); }
+        keepSatelliteGrants(def, origDef);
+      }
       channelChanged = !!r.channelChanged;
       afterWrite = r.after || null;
       afterLabel = r.afterLabel || "";

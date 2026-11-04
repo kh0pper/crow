@@ -462,3 +462,19 @@ test("a name that passes the prefix but is not in the pinned list is never publi
   assert.equal(r.isError, true);
   assert.equal(fake.state.requests.length, before);
 });
+
+test("an approved pin's tool with a description over 300 chars, or past the 64th, is never published", async () => {
+  const TE2 = await import("../servers/gateway/satellites/tool-entry.js");
+  const { MAX_DESCRIPTION, MAX_TOOLS } = await import("../servers/gateway/satellites/tools-pin.js");
+  const tools = [
+    { name: "demo_ok", description: "fine", inputSchema: { type: "object" } },
+    { name: "demo_long", description: "x".repeat(MAX_DESCRIPTION + 1), inputSchema: { type: "object" } },
+    ...Array.from({ length: MAX_TOOLS + 5 }, (_, i) => ({ name: `demo_t${i}`, description: "d", inputSchema: { type: "object" } })),
+  ];
+  const pin = { tools_json: JSON.stringify(tools) };
+  const out = TE2.publishedTools("demo", pin, { sha256: "a".repeat(64) });
+  const names = out.map((t) => t.name);
+  assert.ok(names.includes("demo_ok"));
+  assert.ok(!names.includes("demo_long"), "the over-long description is not published, as the approval dialog says");
+  assert.ok(out.length <= MAX_TOOLS, "at most 64 tools");
+});

@@ -35,7 +35,7 @@ La restauración es posible en **cualquier** máquina que tenga el código de Cr
 La restauración necesita la exportación del llavero cifrada con contraseña que contenga la **clave de respaldo fuera del sitio** de Crow (`offsite-backup / CROW_OFFSITE_BACKUP_KEY`).
 
 - Si ya guardas una exportación fuera de línea, usa esa.
-- Si Crow todavía funciona, haz primero una exportación nueva: **Ajustes → Seguridad y contraseñas → Contraseñas y claves guardadas → Exportar**. Mientras una exportación no contenga esa clave, Crow lo indica en el Nest y no sube ningún respaldo, porque un respaldo que nadie puede descifrar es peor que no tener respaldo.
+- Si Crow todavía funciona, haz primero una exportación nueva: **Ajustes → Seguridad y contraseñas → Contraseñas y claves guardadas → Exportar**. Mientras una exportación no contenga esa clave, Crow lo indica en la página de Servidores (y en un aviso diario cuando el temporizador de la copia externa está activo) y no sube ningún respaldo, porque un respaldo que nadie puede descifrar es peor que no tener respaldo.
 - El archivo de exportación y su contraseña van juntos. Sin ambos, la copia fuera del sitio no se puede abrir — ese es el objetivo del diseño.
 - Importa solo las exportaciones del llavero que hayas hecho tú: una importación puede recuperar una clave fuera del sitio, y una clave que no hiciste tú cifraría los próximos respaldos para otra persona.
 
@@ -72,7 +72,7 @@ Cada fragmento del archivo se autentica antes de escribirse. El texto plano va p
 | 0 | Restaurado y verificado |
 | 2 | Uso: falta un argumento o es inválido, `--file` no se puede leer, o `--out` ya existe |
 | 3 | No se pudo abrir la exportación (contraseña incorrecta, el archivo no es una exportación, o la exportación no contiene la clave de respaldo fuera del sitio) |
-| 4 | El archivo vault fue rechazado. El mensaje nombra el motivo: `bad_magic`, `bad_version`, `bad_header`, `header_too_large`, `bad_chunk_size`, `key_mismatch`, `chunk_too_large`, `tag_failure`, `truncated`, `trailing_data` o `rollback` |
+| 4 | El archivo vault fue rechazado. El mensaje nombra el motivo: `bad_magic`, `bad_version`, `bad_header`, `header_too_large`, `bad_chunk_size`, `key_mismatch`, `chunk_too_large`, `tag_failure`, `truncated`, `trailing_data`, `rollback`, `partial_exists` o `out_exists` (ya hay un archivo: no se sobrescribe nada) |
 
 Un rechazo `rollback` significa que el archivo no es el respaldo de la fecha que pediste. Un `tag_failure` significa que el archivo está dañado, se selló con otra clave o fue manipulado — restaura otra copia en lugar de intentar repararlo.
 
@@ -81,4 +81,7 @@ Después, coloca el `crow.db` restaurado en su sitio a mano: detén Crow, aparta
 ::: tip Mantén una segunda vía de acceso al satélite
 La restauración lee un archivo que está en el satélite, así que necesitas *alguna* forma de entrar allí que no dependa de la máquina principal — una clave ssh guardada junto con la exportación del llavero, o la consola de tu proveedor de hosting. Guárdala donde guardes la exportación y pruébala una vez antes de necesitarla.
 :::
-- Antes de activar los temporizadores de la copia externa en una máquina, comprueba que su systemd puede aislar un servicio de usuario: `systemd-run --user --wait -p PrivateTmp=yes -p ProtectSystem=strict -p ReadWritePaths=$HOME/.crow "$(command -v node)" -e 1` debe terminar con 0. Si falla (algunos núcleos restringen los espacios de nombres de usuario sin privilegios), los temporizadores nunca arrancarían ni te avisarían.
+
+## Antes de activar los temporizadores de la copia externa
+
+Antes de activar los temporizadores de la copia externa en una máquina, comprueba que su systemd puede aislar un servicio de usuario: `systemd-run --user --wait -p PrivateTmp=yes -p ProtectSystem=strict -p ReadWritePaths=$HOME/.crow "$(command -v node)" -e 1` debe terminar con 0. Si falla (algunos núcleos restringen los espacios de nombres de usuario sin privilegios), los temporizadores nunca arrancarían ni te avisarían.

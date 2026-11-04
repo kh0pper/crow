@@ -1869,6 +1869,7 @@ export const translations = {
   "botbuilder.sfSatTitle": { en: "Tools on a paired server", es: "Herramientas en un servidor emparejado" },
   "botbuilder.sfSatLead": { en: "This bot is granted tools from a bundle on a paired server. By default they work only on your own turns.", es: "Este bot tiene herramientas de un paquete en un servidor emparejado. Por defecto solo funcionan en tus propios turnos." },
   "botbuilder.sfSatAnyTurn": { en: "Also on other people's turns", es: "También en turnos de otras personas" },
+  "botbuilder.satOwnerOnly": { en: "Satellite tools and their opt-in can only be changed from your own sign-in on this Crow; those parts were left as they were.", es: "Las herramientas del satélite y su opción solo se pueden cambiar desde tu propio inicio de sesión en este Crow; esas partes se dejaron como estaban." },
   "botbuilder.sfSatAnyTurnWarn": { en: "{bundles} tools will also run on turns started by other people (email, Discord). They can ask this bot to change your repositories.", es: "Las herramientas de {bundles} también funcionarán en turnos iniciados por otras personas (correo, Discord). Podrán pedir a este bot que cambie tus repositorios." },
   "botbuilder.sfSatAnyTurnFailed": { en: "Couldn't save that switch: {error}", es: "No se pudo guardar ese interruptor: {error}" },
   "botbuilder.acReadyTitle": { en: "Ready to run?", es: "¿Listo para funcionar?" },

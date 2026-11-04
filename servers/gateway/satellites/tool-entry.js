@@ -24,7 +24,7 @@ import { currentCaller } from "../caller-context.js";
 import { satelliteFetch } from "./client.js";
 import { BUNDLE_ID_RE, installPaths, satelliteInstalls } from "./installs.js";
 import { getSatellite, getToolPin } from "./store.js";
-import { hhmm, reportedTools, toolNameRe, toolsState } from "./tools-pin.js";
+import { MAX_TOOLS, checkToolList, hhmm, reportedTools, toolsState } from "./tools-pin.js";
 
 /** D22: CLEAN_MCP_TOOLS is an exact-name match on `mcp__artifacts__*`, so this key is refused. */
 export const RESERVED_BUNDLE_IDS = Object.freeze(["artifacts"]);
@@ -78,12 +78,14 @@ export function publishedTools(bundle, pin, reported) {
   if (!pin || !reported || typeof reported.sha256 !== "string" || !reported.sha256) return [];
   let list;
   try { list = JSON.parse(pin.tools_json); } catch { return []; }
-  const re = toolNameRe(bundle);
+  // The same §9.1 caps the approval dialog shows: a bad name or a description over 300 chars is
+  // never published (the dialog says so), and at most 64 tools ever are.
+  const allowed = new Set(checkToolList(bundle, list).allowed);
   const seen = new Set();
   const out = [];
   for (const t of Array.isArray(list) ? list : []) {
     const name = typeof t?.name === "string" ? t.name : "";
-    if (!re.test(name) || seen.has(name)) continue;
+    if (!allowed.has(name) || seen.has(name) || out.length >= MAX_TOOLS) continue;
     seen.add(name);
     out.push({
       name,

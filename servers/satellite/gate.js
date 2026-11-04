@@ -1,5 +1,5 @@
 /**
- * The satellite install gate (SAT-3, spec §7.0 items 2–3, §7.1; Kevin decision K5).
+ * The satellite install gate (SAT-3, spec §7.0 items 2–3, §7.1; the operator's decision K5).
  *
  * Manifest fields, satellite profile only (a full Crow ignores them):
  *   "satellite": true                    eligible, but not measured yet: refused on a satellite

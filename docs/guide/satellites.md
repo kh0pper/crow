@@ -35,7 +35,7 @@ A restore is possible on **any** machine that has Crow's code and your keychain 
 The restore needs the passphrase-encrypted keychain export that contains Crow's **off-site backup key** (`offsite-backup / CROW_OFFSITE_BACKUP_KEY`).
 
 - If you already keep an export offline, use that one.
-- If Crow is still running, make a fresh export first: **Settings → Security & passwords → Saved passwords & keys → Export**. Until an export holds that key, Crow says so on the Nest and does not upload any backup, because a backup nobody can decrypt is worse than no backup.
+- If Crow is still running, make a fresh export first: **Settings → Security & passwords → Saved passwords & keys → Export**. Until an export holds that key, Crow says so on the Servers page (and in a daily notification once the off-site timer is on) and does not upload any backup, because a backup nobody can decrypt is worse than no backup.
 - The export file and its passphrase belong together. Without both, the off-site copy cannot be opened — that is the point of the design.
 - Only import a keychain export you made yourself: an import can bring back an off-site key, and a key you did not make would encrypt future backups for someone else.
 
@@ -72,7 +72,7 @@ Every chunk of the file is authenticated before it is written. Plaintext goes to
 | 0 | Restored and verified |
 | 2 | Usage: a missing or bad argument, an unreadable `--file`, or `--out` already exists |
 | 3 | The export could not be opened (wrong passphrase, not an export file, or the export holds no off-site backup key) |
-| 4 | The vault file was refused. The message names the reason: `bad_magic`, `bad_version`, `bad_header`, `header_too_large`, `bad_chunk_size`, `key_mismatch`, `chunk_too_large`, `tag_failure`, `truncated`, `trailing_data` or `rollback` |
+| 4 | The vault file was refused. The message names the reason: `bad_magic`, `bad_version`, `bad_header`, `header_too_large`, `bad_chunk_size`, `key_mismatch`, `chunk_too_large`, `tag_failure`, `truncated`, `trailing_data`, `rollback`, `partial_exists` or `out_exists` (a file is already there: nothing is overwritten) |
 
 A `rollback` refusal means the file is not the backup for the date you asked for. A `tag_failure` means the file is damaged, was sealed with a different key, or has been tampered with — restore a different copy instead of trying to repair it.
 
@@ -81,4 +81,7 @@ Afterwards, put the restored `crow.db` in place by hand: stop Crow, move the old
 ::: tip Keep a second way onto the satellite
 The restore reads a file that sits on the satellite, so you need *some* way to log in there that does not depend on the primary machine — an ssh key kept with the keychain export, or the hosting provider's console. Keep it wherever you keep the export, and test it once before you need it.
 :::
-- Before enabling the off-site timers on a machine, check that its systemd can sandbox a user service: `systemd-run --user --wait -p PrivateTmp=yes -p ProtectSystem=strict -p ReadWritePaths=$HOME/.crow "$(command -v node)" -e 1` must exit 0. If it fails (some kernels restrict unprivileged user namespaces), the timers would never start and never warn you.
+
+## Before you turn on the off-site timers
+
+Before enabling the off-site timers on a machine, check that its systemd can sandbox a user service: `systemd-run --user --wait -p PrivateTmp=yes -p ProtectSystem=strict -p ReadWritePaths=$HOME/.crow "$(command -v node)" -e 1` must exit 0. If it fails (some kernels restrict unprivileged user namespaces), the timers would never start and never warn you.

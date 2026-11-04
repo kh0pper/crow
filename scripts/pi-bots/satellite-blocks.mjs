@@ -24,7 +24,7 @@
  *    mcp_writer.mjs writes exactly that placeholder for it and the block takes its place. Any
  *    other entry under that name (a real local add-on) still wins and logs the collision;
  *  - not the owner's own turn and the bot has not opted in (`satellite_bot_optins.any_turn`,
- *    Kevin's Q2 answer). The mount refuses that same combination, so emitting would only cost
+ *    the operator's Q2 ruling). The mount refuses that same combination, so emitting would only cost
  *    tool budget;
  *  - file-mode MCP delivery (helper spec §4.5: the token and the signature must never land in
  *    <sessionDir>/.mcp.json);

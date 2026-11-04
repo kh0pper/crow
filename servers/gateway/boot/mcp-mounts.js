@@ -413,7 +413,7 @@ export async function mountMcpServers(app, deps) {
   }
   // Satellite tools (SAT-7 part B): /satellite-tools/<satellite_id>/<bundle>/mcp, the bots' door to
   // a satellite-hosted bundle (satellites/tools-mount.js), on the same shared loopback mount. It
-  // mounts with ownerTurnOnly:false because it applies Kevin's Q2 rule itself (the owner's turn OR
+  // mounts with ownerTurnOnly:false because it applies the operator's Q2 ruling itself (the owner's turn OR
   // the per-bot opt-in), and asks the same SYNC Perch accessor for that check. Independent of the
   // services mount above: one failing never un-mounts the other.
   try {

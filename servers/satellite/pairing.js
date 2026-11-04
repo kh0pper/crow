@@ -18,7 +18,7 @@
  * reaches the MAC check spends its nonce_s whatever the outcome (one complete per hello).
  * Errors are JSON {error:"<snake_code>"}, which crow's client reports as the refusal detail.
  *
- * Hello rate limits (Kevin note c): 10/min per source AND 30/min in all, so one flooding source
+ * Hello rate limits (the operator's note c): 10/min per source AND 30/min in all, so one flooding source
  * cannot lock the owner out for the code's 15 minutes.
  */
 import { randomBytes } from "node:crypto";

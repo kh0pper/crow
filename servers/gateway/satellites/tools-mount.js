@@ -12,7 +12,7 @@
  * spec §8 "Satellite"):
  *  1. the owner's own turn (isOwnerTurnScope: an owner `j:` job, or an `s:` Perch session the
  *     engine reports as serving the owner) OR the per-bot opt-in (`satellite_bot_optins.any_turn`,
- *     Kevin's Q2 answer: a bot the owner marked "also on other people's turns" may run satellite
+ *     the operator's Q2 ruling: a bot the owner marked "also on other people's turns" may run satellite
  *     tools on a Discord or email turn too). Not the owner's and not opted in -> not_owner_turn;
  *  2. the bot exists and is enabled (resolveSignedScope already refuses a disabled bot; this is
  *     the same rule said again where the grant is read);
@@ -90,7 +90,7 @@ export async function authorizeSatelliteCall(db, actor, { sat: satelliteId, bund
     if (!actor || typeof actor !== "object" || typeof actor.botId !== "string" || !actor.botId) return refuse("not_granted");
     if (actor.scope !== "session" && actor.scope !== "job") return refuse("not_granted");
     if (typeof satelliteId !== "string" || !satelliteId || typeof bundle !== "string" || !bundle) return refuse("not_found");
-    // 1. Kevin's Q2: the owner's own turn, or the owner opted this bot in.
+    // 1. The operator's Q2 ruling: the owner's own turn, or the owner opted this bot in.
     const ownerTurn = isOwnerTurnScope(actor, { engine });
     if (!ownerTurn && !(await getBotOptin(db, actor.botId))) return refuse("not_owner_turn");
     // 2. the bot, enabled (pi_bot_defs.enabled is the one "on" switch a bot has).

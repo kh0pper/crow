@@ -8,6 +8,7 @@
  * (sources._setSourcesForTest), the real save handler and the real change tracker.
  */
 import { test, before, after, beforeEach } from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -48,9 +49,15 @@ const mkRes = () => {
   return res;
 };
 /** The real POST handler, the way the browser drives it. */
-const post = async (body) => {
+// A request from the owner's own local password session (the only one that may change a bot's
+// satellite opt-in), or from a peer's SSO sign-in (which may not). A client address that is not
+// this machine's, so the self-origin rule does not apply.
+const OWNER_SESS = "owner-sess-satoptin", SSO_SESS = "sso-sess-satoptin";
+const hashTok = (t) => createHash("sha256").update(t).digest("hex");
+const post = async (body, { session = OWNER_SESS } = {}) => {
   const res = mkRes();
-  await handleBotBuilderPost({ body: { action: "save_safety", bot_id: BOT, ...body }, headers: {}, cookies: {} }, res, { db });
+  const req = { body: { action: "save_safety", bot_id: BOT, ...body }, headers: {}, cookies: {}, dashboardSession: session, socket: { remoteAddress: "100.64.20.5" }, ip: "100.64.20.5" };
+  await handleBotBuilderPost(req, res, { db });
   return res;
 };
 
@@ -58,6 +65,9 @@ before(async () => {
   assert.ok(process.env.CROW_SUITE_SCRATCH, "runs only in the scratch suite env");
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: process.env, stdio: "pipe", cwd: join(import.meta.dirname, "..") });
   db = createDbClient(DB_PATH);
+  for (const [tok, scopes] of [[OWNER_SESS, "dashboard"], [SSO_SESS, "dashboard sso src:instance-peer"]]) {
+    await db.execute({ sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, created_at) VALUES (?, 'access', 'dashboard', ?, datetime('now','+1 day'), datetime('now'))", args: [hashTok(tok), scopes] });
+  }
   // No MCP probe on a page render: the tool sources are pinned.
   _setSourcesForTest({ error: null, sources: [] });
 });
@@ -168,4 +178,25 @@ test("the opt-in is not a grant: saving it never touches the bot's tool list", a
   await applySatelliteOptin({ db, botId: BOT, want: r.satOptin, lang: "en" });
   assert.deepEqual(def.tools.crow_mcp, ["crow-memory/crow_recall"]);
   assert.equal(await getBotOptin(db, BOT), true);
+});
+
+test("spec §8: a peer's SSO sign-in can never switch a bot's satellite opt-in on", async () => {
+  installSatellite([{ id: "gitea", mode: "satellite", host: "sat-alpha-0001", version: "1.0.0" }]);
+  await applySatelliteOptin({ db, botId: BOT, want: false, lang: "en" });
+  const res = await post({ sat_any_turn: "on", sat_any_turn_rendered: "1", pp_read_paths: "/home/u/notes" }, { session: SSO_SESS });
+  assert.match(res.redirected, /saved=1/, "the rest of the save still lands");
+  assert.match(decodeURIComponent(res.redirected), /only be changed from your own sign-in/);
+  assert.equal(await getBotOptin(db, BOT), false, "the opt-in stays off");
+});
+
+test("spec §8: a non-owner save leaves the bot's satellite grants exactly as they were", async () => {
+  const { keepSatelliteGrants } = await import("../servers/gateway/dashboard/panels/bot-builder/api-handlers.js");
+  const bundleIds = new Set(["gitea"]);
+  const orig = { tools: { crow_mcp: ["crow-memory/crow_recall", "gitea/gitea_list_repos"] } };
+  const added = { tools: { crow_mcp: ["crow-memory/crow_recall", "gitea/gitea_list_repos", "gitea/gitea_create_repo", "crow-tasks/x"] } };
+  keepSatelliteGrants(added, orig, { bundleIds });
+  assert.deepEqual(added.tools.crow_mcp.sort(), ["crow-memory/crow_recall", "crow-tasks/x", "gitea/gitea_list_repos"].sort(), "a new satellite grant is dropped, other changes kept");
+  const removed = { tools: { crow_mcp: ["crow-memory/crow_recall"] } };
+  keepSatelliteGrants(removed, orig, { bundleIds });
+  assert.ok(removed.tools.crow_mcp.includes("gitea/gitea_list_repos"), "a removed satellite grant is put back");
 });
