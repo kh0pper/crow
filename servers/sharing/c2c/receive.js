@@ -340,7 +340,9 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
   const envelope = parsed.ok ? null : parsed.envelope;
   const address = frame ? addressOf(frame) : envelopeAddress(envelope);
   // A known kind's body failure still names its kind; an unknown one does not.
-  const kind = frame ? frame.kind : (typeof payload?.kind === "string" ? payload.kind : null);
+  // An unknown kind is routed as `null` (its null target cannot be judged, so it is allowed
+  // and consumed, R4); a known kind with a bad body keeps its name for the routing rule.
+  const kind = frame ? frame.kind : (parsed.reason === "unsupported" ? null : (typeof payload?.kind === "string" ? payload.kind : null));
 
   // 2. Legacy proof: a holding refusal (R5) and a UI flag. F4: nothing is
   // consumed here — the frame may still apply once its sender updates. An ack or

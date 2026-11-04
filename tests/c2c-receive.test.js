@@ -668,6 +668,22 @@ test("F3: an invite with an unknown role at seq n is consumed, so seq n+1 is new
   });
 });
 
+test("an unknown kind with a null target is consumed and refused, never held (the '*' stream does not wedge)", async () => {
+  await withDb(async ({ db }) => {
+    await addProject(db);
+    await addVisit(db);
+    const future = {
+      type: "c2c", v: 1, kind: "project.future", project_uuid: P1,
+      epoch: EPOCH, seq: 1, from_instance_id: PEER, to_instance_id: null, body: {},
+    };
+    const out = await deliver(db, future);
+    assert.equal(refusals(out).length, 1);
+    assert.equal(refusals(out)[0].frame.body.reason, "unsupported", "terminal, not the holding not_home");
+    const rows = (await db.execute({ sql: "SELECT stream, high_water FROM c2c_inbound_seq", args: [] })).rows;
+    assert.deepEqual(rows.map((r) => [r.stream, Number(r.high_water)]), [["*", 1]], "the '*' stream's seq 1 is consumed");
+  });
+});
+
 /* ----------------- F4: unknown kinds and bad bodies pass proof + routing first */
 
 const futureFrame = (over = {}) => ({
