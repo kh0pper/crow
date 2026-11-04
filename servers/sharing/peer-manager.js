@@ -326,11 +326,15 @@ export class PeerManager {
     // be queued before we push back (contacts) or kill (any kind). See the
     // constants above for why it is backpressure first.
     this.chainSoftFrames = positiveOr(chainSoftFrames, CHAIN_SOFT_FRAMES);
-    this.chainSoftBytes = positiveOr(chainSoftBytes, CHAIN_SOFT_BYTES);
     this.chainMaxFrames = positiveOr(chainMaxFrames, CHAIN_MAX_FRAMES);
     // Derived from OUR line cap: the kill cap must be able to hold two maximal
     // lines, or a peer sending back-to-back legal lines would be cut.
     this.chainMaxBytes = positiveOr(chainMaxBytes, chainMaxBytesFor(this.postAdmitLineMax));
+    // The soft cap must sit at least one maximal line under the kill cap, or a
+    // lowered line cap (CROW_PEER_LINE_MAX_BYTES) would kill a legitimate burst
+    // before it was ever paused. The resume mark follows it down.
+    this.chainSoftBytes = Math.max(1, Math.min(positiveOr(chainSoftBytes, CHAIN_SOFT_BYTES), this.chainMaxBytes - this.postAdmitLineMax - 1));
+    this.chainResumeBytes = Math.min(CHAIN_RESUME_BYTES, Math.floor(this.chainSoftBytes / 4));
     // PT-2a: how long a sibling that offered pair binding may take to send
     // its `pair-binding` frame once we have proven ourselves to it.
     this.pairBindingWaitMs = pairBindingWaitMs;
@@ -666,7 +670,7 @@ export class PeerManager {
     // resume marks (a quarter of the soft caps), never on one frame.
     const releaseBackpressure = () => {
       if (!state.paused) return;
-      if (state.chainFrames > CHAIN_RESUME_FRAMES || state.chainBytes > CHAIN_RESUME_BYTES) return;
+      if (state.chainFrames > CHAIN_RESUME_FRAMES || state.chainBytes > this.chainResumeBytes) return;
       state.paused = false;
       try { conn.resume(); } catch { /* already gone */ }
     };

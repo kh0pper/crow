@@ -196,12 +196,21 @@ test("the four caps default to the plan's values; a constructor option lowers an
   assert.equal(CHAIN_MAX_FRAMES, 4096);
   // A lower line cap lowers the byte cap with it: two maximal lines must fit.
   assert.equal(new PeerManager(id, { env: {}, postAdmitLineMax: CAP }).chainMaxBytes, chainMaxBytesFor(CAP));
-  // The seams.
+  // A lowered line cap pulls the soft byte cap down with it: a legitimate burst
+  // must be paused at least one maximal line before the kill cap.
+  for (const lineMax of [1024 * 1024, 4 * 1024 * 1024, CAP]) {
+    const pm2 = new PeerManager(id, { env: {}, postAdmitLineMax: lineMax });
+    assert.ok(pm2.chainSoftBytes + pm2.postAdmitLineMax < pm2.chainMaxBytes,
+      `line cap ${lineMax}: soft ${pm2.chainSoftBytes} + one line ${pm2.postAdmitLineMax} < kill ${pm2.chainMaxBytes}`);
+    assert.ok(pm2.chainResumeBytes <= pm2.chainSoftBytes, "the resume mark sits under the soft cap");
+  }
+  // The seams (a soft byte seam above what the kill cap allows is pulled under it).
   const low = new PeerManager(id, { env: {}, chainSoftFrames: 4, chainSoftBytes: 8, chainMaxFrames: 6, chainMaxBytes: 10 });
   assert.deepEqual(
-    [low.chainSoftFrames, low.chainSoftBytes, low.chainMaxFrames, low.chainMaxBytes],
-    [4, 8, 6, 10],
+    [low.chainSoftFrames, low.chainMaxFrames, low.chainMaxBytes],
+    [4, 6, 10],
   );
+  assert.ok(low.chainSoftBytes >= 1 && low.chainSoftBytes <= 8);
   // Not a positive finite number: the default, never "disabled".
   const junk = new PeerManager(id, {
     env: {}, chainSoftFrames: 0, chainSoftBytes: -1, chainMaxFrames: NaN, chainMaxBytes: Infinity,
