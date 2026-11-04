@@ -99,9 +99,19 @@ process.stdin.resume();
     assert.notEqual(r.abstract, "ABSTRACT", "host abstract sockets are not reachable: " + r.abstract);
     assert.match(r.proxy, /^HTTP\/1\.1 403/, "the proxy is the relay, and it refuses the cloud metadata address");
     assert.equal(r.proxyEnv, true);
-    for (let i = 0; i < 100 && !(pi.piPid && pi.piPid !== pi.sandboxInitPid); i++) await new Promise((res) => setTimeout(res, 50));
     const { readFileSync } = await import("node:fs");
-    const piCmd = readFileSync("/proc/" + pi.piPid + "/cmdline", "utf8");
+    // The netns entry becomes pi a moment after the sandbox reports in; under CI load the
+    // pid can still be the entry when we first look, so poll its cmdline (bounded) instead
+    // of reading it once.
+    const cmdOf = (pid) => { try { return readFileSync("/proc/" + pid + "/cmdline", "utf8"); } catch { return ""; } };
+    let piCmd = "";
+    for (let i = 0; i < 200; i++) {
+      if (pi.piPid && pi.piPid !== pi.sandboxInitPid) {
+        piCmd = cmdOf(pi.piPid);
+        if (piCmd.includes("stub-pi.mjs") && !piCmd.includes("pi_netns_entry.mjs")) break;
+      }
+      await new Promise((res) => setTimeout(res, 50));
+    }
     assert.ok(piCmd.includes("stub-pi.mjs") && !piCmd.includes("pi_netns_entry.mjs"), "piPid is pi itself, past the entry: " + piCmd.replace(/\0/g, " "));
   } finally {
     await pi.close();
