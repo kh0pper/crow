@@ -60,6 +60,34 @@ export async function runCrossHostAuditPrune(dbFactory = createDbClient) {
 }
 
 /**
+ * One sync-conflict expiry pass (servers/sharing/sync-conflict-expiry.js):
+ * resolve every conflict that auto-expires (winner kept: the winning side was
+ * already applied when the row was written), then report it only when it did
+ * something. Opens a fresh db client via the injected factory and always
+ * closes it. NEVER throws — a boot sweep must not cascade into an outage.
+ *
+ * @param {() => {execute: Function, close?: Function}} [dbFactory]
+ * @returns {Promise<number>} rows expired
+ */
+export async function runSyncConflictExpirySweep(dbFactory = createDbClient) {
+  try {
+    const { expireOldConflicts, readExpireDays } = await import("../../sharing/sync-conflict-expiry.js");
+    const db = dbFactory();
+    try {
+      const days = await readExpireDays(db);
+      const n = await expireOldConflicts(db, { days });
+      if (n > 0) console.log(`[sync] expired ${n} old conflicts (older than ${days} days, winner kept)`);
+      return n;
+    } finally {
+      try { db.close?.(); } catch {}
+    }
+  } catch (err) {
+    console.warn("[sync] conflict expiry failed:", err?.message || err);
+    return 0;
+  }
+}
+
+/**
  * Create the reserved Crow voice bot once (servers/shared/voice-bot.js
  * ensureVoiceBot). Skipped on a --no-auth gateway: a loopback secondary
  * gateway is never the operator's dashboard. Opens a fresh db client via the
@@ -481,6 +509,15 @@ export async function runPostListenSetup(server, app, deps) {
     }, XHOST_AUDIT_PRUNE_BOOT_DELAY_MS).unref();
 
     console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
+  }
+
+  // Old sync conflicts expire on their own (operator ruling): the winner is
+  // already applied, so an unresolved row nobody opened is only review noise.
+  // Once after listen, then every 6 h. Never throws; logs only when it acted.
+  {
+    const SYNC_CONFLICT_EXPIRY_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+    setImmediate(() => { runSyncConflictExpirySweep(createDbClient); });
+    setInterval(() => { runSyncConflictExpirySweep(createDbClient); }, SYNC_CONFLICT_EXPIRY_INTERVAL_MS).unref();
   }
 
   // Card offers (redesign P5): the recovery sweep, every 10 minutes after the boot pass in
