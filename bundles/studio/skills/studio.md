@@ -111,7 +111,7 @@ You may write patterns, steps, locks, chains, slices and pad settings, but only 
 | `studio_bank_add` | Add a bank of 16 empty pads to a kit (at most 8 banks per kit). |
 | `studio_bank_rename` | Rename a bank. |
 | `studio_pad_assign` | Put a sample, or one of its slices (`slice_id`), on a pad. An empty pad is yours to fill; a pad that already plays a sound is the operator's, and repointing it is refused. |
-| `studio_pad_set` | One pad's own fields: `name`, `mode` (`oneshot` plays to the end, `gate` releases at the step end), `pitch` ±24 semitones, `gain_db`, `pan`, `attack_ms`/`decay_ms`/`sustain`/`release_ms`, `filter {type, cutoff_hz, resonance}`, `choke` group 1–8 (a hit cuts the other voices in its group) and `reverse`. |
+| `studio_pad_set` | One pad's own fields, inside `fields` (`{track_id, bank_id, index, fields: {…}}`): `name`, `mode` (`oneshot` plays to the end, `gate` releases at the step end), `pitch` ±24 semitones, `gain_db`, `pan`, `attack_ms`/`decay_ms`/`sustain`/`release_ms`, `filter {type, cutoff_hz, resonance}`, `choke` group 1–8 (a hit cuts the other voices in its group) and `reverse`. |
 | `studio_slice_set` | Replace a sample's slices — `{id?, start_frame, end_frame}` in order, at most 64. A kept slice id keeps its pads playing it; removing a slice a pad plays is refused. |
 | `studio_sample_rename` | Rename a sample. |
 

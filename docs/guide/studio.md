@@ -87,7 +87,7 @@ A **sampler track** plays a **kit**: banks of 16 pads, each pad holding one samp
 
 **Patterns and chains.** A pattern clip holds up to 16 patterns and a **chain**: an ordered list of them that loops (`A, B, A`), so one clip is a bar or a phrase and the chain is the part. Pattern tabs, the chain editor and the length and swing controls sit above the steps.
 
-**What the bot can do with the sampler.** It writes patterns, steps, locks, chains, slices and pad settings, and every one of those is a step you can undo. It cannot bring a sound in — it can import nothing, record nothing and resample nothing — and no step of its, undo included, can drop or replace the sound a pad plays, remove a bank or a sampler track whose pads hold sounds, swap a sampler track's device, or take back a sample's arrival. A track you lock keeps it off that kit, and re-chopping a sound a locked track plays is refused too. It cannot hover over a pad in your browser, so it cannot hear what you hear: ask it for a render and say what you think.
+**What the bot can do with the sampler.** It writes patterns, steps, locks, chains, slices and pad settings, and every one of those is a step you can undo. It cannot bring a sound in — it can import nothing, record nothing and resample nothing — and no step of its, undo included, can drop or replace the sound a pad plays, undo the adding of a bank or a sampler track whose pads now hold sounds, swap a sampler track's device, or take back a sample's arrival. A track you lock keeps it off that kit, and re-chopping a sound a locked track plays is refused too. It cannot hover over a pad in your browser, so it cannot hear what you hear: ask it for a render and say what you think.
 
 ## The timeline
 

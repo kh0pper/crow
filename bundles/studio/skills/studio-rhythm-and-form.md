@@ -39,7 +39,7 @@ Studio's grid is beats, not audio: a bar is 4 beats, a 16th is 0.25 beat, and sw
 - Step *n* → `t = (n − 1) × 0.25`; steps 1, 5, 9, 13 are `t` 0, 1, 2, 3.
 - A clip is `length_bars × 4` beats and it loops, so a note must end inside it (`t + d ≤ length`): the loop cuts anything crossing.
 - Milliseconds → beats: `ms × bpm ÷ 60000`, so 10 ms is 0.02 beat at 120 bpm. Four bars last `960 ÷ bpm` seconds.
-- There is no time-signature or swing control — 3/4: a 3-bar clip (12 beats) holds four bars; 6/8: triplet 8ths at 0.333, two 6/8 bars per clip bar. Say which you did.
+- There is no time-signature control, and note clips have no swing control (a sampler's pattern clip does: see Sampler practice) — 3/4: a 3-bar clip (12 beats) holds four bars; 6/8: triplet 8ths at 0.333, two 6/8 bars per clip bar. Say which you did.
 
 ## Swing
 
@@ -108,27 +108,27 @@ Either way: hits 0.1–0.25 beat, nothing crossing the loop point, and a report 
 ## Sampler and groovebox practice
 
 - A clip is a pattern. One bar is 16 steps; two to four bars when the last bar carries a fill.
-- Pattern variations are scenes: A, A with one element changed, B, fill. Name them by section ("V1 drums A") and give the operator the launch order.
+- With note clips, pattern variations are scenes: A, A with one element changed, B, fill. On a sampler track they are patterns of one clip played by its chain (see Sampler practice). Name them by section ("V1 drums A") and give the operator the launch order.
 - Motion must be written, not automated: a longer clip (8 or 16 bars) whose later steps climb, or thin out, is the only movement inside a clip. `studio_track_set_param` changes a track for the whole song, not one scene; say so.
 - Studio cannot yet time-stretch or repitch a sample to tempo, fire conditional or probability trigs, record knob motion, or play samples through the performance-effects bus. Retrigs are just repeated 32nds, and `studio_render` is the only bounce.
 
 ## Sampler practice
 
-On a sampler track the ten grooves above are 16 steps of pads, one bar: step 1 is `t` 0 and step 5 is beat 2. The pad names are the kit's own — `kick`, `snare`, `clap`, `rim`, `hat`, `open hat`, `ride`, `crash`, `tom`, `tambourine` — plus whatever else the kit holds, a `sub`, a `cajón` or a chord stab, which only the operator assigns. A style's row lists the steps each pad fires; every other pad is silent on that step. `step.toggle` puts a hit on one step (`v` is its velocity) and `step.set` gives that one step its locks.
+On a sampler track the ten grooves above are 16 steps of pads, one bar: step 1 is `at` 0 and step 5 is beat 2. The rows name pads by what they hold — `kick`, `snare`, `clap`, `rim`, `hat`, `open hat`, `ride`, `crash`, `tom`, `tambourine`, a `sub`, a `cajón` or a chord stab — but a new pad has no name: read `studio_samples` to see which sound sits on which pad (only the operator brings sounds in), and name the pads with `pad.set` so the steps read. A style's row lists the steps each pad fires; every other pad is silent on that step. `step.toggle` puts a hit on one step (`v` is its velocity) and `step.set` gives that one step its locks.
 
-The swing column is `pattern.set_swing`'s own value, not a percentage: for both 16ths and 8ths, `swing = (p − 50) ÷ 50` where *p* is the percentage in the Swing section above, so 58 % is `0.16` and 66.7 % is `0.33`.
+The swing column is `pattern.set_swing`'s own value, not a percentage: `swing = (p − 50) ÷ 50` where *p* is the percentage in the Swing section above, so 58 % is `0.16` and 66.7 % is `0.33`. Swing delays only the even-numbered steps (2, 4 … 16, the steps with an odd `at`) by `swing` × one step, so with 16th steps it swings the 16ths and a hit on an odd-numbered step never moves. To swing 8ths, set the clip to 8th steps (`pattern.set_steps_beat` 0.5, 8 steps a bar) and write the pattern on that grid, as the Reggae row does.
 
 | Style | bpm | Pads → steps | Swing | Which steps carry a lock |
 |---|---|---|---|---|
 | Rock | 100–140 | kick 1, 9 · snare 5, 13 · hat 1, 3, 5, 7, 9, 11, 13, 15 · crash 1 on a section start | 0 | hat `gain_db` +2 on step 1 (the accent) |
 | Pop | 90–130 | kick 1, 9 · snare + clap 5, 13 · hat 1, 3, 5, 7, 9, 11, 13, 15, all 16 in the chorus | 0 | snare `gain_db` +2 on 5 and 13 |
-| Funk | 90–120 | kick 1, 4, 7, 11 · snare 5, 13 · snare ghosts 3, 10, 15 at v 30 · hat all 16 with accents on 1, 3, 5, 7, 9, 11, 13, 15 | 0 | hat `decay_ms` 60 on 15 (the hat before the bar line) |
-| Boom bap | 80–100 | kick 1, 8, 11 · snare 5, 13 · hat 1, 3, 5, 7, 9, 11, 13, 15 | 0.16–0.20 | hat `decay_ms` 60 on 3, 7, 11 and 15 |
-| Trap | 130–170 (felt 65–85) | kick 1, 7, 11 · clap 9 · hat all 16 · sub 1, 7, 11 | 0 | hat `decay_ms` 40 on 15 and 16 (the roll); set `step_beats` 0.125 and use 32 positions for 32nd rolls |
-| House | 118–130 | kick 1, 5, 9, 13 · clap 5, 13 · open hat 3, 7, 11, 15 | 0.08–0.16 | open hat `gain_db` +2 on 3, 7, 11 and 15 |
+| Funk | 90–120 | kick 1, 4, 7, 11 · snare 5, 13 · snare ghosts 3, 10, 15 at v 30 · hat all 16 with accents on 1, 3, 5, 7, 9, 11, 13, 15 | 0 | hat `decay_ms` 60 on 16 (the hat before the bar line) |
+| Boom bap | 80–100 | kick 1, 8, 11 · snare 5, 13 · hat all 16, v 100 on odd steps and v 60 on even ones | 0.16–0.20 (moves the even-step hats and the kick on 8) | hat `decay_ms` 60 on 4, 8, 12 and 16 |
+| Trap | 130–170 (felt 65–85) | kick 1, 7, 11 · clap 9 · hat all 16 · sub 1, 7, 11 | 0 | hat `decay_ms` 40 on 15 and 16 (the roll). For 32nd rolls the whole clip changes grid: `pattern.set_steps_beat` 0.125 and `pattern.set_length` 32, and every hit above moves to step (n − 1) × 2 + 1 |
+| House | 118–130 | kick 1, 5, 9, 13 · clap 5, 13 · open hat 3, 7, 11, 15 · closed hat 2, 4, 6, 8, 10, 12, 14, 16 at v 60 | 0.08–0.16 (moves the closed hats) | open hat `gain_db` +2 on 3, 7, 11 and 15 |
 | Techno | 120–140 | kick 1, 5, 9, 13 · rim 9 or 13 · hat all 16 | 0 | hat `cutoff_hz` 4000 on step 1, `decay_ms` 200 on step 9 |
 | Drum & bass | 160–180 | kick 1, 11 · snare 5, 13 with a ghost at 7 at v 30 · hat 1, 3, 5, 7, 9, 11, 13, 15 | 0 | kick `decay_ms` 120 on 11 |
-| Reggae | 60–90 | kick 9 · rim 9 · hat 1, 3, 5, 7, 9, 11, 13, 15 · chord stab 3, 7, 11, 15 | 0.16–0.33 | rim `gain_db` +2 on 9 |
+| Reggae | 60–90 | on 8th steps (`pattern.set_steps_beat` 0.5, `pattern.set_length` 8): kick 5 · rim 5 · hat 1–8 · chord stab 2, 4, 6, 8 | 0.16–0.33 (swings the off-8ths: the stabs and every other hat) | rim `gain_db` +2 on 5 |
 | Folk | 60–140 | cajón low 1, 9 · cajón slap 5, 13 · tambourine 5, 13 | 0 | tambourine `gain_db` −3 on 5 |
 
 - A step carries up to 8 locks, one value per pad field: a step that wants a shorter hat and a lower one is one `step.set` with two locks. Velocity is not a lock — write it with `step.toggle`'s `v` or `step.set`'s `v`.
