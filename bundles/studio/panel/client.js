@@ -235,9 +235,11 @@
  *
  * The sampler commands follow: a kit's `bank.*` and `pad.*`, the song's
  * `sample.*` and `slice.*`, a pattern clip's `pattern.*`, `step.*` and
- * `chain.*`, and `clip.add_pattern` that makes one. `sample.add` is not here
- * for the same reason `take.add` is not: only the gateway's sample upload
- * finish route adds a sample, as Studio's own step.
+ * `chain.*`, and `clip.add_pattern` that makes one. `pad.clear` is here because
+ * the panel's **Clear pad** is the only way to run it: it is people-only, so it
+ * has no MCP tool. `sample.add` is not here for the same reason `take.add` is
+ * not: only the gateway's sample upload finish route adds a sample, as Studio's
+ * own step.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -281,6 +283,7 @@ export const COMMANDS = Object.freeze([
   "bank.rename",
   "pad.set",
   "pad.assign",
+  "pad.clear",
   "sample.rename",
   "slice.set",
   "pattern.add",
@@ -5914,6 +5917,17 @@ export const CLIENT_SCRIPT = [
   "      fields.appendChild(padSelect(track, bank, pad, 'choke', 'Choke', chokes, String(Number(pad.choke) || 0)));",
   "      fields.appendChild(padCheck(track, bank, pad, 'reverse', 'Reverse', pad.reverse === true));",
   "      panel.appendChild(fields);",
+  "      // The one control that takes the sound away: the operator's own, so it",
+  "      // asks first (the panel's two-press yes) and sends exactly one pad.clear.",
+  "      var clear = button('st-btn st-small st-danger', 'Clear pad', {",
+  "        'data-act': 'clear-pad',",
+  "        'data-track-id': track.id,",
+  "        'data-bank-id': bank.id,",
+  "        'data-pad-index': String(index),",
+  "        title: 'Take the sound off this pad; its other settings stay'",
+  "      });",
+  "      clear.disabled = !pad.sample_id;",
+  "      panel.appendChild(clear);",
   "      return panel;",
   "    }",
   "",
@@ -8620,6 +8634,19 @@ export const CLIENT_SCRIPT = [
   "        if (!kitTrack || !kitBank) return;",
   "        if (act === 'pad-record') toggleSampleRecord(kitSnap, kitTrack, kitBank, kitPad);",
   "        else toggleResample(kitSnap, kitTrack, kitBank, kitPad);",
+  "        return;",
+  "      }",
+  "      // Clear pad: the operator's own step, so it asks first. It empties the",
+  "      // pad's sound (nothing else), which is what a re-chop needs when a pad",
+  "      // still plays a slice the new chop would drop.",
+  "      if (act === 'clear-pad' && trackId) {",
+  "        var clearTrack = trackOf(snap, trackId);",
+  "        var clearBank = bankOf(snap, trackId, String(target.getAttribute('data-bank-id') || ''));",
+  "        var clearIndex = Number(target.getAttribute('data-pad-index'));",
+  "        if (!clearTrack || !clearBank || !Number.isInteger(clearIndex)) return;",
+  "        confirmThen(target, function () {",
+  "          send('pad.clear', { track_id: clearTrack.id, bank_id: clearBank.id, index: clearIndex });",
+  "        });",
   "        return;",
   "      }",
   "      if (act === 'close-clip') {",

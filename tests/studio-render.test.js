@@ -12,6 +12,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -22,6 +25,14 @@ import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js
 import { decodeWav, encodeWav24 } from "../bundles/studio/server/wav.js";
 
 const SAMPLE_RATE = 48000;
+
+/**
+ * The engine client `render.js` itself builds its engines with (the same
+ * CommonJS module, so the same object): the cap test wraps its `create` to see
+ * what a render asks for.
+ */
+const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
+const studioEngine = createRequire(join(ENGINE_DIR, "x.js"))(join(ENGINE_DIR, "engine-client.js"));
 
 /** The project every song in these tests belongs to. */
 const PROJECT = 7;
@@ -958,6 +969,23 @@ function sampleAudioOf() {
 }
 
 /**
+ * @param {Float32Array} channel
+ * @param {number} from the first frame of the window
+ * @param {number} to the frame it stops at (exclusive)
+ * @returns {number} the largest absolute sample in that window
+ */
+function peakIn(channel, from, to) {
+  let peak = 0;
+  const start = Math.max(0, Math.trunc(from));
+  const end = Math.min(channel.length, Math.trunc(to));
+  for (let at = start; at < end; at += 1) {
+    const value = Math.abs(channel[at]);
+    if (value > peak) peak = value;
+  }
+  return peak;
+}
+
+/**
  * The smallest hub client `createStudioServer`'s render tool reads: one song,
  * in one project. A render issues no commands, so nothing else is needed.
  * @param {object} snapshot the song to render
@@ -1034,6 +1062,96 @@ test("render loads only the samples its patterns use", async () => {
   });
   assert.deepEqual(beforeAsked, [], "a window before the placement reads nothing");
   assert.deepEqual(session.missing_samples, [], "every sample this render heard was loaded");
+
+  // A chain whose entries name no pattern of the clip falls back to the clip's
+  // first pattern, exactly as the sequencer does: the steps have to sound.
+  const dangling = structuredClone(song);
+  dangling.clips["clip-1"].chain = ["gone"];
+  const fallback = [];
+  await renderSong(dangling, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      fallback.push(sample.id);
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(fallback, [SAMPLE_A, SAMPLE_B], "the clip's first pattern still loads its samples");
+});
+
+test("a render whose samples pass 256 MB keeps every one", async (t) => {
+  // Three samples on three steps of one pattern. `sampleCapBytes` stands in for
+  // the browser's 256 MB, lowered so three tiny samples pass it: an engine built
+  // with that cap would drop the first sample when the third one loads, and its
+  // step would play silence.
+  const song = samplerSong();
+  song.steps["clip-1/a/12/a.2"] = stepOf("clip-1", "a", 12, 2);
+
+  const frames = 4800;
+  // The engine counts one frame of slack per sample for the resampler's rounding.
+  const oneSampleBytes = (frames + 1) * 2 * 4;
+  const constant = () => new Float32Array(frames).fill(0.3);
+  const asked = [];
+
+  // The engine the render builds is watched here: its cap is the window's own
+  // sample bytes, not the (lowered) cap it would otherwise start under.
+  const built = [];
+  const realCreate = studioEngine.create;
+  studioEngine.create = async (context, options) => {
+    built.push(options);
+    return realCreate(context, options);
+  };
+  t.after(() => {
+    studioEngine.create = realCreate;
+  });
+
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 6,
+    sampleCapBytes: 2 * oneSampleBytes,
+    sampleAudio: async (sample) => {
+      asked.push(sample.id);
+      return { rate: SAMPLE_RATE, channels: [constant(), constant()] };
+    },
+  });
+
+  assert.equal(built.length, 1, "the render built one engine");
+  assert.equal(
+    built[0].maxSampleBytes,
+    3 * oneSampleBytes,
+    "its cap is room for every sample it loads, not the cap it started under",
+  );
+  assert.deepEqual(asked, [SAMPLE_A, SAMPLE_B, SAMPLE_C], "every sample the pattern triggers was read");
+  assert.deepEqual(rendered.missing_samples, []);
+
+  // Each step sounds. A 16th is 6000 frames at 120 bpm and 48 kHz, and pattern A
+  // plays at beats 0-4 and 8-12, so its steps land on 0, 24000, 48000 and
+  // 264000 frames. The first one proves the earliest sample was not trimmed
+  // away when a later load went past the cap the engine started with.
+  assert.ok(peakIn(rendered.left, 0, frames) > 0.05, "the first step sounds, so its sample is still loaded");
+  assert.ok(peakIn(rendered.left, 24000, 24000 + frames) > 0.05, "the second step sounds");
+  assert.ok(peakIn(rendered.left, 264000, 264000 + frames) > 0.05, "the third step sounds");
+});
+
+test("a render needing more than 1 GiB of samples is refused before it starts", async () => {
+  const song = samplerSong();
+  // Declared frames alone put the window past the budget: the refusal is
+  // arithmetic, so nothing is read, decoded or allocated.
+  song.samples[SAMPLE_A] = { ...song.samples[SAMPLE_A], frames: 200000000, channels: 2 };
+  const asked = [];
+
+  await assert.rejects(
+    renderSong(song, {
+      scene_id: "scene-1",
+      seconds: 1,
+      sampleAudio: async (sample) => {
+        asked.push(sample.id);
+        return sampleAudioOf();
+      },
+    }),
+    { message: /^This render needs \d+ MB of samples; a render holds at most 1024 MB\.$/ },
+  );
+  assert.deepEqual(asked, [], "no sample is read for a render that cannot hold them");
 });
 
 test("a render reports a missing sample", async () => {

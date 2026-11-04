@@ -88,6 +88,7 @@ const COMMAND_IDS = [
   "marker.rename",
   "pad.assign",
   "pad.assign_if_empty",
+  "pad.clear",
   "pad.set",
   "pattern.add",
   "pattern.remove",
@@ -168,6 +169,8 @@ const MINIMAL_ARGS = {
   "bank.rename": { track_id: "t1", bank_id: "b1", name: "A" },
   "pad.set": { track_id: "t1", bank_id: "b1", index: 0, fields: { gain_db: 0 } },
   "pad.assign": { track_id: "t1", bank_id: "b1", index: 0, sample_id: SAMPLE_ID },
+  // The operator's own way to empty a pad: no MCP tool, one GUI button.
+  "pad.clear": { track_id: "t1", bank_id: "b1", index: 0 },
   // Studio's own empty-only twin: the same arguments, a check that the pad is
   // still free made inside the hub's queue.
   "pad.assign_if_empty": { track_id: "t1", bank_id: "b1", index: 0, sample_id: SAMPLE_ID },
@@ -264,6 +267,8 @@ test("the registry lists every command", () => {
   assert.equal(getCommand("track.lock").humanOnly, true);
   assert.equal(getCommand("track.unlock").humanOnly, true);
   assert.equal(getCommand("take.discard").humanOnly, true);
+  // Emptying a pad is the operator's alone, like a track's lock.
+  assert.equal(getCommand("pad.clear").humanOnly, true);
   // A take only ever arrives through the gateway's upload finish route.
   assert.equal(getCommand("take.add").internal, true);
   // And a sample only ever arrives through the same finish route.
@@ -615,6 +620,11 @@ test("apply returns before/after for every touched field", (t) => {
     {
       id: "pad.assign_if_empty",
       args: { track_id: kitTrack, bank_id: "kit-b", index: 5, sample_id: SAMPLE_ID, slice_id: "s1" },
+      keys: [`${padOf("kit-b", 5)}|sample_id`, `${padOf("kit-b", 5)}|slice_id`],
+    },
+    {
+      id: "pad.clear",
+      args: { track_id: kitTrack, bank_id: "kit-b", index: 5 },
       keys: [`${padOf("kit-b", 5)}|sample_id`, `${padOf("kit-b", 5)}|slice_id`],
     },
     {

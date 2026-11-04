@@ -8,7 +8,7 @@
  * MCP tools and the shared history:
  *
  *   bank.add  bank.rename
- *   pad.set  pad.assign  pad.assign_if_empty (internal)
+ *   pad.set  pad.assign  pad.assign_if_empty (internal)  pad.clear (people only)
  *   sample.add (internal)  sample.rename  slice.set
  *   pattern.add  pattern.rename  pattern.remove  pattern.set_length
  *   pattern.set_steps_beat  pattern.set_swing
@@ -32,6 +32,11 @@
  *     has), and the hub refuses the twin without `internal: true`.
  *   - a pad's sample and its slice are checked against the song before they are
  *     written, so a pad never points at a sound that is not there.
+ *   - `pad.clear` is the operator's own: it takes the sound off a pad (and
+ *     nothing else, so the pad keeps its envelope, filter and level), which is
+ *     what a re-chop needs when a pad still plays one of the old slices. Being
+ *     people-only, it has no MCP tool (mcp.js skips every `humanOnly` command),
+ *     and the panel's **Clear pad** is the only way to run it.
  *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (a limit, an unknown pattern, a pad still playing a slice) leaves the
@@ -679,6 +684,49 @@ defineCommand({
   },
 });
 
+defineCommand({
+  id: "pad.clear",
+  // Only the operator empties a pad: taking a sound away is the same yes that
+  // `pad.assign` needs to repoint one, so it is a people-only command with no
+  // MCP tool (mcp.js builds tools only for the commands an agent may run).
+  humanOnly: true,
+  title: "Take the sound off a pad (people only)",
+  schema: z
+    .object({
+      track_id: idSchema.describe("the sampler track"),
+      bank_id: idSchema.describe("the bank the pad sits in"),
+      index: z.number().int().min(0).max(LIMITS.padsPerBank - 1).describe("the pad, 0-15"),
+    })
+    .strict(),
+  summary(args, snap) {
+    return `Cleared pad ${args.index + 1} of bank "${labelOfBank(snap, args.track_id, args.bank_id)}"`;
+  },
+  touches(args) {
+    return [padRef(args.track_id, args.bank_id, args.index), trackRef(args.track_id)];
+  },
+  /**
+   * Only the sound goes. The pad keeps its name, mode, pitch, level, pan,
+   * envelope, filter, choke group and reverse; its `sample_id` and `slice_id`
+   * are both cleared in the same step, so one undo brings the sound back.
+   */
+  apply(doc, args) {
+    requireSamplerTrack(doc, args.track_id);
+    requireBank(doc, args.track_id, args.bank_id);
+    const pad = requirePad(doc, args.track_id, args.bank_id, args.index);
+    const ref = padRef(args.track_id, args.bank_id, args.index);
+    const before = {};
+    const after = {};
+    for (const field of ["sample_id", "slice_id"]) {
+      const current = fieldValue(pad, field);
+      if (current === ABSENT) continue;
+      before[fieldKey(ref, field)] = current;
+      after[fieldKey(ref, field)] = ABSENT;
+      pad.set(field, ABSENT);
+    }
+    return { before, after };
+  },
+});
+
 // --- Samples and slices -----------------------------------------------------
 
 defineCommand({
@@ -834,7 +882,7 @@ defineCommand({
       if (typeof pad.slice_id !== "string") continue;
       if (next.has(pad.slice_id)) continue;
       refuseInvalid(
-        `Pad ${pad.index + 1} of bank "${pad.bank_id}" still plays slice "${pad.slice_id}" of this sample; clear that pad before removing the slice.`,
+        `Pad ${pad.index + 1} of bank "${pad.bank_id}" still plays slice "${pad.slice_id}"; clear that pad (Clear pad) or give it the whole sample before re-chopping.`,
       );
     }
 

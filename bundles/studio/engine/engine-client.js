@@ -101,7 +101,9 @@
  * - `loadSample(sample_id, channels, rate)` does the very same for one sampled
  *   pad's PCM, into the processor's own sample store, and
  *   `unloadSample(sample_id)` drops it again. The song may hold 256 MB of
- *   decoded samples at once: past that the engine drops the least-recently
+ *   decoded samples at once (the browser's cap; `create()` takes
+ *   `maxSampleBytes` for a host that knows how much its own song needs, which
+ *   an offline render does): past that the engine drops the least-recently
  *   played one, and `onSampleNeeded(listener)` says which sample a trigger
  *   wanted so the page can load it back.
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
@@ -598,11 +600,13 @@
    *
    * @param {BaseAudioContext} context an AudioContext or OfflineAudioContext
    * @param {{assetBase?: string, assetBytes?: object, readyTimeoutMs?: number,
-   *          testHooks?: boolean}} options
+   *          testHooks?: boolean, maxSampleBytes?: number}} options
    *   `assetBase` is a URL prefix the engine files are fetched from;
    *   `assetBytes` is a map of file name → string/Uint8Array, which wins over
    *   `assetBase` for the names it holds (Node callers read the files
-   *   themselves); `testHooks` arms the processor's test-only faults
+   *   themselves); `testHooks` arms the processor's test-only faults;
+   *   `maxSampleBytes` is the song-wide cap on decoded samples, the browser's
+   *   256 MB when omitted (an offline render passes the bytes its window needs)
    * @returns {Promise<{node: AudioWorkletNode,
    *                    setSong: function(object): void,
    *                    launchScene: function(string): void,
@@ -1069,8 +1073,13 @@
       numberOfOutputs: 1,
       outputChannelCount: [2],
       // `testHooks` is off unless a caller asks for it; it arms the processor's
-      // two test-only faults (see `throwForTest`).
-      processorOptions: { wasmBinary: wasmBinary, testHooks: opts.testHooks === true },
+      // two test-only faults (see `throwForTest`). `maxSampleBytes` is left out
+      // when the caller names none, so the processor keeps its own 256 MB cap.
+      processorOptions: {
+        wasmBinary: wasmBinary,
+        testHooks: opts.testHooks === true,
+        ...(Number(opts.maxSampleBytes) > 0 ? { maxSampleBytes: Number(opts.maxSampleBytes) } : {}),
+      },
     });
 
     const listeners = new Set();

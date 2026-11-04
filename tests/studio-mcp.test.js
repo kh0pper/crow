@@ -308,6 +308,22 @@ test("every public non-humanOnly command has exactly one tool and the rest have 
   }
 });
 
+test("an agent has no pad.clear", async () => {
+  const { hub } = makeHub();
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+  try {
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    // Clearing a pad is the operator's own act (the panel's Clear pad), so the
+    // agent's surface has no tool for it — while the command itself is there.
+    assert.ok(!names.includes("studio_pad_clear"), "a people-only command must not be a tool");
+    const clear = listCommands().find((command) => command.id === "pad.clear");
+    assert.ok(clear, "the registry holds pad.clear");
+    assert.equal(clear.humanOnly, true, "and it is people-only");
+  } finally {
+    await client.close();
+  }
+});
+
 test("tool call forwards author kind agent even when env says owner", async () => {
   const { hub, calls } = makeHub();
   const client = await connect({

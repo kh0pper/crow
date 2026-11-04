@@ -290,11 +290,14 @@
   const STOLEN_TAILS_PER_TRACK = 2;
 
   /**
-   * How many bytes of decoded samples may be loaded at once. Past this the
+   * How many bytes of decoded samples may be loaded at once when the client
+   * asks for nothing else: the browser panel's cap. Past it the
    * least-recently-triggered sample is unloaded (the client reloads it when a
-   * `sample_needed` says so).
+   * `sample_needed` says so). A caller that knows better passes its own cap as
+   * `processorOptions.maxSampleBytes`; an offline render does, sized to the
+   * samples its window plays so that none of them is trimmed away.
    */
-  const MAX_SAMPLE_BYTES = 256 * 1024 * 1024;
+  const DEFAULT_MAX_SAMPLE_BYTES = 256 * 1024 * 1024;
 
   /**
    * What a trigger for a sample the client has not loaded is reported with,
@@ -744,7 +747,8 @@
    */
   class StudioProcessor extends AudioWorkletProcessor {
     /**
-     * @param {{processorOptions?: {wasmBinary?: ArrayBuffer|Uint8Array, testHooks?: boolean}}} options
+     * @param {{processorOptions?: {wasmBinary?: ArrayBuffer|Uint8Array, testHooks?: boolean,
+     *          maxSampleBytes?: number}}} options
      */
     constructor(options) {
       super();
@@ -796,8 +800,15 @@
        */
       this.samples = new Map();
 
-      /** How many bytes those samples hold together, against `MAX_SAMPLE_BYTES`. */
+      /** How many bytes those samples hold together, against `this.maxSampleBytes`. */
       this.sampleBytes = 0;
+
+      /**
+       * The song-wide cap those samples are held under: the browser's 256 MB,
+       * or whatever the caller asked for (`processorOptions.maxSampleBytes`).
+       */
+      const askedCap = Number(processorOptions.maxSampleBytes);
+      this.maxSampleBytes = Number.isFinite(askedCap) && askedCap > 0 ? askedCap : DEFAULT_MAX_SAMPLE_BYTES;
 
       /** A counter every trigger bumps, so the oldest sample is the least recently played. */
       this.sampleClock = 0;
@@ -1007,8 +1018,8 @@
     /**
      * Store one sample's PCM, already at the context's rate, and acknowledge it.
      *
-     * The song may hold at most `MAX_SAMPLE_BYTES` of decoded samples at once.
-     * A load that would go past that unloads the least-recently-triggered
+     * The song may hold at most `this.maxSampleBytes` of decoded samples at
+     * once. A load that would go past that unloads the least-recently-triggered
      * samples first (a sample that has not been played since it loaded is the
      * first to go), and the client reloads one when a `sample_needed` says a
      * trigger wanted it.
@@ -1060,8 +1071,8 @@
      * @returns {void}
      */
     trimSamples(keepId) {
-      if (this.sampleBytes <= MAX_SAMPLE_BYTES) return;
-      while (this.sampleBytes > MAX_SAMPLE_BYTES) {
+      if (this.sampleBytes <= this.maxSampleBytes) return;
+      while (this.sampleBytes > this.maxSampleBytes) {
         let victim = null;
         for (const [id, held] of this.samples) {
           if (id === keepId) continue;

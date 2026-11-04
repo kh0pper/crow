@@ -30,6 +30,7 @@ import { StudioError, runCommand } from "../bundles/studio/server/commands/regis
 import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/takes.js";
 import "../bundles/studio/server/commands/arrangement.js";
+import "../bundles/studio/server/commands/sampler.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import {
@@ -152,6 +153,36 @@ function placeable(doc, { bars = 2 } = {}) {
   const scene = addScene(doc);
   const clip = addClip(doc, track, scene, bars);
   return { track, scene, clip };
+}
+
+/**
+ * A sampler track with one chained pattern clip: the shape a pattern clip's
+ * cycle is measured on.
+ * @param {import("yjs").Doc} doc
+ * @param {{clipId?: string, trackName?: string, lengthSteps?: number,
+ *          chain?: string[]}} [options]
+ * @returns {{track: string, clip: string}}
+ */
+function chainedPattern(
+  doc,
+  { clipId = "loop", trackName = "Drums", lengthSteps = 16, chain = ["a", "b"] } = {},
+) {
+  const track = runCommand(doc, "track.add", { name: trackName, kind: "sampler" }).args.id;
+  const scene = addScene(doc, `${trackName} scene`);
+  const clip = runCommand(doc, "clip.add_pattern", {
+    clip_id: clipId,
+    track_id: track,
+    scene_id: scene,
+    length_steps: lengthSteps,
+  }).args.clip_id;
+  // `clip.add_pattern` brings pattern "a"; a chain may only name patterns of
+  // its own clip, so every other entry is added first.
+  for (const id of chain) {
+    if (id === "a") continue;
+    runCommand(doc, "pattern.add", { id, clip_id: clip });
+  }
+  runCommand(doc, "chain.set", { clip_id: clip, chain });
+  return { track, clip };
 }
 
 /** Assert that `fn` throws a StudioError with this code, and return it. */
@@ -438,6 +469,109 @@ test("set_length keeps a split placement editable", (t) => {
   assert.deepEqual(undone.plan.blocked, []);
   assert.equal(placementOf(s.doc, "p-b").offset_beats, 4);
   assert.equal(snapshot(s.doc).clips[clip].length_bars, 2);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("splitting a chained pattern clip keeps playing the same pattern", (t) => {
+  const s = studio(t);
+  const { track, clip } = chainedPattern(s.doc);
+
+  // The document still stores the one bar a sixteen-step loop fills; the
+  // timeline measures the whole cycle the clip plays, chain and all.
+  assert.equal(snapshot(s.doc).clips[clip].length_bars, 1);
+
+  s.run("arrangement.place", { id: "p-a", track_id: track, clip_id: clip, start_bar: 0, bars: 4 });
+  const split = s.run("arrangement.split", { id: "p-a", at_bar: 1, new_id: "p-b" });
+  // Sixteen quarter-beat steps chained A → B are eight beats: bar 2 is four
+  // beats into the cycle, which is where the chain reaches B. The unsplit
+  // placement plays B from bar 2 too, so the two halves play what the one
+  // block played — no restart at A.
+  assert.equal(placementOf(s.doc, "p-b").offset_beats, 4);
+  assert.equal(split.result.after["placement:p-b|*"].offset_beats, 4);
+
+  // An offset inside the cycle is a placement that starts inside its clip: the
+  // second half can be moved and resized like any other block, and a placement
+  // may be put down part-way into the cycle in the first place.
+  s.run("arrangement.move", { id: "p-b", start_bar: 6 });
+  s.run("arrangement.resize", { id: "p-b", bars: 2 });
+  assert.equal(placementOf(s.doc, "p-b").offset_beats, 4);
+  const midCycle = s.run("arrangement.place", {
+    id: "p-c",
+    track_id: track,
+    clip_id: clip,
+    start_bar: 8,
+    bars: 1,
+    offset_beats: 4,
+  });
+  assert.equal(placementOf(s.doc, "p-c").offset_beats, 4);
+  assert.match(midCycle.result.summary, /at bar 8/);
+
+  // An offset at the cycle's end is not inside it. Shortening the chain under
+  // the placement (A now, four beats) leaves that offset past the cycle, and
+  // the next edit of it is refused by name.
+  s.run("chain.set", { clip_id: clip, chain: ["a"] });
+  const past = refuses(() => s.run("arrangement.move", { id: "p-b", start_bar: 7 }), "invalid");
+  assert.match(past.message, /under the 4 beats of its whole cycle/);
+  refuses(
+    () => s.run("arrangement.place", { id: "p-d", track_id: track, clip_id: clip, start_bar: 9, bars: 1, offset_beats: 4 }),
+    "invalid",
+  );
+
+  // A loop that is not whole bars wraps on its own beats: twelve sixteenths are
+  // three beats, so a split one bar into it lands one beat into the cycle.
+  const short = chainedPattern(s.doc, {
+    clipId: "short",
+    trackName: "Clicks",
+    lengthSteps: 12,
+    chain: ["a"],
+  });
+  s.run("arrangement.place", { id: "p-s", track_id: short.track, clip_id: short.clip, start_bar: 0, bars: 2 });
+  s.run("arrangement.split", { id: "p-s", at_bar: 1, new_id: "p-t" });
+  assert.equal(placementOf(s.doc, "p-t").offset_beats, 1);
+  // One beat into a three-beat cycle is inside it, so the block is editable...
+  s.run("arrangement.move", { id: "p-t", start_bar: 3 });
+  assert.equal(placementOf(s.doc, "p-t").offset_beats, 1);
+  // ...while a one-beat loop's own end is not: shortening the pattern under the
+  // placement leaves that offset at the cycle's end.
+  s.run("pattern.set_length", { clip_id: short.clip, length_steps: 4 });
+  refuses(() => s.run("arrangement.resize", { id: "p-t", bars: 2 }), "invalid");
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a pattern clip's placement defaults to its whole chain", (t) => {
+  const s = studio(t);
+  const { track, clip } = chainedPattern(s.doc);
+
+  const placed = s.run("arrangement.place", { id: "p-a", track_id: track, clip_id: clip, start_bar: 0 });
+  // Sixteen quarter-beat steps, two chain entries: eight beats, two bars.
+  assert.equal(placementOf(s.doc, "p-a").bars, 2);
+  assert.match(placed.result.summary, /\(2 bars\)$/);
+  assert.equal(snapshot(s.doc).clips[clip].length_bars, 1, "the document keeps its one-bar loop");
+
+  // A chain of one entry is one loop, and an empty chain loops the first
+  // pattern: both default to the clip's own bar.
+  const solo = chainedPattern(s.doc, { clipId: "solo", trackName: "Solo", chain: ["a"] });
+  s.run("arrangement.place", { id: "p-b", track_id: solo.track, clip_id: solo.clip, start_bar: 0 });
+  assert.equal(placementOf(s.doc, "p-b").bars, 1);
+
+  const bare = chainedPattern(s.doc, { clipId: "bare", trackName: "Bare", chain: [] });
+  s.run("arrangement.place", { id: "p-c", track_id: bare.track, clip_id: bare.clip, start_bar: 0 });
+  assert.equal(placementOf(s.doc, "p-c").bars, 1);
+
+  // A twelve-step loop is three beats, which a placement rounds up to one bar.
+  const short = chainedPattern(s.doc, {
+    clipId: "short",
+    trackName: "Clicks",
+    lengthSteps: 12,
+    chain: ["a"],
+  });
+  s.run("arrangement.place", { id: "p-d", track_id: short.track, clip_id: short.clip, start_bar: 0 });
+  assert.equal(placementOf(s.doc, "p-d").bars, 1);
+
+  // Three chain entries are three loops: twelve beats, three bars.
+  const long = chainedPattern(s.doc, { clipId: "long", trackName: "Long", chain: ["a", "b", "c"] });
+  s.run("arrangement.place", { id: "p-e", track_id: long.track, clip_id: long.clip, start_bar: 0 });
+  assert.equal(placementOf(s.doc, "p-e").bars, 3);
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 

@@ -982,6 +982,34 @@ test("changing a pad control sends one pad.set", async () => {
   );
 });
 
+test("Clear pad asks first and sends one pad.clear", async () => {
+  const ui = await bootSampler();
+  const { bankId } = await putSample(ui);
+  await ui.apply("pad.set", {
+    track_id: TRACK,
+    bank_id: bankId,
+    index: 0,
+    fields: { name: "Knock", gain_db: -3 },
+  });
+  await ui.openSampler();
+
+  // The first press only arms the button, the panel's own two-press yes.
+  const clear = ui.view().querySelector("[data-act=clear-pad]");
+  assert.ok(clear, "the pad settings offer Clear pad");
+  assert.equal(clear.disabled, false, "a pad that plays a sound can be cleared");
+  ui.click("[data-act=clear-pad]");
+  await ui.settle();
+  assert.equal(commands(ui, "pad.clear").length, 0, "the first press sends nothing");
+  assert.equal(ui.view().querySelector("[data-act=clear-pad]").textContent, "Sure?", "it asks first");
+
+  // The second press is the yes: exactly one pad.clear, naming this pad.
+  ui.click("[data-act=clear-pad]");
+  await ui.settle();
+  const sent = commands(ui, "pad.clear");
+  assert.equal(sent.length, 1, "one pad.clear");
+  assert.deepEqual(sent[0].args, { track_id: TRACK, bank_id: bankId, index: 0 });
+});
+
 test("keys 1 and Q play pads 1 and 9", async () => {
   const ui = await bootSampler();
   const bankId = await bankIdOf(ui.doc);
@@ -2153,7 +2181,7 @@ test("a refused chop shows the refusal and draws the document's slices", async (
   await ui.settle(60);
   const sent = commands(ui, "slice.set");
   assert.equal(sent.length, 1, "the chop went as one slice.set");
-  const refusal = "Pad 1 of bank A still plays slice sl-2 of this sample; clear that pad before removing the slice.";
+  const refusal = "Pad 1 of bank a still plays slice sl-2; clear that pad (Clear pad) or give it the whole sample before re-chopping.";
   ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: false, error: refusal });
   await ui.settle();
 

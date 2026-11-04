@@ -114,6 +114,7 @@ You may write patterns, steps, locks, chains, slices and pad settings, but only 
 | `studio_pad_set` | One pad's own fields, inside `fields` (`{track_id, bank_id, index, fields: {…}}`): `name`, `mode` (`oneshot` plays to the end, `gate` releases at the step end), `pitch` ±24 semitones, `gain_db`, `pan`, `attack_ms`/`decay_ms`/`sustain`/`release_ms`, `filter {type, cutoff_hz, resonance}`, `choke` group 1–8 (a hit cuts the other voices in its group) and `reverse`. |
 | `studio_slice_set` | Replace a sample's slices — `{id?, start_frame, end_frame}` in order, at most 64. A kept slice id keeps its pads playing it; removing a slice a pad plays is refused. |
 | `studio_sample_rename` | Rename a sample. |
+| *(no tool)* `pad.clear` | Take the sound off a pad and keep its settings. The operator's own step (the panel's **Clear pad**), so you have no tool for it: ask them. It is what a re-chop needs when a pad still plays a slice the new chop drops. |
 
 A pad whose sample you do not name plays the whole sample; `slice_id` narrows it to one slice. Pitches are resampling: `pitch` +12 plays an octave up in half the time, so a repitched hit changes length with its pitch.
 

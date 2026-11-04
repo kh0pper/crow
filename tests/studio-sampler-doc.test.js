@@ -727,6 +727,76 @@ test("shrinking a sample's slices refuses while a pad uses a removed slice", (t)
   );
 });
 
+test("re-chop after Clear pad succeeds", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const loop = addSample(s.doc, { frames: 48000 });
+  const pad = padKey(trackId, bankId, 5);
+  s.run("slice.set", {
+    sample_id: loop,
+    slices: [
+      { id: "s1", start_frame: 0, end_frame: 12000 },
+      { id: "s2", start_frame: 12000, end_frame: 24000 },
+    ],
+  });
+  s.run("pad.assign", { track_id: trackId, bank_id: bankId, index: 5, sample_id: loop, slice_id: "s2" });
+  // The pad's own settings: clearing the pad must not touch them.
+  s.run("pad.set", {
+    track_id: trackId,
+    bank_id: bankId,
+    index: 5,
+    fields: { name: "Snare", gain_db: -3, mode: "gate", choke: 2 },
+  });
+
+  // The re-chop that drops slice s2 is refused, and its sentence names the pad
+  // and the way out of the refusal.
+  const refused = refuses(
+    () => s.run("slice.set", { sample_id: loop, slices: [{ id: "s1", start_frame: 0, end_frame: 12000 }] }),
+    "invalid",
+  );
+  assert.match(refused.message, /Pad 6 of bank "/);
+  assert.match(refused.message, /\(Clear pad\)/);
+
+  // Clear pad is one step, and it takes the sound away and nothing else.
+  const cleared = s.run("pad.clear", { track_id: trackId, bank_id: bankId, index: 5 });
+  assert.deepEqual(cleared.result.after, {
+    [`pad:${pad}|sample_id`]: null,
+    [`pad:${pad}|slice_id`]: null,
+  });
+  const empty = snapshot(s.doc).pads[pad];
+  assert.equal(empty.sample_id, null);
+  assert.equal(empty.slice_id, null);
+  assert.equal(empty.name, "Snare");
+  assert.equal(empty.gain_db, -3);
+  assert.equal(empty.mode, "gate");
+  assert.equal(empty.choke, 2);
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // One undo brings the sound back on the pad, settings untouched.
+  const undone = s.undo(cleared.entry);
+  assert.deepEqual(undone.plan.blocked, []);
+  const back = snapshot(s.doc).pads[pad];
+  assert.equal(back.sample_id, loop);
+  assert.equal(back.slice_id, "s2");
+  assert.equal(back.name, "Snare");
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // Cleared again, the chop the pad blocked goes through.
+  s.run("pad.clear", { track_id: trackId, bank_id: bankId, index: 5 });
+  s.run("slice.set", { sample_id: loop, slices: [{ id: "s1", start_frame: 0, end_frame: 12000 }] });
+  assert.deepEqual(
+    Object.values(snapshot(s.doc).slices).map((slice) => slice.id),
+    ["s1"],
+    "the re-chop kept only the slice it asked for",
+  );
+
+  // Clearing a pad that already plays nothing writes nothing.
+  const again = s.run("pad.clear", { track_id: trackId, bank_id: bankId, index: 5 });
+  assert.deepEqual(again.result.before, {});
+  assert.deepEqual(again.result.after, {});
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
 test("removing a sampler track and undoing it brings back its banks, pads, patterns and steps", (t) => {
   const s = studio(t);
   const { trackId, bankId } = addKit(s.doc, "Drums");

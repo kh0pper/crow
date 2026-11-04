@@ -53,11 +53,17 @@
  * (`engine.loadSample`). A sample a render cannot read is not fatal — a pad
  * whose sample is missing plays silence (the spec's Review Focus 1), and one
  * dangling pad must not turn into a failed render of the whole song — but it is
- * never silently dropped either: the render's answer carries
- * `missing_samples: [{id, reason}]`, the renderer repeats it in its result and
+ * never silently dropped either: the render's answer carries * `missing_samples: [{id, reason}]`, the renderer repeats it in its result and
  * in the `studio.render` audit line, and `studio_render` hands it to the agent.
  * A pad that names a sample the song does not hold at all is reported the same
  * way. The key rule still holds — such an object is never read.
+ *
+ * A render's samples are never trimmed away. The browser panel's engine holds a
+ * 256 MB cap and unloads its least-recently-played sample past it, reloading it
+ * when a pattern asks again; an offline render has no reader to ask, so its
+ * engine is built with a cap the size of every PCM byte its window's samples
+ * take at the render's rate (`sampleCapFor`), and a window whose samples need
+ * more than a render may hold (1 GiB) is refused before it starts.
  *
  * ## The arrangement
  *
@@ -163,6 +169,26 @@ const MAX_SAMPLE_SAMPLES = 5760000;
 /** The largest a sample's WAV file can be: its header plus 3 bytes a sample. */
 const MAX_SAMPLE_BYTES = 44 + MAX_SAMPLE_SAMPLES * 3;
 
+/**
+ * The browser panel's own cap on the decoded samples one engine holds (see
+ * `engine/studio-processor.js`). A render is not the panel: it raises its
+ * engine's cap to fit the window it plays, and refuses to start past
+ * `RENDER_SAMPLE_BUDGET_BYTES`. Tests lower this through `sampleCapBytes`, so a
+ * handful of tiny samples can stand in for a window past the browser's cap.
+ */
+const BROWSER_SAMPLE_CAP_BYTES = 256 * 1024 * 1024;
+
+/**
+ * What one render may hold in decoded samples. Past this the render is refused
+ * before it starts: the MCP host renders one song at a time and does not have
+ * the memory for more, and a render that quietly dropped samples would be a
+ * lie about the song.
+ */
+const RENDER_SAMPLE_BUDGET_BYTES = 1024 * 1024 * 1024;
+
+/** Bytes in a megabyte, for the sentence a refused render gets. */
+const BYTES_PER_MB = 1024 * 1024;
+
 /** The asset map handed to `engine-client.create()`, read once per process. */
 let cachedAssets = null;
 
@@ -199,16 +225,21 @@ let cachedReleaseSymbol;
  *          takeAudio?: (take: object) => Promise<{rate: number,
  *            channels: Float32Array[]}|null>,
  *          sampleAudio?: (sample: object) => Promise<{rate: number,
- *            channels: Float32Array[]}|null>}} [options]
+ *            channels: Float32Array[]}|null>,
+ *          sampleCapBytes?: number}} [options]
  *   `takeAudio` reads and decodes one take's WAV; it is only called for takes
  *   the render can hear, and only when the song has any. `sampleAudio` does the
  *   same for a sample the playing patterns' steps trigger. `mode` and `from_bar`
- *   render the arrangement (see above)
+ *   render the arrangement (see above). `sampleCapBytes` is the cap a render's
+ *   engine is never built under (the browser's 256 MB unless a test lowers it):
+ *   the engine's real cap is that or the window's own sample bytes, whichever
+ *   is larger, so no sample a render loads is trimmed away under it
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number,
  *                    seconds: number,
  *                    missing_samples: Array<{id: string, reason: string}>}>}
  *   the rendered stereo channels, and every sample the render could not load
  *   (empty when there was none, or the song plays no sampler track)
+ * @throws {Error} when the window's samples need more than a render may hold
  */
 export async function renderSong(snapshot, options = {}) {
   const { scene_id = null, clip_id = null, seconds = 1, sampleRate = SAMPLE_RATE } = options;
@@ -221,30 +252,44 @@ export async function renderSong(snapshot, options = {}) {
   const span = Number(seconds);
   if (!Number.isFinite(span) || span <= 0) throw new Error("A render needs a positive number of seconds.");
   const fromBar = mode === "arrangement" ? renderFromBar(options.from_bar) : 0;
-
   const length = Math.max(1, Math.round(span * rate));
+
+  // What this render can hear is worked out before anything is built: the
+  // samples those clips play decide the engine's sample cap, and a window past
+  // the render budget is refused before its engine exists at all.
+  let launch = null;
+  let takes;
+  let samples;
+  if (mode === "arrangement") {
+    const toBar = fromBar + barsOf(span, snapshot);
+    const windowed = windowClips(snapshot, fromBar, toBar);
+    takes = takesOfClips(snapshot, windowed);
+    samples = samplesOfClips(snapshot, windowed);
+  } else {
+    launch = pickLaunch(snapshot, scene_id, clip_id);
+    const playing = playingClips(snapshot, launch);
+    takes = takesOfClips(snapshot, playing);
+    samples = samplesOfClips(snapshot, playing);
+  }
+  const askedCap = Number(options.sampleCapBytes);
+  const baseCap = Number.isFinite(askedCap) && askedCap > 0 ? askedCap : BROWSER_SAMPLE_CAP_BYTES;
+  const sampleCap = sampleCapFor(samples.samples, rate, baseCap);
+
   const context = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: rate });
   let engine = null;
   let rendered = false;
   try {
-    engine = await studioEngine.create(context, { assetBytes: engineAssets() });
+    engine = await studioEngine.create(context, {
+      assetBytes: engineAssets(),
+      maxSampleBytes: sampleCap,
+    });
     engine.setSong(snapshot);
-    let takes;
-    let samples;
     if (mode === "arrangement") {
       engine.setMode("arrangement");
       engine.seek(fromBar);
-      const toBar = fromBar + barsOf(span, snapshot);
-      const windowed = windowClips(snapshot, fromBar, toBar);
-      takes = takesOfClips(snapshot, windowed);
-      samples = samplesOfClips(snapshot, windowed);
     } else {
-      const launch = pickLaunch(snapshot, scene_id, clip_id);
       if (launch.scene) engine.launchScene(launch.scene);
       if (launch.clip) engine.launchClip(launch.clip);
-      const playing = playingClips(snapshot, launch);
-      takes = takesOfClips(snapshot, playing);
-      samples = samplesOfClips(snapshot, playing);
     }
     await loadTakes(engine, takes, options.takeAudio);
     const missingSamples = await loadSamples(engine, samples.samples, options.sampleAudio);
@@ -673,9 +718,63 @@ function samplesOfClips(snapshot, clips) {
 }
 
 /**
+ * The PCM bytes one sample takes in the engine at a render's rate.
+ *
+ * The processor holds decoded float32 frames, one array per channel, and the
+ * engine client resamples a sample recorded at another rate to the context's
+ * rate before it loads it, so the bytes are counted at the render's rate. One
+ * extra frame is allowed per sample for the resampler's own rounding: a cap is
+ * only useful if it is never smaller than what the engine really holds.
+ *
+ * @param {object} sample a sample as the snapshot carries it
+ * @param {number} rate the render's sample rate
+ * @returns {number} bytes, or 0 for a sample with no frames
+ */
+function sampleBytesAt(sample, rate) {
+  const frames = Number(sample && sample.frames);
+  if (!Number.isFinite(frames) || frames <= 0) return 0;
+  const channels = Math.max(1, Math.trunc(Number(sample && sample.channels)) || 1);
+  const source = Number(sample && sample.rate);
+  const from = Number.isFinite(source) && source > 0 ? source : rate;
+  const held = Math.ceil((frames * rate) / from) + 1;
+  return held * channels * 4;
+}
+
+/**
+ * The sample cap a render's engine is built with: every byte the window's
+ * samples take at the render's rate, so nothing the render loads is trimmed
+ * away under it, and never below `base` (the browser's own cap, or the smaller
+ * one a test passes as `sampleCapBytes`).
+ *
+ * A window that needs more than `RENDER_SAMPLE_BUDGET_BYTES` is refused here,
+ * with the megabytes it would need — before a context, an engine or a read.
+ *
+ * @param {object[]} samples the samples this render hears (see `samplesOfClips`)
+ * @param {number} rate the render's sample rate
+ * @param {number} base the cap a render is never built under
+ * @returns {number} the cap, in bytes
+ * @throws {Error} when the samples need more than a render may hold
+ */
+function sampleCapFor(samples, rate, base) {
+  let bytes = 0;
+  for (const sample of samples) bytes += sampleBytesAt(sample, rate);
+  if (bytes > RENDER_SAMPLE_BUDGET_BYTES) {
+    throw new Error(
+      `This render needs ${Math.ceil(bytes / BYTES_PER_MB)} MB of samples; a render holds at most ${RENDER_SAMPLE_BUDGET_BYTES / BYTES_PER_MB} MB.`,
+    );
+  }
+  return Math.max(base, bytes);
+}
+
+/**
  * The patterns of one pattern clip that actually play: its chain in order, or
- * its first pattern when the chain is empty (a chain of no entries loops the
- * first pattern).
+ * its first pattern when no entry names one.
+ *
+ * A chain is followed exactly as the sequencer follows it — an entry that names
+ * no pattern of this clip keeps its slot and plays silence, and the entries that
+ * do name one are played in their order — and, like the sequencer, a chain that
+ * names no pattern of the clip at all falls back to the clip's own first
+ * pattern (an empty chain, or one whose patterns are gone).
  *
  * @param {object} clip the pattern clip
  * @param {Object<string, object>} patterns the song's patterns, keyed by ref id
@@ -684,16 +783,14 @@ function samplesOfClips(snapshot, clips) {
 function patternsPlaying(clip, patterns) {
   const own = Object.values(patterns).filter((pattern) => pattern && pattern.clip_id === clip.id);
   const chain = Array.isArray(clip.chain) ? clip.chain : [];
-  if (chain.length === 0) {
-    const first = own.sort((left, right) => Number(left.order) - Number(right.order))[0];
-    return first ? [first] : [];
-  }
   const playing = [];
   for (const id of chain) {
     const pattern = own.find((candidate) => candidate.id === id);
     if (pattern) playing.push(pattern);
   }
-  return playing;
+  if (playing.length > 0) return playing;
+  const first = own.sort((left, right) => Number(left.order) - Number(right.order))[0];
+  return first ? [first] : [];
 }
 
 /**

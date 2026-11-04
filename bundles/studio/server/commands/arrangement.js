@@ -31,6 +31,15 @@
  *     sections;
  *   - sections never overlap each other.
  *
+ * A placement measures its clip by one whole cycle (`clipLengthBeats`): a
+ * pattern clip cycles on its chain — `length_steps × step_beats` beats for each
+ * entry — exactly as `engine/sequencer.js` loops it, while every other clip
+ * cycles on its own bars. So an offset is inside that cycle, a split carries the
+ * second half to the point in the cycle where the first one stopped (a chained
+ * clip's second half plays the chain's next pattern), and a new placement
+ * defaults to the whole cycle rounded up to bars. The clip's own `length_bars`
+ * stays what the document stores; nothing here rewrites it.
+ *
  * `arrangement.split` marks itself `undoWhole`: its two halves are one edit, so
  * the history takes the step back whole or not at all (history.js).
  *
@@ -45,6 +54,7 @@ import { z } from "zod";
 import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   BEATS_PER_BAR,
+  DEFAULT_STEP_BEATS,
   LIMITS,
   cloneJson,
   getClip,
@@ -129,15 +139,75 @@ function beatText(beats) {
   return String(Math.round(beats * 1000) / 1000);
 }
 
+/**
+ * One field of a clip, read from the live document (a `Y.Map`) or from a
+ * snapshot (a plain object): the two readers this module needs agree on what a
+ * clip's length is, so they read it through the same door.
+ * @param {Y.Map<any>|object|null|undefined} clip
+ * @param {string} field
+ * @returns {any}
+ */
+function clipField(clip, field) {
+  if (!clip) return undefined;
+  return typeof clip.get === "function" ? clip.get(field) : clip[field];
+}
+
 /** @returns {number} a clip's length in bars, at least one. */
 function clipBars(clip) {
-  const bars = Number(clip?.get?.("length_bars"));
+  const bars = Number(clipField(clip, "length_bars"));
   return Number.isInteger(bars) && bars >= 1 ? bars : 1;
 }
 
-/** @returns {number} a clip's length in beats. */
+/**
+ * The beats one loop of a pattern clip lasts: `length_steps × step_beats`, the
+ * loop the sequencer plays a pattern over. It is NOT the clip's `length_bars`:
+ * the document rounds that up to whole bars for scenes and placements, while the
+ * pattern itself loops on these beats.
+ * @param {Y.Map<any>|object} clip
+ * @returns {number}
+ */
+function patternLoopBeats(clip) {
+  const steps = Number(clipField(clip, "length_steps"));
+  const stepBeats = Number(clipField(clip, "step_beats"));
+  const positions = Number.isFinite(steps) && steps >= 1 ? Math.trunc(steps) : 16;
+  const beats = Number.isFinite(stepBeats) && stepBeats > 0 ? stepBeats : DEFAULT_STEP_BEATS;
+  return positions * beats;
+}
+
+/**
+ * How many loops one whole cycle of a clip lasts: a pattern clip cycles on its
+ * chain (every entry is a pattern of its own clip, and an entry keeps its slot
+ * even when it plays nothing), and any other clip on a single loop. This is the
+ * count `engine/sequencer.js` loops on (`cycleBeatsOf`).
+ * @param {Y.Map<any>|object} clip
+ * @returns {number}
+ */
+function cycleLoops(clip) {
+  if (clipField(clip, "kind") !== "pattern") return 1;
+  const chain = clipField(clip, "chain");
+  return Array.isArray(chain) && chain.length > 0 ? chain.length : 1;
+}
+
+/**
+ * A clip's length in beats: one whole cycle of it, which is what the sequencer
+ * loops on and so what a placement plays from its offset. A pattern clip's
+ * whole cycle is its loop times its chain; every other clip's is its own bars.
+ * @param {Y.Map<any>|object} clip
+ * @returns {number}
+ */
 function clipLengthBeats(clip) {
+  if (clipField(clip, "kind") === "pattern") return patternLoopBeats(clip) * cycleLoops(clip);
   return clipBars(clip) * BEATS;
+}
+
+/**
+ * How many bars a placement of a clip lasts when the caller asks for none: the
+ * clip's whole cycle, rounded up to whole bars.
+ * @param {Y.Map<any>|object} clip
+ * @returns {number}
+ */
+function defaultClipBars(clip) {
+  return Math.max(1, Math.ceil(clipLengthBeats(clip) / BEATS));
 }
 
 /** @returns {number} `value` folded into `[0, length)`. */
@@ -241,7 +311,7 @@ function checkPlacementFit(clip, placement) {
   const length = clipLengthBeats(clip);
   if (!(placement.offset_beats >= 0) || placement.offset_beats >= length) {
     refuseInvalid(
-      `A placement starts inside its clip, so its offset is under the ${barsText(clipBars(clip))} of "${clip.get("name")}"; ${beatText(placement.offset_beats)} beats is not.`,
+      `A placement starts inside its clip, so its offset is under the ${beatText(length)} beats of its whole cycle in "${clip.get("name")}"; ${beatText(placement.offset_beats)} beats is not.`,
     );
   }
   if (!onOffsetGrid(placement.offset_beats)) {
@@ -331,11 +401,18 @@ defineCommand({
         .int()
         .min(1)
         .optional()
-        .describe("how many bars it lasts; the clip's own length when omitted"),
+        .describe("how many bars it lasts; the clip's whole cycle when omitted"),
+      offset_beats: z
+        .number()
+        .finite()
+        .min(0)
+        .optional()
+        .describe("where in the clip's whole cycle it starts, in beats; the start of it when omitted"),
     })
     .strict(),
   summary(args, snap) {
-    const bars = args.bars ?? snap.clips[args.clip_id]?.length_bars ?? 1;
+    const clip = snap.clips[args.clip_id] ?? null;
+    const bars = args.bars ?? (clip ? defaultClipBars(clip) : 1);
     return `Placed clip "${labelOfClip(snap, args.clip_id)}" at bar ${args.start_bar} on ${labelOfTrack(snap, args.track_id)} (${barsText(bars)})`;
   },
   touches(args) {
@@ -357,8 +434,10 @@ defineCommand({
       track_id: args.track_id,
       clip_id: args.clip_id,
       start_bar: args.start_bar,
-      bars: args.bars ?? clipBars(clip),
-      offset_beats: 0,
+      // A placement lands on the clip's whole cycle: a chained pattern clip is
+      // as long as the chain it plays, not as long as one of its bars.
+      bars: args.bars ?? defaultClipBars(clip),
+      offset_beats: args.offset_beats ?? 0,
       fade_in_beats: 0,
       fade_out_beats: 0,
     };

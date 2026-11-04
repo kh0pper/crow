@@ -2042,6 +2042,65 @@ test("agent cannot drop a pad's sample", async (t) => {
   assert.equal((await hub.openSong(song_id)).snapshot.pads[pad].gain_db, -6);
 });
 
+test("pad.clear is the operator's own and keeps the pad's settings", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id, bank_id } = await seedSampleSong(hub);
+  const pad = padPath(track_id, bank_id, 0);
+
+  // The pad's own settings, which clearing it must leave alone.
+  await applies(hub, song_id, "operator-pad-settings", "pad.set", {
+    track_id,
+    bank_id,
+    index: 0,
+    fields: { name: "Snare", gain_db: -4, mode: "gate", choke: 2 },
+  });
+
+  // An agent may not empty a pad: taking a sound away is the operator's yes.
+  const refused = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-clear-pad",
+      command: "pad.clear",
+      args: { track_id, bank_id, index: 0 },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.match(refused.error, /Only a person can run "pad.clear"/);
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.pads[pad].sample_id,
+    SAMPLE_A,
+    "the refused clear wrote nothing",
+  );
+
+  // The operator's own clear goes through: the sound guard that stops an agent
+  // is not in the operator's way.
+  const cleared = await applies(hub, song_id, "operator-clear-pad", "pad.clear", {
+    track_id,
+    bank_id,
+    index: 0,
+  });
+  const after = (await hub.openSong(song_id)).snapshot.pads[pad];
+  assert.equal(after.sample_id, null);
+  assert.equal(after.slice_id, null);
+  assert.equal(after.name, "Snare");
+  assert.equal(after.gain_db, -4);
+  assert.equal(after.mode, "gate");
+  assert.equal(after.choke, 2);
+
+  // One undo step, and the sound is back on the pad.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-clear",
+    entry_id: cleared.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  const back = (await hub.openSong(song_id)).snapshot.pads[pad];
+  assert.equal(back.sample_id, SAMPLE_A);
+  assert.equal(back.name, "Snare");
+});
+
 test("agent cannot remove a sampler track with samples, replace its device, or undo a bank.add that holds samples", async (t) => {
   const { hub, db } = await setup(t);
   const { song_id, track_id, bank_id, tracked } = await seedSampleSong(hub);
