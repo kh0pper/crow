@@ -380,6 +380,29 @@ test("census: a loopback socket relaying a LAN client logs exactly ONE line, nam
   assert.equal(lines[0].includes("127.0.0.1"), false, "the loopback socket is not the source the line names");
 });
 
+test("census: a Docker bridge socket with a bearer is classed bridge, not lan", async () => {
+  resetCensus();
+  await withRemote("172.17.0.2", async () => {
+    const r = await door("/llm/v1/chat/completions", { headers: { ...BEARER }, body: CHAT });
+    assert.equal(r.status, 200);
+  });
+  const lines = censusLines();
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /: bridge 172\.17\.0\.2 route=/);
+});
+
+test("census: an IPv6 zone id in a forwarded address never reaches the log", async () => {
+  resetCensus();
+  await withRemote("127.0.0.1", async () => {
+    const r = await door("/llm/v1/chat/completions", { headers: { "x-forwarded-for": "[fe80::1%caller-chosen-text]", ...BEARER }, body: CHAT });
+    assert.equal(r.status, 200);
+  });
+  const lines = censusLines();
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].includes("caller-chosen-text"), false, "the zone id is not logged");
+  assert.equal(lines[0].includes("%"), false);
+});
+
 test("census: a repeat inside the window logs nothing; the same key logs again in a new window", async () => {
   resetCensus();
   const send = () => withRemote("127.0.0.1", () => door("/llm/v1/chat/completions", { headers: { "x-forwarded-for": "192.0.2.7", ...BEARER }, body: CHAT }));

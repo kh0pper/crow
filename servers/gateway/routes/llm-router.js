@@ -236,7 +236,8 @@ function censusClass(addr) {
   if (via !== null && via !== "mapped") return "public";
   if (cls === "loopback") return "loopback";
   if (isTrustedDoorSource(addr)) return "tailnet";
-  if (cls === "private") return v4 && /^172\./.test(v4) ? "bridge" : "lan";
+  // classifyIp leaves v4 null for a plain IPv4 literal, so test the address itself too.
+  if (cls === "private") return /^172\.(1[6-9]|2\d|3[01])\./.test(v4 ?? normalizeAddr(addr) ?? "") ? "bridge" : "lan";
   if (cls === "public") return "public";
   return "lan";
 }
@@ -264,7 +265,11 @@ function logBearerAdmission(req, deps, socketAddr) {
     const addr = firstUntrustedDoorSource(socketAddr, req.headers);
     if (addr === undefined) return;
     const cls = censusClass(addr);
-    const where = cls === "invalid" ? "invalid" : `${cls} ${printable(normalizeAddr(addr), 64)}`;
+    // An IPv6 zone id (`fe80::1%anything`) is caller-chosen text: never logged.
+    // Anything that is not a plain address after that is logged as its class only.
+    const bare = String(normalizeAddr(addr) ?? "").replace(/%.*$/, "");
+    const plain = cls !== "invalid" && /^[0-9a-f:.]+$/i.test(bare);
+    const where = plain ? `${cls} ${bare.slice(0, 64)}` : cls;
     const now = deps.nowFn();
     const last = doorCensusSeen.get(where);
     if (last !== undefined && now - last < DOOR_CENSUS_WINDOW_MS) return;
