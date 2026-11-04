@@ -618,6 +618,9 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
     }
     return total;
   } finally {
+    // A walk that threw never reached takeRewalk: forget its request too, so no
+    // send closure outlives the call (the next flush walks the queue anyway).
+    takeRewalk(db, contactId);
     walking.delete(contactId); // S4: released on every path
   }
 }
