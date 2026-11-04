@@ -114,6 +114,7 @@ then `systemd-tmpfiles --create` and `systemctl daemon-reload`. The `ReadWritePa
 ## Limits it states about itself
 
 - rootless Docker and podman use a different socket: their containers never appear in the snapshot.
+- it checks the systemd unit named `docker.service`; a host whose Docker runs under another unit name (a snap install, for example) reads as "unknown" every run, which fails safe.
 - a listener inside another network namespace is invisible to `ss`.
 - a host-networked container publishes nothing and listens on every address; it is flagged from its network mode, not from the listener rows.
 - listener rows carry no owner and no process name, so they are a hint for the operator, never a claim about which container is listening.

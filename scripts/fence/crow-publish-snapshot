@@ -133,6 +133,12 @@ else
     printf '%s: refusing a world-writable output directory: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
     exit 1
   fi
+  # Group-writable too: a group member could swap the temp file between the
+  # regular-file check and the chmod/chgrp, which act by path name.
+  if (( (8#$dir_mode & 8#020) != 0 )); then
+    printf '%s: refusing a group-writable output directory: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2
+    exit 1
+  fi
   if [ "$(id -u)" -eq 0 ]; then
     [ "$dir_owner" -eq 0 ] || {
       printf '%s: refusing an output directory not owned by root: %s\n' "$PROGNAME" "$OUTPUT_DIR" >&2

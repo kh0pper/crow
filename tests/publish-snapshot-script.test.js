@@ -189,7 +189,7 @@ function setup({ fixtures = {} } = {}) {
   const fixtureDir = join(root, "fixtures");
   const outDir = join(root, "out");
   const log = join(root, "calls.log");
-  for (const dir of [bin, fixtureDir, outDir]) mkdirSync(dir, { recursive: true });
+  for (const dir of [bin, fixtureDir, outDir]) { mkdirSync(dir, { recursive: true }); chmodSync(dir, 0o750); }
   cpSync(FIXTURES, fixtureDir, { recursive: true });
   for (const [name, body] of Object.entries(fixtures)) writeFileSync(join(fixtureDir, name), body);
 
@@ -573,8 +573,8 @@ test("the file is written to a temp name beside the target and renamed into plac
   );
 });
 
-test("M1: an --output directory that is sticky or world-writable is refused, and never re-moded", () => {
-  for (const [mode, reason] of [[0o1777, /sticky/], [0o777, /world-writable/]]) {
+test("M1: an --output directory that is sticky, world-writable or group-writable is refused, and never re-moded", () => {
+  for (const [mode, reason] of [[0o1777, /sticky/], [0o777, /world-writable/], [0o770, /group-writable/]]) {
     const ctx = setup();
     chmodSync(ctx.outDir, mode);
     const r = run(ctx, ["--output", ctx.out, "--group", GROUP]);
