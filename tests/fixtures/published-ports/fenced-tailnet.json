@@ -1,0 +1,43 @@
+{
+  "taken_at": "2026-01-01T00:00:00Z",
+  "docker": { "version": "28.0.1", "firewall_backend": "nftables", "userland_proxy": true },
+  "fence": {
+    "unit_active": true,
+    "conf_sha256": "c0ffee",
+    "conf_saved_sha256": "c0ffee",
+    "docker_flags_sha256": "d00d",
+    "docker_flags_saved_sha256": "d00d"
+  },
+  "tailscale": { "v4": "100.64.20.5", "v6": "fd7a:115c:a1e0::20" },
+  "containers": [
+    {
+      "id": "a1b2c3d4e5f6",
+      "name": "crow-engine-35b",
+      "labels": { "crow.runtime": "docker", "com.docker.compose.project": "example-model" },
+      "host_config": {
+        "network_mode": "default",
+        "port_bindings": {
+          "8003/tcp": [
+            { "HostIp": "100.64.20.5", "HostPort": "8003" },
+            { "HostIp": "fd7a:115c:a1e0::20", "HostPort": "8003" }
+          ]
+        }
+      },
+      "networks": ["crow-eng-35b"]
+    }
+  ],
+  "listeners": [
+    { "address": "100.64.20.5", "port": 8003 },
+    { "address": "fd7a:115c:a1e0::20", "port": 8003 }
+  ],
+  "raw_rules": {
+    "v4": [
+      "-A PREROUTING -j CROW-ENGINE-FENCE",
+      "-A CROW-ENGINE-FENCE -d 100.64.20.5/32 -p tcp -m tcp --dport 8003 ! -i tailscale0 -m comment --comment \"crow-engine-fence:35b:g7\" -j DROP"
+    ],
+    "v6": [
+      "-A PREROUTING -j CROW-ENGINE-FENCE",
+      "-A CROW-ENGINE-FENCE -d fd7a:115c:a1e0::20/128 -p tcp -m tcp --dport 8003 ! -i tailscale0 -m comment --comment \"crow-engine-fence:35b:g7\" -j DROP"
+    ]
+  }
+}

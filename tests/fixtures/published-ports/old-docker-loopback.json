@@ -1,0 +1,20 @@
+{
+  "taken_at": "2026-01-01T00:00:00Z",
+  "docker": { "version": "27.5.1", "firewall_backend": "nftables" },
+  "fence": { "unit_active": true },
+  "tailscale": { "v4": "100.64.20.5", "v6": "fd7a:115c:a1e0::20" },
+  "containers": [
+    {
+      "id": "c9d0e1f2a3b4",
+      "name": "crow-engine-cpu",
+      "labels": { "crow.runtime": "docker" },
+      "host_config": {
+        "network_mode": "default",
+        "port_bindings": { "8007/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "8007" }] }
+      },
+      "networks": ["crow-eng-cpu"]
+    }
+  ],
+  "listeners": [{ "address": "127.0.0.1", "port": 8007 }],
+  "raw_rules": { "v4": [], "v6": [] }
+}

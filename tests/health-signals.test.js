@@ -16,6 +16,11 @@ import { backupLabel, instanceBackupTag, backupFileName } from "../servers/share
 // The signal only counts THIS instance's backup files (per-instance naming).
 const OWN_BACKUP = backupFileName(backupLabel(), instanceBackupTag(), "2026-01-01");
 
+// Test isolation: every collectHealthSignals() call in this file that does not
+// pass its own `publishedPorts.snapshotPath` must read this scratch path, never
+// the host's real fence snapshot.
+process.env.CROW_PUBLISH_SNAPSHOT = "/tmp/__crow_test_no_publish_snapshot__.json";
+
 // ─── Stub DB factory ──────────────────────────────────────────────────────────
 
 function makeDb(overrides = {}) {
@@ -350,4 +355,69 @@ test("syncOutbox: getStats failure (e.g. no executeMultiple) degrades to ok/empt
   });
   const detail = result.details.find(d => d.id === "syncOutbox");
   assert.equal(detail.state, "ok");
+});
+// ─── publishedPorts (plan PR S5a) ────────────────────────────────────────────
+
+test("publishedPorts: no snapshot → info 'unknown' card, no published-port warn", async () => {
+  invalidateHealthCache();
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "crow-nest-pp-"));
+
+  const result = await collectHealthSignals(makeDb(), {
+    publishedPorts: { snapshotPath: join(dir, "absent.json") },
+  });
+
+  const detail = result.details.find(d => d.id === "publishedPorts");
+  assert.ok(detail, "the publishedPorts card is part of the signal list");
+  assert.equal(detail.state, "info", "an unreadable snapshot is info, never ok-looking");
+  assert.equal(
+    result.issues.some(i => i.id.startsWith("published-ports:") && i.severity === "warn"),
+    false,
+    "no snapshot never produces a publish warn by itself",
+  );
+});
+
+test("publishedPorts: a call without its own snapshot path reads the isolated env path", async () => {
+  invalidateHealthCache();
+  assert.ok(
+    process.env.CROW_PUBLISH_SNAPSHOT?.includes("__crow_test"),
+    "the file pins CROW_PUBLISH_SNAPSHOT to a scratch path",
+  );
+
+  const result = await collectHealthSignals(makeDb());
+  const detail = result.details.find(d => d.id === "publishedPorts");
+  assert.ok(detail, "the publishedPorts card is part of the signal list");
+  assert.equal(detail.state, "info");
+  assert.match(detail.value, /unknown/);
+});
+
+test("publishedPorts: a wildcard publish is a warn issue under its own id", async () => {
+  invalidateHealthCache();
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "crow-nest-pp2-"));
+  const path = join(dir, "snapshot.json");
+  writeFileSync(path, JSON.stringify({
+    taken_at: new Date().toISOString(),
+    docker: { version: "28.0.1", userland_proxy: true },
+    containers: [{
+      id: "0123456789ab",
+      name: "crow-engine",
+      labels: { "crow.runtime": "docker" },
+      host_config: { network_mode: "default", port_bindings: { "8011/tcp": [{ HostIp: "", HostPort: "8011" }] } },
+    }],
+    raw_rules: { v4: [], v6: [] },
+  }));
+
+  const result = await collectHealthSignals(makeDb(), {
+    publishedPorts: { snapshotPath: path },
+  });
+
+  const issue = result.issues.find(i => i.id === "published-ports:0123456789ab:8011");
+  assert.ok(issue, "one issue id per container and port");
+  assert.equal(issue.severity, "warn");
+  assert.equal(result.ok, false, "a published-port warn fails the nest roll-up");
 });

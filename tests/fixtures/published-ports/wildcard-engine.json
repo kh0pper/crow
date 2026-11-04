@@ -1,0 +1,33 @@
+{
+  "taken_at": "2026-01-01T00:00:00Z",
+  "docker": { "version": "28.0.1", "firewall_backend": "nftables", "userland_proxy": true },
+  "fence": { "unit_active": true },
+  "tailscale": { "v4": "100.64.20.5", "v6": "fd7a:115c:a1e0::20" },
+  "containers": [
+    {
+      "id": "b2c3d4e5f6a7",
+      "name": "crow-engine-4b",
+      "labels": { "crow.runtime": "docker" },
+      "host_config": {
+        "network_mode": "default",
+        "port_bindings": { "8011/tcp": [{ "HostIp": "", "HostPort": "8011" }] }
+      },
+      "networks": ["crow-eng-4b"]
+    },
+    {
+      "id": "c3d4e5f6a7b8",
+      "name": "some-service",
+      "labels": { "com.docker.compose.project": "some-service" },
+      "host_config": {
+        "network_mode": "default",
+        "port_bindings": { "8080/tcp": [{ "HostIp": "192.0.2.10", "HostPort": "8080" }] }
+      },
+      "networks": ["some-service_default"]
+    }
+  ],
+  "listeners": [
+    { "address": "0.0.0.0", "port": 8011 },
+    { "address": "192.0.2.10", "port": 8080 }
+  ],
+  "raw_rules": { "v4": [], "v6": [] }
+}
