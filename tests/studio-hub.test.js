@@ -305,6 +305,119 @@ async function addTake(hub, song_id, clip_id, take) {
   return added;
 }
 
+// --- A sampler track's sounds -------------------------------------------------
+
+/** A sample id in the UUID shape the import client generates. */
+const SAMPLE_A = "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b";
+
+/** A second sample id, for the tests that repoint a pad. */
+const SAMPLE_B = "9c8b7a6d-5e4f-3a2b-1c0d-9e8f7a6b5c4d";
+
+/** What the agent's sound guard answers with, word for word. */
+const SOUNDS_NEED_A_YES = "Changing recorded or imported sounds needs a yes from the operator.";
+
+/**
+ * The sample object `sample.add` accepts, as the gateway's upload finish route
+ * builds it after the WAV is in storage.
+ * @param {string} id
+ * @returns {object}
+ */
+function makeSample(id) {
+  return {
+    id,
+    storage_key: `studio/song/samples/${id}.wav`,
+    rate: 48000,
+    channels: 2,
+    frames: 96000,
+    name: "Drum loop",
+    origin: "import",
+    author_label: "the operator",
+  };
+}
+
+/**
+ * Run one command and assert it applied.
+ * @param {object} hub
+ * @param {string} song_id
+ * @param {string} cmd_id
+ * @param {string} command
+ * @param {object} args
+ * @param {object} [author]
+ * @returns {Promise<object>} the applied step's result
+ */
+async function applies(hub, song_id, cmd_id, command, args, author = HUMAN) {
+  const result = await hub.runCommand({ song_id, cmd_id, command, args, author });
+  assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
+  return result;
+}
+
+/**
+ * Add one sample the way Studio itself does: `internal: true`, as the gateway's
+ * upload finish route issues it.
+ * @param {object} hub
+ * @param {string} song_id
+ * @param {object} sample
+ * @returns {Promise<object>} the applied step's result
+ */
+async function addSample(hub, song_id, sample) {
+  const added = await hub.runCommand({
+    song_id,
+    cmd_id: `add-sample-${sample.id}`,
+    command: "sample.add",
+    args: { sample },
+    author: HUMAN,
+    internal: true,
+  });
+  assert.equal(added.ok, true, `sample.add was refused: ${added.error}`);
+  return added;
+}
+
+/**
+ * A song with one scene, a sampler track whose bank A plays a sample on pad 1,
+ * and a pattern clip on that track — the shape every sound rule is about.
+ * @param {object} hub
+ * @returns {Promise<{song_id: string, track_id: string, bank_id: string,
+ *                    clip_id: string, assigned: object}>} `assigned` is the
+ *   operator's `pad.assign` step, the one that put the sound on the pad
+ */
+async function seedSampleSong(hub) {
+  const created = await hub.createSong({ project_id: PROJECT, title: "Sample song", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const song_id = created.song_id;
+
+  await applies(hub, song_id, "seed-verse", "scene.add", { id: "verse", name: "Verse" });
+  const tracked = await applies(hub, song_id, "seed-kit", "track.add", {
+    id: "kit",
+    name: "Drums",
+    kind: "sampler",
+  });
+  const opened = await hub.openSong(song_id);
+  const bank = Object.values(opened.snapshot.banks).find((item) => item.track_id === "kit");
+  assert.ok(bank, "a sampler track arrives with its bank");
+
+  await addSample(hub, song_id, makeSample(SAMPLE_A));
+  const assigned = await applies(hub, song_id, "seed-pad", "pad.assign", {
+    track_id: "kit",
+    bank_id: bank.id,
+    index: 0,
+    sample_id: SAMPLE_A,
+  });
+  const clip = await applies(hub, song_id, "seed-pattern", "clip.add_pattern", {
+    clip_id: "kit-loop",
+    track_id: "kit",
+    scene_id: "verse",
+    name: "Kit loop",
+  });
+  return {
+    song_id,
+    track_id: "kit",
+    bank_id: bank.id,
+    clip_id: clip.entry.args.clip_id,
+    assigned,
+    tracked,
+  };
+}
+
 /**
  * The hub client the MCP server talks to, over the real hub in this test.
  * @param {object} hub
@@ -1819,4 +1932,381 @@ test("agent redo of an undo of take.restore is refused", async (t) => {
   });
   assert.equal(redone.ok, true, `the operator's redo was refused: ${redone.error}`);
   assert.equal((await hub.openSong(song_id)).snapshot.takes[TAKE_A].discarded, false);
+});
+
+// --- Who can change a sound --------------------------------------------------
+
+/** @returns {string} the container key of one pad. */
+function padPath(track_id, bank_id, index) {
+  return `${track_id}/${bank_id}/${index}`;
+}
+
+test("agent cannot drop a pad's sample", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id, bank_id, assigned } = await seedSampleSong(hub);
+  await addSample(hub, song_id, makeSample(SAMPLE_B));
+  const pad = padPath(track_id, bank_id, 0);
+
+  // Repointing a pad that plays a sample takes that sound away.
+  const repointed = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-repoint-pad",
+      command: "pad.assign",
+      args: { track_id, bank_id, index: 0, sample_id: SAMPLE_B },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(repointed.error, SOUNDS_NEED_A_YES);
+  assert.equal((await hub.openSong(song_id)).snapshot.pads[pad].sample_id, SAMPLE_A);
+
+  // An empty pad may be filled: only a sound that is already there can be lost.
+  const filled = await applies(
+    hub,
+    song_id,
+    "agent-fill-empty-pad",
+    "pad.assign",
+    { track_id, bank_id, index: 1, sample_id: SAMPLE_B },
+    AGENT,
+  );
+  assert.equal((await hub.openSong(song_id)).snapshot.pads[padPath(track_id, bank_id, 1)].sample_id, SAMPLE_B);
+
+  // Taking that back would drop a sound, whoever put it there.
+  const undoneOwn = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-fill", entry_id: filled.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoneOwn.error, SOUNDS_NEED_A_YES);
+
+  // Nor may it take the operator's own assignment back.
+  const undoneOperator = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-assign", entry_id: assigned.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoneOperator.error, SOUNDS_NEED_A_YES);
+  const opened = await hub.openSong(song_id);
+  assert.equal(opened.snapshot.pads[pad].sample_id, SAMPLE_A, "the refused undos left both pads alone");
+  assert.equal(opened.snapshot.pads[padPath(track_id, bank_id, 1)].sample_id, SAMPLE_B);
+
+  // Everything about the pad that is not its sound stays an agent's to edit.
+  const softer = await applies(
+    hub,
+    song_id,
+    "agent-pad-gain",
+    "pad.set",
+    { track_id, bank_id, index: 0, fields: { gain_db: -6, pitch: 3 } },
+    AGENT,
+  );
+  assert.equal(softer.entry.command, "pad.set");
+  assert.equal((await hub.openSong(song_id)).snapshot.pads[pad].gain_db, -6);
+});
+
+test("agent cannot remove a sampler track with samples, replace its device, or undo a bank.add that holds samples", async (t) => {
+  const { hub, db } = await setup(t);
+  const { song_id, track_id, bank_id, tracked } = await seedSampleSong(hub);
+
+  // Removing the track would take the bank and the sound on its pad with it.
+  const removed = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-track-remove",
+      command: "track.remove",
+      args: { track_id },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(removed.error, SOUNDS_NEED_A_YES);
+  const kept = await hub.openSong(song_id);
+  assert.ok(kept.snapshot.tracks.find((track) => track.id === track_id), "the refused removal wrote nothing");
+  assert.equal(kept.snapshot.pads[padPath(track_id, bank_id, 0)].sample_id, SAMPLE_A);
+
+  // A sampler track's device is its kit's engine: a module swap is refused for
+  // everyone, and no step writes it.
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-swap-device",
+      command: "track.set_device",
+      args: { track_id, type: "SpectraVoice" },
+      author: AGENT,
+    }),
+    "invalid",
+  );
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.tracks.find((track) => track.id === track_id).device,
+    { engine: "sampler" },
+    "the device is still the kit's",
+  );
+
+  // The other door onto a device is the history, and no command can record a
+  // swap onto a kit: this step is written straight into the table, the way a
+  // step from an older build might be, and the hub still refuses the step an
+  // agent would take back from it.
+  const swap = await appendHistory(db, {
+    song_id,
+    seq: 500,
+    command: "track.set_device",
+    author: HUMAN,
+    touched: [`track:${track_id}`],
+    inverse: {
+      before: {
+        [`track:${track_id}|device`]: { engine: "sunvox", type: "Analog generator", params: {} },
+      },
+      after: { [`track:${track_id}|device`]: { engine: "sampler" } },
+    },
+  });
+  const swapped = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-device", entry_id: swap, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(swapped.error, SOUNDS_NEED_A_YES);
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.tracks.find((track) => track.id === track_id).device,
+    { engine: "sampler" },
+    "the refused step left the kit's engine alone",
+  );
+
+  // A bank an operator added, and whose pad plays a sample, cannot be taken back
+  // by an agent: its pads go with it.
+  const banker = await applies(hub, song_id, "operator-bank-b", "bank.add", { track_id, name: "B" }, HUMAN);
+  const second = Object.values((await hub.openSong(song_id)).snapshot.banks).find(
+    (bank) => bank.track_id === track_id && bank.name === "B",
+  );
+  assert.ok(second, "the operator's bank is there");
+  await applies(
+    hub,
+    song_id,
+    "operator-pad-on-b",
+    "pad.assign",
+    { track_id, bank_id: second.id, index: 0, sample_id: SAMPLE_A },
+    HUMAN,
+  );
+
+  const undoneBank = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-bank-add", entry_id: banker.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoneBank.error, SOUNDS_NEED_A_YES);
+  const after = await hub.openSong(song_id);
+  assert.ok(after.snapshot.banks[`${track_id}/${second.id}`], "the refused undo left the bank in the kit");
+  assert.equal(after.snapshot.pads[padPath(track_id, second.id, 0)].sample_id, SAMPLE_A);
+
+  // The same rule closes the history door for the whole track: undoing an
+  // operator's addition of a kit that now holds a sound is not an agent's step.
+  refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-track-add", entry_id: tracked.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.pads[padPath(track_id, bank_id, 0)].sample_id,
+    SAMPLE_A,
+    "the refused undo left the sound on its pad",
+  );
+});
+
+test("an agent re-chop of a sample used by a locked track is refused", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id } = await seedSampleSong(hub);
+  await applies(hub, song_id, "operator-lock", "track.lock", { track_id }, HUMAN);
+
+  // The sample is on a pad of the locked track, so the chop is a write to it.
+  const chopped = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-chop-locked",
+      command: "slice.set",
+      args: { sample_id: SAMPLE_A, slices: [{ id: "one", start_frame: 0, end_frame: 24000 }] },
+      author: AGENT,
+    }),
+    "locked",
+  );
+  assert.match(chopped.error, /locked by the operator/);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.slices, {}, "the refused chop wrote nothing");
+
+  // A rename writes the same sample, and so touches the same track.
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-rename-locked",
+      command: "sample.rename",
+      args: { sample_id: SAMPLE_A, name: "Break" },
+      author: AGENT,
+    }),
+    "locked",
+  );
+  assert.equal((await hub.openSong(song_id)).snapshot.samples[SAMPLE_A].name, "Drum loop");
+
+  // The lock is the operator's to lift, and then the same chop is an agent's.
+  await applies(hub, song_id, "operator-unlock", "track.unlock", { track_id }, HUMAN);
+  await applies(
+    hub,
+    song_id,
+    "agent-chop-unlocked",
+    "slice.set",
+    { sample_id: SAMPLE_A, slices: [{ id: "one", start_frame: 0, end_frame: 24000 }] },
+    AGENT,
+  );
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.slices[`${SAMPLE_A}/one`].end_frame,
+    24000,
+  );
+});
+
+test("agent undo of sample.add is refused", async (t) => {
+  const { hub } = await setup(t);
+  const created = await hub.createSong({ project_id: PROJECT, title: "Samples", author: HUMAN });
+  const song_id = created.song_id;
+  const added = await addSample(hub, song_id, makeSample(SAMPLE_A));
+
+  const refused = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-sample-add", entry_id: added.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refused.error, SOUNDS_NEED_A_YES);
+  assert.ok((await hub.openSong(song_id)).snapshot.samples[SAMPLE_A], "the refused undo left the sample");
+
+  // The operator takes it back, and the operator is the one who puts it back:
+  // a sample is refused in both directions, unlike a take.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-sample-add",
+    entry_id: added.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.samples, {});
+
+  const redoRefused = refuses(
+    await hub.redo({ song_id, cmd_id: "agent-redo-sample-add", entry_id: undone.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(redoRefused.error, SOUNDS_NEED_A_YES);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.samples, {}, "the refused redo wrote nothing");
+
+  const redone = await hub.redo({
+    song_id,
+    cmd_id: "operator-redo-sample-add",
+    entry_id: undone.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(redone.ok, true, `the operator's redo was refused: ${redone.error}`);
+  assert.ok((await hub.openSong(song_id)).snapshot.samples[SAMPLE_A]);
+});
+
+test("agent can edit steps, locks, patterns and chains", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id, bank_id, clip_id } = await seedSampleSong(hub);
+  const where = { clip_id, pattern_id: "a", at: 0, bank_id, index: 0 };
+
+  await applies(hub, song_id, "agent-step-on", "step.toggle", { ...where, v: 110 }, AGENT);
+  await applies(hub, song_id, "agent-step-lock", "step.set", { ...where, locks: { cutoff_hz: 2500 } }, AGENT);
+  await applies(hub, song_id, "agent-step-clear", "step.clear_locks", where, AGENT);
+  await applies(hub, song_id, "agent-step-velocity", "step.set", { ...where, v: 64 }, AGENT);
+
+  const second = (
+    await applies(hub, song_id, "agent-pattern-add", "pattern.add", { clip_id, name: "Fill" }, AGENT)
+  ).entry.args.id;
+  await applies(
+    hub,
+    song_id,
+    "agent-pattern-rename",
+    "pattern.rename",
+    { clip_id, pattern_id: second, name: "Fill bar" },
+    AGENT,
+  );
+  await applies(hub, song_id, "agent-pattern-length", "pattern.set_length", { clip_id, length_steps: 32 }, AGENT);
+  await applies(hub, song_id, "agent-pattern-steps", "pattern.set_steps_beat", { clip_id, step_beats: 0.5 }, AGENT);
+  await applies(hub, song_id, "agent-pattern-swing", "pattern.set_swing", { clip_id, swing: 0.5 }, AGENT);
+  await applies(hub, song_id, "agent-chain", "chain.set", { clip_id, chain: ["a", second] }, AGENT);
+
+  // The track is unlocked, so the sound itself is still an agent's to rename and
+  // to chop: only losing one needs the operator.
+  await applies(
+    hub,
+    song_id,
+    "agent-sample-rename",
+    "sample.rename",
+    { sample_id: SAMPLE_A, name: "Break" },
+    AGENT,
+  );
+  await applies(
+    hub,
+    song_id,
+    "agent-sample-chop",
+    "slice.set",
+    { sample_id: SAMPLE_A, slices: [{ id: "one", start_frame: 0, end_frame: 24000 }] },
+    AGENT,
+  );
+
+  const snap = (await hub.openSong(song_id)).snapshot;
+  assert.equal(snap.clips[clip_id].swing, 0.5);
+  assert.equal(snap.clips[clip_id].length_steps, 32);
+  assert.deepEqual(snap.clips[clip_id].chain, ["a", second]);
+  assert.equal(snap.patterns[`${clip_id}/${second}`].name, "Fill bar");
+  assert.equal(snap.steps[`${clip_id}/a/0/${bank_id}.0`].v, 64);
+  assert.deepEqual(snap.steps[`${clip_id}/a/0/${bank_id}.0`].locks, {});
+  assert.equal(snap.samples[SAMPLE_A].name, "Break");
+  assert.equal(snap.pads[padPath(track_id, bank_id, 0)].sample_id, SAMPLE_A, "the pad still plays it");
+});
+
+test("a human can drop a pad's sample and undo it", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id, bank_id, assigned } = await seedSampleSong(hub);
+  const pad = padPath(track_id, bank_id, 0);
+
+  // The operator drops the pad's sound by taking the assignment back...
+  const dropped = await hub.undo({
+    song_id,
+    cmd_id: "operator-drop-sample",
+    entry_id: assigned.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(dropped.ok, true, `the operator's undo was refused: ${dropped.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.pads[pad].sample_id, null);
+
+  // ... and puts it back by undoing that, with nobody asked for a yes.
+  const back = await hub.redo({
+    song_id,
+    cmd_id: "operator-restore-sample",
+    entry_id: dropped.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(back.ok, true, `the operator's redo was refused: ${back.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.pads[pad].sample_id, SAMPLE_A);
+
+  // A person repoints the pad, re-chops the sample it no longer plays, and takes
+  // a sampler track with a sound on it away and back.
+  await addSample(hub, song_id, makeSample(SAMPLE_B));
+  await applies(
+    hub,
+    song_id,
+    "operator-repoint-pad",
+    "pad.assign",
+    { track_id, bank_id, index: 0, sample_id: SAMPLE_B },
+    HUMAN,
+  );
+  await applies(
+    hub,
+    song_id,
+    "operator-rechop",
+    "slice.set",
+    { sample_id: SAMPLE_A, slices: [{ id: "one", start_frame: 0, end_frame: 24000 }] },
+    HUMAN,
+  );
+  const removed = await applies(hub, song_id, "operator-track-remove", "track.remove", { track_id }, HUMAN);
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks.length, 0);
+
+  const restored = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-remove",
+    entry_id: removed.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(restored.ok, true, `the operator's undo was refused: ${restored.error}`);
+  const reopened = (await hub.openSong(song_id)).snapshot;
+  assert.equal(reopened.tracks.length, 1);
+  assert.equal(reopened.pads[pad].sample_id, SAMPLE_B, "the pad came back with its sound");
+  assert.ok(reopened.samples[SAMPLE_A], "a sample belongs to the song, not to the track");
 });

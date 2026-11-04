@@ -32,12 +32,20 @@
  * "limit", "invalid", "conflict", "storage" or "not_found".
  *
  * Two of those rules are about recordings, which cannot be made again:
- *   - a command marked `internal` (only `take.add` today) is refused with
- *     "studio_only" unless the call says it comes from Studio, so the WS path,
- *     the agent HTTP API and MCP cannot issue one;
+ *   - a command marked `internal` (`take.add` and `sample.add` today) is
+ *     refused with "studio_only" unless the call says it comes from Studio, so
+ *     the WS path, the agent HTTP API and MCP cannot issue one;
  *   - a step — a command, an undo or a redo — whose writes would delete a take
  *     or discard one is refused for anyone but the operator, with
  *     "human_only" and a sentence asking for the operator's yes.
+ *
+ * A third rule guards the sampler's sounds the same way, and is decided on the
+ * same effective writes (see `losesSound`): an agent may put a sample on an
+ * empty pad, rename a sample, or re-chop one no locked track plays, but it may
+ * not delete a sample, drop or repoint a pad that plays one, remove the bank or
+ * the sampler track the pad belongs to, replace a sampler track's device, or
+ * take a `sample.add` back.
+ *
  * "storage" is the one refusal that has to undo something: the edit was
  * already applied to the live document when the write failed, so the hub drops
  * its cached document for that song and the next operation rebuilds it from the
@@ -50,8 +58,17 @@
  * error unchanged.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
-import { newSongDoc, parseObjectRef, snapshot, splitRefField } from "./doc.js";
+import {
+  SAMPLER_DEVICE,
+  bankKey,
+  newSongDoc,
+  parseObjectRef,
+  sampleUsers,
+  snapshot,
+  splitRefField,
+} from "./doc.js";
 import {
   StudioError,
   applyCommand,
@@ -146,6 +163,24 @@ const TAKE_FLAG_BY_COMMAND_ONLY =
 
 /** The ref kinds a step can lose a recorded take through. */
 const TAKE_BEARING_KINDS = Object.freeze(["take", "clip", "track", "scene"]);
+
+/**
+ * What an agent is told when a step would lose a recorded or imported sound.
+ *
+ * A sample is a recording or an import, the one thing in a sampler track that
+ * cannot be made again from the song: losing one needs the operator's own yes
+ * (plan 1c, Global Constraints "Who can change a sound").
+ */
+const SOUNDS_NEED_A_YES = "Changing recorded or imported sounds needs a yes from the operator.";
+
+/**
+ * The people-only command over a sound: a `sample.add` step is the operator's
+ * to take back, in either direction, like `take.add`.
+ */
+const SAMPLE_ADD_COMMAND = "sample.add";
+
+/** The ref kinds a step can lose a recorded or imported sound through. */
+const SOUND_BEARING_KINDS = Object.freeze(["sample", "slice", "pad", "bank", "track"]);
 
 /** What a caller is told when a `cmd_id` comes back for a different change. */
 const CMD_ID_REUSED = "That command id was already used for a different change.";
@@ -245,17 +280,20 @@ function addTrackId(ids, value) {
 /**
  * Note the track one before/after entry names.
  *
- * A clip value carries the track it sits on in `track_id`. A whole-track value
+ * A clip value carries the track it sits on in `track_id`, and so does a pad
+ * and a bank. A pattern, a step and a take carry the clip they belong to in
+ * `clip_id`, and that clip says which track they hang off. A whole-track value
  * (`track:<id>|*`) is the track itself, and it is the one place a restore says
  * whether that track is locked: a track that was removed is not in the song
  * any more, so a lock check against the live document would find nothing to
  * refuse.
  * @param {{trackIds: Set<string>, lockedTracks: Map<string, string>}} found
+ * @param {object} snap - the current snapshot, to find a clip's track
  * @param {string} key - a `"<ref>|<field>"` history key
  * @param {any} value - the value the entry writes
  * @returns {void}
  */
-function noteTrackEntry(found, key, value) {
+function noteTrackEntry(found, snap, key, value) {
   const split = splitRefField(key);
   const target = split ? parseObjectRef(split.ref) : null;
   if (target?.kind === "track" && split.field === "*" && isPlainObject(value)) {
@@ -267,6 +305,13 @@ function noteTrackEntry(found, key, value) {
     return;
   }
   addTrackId(found.trackIds, value);
+  // A pattern or a step says which clip it belongs to, and the clip says which
+  // track's kit plays it.
+  const clipId = isPlainObject(value) && typeof value.clip_id === "string" ? value.clip_id : null;
+  const clip = clipId === null ? null : snap?.clips?.[clipId];
+  if (typeof clip?.track_id === "string" && clip.track_id !== "") {
+    found.trackIds.add(clip.track_id);
+  }
 }
 
 /**
@@ -274,7 +319,7 @@ function noteTrackEntry(found, key, value) {
  * locked.
  *
  * The refs alone are not enough. A restore puts back an object the song does
- * not hold any more, so `trackIdForRef` finds nothing for it — the clip's own
+ * not hold any more, so `trackIdsForRef` finds nothing for it — the clip's own
  * `track_id` inside the value being written is then the only thing that says
  * which track it lands on. The values a plan writes are read for it, and so
  * are the recorded step's own before/after values, because those are what a
@@ -292,15 +337,14 @@ function noteTrackEntry(found, key, value) {
 function planTrackIds(snap, refs, plan, target) {
   const found = { trackIds: new Set(), lockedTracks: new Map() };
   for (const ref of refs) {
-    const trackId = trackIdForRef(snap, ref);
-    if (trackId) found.trackIds.add(trackId);
+    for (const trackId of trackIdsForRef(snap, ref)) found.trackIds.add(trackId);
   }
 
   const applied = plan?.apply instanceof Map ? plan.apply : plan instanceof Map ? plan : null;
-  for (const [key, value] of applied ?? []) noteTrackEntry(found, key, value);
+  for (const [key, value] of applied ?? []) noteTrackEntry(found, snap, key, value);
   for (const map of [target?.inverse?.before, target?.inverse?.after]) {
     if (!map || typeof map !== "object") continue;
-    for (const [key, value] of Object.entries(map)) noteTrackEntry(found, key, value);
+    for (const [key, value] of Object.entries(map)) noteTrackEntry(found, snap, key, value);
   }
   return found;
 }
@@ -405,6 +449,175 @@ function onlyPutsTakesBack(changes, snap) {
 }
 
 /**
+ * The id in front of the first "/" of a sampler container key.
+ *
+ * A slice lives under "<sample_id>/<slice_id>", a bank under
+ * "<track_id>/<bank_id>" and a pad under "<track_id>/<bank_id>/<index>", and
+ * none of those ids holds a "/" of its own (see the id rules in sampler.js), so
+ * the first part is always the object the key hangs off. Only a fallback: the
+ * snapshot's own object is asked first, so a key nothing holds any more can
+ * still name its track.
+ * @param {string} key
+ * @returns {string|null}
+ */
+function keyHead(key) {
+  const text = String(key ?? "");
+  const at = text.indexOf("/");
+  return at > 0 ? text.slice(0, at) : null;
+}
+
+/** @returns {boolean} whether a pad plays a recorded or imported sound. */
+function playsSound(pad) {
+  return typeof pad?.sample_id === "string" && pad.sample_id !== "";
+}
+
+/**
+ * Whether one write takes a field away from a value it holds: cleared, or moved
+ * to a different value. A field that held nothing may be filled in.
+ * @param {any} current - what the song holds now
+ * @param {any} next - what the step would write
+ * @returns {boolean}
+ */
+function takesAway(current, next) {
+  return current !== null && current !== undefined && current !== next;
+}
+
+/** @returns {object|null} one pad of a snapshot, or null. */
+function padIn(snap, key) {
+  const pad = snap?.pads?.[key];
+  return isPlainObject(pad) ? pad : null;
+}
+
+/** @returns {boolean} whether any pad of one bank plays a sound. */
+function bankHoldsSound(snap, trackId, bankId) {
+  return Object.values(snap?.pads ?? {}).some(
+    (pad) => pad?.track_id === trackId && pad?.bank_id === bankId && playsSound(pad),
+  );
+}
+
+/** @returns {boolean} whether any pad of one track plays a sound. */
+function trackHoldsSound(snap, trackId) {
+  return Object.values(snap?.pads ?? {}).some((pad) => pad?.track_id === trackId && playsSound(pad));
+}
+
+/** @returns {boolean} whether any pad plays one slice of one sample. */
+function sliceInUse(snap, sampleId, sliceId) {
+  return Object.values(snap?.pads ?? {}).some(
+    (pad) => pad?.sample_id === sampleId && pad?.slice_id === sliceId,
+  );
+}
+
+/** @returns {boolean} whether one track of a snapshot plays a kit of pads. */
+function isSamplerIn(snap, trackId) {
+  return (snap?.tracks ?? []).some(
+    (track) => track?.id === trackId && track?.device?.engine === SAMPLER_DEVICE.engine,
+  );
+}
+
+/** @returns {object|null} one track of a snapshot, or null. */
+function trackIn(snap, trackId) {
+  return (snap?.tracks ?? []).find((track) => track?.id === trackId) ?? null;
+}
+
+/**
+ * Whether one write to a pad loses the sound it plays: the pad is deleted while
+ * it plays one, or its sample or its slice moves away from the value it held.
+ * @param {object} snap - the song as it stands before the step
+ * @param {string} key - the pad's container key (`<track>/<bank>/<index>`)
+ * @param {string} field - `"*"`, `"sample_id"` or `"slice_id"`
+ * @param {any} value - what the step would write
+ * @returns {boolean}
+ */
+function padWriteLosesSound(snap, key, field, value) {
+  // A pad this step makes was not playing anything a moment ago.
+  const pad = padIn(snap, key);
+  if (!pad) return false;
+  if (field === "*") {
+    if (value === null) return playsSound(pad);
+    if (!isPlainObject(value)) return false;
+    return (
+      takesAway(pad.sample_id ?? null, value.sample_id ?? null)
+      || takesAway(pad.slice_id ?? null, value.slice_id ?? null)
+    );
+  }
+  if (field !== "sample_id" && field !== "slice_id") return false;
+  return takesAway(pad[field] ?? null, value ?? null);
+}
+
+/**
+ * Whether one write to a track loses a kit's sound: the track is deleted while
+ * its pads play a sample, or its device (its kit's engine) is replaced.
+ * @param {object} snap - the song as it stands before the step
+ * @param {string} trackId
+ * @param {string} field - `"*"`, `"device"`, or another field of the track
+ * @param {any} value - what the step would write
+ * @returns {boolean}
+ */
+function trackWriteLosesSound(snap, trackId, field, value) {
+  const track = trackIn(snap, trackId);
+  if (field === "device") {
+    if (!isSamplerIn(snap, trackId)) return false;
+    return !isDeepStrictEqual(track?.device ?? null, value ?? null);
+  }
+  if (field !== "*") return false;
+  if (value === null) return trackHoldsSound(snap, trackId);
+  // A whole track put back is the same instrument it was recorded as; a track
+  // that came back as a different or a missing one is a different sound.
+  if (!track || !isPlainObject(value)) return false;
+  if (!isSamplerIn(snap, trackId)) return false;
+  return !isDeepStrictEqual(track.device ?? null, value.device ?? null);
+}
+
+/**
+ * Whether a change set holds a write that would lose a recorded or imported
+ * sound.
+ *
+ * Judged on the values a step writes, never on the shape of its keys: a pad is
+ * lost through a whole-object delete, through a `sample_id` or `slice_id` that
+ * moves off the value it holds, and through the bank, the track or the device
+ * that carries it. A write that fills an empty pad, renames a sample or changes
+ * any other field of a pad is not a loss, and neither is putting back something
+ * that was taken away.
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes - the
+ *   writes the step makes, keyed `"<ref>|<field>"`
+ * @param {object} snap - the song as it stands before those writes
+ * @returns {boolean}
+ */
+function losesSound(changes, snap) {
+  for (const [key, value] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    const target = split ? parseObjectRef(split.ref) : null;
+    if (!target) continue;
+    if (target.kind === "sample") {
+      if (split.field === "*" && value === null) return true;
+      continue;
+    }
+    if (target.kind === "slice") {
+      if (split.field !== "*" || value !== null) continue;
+      const sampleId = keyHead(target.id);
+      if (sampleId === null) continue;
+      if (sliceInUse(snap, sampleId, target.id.slice(sampleId.length + 1))) return true;
+      continue;
+    }
+    if (target.kind === "pad") {
+      if (padWriteLosesSound(snap, target.id, split.field, value)) return true;
+      continue;
+    }
+    if (target.kind === "bank") {
+      if (split.field !== "*" || value !== null) continue;
+      const trackId = keyHead(target.id);
+      if (trackId === null) continue;
+      if (bankHoldsSound(snap, trackId, target.id.slice(trackId.length + 1))) return true;
+      continue;
+    }
+    if (target.kind === "track" && trackWriteLosesSound(snap, target.id, split.field, value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * What one prepared command would change, worked out on a throwaway copy of the
  * song so a rule can be checked before anything is written.
  *
@@ -442,24 +655,56 @@ function normalizeAuthor(author) {
 }
 
 /**
- * The track a lock check has to look at for one touched ref.
+ * Every track a lock check has to look at for one touched ref.
  *
  * A clip belongs to the track it sits on; a track is itself; a scene or the
- * song's meta belong to no track. Nothing here walks to a clip's track from a
+ * song's meta belong to no track. The sampler's objects name their track the
+ * same way the rest do: a bank and a pad say which track's kit they belong to,
+ * a pattern and a step belong to the track of their clip, and a sample or a
+ * slice touches EVERY track that plays it — re-chopping or renaming a sound is
+ * a write to every kit that has it on a pad, so a locked one among them refuses
+ * the step (see `sampleUsers`). Nothing here walks to a clip's track from a
  * *focused* ref — focus matches the ref exactly.
  * @param {object} snap - a plain snapshot
  * @param {string} ref
- * @returns {string|null}
+ * @returns {string[]} the track ids, each once; empty when the ref names none
  */
-function trackIdForRef(snap, ref) {
+function trackIdsForRef(snap, ref) {
   const target = parseObjectRef(ref);
-  if (!target) return null;
-  if (target.kind === "track") return target.id;
-  if (target.kind === "clip") return snap.clips?.[target.id]?.track_id ?? null;
+  if (!target) return [];
+  if (target.kind === "track") return [target.id];
+  if (target.kind === "clip") return idsOrNone(snap.clips?.[target.id]?.track_id);
   // A placement is a block on a track's lane, so a locked track's placements
   // are off-limits the way its clips are. A marker or a section names no track.
-  if (target.kind === "placement") return snap.arrangement?.placements?.[target.id]?.track_id ?? null;
-  return null;
+  if (target.kind === "placement") {
+    return idsOrNone(snap.arrangement?.placements?.[target.id]?.track_id);
+  }
+  if (target.kind === "pad") return idsOrNone(snap.pads?.[target.id]?.track_id ?? keyHead(target.id));
+  if (target.kind === "bank") return idsOrNone(snap.banks?.[target.id]?.track_id ?? keyHead(target.id));
+  // A pattern and a step carry the clip they belong to; the clip carries the
+  // track. A whole object is named by its own key when the song no longer holds
+  // it, and then the key's first part is still the clip it belonged to.
+  if (target.kind === "pattern") {
+    return trackOfClip(snap, snap.patterns?.[target.id]?.clip_id ?? keyHead(target.id));
+  }
+  if (target.kind === "step") {
+    return trackOfClip(snap, snap.steps?.[target.id]?.clip_id ?? keyHead(target.id));
+  }
+  if (target.kind === "sample") return sampleUsers(snap, target.id);
+  if (target.kind === "slice") {
+    return sampleUsers(snap, snap.slices?.[target.id]?.sample_id ?? keyHead(target.id));
+  }
+  return [];
+}
+
+/** @returns {string[]} one id as a list of one, or nothing when it names none. */
+function idsOrNone(id) {
+  return typeof id === "string" && id !== "" ? [id] : [];
+}
+
+/** @returns {string[]} the track one clip sits on, when the song still holds it. */
+function trackOfClip(snap, clipId) {
+  return idsOrNone(snap.clips?.[clipId]?.track_id);
 }
 
 /**
@@ -484,6 +729,26 @@ function labelForRef(snap, ref) {
   }
   if (target.kind === "marker") return snap.arrangement?.markers?.[target.id]?.name ?? target.id;
   if (target.kind === "section") return snap.arrangement?.sections?.[target.id]?.name ?? target.id;
+  // The sampler's objects, so a focus on one of them names it the way a focus on
+  // a clip does.
+  if (target.kind === "sample") return snap.samples?.[target.id]?.name ?? target.id;
+  if (target.kind === "bank") return snap.banks?.[target.id]?.name ?? target.id;
+  if (target.kind === "pad") {
+    const pad = snap.pads?.[target.id];
+    if (!pad) return target.id;
+    const bankName = snap.banks?.[bankKey(pad.track_id, pad.bank_id)]?.name ?? pad.bank_id;
+    return `pad ${Number(pad.index) + 1} of bank ${bankName}`;
+  }
+  if (target.kind === "pattern") return snap.patterns?.[target.id]?.name ?? target.id;
+  if (target.kind === "step") {
+    const step = snap.steps?.[target.id];
+    return step ? `the step at position ${step.at}` : target.id;
+  }
+  if (target.kind === "slice") {
+    const slice = snap.slices?.[target.id];
+    const sampleId = slice?.sample_id ?? keyHead(target.id);
+    return slice ? `slice ${slice.id} of sample ${snap.samples?.[sampleId]?.name ?? sampleId}` : target.id;
+  }
   return "the song";
 }
 
@@ -892,8 +1157,7 @@ export function createHub({
   function tracksOfRefs(snap, refs) {
     const ids = new Set();
     for (const ref of refs) {
-      const trackId = trackIdForRef(snap, ref);
-      if (trackId) ids.add(trackId);
+      for (const trackId of trackIdsForRef(snap, ref)) ids.add(trackId);
     }
     return ids;
   }
@@ -948,6 +1212,45 @@ export function createHub({
     if (author.kind === "human") return false;
     if (Object.keys(prepared.snap.takes ?? {}).length === 0) return false;
     return prepared.touched.some((ref) => TAKE_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
+  }
+
+  /**
+   * The agent sound guard: a step that would lose a recorded or imported sound
+   * has to come from the operator.
+   *
+   * A sample is a recording or an import, so the sampler's sounds get the
+   * take-loss rule's treatment: a step whose writes delete a sample, drop or
+   * repoint a pad that plays one, remove the bank or the sampler track the pad
+   * belongs to, or replace a sampler track's device is refused for anyone but
+   * the operator (see `losesSound`). A pad that plays nothing may be filled in,
+   * a sample may be renamed, and a sound no locked track plays may be re-chopped
+   * — those write values that are still there afterwards.
+   * @param {{changes: Map<string, any>|Object<string, any>, snap: object,
+   *          author: object}} check - the writes the step makes, and the song
+   *   as it stands before them (a repoint is judged against it)
+   * @returns {object|null} the refusal, or null when the step may run
+   */
+  function soundLossRefusal({ changes, snap, author }) {
+    if (author.kind === "human") return null;
+    return losesSound(changes, snap) ? refuse("human_only", SOUNDS_NEED_A_YES) : null;
+  }
+
+  /**
+   * Whether the sound guard has to look at what a command would write.
+   *
+   * False when nobody can lose anything (a person is calling, or the song holds
+   * no sample at all — a pad with a sound on it always comes from one) and when
+   * the command names none of the objects a sound hangs off. When it is true the
+   * step is previewed on a clone and `soundLossRefusal` decides on the writes
+   * themselves.
+   * @param {{touched: string[], snap: object}} prepared
+   * @param {object} author
+   * @returns {boolean}
+   */
+  function mayLoseSounds(prepared, author) {
+    if (author.kind === "human") return false;
+    if (Object.keys(prepared.snap.samples ?? {}).length === 0) return false;
+    return prepared.touched.some((ref) => SOUND_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
   }
 
   /**
@@ -1226,6 +1529,21 @@ export function createHub({
       if (lost) return lost;
     }
 
+    // Nor does a recorded or imported sound: dropping a pad's sample, repointing
+    // it, removing the bank or the sampler track that holds it, swapping a
+    // sampler track's device and deleting a sample all end here for an agent,
+    // decided on the writes this step would make.
+    if (mayLoseSounds(prepared, actor)) {
+      let preview;
+      try {
+        preview = previewChanges(state.doc, prepared);
+      } catch (err) {
+        return toRefusal(err);
+      }
+      const lost = soundLossRefusal({ changes: preview.after, snap: prepared.snap, author: actor });
+      if (lost) return lost;
+    }
+
     // Capture the diff this one transaction produces: it is exactly the update
     // a client replays and the store keeps. A refusal inside applyCommand
     // leaves the document untouched (every command validates first), so the
@@ -1395,9 +1713,23 @@ export function createHub({
           );
         }
       }
+      // A sample is a recording or an import: like `take.add`, its step is the
+      // operator's to take back. Unlike a take, a sample is refused in both
+      // directions — an agent neither drops one nor puts one into the song.
+      if (original === SAMPLE_ADD_COMMAND) return refuse("human_only", SOUNDS_NEED_A_YES);
     }
 
     if (planError) return toRefusal(planError);
+
+    // The sound guard on a step back along the history, decided on the values
+    // the step would put back (`inverse.before`, which is what an undo and a
+    // redo of an undo both write). It answers before the conflict check below,
+    // so an agent meets the same sentence for a sound whether or not a later
+    // edit has since taken one of those writes out of the plan.
+    if (actor.kind !== "human") {
+      const lostSound = soundLossRefusal({ changes: target.inverse?.before, snap, author: actor });
+      if (lostSound) return lostSound;
+    }
 
     // The history declines a plan it could not apply safely and says why: those
     // reasons are the answer, not "every change was edited again since".
