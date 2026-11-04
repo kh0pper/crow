@@ -66,6 +66,11 @@ import "./commands/takes.js";
 import "./commands/arrangement.js";
 // The 1c sampler commands — kits, pads, samples, patterns and steps.
 import "./commands/sampler.js";
+// The 1c MIDI commands — a mapping table, the operator's accept and the two
+// device profiles. An agent gets tools for `midi.map`, `midi.remove` and
+// `midi.propose_profile`; `midi.accept` is people-only, so mcp.js builds no tool
+// for it (the loop below skips every humanOnly command).
+import "./commands/midi.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */

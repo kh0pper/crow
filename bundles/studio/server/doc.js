@@ -61,6 +61,21 @@
  * kept in the clip, so scenes and placements measure a pattern clip exactly
  * as they measure any other clip.
  *
+ * A MIDI mapping (plan 1c, Task 8) routes one incoming message — a note, a
+ * control change or a program change on one named controller — to one
+ * allow-listed live action. Mappings are their own top-level container keyed by
+ * stable ids:
+ *
+ *   midi_maps  Y.Map of mapping id → Y.Map {id, device_name, message {type,
+ *                     channel, number}, action {kind, …}, set_by, proposed,
+ *                     accepted_action}
+ *
+ * `set_by` says who set the mapping ("operator" or "agent") and `proposed`
+ * says whether it is still waiting for the operator's yes. A mapping is live
+ * only when `proposed` is false AND its `action` still deep-equals its
+ * `accepted_action`: that pair is what the router reads (see `routeFor` in
+ * commands/midi.js), so an action edited after the accept stops routing.
+ *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
  * JSON, so `snapshot()` is a round trip away from the wire, storage or a
@@ -89,7 +104,8 @@ import * as Y from "yjs";
  *         banksPerKit: number, padsPerBank: number, samplesPerSong: number,
  *         sampleSamples: number, slicesPerSample: number,
  *         stepPositions: number, stepEntriesPerPattern: number,
- *         patternsPerClip: number, chainLength: number, locksPerStep: number}}
+ *         patternsPerClip: number, chainLength: number, locksPerStep: number,
+ *         midiMaps: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -124,6 +140,9 @@ export const LIMITS = Object.freeze({
   patternsPerClip: 16,
   chainLength: 64,
   locksPerStep: 8,
+  // The MIDI mapping table of one song (plan 1c, Limits): every message the
+  // operator's controllers drive, proposed or live.
+  midiMaps: 256,
 });
 
 /**
@@ -158,6 +177,12 @@ export const SAMPLE_RATES = Object.freeze([44100, 48000, 88200, 96000]);
 
 /** How a sample came to be in the song. */
 export const SAMPLE_ORIGINS = Object.freeze(["import", "record", "resample"]);
+
+/** The three MIDI messages a mapping may answer: a note, a control, a program change. */
+export const MIDI_MESSAGE_TYPES = Object.freeze(["note", "cc", "pc"]);
+
+/** Who set one MIDI mapping: the operator, or an agent proposing one. */
+export const MIDI_SET_BY = Object.freeze(["operator", "agent"]);
 
 /** The filter kinds one pad may use; "off" is a pad that filters nothing. */
 export const PAD_FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
@@ -781,6 +806,35 @@ export function stepMap(doc) {
 }
 
 /**
+ * The MIDI mappings map, keyed by mapping id. Writers use this; a song written
+ * before the MIDI page existed gets the container the first time it is written
+ * to.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function midiMap(doc) {
+  return ensureContainer(doc, "midi_maps", () => new Y.Map());
+}
+
+/**
+ * Every MIDI mapping in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, mapping: Y.Map<any>}>}
+ */
+export function midiEntries(doc) {
+  return objectEntries(readContainer(doc, "midi_maps"), "mapping");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live MIDI mapping, or null
+ */
+export function getMidiMapping(doc, id) {
+  return liveObject(readContainer(doc, "midi_maps"), id);
+}
+
+/**
  * The key one sample's slice lives under in the song's `slices` map.
  * @param {string} sampleId
  * @param {string} sliceId
@@ -1136,6 +1190,7 @@ export function sampleUsers(snap, sampleId) {
  *            samples: Object<string, object>, slices: Object<string, object>,
  *            banks: Object<string, object>, pads: Object<string, object>,
  *            patterns: Object<string, object>, steps: Object<string, object>,
+ *            midi_maps: Object<string, object>,
  *            arrangement: {placements: Object<string, object>,
  *                          markers: Object<string, object>,
  *                          sections: Object<string, object>}}}
@@ -1146,6 +1201,9 @@ export function sampleUsers(snap, sampleId) {
  *   "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" — so the engine can read a
  *   pad or a step without walking the track or the clip. A song written before
  *   the sampler existed reads all six as empty objects.
+ *   `midi_maps` is a plain object too, keyed by the mapping's own id, so the
+ *   page and the router read the whole table in one place; a song nobody has
+ *   mapped a controller in reads it as an empty object.
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -1190,6 +1248,7 @@ export function snapshot(doc) {
     pads: snapshotContainer(doc, "pads", normalizePad),
     patterns: snapshotContainer(doc, "patterns", normalizePattern),
     steps: snapshotContainer(doc, "steps", normalizeStep),
+    midi_maps: snapshotContainer(doc, "midi_maps", normalizeMidiMapping),
     arrangement: snapshotArrangement(doc),
   };
 }
@@ -1271,6 +1330,9 @@ function snapshotArrangement(doc) {
  *     per song, slices per sample, patterns per clip, chain length, step
  *     entries per pattern, locks per step) — the rules the sampler commands
  *     enforce on their own edits;
+ *   - a song holds at most `LIMITS.midiMaps` MIDI mappings, and no two live
+ *     ones answer the same message on the same controller (one message has one
+ *     live action) — the rules the midi commands enforce on their own edits;
  *   - the arrangement holds at most `LIMITS.placements` placements,
  *     `LIMITS.markers` markers and `LIMITS.sections` sections, ends at bar
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
@@ -1349,6 +1411,7 @@ export function checkInvariants(doc) {
 
   reasons.push(...arrangementReasons(song));
   reasons.push(...samplerReasons(song));
+  reasons.push(...midiReasons(song));
 
   return reasons;
 }
@@ -1675,6 +1738,52 @@ function samplerReasons(song) {
   return reasons;
 }
 
+/**
+ * What is wrong with a song's MIDI mappings, in plain English.
+ *
+ * Two rules, both of which the midi commands keep on their own edits: the table
+ * stays inside `LIMITS.midiMaps`, and no two live mappings answer the same
+ * message on the same controller — one message has one live action, so the
+ * router can never have to choose between two of them.
+ * @param {object} song - a snapshot
+ * @returns {string[]}
+ */
+function midiReasons(song) {
+  const mappings = Object.values(song.midi_maps ?? {});
+  const reasons = [];
+  if (mappings.length > LIMITS.midiMaps) {
+    reasons.push(
+      `The song would hold ${mappings.length} MIDI mappings; a song can hold at most ${LIMITS.midiMaps} MIDI mappings.`,
+    );
+  }
+
+  const live = mappings.filter((mapping) => mapping.proposed !== true);
+  for (let index = 0; index < live.length; index += 1) {
+    for (let other = index + 1; other < live.length; other += 1) {
+      if (live[index].device_name !== live[other].device_name) continue;
+      if (!sameMessage(live[index].message, live[other].message)) continue;
+      reasons.push(
+        `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
+      );
+    }
+  }
+  return reasons;
+}
+
+/** @returns {boolean} whether two MIDI messages are the same message. */
+function sameMessage(left, right) {
+  if (!left || !right) return false;
+  return left.type === right.type && left.channel === right.channel && left.number === right.number;
+}
+
+/** @returns {string} a message in words, for a message about the mappings. */
+function messageName(message) {
+  const number = Number(message?.number);
+  if (message?.type === "note") return `note ${number}`;
+  if (message?.type === "cc") return `control change ${number}`;
+  return `program change ${number}`;
+}
+
 /** @returns {string} a name for a message, or the id when it has none. */
 function nameOrId(name, id) {
   return typeof name === "string" && name !== "" ? name : id;
@@ -1776,6 +1885,8 @@ function barsText(bars) {
  *     object, and a plain field name (or `"locks.<name>"`) writes one field of
  *     one of them — which is how one pad, one step or one lock undoes without
  *     touching its neighbours;
+ *   - `"midi:abc|*"` does the same for one MIDI mapping, and a plain field name
+ *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
  *   - `"placement:abc|*"`, `"marker:abc|*"` and `"section:abc|*"` do the same
  *     for the three arrangement objects, and `"placement:abc|bars"` (and its
  *     siblings) writes one field of one of them;
@@ -1830,7 +1941,8 @@ export function applyBeforeAfter(doc, plan) {
       case "pad":
       case "pattern":
       case "step":
-        writeSamplerObject(doc, target.kind, target.id, split.field, value);
+      case "midi":
+        writeContainerObject(doc, target.kind, target.id, split.field, value);
         break;
       case "placement":
       case "marker":
@@ -1884,8 +1996,8 @@ export function readField(doc, ref, field = "*") {
     return readPath(take, fieldPath(field));
   }
 
-  if (SAMPLER_MAP_OF[target.kind]) {
-    const object = samplerObject(doc, target.kind, target.id);
+  if (OBJECT_MAP_OF[target.kind]) {
+    const object = containerObject(doc, target.kind, target.id);
     if (!object) return ABSENT;
     if (field === "*") return toPlain(object);
     return readPath(object, fieldPath(field));
@@ -2111,33 +2223,35 @@ function writeTake(doc, id, field, value) {
   writeField(take, field, value);
 }
 
-/** Which song container each sampler object kind lives in. */
-const SAMPLER_MAP_OF = Object.freeze({
+/** Which song container each id-keyed object kind lives in. */
+const OBJECT_MAP_OF = Object.freeze({
   sample: "samples",
   slice: "slices",
   bank: "banks",
   pad: "pads",
   pattern: "patterns",
   step: "steps",
+  midi: "midi_maps",
 });
 
-/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern or step, or null. */
-function samplerObject(doc, kind, id) {
-  const key = SAMPLER_MAP_OF[kind];
+/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern, step or MIDI mapping, or null. */
+function containerObject(doc, kind, id) {
+  const key = OBJECT_MAP_OF[kind];
   if (!key) return null;
   return liveObject(readContainer(doc, key), id);
 }
 
 /**
- * Write one field of a sampler object, or (re)create/delete it whole.
+ * Write one field of a sampler object or a MIDI mapping, or (re)create/delete
+ * it whole.
  *
  * A pad and a step carry no `id` of their own: their container key is their
  * identity (`<track>/<bank>/<index>` and `<clip>/<pattern>/<at>/<bank>.<index>`),
- * so nothing here invents one. A sample, slice, bank and pattern do carry one,
- * and it is the same value their key holds.
+ * so nothing here invents one. A sample, slice, bank, pattern and MIDI mapping
+ * do carry one, and it is the same value their key holds.
  */
-function writeSamplerObject(doc, kind, id, field, value) {
-  const key = SAMPLER_MAP_OF[kind];
+function writeContainerObject(doc, kind, id, field, value) {
+  const key = OBJECT_MAP_OF[kind];
   if (field === "*" && value === ABSENT) {
     const existing = readContainer(doc, key);
     if (existing instanceof Y.Map) existing.delete(id);
@@ -2400,6 +2514,38 @@ function normalizeStep(id, value) {
     index: integerOr(plain.index, 0),
     v: integerOr(plain.v, 100),
     locks: plain.locks && typeof plain.locks === "object" ? cloneJson(plain.locks) : {},
+  };
+}
+
+/**
+ * A MIDI mapping as a snapshot carries it: every field present, nothing extra.
+ *
+ * `accepted_action` is `null` until the operator accepts the mapping, and
+ * `proposed` is what says whether it is waiting: only a mapping with
+ * `proposed: false` whose `action` still equals its `accepted_action` is live.
+ */
+function normalizeMidiMapping(id, value) {
+  const plain = stripHints(value);
+  const message = plain.message && typeof plain.message === "object" ? plain.message : {};
+  const action = plain.action && typeof plain.action === "object" ? plain.action : {};
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    device_name: typeof plain.device_name === "string" ? plain.device_name : "",
+    message: {
+      type: MIDI_MESSAGE_TYPES.includes(message.type) ? message.type : MIDI_MESSAGE_TYPES[0],
+      channel: integerOr(message.channel, 1),
+      number: integerOr(message.number, 0),
+    },
+    action: {
+      ...cloneJson(action),
+      kind: typeof action.kind === "string" ? action.kind : "",
+    },
+    set_by: MIDI_SET_BY.includes(plain.set_by) ? plain.set_by : MIDI_SET_BY[0],
+    proposed: plain.proposed === true,
+    accepted_action:
+      plain.accepted_action && typeof plain.accepted_action === "object"
+        ? cloneJson(plain.accepted_action)
+        : ABSENT,
   };
 }
 

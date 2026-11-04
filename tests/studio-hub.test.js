@@ -2409,3 +2409,124 @@ test("a human can drop a pad's sample and undo it", async (t) => {
   assert.equal(reopened.pads[pad].sample_id, SAMPLE_B, "the pad came back with its sound");
   assert.ok(reopened.samples[SAMPLE_A], "a sample belongs to the song, not to the track");
 });
+
+// --- MIDI mappings ------------------------------------------------------------
+
+/** What the agent's MIDI guard answers with, word for word. */
+const MIDI_NEEDS_A_YES = "Only the operator changes an accepted MIDI mapping.";
+
+/** @returns {{type: string, channel: number, number: number}} a MIDI message. */
+function midiMessage(type, channel, number) {
+  return { type, channel, number };
+}
+
+test("agent undo cannot change an accepted mapping", async (t) => {
+  const { hub } = await setup(t);
+  const created = await hub.createSong({ project_id: PROJECT, title: "Pedals", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const song_id = created.song_id;
+  await applies(hub, song_id, "seed-verse", "scene.add", { id: "verse", name: "Verse" });
+  const pedal = midiMessage("pc", 1, 0);
+
+  // An agent's `midi.map` is a proposal, never a live mapping.
+  const proposed = await applies(
+    hub,
+    song_id,
+    "agent-map",
+    "midi.map",
+    { device_name: "FCB1010", message: pedal, action: { kind: "scene.launch", scene_id: "verse" } },
+    AGENT,
+  );
+  const mappingId = proposed.entry.args.id;
+  let mappings = (await hub.openSong(song_id)).snapshot.midi_maps;
+  assert.equal(mappings[mappingId].proposed, true);
+  assert.equal(mappings[mappingId].accepted_action, null);
+
+  // An agent cannot accept it, and cannot edit a proposal it already made: a
+  // second `midi.map` under that id is refused rather than re-purposed.
+  const refuseAccept = refuses(
+    await hub.runCommand({ song_id, cmd_id: "agent-accept", command: "midi.accept", args: { id: mappingId }, author: AGENT }),
+    "human_only",
+  );
+  assert.match(refuseAccept.error, /midi\.accept/);
+  const refuseEdit = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remap",
+      command: "midi.map",
+      args: { id: mappingId, device_name: "FCB1010", message: pedal, action: { kind: "stop_all" } },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.match(refuseEdit.error, /An agent proposes a new mapping/);
+
+  // The operator's yes makes it live.
+  const accepted = await applies(hub, song_id, "operator-accept", "midi.accept", { id: mappingId }, HUMAN);
+  mappings = (await hub.openSong(song_id)).snapshot.midi_maps;
+  assert.equal(mappings[mappingId].proposed, false);
+  assert.deepEqual(mappings[mappingId].accepted_action, { kind: "scene.launch", scene_id: "verse" });
+
+  // The agent's undo of its own proposal now would delete a live mapping, so it
+  // is refused on what it would write, not on the shape of its keys.
+  const refuseProposalUndo = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-proposal", entry_id: proposed.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refuseProposalUndo.error, MIDI_NEEDS_A_YES);
+
+  // Taking the operator's accept back is a step of a people-only command, so an
+  // agent never gets that far.
+  refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-accept", entry_id: accepted.entry.id, author: AGENT }),
+    "human_only",
+  );
+
+  // The operator edits the live mapping's action; the agent's undo and redo of
+  // that edit are both refused, because both would change a live mapping.
+  const edited = await applies(
+    hub,
+    song_id,
+    "operator-edit",
+    "midi.map",
+    { id: mappingId, device_name: "FCB1010", message: pedal, action: { kind: "transport.play" } },
+    HUMAN,
+  );
+  const refuseEditUndo = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-edit", entry_id: edited.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refuseEditUndo.error, MIDI_NEEDS_A_YES);
+
+  // Nothing the agent tried changed the song: the mapping is still live, and its
+  // action is the operator's last word.
+  mappings = (await hub.openSong(song_id)).snapshot.midi_maps;
+  assert.equal(mappings[mappingId].proposed, false);
+  assert.deepEqual(mappings[mappingId].action, { kind: "transport.play" });
+  assert.deepEqual(mappings[mappingId].accepted_action, { kind: "transport.play" });
+
+  // The operator takes the edit back...
+  const undone = await hub.undo({ song_id, cmd_id: "operator-undo-edit", entry_id: edited.entry.id, author: HUMAN });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  mappings = (await hub.openSong(song_id)).snapshot.midi_maps;
+  assert.deepEqual(mappings[mappingId].action, { kind: "scene.launch", scene_id: "verse" });
+
+  // ...and the agent's redo of that undo would put an accepted action back, so
+  // it is refused too.
+  const refuseRedo = refuses(
+    await hub.redo({ song_id, cmd_id: "agent-redo-edit", entry_id: undone.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refuseRedo.error, MIDI_NEEDS_A_YES);
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.midi_maps[mappingId].action,
+    { kind: "scene.launch", scene_id: "verse" },
+    "the refused redo wrote nothing",
+  );
+
+  // The operator can take the accept back again, which removes nothing the
+  // agent could not have proposed itself.
+  const unaccepted = await hub.undo({ song_id, cmd_id: "operator-undo-accept", entry_id: accepted.entry.id, author: HUMAN });
+  assert.equal(unaccepted.ok, true, `the operator's undo was refused: ${unaccepted.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.midi_maps[mappingId].proposed, true);
+});

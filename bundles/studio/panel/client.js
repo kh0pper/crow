@@ -240,6 +240,12 @@
  * has no MCP tool. `sample.add` is not here for the same reason `take.add` is
  * not: only the gateway's sample upload finish route adds a sample, as Studio's
  * own step.
+ *
+ * The MIDI commands end the list: `midi.map` routes one message, `midi.accept`
+ * is the operator's yes to a proposal (`midi.accept` is here for the same reason
+ * `pad.clear` is — it is people-only, and the panel's **Accept** button is the
+ * only way to run it), `midi.remove` takes a row away, and
+ * `midi.propose_profile` fills a device's rows in one step.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -297,6 +303,10 @@ export const COMMANDS = Object.freeze([
   "step.clear_locks",
   "chain.set",
   "clip.add_pattern",
+  "midi.map",
+  "midi.accept",
+  "midi.remove",
+  "midi.propose_profile",
 ]);
 
 /** The `var COMMANDS = [...]` declaration, built from the one list above. */

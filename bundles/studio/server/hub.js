@@ -46,6 +46,14 @@
  * the sampler track the pad belongs to, replace a sampler track's device, or
  * take a `sample.add` back.
  *
+ * A fourth rule guards the mapping table (see `changesLiveMapping`): an agent
+ * may propose MIDI mappings — `midi.map` run by an agent always creates a
+ * proposal, and `midi.propose_profile` fills a device's rows — but only the
+ * operator accepts one, and no agent step may change, delete or make live a
+ * mapping the operator accepted. It is decided on the same effective writes, so
+ * the agent's undo of its own proposal after the operator took it in is refused
+ * just as an edit to the accepted mapping would be.
+ *
  * "storage" is the one refusal that has to undo something: the edit was
  * already applied to the live document when the write failed, so the hub drops
  * its cached document for that song and the next operation rebuilds it from the
@@ -85,6 +93,10 @@ import "./commands/takes.js";
 import "./commands/arrangement.js";
 // The 1c sampler commands — kits, pads, samples, patterns and steps.
 import "./commands/sampler.js";
+// The 1c MIDI commands — the mapping table, the operator's accept and the
+// device profiles — and the sentence an agent meets when it reaches for a
+// mapping the operator has accepted.
+import { MIDI_NEEDS_A_YES } from "./commands/midi.js";
 import {
   REDO_COMMAND,
   UNDO_COMMAND,
@@ -181,6 +193,13 @@ const SAMPLE_ADD_COMMAND = "sample.add";
 
 /** The ref kinds a step can lose a recorded or imported sound through. */
 const SOUND_BEARING_KINDS = Object.freeze(["sample", "slice", "pad", "bank", "track"]);
+
+/**
+ * The ref kind a step reaches a MIDI mapping through. A mapping carries no
+ * track, so the lock check never looks at one; what guards it is whether it is
+ * a mapping the operator accepted (see `changesLiveMapping`).
+ */
+const MIDI_BEARING_KINDS = Object.freeze(["midi"]);
 
 /** What a caller is told when a `cmd_id` comes back for a different change. */
 const CMD_ID_REUSED = "That command id was already used for a different change.";
@@ -520,6 +539,82 @@ function trackIn(snap, trackId) {
 }
 
 /**
+ * Whether one write would change a MIDI mapping that is LIVE — accepted by the
+ * operator, or proposed no more — or would make a mapping live.
+ *
+ * A live mapping is the operator's: only they accept one, so an agent's step may
+ * not edit it, delete it or turn a proposal into one. The question is asked of
+ * what a write does, never of how its keys are shaped: a whole-object write is
+ * live when the song holds a live mapping there or when the value it writes is
+ * live, and a `proposed` write is live when it writes `false`.
+ * @param {object} snap - the song as it stands before the step
+ * @param {string} key - a `"<ref>|<field>"` write
+ * @param {any} value - what the step would write
+ * @returns {boolean}
+ */
+function midiWriteTouchesLive(snap, key, value) {
+  const split = splitRefField(key);
+  const target = split ? parseObjectRef(split.ref) : null;
+  if (target?.kind !== "midi") return false;
+  const current = snap?.midi_maps?.[target.id];
+  if (isPlainObject(current) && current.proposed !== true) return true;
+  if (split.field === "proposed") return value === false;
+  if (split.field === "*") return isPlainObject(value) && value.proposed === false;
+  return false;
+}
+
+/**
+ * Whether a change set holds a write that would change a live MIDI mapping or
+ * make one live.
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes - the
+ *   writes the step makes, keyed `"<ref>|<field>"`
+ * @param {object} snap - the song as it stands before those writes
+ * @returns {boolean}
+ */
+function changesLiveMapping(changes, snap) {
+  for (const [key, value] of changeEntries(changes)) {
+    if (midiWriteTouchesLive(snap, key, value)) return true;
+  }
+  return false;
+}
+
+/**
+ * The agent MIDI guard: a step that would change an accepted MIDI mapping has to
+ * come from the operator.
+ *
+ * A mapping the operator accepted is theirs alone (plan 1c, Review Focus 4), so
+ * neither a fresh command nor a step back along the history may move it on an
+ * agent's say-so: an agent may propose as many mappings as it likes and remove
+ * its own proposals, but it can neither edit a live mapping, delete one nor make
+ * one live.
+ * @param {{changes: Map<string, any>|Object<string, any>, snap: object,
+ *          author: object}} check - the writes the step makes, and the song as it
+ *   stands before them (a mapping already accepted is judged against it)
+ * @returns {object|null} the refusal, or null when the step may run
+ */
+function midiLockRefusal({ changes, snap, author }) {
+  if (author.kind === "human") return null;
+  return changesLiveMapping(changes, snap) ? refuse("human_only", MIDI_NEEDS_A_YES) : null;
+}
+
+/**
+ * Whether the MIDI guard has to look at what a command would write.
+ *
+ * False when nobody can reach a mapping (a person is calling, or the song holds
+ * no mapping at all) and when the command names no mapping. When it is true the
+ * step is previewed on a clone and `midiLockRefusal` decides on the writes
+ * themselves.
+ * @param {{touched: string[], snap: object}} prepared
+ * @param {object} author
+ * @returns {boolean}
+ */
+function mayTouchMidi(prepared, author) {
+  if (author.kind === "human") return false;
+  if (Object.keys(prepared.snap.midi_maps ?? {}).length === 0) return false;
+  return prepared.touched.some((ref) => MIDI_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
+}
+
+/**
  * Whether one write to a pad loses the sound it plays: the pad is deleted while
  * it plays one, or its sample or its slice moves away from the value it held.
  * @param {object} snap - the song as it stands before the step
@@ -750,6 +845,11 @@ function labelForRef(snap, ref) {
     const slice = snap.slices?.[target.id];
     const sampleId = slice?.sample_id ?? keyHead(target.id);
     return slice ? `slice ${slice.id} of sample ${snap.samples?.[sampleId]?.name ?? sampleId}` : target.id;
+  }
+  if (target.kind === "midi") {
+    const mapping = snap.midi_maps?.[target.id];
+    if (!mapping) return target.id;
+    return `the mapping for ${mapping.message?.type} ${mapping.message?.number} on "${mapping.device_name}"`;
   }
   return "the song";
 }
@@ -1502,7 +1602,7 @@ export function createHub({
 
     let prepared;
     try {
-      prepared = prepareCommand(state.doc, command, args);
+      prepared = prepareCommand(state.doc, command, args, { author: actor });
     } catch (err) {
       return toRefusal(err);
     }
@@ -1544,6 +1644,21 @@ export function createHub({
       }
       const lost = soundLossRefusal({ changes: preview.after, snap: prepared.snap, author: actor });
       if (lost) return lost;
+    }
+
+    // Nor may it reach a MIDI mapping the operator accepted: an agent proposes
+    // mappings, and only the operator's yes makes one live (plan 1c, Review
+    // Focus 4). Decided on the writes this step would make, so an agent's new
+    // proposal passes and an edit to an accepted mapping does not.
+    if (mayTouchMidi(prepared, actor)) {
+      let preview;
+      try {
+        preview = previewChanges(state.doc, prepared);
+      } catch (err) {
+        return toRefusal(err);
+      }
+      const locked = midiLockRefusal({ changes: preview.after, snap: prepared.snap, author: actor });
+      if (locked) return locked;
     }
 
     // Capture the diff this one transaction produces: it is exactly the update
@@ -1731,6 +1846,18 @@ export function createHub({
     if (actor.kind !== "human") {
       const lostSound = soundLossRefusal({ changes: target.inverse?.before, snap, author: actor });
       if (lostSound) return lostSound;
+    }
+
+    // The MIDI guard on a step back along the history, judged the same way: the
+    // writes the plan makes and the values the step would put back. Undoing the
+    // agent's own proposal after the operator accepted it, undoing the
+    // operator's edit of an accepted mapping, redoing an edit onto one and
+    // redoing the operator's `midi.map` all meet this sentence; the operator's
+    // `midi.accept` is caught a step earlier, because it is people-only.
+    if (actor.kind !== "human") {
+      const locked = changesLiveMapping(plan?.apply, snap)
+        || changesLiveMapping(target.inverse?.before, snap);
+      if (locked) return refuse("human_only", MIDI_NEEDS_A_YES);
     }
 
     // The history declines a plan it could not apply safely and says why: those
