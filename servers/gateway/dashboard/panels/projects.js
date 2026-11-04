@@ -20,7 +20,7 @@ import {
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
 import { approveBackend, revokeBackendApproval, hasApproval, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
 import { csrfInput } from "../shared/csrf.js";
-import { canOwnProject } from "../../../shared/project-lifecycle.js";
+import { canOwnProject, assertCanChangeStatus } from "../../../shared/project-lifecycle.js";
 import {
   handleLifecyclePost, deleteConfirmHtml, lifecycleRules, detailControlsHtml, archivedRowActionsHtml, resultBannerHtml,
 } from "../shared/project-lifecycle-ui.js";
@@ -158,10 +158,26 @@ export default {
       if (action === "update_status") {
         const { id, status } = req.body;
         if (id && status) {
-          const rowsAffected = await updateProjectSpaceMeta(db, Number(id), { status });
+          const projectId = Number(id);
+          // An archived project is hidden, so a status change is the owner's alone (delete's
+          // rule). Refused before the write, like a refused delete.
+          try {
+            await assertCanChangeStatus(db, projectId);
+          } catch (err) {
+            if (err instanceof AclError && err.code === "not_owner") {
+              return res.redirectAfterPost(`/dashboard/projects?view=${projectId}&error=not_owner`);
+            }
+            throw err;
+          }
+          const cur = await db.execute({ sql: "SELECT status FROM project_spaces WHERE id = ?", args: [projectId] });
+          const from = cur.rows[0] ? cur.rows[0].status : null;
+          const rowsAffected = await updateProjectSpaceMeta(db, projectId, { status });
           if (rowsAffected === 0) {
             return res.redirectAfterPost(`/dashboard/projects?error=project_not_found`);
           }
+          await appendAudit(db, {
+            project_id: projectId, actor_type: "local", action: "status_changed", payload: { from, to: String(status) },
+          });
         }
         return res.redirectAfterPost(`/dashboard/projects?view=${id}`);
       }
@@ -606,6 +622,11 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
     ? `<div class="alert alert-error" role="alert">${escapeHtml(t("projects.members.liveRefused", lang))}</div>`
     : "";
 
+  // A refused status change: only the project's owner may archive it (a soft delete).
+  const statusNotice = req.query?.error === "not_owner"
+    ? `<div class="alert alert-error" role="alert">${escapeHtml(t("projects.status.notOwner", lang))}</div>`
+    : "";
+
   // M2c: Members section. Shows active members with role + resolved capabilities,
   // plus a small "Add member" form (contacts dropdown + role select).
   // Per-member capability override JSON is rendered as a textarea — M5 will
@@ -721,7 +742,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   }
 
   const content = `
-    ${memberNotice}
+    ${memberNotice}${statusNotice}
     ${section("Overview", overviewHtml + workspaceInfo)}
     ${section(`Members (${members.length})`, membersHtml + addMemberForm + c2cOwnerSectionHtml(project.id, c2cContacts, c2cMembers, lang), { delay: 50 })}
     ${section(`Sources (${sourceTotal})`, sourcesHtml, { delay: 100 })}

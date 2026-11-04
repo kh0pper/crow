@@ -4,7 +4,7 @@
 // `archived_at` has only ever meant "deleted"; archive and restore NEVER write it, because the
 // bot runtime treats archived_at as gone. See docs/guide/projects.md.
 
-import { appendAudit } from "./project-acl.js";
+import { AclError, appendAudit } from "./project-acl.js";
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { createDbClient, auditLog, resolveDataDir } from "../db.js";
@@ -45,6 +45,19 @@ async function ownsProject(db, projectId, { allowDeleted }) {
   } catch (err) {
     console.warn("[project-lifecycle] owner lookup failed:", err.message);
     return false;
+  }
+}
+
+/**
+ * A status change is allowed only to the project's owner. Archiving is a soft delete (it hides
+ * the project), so it takes delete's rule: `canOwnProject`, which already allows an archived
+ * row but never a tombstone, a visited/clone-shared project, or a missing one. Throws
+ * AclError('not_owner') so every caller answers it the way it answers a refused delete, and
+ * callers run it BEFORE the write.
+ */
+export async function assertCanChangeStatus(db, projectId) {
+  if (!(await canOwnProject(db, projectId))) {
+    throw new AclError(`Only the owner can change project #${projectId}'s status`, "not_owner");
   }
 }
 

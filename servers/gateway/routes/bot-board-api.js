@@ -75,6 +75,8 @@ import { proposalsDir, normalizeSkillName, listProposals } from "../../../script
 import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
+import { AclError, appendAudit } from "../../shared/project-acl.js";
+import { assertCanChangeStatus } from "../../shared/project-lifecycle.js";
 import { resolveBoardDef, resolveSlugBoardDef, isValidStatus, isTerminal, validateDefPayload } from "./board-defs.js";
 // Track 1 Task 4: the plan drawer re-points from the file rail to plan
 // records (D-T1.4) — plan-ref.js stops being imported HERE (the file itself
@@ -975,9 +977,23 @@ export default function botBoardApiRouter(dashboardAuth) {
     let cdb;
     try {
       cdb = createDbClient();
-      const cur = (await cdb.execute({ sql: "SELECT id FROM project_spaces WHERE id=?", args: [id] })).rows[0];
+      const cur = (await cdb.execute({ sql: "SELECT id, status FROM project_spaces WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "project not found");
+      // An archived project is hidden, so a status change is the owner's alone (delete's rule).
+      if (patch.status != null) {
+        try {
+          await assertCanChangeStatus(cdb, id);
+        } catch (e) {
+          if (e instanceof AclError) return jsonError(res, 403, "not_owner");
+          throw e;
+        }
+      }
       if (!(await updateProjectSpaceMeta(cdb, id, patch))) return jsonError(res, 404, "project not found"); // a deleted project's tombstone
+      if (patch.status != null) {
+        await appendAudit(cdb, {
+          project_id: id, actor_type: "local", action: "status_changed", payload: { from: cur.status ?? null, to: patch.status },
+        });
+      }
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
