@@ -35,7 +35,7 @@ export function serversClientJS(lang) {
       .sat-state { font-size:0.75rem; padding:0.1rem 0.45rem; border-radius:999px; border:1px solid var(--crow-border); }
       .sat-state--warn { border-color:var(--crow-warning, #b7791f); color:var(--crow-warning, #b7791f); }
       .sat-state--ok { border-color:var(--crow-success, #2f855a); color:var(--crow-success, #2f855a); }
-      .sat-modal { position:fixed; inset:0; background:rgba(0,0,0,0.45); display:none; align-items:center; justify-content:center; z-index:1000; padding:16px; }
+      .sat-modal { position:fixed; inset:0; background:rgba(0,0,0,0.45); display:none; align-items:center; justify-content:center; z-index:1200; padding:16px; }
       .sat-modal__box { background:var(--crow-bg-deep, #fff); color:var(--crow-text-primary); border-radius:12px; max-width:40rem; width:100%; max-height:90vh; overflow:auto; padding:1.25rem; }
       .sat-modal__box h3 { margin-top:0; }
       .sat-modal__box pre { white-space:pre-wrap; word-break:break-all; font-size:0.78rem; background:var(--crow-bg-surface, rgba(0,0,0,0.05)); padding:0.6rem; border-radius:6px; max-height:50vh; overflow:auto; }
